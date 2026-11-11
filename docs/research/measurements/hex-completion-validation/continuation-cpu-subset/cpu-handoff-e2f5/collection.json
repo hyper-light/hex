@@ -1,0 +1,43 @@
+{
+  "bytes": 315253,
+  "sha256": "7110a2917b0d384aaa7d1d0bbfe237479ba1056428c35569a2788356416ee4c0",
+  "members": {
+    "cohort-e2f53582-linux-cpu-handoff-e2f5/source-before.json": {
+      "bytes": 462571,
+      "sha256": "413f665d69907b959f20163369d1d023fbb8bba969b605ab282cc3e57689482f"
+    },
+    "cohort-e2f53582-linux-cpu-handoff-e2f5/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-e2f53582-linux-cpu-handoff-e2f5/owned-scope-limits.json": {
+      "bytes": 256,
+      "sha256": "76200891ef8eba3021ff9397cb274ddec3d35292aa6d01f2e079f113b1fbf390"
+    },
+    "cohort-e2f53582-linux-cpu-handoff-e2f5/cpu-observer-original-after.log": {
+      "bytes": 2034,
+      "sha256": "1d9d94209cf03a5ca2b0448a476b224f8ad3a1af15b905a12e9c1f2a58d706b2"
+    },
+    "cohort-e2f53582-linux-cpu-handoff-e2f5/running.json": {
+      "bytes": 1222,
+      "sha256": "df7f0ee4d45b891c30d185ce79e862a3d94baae4411efada88bf744abf8b813e"
+    },
+    "cohort-e2f53582-linux-cpu-handoff-e2f5/source-after.json": {
+      "bytes": 462571,
+      "sha256": "413f665d69907b959f20163369d1d023fbb8bba969b605ab282cc3e57689482f"
+    },
+    "cohort-e2f53582-linux-cpu-handoff-e2f5/result.json": {
+      "bytes": 1572,
+      "sha256": "0382563892b0abd1620438eb4bba709230d85ddcff20bcf3e84b828c72461907"
+    },
+    "cohort-e2f53582-linux-cpu-handoff-e2f5/collected-binaries.json": {
+      "bytes": 870,
+      "sha256": "7599398c2c8b3d1b424d79d6290b9e8bba94826b2f0ddf00837d785ebed55911"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

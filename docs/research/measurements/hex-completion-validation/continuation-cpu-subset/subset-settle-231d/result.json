@@ -1,0 +1,111 @@
+{
+  "source": "231d59eb3244d1cbf7c4c9322ca47ebbcae5dd67",
+  "archive_sha256": "45a265c26494b59579ccec110922a7d7c7a6a46bfb1deeae94fa9db66a446aac",
+  "scope": "ROOT exactly two original GPU Intent/alias controls after narrow remedies, then current all-target strict lint; no replay of prior Driver3 or oldpasses, no VM/GPU/native backend effects",
+  "target": "linux",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 3906310,
+  "phases": [
+    {
+      "name": "cpu-progress-delivered-after",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "scheduler::observer_cpu_tests::failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_facts",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 3909543,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "2f0b3f685bacf51ad7f5d5f73375b497c66025c002f599c6965f5dff2fd86368",
+      "bytes": 4092,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "settle-original-after",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-client",
+        "--lib",
+        "--locked",
+        "calls::budget_tests::absolute_run_settle_error_does_not_renew_kill_answer_budget",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 4026613,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "3263881d357316be22844c98fa55dbc6bb26fe790be6ae65926369a6ca02f1a8",
+      "bytes": 2005,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "released-none-original",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::gpu_pool::tests::released_gpu_receipt_without_identity_finishes_original_published_scope",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 4040757,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "f0439d9b0b462abfe1baed53fdef19816d9522d146393902325e549fb5d08ff2",
+      "bytes": 1293,
+      "expected_selected": 1,
+      "actual_counts": [],
+      "selection_verified": false,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_invocations": 0,
+  "exit": 1
+}

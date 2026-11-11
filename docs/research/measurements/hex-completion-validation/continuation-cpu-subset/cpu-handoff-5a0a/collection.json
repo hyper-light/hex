@@ -1,0 +1,75 @@
+{
+  "bytes": 322297,
+  "sha256": "cea01958da856db5269392a8f9c76c84bc659f3e6fd19e16c22f37de74421e39",
+  "members": {
+    "cohort-5a0a020b-linux-cpu-handoff-5a0a/source-before.json": {
+      "bytes": 465079,
+      "sha256": "d30166a3a3c7f1fe48ef11fcbcfa29eedd3bcceeea3b39ea1d550cdd056e323f"
+    },
+    "cohort-5a0a020b-linux-cpu-handoff-5a0a/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-5a0a020b-linux-cpu-handoff-5a0a/owned-scope-limits.json": {
+      "bytes": 256,
+      "sha256": "06162d327e0130f8e449a7c2a00c3aac4950eb84fc5d92502beacef4098e9e56"
+    },
+    "cohort-5a0a020b-linux-cpu-handoff-5a0a/cpu-observer-original-after.log": {
+      "bytes": 4446,
+      "sha256": "e36f2e60aafe314712e64e8f77eccfe26f9f97ef3fa78010844caf3ceb8718eb"
+    },
+    "cohort-5a0a020b-linux-cpu-handoff-5a0a/running.json": {
+      "bytes": 9167,
+      "sha256": "aa71149da8dac699f22427525a1d9c66c9c33de0a97730935dc1142de568463d"
+    },
+    "cohort-5a0a020b-linux-cpu-handoff-5a0a/unavailable-recovery-refund-new.log": {
+      "bytes": 1199,
+      "sha256": "0e8ccc9f081897670251606aa1fe430c1162e8fda722d805e553e392e5901893"
+    },
+    "cohort-5a0a020b-linux-cpu-handoff-5a0a/api-unavailable-new.log": {
+      "bytes": 570,
+      "sha256": "623c62a77d43f71c2bf751e454fd5d3f0a4cf623d48b179ac62afed6ed1c53c1"
+    },
+    "cohort-5a0a020b-linux-cpu-handoff-5a0a/native-observation-merge-new-two.log": {
+      "bytes": 573,
+      "sha256": "63fd1838c9f8aea14af5c79e96e293bc057dbb422ae1008d49d0ecad40993f5d"
+    },
+    "cohort-5a0a020b-linux-cpu-handoff-5a0a/physical-unavailable-wire-new-three.log": {
+      "bytes": 923,
+      "sha256": "d9b3ca64c59843e2d7271adde2686210f5570c51b682d6302a21829009662b78"
+    },
+    "cohort-5a0a020b-linux-cpu-handoff-5a0a/selected-learned-setup-new.log": {
+      "bytes": 954,
+      "sha256": "e90fb3f4a664bdee0fe31d91c70d635cd2fe7d420e0d3b03e3a3b813c5a220e8"
+    },
+    "cohort-5a0a020b-linux-cpu-handoff-5a0a/isolated-ordinary-hello-new.log": {
+      "bytes": 1221,
+      "sha256": "c72fdeccbd2f1b241ee4affa13c1485fc5f22e4ecfea4ea9f0c2a8bbc691f2d4"
+    },
+    "cohort-5a0a020b-linux-cpu-handoff-5a0a/settle-original-persistent-fixture.log": {
+      "bytes": 2587,
+      "sha256": "3c63fedc016f369580cd29a56066d96bf1c362811051bc3f91c87f79fd4fd4c7"
+    },
+    "cohort-5a0a020b-linux-cpu-handoff-5a0a/released-none-original.log": {
+      "bytes": 1300,
+      "sha256": "712eaf38e657016753950fa73ca8df5a25ddc5c00f609bc4951570c513630094"
+    },
+    "cohort-5a0a020b-linux-cpu-handoff-5a0a/source-after.json": {
+      "bytes": 465079,
+      "sha256": "d30166a3a3c7f1fe48ef11fcbcfa29eedd3bcceeea3b39ea1d550cdd056e323f"
+    },
+    "cohort-5a0a020b-linux-cpu-handoff-5a0a/result.json": {
+      "bytes": 9517,
+      "sha256": "08fa4a6b5d7f054d522c08501941287372f889c36ac1978651185949e85ed992"
+    },
+    "cohort-5a0a020b-linux-cpu-handoff-5a0a/collected-binaries.json": {
+      "bytes": 9548,
+      "sha256": "aa76742b2d6baf8bc76aca058855db64c6d760fd74ef725b08193fb3d6e27510"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

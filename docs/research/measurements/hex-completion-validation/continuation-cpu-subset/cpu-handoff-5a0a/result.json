@@ -1,0 +1,345 @@
+{
+  "source": "5a0a020b4f49073bc020818205739a893b059ac0",
+  "archive_sha256": "46bd4a152688679558ab2e834d2eeef88d4ceb5f2511e70417da0d017a32b579",
+  "scope": "ROOT exactly two original GPU Intent/alias controls after narrow remedies, then current all-target strict lint; no replay of prior Driver3 or oldpasses, no VM/GPU/native backend effects",
+  "target": "linux",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 2459516,
+  "phases": [
+    {
+      "name": "cpu-observer-original-after",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "scheduler::observer_cpu_tests::failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_facts",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2462272,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "e36f2e60aafe314712e64e8f77eccfe26f9f97ef3fa78010844caf3ceb8718eb",
+      "bytes": 4446,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "unavailable-recovery-refund-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-sim",
+        "--lib",
+        "--locked",
+        "index::route_offer_tests::unavailable_route_keeps_committed_recovery_refund_and_backing_charge",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2587159,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "0e8ccc9f081897670251606aa1fe430c1162e8fda722d805e553e392e5901893",
+      "bytes": 1199,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "index::route_offer_tests::unavailable_route_keeps_committed_recovery_refund_and_backing_charge",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "api-unavailable-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-api",
+        "--lib",
+        "--locked",
+        "devices::unavailable_tests::qualified_vm_unavailable_is_bounded_unique_and_preserves_actual_report",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2662935,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "623c62a77d43f71c2bf751e454fd5d3f0a4cf623d48b179ac62afed6ed1c53c1",
+      "bytes": 570,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "devices::unavailable_tests::qualified_vm_unavailable_is_bounded_unique_and_preserves_actual_report",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "native-observation-merge-new-two",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "facts::physical_merge_tests::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2667150,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "63fd1838c9f8aea14af5c79e96e293bc057dbb422ae1008d49d0ecad40993f5d",
+      "bytes": 573,
+      "expected_selected": 2,
+      "actual_counts": [
+        {
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "facts::physical_merge_tests::observer_merge_preserves_native_uncertainty_and_typed_failure",
+          "outcome": "ok"
+        },
+        {
+          "name": "facts::physical_merge_tests::shards_readiness_preserves_known_and_unknown_native_counters_and_refuses_foreign_metadata",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "physical-unavailable-wire-new-three",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-core",
+        "--lib",
+        "--locked",
+        "wire::tests::physical_report_unavailable_",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2667250,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "d9b3ca64c59843e2d7271adde2686210f5570c51b682d6302a21829009662b78",
+      "bytes": 923,
+      "expected_selected": 3,
+      "actual_counts": [
+        {
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "wire::tests::physical_report_unavailable_preserves_legacy_bytes_and_message_bounds",
+          "outcome": "ok"
+        },
+        {
+          "name": "wire::tests::physical_report_unavailable_rejects_hostile_counts_and_entries",
+          "outcome": "ok"
+        },
+        {
+          "name": "wire::tests::physical_report_unavailable_roundtrips_qualified_backing_causes",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "selected-learned-setup-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-client",
+        "--lib",
+        "--locked",
+        "calls::budget_tests::selected_smaller_learned_setup_expiry_prevents_send",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2697029,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "e90fb3f4a664bdee0fe31d91c70d635cd2fe7d420e0d3b03e3a3b813c5a220e8",
+      "bytes": 954,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "isolated-ordinary-hello-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-client",
+        "--lib",
+        "--locked",
+        "calls::budget_tests::isolated_ordinary_stream_hello_withheld_answer_uses_original_cap",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2712238,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "c72fdeccbd2f1b241ee4affa13c1485fc5f22e4ecfea4ea9f0c2a8bbc691f2d4",
+      "bytes": 1221,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "settle-original-persistent-fixture",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-client",
+        "--lib",
+        "--locked",
+        "calls::budget_tests::absolute_run_settle_error_does_not_renew_kill_answer_budget",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2712338,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "3c63fedc016f369580cd29a56066d96bf1c362811051bc3f91c87f79fd4fd4c7",
+      "bytes": 2587,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "released-none-original",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::gpu_pool::tests::released_gpu_receipt_without_identity_finishes_original_published_scope",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2712591,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "712eaf38e657016753950fa73ca8df5a25ddc5c00f609bc4951570c513630094",
+      "bytes": 1300,
+      "expected_selected": 1,
+      "actual_counts": [],
+      "selection_verified": false,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_invocations": 0,
+  "exit": 1
+}
