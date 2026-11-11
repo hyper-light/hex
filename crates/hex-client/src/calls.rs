@@ -2318,6 +2318,10 @@ impl<T: Transport> Runtime for Core<T> {
     ) -> Result<hex_api::BackingOffer, Refusal> {
         grant.check()?;
         let key = grant.key;
+        let grant = triomphe::Arc::try_new(grant).map_err(|_| Refusal::Exhausted {
+            what: "native backing grant",
+            bound: size_of::<hex_api::BackingGrant>(),
+        })?;
         match self.plain(Call::InitializeBacking(grant))? {
             Answer::BackingOffer(offer) if offer.key == key => {
                 offer.allocation()?;

@@ -233,7 +233,8 @@ pub enum Call {
     Capacity(Class),
     /// AC-T7.4.1: factual native observations from the existing Store/turn owner, never grants.
     PhysicalReport,
-    InitializeBacking(BackingGrant),
+    /// AC-T7.4.1: one fallibly allocated payload, moved uniquely before native effects.
+    InitializeBacking(triomphe::Arc<BackingGrant>),
     ReleaseBacking(BackingKey),
     /// Factual host counters from the same native backing owner, answered with Usage.
     BackingUsage(BackingKey),
@@ -732,7 +733,14 @@ fn parse_request(
         kind::CAPACITY => Request::Call(Call::Capacity(class(&mut r).map_err(bad)?)),
         kind::PHYSICAL_REPORT => Request::Call(Call::PhysicalReport),
         kind::INITIALIZE_BACKING => {
-            Request::Call(Call::InitializeBacking(backing_grant(&mut r).map_err(bad)?))
+            let grant = backing_grant(&mut r).map_err(bad)?;
+            let grant = triomphe::Arc::try_new(grant).map_err(|_| {
+                bad(Fault::Storage {
+                    what: "native backing grant",
+                    bound: size_of::<BackingGrant>(),
+                })
+            })?;
+            Request::Call(Call::InitializeBacking(grant))
         }
         kind::RELEASE_BACKING => {
             Request::Call(Call::ReleaseBacking(backing_key(&mut r).map_err(bad)?))
@@ -1383,16 +1391,30 @@ fn backing_key(r: &mut Reader<'_>) -> Result<BackingKey, Fault> {
 }
 
 fn put_backing_option(w: &mut Writer, key: Option<BackingKey>) -> Result<(), Fault> {
-    w.reserve_fixed(1 + key.map_or(0, |_| BACKING_KEY_BYTES))?;
+    let bytes = key
+        .map_or(0, |_| BACKING_KEY_BYTES)
+        .checked_add(1)
+        .ok_or(Fault::Oversized {
+            bytes: usize::MAX,
+            bound: w.bound,
+        })?;
+    w.reserve_fixed(bytes)?;
     w.option_with(key, put_backing_key)
 }
 
 fn put_route_option(w: &mut Writer, route: Option<RouteReceipt>) -> Result<(), Fault> {
-    w.reserve_fixed(
-        1 + route.map_or(0, |r| {
-            ROUTE_KEY_BYTES + 1 + r.backing.map_or(0, |_| BACKING_KEY_BYTES)
-        }),
-    )?;
+    let bytes = match route {
+        Some(route) => ROUTE_KEY_BYTES
+            .checked_add(1)
+            .and_then(|bytes| bytes.checked_add(route.backing.map_or(0, |_| BACKING_KEY_BYTES))),
+        None => Some(0),
+    }
+    .and_then(|bytes| bytes.checked_add(1))
+    .ok_or(Fault::Oversized {
+        bytes: usize::MAX,
+        bound: w.bound,
+    })?;
+    w.reserve_fixed(bytes)?;
     w.option_with(route, |w, route| {
         route
             .check(route.key.class, route.key.gpu == GpuEligibility::Required)
@@ -1417,11 +1439,14 @@ fn put_route_offer(w: &mut Writer, route: RouteOffer) -> Result<(), Fault> {
     route
         .check()
         .map_err(|_| Fault::value("route", "inconsistent initialized route"))?;
-    w.reserve_fixed(
-        ROUTE_OFFER_MIN_BYTES
-            + route.cost.map_or(0, |_| COST_BYTES)
-            + route.backing.map_or(0, |_| BACKING_KEY_BYTES),
-    )?;
+    let bytes = ROUTE_OFFER_MIN_BYTES
+        .checked_add(route.cost.map_or(0, |_| COST_BYTES))
+        .and_then(|bytes| bytes.checked_add(route.backing.map_or(0, |_| BACKING_KEY_BYTES)))
+        .ok_or(Fault::Oversized {
+            bytes: usize::MAX,
+            bound: w.bound,
+        })?;
+    w.reserve_fixed(bytes)?;
     put_route_key(w, route.key)?;
     put_cost_option(w, route.cost)?;
     put_backing_option(w, route.backing)

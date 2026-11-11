@@ -648,7 +648,9 @@ fn requests() -> Vec<(u64, Request, usize)> {
         (87, Request::Call(Call::PhysicalReport), 0),
         (
             201,
-            Request::Call(Call::InitializeBacking(route_wire_grant())),
+            Request::Call(Call::InitializeBacking(triomphe::Arc::new(
+                route_wire_grant(),
+            ))),
             0,
         ),
         (
@@ -2277,7 +2279,9 @@ fn route_wire_backing_calls_and_all_phases_roundtrip() {
     for (tag, expected) in [
         (
             0x0014u16,
-            Request::Call(Call::InitializeBacking(route_wire_grant())),
+            Request::Call(Call::InitializeBacking(triomphe::Arc::new(
+                route_wire_grant(),
+            ))),
         ),
         (
             0x0015,
@@ -2781,7 +2785,9 @@ fn route_wire_backing_claims_reject_duplicates_order_bad_ids_and_counts() {
         let mut bytes = if grant {
             request(
                 211,
-                &Request::Call(Call::InitializeBacking(route_wire_grant())),
+                &Request::Call(Call::InitializeBacking(triomphe::Arc::new(
+                    route_wire_grant(),
+                ))),
                 MAX_MESSAGE,
             )
             .unwrap()
@@ -2956,7 +2962,9 @@ fn route_wire_spec_and_info_inconsistent_route_receipts_refuse() {
 #[test]
 fn route_wire_new_messages_enforce_exact_bounds_truncation_and_trailing_bytes() {
     for expected in [
-        Request::Call(Call::InitializeBacking(route_wire_grant())),
+        Request::Call(Call::InitializeBacking(triomphe::Arc::new(
+            route_wire_grant(),
+        ))),
         Request::Call(Call::ReleaseBacking(route_wire_key())),
         Request::Call(Call::BackingUsage(route_wire_key())),
         Request::Call(Call::Create(Box::new({
@@ -3051,7 +3059,7 @@ fn route_wire_fixed_backing_profiles_and_grants_are_revalidated() {
         assert!(matches!(
             request(
                 215,
-                &Request::Call(Call::InitializeBacking(grant)),
+                &Request::Call(Call::InitializeBacking(triomphe::Arc::new(grant))),
                 MAX_MESSAGE
             ),
             Err(Fault::Value {

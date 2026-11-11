@@ -744,7 +744,11 @@ fn backing_lifecycle_waits_append_without_reordering_old_operations() {
     };
     let waits = <Memory as Transport>::answers();
     assert!(std::ptr::eq(
-        kind_of(waits, &Request::Call(Call::InitializeBacking(grant))).unwrap(),
+        kind_of(
+            waits,
+            &Request::Call(Call::InitializeBacking(triomphe::Arc::new(grant)))
+        )
+        .unwrap(),
         &waits[25]
     ));
     assert!(std::ptr::eq(

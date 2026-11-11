@@ -2044,7 +2044,13 @@ impl<O: Os> Shared<O> {
             Call::Capacity(class) => host.capacity(class).map(Answer::Capacity),
             Call::PhysicalReport => host.physical_report().map(Answer::PhysicalReport),
             Call::InitializeBacking(grant) => {
-                host.initialize_backing(grant).map(Answer::BackingOffer)
+                let grant = triomphe::Arc::try_unwrap(grant).map_err(|grant| Refusal::Backing {
+                    key: grant.key,
+                    cause: hex_api::LifecycleCause::Uncertain,
+                });
+                grant
+                    .and_then(|grant| host.initialize_backing(grant))
+                    .map(Answer::BackingOffer)
             }
             Call::ReleaseBacking(key) => host.release_backing(key).map(Answer::BackingOffer),
             Call::BackingUsage(key) => host.backing_usage(&key).map(Answer::Usage),
