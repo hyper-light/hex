@@ -1058,10 +1058,11 @@ mod tests {
     #[test]
     fn legacy_gpu_receipt_keeps_claims_without_manufacturing_private_report() {
         let receipt = record();
-        let text = receipt
-            .encode()
-            .unwrap()
-            .replace(HEADER, ROUTE_HEADER)
+        let current = receipt.encode().unwrap();
+        // Without an observer the receipt is written as v4, the version rewritten here.
+        assert!(current.starts_with(REPORT_HEADER), "{current}");
+        let text = current
+            .replace(REPORT_HEADER, ROUTE_HEADER)
             .replace("report none\n", "");
         let retained = parse(&text).unwrap();
         assert_eq!(retained.devices, receipt.devices);
@@ -1075,14 +1076,16 @@ mod tests {
     #[test]
     fn legacy_and_hostile_scope_receipts_cannot_authorize_a_new_incarnation() {
         let text = record().encode().unwrap();
+        // Without an observer the receipt is written as v4, the version rewritten here.
+        assert!(text.starts_with(REPORT_HEADER), "{text}");
         let legacy = text
-            .replace(HEADER, LEGACY_HEADER)
+            .replace(REPORT_HEADER, LEGACY_HEADER)
             .replace("scope 07070707070707070707070707070707\n", "")
             .replace("route none\n", "")
             .replace("report none\n", "");
         assert_eq!(parse(&legacy).unwrap().scope, None);
         let previous = text
-            .replace(HEADER, SCOPE_HEADER)
+            .replace(REPORT_HEADER, SCOPE_HEADER)
             .replace("route none\n", "")
             .replace("report none\n", "");
         assert_eq!(parse(&previous).unwrap().route, None);

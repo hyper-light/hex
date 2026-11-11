@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from evidence import InvalidEvidence, finite_positive, require, sha256
+from evidence import InvalidEvidence, end_group, finite_positive, require, sha256, start_group, unwind_on_sigterm
 
 
 def main():
@@ -24,14 +24,17 @@ def main():
     require(sha256(args.binary)==args.sha256,"source-pinned telemetry binary required")
     env=dict(os.environ,HEX_COMPLETION_ROOT_AUTHORIZED="1",HEX_COMPLETION_LOAD_SAMPLES="2",RUST_TEST_THREADS="1")
     argv=[str(args.binary),"--ignored","--exact","completion_native_load_samples","--nocapture","--test-threads=1"]
+    timed_out=False
     with args.output.open("xb") as log:
-        child=subprocess.Popen(argv,env=env,stdin=subprocess.PIPE,stdout=log,stderr=subprocess.STDOUT)
+        child=start_group(argv,env=env,stdin=subprocess.PIPE,stdout=log,stderr=subprocess.STDOUT)
         try:
             child.communicate(input=b"ss",timeout=args.timeout)
         except subprocess.TimeoutExpired:
-            child.kill()
-            child.communicate(timeout=args.timeout)
-            raise InvalidEvidence("native telemetry timed out; not a native pass")
+            timed_out=True
+        finally:
+            ended=end_group(child,args.timeout)
+    require(not timed_out,f"native telemetry timed out; not a native pass; its process group gone: {ended['group_gone']}")
+    require(ended["group_gone"],"native telemetry's process group is not gone")
     raw=args.output.read_bytes()
     require(len(raw)<=args.byte_limit and child.returncode==0,"native telemetry failed/oversized")
     from evidence import libtest_result
@@ -48,6 +51,7 @@ def main():
 
 
 if __name__=="__main__":
+    unwind_on_sigterm()
     try:
         main()
     except (InvalidEvidence,OSError,subprocess.SubprocessError) as error:

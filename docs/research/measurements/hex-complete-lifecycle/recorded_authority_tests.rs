@@ -152,6 +152,14 @@ impl Runtime for Routed {
     }
 }
 impl Recover for Routed {
+    // The registered guest keeps only rows in the same Store: the host's cross-check is all of it.
+    fn preflight_retained(
+        &self,
+        records: &hex_runtime::devices::Records,
+        pools: &[PoolRecord],
+    ) -> Result<(), Refusal> {
+        self.host.preflight_retained(records, pools)
+    }
     fn owns_records(&self, spec: &BoxSpec) -> Result<bool, Refusal> {
         Ok(spec.class.class() == Class::Shards)
     }
