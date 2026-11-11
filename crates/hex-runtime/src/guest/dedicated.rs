@@ -124,10 +124,16 @@ mod tests {
             }
             Ok(())
         }
+        fn managed_usage(&self) -> Result<Usage, Refusal> {
+            Err(Refusal::Broken(
+                "this cleanup model has no native counters".into(),
+            ))
+        }
         fn launch_managed(
             &self,
-            _: &shards_api::PreparedBoot,
+            _: &crate::devices::ManagedLaunch<'_>,
             _: shards_api::LaunchIo,
+            _: Duration,
         ) -> Result<shards_api::ManagedReceipt, Refusal> {
             panic!("cleanup cannot launch")
         }
@@ -180,6 +186,7 @@ mod tests {
             .unwrap(),
         );
         let mut record = BoxRecord::new(spec, hex_core::record::Phase::Deleting, Vec::new());
+        record.native_scope = Some(hex_core::record::NativeScope::from_bytes([7; 16]));
         record.init = Some(hex_core::record::ProcId {
             pid: 42,
             start_ticks: 7,
@@ -213,6 +220,7 @@ mod tests {
             id: id.clone(),
             devices: Vec::new(),
             class: Class::Shards,
+            scope: Some(hex_core::record::NativeScope::from_bytes([7; 16])),
             physical: Vec::new(),
             vcpus: 1,
             memory_mib: 256,
@@ -463,15 +471,55 @@ mod tests {
         let runtime = runtime(dir.path());
         let id = BoxId::new("retained-cost").unwrap();
         let record = model_record(&runtime, &id);
-        let receipt = Record::retained(&record.spec).unwrap();
-        receipt.matches(&record.spec).unwrap();
+        let receipt = Record::retained(&record).unwrap();
+        receipt.matches_record(&record).unwrap();
         let mut changed = runtime.config.clone();
         changed.vcpus = 2;
-        assert!(Record::intent(&record.spec, &changed).is_err());
-        receipt.matches(&record.spec).unwrap();
+        assert!(Record::intent(&record, &changed).is_err());
+        receipt.matches_record(&record).unwrap();
         let mut forged = record.spec.clone();
         forged.allocation.as_mut().unwrap().resources.mem_bytes = 1;
         assert!(receipt.matches(&forged).is_err());
+    }
+
+    /// AC-T7.4.1: a reused BoxId/socket/PID cannot transplant another boot's
+    /// cleanup authority, including legacy records with no native incarnation.
+    #[test]
+    fn selected_scope_must_match_canonical_before_any_native_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = runtime(dir.path());
+        let id = BoxId::new("selected-scope").unwrap();
+        let process = triomphe::Arc::try_new(Controlled {
+            ended: AtomicBool::new(true),
+            released: AtomicBool::new(true),
+            stops: AtomicUsize::new(0),
+            wait: Box::new(|| {}),
+        })
+        .unwrap();
+        std::fs::create_dir_all(runtime.selected_dir().unwrap()).unwrap();
+        let path = runtime.selected_path(&id).unwrap();
+        for (canonical_scope, receipt_scope) in [
+            (Some([8; 16]), Some([7; 16])),
+            (None, Some([7; 16])),
+            (Some([7; 16]), None),
+            (None, None),
+        ] {
+            let mut canonical = model_record(&runtime, &id);
+            canonical.native_scope = canonical_scope.map(hex_core::record::NativeScope::from_bytes);
+            let mut receipt = record(&id);
+            receipt.scope = receipt_scope.map(hex_core::record::NativeScope::from_bytes);
+            selected::write(&path, &receipt).unwrap();
+            assert!(receipt.matches_record(&canonical).is_err());
+            let transaction = Cleanup {
+                record: canonical,
+                process: process.clone(),
+                fail_finalize: AtomicBool::new(false),
+            };
+            assert!(runtime.delete_selected(&id, &transaction).is_err());
+            assert!(runtime.finalize_selected(&id, &transaction).is_err());
+            assert_eq!(selected::read(&path).unwrap(), Some(receipt));
+        }
+        assert_eq!(process.stops.load(Ordering::SeqCst), 0);
     }
 }
 
@@ -613,8 +661,15 @@ impl GuestRuntime {
         }
     }
 
-    pub fn with_gpu_catalog(mut self, catalog: Arc<crate::devices::Catalog>) -> Self {
+    pub fn with_gpu_catalog(mut self, catalog: crate::devices::SharedCatalog) -> Self {
         self.gpu_catalog = Some(catalog);
+        self
+    }
+
+    /// The exact pair already held by the configured probe provider. Native
+    /// launch borrows the same validated values from its prepared plan.
+    pub fn with_runtime_paths(mut self, paths: shards_api::RuntimePaths) -> Self {
+        self.native_paths = Some(paths);
         self
     }
 
@@ -842,12 +897,13 @@ impl GuestRuntime {
         guest: shards_api::ManagedGuest,
         receipt: &Record,
         record: &BoxRecord,
+        budget: managed::Budget,
     ) -> Result<Arc<Booted>, Refusal> {
         let link: Arc<dyn Link> = Arc::new(ShardsLink::managed(
             guest
                 .try_clone()
                 .map_err(|why| refusal("retaining managed guest connection", &why))?,
-            self.first_dial_bound()?,
+            budget.remaining()?,
         ));
         let client = Client::connect(Arc::clone(&link))?;
         let booted = Arc::new(Booted {
@@ -861,6 +917,7 @@ impl GuestRuntime {
                 allocation: record.spec.allocation,
             }),
         });
+        budget.remaining()?;
         self.join(&booted)?;
         Ok(booted)
     }
@@ -902,6 +959,12 @@ impl GuestRuntime {
         }
         if self.uses_books() {
             let record = self.recorded_box(id)?.ok_or(super::books::uncertain(id)?)?;
+            reservation
+                .previous
+                .as_ref()
+                .ok_or(super::books::uncertain(id)?)?
+                .receipt
+                .matches_record(&record)?;
             self.validate_binding(&record.spec)?;
             let identity = booted
                 .guest
@@ -938,7 +1001,10 @@ impl GuestRuntime {
         let books = self.books.get().ok_or(super::books::uncertain(id)?)?;
         crate::devices::with_transaction(books, id, &keys, |transaction| {
             let current = transaction.read(id)?.ok_or(super::books::uncertain(id)?)?;
-            if current.spec != record.spec || current.init != record.init {
+            if current.spec != record.spec
+                || current.init != record.init
+                || current.native_scope != record.native_scope
+            {
                 return Err(super::books::uncertain(id)?);
             }
             self.selected_running_in(id, transaction, &current)
@@ -965,9 +1031,10 @@ impl GuestRuntime {
             return self.cached_selected(id);
         }
         let reservation = self.reserve(id, Operation::Loading)?;
+        let budget = managed::Budget::new(self.first_dial_bound()?)?;
         let receipt =
             selected::read(&self.selected_path(id)?)?.ok_or(super::books::uncertain(id)?)?;
-        receipt.matches(&record.spec)?;
+        receipt.matches_record(record)?;
         let identity = receipt.identity()?;
         managed::same_init(record, identity)?;
         if !matches!(receipt.phase, Phase::Running(_)) {
@@ -976,8 +1043,8 @@ impl GuestRuntime {
         let spec = self.selected_spec(&receipt)?;
         self.checked_physical(&receipt.devices, &receipt.physical)?;
         let plan = self.managed_plan(&spec, &identity.vsock)?;
-        let guest = managed::attach(transaction, plan, identity)?;
-        let booted = self.booted(guest, &receipt, record)?;
+        let guest = managed::attach(transaction, plan, identity, budget)?;
+        let booted = self.booted(guest, &receipt, record, budget)?;
         reservation.publish(Some(Guest {
             receipt,
             booted: Arc::clone(&booted),
@@ -990,12 +1057,18 @@ impl GuestRuntime {
         spec: &shards_api::GuestSpec,
         socket: &std::path::Path,
     ) -> Result<shards_api::PreparedBoot, Refusal> {
+        let paths = self.native_paths.as_ref().ok_or_else(|| Refusal::Invalid {
+            what: "managed Shards runtime paths",
+            why: "the node's configured probe and native launch require the same explicit paths"
+                .into(),
+        })?;
         shards_api::prepare_boot(
             spec,
             &self.config.binary,
             socket,
             shards_api::recorded_console_bytes(&spec.kernel),
         )
+        .and_then(|plan| plan.with_runtime_paths(paths))
         .map_err(|why| refusal("preparing admitted Shards scope", &why))
     }
 
@@ -1019,14 +1092,27 @@ impl GuestRuntime {
         &self,
         spec: BoxSpec,
         transaction: &dyn Transaction,
+        budget: managed::Budget,
     ) -> Result<BoxInfo, Refusal> {
+        budget.remaining()?;
         self.check_allocation(&spec)?;
         let reservation = self.reserve(&spec.id, Operation::Creating)?;
         let path = self.selected_path(&spec.id)?;
         if reservation.previous.is_some() || selected::read(&path)?.is_some() {
             return Err(Refusal::Exists(spec.id));
         }
-        let mut receipt = Record::intent(&spec, &self.config)?;
+        // Store's first fresh Creating put persists this incarnation. The local
+        // pre-put shell cannot supply it, and a reusable BoxId socket is no proof.
+        let canonical = transaction
+            .read(&spec.id)?
+            .ok_or(super::books::uncertain(&spec.id)?)?;
+        if canonical.phase != hex_core::record::Phase::Creating
+            || canonical.spec != spec
+            || canonical.init.is_some()
+        {
+            return Err(super::books::uncertain(&spec.id)?);
+        }
+        let mut receipt = Record::intent(&canonical, &self.config)?;
         receipt.physical = self.physical_for(&receipt.devices)?;
         let guest_spec = self.selected_spec(&receipt)?;
         let rewritten = self.rewrite_spec(spec)?;
@@ -1039,18 +1125,20 @@ impl GuestRuntime {
         }
         let socket = self.selected_socket(&receipt.id)?;
         let plan = self.managed_plan(&guest_spec, &socket)?;
+        budget.remaining()?;
         selected::write(&path, &receipt)?;
-        let guest = managed::boot(transaction, plan)?;
+        let guest = managed::boot(transaction, plan, budget)?;
         let identity = shards_api::Guest::identity(&guest)
             .map_err(|why| refusal("recording selected guest identity", &why))?;
         let record = transaction
             .read(&receipt.id)?
             .ok_or(super::books::uncertain(&receipt.id)?)?;
         managed::same_init(&record, &identity)?;
-        receipt.matches(&record.spec)?;
+        receipt.matches_record(&record)?;
         receipt.phase = Phase::Running(identity);
         selected::write(&path, &receipt)?;
-        let booted = self.booted(guest, &receipt, &record)?;
+        let booted = self.booted(guest, &receipt, &record, budget)?;
+        budget.remaining()?;
         let created = self.create_in(&booted, rewritten);
         reservation.publish(Some(Guest { receipt, booted }))?;
         created
@@ -1065,9 +1153,12 @@ impl GuestRuntime {
         let path = self.selected_path(id)?;
         let receipt = selected::read(&path)?;
         let record = transaction.read(id)?.ok_or(super::books::uncertain(id)?)?;
+        if record.native_scope.is_none() {
+            return Err(super::books::uncertain(id)?);
+        }
         let identity = match receipt.as_ref() {
             Some(receipt) => {
-                receipt.matches(&record.spec)?;
+                receipt.matches_record(&record)?;
                 match &receipt.phase {
                     Phase::Running(identity) | Phase::Stopping(identity) => {
                         managed::same_init(&record, identity)?;
@@ -1123,7 +1214,7 @@ impl GuestRuntime {
             None => {
                 // No effect can precede Intent. Recover a pre-intent failure only
                 // after the native owner positively proved the original scope empty.
-                let mut receipt = Record::retained(&record.spec)?;
+                let mut receipt = Record::retained(&record)?;
                 receipt.physical = self.catalog_physical(&receipt.devices)?;
                 receipt
             }
@@ -1144,7 +1235,7 @@ impl GuestRuntime {
         let receipt =
             selected::read(&self.selected_path(id)?)?.ok_or(super::books::uncertain(id)?)?;
         let record = transaction.read(id)?.ok_or(super::books::uncertain(id)?)?;
-        receipt.matches(&record.spec)?;
+        receipt.matches_record(&record)?;
         let Phase::Released { identity, .. } = &receipt.phase else {
             return Err(super::books::uncertain(id)?);
         };

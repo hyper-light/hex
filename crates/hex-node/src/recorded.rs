@@ -73,32 +73,37 @@ pub trait Recover: Runtime {
     /// `publish` durably introduces its immutable identity in the canonical Creating record.
     fn launch_managed(
         &self,
-        spec: &BoxSpec,
-        plan: &shards_api::PreparedBoot,
+        record: &BoxRecord,
+        plan: &hex_runtime::devices::ManagedLaunch<'_>,
         io: shards_api::LaunchIo,
+        patience: std::time::Duration,
         publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
-        let _ = (plan, io, publish);
-        Err(uncertain(&spec.id))
+        let _ = (plan, io, patience, publish);
+        Err(uncertain(&record.spec.id))
     }
 
     fn attach_managed(
         &self,
-        spec: &BoxSpec,
+        record: &BoxRecord,
         identity: Option<&shards_api::Identity>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
         let _ = identity;
-        Err(uncertain(&spec.id))
+        Err(uncertain(&record.spec.id))
     }
 
     /// Called only after the selected VM receipt durably records positive whole-scope release.
     fn finalize_managed(
         &self,
-        spec: &BoxSpec,
+        record: &BoxRecord,
         identity: Option<&shards_api::Identity>,
     ) -> Result<(), Refusal> {
         let _ = identity;
-        Err(uncertain(&spec.id))
+        Err(uncertain(&record.spec.id))
+    }
+
+    fn managed_usage(&self, record: &BoxRecord) -> Result<Usage, Refusal> {
+        Err(uncertain(&record.spec.id))
     }
 
     /// Initialized native routes only; physical claims are overlaid from this owner's Store.
@@ -197,16 +202,18 @@ struct Transaction<'a> {
 
 type ManagedReceipt = shards_api::ManagedReceipt;
 type NativeLaunch<'a> = dyn Fn(
-        &BoxSpec,
-        &shards_api::PreparedBoot,
+        &BoxRecord,
+        &hex_runtime::devices::ManagedLaunch<'_>,
         shards_api::LaunchIo,
+        std::time::Duration,
         &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
     ) -> Result<ManagedReceipt, Refusal>
     + 'a;
 type NativeAttach<'a> =
-    dyn Fn(&BoxSpec, Option<&shards_api::Identity>) -> Result<ManagedReceipt, Refusal> + 'a;
+    dyn Fn(&BoxRecord, Option<&shards_api::Identity>) -> Result<ManagedReceipt, Refusal> + 'a;
 type NativeFinalize<'a> =
-    dyn Fn(&BoxSpec, Option<&shards_api::Identity>) -> Result<(), Refusal> + 'a;
+    dyn Fn(&BoxRecord, Option<&shards_api::Identity>) -> Result<(), Refusal> + 'a;
+type NativeUsage<'a> = dyn Fn(&BoxRecord) -> Result<Usage, Refusal> + 'a;
 
 /// Borrowed callbacks into Node's or Recorded's existing native owner. They remain on the same
 /// synchronous transaction stack, with no map lock, boxed transaction or second holder owner.
@@ -214,6 +221,7 @@ pub(crate) struct Native<'a> {
     pub launch: &'a NativeLaunch<'a>,
     pub attach: &'a NativeAttach<'a>,
     pub finalize: &'a NativeFinalize<'a>,
+    pub usage: &'a NativeUsage<'a>,
 }
 
 fn uncertain(id: &BoxId) -> Refusal {
@@ -254,19 +262,52 @@ impl Transaction<'_> {
 }
 
 impl hex_runtime::devices::Transaction for Transaction<'_> {
-    fn launch_managed(
-        &self,
-        plan: &shards_api::PreparedBoot,
-        io: shards_api::LaunchIo,
-    ) -> Result<ManagedReceipt, Refusal> {
+    fn managed_usage(&self) -> Result<Usage, Refusal> {
         let record = self
             .store
             .read_lifecycle(self.id)?
             .ok_or_else(|| uncertain(self.id))?;
         self.owns(&record)?;
         record.spec.check()?;
-        if !matches!(record.spec.class.class(), Class::Shards | Class::Oci)
+        if record.native_scope.is_none()
             || record.spec.allocation.is_none()
+            || !matches!(
+                record.spec.class.class(),
+                Class::Shards | Class::Oci | Class::Firecracker
+            )
+        {
+            return Err(uncertain(self.id));
+        }
+        (self.native.usage)(&record)
+    }
+
+    fn launch_managed(
+        &self,
+        plan: &hex_runtime::devices::ManagedLaunch<'_>,
+        io: shards_api::LaunchIo,
+        patience: std::time::Duration,
+    ) -> Result<ManagedReceipt, Refusal> {
+        let deadline = std::time::Instant::now()
+            .checked_add(patience)
+            .filter(|_| patience != std::time::Duration::MAX && !patience.is_zero())
+            .ok_or_else(|| uncertain(self.id))?;
+        let record = self
+            .store
+            .read_lifecycle(self.id)?
+            .ok_or_else(|| uncertain(self.id))?;
+        self.owns(&record)?;
+        record.spec.check()?;
+        let backend_matches = match plan {
+            hex_runtime::devices::ManagedLaunch::Shards(_) => {
+                matches!(record.spec.class.class(), Class::Shards | Class::Oci)
+            }
+            hex_runtime::devices::ManagedLaunch::Firecracker { .. } => {
+                record.spec.class.class() == Class::Firecracker
+            }
+        };
+        if !backend_matches
+            || record.spec.allocation.is_none()
+            || record.native_scope.is_none()
             || record.phase != Phase::Creating
             || record.init.is_some()
         {
@@ -291,7 +332,10 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
                 .store
                 .read_lifecycle(self.id)?
                 .ok_or_else(|| uncertain(self.id))?;
-            if current.spec != *spec || current.phase != Phase::Creating {
+            if current.spec != *spec
+                || current.phase != Phase::Creating
+                || current.native_scope != record.native_scope
+            {
                 return Err(uncertain(self.id));
             }
             current.init = Some(init);
@@ -299,7 +343,11 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
             introduced = Some(init);
             Ok(())
         };
-        let receipt = (self.native.launch)(&record.spec, plan, io, &mut publish)?;
+        let patience = deadline.saturating_duration_since(std::time::Instant::now());
+        if patience.is_zero() {
+            return Err(uncertain(self.id));
+        }
+        let receipt = (self.native.launch)(&record, plan, io, patience, &mut publish)?;
         if introduced.is_none() {
             return Err(uncertain(self.id));
         }
@@ -316,8 +364,11 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
             .ok_or_else(|| uncertain(self.id))?;
         self.owns(&record)?;
         record.spec.check()?;
-        if !matches!(record.spec.class.class(), Class::Shards | Class::Oci)
-            || record.spec.allocation.is_none()
+        if !matches!(
+            record.spec.class.class(),
+            Class::Shards | Class::Oci | Class::Firecracker
+        ) || record.spec.allocation.is_none()
+            || record.native_scope.is_none()
         {
             return Err(uncertain(self.id));
         }
@@ -337,7 +388,7 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
             }
             None => {}
         }
-        (self.native.attach)(&record.spec, identity)
+        (self.native.attach)(&record, identity)
     }
 
     fn finalize_managed(&self, identity: Option<&shards_api::Identity>) -> Result<(), Refusal> {
@@ -347,8 +398,11 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
             .ok_or_else(|| uncertain(self.id))?;
         self.owns(&record)?;
         record.spec.check()?;
-        if !matches!(record.spec.class.class(), Class::Shards | Class::Oci)
-            || record.spec.allocation.is_none()
+        if !matches!(
+            record.spec.class.class(),
+            Class::Shards | Class::Oci | Class::Firecracker
+        ) || record.spec.allocation.is_none()
+            || record.native_scope.is_none()
             || record.phase != Phase::Deleting
         {
             return Err(uncertain(self.id));
@@ -362,7 +416,7 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
             (None, None) => {}
             _ => return Err(uncertain(self.id)),
         }
-        (self.native.finalize)(&record.spec, identity)
+        (self.native.finalize)(&record, identity)
     }
 
     fn records(&self) -> Result<hex_runtime::devices::Records, Refusal> {
@@ -541,18 +595,21 @@ impl<R: Recover> hex_runtime::devices::Books for Recorded<R> {
     ) -> Result<(), Refusal> {
         let _method = self.books.lifecycle.try_take_devices(id, devices)?;
         let launch =
-            |spec: &BoxSpec,
-             plan: &shards_api::PreparedBoot,
+            |record: &BoxRecord,
+             plan: &hex_runtime::devices::ManagedLaunch<'_>,
              io: shards_api::LaunchIo,
+             patience: std::time::Duration,
              publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>| {
-                self.runtime.launch_managed(spec, plan, io, publish)
+                self.runtime
+                    .launch_managed(record, plan, io, patience, publish)
             };
-        let attach = |spec: &BoxSpec, identity: Option<&shards_api::Identity>| {
-            self.runtime.attach_managed(spec, identity)
+        let attach = |record: &BoxRecord, identity: Option<&shards_api::Identity>| {
+            self.runtime.attach_managed(record, identity)
         };
-        let finalize = |spec: &BoxSpec, identity: Option<&shards_api::Identity>| {
-            self.runtime.finalize_managed(spec, identity)
+        let finalize = |record: &BoxRecord, identity: Option<&shards_api::Identity>| {
+            self.runtime.finalize_managed(record, identity)
         };
+        let usage = |record: &BoxRecord| self.runtime.managed_usage(record);
         transaction(
             &self.books.store,
             id,
@@ -561,6 +618,7 @@ impl<R: Recover> hex_runtime::devices::Books for Recorded<R> {
                 launch: &launch,
                 attach: &attach,
                 finalize: &finalize,
+                usage: &usage,
             },
             callback,
         )
@@ -1119,30 +1177,35 @@ fn group(trace: Option<ProcId>) -> Option<(i32, u64)> {
 /// records name that is still there, and removes the rest with what is left of them.
 #[cfg(windows)]
 impl Recover for hex_runtime::windows::WinRuntime {
+    fn managed_usage(&self, record: &BoxRecord) -> Result<Usage, Refusal> {
+        hex_runtime::windows::WinRuntime::managed_usage(self, record)
+    }
+
     fn launch_managed(
         &self,
-        spec: &BoxSpec,
-        plan: &shards_api::PreparedBoot,
+        record: &BoxRecord,
+        plan: &hex_runtime::devices::ManagedLaunch<'_>,
         io: shards_api::LaunchIo,
+        patience: std::time::Duration,
         publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
-        hex_runtime::windows::WinRuntime::launch_managed(self, spec, plan, io, publish)
+        hex_runtime::windows::WinRuntime::launch_managed(self, record, plan, io, patience, publish)
     }
 
     fn attach_managed(
         &self,
-        spec: &BoxSpec,
+        record: &BoxRecord,
         identity: Option<&shards_api::Identity>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
-        hex_runtime::windows::WinRuntime::attach_managed(self, spec, identity)
+        hex_runtime::windows::WinRuntime::attach_managed(self, record, identity)
     }
 
     fn finalize_managed(
         &self,
-        spec: &BoxSpec,
+        record: &BoxRecord,
         identity: Option<&shards_api::Identity>,
     ) -> Result<(), Refusal> {
-        hex_runtime::windows::WinRuntime::finalize_managed(self, spec, identity)
+        hex_runtime::windows::WinRuntime::finalize_managed(self, record, identity)
     }
 
     fn trace(&self, _id: &BoxId) -> Result<Option<ProcId>, Refusal> {
@@ -1184,30 +1247,36 @@ impl Recover for hex_runtime::windows::WinRuntime {
 /// ended). Neither has host processes to end; a box recovery removes that the guest still holds is deleted
 /// there.
 impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
+    fn managed_usage(&self, record: &BoxRecord) -> Result<Usage, Refusal> {
+        self.host().managed_usage(record)
+    }
+
     fn launch_managed(
         &self,
-        spec: &BoxSpec,
-        plan: &shards_api::PreparedBoot,
+        record: &BoxRecord,
+        plan: &hex_runtime::devices::ManagedLaunch<'_>,
         io: shards_api::LaunchIo,
+        patience: std::time::Duration,
         publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
-        self.host().launch_managed(spec, plan, io, publish)
+        self.host()
+            .launch_managed(record, plan, io, patience, publish)
     }
 
     fn attach_managed(
         &self,
-        spec: &BoxSpec,
+        record: &BoxRecord,
         identity: Option<&shards_api::Identity>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
-        self.host().attach_managed(spec, identity)
+        self.host().attach_managed(record, identity)
     }
 
     fn finalize_managed(
         &self,
-        spec: &BoxSpec,
+        record: &BoxRecord,
         identity: Option<&shards_api::Identity>,
     ) -> Result<(), Refusal> {
-        self.host().finalize_managed(spec, identity)
+        self.host().finalize_managed(record, identity)
     }
 
     fn attachment_offers(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {

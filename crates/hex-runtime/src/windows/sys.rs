@@ -933,6 +933,49 @@ pub fn wait(process: &Handle, timeout_ms: u32) -> io::Result<bool> {
     }
 }
 
+/// Publish a flushed temp file beside its final name. MoveFileExW documents write-through move
+/// completion; this is not by itself a hardware power-loss proof (managed-native.md).
+pub fn replace_durable(from: &std::path::Path, to: &std::path::Path) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    fn path(path: &std::path::Path) -> io::Result<Vec<u16>> {
+        use std::os::windows::ffi::OsStrExt;
+        let count = path
+            .as_os_str()
+            .encode_wide()
+            .count()
+            .checked_add(1)
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        let mut wide = Vec::new();
+        wide.try_reserve_exact(count)
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        for unit in path.as_os_str().encode_wide() {
+            if unit == 0 {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            wide.push(unit);
+        }
+        wide.push(0);
+        Ok(wide)
+    }
+    let source = path(from)?;
+    let destination = path(to)?;
+    // SAFETY: both buffers are owned, NUL-terminated native paths alive through the call. The caller
+    // owns both names; flags request immediate same-volume replacement, never copy or reboot work.
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    Ok(())
+}
+
 /// Ends `process` alone with exit code `code` (`Proc::kill`: its job and the job's other members run on).
 /// A process that has ended already is refused `ERROR_ACCESS_DENIED`; the caller reads its exit to tell.
 pub fn terminate_process(process: &Handle, code: u32) -> io::Result<()> {

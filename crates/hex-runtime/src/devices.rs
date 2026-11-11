@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::time::Duration;
 
 use hex_api::{BoxId, BoxSpec, DeviceId, DeviceInfo, DeviceKind, Refusal};
 use hex_core::record::BoxRecord;
@@ -100,12 +101,77 @@ pub struct Catalog {
     entries: Vec<Entry>,
 }
 
+/// One immutable, fallibly allocated catalog shared by the initialized native adapters.
+pub type SharedCatalog = triomphe::Arc<Catalog>;
+
+pub fn shared_catalog(path: &Path) -> Result<SharedCatalog, Refusal> {
+    SharedCatalog::try_new(Catalog::open(path)?).map_err(|_| Refusal::Exhausted {
+        what: "shared runtime device catalog owners",
+        bound: 1,
+    })
+}
+
+/// Encode the persisted incarnation, never a reusable workload id, as a native path component.
+pub fn managed_scope_id(record: &BoxRecord) -> Result<BoxId, Refusal> {
+    let refused = || match record.spec.id.try_clone() {
+        Ok(id) => Refusal::Lifecycle {
+            id,
+            cause: hex_api::LifecycleCause::Uncertain,
+        },
+        Err(error) => error,
+    };
+    let scope = record.native_scope.ok_or_else(refused)?;
+    let room = scope.bytes().len().checked_mul(2).ok_or_else(refused)?;
+    let mut name = String::new();
+    name.try_reserve_exact(room)
+        .map_err(|_| Refusal::Exhausted {
+            what: "native scope name bytes",
+            bound: room,
+        })?;
+    for byte in scope.bytes() {
+        for digit in [byte >> 4, byte & 15] {
+            let byte = b"0123456789abcdef"
+                .get(usize::from(digit))
+                .copied()
+                .ok_or_else(refused)?;
+            name.push(char::from(byte));
+        }
+    }
+    BoxId::try_new(&name)
+}
+
 /// Parsed configuration for one create. No background registry, watcher or mutable copy is kept.
 pub struct CdiPlan<'a> {
     specs: Vec<(hex_core::cdi::Spec, Vec<&'a str>)>,
 }
 
 pub type Records = BTreeMap<BoxId, Result<BoxRecord, String>>;
+
+/// Two actual native command sources, consumed by the SAME canonical record/native owner.
+/// This is an internal borrowed launch input, never a peer-supplied payload or backend fallback.
+pub enum ManagedLaunch<'a> {
+    Shards(&'a shards_api::PreparedBoot),
+    Firecracker {
+        program: &'a hex_api::Program,
+        vsock: &'a Path,
+    },
+}
+
+impl ManagedLaunch<'_> {
+    pub fn class(&self) -> hex_api::Class {
+        match self {
+            Self::Shards(_) => hex_api::Class::Shards,
+            Self::Firecracker { .. } => hex_api::Class::Firecracker,
+        }
+    }
+
+    pub fn vsock(&self) -> &Path {
+        match self {
+            Self::Shards(plan) => plan.vsock(),
+            Self::Firecracker { vsock, .. } => vsock,
+        }
+    }
+}
 
 /// The existing native record owner, shared by OCI, Firecracker and Shards. The callback is
 /// synchronous and invoked exactly once while concrete existing box/device turns live on stack.
@@ -134,8 +200,9 @@ pub trait Transaction {
     /// The existing native receipt alone owns observation/reaping; no Process record is added.
     fn launch_managed(
         &self,
-        plan: &shards_api::PreparedBoot,
+        plan: &ManagedLaunch<'_>,
         io: shards_api::LaunchIo,
+        patience: Duration,
     ) -> Result<shards_api::ManagedReceipt, Refusal>;
     /// Reattach the exact persisted native identity and envelope without creating a process.
     /// None is cleanup-only for Creating/Deleting before identity publication, never a usable
@@ -147,6 +214,8 @@ pub trait Transaction {
     /// Dispose the same native receipt only after the backend durably records its positive whole
     /// scope release. A controller exit alone is insufficient; matching identity/owner guards ABA.
     fn finalize_managed(&self, identity: Option<&shards_api::Identity>) -> Result<(), Refusal>;
+    /// Read this canonical scope's native counters directly, without runtime/capacity recursion.
+    fn managed_usage(&self) -> Result<hex_api::Usage, Refusal>;
 }
 
 /// Upgrade the same Node authority without allocating an owner or transaction. The operation's
@@ -740,8 +809,9 @@ mod authority_tests {
         }
         fn launch_managed(
             &self,
-            _: &shards_api::PreparedBoot,
+            _: &ManagedLaunch<'_>,
             _: shards_api::LaunchIo,
+            _: Duration,
         ) -> Result<shards_api::ManagedReceipt, Refusal> {
             Err(invalid("fixture has no native launcher"))
         }
@@ -753,6 +823,9 @@ mod authority_tests {
         }
         fn finalize_managed(&self, _: Option<&shards_api::Identity>) -> Result<(), Refusal> {
             Err(invalid("fixture has no native launcher"))
+        }
+        fn managed_usage(&self) -> Result<hex_api::Usage, Refusal> {
+            Err(invalid("fixture has no native scope"))
         }
     }
     impl Books for Owner {
@@ -781,6 +854,32 @@ mod authority_tests {
                 Mode::Refused => Err(Refusal::NoSuchBox(id.try_clone()?)),
             }
         }
+    }
+
+    /// AC-T7.4.1: path authority is the canonical incarnation, never the reusable public box id.
+    #[test]
+    fn native_scope_path_keeps_all_bits_and_refuses_legacy_absence() {
+        let mut record = BoxRecord::new(
+            BoxSpec {
+                id: BoxId::new("reused").unwrap(),
+                class: hex_api::ClassSpec::Process,
+                bounds: hex_api::Bounds::default(),
+                owner: None,
+                devices: Vec::new(),
+                allocation: None,
+            },
+            hex_core::record::Phase::Creating,
+            Vec::new(),
+        );
+        assert!(managed_scope_id(&record).is_err());
+        record.native_scope = Some(hex_core::record::NativeScope::from_bytes([0xab; 16]));
+        let first = managed_scope_id(&record).unwrap();
+        assert_eq!(first.as_str(), "abababababababababababababababab");
+        record.native_scope = Some(hex_core::record::NativeScope::from_bytes([0xac; 16]));
+        assert_ne!(managed_scope_id(&record).unwrap(), first);
+        record.native_scope = Some(hex_core::record::NativeScope::from_bytes([0xab; 16]));
+        record.spec.id = BoxId::new("another-public-name").unwrap();
+        assert_eq!(managed_scope_id(&record).unwrap(), first);
     }
 
     /// AC-T7.4.1: no callback protocol failure may duplicate a physical operation or mask refusal.

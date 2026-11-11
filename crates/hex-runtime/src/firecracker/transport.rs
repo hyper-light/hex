@@ -4,7 +4,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use hex_api::{Proc, Refusal};
+use hex_api::Refusal;
 use hex_client::guest::{Duplex, Link};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use serde::Deserialize;
@@ -274,15 +274,35 @@ impl Duplex for StagingStream {
 
 pub(super) fn ready(
     listener: &UnixListener,
-    proc: &mut crate::linux::proc::PidfdProc,
+    proc: &dyn shards_api::ManagedProcess,
     timeout: Duration,
 ) -> Result<(), Refusal> {
     let until = deadline(timeout)?;
+    let identity = proc
+        .identity()
+        .map_err(|_| invalid("native readiness receipt has no identity"))?;
+    let raw = i32::try_from(identity.pid)
+        .map_err(|_| invalid("readiness identity is unrepresentable"))?;
+    let pid = rustix::process::Pid::from_raw(raw)
+        .ok_or_else(|| invalid("readiness identity is invalid"))?;
+    // Readonly event subscription only. The SAME managed receipt remains sole reaping/stopping
+    // authority; this descriptor performs no waitid, signal or native lifecycle transition.
+    let observer = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
+        .map_err(|e| Refusal::os("observing native readiness controller", e))?;
+    if crate::linux::oci::state::start_time(raw) != Some(identity.started) || identity.started == 0
+    {
+        return Err(invalid("native readiness identity changed"));
+    }
+
     listener
         .set_nonblocking(true)
         .map_err(|e| Refusal::os("bounding guest readiness listener", e))?;
     loop {
-        if proc.try_wait()?.is_some() {
+        if proc
+            .terminal()
+            .map_err(|_| invalid("native readiness observation failed"))?
+            .is_some()
+        {
             return Err(Refusal::Broken(
                 "Firecracker ended before guest readiness".into(),
             ));
@@ -303,10 +323,10 @@ pub(super) fn ready(
                         .map_err(|_| invalid("readiness deadline overflow"))?,
                     tv_nsec: i64::from(duration.subsec_nanos()),
                 };
-                let pidfd = proc.pidfd();
+
                 let mut descriptors = [
                     PollFd::new(listener, PollFlags::IN),
-                    PollFd::new(&pidfd, PollFlags::IN),
+                    PollFd::new(&observer, PollFlags::IN),
                 ];
                 match rustix::event::poll(&mut descriptors, Some(&timespec)) {
                     Ok(0) => {

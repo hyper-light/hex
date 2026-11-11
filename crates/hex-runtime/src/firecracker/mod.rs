@@ -4,6 +4,9 @@
 mod config;
 pub use config::{Config, PREBOOT_REVISION};
 
+#[cfg(any(target_os = "linux", test))]
+mod observations;
+
 #[cfg(target_os = "linux")]
 mod native;
 #[cfg(target_os = "linux")]
@@ -23,7 +26,7 @@ fn invalid(why: impl Into<String>) -> Refusal {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn exhausted(what: &'static str, bound: usize) -> Refusal {
     Refusal::Exhausted { what, bound }
 }

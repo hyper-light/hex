@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, Weak}
 use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, Exit, Proc, Refusal};
-use hex_core::record::ProcId;
+use hex_core::record::{BoxRecord, NativeScope, ProcId};
 use rustix::buffer::spare_capacity;
 use rustix::event::epoll::{self, CreateFlags, EventData, EventFlags};
 use rustix::event::{PollFd, PollFlags, Timespec};
@@ -92,6 +92,7 @@ enum ManagedPhase {
     Reserved,
     Absent,
     Held { pid: i64, pidfd: OwnedFd },
+    Observed { pid: i64, pidfd: OwnedFd },
     Running { pid: i64, pidfd: OwnedFd },
     Exited(Exit),
     Finalized(Exit),
@@ -101,6 +102,8 @@ enum ManagedPhase {
 /// The controller pidfd is reaped by this Supervisor, while cgroup.events proves whole-scope absence.
 pub(crate) struct ManagedVm {
     id: BoxId,
+    scope: NativeScope,
+    commitment: [u8; 32],
     cgroup: hex_runtime::linux::cgroup::BoxCgroup,
     events: Option<OwnedFd>,
     identity: OnceLock<shards_api::Identity>,
@@ -160,12 +163,20 @@ impl Inits {
     }
 }
 
+struct ManagedRoot {
+    prefix: String,
+    // Keep sole native authority through the last supervising pass, including Node drop.
+    _lease: std::fs::File,
+}
+
 /// The node's supervision of its boxes' processes.
 pub struct Supervisor {
     epoll: Arc<OwnedFd>,
     inits: Mutex<Inits>,
     /// The node's box root as `/proc/<pid>/cgroup` names it: a zombie under it is the node's.
     box_root: String,
+    /// Only this initialized Node's managed subtree belongs to its orphan reaper.
+    managed_root: OnceLock<ManagedRoot>,
     store: Store,
     /// Why the last pass of the supervising thread failed, if it did; cleared by a clean pass.
     fault: Mutex<Option<String>>,
@@ -191,14 +202,125 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
 }
 
 impl Supervisor {
+    pub(crate) fn bind_managed_root(
+        &self,
+        path: &Path,
+        lease: std::fs::File,
+    ) -> Result<(), Refusal> {
+        let relative = path
+            .strip_prefix(hex_runtime::linux::cgroup::CGROUP_ROOT)
+            .ok()
+            .and_then(|path| path.to_str())
+            .ok_or_else(managed_storage)?;
+        let room = relative.len().checked_add(1).ok_or_else(managed_storage)?;
+        let mut root = String::new();
+        root.try_reserve_exact(room)
+            .map_err(|_| managed_storage())?;
+        root.push('/');
+        root.push_str(relative);
+        if self
+            .managed_root
+            .get()
+            .is_some_and(|existing| existing.prefix != root)
+        {
+            return Err(managed_storage());
+        }
+        self.managed_root
+            .set(ManagedRoot {
+                prefix: root,
+                _lease: lease,
+            })
+            .map_err(|_| managed_storage())
+    }
+
+    /// Reconstruct only this canonical scope. A missing/reused PID is not signal authority;
+    /// helpers remain owned through the exact persisted scope and cgroup.events observation.
+    pub(crate) fn recover_managed(
+        self: &Arc<Self>,
+        record: &BoxRecord,
+        cgroup: hex_runtime::linux::cgroup::BoxCgroup,
+        identity: Option<&shards_api::Identity>,
+    ) -> Result<shards_api::ManagedReceipt, Refusal> {
+        let id = &record.spec.id;
+        if record.native_scope.is_none() {
+            return Err(managed_uncertain(id));
+        }
+        let path = identity.map_or(Path::new(""), |identity| identity.vsock.as_path());
+        let native = self.reserve_managed(record, cgroup, path)?;
+        let phase = match identity {
+            None => ManagedPhase::Exited(Exit::Unknown),
+            Some(identity) => {
+                if record.init
+                    != Some(ProcId {
+                        pid: identity.pid,
+                        start_ticks: identity.started,
+                    })
+                    || identity.started == 0
+                {
+                    return Err(managed_uncertain(id));
+                }
+                let copied = copy_managed_identity(identity)?;
+                native
+                    .identity
+                    .set(copied)
+                    .map_err(|_| managed_uncertain(id))?;
+                let pid = i32::try_from(identity.pid).map_err(|_| managed_uncertain(id))?;
+                let raw = Pid::from_raw(pid).ok_or_else(|| managed_uncertain(id))?;
+                match rustix::process::pidfd_open(raw, PidfdFlags::empty()) {
+                    Err(Errno::SRCH) => ManagedPhase::Exited(Exit::Unknown),
+                    Err(error) => {
+                        return Err(Refusal::os("observing canonical managed controller", error));
+                    }
+                    Ok(pidfd) => {
+                        let stat = Stat::of(pid);
+                        if stat.is_some_and(|stat| stat.start_ticks == identity.started)
+                            && !ended(pidfd.as_fd())?
+                        {
+                            if !native.cgroup.procs()?.contains(&identity.pid) {
+                                return Err(managed_uncertain(id));
+                            }
+                            ManagedPhase::Observed {
+                                pid: i64::from(pid),
+                                pidfd,
+                            }
+                        } else {
+                            ManagedPhase::Exited(Exit::Unknown)
+                        }
+                    }
+                }
+            }
+        };
+        *native.phase.lock().map_err(poisoned)? = phase;
+        {
+            let mut phase = native.phase.lock().map_err(poisoned)?;
+            if let ManagedPhase::Observed { pidfd, .. } = &*phase {
+                epoll::add(
+                    self.epoll.as_fd(),
+                    pidfd.as_fd(),
+                    EventData::new_u64(native.token),
+                    EventFlags::IN,
+                )
+                .map_err(|e| Refusal::os("watching recovered managed controller", e))?;
+                let observed = std::mem::replace(&mut *phase, ManagedPhase::Reserved);
+                if let ManagedPhase::Observed { pid, pidfd } = observed {
+                    *phase = ManagedPhase::Running { pid, pidfd };
+                }
+            }
+        }
+        Ok(shards_api::managed_receipt(native))
+    }
+
     /// Allocate the native owner and publish its place in the EXISTING table before child creation.
     /// No global table lock spans spawn, identity I/O, record publication or gate release.
     pub(crate) fn reserve_managed(
         self: &Arc<Self>,
-        id: &BoxId,
+        record: &BoxRecord,
         cgroup: hex_runtime::linux::cgroup::BoxCgroup,
         vsock: &Path,
     ) -> Result<triomphe::Arc<ManagedVm>, Refusal> {
+        let id = &record.spec.id;
+        let scope = record.native_scope.ok_or_else(|| managed_uncertain(id))?;
+        let commitment = record.native_commitment()?;
         let mut slot = self.reserve()?;
         let token = self.inits()?.token()?;
         let mut path = PathBuf::new();
@@ -221,6 +343,8 @@ impl Supervisor {
         };
         let native = triomphe::Arc::try_new(ManagedVm {
             id: id.try_clone()?,
+            scope,
+            commitment,
             cgroup,
             events,
             identity: OnceLock::new(),
@@ -311,14 +435,16 @@ impl Supervisor {
 
     pub(crate) fn observe_managed(
         &self,
-        id: &BoxId,
+        record: &BoxRecord,
         identity: Option<&shards_api::Identity>,
     ) -> Result<Option<shards_api::ManagedReceipt>, Refusal> {
+        let id = &record.spec.id;
         let native = match self.inits()?.by_box.get(id) {
             Some(Init::Managed(native)) => triomphe::Arc::clone(native),
             Some(Init::Container(_)) => return Err(managed_uncertain(id)),
             None => return Ok(None),
         };
+        native.matches_record(record)?;
         native.matches(identity)?;
         if identity.is_some()
             && matches!(
@@ -331,17 +457,31 @@ impl Supervisor {
         Ok(Some(shards_api::managed_receipt(native)))
     }
 
+    pub(crate) fn managed_usage(&self, record: &BoxRecord) -> Result<hex_api::Usage, Refusal> {
+        let native = match self.inits()?.by_box.get(&record.spec.id) {
+            Some(Init::Managed(native)) => triomphe::Arc::clone(native),
+            _ => return Err(managed_uncertain(&record.spec.id)),
+        };
+        native.matches_record(record)?;
+        if native.cgroup.populated_if_present()?.is_none() {
+            return Err(managed_uncertain(&record.spec.id));
+        }
+        Ok(native.cgroup.usage())
+    }
+
     pub(crate) fn finalize_managed(
         &self,
-        id: &BoxId,
+        record: &BoxRecord,
         identity: Option<&shards_api::Identity>,
     ) -> Result<(), Refusal> {
+        let id = &record.spec.id;
         use shards_api::ManagedProcess;
         let native = match self.inits()?.by_box.get(id) {
             Some(Init::Managed(native)) => triomphe::Arc::clone(native),
             Some(Init::Container(_)) => return Err(managed_uncertain(id)),
             None => return Err(managed_uncertain(id)),
         };
+        native.matches_record(record)?;
         native.matches(identity)?;
         let end = native
             .terminal()
@@ -372,7 +512,7 @@ impl Supervisor {
         for init in inits.by_box.values() {
             if let Init::Managed(native) = init {
                 let phase = native.phase.lock().map_err(poisoned)?;
-                if matches!(&*phase, ManagedPhase::Held { pid: owned, .. } | ManagedPhase::Running { pid: owned, .. } if *owned == i64::from(pid))
+                if matches!(&*phase, ManagedPhase::Held { pid: owned, .. } | ManagedPhase::Observed { pid: owned, .. } | ManagedPhase::Running { pid: owned, .. } if *owned == i64::from(pid))
                 {
                     return Ok(true);
                 }
@@ -407,6 +547,7 @@ impl Supervisor {
                 ..Inits::default()
             }),
             box_root: Path::new("/").join(rel).to_string_lossy().into_owned(),
+            managed_root: OnceLock::new(),
             store,
             fault: Mutex::new(None),
             programs: Mutex::new(BTreeMap::new()),
@@ -795,7 +936,7 @@ impl Supervisor {
                     // orphan sweep must reap that cancelled controller; no second reaper/timer.
                     Init::Managed(native) => matches!(
                         *native.phase.lock().map_err(poisoned)?,
-                        ManagedPhase::Held { .. }
+                        ManagedPhase::Held { .. } | ManagedPhase::Observed { .. }
                     ),
                 };
                 if pending {
@@ -857,8 +998,16 @@ impl Supervisor {
         text.lines()
             .filter_map(|l| l.strip_prefix("0::"))
             .any(|path| {
-                path.strip_prefix(self.box_root.as_str())
-                    .is_some_and(|rest| rest.starts_with('/'))
+                let Some(rest) = path.strip_prefix(self.box_root.as_str()) else {
+                    return false;
+                };
+                if rest.starts_with("/.vm/") {
+                    return self.managed_root.get().is_some_and(|root| {
+                        path.strip_prefix(root.prefix.as_str())
+                            .is_some_and(|child| child.starts_with('/'))
+                    });
+                }
+                rest.starts_with('/')
             })
     }
 
@@ -867,6 +1016,19 @@ impl Supervisor {
             *fault = outcome.err().map(|e| e.to_string());
         }
     }
+}
+
+fn copy_managed_identity(identity: &shards_api::Identity) -> Result<shards_api::Identity, Refusal> {
+    let mut vsock = PathBuf::new();
+    vsock
+        .try_reserve_exact(identity.vsock.as_os_str().len())
+        .map_err(|_| managed_storage())?;
+    vsock.push(&identity.vsock);
+    Ok(shards_api::Identity {
+        pid: identity.pid,
+        started: identity.started,
+        vsock,
+    })
 }
 
 fn managed_storage() -> Refusal {
@@ -900,6 +1062,16 @@ fn managed_os(operation: shards_api::ProcessOperation, error: Errno) -> shards_a
 }
 
 impl ManagedVm {
+    fn matches_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        if self.id != record.spec.id
+            || Some(self.scope) != record.native_scope
+            || self.commitment != record.native_commitment()?
+        {
+            return Err(managed_uncertain(&record.spec.id));
+        }
+        Ok(())
+    }
+
     fn observe_identity(&self) -> Result<&shards_api::Identity, Refusal> {
         if let Some(identity) = self.identity.get() {
             return Ok(identity);
@@ -946,7 +1118,9 @@ impl ManagedVm {
             ManagedPhase::Reserved => return Ok(None),
             ManagedPhase::Absent => return Ok(Some(Exit::Unknown)),
             ManagedPhase::Exited(exit) | ManagedPhase::Finalized(exit) => return Ok(Some(*exit)),
-            ManagedPhase::Held { pidfd, .. } | ManagedPhase::Running { pidfd, .. } => {
+            ManagedPhase::Held { pidfd, .. }
+            | ManagedPhase::Observed { pidfd, .. }
+            | ManagedPhase::Running { pidfd, .. } => {
                 match rustix::process::waitid(
                     WaitId::PidFd(pidfd.as_fd()),
                     WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
@@ -1011,11 +1185,11 @@ impl ManagedVm {
     fn poll_pidfd(&self) -> Result<Option<OwnedFd>, shards_api::Refusal> {
         let phase = self.phase.lock().map_err(managed_poisoned)?;
         match &*phase {
-            ManagedPhase::Held { pidfd, .. } | ManagedPhase::Running { pidfd, .. } => {
-                rustix::io::fcntl_dupfd_cloexec(pidfd, 3)
-                    .map(Some)
-                    .map_err(|error| managed_os(shards_api::ProcessOperation::QueryScope, error))
-            }
+            ManagedPhase::Held { pidfd, .. }
+            | ManagedPhase::Observed { pidfd, .. }
+            | ManagedPhase::Running { pidfd, .. } => rustix::io::fcntl_dupfd_cloexec(pidfd, 3)
+                .map(Some)
+                .map_err(|error| managed_os(shards_api::ProcessOperation::QueryScope, error)),
             _ => Ok(None),
         }
     }

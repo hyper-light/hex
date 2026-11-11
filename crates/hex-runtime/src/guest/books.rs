@@ -141,6 +141,7 @@ impl GuestRuntime {
 
     pub(super) fn create_recorded(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         self.check_allocation(&spec)?;
+        let budget = managed::Budget::new(self.first_dial_bound()?)?;
         let books = self.books.get().ok_or_else(|| {
             Refusal::Broken("a dedicated guest needs the native record authority".into())
         })?;
@@ -163,15 +164,17 @@ impl GuestRuntime {
             }
             // Store the original workload and immutable admission receipt, never
             // the rewritten inner OCI payload. Any failed effect retains Creating.
+            budget.remaining()?;
             let record = BoxRecord::new(spec, Phase::Creating, Vec::new());
             transaction.put(&record)?;
-            let info = self.create_selected(record.spec, transaction)?;
+            let info = self.create_selected(record.spec, transaction, budget)?;
             let mut record = transaction.read(&id)?.ok_or(uncertain(&id)?)?;
             if record.phase != Phase::Creating
                 || info.id != id
                 || info.class != record.spec.class.class()
                 || info.allocation != record.spec.allocation
                 || record.init.is_none()
+                || record.native_scope.is_none()
             {
                 return Err(uncertain(&id)?);
             }
@@ -201,7 +204,10 @@ impl GuestRuntime {
             let record = transaction
                 .read(id)?
                 .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
-            if record.spec != snapshot.spec || record.init != snapshot.init {
+            if record.spec != snapshot.spec
+                || record.init != snapshot.init
+                || record.native_scope != snapshot.native_scope
+            {
                 return Err(uncertain(id)?);
             }
             if ready && record.phase != Phase::Ready {
@@ -227,7 +233,10 @@ impl GuestRuntime {
             let mut record = transaction
                 .read(id)?
                 .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
-            if record.spec != snapshot.spec || record.init != snapshot.init {
+            if record.spec != snapshot.spec
+                || record.init != snapshot.init
+                || record.native_scope != snapshot.native_scope
+            {
                 return Err(uncertain(id)?);
             }
             record.phase = Phase::Deleting;
@@ -253,6 +262,34 @@ impl GuestRuntime {
         capacity.devices = self.attachment_offers()?;
         capacity.check()?;
         Ok(capacity)
+    }
+
+    /// Dedicated VM statistics come from the same native scope, including its
+    /// helpers. No relay/guest must be usable to observe those retained resources.
+    pub(super) fn native_usage(&self, id: &BoxId) -> Result<Option<Usage>, Refusal> {
+        let Some(books) = self.books.get() else {
+            return Ok(None);
+        };
+        let snapshot = self
+            .recorded_box(id)?
+            .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+        if !self.owns_record(&snapshot.spec) {
+            return Ok(None);
+        }
+        let keys = self.turn_keys(&snapshot.spec.devices)?;
+        devices::with_transaction(books, id, &keys, |transaction| {
+            let record = transaction
+                .read(id)?
+                .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+            if record.native_scope.is_none()
+                || record.native_scope != snapshot.native_scope
+                || record.spec != snapshot.spec
+                || record.init != snapshot.init
+            {
+                return Err(uncertain(id)?);
+            }
+            transaction.managed_usage().map(Some)
+        })
     }
 }
 
@@ -294,10 +331,16 @@ mod tests {
         fn finalize_managed(&self, _: Option<&shards_api::Identity>) -> Result<(), Refusal> {
             panic!("pure record control cannot finalize native scope")
         }
+        fn managed_usage(&self) -> Result<Usage, Refusal> {
+            Err(Refusal::Broken(
+                "this pure model has no native counters".into(),
+            ))
+        }
         fn launch_managed(
             &self,
-            _: &shards_api::PreparedBoot,
+            _: &crate::devices::ManagedLaunch<'_>,
             _: shards_api::LaunchIo,
+            _: Duration,
         ) -> Result<shards_api::ManagedReceipt, Refusal> {
             panic!("pure record control cannot launch")
         }

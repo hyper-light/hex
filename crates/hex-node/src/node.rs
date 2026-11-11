@@ -134,7 +134,7 @@ pub const OCI_BOXES: &str = ".oci";
 
 /// A node agent over the `process` and `oci` classes.
 pub struct Node {
-    attachments: Arc<hex_runtime::devices::Catalog>,
+    attachments: hex_runtime::devices::SharedCatalog,
     attachment_turns: Turns,
     backends: OnceLock<backends::Backends>,
     prober: OnceLock<crate::facts::SharedProber>,
@@ -326,7 +326,12 @@ impl Node {
         // devfs makes none, so it parks none.
         let (attachments, attachment_turns) = attachments::catalog(&state_dir.join("devices"))?;
         let node = Self {
-            attachments: Arc::new(attachments),
+            attachments: hex_runtime::devices::SharedCatalog::try_new(attachments).map_err(
+                |_| Refusal::Exhausted {
+                    what: "shared runtime device catalog owners",
+                    bound: 1,
+                },
+            )?,
             attachment_turns,
             backends: OnceLock::new(),
             prober: OnceLock::new(),

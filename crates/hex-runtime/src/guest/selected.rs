@@ -6,10 +6,12 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use hex_api::{BoxId, BoxSpec, CapacityResources, Class, DeviceId, DeviceKind, Refusal};
+use hex_core::record::{BoxRecord, NativeScope};
 
 use super::{GuestConfig, held};
 
-const HEADER: &str = "hex-selected-guest 1";
+const HEADER: &str = "hex-selected-guest 2";
+const LEGACY_HEADER: &str = "hex-selected-guest 1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Phase {
@@ -27,6 +29,7 @@ pub(super) struct Record {
     pub id: BoxId,
     pub devices: Vec<DeviceId>,
     pub class: Class,
+    pub scope: Option<NativeScope>,
     pub physical: Vec<shards_api::PhysicalGpu>,
     pub vcpus: u32,
     pub memory_mib: u64,
@@ -63,8 +66,8 @@ pub fn resources(config: &GuestConfig) -> Result<CapacityResources, Refusal> {
 }
 
 impl Record {
-    pub fn intent(spec: &BoxSpec, config: &GuestConfig) -> Result<Self, Refusal> {
-        let receipt = Self::retained(spec)?;
+    pub fn intent(record: &BoxRecord, config: &GuestConfig) -> Result<Self, Refusal> {
+        let receipt = Self::retained(record)?;
         let configured = resources(config)?;
         if u64::from(receipt.vcpus).checked_mul(1000) != Some(configured.cpu_milli)
             || receipt.memory_mib.checked_mul(1 << 20) != Some(configured.mem_bytes)
@@ -74,7 +77,11 @@ impl Record {
         Ok(receipt)
     }
 
-    pub fn retained(spec: &BoxSpec) -> Result<Self, Refusal> {
+    pub fn retained(record: &BoxRecord) -> Result<Self, Refusal> {
+        let scope = record
+            .native_scope
+            .ok_or(super::books::uncertain(&record.spec.id)?)?;
+        let spec = &record.spec;
         spec.check()?;
         let reserved = spec
             .allocation
@@ -125,6 +132,7 @@ impl Record {
             id: spec.id.try_clone()?,
             devices,
             class: spec.class.class(),
+            scope: Some(scope),
             physical: Vec::new(),
             vcpus,
             memory_mib,
@@ -162,6 +170,14 @@ impl Record {
         Ok(())
     }
 
+    pub fn matches_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        self.matches(&record.spec)?;
+        if self.scope.is_none() || self.scope != record.native_scope {
+            return Err(super::books::uncertain(&record.spec.id)?);
+        }
+        Ok(())
+    }
+
     pub fn identity(&self) -> Result<&shards_api::Identity, Refusal> {
         match &self.phase {
             Phase::Running(identity)
@@ -194,6 +210,16 @@ impl Record {
         writeln!(text, "{HEADER}")?;
         writeln!(text, "box {}", self.id)?;
         writeln!(text, "class {}", self.class.name())?;
+        write!(text, "scope ")?;
+        match self.scope {
+            Some(scope) => {
+                for byte in scope.bytes() {
+                    write!(text, "{byte:02x}")?;
+                }
+                writeln!(text)?;
+            }
+            None => writeln!(text, "none")?,
+        }
         writeln!(text, "vcpus {}", self.vcpus)?;
         writeln!(text, "memory_mib {}", self.memory_mib)?;
         writeln!(text, "devices {}", self.devices.len())?;
@@ -336,14 +362,21 @@ fn parse(text: &str) -> Result<Record, Refusal> {
         return Err(invalid("oversized or truncated receipt"));
     }
     let mut lines = text.lines();
-    if lines.next() != Some(HEADER) {
-        return Err(invalid("unknown receipt version"));
-    }
+    let legacy = match lines.next() {
+        Some(HEADER) => false,
+        Some(LEGACY_HEADER) => true,
+        _ => return Err(invalid("unknown receipt version")),
+    };
     let id = BoxId::new(field(lines.next(), "box ")?)?;
     let class = match field(lines.next(), "class ")? {
         "oci" => Class::Oci,
         "shards" => Class::Shards,
         _ => return Err(invalid("receipt names another backend")),
+    };
+    let scope = if legacy {
+        None
+    } else {
+        parse_scope(field(lines.next(), "scope ")?)?
     };
     let vcpus = field(lines.next(), "vcpus ")?
         .parse::<u32>()
@@ -439,11 +472,37 @@ fn parse(text: &str) -> Result<Record, Refusal> {
         id,
         devices,
         class,
+        scope,
         physical,
         vcpus,
         memory_mib,
         phase,
     })
+}
+
+fn parse_scope(text: &str) -> Result<Option<NativeScope>, Refusal> {
+    if text == "none" {
+        return Ok(None);
+    }
+    // NativeScope is the canonical core's fixed 128-bit incarnation, encoded as
+    // two ASCII hex digits per byte. Never derive it from a reusable socket/PID.
+    let mut bytes = [0; 16];
+    let digits = bytes
+        .len()
+        .checked_mul(2)
+        .ok_or_else(|| invalid("native scope representation overflows"))?;
+    if text.len() != digits || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(invalid("native scope is not exact ASCII hexadecimal"));
+    }
+    let (pairs, _) = text.as_bytes().as_chunks::<2>();
+    for (byte, pair) in bytes.iter_mut().zip(pairs) {
+        *byte = u8::from_str_radix(
+            std::str::from_utf8(pair).map_err(|_| invalid("native scope is not ASCII"))?,
+            16,
+        )
+        .map_err(|_| invalid("native scope byte is invalid"))?;
+    }
+    Ok(Some(NativeScope::from_bytes(bytes)))
 }
 
 fn field<'a>(line: Option<&'a str>, name: &str) -> Result<&'a str, Refusal> {
@@ -463,6 +522,7 @@ mod tests {
                 key: 256,
             }],
             class: Class::Shards,
+            scope: Some(NativeScope::from_bytes([7; 16])),
             physical: vec![shards_api::PhysicalGpu::Pci {
                 domain: 0,
                 bus: 1,
@@ -522,5 +582,27 @@ mod tests {
         ] {
             assert!(parse(&bad).is_err());
         }
+    }
+
+    /// AC-T7.4.1: legacy transport receipts decode without inventing a native
+    /// incarnation; malformed or transplanted scope bytes supply no authority.
+    #[test]
+    fn legacy_and_hostile_scope_receipts_cannot_authorize_a_new_incarnation() {
+        let text = record().encode().unwrap();
+        let legacy = text
+            .replace(HEADER, LEGACY_HEADER)
+            .replace("scope 07070707070707070707070707070707\n", "");
+        assert_eq!(parse(&legacy).unwrap().scope, None);
+        for scope in [
+            "0707070707070707070707070707070+07",
+            "070707070707070707070707070707070",
+            "070707070707070707070707070707070707",
+            "07070707070707070707070707070707gg",
+        ] {
+            assert!(parse(&text.replace("07070707070707070707070707070707", scope)).is_err());
+        }
+        let mut receipt = record();
+        receipt.scope = None;
+        assert_eq!(parse(&receipt.encode().unwrap()).unwrap().scope, None);
     }
 }

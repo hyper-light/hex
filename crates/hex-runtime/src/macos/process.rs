@@ -1039,7 +1039,13 @@ impl Watcher {
                 });
             }
         }
-        let read = self.watch.read(&reading.members);
+        let read = self
+            .watch
+            .read(&reading.members)
+            .map_err(|_| Refusal::Exhausted {
+                what: "watcher growth snapshot",
+                bound: reading.members.len(),
+            })?;
         self.watch.ran(&self.ran);
         // The growth since the last read: a box faster than the node's rates raises them.
         let now = Instant::now();
@@ -1111,7 +1117,11 @@ impl Watcher {
         self.order.rotate_left(first);
         let floor = self
             .watch
-            .runs(&read, &self.order, self.shared.lateness()?, &mut self.run);
+            .runs(&read, &self.order, self.shared.lateness()?, &mut self.run)
+            .map_err(|_| Refusal::Exhausted {
+                what: "watcher run selection",
+                bound: self.order.len(),
+            })?;
         let held = self.state.apply(&self.order, &self.run)?;
         self.ran_from = Some(Instant::now());
         let next = floor.or(next);
@@ -1222,7 +1232,12 @@ impl Watcher {
     /// the box no longer holds (the next step's box-user does). A member whose rusage is gone or ended just
     /// exited, and isn't an escape.
     fn count_escapes(&mut self, now: &[Member]) -> Result<(), Refusal> {
-        let gone = watch::changes(&self.last, now).gone;
+        let gone = watch::changes(&self.last, now)
+            .map_err(|_| Refusal::Exhausted {
+                what: "watcher membership changes",
+                bound: now.len().saturating_add(self.last.len()),
+            })?
+            .gone;
         let mut escaped = 0u64;
         for m in gone {
             let pid = i32::try_from(m.pid).unwrap_or(-1);

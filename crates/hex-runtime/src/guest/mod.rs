@@ -315,9 +315,10 @@ pub struct GuestRuntime {
     /// The event form's client of the guest's node: its answers are read by the node's loop, so a call
     /// through it holds no thread while the guest answers.
     dedicated: Mutex<Vec<dedicated::Slot>>,
-    gpu_catalog: Option<Arc<crate::devices::Catalog>>,
+    gpu_catalog: Option<crate::devices::SharedCatalog>,
     books: OnceLock<Weak<dyn crate::devices::Books>>,
     runtime_cost: Option<hex_api::RuntimeCost>,
+    native_paths: Option<shards_api::RuntimePaths>,
     /// What joins each guest's evented connection to the node's loop ([`GuestRuntime::join_loop`]).
     joins: Mutex<Option<Arc<dyn Joins>>>,
 }
@@ -423,6 +424,7 @@ impl GuestRuntime {
             gpu_catalog: None,
             books: OnceLock::new(),
             runtime_cost: None,
+            native_paths: None,
             joins: Mutex::new(None),
         }
     }
@@ -575,6 +577,11 @@ impl GuestRuntime {
     /// (HEX-GUEST-40). The running guest is never booted again for it: that would end its boxes. At most one
     /// warm-up is in flight, and a binary is warmed once. Called on each create: a stat, no polling.
     fn warm_if_changed(&self) -> Result<(), Refusal> {
+        // A profiled/native-owned runtime has no extra pool grant for a second
+        // VM. Optional warming is skipped; the shared backing never pays twice.
+        if self.runtime_cost.is_some() || self.uses_books() {
+            return Ok(());
+        }
         let Some(now) = binary_identity(&self.config.binary) else {
             return Ok(());
         };
@@ -869,6 +876,9 @@ impl Runtime for GuestRuntime {
     }
 
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
+        if let Some(usage) = self.native_usage(id)? {
+            return Ok(usage);
+        }
         self.call_recorded(id, false, || self.with(id, |b| b.client.usage(id)))
     }
 

@@ -168,34 +168,102 @@ fn quote(line: &mut Vec<u16>, bound: usize, word: &OsStr) -> Result<(), Refusal>
     put(line, bound, u16::from(b'"'))
 }
 
-fn job_name(runtime: &WinRuntime, spec: &BoxSpec) -> Result<Option<String>, Refusal> {
+fn job_name(
+    runtime: &WinRuntime,
+    record: &hex_core::record::BoxRecord,
+) -> Result<Option<String>, Refusal> {
+    let scope = record.native_scope.ok_or_else(|| uncertain(&record.spec))?;
     let Some(node) = runtime.node.as_ref() else {
         return Ok(None);
     };
     let prefix = "Local\\hex-";
+    let suffix = "-vm-";
+    let hex_bytes = scope
+        .bytes()
+        .len()
+        .checked_mul(2)
+        .ok_or_else(|| super::allocation(usize::MAX))?;
     let size = prefix
         .len()
         .checked_add(node.len())
-        .and_then(|size| size.checked_add(1))
-        .and_then(|size| size.checked_add(spec.id.as_str().len()))
+        .and_then(|size| size.checked_add(suffix.len()))
+        .and_then(|size| size.checked_add(hex_bytes))
         .ok_or_else(|| super::allocation(usize::MAX))?;
     let mut name = String::new();
     name.try_reserve_exact(size)
         .map_err(|_| super::allocation(size))?;
     name.push_str(prefix);
     name.push_str(node);
-    name.push('-');
-    name.push_str(spec.id.as_str());
+    name.push_str(suffix);
+    use std::fmt::Write;
+    for byte in scope.bytes() {
+        write!(name, "{byte:02x}").map_err(|_| super::allocation(size))?;
+    }
     Ok(Some(name))
+}
+
+fn runtime_environment(paths: &shards_api::RuntimePaths) -> Result<Vec<u16>, Refusal> {
+    // The exact configured provider pair, in Windows' case-insensitive environment order.
+    let values = [
+        ("SHARDS_CACHE", paths.cache()),
+        ("SHARDS_HOME", paths.home()),
+    ];
+    let mut size = 1usize;
+    for (name, path) in values {
+        let entry = name
+            .len()
+            .checked_add(path.as_os_str().encode_wide().count())
+            .and_then(|count| count.checked_add(2))
+            .ok_or_else(|| super::allocation(usize::MAX))?;
+        if entry > hex_core::hcs::ENV_VAR_UNITS {
+            return Err(Refusal::Invalid {
+                what: "configured native runtime environment",
+                why: copy_text(
+                    "a configured runtime path exceeds Windows' environment variable bound",
+                )?,
+            });
+        }
+        size = size
+            .checked_add(entry)
+            .ok_or_else(|| super::allocation(usize::MAX))?;
+    }
+    let mut environment = Vec::new();
+    environment
+        .try_reserve_exact(size)
+        .map_err(|_| super::allocation(size))?;
+    for (name, path) in values {
+        environment.extend(name.encode_utf16());
+        environment.push(u16::from(b'='));
+        for unit in path.as_os_str().encode_wide() {
+            if unit == 0 {
+                return Err(pending("a configured runtime path contains NUL"));
+            }
+            environment.push(unit);
+        }
+        environment.push(0);
+    }
+    environment.push(0);
+    Ok(environment)
 }
 
 pub(super) fn launch(
     runtime: &WinRuntime,
-    spec: &BoxSpec,
-    plan: &shards_api::PreparedBoot,
+    record: &hex_core::record::BoxRecord,
+    launch: &crate::devices::ManagedLaunch<'_>,
     io: shards_api::LaunchIo,
+    patience: Duration,
     publish: &mut dyn FnMut(&Identity) -> Result<(), Refusal>,
 ) -> Result<ManagedReceipt, Refusal> {
+    let spec = &record.spec;
+    let crate::devices::ManagedLaunch::Shards(plan) = launch else {
+        return Err(uncertain(spec));
+    };
+    let paths = plan.runtime_paths().ok_or_else(|| uncertain(spec))?;
+    let deadline = Instant::now()
+        .checked_add(patience)
+        .filter(|_| patience != Duration::MAX && !patience.is_zero())
+        .ok_or_else(|| uncertain(spec))?;
+    record.native_scope.ok_or_else(|| uncertain(spec))?;
     let bounds = host_bounds(spec)?;
     if !matches!(spec.class.class(), Class::Shards | Class::Oci) {
         return Err(uncertain(spec));
@@ -204,7 +272,7 @@ pub(super) fn launch(
     let vsock = copy_path(plan.vsock())?;
     let mut spawn = sys::Spawn {
         command_line: command_line(plan)?,
-        environment: Vec::new(),
+        environment: runtime_environment(paths)?,
         cwd: None,
         stdio: std_handles(Stdio {
             stdin: None,
@@ -213,9 +281,9 @@ pub(super) fn launch(
             ask: hex_api::Ask::default(),
         })?,
     };
-    let name = job_name(runtime, spec)?;
+    let name = job_name(runtime, record)?;
     let boxed = JobBox::prepare_vm(
-        spec,
+        record,
         bounds,
         runtime.processors,
         name.as_deref(),
@@ -230,6 +298,10 @@ pub(super) fn launch(
         return Err(uncertain(spec));
     }
     let result = (|| {
+        if Instant::now() >= deadline {
+            boxed.not_submitted()?;
+            return Err(uncertain(spec));
+        }
         boxed.bind_vm(name.as_deref())?;
         // The existing passive keeper holds this same job before any VM/helper exists.
         runtime.holding.keep(&spec.id, &held)?;
@@ -255,6 +327,9 @@ pub(super) fn launch(
         boxed.managed.set(receipt).map_err(|_| uncertain(spec))?;
         let identity = &boxed.managed.get().ok_or_else(|| uncertain(spec))?.identity;
         publish(identity)?;
+        if Instant::now() >= deadline {
+            return Err(uncertain(spec));
+        }
         sys::resume(&thread)
             .map_err(|error| Refusal::os("resuming the recorded VM controller", error))?;
         if !runtime.holding.ready(&spec.id)? {
@@ -272,48 +347,205 @@ pub(super) fn launch(
 
 pub(super) fn attach(
     runtime: &WinRuntime,
-    spec: &BoxSpec,
+    record: &hex_core::record::BoxRecord,
     identity: Option<&Identity>,
 ) -> Result<ManagedReceipt, Refusal> {
-    let boxed = {
-        let boxes = runtime.boxes()?;
-        let at = super::slot_index(&boxes, &spec.id).map_err(|_| uncertain(spec))?;
-        let (_, slot) = boxes.get(at).ok_or_else(|| uncertain(spec))?;
-        match slot.physical() {
-            Some(Held::Process(boxed)) if boxed.matches_vm(spec) => Arc::clone(boxed),
-            _ => return Err(uncertain(spec)),
-        }
+    let spec = &record.spec;
+    record.native_scope.ok_or_else(|| uncertain(spec))?;
+    if identity.is_none()
+        && !matches!(
+            record.phase,
+            hex_core::record::Phase::Creating | hex_core::record::Phase::Deleting
+        )
+    {
+        return Err(uncertain(spec));
+    }
+    let boxed = match existing(runtime, record)? {
+        Some(boxed) => boxed,
+        None => cold(runtime, record, identity)?,
     };
     if let Some(expected) = identity {
-        let receipt = boxed.managed.get().ok_or_else(|| uncertain(spec))?;
-        if receipt.identity.pid != expected.pid
-            || receipt.identity.started != expected.started
-            || receipt.identity.vsock != expected.vsock
-        {
-            return Err(uncertain(spec));
+        match boxed.managed.get() {
+            Some(receipt) if receipt.identity == *expected => {}
+            None if boxed.recovered() && same_init(boxed.original_init(), expected) => {}
+            _ => return Err(uncertain(spec)),
         }
     }
-    // None is cleanup-only. Across a node crash, a bare textual job name is not sufficient
-    // ownership proof; existing keeper receipt adoption is required before this can succeed.
+    // A recovered scope without its controller has no usable identity; its API view can only clean
+    // up the proven same job. The canonical Store remains the sole device/resource holder.
     Ok(shards_api::managed_receipt(boxed))
+}
+
+fn same_init(init: Option<hex_core::record::ProcId>, identity: &Identity) -> bool {
+    init.is_some_and(|init| init.pid == identity.pid && init.start_ticks == identity.started)
+}
+
+fn existing(
+    runtime: &WinRuntime,
+    record: &hex_core::record::BoxRecord,
+) -> Result<Option<Arc<JobBox>>, Refusal> {
+    let commitment = record.native_commitment()?;
+    let boxes = runtime.boxes()?;
+    let Ok(at) = super::slot_index(&boxes, &record.spec.id) else {
+        return Ok(None);
+    };
+    let (_, slot) = boxes.get(at).ok_or_else(|| uncertain(&record.spec))?;
+    match slot.physical() {
+        Some(Held::Process(boxed)) if boxed.matches_vm(record, commitment) => {
+            Ok(Some(Arc::clone(boxed)))
+        }
+        _ => Err(uncertain(&record.spec)),
+    }
+}
+
+pub(super) fn usage(
+    runtime: &WinRuntime,
+    record: &hex_core::record::BoxRecord,
+) -> Result<hex_api::Usage, Refusal> {
+    let boxed = match existing(runtime, record)? {
+        Some(boxed) => boxed,
+        None => cold(runtime, record, None)?,
+    };
+    boxed.usage()
+}
+
+fn controller(
+    boxed: &JobBox,
+    expected: &Identity,
+    vsock: std::path::PathBuf,
+) -> Result<Receipt, ProcessFailure> {
+    use windows_sys::Win32::System::Threading::{
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    };
+    let process = super::oci::sys::open_process(
+        expected.pid,
+        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+    )
+    .map_err(|error| io_failure(ProcessOperation::OpenProcess, error))?;
+    let started = sys::created(&process)
+        .map_err(|error| io_failure(ProcessOperation::GetProcessTimes, error))?;
+    if started != expected.started {
+        return Err(ProcessFailure::DifferentStart { observed: started });
+    }
+    let job = boxed
+        .job()
+        .map_err(|_| ProcessFailure::InvalidStartRecord)?;
+    if !super::oci::sys::in_job(&process, job)
+        .map_err(|error| io_failure(ProcessOperation::QueryScope, error))?
+    {
+        return Err(ProcessFailure::DifferentScope);
+    }
+    Ok(Receipt {
+        identity: Identity {
+            pid: expected.pid,
+            started,
+            vsock,
+        },
+        process: Mutex::new(BoxProc::new(process, expected.pid, boxed.shared())),
+    })
+}
+
+fn cold(
+    runtime: &WinRuntime,
+    record: &hex_core::record::BoxRecord,
+    identity: Option<&Identity>,
+) -> Result<Arc<JobBox>, Refusal> {
+    let spec = &record.spec;
+    if let Some(identity) = identity
+        && !same_init(record.init, identity)
+    {
+        return Err(uncertain(spec));
+    }
+    let name = job_name(runtime, record)?.ok_or_else(|| uncertain(spec))?;
+    let Some(keeping) = runtime.holding.keeper.as_ref() else {
+        return Err(uncertain(spec));
+    };
+    let path = super::keeper::vm::path(&keeping.state, &spec.id)?;
+    let vsock = identity
+        .map(|identity| copy_path(&identity.vsock))
+        .transpose()?;
+    // Both typed native owners are allocated before opening any old native scope. A retained
+    // filename/PID/handle alone is never enough: all commitments and kernel object identity agree.
+    let boxed = JobBox::prepare_vm(
+        record,
+        host_bounds(spec)?,
+        runtime.processors,
+        Some(&name),
+        &runtime.holding,
+    )?;
+    let held = super::keeper::vm::read(&path)?.ok_or_else(|| uncertain(spec))?;
+    if !held.commits(boxed.vm_commitment()) {
+        return Err(uncertain(spec));
+    }
+    let _keeper = keeping
+        .keeper
+        .lock()
+        .map_err(|_| pending("native keeper lock is poisoned"))?;
+    let process = sys::open_process(held.pid)
+        .map_err(|error| Refusal::os("opening the committed VM keeper", error))?
+        .ok_or_else(|| uncertain(spec))?;
+    if sys::created(&process)
+        .map_err(|error| Refusal::os("checking the committed VM keeper birth", error))?
+        != held.started
+        || sys::wait(&process, 0)
+            .map_err(|error| Refusal::os("observing the committed VM keeper lifetime", error))?
+    {
+        return Err(uncertain(spec));
+    }
+    let job = sys::Job::open(&name)
+        .map_err(|error| Refusal::os("opening the committed native VM scope", error))?
+        .ok_or_else(|| uncertain(spec))?;
+    if !sys::same_in(&process, held.value, job.borrowed())
+        .map_err(|error| Refusal::os("checking the committed native VM kernel object", error))?
+    {
+        return Err(uncertain(spec));
+    }
+    boxed.adopt_vm(job)?;
+    runtime.holding.reserve(&spec.id, &[], None)?;
+    let retained = Held::Process(Arc::clone(&boxed));
+    let cancelled = runtime.holding.made(&spec.id, retained)?;
+    runtime.holding.keeper_receipt(
+        &spec.id,
+        super::KeeperHold::Held(super::KeeperReceipt {
+            pid: held.pid,
+            created: held.started,
+            value: held.value,
+        }),
+    )?;
+    if let (Some(identity), Some(vsock)) = (identity, vsock) {
+        match controller(&boxed, identity, vsock) {
+            Ok(receipt) => boxed.managed.set(receipt).map_err(|_| uncertain(spec))?,
+            Err(error) => boxed
+                .observation_failure
+                .set(error)
+                .map_err(|_| uncertain(spec))?,
+        }
+    }
+    if cancelled || !runtime.holding.ready(&spec.id)? {
+        return Err(uncertain(spec));
+    }
+    Ok(boxed)
 }
 
 pub(super) fn finalize(
     runtime: &WinRuntime,
-    spec: &BoxSpec,
+    record: &hex_core::record::BoxRecord,
     identity: Option<&Identity>,
 ) -> Result<(), Refusal> {
-    let boxed = {
-        let boxes = runtime.boxes()?;
-        let at = super::slot_index(&boxes, &spec.id).map_err(|_| uncertain(spec))?;
-        let (_, slot) = boxes.get(at).ok_or_else(|| uncertain(spec))?;
-        match slot.physical() {
-            Some(Held::Process(boxed)) if boxed.matches_vm(spec) => Arc::clone(boxed),
-            _ => return Err(uncertain(spec)),
-        }
+    let spec = &record.spec;
+    record.native_scope.ok_or_else(|| uncertain(spec))?;
+    if record.phase != hex_core::record::Phase::Deleting {
+        return Err(uncertain(spec));
+    }
+    let boxed = match existing(runtime, record)? {
+        Some(boxed) => boxed,
+        None if finalized_keeper_is_gone(runtime, record)? => return Ok(()),
+        None => cold(runtime, record, identity)?,
     };
     match (identity, boxed.managed.get()) {
         (Some(expected), Some(receipt)) if receipt.identity == *expected => {}
+        (Some(expected), None)
+            if boxed.recovered() && same_init(boxed.original_init(), expected) => {}
         (None, None) => {}
         _ => return Err(uncertain(spec)),
     }
@@ -328,6 +560,44 @@ pub(super) fn finalize(
         return Err(uncertain(spec));
     }
     boxed.release_scope()
+}
+
+/// The caller already published the exact backend Released receipt. After a crash this path only
+/// disposes this scope's private metadata; it never opens or terminates a possibly reused job name.
+fn finalized_keeper_is_gone(
+    runtime: &WinRuntime,
+    record: &hex_core::record::BoxRecord,
+) -> Result<bool, Refusal> {
+    let Some(keeping) = runtime.holding.keeper.as_ref() else {
+        return Err(uncertain(&record.spec));
+    };
+    let scope = record.native_scope.ok_or_else(|| uncertain(&record.spec))?;
+    let commitment = record.native_commitment()?;
+    let path = super::keeper::vm::path(&keeping.state, &record.spec.id)?;
+    let _keeper = keeping
+        .keeper
+        .lock()
+        .map_err(|_| pending("native keeper lock is poisoned"))?;
+    let Some(held) = super::keeper::vm::read(&path)? else {
+        // Guarded finalize may have completed just before the canonical Store remove was interrupted.
+        return Ok(true);
+    };
+    if !held.commits(Some((scope, commitment))) {
+        return Err(uncertain(&record.spec));
+    }
+    if let Some(process) = sys::open_process(held.pid)
+        .map_err(|error| Refusal::os("observing the finalized VM keeper", error))?
+        && sys::created(&process)
+            .map_err(|error| Refusal::os("checking the finalized VM keeper birth", error))?
+            == held.started
+        && !sys::wait(&process, 0)
+            .map_err(|error| Refusal::os("observing the finalized VM keeper end", error))?
+    {
+        return Ok(false);
+    }
+    std::fs::remove_file(path)
+        .map_err(|error| Refusal::os("removing the finalized VM keeper receipt", error))?;
+    Ok(true)
 }
 
 fn cause(identity: Option<&Identity>, failure: ProcessFailure) -> shards_api::Refusal {
@@ -345,14 +615,16 @@ fn io_cause(
     operation: ProcessOperation,
     error: std::io::Error,
 ) -> shards_api::Refusal {
-    let failure = match error.raw_os_error() {
+    cause(identity, io_failure(operation, error))
+}
+fn io_failure(operation: ProcessOperation, error: std::io::Error) -> ProcessFailure {
+    match error.raw_os_error() {
         Some(code) => ProcessFailure::Os { operation, code },
         None => ProcessFailure::UnrepresentedIo {
             operation,
             kind: error.kind(),
         },
-    };
-    cause(identity, failure)
+    }
 }
 fn observed(identity: Option<&Identity>, error: ObserveError) -> shards_api::Refusal {
     match error {
@@ -397,8 +669,20 @@ fn status(exit: Exit) -> ManagedStatus {
     }
 }
 
+fn scope_proof(boxed: &JobBox) -> Result<(), shards_api::Refusal> {
+    if let Some(failure @ ProcessFailure::DifferentScope) = boxed.observation_failure.get() {
+        // A positive contradictory membership fact cannot become release merely because the
+        // retained job is empty: this observed controller may still own out-of-scope helpers.
+        return Err(shards_api::Refusal::Scope(failure.clone()));
+    }
+    Ok(())
+}
+
 impl ManagedProcess for JobBox {
     fn identity(&self) -> Result<&Identity, shards_api::Refusal> {
+        if let Some(failure) = self.observation_failure.get() {
+            return Err(shards_api::Refusal::Scope(failure.clone()));
+        }
         self.managed
             .get()
             .map(|receipt| &receipt.identity)
@@ -416,6 +700,7 @@ impl ManagedProcess for JobBox {
             .map_err(|error| observed(self.managed.get().map(|receipt| &receipt.identity), error))
     }
     fn terminal(&self) -> Result<Option<ManagedEnd>, shards_api::Refusal> {
+        scope_proof(self)?;
         if !self.is_vm() {
             return Err(shards_api::Refusal::Launch(
                 shards_api::LaunchError::NativeRefused,
@@ -455,6 +740,7 @@ impl ManagedProcess for JobBox {
         }))
     }
     fn wait_for(&self, patience: Duration) -> Result<Option<ManagedEnd>, shards_api::Refusal> {
+        scope_proof(self)?;
         if !self.is_vm() {
             return Err(shards_api::Refusal::Launch(
                 shards_api::LaunchError::NativeRefused,
@@ -525,5 +811,38 @@ impl ManagedProcess for JobBox {
             // A kernel exit event, not a timer probe, is followed by a fresh same-job membership
             // observation. Missing/recycled snapshot identities refuse above without another picker.
         }
+    }
+}
+
+#[cfg(test)]
+mod runtime_environment_tests {
+    use super::*;
+
+    /// AC-T7.4.1: native and probe receive exactly the same explicitly configured runtime pair.
+    #[test]
+    fn runtime_environment_contains_only_the_explicit_provider_paths() {
+        let paths = shards_api::RuntimePaths::new(
+            std::path::PathBuf::from("C:\\cache\\雪"),
+            std::path::PathBuf::from("C:\\home"),
+        )
+        .unwrap();
+        let expected: Vec<u16> = "SHARDS_CACHE=C:\\cache\\雪\0SHARDS_HOME=C:\\home\0\0"
+            .encode_utf16()
+            .collect();
+        assert_eq!(runtime_environment(&paths).unwrap(), expected);
+    }
+
+    /// AC-T7.4.1: native OS paths remain lossless; no Unicode replacement or display conversion.
+    #[test]
+    fn runtime_environment_preserves_native_unpaired_utf16() {
+        use std::os::windows::ffi::OsStringExt;
+        let mut wide: Vec<u16> = "C:\\cache\\".encode_utf16().collect();
+        wide.push(0xd800);
+        let cache = std::ffi::OsString::from_wide(&wide);
+        let paths = shards_api::RuntimePaths::new(cache.into(), "C:\\home".into()).unwrap();
+        let mut expected: Vec<u16> = "SHARDS_CACHE=".encode_utf16().collect();
+        expected.extend(wide);
+        expected.extend("\0SHARDS_HOME=C:\\home\0\0".encode_utf16());
+        assert_eq!(runtime_environment(&paths).unwrap(), expected);
     }
 }

@@ -2,7 +2,9 @@
 
 use super::*;
 use hex_api::{Capacity, DeviceId, LifecycleCause};
-use hex_runtime::devices::{Books, Catalog, Records, Transaction};
+use hex_runtime::devices::{
+    Books, ManagedLaunch, Records, SharedCatalog, Transaction, managed_scope_id,
+};
 use hex_runtime::firecracker::FirecrackerRuntime;
 use hex_runtime::guest::GuestRuntime;
 use std::sync::Weak;
@@ -10,11 +12,16 @@ use std::sync::Weak;
 pub(super) struct Backends {
     firecracker: Option<Arc<FirecrackerRuntime>>,
     shards: Option<Arc<GuestRuntime>>,
+    vm_root: Option<BoxRoot>,
 }
 
 impl Node {
-    fn managed_bounds(spec: &BoxSpec) -> Result<hex_api::Bounds, Refusal> {
-        if !matches!(spec.class, ClassSpec::Shards(_)) {
+    fn managed_bounds(record: &BoxRecord) -> Result<hex_api::Bounds, Refusal> {
+        let spec = &record.spec;
+        spec.check()?;
+        if !matches!(spec.class, ClassSpec::Shards(_) | ClassSpec::Firecracker(_))
+            || record.native_scope.is_none()
+        {
             return Err(uncertain(&spec.id));
         }
         let allocation = spec.allocation.ok_or_else(|| uncertain(&spec.id))?;
@@ -28,27 +35,32 @@ impl Node {
         })
     }
 
-    fn launch_managed(
-        &self,
-        spec: &BoxSpec,
-        plan: &shards_api::PreparedBoot,
-        io: shards_api::LaunchIo,
-        publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
-    ) -> Result<shards_api::ManagedReceipt, Refusal> {
-        spec.check()?;
-        let bounds = Self::managed_bounds(spec)?;
-        let guest = self
-            .backends
+    fn vm_root(&self, id: &BoxId) -> Result<&BoxRoot, Refusal> {
+        self.backends
             .get()
-            .and_then(|backends| backends.shards.as_ref())
-            .ok_or_else(|| uncertain(&spec.id))?;
-        let gate_budget = guest.first_dial_bound()?;
+            .and_then(|backends| backends.vm_root.as_ref())
+            .ok_or_else(|| uncertain(id))
+    }
+
+    /// Exact node-owned inputs shared with the configured Shards provider's initialization probe.
+    /// Both native launch and ROOT's provider constructor consume this same pair.
+    pub fn shards_native_paths(&self) -> Result<(PathBuf, PathBuf), Refusal> {
+        let state = self.bundles.parent().ok_or_else(|| {
+            Refusal::Broken("native bundles directory has no state parent".into())
+        })?;
+        Ok((
+            native_path(state, "shards-native-cache")?,
+            native_path(state, "shards-native-home")?,
+        ))
+    }
+
+    fn shards_program(&self, plan: &shards_api::PreparedBoot) -> Result<Program, Refusal> {
         let mut program = Program::default();
         let count = plan
             .arguments()
             .len()
             .checked_add(1)
-            .ok_or_else(|| uncertain(&spec.id))?;
+            .ok_or(Refusal::Full(MAX_BOXES))?;
         program
             .args
             .try_reserve_exact(count)
@@ -59,61 +71,98 @@ impl Node {
         for argument in plan.arguments() {
             program.args.push(native_argument(argument)?);
         }
-        // A native binary's carried helper cache is in this same Node's owned state, selected
-        // explicitly rather than inheriting workload variables or credentials from its caller.
-        let cache = self
-            .bundles
-            .parent()
-            .ok_or_else(|| uncertain(&spec.id))?
-            .join("shards-native-cache");
+        let (cache, home) = self.shards_native_paths()?;
         program
             .env
-            .try_reserve_exact(1)
-            .map_err(|_| Refusal::Full(1))?;
-        program.env.push((
-            native_argument(std::ffi::OsStr::new("SHARDS_CACHE"))?,
-            native_argument(cache.as_os_str())?,
-        ));
+            .try_reserve_exact(2)
+            .map_err(|_| Refusal::Full(2))?;
+        for (name, path) in [("SHARDS_CACHE", cache), ("SHARDS_HOME", home)] {
+            program.env.push((
+                native_argument(std::ffi::OsStr::new(name))?,
+                native_argument(path.as_os_str())?,
+            ));
+        }
+        Ok(program)
+    }
+
+    fn launch_managed(
+        &self,
+        record: &BoxRecord,
+        plan: &ManagedLaunch<'_>,
+        io: shards_api::LaunchIo,
+        patience: Duration,
+        publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
+    ) -> Result<shards_api::ManagedReceipt, Refusal> {
+        let spec = &record.spec;
+        let until = Instant::now()
+            .checked_add(patience)
+            .filter(|_| !patience.is_zero() && patience != Duration::MAX)
+            .ok_or_else(|| uncertain(&spec.id))?;
+        let bounds = Self::managed_bounds(record)?;
+        if plan.class() != spec.class.class()
+            || record.phase != Phase::Creating
+            || record.init.is_some()
+        {
+            return Err(uncertain(&spec.id));
+        }
+        self.backend(plan.class())?
+            .ok_or_else(|| uncertain(&spec.id))?;
+        let owned = match plan {
+            ManagedLaunch::Shards(prepared) => Some(self.shards_program(prepared)?),
+            ManagedLaunch::Firecracker { .. } => None,
+        };
+        let program = match (plan, owned.as_ref()) {
+            (ManagedLaunch::Shards(_), Some(program)) => program,
+            (ManagedLaunch::Firecracker { program, .. }, None) => *program,
+            _ => return Err(uncertain(&spec.id)),
+        };
         program.check()?;
         program.fits(&process::exec_limit())?;
-        let cgroup = self.root.create(&spec.id, &bounds)?;
+        let scope = managed_scope_id(record)?;
+        let cgroup = self.vm_root(&spec.id)?.create(&scope, &bounds)?;
         let native = self
             .supervisor
-            .reserve_managed(&spec.id, cgroup, plan.vsock())?;
+            .reserve_managed(record, cgroup, plan.vsock())?;
         let stdio = Stdio {
             stdin: None,
             stdout: Some(io.stdout),
             stderr: Some(io.stderr),
             ..Stdio::default()
         };
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(uncertain(&spec.id));
+        }
         self.supervisor
-            .bind_managed(&native, &program, stdio, gate_budget, publish)
+            .bind_managed(&native, program, stdio, left, publish)
     }
 
     fn attach_managed(
         &self,
-        spec: &BoxSpec,
+        record: &BoxRecord,
         identity: Option<&shards_api::Identity>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
-        spec.check()?;
-        Self::managed_bounds(spec)?;
-        if let Some(native) = self.supervisor.observe_managed(&spec.id, identity)? {
+        Self::managed_bounds(record)?;
+        if let Some(native) = self.supervisor.observe_managed(record, identity)? {
             return Ok(native);
         }
-        // A reusable box id, socket or cgroup path cannot prove an old native incarnation.
-        // Cold recovery retains the claims until the canonical NativeScope receipt is joined.
-        Err(uncertain(&spec.id))
+        let scope = managed_scope_id(record)?;
+        let root = self.vm_root(&record.spec.id)?;
+        let cgroup = root
+            .get(&scope)
+            .unwrap_or_else(|| BoxCgroup::at(root.dir().join(scope.as_str())));
+        self.supervisor.recover_managed(record, cgroup, identity)
     }
 
     fn finalize_managed(
         &self,
-        spec: &BoxSpec,
+        record: &BoxRecord,
         identity: Option<&shards_api::Identity>,
     ) -> Result<(), Refusal> {
-        spec.check()?;
-        Self::managed_bounds(spec)?;
-        self.supervisor.finalize_managed(&spec.id, identity)?;
-        self.root.forget(spec.id.as_str());
+        Self::managed_bounds(record)?;
+        let scope = managed_scope_id(record)?;
+        self.supervisor.finalize_managed(record, identity)?;
+        self.vm_root(&record.spec.id)?.forget(scope.as_str());
         Ok(())
     }
 
@@ -136,29 +185,38 @@ impl Node {
         Arc::downgrade(&books)
     }
 
-    pub fn device_catalog(&self) -> Arc<Catalog> {
-        Arc::clone(&self.attachments)
+    pub fn device_catalog(&self) -> SharedCatalog {
+        self.attachments.clone()
     }
 
-    /// A sibling outside the native supervisor/orphan prefix, with the same Node identity.
-    pub fn firecracker_cgroups(&self) -> Result<BoxRoot, Refusal> {
+    fn initialize_vm_root(&self) -> Result<(BoxRoot, std::fs::File), Refusal> {
+        let state = self.bundles.parent().ok_or(Refusal::Full(MAX_BOXES))?;
+        let lease_path = native_path(state, "native-vm-owner.lock")?;
+        let lease = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lease_path)
+            .map_err(|e| Refusal::os("opening native VM owner lease", e))?;
+        lease
+            .try_lock()
+            .map_err(|e| Refusal::os("locking native VM owner lease", e))?;
         let mut disks = Vec::new();
         disks
             .try_reserve_exact(self.root.disks().len())
-            .map_err(|_| Refusal::Exhausted {
-                what: "VM disk controller identities",
-                bound: self.root.disks().len(),
-            })?;
+            .map_err(|_| Refusal::Full(MAX_BOXES))?;
         disks.extend_from_slice(self.root.disks());
-        let parent = self
-            .root
-            .dir()
-            .parent()
-            .ok_or_else(|| Refusal::Broken("native box root has no delegated parent".into()))?;
-        BoxRoot::open(
-            &parent.join(format!("@hex-firecracker-{}", self.key)),
-            disks,
-        )
+        let vm_parent = native_path(self.root.dir(), ".vm")?;
+        let mut parent_disks = Vec::new();
+        parent_disks
+            .try_reserve_exact(disks.len())
+            .map_err(|_| Refusal::Full(MAX_BOXES))?;
+        parent_disks.extend_from_slice(&disks);
+        let _parent = BoxRoot::open(&vm_parent, parent_disks)?;
+        let path = native_path(&vm_parent, &self.key)?;
+        let root = BoxRoot::open(&path, disks)?;
+        Ok((root, lease))
     }
 
     /// ROOT calls this once after Arc<Node> and before recovery/serve. No class is advertised while
@@ -173,6 +231,12 @@ impl Node {
                 "node backends are already initialized".into(),
             ));
         }
+        let (vm_root, lease) = if firecracker.is_some() || shards.is_some() {
+            let (root, lease) = self.initialize_vm_root()?;
+            (Some(root), Some(lease))
+        } else {
+            (None, None)
+        };
         if let Some(guest) = &shards {
             guest.bind_books(self.backend_books())?;
         }
@@ -201,10 +265,14 @@ impl Node {
                 // Guest pools may differ; Books above binds their physical claims to this Node.
             }
         }
+        if let (Some(root), Some(lease)) = (vm_root.as_ref(), lease) {
+            self.supervisor.bind_managed_root(root.dir(), lease)?;
+        }
         self.backends
             .set(Backends {
                 firecracker,
                 shards,
+                vm_root,
             })
             .map_err(|_| {
                 Refusal::Broken("node backend initialization raced another initializer".into())
@@ -391,18 +459,20 @@ impl Books for Node {
         let keys = self.attachments.conflict_ids(devices)?;
         let _devices = self.hold_attachments(&keys)?;
         let launch =
-            |spec: &BoxSpec,
-             plan: &shards_api::PreparedBoot,
+            |record: &BoxRecord,
+             plan: &ManagedLaunch<'_>,
              io: shards_api::LaunchIo,
+             patience: Duration,
              publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>| {
-                self.launch_managed(spec, plan, io, publish)
+                self.launch_managed(record, plan, io, patience, publish)
             };
-        let attach = |spec: &BoxSpec, identity: Option<&shards_api::Identity>| {
-            self.attach_managed(spec, identity)
+        let attach = |record: &BoxRecord, identity: Option<&shards_api::Identity>| {
+            self.attach_managed(record, identity)
         };
-        let finalize = |spec: &BoxSpec, identity: Option<&shards_api::Identity>| {
-            self.finalize_managed(spec, identity)
+        let finalize = |record: &BoxRecord, identity: Option<&shards_api::Identity>| {
+            self.finalize_managed(record, identity)
         };
+        let usage = |record: &BoxRecord| self.supervisor.managed_usage(record);
         crate::recorded::transaction(
             &self.store,
             id,
@@ -411,6 +481,7 @@ impl Books for Node {
                 launch: &launch,
                 attach: &attach,
                 finalize: &finalize,
+                usage: &usage,
             },
             callback,
         )
@@ -435,4 +506,22 @@ fn missing(class: Class) -> Refusal {
             class.name()
         ),
     }
+}
+
+fn native_path(parent: &Path, child: &str) -> Result<PathBuf, Refusal> {
+    let room = parent
+        .as_os_str()
+        .len()
+        .checked_add(child.len())
+        .and_then(|n| n.checked_add(1))
+        .ok_or(Refusal::Full(MAX_BOXES))?;
+    let mut path = PathBuf::new();
+    path.try_reserve_exact(room)
+        .map_err(|_| Refusal::Exhausted {
+            what: "native VM path bytes",
+            bound: room,
+        })?;
+    path.push(parent);
+    path.push(child);
+    Ok(path)
 }

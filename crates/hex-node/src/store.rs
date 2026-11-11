@@ -231,7 +231,7 @@ impl Store {
         if self.get(&record.spec.id)?.is_some() {
             return Err(Refusal::Exists(record.spec.id.try_clone()?));
         }
-        self.write(record)
+        self.write_fresh(record)
     }
 
     /// Publishes only the create still described by this immutable record. A concurrent delete's
@@ -274,7 +274,7 @@ impl Store {
         record.spec.check()?;
         let Some(mut current) = self.read_lifecycle(&record.spec.id)? else {
             return if record.phase == Phase::Creating {
-                self.write(record)
+                self.write_fresh(record)
             } else {
                 Err(uncertain(&record.spec.id))
             };
@@ -291,6 +291,13 @@ impl Store {
         {
             return Err(uncertain(&record.spec.id));
         }
+        if current.native_scope.is_none()
+            && managed_scope_required(&current)
+            && (current.init != record.init
+                || (current.phase == Phase::Creating && record.phase == Phase::Ready))
+        {
+            return Err(uncertain(&record.spec.id));
+        }
         // A VMM's pid/start is introduced while Creating, before its guest is Ready (the
         // Firecracker native create caller). Slot/run are likewise lifetime identities; their
         // later removal or substitution cannot authorize cleanup of a different native object.
@@ -300,11 +307,20 @@ impl Store {
         let slot = lifecycle_fact(current.slot, record.slot, introducing, &record.spec.id)?;
         let run = lifecycle_fact(current.run, record.run, introducing, &record.spec.id)?;
         let exit = lifecycle_fact(current.exit, record.exit, true, &record.spec.id)?;
+        // Scope is introduced only by write_fresh before the first canonical publication. An old
+        // legacy row can never gain authority over an already-alive native scope by an update.
+        let native_scope = lifecycle_fact(
+            current.native_scope,
+            record.native_scope,
+            false,
+            &record.spec.id,
+        )?;
         current.phase = record.phase;
         current.init = init;
         current.slot = slot;
         current.run = run;
         current.exit = exit;
+        current.native_scope = native_scope;
         // Both writers count monotonically: publishing a backend completion cannot discard a
         // disconnect counted by the existing socket owner while native I/O was in flight.
         current.abandoned = current.abandoned.max(record.abandoned);
@@ -341,9 +357,40 @@ impl Store {
         Ok(true)
     }
 
+    fn write_fresh(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        if record.native_scope.is_some() {
+            return Err(uncertain(&record.spec.id));
+        }
+        if !managed_scope_required(record) {
+            return self.write(record);
+        }
+        if record.phase != Phase::Creating {
+            return Err(uncertain(&record.spec.id));
+        }
+        let mut bytes = [0u8; 16];
+        // One checked OS fill; no PID/time/path fallback and no entropy retry loop. Linux may block
+        // before its entropy pool initializes; the node's external startup lifetime guard is required.
+        getrandom::fill(&mut bytes)
+            .map_err(|error| Refusal::os("creating a fresh native scope identity", error))?;
+        let scope = hex_core::record::NativeScope::from_bytes(bytes);
+        self.write_encoded(record, record.encode_fresh_scope(scope)?, true)
+    }
+
     fn write(&self, record: &BoxRecord) -> Result<(), Refusal> {
-        let bytes = record.encode()?;
-        let (dir, durable) = self.place(record);
+        self.write_encoded(record, record.encode()?, record.native_scope.is_some())
+    }
+
+    fn write_encoded(
+        &self,
+        record: &BoxRecord,
+        bytes: Vec<u8>,
+        scoped: bool,
+    ) -> Result<(), Refusal> {
+        let (dir, durable) = if scoped {
+            (&self.disk, true)
+        } else {
+            self.place(record)
+        };
         #[cfg(target_os = "linux")]
         let dir_fd = if durable { &self.disk_fd } else { &self.run_fd };
         // A non-durable record goes to its shard of the runtime directory: a name under it on linux, where
@@ -433,10 +480,24 @@ impl Store {
             final_path.as_str(),
         )
         .map_err(|e| Refusal::os("renaming a record into place", e))?;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(all(not(target_os = "linux"), not(windows)))]
         fs::rename(&tmp, &final_path)
             .map_err(|e| Refusal::os("renaming a record into place", e))?;
+        #[cfg(windows)]
+        if scoped {
+            hex_runtime::windows::sys::replace_durable(&tmp, &final_path)
+                .map_err(|e| Refusal::os("publishing the scoped record with write-through", e))?;
+        } else {
+            fs::rename(&tmp, &final_path)
+                .map_err(|e| Refusal::os("renaming a record into place", e))?;
+        }
         if durable {
+            #[cfg(windows)]
+            if scoped {
+                // The scoped Windows path has already requested write-through publication. It did
+                // not fsync a directory; leave that counter unchanged and retain native fault proof.
+                return Ok(());
+            }
             self.sync_dir(dir)?;
         }
         Ok(())
@@ -651,7 +712,14 @@ fn records_in(dir: &Path) -> Result<Vec<(BoxId, PathBuf)>, Refusal> {
 /// describes nothing left to remove after a host crash; nor does one naming none (a `process` box's).
 /// A rendered bundle's writable layer on disk makes its record durable.
 fn must_outlive_host(record: &BoxRecord) -> bool {
-    record.dirs.iter().any(|dir| !on_tmpfs(dir))
+    record.native_scope.is_some() || record.dirs.iter().any(|dir| !on_tmpfs(dir))
+}
+
+fn managed_scope_required(record: &BoxRecord) -> bool {
+    matches!(
+        record.spec.class.class(),
+        hex_api::Class::Shards | hex_api::Class::Firecracker
+    ) || (record.spec.class.class() == hex_api::Class::Oci && record.spec.allocation.is_some())
 }
 
 /// tmpfs's magic number (include/uapi/linux/magic.h, `TMPFS_MAGIC`).

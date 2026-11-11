@@ -254,3 +254,4 @@ pub fn read_held(state: &Path, id: &str) -> Option<Held> {
 pub fn forget_held(state: &Path, id: &str) {
     let _ = std::fs::remove_file(held_file(state, id));
 }
+pub(super) mod vm;

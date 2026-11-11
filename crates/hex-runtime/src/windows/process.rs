@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use triomphe::Arc;
 
-use hex_api::{Allocation, Bounds, BoxId, BoxSpec, Class, Refusal, Signal, Usage};
+use hex_api::{Bounds, BoxId, Class, Refusal, Signal, Usage};
 use hex_core::job::{self, Sent};
 
 use super::sys::{self, Job, Spawn, Started};
@@ -75,6 +75,7 @@ enum NativeScope {
     /// No controller was submitted and every empty job opened by this attempt has been dropped.
     NotSubmitted,
     Bound(Job),
+    Adopted(Job),
 }
 
 impl State {
@@ -99,13 +100,15 @@ pub struct JobBox {
     /// The original box's optional VM controller receipt, introduced once before it resumes.
     /// A managed API Arc is a view of this existing JobBox allocation, never another process row.
     pub(super) managed: OnceLock<super::managed::Receipt>,
+    pub(super) observation_failure: OnceLock<shards_api::ProcessFailure>,
 }
 
 enum Purpose {
     Process,
     Vm {
-        class: Class,
-        allocation: Allocation,
+        scope: hex_core::record::NativeScope,
+        commitment: [u8; 32],
+        original_init: Option<hex_core::record::ProcId>,
         owner: std::sync::Weak<super::Holding>,
         released: OnceLock<()>,
     },
@@ -178,6 +181,7 @@ impl JobBox {
         Ok(Self {
             purpose: Purpose::Process,
             managed: OnceLock::new(),
+            observation_failure: OnceLock::new(),
             state: Arc::try_new(State {
                 id,
                 bounds: bounds.clone(),
@@ -207,12 +211,17 @@ impl JobBox {
     /// Allocate the same native slot/API owner and its existing shared counts before creating a
     /// kernel job. OnceLock introduces the native handle without unsafe uninitialized storage.
     pub(super) fn prepare_vm(
-        spec: &BoxSpec,
+        record: &hex_core::record::BoxRecord,
         bounds: Bounds,
         processors: std::num::NonZeroU32,
         name: Option<&str>,
         owner: &std::sync::Arc<super::Holding>,
     ) -> Result<Arc<Self>, Refusal> {
+        let spec = &record.spec;
+        let scope = record
+            .native_scope
+            .ok_or_else(|| super::pending("native scope is absent"))?;
+        let commitment = record.native_commitment()?;
         spec.check()?;
         let id = spec.id.try_clone()?;
         let allocation = spec
@@ -241,12 +250,14 @@ impl JobBox {
         let boxed = Arc::try_new(Self {
             state,
             purpose: Purpose::Vm {
-                class: spec.class.class(),
-                allocation,
+                scope,
+                commitment,
+                original_init: record.init,
                 owner: std::sync::Arc::downgrade(owner),
                 released: OnceLock::new(),
             },
             managed: OnceLock::new(),
+            observation_failure: OnceLock::new(),
         })
         .map_err(|_| super::allocation(std::mem::size_of::<Self>()))?;
         Ok(boxed)
@@ -298,9 +309,45 @@ impl JobBox {
         matches!(&self.purpose, Purpose::Vm { .. })
     }
 
-    pub(super) fn matches_vm(&self, spec: &BoxSpec) -> bool {
-        matches!(&self.purpose, Purpose::Vm { class, allocation, .. }
-            if *class == spec.class.class() && Some(*allocation) == spec.allocation)
+    pub(super) fn adopt_vm(&self, job: Job) -> Result<(), Refusal> {
+        if !self.is_vm() || self.state.job.get().is_some() {
+            return Err(self.uncertain());
+        }
+        self.state
+            .job
+            .set(NativeScope::Adopted(job))
+            .map_err(|_| self.uncertain())
+    }
+
+    pub(super) fn recovered(&self) -> bool {
+        matches!(self.state.job.get(), Some(NativeScope::Adopted(_)))
+    }
+
+    pub(super) fn original_init(&self) -> Option<hex_core::record::ProcId> {
+        match self.purpose {
+            Purpose::Vm { original_init, .. } => original_init,
+            Purpose::Process => None,
+        }
+    }
+
+    pub(super) fn matches_vm(
+        &self,
+        record: &hex_core::record::BoxRecord,
+        expected: [u8; 32],
+    ) -> bool {
+        // The commitment binds the full original spec, including class and allocation profile.
+        // Keep that proof rather than duplicating the complete admission receipt in each owner.
+        matches!(&self.purpose, Purpose::Vm { scope, commitment, .. }
+            if Some(*scope) == record.native_scope && *commitment == expected)
+    }
+
+    pub(super) fn vm_commitment(&self) -> Option<(hex_core::record::NativeScope, [u8; 32])> {
+        match self.purpose {
+            Purpose::Vm {
+                scope, commitment, ..
+            } => Some((scope, commitment)),
+            Purpose::Process => None,
+        }
     }
 
     pub(super) fn released(&self) -> bool {
@@ -340,7 +387,7 @@ impl JobBox {
 
     fn native_job(&self) -> Result<&Job, Refusal> {
         match self.state.job.get() {
-            Some(NativeScope::Bound(job)) => Ok(job),
+            Some(NativeScope::Bound(job) | NativeScope::Adopted(job)) => Ok(job),
             _ => Err(self.uncertain()),
         }
     }
@@ -348,7 +395,7 @@ impl JobBox {
     pub(super) fn member(&self) -> Result<sys::Member, super::proc::ObserveError> {
         match self.state.job.get() {
             Some(NativeScope::NotSubmitted) => Ok(sys::Member::Empty),
-            Some(NativeScope::Bound(job)) => {
+            Some(NativeScope::Bound(job) | NativeScope::Adopted(job)) => {
                 job.member()
                     .map_err(|source| super::proc::ObserveError::Os {
                         operation: super::proc::Operation::QueryScope,
@@ -363,7 +410,7 @@ impl JobBox {
         if self.state.stopping.load(Ordering::SeqCst) || !self.is_vm() {
             return Err(self.uncertain());
         }
-        sys::create_inheriting(spawn, &[self.native_job()?.raw()])
+        sys::create(spawn, &[self.native_job()?.raw()])
             .map_err(|error| Refusal::os("creating a suspended bound VM controller", error))
     }
 
@@ -377,7 +424,7 @@ impl JobBox {
             .add(Signal::KILL);
         match self.state.job.get() {
             Some(NativeScope::NotSubmitted) => Ok(()),
-            Some(NativeScope::Bound(job)) => job
+            Some(NativeScope::Bound(job) | NativeScope::Adopted(job)) => job
                 .terminate(job::terminated_code(Signal::KILL))
                 .map_err(|source| super::proc::ObserveError::Os {
                     operation: super::proc::Operation::StopScope,
@@ -457,13 +504,12 @@ impl JobBox {
     pub(super) fn scope_population(&self) -> Result<u64, super::proc::ObserveError> {
         match self.state.job.get() {
             Some(NativeScope::NotSubmitted) => Ok(0),
-            Some(NativeScope::Bound(job)) => {
-                job.live_processes()
-                    .map_err(|source| super::proc::ObserveError::Os {
-                        operation: super::proc::Operation::QueryScope,
-                        source,
-                    })
-            }
+            Some(NativeScope::Bound(job) | NativeScope::Adopted(job)) => job
+                .live_processes()
+                .map_err(|source| super::proc::ObserveError::Os {
+                    operation: super::proc::Operation::QueryScope,
+                    source,
+                }),
             None => Err(super::proc::ObserveError::Unpublished),
         }
     }

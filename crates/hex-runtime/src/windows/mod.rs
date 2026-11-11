@@ -28,7 +28,7 @@ use hex_api::{
     DeviceInfo, Proc, Program, Refusal, Rootfs, Runtime, Signal, Stdio, Usage,
 };
 
-use crate::devices::{Binding, Catalog, Route};
+use crate::devices::{Binding, Catalog, Route, SharedCatalog};
 use crate::guest::Side;
 use hex_core::setup::{self, WindowsFeature};
 use oci::OciBox;
@@ -48,8 +48,17 @@ fn native_held(boxed: JobBox) -> Result<Held, Refusal> {
         .map_err(|_| allocation(std::mem::size_of::<JobBox>()))
 }
 
-fn remove_vm_keeper_file(state: &Path, id: &BoxId) -> Result<(), Refusal> {
-    match std::fs::remove_file(keeper::held_file(state, id.as_str())) {
+fn remove_vm_keeper_file(state: &Path, id: &BoxId, boxed: &JobBox) -> Result<(), Refusal> {
+    let path = keeper::vm::path(state, id)?;
+    let Some(held) = keeper::vm::read(&path)? else {
+        return Ok(());
+    };
+    if !held.commits(boxed.vm_commitment()) {
+        return Err(pending(
+            "the retained keeper file belongs to another native scope",
+        ));
+    }
+    match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(Refusal::os(
@@ -327,7 +336,7 @@ const LINUX_IN_GUEST: &str = "a Linux image runs in the node's Shards guest thro
 pub struct WinRuntime {
     /// The machine's logical processors, the CPU hard cap's denominator (read once at node start).
     processors: NonZeroU32,
-    catalog: Catalog,
+    catalog: NativeCatalog,
     /// Where an `oci` box made from an `OciSpec` keeps its scratch, one folder per box.
     scratch_root: PathBuf,
     /// The folder holding the `hex` binary every `oci` box maps read-only as its launcher: the node's
@@ -350,6 +359,22 @@ pub struct WinRuntime {
     /// What reclaiming a killed node's scratch at start failed to do, each typed (its markers kept for
     /// the next start).
     reclaim_failures: Vec<Refusal>,
+}
+
+/// Legacy constructors advertise an empty catalog without allocating; configured runtimes retain
+/// the caller's one fallibly allocated immutable catalog, also passed to the guest.
+enum NativeCatalog {
+    Empty(Catalog),
+    Shared(SharedCatalog),
+}
+impl std::ops::Deref for NativeCatalog {
+    type Target = Catalog;
+    fn deref(&self) -> &Catalog {
+        match self {
+            Self::Empty(catalog) => catalog,
+            Self::Shared(catalog) => catalog,
+        }
+    }
 }
 
 /// A runtime's boxes and the keeper holding their jobs: shared with a run's thread, which removes its box
@@ -573,17 +598,48 @@ impl Holding {
             keeper.pid(),
             keeper.created(),
             |held| keeper.hold(held.job_token()?),
-            |id, receipt| {
-                keeper::write_held(
-                    &keeping.state,
-                    id.as_str(),
-                    receipt.pid,
-                    receipt.created,
-                    receipt.value,
-                )
-                .map_err(|e| Refusal::os("recording a box's keeper handle", e))
-            },
+            |id, receipt| self.write_keeper_receipt(keeping, id, receipt),
         )
+    }
+
+    fn write_keeper_receipt(
+        &self,
+        keeping: &Keeping,
+        id: &BoxId,
+        receipt: KeeperReceipt,
+    ) -> Result<(), Refusal> {
+        let commitment = {
+            let boxes = self.boxes()?;
+            let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+            let (_, slot) = boxes.get(at).ok_or_else(inconsistent_slots)?;
+            match slot.physical() {
+                Some(Held::Process(boxed)) => boxed.vm_commitment(),
+                Some(Held::Oci(_)) => None,
+                None => return Err(inconsistent_slots()),
+            }
+        };
+        if let Some((scope, commitment)) = commitment {
+            let path = keeper::vm::path(&keeping.state, id)?;
+            keeper::vm::write(
+                &path,
+                &keeper::vm::Held {
+                    scope,
+                    commitment,
+                    pid: receipt.pid,
+                    started: receipt.created,
+                    value: receipt.value,
+                },
+            )
+        } else {
+            keeper::write_held(
+                &keeping.state,
+                id.as_str(),
+                receipt.pid,
+                receipt.created,
+                receipt.value,
+            )
+            .map_err(|error| Refusal::os("recording a box's keeper handle", error))
+        }
     }
 
     /// The caller holds the keeper mutex through replacement and handoff. Removal may mark a slot
@@ -630,6 +686,11 @@ impl Holding {
     }
 
     fn keep(&self, id: &BoxId, held: &Held) -> Result<(), Refusal> {
+        if let Held::Process(boxed) = held
+            && boxed.is_vm()
+        {
+            return self.keep_vm(id, boxed);
+        }
         let Some(keeping) = self.keeping()? else {
             return Ok(());
         };
@@ -672,6 +733,62 @@ impl Holding {
             receipt.value,
         )
         .map_err(|e| Refusal::os("recording a box's keeper handle", e))
+    }
+
+    fn keep_vm(&self, id: &BoxId, boxed: &JobBox) -> Result<(), Refusal> {
+        let Some(keeping) = self.keeping()? else {
+            return Ok(());
+        };
+        let (scope, commitment) = boxed
+            .vm_commitment()
+            .ok_or_else(|| pending("VM scope commitment is absent"))?;
+        let path = keeper::vm::path(&keeping.state, id)?;
+        let keeper = keeping
+            .keeper
+            .lock()
+            .map_err(|_| pending("the native keeper lock is poisoned"))?;
+        let receipt = match keeper::vm::read(&path)? {
+            Some(old) => {
+                if old.scope != scope
+                    || old.commitment != commitment
+                    || old.pid != keeper.pid()
+                    || old.started != keeper.created()
+                {
+                    return Err(pending(
+                        "the retained VM keeper receipt names another native lifetime",
+                    ));
+                }
+                if !sys::same_in(keeper.process(), old.value, boxed.job()?).map_err(|error| {
+                    Refusal::os("checking the committed VM keeper object", error)
+                })? {
+                    self.keeper_receipt(id, KeeperHold::Uncertain)?;
+                    return Err(pending(
+                        "the committed keeper value names another kernel object",
+                    ));
+                }
+                KeeperReceipt {
+                    pid: old.pid,
+                    created: old.started,
+                    value: old.value,
+                }
+            }
+            None => KeeperReceipt {
+                pid: keeper.pid(),
+                created: keeper.created(),
+                value: keeper.hold(boxed.job_token()?)?,
+            },
+        };
+        self.keeper_receipt(id, KeeperHold::Held(receipt))?;
+        keeper::vm::write(
+            &path,
+            &keeper::vm::Held {
+                scope,
+                commitment,
+                pid: receipt.pid,
+                started: receipt.created,
+                value: receipt.value,
+            },
+        )
     }
 
     fn drop_from_keeper(&self, id: &BoxId) -> Result<(), Refusal> {
@@ -736,9 +853,9 @@ impl Holding {
         let receipt = match state {
             KeeperHold::Held(receipt) => receipt,
             KeeperHold::Uncertain => return Err(pending("native VM keeper disposal is uncertain")),
-            KeeperHold::Closed => return remove_vm_keeper_file(&keeping.state, id),
+            KeeperHold::Closed => return remove_vm_keeper_file(&keeping.state, id, boxed),
             KeeperHold::Unheld => {
-                if keeper::read_held(&keeping.state, id.as_str()).is_some() {
+                if keeper::vm::read(&keeper::vm::path(&keeping.state, id)?)?.is_some() {
                     return Err(pending(
                         "unadopted VM keeper metadata has no native ownership proof",
                     ));
@@ -789,7 +906,7 @@ impl Holding {
         }
         self.keeper_receipt(id, KeeperHold::Closed)?;
         drop(current);
-        remove_vm_keeper_file(&keeping.state, id)
+        remove_vm_keeper_file(&keeping.state, id, boxed)
     }
 
     /// Keep the slot through every external cleanup operation; only an actual successful removal
@@ -976,7 +1093,7 @@ impl WinRuntime {
         let reclaim_failures = oci::reclaim(&scratch_root);
         let runtime = Self {
             processors: NonZeroU32::new(processors).unwrap_or(NonZeroU32::MIN),
-            catalog: Catalog::default(),
+            catalog: NativeCatalog::Empty(Catalog::default()),
             scratch_root,
             launcher: None,
             holding: Arc::new(Holding {
@@ -1023,7 +1140,17 @@ impl WinRuntime {
         keeper: &[String],
         path: &Path,
     ) -> Result<Self, Refusal> {
-        let catalog = Catalog::open(path)?;
+        let catalog = SharedCatalog::try_new(Catalog::open(path)?)
+            .map_err(|_| allocation(std::mem::size_of::<Catalog>()))?;
+        Self::outliving_with_catalog(node, dir, keeper, catalog)
+    }
+
+    pub fn outliving_with_catalog(
+        node: &str,
+        dir: &Path,
+        keeper: &[String],
+        catalog: SharedCatalog,
+    ) -> Result<Self, Refusal> {
         if catalog
             .entries()
             .iter()
@@ -1033,8 +1160,15 @@ impl WinRuntime {
                 .map_err(|e| Refusal::os("making the native scratch root", e))?;
         }
         let mut runtime = Self::outliving(node, dir, keeper)?;
-        runtime.catalog = catalog;
+        runtime.catalog = NativeCatalog::Shared(catalog);
         Ok(runtime)
+    }
+
+    pub fn device_catalog(&self) -> Option<SharedCatalog> {
+        match &self.catalog {
+            NativeCatalog::Shared(catalog) => Some(catalog.clone()),
+            NativeCatalog::Empty(_) => None,
+        }
     }
 
     fn bindings(&self, spec: &BoxSpec) -> Result<Vec<hex_core::hcs::DeviceBinding>, Refusal> {
@@ -1135,28 +1269,33 @@ impl WinRuntime {
 
     pub fn launch_managed(
         &self,
-        spec: &BoxSpec,
-        plan: &shards_api::PreparedBoot,
+        record: &hex_core::record::BoxRecord,
+        plan: &crate::devices::ManagedLaunch<'_>,
         io: shards_api::LaunchIo,
+        patience: std::time::Duration,
         publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
-        managed::launch(self, spec, plan, io, publish)
+        managed::launch(self, record, plan, io, patience, publish)
     }
 
     pub fn attach_managed(
         &self,
-        spec: &BoxSpec,
+        record: &hex_core::record::BoxRecord,
         identity: Option<&shards_api::Identity>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
-        managed::attach(self, spec, identity)
+        managed::attach(self, record, identity)
     }
 
     pub fn finalize_managed(
         &self,
-        spec: &BoxSpec,
+        record: &hex_core::record::BoxRecord,
         identity: Option<&shards_api::Identity>,
     ) -> Result<(), Refusal> {
-        managed::finalize(self, spec, identity)
+        managed::finalize(self, record, identity)
+    }
+
+    pub fn managed_usage(&self, record: &hex_core::record::BoxRecord) -> Result<Usage, Refusal> {
+        managed::usage(self, record)
     }
 
     /// Whether this node takes back box `spec` a node before it made (native plan step 8, T-T7.1.2; asked
@@ -1861,7 +2000,7 @@ mod tests {
         let catalog=Catalog::parse(b"hex-devices-1\ngpu\t256\tfixture-a\t4096\thcs\tPCIROOT(0)#PCI(0100)\t\ngpu\t512\tfixture-b\t8192\thcs\tPCIROOT(0)#PCI(0200)\t\ngpu\t768\tfixture-c\t4096\tcdi\t/private/fixture.json\tfixture.test/gpu=c\n").unwrap();
         WinRuntime {
             processors: NonZeroU32::MIN,
-            catalog,
+            catalog: NativeCatalog::Shared(SharedCatalog::try_new(catalog).unwrap()),
             scratch_root: scratch.to_path_buf(),
             launcher: None,
             holding: Arc::new(Holding {
