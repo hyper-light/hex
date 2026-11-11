@@ -150,7 +150,7 @@ fn connect(path: &Path, until: Instant) -> Result<UnixStream, Step> {
     Ok(UnixStream::from(descriptor))
 }
 
-fn write(stream: &mut UnixStream, mut bytes: &[u8], until: Instant) -> Result<(), Step> {
+fn write(stream: &mut impl Duplex, mut bytes: &[u8], until: Instant) -> Result<(), Step> {
     while !bytes.is_empty() {
         stream
             .set_write_timeout(Some(left(until)?))
@@ -168,7 +168,7 @@ fn write(stream: &mut UnixStream, mut bytes: &[u8], until: Instant) -> Result<()
     Ok(())
 }
 
-fn read_exact(stream: &mut UnixStream, mut bytes: &mut [u8], until: Instant) -> Result<(), Step> {
+fn read_exact(stream: &mut impl Duplex, mut bytes: &mut [u8], until: Instant) -> Result<(), Step> {
     while !bytes.is_empty() {
         stream
             .set_read_timeout(Some(left(until)?))
@@ -183,6 +183,74 @@ fn read_exact(stream: &mut UnixStream, mut bytes: &mut [u8], until: Instant) -> 
             .get_mut(count..)
             .ok_or_else(|| Step::Refused(invalid("read count exceeds response")))?;
     }
+    Ok(())
+}
+
+/// Firecracker's host-initiated vsock handshake (vsock.md) on a connected `stream`: `CONNECT
+/// <port>\n` out, `OK <host-port>\n` back, then the stream's timeouts cleared for its owner.
+fn handshake(stream: &mut impl Duplex, port: u32, until: Instant) -> Result<(), Refusal> {
+    // A u32 has at most ten decimal digits; the pinned vsock protocol adds this fixed
+    // prefix/newline. Cursor refuses an overflow instead of allocating a formatting String.
+    let mut request = [0u8; b"CONNECT ".len() + 10 + 1];
+    let used = {
+        let mut buffer = std::io::Cursor::new(request.as_mut_slice());
+        writeln!(&mut buffer, "CONNECT {port}").map_err(|error| {
+            Step::Io("encoding Firecracker connect request", error)
+                .connect(port, ConnectPhase::Write)
+        })?;
+        usize::try_from(buffer.position())
+            .map_err(|_| invalid("vsock request size is unrepresentable"))?
+    };
+    write(
+        &mut *stream,
+        request
+            .get(..used)
+            .ok_or_else(|| invalid("vsock request exceeds its fixed buffer"))?,
+        until,
+    )
+    .map_err(|step| step.connect(port, ConnectPhase::Write))?;
+    // Firecracker vsock.md: `OK <host-port>\n`, the port an unsigned 32-bit integer.
+    let bound = "OK "
+        .len()
+        .checked_add(10)
+        .and_then(|n| n.checked_add(1))
+        .ok_or_else(|| invalid("vsock response bound overflow"))?;
+    let mut line = Vec::new();
+    line.try_reserve_exact(bound)
+        .map_err(|_| exhausted("vsock response", bound))?;
+    while line.len() < bound {
+        let mut byte = [0u8; 1];
+        read_exact(&mut *stream, &mut byte, until)
+            .map_err(|step| step.connect(port, ConnectPhase::Read))?;
+        let byte = *byte.first().ok_or_else(|| invalid("empty vsock byte"))?;
+        line.push(byte);
+        if byte == b'\n' {
+            break;
+        }
+    }
+    let reply = |reply| Refusal::Connect {
+        port,
+        failure: ConnectFailure::Reply(reply),
+    };
+    if line.last() != Some(&b'\n') {
+        return Err(reply(ConnectReply::TooLong));
+    }
+    if std::str::from_utf8(&line)
+        .ok()
+        .and_then(|text| text.strip_prefix("OK "))
+        .and_then(|n| n.strip_suffix('\n'))
+        .and_then(|n| n.parse::<u32>().ok())
+        .filter(|n| *n > 0)
+        .is_none()
+    {
+        return Err(reply(ConnectReply::NotOk));
+    }
+    stream
+        .set_read_timeout(None)
+        .and_then(|()| stream.set_write_timeout(None))
+        .map_err(|e| {
+            Step::Io("handing off guest stream", e).connect(port, ConnectPhase::ClearTimeouts)
+        })?;
     Ok(())
 }
 
@@ -208,70 +276,9 @@ impl Link for Endpoint {
         let own = deadline(remaining)?;
         let until = caller_deadline.map_or(own, |caller| own.min(caller));
         left(until).map_err(|step| step.connect(port, ConnectPhase::Dial))?;
-        // A u32 has at most ten decimal digits; the pinned vsock protocol adds this fixed
-        // prefix/newline. Cursor refuses an overflow instead of allocating a formatting String.
-        let mut request = [0u8; b"CONNECT ".len() + 10 + 1];
-        let used = {
-            let mut buffer = std::io::Cursor::new(request.as_mut_slice());
-            writeln!(&mut buffer, "CONNECT {port}").map_err(|error| {
-                Step::Io("encoding Firecracker connect request", error)
-                    .connect(port, ConnectPhase::Write)
-            })?;
-            usize::try_from(buffer.position())
-                .map_err(|_| invalid("vsock request size is unrepresentable"))?
-        };
         let mut stream =
             connect(&self.path, until).map_err(|step| step.connect(port, ConnectPhase::Dial))?;
-        write(
-            &mut stream,
-            request
-                .get(..used)
-                .ok_or_else(|| invalid("vsock request exceeds its fixed buffer"))?,
-            until,
-        )
-        .map_err(|step| step.connect(port, ConnectPhase::Write))?;
-        // Firecracker vsock.md: `OK <host-port>\n`, the port an unsigned 32-bit integer.
-        let bound = "OK "
-            .len()
-            .checked_add(10)
-            .and_then(|n| n.checked_add(1))
-            .ok_or_else(|| invalid("vsock response bound overflow"))?;
-        let mut line = Vec::new();
-        line.try_reserve_exact(bound)
-            .map_err(|_| exhausted("vsock response", bound))?;
-        while line.len() < bound {
-            let mut byte = [0u8; 1];
-            read_exact(&mut stream, &mut byte, until)
-                .map_err(|step| step.connect(port, ConnectPhase::Read))?;
-            let byte = *byte.first().ok_or_else(|| invalid("empty vsock byte"))?;
-            line.push(byte);
-            if byte == b'\n' {
-                break;
-            }
-        }
-        let reply = |reply| Refusal::Connect {
-            port,
-            failure: ConnectFailure::Reply(reply),
-        };
-        if line.last() != Some(&b'\n') {
-            return Err(reply(ConnectReply::TooLong));
-        }
-        if std::str::from_utf8(&line)
-            .ok()
-            .and_then(|text| text.strip_prefix("OK "))
-            .and_then(|n| n.strip_suffix('\n'))
-            .and_then(|n| n.parse::<u32>().ok())
-            .filter(|n| *n > 0)
-            .is_none()
-        {
-            return Err(reply(ConnectReply::NotOk));
-        }
-        stream
-            .set_read_timeout(None)
-            .and_then(|()| stream.set_write_timeout(None))
-            .map_err(|e| {
-                Step::Io("handing off guest stream", e).connect(port, ConnectPhase::ClearTimeouts)
-            })?;
+        handshake(&mut stream, port, until)?;
         if port == hex_core::stream::files::FILES_PORT {
             // A staging connection is exactly one operation. Its current client otherwise resets
             // per-read timeouts and may be uncalibrated; retain one explicit absolute stage budget.
@@ -455,6 +462,12 @@ pub(super) fn attachment(
     request.push_str(suffix);
     let mut socket = connect(api, until)?;
     write(&mut socket, request.as_bytes(), until)?;
+    witness(&mut socket, until)
+}
+
+/// The attachment witness's whole HTTP response on `socket`, bounded by the API message size and
+/// its own exact Content-Length, read within `until`.
+fn witness(socket: &mut impl Duplex, until: Instant) -> Result<Attachment, Refusal> {
     let bound = hex_core::wire::MAX_MESSAGE;
     let room = bound
         .checked_add(1)
@@ -680,6 +693,129 @@ mod tests {
                 },
             }
         );
+    }
+
+    /// A real connection whose next `reads` reads and `writes` writes fail Interrupted without
+    /// touching it, as a signal makes a socket call with a timeout set fail (signal(7): never
+    /// restarted, whatever SA_RESTART says), and that is otherwise itself.
+    struct Interrupting {
+        stream: UnixStream,
+        reads: u32,
+        writes: u32,
+    }
+
+    impl Read for Interrupting {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            if self.reads > 0 {
+                self.reads -= 1;
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            self.stream.read(bytes)
+        }
+    }
+
+    impl Write for Interrupting {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.writes > 0 {
+                self.writes -= 1;
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            self.stream.write(bytes)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.stream.flush()
+        }
+    }
+
+    impl Duplex for Interrupting {
+        fn try_clone(&self) -> std::io::Result<DuplexOwner> {
+            Duplex::try_clone(&self.stream)
+        }
+        fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
+            self.stream.shutdown(how)
+        }
+        fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+            self.stream.set_write_timeout(timeout)
+        }
+        fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+            self.stream.set_read_timeout(timeout)
+        }
+        fn handle(&self) -> hex_client::guest::Handle<'_> {
+            self.stream.as_fd()
+        }
+        fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
+            self.stream.set_nonblocking(on)
+        }
+    }
+
+    /// The vsock handshake against a peer that answers `OK`, its stream interrupted as given.
+    fn interrupted_handshake(reads: u32, writes: u32) {
+        let (ours, mut peer) = UnixStream::pair().unwrap();
+        let answered = std::thread::spawn(move || {
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while request.last() != Some(&b'\n') {
+                assert_eq!(
+                    peer.read(&mut byte).unwrap(),
+                    1,
+                    "request ends at its newline"
+                );
+                request.push(byte[0]);
+            }
+            peer.write_all(b"OK 1073741824\n").unwrap();
+            request
+        });
+        let mut stream = Interrupting {
+            stream: ours,
+            reads,
+            writes,
+        };
+        let until = Instant::now() + Duration::from_secs(30);
+        assert_eq!(handshake(&mut stream, 1024, until), Ok(()));
+        assert_eq!(answered.join().unwrap(), b"CONNECT 1024\n");
+        assert_eq!((stream.reads, stream.writes), (0, 0));
+    }
+
+    /// AC-T7.4.1: a handshake write a signal interrupts is made again within the same absolute
+    /// deadline, as Shards' handshake does; the dial never fails as Io(Interrupted).
+    #[test]
+    fn an_interrupted_handshake_write_is_made_again() {
+        interrupted_handshake(0, 1);
+    }
+
+    /// AC-T7.4.1: a handshake read a signal interrupts is made again within the same absolute
+    /// deadline, as Shards' handshake does; the dial never fails as Io(Interrupted).
+    #[test]
+    fn an_interrupted_handshake_read_is_made_again() {
+        interrupted_handshake(1, 0);
+    }
+
+    /// AC-T7.4.1: the attachment witness's response read a signal interrupts is made again within
+    /// the same absolute deadline, never failed as an OS error.
+    #[test]
+    fn an_interrupted_witness_read_is_made_again() {
+        let (ours, mut peer) = UnixStream::pair().unwrap();
+        let body = br#"{"id":"pci_100","sbdf":"0000:01:00.0","guest_sbdf":"0000:00:05.0"}"#;
+        let mut response =
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+        response.extend_from_slice(body);
+        peer.write_all(&response).unwrap();
+        let mut stream = Interrupting {
+            stream: ours,
+            reads: 1,
+            writes: 0,
+        };
+        let until = Instant::now() + Duration::from_secs(30);
+        let witnessed = witness(&mut stream, until).unwrap();
+        assert_eq!(
+            (
+                witnessed.id.as_str(),
+                witnessed.sbdf.as_str(),
+                witnessed.guest_sbdf.as_str()
+            ),
+            ("pci_100", "0000:01:00.0", "0000:00:05.0")
+        );
+        assert_eq!(stream.reads, 0);
     }
 
     /// AC-T7.4.1: framing is finite on persistent HTTP connections and rejects ambiguous lengths.
