@@ -1113,6 +1113,30 @@ fn a_failed_start_with_no_seed_left_refuses_the_line() {
     assert_eq!(pool.waiting(), 0);
 }
 
+/// AC-T7.4.1 (Karn's point; the audit of `Patience::ran_out`'s sites, 2026-11-11): a line refused because its only
+/// seed failed to start is no answer and no run-out: no seed was slow, none came. Do: on an armed pool of one slot
+/// (the line's wait 4 ms, the hang bound 8 ms), let a create wait in line, then fail the seed's start at 3 ms. Expect:
+/// the create refused, its wait the 3 ms it waited; both waits as they were, the line's not backed off.
+#[test]
+fn a_failed_start_refusing_the_line_moves_no_wait() {
+    let mut pool = seeds(1, 4, 4, 8);
+    let Ok(Admit::Wait {
+        ticket,
+        until: Some(until),
+    }) = pool.create(ms(0))
+    else {
+        panic!("a create with no seed up didn't wait armed");
+    };
+    assert_eq!(until, ms(4));
+    let failed = pool.start().unwrap();
+    assert_eq!(pool.start_failed(failed, ms(3)), Ok(true));
+    assert_eq!(
+        pool.claim(ticket, ms(3)),
+        Ok(Claim::Refused(Refused::Waited { wait: ms(3) }))
+    );
+    assert_eq!(pool.deadlines(), (Some(ms(4)), Some(ms(8))));
+}
+
 /// Decision 9 (the lead's failure-bound rule, by build profile; AC-T7.1.3): before any answer of its own, a node's pool
 /// bounds its waits from its build's record. Do: open a pool with the node's seeds; then one seeded from the release
 /// record, serve a create for 1 ms, then one 5 ms slower than that record's slowest. Expect: the node's pool armed at
