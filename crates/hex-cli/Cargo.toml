@@ -20,6 +20,8 @@ harness = false
 [dependencies]
 serde_json.workspace = true
 hex-client.workspace = true
+# Actual configured Shards backend now initializes on every supported host.
+shards-api.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 hex-api.workspace = true
@@ -41,7 +43,6 @@ hex-core.workspace = true
 hex-node.workspace = true
 hex-runtime.workspace = true
 rustix.workspace = true
-shards-api.workspace = true
 
 # `hex node` on Windows (native plan step 8): the node over the Windows runtime, and `hex keep`, its
 # keeper. The Windows oci class's launcher (`hex oci-launch`), which HCS runs inside each container
