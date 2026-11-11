@@ -37,6 +37,11 @@ def absent_process(pid, started, timeout, byte_limit):
     # A denied observation is uncertainty, not physical absence.
 
 
+def within(path,scope):
+    """Whether `path`, an artifact that may be gone, lies in `scope`, a resolved directory."""
+    return path.absolute().is_relative_to(scope)
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root-authorized",action="store_true")
@@ -70,7 +75,7 @@ def main():
             living.append({"pid":row["pid"],"start_token":row["start_token"]})
     artifacts=[]
     for path in args.absent:
-        require(path.absolute().is_relative_to(scope),"foreign artifact path")
+        require(within(path,scope),"foreign artifact path")
         if path.exists() or path.is_symlink():
             artifacts.append(str(path))
     print(json.dumps({"owned_native_processes":len(living),"owned_artifacts":len(artifacts),
