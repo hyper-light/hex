@@ -209,6 +209,7 @@ pub(super) fn launch(
             stdin: None,
             stdout: Some(io.stdout),
             stderr: Some(io.stderr),
+            ask: hex_api::Ask::default(),
         })?,
     };
     let name = job_name(runtime, spec)?;

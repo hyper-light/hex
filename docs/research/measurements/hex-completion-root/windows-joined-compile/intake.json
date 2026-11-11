@@ -1,0 +1,27 @@
+{
+  "requirement": "AC-T7.4.1",
+  "source": "8b433d33113aa5bcd49abc9f46602ecf26eae5de",
+  "parent": "c3bd27e84680ee4d587c5be374b361a567f2419f",
+  "files": {
+    "crates/hex-runtime/src/windows/managed.rs": {
+      "before_sha256": "2d4095cd5d0807a979f46d39fdb22c221641b23f08a995e38d9148289a1aebf9",
+      "after_sha256": "31d477226ab215a0f8500060618236ce2470a16f029bdba9747c349ab3e64f44"
+    },
+    "crates/hex-runtime/src/windows/oci/sys.rs": {
+      "before_sha256": "470f7208ed97ffb30cbac3c63c8f7b6fff9524f0d34f55c59088d712a31644c8",
+      "after_sha256": "c9fc3223c5dbc8161070ebe5fcf03517fce93b10e1ff1715e0f8d877cd31165a"
+    }
+  },
+  "original_check": {
+    "source": "c3bd27e84680ee4d587c5be374b361a567f2419f",
+    "exit": 101,
+    "log_sha256": "be68f7e99db7f1a3d61142e5637502bd78f90aba75a9d72e293e05ad11202b83",
+    "cargo_pid": 46715,
+    "reaped": true,
+    "temp_entries": 0,
+    "native_executed": 0
+  },
+  "also_retained": "same-source BoxId behavior1pass/APIClippy0; original collection connection drop retained in cache; data-only retry verified all archive members",
+  "effect": "initialize empty Ask; restrict borrowed HCS submit_create work to helper before returning same PendingCreate; poison/callback close behavior preserved",
+  "checks": "source diff review only; corrected Windows compilation pending"
+}

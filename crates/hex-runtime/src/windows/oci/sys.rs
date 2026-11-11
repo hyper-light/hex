@@ -810,6 +810,12 @@ fn create_system_inner(
         release_create_callback(owned.context);
         return Ok(owned);
     }
+    submit_create(&owned, api, operation, patience);
+    Ok(owned)
+}
+
+// The lock result and callback work borrow the pending owner only inside this operation.
+fn submit_create(owned: &PendingCreate, api: &Api, operation: HCS_OPERATION, patience: Duration) {
     let context = owned.context();
     let mut data = match context.data.lock() {
         Ok(data) => data,
@@ -823,7 +829,7 @@ fn create_system_inner(
             data.publish();
             drop(data);
             release_create_callback(owned.context);
-            return Ok(owned);
+            return;
         }
     };
     data.operation = Some(operation);
@@ -839,7 +845,7 @@ fn create_system_inner(
         data.close(context.calls);
         drop(data);
         release_create_callback(owned.context);
-        return Ok(owned);
+        return;
     };
     if let Some(durable) = data.durable.as_mut() {
         durable.submitted();
@@ -870,7 +876,6 @@ fn create_system_inner(
         }
         drop(data);
     }
-    Ok(owned)
 }
 
 /// Opens compute system `id` a node before this one made, where it still runs (`HcsOpenComputeSystem`,
