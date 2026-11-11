@@ -3,9 +3,10 @@
 //! (a running one with its members still running and watched, so a delete ends them), each half-made or
 //! half-deleted one is cleaned up (no record, no temp file, no member left), and nothing else is left.
 //!
-//! Mid-create: the node is held in the record write that marks the box creating by a FIFO at that write's
-//! temp path, and killed once `sample(1)` shows its thread there, in `__open` under the store's write (macOS
-//! has no wait channel to read). Mid-delete: a delete records the box as deleting before it ends anything, so
+//! Mid-create: the record write that marks the box creating goes through a temp file, which the test makes a
+//! FIFO whose buffer it has filled, so the node's open succeeds and its write cannot finish; the node is killed
+//! once lsof(8) shows it holding that temp file, a fact rather than a stack frame's name. Mid-delete: a delete
+//! records the box as deleting before it ends anything, so
 //! a node killed past that write leaves the record deleting and the box's members running; this test leaves
 //! exactly that (a box made, a member started, the node killed, its record set to deleting), as recovery's
 //! own model holds a crash at every write (`hex_core::recovery`).
@@ -111,28 +112,40 @@ fn wait_for(what: &str, mut fact: impl FnMut() -> bool) {
     }
 }
 
-/// Whether `sample(1)` finds one of node `pid`'s threads in `__open` under the store's record write, and what
-/// it saw of opens and the store, for a failure to name.
-fn held_in_a_record_write(pid: u32) -> (bool, String) {
-    let out = std::process::Command::new("/usr/bin/sample")
+/// The FIFO at `path`, opened for reading and writing without blocking and filled until the kernel takes no
+/// more: a writer that opens it then cannot finish a write while this end is held unread.
+fn filled_fifo(path: &Path) -> rustix::fd::OwnedFd {
+    use rustix::fs::{Mode, OFlags};
+    let fifo = rustix::fs::open(
+        path,
+        OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .unwrap();
+    let chunk = [0u8; 512];
+    loop {
+        match rustix::io::write(&fifo, &chunk) {
+            Ok(_) => {}
+            Err(rustix::io::Errno::AGAIN) => return fifo,
+            Err(error) => panic!("filling the record's FIFO: {error}"),
+        }
+    }
+}
+
+/// Whether process `pid` holds `path` open, as lsof(8) lists its files. lsof names a FIFO by its vnode's
+/// canonical path (`/private/var/...` for `/var/...`) and won't match one by the path it is asked about.
+fn holds_open(pid: u32, path: &Path) -> bool {
+    let name = format!("n{}", std::fs::canonicalize(path).unwrap().display());
+    let out = std::process::Command::new("/usr/sbin/lsof")
+        .arg("-a")
+        .arg("-p")
         .arg(pid.to_string())
-        .arg("1")
-        .arg("-mayDie")
+        .arg("-Fn")
         .output()
         .unwrap();
-    let text = String::from_utf8_lossy(&out.stdout);
-    // Its symbols as `sample` prints them: demangled, or Rust's v0 mangling (`…5Store3put`).
-    let held = text
+    String::from_utf8_lossy(&out.stdout)
         .lines()
-        .skip_while(|l| !(l.contains("Store::put") || l.contains("5Store3put")))
-        .any(|l| l.contains("__open"));
-    let seen: Vec<&str> = text
-        .lines()
-        .filter(|l| l.contains("open") || l.contains("Store") || l.contains("store"))
-        .take(12)
-        .map(str::trim)
-        .collect();
-    (held, seen.join("\n"))
+        .any(|line| line == name)
 }
 
 fn record(dir: &Path, id: &BoxId) -> PathBuf {
@@ -191,26 +204,22 @@ fn a_box_killed_mid_create_is_cleaned_up() {
         .status()
         .unwrap();
     assert!(made_fifo.success());
+    let fifo = filled_fifo(&temp(dir.path(), &id));
     let socket = node.socket.clone();
     let made = id.clone();
-    let _create =
+    let create =
         std::thread::spawn(move || hex_client::Client::connect(&socket)?.create(spec(&made)));
     let pid = node.pid();
-    let mut seen = String::new();
-    let deadline = Instant::now() + PATIENCE;
-    loop {
-        let (held, what) = held_in_a_record_write(pid);
-        if held {
-            break;
-        }
-        seen = what;
-        assert!(
-            Instant::now() < deadline,
-            "the node wasn't seen held in the record write; sample saw:\n{seen}"
-        );
-    }
-    let _ = seen;
+    wait_for(
+        "the node to hold the creating record's temp file open",
+        || holds_open(pid, &temp(dir.path(), &id)),
+    );
+    assert!(
+        !create.is_finished(),
+        "the create returned while its record write could not finish"
+    );
     node.kill();
+    drop(fifo);
     let node = Node::start(dir.path());
     let client = node.client();
     assert_eq!(client.inspect(&id), Err(Refusal::NoSuchBox(id.clone())));
