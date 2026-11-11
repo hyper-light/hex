@@ -187,20 +187,22 @@ impl PoolRecord {
         {
             return Err(bad());
         }
-        let phase = match (self.phase, next.phase) {
+        let phase = matches!(
+            (self.phase, next.phase),
             (
                 BackingPhase::Prepared,
                 BackingPhase::Prepared | BackingPhase::Granted | BackingPhase::Released,
-            )
-            | (
+            ) | (
                 BackingPhase::Granted,
                 BackingPhase::Granted | BackingPhase::Live | BackingPhase::Draining,
-            )
-            | (BackingPhase::Live, BackingPhase::Live | BackingPhase::Draining)
-            | (BackingPhase::Draining, BackingPhase::Draining | BackingPhase::Released)
-            | (BackingPhase::Released, BackingPhase::Released) => true,
-            _ => false,
-        };
+            ) | (
+                BackingPhase::Live,
+                BackingPhase::Live | BackingPhase::Draining
+            ) | (
+                BackingPhase::Draining,
+                BackingPhase::Draining | BackingPhase::Released
+            ) | (BackingPhase::Released, BackingPhase::Released)
+        );
         if !phase {
             return Err(bad());
         }
@@ -265,7 +267,7 @@ impl PoolRecord {
             .0
             .checked_add(1)
             .filter(|count| *count <= MAX_RECORD_BYTES)
-            .ok_or_else(|| Refusal::Exhausted {
+            .ok_or(Refusal::Exhausted {
                 what: "native backing record bytes",
                 bound: MAX_RECORD_BYTES,
             })?;

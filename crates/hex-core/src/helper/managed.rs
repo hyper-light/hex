@@ -301,7 +301,8 @@ impl Launch {
         let mut exec = self
             .binary
             .len()
-            .checked_add(1 + size_of::<usize>())
+            .checked_add(1)
+            .and_then(|n| n.checked_add(size_of::<usize>()))
             .ok_or_else(|| bounded(usize::MAX))?;
         for word in &self.arguments {
             if word.contains(&0) {
@@ -309,7 +310,10 @@ impl Launch {
             }
             exec = exec
                 .checked_add(word.len())
-                .and_then(|n| n.checked_add(1 + size_of::<usize>()))
+                .and_then(|n| {
+                    n.checked_add(1)
+                        .and_then(|n| n.checked_add(size_of::<usize>()))
+                })
                 .ok_or_else(|| bounded(usize::MAX))?;
         }
         check_prepared_arguments(self.arguments.iter().map(Vec::as_slice))?;
@@ -319,13 +323,20 @@ impl Launch {
         if !cache.starts_with(b"SHARDS_CACHE=/") || !home.starts_with(b"SHARDS_HOME=/") {
             return Err(invalid("configured native runtime paths"));
         }
+        let path_bound = b"SHARDS_CACHE="
+            .len()
+            .checked_add(PATH_MAX)
+            .ok_or_else(|| bounded(usize::MAX))?;
         for value in &self.environment {
-            if value.contains(&0) || value.len() > b"SHARDS_CACHE=".len() + PATH_MAX {
+            if value.contains(&0) || value.len() > path_bound {
                 return Err(invalid("configured native runtime path"));
             }
             exec = exec
                 .checked_add(value.len())
-                .and_then(|n| n.checked_add(1 + size_of::<usize>()))
+                .and_then(|n| {
+                    n.checked_add(1)
+                        .and_then(|n| n.checked_add(size_of::<usize>()))
+                })
                 .ok_or_else(|| bounded(usize::MAX))?;
         }
         if exec > ARG_MAX {
@@ -802,7 +813,11 @@ fn words(input: &mut Reader<'_>) -> Result<Vec<Vec<u8>>, Fault> {
     // Even an empty argument consumes its length prefix in this frame and a pointer+NUL at exec.
     if count
         > ARG_MAX
-            .checked_div(1 + size_of::<usize>())
+            .checked_div(
+                size_of::<usize>()
+                    .checked_add(1)
+                    .ok_or_else(|| bounded(ARG_MAX))?,
+            )
             .ok_or_else(|| bounded(ARG_MAX))?
     {
         return Err(invalid("native word count"));
