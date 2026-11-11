@@ -155,13 +155,13 @@ fn an_answer_and_a_run_out_are_census_lines_of_their_own() {
 
 /// Seeds by build profile (the lead, 2026-11-08: a debug build reads the debug record; production builds carry only
 /// release seeds). Do: in this build, a debug one, make a wait whose release record is 5 ms and whose debug record
-/// is 3 ms, and one with no debug record. Expect: the first armed at twice the debug record, 6 ms; the second
+/// is 8 ms, and one with no debug record. Expect: the first armed at twice the debug record, 16 ms; the second
 /// measuring, never armed.
 #[cfg(debug_assertions)]
 #[test]
 fn a_debug_build_reads_the_debug_record() {
-    let p = Patience::by_profile("test", ms(5), Some(ms(3)));
-    assert_eq!(p.deadline(), Some(ms(6)));
+    let p = Patience::by_profile("test", ms(5), Some(ms(8)));
+    assert_eq!(p.deadline(), Some(ms(16)));
     let q = Patience::by_profile("test", ms(5), None);
     q.answered(ms(1));
     assert_eq!(q.deadline(), None);

@@ -169,8 +169,10 @@ pub fn own_link<L: Link>(link: L) -> Result<LinkOwner, Refusal> {
 /// that kind, through the guest. On macOS, Hello and capacity use exact per-profile maxima from
 /// `bench/sched/runtime-pools/calibration-macos-cold-extension-1bb73f74.json` (AC-T7.4.1). Hello begins after dial/token setup;
 /// fresh-backend, subsequent and warm borrower cohorts are retained separately in the record, not per-row VM proof.
-/// Neither row measures VM boot or workload completion. Other host platforms and operations remain measuring
-/// until their own actual rows are recorded; macOS evidence is not extrapolated across OS transports.
+/// Neither row measures VM boot or workload completion. A debug build's seed is never under the release record
+/// (`Patience::by_profile`): Hello's debug campaign met no cold first hello, so its debug seed is the release one.
+/// Other host platforms and operations remain measuring until their own actual rows are recorded; macOS evidence
+/// is not extrapolated across OS transports.
 static ANSWERS: [Patience; KINDS] = [
     #[cfg(target_os = "macos")]
     Patience::by_profile(

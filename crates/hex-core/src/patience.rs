@@ -15,7 +15,9 @@
 //!   value is picked for it and no first answer becomes its bound. A tree with a measuring wait doesn't land.
 //! - **By build profile**: a wait's record is of the build it runs in ([`Patience::by_profile`]): a release build
 //!   is seeded from the release census, a debug build (the suites') from the debug one, measuring until it has
-//!   one, since a debug build's answers are slower and the release record isn't theirs (the lead, 2026-11-08).
+//!   one, since a debug build's answers are slower and the release record isn't theirs (the lead, 2026-11-08). Being
+//!   no faster, a debug build's slowest is at least the release record's, whose cohorts (a cold start the debug
+//!   campaign never met) bound it from below: its seed is the larger of the two records.
 //! - **Karn's point**: a wait that ran out is no sample, nor is an answer from a server taken for dead or hung; the
 //!   shell reports only answers it waited for and got. A run-out for a slow answer still proves that answer slower
 //!   than the bound it ran out at, so this node's slowest is at least that bound from then, and its next wait twice
@@ -107,8 +109,11 @@ impl Patience {
     }
 
     /// The wait `name` seeded from its record for this build's profile: `release`'s slowest answer in a release build,
-    /// `debug`'s in a debug one (`None`: measuring, until the census's debug arm records it), each cited at the caller.
-    /// The choice is made as the wait is built, so a release build holds only its release seed.
+    /// `debug`'s in a debug one, never under `release`'s (`None`: measuring, until the census's debug arm records it),
+    /// each cited at the caller. A debug build's answers are no faster than a release build's under the same
+    /// conditions, so the release record's cohorts bound its slowest from below (AC-T7.4.1: macOS's guest hello, whose
+    /// debug campaign met no cold first hello, ran out at a tenth of the release record). The choice is made as the
+    /// wait is built, so a release build holds only its release seed.
     pub const fn by_profile(
         name: &'static str,
         release: Duration,
@@ -116,6 +121,7 @@ impl Patience {
     ) -> Self {
         if cfg!(debug_assertions) {
             match debug {
+                Some(slowest) if stored(slowest) < stored(release) => Self::seeded(name, release),
                 Some(slowest) => Self::seeded(name, slowest),
                 None => Self::measuring(name),
             }

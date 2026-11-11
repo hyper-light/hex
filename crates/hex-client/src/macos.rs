@@ -27,7 +27,8 @@ use crate::calls::{Core, Handle, KINDS, Lent, Sent, Shared, Take, Transport};
 /// process has had to a call of that kind. Hello, scheduler operations and capacity use the exact per-profile
 /// response maxima and censored run-out lower bounds of the root-verified macOS/SSH guest census (AC-T7.4.1):
 /// `bench/sched/runtime-pools/calibration-macos-cold-extension-1bb73f74.json`. These time wire replies, not workload success.
-/// Other operations remain measuring until their own actual macOS rows are recorded.
+/// A debug build's seed is never under the release record (`Patience::by_profile`), which six scheduler rows'
+/// debug campaigns fall under. Other operations remain measuring until their own actual macOS rows are recorded.
 static ANSWERS: [Patience; KINDS] = [
     Patience::by_profile(
         "client.answer.hello",
