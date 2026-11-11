@@ -17,7 +17,7 @@ use hex_core::stream::Deframer;
 use hex_core::stream::files::{self, Entry, Limits, Meta, Mtime, Op, What, Xattr};
 use hex_core::wire::{self, Answer, Received};
 
-use super::{Duplex, Link};
+use super::{Duplex, DuplexOwner, Link};
 
 /// How long a staging connection waits on the guest's relay, each read for its answer and each write for room
 /// (decision 9): twice the slowest answer to a stage's request this process has had, from its last byte sent to the
@@ -196,7 +196,7 @@ pub fn stage(
         .map_err(|e| Refusal::os("sending staged files", e))?;
     // The relay answers the opening with the stage's budget, what its file system has free and which of
     // the layers it already holds, or refuses.
-    let first = relay_answer(conn.as_mut(), &mut deframer, std::time::Instant::now())?;
+    let first = relay_answer(&mut *conn, &mut deframer, std::time::Instant::now())?;
     let Some(budget) = files::read_budget(&first) else {
         return Err(answer_of(&first).err().unwrap_or_else(|| {
             Refusal::Broken("the relay answered a stage's opening with no budget".to_owned())
@@ -215,7 +215,7 @@ pub fn stage(
         path: limits.path,
     };
     let sent = {
-        let mut out = BufWriter::with_capacity(64 << 10, Writer(conn.as_mut()));
+        let mut out = BufWriter::with_capacity(64 << 10, Writer(&mut *conn));
         pack_items(&mut out, items, &learned, &budget.present, budget.admitting).and_then(
             |hashed| {
                 out.write_all(&files::END)
@@ -232,7 +232,7 @@ pub fn stage(
     // The answer is read first, so the relay has removed a partial copy before this returns. Its
     // answer names a stream cut short when the packer refused part way; the packer's own refusal names
     // the entry, and is the one returned, unless it was only the connection failing.
-    let answered = relay_answer(conn.as_mut(), &mut deframer, ended).and_then(|m| answer_of(&m));
+    let answered = relay_answer(&mut *conn, &mut deframer, ended).and_then(|m| answer_of(&m));
     match (answered, sent) {
         (_, Err(why)) if !matches!(&why, Refusal::Os { op, .. } if op.starts_with("sending")) => {
             Err(why)
@@ -254,10 +254,10 @@ pub fn unstage(link: &dyn Link, id: &BoxId) -> Result<(), Refusal> {
     let _ = conn.shutdown(Shutdown::Write);
     let sent = std::time::Instant::now();
     let mut deframer = Deframer::new(wire::MAX_MESSAGE);
-    relay_answer(conn.as_mut(), &mut deframer, sent).and_then(|m| answer_of(&m))
+    relay_answer(&mut *conn, &mut deframer, sent).and_then(|m| answer_of(&m))
 }
 
-fn dial(link: &dyn Link) -> Result<Box<dyn Duplex>, Refusal> {
+fn dial(link: &dyn Link) -> Result<DuplexOwner, Refusal> {
     let conn = link.dial(files::FILES_PORT)?;
     let patience = STAGING.deadline();
     conn.set_write_timeout(patience)

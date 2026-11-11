@@ -138,7 +138,7 @@ struct Parked {
     id: u64,
     streams: wire::Streams,
     node: Arc<OwnedFd>,
-    writer: Arc<Mutex<Box<dyn Duplex>>>,
+    writer: Arc<Mutex<hex_client::guest::DuplexOwner>>,
 }
 
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
@@ -390,7 +390,7 @@ impl Relay {
         token: u64,
         host: &mut dyn Duplex,
         node: &Arc<OwnedFd>,
-        writer: &Arc<Mutex<Box<dyn Duplex>>>,
+        writer: &Arc<Mutex<hex_client::guest::DuplexOwner>>,
     ) {
         let mut deframer = Deframer::new(wire::MAX_MESSAGE);
         // A read takes at most one whole frame, the most the deframer holds.
@@ -425,7 +425,7 @@ impl Relay {
         token: u64,
         message: &[u8],
         node: &Arc<OwnedFd>,
-        writer: &Arc<Mutex<Box<dyn Duplex>>>,
+        writer: &Arc<Mutex<hex_client::guest::DuplexOwner>>,
     ) -> Result<(), Gone> {
         let exec = match wire::read_request_apart(message, wire::MAX_MESSAGE) {
             Ok((header, Request::Call(Call::Exec { streams, .. } | Call::Run { streams, .. }))) => {
@@ -726,7 +726,7 @@ fn drain(from: &PipeReader, conn: &dyn Conn) -> io::Result<()> {
 }
 
 /// The node's answers, each framed to the host, until the node's connection ends; then the host's ends.
-fn answers(node: &OwnedFd, writer: &Mutex<Box<dyn Duplex>>) {
+fn answers(node: &OwnedFd, writer: &Mutex<hex_client::guest::DuplexOwner>) {
     let mut buf = vec![0u8; wire::MAX_MESSAGE];
     loop {
         let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(wire::MAX_FDS))];

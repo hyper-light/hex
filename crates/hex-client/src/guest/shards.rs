@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use hex_api::Refusal;
 
-use super::{Duplex, Link};
+use super::{Duplex, DuplexOwner, Link, own_duplex};
 
 /// A connection to one of the guest's ports, as Shards gives it.
 pub struct ShardsStream(Box<dyn shards_api::Stream>);
@@ -33,8 +33,9 @@ impl Write for ShardsStream {
 }
 
 impl Duplex for ShardsStream {
-    fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
-        Ok(Box::new(Self(self.0.try_clone()?)))
+    fn try_clone(&self) -> io::Result<DuplexOwner> {
+        own_duplex(Self(self.0.try_clone()?))
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
@@ -110,7 +111,7 @@ impl Link for ShardsLink {
             .map_err(|why| refusal("naming the guest's stream endpoint", &why))
     }
 
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         let patience = if self.listened.load(Ordering::Acquire) {
             Duration::ZERO
         } else {
@@ -122,7 +123,7 @@ impl Link for ShardsLink {
             .connect(port, patience)
             .map_err(|why| refusal("connecting to the guest", &why))?;
         self.listened.store(true, Ordering::Release);
-        Ok(Box::new(ShardsStream(stream)))
+        own_duplex(ShardsStream(stream))
     }
 }
 

@@ -693,16 +693,16 @@ fn the_agent_parks_procs_as_root_and_none_rootless(lab: &Lab, own: &Path, cache:
 struct GuestPorts(PathBuf);
 
 impl hex_client::guest::Link for GuestPorts {
-    fn dial(&self, port: u32) -> Result<Box<dyn hex_client::guest::Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
         let name = match port {
             stream::CONTROL_PORT => "control.sock",
             stream::STDIO_PORT => "stdio.sock",
             stream::files::FILES_PORT => "files.sock",
             other => panic!("dialed port {other:#x}"),
         };
-        Ok(Box::new(
+        hex_client::guest::own_duplex(
             std::os::unix::net::UnixStream::connect(self.0.join(name)).unwrap(),
-        ))
+        )
     }
 }
 

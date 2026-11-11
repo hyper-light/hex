@@ -184,8 +184,9 @@ impl Write for Vsock {
 }
 
 impl Duplex for Vsock {
-    fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
-        Ok(Box::new(Self(self.0.try_clone()?)))
+    fn try_clone(&self) -> io::Result<hex_client::guest::DuplexOwner> {
+        hex_client::guest::own_duplex(Self(self.0.try_clone()?))
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {

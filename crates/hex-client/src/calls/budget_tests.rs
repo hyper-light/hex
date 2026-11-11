@@ -1,7 +1,7 @@
 //! AC-T7.4.1: caller caps at the actual Core/guest setup seam, no VMM or GPU.
 
 use super::*;
-use crate::guest::{self, Duplex, Link};
+use crate::guest::{self, Duplex, DuplexOwner, Link, own_duplex};
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -117,16 +117,12 @@ impl Link for TokenLink {
     fn reply_budget(&self) -> Option<Duration> {
         Some(CAP)
     }
-    fn dial(&self, _: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, _: u32) -> Result<DuplexOwner, Refusal> {
         TcpStream::connect_timeout(&self.address, CAP)
-            .map(|stream| Box::new(stream) as Box<dyn Duplex>)
             .map_err(|error| Refusal::os("bounded original-control dial", error))
+            .and_then(own_duplex)
     }
-    fn dial_before(
-        &self,
-        port: u32,
-        deadline: Option<Instant>,
-    ) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial_before(&self, port: u32, deadline: Option<Instant>) -> Result<DuplexOwner, Refusal> {
         let Some(deadline) = deadline else {
             return self.dial(port);
         };
@@ -138,8 +134,8 @@ impl Link for TokenLink {
             ));
         }
         TcpStream::connect_timeout(&self.address, left)
-            .map(|stream| Box::new(stream) as Box<dyn Duplex>)
             .map_err(|error| Refusal::os("bounded original-control dial", error))
+            .and_then(own_duplex)
     }
 }
 
@@ -221,11 +217,11 @@ impl Link for NoDial {
     fn reply_budget(&self) -> Option<Duration> {
         Some(self.budget)
     }
-    fn dial(&self, _: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, _: u32) -> Result<DuplexOwner, Refusal> {
         self.dials.fetch_add(1, Ordering::SeqCst);
         Err(Refusal::Broken("forbidden dial effect".into()))
     }
-    fn dial_before(&self, port: u32, _: Option<Instant>) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial_before(&self, port: u32, _: Option<Instant>) -> Result<DuplexOwner, Refusal> {
         self.dial(port)
     }
 }
@@ -466,11 +462,12 @@ impl Write for ReadNotice {
     }
 }
 impl Duplex for ReadNotice {
-    fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
-        Ok(Box::new(Self {
+    fn try_clone(&self) -> io::Result<DuplexOwner> {
+        own_duplex(Self {
             socket: self.socket.try_clone()?,
             read: self.read.clone(),
-        }))
+        })
+        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
     }
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         self.socket.shutdown(how)
@@ -503,14 +500,10 @@ impl Link for RecordedLink {
     fn reply_budget(&self) -> Option<Duration> {
         Some(self.budget)
     }
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         self.dial_before(port, Some(Instant::now().checked_add(self.budget).unwrap()))
     }
-    fn dial_before(
-        &self,
-        port: u32,
-        deadline: Option<Instant>,
-    ) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial_before(&self, port: u32, deadline: Option<Instant>) -> Result<DuplexOwner, Refusal> {
         let deadline = deadline.unwrap();
         self.deadlines.lock().unwrap().push((port, deadline));
         let address = if port == hex_core::stream::CONTROL_PORT {
@@ -529,12 +522,12 @@ impl Link for RecordedLink {
         if port == hex_core::stream::CONTROL_PORT
             && let Some(read) = &self.read
         {
-            Ok(Box::new(ReadNotice {
+            own_duplex(ReadNotice {
                 socket,
                 read: read.clone(),
-            }))
+            })
         } else {
-            Ok(Box::new(socket))
+            own_duplex(socket)
         }
     }
 }
@@ -1327,14 +1320,10 @@ struct AbsoluteNamedLink {
 }
 
 impl Link for AbsoluteNamedLink {
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         self.dial_before(port, None)
     }
-    fn dial_before(
-        &self,
-        port: u32,
-        deadline: Option<Instant>,
-    ) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial_before(&self, port: u32, deadline: Option<Instant>) -> Result<DuplexOwner, Refusal> {
         self.deadlines.lock().unwrap().push((port, deadline));
         if deadline.is_some_and(|at| at <= Instant::now()) {
             return Err(Refusal::os(
@@ -1348,8 +1337,8 @@ impl Link for AbsoluteNamedLink {
             self.stdio.lock().unwrap().pop_front()
         };
         stream
-            .map(|stream| Box::new(stream) as Box<dyn Duplex>)
             .ok_or_else(|| Refusal::Broken("owned absolute fixture stream absent".into()))
+            .and_then(own_duplex)
     }
 }
 

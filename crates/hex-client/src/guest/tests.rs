@@ -20,13 +20,13 @@ struct Loopback {
 }
 
 impl Link for Loopback {
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         let addr = match port {
             stream::CONTROL_PORT => self.control,
             stream::STDIO_PORT => self.stdio,
             other => panic!("dialed port {other:#x}"),
         };
-        Ok(Box::new(TcpStream::connect(addr).unwrap()))
+        own_duplex(TcpStream::connect(addr).unwrap())
     }
 }
 
@@ -51,7 +51,7 @@ fn link_owner_retains_one_instance_without_dial_effects() {
         drops: Arc<AtomicUsize>,
     }
     impl Link for Counted {
-        fn dial(&self, _: u32) -> Result<Box<dyn Duplex>, Refusal> {
+        fn dial(&self, _: u32) -> Result<DuplexOwner, Refusal> {
             self.dials.fetch_add(1, Ordering::SeqCst);
             Err(Refusal::Broken("owned test dial".into()))
         }
@@ -369,12 +369,13 @@ impl Write for Recorded {
 }
 
 impl Duplex for Recorded {
-    fn try_clone(&self) -> std::io::Result<Box<dyn Duplex>> {
-        Ok(Box::new(Recorded {
+    fn try_clone(&self) -> std::io::Result<DuplexOwner> {
+        own_duplex(Recorded {
             conn: self.conn.try_clone()?,
             port: self.port,
             bounds: Arc::clone(&self.bounds),
-        }))
+        })
+        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
@@ -412,17 +413,17 @@ struct Recording {
 }
 
 impl Link for Recording {
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         let addr = if port == stream::CONTROL_PORT {
             self.control
         } else {
             self.stdio
         };
-        Ok(Box::new(Recorded {
+        own_duplex(Recorded {
             conn: TcpStream::connect(addr).unwrap(),
             port,
             bounds: Arc::clone(&self.bounds),
-        }))
+        })
     }
 }
 
@@ -925,11 +926,11 @@ impl Link for ConnectLink {
         self.budget
     }
 
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         self.dial_before(port, None)
     }
 
-    fn dial_before(&self, port: u32, at: Option<Instant>) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial_before(&self, port: u32, at: Option<Instant>) -> Result<DuplexOwner, Refusal> {
         self.trace.dials.lock().unwrap().push((port, at));
         let socket = self
             .socket
@@ -937,10 +938,10 @@ impl Link for ConnectLink {
             .unwrap()
             .take()
             .ok_or_else(|| Refusal::Broken("constructor probe has no connection".into()))?;
-        Ok(Box::new(ConnectSocket {
+        own_duplex(ConnectSocket {
             socket,
             trace: Arc::clone(&self.trace),
-        }))
+        })
     }
 }
 
@@ -976,11 +977,12 @@ impl Write for ConnectSocket {
 }
 
 impl Duplex for ConnectSocket {
-    fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
-        Ok(Box::new(Self {
+    fn try_clone(&self) -> io::Result<DuplexOwner> {
+        own_duplex(Self {
             socket: self.socket.try_clone()?,
             trace: Arc::clone(&self.trace),
-        }))
+        })
+        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {

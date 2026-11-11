@@ -24,16 +24,31 @@ use crate::calls::{
     Core, KINDS, Lent, ReplyDeadline, Sent, Shared, SharedOwner, Take, Transport, poisoned,
     protocol_ready,
 };
-use crate::copy::{copy, copy_in};
+use crate::copy::{DuplexIo, copy, copy_in};
 
 /// The OS handle under a guest connection, which an event loop waits on: a file descriptor on Unix, a
 /// Winsock socket on Windows.
 pub use shards_api::Handle;
 
+/// One fallibly allocated, uniquely owned duplex facade. Native stream cloning remains explicit.
+pub type DuplexOwner = triomphe::UniqueArc<dyn Duplex>;
+
+/// Owns a stream facade without adding a native lifecycle owner or an infallible allocation.
+/// Its only refusal is exhaustion of the facade's allocation.
+pub fn own_duplex<D: Duplex>(duplex: D) -> Result<DuplexOwner, Refusal> {
+    use unsize::CoerceUnsize;
+
+    let owner = triomphe::UniqueArc::try_new(duplex).map_err(|_| Refusal::Exhausted {
+        what: "guest duplex owner",
+        bound: std::mem::size_of::<D>(),
+    })?;
+    Ok(owner.unsize(unsize::Coercion!(to dyn Duplex)))
+}
+
 /// A connection to one of the guest's ports.
 pub trait Duplex: Read + Write + Send + Sync + 'static {
     /// Another handle on the same connection.
-    fn try_clone(&self) -> io::Result<Box<dyn Duplex>>;
+    fn try_clone(&self) -> io::Result<DuplexOwner>;
     fn shutdown(&self, how: Shutdown) -> io::Result<()>;
     fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
@@ -44,8 +59,9 @@ pub trait Duplex: Read + Write + Send + Sync + 'static {
 }
 
 impl Duplex for TcpStream {
-    fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
-        Ok(Box::new(TcpStream::try_clone(self)?))
+    fn try_clone(&self) -> io::Result<DuplexOwner> {
+        own_duplex(TcpStream::try_clone(self)?)
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
@@ -74,8 +90,9 @@ impl Duplex for TcpStream {
 
 #[cfg(unix)]
 impl Duplex for std::os::unix::net::UnixStream {
-    fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
-        Ok(Box::new(std::os::unix::net::UnixStream::try_clone(self)?))
+    fn try_clone(&self) -> io::Result<DuplexOwner> {
+        own_duplex(std::os::unix::net::UnixStream::try_clone(self)?)
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
@@ -102,18 +119,14 @@ impl Duplex for std::os::unix::net::UnixStream {
 /// What dials the guest's ports.
 pub trait Link: Send + Sync + 'static {
     /// A new connection to the guest's `port`.
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal>;
+    fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal>;
     /// Optional caller budget for one control/setup operation; never a connection lifetime.
     fn reply_budget(&self) -> Option<Duration> {
         None
     }
     /// Dials within the operation's remaining absolute deadline. A link opting into a reply
     /// budget must override this; an unbounded legacy dial cannot truthfully implement the cap.
-    fn dial_before(
-        &self,
-        port: u32,
-        deadline: Option<Instant>,
-    ) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial_before(&self, port: u32, deadline: Option<Instant>) -> Result<DuplexOwner, Refusal> {
         if deadline.is_some() {
             return Err(Refusal::Invalid {
                 what: "guest dial deadline",
@@ -208,18 +221,18 @@ pub struct Stream {
     /// The token the relay sent first on the control connection, which its stdio connections name.
     token: u64,
     /// The writing handle, its messages one at a time under the core's send lock.
-    write: Mutex<Box<dyn Duplex>>,
+    write: Mutex<DuplexOwner>,
     /// A handle to wait on and to end the connection with while a send holds the writing one.
-    end: Box<dyn Duplex>,
+    end: DuplexOwner,
     /// The reading handle, until the core's read state takes it.
-    read: Mutex<Option<Box<dyn Duplex>>>,
+    read: Mutex<Option<DuplexOwner>>,
     /// In the event form, what waits to be written ([`Backlog`]); else nothing.
     backlog: Mutex<Option<Backlog>>,
 }
 
 /// What the turn's holder reads with and into, and what of a frame has come.
 pub struct Reading {
-    conn: Option<Box<dyn Duplex>>,
+    conn: Option<DuplexOwner>,
     /// A read takes at most one whole frame, the most the deframer holds.
     buf: Vec<u8>,
     deframer: Deframer,
@@ -297,7 +310,7 @@ fn protocol_write(
 impl Stream {
     /// A stdio connection of its own to the guest, named for `named`, so the guest's relay hands it to that exec's
     /// program as its stream.
-    fn dial_named(&self, named: Named) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial_named(&self, named: Named) -> Result<DuplexOwner, Refusal> {
         self.dial_named_before(named, None)
     }
 
@@ -305,7 +318,7 @@ impl Stream {
         &self,
         named: Named,
         deadline: Option<ReplyDeadline>,
-    ) -> Result<Box<dyn Duplex>, Refusal> {
+    ) -> Result<DuplexOwner, Refusal> {
         if let Some(deadline) = deadline {
             deadline.remaining("dialing a stdio connection")?;
         }
@@ -458,13 +471,21 @@ impl Transport for Stream {
         };
         let named = |stream| Named { exec, stream };
         if let Some(r) = stdio.stdin {
-            copy_in(r, self.dial_named(named(stream::Stdio::In))?)?;
+            copy_in(r, DuplexIo(self.dial_named(named(stream::Stdio::In))?))?;
         }
         if let Some(w) = stdio.stdout {
-            copy(self.dial_named(named(stream::Stdio::Out))?, w, drop)?;
+            copy(
+                DuplexIo(self.dial_named(named(stream::Stdio::Out))?),
+                w,
+                drop,
+            )?;
         }
         if let Some(w) = stdio.stderr {
-            copy(self.dial_named(named(stream::Stdio::Err))?, w, drop)?;
+            copy(
+                DuplexIo(self.dial_named(named(stream::Stdio::Err))?),
+                w,
+                drop,
+            )?;
         }
         Ok(())
     }
@@ -498,13 +519,13 @@ impl Transport for Stream {
             .map(|_| dial(stream::Stdio::Err))
             .transpose()?;
         if let (Some(r), Some(conn)) = (stdio.stdin, input) {
-            copy_in(r, conn)?;
+            copy_in(r, DuplexIo(conn))?;
         }
         if let (Some(w), Some(conn)) = (stdio.stdout, output) {
-            copy(conn, w, drop)?;
+            copy(DuplexIo(conn), w, drop)?;
         }
         if let (Some(w), Some(conn)) = (stdio.stderr, error) {
-            copy(conn, w, drop)?;
+            copy(DuplexIo(conn), w, drop)?;
         }
         Ok(())
     }

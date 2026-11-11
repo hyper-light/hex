@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
-use hex_client::guest::{Duplex, Link};
+use hex_client::guest::{Duplex, DuplexOwner, Link, own_duplex};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use serde::Deserialize;
 use socket2::{Domain, SockAddr, Socket, Type};
@@ -154,7 +154,7 @@ impl Link for Endpoint {
         Some(self.remaining())
     }
 
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         self.dial_before(port, None)
     }
 
@@ -162,7 +162,7 @@ impl Link for Endpoint {
         &self,
         port: u32,
         caller_deadline: Option<Instant>,
-    ) -> Result<Box<dyn Duplex>, Refusal> {
+    ) -> Result<DuplexOwner, Refusal> {
         let own = deadline(self.remaining())?;
         let until = caller_deadline.map_or(own, |caller| own.min(caller));
         left(until)?;
@@ -205,9 +205,9 @@ impl Link for Endpoint {
         if port == hex_core::stream::files::FILES_PORT {
             // A staging connection is exactly one operation. Its current client otherwise resets
             // per-read timeouts and may be uncalibrated; retain one explicit absolute stage budget.
-            return Ok(Box::new(StagingStream { stream, until }));
+            return own_duplex(StagingStream { stream, until });
         }
-        Ok(Box::new(stream))
+        own_duplex(stream)
     }
 }
 
@@ -249,11 +249,12 @@ impl Write for StagingStream {
 }
 
 impl Duplex for StagingStream {
-    fn try_clone(&self) -> std::io::Result<Box<dyn Duplex>> {
-        Ok(Box::new(Self {
+    fn try_clone(&self) -> std::io::Result<DuplexOwner> {
+        own_duplex(Self {
             stream: self.stream.try_clone()?,
             until: self.until,
-        }))
+        })
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::OutOfMemory))
     }
     fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
         self.stream.shutdown(how)

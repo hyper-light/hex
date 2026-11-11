@@ -623,6 +623,7 @@ fn backend_path(state: &Path, name: &str) -> Result<PathBuf, Refusal> {
     Ok(path)
 }
 
+#[cfg(target_os = "linux")]
 fn startup_invalid(what: &'static str, message: &'static str) -> Refusal {
     let mut why = String::new();
     if why.try_reserve_exact(message.len()).is_err() {

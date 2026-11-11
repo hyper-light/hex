@@ -27,7 +27,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, Class, Exit, Program, Refusal, Runtime, Stdio};
-use hex_client::guest::{Client, Duplex, Link};
+use hex_client::guest::{Client, Link};
 use hex_core::stream::{self, Deframer};
 use hex_core::wire::{self, Answer, Call, Header, Limits, Request};
 
@@ -37,7 +37,7 @@ struct Loopback {
 }
 
 impl Link for Loopback {
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
         let addr = if port == stream::CONTROL_PORT {
             self.control
         } else {
@@ -45,7 +45,7 @@ impl Link for Loopback {
         };
         let conn = TcpStream::connect(addr).unwrap();
         conn.set_nodelay(true).unwrap();
-        Ok(Box::new(conn))
+        hex_client::guest::own_duplex(conn)
     }
 }
 

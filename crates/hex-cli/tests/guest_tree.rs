@@ -214,7 +214,7 @@ mod local {
     use std::path::PathBuf;
 
     use hex_api::{BoxId, Refusal};
-    use hex_client::guest::{Duplex, Link, stage};
+    use hex_client::guest::{Link, stage};
     use hex_core::stream::files::LIMITS;
 
     use super::{Image, Side, box_layers, items};
@@ -223,14 +223,14 @@ mod local {
     struct InProcess(PathBuf);
 
     impl Link for InProcess {
-        fn dial(&self, _port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+        fn dial(&self, _port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
             let (near, far) = std::os::unix::net::UnixStream::pair()
                 .map_err(|e| Refusal::os("pairing a staging socket", e))?;
             let staged = self.0.clone();
             std::thread::spawn(move || {
                 hex_node::relay::files::serve(Box::new(far), &staged, &LIMITS)
             });
-            Ok(Box::new(near))
+            hex_client::guest::own_duplex(near)
         }
     }
 

@@ -28,14 +28,14 @@ struct Ports {
 }
 
 impl Link for Ports {
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
         let path = match port {
             stream::CONTROL_PORT => &self.control,
             stream::STDIO_PORT => &self.stdio,
             stream::files::FILES_PORT => &self.files,
             other => panic!("dialed port {other:#x}"),
         };
-        Ok(Box::new(UnixStream::connect(path).unwrap()))
+        hex_client::guest::own_duplex(UnixStream::connect(path).unwrap())
     }
 }
 
@@ -274,11 +274,12 @@ impl Write for Told {
 }
 
 impl Duplex for Told {
-    fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
-        Ok(Box::new(Told {
+    fn try_clone(&self) -> io::Result<hex_client::guest::DuplexOwner> {
+        hex_client::guest::own_duplex(Told {
             conn: self.conn.try_clone()?,
             wrote: self.wrote.clone(),
-        }))
+        })
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
@@ -312,16 +313,16 @@ struct Held {
 }
 
 impl Link for Held {
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
         if port != stream::CONTROL_PORT {
-            return Ok(Box::new(UnixStream::connect(&self.stdio).unwrap()));
+            return hex_client::guest::own_duplex(UnixStream::connect(&self.stdio).unwrap());
         }
         let conn = UnixStream::connect(&self.control).unwrap();
         *self.held.lock().unwrap() = Some(conn.try_clone().unwrap());
-        Ok(Box::new(Told {
+        hex_client::guest::own_duplex(Told {
             conn,
             wrote: self.wrote.lock().unwrap().clone(),
-        }))
+        })
     }
 }
 
@@ -627,8 +628,9 @@ impl Write for Late {
 }
 
 impl Duplex for Late {
-    fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
-        Ok(Box::new(self.conn.try_clone()?))
+    fn try_clone(&self) -> io::Result<hex_client::guest::DuplexOwner> {
+        hex_client::guest::own_duplex(self.conn.try_clone()?)
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
@@ -659,16 +661,16 @@ struct LatePorts {
 }
 
 impl Link for LatePorts {
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
         if port == stream::CONTROL_PORT {
-            return Ok(Box::new(
+            return hex_client::guest::own_duplex(
                 UnixStream::connect(self.dir.join("control.sock")).unwrap(),
-            ));
+            );
         }
-        Ok(Box::new(Late {
+        hex_client::guest::own_duplex(Late {
             conn: UnixStream::connect(self.dir.join("stdio.sock")).unwrap(),
             relay: Arc::clone(&self.relay),
-        }))
+        })
     }
 }
 
@@ -754,11 +756,12 @@ impl AsFd for CountingConn {
 }
 
 impl Duplex for CountingConn {
-    fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
-        Ok(Box::new(CountingConn {
+    fn try_clone(&self) -> io::Result<hex_client::guest::DuplexOwner> {
+        hex_client::guest::own_duplex(CountingConn {
             conn: self.conn.try_clone()?,
             moved: Arc::clone(&self.moved),
-        }))
+        })
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {

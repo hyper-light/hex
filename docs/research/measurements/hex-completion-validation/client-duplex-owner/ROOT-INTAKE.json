@@ -1,0 +1,27 @@
+{
+  "parent": "8285e0bfab24eff6e50f3fe8d32b3de393a19f3e",
+  "client_producer": "948351166bf80adfc93eb405f6abcaf59859a6e3",
+  "firecracker_consumer": "ce4c79c64a321e44dcd1f1cc2532708e0c5fe99b",
+  "root_ports": "Existing CLI socket clone, relay writer and test/bench Link/clone facade return types; concrete native handles and test oracles unchanged. startup_invalid follows its Linux-only caller.",
+  "protected_calls_rs_sha256": "42ce7c212677453c8caed09f4d15034cc0c70f49e235fe099ef19ab8dc825daa",
+  "changed_sources": {
+    "crates/hex-cli/src/guest.rs": "ce57a7d3e44aa1c06d66f6faa46c3f5307c0ef6ce67783c4e2756be3a5c3494b",
+    "crates/hex-cli/src/node.rs": "c20368fc1cf6e457b5f3e7e28c92906e1e374efc33607e1816873f0d39ec37b3",
+    "crates/hex-cli/tests/guest_tree.rs": "e33af317d85da8efdd2bfbcf474d90c6ec25e55c6e519fb21fe2907715b0b601",
+    "crates/hex-cli/tests/node_socket.rs": "40e38ecc12d732843ddb99c6e10e1f3a3aa90949dbce16f16a5ec89737c43d30",
+    "crates/hex-client/src/calls/budget_tests.rs": "a892505c8ff87433c992725743b09c5be085e40e5bd900db15c5f65084dfd9f8",
+    "crates/hex-client/src/copy.rs": "ee30ad82c52ea5ce5af5cf5da1ba0d6a9dc30304389642686451e67023fb325d",
+    "crates/hex-client/src/guest.rs": "893c281be8a3d4907d81bcffc36c0991a1d614108e3e68ecf7500e130887c6b3",
+    "crates/hex-client/src/guest/shards.rs": "3411d8c2d2c4fd8f338271aaa4bcf26d03cbcd8454e647ffb0da7f13d7066557",
+    "crates/hex-client/src/guest/stage.rs": "f303bd4a6d2619d2efc912d15c60947fa6e9f3a559fb00ac5e6709df38d9c1c8",
+    "crates/hex-client/src/guest/stage/tests.rs": "6468125e1aabbd60da48cca253f7b193c5d0351f69ceb1e4326d960c03b4058c",
+    "crates/hex-client/src/guest/tests.rs": "60761a7c7a28e401501230433bfb2a8a9cc59ef5d4ab2b2cead5730183546304",
+    "crates/hex-client/tests/guest_client_bench.rs": "8432c58f83ec76f2c8bb0cdfe87938ca4c12a318613970d4f341edd42961f9a3",
+    "crates/hex-node/src/relay.rs": "98ca7a49ac58953c7c7355b76a3e56c3cc2a31b6e7017f005f381c9e8f9ae85d",
+    "crates/hex-node/src/relay/tests.rs": "d328e4d43ed26ffb9dd5d206aa06542268043fdc32c51acc0bc597d25f2042e7",
+    "crates/hex-node/tests/relay_exec_bench.rs": "df70a9da1b59c3610b8be65ee92f4056bc9e1ae20825abdb3298a188c88ca0a5",
+    "crates/hex-runtime/src/firecracker/transport.rs": "03c4e2df4e3f3aca6c7b2eba86f6222b7a6255eb1aca7515547c1ddb8f1a708d",
+    "crates/hex-runtime/src/guest/tests.rs": "31d49f9ea9587e139c88cd2839ffb166a7b6837c137185f1fe5a470cd76a0591"
+  },
+  "checks": "Source reviewed, scoped rustfmt/diff check only. Compilation and native effects unverified."
+}
