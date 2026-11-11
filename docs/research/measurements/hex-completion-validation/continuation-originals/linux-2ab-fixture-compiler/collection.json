@@ -1,0 +1,43 @@
+{
+  "bytes": 288277,
+  "sha256": "f1244ad90b6aca6070ca98855add7abd33deeeea5fb6ee42d8bad2e55bb2534a",
+  "members": {
+    "cohort-2abfb170-linux-linux-native-preflight-v1/source-before.json": {
+      "bytes": 432725,
+      "sha256": "3e2dba6b2dba87404ef71f24935e4c00979ce91f504ba671cd5d64f388cbe38e"
+    },
+    "cohort-2abfb170-linux-linux-native-preflight-v1/public-registry-seed.json": {
+      "bytes": 198,
+      "sha256": "3605b9dcf84f04d592a67254bd86f4e122577ab68e9e461e8b19ebf1a129e719"
+    },
+    "cohort-2abfb170-linux-linux-native-preflight-v1/owned-scope-limits.json": {
+      "bytes": 261,
+      "sha256": "7e2a66b7e07617e9a025cea963f4c482ed1cf80b280b7c27a7dbed8a062579ce"
+    },
+    "cohort-2abfb170-linux-linux-native-preflight-v1/original-sink-after.log": {
+      "bytes": 6136,
+      "sha256": "56acd7f2de16c334cebeacf092f089e5ea8ca17807acda1d54439aa6cc9805d6"
+    },
+    "cohort-2abfb170-linux-linux-native-preflight-v1/running.json": {
+      "bytes": 1195,
+      "sha256": "f1c01c218794d4604aa2a07b6385e0a42d0ed8debf406c88f71eb299d718916d"
+    },
+    "cohort-2abfb170-linux-linux-native-preflight-v1/source-after.json": {
+      "bytes": 432725,
+      "sha256": "3e2dba6b2dba87404ef71f24935e4c00979ce91f504ba671cd5d64f388cbe38e"
+    },
+    "cohort-2abfb170-linux-linux-native-preflight-v1/result.json": {
+      "bytes": 1545,
+      "sha256": "9a2b1643d779f1ff11dec224c23bb6d88e0e2f784d508e648ee6ea35fe94a042"
+    },
+    "cohort-2abfb170-linux-linux-native-preflight-v1/collected-binaries.json": {
+      "bytes": 842,
+      "sha256": "ea8ec3e760f6e12fd22eb386ebae1b6a1ad3bcf0dd76d80689ca5300e341b3e9"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

@@ -1,0 +1,55 @@
+{
+  "bytes": 237121,
+  "sha256": "f1f1491b4f68be6f57e5023b370813762c4c1dabab94bdb33278c1315d60c0af",
+  "members": {
+    "cohort-0fe30130-linux-linux-report-sink-original-v3/source-before.json": {
+      "bytes": 344655,
+      "sha256": "68274f0ea86e765173f66d40c1cddc87f80ad89ce74c0534a16d23f779158f65"
+    },
+    "cohort-0fe30130-linux-linux-report-sink-original-v3/public-registry-seed.json": {
+      "bytes": 198,
+      "sha256": "3605b9dcf84f04d592a67254bd86f4e122577ab68e9e461e8b19ebf1a129e719"
+    },
+    "cohort-0fe30130-linux-linux-report-sink-original-v3/owned-scope-limits.json": {
+      "bytes": 265,
+      "sha256": "77d7f02ba85cc0e1a394141337d5c2e567d79e40d08720f7314ff98bd012e8f8"
+    },
+    "cohort-0fe30130-linux-linux-report-sink-original-v3/firecracker-sink-original.log": {
+      "bytes": 6567,
+      "sha256": "4e375a488abfc9ac4c54c75ae6fcc1aaf92e8b5ac2dd3e46cf1f8e950da9530e"
+    },
+    "cohort-0fe30130-linux-linux-report-sink-original-v3/running.json": {
+      "bytes": 3950,
+      "sha256": "12d330a9b19c32564577d453b42e42684988d8b1de454e50b9fbc803a01a11f3"
+    },
+    "cohort-0fe30130-linux-linux-report-sink-original-v3/shared-report-guard-new.log": {
+      "bytes": 457,
+      "sha256": "2b05940864977b9c4439c1aa53f90bcac58746c087b1aeb262f3456010359760"
+    },
+    "cohort-0fe30130-linux-linux-report-sink-original-v3/linux-report-exec-bound-new.log": {
+      "bytes": 458,
+      "sha256": "03de54dcd9ee49c48587b01dd7e31af2aed1160d179dc8fab4f9f7ca05ba4c33"
+    },
+    "cohort-0fe30130-linux-linux-report-sink-original-v3/linux-joined-report-check.log": {
+      "bytes": 3469,
+      "sha256": "75d91128621f3ce41bf94ebf130447cdd3f313d753d6bd91cf7f204b68243a13"
+    },
+    "cohort-0fe30130-linux-linux-report-sink-original-v3/source-after.json": {
+      "bytes": 344655,
+      "sha256": "68274f0ea86e765173f66d40c1cddc87f80ad89ce74c0534a16d23f779158f65"
+    },
+    "cohort-0fe30130-linux-linux-report-sink-original-v3/result.json": {
+      "bytes": 4208,
+      "sha256": "f6c621b25a9f3d81433d9d3048516a17d3d9da022c3ddf2dd7d1f15ca2ba34e3"
+    },
+    "cohort-0fe30130-linux-linux-report-sink-original-v3/collected-binaries.json": {
+      "bytes": 3734,
+      "sha256": "a459aa3763af406a7a5c7edb3e23ac65ada6ebf6d5eaee585363a4ff264e4545"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

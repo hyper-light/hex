@@ -1,0 +1,47 @@
+[
+  {
+    "path": "linux-7b-compiler",
+    "source": "7b3fca63dddeba933776e338b424d523a778fd2a",
+    "archive_sha256": "73061de68e5be0eff24ef584b20e1fe66fda5a712e93c441a6cd38bc0d6509d8",
+    "archive_bytes": 238130,
+    "members": 12,
+    "all_members_verified": true,
+    "result_exit": 1
+  },
+  {
+    "path": "linux-0fe-sink-original",
+    "source": "0fe3013065848c67c90eb1d18e19cafa930287a7",
+    "archive_sha256": "f1f1491b4f68be6f57e5023b370813762c4c1dabab94bdb33278c1315d60c0af",
+    "archive_bytes": 237121,
+    "members": 11,
+    "all_members_verified": true,
+    "result_exit": 1
+  },
+  {
+    "path": "mac-e852-observer-originals",
+    "source": "e852c1b5ba9e1e2c8eb122dfb5817cd4dc339748",
+    "archive_sha256": "d216c534c822cd1b2778b920a203db83acdd7d01025376061c84796c58a13f91",
+    "archive_bytes": 296765,
+    "members": 22,
+    "all_members_verified": true,
+    "result_exit": 1
+  },
+  {
+    "path": "mac-e852-finite-original-short",
+    "source": "e852c1b5ba9e1e2c8eb122dfb5817cd4dc339748",
+    "archive_sha256": "faa09c7c0029b22ad6b0f1b17f594722aeac3c0316c8525dbc6ea4c7968674b6",
+    "archive_bytes": 989,
+    "members": 3,
+    "all_members_verified": true,
+    "result_exit": 101
+  },
+  {
+    "path": "linux-2ab-fixture-compiler",
+    "source": "2abfb17056b43dda5ce994175c5b1804043fe13f",
+    "archive_sha256": "f1244ad90b6aca6070ca98855add7abd33deeeea5fb6ee42d8bad2e55bb2534a",
+    "archive_bytes": 288277,
+    "members": 8,
+    "all_members_verified": true,
+    "result_exit": 1
+  }
+]
