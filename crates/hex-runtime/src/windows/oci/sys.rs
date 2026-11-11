@@ -89,17 +89,7 @@ impl HcsFailure {
     fn of(hr: HRESULT, doc: Option<String>) -> Self {
         Self {
             code: u32::from_ne_bytes(hr.to_ne_bytes()),
-            // A ResultError document's message (`SchemaReference.md:3073-3076`), else the document whole.
-            message: doc.map(|d| {
-                serde_json::from_str::<serde_json::Value>(&d)
-                    .ok()
-                    .and_then(|v| {
-                        v.get("ErrorMessage")
-                            .and_then(|m| m.as_str())
-                            .map(str::to_owned)
-                    })
-                    .unwrap_or(d)
-            }),
+            message: doc.map(|d| hcs::result_message(&d)),
         }
     }
 }

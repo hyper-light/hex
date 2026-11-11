@@ -1,0 +1,49 @@
+Subject: seccomp allow guest-driven VFIO interrupt programming on vCPU threads
+Why: AC-T7.4.1: change 0001 enables, switches and disables a passthrough device's MSI/MSI-X when the guest programs the capability or MSI-X table (VfioSources::synchronize from write_config_register and MSI-X table writes), on vCPU threads, through ioctl VFIO_DEVICE_SET_IRQS (_IO(';', 100 + 10) = 0x3b6e = 15214, linux/vfio.h). Upstream at this pin calls it once at device setup, before start_vcpus applies the filters, so its vCPU filter allows KVM_IRQFD and KVM_SET_GSI_ROUTING but not this request, and a release VMM dies of SIGSYS at the guest's first MSI/MSI-X enable. Reproduced: the pinned x86_64 vcpu program compiled by this tree's seccompiler-bin traps 0x3b6e (exit 159) while 0x4020ae76 and 0x4008ae6a pass. Only the vcpu filter gains the request; teardown on the vmm thread still resets the device without it.
+
+diff --git a/resources/seccomp/aarch64-unknown-linux-musl.json b/resources/seccomp/aarch64-unknown-linux-musl.json
+index 4e5039eefaf0eb454456b005bb651de27751d6a1..f70f04b8fa4c0d60b4a0227eba88ca28d331e7ed 100644
+--- a/resources/seccomp/aarch64-unknown-linux-musl.json
++++ b/resources/seccomp/aarch64-unknown-linux-musl.json
+@@ -1473,6 +1473,18 @@
+                     }
+                 ]
+             },
++            {
++                "syscall": "ioctl",
++                "args": [
++                    {
++                        "index": 1,
++                        "type": "dword",
++                        "op": "eq",
++                        "val": 15214,
++                        "comment": "VFIO_DEVICE_SET_IRQS, Used by VFIO passthrough when the guest enables or disables MSI/MSI-X"
++                    }
++                ]
++            },
+             {
+                 "syscall": "ioctl",
+                 "args": [
+diff --git a/resources/seccomp/x86_64-unknown-linux-musl.json b/resources/seccomp/x86_64-unknown-linux-musl.json
+index d59459e799d6e909e2d51a2e5cbdf475c8da991d..fb0a9728739c78b32b276100edeef525e5bc9f1b 100644
+--- a/resources/seccomp/x86_64-unknown-linux-musl.json
++++ b/resources/seccomp/x86_64-unknown-linux-musl.json
+@@ -1618,6 +1618,18 @@
+                     }
+                 ]
+             },
++            {
++                "syscall": "ioctl",
++                "args": [
++                    {
++                        "index": 1,
++                        "type": "dword",
++                        "op": "eq",
++                        "val": 15214,
++                        "comment": "VFIO_DEVICE_SET_IRQS, Used by VFIO passthrough when the guest enables or disables MSI/MSI-X"
++                    }
++                ]
++            },
+             {
+                 "syscall": "ioctl",
+                 "args": [

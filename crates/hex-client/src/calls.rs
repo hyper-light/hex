@@ -133,24 +133,33 @@ enum ReplyBound {
     Caller(Duration),
     CallerAbsolute,
     Learned(Duration),
+    /// A guest link's own bound on a connection's setup, where its caller gave no deadline.
+    Link(Duration),
 }
 
 impl ReplyDeadline {
     pub(crate) fn caller(budget: Option<Duration>) -> Result<Option<Self>, Refusal> {
-        let Some(budget) = budget else {
-            return Ok(None);
-        };
-        let at = (!budget.is_zero())
-            .then(|| Instant::now().checked_add(budget))
+        budget
+            .map(|budget| Self::from_now(budget, ReplyBound::Caller(budget), "client reply budget"))
+            .transpose()
+    }
+
+    /// A link's own setup bound from now ([`crate::guest::Link::setup_bound`]): none where it has none.
+    pub(crate) fn link(bound: Option<Duration>) -> Result<Option<Self>, Refusal> {
+        bound
+            .map(|bound| Self::from_now(bound, ReplyBound::Link(bound), "guest link setup bound"))
+            .transpose()
+    }
+
+    fn from_now(span: Duration, source: ReplyBound, what: &'static str) -> Result<Self, Refusal> {
+        let at = (!span.is_zero())
+            .then(|| Instant::now().checked_add(span))
             .flatten()
             .ok_or_else(|| Refusal::Invalid {
-                what: "client reply budget",
+                what,
                 why: "it must be positive and fit a monotonic deadline".to_owned(),
             })?;
-        Ok(Some(Self {
-            at,
-            source: ReplyBound::Caller(budget),
-        }))
+        Ok(Self { at, source })
     }
 
     pub(crate) fn caller_before(at: Instant) -> Result<Self, Refusal> {
@@ -209,6 +218,9 @@ impl ReplyDeadline {
             }
             ReplyBound::Learned(wait) => {
                 format!("none came in {wait:?}, twice the slowest answer to a call of its kind")
+            }
+            ReplyBound::Link(bound) => {
+                format!("the guest link's own setup bound of {bound:?} expired")
             }
         };
         Refusal::Os { op, why }
@@ -713,9 +725,9 @@ impl<T: Transport> Shared<T> {
     }
 
     /// Hands one message to whoever waits for it: an answer to its call, a program's end to its `Proc` or completion;
-    /// a given answer's descriptors, one for each stream it names, in order, kept for its exec. One nobody waits for (a
-    /// call that gave up waiting, a program released) has no taker. Completions run after the lock is let go, so one
-    /// may call the client again.
+    /// a given answer's descriptors, one for each stream it names, in order, kept for its exec while its call waits. One
+    /// nobody waits for (a call that gave up waiting, a program released) has no taker, and a given one's ends close.
+    /// Completions run after the lock is let go, so one may call the client again.
     fn deliver(
         &self,
         header: Header,
@@ -737,7 +749,11 @@ impl<T: Transport> Shared<T> {
                     stdout: take(given.stdout),
                     stderr: take(given.stderr),
                 };
-                state.given.insert(header.id, ends);
+                // AC-T7.4.1: kept only while its call waits. One that gave up never takes them, so
+                // they close here, and the Taken word owed above lets the agent's copies go too.
+                if state.calls.contains_key(&header.id) {
+                    state.given.insert(header.id, ends);
+                }
             }
             match answer {
                 Answer::Offered(offer) => {
@@ -2615,9 +2631,6 @@ impl<T: Transport> RemoteProc<T> {
         }
         let shared = triomphe::Arc::clone(&self.conn.shared);
         let deadline = timeout.map(|t| Instant::now().checked_add(t));
-        // AC-T7.4.1: a poll (no time asked, no cap) is bounded by its work, one turn's read, so messages
-        // for others that keep coming can't hold it.
-        let poll = cap.is_none() && timeout.is_none_or(|t| t.is_zero());
         shared.state()?.waiting.insert(self.exec);
         let mut mine = false;
         // Every way out of the loop goes through its end, so the wait is never left registered.
@@ -2664,9 +2677,10 @@ impl<T: Transport> RemoteProc<T> {
             };
             if mine {
                 match shared.turn(Some(left)) {
-                    Ok(true) if !poll => continue,
-                    Ok(false) if !left.is_zero() => continue,
-                    // Waited out, or polled: what came is its end, or none.
+                    // AC-T7.4.1: time left, it waits on. None (a poll, a spent deadline or cap):
+                    // what this one turn read is its end, or none, however many messages for
+                    // others keep coming, so they can't hold it past its time.
+                    Ok(_) if !left.is_zero() => continue,
                     Ok(_) => {
                         let ended = match self.ending.state.lock() {
                             Ok(ended) => ended,

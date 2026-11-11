@@ -679,7 +679,9 @@ impl std::fmt::Display for Refusal {
 impl std::error::Error for Refusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Process { failure, .. } | Self::Scope(failure) => Some(failure),
+            // Its Display already ends with the failure, which has no source of its own.
+            Self::Process { failure, .. } => std::error::Error::source(failure),
+            Self::Scope(failure) => Some(failure),
             Self::Borrowed { failure, .. } => Some(failure),
             Self::Connect { failure, .. } => Some(failure),
             _ => None,
@@ -782,6 +784,15 @@ pub trait Guest: Send + Sync {
     /// Synchronous OS calls/scheduling are not hard real-time bounded. A stream
     /// completed after `deadline` is closed and refused before publication.
     fn connect_before(&self, port: u32, deadline: Instant) -> Result<Box<dyn Stream>, Refusal>;
+    /// One dial to `port` under the same absolute deadline, never asked again: a guest that
+    /// does not listen there now (refused, absent, or closed unanswered) is refused at once,
+    /// and one that accepts but does not answer is refused by `deadline`. For a port the
+    /// guest has already been reached on; a first or boot dial uses
+    /// [`connect_before`](Guest::connect_before), which waits for the guest to listen. An
+    /// implementor without a single attempt of its own dials as `connect_before` does.
+    fn connect_once_before(&self, port: u32, deadline: Instant) -> Result<Box<dyn Stream>, Refusal> {
+        self.connect_before(port, deadline)
+    }
     /// Ends it at once: its VM's process is killed (SIGKILL; on Windows, its process
     /// ended), and its [`wait_for`](Guest::wait_for) then returns [`End::Stopped`]. Never
     /// refused, as a VM left running is a leak. The VMM has no host-to-guest power-off

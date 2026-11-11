@@ -158,7 +158,8 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
     let term =
         hex_runtime::linux::oci::sys::forward_signals(&[rustix::process::Signal::TERM.as_raw()])
             .map_err(|e| (1, format!("reading SIGTERM: {e}")))?;
-    #[cfg(unix)]
+    // A Linux node raises its own at its start (hex_node::netns::hold_descriptors), as every embedding does.
+    #[cfg(target_os = "macos")]
     raise_descriptor_limit().map_err(failed)?;
     // The state's disk is what the boxes' io bounds apply to, so it exists before the node looks.
     std::fs::create_dir_all(&args.state)
@@ -738,8 +739,8 @@ fn startup_invalid(what: &'static str, message: &'static str) -> Refusal {
 /// Raises the soft limit on open descriptors to the hard one: each connection and watched program
 /// holds descriptors, and a service's soft limit stays 1,024 for `select(2)`'s sake while its hard
 /// limit is 524,288 (systemd-system.conf(5), `DefaultLimitNOFILE=`), which a program that needs
-/// more raises its soft limit to.
-#[cfg(unix)]
+/// more raises its soft limit to. The macOS node's; a Linux node raises its own at its start.
+#[cfg(target_os = "macos")]
 fn raise_descriptor_limit() -> Result<(), Refusal> {
     let limit = rustix::process::getrlimit(Resource::Nofile);
     if limit.current < limit.maximum {

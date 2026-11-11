@@ -1,11 +1,13 @@
 //! The guest's ports through Shards (docs/design/shards-guest.md §2, Appendix A "Hex's side"): a
-//! [`Link`] whose every dial is `shards_api::Guest::connect_before`, Firecracker's `CONNECT <port>` on the
-//! guest's vsock, and a [`Duplex`] over the stream it returns. Hex never names Shards' stream type: on
+//! [`Link`] whose first dial is `shards_api::Guest::connect_before` and every later one
+//! `connect_once_before`, Firecracker's `CONNECT <port>` on the guest's vsock, and a [`Duplex`] over the
+//! stream it returns. Hex never names Shards' stream type: on
 //! Windows it is Shards' overlapped AF_UNIX socket, whose timeouts poll first, behind the same trait.
 
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use hex_api::{ConnectFailure, ConnectPhase, ConnectReply, IoKind, Refusal};
@@ -57,15 +59,19 @@ impl Duplex for ShardsStream {
     }
 }
 
-/// A guest's ports. Each dial is one `connect_before` with a finite absolute deadline, the caller's or
-/// else `bound` from the dial's start, within which Shards' client asks again while the guest doesn't
-/// listen there yet. `bound` is the caller's learned bound on a boot to ready
+/// A guest's ports. Each dial has a finite absolute deadline, the caller's or else `bound` from the
+/// dial's start. Until a dial has reached the guest's relay it is one `connect_before`, within which
+/// Shards' client asks again while the guest doesn't listen there yet. The relay binds every port it
+/// serves before it serves any (`hex guest`), so after that a refused port has no relay behind it:
+/// each later dial is one `connect_once_before`, refused at once if nothing listens and by its
+/// deadline if nothing answers. `bound` is the caller's learned bound on a boot to ready
 /// (`hex_runtime::guest::GuestRuntime::first_dial_bound`), whose ready includes a whole CONNECT/OK
 /// exchange. Never a relative patience: Shards' client awaits a zero or `Duration::MAX` patience's
 /// answer without a bound (HEX-GUEST-33).
 pub struct ShardsLink {
     guest: ShardsGuest,
     bound: Duration,
+    listened: AtomicBool,
 }
 
 enum ShardsGuest {
@@ -87,6 +93,7 @@ impl ShardsLink {
         Self {
             guest: ShardsGuest::Owned(guest),
             bound,
+            listened: AtomicBool::new(false),
         }
     }
 
@@ -97,6 +104,7 @@ impl ShardsLink {
         Self {
             guest: ShardsGuest::Managed(guest),
             bound,
+            listened: AtomicBool::new(false),
         }
     }
 }
@@ -107,6 +115,12 @@ impl Link for ShardsLink {
             .guest()
             .identity()
             .map_err(|why| refusal("naming the guest's stream endpoint", &why))
+    }
+
+    /// The learned bound on a boot to ready, whose ready includes the CONNECT/OK exchange and the
+    /// relay's token after it: a connect with no caller deadline spends it once on both.
+    fn setup_bound(&self) -> Option<Duration> {
+        Some(self.bound)
     }
 
     fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
@@ -126,11 +140,14 @@ impl Link for ShardsLink {
         };
         let cap = crate::calls::ReplyDeadline::caller_before(at)?;
         cap.remaining("connecting to the guest within the original operation deadline")?;
-        let stream = self
-            .guest
-            .guest()
-            .connect_before(port, at)
-            .map_err(|why| refusal("connecting to the guest", &why))?;
+        let guest = self.guest.guest();
+        let stream = if self.listened.load(Ordering::Acquire) {
+            guest.connect_once_before(port, at)
+        } else {
+            guest.connect_before(port, at)
+        }
+        .map_err(|why| refusal("connecting to the guest", &why))?;
+        self.listened.store(true, Ordering::Release);
         let stream = own_duplex(ShardsStream(stream))?;
         cap.remaining("retaining the guest connection within the original operation deadline")?;
         Ok(stream)

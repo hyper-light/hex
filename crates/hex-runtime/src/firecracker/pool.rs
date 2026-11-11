@@ -578,11 +578,16 @@ impl FirecrackerRuntime {
                 Err(error) => return Err(Refusal::os("checking observer incarnation path", error)),
                 Ok(_) => return Err(refused(grant.key, LifecycleCause::Uncertain)),
             }
-            let vm = self
-                .config
-                .machine_guest(grant.allocation.guest()?, &paths.vsock, &plan)?;
+            // The observer VM owns its own attached GPUs; no Box runs in it.
+            let owner = crate::devices::managed_native_scope_id(NativeRecord::Pool(&record))?;
+            let vm = self.config.machine_guest(
+                grant.allocation.guest()?,
+                &paths.vsock,
+                &plan,
+                &owner,
+            )?;
             let program = self.vm_program(&paths)?;
-            let io = Self::vm_io()?;
+            let (io, mut output) = Self::vm_io()?;
             fs::create_dir(&paths.dir)
                 .and_then(|()| fs::set_permissions(&paths.dir, fs::Permissions::from_mode(0o700)))
                 .map_err(|error| Refusal::os("creating observer incarnation directory", error))?;
@@ -609,7 +614,8 @@ impl FirecrackerRuntime {
             {
                 return Err(refused(grant.key, LifecycleCause::Uncertain));
             }
-            transport::ready(&ready, native.as_ref(), until)?;
+            transport::ready(&ready, native.as_ref(), &mut output, until)?;
+            drop(output);
             let client = self.pool_client(&current, transaction, Some(until))?;
             self.pool_observations(&current, &client, Some(until))?;
             current.phase = BackingPhase::Live;
@@ -1141,6 +1147,7 @@ pub(super) mod tests {
                     allocation.guest().unwrap(),
                     Path::new("/fixture/vsock"),
                     &[],
+                    &BoxId::new("observer").unwrap(),
                 )
                 .unwrap(),
         )

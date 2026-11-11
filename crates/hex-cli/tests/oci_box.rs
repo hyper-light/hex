@@ -243,8 +243,8 @@ fn prepared_devs_match_ordinary_setup_and_isolate_containers() {
 
 /// AC-T7.1.4 (runtime-tools' rootless subset, goal 17's rootless variant): a rootless `hex oci create` of a spec that
 /// names no cgroupsPath makes the container's cgroup beside the command line's own, as crun's does. Do: run the case
-/// alone through the lab's fixture, rootless. Expect it to pass, or to say why it was skipped. As root it is no case:
-/// a root runtime writes the hierarchy's root, as before.
+/// alone through the lab's fixture, rootless. Expect it to pass, or, unless HEX_DELEGATED gave this binary a delegated
+/// cgroup of its own, to say why it was skipped. As root it is no case: a root runtime writes the hierarchy's root.
 #[test]
 fn a_rootless_command_line_create_makes_its_cgroup_beside_its_own() {
     if host_id("-u") == 0 {
@@ -254,7 +254,30 @@ fn a_rootless_command_line_create_makes_its_cgroup_beside_its_own() {
         return;
     }
     let _serial = LAB_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let output = Command::new(std::env::current_exe().expect("test binary path"))
+    let exe = std::env::current_exe().expect("test binary path");
+    // A child started here shares this process's cgroup (its own, or the hex-agent leaf the full suite moved it
+    // into), which it can't subdivide while this process is in it. Where that cgroup is delegated to this binary,
+    // start the child alone in a fresh cgroup beside the leaf, as the root oracles do; elsewhere the child finds its
+    // own delegation (a systemd re-run) or says why there's none.
+    let mut child = match prepare_cgroup(&cache_dir()) {
+        Ok(parent) => {
+            let own = parent.join(format!("hex-rootless-cli-{}", std::process::id()));
+            std::fs::create_dir(&own).expect("a fresh cgroup for the rootless case");
+            let mut placed = Command::new("/bin/sh");
+            placed
+                .args([
+                    "-e",
+                    "-c",
+                    r#"printf '%s' "$$" > "$1/cgroup.procs"; shift; exec "$@""#,
+                    "hex-rootless-cli",
+                ])
+                .arg(&own)
+                .arg(&exe);
+            placed
+        }
+        Err(_) => Command::new(&exe),
+    };
+    let output = child
         .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
         .env(ROOTLESS_CLI_CGROUP_ENV, "1")
         .output()
@@ -270,6 +293,11 @@ fn a_rootless_command_line_create_makes_its_cgroup_beside_its_own() {
         "the rootless command line's cgroup case failed"
     );
     if !log.lines().any(|line| line == ROOTLESS_CLI_CGROUP_PASS) {
+        // Under HEX_DELEGATED the runner gave this binary a delegated cgroup of its own, so the case runs there.
+        assert!(
+            std::env::var_os("HEX_DELEGATED").is_none(),
+            "the rootless command line's cgroup case was skipped though this binary's cgroup is delegated to it"
+        );
         // The fixture says why where it can't run a rootless container here (no delegation, no user namespaces).
         assert!(
             log.lines().any(|line| line.starts_with("SKIP")),

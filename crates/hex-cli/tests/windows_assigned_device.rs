@@ -369,7 +369,12 @@ impl Lab {
             "native scratch reclaim failures: {:?}",
             native.reclaim_failures()
         );
-        self.runtime = Some(Recorded::open(native, &self.state).unwrap());
+        // As the Windows CLI opens its node (src/node.rs): device capacity reads the one shared
+        // native provider, and without it every capacity call is refused before any HCS create.
+        let prober =
+            hex_node::facts::shared_prober(&self.state, hex_node::facts::Declared::default())
+                .expect("the native provider the Windows CLI initializes");
+        self.runtime = Some(Recorded::open_with_prober(native, &self.state, prober).unwrap());
     }
 
     fn rt(&self) -> &Recorded<WinRuntime> {
