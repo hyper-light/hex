@@ -166,12 +166,28 @@ impl Link for Endpoint {
         let own = deadline(self.remaining())?;
         let until = caller_deadline.map_or(own, |caller| own.min(caller));
         left(until)?;
+        // A u32 has at most ten decimal digits; the pinned vsock protocol adds this fixed
+        // prefix/newline. Cursor refuses an overflow instead of allocating a formatting String.
+        let mut request = [0u8; b"CONNECT ".len() + 10 + 1];
+        let used = {
+            let mut buffer = std::io::Cursor::new(request.as_mut_slice());
+            write!(&mut buffer, "CONNECT {port}\n")
+                .map_err(|error| Refusal::os("encoding Firecracker connect request", error))?;
+            usize::try_from(buffer.position())
+                .map_err(|_| invalid("vsock request size is unrepresentable"))?
+        };
         let mut stream = connect(&self.path, until)?;
-        write(&mut stream, format!("CONNECT {port}\n").as_bytes(), until)?;
+        write(
+            &mut stream,
+            request
+                .get(..used)
+                .ok_or_else(|| invalid("vsock request exceeds its fixed buffer"))?,
+            until,
+        )?;
         // Firecracker vsock.md: `OK <host-port>\n`, the port an unsigned 32-bit integer.
         let bound = "OK "
             .len()
-            .checked_add(u32::MAX.to_string().len())
+            .checked_add(10)
             .and_then(|n| n.checked_add(1))
             .ok_or_else(|| invalid("vsock response bound overflow"))?;
         let mut line = Vec::new();
@@ -276,9 +292,9 @@ impl Duplex for StagingStream {
 pub(super) fn ready(
     listener: &UnixListener,
     proc: &dyn shards_api::ManagedProcess,
-    timeout: Duration,
+    until: Instant,
 ) -> Result<(), Refusal> {
-    let until = deadline(timeout)?;
+    left(until)?;
     let identity = proc
         .identity()
         .map_err(|_| invalid("native readiness receipt has no identity"))?;
@@ -354,23 +370,37 @@ pub(super) struct Attachment {
 }
 
 /// Readonly witness supplied by Hex's pinned Firecracker extension, never an ordinal guess.
-pub(super) fn attachment(api: &Path, id: &str, timeout: Duration) -> Result<Attachment, Refusal> {
+pub(super) fn attachment(
+    api: &Path,
+    id: &str,
+    timeout: Duration,
+    original: Option<Instant>,
+) -> Result<Attachment, Refusal> {
     if id
         .bytes()
         .any(|c| !c.is_ascii_alphanumeric() && !matches!(c, b'_' | b'-' | b':' | b'.'))
     {
         return Err(invalid("invalid attachment witness identifier"));
     }
-    let until = deadline(timeout)?;
+    let own = deadline(timeout)?;
+    let until = original.map_or(own, |original| own.min(original));
+    left(until)?;
+    let prefix = "GET /device-passthrough/";
+    let suffix = " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    let size = prefix
+        .len()
+        .checked_add(id.len())
+        .and_then(|size| size.checked_add(suffix.len()))
+        .ok_or_else(|| exhausted("Firecracker API request", hex_core::wire::MAX_MESSAGE))?;
+    let mut request = String::new();
+    request
+        .try_reserve_exact(size)
+        .map_err(|_| exhausted("Firecracker API request", size))?;
+    request.push_str(prefix);
+    request.push_str(id);
+    request.push_str(suffix);
     let mut socket = connect(api, until)?;
-    write(
-        &mut socket,
-        format!(
-            "GET /device-passthrough/{id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-        )
-        .as_bytes(),
-        until,
-    )?;
+    write(&mut socket, request.as_bytes(), until)?;
     let bound = hex_core::wire::MAX_MESSAGE;
     let room = bound
         .checked_add(1)

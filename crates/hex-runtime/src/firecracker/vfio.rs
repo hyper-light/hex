@@ -1,9 +1,11 @@
 //! Native prerequisites for exact prebound PCI functions and IOMMU groups.
 //! No driver mutation, module loading or host configuration occurs here.
 
+use super::native::{path, text};
 use super::{config::Passthrough, exhausted, invalid};
 use crate::devices::{Binding, Catalog, Entry, Route};
 use hex_api::{DeviceId, DeviceKind, Refusal};
+use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::path::Path;
@@ -11,10 +13,28 @@ use std::path::Path;
 fn pci(sbdf: &str) -> Result<hex_gpu::PciAddress, Refusal> {
     let pci =
         hex_gpu::PciAddress::parse(sbdf).ok_or_else(|| invalid("invalid native PCI address"))?;
-    if pci.domain > u32::from(u16::MAX) || pci.to_string() != sbdf {
+    if pci.domain > u32::from(u16::MAX) {
+        return Err(invalid("PCI function must use the canonical native SBDF"));
+    }
+    // Linux SBDF is domain16/bus8/device5/function3 with these fixed separators.
+    let mut canonical = String::new();
+    canonical
+        .try_reserve_exact("ffff:ff:1f.7".len())
+        .map_err(|_| exhausted("native PCI address", "ffff:ff:1f.7".len()))?;
+    write!(&mut canonical, "{pci}").map_err(|_| invalid("native PCI address cannot be encoded"))?;
+    if canonical != sbdf {
         return Err(invalid("PCI function must use the canonical native SBDF"));
     }
     Ok(pci)
+}
+
+fn group_name(group: u32) -> Result<String, Refusal> {
+    // IOMMU group numbers are u32; ten decimal digits cover every representable group.
+    let mut name = String::new();
+    name.try_reserve_exact(10)
+        .map_err(|_| exhausted("IOMMU group name", 10))?;
+    write!(&mut name, "{group}").map_err(|_| invalid("IOMMU group cannot be encoded"))?;
+    Ok(name)
 }
 
 fn reserve<T>(items: &mut Vec<T>, more: usize) -> Result<(), Refusal> {
@@ -84,12 +104,11 @@ pub(super) fn plan(catalog: &Catalog, ids: &[DeviceId]) -> Result<Vec<Passthroug
     functions.dedup_by_key(|function| (function.0, function.1));
     let mut devices = Vec::new();
     for group in groups {
-        let path = Path::new("/sys/kernel/iommu_groups")
-            .join(group.to_string())
-            .join("devices");
+        let group_path = path(Path::new("/sys/kernel/iommu_groups"), &group_name(group)?)?;
+        let group_path = path(&group_path, "devices")?;
         let mut count = 0usize;
         for member in
-            fs::read_dir(&path).map_err(|e| Refusal::os("reading VFIO isolation group", e))?
+            fs::read_dir(&group_path).map_err(|e| Refusal::os("reading VFIO isolation group", e))?
         {
             if count >= hex_api::MAX_DEVICES {
                 return Err(exhausted("VFIO group functions", hex_api::MAX_DEVICES));
@@ -116,7 +135,7 @@ pub(super) fn plan(catalog: &Catalog, ids: &[DeviceId]) -> Result<Vec<Passthroug
             reserve(&mut devices, 1)?;
             devices.push(Passthrough {
                 id: function_id(name)?,
-                sbdf: name.to_owned(),
+                sbdf: text(name)?,
             });
         }
         if count == 0 {
@@ -210,11 +229,12 @@ pub(super) fn validate(entry: &Entry) -> Result<(), Refusal> {
             "selected native function is not a GPU/compute accelerator",
         ));
     }
-    for interface in ["vfio".to_owned(), group.to_string()] {
+    let group_name = group_name(*group)?;
+    for interface in ["vfio", group_name.as_str()] {
         let _access = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(Path::new("/dev/vfio").join(interface))
+            .open(path(Path::new("/dev/vfio"), interface)?)
             .map_err(|e| Refusal::os("opening selected VFIO interface", e))?;
     }
     Ok(())
@@ -222,8 +242,8 @@ pub(super) fn validate(entry: &Entry) -> Result<(), Refusal> {
 
 fn validate_function(sbdf: &str, group: u32) -> Result<u32, Refusal> {
     pci(sbdf)?;
-    let path = Path::new("/sys/bus/pci/devices").join(sbdf);
-    let native_group = fs::canonicalize(path.join("iommu_group"))
+    let device_path = path(Path::new("/sys/bus/pci/devices"), sbdf)?;
+    let native_group = fs::canonicalize(path(&device_path, "iommu_group")?)
         .map_err(|e| Refusal::os("resolving native IOMMU group", e))?;
     if native_group
         .file_name()
@@ -235,7 +255,7 @@ fn validate_function(sbdf: &str, group: u32) -> Result<u32, Refusal> {
             "physical function moved to a different isolation group",
         ));
     }
-    let driver = fs::canonicalize(path.join("driver"))
+    let driver = fs::canonicalize(path(&device_path, "driver")?)
         .map_err(|e| Refusal::os("resolving native PCI driver", e))?;
     if driver.file_name().is_none_or(|name| name != "vfio-pci") {
         return Err(invalid("selected function is not prebound to vfio-pci"));
@@ -243,7 +263,7 @@ fn validate_function(sbdf: &str, group: u32) -> Result<u32, Refusal> {
     // PCI class is 24 bits, encoded by sysfs as 0x + six hex digits + newline. One excess
     // byte distinguishes an oversized/changed object; no unbounded string allocation occurs.
     let mut bytes = [0u8; b"0xffffff\n".len() + 1];
-    let mut file = fs::File::open(path.join("class"))
+    let mut file = fs::File::open(path(&device_path, "class")?)
         .map_err(|e| Refusal::os("reading native PCI class", e))?;
     let mut used = 0usize;
     while used < bytes.len() {
@@ -278,15 +298,44 @@ fn validate_function(sbdf: &str, group: u32) -> Result<u32, Refusal> {
 }
 
 pub(super) fn function_id(sbdf: &str) -> Result<String, Refusal> {
-    Ok(format!(
-        "pci_{:x}",
-        hex_gpu::Identity::Pci(pci(sbdf)?).key()
-    ))
+    let key = hex_gpu::Identity::Pci(pci(sbdf)?).key();
+    // Prefix plus at most sixteen hexadecimal digits for the existing u64 physical key.
+    let bound = "pci_"
+        .len()
+        .checked_add(16)
+        .ok_or_else(|| invalid("VFIO identifier bound overflows"))?;
+    let mut id = String::new();
+    id.try_reserve_exact(bound)
+        .map_err(|_| exhausted("VFIO function identifier", bound))?;
+    write!(&mut id, "pci_{key:x}")
+        .map_err(|_| invalid("VFIO function identifier cannot be encoded"))?;
+    Ok(id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AC-T7.4.1: native address and VMM witness identifiers retain exact canonical physical bits.
+    #[test]
+    fn native_function_names_keep_canonical_full_physical_identity() {
+        assert_eq!(function_id("0000:01:00.0").unwrap(), "pci_100");
+        assert_eq!(function_id("ffff:ff:1f.7").unwrap(), "pci_ffffffff");
+        assert_eq!(group_name(u32::MAX).unwrap(), "4294967295");
+        for invalid in [
+            "0:01:00.0",
+            "FFFF:ff:1f.7",
+            "10000:00:00.0",
+            "0000:00:20.0",
+            "0000:00:00.8",
+        ] {
+            assert!(
+                function_id(invalid).is_err(),
+                "accepted noncanonical {invalid}"
+            );
+        }
+    }
+
     #[test]
     fn companion_declaration_cannot_authorize_a_second_physical_gpu() {
         let catalog = Catalog::parse(

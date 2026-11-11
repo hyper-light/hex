@@ -193,7 +193,7 @@ impl FirecrackerRuntime {
             transaction
                 .read(id)?
                 .filter(|r| matches!(r.spec.class, ClassSpec::Firecracker(_)))
-                .ok_or_else(|| Refusal::NoSuchBox(id.clone()))
+                .ok_or_else(|| missing(id))
         })
     }
 
@@ -207,9 +207,7 @@ impl FirecrackerRuntime {
         let before = self.record(id)?;
         let keys = self.catalog.conflict_ids(&before.spec.devices)?;
         crate::devices::with_transaction(&self.books, id, &keys, |transaction| {
-            let record = transaction
-                .read(id)?
-                .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+            let record = transaction.read(id)?.ok_or_else(|| missing(id))?;
             if record.spec != before.spec
                 || record.init != before.init
                 || record.native_scope != before.native_scope
@@ -221,11 +219,11 @@ impl FirecrackerRuntime {
         })
     }
 
-    fn link(&self, record: &BoxRecord) -> Result<LinkOwner, Refusal> {
+    fn link(&self, record: &BoxRecord, until: Option<Instant>) -> Result<LinkOwner, Refusal> {
         own_link(transport::Endpoint {
             path: self.paths(record)?.vsock,
             timeout: self.config.operation_timeout,
-            create_deadline: None,
+            create_deadline: until,
         })
     }
 
@@ -271,11 +269,24 @@ impl FirecrackerRuntime {
     }
 
     fn client(&self, record: &BoxRecord, transaction: &dyn Transaction) -> Result<Client, Refusal> {
+        self.client_before(record, transaction, None)
+    }
+
+    fn client_before(
+        &self,
+        record: &BoxRecord,
+        transaction: &dyn Transaction,
+        until: Option<Instant>,
+    ) -> Result<Client, Refusal> {
         if record.phase != Phase::Ready {
             return Err(lifecycle(&record.spec.id, LifecycleCause::Pending)?);
         }
         self.check_process(record, transaction)?;
-        Client::connect(self.link(record)?)
+        let link = self.link(record, until)?;
+        match until {
+            Some(until) => Client::connect_before(link, until),
+            None => Client::connect(link),
+        }
     }
 
     fn translate(
@@ -289,9 +300,11 @@ impl FirecrackerRuntime {
         if spec.devices.is_empty() {
             return Ok(Vec::new());
         }
-        let mut capacity = client
-            .capacity(Class::Oci)?
-            .ok_or_else(|| invalid("guest has no initialized native device adapter"))?;
+        let mut capacity = match until {
+            Some(until) => client.capacity_before(Class::Oci, until),
+            None => client.capacity(Class::Oci),
+        }?
+        .ok_or_else(|| invalid("guest has no initialized native device adapter"))?;
         capacity.check()?;
         capacity.devices.sort_unstable_by_key(|device| device.id);
         let mut catalog = Vec::new();
@@ -319,13 +332,8 @@ impl FirecrackerRuntime {
                 return Err(invalid("recorded binding is no longer VFIO"));
             };
             let id = vfio::function_id(sbdf)?;
-            let timeout = until
-                .map(remaining)
-                .transpose()?
-                .map_or(self.config.operation_timeout, |left| {
-                    left.min(self.config.operation_timeout)
-                });
-            let witness = transport::attachment(&paths.api, &id, timeout)?;
+            let witness =
+                transport::attachment(&paths.api, &id, self.config.operation_timeout, until)?;
             if witness.id != id || witness.sbdf != *sbdf {
                 return Err(invalid(
                     "VMM attachment witness names different host hardware",
@@ -368,7 +376,10 @@ impl FirecrackerRuntime {
         }
         // This is the initialized guest Node's SAME native provider, not a second host Gpus open
         // or a catalog substitute. The VMM witness is the only host/guest identity translation.
-        let report = client.physical_report()?;
+        let report = match until {
+            Some(until) => client.physical_report_before(until),
+            None => client.physical_report(),
+        }?;
         let observed = observations::join(&assignments, &report)?;
         for actual in observed {
             if catalog
@@ -478,8 +489,8 @@ impl FirecrackerRuntime {
             return Err(lifecycle(&id, LifecycleCause::Uncertain)?);
         }
         record = current;
-        transport::ready(&listener, native.as_ref(), remaining(until)?)?;
-        let client = Client::connect(link.clone())?;
+        transport::ready(&listener, native.as_ref(), until)?;
+        let client = Client::connect_before(link.clone(), until)?;
         guest_spec.devices = self.translate(&record, &client, Some(until))?;
         let memory = self
             .config
@@ -491,7 +502,7 @@ impl FirecrackerRuntime {
         limits.bytes = limits.bytes.min(memory);
         stage::stage(link.as_ref(), &id, &rewritten.items, &limits)?;
         remaining(until)?;
-        let mut info = client.create(rewritten.spec)?;
+        let mut info = client.create_before(rewritten.spec, until)?;
         record.phase = Phase::Ready;
         transaction.put(&record)?;
         info.class = record.spec.class.class();
@@ -609,15 +620,7 @@ impl FirecrackerRuntime {
         let mut capacity = self.authority()?.capacity()?;
         let observer = self.observer_record()?;
         let guest_observed = self.physical_observations_before(until)?;
-        let mut observed = if self
-            .catalog
-            .entries_for(Route::Vfio)
-            .any(|entry| entry.info.id.kind == DeviceKind::Gpu)
-        {
-            self.authority()?.physical_devices()?
-        } else {
-            Vec::new()
-        };
+        let mut observed: Vec<hex_api::DeviceInfo> = Vec::new();
         observed
             .try_reserve_exact(guest_observed.len())
             .map_err(|_| exhausted("current observer facts", guest_observed.len()))?;
@@ -759,6 +762,13 @@ fn remaining(until: Instant) -> Result<std::time::Duration, Refusal> {
     }
 }
 
+fn missing(id: &BoxId) -> Refusal {
+    match id.try_clone() {
+        Ok(id) => Refusal::NoSuchBox(id),
+        Err(error) => error,
+    }
+}
+
 fn uncertain(id: &BoxId) -> Refusal {
     match id.try_clone() {
         Ok(id) => Refusal::Lifecycle {
@@ -793,7 +803,11 @@ impl Runtime for FirecrackerRuntime {
     }
     fn release_backing(&self, key: hex_api::BackingKey) -> Result<hex_api::BackingOffer, Refusal> {
         self.require_initialized()?;
-        self.release_observer(&key)
+        let released = self.release_observer(&key)?;
+        // The caller first consumed the canonical Released capacity receipt. Its explicit release
+        // acknowledgement may now rearm only after every original Box reference is gone.
+        self.prepare_backing()?;
+        Ok(released)
     }
     fn backing_usage(&self, key: &hex_api::BackingKey) -> Result<Usage, Refusal> {
         self.require_initialized()?;
@@ -965,7 +979,7 @@ fn exit(status: shards_api::ManagedStatus) -> hex_api::Exit {
     }
 }
 
-fn text(value: &str) -> Result<String, Refusal> {
+pub(super) fn text(value: &str) -> Result<String, Refusal> {
     let mut owned = String::new();
     owned
         .try_reserve_exact(value.len())
@@ -983,7 +997,7 @@ fn copy_path(value: &Path) -> Result<PathBuf, Refusal> {
     Ok(owned)
 }
 
-fn path(parent: &Path, child: &str) -> Result<PathBuf, Refusal> {
+pub(super) fn path(parent: &Path, child: &str) -> Result<PathBuf, Refusal> {
     let room = parent
         .as_os_str()
         .len()

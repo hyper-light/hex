@@ -234,6 +234,7 @@ impl FirecrackerRuntime {
             return Ok(None);
         }
         let pool = observer_configuration(&self.config, &claims)?;
+        self.rearm_released_observer(&claims)?;
         let offer = self.authority()?.prepare_pool(
             pool,
             Execution::Firecracker,
@@ -249,6 +250,44 @@ impl FirecrackerRuntime {
         Ok(Some(offer))
     }
 
+    fn rearm_released_observer(&self, claims: &[DeviceId]) -> Result<(), Refusal> {
+        let Some(before) = self.observer_record()? else {
+            return Ok(());
+        };
+        if before.phase != BackingPhase::Released {
+            return Ok(());
+        }
+        let keys = self.catalog.conflict_ids(claims)?;
+        crate::devices::with_pool_transaction(&self.books, &before.key, &keys, |transaction| {
+            let current = transaction
+                .read_pool(&before.key)?
+                .ok_or_else(|| refused(before.key, LifecycleCause::Uncertain))?;
+            if current != before {
+                return Err(refused(before.key, LifecycleCause::Busy));
+            }
+            self.preflight_backing(&current)?;
+            for (_, record) in transaction.records()? {
+                let record = record.map_err(|_| refused(before.key, LifecycleCause::Uncertain))?;
+                record.spec.check()?;
+                if record
+                    .spec
+                    .route
+                    .is_some_and(|route| route.backing == Some(before.key))
+                {
+                    return Ok(());
+                }
+            }
+            match fs::symlink_metadata(self.pool_paths(&current)?.dir) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(Refusal::os("checking released observer state", error)),
+                Ok(_) => return Err(refused(before.key, LifecycleCause::Uncertain)),
+            }
+            // Released is the same canonical positive whole-scope/owned-state terminal receipt.
+            // No old Box references it; remove only that row before preparing a fresh generation.
+            transaction.remove_pool(&before.key)
+        })
+    }
+
     /// Pure second pass for the same owner's all-record preflight, before any native callback.
     pub fn preflight_backing(&self, record: &PoolRecord) -> Result<(), Refusal> {
         record.check()?;
@@ -260,10 +299,10 @@ impl FirecrackerRuntime {
         {
             return Err(bad());
         }
-        if let Some(allocation) = record.allocation {
-            if allocation != record.cost.allocate(CapacityResources::default())? {
-                return Err(bad());
-            }
+        if let Some(allocation) = record.allocation
+            && allocation != record.cost.allocate(CapacityResources::default())?
+        {
+            return Err(bad());
         }
         Ok(())
     }
@@ -331,7 +370,10 @@ impl FirecrackerRuntime {
             timeout: self.config.operation_timeout,
             create_deadline: until,
         })?;
-        Client::connect(link)
+        match until {
+            Some(until) => Client::connect_before(link, until),
+            None => Client::connect(link),
+        }
     }
 
     fn pool_observations(
@@ -341,32 +383,48 @@ impl FirecrackerRuntime {
         until: Option<Instant>,
     ) -> Result<Vec<PhysicalDevice>, Refusal> {
         let paths = self.pool_paths(record)?;
+        self.native_observations(&record.devices, &paths, client, None, until)
+    }
+
+    fn native_observations(
+        &self,
+        selected: &[DeviceId],
+        paths: &Paths,
+        client: &Client,
+        owner: Option<&BoxId>,
+        until: Option<Instant>,
+    ) -> Result<Vec<PhysicalDevice>, Refusal> {
+        let mut indexed = Vec::new();
+        indexed
+            .try_reserve_exact(self.catalog.entries().len())
+            .map_err(|_| exhausted("observer catalog index", self.catalog.entries().len()))?;
+        indexed.extend(self.catalog.entries());
+        indexed.sort_unstable_by_key(|entry| entry.info.id);
         let mut assignments = Vec::new();
         assignments
-            .try_reserve_exact(record.devices.len())
-            .map_err(|_| exhausted("observer PCI witnesses", record.devices.len()))?;
-        for selected in &record.devices {
-            let entry = self
-                .catalog
-                .entries_for(Route::Vfio)
-                .find(|entry| entry.info.id == *selected)
-                .ok_or_else(|| refused(record.key, LifecycleCause::Uncertain))?;
+            .try_reserve_exact(selected.len())
+            .map_err(|_| exhausted("observer PCI witnesses", selected.len()))?;
+        for selected in selected.iter().filter(|id| id.kind == DeviceKind::Gpu) {
+            let entry = indexed
+                .binary_search_by_key(selected, |entry| entry.info.id)
+                .ok()
+                .and_then(|at| indexed.get(at))
+                .ok_or_else(|| {
+                    invalid("native observer selection has no exact catalog identity")
+                })?;
             let Some(Binding::Vfio { sbdf, .. }) = entry.binding(Route::Vfio) else {
-                return Err(refused(record.key, LifecycleCause::Uncertain));
+                return Err(invalid("native observer identity has no VFIO route"));
             };
             let id = vfio::function_id(sbdf)?;
-            let timeout = until
-                .map(remaining)
-                .transpose()?
-                .map_or(self.config.operation_timeout, |left| {
-                    left.min(self.config.operation_timeout)
-                });
-            let witness = transport::attachment(&paths.api, &id, timeout)?;
+            let witness =
+                transport::attachment(&paths.api, &id, self.config.operation_timeout, until)?;
             if witness.id != id || witness.sbdf != *sbdf {
-                return Err(refused(record.key, LifecycleCause::Uncertain));
+                return Err(invalid(
+                    "native observer VMM witness changes physical identity",
+                ));
             }
             let guest = hex_gpu::PciAddress::parse(&witness.guest_sbdf)
-                .ok_or_else(|| refused(record.key, LifecycleCause::Uncertain))?;
+                .ok_or_else(|| invalid("native observer VMM guest PCI identity is malformed"))?;
             assignments.push(observations::Assignment {
                 host: *selected,
                 guest: DeviceId {
@@ -375,8 +433,17 @@ impl FirecrackerRuntime {
                 },
             });
         }
-        let report = client.physical_report()?;
+        let report = match until {
+            Some(until) => client.physical_report_before(until),
+            None => client.physical_report(),
+        }?;
         let joined = observations::join(&assignments, &report)?;
+        let capacity = match until {
+            Some(until) => client.capacity_before(Class::Oci, until),
+            None => client.capacity(Class::Oci),
+        }?
+        .ok_or_else(|| invalid("native observer guest has no OCI attachment capacity"))?;
+        observations::check_bindings(&assignments, &report, &capacity, owner)?;
         if let Some(until) = until {
             remaining(until)?;
         }
@@ -393,23 +460,69 @@ impl FirecrackerRuntime {
         &self,
         until: Option<Instant>,
     ) -> Result<Vec<PhysicalDevice>, Refusal> {
-        let Some(before) = self.observer_record()? else {
-            return Ok(Vec::new());
-        };
-        if before.phase != BackingPhase::Live {
-            return Ok(Vec::new());
+        let mut observed = Vec::new();
+        if let Some(before) = self.observer_record()?
+            && before.phase == BackingPhase::Live
+        {
+            let keys = self.catalog.conflict_ids(&before.devices)?;
+            observed = crate::devices::with_pool_transaction(
+                &self.books,
+                &before.key,
+                &keys,
+                |transaction| {
+                    let record = transaction
+                        .read_pool(&before.key)?
+                        .ok_or_else(|| refused(before.key, LifecycleCause::Uncertain))?;
+                    if record != before {
+                        return Err(refused(before.key, LifecycleCause::Uncertain));
+                    }
+                    let client = self.pool_client(&record, transaction, until)?;
+                    self.pool_observations(&record, &client, until)
+                },
+            )?;
         }
-        let keys = self.catalog.conflict_ids(&before.devices)?;
-        crate::devices::with_pool_transaction(&self.books, &before.key, &keys, |transaction| {
-            let record = transaction
-                .read_pool(&before.key)?
-                .ok_or_else(|| refused(before.key, LifecycleCause::Uncertain))?;
-            if record != before {
-                return Err(refused(before.key, LifecycleCause::Uncertain));
+        // After observer handoff a retained GPU Box is the actual current driver provider. Read
+        // each through its same method/device turns and managed receipt; never repick or cache.
+        for (id, record) in self.authority()?.records()? {
+            let record = record.map_err(|_| uncertain(&id))?;
+            if record.spec.backend_class()? != Class::Firecracker
+                || record.phase != Phase::Ready
+                || !record
+                    .spec
+                    .devices
+                    .iter()
+                    .any(|id| id.kind == DeviceKind::Gpu)
+            {
+                continue;
             }
-            let client = self.pool_client(&record, transaction, until)?;
-            self.pool_observations(&record, &client, until)
-        })
+            let next = self.with_record(&id, |record, transaction| {
+                let client = self.client_before(record, transaction, until)?;
+                self.native_observations(
+                    &record.spec.devices,
+                    &self.paths(record)?,
+                    &client,
+                    Some(&id),
+                    until,
+                )
+            })?;
+            let total = observed
+                .len()
+                .checked_add(next.len())
+                .filter(|count| *count <= hex_api::MAX_DEVICES)
+                .ok_or_else(|| exhausted("current native observed GPUs", hex_api::MAX_DEVICES))?;
+            observed
+                .try_reserve_exact(next.len())
+                .map_err(|_| exhausted("current native observed GPUs", total))?;
+            observed.extend(next);
+        }
+        observed.sort_unstable_by_key(|device| device.info.id);
+        if observed
+            .windows(2)
+            .any(|pair| matches!(pair, [a,b] if a.info.id == b.info.id))
+        {
+            return Err(invalid("two native scopes report the same physical GPU"));
+        }
+        Ok(observed)
     }
 
     pub(super) fn initialize_observer(&self, grant: BackingGrant) -> Result<BackingOffer, Refusal> {
@@ -482,7 +595,7 @@ impl FirecrackerRuntime {
             {
                 return Err(refused(grant.key, LifecycleCause::Uncertain));
             }
-            transport::ready(&ready, native.as_ref(), remaining(until)?)?;
+            transport::ready(&ready, native.as_ref(), until)?;
             let client = self.pool_client(&current, transaction, Some(until))?;
             self.pool_observations(&current, &client, Some(until))?;
             current.phase = BackingPhase::Live;

@@ -1,7 +1,10 @@
 //! Current guest-native facts joined through the VMM's authoritative PCI assignment witness.
 //! The result is transient observation, not another inventory cache, picker or holder authority.
 
-use hex_api::{DeviceId, DeviceInfo, DeviceKind, PhysicalDevice, PhysicalReport, Refusal};
+use hex_api::{
+    BoxId, Capacity, Class, DeviceId, DeviceInfo, DeviceKind, Execution, GpuEligibility, ImageOs,
+    PhysicalDevice, PhysicalReport, Refusal,
+};
 
 use super::{exhausted, invalid};
 
@@ -77,6 +80,72 @@ pub(super) fn join(
         });
     }
     Ok(joined)
+}
+
+/// Driver visibility alone does not prove that the SAME guest node can bind the selected GPU to
+/// its native OCI payload. Check its already validated attachment routes, without selecting again.
+pub(super) fn check_bindings(
+    assignments: &[Assignment],
+    report: &PhysicalReport,
+    capacity: &Capacity,
+    owner: Option<&BoxId>,
+) -> Result<(), Refusal> {
+    report.check()?;
+    capacity.check()?;
+    if assignments.len() > hex_api::MAX_DEVICES {
+        return Err(exhausted(
+            "guest attachment witnesses",
+            hex_api::MAX_DEVICES,
+        ));
+    }
+    let mut guests = Vec::new();
+    reserve(&mut guests, assignments.len())?;
+    guests.extend(assignments.iter().map(|assignment| assignment.guest));
+    guests.sort_unstable();
+    if repeated(&guests)
+        || report.devices.iter().any(|device| {
+            device.info.id.kind == DeviceKind::Gpu && guests.binary_search(&device.info.id).is_err()
+        })
+    {
+        return Err(invalid(
+            "guest driver exposes GPUs outside the exact VMM witness set",
+        ));
+    }
+    let mut eligible = 0u64;
+    for (at, route) in capacity.routes.iter().enumerate() {
+        if route.key.class == Class::Oci
+            && route.key.execution == Execution::Native
+            && route.key.image.os == ImageOs::Linux
+            && route.key.gpu != GpuEligibility::None
+        {
+            eligible |= u32::try_from(at)
+                .ok()
+                .and_then(|at| 1u64.checked_shl(at))
+                .ok_or_else(|| invalid("guest native attachment route exceeds its mask"))?;
+        }
+    }
+    let mut attachments = Vec::new();
+    reserve(&mut attachments, capacity.devices.len())?;
+    attachments.extend(capacity.devices.iter().zip(&capacity.device_routes));
+    attachments.sort_unstable_by_key(|(device, _)| device.id);
+    for guest in guests {
+        let (device, mask) = attachments
+            .binary_search_by_key(&guest, |(device, _)| device.id)
+            .ok()
+            .and_then(|at| attachments.get(at))
+            .ok_or_else(|| invalid("assigned guest GPU has no native OCI attachment"))?;
+        if **mask & eligible == 0
+            || device
+                .holder
+                .as_ref()
+                .is_some_and(|holder| owner.is_none_or(|owner| holder.box_id() != Some(owner)))
+        {
+            return Err(invalid(
+                "assigned guest GPU is not bindable by its native OCI owner",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn reserve<T>(items: &mut Vec<T>, count: usize) -> Result<(), Refusal> {
@@ -208,5 +277,70 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// AC-T7.4.1: a real native reading still needs the actual guest OCI attachment; renderer
+    /// substitution, a foreign holder and any extra driver-visible GPU cannot grant readiness.
+    #[test]
+    fn observer_needs_exact_driver_set_and_real_native_container_binding() {
+        use hex_api::{CapacityResources, ImageArch, ImagePlatform, RouteKey, RouteOffer};
+        let assignment = Assignment {
+            host: id(100),
+            guest: id(7),
+        };
+        let actual = report(vec![reading(7, None, Some(17))]);
+        let route = RouteOffer {
+            key: RouteKey {
+                class: Class::Oci,
+                image: ImagePlatform {
+                    os: ImageOs::Linux,
+                    arch: ImageArch::Amd64,
+                },
+                execution: Execution::Native,
+                gpu: GpuEligibility::Any,
+            },
+            cost: None,
+            backing: None,
+        };
+        let total = CapacityResources {
+            cpu_milli: 1_000,
+            mem_bytes: 128 << 20,
+            disk_bytes: 0,
+        };
+        let mut capacity = Capacity {
+            id: "private actual guest node".into(),
+            total,
+            free: total,
+            devices: Vec::new(),
+            cost: None,
+            routes: vec![route],
+            device_routes: Vec::new(),
+            backings: Vec::new(),
+        };
+        assert!(check_bindings(&[assignment], &actual, &capacity, None).is_err());
+        capacity
+            .devices
+            .push(actual.devices[0].info.try_clone().unwrap());
+        capacity.device_routes.push(1);
+        check_bindings(&[assignment], &actual, &capacity, None).unwrap();
+        let owner = BoxId::new("actual-inner-owner").unwrap();
+        capacity.devices[0].holder = Some(hex_api::DeviceHolder::Box(owner.clone()));
+        assert!(check_bindings(&[assignment], &actual, &capacity, None).is_err());
+        check_bindings(&[assignment], &actual, &capacity, Some(&owner)).unwrap();
+        assert!(
+            check_bindings(
+                &[assignment],
+                &report(vec![
+                    reading(7, Some(0), Some(0)),
+                    reading(9, Some(0), Some(0))
+                ]),
+                &capacity,
+                Some(&owner),
+            )
+            .is_err()
+        );
+        capacity.devices[0].holder = None;
+        capacity.device_routes[0] = 0;
+        assert!(check_bindings(&[assignment], &actual, &capacity, None).is_err());
     }
 }

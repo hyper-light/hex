@@ -1,0 +1,31 @@
+{
+  "parent": "05cf4c7058fa5620f5c344ee55b6df15e8a08cba",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": {
+    "crates/hex-runtime/src/firecracker/native.rs": "7bb1f775dcadf488964dc911450ec10b9fb30ea6dfddc1de87e3cad6c15d0d7e",
+    "crates/hex-runtime/src/firecracker/transport.rs": "708ada1594bd72fa73f5f49adb433923ee9f60d9124e17a8ce213edf8251276d"
+  },
+  "scope": "Required R01 source compliance increment for new FC code; not an actual reproduced runtime/allocation defect claim. No FD, retry, deadline, driver, holder or lifecycle transition change.",
+  "changes": [
+    "Two missing-record paths lazily call existing BoxId.try_clone; identity allocation failure returns its typed refusal rather than unchecked String clone. Successful record lookup allocates no missing-ID error.",
+    "CONNECT request is formatted into fixed stack19-byte buffer: 8-byte prefix +maximum10 decimal u32 digits +newline. Cursor overflow returns error. OK response bound uses same u32 digit invariant without to_string.",
+    "Existing exact HTTP GET header uses checked prefix/id/suffix length and try_reserve_exact before any socket connect. Wire bytes and identity validation remain the same."
+  ],
+  "primary": "Official pinned Firecracker500efc6bb169705f5d9417cb411e3f6723e051fe docs/vsock.md CONNECT/OK unsigned32-bit port protocol; the readonly attachment HTTP path is existing pinned extension2c62f12a0a4c90ea4d2a806c44797e12a582f594.",
+  "checks": {
+    "scoped_rustfmt": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "tests": "UNRUN/no duplicated behavior mirror",
+    "test_dispatches": 0,
+    "native_effects": 0
+  },
+  "originals": "Existing sink io_tests and HTTP response test bodies byte-identical to parent; original EBADF red and pending green remain separately attributed. CPU observer e5c and subset89ec original controls unchanged.",
+  "remaining_R01": [
+    "Existing Link::dial/try_clone Box<dyn Duplex> contract still has unchecked Box::new in FC transport; shared ownership API resolution belongs coordinated client boundary, no custom refcount/wrapper invented here.",
+    "Other VFIO path/format and standard filesystem/error-render allocation seams remain subject to source implementation and ROOT allocation/fault work; no global allocation-safe claim."
+  ],
+  "R02_R16": "No new architecture/provider/cache/queue/wait or measured tuning constant; byte-level protocol invariant and existing fallible identity API reused. Same authoritative records/native scope. No performance, portability, fault/mutation/native or completion claim. ROOT retains combined gates/profiles/native effects; no owned check started."
+}
