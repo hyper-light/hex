@@ -12,24 +12,24 @@
 
 use std::io;
 use std::mem::{size_of, zeroed};
-use std::os::windows::io::{AsRawHandle, OwnedHandle};
+use std::os::windows::io::{AsRawHandle, BorrowedHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle,
-    ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_NOT_ENOUGH_QUOTA, FILETIME,
-    GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, CompareObjectHandles, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS,
+    DuplicateHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA,
+    ERROR_NOT_ENOUGH_QUOTA, FILETIME, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
+    INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
     JOB_OBJECT_CPU_RATE_CONTROL_WEIGHT_BASED, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAndIoAccountingInformation,
-    JobObjectBasicProcessIdList, JobObjectCpuRateControlInformation,
-    JobObjectExtendedLimitInformation, OpenJobObjectW, QueryInformationJobObject,
-    SetInformationJobObject, TerminateJobObject,
+    JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION, JOBOBJECT_BASIC_PROCESS_ID_LIST,
+    JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicAndIoAccountingInformation, JobObjectBasicProcessIdList,
+    JobObjectCpuRateControlInformation, JobObjectExtendedLimitInformation, OpenJobObjectW,
+    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
     ALL_PROCESSOR_GROUPS, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
@@ -301,6 +301,23 @@ const JOB_RIGHTS: u32 = 0x0001 | 0x0002 | 0x0004 | 0x0008;
 /// handle is closed on drop; with kill-on-close set, that ends every process still in the job.
 pub struct Job(Handle);
 
+fn job_name_wide(name: &str) -> io::Result<Vec<u16>> {
+    if name.is_empty() || name.contains('\0') {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    let units = name
+        .encode_utf16()
+        .count()
+        .checked_add(1)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
+    let mut wide = Vec::new();
+    wide.try_reserve_exact(units)
+        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+    wide.extend(name.encode_utf16());
+    wide.push(0);
+    Ok(wide)
+}
+
 impl Job {
     /// A new, empty job object.
     pub fn create() -> io::Result<Job> {
@@ -318,7 +335,7 @@ impl Job {
     /// creator's default: this user and SYSTEM. One of that name held already is refused
     /// (`ERROR_ALREADY_EXISTS`): it is a box a node made before, which [`Job::open`] takes back.
     pub fn create_named(name: &str) -> io::Result<Job> {
-        let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        let wide = job_name_wide(name)?;
         // SAFETY: null attributes; `wide` is a NUL-terminated name alive for the call. The handle returned
         // (to a new job, or to one of that name already, which GetLastError then says) is owned below.
         let h = unsafe { CreateJobObjectW(null(), wide.as_ptr()) };
@@ -329,10 +346,9 @@ impl Job {
         // SAFETY: h is a job handle this call returned, owned from here, closed as the value drops.
         let job = Job(unsafe { Handle::own(h) });
         if existed {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("a job named {name} is held already: a box a node made before"),
-            ));
+            let code = i32::try_from(ERROR_ALREADY_EXISTS)
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+            return Err(io::Error::from_raw_os_error(code));
         }
         Ok(job)
     }
@@ -341,7 +357,7 @@ impl Job {
     /// no job holds the name (the box's members all ended and its last handle closed, or the machine
     /// restarted).
     pub fn open(name: &str) -> io::Result<Option<Job>> {
-        let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        let wide = job_name_wide(name)?;
         // SAFETY: `wide` is a NUL-terminated name alive for the call; not inherited. The handle returned
         // is owned below.
         let h = unsafe { OpenJobObjectW(JOB_RIGHTS, 0, wide.as_ptr()) };
@@ -460,39 +476,57 @@ impl Job {
     /// (`an_ended_member_whose_handle_is_held_leaves_the_id_list`, run on jupiter), so a box whose member
     /// has exited reads as empty. The job's accounting `ActiveProcesses` is not used.
     pub fn live_processes(&self) -> io::Result<u64> {
-        let header = size_of::<u32>().saturating_mul(2);
-        self.assigned_processes(header.saturating_add(size_of::<usize>()))
-            .map(u64::from)
+        self.process_list()
+            .map(|list| u64::from(list.NumberOfAssignedProcesses))
     }
 
-    /// One read of the job's process id list into a buffer of `len` bytes, for its
-    /// `NumberOfAssignedProcesses`. `ERROR_MORE_DATA` (the ids don't all fit) still fills it in.
-    fn assigned_processes(&self, len: usize) -> io::Result<u32> {
+    /// An event to wait on for this same nested scope, or positive emptiness. A recycled snapshot
+    /// PID is checked against the held job before its observation handle can be used.
+    pub(crate) fn member(&self) -> io::Result<Member> {
+        let list = self.process_list()?;
+        if list.NumberOfAssignedProcesses == 0 {
+            return Ok(Member::Empty);
+        }
+        let pid = list
+            .ProcessIdList
+            .first()
+            .copied()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .filter(|pid| *pid != 0 && list.NumberOfProcessIdsInList != 0)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+        let process =
+            process_with_rights(pid, PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION)?;
+        if !super::oci::sys::in_job(&process, self.borrowed())? {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock));
+        }
+        Ok(Member::Process(process))
+    }
+
+    fn process_list(&self) -> io::Result<JOBOBJECT_BASIC_PROCESS_ID_LIST> {
         #[cfg(test)]
         tests::ID_LIST_READS.with(|n| n.set(n.get() + 1));
-        // usize-aligned, as the list's ids are; the count is its first 4 bytes.
-        let mut buf = vec![0usize; len.div_ceil(size_of::<usize>())];
-        let bytes = u32::try_from(buf.len().saturating_mul(size_of::<usize>()))
-            .map_err(|_| io::Error::other("a job's process id list past 4 GiB"))?;
-        // SAFETY: QueryInformationJobObject writes at most `bytes` bytes into `buf`, alive and that long
-        // for the call, for the job self owns; the class names the structure, whose header is two u32s.
+        let mut list: JOBOBJECT_BASIC_PROCESS_ID_LIST = zeroed_struct();
+        let bytes = u32::try_from(size_of::<JOBOBJECT_BASIC_PROCESS_ID_LIST>())
+            .map_err(|_| io::Error::other("a job's process list header exceeds a DWORD"))?;
+        // SAFETY: the SDK structure has room for one ULONG_PTR and is alive for this bounded
+        // query. NumberOfAssignedProcesses includes descendants in nested jobs even when the
+        // returned PID buffer is too small (Microsoft JOBOBJECT_BASIC_PROCESS_ID_LIST contract).
         let ok = unsafe {
             QueryInformationJobObject(
                 self.0.raw(),
                 JobObjectBasicProcessIdList,
-                buf.as_mut_ptr().cast(),
+                (&raw mut list).cast(),
                 bytes,
                 null_mut(),
             )
         };
         if ok == 0 {
-            let err = last_error();
-            if err.raw_os_error() != i32::try_from(ERROR_MORE_DATA).ok() {
-                return Err(err);
+            let error = last_error();
+            if error.raw_os_error() != i32::try_from(ERROR_MORE_DATA).ok() {
+                return Err(error);
             }
         }
-        let head: Vec<u8> = buf.iter().flat_map(|w| w.to_ne_bytes()).take(4).collect();
-        Ok(<[u8; 4]>::try_from(head.as_slice()).map_or(0, u32::from_ne_bytes))
+        Ok(list)
     }
 
     /// Ends every process in the job with `code`, at once. Idempotent: an already-empty job is fine.
@@ -503,6 +537,12 @@ impl Job {
         }
         Ok(())
     }
+}
+
+/// This is a short observation of an existing job, not a process receipt/reaper or holder table.
+pub(crate) enum Member {
+    Empty,
+    Process(Handle),
 }
 
 /// A job's resource accounting, read whole.
@@ -530,12 +570,31 @@ pub(crate) fn started_here() -> u64 {
 /// Only its three standard handles are inherited (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`). The caller
 /// resumes it with [`resume`].
 pub fn create(spawn: &mut Spawn, jobs: &[HANDLE]) -> io::Result<Started> {
+    create_using(spawn, jobs, Environment::Supplied)
+}
+
+/// The managed Shards controller preserves its existing inherited environment. It still inherits
+/// only the three explicitly supplied stream handles and is atomically created in `jobs`.
+pub(crate) fn create_inheriting(spawn: &mut Spawn, jobs: &[HANDLE]) -> io::Result<Started> {
+    create_using(spawn, jobs, Environment::Inherited)
+}
+
+#[derive(Clone, Copy)]
+enum Environment {
+    Supplied,
+    Inherited,
+}
+
+fn create_using(
+    spawn: &mut Spawn,
+    jobs: &[HANDLE],
+    environment: Environment,
+) -> io::Result<Started> {
     // The three standard handles, made inheritable, as a contiguous array for the handle-list attribute.
-    let handles: [HANDLE; 3] = [
-        spawn.stdio[0].as_raw_handle() as HANDLE,
-        spawn.stdio[1].as_raw_handle() as HANDLE,
-        spawn.stdio[2].as_raw_handle() as HANDLE,
-    ];
+    let handles = spawn
+        .stdio
+        .each_ref()
+        .map(|handle| handle.as_raw_handle() as HANDLE);
     for h in handles {
         // SAFETY: each handle is owned by spawn.stdio for the call; marking it inheritable is sound.
         if unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
@@ -551,14 +610,19 @@ pub fn create(spawn: &mut Spawn, jobs: &[HANDLE]) -> io::Result<Started> {
     if size == 0 {
         return Err(io::Error::other("attribute list size is zero"));
     }
-    let mut buf = vec![0u8; size];
+    // Pointer-aligned storage for the native attribute list, reserved before any process exists.
+    let words = size.div_ceil(size_of::<usize>());
+    let mut buf = Vec::<usize>::new();
+    buf.try_reserve_exact(words)
+        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+    buf.resize(words, 0);
     let list = buf.as_mut_ptr().cast::<core::ffi::c_void>();
     // SAFETY: `list` points at `size` writable bytes (buf), the size the call above asked for, for 2
     // attributes.
     if unsafe { InitializeProcThreadAttributeList(list, 2, 0, &mut size) } == 0 {
         return Err(last_error());
     }
-    let started = create_in(spawn, jobs, &handles, list);
+    let started = create_in(spawn, jobs, &handles, list, environment);
     // SAFETY: `list` was initialized above; deleting it frees its internal allocations once, and buf
     // (its backing bytes) is still alive and dropped after.
     unsafe { DeleteProcThreadAttributeList(list) };
@@ -571,8 +635,9 @@ fn create_in(
     jobs: &[HANDLE],
     handles: &[HANDLE; 3],
     list: LPPROC_THREAD_ATTRIBUTE_LIST,
+    environment: Environment,
 ) -> io::Result<Started> {
-    let handles_bytes = u32::try_from(size_of::<HANDLE>().saturating_mul(3)).unwrap_or(u32::MAX);
+    let handles_bytes = size_of::<[HANDLE; 3]>();
     // SAFETY: the handle-list attribute points at `handles` (3 HANDLEs), alive for this call; the size
     // matches. The list has room for 2 attributes.
     if unsafe {
@@ -581,7 +646,7 @@ fn create_in(
             0,
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
             handles.as_ptr().cast(),
-            handles_bytes as usize,
+            handles_bytes,
             null_mut(),
             null(),
         )
@@ -590,7 +655,9 @@ fn create_in(
         return Err(last_error());
     }
     if !jobs.is_empty() {
-        let jobs_bytes = size_of::<HANDLE>().saturating_mul(jobs.len());
+        let jobs_bytes = size_of::<HANDLE>()
+            .checked_mul(jobs.len())
+            .ok_or_else(|| io::Error::other("job-list attribute size overflows"))?;
         // SAFETY: the job-list attribute points at `jobs` (jobs.len() HANDLEs), alive for this call; the
         // size matches.
         if unsafe {
@@ -610,7 +677,8 @@ fn create_in(
     }
 
     let mut si: STARTUPINFOEXW = zeroed_struct();
-    si.StartupInfo.cb = u32::try_from(size_of::<STARTUPINFOEXW>()).unwrap_or(0);
+    si.StartupInfo.cb = u32::try_from(size_of::<STARTUPINFOEXW>())
+        .map_err(|_| io::Error::other("STARTUPINFOEXW exceeds a DWORD"))?;
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     si.StartupInfo.hStdInput = handles[0];
     si.StartupInfo.hStdOutput = handles[1];
@@ -618,9 +686,13 @@ fn create_in(
     si.lpAttributeList = list;
 
     let cwd = spawn.cwd.as_ref().map_or(null(), |c| c.as_ptr());
+    let environment = match environment {
+        Environment::Supplied => spawn.environment.as_ptr().cast(),
+        Environment::Inherited => null(),
+    };
     let mut pi: PROCESS_INFORMATION = zeroed_struct();
     // SAFETY: command_line is a NUL-terminated writable UTF-16 buffer (CreateProcessW may modify it);
-    // environment is a double-NUL-terminated UTF-16 block; cwd is NUL-terminated or null; si and pi are
+    // environment is a double-NUL-terminated UTF-16 block or null to inherit; cwd is NUL-terminated or null; si and pi are
     // valid and alive for the call. bInheritHandles is TRUE because only the listed handles are
     // inherited (the handle-list attribute). The process is created suspended and in its jobs.
     let ok = unsafe {
@@ -634,7 +706,7 @@ fn create_in(
                 | CREATE_UNICODE_ENVIRONMENT
                 | CREATE_NO_WINDOW
                 | EXTENDED_STARTUPINFO_PRESENT,
-            spawn.environment.as_ptr().cast(),
+            environment,
             cwd,
             (&si as *const STARTUPINFOEXW).cast::<STARTUPINFOW>(),
             &mut pi,
@@ -710,27 +782,71 @@ pub fn close_in(into: &Handle, value: usize) -> io::Result<()> {
     Ok(())
 }
 
+/// The caller holds its existing keeper lock from comparison through close. Duplicate only an
+/// observation handle here; a stale/reused remote value never authorizes closing another object.
+pub(crate) fn close_in_if_same(
+    into: &Handle,
+    value: usize,
+    expected: BorrowedHandle<'_>,
+) -> io::Result<bool> {
+    if !same_in(into, value, expected)? {
+        return Ok(false);
+    }
+    close_in(into, value)?;
+    Ok(true)
+}
+
+pub(crate) fn same_in(
+    into: &Handle,
+    value: usize,
+    expected: BorrowedHandle<'_>,
+) -> io::Result<bool> {
+    let mut copied: HANDLE = null_mut();
+    // SAFETY: into is a verified keeper process handle with PROCESS_DUP_HANDLE. Its value is
+    // borrowed, not consumed; the duplicate is non-inheritable and owned below on success.
+    if unsafe {
+        DuplicateHandle(
+            into.raw(),
+            value as HANDLE,
+            GetCurrentProcess(),
+            &raw mut copied,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    // SAFETY: DuplicateHandle succeeded and transferred ownership of this new local handle.
+    let observed = unsafe { Handle::own(copied) };
+    // SAFETY: both handles remain alive for the comparison; this API compares kernel object
+    // identity without modifying either object or requiring object-specific access rights.
+    Ok(unsafe { CompareObjectHandles(observed.raw(), expected.as_raw_handle() as HANDLE) } != 0)
+}
+
 /// Process `pid` opened for waiting on, handing handles to and from, and reading its times; `None` where
 /// no process has the pid.
 pub fn open_process(pid: u32) -> io::Result<Option<Handle>> {
+    match process_with_rights(
+        pid,
+        PROCESS_SYNCHRONIZE | PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION,
+    ) {
+        Ok(process) => Ok(Some(process)),
+        Err(error) if error.raw_os_error() == Some(87) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn process_with_rights(pid: u32, rights: u32) -> io::Result<Handle> {
     // SAFETY: opens `pid` with the rights named; the handle returned is owned below.
-    let h = unsafe {
-        OpenProcess(
-            PROCESS_SYNCHRONIZE | PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION,
-            0,
-            pid,
-        )
-    };
+    let h = unsafe { OpenProcess(rights, 0, pid) };
     if h.is_null() {
         let e = last_error();
-        // ERROR_INVALID_PARAMETER: no process has that pid.
-        if e.raw_os_error() == Some(87) {
-            return Ok(None);
-        }
         return Err(e);
     }
     // SAFETY: a handle just opened, owned from here.
-    Ok(Some(unsafe { Handle::own(h) }))
+    Ok(unsafe { Handle::own(h) })
 }
 
 /// When `process` was created (100 ns ticks since 1601), which with its pid names it: a process given
@@ -1056,7 +1172,7 @@ mod tests {
         // the call, and sets it on the box's job, which `bx` owns for the test.
         let ok = unsafe {
             SetInformationJobObject(
-                bx.job().as_raw_handle() as HANDLE,
+                bx.job().unwrap().as_raw_handle() as HANDLE,
                 JobObjectNotificationLimitInformation,
                 (&off as *const JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION).cast(),
                 u32::try_from(size_of::<JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION>()).unwrap(),
@@ -1136,7 +1252,7 @@ mod tests {
         // `x`, alive for the call, for the box's job, which `bx` owns for the test.
         let ok = unsafe {
             QueryInformationJobObject(
-                bx.job().as_raw_handle() as HANDLE,
+                bx.job().unwrap().as_raw_handle() as HANDLE,
                 JobObjectExtendedLimitInformation,
                 (&mut x as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
                 u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).unwrap(),

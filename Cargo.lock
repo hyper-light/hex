@@ -416,6 +416,7 @@ dependencies = [
  "socket2",
  "tempfile",
  "thiserror",
+ "triomphe",
  "windows",
  "windows-sys",
 ]

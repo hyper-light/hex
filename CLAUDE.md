@@ -193,7 +193,9 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   the keeper as it starts a member but in no job (`CreateProcessW` with the `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`
   alone, its three standard handles the NUL device), so the keeper, which outlives the node, holds none of
   the node's handles, names a process by its creation time (`GetProcessTimes`) so a reused pid is told
-  apart, and makes and signals the keeper's stop (`CreateEventW` named, `SetEvent`). Its HCS request
+  apart, compares an observation duplicate of a keeper-held handle with the original native job
+  (`CompareObjectHandles`) before closing that remote value, so a recycled value cannot authorize
+  disposal of a different object, and makes and signals the keeper's stop (`CreateEventW` named, `SetEvent`). Its HCS request
   wake event is reset before scanning durable requests (`ResetEvent`), and the keeper waits on its
   stop and request events together (`WaitForMultipleObjects`), retaining native creation ownership
   after the node ends without periodically probing the request folder. `windows-sys` binds these as `unsafe` foreign

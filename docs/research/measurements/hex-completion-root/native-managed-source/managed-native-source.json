@@ -1,0 +1,21 @@
+{
+  "parent": "c955a08cd735fa56130e6e160b25ba946a8cc091",
+  "policy_revision": "ca3ab10c151aa5539e757f1cc76029746ccbb561",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "sdk_required": "eee80c129e44d35e957377c60629af088f4b2da3",
+  "books_required": "94d2d3879a9b393e2b5ff1b7a184edaec79ecd80",
+  "selected_receipt_required": "9ec1de6",
+  "source_only": true,
+  "whole_check": "HELD until ROOT matched native/API/Books/provider/manifest cohort",
+  "files": {
+    "crates/hex-node/src/recorded.rs": "7f2d0b7465c10c6fc3ab76ef8127c2684cd9ba917ab5ac0d14ec30d7cd1ef641",
+    "crates/hex-runtime/src/windows/mod.rs": "83ec8271fe7aa8e3af75604f70b71527fb5d38e226e30f4f506887dde4ef5735",
+    "crates/hex-runtime/src/windows/managed.rs": "a9dc8be01272ebe83ca1acefecd03ed32872b820c8870b3a55e74e5ad10e00b5",
+    "crates/hex-runtime/src/windows/process.rs": "a92fa0c2bbae8b766ab4ebd9f4c2d9fb3ea995aaf8b5cd9aa0fe8c1c5c6ff12a",
+    "crates/hex-runtime/src/windows/proc.rs": "38906cf4d938535274e5dedc8cc76fe7c0397385728b240a6834d1e3233965c2",
+    "crates/hex-runtime/src/windows/sys.rs": "eecf7bd52d695a282bb53ef212a6a271a3f7e2230fc2c0c5ae4de14b33814841",
+    "crates/hex-runtime/src/windows/oci/mod.rs": "29ade06d83c637b41cbbb44aba70e2c1f3348a8b180c43bb60d85caa6657ff08",
+    "crates/hex-runtime/src/windows/oci/launch.rs": "3600c3592a81bbfc3bab4827184ad8a02baf04ce4afbcdd9a0469194ad67ed15"
+  }
+}

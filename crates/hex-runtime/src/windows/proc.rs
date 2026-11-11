@@ -4,13 +4,49 @@
 //! as that signal ([`hex_core::job::exit`] against the box's recorded signals); any other code reads as
 //! itself.
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
+use triomphe::Arc;
 
 use hex_api::{Exit, Proc, Refusal, Signal};
 
 use super::process::State;
 use super::sys::{self, Handle};
+
+/// The same native observation serves Proc and the managed VM receipt. Preserve the actual OS
+/// failure until its caller chooses the Hex or Shards API representation.
+pub(crate) enum ObserveError {
+    Unpublished,
+    Os {
+        operation: Operation,
+        source: std::io::Error,
+    },
+    State(Refusal),
+}
+
+pub(crate) enum Operation {
+    Wait,
+    ExitCode,
+    StopScope,
+    QueryScope,
+}
+
+impl ObserveError {
+    pub(crate) fn refusal(self) -> Refusal {
+        match self {
+            Self::Unpublished => super::pending("the native job handle is not published"),
+            Self::Os { operation, source } => Refusal::os(
+                match operation {
+                    Operation::Wait => "waiting on a program",
+                    Operation::ExitCode => "reading a program's exit code",
+                    Operation::StopScope => "ending a managed native job",
+                    Operation::QueryScope => "reading the native job's scope",
+                },
+                source,
+            ),
+            Self::State(why) => why,
+        }
+    }
+}
 
 /// A program the node started in a box, by its process handle. The handle is dropped once the program
 /// has ended and its exit is read, so the terminated process is reaped and leaves the box's job (a
@@ -40,19 +76,24 @@ impl BoxProc {
 
     /// Reads the program's exit if it has ended within `timeout_ms` (`u32::MAX` waits for it), caching
     /// it and closing its handle; `Ok(None)` while it still runs.
-    fn poll(&mut self, timeout_ms: u32) -> Result<Option<Exit>, Refusal> {
+    pub(crate) fn poll_raw(&mut self, timeout_ms: u32) -> Result<Option<Exit>, ObserveError> {
         if let Some(exit) = self.exit {
             return Ok(Some(exit));
         }
         let Some(process) = self.process.as_ref() else {
             return Ok(self.exit);
         };
-        if !sys::wait(process, timeout_ms).map_err(|e| Refusal::os("waiting on a program", e))? {
+        if !sys::wait(process, timeout_ms).map_err(|source| ObserveError::Os {
+            operation: Operation::Wait,
+            source,
+        })? {
             return Ok(None);
         }
-        let code =
-            sys::exit_code(process).map_err(|e| Refusal::os("reading a program's exit code", e))?;
-        let mut sent = self.state.sent()?;
+        let code = sys::exit_code(process).map_err(|source| ObserveError::Os {
+            operation: Operation::ExitCode,
+            source,
+        })?;
+        let mut sent = self.state.sent().map_err(ObserveError::State)?;
         if self.killed {
             sent.add(Signal::KILL);
         }
@@ -61,6 +102,28 @@ impl BoxProc {
         // Close the handle: the ended process is reaped and leaves the box's job.
         self.process = None;
         Ok(Some(exit))
+    }
+
+    fn poll(&mut self, timeout_ms: u32) -> Result<Option<Exit>, Refusal> {
+        self.poll_raw(timeout_ms).map_err(ObserveError::refusal)
+    }
+
+    pub(crate) fn wait_raw(&mut self, timeout: Duration) -> Result<Option<Exit>, ObserveError> {
+        // One kernel event wait covers the caller's budget. A spurious early wake consumes only
+        // the remaining time; the same receipt caches the one terminal observation.
+        let deadline = Instant::now().checked_add(timeout);
+        if self.poll_raw(millis(timeout))?.is_some() {
+            return Ok(self.exit);
+        }
+        loop {
+            let left = deadline.map_or(timeout, |d| d.saturating_duration_since(Instant::now()));
+            if left.is_zero() {
+                return Ok(None);
+            }
+            if self.poll_raw(millis(left))?.is_some() {
+                return Ok(self.exit);
+            }
+        }
     }
 }
 
@@ -82,22 +145,7 @@ impl Proc for BoxProc {
     }
 
     fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
-        // One bounded wait on the process handle for the whole timeout: it is signalled the instant the
-        // process ends, so this returns then, not at a polled interval.
-        let deadline = Instant::now().checked_add(timeout);
-        if self.poll(millis(timeout))?.is_some() {
-            return Ok(self.exit);
-        }
-        // A spurious early return (none yet) is retried for the time left, so the bound holds.
-        loop {
-            let left = deadline.map_or(timeout, |d| d.saturating_duration_since(Instant::now()));
-            if left.is_zero() {
-                return Ok(None);
-            }
-            if self.poll(millis(left))?.is_some() {
-                return Ok(self.exit);
-            }
-        }
+        self.wait_raw(timeout).map_err(ObserveError::refusal)
     }
 
     /// Terminates this process alone, with the code Hex ends a job with for KILL, so its end reads as

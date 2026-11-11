@@ -50,6 +50,8 @@ sha2 = "0.10.9"
 tar = "0.4.46"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
+# Same fallibly allocated native scope receipt passed to shards-api (AC-T7.4.1).
+triomphe = { version = "=0.1.17", default-features = false, features = ["std"] }
 ureq = "3"
 # The Windows `process` class: job objects, suspended process creation with a job and handle list, and
 # the job's accounting and guaranteed memory-limit violation (crates/hex-runtime/src/windows). Security

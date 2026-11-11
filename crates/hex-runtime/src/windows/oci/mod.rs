@@ -913,7 +913,7 @@ impl OciBox {
     }
 
     /// The box's job handle value, for the node's keeper to hold a second handle to it (`super::keeper`).
-    pub fn job_token(&self) -> usize {
+    pub fn job_token(&self) -> Result<usize, Refusal> {
         self.job.job_token()
     }
 

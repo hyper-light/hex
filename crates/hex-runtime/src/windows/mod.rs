@@ -9,6 +9,7 @@
 
 pub mod features;
 pub mod keeper;
+mod managed;
 pub mod oci;
 pub mod proc;
 pub mod process;
@@ -20,6 +21,7 @@ use std::num::NonZeroU32;
 use std::os::windows::io::OwnedHandle;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use triomphe::Arc as NativeArc;
 
 use hex_api::{
     BoxId, BoxInfo, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec, DeviceId,
@@ -36,13 +38,30 @@ use sys::{Spawn, Started};
 /// A box of either class.
 #[derive(Clone)]
 enum Held {
-    Process(Arc<JobBox>),
+    Process(NativeArc<JobBox>),
     Oci(Arc<OciBox>),
+}
+
+fn native_held(boxed: JobBox) -> Result<Held, Refusal> {
+    NativeArc::try_new(boxed)
+        .map(Held::Process)
+        .map_err(|_| allocation(std::mem::size_of::<JobBox>()))
+}
+
+fn remove_vm_keeper_file(state: &Path, id: &BoxId) -> Result<(), Refusal> {
+    match std::fs::remove_file(keeper::held_file(state, id.as_str())) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Refusal::os(
+            "removing the released VM keeper receipt",
+            error,
+        )),
+    }
 }
 
 impl Held {
     /// The box's job handle value, for the node's keeper to hold a second handle to it.
-    fn job_token(&self) -> usize {
+    fn job_token(&self) -> Result<usize, Refusal> {
         match self {
             Held::Process(b) => b.job_token(),
             Held::Oci(b) => b.job_token(),
@@ -343,6 +362,66 @@ struct Holding {
 }
 
 impl Holding {
+    /// Discharge this exact VM receipt only after a positive same-job empty observation. Pointer
+    /// identity pins the native lifetime, so an old callback cannot remove a recreated same-ID slot.
+    fn release_vm(&self, boxed: &JobBox) -> Result<(), Refusal> {
+        if boxed.released() {
+            return Ok(());
+        }
+        let id = boxed.id();
+        let held = {
+            let mut boxes = self.boxes()?;
+            let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+            let (_, slot) = boxes.get_mut(at).ok_or_else(inconsistent_slots)?;
+            let held = match &slot.state {
+                SlotState::Ready(Held::Process(current))
+                | SlotState::Finishing(Held::Process(current))
+                | SlotState::CleanupPending(Held::Process(current))
+                | SlotState::CancelFinishing(Held::Process(current))
+                    if std::ptr::eq(NativeArc::as_ptr(current), boxed) && current.is_vm() =>
+                {
+                    Held::Process(NativeArc::clone(current))
+                }
+                _ => {
+                    return Err(pending(
+                        "the exact native VM receipt is busy or no longer held",
+                    ));
+                }
+            };
+            slot.state = SlotState::Removing(held.clone());
+            held
+        };
+        let result = (|| {
+            if boxed
+                .scope_population()
+                .map_err(proc::ObserveError::refusal)?
+                != 0
+            {
+                return Err(pending("the native VM job still has a live member"));
+            }
+            self.drop_vm_from_keeper(id, boxed)
+        })();
+        let mut boxes = self.boxes()?;
+        let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+        let (_, slot) = boxes.get_mut(at).ok_or_else(inconsistent_slots)?;
+        if !matches!(&slot.state, SlotState::Removing(Held::Process(current))
+            if std::ptr::eq(NativeArc::as_ptr(current), boxed))
+        {
+            return Err(inconsistent_slots());
+        }
+        match result {
+            Ok(()) => {
+                boxed.mark_released()?;
+                boxes.remove(at);
+                Ok(())
+            }
+            Err(error) => {
+                slot.state = SlotState::CleanupPending(held);
+                Err(error)
+            }
+        }
+    }
+
     fn boxes(&self) -> Result<std::sync::MutexGuard<'_, Vec<(BoxId, Slot)>>, Refusal> {
         self.boxes
             .lock()
@@ -493,7 +572,7 @@ impl Holding {
         self.rehold_ready_using(
             keeper.pid(),
             keeper.created(),
-            |held| keeper.hold(held.job_token()),
+            |held| keeper.hold(held.job_token()?),
             |id, receipt| {
                 keeper::write_held(
                     &keeping.state,
@@ -559,15 +638,28 @@ impl Holding {
             .lock()
             .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?;
         let receipt = match keeper::read_held(&keeping.state, id.as_str()) {
-            Some(old) if old.held_by(keeper.pid(), keeper.created()) => KeeperReceipt {
-                pid: old.keeper_pid,
-                created: old.keeper_created,
-                value: old.value,
-            },
+            Some(old) if old.held_by(keeper.pid(), keeper.created()) => {
+                if let Held::Process(boxed) = held
+                    && boxed.is_vm()
+                    && !sys::same_in(keeper.process(), old.value, boxed.job()?).map_err(
+                        |error| Refusal::os("checking the original VM keeper job", error),
+                    )?
+                {
+                    self.keeper_receipt(id, KeeperHold::Uncertain)?;
+                    return Err(pending(
+                        "the VM keeper value names a different kernel object",
+                    ));
+                }
+                KeeperReceipt {
+                    pid: old.keeper_pid,
+                    created: old.keeper_created,
+                    value: old.value,
+                }
+            }
             _ => KeeperReceipt {
                 pid: keeper.pid(),
                 created: keeper.created(),
-                value: keeper.hold(held.job_token())?,
+                value: keeper.hold(held.job_token()?)?,
             },
         };
         // Save the exact owned remote handle before the file write: an error cannot lose its cleanup.
@@ -630,6 +722,74 @@ impl Holding {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(Refusal::os("removing a box's keeper handle record", e)),
         }
+    }
+
+    fn drop_vm_from_keeper(&self, id: &BoxId, boxed: &JobBox) -> Result<(), Refusal> {
+        let Some(keeping) = self.keeper.as_ref() else {
+            return Ok(());
+        };
+        let state = {
+            let boxes = self.boxes()?;
+            let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+            boxes.get(at).ok_or_else(inconsistent_slots)?.1.keeper
+        };
+        let receipt = match state {
+            KeeperHold::Held(receipt) => receipt,
+            KeeperHold::Uncertain => return Err(pending("native VM keeper disposal is uncertain")),
+            KeeperHold::Closed => return remove_vm_keeper_file(&keeping.state, id),
+            KeeperHold::Unheld => {
+                if keeper::read_held(&keeping.state, id.as_str()).is_some() {
+                    return Err(pending(
+                        "unadopted VM keeper metadata has no native ownership proof",
+                    ));
+                }
+                return Ok(());
+            }
+        };
+        // The same existing lock serializes observation and remote close. A keeper restart or a
+        // reused value never supplies authority over another job's remote handle.
+        let current = keeping
+            .keeper
+            .lock()
+            .map_err(|_| pending("native keeper lock is poisoned"))?;
+        let previous;
+        let process = if current.pid() == receipt.pid && current.created() == receipt.created {
+            Some(current.process())
+        } else {
+            previous = sys::open_process(receipt.pid)
+                .map_err(|error| Refusal::os("observing the original VM keeper", error))?;
+            match previous.as_ref() {
+                Some(process)
+                    if sys::created(process).map_err(|error| {
+                        Refusal::os("checking the original VM keeper birth", error)
+                    })? == receipt.created =>
+                {
+                    Some(process)
+                }
+                _ => None,
+            }
+        };
+        if let Some(process) = process
+            && !sys::wait(process, 0)
+                .map_err(|error| Refusal::os("observing the original VM keeper end", error))?
+        {
+            match sys::close_in_if_same(process, receipt.value, boxed.job()?) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.keeper_receipt(id, KeeperHold::Uncertain)?;
+                    return Err(pending(
+                        "VM keeper handle no longer names the owned kernel job",
+                    ));
+                }
+                Err(error) => {
+                    self.keeper_receipt(id, KeeperHold::Uncertain)?;
+                    return Err(Refusal::os("disposing the owned VM keeper job", error));
+                }
+            }
+        }
+        self.keeper_receipt(id, KeeperHold::Closed)?;
+        drop(current);
+        remove_vm_keeper_file(&keeping.state, id)
     }
 
     /// Keep the slot through every external cleanup operation; only an actual successful removal
@@ -969,6 +1129,36 @@ impl WinRuntime {
             .map(|node| format!("Local\\hex-{node}-{id}"))
     }
 
+    pub fn check_vm_cost(&self, cost: &hex_api::RuntimeCost) -> Result<(), Refusal> {
+        managed::check_cost(self, cost)
+    }
+
+    pub fn launch_managed(
+        &self,
+        spec: &BoxSpec,
+        plan: &shards_api::PreparedBoot,
+        io: shards_api::LaunchIo,
+        publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
+    ) -> Result<shards_api::ManagedReceipt, Refusal> {
+        managed::launch(self, spec, plan, io, publish)
+    }
+
+    pub fn attach_managed(
+        &self,
+        spec: &BoxSpec,
+        identity: Option<&shards_api::Identity>,
+    ) -> Result<shards_api::ManagedReceipt, Refusal> {
+        managed::attach(self, spec, identity)
+    }
+
+    pub fn finalize_managed(
+        &self,
+        spec: &BoxSpec,
+        identity: Option<&shards_api::Identity>,
+    ) -> Result<(), Refusal> {
+        managed::finalize(self, spec, identity)
+    }
+
     /// Whether this node takes back box `spec` a node before it made (native plan step 8, T-T7.1.2; asked
     /// by the node's recovery before it takes a box back or removes it): for an `oci` box, whether its
     /// record names a box [`WinRuntime::adopt`] takes back ([`oci::alive`]); `None` for a `process` box,
@@ -1025,7 +1215,7 @@ impl WinRuntime {
         let made = match &spec.class {
             ClassSpec::Process => {
                 JobBox::take_back(spec.id.try_clone()?, &spec.bounds, self.processors, &name)
-                    .map(|b| Held::Process(Arc::new(b)))
+                    .and_then(native_held)
             }
             _ => self
                 .take_back_oci(spec, &name)
@@ -1161,6 +1351,9 @@ impl WinRuntime {
         let at = slot_index(&boxes, id).map_err(|_| Refusal::NoSuchBox(id.clone()))?;
         let (_, slot) = boxes.get(at).ok_or_else(inconsistent_slots)?;
         match &slot.state {
+            SlotState::Ready(Held::Process(boxed)) if boxed.is_vm() => {
+                Err(Refusal::NoSuchBox(id.try_clone()?))
+            }
             SlotState::Ready(held) => Ok(held.clone()),
             _ => Err(pending("box is not ready; its resources remain held")),
         }
@@ -1398,6 +1591,14 @@ impl Runtime for WinRuntime {
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         spec.check()?;
+        // This ordinary native route advertises legacy identity cost (None). Managed VM launches
+        // enter the canonical Books transaction and configure their explicit allocation instead.
+        if spec.allocation.is_some() {
+            return Err(Refusal::Invalid {
+                what: "native runtime allocation",
+                why: copy_text("this ordinary native route advertises identity cost")?,
+            });
+        }
         if matches!(spec.class, ClassSpec::Process) {
             spec.check_no_devices("windows process")?;
         }
@@ -1421,7 +1622,7 @@ impl Runtime for WinRuntime {
                 }
                 None => JobBox::create(physical_id, &spec.bounds, self.processors),
             }
-            .map(|boxed| Held::Process(Arc::new(boxed))),
+            .and_then(native_held),
             _ => match container.as_ref() {
                 Some(container) => self
                     .create_oci(&spec, container)
@@ -1548,6 +1749,11 @@ impl Runtime for WinRuntime {
             held.try_reserve_exact(boxes.len())
                 .map_err(|_| allocation(boxes.len()))?;
             for (_, slot) in boxes.iter() {
+                if let Some(Held::Process(boxed)) = slot.physical()
+                    && boxed.is_vm()
+                {
+                    continue;
+                }
                 match &slot.state {
                     SlotState::Ready(boxed) => held.push(boxed.clone()),
                     _ => return Err(pending("native boxes have pending lifecycle work")),
@@ -1559,6 +1765,16 @@ impl Runtime for WinRuntime {
     }
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        {
+            let boxes = self.boxes()?;
+            if let Ok(at) = slot_index(&boxes, id)
+                && let Some((_, slot)) = boxes.get(at)
+                && let Some(Held::Process(boxed)) = slot.physical()
+                && boxed.is_vm()
+            {
+                return Err(Refusal::NoSuchBox(id.try_clone()?));
+            }
+        }
         self.holding.remove(id)
     }
 }
