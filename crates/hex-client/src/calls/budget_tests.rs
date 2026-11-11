@@ -2053,7 +2053,8 @@ fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
     let sent = transport.io.outbound.lock().unwrap();
     let run_ids: Vec<_> = sent
         .iter()
-        .filter_map(|(id, request)| matches!(request, Request::Call(Call::Run { .. })).then(|| *id))
+        .filter(|(_, request)| matches!(request, Request::Call(Call::Run { .. })))
+        .map(|(id, _)| *id)
         .collect();
     let kills: Vec<_> = sent
         .iter()
@@ -2593,7 +2594,8 @@ fn prepared_actor_settle_error_retains_original_kill_answer_authority() {
     let sent = transport.io.outbound.lock().unwrap();
     let runs: Vec<_> = sent
         .iter()
-        .filter_map(|(id, request)| matches!(request, Request::Call(Call::Run { .. })).then(|| *id))
+        .filter(|(_, request)| matches!(request, Request::Call(Call::Run { .. })))
+        .map(|(id, _)| *id)
         .collect();
     let kills: Vec<_> = sent
         .iter()
