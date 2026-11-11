@@ -1,0 +1,20 @@
+{
+  "root_git": "a310955132b7d55a8cf22536f0228c9461fbd63a",
+  "producer_git": "0ae64af581b745e098c801ac1761e8f615d80fba",
+  "unchanged_original_test_git": "f1c6103c19bb2e87431b1f24d6630d54c34fd107",
+  "scope": "exact three-file composite; producer parser original, only prior fallible owner-construction correction; no macOS unsafe/helper shell",
+  "files": {
+    "crates/hex-core/src/helper.rs": {
+      "bytes": 19842,
+      "sha256": "04a3cf38c052cd5bfc741cfc12ac382d75363fe1077876a28e89f994c44aff17"
+    },
+    "crates/hex-core/src/helper/managed.rs": {
+      "bytes": 37872,
+      "sha256": "e84005f828d48c289951588481109e6efcd0a6f099120fca71f85338c0dfb949"
+    },
+    "crates/hex-core/tests/managed_argument_original.rs": {
+      "bytes": 2059,
+      "sha256": "bc998fcbf2fd8e30f94ff99bd184f677e03df81ce54ee08c6a07da2aefc1f2b8"
+    }
+  }
+}

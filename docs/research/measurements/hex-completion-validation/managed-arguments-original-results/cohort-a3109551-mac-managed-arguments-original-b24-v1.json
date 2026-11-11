@@ -1,0 +1,94 @@
+{
+  "source": "a310955132b7d55a8cf22536f0228c9461fbd63a",
+  "archive_sha256": "5edab943636f2ad61da8f3540154242449d4005aad24581c1a84328c82567e04",
+  "scope": "ROOT pure managed helper producer original argument controls before validator remedy; explicit Root+signed producer+unchanged test composite, no Machelper/nativebackend/VM/GPU invocation",
+  "target": "mac",
+  "platform": "macOS-26.2-arm64-arm-64bit",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 39938,
+  "phases": [
+    {
+      "name": "managed-argument-original-two",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-core",
+        "--test",
+        "managed_argument_original",
+        "--locked",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 39962,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "352f89e213d9e0d145a7c21f1dea567a339a3ec2155b28501179122f3876476c",
+      "bytes": 2943,
+      "expected_selected": 2,
+      "actual_counts": [
+        {
+          "passed": 0,
+          "failed": 2,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "managed-codec-independent-three",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-core",
+        "--lib",
+        "--locked",
+        "helper::managed::tests::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 40124,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "aa99a23737336404c922636c826955b5bed8b1f51e335998ef4324fbd2ec248e",
+      "bytes": 813,
+      "expected_selected": 3,
+      "actual_counts": [
+        {
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "helper::managed::tests::control_and_terminal_frames_keep_native_lifetime_and_release_distinct",
+          "outcome": "ok"
+        },
+        {
+          "name": "helper::managed::tests::managed_extension_preserves_legacy_frames_and_hostile_failure_controls",
+          "outcome": "ok"
+        },
+        {
+          "name": "helper::managed::tests::preparation_fences_descriptors_and_final_launcher_report_rendering",
+          "outcome": "ok"
+        }
+      ]
+    }
+  ],
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_backend_invocations": 0,
+  "exit": 1
+}

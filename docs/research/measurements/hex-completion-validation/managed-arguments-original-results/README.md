@@ -1,0 +1,5 @@
+# Retained ROOT light results
+
+ROOT actual explicit3-file composite: Roota310955132b7d55a8cf22536f0228c9461fbd63a +signed0ae64af581b745e098c801ac1761e8f615d80fba helper.rs/managed.rs +unchangedf1c6103c19bb2e87431b1f24d6630d54c34fd107 standalone originaltest. Exact composite identity/source hashes recorded; this is NOT the unmodifiedRoot Git tree. Original2controls0PASS/2FAIL/0IGNORE at actualLaunch validator: cmdlineVALUE reportflag falselyrefused; VALUEdouble-dash hideslateractualreportflag. Independentcodec3PASS. No Macpersistenthelper/nativeeffect. Cargo39962/40124reaped,tmp0/source0diff. Raw236279B SHAd817be398fe583baa8c6d93793edf6af2bfb573e29f437039591ed6756709657 allmembers/archive verified; collector8739exit0/reaped. Originalparser frozen; L3narrowremedy assigned onlyafter theseactualreds.
+
+New private source/target/cache/temp, admitted1CPU/4GiB/12GiB,nice10/jobs1/threads1, Rust1.99.1 MacARM64. Exact source inputs/results/commands/log and binary hashes are retained in the archive/index. Source-only or pure passes do not establish whole native ownership, execution/recovery, performance or final gates.

@@ -1,0 +1,59 @@
+{
+  "bytes": 239847,
+  "sha256": "ffbf3c9815a410a360cde1a0e9365df3517526002b1fe9a8bef2c6ea29992ff1",
+  "members": {
+    "cohort-5de0ea4c-mac-windows-pci-pure-b24-v1/running.json": {
+      "bytes": 6377,
+      "sha256": "afe2421c923d7b6a27338d6678cb41d3a7bd533d9da69e18b82a136785959ce8"
+    },
+    "cohort-5de0ea4c-mac-windows-pci-pure-b24-v1/windows-adl-mapping-affected-thirteen.log": {
+      "bytes": 1227,
+      "sha256": "84d52252524a6b2a3f323f87cd236f7b7e7b40cbb9483a10b9defdc365a9479f"
+    },
+    "cohort-5de0ea4c-mac-windows-pci-pure-b24-v1/result.json": {
+      "bytes": 7008,
+      "sha256": "84bad075c678405d075c2975c440a971c6e57b34e5ab0eac273a469704d0f28b"
+    },
+    "cohort-5de0ea4c-mac-windows-pci-pure-b24-v1/source-before.json": {
+      "bytes": 342840,
+      "sha256": "e45b6075233f7f6353ff8dcfe79f9864a7f0e3f2b2ee1e0dfbc5150f265102d5"
+    },
+    "cohort-5de0ea4c-mac-windows-pci-pure-b24-v1/source-after.json": {
+      "bytes": 342938,
+      "sha256": "280e2701c888b78cfe08b44117a6129f4dc5d1b3822b9a4f16023065ff624a05"
+    },
+    "cohort-5de0ea4c-mac-windows-pci-pure-b24-v1/gpu-native-clippy.log": {
+      "bytes": 460,
+      "sha256": "787d33b84db68ddedb7339389771b736aa346cd1c51acc8f74e24d9d0a4a6a77"
+    },
+    "cohort-5de0ea4c-mac-windows-pci-pure-b24-v1/api-lock-cohort.json": {
+      "bytes": 296,
+      "sha256": "cdd8326f99d757c13010fc2c8751bd99d2b62d34c1d828e20d11fc947157d804"
+    },
+    "cohort-5de0ea4c-mac-windows-pci-pure-b24-v1/windows-identity-parser-three.log": {
+      "bytes": 1222,
+      "sha256": "8f705895ecdbf2d29503315385bd389497d37e3e4b600c9ed65f279496b52dbb"
+    },
+    "cohort-5de0ea4c-mac-windows-pci-pure-b24-v1/windows-native-qualification-one.log": {
+      "bytes": 3314,
+      "sha256": "7d43850b89c201d321ae7b1dc4df919100df168836290137057985c061184183"
+    },
+    "cohort-5de0ea4c-mac-windows-pci-pure-b24-v1/public-registry-seed.json": {
+      "bytes": 29092,
+      "sha256": "a3b054069beb140848548948af37419c2e7cbfd5ebe1f8d9a1f18c7bfbac7909"
+    },
+    "cohort-5de0ea4c-mac-windows-pci-pure-b24-v1/api20-native-clippy-only.log": {
+      "bytes": 2848,
+      "sha256": "21f8eaaedae0d1220978f569d8ccc44b044d3bae2850c5ee6869e21b0861844d"
+    },
+    "cohort-5de0ea4c-mac-windows-pci-pure-b24-v1/collected-binaries.json": {
+      "bytes": 6157,
+      "sha256": "23e04c18a88f399f38ddf79ad5bda6497c2b057256899a6871209815c10f542d"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}
