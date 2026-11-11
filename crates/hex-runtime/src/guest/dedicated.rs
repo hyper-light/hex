@@ -1441,7 +1441,9 @@ impl GuestRuntime {
             guest
                 .try_clone()
                 .map_err(|why| refusal("retaining managed guest connection", &why))?,
-            budget.remaining()?,
+            // HEX-GUEST-33: a later dial without its caller's deadline spends the whole learned bound,
+            // not what this create had left; the create's own dials carry its deadline.
+            budget.remaining().and_then(|_| self.first_dial_bound())?,
         ))?;
         let client = Client::connect_before(triomphe::Arc::clone(&link), budget.deadline())?;
         let booted = booted_owner(Booted {
