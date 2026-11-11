@@ -506,7 +506,7 @@ fn advertise_timing_service(
     )
 }
 
-fn advertise_service_with_budget(
+pub(super) fn advertise_service_with_budget(
     id: NodeId,
     dir: &Path,
     mut cluster: Cluster,

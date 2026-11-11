@@ -1,0 +1,31 @@
+{
+  "parent": "3bd9a4758b31acd15058ffe86bcdec52fd242f43",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "scope": "ONE original actual Runtimes/Service refresh-seam CPU-isolation control; production remedy held until ROOT actual result",
+  "source_sha256": {
+    "crates/hex-node/src/scheduler/observer_cpu_tests.rs": "4ee9e2c847c55e47cbb65fb77f38b9fb0beaea126d97f8dd63f0c20c9c9b7f54",
+    "crates/hex-node/src/scheduler.rs": "c96209cee0f42359fb923703a69a03eb092428f59ab56c4a1a2498bcab50a9aa",
+    "crates/hex-node/src/scheduler/tests.rs": "298b8e09769ac18d9fd0e6d3c0c714043e1ad6f25bc31b8132b4f75b58cea911"
+  },
+  "integration": "New Linux-only test module; scheduler.rs cfg registration only; scheduler/tests.rs existing helper visibility pub(super) only. Preserve ROOT current production and compatibility bodies.",
+  "control": "scheduler::observer_cpu_tests::failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_facts",
+  "fixture": {
+    "native": "SAME Process SimRuntime, explicit native Process capacity route, empty physical report simulator:cpu",
+    "configured_observer": "Firecracker Required/Prepared route with provisioning identity only; failure returns typed Backing Uncertain from capacity and physical_report after healthy normalization",
+    "resources": "1000m CPU/512MiB host; observer fixed1000m/128MiB; explicit test-only synthetic cost/zero overhead; bounded four records per direction",
+    "effects": "private regular-file Service/Driver state only, simulated CPU create/delete; no Gpus/provider/SDK/VM/cgroup/native effects"
+  },
+  "expected": "healthy normalization succeeds; failed observer callback observed; subsequent refresh succeeds, facts remain empty GPU with diagnostic and original authority; fresh CPU workload reaches actual simulated physical create and cleanup",
+  "status": {
+    "compile": "UNRUN",
+    "control": "UNRUN/intended original hypothesis only",
+    "production_remedy": false,
+    "check_dispatches": 0,
+    "native_effects": 0,
+    "scoped_rustfmt": 0,
+    "diff_check": 0
+  },
+  "required_root": "Run ONLY the Linux exact new control after coherent intake. A Mac cfg-filtered zero case is not a pass. Preserve actual logs/source/cleanup before authorizing any remedy."
+}

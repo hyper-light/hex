@@ -695,3 +695,86 @@ fn a_prepared_snapshot_cannot_roll_back_a_granted_backing_or_its_claims() {
     assert_eq!(after, before);
     assert_eq!(index.grant_backing(NodeId(0), key).unwrap(), grant);
 }
+
+/// AC-T7.4.1: an observer's wider provisioning set must not silently enlarge an exact GPU demand.
+/// Original source-first control for the multi-GPU topology gap; no production remedy is included.
+#[test]
+fn one_gpu_demand_can_select_an_exact_subset_of_a_two_gpu_observer() {
+    let ids = [7, 8].map(|key| hex_api::DeviceId {
+        kind: hex_api::DeviceKind::Gpu,
+        key,
+    });
+    let key = BackingKey {
+        pool: [71; 32],
+        generation: [72; 16],
+    };
+    let mut node = NodeSpec::new(
+        NodeId(0),
+        Resources {
+            cpu_milli: 8000,
+            mem_bytes: 8 << 30,
+            disk_bytes: 0,
+            gpus: 2,
+        },
+    );
+    node.virt.kvm = true;
+    node.classes = Classes::ALL;
+    for (gpu, id) in node.devices.iter_mut().zip(ids) {
+        gpu.key = Some(id.key);
+        gpu.classes = Classes::ALL;
+    }
+    node.routes = Some(
+        RuntimeRoutes {
+            offers: vec![RouteOffer {
+                key: RouteKey {
+                    class: hex_api::Class::Firecracker,
+                    image: image(ImageOs::Linux, false),
+                    execution: Execution::Firecracker,
+                    gpu: GpuEligibility::Required,
+                },
+                cost: Some(profile()),
+                backing: Some(key),
+            }],
+            device_routes: vec![1, 1],
+            backings: vec![BackingOffer {
+                key,
+                cost: profile(),
+                phase: BackingPhase::Live,
+                devices: ids.to_vec(),
+            }],
+        }
+        .share()
+        .unwrap(),
+    );
+    let index = FitIndex::new(&[node]).unwrap();
+    let request = Demand {
+        class: Class::Firecracker,
+        ask: Ask {
+            runtime_class: Some(hex_api::Class::Firecracker),
+            os: Some(Os::Linux),
+            arch: Some(crate::model::Arch::X86_64),
+            ..Ask::default()
+        },
+        ..demand(Some(Os::Linux), 1)
+    };
+    let mut complete = request;
+    complete.need.gpus = 2;
+    let wider = index.verdict(NodeId(0), &complete).unwrap();
+    let subset = index.verdict(NodeId(0), &request).unwrap();
+    eprintln!(
+        "two-GPU observer source control: complete={wider:?}, exact_one={subset:?}; native_effect=false"
+    );
+    assert_eq!(
+        wider,
+        Verdict::Admits,
+        "the fixture must expose both actually observed devices"
+    );
+    assert_eq!(
+        subset,
+        Verdict::Admits,
+        "one GPU demand must not be enlarged to the observer's complete provisioning set"
+    );
+    let route = index.route(NodeId(0), &request).unwrap().unwrap();
+    assert_eq!(route.backing, Some(key));
+    assert_eq!(request.need.gpus, 1);
+}

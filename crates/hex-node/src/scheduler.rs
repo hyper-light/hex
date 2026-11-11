@@ -1327,3 +1327,6 @@ pub fn read_config(path: &Path) -> Result<Config, Refusal> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod observer_cpu_tests;

@@ -628,4 +628,25 @@ pub(in crate::guest) mod tests {
         input.artifacts.last_mut().unwrap().guest = duplicate;
         assert!(GpuObserver::new(input, &config, allocation).is_err());
     }
+
+    /// AC-T7.4.1: the same initialized artifact cannot be mutable through a
+    /// second guest path. A read-only child share does not seal a writable parent.
+    /// Original validation remains unchanged until this control is reproduced.
+    #[test]
+    fn observer_artifact_refuses_a_writable_parent_share_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let closure = dir.path().join("closure");
+        std::fs::create_dir(&closure).unwrap();
+        let (mut config, input, allocation) = fixture(&closure);
+        config.shares.push(shares::Share {
+            dir: dir.path().to_path_buf(),
+            read_only: false,
+            at: "/run/hex/shares/1".into(),
+        });
+        let initialized = GpuObserver::new(input, &config, allocation);
+        assert!(
+            initialized.is_err(),
+            "read-only artifact bytes remain writable through the second parent share"
+        );
+    }
 }

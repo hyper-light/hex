@@ -1,0 +1,25 @@
+{
+  "status": "ORIGINAL SOURCE CONTROL ONLY; production unchanged; no compile/test/native run",
+  "parent": "a29bf7e2d3527aedce62b04bb5011edb9253fb09",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "source": {
+    "path": "crates/hex-runtime/src/guest/observer/config.rs",
+    "sha256": "501d37da5d22d3c5c5cf37cee5261759f1080be2d031eb5aa6710ee1d763e5cf",
+    "production_prefix_sha256": "9186372d3fff0901e8cad584a5ab618b20abe395fac02c299ff54b7a1c585626",
+    "production_prefix_byte_identical_to_parent": true
+  },
+  "test": "guest::observer::config::tests::observer_artifact_refuses_a_writable_parent_share_alias",
+  "command": "cargo test -p hex-runtime --lib --locked guest::observer::config::tests::observer_artifact_refuses_a_writable_parent_share_alias -- --exact --test-threads=1",
+  "requirement": "AC-T7.4.1 initialized artifact immutability",
+  "fixture": "private TempDir parent, hashed model artifact closure in read-only child share at0, distinct writable parent share at1; both normal absolute configured roots. No socket/VM/driver/native call or HOST Box row.",
+  "source_finding": "mapped() finds the exact read-only child mapping but ignores another writable parent path for the same file. Source observation only; this unit has not run.",
+  "oracle": "actual GpuObserver::new refuses before initialization; old mapped()/verify() remain unchanged until ROOT original relevant red",
+  "limits": [
+    "does not prove actual guest write/virtio-fs effect or host trust boundary",
+    "symlink/hardlink aliases, outside host writers and transitive loader closure remain separately unproven",
+    "no production remedy, new cache/inventory/picker or resource allowance",
+    "ROOT owns fixed-source original execution and any native forbidden-effect validation"
+  ]
+}
