@@ -87,3 +87,29 @@ commit = "33df95b08ad8f95bddeaa1c48acf0c64386e0eac"
 path = "vendor/shards"
 take = ["LICENSE", "AGENTS.md", "CLAUDE.md", "clippy.toml", "rustfmt.toml", "docs/development-rules.md", "docs/development-evidence.md", "crates/api", "crates/abi", "crates/afunix", "crates/testdir", "docs/research/measurements/managed-borrowed-nowait/focused.rs", "docs/research/measurements/managed-borrowed-nowait/contract.rs", "docs/research/measurements/managed-proc-main/allocation.rs", "docs/research/measurements/managed-proc-main/repro.rs", "docs/research/measurements/managed-proc-main/reader-tests.rs"]
 own = ["Cargo.toml", "UPSTREAM.md"]
+
+# Firecracker (AWS): the VMM Hex's `firecracker` class launches (crates/hex-runtime/src/firecracker; its
+# PREBOOT_REVISION is this commit). Upstream's VFIO development chain (feature/vfio, in no release yet)
+# assigns PCI devices before boot here. Hex's recorded changes route a passthrough device's MSI/MSI-X
+# through KVM irqfds, serve GET /device-passthrough/{id} (the host/guest PCI witness the adapter reads,
+# transport.rs `attachment`), and complete Cargo.lock for a --locked build. Hex compiles none of it: only
+# the files those changes touch are taken, so `check` proves each change applies to this commit, and
+# scripts/firecracker/build.sh rebuilds the VMM from this commit plus vendor/patches/firecracker.
+# Apache-2.0, as are its LICENSE and NOTICE taken beside it.
+[projects.firecracker]
+kind = "git"
+repository = "https://github.com/firecracker-microvm/firecracker"
+commit = "500efc6bb169705f5d9417cb411e3f6723e051fe"
+path = "vendor/firecracker"
+take = [
+    "LICENSE",
+    "NOTICE",
+    "Cargo.lock",
+    "src/firecracker/src/api_server/parsed_request.rs",
+    "src/firecracker/src/api_server/request/device_passthrough.rs",
+    "src/vmm/src/device_manager/pci_mngr.rs",
+    "src/vmm/src/pci/mod.rs",
+    "src/vmm/src/rpc_interface.rs",
+    "src/vmm/src/vfio.rs",
+]
+own = ["UPSTREAM.md"]

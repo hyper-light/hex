@@ -344,11 +344,19 @@ fn a_route_to_an_unknown_backing_never_reaches_an_initialized_adapter() {
         }),
     });
     add(&node, "aa-cpu", b"same initialized metadata");
-    node.books
-        .store
-        .put(&BoxRecord::new(inner, Phase::Ready, Vec::new()))
-        .unwrap();
+    // Store::put refuses a reference to an unknown backing (check_box_backing). A retained row can
+    // still name one (an older writer, a damaged file), so it is planted as its encoded bytes.
+    let dangling = BoxRecord::new(inner, Phase::Ready, Vec::new());
+    std::fs::write(
+        crate::store::runtime_record(
+            &dir.path().join("state").join("@records"),
+            &dangling.spec.id,
+        ),
+        dangling.encode().unwrap(),
+    )
+    .unwrap();
     let before = node.books.store.all().unwrap();
+    assert!(before.contains_key(&dangling.spec.id));
     assert!(node.recover().is_err());
     assert_eq!(checked.load(Ordering::SeqCst), 0);
     assert_eq!(initialized.load(Ordering::SeqCst), 0);
