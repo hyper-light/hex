@@ -1,15 +1,32 @@
-"""Pure/light behavior checks only. Never invokes a runtime, GPU, VM, mutation or profiler."""
+"""Pure/light behavior checks only; drivers run local stand-in programs alone. Never invokes a runtime,
+GPU, VM, mutation or profiler."""
 
+import argparse
+import contextlib
 import copy
 import importlib.util
+import io
 import json
+import os
+import platform
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import build
+import load_probe
+import origin
+import run
 from evidence import (BACKENDS, POLICY, RULES, STAGES, TARGETS, InvalidEvidence, artifact,
                       check_events, check_run, libtest_result, load_json, matrix, sha256)
-from mutation import replacement
+from mutation import command, replacement
 
 compare_path=Path(__file__).resolve().parents[2]/"bench/scheduler-completion/compare.py"
 spec=importlib.util.spec_from_file_location("completion_compare",compare_path)
@@ -191,6 +208,189 @@ class EvidenceBehavior(unittest.TestCase):
         self.assertEqual(report["metrics"]["latency_seconds"]["ratio"],2)
         self.assertFalse(report["metrics"]["latency_seconds"]["achieved"])
         self.assertFalse(report["all_targets_achieved"])
+
+
+def alive(pid):
+    """Signal 0: only ProcessLookupError says the PID is gone."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
+
+
+def until(condition, budget):
+    """Probe `condition` until it holds or `budget` seconds pass, at Popen.wait(timeout)'s cadence."""
+    deadline, delay = time.monotonic() + budget, 0.0005
+    while not condition() and time.monotonic() < deadline:
+        delay = min(delay * 2, 0.05)
+        time.sleep(delay)
+    return condition()
+
+
+def tree_pids(program):
+    """The stand-in's `$$ $!` record beside it: its own PID and its grandchild's, or None until written."""
+    record = Path(f"{program}.tree")
+    pids = record.read_text().split() if record.is_file() else []
+    return tuple(int(pid) for pid in pids) if len(pids) == 2 else None
+
+
+def host_target():
+    machine = {"arm64": "aarch64", "aarch64": "aarch64", "x86_64": "x86_64", "amd64": "x86_64"}[platform.machine().lower()]
+    system = "apple-darwin" if sys.platform == "darwin" else "linux"
+    return next(target for target in TARGETS if target.startswith(machine + "-") and system in target)
+
+
+class ProcessGroupEnding(unittest.TestCase):
+    """AC-T7.4.1: each driver ends its child's whole process group, on timeout, cancellation or exit, and
+    records what it observed. The child is a stand-in that starts a grandchild sleeping until signaled;
+    the oracle is signal 0 to both PIDs, never the driver's own report."""
+
+    # TIMEOUT expires on a stand-in that hangs; the stand-in records its tree within milliseconds, and one
+    # ended before that fails as vacuous. CLEANUP bounds each cleanup phase and the oracle. BOUND only
+    # bounds waits that a fact ends first (a cancellation, readiness, a driver's exit).
+    TIMEOUT, CLEANUP, BOUND = 1.0, 1.0, 10.0
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+
+    def stand_in(self, name, first="", last="wait"):
+        path = self.root / name
+        path.write_text(f"#!/bin/sh\n{first}\n{shlex.quote(sys.executable)} -I -c 'import signal; signal.pause()' &\n"
+                        f'echo "$$ $!" >"$0.tree"\n{last}\n')
+        path.chmod(0o755)
+        return path
+
+    def load_argv(self, program, timeout):
+        return [str(Path(load_probe.__file__).resolve()), "--root-authorized", "--binary", str(program),
+                "--sha256", sha256(program), "--timeout", str(timeout), "--output", str(self.root / "load.log"),
+                "--byte-limit", str(1 << 20)]
+
+    @contextlib.contextmanager
+    def tree_gone(self, program):
+        """After the block, both PIDs `program` recorded must be gone within CLEANUP. A grandchild still
+        alive is this test's own: it is killed by its recorded PID."""
+        try:
+            yield
+        finally:
+            pids = tree_pids(program)
+            self.assertIsNotNone(pids, "stand-in ended before recording its grandchild: vacuous")
+            until(lambda: not any(alive(pid) for pid in pids), self.CLEANUP)
+            left = [pid for pid in pids if alive(pid)]
+            if pids[1] in left:
+                os.kill(pids[1], signal.SIGKILL)
+            self.assertEqual(left, [], "the driver left its child's process tree running")
+
+    def test_mutation_phase_timeout_ends_the_whole_tree(self):
+        """AC-T7.4.1: a mutation phase past its budget has its grandchild ended too; its row says so."""
+        program = self.stand_in("phase")
+        with self.tree_gone(program):
+            row = command([str(program)], self.root, "phase", self.TIMEOUT, self.CLEANUP)
+        self.assertEqual((row["timed_out"], row["reaped"], row["group_signaled"], row["group_gone"]),
+                         (True, True, True, True))
+
+    def test_tree_ignoring_term_is_killed_once_cleanup_runs_out(self):
+        """AC-T7.4.1: a tree that ignores TERM is KILLed, grandchild too, once the cleanup budget passes."""
+        program = self.stand_in("phase", first="trap '' TERM")
+        with self.tree_gone(program):
+            row = command([str(program)], self.root, "phase", self.TIMEOUT, self.CLEANUP)
+        self.assertEqual((row["exit"], row["group_gone"]), (-signal.SIGKILL, True))
+
+    def test_exit_leaving_a_grandchild_has_it_ended_and_recorded(self):
+        """AC-T7.4.1: a child that exits leaving a grandchild in its group has it ended; the row says so."""
+        program = self.stand_in("phase", last="exit 0")
+        with self.tree_gone(program):
+            row = command([str(program)], self.root, "phase", self.TIMEOUT, self.CLEANUP)
+        self.assertEqual((row["exit"], row["timed_out"], row["group_signaled"], row["group_gone"]),
+                         (0, False, True, True))
+
+    def test_cancelled_phase_ends_the_whole_tree(self):
+        """AC-T7.4.1: ROOT's cancellation mid-phase (the InterruptedError mutation.py makes of SIGTERM)
+        ends the grandchild too before it goes on."""
+        def cancel(*_):
+            raise InterruptedError("ROOT cancellation")
+        self.addCleanup(signal.signal, signal.SIGUSR1, signal.signal(signal.SIGUSR1, cancel))
+        program = self.stand_in("phase", last="kill -USR1 $PPID\nwait")
+        with self.tree_gone(program), self.assertRaises(InterruptedError):
+            command([str(program)], self.root, "phase", self.BOUND, self.CLEANUP)
+
+    def test_run_timeout_ends_the_fixture_tree(self):
+        """AC-T7.4.1: run.py's timeout ends the fixture's grandchild too; its receipt says the group is gone."""
+        program, source, target = self.stand_in("fixture"), "a" * 40, host_target()
+        built = self.root / "build"
+        built.mkdir()
+        shutil.copy2(program, built / "fixture")
+        binary = {"path": "fixture", "sha256": sha256(program), "bytes": program.stat().st_size}
+        (built / "build.json").write_text(json.dumps({"schema": "hex-completion-build-1", "source": source,
+            "target": target, "test": "completion_backends", "exit": 0, "timed_out": False, "reaped": True,
+            "group_gone": True, "source_unchanged": True, "binary": binary}))
+        (self.root / "fixture.json").write_text(json.dumps({"proof": "selected", "source": source,
+                                                            "backend": "oci", "topology": "laptop"}))
+        args = argparse.Namespace(root_authorized=True, source=source, binary=program, binary_sha256=binary["sha256"],
+            build_receipt=built / "build.json", config=self.root / "fixture.json", backend="oci", topology="laptop",
+            proof="selected", target=target, timeout=self.TIMEOUT, cleanup_timeout=self.CLEANUP,
+            byte_limit=1 << 20, output=self.root / "run")
+        with self.tree_gone(self.root / "run/test-binary"), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run.run(args), 1)
+        receipt = load_json(self.root / "run/run.json", 1 << 20)
+        self.assertEqual((receipt["timed_out"], receipt["reaped"], receipt["group_gone"],
+                          receipt["assessment"]["outcome"]), (True, True, True, "unverified"))
+
+    def test_build_timeout_ends_cargos_tree(self):
+        """AC-T7.4.1: build.py's timeout ends Cargo's grandchild too; its receipt says the group is gone."""
+        repo = self.root / "repo"
+        repo.mkdir()
+        (repo / "tracked").write_text("pinned\n")
+        git = ["git", "-C", str(repo), "-c", "init.defaultBranch=main", "-c", "user.name=t", "-c", "user.email=t@t",
+               "-c", "commit.gpgsign=false"]
+        own = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        for argv in (["init", "-q"], ["add", "tracked"], ["commit", "-q", "-m", "pinned"]):
+            subprocess.run([*git, *argv], env=own, check=True)
+        source = subprocess.check_output([*git, "rev-parse", "HEAD"], env=own).decode().strip()
+        program = self.stand_in("cargo")
+        args = argparse.Namespace(root_authorized=True, repo=repo, source=source, cargo=program, package="hex-cli",
+            test="completion_backends", target=TARGETS[0], output=self.root / "build", timeout=self.TIMEOUT,
+            cleanup_timeout=self.CLEANUP, byte_limit=1 << 20, overlay_file=None, overlay_original_sha256=None,
+            overlay_sha256=None)
+        with self.tree_gone(program), self.assertRaises(InvalidEvidence):
+            build.build(args)
+        receipt = load_json(self.root / "build/build.json", 1 << 20)
+        self.assertEqual((receipt["timed_out"], receipt["reaped"], receipt["group_gone"]), (True, True, True))
+
+    def test_origin_status_timeout_ends_its_tree(self):
+        """AC-T7.4.1: origin.py's timed-out Status call has its grandchild ended too."""
+        program, placement = self.stand_in("hex"), self.root / "placement.json"
+        placement.write_text(json.dumps({"key": "box"}))
+        args = argparse.Namespace(placement=placement, hex=program, hex_sha256=sha256(program),
+            socket=self.root / "socket", target=host_target(), output=self.root / "origin", address=None,
+            forward_host=None, forward_port=None, timeout=self.TIMEOUT, byte_limit=1 << 20)
+        with self.tree_gone(self.root / "origin/hex"), self.assertRaises(InvalidEvidence):
+            origin.observe(args)
+
+    def test_load_probe_timeout_ends_its_tree(self):
+        """AC-T7.4.1: load_probe.py's timed-out telemetry run has its grandchild ended too."""
+        program = self.stand_in("telemetry")
+        with self.tree_gone(program), mock.patch.object(sys, "argv", self.load_argv(program, self.TIMEOUT)), \
+                self.assertRaises(InvalidEvidence):
+            load_probe.main()
+
+    def test_sigterm_to_a_driver_ends_its_childs_tree(self):
+        """AC-T7.4.1: a guard's SIGTERM to a driver (GNU timeout signals its own group, which the child's
+        session has left) unwinds the driver, which ends the child's tree before it exits."""
+        program = self.stand_in("telemetry")
+        with self.tree_gone(program):
+            driver = subprocess.Popen([sys.executable, *self.load_argv(program, self.BOUND)],
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            self.addCleanup(driver.wait, self.BOUND)
+            self.addCleanup(driver.kill)
+            until(lambda: tree_pids(program) is not None or driver.poll() is not None, self.BOUND)
+            driver.terminate()
+            _, error = driver.communicate(timeout=self.BOUND)
+        self.assertEqual((driver.returncode, b"ROOT cancellation" in error), (1, True), error.decode())
 
 
 if __name__=="__main__":
