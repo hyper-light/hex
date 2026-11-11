@@ -396,8 +396,11 @@ pub struct RuntimePool {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeRoutes {
+    #[serde(deserialize_with = "hex_api::Capacity::deserialize_routes")]
     pub offers: Vec<hex_api::RouteOffer>,
+    #[serde(deserialize_with = "hex_api::Capacity::deserialize_device_routes")]
     pub device_routes: Vec<u64>,
+    #[serde(deserialize_with = "hex_api::Capacity::deserialize_backings")]
     pub backings: Vec<hex_api::BackingOffer>,
 }
 
@@ -564,6 +567,36 @@ pub fn reserved_resources(
 }
 
 impl NodeSpec {
+    /// Copy bounded node facts fallibly; the initialized route/claim catalog keeps the SAME owner.
+    /// Structural and capability validation remains the caller's explicit operation.
+    pub fn try_clone(&self) -> Result<Self, crate::SimError> {
+        if self.devices.len() > DEVICES || self.runtime_pools.len() > Class::COUNT {
+            return Err(crate::SimError::Resources(self.id));
+        }
+        let mut devices = Vec::new();
+        devices
+            .try_reserve_exact(self.devices.len())
+            .map_err(|_| crate::SimError::Resources(self.id))?;
+        devices.extend_from_slice(&self.devices);
+        let mut runtime_pools = Vec::new();
+        runtime_pools
+            .try_reserve_exact(self.runtime_pools.len())
+            .map_err(|_| crate::SimError::Resources(self.id))?;
+        runtime_pools.extend_from_slice(&self.runtime_pools);
+        Ok(Self {
+            id: self.id,
+            capacity: self.capacity,
+            background_milli: self.background_milli,
+            classes: self.classes,
+            platform: self.platform,
+            virt: self.virt,
+            devices,
+            runtime_pools,
+            costs: self.costs,
+            routes: self.routes.clone(),
+        })
+    }
+
     /// Runtime pools are bounded by the runtime class set: each class belongs to at most one pool.
     pub fn check_runtime_pools(&self) -> Result<(), crate::SimError> {
         if let Some(routes) = &self.routes {
@@ -959,4 +992,41 @@ pub fn model_name(name: &str) -> String {
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>()
         .join("-")
+}
+
+#[cfg(test)]
+mod route_decode_tests {
+    use super::*;
+
+    /// AC-T7.4.1/R01: the SAME bounded API visitors run before immutable-owner allocation.
+    #[test]
+    fn initialized_route_json_bounds_precede_shared_owner_construction() {
+        #[derive(Deserialize)]
+        struct View {
+            #[serde(with = "shared_routes")]
+            routes: Option<SharedRoutes>,
+        }
+        assert!(
+            serde_json::from_str::<View>(r#"{"routes":null}"#)
+                .unwrap()
+                .routes
+                .is_none()
+        );
+        let route = serde_json::json!({
+            "key": {"class":"oci","image":{"os":"linux","arch":"amd64"},"execution":"native","gpu":"any"},
+            "cost":null,"backing":null
+        });
+        let mut input =
+            serde_json::json!({"routes":{"offers":[],"device_routes":[],"backings":[]}});
+        let empty: View = serde_json::from_value(input.clone()).unwrap();
+        assert!(empty.routes.unwrap().offers.is_empty());
+        input["routes"]["offers"] =
+            serde_json::Value::Array(vec![route; hex_api::MAX_RUNTIME_ROUTES + 1]);
+        let error = serde_json::from_value::<View>(input).err().unwrap();
+        assert!(error.to_string().contains("route count"));
+        let input =
+            serde_json::json!({"offers":[],"device_routes":vec![0u64; DEVICES+1],"backings":[]});
+        let error = serde_json::from_value::<RuntimeRoutes>(input).unwrap_err();
+        assert!(error.to_string().contains("eligibility count"));
+    }
 }

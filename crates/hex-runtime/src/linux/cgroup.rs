@@ -854,6 +854,93 @@ impl BoxCgroup {
             io_stat: read("io.stat"),
         })
     }
+
+    /// Measured native backing usage, never a failed read represented as free host capacity. Only
+    /// a directory already pinned by the native owner can supply it; a reused path is not authority.
+    pub fn managed_usage(&self) -> Result<Usage, Refusal> {
+        if self.fd.is_none() {
+            return Err(managed_read_error(
+                "native backing usage",
+                "the native owner has no pinned cgroup directory",
+            ));
+        }
+        let read = |file: &'static str| {
+            let mut storage = Vec::new();
+            // The shared reader tests the bound after one chunk; reserve that possible last chunk
+            // too, so none of its appends can allocate on this path (ordinary reads are unchanged).
+            let bound = MAX_CGROUP_FILE
+                .checked_add(READ_CHUNK)
+                .ok_or(Refusal::Exhausted {
+                    what: "managed cgroup file bytes",
+                    bound: MAX_CGROUP_FILE,
+                })?;
+            storage
+                .try_reserve_exact(bound)
+                .map_err(|_| Refusal::Exhausted {
+                    what: "managed cgroup file bytes",
+                    bound,
+                })?;
+            let fd = self
+                .open_file(file, OFlags::RDONLY)
+                .map_err(|error| managed_read_error(file, error))?;
+            read_text(
+                MAX_CGROUP_FILE,
+                |buf, at| rustix::io::pread(fd.as_fd(), buf, at),
+                storage,
+            )
+            .map_err(|error| match error {
+                ReadFailure::Io(error) => managed_read_error(file, error),
+                ReadFailure::OverLimit(_) => {
+                    managed_read_error(file, "required counter file exceeds its read bound")
+                }
+                ReadFailure::Encoding(error) => managed_read_error(file, error),
+            })
+        };
+        core::managed_usage(&UsageFiles {
+            memory_current: read("memory.current")?,
+            memory_peak: read("memory.peak")?,
+            memory_events: read("memory.events")?,
+            pids_current: read("pids.current")?,
+            pids_events: read("pids.events")?,
+            cpu_stat: read("cpu.stat")?,
+            io_stat: read("io.stat")?,
+        })
+    }
+}
+
+fn managed_read_error(file: &'static str, error: impl std::fmt::Display) -> Refusal {
+    struct Diagnostic {
+        text: String,
+        needed: usize,
+    }
+    impl std::fmt::Write for Diagnostic {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            self.needed = self
+                .text
+                .len()
+                .checked_add(text.len())
+                .ok_or(std::fmt::Error)?;
+            self.text
+                .try_reserve_exact(text.len())
+                .map_err(|_| std::fmt::Error)?;
+            self.text.push_str(text);
+            Ok(())
+        }
+    }
+    let mut diagnostic = Diagnostic {
+        text: String::new(),
+        needed: 0,
+    };
+    if std::fmt::write(&mut diagnostic, format_args!("{error}")).is_err() {
+        return Refusal::Exhausted {
+            what: "managed usage refusal bytes",
+            bound: diagnostic.needed,
+        };
+    }
+    Refusal::Os {
+        op: file,
+        why: diagnostic.text,
+    }
 }
 
 /// Whether any swap is on: `/proc/swaps` lists one device per line past its header.
@@ -895,21 +982,30 @@ fn cpu_max_holds(cg: &BoxCgroup, want: &str) -> bool {
 /// (`fs::read_to_string` takes one per file to size its buffer): an idle cgroup's check and baseline read a
 /// dozen on create's path. Refused past `max` bytes; `path` names the file in a refusal.
 fn read_fd(fd: BorrowedFd<'_>, max: usize, path: impl Fn() -> PathBuf) -> Result<String, Refusal> {
-    read_text(max, &path, |buf, at| rustix::io::pread(fd, buf, at)).map_err(|e| e.refusal(&path()))
+    read_text(max, |buf, at| rustix::io::pread(fd, buf, at), Vec::new())
+        .map_err(|e| e.refusal(&path()))
 }
 
-/// Preserve a read errno until the caller decides whether removal is absence. Format and size failures are
-/// already typed refusals, and never count as removal.
+/// Preserve read, format and size failures until the caller renders its refusal. Only an explicit
+/// removal-aware caller can interpret a removal errno as absence.
 enum ReadFailure {
     Io(rustix::io::Errno),
-    Refused(Refusal),
+    OverLimit(usize),
+    Encoding(std::string::FromUtf8Error),
 }
 
 impl ReadFailure {
     fn refusal(self, path: &Path) -> Refusal {
         match self {
             Self::Io(e) => os_err("reading a cgroup file", path, e),
-            Self::Refused(r) => r,
+            Self::OverLimit(max) => Refusal::Os {
+                op: "reading a cgroup file",
+                why: format!("{} is over {max} bytes", path.display()),
+            },
+            Self::Encoding(e) => Refusal::Os {
+                op: "reading a cgroup file",
+                why: format!("{} isn't UTF-8: {e}", path.display()),
+            },
         }
     }
 }
@@ -921,7 +1017,7 @@ fn read_if_present(
     path: impl Fn() -> PathBuf,
     read: impl FnMut(&mut [u8], u64) -> rustix::io::Result<usize>,
 ) -> Result<Option<String>, Refusal> {
-    match read_text(max, &path, read) {
+    match read_text(max, read, Vec::new()) {
         Ok(text) => Ok(Some(text)),
         Err(ReadFailure::Io(rustix::io::Errno::NODEV | rustix::io::Errno::NOENT)) => Ok(None),
         Err(e) => Err(e.refusal(&path())),
@@ -932,10 +1028,9 @@ fn read_if_present(
 /// can stand in for a removed kernfs file in a deterministic unit test.
 fn read_text(
     max: usize,
-    path: &impl Fn() -> PathBuf,
     mut read: impl FnMut(&mut [u8], u64) -> rustix::io::Result<usize>,
+    mut out: Vec<u8>,
 ) -> Result<String, ReadFailure> {
-    let mut out = Vec::new();
     let mut buf = [0u8; READ_CHUNK];
     // From the file's start whatever its offset: a descriptor opened ahead is read more than once, through copies that
     // share it ([`BoxCgroup::open_ahead`]).
@@ -947,18 +1042,10 @@ fn read_text(
         }
         out.extend_from_slice(buf.get(..n).unwrap_or_default());
         if out.len() > max {
-            return Err(ReadFailure::Refused(Refusal::Os {
-                op: "reading a cgroup file",
-                why: format!("{} is over {max} bytes", path().display()),
-            }));
+            return Err(ReadFailure::OverLimit(max));
         }
     }
-    String::from_utf8(out).map_err(|e| {
-        ReadFailure::Refused(Refusal::Os {
-            op: "reading a cgroup file",
-            why: format!("{} isn't UTF-8: {e}", path().display()),
-        })
-    })
+    String::from_utf8(out).map_err(ReadFailure::Encoding)
 }
 
 /// Writes `value` to the cgroup file open at `fd`: one write(2), as the kernel takes a cgroup file's
@@ -1179,6 +1266,149 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    fn managed_counter_files(dir: &Path, memory: &str) {
+        for (file, value) in [
+            ("memory.current", memory),
+            ("memory.peak", "4096\n"),
+            ("memory.events", "oom_kill 0\n"),
+            ("pids.current", "1\n"),
+            ("pids.events", "max 0\n"),
+            ("cpu.stat", "usage_usec 100\n"),
+            ("io.stat", ""),
+        ] {
+            fs::write(dir.join(file), value).unwrap();
+        }
+    }
+
+    fn pinned_managed_cgroup(dir: &Path) -> BoxCgroup {
+        BoxCgroup {
+            dir: dir.to_path_buf(),
+            fd: Some(Arc::new(
+                rustix::fs::open(
+                    dir,
+                    OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .unwrap(),
+            )),
+            opened: None,
+        }
+    }
+
+    /// AC-T7.1.2/HEX-RT-15: native backing observation uses the pinned cgroup, never an unrelated
+    /// replacement at its old name. An unpinned path is insufficient cleanup/accounting authority.
+    #[test]
+    fn managed_usage_reads_the_pinned_native_cgroup_after_path_reuse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("managed");
+        fs::create_dir(&dir).unwrap();
+        managed_counter_files(&dir, "2048\n");
+        let old = pinned_managed_cgroup(&dir);
+        assert_eq!(old.managed_usage().unwrap().memory_bytes, 2048);
+        fs::rename(&dir, tmp.path().join("original")).unwrap();
+        fs::create_dir(&dir).unwrap();
+        managed_counter_files(&dir, "0\n");
+        assert_eq!(old.managed_usage().unwrap().memory_bytes, 2048);
+        assert!(BoxCgroup::at(dir.clone()).managed_usage().is_err());
+        assert_eq!(
+            pinned_managed_cgroup(&dir)
+                .managed_usage()
+                .unwrap()
+                .memory_bytes,
+            0
+        );
+    }
+
+    /// AC-T7.1.2: successful empty I/O is zero; absent, unreadable, non-UTF-8 and malformed required
+    /// files refuse measured backing usage. Ordinary optional-counter behavior remains unchanged.
+    #[test]
+    fn managed_usage_refuses_required_file_failures_instead_of_crediting_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cg = pinned_managed_cgroup(tmp.path());
+        for file in [
+            "memory.current",
+            "memory.peak",
+            "memory.events",
+            "pids.current",
+            "pids.events",
+            "cpu.stat",
+            "io.stat",
+        ] {
+            managed_counter_files(tmp.path(), "2048\n");
+            let path = tmp.path().join(file);
+            fs::remove_file(&path).unwrap();
+            assert!(cg.managed_usage().is_err(), "missing {file}");
+            fs::create_dir(&path).unwrap();
+            assert!(cg.managed_usage().is_err(), "unreadable {file}");
+            fs::remove_dir(&path).unwrap();
+            fs::write(&path, [0xff]).unwrap();
+            assert!(cg.managed_usage().is_err(), "non-UTF-8 {file}");
+            fs::write(&path, "malformed").unwrap();
+            assert!(cg.managed_usage().is_err(), "malformed {file}");
+        }
+        managed_counter_files(tmp.path(), "2048\n");
+        assert_eq!(cg.managed_usage().unwrap().io_read_bytes, 0);
+        fs::remove_file(tmp.path().join("io.stat")).unwrap();
+        assert!(cg.managed_usage().is_err());
+        assert_eq!(cg.usage().io_read_bytes, 0, "legacy fallback is preserved");
+    }
+
+    /// AC-T7.1.2/CLAUDE §2: the shared reader accepts pre-reserved managed storage without growing
+    /// it, and a later read error never publishes the earlier partial counter text.
+    #[test]
+    fn managed_counter_reader_keeps_its_storage_bound_and_partial_failures() {
+        let mut storage = Vec::new();
+        storage
+            .try_reserve_exact(MAX_CGROUP_FILE + READ_CHUNK)
+            .unwrap();
+        let pointer = storage.as_ptr();
+        let text = b"usage_usec 100\n";
+        let got = read_text(
+            MAX_CGROUP_FILE,
+            |buf, at| {
+                if at == 0 {
+                    buf[..text.len()].copy_from_slice(text);
+                    Ok(text.len())
+                } else {
+                    Ok(0)
+                }
+            },
+            storage,
+        )
+        .ok()
+        .unwrap();
+        assert_eq!(got.as_ptr(), pointer);
+        assert_eq!(got.as_bytes(), text);
+        let failed = read_text(
+            MAX_CGROUP_FILE,
+            |buf, at| {
+                if at == 0 {
+                    buf[..text.len()].copy_from_slice(text);
+                    Ok(text.len())
+                } else {
+                    Err(rustix::io::Errno::IO)
+                }
+            },
+            Vec::new(),
+        );
+        assert!(matches!(
+            failed,
+            Err(ReadFailure::Io(rustix::io::Errno::IO))
+        ));
+        let too_long = read_text(
+            MAX_CGROUP_FILE,
+            |buf, _| {
+                buf.fill(b'0');
+                Ok(buf.len())
+            },
+            Vec::new(),
+        );
+        assert!(matches!(
+            too_long,
+            Err(ReadFailure::OverLimit(MAX_CGROUP_FILE))
+        ));
     }
 
     /// HEX-RT-15: once the run supervisor removes a cgroup, its pinned directory must report absence even if

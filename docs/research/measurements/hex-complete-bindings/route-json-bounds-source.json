@@ -1,0 +1,33 @@
+{
+  "checks": {
+    "compile": "unrun",
+    "diff": "pass",
+    "native": "unrun",
+    "scoped_format": "pass"
+  },
+  "controls": {
+    "backing_json_claims_obey_the_same_device_address_space_before_allocation": "unrun",
+    "capacity_route_json_fields_refuse_counts_before_materializing_a_report": "unrun",
+    "initialized_route_json_bounds_precede_shared_owner_construction": "unrun",
+    "route_sequence_bounds_refuse_before_visiting_the_excess_value": "unrun"
+  },
+  "frozen_logical_source": "f3f99e71304a780e2a75fd143895396dbd8f2d6a",
+  "kind": "source-only/new-feature-input-boundary",
+  "new_crate_versions": false,
+  "policy": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "role": "implementer",
+  "root_metadata": {
+    "entry": "serde_json.workspace = true",
+    "lock": "hex-sim dependency edge to existing serde_json only",
+    "manifest": "crates/hex-sim/Cargo.toml",
+    "section": "dev-dependencies",
+    "workspace_version": "1.0.154"
+  },
+  "route_admission_remedy": false,
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source_sha256": {
+    "crates/hex-api/src/runtime.rs": "11bc6efca20f42e394555ebf613a12feeec112ceb3300dc40e44c5ce9a3fdb8e",
+    "crates/hex-sim/src/model.rs": "337556fdf17f55730b475e9c6a9fcdbbff156a7e633375a8bafe458d1cf93222"
+  },
+  "wire_changed": false
+}

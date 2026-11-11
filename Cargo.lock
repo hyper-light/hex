@@ -435,6 +435,7 @@ dependencies = [
  "hyper-timing",
  "proptest",
  "serde",
+ "serde_json",
  "thiserror",
  "triomphe",
 ]

@@ -1,0 +1,61 @@
+{
+  "base": "4687c3d8d210b43887309961357235f9086ae873",
+  "kind": "new required measured-backing contract; not a reproduced legacy-usage bug",
+  "source_only": true,
+  "production": {
+    "crates/hex-core/src/cgroup.rs": "1cb1047272a1c9010fe04d6fda6c24eb9ba9502ca9dbe91fdd879cb29ee03e01",
+    "crates/hex-runtime/src/linux/cgroup.rs": "162015adf83742c4016ac8b4cb5c5b4fad93eb9f75351f473d455c19779c6dcc"
+  },
+  "api": [
+    "hex_core::cgroup::managed_usage(&UsageFiles) -> Result<Usage, Refusal>",
+    "BoxCgroup::managed_usage(&self) -> Result<Usage, Refusal>"
+  ],
+  "constructor_dependency": "SAME native receipt must retain BoxRoot::create/get -> child with fd Some. BoxCgroup::at refuses; no path reopen or new owner. L1 confirmed create/get/cold initialized-root attach pin directory. Supervisor maps failures to exact NativeRecord uncertainty.",
+  "ordinary_function_bodies_byte_identical": {
+    "crates/hex-core/src/cgroup.rs:pub fn usage(": true,
+    "crates/hex-runtime/src/linux/cgroup.rs:pub fn usage(": true,
+    "crates/hex-runtime/src/linux/cgroup.rs:pub fn baseline(": true,
+    "crates/hex-runtime/src/linux/cgroup.rs:pub fn usage_since(": true
+  },
+  "new_controls": {
+    "core": 3,
+    "runtime_private_file_and_reader": 3,
+    "executed": 0,
+    "outcome": "UNRUN; matched source/light envelope needed, no native or readiness claim"
+  },
+  "local_checks": {
+    "named_path_rustfmt": 0,
+    "git_diff_check": 0,
+    "ordinary_function_body_comparison": "identical"
+  },
+  "bounds": "Existing MAX_CGROUP_FILE 64KiB plus existing READ_CHUNK 4096 bytes per required file, checked and try_reserve_exact before file open/read. Same existing read loop. Seven UsageFiles strings retained at most seven such buffers; this reservation cost is unprofiled, not claimed fast. Shared ReadFailure now delays formatting so strict errors use fallible formatting; legacy error text preserved.",
+  "refusals": "Required file absent/read/UTF-8/size error -> Os or Exhausted. Missing/malformed/duplicate required numeric counter or checked IO sum overflow -> Invalid/Exhausted. Successful empty io.stat -> measured zero. No partial observation returned.",
+  "sources": [
+    {
+      "url": "https://docs.kernel.org/admin-guide/cgroup-v2.html#cpu-interface-files",
+      "checked": "2026-11-10",
+      "basis": "cpu.stat required usage_usec; all descendants included"
+    },
+    {
+      "url": "https://docs.kernel.org/admin-guide/cgroup-v2.html#io-interface-files",
+      "checked": "2026-11-10",
+      "basis": "io.stat nested major:minor keys; rbytes/wbytes counters, order unspecified"
+    },
+    {
+      "url": "https://doc.rust-lang.org/std/vec/struct.Vec.html#method.try_reserve_exact",
+      "checked": "2026-11-10",
+      "basis": "fallible reservation before existing Vec append; capacity can exceed requested, logical read bound remains fixed"
+    }
+  ],
+  "alternatives": "Legacy missing->0 cannot credit measured backing room. Independent reader/parser/cache rejected: validate format/checked sum, then reuse existing core usage projection and SAME descriptor reader. No new DTO or ledger.",
+  "rules": {
+    "R01": "New required storage/diagnostic reservation fallible; legacy usage/read/allocation policies outside span unchanged. Source-only, compiler/lints owed.",
+    "R02_R03": "Primary kernel/Rust contracts above; reused existing read/chunk bound, no invented timer or tuning value.",
+    "R04_R05_R06_R07_R12_R13": "One synchronous observation -> complete Usage or typed refusal; same pinned native owner, parser/reader, no wait/cache/manager.",
+    "R08_R14": "ROOT profiling/benchmark/competition/allocations owed; no performance claim.",
+    "R09": "Required new contract, not prior legacy defect allegation; no red/green claimed.",
+    "R10_R15": "Signed source and six unrun focused controls; ROOT matched integration/native/audit/full gates still owed.",
+    "R11": "Linux glibc/musl amd64/arm64 source adapter; tests/compiler/native unrun here; Mac/Windows backing producers separate.",
+    "R16": "No jobs, native actions, runner changes or deletions; preserved originals/drafts."
+  }
+}

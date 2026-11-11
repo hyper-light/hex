@@ -267,6 +267,7 @@ pub struct BackingOffer {
     pub cost: RuntimeCost,
     pub phase: BackingPhase,
     /// Exact administrator-provisioned claims. These IDs supply no model, memory or load facts.
+    #[serde(deserialize_with = "deserialize_provisioning")]
     pub devices: Vec<crate::DeviceId>,
 }
 impl BackingOffer {
@@ -308,7 +309,89 @@ impl BackingOffer {
 pub struct BackingGrant {
     pub key: BackingKey,
     pub allocation: Allocation,
+    #[serde(deserialize_with = "deserialize_provisioning")]
     pub devices: Vec<crate::DeviceId>,
+}
+
+fn deserialize_provisioning<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<crate::DeviceId>, D::Error> {
+    bounded_values(
+        deserializer,
+        crate::MAX_DEVICES,
+        "physical claim count exceeds its address space",
+    )
+}
+
+/// Count before decoding another value; an excessive next element is never materialized. These
+/// vectors have protocol/address-space bounds, not input-selected allocation hints. Doubling a
+/// checked capacity up to that exact bound gives amortized growth; an empty sequence allocates none.
+fn bounded_values<'de, D, T>(
+    deserializer: D,
+    bound: usize,
+    refused: &'static str,
+) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    use serde::de::{DeserializeSeed, Error, SeqAccess, Visitor};
+    struct EndOnly(&'static str);
+    impl<'de> DeserializeSeed<'de> for EndOnly {
+        type Value = ();
+        fn deserialize<D: serde::Deserializer<'de>>(self, _: D) -> Result<(), D::Error> {
+            Err(D::Error::custom(self.0))
+        }
+    }
+    struct Values<T> {
+        bound: usize,
+        refused: &'static str,
+        element: std::marker::PhantomData<T>,
+    }
+    impl<'de, T: serde::Deserialize<'de>> Visitor<'de> for Values<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a bounded runtime route or physical-claim sequence")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            if seq.size_hint().is_some_and(|count| count > self.bound) {
+                return Err(A::Error::custom(self.refused));
+            }
+            let mut values: Vec<T> = Vec::new();
+            loop {
+                if values.len() == self.bound {
+                    if seq.next_element_seed(EndOnly(self.refused))?.is_some() {
+                        return Err(A::Error::custom(self.refused));
+                    }
+                    break;
+                }
+                let Some(value) = seq.next_element::<T>()? else {
+                    break;
+                };
+                if values.len() == values.capacity() {
+                    let capacity = values
+                        .capacity()
+                        .checked_mul(2)
+                        .unwrap_or(self.bound)
+                        .max(1)
+                        .min(self.bound);
+                    let additional = capacity
+                        .checked_sub(values.len())
+                        .ok_or_else(|| A::Error::custom(self.refused))?;
+                    values
+                        .try_reserve_exact(additional)
+                        .map_err(|_| A::Error::custom("runtime sequence allocation refused"))?;
+                }
+                values.push(value);
+            }
+            Ok(values)
+        }
+    }
+    deserializer.deserialize_seq(Values::<T> {
+        bound,
+        refused,
+        element: std::marker::PhantomData,
+    })
 }
 impl BackingGrant {
     pub fn check(&self) -> Result<(), Refusal> {
@@ -625,18 +708,63 @@ pub struct Capacity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<RuntimeCost>,
     /// Actual initialized execution routes. Empty retains only unambiguous legacy native behavior.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Capacity::deserialize_routes"
+    )]
     pub routes: Vec<RouteOffer>,
     /// One eligibility word paired with each canonical DeviceInfo above. Bit positions are local
     /// to this snapshot's routes; persisted physical identity is ALWAYS the DeviceId, never a bit.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Capacity::deserialize_device_routes"
+    )]
     pub device_routes: Vec<u64>,
     /// Real pool backing offers/receipts from the same native owner, not synthetic workload rows.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Capacity::deserialize_backings"
+    )]
     pub backings: Vec<BackingOffer>,
 }
 
 impl Capacity {
+    /// Serde field entrypoint also used by the scheduler's SAME immutable route view.
+    pub fn deserialize_routes<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<RouteOffer>, D::Error> {
+        bounded_values(
+            deserializer,
+            MAX_RUNTIME_ROUTES,
+            "runtime route count exceeds the 64-bit mask",
+        )
+    }
+
+    /// One word per existing canonical device; no second inventory is decoded here.
+    pub fn deserialize_device_routes<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<u64>, D::Error> {
+        bounded_values(
+            deserializer,
+            crate::MAX_DEVICES,
+            "device eligibility count exceeds its address space",
+        )
+    }
+
+    /// A backing must have a referencing initialized route, so the SAME route bound applies.
+    pub fn deserialize_backings<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<BackingOffer>, D::Error> {
+        bounded_values(
+            deserializer,
+            MAX_RUNTIME_ROUTES,
+            "runtime backing count exceeds the route mask",
+        )
+    }
+
     /// Copy an owned snapshot without unchecked allocation. Validation remains explicit: copying
     /// scalar facts cannot turn a malformed report into an initialized capability.
     pub fn try_clone(&self) -> Result<Self, Refusal> {
@@ -1331,6 +1459,128 @@ mod tests {
 #[cfg(test)]
 mod route_tests {
     use super::*;
+
+    /// AC-T7.4.1/R01: count/hint checks precede decoding an excessive value and fallible Vec growth.
+    #[test]
+    fn route_sequence_bounds_refuse_before_visiting_the_excess_value() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static VISITED: AtomicUsize = AtomicUsize::new(0);
+        #[derive(Debug)]
+        struct Counted;
+        impl<'de> Deserialize<'de> for Counted {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                VISITED.fetch_add(1, Ordering::SeqCst);
+                u64::deserialize(deserializer)?;
+                Ok(Self)
+            }
+        }
+        let empty: Vec<Counted> = bounded_values(
+            &mut serde_json::Deserializer::from_str("[]"),
+            MAX_RUNTIME_ROUTES,
+            "route bound",
+        )
+        .unwrap();
+        assert_eq!((empty.len(), empty.capacity()), (0, 0));
+        for count in [MAX_RUNTIME_ROUTES, MAX_RUNTIME_ROUTES + 1] {
+            VISITED.store(0, Ordering::SeqCst);
+            let json = format!("[{}]", vec!["0"; count].join(","));
+            let result: Result<Vec<Counted>, _> = bounded_values(
+                &mut serde_json::Deserializer::from_str(&json),
+                MAX_RUNTIME_ROUTES,
+                "route bound",
+            );
+            assert_eq!(result.is_ok(), count == MAX_RUNTIME_ROUTES);
+            assert_eq!(VISITED.load(Ordering::SeqCst), MAX_RUNTIME_ROUTES);
+        }
+        VISITED.store(0, Ordering::SeqCst);
+        let hostile = serde::de::value::SeqDeserializer::<_, serde::de::value::Error>::new(
+            std::iter::repeat_n(0u64, usize::MAX),
+        );
+        let result: Result<Vec<Counted>, _> =
+            bounded_values(hostile, MAX_RUNTIME_ROUTES, "route bound");
+        assert!(result.is_err());
+        assert_eq!(VISITED.load(Ordering::SeqCst), 0);
+    }
+
+    /// AC-T7.4.1/R01: actual new Capacity fields use the count guard before model validation.
+    #[test]
+    fn capacity_route_json_fields_refuse_counts_before_materializing_a_report() {
+        let route = serde_json::to_value(RouteOffer {
+            key: key(ImageOs::Windows, Execution::Native, GpuEligibility::Any),
+            cost: None,
+            backing: None,
+        })
+        .unwrap();
+        let backing = serde_json::to_value(BackingOffer {
+            key: BackingKey {
+                pool: [1; 32],
+                generation: [2; 16],
+            },
+            cost: cost(),
+            phase: BackingPhase::Prepared,
+            devices: Vec::new(),
+        })
+        .unwrap();
+        for (field, value, count, cause) in [
+            ("routes", route, MAX_RUNTIME_ROUTES + 1, "route count"),
+            (
+                "device_routes",
+                serde_json::json!(0),
+                crate::MAX_DEVICES + 1,
+                "eligibility count",
+            ),
+            ("backings", backing, MAX_RUNTIME_ROUTES + 1, "backing count"),
+        ] {
+            let mut input = serde_json::to_value(capacity()).unwrap();
+            input[field] = serde_json::Value::Array(vec![value; count]);
+            let error = serde_json::from_value::<Capacity>(input).unwrap_err();
+            assert!(error.to_string().contains(cause), "{field}: {error}");
+        }
+        let empty = serde_json::to_value(capacity()).unwrap();
+        let parsed: Capacity = serde_json::from_value(empty).unwrap();
+        assert!(
+            parsed.routes.is_empty()
+                && parsed.backings.is_empty()
+                && parsed.device_routes.is_empty()
+        );
+    }
+
+    /// AC-T7.4.1/R01: nested grants/offers cannot allocate an unbounded provisioning claim list.
+    #[test]
+    fn backing_json_claims_obey_the_same_device_address_space_before_allocation() {
+        let grant = BackingGrant {
+            key: BackingKey {
+                pool: [1; 32],
+                generation: [2; 16],
+            },
+            allocation: cost().allocate(CapacityResources::default()).unwrap(),
+            devices: Vec::new(),
+        };
+        let claims: Vec<_> = (0..crate::MAX_DEVICES)
+            .map(|key| serde_json::json!({"kind":"gpu","key":key}))
+            .collect();
+        let mut input = serde_json::to_value(&grant).unwrap();
+        input["devices"] = serde_json::Value::Array(claims);
+        let parsed: BackingGrant = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(parsed.devices.len(), crate::MAX_DEVICES);
+        input["devices"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"kind":"gpu","key":crate::MAX_DEVICES}));
+        let error = serde_json::from_value::<BackingGrant>(input.clone()).unwrap_err();
+        assert!(error.to_string().contains("physical claim count"));
+        let mut offer = serde_json::to_value(BackingOffer {
+            key: grant.key,
+            cost: cost(),
+            phase: BackingPhase::Prepared,
+            devices: Vec::new(),
+        })
+        .unwrap();
+        offer["devices"] = input["devices"].take();
+        let error = serde_json::from_value::<BackingOffer>(offer).unwrap_err();
+        assert!(error.to_string().contains("physical claim count"));
+    }
+
     fn platform(os: ImageOs) -> ImagePlatform {
         ImagePlatform {
             os,

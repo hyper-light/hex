@@ -282,6 +282,222 @@ pub fn usage(f: &UsageFiles) -> Usage {
     }
 }
 
+/// Native backing accounting requires every counter used by [`Usage`]. Unlike [`usage`], missing or
+/// malformed counters cannot become room for another allocation. The shell must have successfully
+/// read all seven files from the same pinned cgroup; an empty `io.stat` is a valid read of no I/O.
+pub fn managed_usage(f: &UsageFiles) -> Result<Usage, Refusal> {
+    managed_number(&f.memory_current, "memory.current")?;
+    managed_number(&f.memory_peak, "memory.peak")?;
+    managed_number(&f.pids_current, "pids.current")?;
+    managed_flat(&f.memory_events, "oom_kill", "memory.events")?;
+    managed_flat(&f.pids_events, "max", "pids.events")?;
+    managed_flat(&f.cpu_stat, "usage_usec", "cpu.stat")?;
+
+    let mut read = 0u64;
+    let mut written = 0u64;
+    for line in f.io_stat.lines().filter(|line| !line.trim().is_empty()) {
+        let mut parts = line.split_ascii_whitespace();
+        let device = parts
+            .next()
+            .and_then(|value| value.split_once(':'))
+            .ok_or_else(|| managed_invalid("io.stat", "missing major:minor device key"))?;
+        for number in [device.0, device.1] {
+            u32::try_from(managed_number(number, "io.stat")?)
+                .map_err(|_| managed_invalid("io.stat", "device number exceeds u32"))?;
+        }
+        let mut rbytes = None;
+        let mut wbytes = None;
+        for field in parts {
+            let (key, value) = field
+                .split_once('=')
+                .filter(|(key, _)| !key.is_empty())
+                .ok_or_else(|| managed_invalid("io.stat", "invalid nested counter"))?;
+            managed_number(value, "io.stat")?;
+            let target = match key {
+                "rbytes" => &mut rbytes,
+                "wbytes" => &mut wbytes,
+                _ => continue,
+            };
+            if target.replace(value).is_some() {
+                return Err(managed_invalid("io.stat", "duplicate required counter"));
+            }
+        }
+        let rbytes = rbytes.ok_or_else(|| managed_invalid("io.stat", "missing rbytes counter"))?;
+        let wbytes = wbytes.ok_or_else(|| managed_invalid("io.stat", "missing wbytes counter"))?;
+        // The ordinary parser saturates. That cannot hide an overflow in measured backing usage.
+        read = read
+            .checked_add(managed_number(rbytes, "io.stat")?)
+            .ok_or_else(|| managed_invalid("io.stat", "read-byte sum overflows u64"))?;
+        written = written
+            .checked_add(managed_number(wbytes, "io.stat")?)
+            .ok_or_else(|| managed_invalid("io.stat", "write-byte sum overflows u64"))?;
+    }
+    Ok(usage(f))
+}
+
+fn managed_number(text: &str, file: &'static str) -> Result<u64, Refusal> {
+    let text = text.trim();
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(managed_invalid(
+            file,
+            "required counter is not an unsigned decimal",
+        ));
+    }
+    text.parse()
+        .map_err(|_| managed_invalid(file, "required counter exceeds u64"))
+}
+
+fn managed_flat(text: &str, required: &str, file: &'static str) -> Result<(), Refusal> {
+    let mut found = false;
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let mut parts = line.split_ascii_whitespace();
+        let key = parts
+            .next()
+            .ok_or_else(|| managed_invalid(file, "missing counter key"))?;
+        let value = parts
+            .next()
+            .ok_or_else(|| managed_invalid(file, "missing counter value"))?;
+        managed_number(value, file)?;
+        if parts.next().is_some() {
+            return Err(managed_invalid(file, "extra counter fields"));
+        }
+        if key == required {
+            if found {
+                return Err(managed_invalid(file, "duplicate required counter"));
+            }
+            found = true;
+        }
+    }
+    if !found {
+        return Err(managed_invalid(file, "missing required counter"));
+    }
+    Ok(())
+}
+
+fn managed_invalid(file: &'static str, message: &'static str) -> Refusal {
+    let mut why = String::new();
+    if why.try_reserve_exact(message.len()).is_err() {
+        return Refusal::Exhausted {
+            what: "managed usage refusal bytes",
+            bound: message.len(),
+        };
+    }
+    why.push_str(message);
+    Refusal::Invalid { what: file, why }
+}
+
+#[cfg(test)]
+mod managed_usage_tests {
+    use super::*;
+
+    fn counters() -> UsageFiles {
+        UsageFiles {
+            memory_current: "2048\n".into(),
+            memory_peak: "4096\n".into(),
+            memory_events: "low 0\noom_kill 2\noom_group_kill 0\n".into(),
+            pids_current: "3\n".into(),
+            pids_events: "max 4\n".into(),
+            cpu_stat: "system_usec 20\nusage_usec 70\nuser_usec 50\n".into(),
+            io_stat: "8:16 wbytes=200 rbytes=100 rios=1\n8:0 rbytes=7 wbytes=11\n".into(),
+        }
+    }
+
+    /// AC-T7.1.2: actual backing usage has all kernel-reported fields; a valid empty I/O report
+    /// measures zero while unknown well-formed counters and kernel ordering remain compatible.
+    #[test]
+    fn strict_usage_accepts_complete_counters_and_empty_io() {
+        let mut files = counters();
+        assert_eq!(
+            managed_usage(&files),
+            Ok(Usage {
+                memory_bytes: 2048,
+                memory_peak_bytes: 4096,
+                oom_kills: 2,
+                pids: 3,
+                pids_refused: 4,
+                cpu_usec: 70,
+                io_read_bytes: 107,
+                io_write_bytes: 211,
+            })
+        );
+        files.io_stat.clear();
+        let got = managed_usage(&files).unwrap();
+        assert_eq!((got.io_read_bytes, got.io_write_bytes), (0, 0));
+        files.memory_current = "0\n".into();
+        files.memory_peak = "0\n".into();
+        files.memory_events = "oom_kill 0\n".into();
+        files.pids_current = "0\n".into();
+        files.pids_events = "max 0\n".into();
+        files.cpu_stat = "usage_usec 0\n".into();
+        assert_eq!(managed_usage(&files), Ok(Usage::default()));
+    }
+
+    /// AC-T7.1.2: a missing or malformed required counter refuses the entire observation; it must
+    /// never turn into spare capacity while the native backing remains charged.
+    #[test]
+    fn strict_usage_refuses_every_missing_or_malformed_required_counter() {
+        for field in 0..7 {
+            for damaged in ["", "not-a-counter", "-1", "18446744073709551616"] {
+                if field == 6 && damaged.is_empty() {
+                    continue; // A successfully read empty io.stat is valid.
+                }
+                let mut files = counters();
+                let target = match field {
+                    0 => &mut files.memory_current,
+                    1 => &mut files.memory_peak,
+                    2 => &mut files.memory_events,
+                    3 => &mut files.pids_current,
+                    4 => &mut files.pids_events,
+                    5 => &mut files.cpu_stat,
+                    6 => &mut files.io_stat,
+                    _ => unreachable!(),
+                };
+                *target = damaged.into();
+                assert!(managed_usage(&files).is_err(), "field {field}: {damaged:?}");
+            }
+        }
+        let mut files = counters();
+        files.cpu_stat = "user_usec 50\nsystem_usec 20\n".into();
+        assert!(matches!(
+            managed_usage(&files),
+            Err(Refusal::Invalid {
+                what: "cpu.stat",
+                ..
+            })
+        ));
+    }
+
+    /// AC-T7.1.2: hostile counter text cannot select one of conflicting facts or saturate an
+    /// overflowing sum into a successful measurement.
+    #[test]
+    fn strict_usage_refuses_ambiguous_nested_and_flat_counters() {
+        for cpu in [
+            "usage_usec 1\nusage_usec 2\n",
+            "usage_usec 1 extra\n",
+            "usage_usec +1\n",
+        ] {
+            let mut files = counters();
+            files.cpu_stat = cpu.into();
+            assert!(managed_usage(&files).is_err());
+        }
+        for io in [
+            "8:0 rbytes=1",
+            "8:0 wbytes=1",
+            "8:0 rbytes=1 wbytes=2 rbytes=3",
+            "8:0 rbytes=1 wbytes=+2",
+            "8:0 rbytes=1 wbytes=2 unknown=broken",
+            "8:0:0 rbytes=1 wbytes=2",
+            "4294967296:0 rbytes=1 wbytes=2",
+            "8:0 rbytes=18446744073709551615 wbytes=0\n8:1 rbytes=1 wbytes=0",
+            "8:0 rbytes=0 wbytes=18446744073709551615\n8:1 rbytes=0 wbytes=1",
+        ] {
+            let mut files = counters();
+            files.io_stat = io.into();
+            assert!(managed_usage(&files).is_err(), "{io:?}");
+        }
+    }
+}
+
 /// The value of `key` in a flat-keyed file ("key value" lines).
 pub fn flat(text: &str, key: &str) -> Option<u64> {
     text.lines().find_map(|line| {
