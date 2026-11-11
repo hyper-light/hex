@@ -1,0 +1,11 @@
+# ROOT release follow-up at 8199ca34
+
+Source `8199ca3443ecee06c819381afbd19534d2abaa25`, Linux x86_64 glibc, Rust1.99.1. Normal admitted 1 CPU/4 GiB/12 GiB owned scope, nice10/jobs1/threads1. Coordinator policy7d7e0855, rules SHA df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3. Raw archive/member hashes independently verified again before this record. Commands, binary hashes, limits, exact children and outcomes are in result/raw.
+
+198 selected: 194 passed, four failed, zero ignored. The Released(None) original after cleanup fix, no-Intent configuration inputs, actual pending phase matrix, and native-OCI capacity composition each passed. Full simulator: 193 selected, 190 passed and three failed; the release freshness original and new ordered refresh/duplicate-ACK controls passed within those190. Full simulator regression was necessary after four common resource-delta call sites changed. Do not replay those190 without a new reason.
+
+The checked factual-slot original failed at the intended publication assertion: actual empty DeviceInfo list versus checked supplied metadata (e05520c2...). This is a relevant red; L2 owns the minimal publication remedy. The simulator failures were facts_make_the_node_each_os_can_be, a_seed_names_one_cluster_of_workloads_that_fit, and reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_twice. The latter helper is used before and after recovery; this raw panic alone does not identify which stage failed. L1 owns diagnosis, narrow source changes and new controls.
+
+Strict seven-crate all-target Clippy reached CLI and failed only three standalone completion_backends fixture style causes (start9arguments and two collapsible conditionals). L4's cb21 correction is source-only until the next joined check. No warning waiver, guard/oracle weakening or production change follows from those three causes.
+
+All seven recorded Cargo processes were reaped; temp entries0 and original source differences0. Native invocations0. Whole check exit1 is retained. Source/pure results do not prove native HCS/Firecracker GPU execution, scope cleanup, allocation/performance or supported-target completion. Full R01-R16 audit, native/fault/mutation, profiling/benchmarks and final gates remain owed.

@@ -231,8 +231,8 @@ pub fn platform(os: &str, arch: &str) -> Option<(Os, Arch)> {
 impl Facts {
     /// The node the scheduler places on with an empty own ledger: its threads and current memory
     /// and disk room; initialized classes its platform supports; and devices those classes can be
-    /// given. Apple GPUs and whole devices on microVM-only nodes are omitted; GPU models are interned
-    /// in `cluster`.
+    /// given. Raw GPU observations retain the legacy OCI-only device mask until an initialized
+    /// attachment report supplies actual route eligibility; GPU models are interned in `cluster`.
     pub fn node(&self, id: NodeId, cluster: &mut Cluster) -> Result<NodeSpec, SimError> {
         self.node_with_owned(id, cluster, Resources::default())
     }
@@ -571,8 +571,8 @@ mod tests {
 
     /// CP-T7.4: do turn each OS's facts into a node; expect its capacity from its threads, memory and
     /// disk, the classes its OS and KVM run, and only the devices one of those classes can be given:
-    /// a Linux host's GPU and VFIO function, a Windows host's GPU and none of its devices whole, a
-    /// Mac's GPU not at all.
+    /// a Linux host's GPU and VFIO function, a Windows host's GPU and none of its devices whole,
+    /// and Mac GPU metadata without inventing a verified guest attachment route.
     #[test]
     fn facts_make_the_node_each_os_can_be() {
         let gpu = Gpu {
@@ -639,7 +639,13 @@ mod tests {
         let mut mac_facts = facts(Os::Macos, false);
         mac_facts.arch = Arch::Aarch64;
         let mac = mac_facts.node(NodeId(3), &mut c).unwrap();
-        assert_eq!((mac.capacity.gpus, mac.devices.len()), (0, 0));
+        assert_eq!((mac.capacity.gpus, mac.devices.len()), (1, 1));
+        assert_eq!(mac.devices[0].load, gpu.load);
+        assert_eq!(
+            mac.devices[0].classes,
+            Classes::NONE.with(crate::model::Class::Oci)
+        );
+        assert!(!mac.devices[0].classes.has(crate::model::Class::Shards));
         assert_eq!(c.models.len(), 1);
     }
 }

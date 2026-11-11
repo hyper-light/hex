@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "hex_claude_full_read_sha256": "a093d49f0e51a0c9026996cb170980696dc375364b8d9f13866200c6232e0c2b",
+  "parent": "8199ca3443ecee06c819381afbd19534d2abaa25",
+  "source": {
+    "path": "crates/hex-cli/tests/completion_backends.rs",
+    "parent_sha256": "33898eb92137cba486a24f871a3cb71f8091e1942a35ca45a2d0bfd19374f81b",
+    "sha256": "c905b1988bbfc82f6b55bc9987bd5845796d391736230c0108bc16b9a5871265",
+    "bytes": 77989
+  },
+  "original_actual": {
+    "root_source": "8199ca3443ecee06c819381afbd19534d2abaa25",
+    "phase": "joined strict Clippy",
+    "exit": 101,
+    "raw_copy": "original-8199-joined-strict-clippy.log",
+    "raw_sha256": "b375f933402eb2c2a925003a955125c85eaf8305c197fca0f4c85f19b0afc26e",
+    "raw_bytes": 6112,
+    "verified_root_archive_sha256": "ef90398bba474797dda1ffc659f112a82f886ce3e16834d9a3221b1d3097d16c",
+    "verified_root_archive_bytes": 345535,
+    "diagnostics": [
+      "CreatingObserver::start line387,9arguments/7limit",
+      "finish line538,collapsible nested wake write if",
+      "Drop line586,collapsible nested finish error if"
+    ],
+    "attribution": "Full actual log read; no original standalone backend fixture invocation or workspace/native pass inferred."
+  },
+  "changes": [
+    "Private CreatingBounds groups the SAME wait,entries,events,bytes,notification_bytes scalars; start destructures immediately; single callsite supplies the SAME expressions/order; no default, validation/deadline/schema change.",
+    "Wake let-chain preserves Some wake -> failed write -> not BrokenPipe order; same uncertainty assignment.",
+    "Drop let-chain preserves (worker_some OR child_some) before calling finish once and logging only Err."
+  ],
+  "preserved": "No added allow/guard/oracle/test-selector change; existing header/helpers and unrelated Service/workload/oracle/test bodies identical.",
+  "protected": [
+    {
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "2274b7d480ab9291716b0ea257f750e0e9c53fb8e86ab20bf600cbcc51b1dd59",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/calls/budget_tests.rs",
+      "sha256": "1a0be87518194ba141359eedfd0c1f124cb436d8a064098af9fd04c335e486ec",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-core/src/wire.rs",
+      "sha256": "9f0e456b8d0c030f58539f8bfa9bf9f3f584bec9ffa969d04e2928cc9706b138",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-api/src/devices.rs",
+      "sha256": "c1318774bda085cff7ec888aeb236179aac526d7adb5e244fad7afcf1ee3bf3b",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "a8f51f83a7b8ed2c43e0824f3af7aff5e967ba77159dde320841183559ea29b8",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+      "unchanged": true
+    },
+    {
+      "path": "CLAUDE.md",
+      "sha256": "a093d49f0e51a0c9026996cb170980696dc375364b8d9f13866200c6232e0c2b",
+      "unchanged": true
+    }
+  ],
+  "r10_evidence": "ROOT7281b44c prepared-settle identical-fixture comparison retained exactly at its prior before/after/mutation/restored attribution; no replay or workspace-green claim.",
+  "builds_executed": 0,
+  "tests_executed": 0,
+  "native_executed": 0,
+  "checks_dispatched": 0,
+  "status": "SOURCE ONLY; scoped rustfmt/source-integrity inspection only. ROOT owns next matched strict compilation/intake; no hardware/native/full gates claim."
+}

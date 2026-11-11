@@ -1,0 +1,31 @@
+{
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "parent_original": "c8f9184d8661d88374dde8ab645809f5f57d27fa",
+  "fixed_production": "005f3a23bbfb173718a520160a48c83f66ca56d3",
+  "original_a102": "PRECONDITION FAIL before snapshot/oracle; cleanup UNKNOWN; not semantic red",
+  "original_a102_log_sha256": "458f81cc463276135a8ccb91b82d5298255ca1e5801ac913c01ee02ffa56e4f0",
+  "original_clippy_log_sha256": "ef714bb0e7b567b0dea6e4ff3e3b1d8fe8c94836e4da2b144beca2819b7c5701",
+  "nproc_primitive_body_unchanged": true,
+  "nproc_original_pass_do_not_repeat": true,
+  "one_original_waiter_moved_to_ProcessBox": true,
+  "native_symbols_added": [],
+  "production_changes": [],
+  "remaining": "ROOT matched changed escape/Clippy checks; production remedy held; actual cleanup and scope completion unverified",
+  "local_metadata": {
+    "scoped_rustfmt": 0,
+    "git_diff_check": 0,
+    "build_test_native_dispatch": false
+  },
+  "source_hashes": {
+    "docs/research/measurements/hex-complete-lifecycle/macos_scope_completion_root005_tests.rs": {
+      "bytes": 24678,
+      "sha256": "28e12918048c444b07f624fafe17fa604c463abaf773a0a80312eb0fa7901d77"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/macos-scope-root005-fixture-cause.md": {
+      "bytes": 4258,
+      "sha256": "c4787f2c07eb47d85d593c9886c25ceee02b859beec5fa15e4b501a57b3860a3"
+    }
+  }
+}

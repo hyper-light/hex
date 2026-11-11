@@ -123,6 +123,13 @@ fn reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_t
         |_| Boxed::Absent,
     )
     .unwrap();
+    eprintln!(
+        "device-recovery phase=initial-create load={:?}",
+        spec.devices
+            .iter()
+            .map(|device| device.load)
+            .collect::<Vec<_>>()
+    );
     let (old, before_held) = create_confirmed(&mut node, &mut records, gpu);
     assert_eq!(before_held, [0]);
     let (sibling, sibling_assignment) = create_confirmed(&mut node, &mut records, cpu);
@@ -141,7 +148,11 @@ fn reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_t
         busy_per_mille: Some(1_000),
         memory_used: Some(0),
     };
-    swapped.devices[1].load = GpuLoad::default();
+    // This fixture swaps two KNOWN readings; Default intentionally denotes unread native data.
+    swapped.devices[1].load = GpuLoad {
+        busy_per_mille: Some(0),
+        memory_used: Some(0),
+    };
     for (before, after) in spec.devices.iter().zip(&swapped.devices) {
         assert_eq!(
             (before.kind, before.model, before.size),
@@ -192,6 +203,7 @@ fn reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_t
     let reconfirmed = std::mem::take(&mut node.told);
     let sibling_survived = reconfirmed.contains(&Told::Started(sibling, NodeId(0)))
         && assignments.get(&sibling) == before_assignments.get(&sibling);
+    eprintln!("device-recovery phase=recovered-fresh-create old={old:?} held={recovered_held:?}");
     let (fresh, fresh_held) = create_confirmed(&mut node, &mut records, gpu);
     assert!(assignments.insert(fresh, fresh_held.clone()).is_none());
     let collisions: Held = before_held

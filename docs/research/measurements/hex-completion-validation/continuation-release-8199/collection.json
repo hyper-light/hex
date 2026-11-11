@@ -1,0 +1,67 @@
+{
+  "bytes": 345535,
+  "sha256": "ef90398bba474797dda1ffc659f112a82f886ce3e16834d9a3221b1d3097d16c",
+  "members": {
+    "cohort-8199ca34-linux-release-after-8199/source-before.json": {
+      "bytes": 478079,
+      "sha256": "0398092accfc578427566323c8affadfd2bf3297a96908df9f627044a24be056"
+    },
+    "cohort-8199ca34-linux-release-after-8199/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-8199ca34-linux-release-after-8199/owned-scope-limits.json": {
+      "bytes": 258,
+      "sha256": "3e5d9e1d4e871fed073f6f7bd04ebb1fbbee4d3e4bba3aa76392557c7070d141"
+    },
+    "cohort-8199ca34-linux-release-after-8199/released-none-after.log": {
+      "bytes": 3435,
+      "sha256": "e42716770611993d0a273cc8b2f4922c5014fe05dbc7b77883234e22ea23eb91"
+    },
+    "cohort-8199ca34-linux-release-after-8199/running.json": {
+      "bytes": 33133,
+      "sha256": "521334bf43d000a839894236b96f5fe387c9fb1ef44d9f7202157b02d3116ab1"
+    },
+    "cohort-8199ca34-linux-release-after-8199/no-intent-input-after.log": {
+      "bytes": 448,
+      "sha256": "65396ff749fa409867df80ae003d8963afa6b2455a80e0a1d21e401ffcdc3420"
+    },
+    "cohort-8199ca34-linux-release-after-8199/handoff-phase-input-after.log": {
+      "bytes": 458,
+      "sha256": "6af7ffdbf8a0f00dc7bb6dac7688e04ad152737e292cc643bee675cfbe59832b"
+    },
+    "cohort-8199ca34-linux-release-after-8199/composition-original-after.log": {
+      "bytes": 460,
+      "sha256": "655a1b551f6ce0393810f7508b8ad19d7370f645299ac878f1ee5463b182cc01"
+    },
+    "cohort-8199ca34-linux-release-after-8199/factual-slot-original-valid-prefix.log": {
+      "bytes": 1359,
+      "sha256": "e05520c2dc384c2f588aa489d71f20445cb09a23ad17f5dbcc4c5373f34fab5f"
+    },
+    "cohort-8199ca34-linux-release-after-8199/sim-resource-and-peer-regression.log": {
+      "bytes": 18412,
+      "sha256": "58df64bede84907e61dc3299b707957b98b79528c937eec34182434dd80221a5"
+    },
+    "cohort-8199ca34-linux-release-after-8199/joined-strict-clippy.log": {
+      "bytes": 6112,
+      "sha256": "b375f933402eb2c2a925003a955125c85eaf8305c197fca0f4c85f19b0afc26e"
+    },
+    "cohort-8199ca34-linux-release-after-8199/source-after.json": {
+      "bytes": 478079,
+      "sha256": "0398092accfc578427566323c8affadfd2bf3297a96908df9f627044a24be056"
+    },
+    "cohort-8199ca34-linux-release-after-8199/result.json": {
+      "bytes": 33391,
+      "sha256": "16b5cdf76b6d2f7663d8e5634faa553b80b2c8ca4a03e1748469dee3a22a324e"
+    },
+    "cohort-8199ca34-linux-release-after-8199/collected-binaries.json": {
+      "bytes": 33038,
+      "sha256": "218c3599e0307006fc05cf655a7c9d28feecbc38839ecc30188f5a630315c3d8"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

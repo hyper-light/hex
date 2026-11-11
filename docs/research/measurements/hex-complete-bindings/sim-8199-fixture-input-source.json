@@ -1,0 +1,48 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "fixed_source": "8199ca3443ecee06c819381afbd19534d2abaa25",
+  "source": [
+    {
+      "path": "crates/hex-sim/src/facts.rs",
+      "sha256": "7b955c67e4007d46fb977b59b61a8e49dd4b2ea94f4234abd3242cd6825d90b5"
+    },
+    {
+      "path": "crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs",
+      "sha256": "273793b02d1ed6e7d25cb5dc25f722587b78259bd77be52a95dfef461ea6981f"
+    }
+  ],
+  "actual_original": {
+    "source": "8199ca3443ecee06c819381afbd19534d2abaa25",
+    "selected": 193,
+    "passed": 190,
+    "failed": 3,
+    "ignored": 0,
+    "log_sha256": "58df64bede84907e61dc3299b707957b98b79528c937eec34182434dd80221a5",
+    "raw_sha256": "ef90398bba474797dda1ffc659f112a82f886ce3e16834d9a3221b1d3097d16c",
+    "full_log_read": true,
+    "source_changes": [],
+    "native": 0,
+    "temp_entries": 0,
+    "reaped": true
+  },
+  "scope": "ONLY two fixture input/feature-contract compatibility corrections and associated fact comments. No production admission/recovery/load-unknown fix; generator cause separate.",
+  "facts_cause": "Mac fact formatter now retains actual GPU metadata because VM class physical ceiling permits it. Old0/0 assertion predates new support. Port onlyto1/1 +same knownload +EXPLICIT legacyOCI-only device mask and noShards bit. Raw hardware facts stilldo not prove actual initialized attachment or grant.",
+  "peer_cause_and_limit": "Actual panic at create_confirmed27 reports Start[] but this helper is used both before and after reboot; raw contains no phase marker, so it does NOT establish initial-stage failure. Source initial Device::gpu creates explicit known0 counters. After reboot, swappedGPU1 used GpuLoad::default(None,None), contradicting this fixture known-idle load-swap requirement. Port ONLYthat fixture field toSome0/Some0; preserve unknownnative semantics and all assignment/noncollision/charge/delete/create oracles. Add bounded phase diagnostics to disambiguate any next failure. This is a fixture precondition cause, not a reproduced production recovery defect.",
+  "preserved": [
+    "Runtime/Index/peer production bodies unchanged",
+    "Original8199 source/raw fixed andretained",
+    "All recovery selected identities, surviving assignment equality, fourcreate/fourdelete evidence, zeroresource/record cleanup oracles unchanged",
+    "190passing cases not requested torepeat; native0 sourcefacts are pure model observations"
+  ],
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "tests_after": "UNRUN",
+    "dispatches": 0,
+    "native": 0
+  },
+  "remaining": "ROOT onlytwo affected fixture afters, generator actualcapability fix separately scoped; no full193repeat unless Root later gate requires. All realGPU/VM/resource/fault/profiling/main proofs stillROOT."
+}

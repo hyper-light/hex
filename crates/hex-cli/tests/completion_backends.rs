@@ -375,6 +375,14 @@ impl CreatingChanges {
     }
 }
 
+struct CreatingBounds {
+    wait: Duration,
+    entries: u64,
+    events: u64,
+    bytes: u64,
+    notification_bytes: u64,
+}
+
 struct CreatingObserver {
     stop: Arc<std::sync::atomic::AtomicBool>,
     ready: mpsc::Receiver<()>,
@@ -387,14 +395,17 @@ impl CreatingObserver {
     fn start(
         root: PathBuf,
         class: Class,
-        wait: Duration,
-        entries: u64,
-        events: u64,
-        bytes: u64,
-        notification_bytes: u64,
+        bounds: CreatingBounds,
         external: Option<Value>,
         scope: &Path,
     ) -> Result<Self, String> {
+        let CreatingBounds {
+            wait,
+            entries,
+            events,
+            bytes,
+            notification_bytes,
+        } = bounds;
         let until = Instant::now()
             .checked_add(wait)
             .ok_or("Creating observer deadline overflow")?;
@@ -535,12 +546,11 @@ impl CreatingObserver {
         self.stop.store(true, std::sync::atomic::Ordering::Release);
         let mut uncertainty = None;
         let mut reaped = None;
-        if let Some(wake) = &mut self.wake {
-            if let Err(error) = wake.write_all(b"x")
-                && error.kind() != std::io::ErrorKind::BrokenPipe
-            {
-                uncertainty = Some(error.to_string());
-            }
+        if let Some(wake) = &mut self.wake
+            && let Err(error) = wake.write_all(b"x")
+            && error.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            uncertainty = Some(error.to_string());
         }
         if let Some(mut child) = self.child.take() {
             match child.try_wait() {
@@ -583,10 +593,10 @@ impl CreatingObserver {
 
 impl Drop for CreatingObserver {
     fn drop(&mut self) {
-        if self.worker.is_some() || self.child.is_some() {
-            if let Err(error) = self.finish() {
-                eprintln!("UNVERIFIED Creating observer drop:{error}");
-            }
+        if (self.worker.is_some() || self.child.is_some())
+            && let Err(error) = self.finish()
+        {
+            eprintln!("UNVERIFIED Creating observer drop:{error}");
         }
     }
 }
@@ -1462,11 +1472,13 @@ impl Lab {
             CreatingObserver::start(
                 PathBuf::from(text(&self.input, "record_root")),
                 self.class(),
-                self.wait,
-                count(&self.input, "creating_entry_limit"),
-                count(&self.input, "creating_event_limit"),
-                self.budget,
-                count(&self.input, "creating_notification_bytes"),
+                CreatingBounds {
+                    wait: self.wait,
+                    entries: count(&self.input, "creating_entry_limit"),
+                    events: count(&self.input, "creating_event_limit"),
+                    bytes: self.budget,
+                    notification_bytes: count(&self.input, "creating_notification_bytes"),
+                },
                 self.input.get("creating_notifications").cloned(),
                 &self.scope,
             )
