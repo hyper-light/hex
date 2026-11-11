@@ -97,7 +97,11 @@ fn refused(why: files::Refused) -> Refusal {
     }
 }
 
-/// Reads the connection to its end and does what it asks.
+/// Reads the connection to the stream's in-band end and does what it asks. A removal ends at its opening and a
+/// stage at its end head ([`files`]), and the relay answers there, not at the connection's end, which a transport
+/// need not carry: Firecracker's vsock makes a host's half-close a full shutdown, after which nothing the guest
+/// sends reaches the host (`vsock/csm/connection.rs:228-239` and `:307` at upstream 500efc6). Bytes after the end,
+/// in what was read, are refused before the end is acted on; past it, the relay reads nothing (AC-T7.4.1).
 fn take(conn: &mut dyn Duplex, staged: &Path, limits: &Limits) -> Result<(), Refusal> {
     let mut unpack = Unpack::new(*limits);
     let mut buf = vec![0u8; 64 << 10];
@@ -118,6 +122,9 @@ fn take(conn: &mut dyn Duplex, staged: &Path, limits: &Limits) -> Result<(), Ref
             let data = input.get(..took).unwrap_or_default();
             input = input.get(took..).unwrap_or_default();
             let Some(step) = step else { continue };
+            if !input.is_empty() && unpack.finish().is_ok() {
+                return fail(stage, refused(files::Refused::Trailing(input.len())));
+            }
             let done = match (step, stage.as_mut()) {
                 (Step::Open { op, id, layers }, None) => {
                     let id = BoxId::new(&id)?;
@@ -144,6 +151,9 @@ fn take(conn: &mut dyn Duplex, staged: &Path, limits: &Limits) -> Result<(), Ref
             if let Err(why) = done {
                 return fail(stage, why);
             }
+        }
+        if unpack.finish().is_ok() {
+            return Ok(());
         }
     }
     if let Err(why) = unpack.finish() {
