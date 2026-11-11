@@ -1,0 +1,50 @@
+{
+  "requirement": "AC-T7.4.1/R16",
+  "originals": [
+    {
+      "source": "b3d0962e07c506179ff92936aa2266569d386b1c",
+      "target": "mac",
+      "pid": 60919,
+      "remote": "~/.cache/hex-lead/cohort-b3d0962e-mac-recorded-preflight-original-v1",
+      "archive_sha256": "abb04811e23ffc60d3ebda6897d6d5aa6b4dca4fc4d108c3c0d759417f5070fd",
+      "archive_bytes": 23168275,
+      "driver_sha256": "9f384e96f3c9719d70785d53dd5777b495134a644456f7061f8c4b7f5f4e6074",
+      "cohort": "cohort-b3d0962e-mac-recorded-preflight-original-v1",
+      "local_cli_exit": 1,
+      "raw_log_sha256": "f7a587cc21bdb477bb649dfcad0f1a883265ee0ed90d20a53645e703689dccc5",
+      "test_outcome": "UNKNOWN: no usable result"
+    },
+    {
+      "source": "88f72b313ef35dbc369e4b4ace98a6d35be8aa8a",
+      "target": "mac",
+      "pid": 80602,
+      "remote": "~/.cache/hex-lead/cohort-88f72b31-mac-pool-joined-consumer-v1",
+      "archive_sha256": "b60e414c7cb14b24be7a134b351a99238139b6d752f9719212689aa99151b7b3",
+      "archive_bytes": 24140122,
+      "driver_sha256": "fbf0d0e34b80f12f954df85a96db8a7bb7e4fa0c9190aa83c877cef8554b77e5",
+      "cohort": "cohort-88f72b31-mac-pool-joined-consumer-v1",
+      "local_cli_exit": 1,
+      "raw_log_sha256": "7ccc4ee46f782c40a9e9d8235fc51e4eed82c08b0336ca245ea6efe977769fa7",
+      "test_outcome": "UNKNOWN: no usable result"
+    }
+  ],
+  "reach_states": [
+    {
+      "id": "reach-owned-01a1c8e6bc1b74b3bf3dffdb701672a4",
+      "cohort": "b3d",
+      "reported_status": "pending",
+      "started": 0,
+      "output": "no run; stale state is not live proof"
+    },
+    {
+      "id": "reach-owned-01a1c8e8b4607407a4036e6313515024",
+      "cohort": "88",
+      "reported_status": "failed",
+      "started": 0,
+      "output": "no run"
+    }
+  ],
+  "fence": "Direct run on d132 returned actual Adas-Mac-Studio.local/UID501; both exact absolute roots absent; required private Rust/Python files exist. No recorded remote child IDs were available. No foreign process scan/kill, runner or service action performed.",
+  "local_cli_reaped": true,
+  "new_attempts": "Fresh v2 destinations with identical fixed signed sources/drivers; originals retained; no passed controls repeated."
+}

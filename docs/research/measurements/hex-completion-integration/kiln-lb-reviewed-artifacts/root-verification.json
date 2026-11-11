@@ -1,0 +1,65 @@
+{
+  "requirement": "AC-T7.4.1",
+  "kind": "independent local artifact byte/hash verification; no checks rerun",
+  "source_manifest_sha256": "4b25100b225909a548719d9870bb44a8902c6ef1da2300b4c85a996d8e8dab6c",
+  "files": {
+    "r28-output.log": {
+      "bytes": 1259,
+      "sha256": "11237095ab106eacc2f6e15076808297cdc20b4feb7ece56853921976cb7d8a4"
+    },
+    "r30-output.log": {
+      "bytes": 1586,
+      "sha256": "837e4b44f26a4ffedc5fddf0c6e91cf2925593a2e324a6d087c75fe67750f9f9"
+    },
+    "r33-output.log": {
+      "bytes": 570,
+      "sha256": "a94c545e6d1a00daeb8adad48b1d3fa92da4c065478fee55951481160a458bb2"
+    },
+    "r33-provider-clippy.log": {
+      "bytes": 396,
+      "sha256": "f05d64ed9c49d7e37323b9698e38f441535816b33f3999b9078c065e4681156e"
+    },
+    "r33-provider-unit.log": {
+      "bytes": 1677,
+      "sha256": "8e5c4ff196e3ae8f05f4ad590aba215339698b603105a18fe811ee50c5ad2cd5"
+    },
+    "r33-apple-hardware.log": {
+      "bytes": 724,
+      "sha256": "2852579dfdd3127fce9bce93f8efd24bb9cf34e448e361f7acb2545097ce03ba"
+    }
+  },
+  "cohorts": [
+    {
+      "run": "r28",
+      "source": "b4884f6b987b4a0ce16147bc70c98b456b91bdec",
+      "runner": "451397fcc585f7f7cb9aaf00e42064bb",
+      "exit": 101,
+      "meaning": "original fresh unread GPU regression RED,0pass1fail"
+    },
+    {
+      "run": "r30",
+      "source": "2a49894ae4e0666092a6ddfe34e152e6bcad824c",
+      "runner": "451397fcc585f7f7cb9aaf00e42064bb",
+      "exit": 0,
+      "meaning": "all-targetcore/providerclippy,22GPU,42provider,1actualLinuxNVIDIA+AMD hardware PASS",
+      "raw_directory": "/home/adalundhe/.cache/kiln-lb/int/hex-fixes-validation"
+    },
+    {
+      "run": "r33",
+      "source": "7d039cf3c845dc3244866ad0604a31c80e7e5943",
+      "runner": "e30189ea29182644fe5a4b2e06c7dac2",
+      "exit": 0,
+      "meaning": "provideralltargetclippy,18pure,1strictactualApplecounterleaf PASS",
+      "raw_directory": "/Users/adalundhe/.cache/kiln-lb/int/hex-fixes-mac"
+    }
+  ],
+  "limits": [
+    "count-only compatibility is separate from strict observed-inventory fresh binding",
+    "no physical attachment/isolation/durable runtime recovery proof",
+    "no cross-boot Metal identity guarantee",
+    "no native per-sample allocation, performance, lifetime/leak or cleanup proof",
+    "private Git commits are currently unsigned; this artifact is sealed by SHA-256, not a cryptographic author signature"
+  ],
+  "attribution": "Executed results belong to the Kiln Load Balancing owner. Root verified local provided artifact bytes; r28/r30-output are decoded MCP text, not independently collected original compiler logs. r33 compiler/unit/native files are owner-provided original copies; no independent native invocation.",
+  "r34": "Not present in manifest-v1; separately owner-reported only, no independent artifact claim."
+}

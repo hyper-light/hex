@@ -1,0 +1,11 @@
+{
+  "requirement": "AC-T7.4.1/R16",
+  "kind": "read-only direct runner identity and exact path fence; no build/test",
+  "result": {
+    "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+    "output": "{\"hostname\": \"Adas-Mac-Studio.local\", \"home\": \"/Users/adalundhe\", \"uid\": 501, \"roots\": [{\"path\": \"/Users/adalundhe/.cache/hex-lead/cohort-b3d0962e-mac-recorded-preflight-original-v1\", \"exists\": false}, {\"path\": \"/Users/adalundhe/.cache/hex-lead/cohort-88f72b31-mac-pool-joined-consumer-v1\", \"exists\": false}], \"tools\": [{\"path\": \"/Users/adalundhe/.cache/hex-lead/python-3.13.18-20261026/python/bin/python3\", \"exists\": true}, {\"path\": \"/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/rustc\", \"exists\": true}]}\n",
+    "running": false,
+    "why": "macos/aarch64 · 31 of 32 cores idle · 59 GB free · room for 1 CPU, 4 GiB of memory, 12 GiB of disk",
+    "exit_code": 0
+  }
+}

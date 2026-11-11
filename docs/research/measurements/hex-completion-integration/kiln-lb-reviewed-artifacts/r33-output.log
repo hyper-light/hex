@@ -1,0 +1,7 @@
+Mac provider all-target clippy PASS
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+test w13_r01_native_apple_gpu_has_observed_counters_and_full_identity ... native Apple GPU: Apple M5 Max id=metal:4294968612 budget=115448725504
+observation 0: id=metal:4294968612 busy=Ok(0) mapped=Ok(4672602112)
+observation 1: id=metal:4294968612 busy=Ok(0) mapped=Ok(4672602112)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+HEX PROVIDER MAC PASS: 7d039cf3c845dc3244866ad0604a31c80e7e5943

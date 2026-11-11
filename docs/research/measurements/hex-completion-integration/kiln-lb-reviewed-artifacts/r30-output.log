@@ -1,0 +1,18 @@
+Running as unit: kiln-lb-hex-fixes-core-1184746.service
+HEX FIXES CORE SOURCE: 2a49894ae4e0666092a6ddfe34e152e6bcad824c
+Hex-fix core/provider all-target clippy PASS
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 1342 filtered out; finished in 1.56s
+test result: ok. 42 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+found Gpu { vendor: Nvidia, model: "NVIDIA GeForce RTX 5060 Ti", memory_total_bytes: 8546942976, identity: Pci(PciAddress { domain: 0, bus: 1, device: 0, function: 0 }), driver_version: "615.78.08" }
+found Gpu { vendor: Amd, model: "1002:13c0 rev e5", memory_total_bytes: 2147483648, identity: Pci(PciAddress { domain: 0, bus: 121, device: 0, function: 0 }), driver_version: "7.2.9-2-cachyos" }
+sample 0: 0000:01:00.0 NVIDIA GeForce RTX 5060 Ti: Load { busy_percent: Ok(0), memory_used_bytes: Ok(991756288) }
+sample 0: 0000:79:00.0 1002:13c0 rev e5: Load { busy_percent: Ok(0), memory_used_bytes: Ok(37498880) }
+sample 1: 0000:01:00.0 NVIDIA GeForce RTX 5060 Ti: Load { busy_percent: Ok(0), memory_used_bytes: Ok(991756288) }
+sample 1: 0000:79:00.0 1002:13c0 rev e5: Load { busy_percent: Ok(0), memory_used_bytes: Ok(37498880) }
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+HEX FIXES LINUX CORE PASS: 2a49894ae4e0666092a6ddfe34e152e6bcad824c
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 1min 9.457s
+             CPU time consumed: 49.805s
+                   Memory peak: 3.7G (swap: 83.5M)

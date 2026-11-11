@@ -1,0 +1,29 @@
+    Updating crates.io index
+   Compiling getrandom v0.4.3
+   Compiling tempfile v3.27.0
+   Compiling kiln-gpu v0.2.0 (/Users/adalundhe/.cache/kiln-lb/int/tree-int/crates/kiln-gpu)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.99s
+     Running unittests src/lib.rs (/Users/adalundhe/.cache/kiln-lb/int/tree-target-int/debug/deps/kiln_gpu-3fd551a5571dca44)
+
+running 18 tests
+test adl::tests::a_count_past_adls_bound_is_refused_and_none_is_none ... ok
+test adl::tests::a_gpu_gone_or_disabled_reads_gone ... ok
+test adl::tests::a_sample_is_two_adl_calls_a_gpu ... ok
+test adl::tests::adls_refusals_at_open_are_kept ... ok
+test adl::tests::an_asleep_gpu_reads_asleep_and_its_memory ... ok
+test adl::tests::jupiters_five_adapters_are_one_gpu ... ok
+test adl::tests::rows_are_grouped_other_vendors_passed_over_and_garbage_skipped ... ok
+test adl::tests::the_drivers_release_else_its_packaging_version ... ok
+test adl::tests::what_adl_doesnt_document_is_refused_by_type ... ok
+test apple::tests::a_package_counter_is_never_copied_to_multiple_devices ... ok
+test apple::tests::residency_refuses_negative_values_and_keeps_wide_sums ... ok
+test apple::tests::residency_uses_observed_ticks_and_distinguishes_idle_from_no_sample ... ok
+test tests::a_refusal_says_each_vendors_reason ... ok
+test tests::addresses_no_bus_has_are_refused ... ok
+test tests::gpus_go_to_the_probes_thread ... ok
+test tests::hostile_addresses_never_panic ... ok
+test tests::identities_keep_native_bits_and_their_address_kind ... ok
+test tests::nvml_and_the_kernel_name_one_pci_address ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
