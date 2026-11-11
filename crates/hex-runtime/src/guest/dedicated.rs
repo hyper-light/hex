@@ -672,13 +672,16 @@ mod tests {
     }
 
     /// One bound owner of a selected GPU create: its canonical Creating record,
-    /// its provider's current LUID, and a launcher that only counts.
+    /// its provider's current LUID, and a launcher that only counts. Unix only, like
+    /// the one test that builds it (its socket path must be short).
+    #[cfg(unix)]
     struct Preboot {
         record: BoxRecord,
         luid: Option<[u8; 8]>,
         queries: AtomicUsize,
         launches: AtomicUsize,
     }
+    #[cfg(unix)]
     impl Transaction for Preboot {
         fn check_unsubmitted_pool(&self) -> Result<(), Refusal> {
             panic!("a selected create owns no pool")
@@ -741,6 +744,7 @@ mod tests {
             panic!("a fresh create attaches nothing")
         }
     }
+    #[cfg(unix)]
     impl crate::devices::Books for Preboot {
         fn records(&self) -> Result<crate::devices::Records, Refusal> {
             panic!("a selected create reads only its own record")
