@@ -10,7 +10,8 @@ use hex_core::record::{MAX_RECORD_BYTES, PoolRecord};
 use super::selected::{self, Phase};
 use super::{GuestConfig, held};
 
-const HEADER: &str = "hex-guest-backing 4";
+const HEADER: &str = "hex-guest-backing 5";
+const ATTEMPT_HEADER: &str = "hex-guest-backing 4";
 const READINESS_HEADER: &str = "hex-guest-backing 3";
 const REPORT_HEADER: &str = "hex-guest-backing 2";
 const LEGACY_HEADER: &str = "hex-guest-backing 1";
@@ -152,6 +153,19 @@ impl Receipt {
     }
 
     pub fn checked_readiness(&self) -> Result<&super::observer::Evidence, Refusal> {
+        let readiness = self.readiness_payload()?;
+        if !self
+            .attempt
+            .as_ref()
+            .ok_or_else(|| refused(self.original.key, LifecycleCause::Uncertain))?
+            .ready_facts()?
+        {
+            return Err(refused(self.original.key, LifecycleCause::Uncertain));
+        }
+        Ok(readiness)
+    }
+
+    fn readiness_payload(&self) -> Result<&super::observer::Evidence, Refusal> {
         self.check()?;
         if !matches!(self.phase, Phase::Running(_)) {
             return Err(refused(self.original.key, LifecycleCause::Uncertain));
@@ -184,7 +198,9 @@ impl Receipt {
             return Err(refused(record.key, LifecycleCause::Uncertain));
         }
         if record.phase == BackingPhase::Live && !self.physical.is_empty() {
-            self.checked_readiness()?;
+            // Preserve v4 provenance/payload checks. A v5 opaque diagnostic is
+            // not usable readiness, but cannot prevent the same scope's cleanup.
+            self.readiness_payload()?;
         }
         Ok(())
     }
@@ -236,7 +252,13 @@ impl Receipt {
         original: &str,
         report: Option<&str>,
     ) -> std::fmt::Result {
-        writeln!(out, "{HEADER}")?;
+        let facts = self.attempt.as_ref().filter(|attempt| attempt.has_facts());
+        let header = if facts.is_some() {
+            HEADER
+        } else {
+            ATTEMPT_HEADER
+        };
+        writeln!(out, "{header}")?;
         write!(out, "original {original}")?;
         writeln!(out, "physical {}", self.physical.len())?;
         for physical in &self.physical {
@@ -255,6 +277,9 @@ impl Receipt {
             None => write!(out, "none")?,
         }
         writeln!(out)?;
+        if let Some(attempt) = facts {
+            attempt.render_facts(out)?;
+        }
         selected::render_phase(out, &self.phase)
     }
 }
@@ -303,6 +328,7 @@ fn parse(text: &str) -> Result<Receipt, Refusal> {
         .split_once('\n')
         .ok_or_else(|| super::route::invalid("guest backing receipt is truncated"))?;
     if header != HEADER
+        && header != ATTEMPT_HEADER
         && header != READINESS_HEADER
         && header != REPORT_HEADER
         && header != LEGACY_HEADER
@@ -357,7 +383,7 @@ fn parse(text: &str) -> Result<Receipt, Refusal> {
     } else {
         None
     };
-    let readiness = if header == HEADER || header == READINESS_HEADER {
+    let readiness = if header == HEADER || header == ATTEMPT_HEADER || header == READINESS_HEADER {
         let frame = lines
             .next()
             .and_then(|line| line.strip_prefix("readiness "))
@@ -368,7 +394,7 @@ fn parse(text: &str) -> Result<Receipt, Refusal> {
         // to guest readiness or an initialized Live physical offer.
         None
     };
-    let attempt = if header == HEADER {
+    let mut attempt = if header == HEADER || header == ATTEMPT_HEADER {
         let line = lines
             .next()
             .and_then(|line| line.strip_prefix("observer "))
@@ -377,6 +403,12 @@ fn parse(text: &str) -> Result<Receipt, Refusal> {
     } else {
         None
     };
+    if header == HEADER {
+        attempt
+            .as_mut()
+            .ok_or_else(|| super::route::invalid("v5 receipt lacks its observer attempt"))?
+            .parse_facts(&mut lines)?;
+    }
     let phase = selected::parse_phase(&mut lines)?;
     if lines.next().is_some() {
         return Err(super::route::invalid(
@@ -532,5 +564,51 @@ mod tests {
         ] {
             assert!(parse(&bad).is_err());
         }
+    }
+
+    /// AC-T7.4.1: v4 remains byte compatible and cleanup-readable. New v5
+    /// diagnostics retain the same native grant and cannot initialize readiness.
+    #[test]
+    fn observer_v5_diagnostics_preserve_legacy_v4_and_same_grant_cleanup() {
+        let mut record = granted();
+        record.execution = Execution::ShardsDedicated;
+        record.devices = vec![hex_api::DeviceId {
+            kind: hex_api::DeviceKind::Gpu,
+            key: 256,
+        }];
+        let physical = shards_api::PhysicalGpu::Pci {
+            domain: 0,
+            bus: 1,
+            device: 0,
+            function: 0,
+        };
+        let mut receipt =
+            Receipt::intent(record, vec![physical], &super::super::tests::config()).unwrap();
+        let mut attempt = super::super::observer::Attempt::parse(&format!(
+            "{} 2 waiting eof 2 - eof 2 -",
+            "09".repeat(32)
+        ))
+        .unwrap()
+        .unwrap();
+        receipt.attempt = Some(attempt);
+        let v4 = receipt.encode().unwrap();
+        assert!(v4.starts_with("hex-guest-backing 4\n"));
+        assert_eq!(parse(&v4).unwrap().encode().unwrap(), v4);
+        attempt = receipt.attempt.take().unwrap();
+        attempt.parse_facts(&mut "observer-exit\t2\t0000000000000001\t1\t00\nobserver-failure\twaiting\t1\t0000000000000001\t1\t00\nobserver-cleanup\tfailed\t1\t0000000000000001\t1\t00\n".lines()).unwrap();
+        receipt.attempt = Some(attempt);
+        let v5 = receipt.encode().unwrap();
+        assert!(v5.starts_with("hex-guest-backing 5\n"));
+        let mut retained = parse(&v5).unwrap();
+        assert_eq!(retained, receipt);
+        assert!(retained.checked_readiness().is_err());
+        retained.phase = Phase::Released {
+            identity: None,
+            status: shards_api::ManagedStatus::Unknown,
+        };
+        let released = retained.encode().unwrap();
+        assert_eq!(parse(&released).unwrap(), retained);
+        assert_eq!(retained.original, receipt.original);
+        assert!(parse(&v5.replace("observer-exit\t", "observer-cleanup\t")).is_err());
     }
 }
