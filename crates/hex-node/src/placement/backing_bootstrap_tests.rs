@@ -108,6 +108,20 @@ fn fixture() -> (Capacity, NodeSpec, BackingKey) {
     (report, node, key)
 }
 
+#[derive(Clone, Copy)]
+enum ReleaseMode {
+    AckOnly,
+    Cleanup(CleanupReply),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CleanupReply {
+    Released,
+    Uncertain,
+    WrongGeneration,
+    WrongSelection,
+    StillDraining,
+}
+
 struct Callback {
     sim: hex_api::sim::SimRuntime,
     report: Capacity,
@@ -115,6 +129,7 @@ struct Callback {
     driver: Mutex<Weak<Driver>>,
     calls: AtomicUsize,
     releases: AtomicUsize,
+    release_mode: ReleaseMode,
     wrong_generation: bool,
     exposes_firecracker: bool,
 }
@@ -160,19 +175,40 @@ impl Runtime for Callback {
         Ok(observed)
     }
     fn release_backing(&self, key: BackingKey) -> Result<BackingOffer, Refusal> {
-        self.releases.fetch_add(1, Ordering::SeqCst);
+        let call = self.releases.fetch_add(1, Ordering::SeqCst);
         let driver = self.driver.lock().unwrap().upgrade().unwrap();
         assert!(driver.operation.try_lock().is_err());
         let core = driver
             .state
             .try_lock()
             .expect("release RPC cannot retain core mutex");
-        assert!(
-            core.node.backing_released(key).unwrap(),
-            "old Released receipt must precede native rearm acknowledgement"
-        );
         let mut observed = self.report.backings[0].try_clone()?;
         observed.phase = BackingPhase::Released;
+        if let ReleaseMode::Cleanup(reply) = self.release_mode
+            && call == 0
+        {
+            assert!(
+                !core.node.backing_released(key).unwrap(),
+                "native cleanup must finish before either Index refund or ACK"
+            );
+            match reply {
+                CleanupReply::Released => {}
+                CleanupReply::Uncertain => {
+                    return Err(Refusal::Backing {
+                        key,
+                        cause: LifecycleCause::Uncertain,
+                    });
+                }
+                CleanupReply::WrongGeneration => observed.key.generation = [99; 16],
+                CleanupReply::WrongSelection => observed.devices.clear(),
+                CleanupReply::StillDraining => observed.phase = BackingPhase::Draining,
+            }
+        } else {
+            assert!(
+                core.node.backing_released(key).unwrap(),
+                "old Released receipt must precede native rearm acknowledgement"
+            );
+        }
         Ok(observed)
     }
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
@@ -218,6 +254,7 @@ fn driver_reserves_the_exact_backing_before_unlocked_native_callback() {
             driver: Mutex::new(Weak::new()),
             calls: AtomicUsize::new(0),
             releases: AtomicUsize::new(0),
+            release_mode: ReleaseMode::AckOnly,
             wrong_generation,
             exposes_firecracker: true,
         });
@@ -273,6 +310,7 @@ fn route_snapshot_requires_the_real_backend_in_the_originating_endpoint() {
         driver: Mutex::new(Weak::new()),
         calls: AtomicUsize::new(0),
         releases: AtomicUsize::new(0),
+        release_mode: ReleaseMode::AckOnly,
         wrong_generation: false,
         exposes_firecracker: false,
     });
@@ -306,6 +344,7 @@ fn native_rearm_waits_for_the_original_released_snapshot() {
         driver: Mutex::new(Weak::new()),
         calls: AtomicUsize::new(0),
         releases: AtomicUsize::new(0),
+        release_mode: ReleaseMode::AckOnly,
         wrong_generation: false,
         exposes_firecracker: true,
     });
@@ -372,4 +411,99 @@ fn native_rearm_waits_for_the_original_released_snapshot() {
             .is_err()
     );
     assert_eq!(runtime.releases.load(Ordering::SeqCst), 1);
+}
+
+/// AC-T7.4.1: the actual Driver retains its grant through native cleanup, validates the full
+/// receipt, consumes Released in both Index views, and only then makes a separate explicit ACK.
+/// These are pure runtime callbacks/private file rows, not native VM termination witnesses.
+#[test]
+fn canonical_draining_cleanup_refunds_only_exact_release_before_separate_ack() {
+    for reply in [
+        CleanupReply::Released,
+        CleanupReply::Uncertain,
+        CleanupReply::WrongGeneration,
+        CleanupReply::WrongSelection,
+        CleanupReply::StillDraining,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (report, node, key) = fixture();
+        let runtime = Arc::new(Callback {
+            sim: hex_api::sim::SimRuntime::default(),
+            report,
+            node: node.try_clone().unwrap(),
+            driver: Mutex::new(Weak::new()),
+            calls: AtomicUsize::new(0),
+            releases: AtomicUsize::new(0),
+            release_mode: ReleaseMode::Cleanup(reply),
+            wrong_generation: false,
+            exposes_firecracker: true,
+        });
+        let driver = Arc::new(
+            Driver::boot_in(
+                Identity {
+                    namespace: "00112233445566778899aabbccddeeff",
+                    node: NodeId(0),
+                },
+                std::slice::from_ref(&node),
+                &[],
+                Budget { owned: 4, ran: 4 },
+                Pick::default(),
+                dir.path(),
+                Runtimes::new([(Class::Firecracker, runtime.clone() as Arc<dyn Runtime>)]).unwrap(),
+            )
+            .unwrap(),
+        );
+        *runtime.driver.lock().unwrap() = Arc::downgrade(&driver);
+        assert!(driver.initialize_backing(Class::Firecracker, key).unwrap());
+        let mut draining = runtime.report.backings[0].try_clone().unwrap();
+        draining.phase = BackingPhase::Draining;
+        let result = driver.drain_backing(Class::Firecracker, &draining);
+        assert_eq!(runtime.releases.load(Ordering::SeqCst), 1);
+        if reply == CleanupReply::Released {
+            let released = result.unwrap();
+            assert_eq!(released.key, key);
+            assert_eq!(released.devices, draining.devices);
+            assert_eq!(released.cost, draining.cost);
+            assert_eq!(released.phase, BackingPhase::Released);
+            assert!(
+                driver
+                    .state
+                    .lock()
+                    .unwrap()
+                    .node
+                    .backing_released(key)
+                    .unwrap()
+            );
+            driver
+                .release_backing(Class::Firecracker, &released)
+                .unwrap();
+            assert_eq!(runtime.releases.load(Ordering::SeqCst), 2);
+        } else {
+            assert!(
+                result.is_err(),
+                "{reply:?} cannot prove original full-scope release"
+            );
+            assert!(
+                !driver
+                    .state
+                    .lock()
+                    .unwrap()
+                    .node
+                    .backing_released(key)
+                    .unwrap()
+            );
+            let mut unproved = draining;
+            unproved.phase = BackingPhase::Released;
+            assert!(
+                driver
+                    .release_backing(Class::Firecracker, &unproved)
+                    .is_err()
+            );
+            assert_eq!(
+                runtime.releases.load(Ordering::SeqCst),
+                1,
+                "no native ACK after a failed cleanup"
+            );
+        }
+    }
 }

@@ -20,7 +20,7 @@ impl GuestRuntime {
         if record.phase != BackingPhase::Released || record.exit.is_none() {
             return Err(bad());
         }
-        let definition = self.gpu_definition_for(record.key)?;
+        let definition = self.gpu_definition_for_record(record)?;
         let receipt = pool::read(&definition.path)?.ok_or_else(bad)?;
         receipt.matches(record)?;
         let Phase::Released { status, .. } = receipt.phase else {
@@ -76,14 +76,120 @@ impl GuestRuntime {
         })?;
         reservation.previous.take();
         reservation.publish(None)?;
-        // Fresh Prepared generation is created by the existing Store authority,
-        // never before Index acknowledgement or a remaining Box reference.
-        self.authority()?.prepare_pool(
-            definition.pool,
-            hex_api::Execution::ShardsDedicated,
-            definition.cost,
-            &definition.devices,
-        )?;
+        // Only this existing Index ACK removes old metadata. The next guarded
+        // preparation/capacity refresh may publish the current complement; an
+        // unrelated stale proposal cannot undo this completed acknowledgment.
+        Ok(offer)
+    }
+
+    /// Draining cleanup and Released Index acknowledgment are separate calls.
+    /// Native finalization precedes canonical Released; metadata removal never
+    /// stands in for whole-scope termination.
+    pub(super) fn release_gpu_backing(&self, key: BackingKey) -> Result<BackingOffer, Refusal> {
+        let snapshot = self.pool_record(key)?;
+        if snapshot.phase == BackingPhase::Released {
+            return self.acknowledge_gpu_release(key);
+        }
+        let definition = self.gpu_definition_for_record(&snapshot)?;
+        let budget = managed::Budget::new(self.first_dial_bound()?)?;
+        let keys = self.turn_keys(&definition.devices)?;
+        let books = self
+            .books
+            .get()
+            .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+        let mut reservation = self.reserve_owner(OwnerRef::Pool(&key.pool), Operation::Stopping)?;
+        let offer = devices::with_pool_transaction(books, &key, &keys, |transaction| {
+            let mut record = transaction
+                .read_pool(&key)?
+                .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+            self.preflight_backing(&record)?;
+            if snapshot.phase == BackingPhase::Prepared {
+                if record != snapshot {
+                    return Err(refused(key, LifecycleCause::Uncertain));
+                }
+            } else if record.native_commitment()? != snapshot.native_commitment()?
+                || record.init != snapshot.init
+            {
+                return Err(refused(key, LifecycleCause::Uncertain));
+            }
+            for boxed in transaction.records()?.values() {
+                let boxed = boxed
+                    .as_ref()
+                    .map_err(|_| refused(key, LifecycleCause::Uncertain))?;
+                if boxed.spec.route.and_then(|route| route.backing) == Some(key) {
+                    return Err(refused(key, LifecycleCause::Busy));
+                }
+            }
+            if record.phase == BackingPhase::Prepared {
+                // Prepared alone is insufficient: exact no-submission also
+                // requires no local Intent or retained process publication.
+                if reservation.previous.is_some()
+                    || pool::read(&definition.path)?.is_some()
+                    || record.allocation.is_some()
+                    || record.init.is_some()
+                    || record.exit.is_some()
+                {
+                    return Err(refused(key, LifecycleCause::Uncertain));
+                }
+                transaction.check_unsubmitted_pool()?;
+                record.phase = BackingPhase::Released;
+                transaction.put_pool(&record)?;
+                return record.offer();
+            }
+            if !matches!(
+                record.phase,
+                BackingPhase::Granted | BackingPhase::Live | BackingPhase::Draining
+            ) {
+                return Err(refused(key, LifecycleCause::Uncertain));
+            }
+            let mut receipt = match pool::read(&definition.path)? {
+                Some(receipt) => receipt,
+                None if record.init.is_none() => {
+                    let mut original = PoolRecord::decode(&record.encode()?)?;
+                    original.phase = BackingPhase::Granted;
+                    original.exit = None;
+                    Receipt::retained(original, self.catalog_physical(&record.devices)?)?
+                }
+                None => return Err(refused(key, LifecycleCause::Uncertain)),
+            };
+            receipt.matches(&record)?;
+            let identity = match &receipt.phase {
+                Phase::Running(identity)
+                | Phase::Stopping(identity)
+                | Phase::Released {
+                    identity: Some(identity),
+                    ..
+                } => {
+                    managed::same_native(NativeRecord::Pool(&record), identity)?;
+                    Some(super::shared::copy_identity(identity)?)
+                }
+                Phase::Intent | Phase::Released { identity: None, .. } => None,
+            };
+            record.phase = BackingPhase::Draining;
+            transaction.put_pool(&record)?;
+            if let Some(identity) = &identity {
+                receipt.phase = Phase::Stopping(super::shared::copy_identity(identity)?);
+            }
+            pool::write(&definition.path, &receipt)?;
+            let terminal = managed::stop_scope(
+                transaction,
+                identity.as_ref(),
+                budget.remaining()?,
+                refused(key, LifecycleCause::Uncertain),
+            )?;
+            receipt.phase = Phase::Released {
+                identity,
+                status: terminal.status,
+            };
+            pool::write(&definition.path, &receipt)?;
+            transaction.finalize_managed(receipt.released_identity()?)?;
+            record.phase = BackingPhase::Released;
+            record.exit = Some(super::shared::exit_of(terminal.status));
+            transaction.put_pool(&record)?;
+            record.offer()
+        })?;
+        reservation.previous.take();
+        reservation.publish(None)?;
         Ok(offer)
     }
 
@@ -249,9 +355,24 @@ impl GuestRuntime {
     }
 
     fn gpu_definition_for(&self, key: BackingKey) -> Result<GpuBacking, Refusal> {
-        self.gpu_backing_definition()?
-            .filter(|definition| definition.pool == key.pool)
-            .ok_or_else(|| refused(key, LifecycleCause::Uncertain))
+        self.gpu_definition_for_record(&self.pool_record(key)?)
+    }
+
+    pub(super) fn gpu_definition_for_record(
+        &self,
+        record: &PoolRecord,
+    ) -> Result<GpuBacking, Refusal> {
+        record.check()?;
+        let definition = self
+            .gpu_backing_definition_for(Some(&record.devices))?
+            .ok_or_else(|| refused(record.key, LifecycleCause::Uncertain))?;
+        if record.execution != hex_api::Execution::ShardsDedicated
+            || record.key.pool != definition.pool
+            || record.cost != definition.cost
+        {
+            return Err(refused(record.key, LifecycleCause::Uncertain));
+        }
+        Ok(definition)
     }
 
     fn boot_gpu_pool(
@@ -363,16 +484,25 @@ impl GuestRuntime {
     }
 
     pub(super) fn recover_gpu_backing(&self) -> Result<(), Refusal> {
-        let Some(definition) = self.gpu_backing_definition()? else {
+        if self.gpu_backing_definition()?.is_none() {
             return Ok(());
-        };
+        }
         let authority = self.authority()?;
         let records = authority.pool_records()?;
+        // Every retained member is checked before the first native cleanup.
+        // A stale/foreign subset later in the snapshot must not be discovered
+        // only after another scope has already been changed.
         for record in records
             .iter()
-            .filter(|record| record.key.pool == definition.pool)
+            .filter(|record| record.execution == hex_api::Execution::ShardsDedicated)
         {
             self.preflight_backing(record)?;
+        }
+        for record in records
+            .iter()
+            .filter(|record| record.execution == hex_api::Execution::ShardsDedicated)
+        {
+            let definition = self.gpu_definition_for_record(record)?;
             if matches!(
                 record.phase,
                 BackingPhase::Granted | BackingPhase::Live | BackingPhase::Draining
@@ -1398,6 +1528,455 @@ mod tests {
         assert_eq!(standalone.0.load(Ordering::SeqCst), 0);
     }
 
+    /// AC-T7.4.1: family/set identity is configuration, not another selection
+    /// authority. Retained exact subsets keep their own path/key; a full-set
+    /// legacy record keeps its old path and cannot be transplanted onto R.
+    #[test]
+    fn retained_gpu_subsets_bind_exact_family_key_and_keep_legacy_full_set_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, input, allocation) = observer::config::tests::fixture(dir.path());
+        let standalone = Arc::new(NoEffects(AtomicUsize::new(0)));
+        let catalog = devices::Catalog::parse(b"hex-devices-1\ngpu\t256\tunmeasured\t777\tshards-gpu\tpci:0000:01:00.0\t\ngpu\t512\tunmeasured\t777\tshards-gpu\tpci:0000:02:00.0\t\n").unwrap();
+        let runtime = GuestRuntime::new(standalone.clone(), config)
+            .recorded_at(dir.path().join("guest"))
+            .with_runtime_paths(
+                shards_api::RuntimePaths::new(dir.path().join("cache"), dir.path().join("home"))
+                    .unwrap(),
+            )
+            .with_runtime_cost(allocation.cost)
+            .unwrap()
+            .with_gpu_catalog(triomphe::Arc::try_new(catalog).unwrap())
+            .with_gpu_observer(input)
+            .unwrap();
+        let family = runtime.gpu_backing_definition().unwrap().unwrap();
+        assert_eq!(family.path, dir.path().join("guest.gpu-observer"));
+        let explicit_full = runtime
+            .gpu_backing_definition_for(Some(&family.devices))
+            .unwrap()
+            .unwrap();
+        assert_eq!(family.pool, explicit_full.pool);
+        assert_eq!(family.path, explicit_full.path);
+        for devices in [&family.devices[..1], &family.devices[1..]] {
+            let definition = runtime
+                .gpu_backing_definition_for(Some(devices))
+                .unwrap()
+                .unwrap();
+            assert_ne!(definition.pool, family.pool);
+            assert_ne!(definition.path, family.path);
+            assert_eq!(definition.devices, devices);
+            assert_eq!(definition.cost, family.cost);
+            let repeated = runtime
+                .gpu_backing_definition_for(Some(devices))
+                .unwrap()
+                .unwrap();
+            assert_eq!(definition.pool, repeated.pool);
+            assert_eq!(definition.path, repeated.path);
+            let mut record = PoolRecord {
+                version: hex_core::record::RECORD_VERSION,
+                key: BackingKey {
+                    pool: definition.pool,
+                    generation: [7; 16],
+                },
+                execution: hex_api::Execution::ShardsDedicated,
+                cost: allocation.cost,
+                allocation: None,
+                devices: devices.to_vec(),
+                phase: BackingPhase::Prepared,
+                init: None,
+                exit: None,
+            };
+            runtime.preflight_backing(&record).unwrap();
+            let retained = runtime.gpu_definition_for_record(&record).unwrap();
+            assert_eq!(retained.pool, definition.pool);
+            assert_eq!(retained.path, definition.path);
+            record.key.pool = family.pool;
+            assert!(
+                runtime.preflight_backing(&record).is_err(),
+                "a legacy full-set identity cannot authorize a different subset"
+            );
+        }
+        for bad in [
+            Vec::new(),
+            vec![family.devices[0], family.devices[0]],
+            vec![family.devices[1], family.devices[0]],
+            vec![hex_api::DeviceId {
+                kind: hex_api::DeviceKind::Gpu,
+                key: 768,
+            }],
+        ] {
+            assert!(runtime.gpu_backing_definition_for(Some(&bad)).is_err());
+        }
+        assert_eq!(standalone.0.load(Ordering::SeqCst), 0);
+        assert!(runtime.dedicated.lock().unwrap().is_empty());
+        assert!(!family.path.exists());
+    }
+
+    /// AC-T7.4.1: global route storage counts actual initialized aliases and
+    /// historical lifetimes without querying capacity, a provider or a receipt.
+    #[test]
+    fn pure_route_projection_keeps_retained_gpu_aliases_and_new_cpu_lifetime() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, input, allocation) = observer::config::tests::fixture(dir.path());
+        let standalone = Arc::new(NoEffects(AtomicUsize::new(0)));
+        let catalog = devices::Catalog::parse(b"hex-devices-1\ngpu\t256\tunmeasured\t777\tshards-gpu\tpci:0000:01:00.0\t\ngpu\t512\tunmeasured\t777\tshards-gpu\tpci:0000:02:00.0\t\n").unwrap();
+        let runtime = GuestRuntime::new(standalone.clone(), config)
+            .recorded_at(dir.path().join("guest"))
+            .with_runtime_paths(
+                shards_api::RuntimePaths::new(dir.path().join("cache"), dir.path().join("home"))
+                    .unwrap(),
+            )
+            .with_runtime_cost(allocation.cost)
+            .unwrap()
+            .with_gpu_catalog(triomphe::Arc::try_new(catalog).unwrap())
+            .with_gpu_observer(input)
+            .unwrap();
+        let owner = Arc::new(Cold {
+            row: Mutex::new(None),
+            shared: Mutex::new(None),
+            native_report: None,
+            physical: None,
+            effects: AtomicUsize::new(0),
+            queries: AtomicUsize::new(0),
+            native: None,
+            finalized: AtomicUsize::new(0),
+            luid: None,
+            launches: AtomicUsize::new(0),
+        });
+        let books: Arc<dyn Books> = owner.clone();
+        runtime.bind_books(Arc::downgrade(&books)).unwrap();
+        let definition = runtime.gpu_backing_definition().unwrap().unwrap();
+        let mut parent = PoolRecord {
+            version: hex_core::record::RECORD_VERSION,
+            key: BackingKey {
+                pool: definition.pool,
+                generation: [7; 16],
+            },
+            execution: hex_api::Execution::ShardsDedicated,
+            cost: allocation.cost,
+            allocation: Some(allocation),
+            devices: definition.devices,
+            phase: BackingPhase::Released,
+            init: Some(hex_core::record::ProcId {
+                pid: 42,
+                start_ticks: 7,
+            }),
+            exit: Some(hex_api::Exit::Code(7)),
+        };
+        parent.check().unwrap();
+        let remaining = vec![parent.devices[1]];
+        let subset = runtime
+            .gpu_backing_definition_for(Some(&remaining))
+            .unwrap()
+            .unwrap();
+        let current = PoolRecord {
+            key: BackingKey {
+                pool: subset.pool,
+                generation: [8; 16],
+            },
+            allocation: None,
+            devices: remaining,
+            phase: BackingPhase::Prepared,
+            init: None,
+            exit: None,
+            ..PoolRecord::decode(&parent.encode().unwrap()).unwrap()
+        };
+        current.check().unwrap();
+        // Deliberately malformed local bytes cannot be touched by this pure
+        // projection. The separate whole-owner preflight must reject them.
+        super::super::held::replace(&definition.path, b"not a process receipt").unwrap();
+        assert!(runtime.preflight_backing(&parent).is_err());
+        let rows = vec![
+            PoolRecord::decode(&parent.encode().unwrap()).unwrap(),
+            current,
+        ];
+        let mut projection = devices::RouteProjection::new();
+        runtime
+            .project_routes(
+                &rows,
+                Some((hex_api::Execution::ShardsShared, &[])),
+                &mut projection,
+            )
+            .unwrap();
+        // Fixed dedicated CPU +two actual aliases for EACH retained GPU
+        // lifetime +one new shared-CPU lifetime, not a guessed per-class cap.
+        assert_eq!(projection.count().unwrap(), 6);
+        runtime
+            .project_routes(&rows, None, &mut projection)
+            .unwrap();
+        assert_eq!(projection.count().unwrap(), 6);
+        parent.cost.id = [9; 32];
+        assert!(
+            runtime
+                .project_routes(&[parent], None, &mut devices::RouteProjection::new())
+                .is_err()
+        );
+        let foreign = [hex_api::DeviceId {
+            kind: hex_api::DeviceKind::Gpu,
+            key: 768,
+        }];
+        assert!(
+            runtime
+                .project_routes(
+                    &rows,
+                    Some((hex_api::Execution::ShardsDedicated, &foreign)),
+                    &mut devices::RouteProjection::new()
+                )
+                .is_err()
+        );
+        assert_eq!(owner.queries.load(Ordering::SeqCst), 0);
+        assert_eq!(owner.effects.load(Ordering::SeqCst), 0);
+        assert_eq!(owner.launches.load(Ordering::SeqCst), 0);
+        assert_eq!(standalone.0.load(Ordering::SeqCst), 0);
+        assert!(owner.row.lock().unwrap().is_none());
+    }
+
+    /// AC-T7.4.1: one deterministic remainder is recomputed from canonical
+    /// workload/native claims, and grows only across drain/finalize/Index-ACK.
+    /// This pure control supplies phases as model inputs, never release proof.
+    #[test]
+    fn lazy_gpu_family_preserves_subset_parent_and_coalescing_ack_barriers() {
+        use super::super::family::Proposal;
+        use hex_api::{
+            Class, DeviceId, DeviceKind, Execution, GpuEligibility, ImageOs, ImagePlatform,
+            RouteKey, RouteReceipt,
+        };
+        use hex_core::record::{BoxRecord, Phase as BoxPhase};
+        fn copy(row: &PoolRecord) -> PoolRecord {
+            PoolRecord::decode(&row.encode().unwrap()).unwrap()
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (config, input, allocation) = observer::config::tests::fixture(dir.path());
+        let standalone = Arc::new(NoEffects(AtomicUsize::new(0)));
+        let catalog = devices::Catalog::parse(b"hex-devices-1\ngpu\t256\tunmeasured\t777\tshards-gpu\tpci:0000:01:00.0\t\ngpu\t512\tunmeasured\t777\tshards-gpu\tpci:0000:02:00.0\t\n").unwrap();
+        let runtime = GuestRuntime::new(standalone.clone(), config)
+            .recorded_at(dir.path().join("guest"))
+            .with_runtime_paths(
+                shards_api::RuntimePaths::new(dir.path().join("cache"), dir.path().join("home"))
+                    .unwrap(),
+            )
+            .with_runtime_cost(allocation.cost)
+            .unwrap()
+            .with_gpu_catalog(triomphe::Arc::try_new(catalog).unwrap())
+            .with_gpu_observer(input)
+            .unwrap();
+        assert!(
+            !runtime.uses_books(),
+            "pure reconciliation cannot call Books"
+        );
+        let family = runtime.gpu_backing_definition().unwrap().unwrap();
+        let empty = Records::new();
+        assert!(
+            matches!(runtime.gpu_proposal(&family, &empty, &[]).unwrap(), Proposal::Prepare { definition, current: None } if definition.devices == family.devices && definition.pool == family.pool)
+        );
+        let mut parent = PoolRecord {
+            version: hex_core::record::RECORD_VERSION,
+            key: BackingKey {
+                pool: family.pool,
+                generation: [7; 16],
+            },
+            execution: Execution::ShardsDedicated,
+            cost: allocation.cost,
+            allocation: None,
+            devices: family.devices.clone(),
+            phase: BackingPhase::Prepared,
+            init: None,
+            exit: None,
+        };
+        assert!(
+            matches!(runtime.gpu_proposal(&family, &empty, &[copy(&parent)]).unwrap(), Proposal::Prepare { definition, current: Some(_) } if definition.devices == family.devices)
+        );
+        parent
+            .accept_grant(&BackingGrant {
+                key: parent.key,
+                allocation,
+                devices: parent.devices.clone(),
+            })
+            .unwrap();
+        parent.init = Some(hex_core::record::ProcId {
+            pid: 42,
+            start_ticks: 7,
+        });
+        parent.phase = BackingPhase::Live;
+        let mut spec =
+            super::super::tests::oci(hex_api::Rootfs::Dir(dir.path().to_path_buf()), Vec::new());
+        spec.id = hex_api::BoxId::new("selected-family-consumer").unwrap();
+        spec.bounds.cpu_max_milli = Some(hex_api::MIN_CPU_MILLI);
+        spec.bounds.memory_max = Some(hex_api::MIN_MEMORY);
+        spec.devices = vec![parent.devices[0]];
+        spec.allocation = Some(allocation);
+        let image = ImagePlatform {
+            os: ImageOs::Linux,
+            arch: super::super::route::host_platform().unwrap().arch,
+        };
+        spec.route = Some(RouteReceipt {
+            key: RouteKey {
+                class: Class::Oci,
+                image,
+                execution: Execution::ShardsDedicated,
+                gpu: GpuEligibility::Required,
+            },
+            backing: Some(parent.key),
+        });
+        spec.check().unwrap();
+        let mut boxed = BoxRecord::new(spec, BoxPhase::Creating, Vec::new());
+        boxed.native_scope = Some(hex_core::record::NativeScope::from_bytes([8; 16]));
+        let mut records = Records::new();
+        records.insert(boxed.spec.id.clone(), Ok(boxed.clone()));
+        // Referenced Live parent keeps FULL P; its unselected sibling cannot be
+        // provisioned until that same scope is actually Released.
+        assert!(matches!(
+            runtime
+                .gpu_proposal(&family, &records, &[copy(&parent)])
+                .unwrap(),
+            Proposal::Empty
+        ));
+        parent.phase = BackingPhase::Released;
+        parent.exit = Some(hex_api::Exit::Code(7));
+        let remaining = vec![parent.devices[1]];
+        let subset = match runtime
+            .gpu_proposal(&family, &records, &[copy(&parent)])
+            .unwrap()
+        {
+            Proposal::Prepare {
+                definition,
+                current: None,
+            } => definition,
+            _ => panic!("Released referenced parent did not expose exact complement"),
+        };
+        assert_eq!(subset.devices, remaining);
+        assert_ne!(subset.pool, parent.key.pool);
+        let mut current = PoolRecord {
+            key: BackingKey {
+                pool: subset.pool,
+                generation: [9; 16],
+            },
+            devices: subset.devices,
+            phase: BackingPhase::Prepared,
+            allocation: None,
+            init: None,
+            exit: None,
+            ..copy(&parent)
+        };
+        assert!(
+            matches!(runtime.gpu_proposal(&family, &records, &[copy(&parent), copy(&current)]).unwrap(), Proposal::Prepare { definition, current: Some(_) } if definition.devices == remaining)
+        );
+        current
+            .accept_grant(&BackingGrant {
+                key: current.key,
+                allocation,
+                devices: current.devices.clone(),
+            })
+            .unwrap();
+        current.init = Some(hex_core::record::ProcId {
+            pid: 43,
+            start_ticks: 9,
+        });
+        current.phase = BackingPhase::Live;
+        assert_eq!(
+            runtime
+                .gpu_fresh_candidate(&records, &[copy(&parent), copy(&current)])
+                .unwrap()
+                .unwrap()
+                .key,
+            current.key
+        );
+        assert!(
+            runtime
+                .gpu_fresh_candidate(&empty, &[copy(&parent), copy(&current)])
+                .unwrap()
+                .is_none(),
+            "changed R stayed fresh while waiting for an older ACK"
+        );
+        // Box removal grows desired R, but no-ref Released P must be ACKed
+        // first. Existing live R is untouched and still reusable while P waits.
+        assert!(
+            matches!(runtime.gpu_proposal(&family, &empty, &[copy(&parent), copy(&current)]).unwrap(), Proposal::AwaitAck(row) if row.key == parent.key)
+        );
+        assert!(
+            matches!(runtime.gpu_proposal(&family, &records, &[copy(&parent), copy(&current)]).unwrap(), Proposal::Prepare { current: Some(row), definition } if row.key == current.key && definition.devices == remaining)
+        );
+        assert!(
+            matches!(runtime.gpu_proposal(&family, &empty, &[copy(&current)]).unwrap(), Proposal::Prepare { current: Some(row), definition } if row.key == current.key && definition.pool == family.pool)
+        );
+        current.phase = BackingPhase::Draining;
+        assert!(
+            matches!(runtime.gpu_proposal(&family, &empty, &[copy(&current)]).unwrap(), Proposal::Prepare { current: Some(row), .. } if row.phase == BackingPhase::Draining)
+        );
+        current.phase = BackingPhase::Released;
+        current.exit = Some(hex_api::Exit::Code(7));
+        assert!(
+            matches!(runtime.gpu_proposal(&family, &empty, &[copy(&current)]).unwrap(), Proposal::AwaitAck(row) if row.key == current.key)
+        );
+        assert!(
+            matches!(runtime.gpu_proposal(&family, &empty, &[]).unwrap(), Proposal::Prepare { current: None, definition } if definition.pool == family.pool)
+        );
+        // An uncharged Prepared can lose all unheld IDs to actual native work.
+        // Empty is a drain/cancel proposal only, never a new GPU Pool/route.
+        let mut native = boxed.clone();
+        native.spec.id = hex_api::BoxId::new("actual-native-gpu-workload").unwrap();
+        native.spec.devices = parent.devices.clone();
+        native.spec.allocation = None;
+        native.spec.route = Some(RouteReceipt {
+            key: RouteKey {
+                execution: Execution::Native,
+                gpu: GpuEligibility::Any,
+                ..boxed.spec.route.unwrap().key
+            },
+            backing: None,
+        });
+        native.spec.check().unwrap();
+        let mut native_records = Records::new();
+        native_records.insert(native.spec.id.clone(), Ok(native));
+        let prepared = PoolRecord {
+            allocation: None,
+            init: None,
+            exit: None,
+            phase: BackingPhase::Prepared,
+            ..copy(&parent)
+        };
+        assert!(
+            matches!(runtime.gpu_proposal(&family, &native_records, &[copy(&prepared)]).unwrap(), Proposal::Drain { current, pool } if current.key == prepared.key && pool == runtime.gpu_backing_pool(allocation.cost, &[], &[]).unwrap())
+        );
+        let cancelled = PoolRecord {
+            phase: BackingPhase::Released,
+            ..copy(&prepared)
+        };
+        runtime.preflight_backing(&cancelled).unwrap();
+        assert!(
+            matches!(runtime.gpu_proposal(&family, &empty, &[copy(&cancelled)]).unwrap(), Proposal::AwaitAck(row) if row.key == cancelled.key)
+        );
+        assert!(
+            runtime.handoff_source_released(&cancelled).is_err(),
+            "unsubmitted cancellation invented a native terminal witness"
+        );
+        // Canonical max-one-current and max-one consumer are independent guards.
+        let second = PoolRecord {
+            key: BackingKey {
+                pool: subset.pool,
+                generation: [10; 16],
+            },
+            devices: vec![DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 512,
+            }],
+            ..copy(&prepared)
+        };
+        assert!(
+            runtime
+                .gpu_proposal(&family, &empty, &[copy(&prepared), second])
+                .is_err()
+        );
+        let mut other = boxed;
+        other.spec.id = hex_api::BoxId::new("second-consumer").unwrap();
+        records.insert(other.spec.id.clone(), Ok(other));
+        assert!(
+            runtime
+                .gpu_proposal(&family, &records, &[copy(&parent)])
+                .is_err()
+        );
+        assert_eq!(standalone.0.load(Ordering::SeqCst), 0);
+    }
+
     struct Cold {
         row: Mutex<Option<PoolRecord>>,
         shared: Mutex<Option<PoolRecord>>,
@@ -1439,7 +2018,12 @@ mod tests {
             execution: hex_api::Execution,
             cost: hex_api::RuntimeCost,
             devices: &[hex_api::DeviceId],
-        ) -> Result<BackingOffer, Refusal> {
+            family: (&[u8; 32], &[hex_api::DeviceId], Option<&PoolRecord>),
+            validate: &mut dyn FnMut(&Records, &[PoolRecord]) -> Result<(), Refusal>,
+        ) -> Result<PoolRecord, Refusal> {
+            let snapshot = Books::pool_records(self)?;
+            assert_eq!(snapshot.iter().find(|row| row.key.pool == pool), family.2);
+            validate(&Books::records(self)?, &snapshot)?;
             let slot = if execution == hex_api::Execution::ShardsShared {
                 &self.shared
             } else {
@@ -1462,7 +2046,7 @@ mod tests {
                     exit: None,
                 });
             }
-            row.as_ref().ok_or_else(refused_model)?.offer()
+            PoolRecord::decode(&row.as_ref().ok_or_else(refused_model)?.encode()?)
         }
         fn capacity(&self) -> Result<hex_api::Capacity, Refusal> {
             if let Some(report) = &self.native_report {
@@ -1570,6 +2154,20 @@ mod tests {
     }
 
     impl Transaction for Cold {
+        fn check_unsubmitted_pool(&self) -> Result<(), Refusal> {
+            let held = self.row.lock().unwrap();
+            let row = held.as_ref().ok_or_else(refused_model)?;
+            if row.phase != BackingPhase::Prepared
+                || row.allocation.is_some()
+                || row.init.is_some()
+                || row.exit.is_some()
+                || self.native.is_some()
+                || self.launches.load(Ordering::SeqCst) != 0
+            {
+                return Err(refused_model());
+            }
+            Ok(())
+        }
         fn records(&self) -> Result<Records, Refusal> {
             Books::records(self)
         }

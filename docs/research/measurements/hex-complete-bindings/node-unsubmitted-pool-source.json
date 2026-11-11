@@ -1,0 +1,35 @@
+{
+  "role": "implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "base": "6c71c072957993cff77b8005b64d59e8d01b6784",
+  "sources": [
+    {
+      "path": "crates/hex-node/src/node/backends.rs",
+      "sha256": "257e2403b4bc593cfbb556b55f09bd3a6a2b683b1f029b305e87577a652761b3"
+    },
+    {
+      "path": "crates/hex-node/src/supervise/managed_preflight.rs",
+      "sha256": "d135417fee6defd04b61b2d755732dee45383c31d8995def7ef1e0c456a59145"
+    }
+  ],
+  "contract": "Transaction::check_unsubmitted_pool()->Result<(),Refusal>, exact signed8641a1d08b2baa5e2a7938df747466a9d38bb393",
+  "native_callback": "L3 Native.unsubmitted_pool:&dyn Fn(NativeRecord)->Result<(),Refusal>, Node provides borrowed closure on SAME Supervisor/root. L3 stack Tx must reread/check canonical row under SAME Pool turn before callback.",
+  "implementation": [
+    "Only Pool Prepared with allocation/init/exit None and valid canonical record can reach observation.",
+    "Lookup existing init owner; ANY receipt/presence refuses. Table guard drops before OS reads, no allocation or I/O under table mutex. No native row, pidfd, process or new reaper is created.",
+    "Open SAME configured owner root RDONLY|DIRECTORY|NOFOLLOW|CLOEXEC, statat exact canonical scope name SYMLINK_NOFOLLOW. Only target NOENT succeeds; missing/symlink root or any named target object/error refuses. No whole-root/singleton scan; sibling native owner independent.",
+    "Caller owns canonical Pool/R turn through observation, excluding same-owner native launch. Native positive metadata is not adopted/attached/finalized/cleaned; this is no-submission evidence, never ScopeReleased.",
+    "Retains ROOT6c71 full managed-preflight/cgroup/stat/bounds readers, d085 lints, ordinary paths and native owner; only one new narrow check +Node callback field."
+  ],
+  "control": "supervise::managed_preflight::tests::unsubmitted_prepared_pool_requires_no_slot_and_exact_native_metadata_absence",
+  "control_scope": "One new private-regular-file/pure control: exact absent scope positive, unrelated sibling survives, present slot flag refusal, directory/file/dangling symlink presence refusal unchanged, missing/symlink root errors, valid other canonical phases refuse. No cgroup/native process/KVM/GPU calls in this test.",
+  "validation": {
+    "rustfmt": "installed parser/format0",
+    "diff": "git diff --check0",
+    "checks": "UNRUN; matched L3 callback/Tx producer and runtime8641 required; no stub",
+    "native": "0 calls/no native proof"
+  },
+  "intake": "Narrow five-line Node callback addition and new managed_preflight method/helpers/test only; do not overwrite ROOT Node routing/render/59363 projection/current config/CPU joins. Root preserves own constructor fields.",
+  "owed": "ROOT matched light controls and actual native/recovery/fault/mutation/lease/fd proof/R14. FC/L2 Prepared-cancellation consumers follow actual required producer."
+}

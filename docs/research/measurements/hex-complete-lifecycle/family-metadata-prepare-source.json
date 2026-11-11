@@ -1,0 +1,74 @@
+{
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "fixed_parent": "de2a92a116e39e97a6192055b9218cfea77fda90",
+  "required_boundary": "b924aec5b7dfb98e4ce6ce11a767c51c7b3a0d48",
+  "node_consumer": "a5f22960acd5c9d98c69a48e1aa01a84860094a6",
+  "source_only": true,
+  "own_build_test_native_dispatch": false,
+  "new_controls": 5,
+  "control_status": "UNRUN, ROOT matched cohort only",
+  "native_symbols_added": [],
+  "new_dependencies": [],
+  "turns_state_changes": [],
+  "originals_unchanged": [
+    "c9b",
+    "de2a92a116e39e97a6192055b9218cfea77fda90"
+  ],
+  "source_hashes": {
+    "crates/hex-node/src/store.rs": {
+      "bytes": 66407,
+      "sha256": "d22b73966070aae94df0ce86370e5c2fc745cb374db431ca3cb3d94410d42b63"
+    },
+    "crates/hex-node/src/store/pool.rs": {
+      "bytes": 27572,
+      "sha256": "ce86d3b29e8122974287be6a4f3c6072aed6ef1d069fa318db94caf9d6e508b2"
+    },
+    "crates/hex-node/src/recorded.rs": {
+      "bytes": 103395,
+      "sha256": "6e0a2ef0250bd9dd82d7e5f5ee15be00da02cd66520e8683d8abb905a536a63e"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/store_family_prepare_tests.rs": {
+      "bytes": 13506,
+      "sha256": "7251ba5111c554a9f4f2ca302711af73fd362a76cc79dc7558b61f1590011b3f"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/family-metadata-prepare-source.md": {
+      "bytes": 9622,
+      "sha256": "71331ee05254bf5c32084f1e025e5136b350b953fbc1c20fd9be4f204822539d"
+    }
+  },
+  "primary_manifests": [
+    {
+      "repository": "https://github.com/rust-lang/rust",
+      "revision": "58cf8f9c35b355199727627d07ae34a4e2846d67",
+      "path": "library/std/src/sync/poison/rwlock.rs",
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sync/poison/rwlock.rs",
+      "bytes": 48728,
+      "sha256": "fa19fbb8f0cd3c55f83f5f90d682821455170eccda1f3ef90088f02e04aaa81a"
+    },
+    {
+      "revision": "58cf8f9c35b355199727627d07ae34a4e2846d67",
+      "sources": [
+        {
+          "path": "library/std/src/sys/sync/rwlock/mod.rs",
+          "url": "https://raw.githubusercontent.com/rust-lang/rust/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sys/sync/rwlock/mod.rs",
+          "bytes": 972,
+          "sha256": "800959dcab669de71206b5492b81deb2765a183d323e2807daefee35fa00ae19"
+        },
+        {
+          "path": "library/std/src/sys/sync/rwlock/queue.rs",
+          "url": "https://raw.githubusercontent.com/rust-lang/rust/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sys/sync/rwlock/queue.rs",
+          "bytes": 31562,
+          "sha256": "a2b1b14e4ecb9b66e8691680c09bfedefa0fadda7d90521e784ef859f5d760ca"
+        },
+        {
+          "path": "library/std/src/sys/sync/rwlock/futex.rs",
+          "url": "https://raw.githubusercontent.com/rust-lang/rust/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sys/sync/rwlock/futex.rs",
+          "bytes": 13013,
+          "sha256": "e05bc3eb45129408d232e867ce9f4bed49fdeb3b8ea435f1585c976fc1a6dd01"
+        }
+      ]
+    }
+  ]
+}

@@ -272,10 +272,20 @@ impl Api {
     }
 }
 
+static API: OnceLock<Result<Api, String>> = OnceLock::new();
+
 /// The calls, loaded on first use; `Err` says which module or export is missing.
 fn api() -> Result<&'static Api, &'static str> {
-    static API: OnceLock<Result<Api, String>> = OnceLock::new();
     API.get_or_init(Api::load).as_ref().map_err(String::as_str)
+}
+
+pub(super) fn initialize_api() {
+    let _ = api();
+}
+
+/// DLL/export initialization only. This does not claim HcsGetServiceProperties answered.
+pub(super) fn initialized_api_loaded() -> Option<bool> {
+    API.get().map(Result::is_ok)
 }
 
 /// Whether HCS is here and answering: its calls load and `HcsGetServiceProperties` succeeds. `Err` says

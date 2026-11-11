@@ -748,6 +748,58 @@ impl FirecrackerRuntime {
         }
     }
 
+    fn route_key(&self, gpu: hex_api::GpuEligibility) -> Result<hex_api::RouteKey, Refusal> {
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => hex_api::ImageArch::Amd64,
+            "aarch64" => hex_api::ImageArch::Arm64,
+            _ => {
+                return Err(invalid(
+                    "native architecture is outside the supported Firecracker targets",
+                ));
+            }
+        };
+        let key = hex_api::RouteKey {
+            class: Class::Firecracker,
+            image: hex_api::ImagePlatform {
+                os: hex_api::ImageOs::Linux,
+                arch,
+            },
+            execution: hex_api::Execution::Firecracker,
+            gpu,
+        };
+        key.check()?;
+        Ok(key)
+    }
+
+    /// Actual initialized fixed prefix and canonical row forms, without capacity/provider/Books
+    /// reentry. The same key constructor drives current_capacity below.
+    pub fn project_routes(
+        &self,
+        pools: &[PoolRecord],
+        introduced: Option<(hex_api::Execution, &[DeviceId])>,
+        projection: &mut crate::devices::RouteProjection,
+    ) -> Result<(), Refusal> {
+        self.require_initialized()?;
+        projection.retain(self.route_key(hex_api::GpuEligibility::None)?, None)?;
+        for record in pools
+            .iter()
+            .filter(|record| record.execution == hex_api::Execution::Firecracker)
+        {
+            self.preflight_backing(record)?;
+            projection.retain(
+                self.route_key(hex_api::GpuEligibility::Required)?,
+                Some(record.key),
+            )?;
+        }
+        if let Some((hex_api::Execution::Firecracker, devices)) = introduced {
+            hex_api::BackingOffer::check_selection_parts(&self.observer_claims()?, devices)?;
+            // The caller's absent-target proof supplies lifetime distinctness; no generation is
+            // guessed for this projection. The canonical row is created only after it passes.
+            projection.introduce(self.route_key(hex_api::GpuEligibility::Required)?)?;
+        }
+        Ok(())
+    }
+
     fn current_capacity(
         &self,
         class: Class,
@@ -757,23 +809,39 @@ impl FirecrackerRuntime {
         if class != Class::Firecracker {
             return Err(invalid("capacity requested for another backend"));
         }
+        self.prepare_backing()?;
         let authority = self.authority()?;
         let records = authority.records()?;
         let pools = authority.pool_records()?;
-        let mut capacity = self.authority()?.capacity()?;
-        let observer = self.observer_record()?;
-        let guest_observed = self.physical_observations_before(until)?;
+        let mut capacity = authority.capacity()?;
+        let fresh = self.fresh_observer(&records, &pools)?;
+        let guest_observed = match self.physical_observations_before(until) {
+            Ok(observed) => observed,
+            Err(why) => {
+                // Current typed diagnostics are reported independently by the SAME native
+                // PhysicalReport owner. A qualified exact-key observation failure cannot erase
+                // the first canonical resource/claim topology or invent fresh facts.
+                let unavailable =
+                    hex_api::BackendUnavailable::from_refusal(Class::Firecracker, why)?;
+                let Refusal::Backing { key, .. } = unavailable.cause else {
+                    return Err(invalid("observer failure lost its canonical source key"));
+                };
+                if !pools.iter().any(|pool| {
+                    pool.key == key && pool.execution == hex_api::Execution::Firecracker
+                }) {
+                    return Err(invalid(
+                        "observer failure names another configured authority",
+                    ));
+                }
+                Vec::new()
+            }
+        };
         let mut observed: Vec<hex_api::DeviceInfo> = Vec::new();
         observed
             .try_reserve_exact(guest_observed.len())
             .map_err(|_| exhausted("current observer facts", guest_observed.len()))?;
-        for actual in guest_observed {
-            if let Some(host) = observed.iter_mut().find(|host| host.id == actual.info.id) {
-                *host = actual.info;
-            } else {
-                observed.push(actual.info);
-            }
-        }
+        observed.extend(guest_observed.into_iter().map(|actual| actual.info));
+        observed.sort_unstable_by_key(|actual| actual.id);
         capacity.cost = None;
         capacity.routes.clear();
         capacity.device_routes.clear();
@@ -793,7 +861,11 @@ impl FirecrackerRuntime {
                 // An administrator's catalog is not current VRAM/load evidence. Prebound VFIO
                 // may hide host NVML: only the same initialized facts provider may supply this
                 // actual identity/metadata observation (including a witnessed live guest).
-                let Some(actual) = observed.iter().find(|actual| actual.id == entry.info.id) else {
+                let Some(actual) = observed
+                    .binary_search_by_key(&entry.info.id, |actual| actual.id)
+                    .ok()
+                    .and_then(|at| observed.get(at))
+                else {
                     continue;
                 };
                 vfio::validate(entry)?;
@@ -809,71 +881,82 @@ impl FirecrackerRuntime {
                 &pools,
             )?)?);
         }
-        let arch = match std::env::consts::ARCH {
-            "x86_64" => hex_api::ImageArch::Amd64,
-            "aarch64" => hex_api::ImageArch::Arm64,
-            _ => {
-                return Err(invalid(
-                    "native architecture is outside the supported Firecracker targets",
-                ));
-            }
-        };
-        let cpu = hex_api::RouteOffer {
-            key: hex_api::RouteKey {
-                class: Class::Firecracker,
-                image: hex_api::ImagePlatform {
-                    os: hex_api::ImageOs::Linux,
-                    arch,
-                },
-                execution: hex_api::Execution::Firecracker,
-                gpu: hex_api::GpuEligibility::None,
-            },
-            cost: Some(self.config.cost),
-            backing: None,
-        };
+        let count = pools
+            .iter()
+            .filter(|pool| pool.execution == hex_api::Execution::Firecracker)
+            .count();
+        let routes = count
+            .checked_add(1)
+            .filter(|count| *count <= hex_api::MAX_RUNTIME_ROUTES)
+            .ok_or_else(|| {
+                exhausted(
+                    "Firecracker initialized routes",
+                    hex_api::MAX_RUNTIME_ROUTES,
+                )
+            })?;
         capacity
             .routes
-            .try_reserve_exact(2)
-            .map_err(|_| exhausted("Firecracker initialized routes", 2))?;
+            .try_reserve_exact(routes)
+            .map_err(|_| exhausted("Firecracker initialized routes", routes))?;
+        capacity
+            .backings
+            .try_reserve_exact(count)
+            .map_err(|_| exhausted("Firecracker backing receipts", count))?;
         capacity
             .device_routes
             .try_reserve_exact(capacity.devices.len())
             .map_err(|_| exhausted("Firecracker device eligibility", capacity.devices.len()))?;
-        capacity.routes.push(cpu);
-        let gpu = observer.is_some()
-            || capacity
-                .devices
-                .iter()
-                .any(|device| device.id.kind == DeviceKind::Gpu);
-        let backing = observer.as_ref().map(|record| record.key);
-        if let Some(observer) = observer {
-            capacity
-                .backings
-                .try_reserve_exact(1)
-                .map_err(|_| exhausted("Firecracker observer offer", 1))?;
-            capacity.backings.push(observer.offer()?);
-        }
-        if gpu {
+        capacity.routes.push(hex_api::RouteOffer {
+            key: self.route_key(hex_api::GpuEligibility::None)?,
+            cost: Some(self.config.cost),
+            backing: None,
+        });
+        for pool in pools
+            .iter()
+            .filter(|pool| pool.execution == hex_api::Execution::Firecracker)
+        {
+            self.preflight_backing(pool)?;
             capacity.routes.push(hex_api::RouteOffer {
-                key: hex_api::RouteKey {
-                    gpu: hex_api::GpuEligibility::Required,
-                    ..cpu.key
-                },
-                backing,
-                ..cpu
+                key: self.route_key(hex_api::GpuEligibility::Required)?,
+                cost: Some(self.config.cost),
+                backing: Some(pool.key),
             });
+            capacity.backings.push(pool.offer()?);
         }
-        capacity
-            .device_routes
-            .extend(capacity.devices.iter().map(|device| {
-                if device.id.kind == DeviceKind::Gpu {
-                    2
-                } else if gpu {
-                    3
-                } else {
-                    1
-                }
-            }));
+        let fresh = fresh
+            .map(|key| {
+                let source = pools
+                    .iter()
+                    .find(|pool| pool.key == key)
+                    .ok_or_else(|| invalid("fresh observer source vanished within snapshot"))?;
+                let at = capacity
+                    .routes
+                    .iter()
+                    .position(|route| route.backing == Some(key))
+                    .ok_or_else(|| invalid("fresh observer route vanished within snapshot"))?;
+                let bit = u32::try_from(at)
+                    .ok()
+                    .and_then(|at| 1u64.checked_shl(at))
+                    .ok_or_else(|| {
+                        exhausted("Firecracker route mask", hex_api::MAX_RUNTIME_ROUTES)
+                    })?;
+                Ok::<_, Refusal>((source, bit))
+            })
+            .transpose()?;
+        for device in &capacity.devices {
+            let mut word = if device.id.kind == DeviceKind::Gpu {
+                0u64
+            } else {
+                1u64
+            };
+            if let Some((source, bit)) = fresh
+                && (device.id.kind != DeviceKind::Gpu
+                    || source.devices.binary_search(&device.id).is_ok())
+            {
+                word |= bit;
+            }
+            capacity.device_routes.push(word);
+        }
         capacity.check()?;
         Ok(Some(capacity))
     }
@@ -946,11 +1029,17 @@ impl Runtime for FirecrackerRuntime {
     }
     fn release_backing(&self, key: hex_api::BackingKey) -> Result<hex_api::BackingOffer, Refusal> {
         self.require_initialized()?;
-        let released = self.release_observer(&key)?;
-        // The caller first consumed the canonical Released capacity receipt. Its explicit release
-        // acknowledgement may now rearm only after every original Box reference is gone.
-        self.prepare_backing()?;
-        Ok(released)
+        // A cleanup response must not also rearm/remove its generation. The driver's separate
+        // explicit call after BOTH Index views consumed Released is the metadata ACK phase.
+        if self
+            .observer_records()?
+            .iter()
+            .any(|record| record.key == key && record.phase == hex_api::BackingPhase::Released)
+        {
+            self.acknowledge_observer(&key)
+        } else {
+            self.release_observer(&key)
+        }
     }
     fn backing_usage(&self, key: &hex_api::BackingKey) -> Result<Usage, Refusal> {
         self.require_initialized()?;
@@ -1234,7 +1323,7 @@ mod handoff_tests {
         ImageOs, ImagePlatform, RouteKey, RouteReceipt, RuntimeCost,
     };
 
-    struct NoOwnerCalls;
+    pub(super) struct NoOwnerCalls;
     impl Books for NoOwnerCalls {
         fn records(&self) -> Result<Records, Refusal> {
             panic!("read-only proof must not call Books")
@@ -1248,7 +1337,9 @@ mod handoff_tests {
             _: Execution,
             _: RuntimeCost,
             _: &[DeviceId],
-        ) -> Result<BackingOffer, Refusal> {
+            _: (&[u8; 32], &[DeviceId], Option<&PoolRecord>),
+            _: &mut dyn FnMut(&Records, &[PoolRecord]) -> Result<(), Refusal>,
+        ) -> Result<PoolRecord, Refusal> {
             panic!("read-only proof must not call Books")
         }
         fn capacity(&self) -> Result<Capacity, Refusal> {
@@ -1390,5 +1481,107 @@ mod handoff_tests {
         source.exit = Some(hex_api::Exit::Code(0));
         assert!(runtime.handoff_unsubmitted(&record, &source).is_err());
         assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+    /// AC-T7.4.1: actual FC key constructors project CPU/history/subset forms with no Books/I/O.
+    #[test]
+    fn pure_firecracker_projection_uses_configured_subset_rows_and_no_native_queries() {
+        let catalog = Catalog::parse(b"hex-devices-1\ngpu\t256\ta\t1\tvfio\t0000:01:00.0\t7\ngpu\t512\tb\t1\tvfio\t0000:02:00.0\t8\n").unwrap();
+        let owner: Arc<dyn Books> = Arc::new(NoOwnerCalls);
+        let runtime = FirecrackerRuntime {
+            config: pool::tests::config(),
+            catalog: triomphe::Arc::try_new(catalog).unwrap(),
+            books: Arc::downgrade(&owner),
+            initialized: std::sync::OnceLock::new(),
+        };
+        let full = [256, 512].map(|key| DeviceId {
+            kind: DeviceKind::Gpu,
+            key,
+        });
+        let cost = RuntimeCost {
+            ceiling: runtime.config.cost.floor,
+            ..runtime.config.cost
+        };
+        let make = |devices: Vec<DeviceId>, phase| PoolRecord {
+            version: hex_core::record::RECORD_VERSION,
+            key: BackingKey {
+                pool: pool::observer_configuration(&runtime.config, &devices).unwrap(),
+                generation: [if devices.len() == full.len() { 3 } else { 4 }; 16],
+            },
+            execution: Execution::Firecracker,
+            cost,
+            allocation: (phase != BackingPhase::Prepared).then(|| {
+                cost.allocate(hex_api::CapacityResources::default())
+                    .unwrap()
+            }),
+            devices,
+            phase,
+            init: if phase == BackingPhase::Released {
+                Some(hex_core::record::ProcId {
+                    pid: 1,
+                    start_ticks: 1,
+                })
+            } else {
+                None
+            },
+            exit: if phase == BackingPhase::Released {
+                Some(hex_api::Exit::Code(0))
+            } else {
+                None
+            },
+        };
+        let rows = [
+            make(full.to_vec(), BackingPhase::Released),
+            make(vec![full[1]], BackingPhase::Prepared),
+        ];
+        let mut projection = crate::devices::RouteProjection::new();
+        assert!(
+            runtime
+                .project_routes(&rows, None, &mut projection)
+                .is_err(),
+            "uninitialized adapter cannot project VM prefixes"
+        );
+        assert_eq!(projection.count().unwrap(), 0);
+        runtime.initialized.set(()).unwrap(); // Pure fixture condition only, never native readiness proof.
+        let (process, oci) = crate::devices::native_route_keys(
+            Class::Oci,
+            runtime.route_key(GpuEligibility::None).unwrap().image,
+        )
+        .unwrap();
+        projection.retain(process, None).unwrap();
+        projection.retain(oci.unwrap(), None).unwrap();
+        runtime
+            .project_routes(
+                &rows,
+                Some((Execution::Firecracker, &full[..1])),
+                &mut projection,
+            )
+            .unwrap();
+        assert_eq!(
+            projection.count().unwrap(),
+            6,
+            "native2 +FCcpu1 +retainedGPUpairs2 +newLifetime1"
+        );
+        assert!(
+            runtime
+                .project_routes(
+                    &rows,
+                    Some((
+                        Execution::Firecracker,
+                        &[DeviceId {
+                            kind: DeviceKind::Gpu,
+                            key: 768
+                        }]
+                    )),
+                    &mut crate::devices::RouteProjection::new()
+                )
+                .is_err()
+        );
+        let mut wrong = make(vec![full[1]], BackingPhase::Prepared);
+        wrong.cost.id = [9; 32];
+        assert!(
+            runtime
+                .project_routes(&[wrong], None, &mut crate::devices::RouteProjection::new())
+                .is_err()
+        );
     }
 }

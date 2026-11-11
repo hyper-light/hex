@@ -80,6 +80,7 @@ fn failed(error: Error) -> Refusal {
 
 struct BackingActions {
     prepared: Vec<(hex_sim::model::Class, hex_api::BackingKey)>,
+    draining: Vec<(hex_sim::model::Class, hex_api::BackingOffer)>,
     released: Vec<(hex_sim::model::Class, hex_api::BackingOffer)>,
 }
 
@@ -89,6 +90,7 @@ impl BackingActions {
     ) -> Result<Self, Refusal> {
         Ok(Self {
             prepared: Runtimes::prepared_backings(reports).map_err(failed)?,
+            draining: Runtimes::draining_backings(reports).map_err(failed)?,
             released: Runtimes::released_backings(reports).map_err(failed)?,
         })
     }
@@ -129,8 +131,8 @@ impl BackingActions {
                 }
             }
         });
-        // A validated canonical Released receipt is a termination/refund witness, not a fresh
-        // observation. Unread renderer telemetry cannot suppress that existing authority.
+        // Draining cleanup and validated Released refunds are native lifecycle authority, not
+        // fresh observation grants. Unread renderer telemetry cannot suppress either action.
         if let Some(refusal) = refusal {
             return Err(refusal);
         }
@@ -959,11 +961,21 @@ impl Service {
         self.initialize_backings(prepared)
     }
 
-    /// One bounded pass over actual Prepared offers. The native effect consumes the same Index
-    /// grant; a fresh snapshot, never the initialization reply alone, publishes factual admission.
+    /// One bounded pass over actual canonical lifecycle offers. Native cleanup finishes before
+    /// Index refund and its separate ACK; new boot still consumes the same Index grant.
     fn initialize_backings(&self, actions: BackingActions) -> Result<(), Refusal> {
         let mut initialized = false;
         for (endpoint, released) in actions.released {
+            self.driver
+                .release_backing(endpoint, &released)
+                .map_err(failed)?;
+            initialized = true;
+        }
+        for (endpoint, draining) in actions.draining {
+            let released = self
+                .driver
+                .drain_backing(endpoint, &draining)
+                .map_err(failed)?;
             self.driver
                 .release_backing(endpoint, &released)
                 .map_err(failed)?;

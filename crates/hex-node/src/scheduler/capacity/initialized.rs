@@ -84,7 +84,10 @@ pub(super) fn apply(
         let free = amounts(&report.free, 0);
         room = Some(room.map_or(free, |previous| least(previous, free)));
         for offer in &report.routes {
-            if let Some(previous) = offers.iter().find(|previous| previous.key == offer.key) {
+            if let Some(previous) = offers
+                .iter()
+                .find(|previous| previous.key == offer.key && previous.backing == offer.backing)
+            {
                 if previous != offer {
                     return Err(invalid(
                         "route aliases disagree about cost or canonical backing",
@@ -150,7 +153,7 @@ pub(super) fn apply(
                 }
                 let global_at = offers
                     .iter()
-                    .position(|global| global.key == offer.key)
+                    .position(|global| global.key == offer.key && global.backing == offer.backing)
                     .ok_or_else(|| invalid("local route is absent from normalized catalog"))?;
                 *mask |= bit(global_at)?;
             }
@@ -235,9 +238,11 @@ pub(super) fn retain_unavailable(
         observation.check()?;
     }
     let failed = |offer: &hex_api::RouteOffer| {
-        unavailable
-            .iter()
-            .any(|value| value.backend == offer.key.backend_class())
+        unavailable.iter().any(|value| {
+            value.backend == offer.key.backend_class()
+                && matches!(&value.cause, hex_api::Refusal::Backing { key, .. }
+                    if offer.backing == Some(*key))
+        })
     };
     let prior = previous.and_then(|node| node.routes.as_deref());
     let Some(shared) = node.routes.as_mut() else {
@@ -277,12 +282,12 @@ pub(super) fn retain_unavailable(
             if let Some(existing) = current
                 .offers
                 .iter()
-                .find(|existing| existing.key == offer.key)
+                .find(|existing| existing.key == offer.key && existing.backing == offer.backing)
             {
                 if existing != offer {
-                    // A successful current unrelated key may advance legitimately. Index's
-                    // retained-receipt check still refuses removal of any actual held lifetime.
-                    continue;
+                    return Err(invalid(
+                        "retained qualified route changed its immutable cost",
+                    ));
                 }
             } else {
                 if current.offers.len() >= hex_api::MAX_RUNTIME_ROUTES {
@@ -947,5 +952,86 @@ mod tests {
                 assert_eq!(after, before);
             }
         }
+    }
+    /// AC-T7.4.1: reversed local masks map by full tuple while Released history remains addressable.
+    #[test]
+    fn normalized_historical_and_current_tuples_keep_exact_masks_and_current_choice() {
+        let parent = BackingKey {
+            pool: [0x41; 32],
+            generation: [0x42; 16],
+        };
+        let current = BackingKey {
+            pool: [0x43; 32],
+            generation: [0x44; 16],
+        };
+        let id = device().id;
+        let mut historical = route(
+            hex_api::Class::Shards,
+            Execution::ShardsDedicated,
+            GpuEligibility::Required,
+        );
+        historical.cost = Some(profile());
+        historical.backing = Some(parent);
+        let fresh = RouteOffer {
+            backing: Some(current),
+            ..historical
+        };
+        let rows = || {
+            vec![
+                BackingOffer {
+                    key: parent,
+                    cost: profile(),
+                    phase: BackingPhase::Released,
+                    devices: vec![id, DeviceId { key: 2, ..id }],
+                },
+                BackingOffer {
+                    key: current,
+                    cost: profile(),
+                    phase: BackingPhase::Live,
+                    devices: vec![id],
+                },
+            ]
+        };
+        let actual = || {
+            let mut actual = device();
+            actual.holder = Some(hex_api::DeviceHolder::Backing(current));
+            actual
+        };
+        let node = normalize(vec![
+            (
+                Class::Oci,
+                Some(report(
+                    vec![historical, fresh],
+                    vec![actual()],
+                    vec![2],
+                    rows(),
+                )),
+            ),
+            (
+                Class::Shards,
+                Some(report(
+                    vec![fresh, historical],
+                    vec![actual()],
+                    vec![1],
+                    rows(),
+                )),
+            ),
+        ])
+        .unwrap();
+        let routes = node.routes.as_ref().unwrap();
+        assert_eq!(routes.offers.len(), 2);
+        assert_eq!(routes.backings.len(), 2);
+        assert_eq!(routes.device_routes, vec![2]);
+        assert_eq!(node.devices.len(), 1);
+        let index = hex_sim::index::FitIndex::new(&[node]).unwrap();
+        let demand = original_pending_request(true);
+        assert_eq!(
+            index.verdict(NodeId(0), &demand).unwrap(),
+            hex_sim::index::Verdict::Admits
+        );
+        assert_eq!(
+            index.route(NodeId(0), &demand).unwrap().unwrap().backing,
+            Some(current)
+        );
     }
 }

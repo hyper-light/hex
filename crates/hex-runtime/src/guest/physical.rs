@@ -165,21 +165,20 @@ impl GuestRuntime {
 
     /// Read only facts from the original charged live observer. A file/report
     /// alone is insufficient: the SAME canonical native scope must still exist.
-    fn live_gpu_receipt(&self) -> Result<Option<super::pool::Receipt>, Refusal> {
-        let Some(definition) = self.gpu_backing_definition()? else {
-            return Ok(None);
-        };
+    fn live_gpu_receipt(
+        &self,
+        ids: &[hex_api::DeviceId],
+    ) -> Result<Option<super::pool::Receipt>, Refusal> {
         let authority = self.authority()?;
-        let records = authority.pool_records()?;
-        let Some(record) = records
-            .iter()
-            .find(|record| record.key.pool == definition.pool)
-        else {
+        let records = authority.records()?;
+        let pools = authority.pool_records()?;
+        let Some(record) = self.gpu_fresh_candidate(&records, &pools)? else {
             return Ok(None);
         };
-        if record.phase != hex_api::BackingPhase::Live {
+        if record.phase != hex_api::BackingPhase::Live || record.devices != ids {
             return Ok(None);
         }
+        let definition = self.gpu_definition_for_record(record)?;
         self.preflight_backing(record)?;
         let receipt = super::pool::read(&definition.path)?
             .ok_or_else(|| super::pool::refused(record.key, hex_api::LifecycleCause::Uncertain))?;
@@ -251,7 +250,7 @@ impl GuestRuntime {
         if ids.len() != physical.len() || ids.len() > hex_api::MAX_DEVICES {
             return Err(invalid("physical claim count changed"));
         }
-        let Some(receipt) = self.live_gpu_receipt()? else {
+        let Some(receipt) = self.live_gpu_receipt(ids)? else {
             // Prepared/Granted remains explicit in Capacity.backings; there is
             // no observed GPU eligibility before native+guest readiness is Live.
             return Ok(Vec::new());
@@ -352,14 +351,34 @@ impl GuestRuntime {
     /// A cold key supplies only a qualified refusal, never invented metadata.
     pub fn physical_observations(&self) -> Result<Vec<hex_api::PhysicalDevice>, Refusal> {
         use hex_api::{BackingPhase, LifecycleCause};
-        let Some(definition) = self.gpu_backing_definition()? else {
+        if self.gpu_backing_definition()?.is_none() {
             return Ok(Vec::new());
+        }
+        let authority = self.authority()?;
+        let records = authority.records()?;
+        let pools = authority.pool_records()?;
+        let (current, pending_ack) = self.gpu_family_rows(&records, &pools)?;
+        let record = match current {
+            Some(record) => record,
+            None => {
+                let retained = pending_ack.or_else(|| {
+                    pools
+                        .iter()
+                        .filter(|row| row.execution == hex_api::Execution::ShardsDedicated)
+                        .min_by_key(|row| row.key)
+                });
+                return match retained {
+                    Some(row) => Err(super::pool::refused(row.key, LifecycleCause::Busy)),
+                    None => Ok(Vec::new()),
+                };
+            }
         };
-        let records = self.authority()?.pool_records()?;
-        let record = records
-            .iter()
-            .find(|record| record.key.pool == definition.pool)
-            .ok_or_else(|| invalid("prepare the configured GPU backing before observation"))?;
+        if record.phase == BackingPhase::Live
+            && self.gpu_fresh_candidate(&records, &pools)?.is_none()
+        {
+            return Err(super::pool::refused(record.key, LifecycleCause::Busy));
+        }
+        let definition = self.gpu_definition_for_record(record)?;
         self.preflight_backing(record)?;
         match record.phase {
             BackingPhase::Prepared | BackingPhase::Granted => {
@@ -395,25 +414,20 @@ impl GuestRuntime {
     }
 
     pub fn attachment_offers(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
-        if self.gpu_catalog.is_none() {
+        if self.gpu_backing_definition()?.is_none() {
             return Ok(Vec::new());
         }
-        let entries = self.physical_entries()?;
-        let mut ids = Vec::new();
-        ids.try_reserve_exact(entries.len())
-            .map_err(|_| Refusal::Full(hex_api::MAX_DEVICES))?;
-        ids.extend(entries.into_iter().map(|entry| entry.info.id));
-        ids.sort_unstable();
-        if ids.is_empty() {
+        let authority = self.authority()?;
+        let records = authority.records()?;
+        let pools = authority.pool_records()?;
+        let Some(record) = self.gpu_fresh_candidate(&records, &pools)? else {
+            return Ok(Vec::new());
+        };
+        if record.phase != hex_api::BackingPhase::Live {
             return Ok(Vec::new());
         }
-        if ids.windows(2).any(|pair| matches!(pair, [a,b] if a >= b)) {
-            return Err(invalid(
-                "native provider repeated a selected device identity",
-            ));
-        }
-        let physical = self.catalog_physical(&ids)?;
-        self.checked_physical(&ids, &physical)
+        let definition = self.gpu_definition_for_record(record)?;
+        self.checked_physical(&definition.devices, &definition.physical)
     }
 
     /// Explicit initialization uses the same production join as later admission.

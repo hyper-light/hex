@@ -1,0 +1,47 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "d6e248100b1d2bf9854413017f94691cfe47c996",
+  "source": [
+    {
+      "path": "crates/hex-runtime/src/devices.rs",
+      "sha256": "2bfbf5cdb59dd84b32616cb9bea63ad84ff8c4f3590a6369f75037c32061fdff"
+    },
+    {
+      "path": "crates/hex-runtime/src/devices/tests.rs",
+      "sha256": "6e639e76cb38a1bfba5be9cb8134c11bddd0cad62436949bf13d94ab0d8da8e2"
+    }
+  ],
+  "scope": "ROOT-ACKed one transient pure route projection, shared actual native key constructor, two bounded protocol controls. No new Books method/DTO/wire/cache/ledger or native query.",
+  "sealed_names": [
+    "devices::RouteProjection::new()->Self (stack scratch, empty existing Vecs)",
+    "retain(&mut self,key:RouteKey,backing:Option<BackingKey>)->Result<(),Refusal>",
+    "introduce(&mut self,key:RouteKey)->Result<(),Refusal>",
+    "count(&self)->Result<usize,Refusal>",
+    "devices::native_route_keys(form:Class,image:ImagePlatform)->Result<(RouteKey,Option<RouteKey>),Refusal>"
+  ],
+  "contract": [
+    "Retained actual fixed/row forms union full existing RouteReceipt tuple, aliases do not double count. Actual configured producer/preflight still owns cost/profile/family validation.",
+    "Introduced keys are forms of exactly ONE absent target after Store proof, distinct new lifetime count; no fabricated generation or fake canonical row. Introducing native prefix or native backing refuses.",
+    "Total tuple/form count checked with checked_add and MAX_RUNTIME_ROUTES64 BEFORE each fallible scratch growth; exactlimit accepted and overbound refuses. Nothing in scratch owns resources, publishes metadata or persists.",
+    "native_routes actual capacity producer now uses SAME pure native_route_keys function as metadata projection. Original process/OCI form/image/masks/cost behavior retained. The caller must supply actually initialized form; no OS/features/classes inference here.",
+    "Node private+Recorded Recover wrappers must construct actual runtime/adapter forms under same metadata callback: Node LinuxProcess/OCI; Mac at8199 has no nativeCapacityprefix (do not inventProcess fromclasses); Windows actual initialized HCS/Containers snapshot only (no lazy WMI/features/available query underfence).",
+    "Required FC/Guest actual project_routes(pools,introduced:Option<(Execution,&[DeviceId])>,&mutRouteProjection) consumers remain separate. They reuse actual offer-key constructors, not magicperclass aliascounts. No permissive VM default."
+  ],
+  "new_controls_unrun": [
+    "devices::tests::route_projection_unions_mixed_producers_and_distinct_lifetimes (actual native key builder +explicit mixed FC/Shards/historical tuple fixtures; aliasunion/newlife counts and illegalNative reject)",
+    "devices::tests::route_projection_accepts_exact_word_and_refuses_overbound_without_fake_generation (exact64, duplicateunion, introduced65th/retainednewgen refusal)"
+  ],
+  "limits": "These are pure collector/shape controls, not actual Node/Mac/Win initialization/absence proof. Required owner/backend integration controls must still exercise no-backend behavior +metadata publication rejection/oldcharge preservation. No native permission is granted by projection.",
+  "allocation_wait_complexity": "Two temporary bounded Vecs of existing tuple/key scalar values, linear bounded contains<=64, fallible reserve per newslot. No cache/mutex/refcount/timer/wait/native/provider/Books access. No size/speed/allocation-free claim; ROOT R14 allocation/copy/fault and all inherited allocation seams remain audit obligations.",
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compile": "UNRUN; actual consumers/cohort pending",
+    "tests": "UNRUN",
+    "dispatches": 0,
+    "native": 0
+  },
+  "remaining": "L1 Node/FC actual producer +L2 guest actual constructor+L3 Recover/native pure bodies and initialized snapshots, existing family8b callback join; ROOT matched new controls/current compile. Lazy grant/drain/ReleasedACK/canonical history implementation and actual hardware/native acceptance still owed."
+}

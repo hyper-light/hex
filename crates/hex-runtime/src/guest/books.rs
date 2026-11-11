@@ -461,6 +461,11 @@ mod tests {
         calls: AtomicUsize,
     }
     impl Transaction for Owner {
+        fn check_unsubmitted_pool(&self) -> Result<(), Refusal> {
+            Err(Refusal::Broken(
+                "ordinary-box model owns no pool scope".into(),
+            ))
+        }
         fn pool_records(&self) -> Result<crate::devices::PoolRecords, Refusal> {
             Ok(Vec::new())
         }
@@ -547,7 +552,13 @@ mod tests {
             _: hex_api::Execution,
             _: hex_api::RuntimeCost,
             _: &[hex_api::DeviceId],
-        ) -> Result<hex_api::BackingOffer, Refusal> {
+            _: (
+                &[u8; 32],
+                &[hex_api::DeviceId],
+                Option<&hex_core::record::PoolRecord>,
+            ),
+            _: &mut dyn FnMut(&Records, &[hex_core::record::PoolRecord]) -> Result<(), Refusal>,
+        ) -> Result<hex_core::record::PoolRecord, Refusal> {
             panic!("box control must not prepare a pool")
         }
         fn with_pool_transaction(

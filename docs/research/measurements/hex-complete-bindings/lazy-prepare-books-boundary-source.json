@@ -1,0 +1,34 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "2c6535f49f90e9290419e53549315ecd7364a71a",
+  "contract_source": "2c6535f49f90e9290419e53549315ecd7364a71a",
+  "source": {
+    "path": "crates/hex-runtime/src/devices.rs",
+    "sha256": "c3fbb6ea80e5ee70a46e98935c305c0fd783af086a2383c1a5e0faa8d47d30ab"
+  },
+  "scope": "Exact jointly ACKed required Books::prepare_pool signature plus existing test-only owner mechanical type compatibility. No production default/stub, Store/Native implementation or wire change.",
+  "signature": "fn prepare_pool(&self,pool:[u8;32],execution:Execution,cost:RuntimeCost,devices:&[DeviceId],family:(&[u8;32],&[DeviceId],Option<&PoolRecord>),validate:&mut dyn FnMut(&Records,&[PoolRecord])->Result<(),Refusal>)->Result<PoolRecord,Refusal>",
+  "invariants": [
+    "F hashes full immutable configuration/selector set. Full canonical conflict aliases serialize SAME owner changes; expected row must match exactly under guard.",
+    "Strict bounded canonical Box/Pool snapshots are borrowed by pure callback. It checks proposed R/config hash/family/profile/references and catalog bound, never Books/Store/native recursion or re-pick.",
+    "One current complement plus retained referenced Released parents, no duplicate native owner/picker/ledger/cache. Native grant/cleanup transactions retain original exact R owner; callback only publishes metadata.",
+    "Native finalize/helper absence precedes canonical Released. Phase alone never proves Index ACK; preparation/replacement waits existing Released ACK/removal."
+  ],
+  "consumers_owed": {
+    "L3": "SAME Recorded/Store/Turns real producer and strict snapshots/reference guard",
+    "L1": "Node Books producer +FC consumer using initialized same Catalog/authority",
+    "L2": "Guest shared/GPU consumers, exact canonical return avoids redundant postprepare read",
+    "ROOT": "Outside test-only Books literal/signature compatibility, matched cohort/source intake; no compile while unmatched boundary"
+  },
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compile": "UNRUN/coherent consumers pending",
+    "tests": "UNRUN",
+    "native": 0,
+    "dispatches": 0
+  },
+  "status": "SOURCE boundary only; no readiness claim. No existing control oracle changed. Current ROOT frozen11-case run is independent and not repeated."
+}

@@ -8,6 +8,7 @@
 mod books;
 mod cost;
 mod dedicated;
+mod family;
 pub mod gpu;
 mod gpu_pool;
 pub mod held;
@@ -348,7 +349,7 @@ pub struct GuestRuntime {
     books: OnceLock<Weak<dyn crate::devices::Books>>,
     runtime_cost: Option<hex_api::RuntimeCost>,
     native_paths: Option<shards_api::RuntimePaths>,
-    shared_pool: OnceLock<hex_api::BackingKey>,
+    shared_pool: Mutex<Option<hex_api::BackingKey>>,
     gpu_observer: Option<GpuObserver>,
     /// What joins each guest's evented connection to the node's loop ([`GuestRuntime::join_loop`]).
     joins: Mutex<Option<Arc<dyn Joins>>>,
@@ -456,7 +457,7 @@ impl GuestRuntime {
             books: OnceLock::new(),
             runtime_cost: None,
             native_paths: None,
-            shared_pool: OnceLock::new(),
+            shared_pool: Mutex::new(None),
             gpu_observer: None,
             joins: Mutex::new(None),
         }
@@ -861,7 +862,7 @@ impl Runtime for GuestRuntime {
         &self,
         grant: hex_api::BackingGrant,
     ) -> Result<hex_api::BackingOffer, Refusal> {
-        if self.shared_pool.get() == Some(&grant.key) {
+        if self.shared_key()? == Some(grant.key) {
             self.initialize_pool(grant)
         } else {
             self.initialize_gpu_pool(grant)
@@ -869,10 +870,14 @@ impl Runtime for GuestRuntime {
     }
 
     fn release_backing(&self, key: hex_api::BackingKey) -> Result<hex_api::BackingOffer, Refusal> {
-        if self.shared_pool.get() == Some(&key) {
-            self.release_pool(key)
+        if self.shared_key()? == Some(key) {
+            if self.pool_record(key)?.phase == hex_api::BackingPhase::Released {
+                self.acknowledge_shared_release(key)
+            } else {
+                self.release_pool(key)
+            }
         } else {
-            self.acknowledge_gpu_release(key)
+            self.release_gpu_backing(key)
         }
     }
     fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {

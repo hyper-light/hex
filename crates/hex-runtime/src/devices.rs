@@ -10,6 +10,116 @@ use std::time::{Duration, Instant};
 use hex_api::{BoxId, BoxSpec, DeviceId, DeviceInfo, DeviceKind, Refusal};
 use hex_core::record::{BoxRecord, NativeRecord, NativeStage, PoolRecord};
 
+/// One metadata callback's bounded route-count scratch, never stored as inventory or grants.
+/// Retained tuples are real identities; introduced keys describe ONE new lifetime only after
+/// Store has proved its target absent. No fake generation or temporary canonical row is needed.
+#[derive(Debug, Default)]
+pub struct RouteProjection {
+    retained: Vec<hex_api::RouteReceipt>,
+    introduced: Vec<hex_api::RouteKey>,
+}
+
+impl RouteProjection {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn count(&self) -> Result<usize, Refusal> {
+        self.retained
+            .len()
+            .checked_add(self.introduced.len())
+            .ok_or_else(Self::full)
+    }
+
+    fn full() -> Refusal {
+        Refusal::Exhausted {
+            what: "projected initialized runtime routes",
+            bound: hex_api::MAX_RUNTIME_ROUTES,
+        }
+    }
+
+    fn admit(&self) -> Result<(), Refusal> {
+        if self.count()? >= hex_api::MAX_RUNTIME_ROUTES {
+            return Err(Self::full());
+        }
+        Ok(())
+    }
+
+    /// Actual initialized fixed prefixes and retained rows use the full existing tuple.
+    /// Alias cost/profile consistency is still checked by the same configured producer/preflight.
+    pub fn retain(
+        &mut self,
+        key: hex_api::RouteKey,
+        backing: Option<hex_api::BackingKey>,
+    ) -> Result<(), Refusal> {
+        key.check()?;
+        if key.execution == hex_api::Execution::Native && backing.is_some() {
+            return Err(invalid("native projected prefix cannot name a VM backing"));
+        }
+        let tuple = hex_api::RouteReceipt { key, backing };
+        if self.retained.contains(&tuple) {
+            return Ok(());
+        }
+        self.admit()?;
+        self.retained
+            .try_reserve_exact(1)
+            .map_err(|_| Self::full())?;
+        self.retained.push(tuple);
+        Ok(())
+    }
+
+    /// These forms belong to the one absent target, so they are distinct from every retained
+    /// backing generation even when a historical RouteKey is identical.
+    pub fn introduce(&mut self, key: hex_api::RouteKey) -> Result<(), Refusal> {
+        key.check()?;
+        if key.execution == hex_api::Execution::Native {
+            return Err(invalid("new VM lifetime cannot introduce a native prefix"));
+        }
+        if self.introduced.contains(&key) {
+            return Ok(());
+        }
+        self.admit()?;
+        self.introduced
+            .try_reserve_exact(1)
+            .map_err(|_| Self::full())?;
+        self.introduced.push(key);
+        Ok(())
+    }
+}
+
+/// Shared pure keys for the ACTUAL native producer and its metadata projection. The caller
+/// supplies the initialized form; this function performs no OS/feature/capacity query.
+pub fn native_route_keys(
+    form: hex_api::Class,
+    image: hex_api::ImagePlatform,
+) -> Result<(hex_api::RouteKey, Option<hex_api::RouteKey>), Refusal> {
+    if !matches!(form, hex_api::Class::Process | hex_api::Class::Oci) {
+        return Err(invalid(
+            "native route keys require an initialized native form",
+        ));
+    }
+    let process = hex_api::RouteKey {
+        class: hex_api::Class::Process,
+        image,
+        execution: hex_api::Execution::Native,
+        gpu: hex_api::GpuEligibility::None,
+    };
+    process.check()?;
+    let oci = if form == hex_api::Class::Oci {
+        let key = hex_api::RouteKey {
+            class: form,
+            image,
+            execution: hex_api::Execution::Native,
+            gpu: hex_api::GpuEligibility::Any,
+        };
+        key.check()?;
+        Some(key)
+    } else {
+        None
+    };
+    Ok((process, oci))
+}
+
 /// Join an initialized capacity's existing IDs with the SAME owner's current metadata.
 /// `actual` may be raw discovery (no holders) or Books capacity (canonical holders). Discovery
 /// cannot release a retained holder; a conflicting positive owner is always a refusal.
@@ -96,30 +206,7 @@ pub fn native_routes(
             "native route producer received another execution topology",
         ));
     }
-    let process = hex_api::RouteOffer {
-        key: hex_api::RouteKey {
-            class: hex_api::Class::Process,
-            image,
-            execution: hex_api::Execution::Native,
-            gpu: hex_api::GpuEligibility::None,
-        },
-        cost: None,
-        backing: None,
-    };
-    let oci = hex_api::RouteOffer {
-        key: hex_api::RouteKey {
-            class: hex_api::Class::Oci,
-            image,
-            execution: hex_api::Execution::Native,
-            gpu: hex_api::GpuEligibility::Any,
-        },
-        cost: None,
-        backing: None,
-    };
-    process.check()?;
-    if form == hex_api::Class::Oci {
-        oci.check()?;
-    }
+    let (process, oci) = native_route_keys(form, image)?;
     capacity
         .routes
         .try_reserve_exact(2)
@@ -129,9 +216,17 @@ pub fn native_routes(
         .try_reserve_exact(capacity.devices.len())
         .map_err(|_| allocation(capacity.devices.len()))?;
     capacity.cost = None;
-    capacity.routes.push(process);
-    if form == hex_api::Class::Oci {
-        capacity.routes.push(oci);
+    capacity.routes.push(hex_api::RouteOffer {
+        key: process,
+        cost: None,
+        backing: None,
+    });
+    if let Some(oci) = oci {
+        capacity.routes.push(hex_api::RouteOffer {
+            key: oci,
+            cost: None,
+            backing: None,
+        });
     }
     // Process never acquires physical devices; bit1 names the actual native OCI route above.
     capacity.device_routes.resize(
@@ -422,13 +517,20 @@ fn check_report_selection(
 pub trait Books: Send + Sync {
     fn records(&self) -> Result<Records, Refusal>;
     fn pool_records(&self) -> Result<PoolRecords, Refusal>;
+    /// Metadata-only preparation under the SAME family configuration and full conflict turns.
+    /// The family tuple is (immutable full-configuration identity, complete alias keys, expected
+    /// current row). Strict snapshots remain guarded through publication. The callback validates
+    /// the proposed set/key and must not reenter Books, Store or native operations; stale state
+    /// refuses rather than selecting another set. Returning the canonical row avoids a second read.
     fn prepare_pool(
         &self,
         pool: [u8; 32],
         execution: hex_api::Execution,
         cost: hex_api::RuntimeCost,
         devices: &[DeviceId],
-    ) -> Result<hex_api::BackingOffer, Refusal>;
+        family: (&[u8; 32], &[DeviceId], Option<&PoolRecord>),
+        validate: &mut dyn FnMut(&Records, &[PoolRecord]) -> Result<(), Refusal>,
+    ) -> Result<PoolRecord, Refusal>;
     fn capacity(&self) -> Result<hex_api::Capacity, Refusal>;
     /// Direct current native observations from this Node's SAME facts provider. Never reenter
     /// capacity/attachment_offers here: those consumers validate routes against this view.
@@ -471,6 +573,10 @@ pub trait Transaction {
     fn put_pool(&self, record: &PoolRecord) -> Result<(), Refusal>;
     fn grant_pool(&self, grant: &hex_api::BackingGrant) -> Result<PoolRecord, Refusal>;
     fn remove_pool(&self, key: &hex_api::BackingKey) -> Result<(), Refusal>;
+    /// Read-only no-submission evidence for this SAME canonical Pool Prepared row only, with
+    /// allocation/init/exit all absent. Native positive metadata refuses. This neither proves a
+    /// released scope nor grants attachment, adoption, finalization or a synthetic zero grant.
+    fn check_unsubmitted_pool(&self) -> Result<(), Refusal>;
     fn read(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal>;
     fn put(&self, record: &BoxRecord) -> Result<(), Refusal>;
     /// Called only after physical termination/absence and owned state removal are proved.
@@ -879,6 +985,134 @@ impl Catalog {
             }
         }
         Ok(keys)
+    }
+
+    /// Deterministic identity-only provisioning complement from the SAME canonical snapshot.
+    /// This chooses no workload, model or load. A no-reference current observer contributes its
+    /// own IDs to the complement; every other retained Box/native scope still excludes its IDs.
+    /// The caller validates family/configuration/current-role and ACK state under Books' guard.
+    pub fn unheld_subset(
+        &self,
+        configured: &[DeviceId],
+        current: Option<hex_api::BackingKey>,
+        records: &Records,
+        pools: &[PoolRecord],
+    ) -> Result<Vec<DeviceId>, Refusal> {
+        if configured.len() > hex_api::MAX_DEVICES
+            || records.len() > crate::MAX_BOXES
+            || pools.len() > crate::MAX_BOXES
+        {
+            return Err(invalid(
+                "provisioning snapshot exceeds its existing owner bounds",
+            ));
+        }
+        if configured.iter().any(|id| id.kind != DeviceKind::Gpu)
+            || configured
+                .windows(2)
+                .any(|pair| matches!(pair, [a,b] if a >= b))
+        {
+            return Err(invalid(
+                "configured GPU family must be canonical and unique",
+            ));
+        }
+        if let Some(key) = current {
+            let record = pools
+                .iter()
+                .find(|record| record.key == key)
+                .ok_or_else(|| record_error(key))?;
+            record.check()?;
+            if record.phase == hex_api::BackingPhase::Released {
+                return Err(record_error(key));
+            }
+        }
+        let aliases = if configured.is_empty() {
+            Vec::new()
+        } else {
+            self.conflict_ids(configured)?
+        };
+        let mut occupied = Vec::new();
+        occupied
+            .try_reserve_exact(aliases.len())
+            .map_err(|_| allocation(aliases.len()))?;
+        occupied.resize(aliases.len(), false);
+        let mut mark = |id: DeviceId| -> Result<(), Refusal> {
+            if let Ok(at) = aliases.binary_search(&id) {
+                *occupied
+                    .get_mut(at)
+                    .ok_or_else(|| invalid("family alias index is absent"))? = true;
+            }
+            Ok(())
+        };
+        for (id, record) in records {
+            let bad = || match id.try_clone() {
+                Ok(id) => Refusal::Lifecycle {
+                    id,
+                    cause: hex_api::LifecycleCause::Uncertain,
+                },
+                Err(refusal) => refusal,
+            };
+            let record = record.as_ref().map_err(|_| bad())?;
+            if record.spec.id != *id {
+                return Err(bad());
+            }
+            record.spec.check()?;
+            if let Some(key) = current
+                && record
+                    .spec
+                    .route
+                    .is_some_and(|route| route.backing == Some(key))
+            {
+                return Err(Refusal::Backing {
+                    key,
+                    cause: hex_api::LifecycleCause::Busy,
+                });
+            }
+            for id in &record.spec.devices {
+                mark(*id)?;
+            }
+        }
+        for record in pools {
+            record.check()?;
+            if Some(record.key) == current
+                || matches!(
+                    record.phase,
+                    hex_api::BackingPhase::Prepared | hex_api::BackingPhase::Released
+                )
+            {
+                continue;
+            }
+            for id in &record.devices {
+                mark(*id)?;
+            }
+        }
+        let mut selected = Vec::new();
+        selected
+            .try_reserve_exact(aliases.len())
+            .map_err(|_| allocation(aliases.len()))?;
+        selected.extend(
+            aliases
+                .iter()
+                .zip(occupied)
+                .filter_map(|(id, held)| if held { Some(*id) } else { None }),
+        );
+        // Expand occupied aliases once. Calling holder() for every configured ID would repeatedly
+        // traverse all records and rescan catalog groups. Scratch is bounded by MAX_DEVICES.
+        let excluded = if selected.is_empty() {
+            Vec::new()
+        } else {
+            self.conflict_ids(&selected)?
+        };
+        let mut unheld = Vec::new();
+        unheld
+            .try_reserve_exact(configured.len())
+            .map_err(|_| allocation(configured.len()))?;
+        unheld.extend(
+            configured
+                .iter()
+                .copied()
+                .filter(|id| excluded.binary_search(id).is_err()),
+        );
+        Ok(unheld)
     }
 
     /// Each file is read once per create; all selected files share the native config byte budget.
@@ -1429,6 +1663,9 @@ mod authority_tests {
         fn remove_pool(&self, _: &hex_api::BackingKey) -> Result<(), Refusal> {
             Err(invalid("fixture has no pool"))
         }
+        fn check_unsubmitted_pool(&self) -> Result<(), Refusal> {
+            Err(invalid("fixture has no pool"))
+        }
         fn read(&self, _: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
             Ok(None)
         }
@@ -1482,7 +1719,9 @@ mod authority_tests {
             _: hex_api::Execution,
             _: hex_api::RuntimeCost,
             _: &[DeviceId],
-        ) -> Result<hex_api::BackingOffer, Refusal> {
+            _: (&[u8; 32], &[DeviceId], Option<&PoolRecord>),
+            _: &mut dyn FnMut(&Records, &[PoolRecord]) -> Result<(), Refusal>,
+        ) -> Result<PoolRecord, Refusal> {
             Err(invalid("fixture has no pool"))
         }
         fn with_pool_transaction(

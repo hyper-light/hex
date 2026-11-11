@@ -74,6 +74,9 @@ impl Owner {
 }
 
 impl Transaction for Owner {
+    fn check_unsubmitted_pool(&self) -> Result<(), Refusal> {
+        Err(refused(self.row().key, LifecycleCause::Uncertain))
+    }
     fn records(&self) -> Result<Records, Refusal> {
         Ok(self.boxes.lock().unwrap().clone())
     }
@@ -204,11 +207,16 @@ impl Books for Owner {
         execution: Execution,
         cost: hex_api::RuntimeCost,
         devices: &[hex_api::DeviceId],
-    ) -> Result<BackingOffer, Refusal> {
+        family: (&[u8; 32], &[hex_api::DeviceId], Option<&PoolRecord>),
+        validate: &mut dyn FnMut(&Records, &[PoolRecord]) -> Result<(), Refusal>,
+    ) -> Result<PoolRecord, Refusal> {
+        let snapshot = Books::pool_records(self)?;
+        assert_eq!(snapshot.iter().find(|row| row.key.pool == pool), family.2);
+        validate(&Books::records(self)?, &snapshot)?;
         let mut held = self.pool.lock().unwrap();
         if let Some(row) = held.as_ref() {
             assert_eq!(row.key.pool, pool);
-            return row.offer();
+            return PoolRecord::decode(&row.encode()?);
         }
         let generation = 7u8
             .checked_add(u8::try_from(self.preparations.fetch_add(1, Ordering::SeqCst)).unwrap())
@@ -227,9 +235,9 @@ impl Books for Owner {
             init: None,
             exit: None,
         };
-        let offer = row.offer()?;
+        let returned = PoolRecord::decode(&row.encode()?)?;
         *held = Some(row);
-        Ok(offer)
+        Ok(returned)
     }
     fn physical_devices(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
         Ok(Vec::new())
@@ -769,4 +777,68 @@ fn shared_backing_rearms_only_after_original_scope_release_and_index_ack() {
     );
     assert_eq!(owner.native.stops.load(Ordering::SeqCst), stops);
     assert!(owner.boxes.lock().unwrap().is_empty());
+}
+
+/// AC-T7.4.1: explicit Index ACK cannot erase a remaining shared workload or
+/// remove a later incarnation when the original key is replayed.
+#[test]
+fn shared_index_ack_preserves_references_and_refuses_a_stale_generation() {
+    use hex_api::{GpuEligibility, ImageOs, ImagePlatform, RouteKey, RouteReceipt};
+    let dir = socket_fixture();
+    let (runtime, owner) = configured(dir.path());
+    let original = runtime.prepare_backing().unwrap();
+    assert!(runtime.initialize_backing(grant(&original)).is_err());
+    assert_eq!(owner.launches.load(Ordering::SeqCst), 1);
+    owner.native.released.store(true, Ordering::SeqCst);
+    let released = runtime.release_backing(original.key).unwrap();
+    assert_eq!(released.phase, BackingPhase::Released);
+    assert_eq!(owner.finalized.load(Ordering::SeqCst), 1);
+    let stops = owner.native.stops.load(Ordering::SeqCst);
+    // A retained canonical workload is an explicit model input. The actual
+    // existing native scope has ended; metadata retention still fences ACK.
+    let mut spec =
+        super::super::tests::oci(hex_api::Rootfs::Dir(dir.path().to_path_buf()), Vec::new());
+    spec.id = BoxId::new("retained-shared-workload").unwrap();
+    spec.bounds.cpu_max_milli = Some(hex_api::MIN_CPU_MILLI);
+    spec.bounds.memory_max = Some(hex_api::MIN_MEMORY);
+    spec.route = Some(RouteReceipt {
+        key: RouteKey {
+            class: Class::Oci,
+            image: ImagePlatform {
+                os: ImageOs::Linux,
+                arch: route::host_platform().unwrap().arch,
+            },
+            execution: Execution::ShardsShared,
+            gpu: GpuEligibility::None,
+        },
+        backing: Some(original.key),
+    });
+    spec.check().unwrap();
+    let id = spec.id.clone();
+    owner.boxes.lock().unwrap().insert(
+        id.clone(),
+        Ok(BoxRecord::new(
+            spec,
+            hex_core::record::Phase::Deleting,
+            Vec::new(),
+        )),
+    );
+    assert!(
+        matches!(runtime.release_backing(original.key), Err(Refusal::Backing { key, cause: LifecycleCause::Busy }) if key == original.key)
+    );
+    assert_eq!(owner.removals.load(Ordering::SeqCst), 0);
+    assert_eq!(owner.row().key, original.key);
+    assert_eq!(runtime.prepare_backing().unwrap().key, original.key);
+    owner.boxes.lock().unwrap().remove(&id);
+    runtime.release_backing(original.key).unwrap();
+    let fresh = runtime.prepare_backing().unwrap();
+    assert_ne!(fresh.key, original.key);
+    let row = owner.row().encode().unwrap();
+    assert!(runtime.release_backing(original.key).is_err());
+    assert_eq!(owner.row().encode().unwrap(), row);
+    assert_eq!(owner.removals.load(Ordering::SeqCst), 1);
+    assert_eq!(owner.preparations.load(Ordering::SeqCst), 2);
+    assert_eq!(owner.launches.load(Ordering::SeqCst), 1);
+    assert_eq!(owner.finalized.load(Ordering::SeqCst), 1);
+    assert_eq!(owner.native.stops.load(Ordering::SeqCst), stops);
 }

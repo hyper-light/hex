@@ -126,6 +126,7 @@ impl Store {
 
     /// Prepared initialization is internal to configured backends, never arbitrary peer input.
     /// No native effect or Index grant is permitted until this SAME fresh scope is durable.
+    #[cfg(test)]
     pub(crate) fn prepare_pool(
         &self,
         pool: [u8; 32],
@@ -136,6 +137,7 @@ impl Store {
         self.prepare_pool_with(pool, execution, cost, devices, fresh_scope)
     }
 
+    #[cfg(test)]
     fn prepare_pool_with(
         &self,
         pool: [u8; 32],
@@ -144,12 +146,140 @@ impl Store {
         devices: &[DeviceId],
         create_scope: impl FnOnce() -> Result<hex_core::record::NativeScope, Refusal>,
     ) -> Result<PoolRecord, Refusal> {
+        let _metadata = self.preparing_metadata()?;
         let _turn = self.turns.take_pool_configuration(&pool)?;
-        let _preparation = self
-            .synced
-            .pool_preparation
-            .lock()
-            .map_err(|_| invalid("the existing Store's pool preparation lock is poisoned"))?;
+        self.prepare_pool_guarded(pool, execution, cost, devices, create_scope)
+    }
+
+    /// The SAME preparation fence covers the complete retained snapshot, stale-proposal check,
+    /// pure configured validator, and actual publication. The callback cannot reenter this Store.
+    pub(crate) fn prepare_pool_validated(
+        &self,
+        pool: [u8; 32],
+        execution: Execution,
+        cost: RuntimeCost,
+        devices: &[DeviceId],
+        family: (&[u8; 32], &[DeviceId], Option<&PoolRecord>),
+        validate: &mut dyn FnMut(
+            &hex_runtime::devices::Records,
+            &[PoolRecord],
+        ) -> Result<(), Refusal>,
+    ) -> Result<PoolRecord, Refusal> {
+        let (configuration, conflicts, expected) = family;
+        cost.check()?;
+        if devices.len() > hex_api::MAX_DEVICES || conflicts.len() > hex_api::MAX_DEVICES {
+            return Err(allocation(hex_api::MAX_DEVICES));
+        }
+        for ids in [devices, conflicts] {
+            for id in ids {
+                id.check()?;
+            }
+            if ids
+                .windows(2)
+                .any(|pair| matches!(pair, [left, right] if left >= right))
+            {
+                return Err(invalid("backing preparation selections must be canonical"));
+            }
+        }
+        if devices
+            .iter()
+            .any(|id| conflicts.binary_search(id).is_err())
+            || expected.is_some_and(|row| {
+                row.devices
+                    .iter()
+                    .any(|id| conflicts.binary_search(id).is_err())
+            })
+        {
+            return Err(invalid(
+                "backing preparation is missing a full-family conflict key",
+            ));
+        }
+        let _metadata = self.preparing_metadata()?;
+        let _turn = self.turns.take_pool_configuration(configuration)?;
+        let records = self.retained_records()?;
+        let mut pools = self.all_pools()?;
+        for (id, row) in &records {
+            let row = row.as_ref().map_err(|_| super::uncertain(id))?;
+            if row.version != RECORD_VERSION || row.spec.id != *id {
+                return Err(super::uncertain(id));
+            }
+            row.spec.check()?;
+        }
+        // These snapshots are complete and ordered; the expected row includes generation,
+        // phase, native identity and every immutable cost/device commitment, not just its key.
+        let actual = pools
+            .iter()
+            .find(|row| row.key.pool == expected.map_or(pool, |row| row.key.pool));
+        if actual != expected {
+            return Err(match expected.or(actual) {
+                Some(row) => refused(row.key),
+                None => invalid("backing preparation lost its expected current row"),
+            });
+        }
+        if let Some(expected) = expected
+            && expected.key.pool != pool
+            && let Some(conflicting) = pools.iter().find(|row| row.key.pool == pool)
+        {
+            return Err(refused(conflicting.key));
+        }
+        validate(&records, &pools)?;
+        if let Some(expected) = expected {
+            let at = pools
+                .binary_search_by_key(&expected.key, |row| row.key)
+                .map_err(|_| refused(expected.key))?;
+            if at >= pools.len() {
+                return Err(refused(expected.key));
+            }
+            // Move this exact canonical row out of the temporary snapshot. No deep clone.
+            let mut current = pools.remove(at);
+            if current.execution != execution || current.cost != cost {
+                return Err(refused(current.key));
+            }
+            if current.key.pool == pool {
+                if current.devices != devices {
+                    return Err(refused(current.key));
+                }
+                return Ok(current);
+            }
+            if records.values().any(|row| {
+                matches!(row,
+                Ok(row) if row.spec.route.and_then(|route| route.backing)
+                    .is_some_and(|source| source.pool == current.key.pool))
+            }) {
+                return Err(Refusal::Backing {
+                    key: current.key,
+                    cause: LifecycleCause::Busy,
+                });
+            }
+            // A changed complement cannot replace an admitted native scope. Publish only its
+            // drain intent, then return the OLD row for native cleanup/Index acknowledgment.
+            // Prepared is unchanged: its adapter still owes exact no-submission proof.
+            if matches!(current.phase, BackingPhase::Granted | BackingPhase::Live) {
+                current.phase = BackingPhase::Draining;
+                current.check()?;
+                self.write_pool(&current)?;
+            }
+            return Ok(current);
+        }
+        if let Some(source) = Self::pool_reference(&records, &pool)? {
+            return Err(refused(source));
+        }
+        if pools.len() >= TURNS {
+            return Err(allocation(TURNS));
+        }
+        self.publish_prepared(pool, execution, cost, devices, fresh_scope)
+    }
+
+    /// Called only while this Store's existing metadata preparation fence is exclusive.
+    #[cfg(test)]
+    fn prepare_pool_guarded(
+        &self,
+        pool: [u8; 32],
+        execution: Execution,
+        cost: RuntimeCost,
+        devices: &[DeviceId],
+        create_scope: impl FnOnce() -> Result<hex_core::record::NativeScope, Refusal>,
+    ) -> Result<PoolRecord, Refusal> {
         if let Some(record) = self.read_pool(&pool)? {
             if record.execution != execution || record.cost != cost || record.devices != devices {
                 return Err(refused(record.key));
@@ -169,6 +299,17 @@ impl Store {
         if self.all_pools()?.len() >= TURNS {
             return Err(allocation(TURNS));
         }
+        self.publish_prepared(pool, execution, cost, devices, create_scope)
+    }
+
+    fn publish_prepared(
+        &self,
+        pool: [u8; 32],
+        execution: Execution,
+        cost: RuntimeCost,
+        devices: &[DeviceId],
+        create_scope: impl FnOnce() -> Result<hex_core::record::NativeScope, Refusal>,
+    ) -> Result<PoolRecord, Refusal> {
         let mut selected = Vec::new();
         if devices.len() > hex_api::MAX_DEVICES {
             return Err(allocation(hex_api::MAX_DEVICES));
@@ -264,6 +405,7 @@ impl Store {
     }
 
     pub(crate) fn grant_pool(&self, grant: &BackingGrant) -> Result<PoolRecord, Refusal> {
+        let _metadata = self.changing_metadata()?;
         let _turn = self.turns.take_pool(&grant.key)?;
         let mut record = self
             .read_pool(&grant.key.pool)?
@@ -274,6 +416,7 @@ impl Store {
     }
 
     pub(crate) fn put_pool(&self, record: &PoolRecord) -> Result<(), Refusal> {
+        let _metadata = self.changing_metadata()?;
         let _turn = self.turns.take_pool(&record.key)?;
         let current = self
             .read_pool(&record.key.pool)?
@@ -292,9 +435,25 @@ impl Store {
     /// A strict bounded SAME-Store snapshot, not a reference cache. Unknown/incomplete rows
     /// refuse; no old generation can be erased/rearmed because its source row disappeared.
     fn referenced_pool(&self, pool: &[u8; 32]) -> Result<Option<BackingKey>, Refusal> {
-        for (id, row) in self.retained_records()? {
-            let row = row.map_err(Refusal::Broken)?;
-            if row.version != RECORD_VERSION || row.spec.id != id {
+        Self::pool_reference(&self.retained_records()?, pool)
+    }
+
+    fn pool_reference(
+        records: &hex_runtime::devices::Records,
+        pool: &[u8; 32],
+    ) -> Result<Option<BackingKey>, Refusal> {
+        for (id, row) in records {
+            let row = match row {
+                Ok(row) => row,
+                Err(error) => {
+                    let mut why = String::new();
+                    why.try_reserve_exact(error.len())
+                        .map_err(|_| allocation(error.len()))?;
+                    why.push_str(error);
+                    return Err(Refusal::Broken(why));
+                }
+            };
+            if row.version != RECORD_VERSION || row.spec.id != *id {
                 return Err(invalid(
                     "retained backing reference has inconsistent identity",
                 ));
@@ -311,6 +470,7 @@ impl Store {
 
     /// Only exact Released state permits removal; a reused configuration's generation is untouched.
     pub(crate) fn remove_pool(&self, key: &BackingKey) -> Result<(), Refusal> {
+        let _metadata = self.changing_metadata()?;
         let _turn = self.turns.take_pool(key)?;
         let Some(record) = self.read_pool(&key.pool)? else {
             return Ok(());
@@ -435,7 +595,7 @@ mod tests {
     use super::*;
     use hex_core::record::{NativeScope, ProcId};
 
-    fn cost() -> RuntimeCost {
+    pub(super) fn cost() -> RuntimeCost {
         let fixed = hex_api::CapacityResources {
             cpu_milli: 1000,
             mem_bytes: hex_api::MIN_MEMORY,
@@ -550,3 +710,7 @@ mod tests {
 #[cfg(test)]
 #[path = "../../../../docs/research/measurements/hex-complete-lifecycle/store_backing_reference_tests.rs"]
 mod retained_reference;
+
+#[cfg(test)]
+#[path = "../../../../docs/research/measurements/hex-complete-lifecycle/store_family_prepare_tests.rs"]
+mod family_preparation;

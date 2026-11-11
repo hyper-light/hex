@@ -1,0 +1,14 @@
+{
+  "role": "implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "1aee0be8d8d9bbcb4fbb2fef43f30aa5fb4203ee",
+  "source": "crates/hex-node/src/supervise/managed_preflight.rs",
+  "sha256": "1d34a507eba7bf6c6aa5207200968a684f0e4f2f8f70c59057b757e7862088c9",
+  "scope": "ROOT ACK private Native.unsubmitted_pool callback reuse for exact Released/allocation/init/exitNone during explicit Index ACK remove_pool, alongside Prepared before cancellation. Public required Transaction.check_unsubmitted_pool remains Prepared-only, enforced by L3 actual Tx0597523f.",
+  "semantics": "Only no-submission/native metadata absence, not ScopeReleased, adoption, attach/finalize or zero grant. Same current-owner slot lookup/scoped NOFOLLOW root+statat absence path as1aee. Any positive native metadata/error refuses; source/profile/refs remain authoritative.",
+  "new_control": "supervise::managed_preflight::tests::canceled_unallocated_pool_ack_rechecks_exact_absence_and_retains_new_metadata",
+  "unchanged": "Original1aee body unchanged; all preexisting helpers/readers/gates/ordinary lifecycle bodies unchanged. New helper internal predicate permits two exact phases with no allocation/init/exit; allocated Released still refuses.",
+  "validation": "installed rustfmt parser0/git diff check0; testsUNRUN/no own dispatch/native. Requires matched L3 private remove_pool branch+ordered controls; no default proof.",
+  "remaining": "ROOT focused controls/mutation/native; FC/L2 full lazy consumer and phase-aware driver closure remain owed."
+}

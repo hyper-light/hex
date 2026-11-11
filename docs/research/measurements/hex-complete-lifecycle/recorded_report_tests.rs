@@ -113,6 +113,7 @@ fn canonical_report_is_required_before_the_recorded_native_callback() {
         attach: &attach,
         finalize: &finalize,
         usage: &usage,
+        unsubmitted_pool: &|_| panic!("this control cannot check Prepared native submission"),
     };
     pool_transaction(&store, &key, &devices, &native, &mut |tx| {
         tx.grant_pool(&BackingGrant {
@@ -222,6 +223,7 @@ fn cpu_none_reaches_the_same_callback_without_a_catalog_or_report() {
         attach: &attach,
         finalize: &finalize,
         usage: &usage,
+        unsubmitted_pool: &|_| panic!("this control cannot check Prepared native submission"),
     };
     pool_transaction(&store, &row.key, &[], &native, &mut |tx| {
         tx.grant_pool(&BackingGrant {

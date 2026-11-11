@@ -1,0 +1,13 @@
+{
+  "base": "5e03a78c7d61be52cca3654749f7f0bfd3e1c337",
+  "scope": "only common top-level and WithGuest component owner-bound namespace correction; predicate/refusal both use actual hex_runtime::MAX_BOXES",
+  "actual_export": "crates/hex-runtime/src/lib.rs MAX_BOXES existing owner bound; API does not export it",
+  "production": "crates/hex-node/src/recorded.rs",
+  "sha256": "3be5bae5b09d8973f2be0fb294fc220eb0a6586fbabd6ef7b6952defdb7591e0",
+  "predicate_limit_oracle_change": false,
+  "tests_or_native": "UNRUN, no own dispatch requested",
+  "source_check": "git diff --check0",
+  "previous_source_manifest": "recorded-route-projection-source.json retains exact original5e03 hashes",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3"
+}

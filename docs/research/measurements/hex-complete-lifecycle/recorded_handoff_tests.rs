@@ -150,6 +150,7 @@ fn subset_handoff_reservation_and_cancel_keep_full_source_and_native_gate() {
         attach: &no_attach,
         finalize: &no_finalize,
         usage: &usage,
+        unsubmitted_pool: &|_| panic!("this control cannot check Prepared native submission"),
     };
     let spec = box_spec(directory.path(), &pool, "subset-reserved");
     let id = spec.id.try_clone().unwrap();
@@ -393,6 +394,7 @@ fn subset_native_launch_waits_for_full_source_release_then_passes_only_selected_
         attach: &no_attach,
         finalize: &no_finalize,
         usage: &usage,
+        unsubmitted_pool: &|_| panic!("this control cannot check Prepared native submission"),
     };
     let spec = box_spec(directory.path(), &pool, "launch-subset");
     let id = spec.id.try_clone().unwrap();

@@ -131,6 +131,11 @@ mod tests {
         fail_finalize: AtomicBool,
     }
     impl Transaction for Cleanup {
+        fn check_unsubmitted_pool(&self) -> Result<(), Refusal> {
+            Err(Refusal::Broken(
+                "selected-box cleanup owns no pool scope".into(),
+            ))
+        }
         fn pool_records(&self) -> Result<crate::devices::PoolRecords, Refusal> {
             panic!("box cleanup must not inspect unrelated pools")
         }

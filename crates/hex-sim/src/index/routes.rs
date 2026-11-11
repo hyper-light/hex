@@ -403,6 +403,16 @@ impl Routes {
                 unavailable_gpu |= demand.need.gpus != 0;
                 continue;
             }
+            if offer.backing.is_some_and(|key| {
+                matches!(
+                    self.backing(key),
+                    Some((_, BackingPhase::Draining | BackingPhase::Released))
+                )
+            }) {
+                // History remains addressable by committed receipt, never a fresh alternative.
+                unavailable_gpu |= demand.need.gpus != 0;
+                continue;
+            }
             if offer
                 .backing
                 .is_some_and(|key| !matches!(self.backing(key), Some((_, BackingPhase::Live))))

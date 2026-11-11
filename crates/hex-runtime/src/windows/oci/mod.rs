@@ -651,6 +651,14 @@ pub fn available() -> Result<(), Refusal> {
     sys::available().map_err(|missing| hcs::containers_off(&missing))
 }
 
+pub(super) fn initialize_api() {
+    sys::initialize_api();
+}
+
+pub(super) fn initialized_api_loaded() -> Option<bool> {
+    sys::initialized_api_loaded()
+}
+
 /// A bundle's `config.json` at `dir`, read at most [`hex_core::bundle::MAX_CONFIG_BYTES`] bytes (the
 /// Linux bundle reader's bound: one rule for both) and parsed.
 pub fn bundle_config(dir: &Path) -> Result<serde_json::Value, Refusal> {

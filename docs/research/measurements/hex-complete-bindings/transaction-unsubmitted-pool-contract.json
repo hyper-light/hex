@@ -1,0 +1,17 @@
+{
+  "role": "implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "b7645ef30f8eb08e0a11b4712a8ba8be72bd82d6",
+  "source": "crates/hex-runtime/src/devices.rs",
+  "sha256": "2d6e97041d7af98329157195b5d78fcb949b0b8f3264ac13fb09c6087a5a14d0",
+  "signature": "Transaction::check_unsubmitted_pool(&self)->Result<(),Refusal>",
+  "authority": "Required real callback on SAME stack transaction/canonical NativeRecord, no default. Only Pool Prepared allocation/init/exit None; current positive native metadata refuses. Read-only no-submission evidence is not ScopeReleased/adoption/attachment/finalization or zero grant. L2/FC callers also check exact local no-Intent and canonical row under existing Pool/R turn.",
+  "allocation": "No new API DTO/owner/manager/RPC or per-operation Box. Existing test-only no-pool TransactionView returns explicit refusal.",
+  "producer_partitions": {
+    "L1": "trait and Node scoped Supervisor callback/controls, producer successor follows",
+    "L3": "SAME stack Tx/Native callback and Recorded Recover::preflight_managed delegation",
+    "L2": "local exact noIntent/cancellation consumer"
+  },
+  "validation": "source rustfmt/diff only; no Cargo/native check. Joined producers plus focused meaningful positive/error/presence controls required before ROOT check/intake; no stub success."
+}

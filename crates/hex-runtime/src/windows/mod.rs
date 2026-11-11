@@ -1186,6 +1186,9 @@ impl WinRuntime {
         };
         // Read now so no create waits on it; a failure is read again, and refused, at the first ask.
         let _ = runtime.features_off();
+        // Warm only the SAME DLL/export owner. Its pure initialized view bounds possible route
+        // encoding; actual availability continues to query the service at its existing seam.
+        oci::initialize_api();
         runtime
     }
 
@@ -1240,6 +1243,20 @@ impl WinRuntime {
             NativeCatalog::Shared(catalog) => Some(catalog.clone()),
             NativeCatalog::Empty(_) => None,
         }
+    }
+
+    /// A conservative encoding reservation, never fresh advertised OCI eligibility. It includes
+    /// the possible native OCI form even if the service query is currently unavailable, so later
+    /// service recovery cannot exceed the route protocol bound. No OS query occurs here.
+    pub fn project_native_encoding_upper_bound(
+        &self,
+        projection: &mut crate::devices::RouteProjection,
+    ) -> Result<(), Refusal> {
+        native_encoding_upper_bound(
+            oci::initialized_api_loaded(),
+            self.features_off.get(),
+            projection,
+        )
     }
 
     fn bindings(&self, spec: &BoxSpec) -> Result<Vec<hex_core::hcs::DeviceBinding>, Refusal> {
@@ -1810,6 +1827,38 @@ impl Default for WinRuntime {
     }
 }
 
+fn native_platform() -> hex_api::ImagePlatform {
+    #[cfg(target_arch = "x86_64")]
+    let arch = hex_api::ImageArch::Amd64;
+    #[cfg(target_arch = "aarch64")]
+    let arch = hex_api::ImageArch::Arm64;
+    hex_api::ImagePlatform {
+        os: hex_api::ImageOs::Windows,
+        arch,
+    }
+}
+
+fn native_encoding_upper_bound(
+    loaded: Option<bool>,
+    features_off: Option<&BTreeSet<WindowsFeature>>,
+    projection: &mut crate::devices::RouteProjection,
+) -> Result<(), Refusal> {
+    let loaded = loaded.ok_or_else(|| pending("native HCS API has not been initialized"))?;
+    let off = features_off
+        .ok_or_else(|| pending("native Containers configuration has not been initialized"))?;
+    let form = if loaded && !off.contains(&WindowsFeature::Containers) {
+        Class::Oci
+    } else {
+        Class::Process
+    };
+    let (process, oci) = crate::devices::native_route_keys(form, native_platform())?;
+    projection.retain(process, None)?;
+    if let Some(oci) = oci {
+        projection.retain(oci, None)?;
+    }
+    Ok(())
+}
+
 fn native_route_offer(
     report: &mut Capacity,
     class: Class,
@@ -1818,10 +1867,12 @@ fn native_route_offer(
     if !initialized {
         return Ok(());
     }
-    #[cfg(target_arch = "x86_64")]
-    let arch = hex_api::ImageArch::Amd64;
-    #[cfg(target_arch = "aarch64")]
-    let arch = hex_api::ImageArch::Arm64;
+    let (process, oci) = crate::devices::native_route_keys(class, native_platform())?;
+    let key = if class == Class::Process {
+        process
+    } else {
+        oci.ok_or_else(|| pending("native OCI producer has no initialized route key"))?
+    };
     report
         .routes
         .try_reserve_exact(1)
@@ -1831,19 +1882,7 @@ fn native_route_offer(
         .try_reserve_exact(report.devices.len())
         .map_err(|_| allocation(report.devices.len()))?;
     report.routes.push(hex_api::RouteOffer {
-        key: hex_api::RouteKey {
-            class,
-            image: hex_api::ImagePlatform {
-                os: hex_api::ImageOs::Windows,
-                arch,
-            },
-            execution: hex_api::Execution::Native,
-            gpu: if class == Class::Process {
-                hex_api::GpuEligibility::None
-            } else {
-                hex_api::GpuEligibility::Any
-            },
-        },
+        key,
         cost: None,
         backing: None,
     });
@@ -2229,6 +2268,43 @@ mod tests {
         assert_eq!(route.key.class, Class::Oci);
         assert!(report.devices.is_empty() && report.device_routes.is_empty());
         report.check().unwrap();
+    }
+
+    /// AC-T7.4.1: reserve possible fixed encoding forms without promoting a currently unavailable
+    /// service into fresh OCI eligibility. Initialization unknowns refuse before collector mutation.
+    #[test]
+    fn encoding_upper_bound_does_not_advertise_an_unavailable_oci_service() {
+        let enabled = BTreeSet::new();
+        for (api, features) in [(None, Some(&enabled)), (Some(true), None)] {
+            let mut projection = crate::devices::RouteProjection::new();
+            assert!(native_encoding_upper_bound(api, features, &mut projection).is_err());
+            assert_eq!(projection.count().unwrap(), 0);
+        }
+        let mut projection = crate::devices::RouteProjection::new();
+        native_encoding_upper_bound(Some(true), Some(&enabled), &mut projection).unwrap();
+        assert_eq!(projection.count().unwrap(), 2); // Possible Process + OCI, not current service facts.
+        let mut unavailable = Capacity {
+            id: "service-unavailable-control".into(),
+            total: CapacityResources::default(),
+            free: CapacityResources::default(),
+            devices: Vec::new(),
+            cost: None,
+            routes: Vec::new(),
+            device_routes: Vec::new(),
+            backings: Vec::new(),
+        };
+        native_route_offer(&mut unavailable, Class::Oci, false).unwrap();
+        assert!(
+            unavailable.routes.is_empty(),
+            "encoding room cannot grant fresh native OCI"
+        );
+        assert!(unavailable.device_routes.is_empty() && unavailable.backings.is_empty());
+        let disabled = BTreeSet::from([WindowsFeature::Containers]);
+        for (api, features) in [(false, &enabled), (true, &disabled)] {
+            let mut projection = crate::devices::RouteProjection::new();
+            native_encoding_upper_bound(Some(api), Some(features), &mut projection).unwrap();
+            assert_eq!(projection.count().unwrap(), 1); // Only the actual native Process form can exist.
+        }
     }
 
     /// AC-T7.4.1: one bounded native table, with real Box and Pool keys and no fabricated BoxId.

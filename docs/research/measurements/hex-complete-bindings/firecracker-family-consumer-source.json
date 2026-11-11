@@ -1,0 +1,60 @@
+{
+  "requirement": "AC-T7.4.1",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "4f1e292691b74af6cb490d27f71fcce91aa473da",
+  "sources": [
+    {
+      "path": "crates/hex-runtime/src/firecracker/native.rs",
+      "sha256": "2cf331f7a5132c92800da9fafb26442659da3643f7f2eeebe54038a9ed7b7b5e"
+    },
+    {
+      "path": "crates/hex-runtime/src/firecracker/pool.rs",
+      "sha256": "5831dce9d6272a4c0064b018f27170a01354ea43329602d7fb1b401693a32f7c"
+    }
+  ],
+  "dependencies": {
+    "API_lifetimes": "c8378325c634b629160e23f7ab0d29856633bdbc",
+    "Books_family": "b924aec5b7dfb98e4ce6ce11a767c51c7b3a0d48",
+    "one_complement": "d6e248100b1d2bf9854413017f94691cfe47c996 +final4f1e292691b74af6cb490d27f71fcce91aa473da",
+    "Store_family": "8b5534be5277e422c7cc6c949e6c3019fb8ecab0 +507a32513a4dc6504ca57b25b123dbb46c7bda8d",
+    "actual_Node_projection": "59363a0f5e8d669b2a0e7c86601f2d60c5dd0eaf +9b9d5932ecb84fa4b417fd265a1f1e532fa62a50",
+    "required_Tx_native": "8641a1d08b2baa5e2a7938df747466a9d38bb393 +L3 0597523f +70b364aeb198b425a794878916f83321e41f0966",
+    "actual_Node_native_absence": "1aee0be8d8d9bbcb4fbb2fef43f30aa5fb4203ee +431ca4173ade1c26eef7b2860e9f14af48912455",
+    "same_collector": "ec0a0ab6f2fe6266696979d8df2fdf6032178ff5 +a5680320715d8f9e18dcfd089158630b9d3464ae",
+    "keyed_unavailable": "d3b9c9e5cf38f10bd3d89575f7b943e1b14676cf",
+    "client": "ROOT same LinkOwner/17e finite operation producer already integrated"
+  },
+  "state_order": [
+    "Pure family proposal validates actual fixed profile/key/subset plus exact consuming references; sorted refs refuse max1 source consumer. One no-ref/nonReleased current; Released/noRef is deterministic IndexACK queue, referenced parents remain immutable history.",
+    "SAME Catalog.unheld_subset computes configured IDs minus canonical other/Box claims, including own unconsumed current only. No load/model/count selection, no new inventory/holder ledger/cache.",
+    "Recompute entire proposal under required Books F/full-family turns +8b Store metadata fence. Current exact whole row must match. SameR reuse; changedR stages OLD Granted/Live Draining and returns OLD; Prepared changedR cancels only outside fence after local no-Intent +actual check_unsubmitted_pool. Empty hash is transient drain/cancel proposal ONLY expectedSome; never empty GPU row/route/offer.",
+    "If a Released/noRef queue can collide with changed/new R, return existing ACK receipt without publication and keep current native charge. No new generation before Index ACK removal. Unchanged currentR can reuse its own observation; no parent reading lends freshness.",
+    "Capacity publishes CPU actual cost and EVERY retained qualified GPU tuple/BackingOffer from SAME canonical pool. Fresh physical mask belongs only exact desired current Live/no-ref R and actual measured guest devices; pending/history/changed union get no fresh bits. No catalog model/size/load as facts.",
+    "Qualified exact-key native observation failure retains first-snapshot canonical accounting/routes/claims with no fresh facts; actual current typed cause remains on SAME native PhysicalReport path. Invalid/foreign failures stay fatal. Snapshot races are not simultaneity/hotplug proof.",
+    "Recovery preflights ALL FC rows before callbacks, then handles exact retained keys/subsets; never boots Granted interruption or repicks a surviving Box.",
+    "Cleanup returns original full-P canonical Released only AFTER native full-scope witness, finalize and owned state removal. It cannot remove/rearm generation. A SEPARATE enteredReleased release_backing call is explicit Driver IndexACK; preserve source row while Box refs exist, otherwise same Tx native absence/finalization guard before remove. No immediate replacement inside cleanup/ACK callback."
+  ],
+  "bounds_and_allocations": "MAX_BOXES snapshots/MAX_DEVICES identity scratch; MAX_RUNTIME_ROUTES64 capacity masks and shared initialized-owner prepublication projection. Fallible temporary references/ID/metadata vectors and existing typed copies; sorted reference/join indices, no persistent inventory or infallible new owner. Existing inherited filesystem/serde/refusal allocation seams remain R14 audit obligations. No complexity/performance/allocation-free claim.",
+  "source_protocol": "Existing observer v1 full-set configuration hash/domain/pin unchanged. Per-R uses SAME hash over exact sorted R; stable physical DeviceId is checked against SBDF by existing VFIO authority. No released/mainline VFIO claim: official500ef preboot+signed private extension provenance retained.",
+  "new_controls": [
+    "firecracker::native::pool::tests::family_complement_keeps_parent_and_requires_ack_before_growing_a_live_scope",
+    "firecracker::native::pool::tests::family_cold_and_empty_complements_preserve_exact_identity_without_facts",
+    "firecracker::native::pool::tests::family_profile_current_and_consuming_reference_ambiguity_refuses"
+  ],
+  "controls_scope": "Pure actual proposal/config helpers with NoOwnerCalls; fullset/P->S/R, referenced parent, Box end+ACKP then drain/ACKR before newP, cold identity/empty Prepared and foreign claim exclusion, invalid profile/multiple current/duplicate consumers. Model transitions are NOT native scope/readiness proof. Prior tests retained except no-behavior bool.then_some style replacement and test-only NoOwnerCalls visibility.",
+  "validation": {
+    "rustfmt": "installed rustfmt parser/format exit0",
+    "diff": "git diff --check exit0",
+    "Cargo": "UNRUN; no own dispatch; ROOT must join actual required producer closure and outside test-only Tx literal ports",
+    "native": "UNRUN; no hardware/cgroup/VM/syscalls executed by lane"
+  },
+  "remaining": [
+    "Runtimes/Driver/Service must actively drive canonical Draining cleanup then Index observe Released and separate ACK. L1 source next; until then this adapter mechanism alone is not CLI scheduler completion.",
+    "Original committed dedicated recovery05048 still UNRUN: no Index remedy taken without ROOT actual result.",
+    "ROOT matched controls/strict cross-target/native helper/GPU load/identity/scope mutation/fault proofs/full gates, API/wire prefix joins and R14 measurements owed.",
+    "Actual approved Linux physical GPUs currently bound nvidia/amdgpu with no /dev/vfio groups; no driver rebind authorized. Hardware GPU passthrough proof unavailable, not Unsupported completion.",
+    "Opaque API direct callers/recovery and partial multi-scope observer fact composition need ROOT native/adversarial review; no blanket native-ready/performance/completion claim."
+  ]
+}

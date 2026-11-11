@@ -1,13 +1,11 @@
 //! AC-T7.4.1: initialized backend routing on the existing Node/Store/Turns owner.
 
 use super::*;
-use hex_api::{
-    BackingKey, BackingOffer, Capacity, DeviceId, Execution, LifecycleCause, RuntimeCost,
-};
-use hex_core::record::NativeRecord;
+use hex_api::{BackingKey, Capacity, DeviceId, Execution, LifecycleCause, RuntimeCost};
+use hex_core::record::{NativeRecord, PoolRecord};
 use hex_runtime::devices::{
-    Books, ManagedLaunch, PoolRecords, Records, SharedCatalog, Transaction, check_managed_report,
-    managed_native_scope_id,
+    Books, ManagedLaunch, PoolRecords, Records, RouteProjection, SharedCatalog, Transaction,
+    check_managed_report, managed_native_scope_id, native_route_keys,
 };
 use hex_runtime::firecracker::FirecrackerRuntime;
 use hex_runtime::guest::GuestRuntime;
@@ -17,6 +15,79 @@ pub(super) struct Backends {
     firecracker: Option<Arc<FirecrackerRuntime>>,
     shards: Option<Arc<GuestRuntime>>,
     vm_root: Option<BoxRoot>,
+}
+
+/// Only frozen initialized configurations participate. This runs inside the existing metadata
+/// validator: no capacity/Books/provider/native query is permitted here.
+fn project_initialized_routes(
+    backends: Option<&Backends>,
+    pools: &[PoolRecord],
+    introduced: Option<(Execution, &[DeviceId])>,
+) -> Result<RouteProjection, Refusal> {
+    if pools.len() > MAX_BOXES {
+        return Err(Refusal::Full(MAX_BOXES));
+    }
+    let firecracker = backends.and_then(|backends| backends.firecracker.as_deref());
+    let shards = backends.and_then(|backends| backends.shards.as_deref());
+    for pool in pools {
+        pool.check()?;
+        let present = match pool.execution {
+            Execution::Firecracker => firecracker.is_some(),
+            Execution::ShardsShared | Execution::ShardsDedicated => shards.is_some(),
+            Execution::Native => false,
+        };
+        if !present {
+            return Err(Refusal::Backing {
+                key: pool.key,
+                cause: LifecycleCause::Uncertain,
+            });
+        }
+    }
+    if let Some((execution, _)) = introduced {
+        let present = match execution {
+            Execution::Firecracker => firecracker.is_some(),
+            Execution::ShardsShared | Execution::ShardsDedicated => shards.is_some(),
+            Execution::Native => false,
+        };
+        if !present {
+            return Err(projection_refused(
+                "new backing has no initialized VM route producer",
+            ));
+        }
+    }
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => hex_api::ImageArch::Amd64,
+        "aarch64" => hex_api::ImageArch::Arm64,
+        _ => {
+            return Err(projection_refused(
+                "native route projection has an unsupported architecture",
+            ));
+        }
+    };
+    let mut projection = RouteProjection::new();
+    // Node's actual native capacity producer always initializes these Linux Process/OCI forms.
+    let (process, oci) = native_route_keys(
+        Class::Oci,
+        hex_api::ImagePlatform {
+            os: hex_api::ImageOs::Linux,
+            arch,
+        },
+    )?;
+    projection.retain(process, None)?;
+    if let Some(oci) = oci {
+        projection.retain(oci, None)?;
+    }
+    if let Some(backend) = firecracker {
+        backend.project_routes(pools, introduced, &mut projection)?;
+    }
+    if let Some(backend) = shards {
+        backend.project_routes(pools, introduced, &mut projection)?;
+    }
+    Ok(projection)
+}
+
+fn projection_refused(why: &'static str) -> Refusal {
+    native_argument(std::ffi::OsStr::new(why)).map_or_else(|error| error, Refusal::Broken)
 }
 
 impl Node {
@@ -277,13 +348,35 @@ impl Node {
         };
         if let Some(backend) = &firecracker {
             backend.initialize_native()?;
+        }
+        if let (Some(root), Some(lease)) = (vm_root.as_ref(), lease) {
+            self.supervisor.bind_managed_root(root.dir(), lease)?;
+        }
+        // The same initialized owner must exist before guarded metadata preparation projects
+        // its real routes. The complete retained-state barrier above precedes this publication;
+        // startup still returns only after preparation and capacity validation below succeed.
+        self.backends
+            .set(Backends {
+                firecracker,
+                shards,
+                vm_root,
+            })
+            .map_err(|_| {
+                projection_refused("node backend initialization raced another initializer")
+            })?;
+        let backends = self
+            .backends
+            .get()
+            .ok_or_else(|| projection_refused("initialized node backends were not published"))?;
+        if let Some(backend) = &backends.firecracker {
             backend.prepare_backing()?;
         }
         if retained_pools
             .iter()
             .any(|record| record.execution == Execution::ShardsShared)
         {
-            shards
+            backends
+                .shards
                 .as_ref()
                 .ok_or_else(|| missing(Class::Shards))?
                 .prepare_backing()?;
@@ -291,13 +384,17 @@ impl Node {
         for (class, backend) in [
             (
                 Class::Firecracker,
-                firecracker
+                backends
+                    .firecracker
                     .as_deref()
                     .map(|backend| backend as &dyn Runtime),
             ),
             (
                 Class::Shards,
-                shards.as_deref().map(|backend| backend as &dyn Runtime),
+                backends
+                    .shards
+                    .as_deref()
+                    .map(|backend| backend as &dyn Runtime),
             ),
         ] {
             if let Some(backend) = backend {
@@ -318,18 +415,15 @@ impl Node {
                 // Per-route cost/backing validation above replaces the legacy class-wide cost.
             }
         }
-        if let (Some(root), Some(lease)) = (vm_root.as_ref(), lease) {
-            self.supervisor.bind_managed_root(root.dir(), lease)?;
-        }
-        self.backends
-            .set(Backends {
-                firecracker,
-                shards,
-                vm_root,
-            })
-            .map_err(|_| {
-                Refusal::Broken("node backend initialization raced another initializer".into())
-            })
+        Ok(())
+    }
+
+    fn check_route_projection(
+        &self,
+        pools: &[PoolRecord],
+        introduced: Option<(Execution, &[DeviceId])>,
+    ) -> Result<(), Refusal> {
+        project_initialized_routes(self.backends.get(), pools, introduced).map(|_| ())
     }
 
     fn preflight_configured(
@@ -752,12 +846,17 @@ impl Node {
             self.finalize_managed(record, identity)
         };
         let usage = |record: NativeRecord<'_>| self.supervisor.managed_usage(record);
+        let unsubmitted_pool = |record: NativeRecord<'_>| {
+            self.supervisor
+                .check_unsubmitted_pool(record, self.vm_root(record)?.dir())
+        };
         let native = crate::recorded::Native {
             catalog: Some(self.attachments.as_ref()),
             launch: &launch,
             attach: &attach,
             finalize: &finalize,
             usage: &usage,
+            unsubmitted_pool: &unsubmitted_pool,
         };
         match owner {
             BookOwner::Box(id) => {
@@ -791,11 +890,30 @@ impl Books for Node {
         execution: Execution,
         cost: RuntimeCost,
         devices: &[DeviceId],
-    ) -> Result<BackingOffer, Refusal> {
-        let keys = self.attachments.conflict_ids(devices)?;
-        let _method = self.turns.try_take_pool_configuration(&pool, &keys)?;
+        family: (&[u8; 32], &[DeviceId], Option<&PoolRecord>),
+        validate: &mut dyn FnMut(&Records, &[PoolRecord]) -> Result<(), Refusal>,
+    ) -> Result<PoolRecord, Refusal> {
+        let keys = self.attachments.conflict_ids(family.1)?;
+        let _method = self.turns.try_take_pool_configuration(family.0, &keys)?;
         let _devices = self.hold_attachments(&keys)?;
-        crate::recorded::prepare_pool(&self.store, pool, execution, cost, devices)
+        let introduced = if family.2.is_none() {
+            Some((execution, devices))
+        } else {
+            None
+        };
+        let mut checked = |records: &Records, pools: &[PoolRecord]| {
+            validate(records, pools)?;
+            self.check_route_projection(pools, introduced)
+        };
+        crate::recorded::prepare_pool(
+            &self.store,
+            pool,
+            execution,
+            cost,
+            devices,
+            (family.0, &keys, family.2),
+            &mut checked,
+        )
     }
     fn capacity(&self) -> Result<Capacity, Refusal> {
         self.native_capacity()
@@ -879,6 +997,45 @@ fn native_path(parent: &Path, child: &str) -> Result<PathBuf, Refusal> {
 mod preflight_dispatch_tests {
     use super::*;
     use hex_api::{BackingPhase, CapacityResources};
+
+    /// AC-T7.4.1: a native-only initialized Node has its actual two native prefixes; an absent
+    /// adapter cannot create VM route room merely because a proposed lifetime names that class.
+    #[test]
+    fn native_only_projection_does_not_invent_vm_routes_for_new_lifetimes() {
+        assert_eq!(
+            project_initialized_routes(None, &[], None)
+                .unwrap()
+                .count()
+                .unwrap(),
+            2
+        );
+        let no_vm = Backends {
+            firecracker: None,
+            shards: None,
+            vm_root: None,
+        };
+        assert_eq!(
+            project_initialized_routes(Some(&no_vm), &[], None)
+                .unwrap()
+                .count()
+                .unwrap(),
+            2
+        );
+        let gpu = [DeviceId {
+            kind: hex_api::DeviceKind::Gpu,
+            key: 256,
+        }];
+        for (execution, devices) in [
+            (Execution::Firecracker, gpu.as_slice()),
+            (Execution::ShardsDedicated, gpu.as_slice()),
+            (Execution::ShardsShared, [].as_slice()),
+            (Execution::Native, [].as_slice()),
+        ] {
+            assert!(
+                project_initialized_routes(Some(&no_vm), &[], Some((execution, devices))).is_err()
+            );
+        }
+    }
 
     /// AC-T7.4.1: both concrete adapters use this actual mutually exclusive callback dispatch.
     /// The adapter proof bodies are covered separately; this is not native absence evidence.

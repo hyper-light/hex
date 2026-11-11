@@ -69,6 +69,37 @@ pub(crate) fn why_text(why: &Why) -> String {
 
 /// What a node needs of its runtime to take its boxes back after a crash (T-T7.1.2).
 pub trait Recover: Runtime {
+    /// Pure initialized encoding forms appended to the SAME transient global tuple union. A native
+    /// component may explicitly reserve conservative possible forms, never fresh eligibility.
+    /// No component calls capacity/Books/native I/O while the publication fence holds.
+    fn project_routes(
+        &self,
+        pools: &[PoolRecord],
+        introduced: Option<(hex_api::Execution, &[DeviceId])>,
+        projection: &mut hex_runtime::devices::RouteProjection,
+    ) -> Result<(), Refusal> {
+        let _ = (pools, introduced, projection);
+        Err(broken("runtime has no initialized route projection"))
+    }
+
+    /// Check the union once, including ordinary host prefixes and every initialized VM alias.
+    fn check_route_projection(
+        &self,
+        pools: &[PoolRecord],
+        introduced: Option<(hex_api::Execution, &[DeviceId])>,
+    ) -> Result<(), Refusal> {
+        if pools.len() > hex_runtime::MAX_BOXES {
+            return Err(Refusal::Full(hex_runtime::MAX_BOXES));
+        }
+        for pool in pools {
+            pool.check()?;
+        }
+        let mut projection = hex_runtime::devices::RouteProjection::new();
+        self.project_routes(pools, introduced, &mut projection)?;
+        projection.count()?;
+        Ok(())
+    }
+
     /// A view of the SAME initialized immutable catalog, never another load or holder owner.
     fn device_catalog(&self) -> Result<Option<hex_runtime::devices::SharedCatalog>, Refusal> {
         Ok(None)
@@ -78,6 +109,19 @@ pub trait Recover: Runtime {
     /// report remains required. This never calls capacity/physical_report or opens another provider.
     fn physical_observations(&self) -> Result<Vec<hex_api::PhysicalDevice>, Refusal> {
         Ok(Vec::new())
+    }
+
+    /// A pending/cancelled source handoff has no boot Intent. This is metadata validation only,
+    /// never scope termination, permission to adopt a Guest, or release from absence alone.
+    fn handoff_unsubmitted(&self, record: &BoxRecord, pool: &PoolRecord) -> Result<(), Refusal> {
+        let _ = pool;
+        Err(uncertain(&record.spec.id))
+    }
+
+    /// Native half of the same pending no-Intent check. Concrete owners must prove that no
+    /// conflicting submission receipt is retained; missing cold proof remains typed uncertainty.
+    fn preflight_unsubmitted(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        Err(uncertain(&record.spec.id))
     }
 
     /// Read-only initialized configuration and retained metadata validation, before ANY owner is
@@ -270,6 +314,7 @@ type NativeAttach<'a> =
 type NativeFinalize<'a> =
     dyn Fn(NativeRecord<'_>, Option<&shards_api::Identity>) -> Result<(), Refusal> + 'a;
 type NativeUsage<'a> = dyn Fn(NativeRecord<'_>) -> Result<Usage, Refusal> + 'a;
+type NativeUnsubmittedPool<'a> = dyn Fn(NativeRecord<'_>) -> Result<(), Refusal> + 'a;
 
 /// Borrowed callbacks into Node's or Recorded's existing native owner. They remain on the same
 /// synchronous transaction stack, with no map lock, boxed transaction or second holder owner.
@@ -279,6 +324,7 @@ pub(crate) struct Native<'a> {
     pub attach: &'a NativeAttach<'a>,
     pub finalize: &'a NativeFinalize<'a>,
     pub usage: &'a NativeUsage<'a>,
+    pub unsubmitted_pool: &'a NativeUnsubmittedPool<'a>,
 }
 
 fn uncertain(id: &BoxId) -> Refusal {
@@ -301,6 +347,22 @@ fn broken(message: &'static str) -> Refusal {
     }
     why.push_str(message);
     Refusal::Broken(why)
+}
+
+/// A native-only component owns no VM routes. WithGuest projects those separately using the
+/// same collector; a missing initialized adapter must not silently discard retained VM tuples.
+#[cfg(any(target_os = "macos", windows, test))]
+fn check_native_projection(
+    pools: &[PoolRecord],
+    introduced: Option<(hex_api::Execution, &[DeviceId])>,
+) -> Result<(), Refusal> {
+    if let Some(pool) = pools.first() {
+        return Err(NativeRecord::Pool(pool).refusal(hex_api::LifecycleCause::Uncertain));
+    }
+    if introduced.is_some() {
+        return Err(broken("native runtime cannot project a VM backing"));
+    }
+    Ok(())
 }
 
 /// One retained route joins its SAME canonical source generation/profile. A reserved/cancelled
@@ -750,6 +812,26 @@ impl Transaction<'_> {
 }
 
 impl hex_runtime::devices::Transaction for Transaction<'_> {
+    fn check_unsubmitted_pool(&self) -> Result<(), Refusal> {
+        if !matches!(self.owner, TransactionOwner::Pool(_)) {
+            return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+        }
+        self.with_native(|record| {
+            let NativeRecord::Pool(pool) = record else {
+                return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+            };
+            if pool.phase != hex_api::BackingPhase::Prepared
+                || pool.allocation.is_some()
+                || pool.init.is_some()
+                || pool.exit.is_some()
+            {
+                return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+            }
+            // The caller's SAME Pool/configuration turn excludes grant/native submission.
+            // This is only the native metadata half of cancellation, never a Released witness.
+            (self.native.unsubmitted_pool)(record)
+        })
+    }
     fn managed_usage(&self) -> Result<Usage, Refusal> {
         self.with_native(|record| {
             if record.scope().is_none()
@@ -950,6 +1032,15 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
             .read_pool(key)?
             .ok_or_else(|| self.refused(hex_api::LifecycleCause::Uncertain))?;
         self.owns(NativeRecord::Pool(&record))?;
+        if record.phase == hex_api::BackingPhase::Released
+            && record.allocation.is_none()
+            && record.init.is_none()
+            && record.exit.is_none()
+        {
+            // This is the explicit Index ACK of a never-submitted cancellation, not native
+            // scope release. Recheck the SAME native metadata before erasing its only receipt.
+            (self.native.unsubmitted_pool)(NativeRecord::Pool(&record))?;
+        }
         self.store.remove_pool(key)
     }
 }
@@ -1044,10 +1135,10 @@ pub(crate) fn prepare_pool(
     execution: hex_api::Execution,
     cost: hex_api::RuntimeCost,
     devices: &[DeviceId],
-) -> Result<hex_api::BackingOffer, Refusal> {
-    // Prepared entries contain provisioning references only. Actual physical exclusion is
-    // checked at grant and before native effects under the same method/device turns.
-    store.prepare_pool(pool, execution, cost, devices)?.offer()
+    family: (&[u8; 32], &[DeviceId], Option<&PoolRecord>),
+    validate: &mut dyn FnMut(&hex_runtime::devices::Records, &[PoolRecord]) -> Result<(), Refusal>,
+) -> Result<PoolRecord, Refusal> {
+    store.prepare_pool_validated(pool, execution, cost, devices, family, validate)
 }
 
 fn check_box_claims(
@@ -1141,13 +1232,27 @@ impl<R: Recover> Recorded<R> {
         // cleanup are deliberately deferred until every sibling and backing passes both passes.
         for (id, record) in &records {
             let record = record.as_ref().map_err(|_| uncertain(id))?;
-            let _handoff = preflight_handoff_turns(
+            let handoff = preflight_handoff_turns(
                 &self.books.lifecycle,
                 &self.books.store,
                 record,
                 catalog.as_deref(),
             )?;
-            self.runtime.preflight_record(record)?;
+            if handoff.is_some() {
+                let source = record
+                    .spec
+                    .route
+                    .and_then(|route| route.backing)
+                    .ok_or_else(|| uncertain(id))?;
+                let pool = pools
+                    .binary_search_by_key(&source, |pool| pool.key)
+                    .ok()
+                    .and_then(|at| pools.get(at))
+                    .ok_or_else(|| uncertain(id))?;
+                self.runtime.handoff_unsubmitted(record, pool)?;
+            } else {
+                self.runtime.preflight_record(record)?;
+            }
         }
         for record in &pools {
             self.runtime.preflight_pool(record)?;
@@ -1190,6 +1295,7 @@ impl<R: Recover> Recorded<R> {
             self.runtime.finalize_managed(record, identity)
         };
         let usage = |record: NativeRecord<'_>| self.runtime.managed_usage(record);
+        let unsubmitted_pool = |record: NativeRecord<'_>| self.runtime.preflight_managed(record);
         let catalog = self.runtime.device_catalog()?;
         let native = Native {
             catalog: catalog.as_deref(),
@@ -1197,6 +1303,7 @@ impl<R: Recover> Recorded<R> {
             attach: &attach,
             finalize: &finalize,
             usage: &usage,
+            unsubmitted_pool: &unsubmitted_pool,
         };
         match owner {
             TransactionOwner::Box(id) => {
@@ -1270,12 +1377,40 @@ impl<R: Recover> hex_runtime::devices::Books for Recorded<R> {
         execution: hex_api::Execution,
         cost: hex_api::RuntimeCost,
         devices: &[DeviceId],
-    ) -> Result<hex_api::BackingOffer, Refusal> {
+        family: (&[u8; 32], &[DeviceId], Option<&PoolRecord>),
+        validate: &mut dyn FnMut(
+            &hex_runtime::devices::Records,
+            &[PoolRecord],
+        ) -> Result<(), Refusal>,
+    ) -> Result<PoolRecord, Refusal> {
+        let catalog = self.runtime.device_catalog()?;
+        let conflicts = match catalog.as_deref() {
+            Some(catalog) => catalog.conflict_ids(family.1)?,
+            None if family.1.is_empty() => Vec::new(),
+            None => return Err(broken("native backing preparation has no device catalog")),
+        };
         let _method = self
             .books
             .lifecycle
-            .try_take_pool_configuration(&pool, devices)?;
-        prepare_pool(&self.books.store, pool, execution, cost, devices)
+            .try_take_pool_configuration(family.0, &conflicts)?;
+        let introduced = if family.2.is_none() {
+            Some((execution, devices))
+        } else {
+            None
+        };
+        let mut checked = |records: &hex_runtime::devices::Records, pools: &[PoolRecord]| {
+            validate(records, pools)?;
+            self.runtime.check_route_projection(pools, introduced)
+        };
+        prepare_pool(
+            &self.books.store,
+            pool,
+            execution,
+            cost,
+            devices,
+            (family.0, &conflicts, family.2),
+            &mut checked,
+        )
     }
     fn with_handoff_transaction(
         &self,
@@ -1976,6 +2111,19 @@ impl<R: Recover> Host for Recorded<R> {
 /// time (`proc_pid_rusage`'s Mach absolute time, in [`ProcId::start_ticks`]).
 #[cfg(target_os = "macos")]
 impl Recover for hex_runtime::macos::MacRuntime {
+    fn project_routes(
+        &self,
+        pools: &[PoolRecord],
+        introduced: Option<(hex_api::Execution, &[DeviceId])>,
+        projection: &mut hex_runtime::devices::RouteProjection,
+    ) -> Result<(), Refusal> {
+        check_native_projection(pools, introduced)?;
+        // MacRuntime's actual Runtime::capacity is currently the trait's None. Do not invent
+        // an explicit native prefix from classes(); WithGuest appends its real configured forms.
+        let _ = projection;
+        Ok(())
+    }
+
     fn preflight_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
         hex_runtime::macos::MacRuntime::preflight_record(self, record)
     }
@@ -2052,6 +2200,20 @@ fn group(trace: Option<ProcId>) -> Option<(i32, u64)> {
 /// records name that is still there, and removes the rest with what is left of them.
 #[cfg(windows)]
 impl Recover for hex_runtime::windows::WinRuntime {
+    fn project_routes(
+        &self,
+        pools: &[PoolRecord],
+        introduced: Option<(hex_api::Execution, &[DeviceId])>,
+        projection: &mut hex_runtime::devices::RouteProjection,
+    ) -> Result<(), Refusal> {
+        check_native_projection(pools, introduced)?;
+        hex_runtime::windows::WinRuntime::project_native_encoding_upper_bound(self, projection)
+    }
+
+    fn preflight_unsubmitted(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        hex_runtime::windows::WinRuntime::preflight_unsubmitted(self, record)
+    }
+
     fn preflight_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
         hex_runtime::windows::WinRuntime::preflight_record(self, record)
     }
@@ -2147,6 +2309,46 @@ impl Recover for hex_runtime::windows::WinRuntime {
 /// ended). Neither has host processes to end; a box recovery removes that the guest still holds is deleted
 /// there.
 impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
+    fn project_routes(
+        &self,
+        pools: &[PoolRecord],
+        introduced: Option<(hex_api::Execution, &[DeviceId])>,
+        projection: &mut hex_runtime::devices::RouteProjection,
+    ) -> Result<(), Refusal> {
+        if pools.len() > hex_runtime::MAX_BOXES {
+            return Err(Refusal::Full(hex_runtime::MAX_BOXES));
+        }
+        for pool in pools {
+            if !matches!(
+                pool.execution,
+                hex_api::Execution::ShardsShared | hex_api::Execution::ShardsDedicated
+            ) {
+                return Err(NativeRecord::Pool(pool).refusal(hex_api::LifecycleCause::Uncertain));
+            }
+        }
+        if introduced.is_some_and(|(execution, _)| {
+            !matches!(
+                execution,
+                hex_api::Execution::ShardsShared | hex_api::Execution::ShardsDedicated
+            )
+        }) {
+            return Err(broken(
+                "new backing has no initialized guest route producer",
+            ));
+        }
+        self.host().project_routes(&[], None, projection)?;
+        self.guest().project_routes(pools, introduced, projection)
+    }
+
+    fn preflight_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
+        self.host().preflight_managed(record)
+    }
+    fn handoff_unsubmitted(&self, record: &BoxRecord, pool: &PoolRecord) -> Result<(), Refusal> {
+        check_backing_reference(record, pool)?;
+        self.guest().handoff_unsubmitted(record, pool)?;
+        self.host().preflight_unsubmitted(record)
+    }
+
     fn physical_observations(&self) -> Result<Vec<hex_api::PhysicalDevice>, Refusal> {
         self.guest().physical_observations()
     }
@@ -2562,3 +2764,11 @@ mod report_tests;
 #[cfg(test)]
 #[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs"]
 mod handoff_tests;
+
+#[cfg(test)]
+#[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_unsubmitted_pool_tests.rs"]
+mod unsubmitted_pool_tests;
+
+#[cfg(test)]
+#[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_route_projection_tests.rs"]
+mod route_projection_tests;

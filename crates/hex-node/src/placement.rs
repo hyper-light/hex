@@ -338,6 +338,48 @@ impl Runtimes {
         Ok(released)
     }
 
+    /// Canonical drain intent is accounting/cleanup authority, independent of fresh GPU readings.
+    /// Keep the actual endpoint and complete physical set for the same native owner.
+    pub fn draining_backings(
+        reports: &[(Class, Option<hex_api::Capacity>)],
+    ) -> Result<Vec<(Class, hex_api::BackingOffer)>, Error> {
+        let mut draining: Vec<(Class, hex_api::BackingOffer)> = Vec::new();
+        draining
+            .try_reserve_exact(hex_api::MAX_RUNTIME_ROUTES)
+            .map_err(|_| Refusal::Exhausted {
+                what: "draining native backing count",
+                bound: hex_api::MAX_RUNTIME_ROUTES,
+            })?;
+        for (class, report) in reports {
+            let Some(report) = report else { continue };
+            report.check()?;
+            for backing in &report.backings {
+                if backing.phase != hex_api::BackingPhase::Draining {
+                    continue;
+                }
+                if let Some((_, prior)) =
+                    draining.iter().find(|(_, prior)| prior.key == backing.key)
+                {
+                    if prior != backing {
+                        return Err(
+                            invalid_static("canonical backing drain receipts disagree").into()
+                        );
+                    }
+                    continue;
+                }
+                if draining.len() == hex_api::MAX_RUNTIME_ROUTES {
+                    return Err(Refusal::Exhausted {
+                        what: "draining native backing count",
+                        bound: hex_api::MAX_RUNTIME_ROUTES,
+                    }
+                    .into());
+                }
+                draining.push((*class, backing.try_clone()?));
+            }
+        }
+        Ok(draining)
+    }
+
     /// The native Store/turn owner supplies facts over the existing Runtime seam. This registry
     /// has no mutable query lock, and no provider is opened in the scheduling process.
     pub fn physical_report(&self) -> Result<Option<hex_api::PhysicalReport>, Error> {
@@ -968,6 +1010,45 @@ impl Driver {
             .into());
         }
         Ok(true)
+    }
+
+    /// Drive native cleanup under the SAME operation, with no core lock through the callback.
+    /// Draining retains its complete grant until an exact positive whole-scope result advances
+    /// BOTH existing Index views. A later explicit call acknowledges that terminal observation.
+    pub fn drain_backing(
+        &self,
+        endpoint: Class,
+        expected: &hex_api::BackingOffer,
+    ) -> Result<hex_api::BackingOffer, Error> {
+        expected.allocation()?;
+        let _operation = self.operation()?;
+        let key = expected.key;
+        let refused = || Refusal::Backing {
+            key,
+            cause: hex_api::LifecycleCause::Uncertain,
+        };
+        if expected.phase != hex_api::BackingPhase::Draining {
+            return Err(invalid_static("native cleanup requires canonical Draining intent").into());
+        }
+        self.lock()?
+            .node
+            .observe_backing(expected)
+            .map_err(|_| refused())?;
+        let observed = self.runtimes.get(endpoint)?.release_backing(key)?;
+        if observed.key != key
+            || observed.cost != expected.cost
+            || observed.devices != expected.devices
+            || observed.phase != hex_api::BackingPhase::Released
+        {
+            self.lock()?.admission = Some(refused());
+            return Err(invalid_static("native cleanup changed its exact backing receipt").into());
+        }
+        let mut state = self.lock()?;
+        if state.node.observe_backing(&observed).is_err() {
+            state.admission = Some(refused());
+            return Err(refused().into());
+        }
+        Ok(observed)
     }
 
     /// Acknowledges an already consumed native terminal receipt, before that owner may remove

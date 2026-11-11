@@ -1,0 +1,25 @@
+{
+  "status": "SOURCE ONLY / new feature coherence successor, UNCOMPILED/UNRUN",
+  "parent": "56fd2caba924f0af3524b3b97285e28d018d9687",
+  "family_source": "3bdb5707b806304df0a367401a328a7c5d8926ef retained unchanged in history",
+  "contract": "coordinator accepted exact desired-R freshness, matching L1 FC9075",
+  "change": "ONE pure gpu_fresh_candidate computes exact current noRef Live +same proposal set/key. add_offers, native private receipt/attachment and physical observation use it. A changed current set waiting on old ACK contributes Busy at its own key/no fresh bits; no stale report or sibling reading reuse. Invalid config remains fatal.",
+  "unit": "Adds positive unchangedR and negative changedR-beforeACK assertions to new UNRUN family decision control; no original normalization/handoff controls weakened",
+  "role": "implementer shards-gpu",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "checks": {
+    "scoped_rustfmt_parser": "exit0",
+    "git_diff_check": "exit0",
+    "cargo": "NOT RUN",
+    "native": "NOT RUN"
+  },
+  "files": {
+    "crates/hex-runtime/src/guest/family.rs": "25a9debedf3eb384d48287511c23bd2f7896748b6a9079fb9ef2004cbea08052",
+    "crates/hex-runtime/src/guest/shared.rs": "3ff88db356b78c1defc3322a28a81d870cf19a4c8fb03caf4cae250ae2fb01e6",
+    "crates/hex-runtime/src/guest/physical.rs": "77dcf586d4cc2803cddcd2bf73be3e18167dbad12916066d8928471d77058275",
+    "crates/hex-runtime/src/guest/gpu_pool.rs": "7baab37167f9b8a460cabe8c30dbc32b13cb0b2536cfcdb401fae715edb91b96",
+    "docs/research/measurements/hex-complete-shards-gpu/GPU-FAMILY-CONSUMER.md": "a2ecbb9d20e4d0b18ab8710e0c84daf979d3503464473f0dcf1d326e4b6969ca"
+  },
+  "remaining": "Same full real producer closure as3bdb; ROOT compiler/light controls/native measurements/whole-scope and Mac proof unverified."
+}

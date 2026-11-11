@@ -1,0 +1,68 @@
+{
+  "base": "9a5879b7726287ae7fd1216286787df887f5571c",
+  "role": "implementer L3",
+  "feature": "required Prepared Pool read-only native no-submission callback",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "dependencies": {
+    "required_transaction_trait": "8641a1d08b2baa5e2a7938df747466a9d38bb393",
+    "real_node_supervisor": "1aee0be8d8d9bbcb4fbb2fef43f30aa5fb4203ee",
+    "matching_L2_cancel_consumer": "pending source intake"
+  },
+  "files": {
+    "crates/hex-node/src/recorded.rs": {
+      "sha256": "f33507bb98749c95db6137bd4e2fb8567cdcc0fc1ea1705f28107dafa094faa9",
+      "bytes": 104227
+    },
+    "docs/research/measurements/hex-complete-lifecycle/recorded_pool_tests.rs": {
+      "sha256": "4358fd0ae447c63fc50ee5878f5653dcf18e1ede6f76a4bb3984ae8b9e191dfc",
+      "bytes": 5322
+    },
+    "docs/research/measurements/hex-complete-lifecycle/recorded_report_tests.rs": {
+      "sha256": "ec31e181cb8e9f614e93766aa2d7044daa15bcd391115ef81c30546d4f0544c0",
+      "bytes": 8922
+    },
+    "docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs": {
+      "sha256": "c94022e35226618e9a262aea4bcc81014686d42819f8b24b792c7fc68a888772",
+      "bytes": 24022
+    },
+    "docs/research/measurements/hex-complete-lifecycle/recorded_unsubmitted_pool_tests.rs": {
+      "sha256": "2842dc374eb2fd0849f97560efbfa049a552313b7ce1a8fcaf9ce908d18c4e64",
+      "bytes": 10771
+    },
+    "docs/research/measurements/hex-complete-lifecycle/prepared-pool-native-preflight.md": {
+      "sha256": "2bbabeed9114e05fc8dd76362d472675e01792fbb3549c73541ecea0fad7de2d",
+      "bytes": 5776
+    }
+  },
+  "mechanical_fixture_ports": {
+    "docs/research/measurements/hex-complete-lifecycle/recorded_pool_tests.rs": {
+      "parent_sha256": "857c1e3bdcca8db77701236a8bbf0ab60af9b59a4f0ee212c995c4a53cec4667",
+      "only_delta": "two required panic-if-called callback fields"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/recorded_report_tests.rs": {
+      "parent_sha256": "81d74d9c1cfe64bbb79db5ee367eb0749d4f55788c5ad2e967a063157d9bbc22",
+      "only_delta": "two required panic-if-called callback fields"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs": {
+      "parent_sha256": "2bd74bc8a07dcc69033cad1b0696271bceacea7ef3536ac366458a03d41e3afe",
+      "only_delta": "two required panic-if-called callback fields"
+    }
+  },
+  "new_units": 4,
+  "compile_tests_native": "UNRUN; no L3 dispatch",
+  "source_checks": [
+    "scoped rustfmt parser/format only",
+    "git diff --check"
+  ],
+  "separate_unimported_source": [
+    "2ef full persistent Mac helper",
+    "9a587 measurement-only standalone C fixture"
+  ],
+  "root_remaining": [
+    "join exact real producer/caller cohort",
+    "focused unit/native-owner private-file checks",
+    "supported-target compile/strict lint",
+    "actual native metadata/recovery proof; full gates"
+  ]
+}

@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 #[cfg(all(debug_assertions, target_os = "linux"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 use std::time::Duration;
 
 use hex_api::{BoxId, Refusal};
@@ -100,9 +100,10 @@ pub struct Store {
 
 #[derive(Debug, Default)]
 struct Synced {
-    // Only first pool configuration publication spans this lock. No holder inventory or native
-    // callback is stored here; clones share it so count-before-create has one bounded owner.
-    pool_preparation: Mutex<()>,
+    // The existing preparation owner fences strict metadata snapshots through publication.
+    // Ordinary writes share it; preparation takes it exclusively, without waiting. It holds no
+    // inventory/native callback and creates no second reference or resource authority.
+    pool_preparation: RwLock<()>,
     files: AtomicU64,
     dirs: AtomicU64,
 }
@@ -192,6 +193,28 @@ impl Store {
         }
     }
 
+    fn changing_metadata(&self) -> Result<RwLockReadGuard<'_, ()>, Refusal> {
+        self.synced.pool_preparation.try_read().map_err(|error| {
+            metadata_refusal(match error {
+                TryLockError::WouldBlock => {
+                    "a backing preparation owns the Store metadata snapshot"
+                }
+                TryLockError::Poisoned(_) => "the Store metadata preparation fence is poisoned",
+            })
+        })
+    }
+
+    fn preparing_metadata(&self) -> Result<RwLockWriteGuard<'_, ()>, Refusal> {
+        self.synced.pool_preparation.try_write().map_err(|error| {
+            metadata_refusal(match error {
+                TryLockError::WouldBlock => {
+                    "a Store metadata mutation prevents backing preparation"
+                }
+                TryLockError::Poisoned(_) => "the Store metadata preparation fence is poisoned",
+            })
+        })
+    }
+
     /// How many changes of a box's record have waited for a change of the same box to finish.
     pub fn waited(&self) -> u64 {
         self.turns.waited()
@@ -235,6 +258,7 @@ impl Store {
     /// Writes `record` whole, in its place: either the old file or the new one survives a crash of
     /// the node agent, and a record that must outlive the host ([`must_outlive_host`]) is fsynced too.
     pub fn put(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        let _metadata = self.changing_metadata()?;
         let _source = self.claim_backing(record)?;
         let _turn = self.claim(&record.spec.id)?;
         if let Some(current) = self.read_lifecycle(&record.spec.id)?
@@ -250,6 +274,7 @@ impl Store {
     /// Claims an unused identity before a runtime effect. An unfinished or unreadable record owns
     /// its name too: retrying create cannot replace the only durable cleanup/binding identity.
     pub(crate) fn begin(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        let _metadata = self.changing_metadata()?;
         let _source = self.claim_backing(record)?;
         let _turn = self.claim(&record.spec.id)?;
         if self.get(&record.spec.id)?.is_some() {
@@ -262,6 +287,7 @@ impl Store {
     /// Publishes only the create still described by this immutable record. A concurrent delete's
     /// durable intent wins; an old completion must never turn Deleting back into Ready.
     pub(crate) fn made(&self, expected: &BoxRecord) -> Result<(), Refusal> {
+        let _metadata = self.changing_metadata()?;
         let _source = self.claim_backing(expected)?;
         let _turn = self.claim(&expected.spec.id)?;
         let Some(Ok(mut record)) = self.get(&expected.spec.id)? else {
@@ -294,8 +320,9 @@ impl Store {
     /// Preserves the immutable cleanup authority and concurrent accounting when a backend advances
     /// a record. A fresh native effect must first publish Creating; deletion never rolls back.
     pub(crate) fn put_lifecycle(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        let _metadata = self.changing_metadata()?;
         // Only scoped reference writes take this short existing Store configuration turn, before
-        // the Box record turn. No method/native callback is held by this metadata mutex.
+        // the Box record turn. This short record mutation holds no native callback.
         let _source = self.claim_backing(record)?;
         let _turn = self.claim(&record.spec.id)?;
         let _backing_phase = self.check_box_backing(record)?;
@@ -361,6 +388,7 @@ impl Store {
     /// The caller owns the shared native method/device receipts and has proved physical cleanup.
     /// A retained Ready or unreadable record cannot be dropped by a delayed remove.
     pub(crate) fn remove_lifecycle(&self, id: &BoxId) -> Result<(), Refusal> {
+        let _metadata = self.changing_metadata()?;
         let _turn = self.claim(id)?;
         if let Some(record) = self.read_lifecycle(id)?
             && record.phase != Phase::Deleting
@@ -377,6 +405,7 @@ impl Store {
         id: &BoxId,
         change: impl FnOnce(&mut BoxRecord) -> bool,
     ) -> Result<bool, Refusal> {
+        let _metadata = self.changing_metadata()?;
         let _turn = self.claim(id)?;
         let Some(Ok(mut record)) = self.get(id)? else {
             return Ok(false);
@@ -557,6 +586,7 @@ impl Store {
     /// directories are gone before its record is, so a removal a host crash undoes leaves a record
     /// recovery scrubs again.
     pub fn remove(&self, id: &BoxId) -> Result<(), Refusal> {
+        let _metadata = self.changing_metadata()?;
         let _turn = self.claim(id)?;
         self.unlink(id)
     }
@@ -617,6 +647,7 @@ impl Store {
     /// under its box's turn, so a write under way keeps its own; how many it removed. Recovery's, so a
     /// crash at a record write leaves nothing behind (T-T7.1.2).
     pub fn remove_strays(&self) -> Result<usize, Refusal> {
+        let _metadata = self.changing_metadata()?;
         let mut removed = 0usize;
         for dir in self.listed() {
             let entries = fs::read_dir(&dir).map_err(|e| Refusal::os("listing records", e))?;
@@ -710,6 +741,21 @@ fn retained_identity_error(message: &'static str) -> Refusal {
     why.push_str(message);
     Refusal::Invalid {
         what: "retained record identity",
+        why,
+    }
+}
+
+fn metadata_refusal(message: &'static str) -> Refusal {
+    let mut why = String::new();
+    if why.try_reserve_exact(message.len()).is_err() {
+        return Refusal::Exhausted {
+            what: "Store metadata refusal bytes",
+            bound: message.len(),
+        };
+    }
+    why.push_str(message);
+    Refusal::Os {
+        op: "entering the retained owner metadata fence",
         why,
     }
 }

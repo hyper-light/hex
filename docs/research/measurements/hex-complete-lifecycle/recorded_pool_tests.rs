@@ -71,6 +71,7 @@ fn prepared_pool_cannot_reach_native_usage_before_its_exact_grant() {
         attach: &attach,
         finalize: &finalize,
         usage: &usage,
+        unsubmitted_pool: &|_| panic!("this control cannot check Prepared native submission"),
     };
     pool_transaction(&store, &key, &[], &native, &mut |tx| {
         assert!(matches!(tx.managed_usage(), Err(Refusal::Backing { key: got, .. }) if got == key));
@@ -130,6 +131,7 @@ fn stale_pool_generation_is_refused_before_any_native_callback() {
         attach: &attach,
         finalize: &finalize,
         usage: &usage,
+        unsubmitted_pool: &|_| panic!("this control cannot check Prepared native submission"),
     };
     pool_transaction(&store, &stale, &[], &native, &mut |tx| {
         assert!(matches!(tx.read_pool(&stale), Err(Refusal::Backing { key, .. }) if key == stale));

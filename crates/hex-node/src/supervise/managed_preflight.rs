@@ -14,6 +14,21 @@ struct Expected<'a> {
 }
 
 impl Supervisor {
+    /// Called under this canonical Pool's existing method turn. No native slot or named scope
+    /// may exist for an ungranted lifetime: Prepared before cancellation, or exact unallocated
+    /// Released during explicit Index ACK. Absence is not a released-scope receipt.
+    pub(crate) fn check_unsubmitted_pool(
+        &self,
+        record: NativeRecord<'_>,
+        root: &Path,
+    ) -> Result<(), Refusal> {
+        let present = self.inits()?.get(record.owner()).is_some();
+        let name = unsubmitted_pool_name(record, present)?;
+        // The table guard ended before native metadata I/O. Same-Pool launch/publication is
+        // excluded by the caller's turn; unrelated native owners remain independent.
+        check_unsubmitted_pool_path(root, name.as_str(), record)
+    }
+
     pub(crate) fn preflight_managed(
         &self,
         root: &Path,
@@ -64,6 +79,46 @@ impl Supervisor {
             }
         }
         preflight(root, &expected)
+    }
+}
+
+fn unsubmitted_pool_name(record: NativeRecord<'_>, present: bool) -> Result<BoxId, Refusal> {
+    let refused = || record.refusal(hex_api::LifecycleCause::Uncertain);
+    let NativeRecord::Pool(pool) = record else {
+        return Err(refused());
+    };
+    pool.check()?;
+    if present
+        || !matches!(
+            pool.phase,
+            hex_api::BackingPhase::Prepared | hex_api::BackingPhase::Released
+        )
+        || pool.allocation.is_some()
+        || pool.init.is_some()
+        || pool.exit.is_some()
+    {
+        return Err(refused());
+    }
+    managed_native_scope_id(record)
+}
+
+fn check_unsubmitted_pool_path(
+    root: &Path,
+    name: &str,
+    record: NativeRecord<'_>,
+) -> Result<(), Refusal> {
+    let refused = || record.refusal(hex_api::LifecycleCause::Uncertain);
+    // Require the initialized owner root itself. NOENT on an intermediate/missing root is not
+    // evidence for this exact scope, and neither a symlink nor an empty preexisting scope suffices.
+    let root = rustix::fs::open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| refused())?;
+    match rustix::fs::statat(&root, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(Errno::NOENT) => Ok(()),
+        Ok(_) | Err(_) => Err(refused()),
     }
 }
 
@@ -549,6 +604,89 @@ mod tests {
         ];
         assert!(expected(&retained).is_err());
     }
+
+    /// AC-T7.4.1: cancellation requires both a canonical ungranted lifetime and this owner's
+    /// exact scope absence. A sibling is not a singleton conflict; any named object/presence or
+    /// observation error for the target refuses, without removing or adopting anything.
+    #[test]
+    fn unsubmitted_prepared_pool_requires_no_slot_and_exact_native_metadata_absence() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut record = pool();
+        record.phase = BackingPhase::Prepared;
+        record.allocation = None;
+        let native = NativeRecord::Pool(&record);
+        let name = unsubmitted_pool_name(native, false).unwrap();
+        std::fs::create_dir(temp.path().join("unrelated-sibling")).unwrap();
+        check_unsubmitted_pool_path(temp.path(), name.as_str(), native).unwrap();
+        assert!(unsubmitted_pool_name(native, true).is_err());
+        let path = temp.path().join(name.as_str());
+        std::fs::create_dir(&path).unwrap();
+        assert!(check_unsubmitted_pool_path(temp.path(), name.as_str(), native).is_err());
+        assert!(path.is_dir());
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, b"retained-positive-metadata").unwrap();
+        assert!(check_unsubmitted_pool_path(temp.path(), name.as_str(), native).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"retained-positive-metadata");
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(temp.path().join("missing-target"), &path).unwrap();
+        assert!(check_unsubmitted_pool_path(temp.path(), name.as_str(), native).is_err());
+        std::fs::remove_file(&path).unwrap();
+        let missing_root = temp.path().join("missing-root");
+        assert!(check_unsubmitted_pool_path(&missing_root, name.as_str(), native).is_err());
+        let linked_root = temp.path().join("linked-root");
+        std::os::unix::fs::symlink(temp.path(), &linked_root).unwrap();
+        assert!(check_unsubmitted_pool_path(&linked_root, name.as_str(), native).is_err());
+        for phase in [
+            BackingPhase::Granted,
+            BackingPhase::Live,
+            BackingPhase::Draining,
+            BackingPhase::Released,
+        ] {
+            let mut changed = pool();
+            changed.phase = phase;
+            if phase != BackingPhase::Granted {
+                changed.init = Some(ProcId {
+                    pid: 7,
+                    start_ticks: 11,
+                });
+            }
+            if phase == BackingPhase::Released {
+                changed.exit = Some(Exit::Code(0));
+            }
+            changed.check().unwrap();
+            assert!(unsubmitted_pool_name(NativeRecord::Pool(&changed), false).is_err());
+        }
+        record.allocation = Some(record.cost.allocate(CapacityResources::default()).unwrap());
+        assert!(unsubmitted_pool_name(NativeRecord::Pool(&record), false).is_err());
+        assert!(temp.path().join("unrelated-sibling").is_dir());
+    }
+
+    /// AC-T7.4.1: cancellation and later Index ACK are two observations of the SAME unallocated
+    /// lifetime. New metadata between them retains the row; no fake exit or native release proof.
+    #[test]
+    fn canceled_unallocated_pool_ack_rechecks_exact_absence_and_retains_new_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut record = pool();
+        record.phase = BackingPhase::Prepared;
+        record.allocation = None;
+        let name = unsubmitted_pool_name(NativeRecord::Pool(&record), false).unwrap();
+        check_unsubmitted_pool_path(temp.path(), name.as_str(), NativeRecord::Pool(&record))
+            .unwrap();
+        record.phase = BackingPhase::Released;
+        record.check().unwrap();
+        let native = NativeRecord::Pool(&record);
+        assert_eq!(unsubmitted_pool_name(native, false).unwrap(), name);
+        assert!(record.init.is_none() && record.exit.is_none() && record.allocation.is_none());
+        assert!(unsubmitted_pool_name(native, true).is_err());
+        let path = temp.path().join(name.as_str());
+        std::fs::create_dir(&path).unwrap();
+        assert!(check_unsubmitted_pool_path(temp.path(), name.as_str(), native).is_err());
+        assert!(path.is_dir());
+        std::fs::remove_dir(&path).unwrap();
+        check_unsubmitted_pool_path(temp.path(), name.as_str(), native).unwrap();
+        assert!(!path.exists());
+    }
+
     /// AC-T7.1.2: real proc stat command bytes never replace the exact PID/birth/policy suffix.
     #[test]
     fn native_stat_command_bytes_do_not_replace_the_exact_birth_and_policy() {

@@ -1,0 +1,41 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "05048a3e4474ddb008e1499114b8ec07637c2d87",
+  "source": [
+    {
+      "path": "crates/hex-runtime/src/devices.rs",
+      "sha256": "f2a4b533723bc722120153c02488574a166112afa49ef096df5f892e2897aebf"
+    },
+    {
+      "path": "crates/hex-runtime/src/devices/tests.rs",
+      "sha256": "397fdf7196fdfc3227da59803a059fb7453a04d7482eea409bfe9013ab3265f9"
+    }
+  ],
+  "signature": "Catalog::unheld_subset(&self,configured:&[DeviceId],current:Option<BackingKey>,records:&Records,pools:&[PoolRecord])->Result<Vec<DeviceId>,Refusal>",
+  "contract": "2c6535f49f90e9290419e53549315ecd7364a71a +b924 family Books; L2 acknowledged consuming ONE identity subtraction helper before implementation.",
+  "behavior": [
+    "Canonical configured GPU list only, exact current generation must exist and notReleased. A current source referenced by any retained Box refuses Busy; it cannot be mistaken for unconsumed observer.",
+    "Mark every retained Box selection plus Granted/Live/Draining pool claims; omit only exact no-ref current owner. Prepared and Released are identity history/proposal, not native holders.",
+    "Full-family alias index and transient occupied bits remain within existing MAX_DEVICES, then expand occupied group aliases once and subtract from configured order. No repeated per-ID Catalog.holder nested catalog traversal.",
+    "Malformed/inconsistent retained Box refuses with affected identity; pool validation errors remain typed. Family/config/profile/max1/current-role/reference/ACK/canonical-snapshot validation remains SAME Books/Store callback responsibility, not inferred from this helper result.",
+    "The result is deterministic provisioning identity refs only. No workload GPU selection/ranking, device metadata/pressure, native grant/boot, cache/manager/ledger or independent provider. Empty family naturally returns empty with no catalog expansion."
+  ],
+  "complexity_review": {
+    "scratch": "Temporary aliases/occupancy/occupied closure/result each bounded by MAX_DEVICES; existing conflict_ids temporary sorted catalog indexes remain fallible. No combined all-record-claims allocation.",
+    "work": "Flat traversal of actual bounded canonical Box/Pool claim slices with binary lookup in family aliases; existing catalog sort/group closure at most twice. Configured-order result, no exponential subset enumeration.",
+    "bounds": "MAX_DEVICES existing physical address space; MAX_BOXES shared existing Store/method slot count. No new constants/budgets.",
+    "performance": "UNMEASURED/no speed or allocation-free claim; ROOT allocation/fault/profile obligations retained."
+  },
+  "new_control_unrun": "devices::tests::deterministic_family_complement_respects_current_claims_references_and_group_aliases: ownLive reuse, Box-end union, nonIgnored current exclusion, Prepared companion conflict, consumed-current Busy, Released history+BoxS, foreignDraining exclusion, malformed/unsorted/duplicate/empty cases. Structurally valid pure record/catalog fixtures only; no actual hardware/config/readiness proof.",
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compile": "UNRUN/coherent consumers pending",
+    "tests": "UNRUN",
+    "dispatches": 0,
+    "native": 0
+  },
+  "remaining": "L1 FC and L2 guest use this SAME helper before/inside L3 guarded proposal validation; signed real L3 helper+Nodea5f consumers then ROOT matched check. Full lazy coalescing release/ACK and native artifact/GPU effects still owed. No original oracle changed."
+}

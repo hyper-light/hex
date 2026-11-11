@@ -1,0 +1,41 @@
+{
+  "role": "implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "a5f22960acd5c9d98c69a48e1aa01a84860094a6",
+  "path": "crates/hex-node/src/node/backends.rs",
+  "sha256": "cd6919740a0a62de3d3811843ee6df35e213134774d7fa36259cda1375c29ddc",
+  "required_sources": {
+    "collector": "ec0a0ab6f2fe6266696979d8df2fdf6032178ff5",
+    "Firecracker": "a5680320715d8f9e18dcfd089158630b9d3464ae",
+    "Shards": "b3c05c9e58c86170c0c41d5c2322f173238bd7cd +2b7b555d8ecef37f0346d6cddabfc5f68e5c1f9e",
+    "Books": "b924aec5b7dfb98e4ce6ce11a767c51c7b3a0d48",
+    "Store": "8b5534be5277e422c7cc6c949e6c3019fb8ecab0",
+    "prior_Node_family_adapter": "a5f22960acd5c9d98c69a48e1aa01a84860094a6"
+  },
+  "behavior": [
+    "Actual Node Books metadata callback first runs backend family snapshot validation, then SAME initialized-owner pure global route projection before Store can publish. introduced only when expected current is None, after common Store target-absence proof.",
+    "Actual Linux native Process+OCI common key constructor plus real initialized FC+Guest project_routes feed ONE bounded collector. Retained exact tuples union, distinct new lifetime keys, MAX_RUNTIME_ROUTES=64 checked before each fallible growth; no guessed alias/cardinality cap.",
+    "Missing backend for retained row refuses affected Backing Uncertain; missing producer for proposed lifetime refuses. Native-only Node projects exactly its actual native prefixes, no VM route.",
+    "Startup keeps complete whole-owner retained/config preflight first, initializes same native root/FC, then publishes SAME Backends owner before any guarded preparation consults it. Preparation/capacity validation still complete before successful install return/serve; no new owner or strong cycle.",
+    "No Books/Capacity/provider/native/file query under the metadata callback; only pure actual constructors/config checks. Existing Store/Turns remain authority."
+  ],
+  "preserved": [
+    "Node render fullBoxSpec and ordinary lifecycle paths untouched",
+    "616/76d handoff two-borrow/exclusive proof and same supervisor/native receipts unchanged",
+    "Native RPC/observer typed joins preserved",
+    "ROOT-specific projection/literal/config/CLI deltas must be composed as narrow changes, never whole-file overwritten"
+  ],
+  "controls": [
+    "node::backends::preflight_dispatch_tests::native_only_projection_does_not_invent_vm_routes_for_new_lifetimes (new, UNRUN)",
+    "ec0 collector exact-bound/overbound/mixed retained-history union controls (source-only)",
+    "a568 actual FC projector and b3c actual Guest projector constructor controls (source-only)"
+  ],
+  "checks": {
+    "rustfmt": "installed rustfmt parser/format exit0",
+    "diff": "git diff --check exit0",
+    "Cargo": "UNRUN; matched full family producers required; no stubs",
+    "native": "UNRUN; no calls/check dispatch by lane"
+  },
+  "remaining": "L3 Recover/WithGuest native projection wrapper/captured Windows capability, FC/L2 complete lazy consumers and phase-aware release/Index ACK; ROOT matched union bound controls/native and R14 evidence remain owed. This is source-only, not initialized/native execution proof."
+}

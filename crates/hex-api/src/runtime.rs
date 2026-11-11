@@ -946,15 +946,10 @@ impl Capacity {
             .routes
             .iter()
             .enumerate()
-            .find(|(_, offer)| offer.key == receipt.key)
+            .find(|(_, offer)| offer.key == receipt.key && offer.backing == receipt.backing)
             .ok_or_else(|| {
                 invalid_route("committed execution is not an initialized native offer")
             })?;
-        if receipt.backing != offer.backing {
-            return Err(invalid_route(
-                "committed backing differs from the initialized route",
-            ));
-        }
         if let Some(key) = receipt.backing {
             let backing = self
                 .backings
@@ -1088,7 +1083,7 @@ impl Capacity {
         for (at, route) in routes.iter().enumerate() {
             route.check()?;
             if routes.iter().take(at).any(|previous| {
-                previous.key == route.key
+                (previous.key == route.key && previous.backing == route.backing)
                     || active(previous)
                         && active(route)
                         && previous.key.class == route.key.class
@@ -1942,11 +1937,120 @@ mod route_tests {
             "free metadata cannot replace the physical grant"
         );
         c.backings[0].devices = vec![id, crate::DeviceId { key: 8, ..id }];
-        assert!(
-            c.validate_route(&spec).is_err(),
-            "an exact request cannot inherit extra granted GPUs"
+        c.validate_route(&spec).unwrap();
+        assert_eq!(
+            spec.devices,
+            vec![id],
+            "a source's larger grant must not enlarge the exact Box selection"
         );
     }
+    /// AC-T7.4.1: current and historical incarnations use the complete existing key/backing tuple.
+    #[test]
+    fn qualified_route_history_and_current_selection_do_not_alias() {
+        let parent = BackingKey {
+            pool: [2; 32],
+            generation: [3; 16],
+        };
+        let current = BackingKey {
+            pool: [4; 32],
+            generation: [5; 16],
+        };
+        let id = crate::DeviceId {
+            kind: crate::DeviceKind::Gpu,
+            key: 8,
+        };
+        let historical = RouteOffer {
+            key: key(
+                ImageOs::Linux,
+                Execution::ShardsDedicated,
+                GpuEligibility::Required,
+            ),
+            cost: Some(cost()),
+            backing: Some(parent),
+        };
+        let fresh = RouteOffer {
+            backing: Some(current),
+            ..historical
+        };
+        let mut c = capacity();
+        c.routes = vec![historical, fresh];
+        c.backings = vec![
+            BackingOffer {
+                key: parent,
+                cost: cost(),
+                phase: BackingPhase::Released,
+                devices: vec![crate::DeviceId { key: 7, ..id }, id],
+            },
+            BackingOffer {
+                key: current,
+                cost: cost(),
+                phase: BackingPhase::Live,
+                devices: vec![id],
+            },
+        ];
+        c.devices.push(crate::DeviceInfo {
+            id,
+            model: "current actual fixture GPU".into(),
+            size: 10,
+            holder: Some(crate::DeviceHolder::Backing(current)),
+        });
+        c.device_routes = vec![2];
+        c.check().unwrap();
+        let mut spec = crate::BoxSpec {
+            id: crate::BoxId::new("qualified-current").unwrap(),
+            class: crate::ClassSpec::Oci(Box::new(crate::OciSpec {
+                rootfs: crate::Rootfs::Dir(std::env::current_dir().unwrap()),
+                init: crate::Program::of(&["/bin/true"]),
+                mounts: Vec::new(),
+                hostname: None,
+                network: crate::Network::Private,
+                hosts: Vec::new(),
+            })),
+            bounds: crate::Bounds {
+                cpu_max_milli: Some(crate::MIN_CPU_MILLI),
+                memory_max: Some(crate::MIN_MEMORY),
+                ..crate::Bounds::default()
+            },
+            owner: None,
+            devices: vec![id],
+            allocation: Some(cost().allocate(CapacityResources::default()).unwrap()),
+            route: Some(RouteReceipt {
+                key: fresh.key,
+                backing: fresh.backing,
+            }),
+        };
+        assert_eq!(c.validate_route(&spec).unwrap(), fresh);
+        spec.route.as_mut().unwrap().backing = Some(parent);
+        assert!(
+            matches!(c.validate_route(&spec), Err(Refusal::Backing { key, cause: LifecycleCause::Pending }) if key == parent)
+        );
+        spec.route.as_mut().unwrap().backing = Some(BackingKey {
+            generation: [9; 16],
+            ..current
+        });
+        assert!(
+            c.validate_route(&spec).is_err(),
+            "no RouteKey-only fallback"
+        );
+        c.routes.push(fresh);
+        assert!(
+            c.check().is_err(),
+            "duplicate exact qualified tuple refuses"
+        );
+        c.routes.pop();
+        c.backings[0].phase = BackingPhase::Live;
+        assert!(
+            c.check().is_err(),
+            "history cannot become a competing fresh predicate"
+        );
+        c.backings[0].phase = BackingPhase::Released;
+        c.routes[1].cost.as_mut().unwrap().id = [9; 32];
+        assert!(
+            c.check().is_err(),
+            "qualified cost still matches its actual backing"
+        );
+    }
+
     /// AC-T7.4.1: cold provisioning reserves identity refs without inventing native metadata.
     #[test]
     fn cold_backing_claims_are_explicit_unique_and_not_measured_fresh_devices() {

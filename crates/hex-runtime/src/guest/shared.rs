@@ -27,7 +27,110 @@ pub(super) struct GpuBacking {
     pub path: PathBuf,
 }
 
+fn guest_route_key(
+    class: Class,
+    execution: Execution,
+    gpu: hex_api::GpuEligibility,
+) -> Result<hex_api::RouteKey, Refusal> {
+    let key = hex_api::RouteKey {
+        class,
+        image: hex_api::ImagePlatform {
+            os: hex_api::ImageOs::Linux,
+            arch: route::host_platform()?.arch,
+        },
+        execution,
+        gpu,
+    };
+    key.check()?;
+    Ok(key)
+}
+
+fn backing_route_keys(
+    execution: Execution,
+    devices: &[hex_api::DeviceId],
+) -> Result<(hex_api::RouteKey, Option<hex_api::RouteKey>), Refusal> {
+    use hex_api::GpuEligibility;
+    match execution {
+        Execution::ShardsShared if devices.is_empty() => Ok((
+            guest_route_key(Class::Oci, execution, GpuEligibility::None)?,
+            None,
+        )),
+        Execution::ShardsDedicated if !devices.is_empty() => Ok((
+            guest_route_key(Class::Oci, execution, GpuEligibility::Required)?,
+            Some(guest_route_key(
+                Class::Shards,
+                execution,
+                GpuEligibility::Required,
+            )?),
+        )),
+        _ => Err(route::invalid(
+            "Shards backing has no initialized route forms",
+        )),
+    }
+}
+
 impl GuestRuntime {
+    /// Pure projection into the SAME owner's global bounded tuple union. This
+    /// uses initialized forms and canonical rows, never a capacity/provider call
+    /// or a receipt read while the owner's family publication fence is held.
+    pub fn project_routes(
+        &self,
+        pools: &[PoolRecord],
+        introduced: Option<(Execution, &[hex_api::DeviceId])>,
+        projection: &mut devices::RouteProjection,
+    ) -> Result<(), Refusal> {
+        if pools.len() > crate::MAX_BOXES {
+            return Err(Refusal::Full(crate::MAX_BOXES));
+        }
+        if !self.uses_books() || self.runtime_cost.is_none() {
+            return Err(route::invalid(
+                "route projection needs the initialized Shards owner/cost",
+            ));
+        }
+        self.configured_allocation()?;
+        projection.retain(
+            guest_route_key(
+                Class::Shards,
+                Execution::ShardsDedicated,
+                hex_api::GpuEligibility::None,
+            )?,
+            None,
+        )?;
+        for pool in pools {
+            if !matches!(
+                pool.execution,
+                Execution::ShardsShared | Execution::ShardsDedicated
+            ) {
+                continue;
+            }
+            self.backing_configuration(pool)?;
+            let (first, alias) = backing_route_keys(pool.execution, &pool.devices)?;
+            projection.retain(first, Some(pool.key))?;
+            if let Some(alias) = alias {
+                projection.retain(alias, Some(pool.key))?;
+            }
+        }
+        if let Some((execution, ids)) = introduced {
+            match execution {
+                Execution::ShardsShared if ids.is_empty() => {}
+                Execution::ShardsDedicated => {
+                    self.gpu_backing_definition_for(Some(ids))?.ok_or_else(|| {
+                        route::invalid("new GPU backing has no initialized configuration")
+                    })?;
+                }
+                Execution::ShardsShared => {
+                    return Err(route::invalid("shared CPU backing cannot claim GPU IDs"));
+                }
+                Execution::Native | Execution::Firecracker => return Ok(()),
+            }
+            let (first, alias) = backing_route_keys(execution, ids)?;
+            projection.introduce(first)?;
+            if let Some(alias) = alias {
+                projection.introduce(alias)?;
+            }
+        }
+        Ok(())
+    }
     /// Configure the real guest readiness workload after the exact measured VM
     /// cost and read-only shares. This verifies files only; it never queries GPU
     /// hardware, starts a Program/VM or creates a resource/holder record.
@@ -43,26 +146,20 @@ impl GuestRuntime {
     /// Persist a real Prepared Pool scope before Index admission. Configured IDs
     /// are claims only; this reads no GPU/provider and creates no VM or metadata.
     pub fn prepare_gpu_backing(&self) -> Result<Option<hex_api::BackingOffer>, Refusal> {
-        let Some(definition) = self.gpu_backing_definition()? else {
-            return Ok(None);
-        };
-        let authority = self.authority()?;
-        if let Some(receipt) = pool::read(&definition.path)? {
-            let record = self.pool_record(receipt.original.key)?;
-            receipt.matches(&record)?;
-            self.preflight_backing(&record)?;
-        }
-        let offer = authority.prepare_pool(
-            definition.pool,
-            Execution::ShardsDedicated,
-            definition.cost,
-            &definition.devices,
-        )?;
-        self.preflight_backing(&self.pool_record(offer.key)?)?;
-        Ok(Some(offer))
+        self.prepare_gpu_family()
     }
 
     pub(super) fn gpu_backing_definition(&self) -> Result<Option<GpuBacking>, Refusal> {
+        self.gpu_backing_definition_for(None)
+    }
+
+    /// A subset is supplied by retained canonical claims or the guarded
+    /// preparation proposal. This only binds configuration; it selects no
+    /// workload device and supplies neither observation nor resource authority.
+    pub(super) fn gpu_backing_definition_for(
+        &self,
+        selected: Option<&[hex_api::DeviceId]>,
+    ) -> Result<Option<GpuBacking>, Refusal> {
         if self.gpu_catalog.is_none() {
             return Ok(None);
         }
@@ -75,7 +172,6 @@ impl GuestRuntime {
         if entries.is_empty() {
             return Ok(None);
         }
-        observer.output_bytes(entries.len())?;
         let allocation = self.configured_allocation()?;
         observer.check_allocation(allocation)?;
         let cost = allocation.cost;
@@ -94,12 +190,90 @@ impl GuestRuntime {
                 "configured GPU backing claims are not unique",
             ));
         }
+        let full = match selected {
+            Some(selected) => {
+                BackingOffer::check_selection_parts(&devices, selected)?;
+                let full = selected == devices;
+                // The checked subset cannot exceed this already fallibly
+                // reserved full-family storage; extend cannot grow it.
+                devices.clear();
+                devices.extend_from_slice(selected);
+                full
+            }
+            None => true,
+        };
+        observer.output_bytes(devices.len())?;
         let physical = self.catalog_physical(&devices)?;
+        let pool = self.gpu_backing_pool(cost, &devices, &physical)?;
+        let original = self.pool_path()?;
+        // Full-set legacy receipts retain their exact path. Subsets use the
+        // set-bound SHA-256 pool identity, never a reused Box/socket identity.
+        let suffix = if full {
+            ".gpu-observer"
+        } else {
+            ".gpu-observer."
+        };
+        let digits = if full {
+            0
+        } else {
+            pool.len()
+                .checked_mul(2)
+                .ok_or_else(|| route::invalid("GPU backing pool hash length overflows"))?
+        };
+        let mut path = OsString::new();
+        path.try_reserve_exact(
+            original
+                .as_os_str()
+                .len()
+                .checked_add(suffix.len())
+                .and_then(|length| length.checked_add(digits))
+                .ok_or_else(|| route::invalid("GPU backing receipt path length overflows"))?,
+        )
+        .map_err(|_| route::invalid("GPU backing receipt path storage is unavailable"))?;
+        path.push(original.as_os_str());
+        path.push(suffix);
+        if !full {
+            use std::fmt::Write as _;
+            let mut encoded = String::new();
+            encoded
+                .try_reserve_exact(digits)
+                .map_err(|_| route::invalid("GPU backing pool hash storage is unavailable"))?;
+            for byte in pool {
+                write!(&mut encoded, "{byte:02x}")
+                    .map_err(|_| route::invalid("GPU backing pool hash encoding failed"))?;
+            }
+            path.push(encoded);
+        }
+        Ok(Some(GpuBacking {
+            pool,
+            cost,
+            devices,
+            physical,
+            path: PathBuf::from(path),
+        }))
+    }
+    /// The existing v2 identity formula also names an empty drain proposal.
+    /// Empty is never a Prepared GPU record, route or physical selector grant.
+    pub(super) fn gpu_backing_pool(
+        &self,
+        cost: hex_api::RuntimeCost,
+        devices: &[hex_api::DeviceId],
+        physical: &[shards_api::PhysicalGpu],
+    ) -> Result<[u8; 32], Refusal> {
+        if devices.len() != physical.len() || devices.len() > hex_api::MAX_DEVICES {
+            return Err(route::invalid(
+                "GPU pool identity has inconsistent bounded selectors",
+            ));
+        }
+        let observer = self
+            .gpu_observer
+            .as_ref()
+            .ok_or_else(|| route::invalid("GPU identity has no configured observer"))?;
         let mut digest = Sha256::new();
         digest.update(b"hex-shards-gpu-observer/v2");
         digest.update(self.pool_configuration(cost)?);
         digest.update(observer.identity());
-        for (device, selector) in devices.iter().zip(&physical) {
+        for (device, selector) in devices.iter().zip(physical) {
             digest.update(device.key.to_be_bytes());
             let argument = shards_api::physical::argument(*selector).map_err(|why| {
                 refusal(
@@ -114,27 +288,9 @@ impl GuestRuntime {
             );
             digest.update(argument.as_encoded_bytes());
         }
-        let original = self.pool_path()?;
-        let suffix = ".gpu-observer";
-        let mut path = OsString::new();
-        path.try_reserve_exact(
-            original
-                .as_os_str()
-                .len()
-                .checked_add(suffix.len())
-                .ok_or_else(|| route::invalid("GPU backing receipt path length overflows"))?,
-        )
-        .map_err(|_| route::invalid("GPU backing receipt path storage is unavailable"))?;
-        path.push(original.as_os_str());
-        path.push(suffix);
-        Ok(Some(GpuBacking {
-            pool: digest.finalize().into(),
-            cost,
-            devices,
-            physical,
-            path: PathBuf::from(path),
-        }))
+        Ok(digest.finalize().into())
     }
+
     /// Read-only initialized-backend and retained VM-receipt validation during
     /// the SAME owner's whole-record preflight. The caller joins every canonical
     /// backing/holder first; this never probes, launches, cleans up or writes.
@@ -154,7 +310,7 @@ impl GuestRuntime {
                     || !spec.devices.is_empty()
                     || spec.allocation.is_some()
                     || key.pool != self.pool_configuration(cost)?
-                    || self.shared_pool.get().is_some_and(|bound| *bound != key)
+                    || self.shared_key()?.is_some_and(|bound| bound != key)
                 {
                     return Err(super::books::uncertain(&spec.id)?);
                 }
@@ -222,7 +378,10 @@ impl GuestRuntime {
 
     /// Read-only route/profile validation for the SAME owner's retained-record
     /// preflight. This performs no GPU query, file cleanup, launch or adoption.
-    pub fn preflight_backing(&self, record: &PoolRecord) -> Result<(), Refusal> {
+    pub(super) fn backing_configuration(
+        &self,
+        record: &PoolRecord,
+    ) -> Result<Option<GpuBacking>, Refusal> {
         record.check()?;
         let key = record.key;
         if self.runtime_cost != Some(record.cost) {
@@ -231,23 +390,12 @@ impl GuestRuntime {
         let gpu = match record.execution {
             Execution::ShardsShared
                 if record.devices.is_empty()
-                    && self.shared_pool.get().is_none_or(|bound| *bound == key)
+                    && self.shared_key()?.is_none_or(|bound| bound == key)
                     && key.pool == self.pool_configuration(record.cost)? =>
             {
                 None
             }
-            Execution::ShardsDedicated => {
-                let definition = self
-                    .gpu_backing_definition()?
-                    .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
-                if key.pool != definition.pool
-                    || record.devices != definition.devices
-                    || record.cost != definition.cost
-                {
-                    return Err(refused(key, LifecycleCause::Uncertain));
-                }
-                Some(definition)
-            }
+            Execution::ShardsDedicated => Some(self.gpu_definition_for_record(record)?),
             _ => return Err(refused(key, LifecycleCause::Uncertain)),
         };
         let allocation = record
@@ -263,6 +411,11 @@ impl GuestRuntime {
         {
             return Err(refused(key, LifecycleCause::Uncertain));
         }
+        Ok(gpu)
+    }
+
+    pub fn preflight_backing(&self, record: &PoolRecord) -> Result<(), Refusal> {
+        let gpu = self.backing_configuration(record)?;
         let (path, physical): (&Path, &[shards_api::PhysicalGpu]) = match &gpu {
             Some(definition) => (definition.path.as_path(), &definition.physical),
             None => (self.pool_path()?, &[]),
@@ -284,6 +437,16 @@ impl GuestRuntime {
             // prepare_backing removes a positively completed local receipt before
             // issuing a new generation; the canonical terminal row is retained.
             None if record.phase == BackingPhase::Released && record.exit.is_some() => {
+                return Ok(());
+            }
+            // Cancellation before any grant is cleanup-readable only. The SAME
+            // native owner must recheck no-submission before later Index-ACK
+            // metadata removal; this branch supplies no usable Guest/end fact.
+            None if record.phase == BackingPhase::Released
+                && record.allocation.is_none()
+                && record.init.is_none()
+                && record.exit.is_none() =>
+            {
                 return Ok(());
             }
             None => return Err(refused(record.key, LifecycleCause::Uncertain)),
@@ -336,29 +499,45 @@ impl GuestRuntime {
         })
     }
 
+    /// Existing single generation binding, copied under a short lock. It is
+    /// invalidated only by the explicit Index ACK after canonical removal.
+    pub(super) fn shared_key(&self) -> Result<Option<BackingKey>, Refusal> {
+        self.shared_pool
+            .lock()
+            .map(|bound| *bound)
+            .map_err(|_| route::invalid("shared backing generation lock is poisoned"))
+    }
+
     fn bind_pool(&self, key: BackingKey) -> Result<(), Refusal> {
-        if let Some(bound) = self.shared_pool.get() {
-            return if *bound == key {
-                Ok(())
-            } else {
-                Err(refused(key, LifecycleCause::Uncertain))
-            };
+        let mut bound = self
+            .shared_pool
+            .lock()
+            .map_err(|_| refused(key, LifecycleCause::Uncertain))?;
+        if bound.is_some_and(|known| known != key) {
+            return Err(refused(key, LifecycleCause::Uncertain));
         }
-        self.shared_pool.set(key).or_else(|key| {
-            if self.shared_pool.get() == Some(&key) {
-                Ok(())
-            } else {
-                Err(refused(key, LifecycleCause::Uncertain))
-            }
-        })
+        *bound = Some(key);
+        Ok(())
+    }
+
+    fn clear_shared_key(&self, key: BackingKey) -> Result<(), Refusal> {
+        let mut bound = self
+            .shared_pool
+            .lock()
+            .map_err(|_| refused(key, LifecycleCause::Uncertain))?;
+        if *bound != Some(key) {
+            return Err(refused(key, LifecycleCause::Uncertain));
+        }
+        *bound = None;
+        Ok(())
     }
 
     /// Called after registration of the SAME Books owner, before capacity/recovery.
     /// Store persists Prepared/scope before Index may issue the grant. No VM starts.
     pub fn prepare_backing(&self) -> Result<BackingOffer, Refusal> {
         let authority = self.authority()?;
-        if let Some(key) = self.shared_pool.get() {
-            return self.pool_record(*key)?.offer();
+        if let Some(key) = self.shared_key()? {
+            return self.pool_record(key)?.offer();
         }
         let path = self.pool_path()?;
         if let Some(receipt) = pool::read(path)? {
@@ -394,13 +573,52 @@ impl GuestRuntime {
         }
         let allocation = self.configured_allocation()?;
         let pool = self.pool_configuration(allocation.cost)?;
-        let offer = authority.prepare_pool(pool, Execution::ShardsShared, allocation.cost, &[])?;
-        if offer.key.pool != pool || offer.cost != allocation.cost || !offer.devices.is_empty() {
-            return Err(refused(offer.key, LifecycleCause::Uncertain));
+        let snapshot = authority.pool_records()?;
+        let expected = snapshot.iter().find(|row| row.key.pool == pool);
+        let mut validate = |records: &devices::Records, pools: &[PoolRecord]| {
+            let mut current = None;
+            for row in pools {
+                if row.execution != Execution::ShardsShared {
+                    continue;
+                }
+                self.backing_configuration(row)?;
+                if current.replace(row).is_some() {
+                    return Err(refused(row.key, LifecycleCause::Uncertain));
+                }
+            }
+            if current != expected {
+                return Err(route::invalid(
+                    "shared CPU backing changed before guarded publication",
+                ));
+            }
+            for (id, boxed) in records {
+                let boxed = match boxed {
+                    Ok(boxed) => boxed,
+                    Err(_) => return Err(super::books::uncertain(id)?),
+                };
+                if boxed.spec.route_execution() == Some(Execution::ShardsShared)
+                    && boxed.spec.route.and_then(|route| route.backing)
+                        != current.map(|row| row.key)
+                {
+                    return Err(super::books::uncertain(id)?);
+                }
+            }
+            Ok(())
+        };
+        let row = authority.prepare_pool(
+            pool,
+            Execution::ShardsShared,
+            allocation.cost,
+            &[],
+            (&pool, &[], expected),
+            &mut validate,
+        )?;
+        if row.key.pool != pool || row.cost != allocation.cost || !row.devices.is_empty() {
+            return Err(refused(row.key, LifecycleCause::Uncertain));
         }
-        self.preflight_backing(&self.pool_record(offer.key)?)?;
-        self.bind_pool(offer.key)?;
-        Ok(offer)
+        self.preflight_backing(&row)?;
+        self.bind_pool(row.key)?;
+        row.offer()
     }
 
     fn pool_configuration(&self, cost: hex_api::RuntimeCost) -> Result<[u8; 32], Refusal> {
@@ -472,9 +690,8 @@ impl GuestRuntime {
     /// a new generation or restarts an interrupted native launch.
     pub fn recover_backing(&self) -> Result<(), Refusal> {
         self.recover_gpu_backing()?;
-        let key = *self
-            .shared_pool
-            .get()
+        let key = self
+            .shared_key()?
             .ok_or_else(|| route::invalid("prepare the shared backing before recovery"))?;
         let mut record = self.pool_record(key)?;
         self.preflight_backing(&record)?;
@@ -558,7 +775,7 @@ impl GuestRuntime {
     pub(super) fn initialize_pool(&self, grant: BackingGrant) -> Result<BackingOffer, Refusal> {
         grant.check()?;
         let key = grant.key;
-        if self.shared_pool.get() != Some(&key) {
+        if self.shared_key()? != Some(key) {
             return Err(refused(key, LifecycleCause::Pending));
         }
         let budget = managed::Budget::new(self.first_dial_bound()?)?;
@@ -789,9 +1006,8 @@ impl GuestRuntime {
     }
 
     pub(super) fn shared_running(&self) -> Result<triomphe::Arc<Booted>, Refusal> {
-        let key = *self
-            .shared_pool
-            .get()
+        let key = self
+            .shared_key()?
             .ok_or_else(|| route::invalid("shared backing has not been prepared and granted"))?;
         let record = self.pool_record(key)?;
         if record.phase != BackingPhase::Live {
@@ -817,7 +1033,7 @@ impl GuestRuntime {
             .filter(|route| route.key.execution == Execution::ShardsShared)
             .and_then(|route| route.backing)
             .ok_or(super::books::uncertain(&boxed.spec.id)?)?;
-        if self.shared_pool.get() != Some(&key) {
+        if self.shared_key()? != Some(key) {
             return Err(super::books::uncertain(&boxed.spec.id)?);
         }
         let record = self.pool_record(key)?;
@@ -889,7 +1105,7 @@ impl GuestRuntime {
     /// a different measurement plane from each inner OCI workload's counters.
     pub fn backing_usage(&self, key: &BackingKey) -> Result<Usage, Refusal> {
         let key = *key;
-        if self.shared_pool.get() != Some(&key) {
+        if self.shared_key()? != Some(key) {
             return self.gpu_backing_usage(key);
         }
         let books = self
@@ -916,13 +1132,12 @@ impl GuestRuntime {
         capacity: &mut hex_api::Capacity,
         class: Class,
     ) -> Result<(), Refusal> {
-        use hex_api::{GpuEligibility, ImageOs, ImagePlatform, RouteKey, RouteOffer};
+        use hex_api::{GpuEligibility, RouteOffer};
         capacity.check()?;
+        // Metadata-only reconciliation is outside the family fence/native
+        // callbacks. Index still grants and charges a new scope before boot.
+        self.prepare_gpu_backing()?;
         let allocation = self.configured_allocation()?;
-        let image = ImagePlatform {
-            os: ImageOs::Linux,
-            arch: route::host_platform()?.arch,
-        };
         if capacity.routes.is_empty() {
             capacity
                 .device_routes
@@ -934,7 +1149,7 @@ impl GuestRuntime {
             capacity.device_routes.resize(capacity.devices.len(), 0);
         }
         if class == Class::Oci {
-            let key = *self.shared_pool.get().ok_or_else(|| {
+            let key = self.shared_key()?.ok_or_else(|| {
                 route::invalid("prepare shared backing before advertising its route")
             })?;
             let record = self.pool_record(key)?;
@@ -954,12 +1169,7 @@ impl GuestRuntime {
             push_offer(
                 capacity,
                 RouteOffer {
-                    key: RouteKey {
-                        class,
-                        image,
-                        execution: Execution::ShardsShared,
-                        gpu: GpuEligibility::None,
-                    },
+                    key: backing_route_keys(Execution::ShardsShared, &[])?.0,
                     cost: None,
                     backing: Some(key),
                 },
@@ -969,12 +1179,7 @@ impl GuestRuntime {
             push_offer(
                 capacity,
                 RouteOffer {
-                    key: RouteKey {
-                        class,
-                        image,
-                        execution: Execution::ShardsDedicated,
-                        gpu: GpuEligibility::None,
-                    },
+                    key: guest_route_key(class, Execution::ShardsDedicated, GpuEligibility::None)?,
                     cost: Some(allocation.cost),
                     backing: None,
                 },
@@ -988,62 +1193,63 @@ impl GuestRuntime {
         // Prepared full IDs are provisioning claims only. Bootstrap may reserve
         // them without a running GPU provider; actual DeviceInfo/route bits wait
         // for charged native+guest readiness, never a fabricated cold inventory.
-        if let Some(definition) = self.gpu_backing_definition()? {
-            let records = self.authority()?.pool_records()?;
-            let backing = records
+        if self.gpu_backing_definition()?.is_some() {
+            let authority = self.authority()?;
+            let records = authority.records()?;
+            let pools = authority.pool_records()?;
+            let current = self.gpu_fresh_candidate(&records, &pools)?;
+            for backing in pools
                 .iter()
-                .find(|record| record.key.pool == definition.pool)
-                .ok_or_else(|| {
-                    route::invalid("prepare the GPU backing before advertising its route")
-                })?;
-            self.preflight_backing(backing)?;
-            if !capacity
-                .backings
-                .iter()
-                .any(|known| known.key == backing.key)
+                .filter(|row| row.execution == Execution::ShardsDedicated)
             {
-                capacity
+                let definition = self.gpu_definition_for_record(backing)?;
+                self.preflight_backing(backing)?;
+                if !capacity
                     .backings
-                    .try_reserve_exact(1)
-                    .map_err(|_| Refusal::Exhausted {
-                        what: "initialized GPU backing",
-                        bound: hex_api::MAX_RUNTIME_ROUTES,
-                    })?;
-                capacity.backings.push(backing.offer()?);
-            }
-            let eligible = if backing.phase == BackingPhase::Live {
-                match self.checked_physical(&definition.devices, &definition.physical) {
-                    Ok(eligible) => eligible,
-                    Err(why) => {
-                        let unavailable =
-                            hex_api::BackendUnavailable::from_refusal(Class::Shards, why)?;
-                        if !matches!(&unavailable.cause, Refusal::Backing { key, .. } if *key == backing.key)
-                        {
-                            return Err(unavailable.cause);
-                        }
-                        // Capacity keeps initialized routes/canonical charges.
-                        // Qualified failures use the SAME owner's typed
-                        // physical_report; this observation supplies no bits.
-                        Vec::new()
-                    }
+                    .iter()
+                    .any(|known| known.key == backing.key)
+                {
+                    capacity
+                        .backings
+                        .try_reserve_exact(1)
+                        .map_err(|_| Refusal::Exhausted {
+                            what: "initialized GPU backing",
+                            bound: hex_api::MAX_RUNTIME_ROUTES,
+                        })?;
+                    capacity.backings.push(backing.offer()?);
                 }
-            } else {
-                Vec::new()
-            };
-            push_offer(
-                capacity,
-                RouteOffer {
-                    key: RouteKey {
-                        class,
-                        image,
-                        execution: Execution::ShardsDedicated,
-                        gpu: GpuEligibility::Required,
+                let eligible = if current.is_some_and(|row| row.key == backing.key)
+                    && backing.phase == BackingPhase::Live
+                {
+                    match self.checked_physical(&definition.devices, &definition.physical) {
+                        Ok(eligible) => eligible,
+                        Err(why) => {
+                            let unavailable =
+                                hex_api::BackendUnavailable::from_refusal(Class::Shards, why)?;
+                            if !matches!(&unavailable.cause, Refusal::Backing { key, .. } if *key == backing.key)
+                            {
+                                return Err(unavailable.cause);
+                            }
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
+                push_offer(
+                    capacity,
+                    hex_api::RouteOffer {
+                        key: guest_route_key(
+                            class,
+                            Execution::ShardsDedicated,
+                            GpuEligibility::Required,
+                        )?,
+                        cost: Some(allocation.cost),
+                        backing: Some(backing.key),
                     },
-                    cost: Some(allocation.cost),
-                    backing: Some(backing.key),
-                },
-                &eligible,
-            )?;
+                    &eligible,
+                )?;
+            }
         }
         // There is no class-wide VM cost: explicit route+backing describes it.
         capacity.cost = None;
@@ -1058,7 +1264,7 @@ impl GuestRuntime {
             .backing
             .ok_or_else(|| route::invalid("shared OCI needs its admitted backing generation"))?;
         if route.key.execution != Execution::ShardsShared
-            || self.shared_pool.get() != Some(&key)
+            || self.shared_key()? != Some(key)
             || !spec.devices.is_empty()
             || spec.allocation.is_some()
         {
@@ -1082,8 +1288,56 @@ impl GuestRuntime {
         })
     }
 
+    /// The existing Driver calls this only after observing this exact Released
+    /// generation. Cleanup itself returns Released and never clears this binding.
+    pub(super) fn acknowledge_shared_release(
+        &self,
+        key: BackingKey,
+    ) -> Result<BackingOffer, Refusal> {
+        if self.shared_key()? != Some(key) {
+            return Err(refused(key, LifecycleCause::Uncertain));
+        }
+        let books = self
+            .books
+            .get()
+            .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+        devices::with_pool_transaction(books, &key, &[], |transaction| {
+            let record = transaction
+                .read_pool(&key)?
+                .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+            self.preflight_backing(&record)?;
+            if record.execution != Execution::ShardsShared
+                || !record.devices.is_empty()
+                || record.phase != BackingPhase::Released
+            {
+                return Err(refused(key, LifecycleCause::Uncertain));
+            }
+            for boxed in transaction.records()?.values() {
+                let boxed = boxed
+                    .as_ref()
+                    .map_err(|_| refused(key, LifecycleCause::Uncertain))?;
+                if boxed.spec.route.and_then(|route| route.backing) == Some(key) {
+                    return Err(refused(key, LifecycleCause::Busy));
+                }
+            }
+            let path = self.pool_path()?;
+            if let Some(receipt) = pool::read(path)? {
+                receipt.matches(&record)?;
+                if !matches!(receipt.phase, Phase::Released { .. }) {
+                    return Err(refused(key, LifecycleCause::Uncertain));
+                }
+                transaction.finalize_managed(receipt.released_identity()?)?;
+                remove_receipt(path)?;
+            }
+            let offer = record.offer()?;
+            transaction.remove_pool(&key)?;
+            self.clear_shared_key(key)?;
+            Ok(offer)
+        })
+    }
+
     pub(super) fn release_pool(&self, key: BackingKey) -> Result<BackingOffer, Refusal> {
-        if self.shared_pool.get() != Some(&key) {
+        if self.shared_key()? != Some(key) {
             return Err(refused(key, LifecycleCause::Uncertain));
         }
         let books = self
@@ -1227,7 +1481,11 @@ fn push_offer(
     eligible: &[hex_api::DeviceInfo],
 ) -> Result<(), Refusal> {
     offer.check()?;
-    if capacity.routes.iter().any(|known| known.key == offer.key) {
+    if capacity
+        .routes
+        .iter()
+        .any(|known| known.key == offer.key && known.backing == offer.backing)
+    {
         return Err(route::invalid(
             "an initialized route was advertised more than once",
         ));

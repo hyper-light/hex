@@ -1,0 +1,77 @@
+{
+  "status": "SIGNED SOURCE CHECKPOINT / UNCOMPILED / new unit UNRUN; no native effects/jobs",
+  "parent": "55e86afbd256858725b64160b436fa38b95b9454",
+  "role": "implementer shards-gpu",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "owned_paths": "guest subtree +this measurement record only; ROOT owns foreign integration/native/gates/main",
+  "dependencies": {
+    "books_boundary": "b924aec5b7dfb98e4ce6ce11a767c51c7b3a0d48",
+    "canonical_family_owner": "8b5534be5277e422c7cc6c949e6c3019fb8ecab0",
+    "catalog_subtraction": "d6e248100b1d2bf9854413017f94691cfe47c996",
+    "route_projection": "ec0a0ab6f2fe6266696979d8df2fdf6032178ff5",
+    "qualified_tuples": "c8378325c634b629160e23f7ab0d29856633bdbc",
+    "node_global_projection": "59363a0f5e8d669b2a0e7c86601f2d60c5dd0eaf",
+    "public_prepared_method": "8641a1d08b2baa5e2a7938df747466a9d38bb393",
+    "node_native_absence": "1aee0be8d8d9bbcb4fbb2fef43f30aa5fb4203ee",
+    "node_cancelled_ack_absence": "431ca4173ade1c26eef7b2860e9f14af48912455",
+    "recorded_prepared_callback": "0597523f90fdc665e4f1d3393665544d47443bdf",
+    "recorded_cancelled_ack": "70b364aeb198b425a794878916f83321e41f0966"
+  },
+  "new_unit": "guest::gpu_pool::tests::lazy_gpu_family_preserves_subset_parent_and_coalescing_ack_barriers",
+  "preserved": "selected VM observer283, original6fb at ROOT, normalizer source55e+ROOT exactcrate::devices namespace, original allocation/route/native identity; no GPU fact invented from catalog",
+  "checks": {
+    "scoped_rustfmt_parser": "exit0",
+    "git_diff_check": "exit0",
+    "cargo": "NOT RUN; matched ROOT callback/owner cohort required",
+    "native": "NOT RUN"
+  },
+  "prior_separate_evidence": {
+    "normalizer_only_source": "2d828f39304762f0b0669e4407adb3f4b3fee484",
+    "selected": 5,
+    "passed": 5,
+    "failed": 0,
+    "ignored": 0,
+    "raw_sha256": "f7fd6c734027fd0fe0bfacc75059360dd38225802f86af30bf1c651fecfbfcf5",
+    "applies_to_family": false
+  },
+  "files": {
+    "crates/hex-runtime/src/guest/family.rs": {
+      "sha256": "403f75636a0f50bbefb828499785a0535b85f9a2282f6c24eccfe91258e6ef30",
+      "bytes": 9823
+    },
+    "crates/hex-runtime/src/guest/shared.rs": {
+      "sha256": "4a0c468fad14f6064fc61465f92a0be55ec1933b5849b89c600c69a6af3c3234",
+      "bytes": 61655
+    },
+    "crates/hex-runtime/src/guest/gpu_pool.rs": {
+      "sha256": "8edcff71c5852ed2e73a45839577f3382470d0e9bfb032b204b0ad53bbb2d527",
+      "bytes": 92532
+    },
+    "crates/hex-runtime/src/guest/physical.rs": {
+      "sha256": "fc0826c5f28a2db36c93fb40bdc4e0a63e5cdd42d30abf661a7ed8a1fd85c264",
+      "bytes": 19313
+    },
+    "crates/hex-runtime/src/guest/mod.rs": {
+      "sha256": "30e766b8d6c34404e7db6605025aba929daade69f0b62133326613601dba4ef7",
+      "bytes": 53997
+    },
+    "crates/hex-runtime/src/guest/books.rs": {
+      "sha256": "122fc0d620242736dc08ea0e64f607804aa5dc921672e77db6dcfd4918e97b14",
+      "bytes": 33654
+    },
+    "crates/hex-runtime/src/guest/dedicated.rs": {
+      "sha256": "4278e405e805c861c2edd48da1d52f73dfc8249d9647cb030ff6722061c40a1f",
+      "bytes": 62673
+    },
+    "crates/hex-runtime/src/guest/shared_tests.rs": {
+      "sha256": "2ab86154e3fd5e04c495bc72f4bc44938bb817a588a54aa61dde339e3ab9ec72",
+      "bytes": 24954
+    },
+    "docs/research/measurements/hex-complete-shards-gpu/GPU-FAMILY-CONSUMER.md": {
+      "sha256": "2f1d5b7e0161240ac0f59f6d70401b979123805a25392364da08ff313b988f33",
+      "bytes": 7279
+    }
+  },
+  "open": "ROOT joined compiler and focused controls; concurrent old/new native ownership, cancellation/ACK presence/error, empty/overbound projections, actual measured resources, native whole-scope helpers, renderer/guest compute/LDA correspondence, sharedCPU rearm are not claimed complete."
+}

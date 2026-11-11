@@ -1117,3 +1117,86 @@ fn released_scope_keeps_selected_identity_and_charge_until_new_physical_refresh(
         .unwrap();
     assert!(index.holds(NodeId(0), WorkloadId(91)).is_empty());
 }
+
+/// AC-T7.4.1 original: recovery retains BoxS's old tuple while fresh cold R provisions independently.
+/// Source hypothesis only; no committed-recovery remedy is included before ROOT's actual result.
+#[test]
+fn committed_subset_recovery_keeps_released_parent_and_does_not_repick_current_remainder() {
+    let (mut node, request, mut parent) = subset_observer_fixture(false);
+    let current = BackingOffer {
+        key: BackingKey {
+            pool: [0x61; 32],
+            generation: [0x62; 16],
+        },
+        cost: profile(),
+        phase: BackingPhase::Prepared,
+        devices: vec![parent.devices[1]],
+    };
+    parent.phase = BackingPhase::Released;
+    let catalog = triomphe::Arc::get_mut(node.routes.as_mut().unwrap()).unwrap();
+    catalog.backings[0].phase = parent.phase;
+    let original = hex_api::RouteReceipt {
+        key: catalog.offers[0].key,
+        backing: Some(parent.key),
+    };
+    catalog.offers.push(RouteOffer {
+        backing: Some(current.key),
+        ..catalog.offers[0]
+    });
+    catalog.backings.push(current.try_clone().unwrap());
+    // Retained P metadata can validate old S, but it does not certify R's fresh execution.
+    catalog.device_routes = vec![1, 0];
+    let mut index = FitIndex::new(&[node]).unwrap();
+    assert_eq!(
+        index.route(NodeId(0), &request).unwrap().unwrap().backing,
+        Some(current.key)
+    );
+    assert_eq!(index.verdict(NodeId(0), &request).unwrap(), Verdict::NoGpu);
+    let allocation = Some(
+        profile()
+            .allocate(crate::model::capacity_resources(request.need))
+            .unwrap(),
+    );
+    let before = index.key(NodeId(0)).unwrap();
+    let restored = index.take_recovered_routed(
+        NodeId(0),
+        WorkloadId(91),
+        &request,
+        &[0],
+        allocation,
+        Some(original),
+    );
+    eprintln!(
+        "released parent recovery original: restored={restored:?}; source={:?}; current={:?}; native_effect=false",
+        parent.key, current.key
+    );
+    assert!(
+        restored.is_ok(),
+        "the exact retained BoxS tuple must survive independently of a current provisioning source"
+    );
+    assert_eq!(
+        index.held_devices(NodeId(0), WorkloadId(91)).unwrap()[0].native_id(),
+        Some(parent.devices[0])
+    );
+    assert_eq!(
+        index.key(NodeId(0)).unwrap().cpu_milli,
+        before.cpu_milli - allocation.unwrap().resources.cpu_milli
+    );
+    let grant = index.grant_backing(NodeId(0), current.key).unwrap();
+    assert_eq!(grant.devices, current.devices);
+    assert_eq!(index.verdict(NodeId(0), &request).unwrap(), Verdict::NoGpu);
+    index
+        .give_routed(
+            NodeId(0),
+            WorkloadId(91),
+            &request,
+            allocation,
+            Some(original),
+        )
+        .unwrap();
+    assert!(index.holds(NodeId(0), WorkloadId(91)).is_empty());
+    assert_eq!(
+        index.key(NodeId(0)).unwrap().cpu_milli,
+        before.cpu_milli - grant.allocation.resources.cpu_milli
+    );
+}

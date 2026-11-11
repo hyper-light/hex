@@ -1,0 +1,57 @@
+{
+  "status": "SOURCE ONLY owned family/subset definition and retained recovery mapping; parser0/diff0, no compile/test/native dispatch",
+  "parent": "c78dc198830930a648c90ee9b43227f2d141a5e2",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": [
+    {
+      "path": "crates/hex-runtime/src/guest/shared.rs",
+      "sha256": "bd6f7fc5727b743218472d62f17ddaf33ee080a64086f91f9d61c87212b47c69"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/gpu_pool.rs",
+      "sha256": "c07fab68fab925eb9195b0e64278f3350ffbb7063a9fe0778769cde2bd7bb2df"
+    }
+  ],
+  "contract": [
+    "same immutable full configuration defines family F via existing full-set pool hash",
+    "provided canonical subset IDs must be sorted unique positive members of full family; no workload selection, inventory, grant or new holder authority",
+    "same v2 hash inputs/formula over R; full-set digest body is byte-identical to parent, full legacy receipt path unchanged",
+    "subset receipt path uses fallibly checked base/suffix plus exact SHA256 hex width; all allocations bounded/fallible; no reusable socket identity",
+    "retained record validates execution/full configured cost and recomputed exact set-bound pool identity before receipt/native use",
+    "borrowed retained-record lookup avoids Books reread under handoff callback; key-only entrypoints first read exact canonical record",
+    "recovery preflights all ShardsDedicated rows before first native cleanup, then revalidates/uses each exact existing Pool owner; no-GPU configured path keeps prior early return"
+  ],
+  "new_control": "guest::gpu_pool::tests::retained_gpu_subsets_bind_exact_family_key_and_keep_legacy_full_set_path",
+  "control_cases": [
+    "implicit full vs explicit full preserves key/path",
+    "two strict singleton subsets get deterministic distinct identities/paths",
+    "exact Prepared subset accepted by retained preflight",
+    "full-set identity cannot authorize singleton record transplant",
+    "empty/duplicate/reordered/foreign IDs refuse",
+    "no observer/native effect, durable receipt or route slot created"
+  ],
+  "checks": "control UNRUN; source hash/old digest body/all previous test bodies verified; no own Cargo or native dispatch",
+  "dependencies": {
+    "membership_API": "a56fe683494544e9783f0d5e13e922d823ca8221",
+    "profile_receipts": "b2e5e185652cb87336eca993e8eec3aeb892045e",
+    "coalescing_contract": "d04c21f4c121111d54170e021dde897651bdac7b corrected by c78",
+    "upcoming_Books_shape_not_yet_consumed": "b924aec5b7dfb98e4ce6ce11a767c51c7b3a0d48"
+  },
+  "preserved": [
+    "old full-set v2 digest body byte-identical",
+    "all prior tests/fixtures exact",
+    "all selected observer/payload/charge/original route/known-failure snapshots unchanged",
+    "all shared API/Store/Turns/manifests/CLI/upstream source untouched",
+    "no Released(None) or capacity production remedy before ROOT original results"
+  ],
+  "remaining": [
+    "real L3 family metadata/claim guard plus L1 Node producer and matching Books consumers",
+    "qualified tuple Capacity/normalization/Index producer and one current complement publication",
+    "phase-aware Draining cleanup /Index Released ACK /coalescing replacement",
+    "multi-retained/current subset observation, capacity and preparation routing; current singleton fresh observation remains unchanged in this increment",
+    "native physical/helper/artifact/execution/fault/full gates remain ROOT"
+  ],
+  "attribution": "ROOT coordinator selected tuple/complement architecture within Ada full implementation scope; no claim of explicit architecture instruction by Ada"
+}

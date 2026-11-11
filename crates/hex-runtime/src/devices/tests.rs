@@ -534,3 +534,261 @@ fn subset_handoff_keeps_full_pool_holder_and_one_consumer_until_scope_released()
             .is_err()
     );
 }
+
+/// AC-T7.4.1: provisioning uses one canonical unheld set, independent of telemetry/workload selection.
+#[test]
+fn deterministic_family_complement_respects_current_claims_references_and_group_aliases() {
+    use hex_api::{BackingPhase, LifecycleCause};
+    let catalog = Catalog::parse(b"hex-devices-1\ngpu\t256\ta\t4096\tvfio\t0000:01:00.0\t7\ngpu\t257\tb\t4096\tvfio\t0000:01:00.1\t7\ngpu\t512\tc\t8192\thcs\tPCIROOT(0)#PCI(0200)\t\n").unwrap();
+    let id = |key| DeviceId {
+        kind: DeviceKind::Gpu,
+        key,
+    };
+    let full = [id(256), id(512)];
+    let current = pool(BackingPhase::Live);
+    let key = current.key;
+    let mut pools = vec![current];
+    let mut records = Records::new();
+    let box_s = spec("selected-s", 512);
+    records.insert(
+        box_s.id.clone(),
+        Ok(BoxRecord::new(box_s, Phase::Ready, Vec::new())),
+    );
+    assert_eq!(
+        catalog
+            .unheld_subset(&full, Some(key), &records, &pools)
+            .unwrap(),
+        vec![id(256)]
+    );
+    records.clear();
+    assert_eq!(
+        catalog
+            .unheld_subset(&full, Some(key), &records, &pools)
+            .unwrap(),
+        full
+    );
+    assert_eq!(
+        catalog
+            .unheld_subset(&full, None, &records, &pools)
+            .unwrap(),
+        vec![id(512)]
+    );
+
+    // Prepared owns no hardware. A Box claim on a catalogued companion excludes its
+    // inseparable family member from this proposal's desired complement.
+    pools[0] = pool(BackingPhase::Prepared);
+    let boxed = spec("foreign-alias", 257);
+    records.insert(
+        boxed.id.clone(),
+        Ok(BoxRecord::new(boxed, Phase::Deleting, Vec::new())),
+    );
+    assert_eq!(
+        catalog
+            .unheld_subset(&full, Some(key), &records, &pools)
+            .unwrap(),
+        vec![id(512)]
+    );
+    records.clear();
+    pools[0] = pool(BackingPhase::Live);
+    let mut selected = spec("handoff-reference", 256);
+    selected.bounds.cpu_max_milli = Some(hex_api::MIN_CPU_MILLI);
+    selected.bounds.memory_max = Some(hex_api::MIN_MEMORY);
+    selected.allocation = pools[0].allocation;
+    selected.route = Some(hex_api::RouteReceipt {
+        key: hex_api::RouteKey {
+            class: hex_api::Class::Oci,
+            image: hex_api::ImagePlatform {
+                os: hex_api::ImageOs::Linux,
+                arch: hex_api::ImageArch::Amd64,
+            },
+            execution: hex_api::Execution::ShardsDedicated,
+            gpu: hex_api::GpuEligibility::Required,
+        },
+        backing: Some(key),
+    });
+    let mut pending = BoxRecord::new(selected, Phase::Creating, Vec::new());
+    pending.native_scope = Some(hex_core::record::NativeScope::from_bytes([11; 16]));
+    records.insert(pending.spec.id.clone(), Ok(pending));
+    assert!(
+        matches!(catalog.unheld_subset(&full, Some(key), &records, &pools), Err(Refusal::Backing { key: actual, cause: LifecycleCause::Busy }) if actual == key)
+    );
+    records.clear();
+    pools[0] = pool(BackingPhase::Released);
+    let boxed = spec("released-parent-s", 512);
+    records.insert(
+        boxed.id.clone(),
+        Ok(BoxRecord::new(boxed, Phase::Ready, Vec::new())),
+    );
+    assert_eq!(
+        catalog
+            .unheld_subset(&full, None, &records, &pools)
+            .unwrap(),
+        vec![id(256)]
+    );
+    assert!(
+        catalog
+            .unheld_subset(&full, Some(key), &records, &pools)
+            .is_err()
+    );
+    let mut foreign = pool(BackingPhase::Draining);
+    foreign.key.pool = [10; 32];
+    pools.push(foreign);
+    assert!(
+        catalog
+            .unheld_subset(&full, None, &records, &pools)
+            .unwrap()
+            .is_empty()
+    );
+    records.clear();
+    records.insert(
+        BoxId::new("malformed").unwrap(),
+        Err("retained unread row".into()),
+    );
+    assert!(matches!(
+        catalog.unheld_subset(&full, None, &records, &pools),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Uncertain,
+            ..
+        })
+    ));
+    assert!(
+        catalog
+            .unheld_subset(&[id(512), id(256)], None, &Records::new(), &[])
+            .is_err()
+    );
+    assert!(
+        catalog
+            .unheld_subset(&[id(256), id(256)], None, &Records::new(), &[])
+            .is_err()
+    );
+    assert!(
+        catalog
+            .unheld_subset(&[], None, &Records::new(), &[])
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// AC-T7.4.1: exact tuple union includes real native/FC/Shards forms and referenced history.
+#[test]
+fn route_projection_unions_mixed_producers_and_distinct_lifetimes() {
+    use hex_api::{
+        BackingKey, Class, Execution, GpuEligibility, ImageArch, ImageOs, ImagePlatform, RouteKey,
+    };
+    let image = ImagePlatform {
+        os: ImageOs::Linux,
+        arch: ImageArch::Amd64,
+    };
+    let mut projection = RouteProjection::new();
+    let (process, oci) = native_route_keys(Class::Oci, image).unwrap();
+    projection.retain(process, None).unwrap();
+    projection.retain(oci.unwrap(), None).unwrap();
+    projection.retain(process, None).unwrap();
+    assert_eq!(projection.count().unwrap(), 2);
+    let shards = RouteKey {
+        class: Class::Shards,
+        image,
+        execution: Execution::ShardsDedicated,
+        gpu: GpuEligibility::Required,
+    };
+    let oci_guest = RouteKey {
+        class: Class::Oci,
+        ..shards
+    };
+    let fc = RouteKey {
+        class: Class::Firecracker,
+        execution: Execution::Firecracker,
+        ..shards
+    };
+    let parent = BackingKey {
+        pool: [1; 32],
+        generation: [2; 16],
+    };
+    let current = BackingKey {
+        pool: [3; 32],
+        generation: [4; 16],
+    };
+    for key in [shards, oci_guest] {
+        projection.retain(key, Some(parent)).unwrap();
+        projection.retain(key, Some(current)).unwrap();
+    }
+    projection
+        .retain(
+            fc,
+            Some(BackingKey {
+                pool: [5; 32],
+                generation: [6; 16],
+            }),
+        )
+        .unwrap();
+    assert_eq!(projection.count().unwrap(), 7);
+    projection.introduce(shards).unwrap();
+    projection.introduce(oci_guest).unwrap();
+    projection.introduce(shards).unwrap();
+    assert_eq!(projection.count().unwrap(), 9);
+    assert!(projection.retain(process, Some(parent)).is_err());
+    assert!(projection.introduce(oci.unwrap()).is_err());
+    // This models actual absence: no caller invokes a Mac native producer that has no capacity.
+    let absent = RouteProjection::new();
+    assert_eq!(absent.count().unwrap(), 0);
+}
+
+/// AC-T7.4.1: protocol bound applies to complete tuple union BEFORE another slot allocation.
+#[test]
+fn route_projection_accepts_exact_word_and_refuses_overbound_without_fake_generation() {
+    use hex_api::{
+        BackingKey, Class, Execution, GpuEligibility, ImageArch, ImageOs, ImagePlatform, RouteKey,
+    };
+    let key = RouteKey {
+        class: Class::Firecracker,
+        image: ImagePlatform {
+            os: ImageOs::Linux,
+            arch: ImageArch::Amd64,
+        },
+        execution: Execution::Firecracker,
+        gpu: GpuEligibility::Required,
+    };
+    let mut projection = RouteProjection::new();
+    for i in 0..hex_api::MAX_RUNTIME_ROUTES {
+        let pool = u8::try_from(i).unwrap();
+        projection
+            .retain(
+                key,
+                Some(BackingKey {
+                    pool: [pool; 32],
+                    generation: [1; 16],
+                }),
+            )
+            .unwrap();
+    }
+    assert_eq!(projection.count().unwrap(), hex_api::MAX_RUNTIME_ROUTES);
+    projection
+        .retain(
+            key,
+            Some(BackingKey {
+                pool: [0; 32],
+                generation: [1; 16],
+            }),
+        )
+        .unwrap();
+    assert!(matches!(
+        projection.introduce(key),
+        Err(Refusal::Exhausted {
+            bound: hex_api::MAX_RUNTIME_ROUTES,
+            ..
+        })
+    ));
+    assert_eq!(projection.count().unwrap(), hex_api::MAX_RUNTIME_ROUTES);
+    assert!(
+        projection
+            .retain(
+                key,
+                Some(BackingKey {
+                    pool: [0; 32],
+                    generation: [2; 16]
+                })
+            )
+            .is_err()
+    );
+    assert_eq!(projection.count().unwrap(), hex_api::MAX_RUNTIME_ROUTES);
+}

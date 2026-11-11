@@ -52,6 +52,40 @@ impl WinRuntime {
         self.preflight_legacy_keeper(&spec.id)
     }
 
+    /// Joined only with canonical source Live/Draining plus the guest's exact no-Intent proof.
+    /// No native job is opened/adopted/stopped. Missing metadata is not a Released scope fact.
+    pub fn preflight_unsubmitted(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        record.spec.check()?;
+        let bad = || NativeRecord::Box(record).refusal(LifecycleCause::Uncertain);
+        if record.spec.backend_class()? != Class::Shards
+            || record.native_scope.is_none()
+            || !matches!(
+                record.phase,
+                hex_core::record::Phase::Creating | hex_core::record::Phase::Deleting
+            )
+            || record.init.is_some()
+            || record.run.is_some()
+            || record.exit.is_some()
+        {
+            return Err(bad());
+        }
+        let cost = record.spec.allocation.ok_or_else(bad)?.cost;
+        self.check_vm_cost(&cost)?;
+        {
+            let boxes = self.boxes()?;
+            if owner_index(&boxes, OwnerRef::Box(&record.spec.id)).is_ok() {
+                return Err(bad());
+            }
+        }
+        if let Some(keeping) = &self.holding.keeper {
+            let path = keeper::vm::path(&keeping.state, OwnerRef::Box(&record.spec.id))?;
+            if keeper::vm::read(&path)?.is_some() {
+                return Err(bad());
+            }
+        }
+        Ok(())
+    }
+
     /// Read the SAME keeper commitment without opening/adopting a job or starting the keeper.
     pub fn preflight_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
         let bad = || record.refusal(LifecycleCause::Uncertain);
@@ -470,5 +504,94 @@ mod tests {
             ))
             .unwrap();
         assert!(runtime.boxes().unwrap().is_empty());
+    }
+
+    /// AC-T7.4.1: the native half of pending Shards handoff checks exact local/keeper metadata.
+    /// Private files and a reserved slot only; zero HCS/job/WMI/keeper-start operations.
+    #[test]
+    fn unsubmitted_handoff_keeps_local_presence_and_keeper_errors_uncertain() {
+        let dir = tempfile::tempdir().unwrap();
+        let native = runtime(dir.path());
+        let fixed = hex_api::CapacityResources {
+            cpu_milli: 1000,
+            mem_bytes: shards_api::min_memory_mib(std::env::consts::ARCH) << 20,
+            disk_bytes: 0,
+        };
+        let cost = hex_api::RuntimeCost {
+            id: [0x71; 32],
+            floor: fixed,
+            ceiling: fixed,
+            quantum: hex_api::CapacityResources {
+                cpu_milli: 1000,
+                mem_bytes: 1,
+                disk_bytes: 1,
+            },
+            guest_overhead: hex_api::CapacityResources::default(),
+            overhead: hex_api::CapacityResources::default(),
+        };
+        let mut selected = spec();
+        selected.class = ClassSpec::Shards(Box::new(hex_api::OciSpec {
+            rootfs: hex_api::Rootfs::Dir(dir.path().to_path_buf()),
+            init: hex_api::Program::of(&["/bin/true"]),
+            mounts: Vec::new(),
+            hostname: None,
+            network: hex_api::Network::Private,
+            hosts: Vec::new(),
+        }));
+        selected.allocation = Some(
+            cost.allocate(hex_api::CapacityResources::default())
+                .unwrap(),
+        );
+        let mut record = BoxRecord::new(selected, hex_core::record::Phase::Creating, Vec::new());
+        record.native_scope = Some(hex_core::record::NativeScope::from_bytes([0x72; 16]));
+        native.preflight_unsubmitted(&record).unwrap();
+        record.phase = hex_core::record::Phase::Deleting;
+        native.preflight_unsubmitted(&record).unwrap();
+        native
+            .holding
+            .reserve(OwnerRef::Box(&record.spec.id), &[], None, None)
+            .unwrap();
+        assert!(
+            matches!(native.preflight_unsubmitted(&record), Err(Refusal::Lifecycle { id, cause: LifecycleCause::Uncertain }) if id == record.spec.id)
+        );
+        assert_eq!(native.boxes().unwrap().len(), 1);
+
+        let mut kept = runtime(dir.path());
+        let state = dir.path().join("unstarted-keeper");
+        Arc::get_mut(&mut kept.holding).unwrap().keeper = Some(
+            super::super::Keeping::configured(&state, &["must-not-execute.exe".into()]).unwrap(),
+        );
+        kept.preflight_unsubmitted(&record).unwrap();
+        assert!(!state.exists());
+        std::fs::create_dir(&state).unwrap();
+        let path = keeper::vm::path(&state, OwnerRef::Box(&record.spec.id)).unwrap();
+        let held = keeper::vm::Held {
+            scope: record.native_scope.unwrap(),
+            commitment: record.native_commitment().unwrap(),
+            pid: 17,
+            started: 19,
+            value: 23,
+        }
+        .encode()
+        .unwrap();
+        std::fs::write(&path, &held).unwrap();
+        assert!(
+            kept.preflight_unsubmitted(&record).is_err(),
+            "even a matching positive keeper receipt contradicts no submission"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), held);
+        let malformed = b"unreadable-keeper-commitment\n";
+        std::fs::write(&path, malformed).unwrap();
+        assert!(kept.preflight_unsubmitted(&record).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), malformed);
+        assert!(kept.boxes().unwrap().is_empty());
+        assert!(matches!(
+            *kept.holding.keeper.as_ref().unwrap().keeper.lock().unwrap(),
+            super::super::KeeperState::Configured
+        ));
+        assert_eq!(
+            kept.feature_reads.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
     }
 }

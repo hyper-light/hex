@@ -1,0 +1,50 @@
+{
+  "status": "SOURCE ONLY / AFTER and new control UNRUN",
+  "parent": "0f752b1078192ce4596021839118b80014dd25f6",
+  "role": "implementer shards-gpu",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "actual_red": {
+    "original": "7e6caf974f185c854d5cfb8028e523e7ac3d2c0d",
+    "source": "0f752b1078192ce4596021839118b80014dd25f6",
+    "selected": 1,
+    "passed": 0,
+    "failed": 1,
+    "ignored": 0,
+    "log_sha256": "1687a4f32b70fb90ffd0e43228c914e3cda217d52579e8ac5894827bfe24664f",
+    "raw_sha256": "e1f8d5b78a04a63e007981d450e3c54cf3e5888ac7192fc5384500d025b69159",
+    "symptom": "all setup/charge/positive scope/finalize1/capacity exactReleased/explicitACK preconditions passed; fresh key remained old generation7"
+  },
+  "change": "SAME single binding becomes short fallible Mutex<Option<Key>>, invalidated only after explicit Index ACK strict canonical/reference/local-receipt checks+Store removal. Existing cleanup does not rearm. Next prepare is fresh unallocated same cost/no boot.",
+  "tests": {
+    "old_unit_bodies_unchanged": 10,
+    "original": "guest::shared::tests::shared_backing_rearms_only_after_original_scope_release_and_index_ack",
+    "new": "guest::shared::tests::shared_index_ack_preserves_references_and_refuses_a_stale_generation",
+    "ran_here": false
+  },
+  "checks": {
+    "scoped_rustfmt_parser": "exit0",
+    "diff_check": "exit0",
+    "cargo": "NOT RUN",
+    "native": "NOT RUN"
+  },
+  "files": {
+    "crates/hex-runtime/src/guest/mod.rs": {
+      "sha256": "49dc6adf50581cb19814a62971a40a7979e5982758c0a1b2d8fdffb30f4fd21a",
+      "bytes": 54158
+    },
+    "crates/hex-runtime/src/guest/shared.rs": {
+      "sha256": "2c8c2bf04d546c7948b806a63506ea552b456cac9e244f925afc3f7f64852ded",
+      "bytes": 56821
+    },
+    "crates/hex-runtime/src/guest/shared_tests.rs": {
+      "sha256": "7a12f3b041d368bf96c6559023c1c27c7735f1594d8032795e87ef8522c94f1e",
+      "bytes": 31817
+    },
+    "docs/research/measurements/hex-complete-shards-gpu/SHARED-CPU-REARM-REMEDY.md": {
+      "sha256": "865bcbfd97e07a396249351f99d7186fdf4ba98a842b57cc22f8764d8fd7a535",
+      "bytes": 4960
+    }
+  },
+  "join": "Apply narrow delta over original0f75 first. Later port getters into3bdb factored backing_configuration/CPU b924 validator; retain3896 GPU release else branch and ROOT original projections/fixtures/normalizer. See guide exact cancellation producer limitation; no new unallocated Released authority in older cohort."
+}

@@ -1,0 +1,48 @@
+{
+  "base": "112297aff40855db96ed550682dbf052a0e5fc65",
+  "branch": "cp/t7-lifecycle-112-no-intent-v1",
+  "original_narrow_source": "85838529478817990dda5a09192e8bc616aee62e",
+  "native_Windows_function_byte_identical_to_858": "9125a5f6c7300e33b4e03fc2e060c02af86e7d721d0bc724e4791be857965a7d",
+  "scope": "Recorded handoff chooser+WithGuest native/guest bridge and concrete local Windows metadata proof only",
+  "Mac": "strict typed Uncertain default; no cold no-submission proof, no remote helper/2ef import",
+  "Prepared_managed_delegate": "ROOT adds independently; excluded here",
+  "files": {
+    "crates/hex-node/src/recorded.rs": {
+      "sha256": "fe1483d5da45da1797977d66d800c67e05c668aa405c3a3a4ed9963d4a4ff35c",
+      "bytes": 100840
+    },
+    "crates/hex-runtime/src/windows/preflight.rs": {
+      "sha256": "8b96593ad890bb4db6a002d8378e3c9490b6207fe1047349326883bb729f7bbd",
+      "bytes": 25199
+    },
+    "docs/research/measurements/hex-complete-lifecycle/recorded-no-intent-root112.md": {
+      "sha256": "044ee87e56b21cf6fbfdb108e524f8c4df15cf233e2024bb62b746a9eb77dd71",
+      "bytes": 4270
+    }
+  },
+  "untouched_Mac": {
+    "crates/hex-runtime/src/macos/managed/preflight.rs": {
+      "unchanged_from_base": true,
+      "sha256": "dd94e050379b7fb2c3305f023710f08809fcb4837a54042d1846d4a7dca4cbb2"
+    },
+    "crates/hex-runtime/src/macos/managed.rs": {
+      "unchanged_from_base": true,
+      "sha256": "ca9dc9920792c398ffd46220015682559c37595d7115d7ac88d5225cc81659bd"
+    }
+  },
+  "new_units": 1,
+  "tests_compile_native": "UNRUN; no L3 dispatch",
+  "source_checks": [
+    "scoped rustfmt0",
+    "git diff --check0"
+  ],
+  "preserve": [
+    "ROOT507 Draining guard",
+    "route_for seven dispatches",
+    "reports/canonical projections/holders/normalization",
+    "all original unit oracles/raw"
+  ],
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer L3"
+}

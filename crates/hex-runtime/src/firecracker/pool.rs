@@ -84,8 +84,18 @@ pub(super) fn observer_configuration(
     Ok(hash.finalize().into())
 }
 
+/// Pure temporary proposal; only existing Books/Store may publish its selected canonical row.
+enum ObserverProposal<'a> {
+    Empty,
+    AwaitAck(&'a PoolRecord),
+    Prepare {
+        devices: Vec<DeviceId>,
+        current: Option<&'a PoolRecord>,
+    },
+}
+
 impl FirecrackerRuntime {
-    fn observer_claims(&self) -> Result<Vec<DeviceId>, Refusal> {
+    pub(super) fn observer_claims(&self) -> Result<Vec<DeviceId>, Refusal> {
         let mut claims = Vec::new();
         let count = self
             .catalog
@@ -108,67 +118,180 @@ impl FirecrackerRuntime {
         Ok(claims)
     }
 
-    /// Called only after global retained preflight. Persists scope/identity authority without
-    /// touching a GPU, opening another provider, granting resources or starting a VM.
+    /// Metadata-only proposal on the SAME initialized owner. The guarded callback recomputes
+    /// the one identity complement; no readings, grants or native effect are inferred here.
     pub fn prepare_backing(&self) -> Result<Option<BackingOffer>, Refusal> {
         self.require_initialized()?;
-        let claims = self.observer_claims()?;
-        if claims.is_empty() {
+        let configured = self.observer_claims()?;
+        if configured.is_empty() {
             return Ok(None);
         }
-        let pool = observer_configuration(&self.config, &claims)?;
-        self.rearm_released_observer(&claims)?;
-        let offer = self.authority()?.prepare_pool(
+        let authority = self.authority()?;
+        let records = authority.records()?;
+        let pools = authority.pool_records()?;
+        let (devices, current) = match self.observer_proposal(&configured, &records, &pools)? {
+            ObserverProposal::Empty => return Ok(None),
+            ObserverProposal::AwaitAck(record) => return record.offer().map(Some),
+            ObserverProposal::Prepare { devices, current } => (devices, current),
+        };
+        let configuration = observer_configuration(&self.config, &configured)?;
+        // An empty desired set is only a changed-current drain/cancel proposal. With no current
+        // row it returned Empty above; it never becomes an empty GPU PoolRecord/route/offer.
+        let pool = observer_configuration(&self.config, &devices)?;
+        let cost = observer_cost(&self.config)?;
+        let mut validate = |records: &crate::devices::Records, pools: &[PoolRecord]| match self
+            .observer_proposal(&configured, records, pools)?
+        {
+            ObserverProposal::Prepare {
+                devices: now,
+                current: retained,
+            } if now == devices && retained == current => Ok(()),
+            _ => Err(match current {
+                Some(record) => refused(record.key, LifecycleCause::Busy),
+                None => invalid("canonical observer complement changed before publication"),
+            }),
+        };
+        let canonical = authority.prepare_pool(
             pool,
             Execution::Firecracker,
-            observer_cost(&self.config)?,
-            &claims,
+            cost,
+            &devices,
+            (&configuration, &configured, current),
+            &mut validate,
         )?;
-        if offer.key.pool != pool
-            || offer.cost != observer_cost(&self.config)?
-            || offer.devices != claims
-        {
-            return Err(refused(offer.key, LifecycleCause::Uncertain));
-        }
-        Ok(Some(offer))
-    }
-
-    fn rearm_released_observer(&self, claims: &[DeviceId]) -> Result<(), Refusal> {
-        let Some(before) = self.observer_record()? else {
-            return Ok(());
-        };
-        if before.phase != BackingPhase::Released {
-            return Ok(());
-        }
-        let keys = self.catalog.conflict_ids(claims)?;
-        crate::devices::with_pool_transaction(&self.books, &before.key, &keys, |transaction| {
-            let current = transaction
-                .read_pool(&before.key)?
-                .ok_or_else(|| refused(before.key, LifecycleCause::Uncertain))?;
-            if current != before {
-                return Err(refused(before.key, LifecycleCause::Busy));
-            }
-            self.preflight_backing(&current)?;
-            for (_, record) in transaction.records()? {
-                let record = record.map_err(|_| refused(before.key, LifecycleCause::Uncertain))?;
-                record.spec.check()?;
-                if record
-                    .spec
-                    .route
-                    .is_some_and(|route| route.backing == Some(before.key))
-                {
-                    return Ok(());
+        self.preflight_backing(&canonical)?;
+        if canonical.cost != cost
+            || match current {
+                Some(before) => {
+                    canonical.key != before.key
+                        || canonical.devices != before.devices
+                        || canonical.allocation != before.allocation
+                        || canonical.init != before.init
+                }
+                None => {
+                    canonical.key.pool != pool
+                        || canonical.devices != devices
+                        || canonical.phase != BackingPhase::Prepared
                 }
             }
-            match fs::symlink_metadata(self.pool_paths(&current)?.dir) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(Refusal::os("checking released observer state", error)),
-                Ok(_) => return Err(refused(before.key, LifecycleCause::Uncertain)),
+        {
+            return Err(refused(canonical.key, LifecycleCause::Uncertain));
+        }
+        if canonical.phase == BackingPhase::Prepared && canonical.devices != devices {
+            // No native I/O runs while the family metadata fence is held. Cancellation owes
+            // local no-Intent AND the actual same-native-owner no-submission observation.
+            return self.release_observer(&canonical.key).map(Some);
+        }
+        canonical.offer().map(Some)
+    }
+
+    fn observer_proposal<'a>(
+        &self,
+        configured: &[DeviceId],
+        records: &crate::devices::Records,
+        pools: &'a [PoolRecord],
+    ) -> Result<ObserverProposal<'a>, Refusal> {
+        if records.len() > crate::MAX_BOXES || pools.len() > crate::MAX_BOXES {
+            return Err(Refusal::Full(crate::MAX_BOXES));
+        }
+        let mut family = Vec::new();
+        family
+            .try_reserve_exact(pools.len())
+            .map_err(|_| exhausted("observer family snapshot", pools.len()))?;
+        for pool in pools
+            .iter()
+            .filter(|pool| pool.execution == Execution::Firecracker)
+        {
+            self.preflight_backing(pool)?;
+            family.push(pool);
+        }
+        family.sort_unstable_by_key(|pool| pool.key);
+        let mut references = Vec::new();
+        references
+            .try_reserve_exact(records.len())
+            .map_err(|_| exhausted("observer consuming references", records.len()))?;
+        for (id, boxed) in records {
+            let boxed = boxed.as_ref().map_err(|_| uncertain(id))?;
+            boxed.spec.check()?;
+            let Some(route) = boxed.spec.route.filter(|route| {
+                route.key.execution == Execution::Firecracker && route.backing.is_some()
+            }) else {
+                continue;
+            };
+            let key = route.backing.ok_or_else(|| uncertain(id))?;
+            let source = family
+                .binary_search_by_key(&key, |pool| pool.key)
+                .ok()
+                .and_then(|at| family.get(at))
+                .copied()
+                .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+            route.check_backing_parts(
+                boxed.spec.allocation.map(|allocation| allocation.cost),
+                key,
+                source.cost,
+                &source.devices,
+                &boxed.spec.devices,
+            )?;
+            references.push(key);
+        }
+        references.sort_unstable();
+        if let Some(pair) = references
+            .windows(2)
+            .find(|pair| matches!(pair, [a,b] if a == b))
+        {
+            let key = pair
+                .first()
+                .copied()
+                .ok_or_else(|| invalid("missing consuming reference"))?;
+            return Err(refused(key, LifecycleCause::Uncertain));
+        }
+        let mut current: Option<&PoolRecord> = None;
+        let mut ack = None;
+        for pool in family {
+            if references.binary_search(&pool.key).is_ok() {
+                continue;
             }
-            // Released is the same canonical positive whole-scope/owned-state terminal receipt.
-            // No old Box references it; remove only that row before preparing a fresh generation.
-            transaction.remove_pool(&before.key)
-        })
+            if pool.phase == BackingPhase::Released {
+                if ack.is_none() {
+                    ack = Some(pool);
+                }
+            } else if current.replace(pool).is_some() {
+                return Err(refused(pool.key, LifecycleCause::Uncertain));
+            }
+        }
+        let devices =
+            self.catalog
+                .unheld_subset(configured, current.map(|pool| pool.key), records, pools)?;
+        // A historical configuration with no references still needs Index ACK/removal. Let its
+        // ordinary Released queue run before replacing a changed current configuration; otherwise
+        // a full-P parent can collide with the same hash of the proposed union.
+        if current.is_none_or(|pool| pool.devices != devices)
+            && let Some(ack) = ack
+        {
+            return Ok(ObserverProposal::AwaitAck(ack));
+        }
+        if current.is_none() && devices.is_empty() {
+            return Ok(ObserverProposal::Empty);
+        }
+        Ok(ObserverProposal::Prepare { devices, current })
+    }
+
+    pub(super) fn fresh_observer(
+        &self,
+        records: &crate::devices::Records,
+        pools: &[PoolRecord],
+    ) -> Result<Option<BackingKey>, Refusal> {
+        Ok(
+            match self.observer_proposal(&self.observer_claims()?, records, pools)? {
+                ObserverProposal::Prepare {
+                    devices,
+                    current: Some(record),
+                } if record.phase == BackingPhase::Live && record.devices == devices => {
+                    Some(record.key)
+                }
+                _ => None,
+            },
+        )
     }
 
     /// Pure second pass for the same owner's all-record preflight, before any native callback.
@@ -177,11 +300,11 @@ impl FirecrackerRuntime {
         let bad = || refused(record.key, LifecycleCause::Uncertain);
         if record.execution != Execution::Firecracker
             || record.cost != observer_cost(&self.config)?
-            || record.devices != self.observer_claims()?
             || record.key.pool != observer_configuration(&self.config, &record.devices)?
         {
             return Err(bad());
         }
+        hex_api::BackingOffer::check_selection_parts(&self.observer_claims()?, &record.devices)?;
         if let Some(allocation) = record.allocation
             && allocation != record.cost.allocate(CapacityResources::default())?
         {
@@ -190,21 +313,34 @@ impl FirecrackerRuntime {
         Ok(())
     }
 
-    pub(super) fn observer_record(&self) -> Result<Option<PoolRecord>, Refusal> {
-        let claims = self.observer_claims()?;
-        if claims.is_empty() {
-            return Ok(None);
+    pub(super) fn observer_records(&self) -> Result<Vec<PoolRecord>, Refusal> {
+        let mut records = self.authority()?.pool_records()?;
+        if records.len() > crate::MAX_BOXES {
+            return Err(Refusal::Full(crate::MAX_BOXES));
         }
-        let key = observer_configuration(&self.config, &claims)?;
-        let record = self
-            .authority()?
-            .pool_records()?
-            .into_iter()
-            .find(|record| record.key.pool == key);
-        if let Some(record) = &record {
+        // Validate ALL configured family rows before any caller can make a native callback.
+        for record in records
+            .iter()
+            .filter(|record| record.execution == Execution::Firecracker)
+        {
             self.preflight_backing(record)?;
         }
-        Ok(record)
+        records.retain(|record| record.execution == Execution::Firecracker);
+        records.sort_unstable_by_key(|record| record.key);
+        if records
+            .windows(2)
+            .any(|pair| matches!(pair,[a,b] if a.key.pool == b.key.pool))
+        {
+            return Err(invalid("observer family repeats a canonical configuration"));
+        }
+        Ok(records)
+    }
+
+    fn observer_record(&self, key: &BackingKey) -> Result<PoolRecord, Refusal> {
+        self.observer_records()?
+            .into_iter()
+            .find(|record| record.key == *key)
+            .ok_or_else(|| refused(*key, LifecycleCause::Uncertain))
     }
 
     fn pool_paths(&self, record: &PoolRecord) -> Result<Paths, Refusal> {
@@ -344,11 +480,13 @@ impl FirecrackerRuntime {
         until: Option<Instant>,
     ) -> Result<Vec<PhysicalDevice>, Refusal> {
         let mut observed = Vec::new();
-        if let Some(before) = self.observer_record()?
-            && before.phase == BackingPhase::Live
+        for before in self
+            .observer_records()?
+            .into_iter()
+            .filter(|record| record.phase == BackingPhase::Live)
         {
             let keys = self.catalog.conflict_ids(&before.devices)?;
-            observed = crate::devices::with_pool_transaction(
+            let next = crate::devices::with_pool_transaction(
                 &self.books,
                 &before.key,
                 &keys,
@@ -363,6 +501,7 @@ impl FirecrackerRuntime {
                     self.pool_observations(&record, &client, until)
                 },
             )?;
+            append_observations(&mut observed, next)?;
         }
         // After observer handoff a retained GPU Box is the actual current driver provider. Read
         // each through its same method/device turns and managed receipt; never repick or cache.
@@ -388,15 +527,7 @@ impl FirecrackerRuntime {
                     until,
                 )
             })?;
-            let total = observed
-                .len()
-                .checked_add(next.len())
-                .filter(|count| *count <= hex_api::MAX_DEVICES)
-                .ok_or_else(|| exhausted("current native observed GPUs", hex_api::MAX_DEVICES))?;
-            observed
-                .try_reserve_exact(next.len())
-                .map_err(|_| exhausted("current native observed GPUs", total))?;
-            observed.extend(next);
+            append_observations(&mut observed, next)?;
         }
         observed.sort_unstable_by_key(|device| device.info.id);
         if observed
@@ -496,10 +627,7 @@ impl FirecrackerRuntime {
         key: &BackingKey,
         until: Option<Instant>,
     ) -> Result<BackingOffer, Refusal> {
-        let before = self
-            .observer_record()?
-            .filter(|record| record.key == *key)
-            .ok_or_else(|| refused(*key, LifecycleCause::Uncertain))?;
+        let before = self.observer_record(key)?;
         let keys = self.catalog.conflict_ids(&before.devices)?;
         crate::devices::with_pool_transaction(&self.books, key, &keys, |transaction| {
             let mut record = transaction
@@ -510,6 +638,14 @@ impl FirecrackerRuntime {
                 return record.offer();
             }
             if record.phase == BackingPhase::Prepared {
+                match fs::symlink_metadata(self.pool_paths(&record)?.dir) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(Refusal::os("checking unsubmitted observer Intent", error));
+                    }
+                    Ok(_) => return Err(refused(*key, LifecycleCause::Uncertain)),
+                }
+                transaction.check_unsubmitted_pool()?;
                 record.phase = BackingPhase::Released;
                 transaction.put_pool(&record)?;
                 return record.offer();
@@ -552,11 +688,47 @@ impl FirecrackerRuntime {
         })
     }
 
+    /// This second protocol call is the caller's explicit Index ACK, not an inference from
+    /// observing Released in capacity. Runtime entry decides that it entered the ACK phase.
+    pub(super) fn acknowledge_observer(&self, key: &BackingKey) -> Result<BackingOffer, Refusal> {
+        let before = self.observer_record(key)?;
+        let keys = self.catalog.conflict_ids(&before.devices)?;
+        crate::devices::with_pool_transaction(&self.books, key, &keys, |transaction| {
+            let record = transaction
+                .read_pool(key)?
+                .ok_or_else(|| refused(*key, LifecycleCause::Uncertain))?;
+            self.preflight_backing(&record)?;
+            if record != before || record.phase != BackingPhase::Released {
+                return Err(refused(*key, LifecycleCause::Uncertain));
+            }
+            let released = record.offer()?;
+            for (id, boxed) in transaction.records()? {
+                let boxed = boxed.map_err(|_| uncertain(&id))?;
+                boxed.spec.check()?;
+                if boxed.spec.route.and_then(|route| route.backing) == Some(*key) {
+                    // Parent metadata remains the immutable source for its sole Box S lifetime.
+                    return Ok(released);
+                }
+            }
+            if record.allocation.is_some() {
+                transaction.finalize_managed(self.pool_identity(&record)?.as_ref())?;
+            }
+            match fs::symlink_metadata(self.pool_paths(&record)?.dir) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(Refusal::os("checking acknowledged observer state", error));
+                }
+                Ok(_) => return Err(refused(*key, LifecycleCause::Uncertain)),
+            }
+            // SAME Tx removal revalidates native no-submission for an unallocated canceled
+            // lifetime; allocated Released already owes positive full-scope finalization above.
+            transaction.remove_pool(key)?;
+            Ok(released)
+        })
+    }
+
     pub(super) fn observer_usage(&self, key: &BackingKey) -> Result<Usage, Refusal> {
-        let before = self
-            .observer_record()?
-            .filter(|record| record.key == *key)
-            .ok_or_else(|| refused(*key, LifecycleCause::Uncertain))?;
+        let before = self.observer_record(key)?;
         let keys = self.catalog.conflict_ids(&before.devices)?;
         crate::devices::with_pool_transaction(&self.books, key, &keys, |transaction| {
             let record = transaction
@@ -573,46 +745,62 @@ impl FirecrackerRuntime {
     /// cleanup releases claims only through the same positive whole-scope terminal witness.
     pub fn recover_backing(&self) -> Result<(), Refusal> {
         self.require_initialized()?;
-        let Some(record) = self.observer_record()? else {
-            return Ok(());
-        };
-        match record.phase {
-            BackingPhase::Prepared | BackingPhase::Released => Ok(()),
-            BackingPhase::Granted | BackingPhase::Draining => {
-                self.release_observer(&record.key).map(|_| ())
-            }
-            BackingPhase::Live => {
-                let keys = self.catalog.conflict_ids(&record.devices)?;
-                let ended = crate::devices::with_pool_transaction(
-                    &self.books,
-                    &record.key,
-                    &keys,
-                    |transaction| {
-                        let current = transaction
-                            .read_pool(&record.key)?
-                            .ok_or_else(|| refused(record.key, LifecycleCause::Uncertain))?;
-                        if current != record {
-                            return Err(refused(record.key, LifecycleCause::Uncertain));
-                        }
-                        let identity = self.pool_identity(&current)?;
-                        let native = transaction.attach_managed(identity.as_ref())?;
-                        Ok(native
-                            .terminal()
-                            .map_err(|_| refused(record.key, LifecycleCause::Uncertain))?
-                            .is_some_and(|terminal| {
-                                terminal.scope == shards_api::TerminalScope::Released
-                            }))
-                    },
-                )?;
-                if ended {
-                    self.release_observer(&record.key)?;
-                } else {
-                    self.physical_observations()?;
+        for record in self.observer_records()? {
+            match record.phase {
+                BackingPhase::Prepared | BackingPhase::Released => Ok(()),
+                BackingPhase::Granted | BackingPhase::Draining => {
+                    self.release_observer(&record.key).map(|_| ())
                 }
-                Ok(())
-            }
+                BackingPhase::Live => {
+                    let keys = self.catalog.conflict_ids(&record.devices)?;
+                    let ended = crate::devices::with_pool_transaction(
+                        &self.books,
+                        &record.key,
+                        &keys,
+                        |transaction| {
+                            let current = transaction
+                                .read_pool(&record.key)?
+                                .ok_or_else(|| refused(record.key, LifecycleCause::Uncertain))?;
+                            if current != record {
+                                return Err(refused(record.key, LifecycleCause::Uncertain));
+                            }
+                            let identity = self.pool_identity(&current)?;
+                            let native = transaction.attach_managed(identity.as_ref())?;
+                            Ok(native
+                                .terminal()
+                                .map_err(|_| refused(record.key, LifecycleCause::Uncertain))?
+                                .is_some_and(|terminal| {
+                                    terminal.scope == shards_api::TerminalScope::Released
+                                }))
+                        },
+                    )?;
+                    if ended {
+                        self.release_observer(&record.key)?;
+                    } else {
+                        self.physical_observations()?;
+                    }
+                    Ok(())
+                }
+            }?;
         }
+        Ok(())
     }
+}
+
+fn append_observations(
+    observed: &mut Vec<PhysicalDevice>,
+    next: Vec<PhysicalDevice>,
+) -> Result<(), Refusal> {
+    let total = observed
+        .len()
+        .checked_add(next.len())
+        .filter(|count| *count <= hex_api::MAX_DEVICES)
+        .ok_or_else(|| exhausted("current native observed GPUs", hex_api::MAX_DEVICES))?;
+    observed
+        .try_reserve_exact(next.len())
+        .map_err(|_| exhausted("current native observed GPUs", total))?;
+    observed.extend(next);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -666,6 +854,238 @@ pub(super) mod tests {
                 path: 100,
             },
         }
+    }
+
+    fn family_fixture() -> (FirecrackerRuntime, Arc<dyn Books>) {
+        let catalog = crate::devices::Catalog::parse(b"hex-devices-1\ngpu\t256\tconfig-a\t777\tvfio\t0000:01:00.0\t7\ngpu\t512\tconfig-b\t888\tvfio\t0000:02:00.0\t8\n").unwrap();
+        let owner: Arc<dyn Books> = Arc::new(super::super::handoff_tests::NoOwnerCalls);
+        let runtime = FirecrackerRuntime {
+            config: config(),
+            catalog: triomphe::Arc::try_new(catalog).unwrap(),
+            books: Arc::downgrade(&owner),
+            initialized: std::sync::OnceLock::new(),
+        };
+        (runtime, owner)
+    }
+
+    fn family_row(runtime: &FirecrackerRuntime, keys: &[u64], phase: BackingPhase) -> PoolRecord {
+        let devices: Vec<_> = keys
+            .iter()
+            .map(|key| DeviceId {
+                kind: DeviceKind::Gpu,
+                key: *key,
+            })
+            .collect();
+        let generation = if keys.len() == 2 {
+            3
+        } else if keys.first() == Some(&256) {
+            4
+        } else {
+            5
+        };
+        let cost = observer_cost(&runtime.config).unwrap();
+        let record = PoolRecord {
+            version: hex_core::record::RECORD_VERSION,
+            key: BackingKey {
+                pool: observer_configuration(&runtime.config, &devices).unwrap(),
+                generation: [generation; 16],
+            },
+            execution: Execution::Firecracker,
+            cost,
+            allocation: (phase != BackingPhase::Prepared)
+                .then(|| cost.allocate(CapacityResources::default()).unwrap()),
+            devices,
+            phase,
+            init: if matches!(
+                phase,
+                BackingPhase::Live | BackingPhase::Draining | BackingPhase::Released
+            ) {
+                Some(hex_core::record::ProcId {
+                    pid: 7,
+                    start_ticks: 11,
+                })
+            } else {
+                None
+            },
+            exit: if phase == BackingPhase::Released {
+                Some(hex_api::Exit::Code(0))
+            } else {
+                None
+            },
+        };
+        record.check().unwrap();
+        runtime.preflight_backing(&record).unwrap();
+        record
+    }
+
+    fn consuming_box(runtime: &FirecrackerRuntime, source: &PoolRecord, name: &str) -> BoxRecord {
+        let workload = CapacityResources {
+            cpu_milli: 1_000,
+            mem_bytes: hex_api::MIN_MEMORY,
+            disk_bytes: 0,
+        };
+        let spec = BoxSpec {
+            id: BoxId::new(name).unwrap(),
+            class: ClassSpec::Firecracker(Box::new(hex_api::OciSpec {
+                rootfs: hex_api::Rootfs::Dir("/fixture/payload".into()),
+                init: Program::of(&["true"]),
+                mounts: Vec::new(),
+                hostname: None,
+                network: hex_api::Network::Private,
+                hosts: Vec::new(),
+            })),
+            bounds: hex_api::Bounds {
+                cpu_max_milli: Some(1_000),
+                memory_max: Some(hex_api::MIN_MEMORY),
+                ..hex_api::Bounds::default()
+            },
+            owner: None,
+            devices: vec![source.devices[0]],
+            allocation: Some(runtime.config.cost.allocate(workload).unwrap()),
+            route: Some(hex_api::RouteReceipt {
+                key: runtime
+                    .route_key(hex_api::GpuEligibility::Required)
+                    .unwrap(),
+                backing: Some(source.key),
+            }),
+        };
+        spec.check().unwrap();
+        let mut boxed = BoxRecord::new(spec, Phase::Ready, Vec::new());
+        boxed.native_scope = Some(hex_core::record::NativeScope::from_bytes(
+            [if name == "first-consumer" { 17 } else { 18 }; 16],
+        ));
+        boxed.init = Some(hex_core::record::ProcId {
+            pid: 19,
+            start_ticks: 23,
+        });
+        boxed
+    }
+
+    /// AC-T7.4.1: one current deterministic complement, retained full-P source, and ordered ACK
+    /// queue during Box-end/coalescing. This is identity/metadata modeling, not native readiness.
+    #[test]
+    fn family_complement_keeps_parent_and_requires_ack_before_growing_a_live_scope() {
+        let (runtime, _no_calls) = family_fixture();
+        let configured = runtime.observer_claims().unwrap();
+        let mut records = crate::devices::Records::new();
+        assert!(
+            matches!(runtime.observer_proposal(&configured,&records,&[]).unwrap(),
+            ObserverProposal::Prepare { devices, current: None } if devices==configured)
+        );
+        let parent = family_row(&runtime, &[256, 512], BackingPhase::Released);
+        let boxed = consuming_box(&runtime, &parent, "selected-one");
+        records.insert(boxed.spec.id.clone(), Ok(boxed));
+        assert!(
+            matches!(runtime.observer_proposal(&configured,&records,std::slice::from_ref(&parent)).unwrap(),
+            ObserverProposal::Prepare { devices,current:None } if devices==vec![configured[1]])
+        );
+        let current = family_row(&runtime, &[512], BackingPhase::Live);
+        let mut pools = vec![parent, current];
+        assert_eq!(
+            runtime.fresh_observer(&records, &pools).unwrap(),
+            Some(pools[1].key)
+        );
+        records.clear(); // The original selected Box ended; R must grow to the full configuration.
+        assert!(
+            matches!(runtime.observer_proposal(&configured,&records,&pools).unwrap(),
+            ObserverProposal::AwaitAck(row) if row.key==pools[0].key)
+        );
+        assert_eq!(runtime.fresh_observer(&records, &pools).unwrap(), None);
+        pools.remove(0); // The actual Index ACK path, not the proposal, owns this metadata removal.
+        assert!(
+            matches!(runtime.observer_proposal(&configured,&records,&pools).unwrap(),
+            ObserverProposal::Prepare { devices,current:Some(row) } if devices==configured && row.key==pools[0].key)
+        );
+        pools[0].phase = BackingPhase::Draining;
+        assert_eq!(runtime.fresh_observer(&records, &pools).unwrap(), None);
+        assert_eq!(pools[0].devices, vec![configured[1]]);
+        assert!(pools[0].allocation.is_some());
+        pools[0].phase = BackingPhase::Released;
+        pools[0].exit = Some(hex_api::Exit::Code(0));
+        assert!(matches!(
+            runtime
+                .observer_proposal(&configured, &records, &pools)
+                .unwrap(),
+            ObserverProposal::AwaitAck(_)
+        ));
+        pools.clear(); // A separate whole-scope release and Index ACK must have completed first.
+        assert!(
+            matches!(runtime.observer_proposal(&configured,&records,&pools).unwrap(),
+            ObserverProposal::Prepare { devices,current:None } if devices==configured)
+        );
+    }
+
+    /// AC-T7.4.1: the first cold proposal carries only canonical IDs; foreign/held devices are
+    /// excluded without model/VRAM/load invention, and an old Prepared can be canceled to empty.
+    #[test]
+    fn family_cold_and_empty_complements_preserve_exact_identity_without_facts() {
+        let (runtime, _no_calls) = family_fixture();
+        let configured = runtime.observer_claims().unwrap();
+        let mut records = crate::devices::Records::new();
+        let source = family_row(&runtime, &[256, 512], BackingPhase::Prepared);
+        let mut claimed = consuming_box(
+            &runtime,
+            &family_row(&runtime, &[256, 512], BackingPhase::Released),
+            "native-holder",
+        );
+        claimed.spec.route = None;
+        claimed.spec.class = ClassSpec::Oci(match claimed.spec.class {
+            ClassSpec::Firecracker(oci) => oci,
+            _ => unreachable!(),
+        });
+        claimed.spec.allocation = None;
+        claimed.native_scope = None;
+        claimed.spec.devices = configured.clone();
+        claimed.spec.check().unwrap();
+        records.insert(claimed.spec.id.clone(), Ok(claimed));
+        assert!(matches!(
+            runtime
+                .observer_proposal(&configured, &records, &[])
+                .unwrap(),
+            ObserverProposal::Empty
+        ));
+        assert!(
+            matches!(runtime.observer_proposal(&configured,&records,std::slice::from_ref(&source)).unwrap(),
+            ObserverProposal::Prepare { devices,current:Some(row) } if devices.is_empty() && row.key==source.key)
+        );
+        assert_eq!(source.phase, BackingPhase::Prepared);
+        assert!(source.allocation.is_none() && source.init.is_none() && source.exit.is_none());
+        assert_eq!(runtime.fresh_observer(&records, &[source]).unwrap(), None);
+    }
+
+    /// AC-T7.4.1: an unrelated profile, two unconsumed current rows, or two consumers of one
+    /// source are invalid authority, not fresh fallback choices. No Books/provider call is allowed.
+    #[test]
+    fn family_profile_current_and_consuming_reference_ambiguity_refuses() {
+        let (runtime, _no_calls) = family_fixture();
+        let configured = runtime.observer_claims().unwrap();
+        let mut bad = family_row(&runtime, &[256], BackingPhase::Prepared);
+        bad.cost.id = [42; 32];
+        assert!(
+            runtime
+                .observer_proposal(&configured, &crate::devices::Records::new(), &[bad])
+                .is_err()
+        );
+        let multiple = [
+            family_row(&runtime, &[256], BackingPhase::Prepared),
+            family_row(&runtime, &[512], BackingPhase::Prepared),
+        ];
+        assert!(
+            runtime
+                .observer_proposal(&configured, &crate::devices::Records::new(), &multiple)
+                .is_err()
+        );
+        let source = family_row(&runtime, &[256, 512], BackingPhase::Released);
+        let mut records = crate::devices::Records::new();
+        for name in ["first-consumer", "second-consumer"] {
+            let boxed = consuming_box(&runtime, &source, name);
+            records.insert(boxed.spec.id.clone(), Ok(boxed));
+        }
+        assert!(
+            runtime
+                .observer_proposal(&configured, &records, &[source])
+                .is_err()
+        );
     }
 
     /// AC-T7.4.1: a metadata-only cold observer's fixed charge carries the full physical set;

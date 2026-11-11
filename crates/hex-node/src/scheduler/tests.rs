@@ -1095,3 +1095,84 @@ mod adversarial_relay_tests;
 
 #[path = "device_offer_tests.rs"]
 mod device_offer_tests;
+
+/// AC-T7.4.1: cleanup intent survives unavailable renderer telemetry; it is never a new boot
+/// grant. This uses the actual Service action parser over canonical full-set receipts.
+#[test]
+fn canonical_draining_action_is_not_filtered_by_unavailable_fresh_gpu_observation() {
+    let fixed = hex_api::CapacityResources {
+        cpu_milli: 1_000,
+        mem_bytes: 64 << 20,
+        disk_bytes: 0,
+    };
+    let cost = hex_api::RuntimeCost {
+        id: [71; 32],
+        floor: fixed,
+        ceiling: fixed,
+        quantum: hex_api::CapacityResources {
+            cpu_milli: 1,
+            mem_bytes: 1,
+            disk_bytes: 1,
+        },
+        overhead: hex_api::CapacityResources::default(),
+        guest_overhead: hex_api::CapacityResources::default(),
+    };
+    let key = hex_api::BackingKey {
+        pool: [72; 32],
+        generation: [73; 16],
+    };
+    let backing = hex_api::BackingOffer {
+        key,
+        cost,
+        phase: hex_api::BackingPhase::Draining,
+        devices: vec![hex_api::DeviceId {
+            kind: hex_api::DeviceKind::Gpu,
+            key: 7,
+        }],
+    };
+    let report = hex_api::Capacity {
+        id: "same-owner".into(),
+        total: fixed,
+        free: fixed,
+        cost: None,
+        devices: Vec::new(),
+        device_routes: Vec::new(),
+        backings: vec![backing],
+        routes: vec![hex_api::RouteOffer {
+            key: hex_api::RouteKey {
+                class: hex_api::Class::Firecracker,
+                image: hex_api::ImagePlatform {
+                    os: hex_api::ImageOs::Linux,
+                    arch: hex_api::ImageArch::Amd64,
+                },
+                execution: hex_api::Execution::Firecracker,
+                gpu: hex_api::GpuEligibility::Required,
+            },
+            cost: Some(cost),
+            backing: Some(key),
+        }],
+    };
+    report.check().unwrap();
+    let reports = vec![(hex_sim::model::Class::Firecracker, Some(report))];
+    let mut actions = BackingActions::from_reports(&reports).unwrap();
+    let unavailable = hex_api::BackendUnavailable::from_refusal(
+        hex_api::Class::Firecracker,
+        Refusal::Backing {
+            key,
+            cause: hex_api::LifecycleCause::Uncertain,
+        },
+    )
+    .unwrap();
+    actions.only_available(&reports, &[unavailable]).unwrap();
+    assert!(actions.prepared.is_empty() && actions.released.is_empty());
+    assert_eq!(actions.draining.len(), 1);
+    assert_eq!(actions.draining[0].0, hex_sim::model::Class::Firecracker);
+    assert_eq!(actions.draining[0].1.key, key);
+    assert_eq!(
+        actions.draining[0].1.devices,
+        vec![hex_api::DeviceId {
+            kind: hex_api::DeviceKind::Gpu,
+            key: 7
+        }]
+    );
+}
