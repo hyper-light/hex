@@ -1706,6 +1706,33 @@ impl Runtime for Node {
         if class == Class::Oci {
             capacity.devices = self.attachment_capacity()?;
         }
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => hex_api::ImageArch::Amd64,
+            "aarch64" => hex_api::ImageArch::Arm64,
+            _ => {
+                let reason = "architecture is outside Hex's supported native targets";
+                let mut why = String::new();
+                why.try_reserve_exact(reason.len())
+                    .map_err(|_| Refusal::Exhausted {
+                        what: "native architecture refusal bytes",
+                        bound: reason.len(),
+                    })?;
+                why.push_str(reason);
+                return Err(Refusal::Platform {
+                    what: "native image architecture",
+                    platform: std::env::consts::ARCH,
+                    why,
+                });
+            }
+        };
+        hex_runtime::devices::native_routes(
+            &mut capacity,
+            class,
+            hex_api::ImagePlatform {
+                os: hex_api::ImageOs::Linux,
+                arch,
+            },
+        )?;
         Ok(Some(capacity))
     }
 
@@ -1720,6 +1747,11 @@ impl Runtime for Node {
         spec.check()?;
         if let Some(backend) = self.backend(spec.backend_class()?)? {
             return backend.create(spec);
+        }
+        if spec.route.is_some() {
+            self.capacity(spec.class.class())?
+                .ok_or_else(|| backends::uncertain(&spec.id))?
+                .validate_route(&spec)?;
         }
         if !spec.devices.is_empty() && !matches!(&spec.class, ClassSpec::Oci(_)) {
             return Err(Refusal::Platform {

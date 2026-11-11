@@ -19,6 +19,55 @@ pub(super) struct Binding {
 }
 
 impl GuestRuntime {
+    /// Pure initialized-backend validation during the SAME owner's whole-record
+    /// preflight. The caller separately joins every backing/holder before any
+    /// native effect; this method reads no file, provider, capacity or process.
+    pub fn preflight_box(&self, record: &hex_core::record::BoxRecord) -> Result<(), Refusal> {
+        let spec = &record.spec;
+        route::guest_spec(spec)?;
+        match spec.route_execution() {
+            Some(Execution::ShardsShared) => {
+                let key = spec
+                    .route
+                    .and_then(|receipt| receipt.backing)
+                    .ok_or(super::books::uncertain(&spec.id)?)?;
+                let cost = self
+                    .runtime_cost
+                    .ok_or(super::books::uncertain(&spec.id)?)?;
+                if spec.class.class() != Class::Oci
+                    || !spec.devices.is_empty()
+                    || spec.allocation.is_some()
+                    || key.pool != self.pool_configuration(cost)?
+                    || self.shared_pool.get().is_some_and(|bound| *bound != key)
+                {
+                    return Err(super::books::uncertain(&spec.id)?);
+                }
+                Ok(())
+            }
+            Some(Execution::ShardsDedicated) => {
+                self.check_allocation(spec)?;
+                selected::Record::intent(record, &self.config)?;
+                if !spec.devices.is_empty() {
+                    // Catalog correspondence is configuration, not a fresh GPU
+                    // observation. The full native/report join is still required.
+                    self.catalog_physical(&spec.devices)?;
+                }
+                Ok(())
+            }
+            // Only an already charged exact dedicated legacy record is
+            // unambiguous here. A legacy shared VM cannot acquire a new grant.
+            None if spec.class.class() == Class::Shards || !spec.devices.is_empty() => {
+                self.check_allocation(spec)?;
+                selected::Record::intent(record, &self.config)?;
+                if !spec.devices.is_empty() {
+                    self.catalog_physical(&spec.devices)?;
+                }
+                Ok(())
+            }
+            Some(_) | None => Err(super::books::uncertain(&spec.id)?),
+        }
+    }
+
     /// Read-only route/profile validation for the SAME owner's retained-record
     /// preflight. This performs no GPU query, file cleanup, launch or adoption.
     pub fn preflight_backing(&self, record: &PoolRecord) -> Result<(), Refusal> {

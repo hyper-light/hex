@@ -272,11 +272,16 @@ impl Node {
                 }
                 let capacity = backend.capacity(class)?.ok_or_else(|| missing(class))?;
                 capacity.check()?;
-                if capacity.cost.is_none() {
+                if capacity.routes.is_empty() && capacity.cost.is_none()
+                    || !capacity.routes.is_empty()
+                        && !capacity
+                            .routes
+                            .iter()
+                            .any(|offer| offer.key.backend_class() == class)
+                {
                     return Err(missing(class));
                 }
-                // Pool identity names a resource envelope, not the physical-provider authority.
-                // Guest pools may differ; Books above binds their physical claims to this Node.
+                // Per-route cost/backing validation above replaces the legacy class-wide cost.
             }
         }
         if let (Some(root), Some(lease)) = (vm_root.as_ref(), lease) {

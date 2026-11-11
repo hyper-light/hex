@@ -19,10 +19,19 @@ pub use native::FirecrackerRuntime;
 pub use crate::devices::{Books, Transaction};
 use hex_api::Refusal;
 
-fn invalid(why: impl Into<String>) -> Refusal {
+fn invalid(why: impl AsRef<str>) -> Refusal {
+    let why = why.as_ref();
+    let mut text = String::new();
+    if text.try_reserve_exact(why.len()).is_err() {
+        return Refusal::Exhausted {
+            what: "Firecracker refusal bytes",
+            bound: why.len(),
+        };
+    }
+    text.push_str(why);
     Refusal::Invalid {
         what: "Firecracker backend",
-        why: why.into(),
+        why: text,
     }
 }
 

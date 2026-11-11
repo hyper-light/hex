@@ -153,6 +153,7 @@ fn collect_offers(
                                     report.as_ref().is_some_and(|report| {
                                         report.backings.iter().any(|backing| {
                                             backing.key == *key
+                                                && backing.devices.binary_search(&offer.id).is_ok()
                                                 && matches!(
                                                     backing.phase,
                                                     hex_api::BackingPhase::Granted

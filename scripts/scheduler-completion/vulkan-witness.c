@@ -225,9 +225,11 @@ static int compute(const struct inputs *args, struct owned *own, VkPhysicalDevic
                    const VkPhysicalDeviceProperties *properties) {
     VkResult result;
 #define VK_DO(phase, call) do { result = (call); if (result != VK_SUCCESS) return fail(phase, result); } while (0)
+    /* w > SIZE_MAX / e iff e > SIZE_MAX / w for positive w. The zero
+     * term preserves the original bound's zero-byte result. */
     if (args->words > properties->limits.maxComputeWorkGroupCount[0] ||
         (uint64_t)args->words * sizeof(uint32_t) > properties->limits.maxStorageBufferRange ||
-        (uint64_t)args->words > SIZE_MAX / sizeof(uint32_t)) return fail("work_exceeds_device_limits", 0);
+        (args->words && sizeof(uint32_t) > SIZE_MAX / args->words)) return fail("work_exceeds_device_limits", 0);
     uint32_t queue_count = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physical, &queue_count, NULL);
     if (!queue_count || queue_count > args->max_items) return fail("queue_budget", 0);

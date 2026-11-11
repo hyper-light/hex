@@ -233,6 +233,16 @@ impl Books for Owner {
     }
 }
 
+// These two controls must reach the native model callback. Its real prepared
+// socket uses the platform's 103-byte minimum sun_path bound; a cohort's long
+// TMPDIR is not a valid socket fixture. TempDir still owns/removes this directory.
+fn socket_fixture() -> tempfile::TempDir {
+    #[cfg(unix)]
+    return tempfile::tempdir_in("/tmp").unwrap();
+    #[cfg(not(unix))]
+    tempfile::tempdir().unwrap()
+}
+
 fn configured(path: &Path) -> (GuestRuntime, Arc<Owner>) {
     let mut config = super::super::tests::config();
     config.binary = path.join("shards");
@@ -326,7 +336,7 @@ fn shared_retained_preflight_rejects_replaced_profile_key_or_generation_before_e
 
 #[test]
 fn interrupted_shared_launch_keeps_the_exact_charge_and_never_reboots_an_intent() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = socket_fixture();
     let (runtime, owner) = configured(dir.path());
     let offer = runtime.prepare_backing().unwrap();
     let mut wrong = grant(&offer);
@@ -409,7 +419,7 @@ fn shared_workload_reference_refuses_release_before_any_native_stop() {
 
 #[test]
 fn ended_shared_scope_allows_inner_cleanup_while_the_original_grant_stays_charged() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = socket_fixture();
     let (runtime, owner) = configured(dir.path());
     let offer = runtime.prepare_backing().unwrap();
     assert!(runtime.initialize_backing(grant(&offer)).is_err());

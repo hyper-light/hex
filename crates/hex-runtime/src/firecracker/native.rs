@@ -75,13 +75,6 @@ impl FirecrackerRuntime {
                 fs::set_permissions(&config.state_dir, fs::Permissions::from_mode(0o700))
             })
             .map_err(|e| Refusal::os("opening private Firecracker state", e))?;
-        for entry in catalog
-            .entries()
-            .iter()
-            .filter(|entry| entry.binding(Route::Vfio).is_some())
-        {
-            vfio::validate(entry)?;
-        }
         Ok(Self {
             config,
             catalog,
@@ -379,6 +372,7 @@ impl FirecrackerRuntime {
         };
         guest_spec.class = ClassSpec::Oci(workload);
         guest_spec.allocation = None;
+        guest_spec.route = None;
         let link: Arc<dyn Link> = Arc::new(transport::Endpoint {
             path: copy_path(&paths.vsock)?,
             timeout: self.config.operation_timeout,
@@ -528,6 +522,30 @@ impl FirecrackerRuntime {
         })
     }
 
+    /// Pure retained-configuration check for the common all-record preflight. No paths, probes,
+    /// protocol clients, native receipts or current capacity are opened here.
+    pub fn preflight_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        record.spec.check()?;
+        self.config.check()?;
+        if record.spec.backend_class()? != Class::Firecracker
+            || !matches!(record.spec.class, ClassSpec::Firecracker(_))
+            || record.native_scope.is_none()
+        {
+            return Err(uncertain(&record.spec.id));
+        }
+        self.config
+            .guest(&record.spec)
+            .map_err(|_| uncertain(&record.spec.id))?;
+        self.config
+            .machine_memory(&record.spec)
+            .map_err(|_| uncertain(&record.spec.id))?;
+        let paths = self.paths(record)?;
+        if record.dirs.iter().any(|owned| owned != &paths.dir) {
+            return Err(uncertain(&record.spec.id));
+        }
+        Ok(())
+    }
+
     pub fn recover(&self) -> Result<(), Refusal> {
         for (id, record) in self.authority()?.records()? {
             let record = record.map_err(|_| uncertain(&id))?;
@@ -594,8 +612,10 @@ impl Runtime for FirecrackerRuntime {
         } else {
             Vec::new()
         };
-        capacity.id = self.config.pool_id.clone();
-        capacity.cost = Some(self.config.cost);
+        capacity.cost = None;
+        capacity.routes.clear();
+        capacity.device_routes.clear();
+        capacity.backings.clear();
         capacity.devices.clear();
         capacity
             .devices
@@ -607,7 +627,6 @@ impl Runtime for FirecrackerRuntime {
             .iter()
             .filter(|entry| entry.binding(Route::Vfio).is_some())
         {
-            vfio::validate(entry)?;
             if entry.info.id.kind == DeviceKind::Gpu {
                 // An administrator's catalog is not current VRAM/load evidence. Prebound VFIO
                 // may hide host NVML: only the same initialized facts provider may supply this
@@ -621,12 +640,68 @@ impl Runtime for FirecrackerRuntime {
                     ));
                 }
             }
+            vfio::validate(entry)?;
             capacity.devices.push(entry.report(self.catalog.holder(
                 entry.info.id,
                 &records,
                 &pools,
             )?)?);
         }
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => hex_api::ImageArch::Amd64,
+            "aarch64" => hex_api::ImageArch::Arm64,
+            _ => {
+                return Err(invalid(
+                    "native architecture is outside the supported Firecracker targets",
+                ));
+            }
+        };
+        let cpu = hex_api::RouteOffer {
+            key: hex_api::RouteKey {
+                class: Class::Firecracker,
+                image: hex_api::ImagePlatform {
+                    os: hex_api::ImageOs::Linux,
+                    arch,
+                },
+                execution: hex_api::Execution::Firecracker,
+                gpu: hex_api::GpuEligibility::None,
+            },
+            cost: Some(self.config.cost),
+            backing: None,
+        };
+        capacity
+            .routes
+            .try_reserve_exact(2)
+            .map_err(|_| exhausted("Firecracker initialized routes", 2))?;
+        capacity
+            .device_routes
+            .try_reserve_exact(capacity.devices.len())
+            .map_err(|_| exhausted("Firecracker device eligibility", capacity.devices.len()))?;
+        capacity.routes.push(cpu);
+        let gpu = capacity
+            .devices
+            .iter()
+            .any(|device| device.id.kind == DeviceKind::Gpu);
+        if gpu {
+            capacity.routes.push(hex_api::RouteOffer {
+                key: hex_api::RouteKey {
+                    gpu: hex_api::GpuEligibility::Required,
+                    ..cpu.key
+                },
+                ..cpu
+            });
+        }
+        capacity
+            .device_routes
+            .extend(capacity.devices.iter().map(|device| {
+                if device.id.kind == DeviceKind::Gpu {
+                    2
+                } else if gpu {
+                    3
+                } else {
+                    1
+                }
+            }));
         capacity.check()?;
         Ok(Some(capacity))
     }
@@ -637,6 +712,11 @@ impl Runtime for FirecrackerRuntime {
             return Err(invalid(
                 "endpoint only executes explicit Firecracker payloads",
             ));
+        }
+        if spec.route.is_some() {
+            self.capacity(Class::Firecracker)?
+                .ok_or_else(|| invalid("Firecracker endpoint has no initialized capacity"))?
+                .validate_route(&spec)?;
         }
         let keys = self.catalog.conflict_ids(&spec.devices)?;
         let id = spec.id.try_clone()?;

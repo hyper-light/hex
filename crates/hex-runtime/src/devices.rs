@@ -10,6 +10,69 @@ use std::time::Duration;
 use hex_api::{BoxId, BoxSpec, DeviceId, DeviceInfo, DeviceKind, Refusal};
 use hex_core::record::{BoxRecord, NativeRecord, PoolRecord};
 
+/// The already initialized native adapter supplies its actual payload platform. This helper
+/// describes native execution only; it never substitutes a guest for an OCI implementation.
+pub fn native_routes(
+    capacity: &mut hex_api::Capacity,
+    form: hex_api::Class,
+    image: hex_api::ImagePlatform,
+) -> Result<(), Refusal> {
+    capacity.check()?;
+    if !matches!(form, hex_api::Class::Process | hex_api::Class::Oci)
+        || capacity.cost.is_some()
+        || !capacity.routes.is_empty()
+        || !capacity.device_routes.is_empty()
+        || !capacity.backings.is_empty()
+    {
+        return Err(invalid(
+            "native route producer received another execution topology",
+        ));
+    }
+    let process = hex_api::RouteOffer {
+        key: hex_api::RouteKey {
+            class: hex_api::Class::Process,
+            image,
+            execution: hex_api::Execution::Native,
+            gpu: hex_api::GpuEligibility::None,
+        },
+        cost: None,
+        backing: None,
+    };
+    let oci = hex_api::RouteOffer {
+        key: hex_api::RouteKey {
+            class: hex_api::Class::Oci,
+            image,
+            execution: hex_api::Execution::Native,
+            gpu: hex_api::GpuEligibility::Any,
+        },
+        cost: None,
+        backing: None,
+    };
+    process.check()?;
+    if form == hex_api::Class::Oci {
+        oci.check()?;
+    }
+    capacity
+        .routes
+        .try_reserve_exact(2)
+        .map_err(|_| allocation(2))?;
+    capacity
+        .device_routes
+        .try_reserve_exact(capacity.devices.len())
+        .map_err(|_| allocation(capacity.devices.len()))?;
+    capacity.cost = None;
+    capacity.routes.push(process);
+    if form == hex_api::Class::Oci {
+        capacity.routes.push(oci);
+    }
+    // Process never acquires physical devices; bit1 names the actual native OCI route above.
+    capacity.device_routes.resize(
+        capacity.devices.len(),
+        if form == hex_api::Class::Oci { 2 } else { 0 },
+    );
+    capacity.check()
+}
+
 /// A trusted administrator binds one physical resource to an existing native adapter.
 /// CDI hooks/paths and HCS location paths are backend configuration, never peer payloads.
 #[derive(Debug)]
@@ -895,6 +958,62 @@ fn read_bounded(path: &Path, bound: usize) -> Result<Vec<u8>, Refusal> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod native_route_tests {
+    use super::*;
+
+    #[test]
+    fn native_container_and_process_keep_the_actual_platform_and_physical_mask() {
+        let room = hex_api::CapacityResources {
+            cpu_milli: 4_000,
+            mem_bytes: 4 << 30,
+            disk_bytes: 0,
+        };
+        for os in [hex_api::ImageOs::Linux, hex_api::ImageOs::Windows] {
+            let image = hex_api::ImagePlatform {
+                os,
+                arch: hex_api::ImageArch::Arm64,
+            };
+            let mut capacity = hex_api::Capacity {
+                id: "actual native fixture".into(),
+                total: room,
+                free: room,
+                devices: vec![DeviceInfo {
+                    id: DeviceId {
+                        kind: DeviceKind::Gpu,
+                        key: 1,
+                    },
+                    model: "measured fixture".into(),
+                    size: 1024,
+                    holder: None,
+                }],
+                cost: None,
+                routes: Vec::new(),
+                device_routes: Vec::new(),
+                backings: Vec::new(),
+            };
+            native_routes(&mut capacity, hex_api::Class::Oci, image).unwrap();
+            assert_eq!(capacity.device_routes, vec![2]);
+            assert!(capacity.routes.iter().all(|offer| offer.key.image == image
+                && offer.key.execution == hex_api::Execution::Native));
+            assert_eq!(
+                capacity.routes.first().unwrap().key.class,
+                hex_api::Class::Process
+            );
+            assert_eq!(
+                capacity.routes.first().unwrap().key.gpu,
+                hex_api::GpuEligibility::None
+            );
+            assert_eq!(
+                capacity.routes.get(1).unwrap().key.class,
+                hex_api::Class::Oci
+            );
+            assert_eq!(capacity.total, room);
+            assert!(native_routes(&mut capacity, hex_api::Class::Oci, image).is_err());
+        }
+    }
+}
 
 #[cfg(test)]
 mod authority_tests {
