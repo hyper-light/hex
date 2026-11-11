@@ -136,6 +136,7 @@ pub(super) fn plan(catalog: &Catalog, ids: &[DeviceId]) -> Result<Vec<Passthroug
             devices.push(Passthrough {
                 id: function_id(name)?,
                 sbdf: text(name)?,
+                graphics: graphics(class),
             });
         }
         if count == 0 {
