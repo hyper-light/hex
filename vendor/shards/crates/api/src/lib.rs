@@ -679,7 +679,9 @@ impl std::fmt::Display for Refusal {
 impl std::error::Error for Refusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Process { failure, .. } | Self::Scope(failure) => Some(failure),
+            // Its Display already ends with the failure, which has no source of its own.
+            Self::Process { failure, .. } => std::error::Error::source(failure),
+            Self::Scope(failure) => Some(failure),
             Self::Borrowed { failure, .. } => Some(failure),
             Self::Connect { failure, .. } => Some(failure),
             _ => None,
