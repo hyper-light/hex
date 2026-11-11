@@ -1,0 +1,15 @@
+{
+  "requirement": "AC-T7.4.1/R01",
+  "source_revision": "779170ccd5635bd9a82f026ff4db2131cd08b3eb",
+  "source_base": "4f0922ae79a9e3fa500a2ec021edceeff05fd926",
+  "files": {
+    "crates/hex-sim/src/sim.rs": "42dcfe682278796e8b3ed197c7d1713945421308d45e7309dca2c8afb13448c2",
+    "crates/hex-sim/src/federation.rs": "8b2139219921505b21f4596fbbe39adc054145b27b7e87ff089f062ac0863d58"
+  },
+  "dependencies": [
+    "2d2a571a NodeSpec.try_clone, joined in fcc1766f",
+    "8a20dcaf outside test borrowers"
+  ],
+  "copy_contract": "Preserve all layout/node facts, same shared routes and retained FitIndex state through fallible copies. Remove only unused live-state Clone derives.",
+  "tests_executed": 0
+}
