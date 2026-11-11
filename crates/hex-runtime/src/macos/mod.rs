@@ -15,6 +15,9 @@ pub mod proc;
 pub mod process;
 pub mod sys;
 
+#[cfg(feature = "native-trusted-entry-measurement")]
+pub use process::trusted_entry;
+
 #[cfg(test)]
 mod tests;
 

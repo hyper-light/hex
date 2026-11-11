@@ -1,0 +1,60 @@
+{
+  "coordinator_policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "root_before": "f522a9a4e14a8654567fb19aa7ed85471910d9dd",
+  "named_inputs": [
+    {
+      "commit": "cfd222a8971295fdb90409a906d0fecda20d1e3d",
+      "path": "crates/hex-runtime/src/macos/sys.rs",
+      "bytes": 79612,
+      "sha256": "f36ac0c28b97225af83f8699659de8c47daeda875ea3e2b3fb98b7324f298c3e"
+    },
+    {
+      "commit": "cfd222a8971295fdb90409a906d0fecda20d1e3d",
+      "path": "docs/research/measurements/hex-complete-lifecycle/trusted-entry-native-component.json",
+      "bytes": 9892,
+      "sha256": "8b55fd5922daf2c6fd965b65cffcde160bd8e60e80e6cd1c681ef4e8e9b1d06d"
+    },
+    {
+      "commit": "cfd222a8971295fdb90409a906d0fecda20d1e3d",
+      "path": "docs/research/measurements/hex-complete-lifecycle/trusted-entry-native-component.md",
+      "bytes": 5740,
+      "sha256": "c5050f453b89848dd006069588d20db7faf1ed136117bcfc0958e6bc85a91467"
+    },
+    {
+      "commit": "04ece3387196d3d93ef7ee769282e3981077f5cc",
+      "path": "crates/hex-runtime/src/macos/process/trusted_entry.rs",
+      "bytes": 48518,
+      "sha256": "976902dddf4a5b4dfe218344ecd655ff631b960dd0f9a2d22a26a6475fd80ff0"
+    },
+    {
+      "commit": "04ece3387196d3d93ef7ee769282e3981077f5cc",
+      "path": "crates/hex-runtime/src/macos/process/trusted_entry/tests.rs",
+      "bytes": 7051,
+      "sha256": "548f8d21161e0add428dcfbf62e0960b8d13e124cab3bda4be55f258686869f3"
+    },
+    {
+      "commit": "04ece3387196d3d93ef7ee769282e3981077f5cc",
+      "path": "docs/research/measurements/hex-complete-lifecycle/trusted-entry-measurement-source.json",
+      "bytes": 6219,
+      "sha256": "f15b0eb0bc9ab25e43a5b839e5730614fafc7f5abb7fc9e17738245a800590c5"
+    },
+    {
+      "commit": "04ece3387196d3d93ef7ee769282e3981077f5cc",
+      "path": "docs/research/measurements/hex-complete-lifecycle/trusted-entry-measurement-source.md",
+      "bytes": 13364,
+      "sha256": "4500aee7347ed84b1957a950e7f5f08243f0a35f8bac6e1ea4ec832c5fadc553"
+    }
+  ],
+  "full_leaf_and_five_controls_read": true,
+  "native_component_full_review": "previous ROOT full sys delta review retained, guide/manifest reread at this intake",
+  "compile_pure_strict_native": "UNRUN",
+  "ordinary_mac_sys_before_unchanged_since": "786775e3b119c5163d49aa12662c0207cb25cc29",
+  "review_limits": [
+    "No full2ef/fab helper intake or source registration",
+    "Foreign image is never CONT; known direct controller cleanup only",
+    "Raw report overflow consumes a chunk before journal retention in current drain; source finding, no runtime reproduction/remedy yet",
+    "No pre-main/image execution seal/unknown descendant/GPU/native resource or wholeScope Released proof",
+    "Native actual input and resource-floor/calibration review still required; no native dispatch from this intake"
+  ]
+}

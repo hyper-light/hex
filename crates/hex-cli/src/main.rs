@@ -4,6 +4,22 @@ use std::io::Write;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    #[cfg(all(target_os = "macos", feature = "native-trusted-entry-measurement"))]
+    match hex_runtime::macos::trusted_entry::dispatch() {
+        Ok(Some(code)) => return ExitCode::from(code),
+        Ok(None) => {}
+        Err(failure) => {
+            if let Err(write_error) =
+                writeln!(std::io::stderr().lock(), "TRUSTED_ENTRY_ERROR {failure}")
+            {
+                let _ = writeln!(
+                    std::io::stdout().lock(),
+                    "TRUSTED_ENTRY_ERROR {failure}; DIAGNOSTIC_WRITE {write_error}"
+                );
+            }
+            return ExitCode::FAILURE;
+        }
+    }
     let args: Vec<Option<String>> = std::env::args_os()
         .skip(1)
         .map(|a| a.into_string().ok())

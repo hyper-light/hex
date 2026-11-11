@@ -563,71 +563,7 @@ enum Start {
 }
 
 fn spawn_using(s: &Spawn, pgroup: i32, clamp: Clamp, start: Start) -> io::Result<i32> {
-    let mut attr = Attr(std::ptr::null_mut());
-    // SAFETY: posix_spawnattr_init initializes the attribute object it is given; `attr` destroys it once.
-    errno(unsafe { libc::posix_spawnattr_init(&raw mut attr.0) })?;
-    let mut flags = libc::POSIX_SPAWN_SETPGROUP
-        | libc::POSIX_SPAWN_SETSIGMASK
-        | libc::POSIX_SPAWN_SETSIGDEF
-        | libc::POSIX_SPAWN_CLOEXEC_DEFAULT;
-    if matches!(start, Start::Suspended) {
-        // XNU kern_exec.c applies START_SUSPENDED before returning the new thread to user mode.
-        // This is Apple's public spawn.h flag, not a signal sent after the child starts running.
-        flags |= libc::POSIX_SPAWN_START_SUSPENDED;
-    }
-    let flags =
-        i16::try_from(flags).map_err(|_| io::Error::other("posix_spawn flags past a short"))?;
-    let mut none: libc::sigset_t = 0;
-    let mut all: libc::sigset_t = 0;
-    // SAFETY: each call takes the attribute object initialized above and reads or writes only the signal
-    // sets given, which outlive the calls.
-    unsafe {
-        errno(libc::posix_spawnattr_setflags(&raw mut attr.0, flags))?;
-        errno(libc::posix_spawnattr_setpgroup(&raw mut attr.0, pgroup))?;
-        errno(libc::sigemptyset(&raw mut none))?;
-        errno(libc::sigfillset(&raw mut all))?;
-        errno(libc::posix_spawnattr_setsigmask(
-            &raw mut attr.0,
-            &raw const none,
-        ))?;
-        errno(libc::posix_spawnattr_setsigdefault(
-            &raw mut attr.0,
-            &raw const all,
-        ))?;
-        if clamp == Clamp::Background {
-            errno(posix_spawnattr_set_qos_class_np(
-                &raw mut attr.0,
-                QOS_CLASS_BACKGROUND,
-            ))?;
-        }
-    }
-    // Arm the box's whole memory bound as a fatal per-process cap, so the kernel bounds this member with
-    // no overshoot (native plan step 1's `_ext` backstop). The watcher tracks it as armed.
-    if let Some(mib) = s.jetsam_mib {
-        set_jetsam_cap(&raw mut attr.0, mib)?;
-    }
-    let mut actions = Actions(std::ptr::null_mut());
-    // SAFETY: initializes the file-actions object it is given; `actions` destroys it once.
-    errno(unsafe { libc::posix_spawn_file_actions_init(&raw mut actions.0) })?;
-    for (fd, target) in s.stdio.iter().zip(0..) {
-        // SAFETY: records a dup2 of a descriptor open for the whole spawn (`s` owns it) onto `target`.
-        errno(unsafe {
-            libc::posix_spawn_file_actions_adddup2(
-                &raw mut actions.0,
-                fd.as_fd().as_raw_fd(),
-                target,
-            )
-        })?;
-    }
-    if let Some(cwd) = &s.cwd {
-        // SAFETY: records a chdir to a NUL-terminated path the action list copies. The `_np` form is the one
-        // every macOS from 10.15 has; macOS 26 adds the unsuffixed name.
-        errno(unsafe {
-            libc::posix_spawn_file_actions_addchdir_np(&raw mut actions.0, cwd.as_ptr())
-        })?;
-    }
-    let argv = nul_terminated(&s.argv)?;
-    let envp = nul_terminated(&s.envp)?;
+    let prepared = PreparedSpawn::new(s, pgroup, clamp, start)?;
     let mut refused = None;
     for path in &s.paths {
         let mut pid: libc::pid_t = 0;
@@ -637,10 +573,10 @@ fn spawn_using(s: &Spawn, pgroup: i32, clamp: Clamp, start: Start) -> io::Result
             libc::posix_spawn(
                 &raw mut pid,
                 path.as_ptr(),
-                &raw const actions.0,
-                &raw const attr.0,
-                argv.as_ptr(),
-                envp.as_ptr(),
+                &raw const prepared.actions.0,
+                &raw const prepared.attr.0,
+                prepared.argv.as_ptr(),
+                prepared.envp.as_ptr(),
             )
         };
         match r {
@@ -653,6 +589,91 @@ fn spawn_using(s: &Spawn, pgroup: i32, clamp: Clamp, start: Start) -> io::Result
     Err(io::Error::from_raw_os_error(
         refused.unwrap_or(libc::ENOENT),
     ))
+}
+
+/// One checked attribute/action preparation serves ordinary spawn and the opt-in measurement.
+struct PreparedSpawn {
+    // Preserve the old local teardown order: pointer vectors, file actions, attributes.
+    envp: Vec<*mut c_char>,
+    argv: Vec<*mut c_char>,
+    actions: Actions,
+    attr: Attr,
+}
+
+impl PreparedSpawn {
+    fn new(s: &Spawn, pgroup: i32, clamp: Clamp, start: Start) -> io::Result<Self> {
+        let mut attr = Attr(std::ptr::null_mut());
+        // SAFETY: posix_spawnattr_init initializes the attribute object it is given; `attr` destroys it once.
+        errno(unsafe { libc::posix_spawnattr_init(&raw mut attr.0) })?;
+        let mut flags = libc::POSIX_SPAWN_SETPGROUP
+            | libc::POSIX_SPAWN_SETSIGMASK
+            | libc::POSIX_SPAWN_SETSIGDEF
+            | libc::POSIX_SPAWN_CLOEXEC_DEFAULT;
+        if matches!(start, Start::Suspended) {
+            // XNU kern_exec.c applies START_SUSPENDED before returning the new thread to user mode.
+            // This is Apple's public spawn.h flag, not a signal sent after the child starts running.
+            flags |= libc::POSIX_SPAWN_START_SUSPENDED;
+        }
+        let flags =
+            i16::try_from(flags).map_err(|_| io::Error::other("posix_spawn flags past a short"))?;
+        let mut none: libc::sigset_t = 0;
+        let mut all: libc::sigset_t = 0;
+        // SAFETY: each call takes the attribute object initialized above and reads or writes only the signal
+        // sets given, which outlive the calls.
+        unsafe {
+            errno(libc::posix_spawnattr_setflags(&raw mut attr.0, flags))?;
+            errno(libc::posix_spawnattr_setpgroup(&raw mut attr.0, pgroup))?;
+            errno(libc::sigemptyset(&raw mut none))?;
+            errno(libc::sigfillset(&raw mut all))?;
+            errno(libc::posix_spawnattr_setsigmask(
+                &raw mut attr.0,
+                &raw const none,
+            ))?;
+            errno(libc::posix_spawnattr_setsigdefault(
+                &raw mut attr.0,
+                &raw const all,
+            ))?;
+            if clamp == Clamp::Background {
+                errno(posix_spawnattr_set_qos_class_np(
+                    &raw mut attr.0,
+                    QOS_CLASS_BACKGROUND,
+                ))?;
+            }
+        }
+        // Arm the box's whole memory bound as a fatal per-process cap, so the kernel bounds this member with
+        // no overshoot (native plan step 1's `_ext` backstop). The watcher tracks it as armed.
+        if let Some(mib) = s.jetsam_mib {
+            set_jetsam_cap(&raw mut attr.0, mib)?;
+        }
+        let mut actions = Actions(std::ptr::null_mut());
+        // SAFETY: initializes the file-actions object it is given; `actions` destroys it once.
+        errno(unsafe { libc::posix_spawn_file_actions_init(&raw mut actions.0) })?;
+        for (fd, target) in s.stdio.iter().zip(0..) {
+            // SAFETY: records a dup2 of a descriptor open for the whole spawn (`s` owns it) onto `target`.
+            errno(unsafe {
+                libc::posix_spawn_file_actions_adddup2(
+                    &raw mut actions.0,
+                    fd.as_fd().as_raw_fd(),
+                    target,
+                )
+            })?;
+        }
+        if let Some(cwd) = &s.cwd {
+            // SAFETY: records a chdir to a NUL-terminated path the action list copies. The `_np` form is the one
+            // every macOS from 10.15 has; macOS 26 adds the unsuffixed name.
+            errno(unsafe {
+                libc::posix_spawn_file_actions_addchdir_np(&raw mut actions.0, cwd.as_ptr())
+            })?;
+        }
+        let argv = nul_terminated(&s.argv)?;
+        let envp = nul_terminated(&s.envp)?;
+        Ok(Self {
+            attr,
+            actions,
+            argv,
+            envp,
+        })
+    }
 }
 
 /// `strings` as the NULL-terminated list of pointers exec takes; it borrows them.
@@ -1022,5 +1043,801 @@ fn kevent(
         fflags,
         data,
         udata: std::ptr::without_provenance_mut(usize::try_from(tag).unwrap_or(usize::MAX)),
+    }
+}
+
+/// Opt-in trusted-entry measurement primitives. No ordinary runtime path calls these.
+#[cfg(feature = "native-trusted-entry-measurement")]
+pub(crate) mod trusted_entry_native {
+    use std::ffi::{OsString, c_char, c_int};
+    use std::io;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStringExt as _;
+    use std::time::{Duration, Instant};
+
+    use super::{Clamp, Kqueue, PreparedSpawn, Spawn, Start, kevent, rusage};
+
+    #[derive(Debug, thiserror::Error)]
+    pub(crate) enum Error {
+        #[error("{0}")]
+        Invalid(&'static str),
+        #[error("{operation}: {source}")]
+        Io {
+            operation: &'static str,
+            #[source]
+            source: io::Error,
+        },
+        #[error(transparent)]
+        Clock(#[from] UptimeFailure),
+        #[error("the original native expiry was reached")]
+        Deadline,
+    }
+    fn io(operation: &'static str, source: io::Error) -> Error {
+        Error::Io { operation, source }
+    }
+    fn count(argc: c_int, maximum: usize) -> Result<usize, Error> {
+        let count = usize::try_from(argc).map_err(|_| Error::Invalid("negative argc"))?;
+        let pointers = count
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(size_of::<*const c_char>()))
+            .ok_or(Error::Invalid("argv pointer width overflow"))?;
+        if count == 0 || pointers > maximum || maximum > isize::MAX.unsigned_abs() {
+            return Err(Error::Invalid("argc exceeds the native exec budget"));
+        }
+        Ok(count)
+    }
+    // The process loader supplies a NUL-terminated argument. Stop at its first NUL;
+    // never scan beyond the remaining native exec budget or after that terminator.
+    unsafe fn argument<'a>(pointer: *const c_char, maximum: usize) -> Result<&'a [u8], Error> {
+        if pointer.is_null() {
+            return Err(Error::Invalid("NULL argument before argc"));
+        }
+        for at in 0..maximum {
+            // SAFETY: called only on the loader's live initial argv, before any application
+            // argument mutation. Its argument is readable up to/including its first NUL;
+            // the loop stops there and the caller bounds every offset by isize::MAX.
+            if unsafe { pointer.add(at).read() } == 0 {
+                // SAFETY: the preceding bounded reads establish these exact initialized bytes.
+                return Ok(unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), at) });
+            }
+        }
+        Err(Error::Invalid(
+            "argument has no NUL within the native exec budget",
+        ))
+    }
+    /// Called by the FIRST main branch, before std::env::args_os copies every argument.
+    /// A nonmatching selector performs no argument allocation. These are the same
+    /// initialized dyld accessors pinned Rust uses; no borrowed pointer leaves this call.
+    pub(crate) fn arguments(selector: &[u8]) -> Result<Option<Vec<OsString>>, Error> {
+        let maximum = super::arg_max().map_err(|e| io("reading native ARG_MAX", e))?;
+        // SAFETY: libdyld initializes both globals before main. This first dispatch does
+        // not mutate them and precedes every other application/library argument reader.
+        let (argc_ptr, argv_ptr) = unsafe { (libc::_NSGetArgc(), libc::_NSGetArgv()) };
+        if argc_ptr.is_null()
+            || !argc_ptr.is_aligned()
+            || argv_ptr.is_null()
+            || !argv_ptr.is_aligned()
+        {
+            return Err(Error::Invalid("invalid dyld argc/argv globals"));
+        }
+        // SAFETY: the checked globals have their declared initialized scalar/pointer extent.
+        let (argc, argv) = unsafe { (argc_ptr.read(), argv_ptr.read()) };
+        let argc = count(argc, maximum)?;
+        if argc < 2 {
+            return Ok(None);
+        }
+        if argv.is_null() || !argv.is_aligned() {
+            return Err(Error::Invalid("invalid initial argv"));
+        }
+        // SAFETY: loader argc was checked above; argv has argc initialized pointers plus NUL.
+        let first = unsafe { argument(argv.add(1).read(), maximum)? };
+        if first != selector {
+            return Ok(None);
+        }
+        let pointers = argc
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(size_of::<*const c_char>()))
+            .ok_or(Error::Invalid("argv pointer width overflow"))?;
+        let mut left = maximum
+            .checked_sub(pointers)
+            .ok_or(Error::Invalid("argv budget"))?;
+        let mut result = Vec::new();
+        result
+            .try_reserve_exact(argc)
+            .map_err(|_| Error::Invalid("argv storage unavailable"))?;
+        for at in 0..argc {
+            // SAFETY: same immutable loader argv and checked count; argument scans stop at NUL.
+            let bytes = unsafe { argument(argv.add(at).read(), left)? };
+            let consumed = bytes
+                .len()
+                .checked_add(1)
+                .ok_or(Error::Invalid("argument width"))?;
+            left = left
+                .checked_sub(consumed)
+                .ok_or(Error::Invalid("argv byte budget"))?;
+            let mut owned = Vec::new();
+            owned
+                .try_reserve_exact(bytes.len())
+                .map_err(|_| Error::Invalid("argument storage unavailable"))?;
+            owned.extend_from_slice(bytes);
+            result.push(OsString::from_vec(owned));
+        }
+        // SAFETY: loader argv has one further pointer; no pointed-to bytes are read here.
+        if !unsafe { argv.add(argc).read() }.is_null() {
+            return Err(Error::Invalid("argv lacks final NULL"));
+        }
+        Ok(Some(result))
+    }
+    pub(crate) fn expiry(deadline: Instant) -> Result<Duration, Error> {
+        let raw = uptime_raw()?; // MUST precede the Instant remaining sample.
+        conservative_expiry(raw, deadline.checked_duration_since(Instant::now()))
+    }
+    fn conservative_expiry(raw: Duration, left: Option<Duration>) -> Result<Duration, Error> {
+        let left = left
+            .filter(|left| !left.is_zero() && *left != Duration::MAX)
+            .ok_or(Error::Deadline)?;
+        raw.checked_add(left)
+            .ok_or(Error::Invalid("native expiry overflow"))
+    }
+    pub(crate) fn remaining(expiry: Duration) -> Result<Duration, Error> {
+        expiry
+            .checked_sub(uptime_raw()?)
+            .filter(|left| !left.is_zero())
+            .ok_or(Error::Deadline)
+    }
+    /// Duplicate only existing stdio, with separate descriptor flags. No parent/global
+    /// inheritability is changed; partial array construction closes earlier owned copies.
+    pub(crate) fn stdio() -> Result<[OwnedFd; 3], Error> {
+        fn copy(raw: c_int) -> Result<OwnedFd, Error> {
+            // SAFETY: these are the three initial stdio descriptors supplied by the parent.
+            // F_DUPFD_CLOEXEC returns a fresh descriptor without mutating the source flags.
+            let fd = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, 3) };
+            if fd < 0 {
+                return Err(io("duplicating probe stdio", io::Error::last_os_error()));
+            }
+            // SAFETY: this successful fcntl transferred exactly one new, exclusively owned fd.
+            Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+        }
+        Ok([copy(0)?, copy(1)?, copy(2)?])
+    }
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct FdObservation {
+        pub fd: c_int,
+        pub before: c_int,
+        pub after: c_int,
+    }
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct Limits {
+        pub soft: u64,
+        pub hard: u64,
+        pub fds: [FdObservation; 3],
+    }
+    /// Prepared solely inside an ordinarily execed trusted entry. Raw pointers borrow
+    /// this entry's Spawn; neither pointers nor opaque spawn objects cross process exec.
+    pub(crate) struct Setexec<'a> {
+        spawn: &'a Spawn,
+        prepared: PreparedSpawn,
+    }
+    impl<'a> Setexec<'a> {
+        pub(crate) fn new(spawn: &'a Spawn, group: i32, clamp: Clamp) -> Result<Self, Error> {
+            if spawn.paths.len() != 1
+                || spawn
+                    .paths
+                    .first()
+                    .is_none_or(|p| !p.as_bytes().starts_with(b"/"))
+            {
+                return Err(Error::Invalid(
+                    "SETEXEC requires one explicit absolute image",
+                ));
+            }
+            let mut prepared = PreparedSpawn::new(spawn, group, clamp, Start::Suspended)
+                .map_err(|e| io("preparing native held SETEXEC", e))?;
+            let mut flags: i16 = 0;
+            // SAFETY: both native objects were initialized by the shared checked preparation;
+            // the getter writes one short, and the setter copies that short into this owned attr.
+            super::errno(unsafe {
+                libc::posix_spawnattr_getflags(&raw const prepared.attr.0, &raw mut flags)
+            })
+            .map_err(|e| io("reading native SETEXEC flags", e))?;
+            flags |= i16::try_from(libc::POSIX_SPAWN_SETEXEC)
+                .map_err(|_| Error::Invalid("SETEXEC flag width"))?;
+            // SAFETY: same initialized private attribute object; no foreign code has run.
+            super::errno(unsafe {
+                libc::posix_spawnattr_setflags(&raw mut prepared.attr.0, flags)
+            })
+            .map_err(|e| io("setting native SETEXEC flag", e))?;
+            Ok(Self { spawn, prepared })
+        }
+        /// Success normally replaces THIS PID. If a wrapper unexpectedly returns0,
+        /// always return its actual PID to the preallocated direct-child owner.
+        pub(crate) fn replace(
+            self,
+            expiry: Duration,
+            publish: &mut dyn FnMut(Limits) -> Result<(), Error>,
+        ) -> Result<i32, Error> {
+            remaining(expiry)?;
+            if rustix::process::getuid().as_raw() == 0
+                || rustix::process::geteuid() != rustix::process::getuid()
+            {
+                return Err(Error::Invalid(
+                    "the trusted-entry probe must be rootless without credentials change",
+                ));
+            }
+            let zero = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: this changes ONLY this already-execed process's NPROC soft/hard
+            // values. The fully initialized constant has the native rlimit ABI extent.
+            if unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &raw const zero) } != 0 {
+                return Err(io("sealing native NPROC", io::Error::last_os_error()));
+            }
+            let mut limits = zero;
+            // SAFETY: reads this process's same limit into a fully initialized live object.
+            if unsafe { libc::getrlimit(libc::RLIMIT_NPROC, &raw mut limits) } != 0 {
+                return Err(io(
+                    "reading sealed native NPROC",
+                    io::Error::last_os_error(),
+                ));
+            }
+            if limits.rlim_cur != 0 || limits.rlim_max != 0 {
+                return Err(Error::Invalid("NPROC seal did not hold"));
+            }
+            let mut observed = [FdObservation {
+                fd: -1,
+                before: 0,
+                after: 0,
+            }; 3];
+            for (slot, fd) in observed.iter_mut().zip(&self.spawn.stdio) {
+                let raw = fd.as_raw_fd();
+                // SAFETY: Spawn owns each source through this complete native call. F_GETFD
+                // reads its local descriptor flags; only these entry-owned copies may change.
+                let before = unsafe { libc::fcntl(raw, libc::F_GETFD) };
+                if before < 0 {
+                    return Err(io(
+                        "reading SETEXEC source flags",
+                        io::Error::last_os_error(),
+                    ));
+                }
+                if before & libc::FD_CLOEXEC != 0 {
+                    // SAFETY: modifies only this entry's owned source, not the original parent.
+                    // Pinned exec-copy prunes CLOEXEC sources BEFORE applying file actions.
+                    if unsafe { libc::fcntl(raw, libc::F_SETFD, before & !libc::FD_CLOEXEC) } != 0 {
+                        return Err(io(
+                            "preparing SETEXEC source flags",
+                            io::Error::last_os_error(),
+                        ));
+                    }
+                }
+                // SAFETY: same still-owned descriptor, read-only observation after the change.
+                let after = unsafe { libc::fcntl(raw, libc::F_GETFD) };
+                if after < 0 {
+                    return Err(io(
+                        "checking SETEXEC source flags",
+                        io::Error::last_os_error(),
+                    ));
+                }
+                *slot = FdObservation {
+                    fd: raw,
+                    before,
+                    after,
+                };
+            }
+            publish(Limits {
+                soft: limits.rlim_cur,
+                hard: limits.rlim_max,
+                fds: observed,
+            })?;
+            remaining(expiry)?;
+            let image = self
+                .spawn
+                .paths
+                .first()
+                .ok_or(Error::Invalid("missing SETEXEC image"))?;
+            let mut returned = 0;
+            // SAFETY: all strings and pointer arrays are NUL-terminated, attributes/actions
+            // prepared in THIS ordinarily execed process and live through the call. PID is
+            // always captured, even for SETEXEC, so an unexpected child cannot be discarded.
+            let result = unsafe {
+                libc::posix_spawn(
+                    &raw mut returned,
+                    image.as_ptr(),
+                    &raw const self.prepared.actions.0,
+                    &raw const self.prepared.attr.0,
+                    self.prepared.argv.as_ptr(),
+                    self.prepared.envp.as_ptr(),
+                )
+            };
+            super::errno(result).map_err(|e| io("native held SETEXEC", e))?;
+            Ok(returned)
+        }
+    }
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct ImageEvent {
+        pub exec: bool,
+        pub exit: bool,
+        pub readable: bool,
+        pub waitable: bool,
+        pub raw_flags: u16,
+        pub raw_fflags: u32,
+        pub raw_data: isize,
+    }
+    /// Notifications only. The SAME BoxProc remains the sole native wait/reap owner.
+    pub(crate) struct ImageEvents {
+        queue: Kqueue,
+        pid: Option<i32>,
+        report: Option<c_int>,
+    }
+    impl ImageEvents {
+        pub(crate) fn new() -> Result<Self, Error> {
+            let queue = Kqueue::new().map_err(|e| io("preparing native image events", e))?;
+            queue
+                .child_completions()
+                .map_err(|e| io("preparing waitable child notification", e))?;
+            Ok(Self {
+                queue,
+                pid: None,
+                report: None,
+            })
+        }
+        pub(crate) fn bind(&mut self, pid: i32, report: Option<c_int>) -> Result<(), Error> {
+            let ident = usize::try_from(pid)
+                .ok()
+                .filter(|p| *p != 0)
+                .ok_or(Error::Invalid("nonpositive image PID"))?;
+            if self.pid.is_some() {
+                return Err(Error::Invalid("image observer already bound"));
+            }
+            self.pid = Some(pid);
+            self.report = report;
+            let changes = [kevent(
+                ident,
+                libc::EVFILT_PROC,
+                libc::EV_ADD | libc::EV_CLEAR | libc::EV_RECEIPT,
+                libc::NOTE_EXEC | libc::NOTE_EXIT | super::NOTE_EXITSTATUS,
+                0,
+                0,
+            )];
+            let mut reply = [kevent(0, 0, 0, 0, 0, 0)];
+            let n = self
+                .queue
+                .kevent(&changes, &mut reply, Some(Duration::ZERO))
+                .map_err(|e| io("registering held image", e))?;
+            let reply = reply
+                .first()
+                .ok_or(Error::Invalid("missing image registration receipt"))?;
+            if n != 1
+                || reply.ident != ident
+                || reply.filter != libc::EVFILT_PROC
+                || reply.flags & libc::EV_ERROR == 0
+            {
+                return Err(Error::Invalid("invalid image registration receipt"));
+            }
+            if reply.data != 0 {
+                return Err(io(
+                    "registering held image",
+                    io::Error::from_raw_os_error(
+                        c_int::try_from(reply.data)
+                            .map_err(|_| Error::Invalid("image errno width"))?,
+                    ),
+                ));
+            }
+            if let Some(fd) = report {
+                if fd < 0 {
+                    return Err(Error::Invalid("invalid report fd"));
+                }
+                self.queue
+                    .change(&[kevent(
+                        usize::try_from(fd).map_err(|_| Error::Invalid("report fd width"))?,
+                        libc::EVFILT_READ,
+                        libc::EV_ADD | libc::EV_CLEAR,
+                        0,
+                        0,
+                        0,
+                    )])
+                    .map_err(|e| io("watching probe report", e))?;
+            }
+            Ok(())
+        }
+        pub(crate) fn next(&self, expiry: Duration) -> Result<ImageEvent, Error> {
+            let pid = self.pid.ok_or(Error::Invalid("unbound image observer"))?;
+            loop {
+                let left = remaining(expiry)?;
+                let timeout = libc::timespec {
+                    tv_sec: libc::time_t::try_from(left.as_secs())
+                        .map_err(|_| Error::Invalid("image wait seconds"))?,
+                    tv_nsec: libc::c_long::from(left.subsec_nanos()),
+                };
+                let mut events = [kevent(0, 0, 0, 0, 0, 0); 3]; // One PID, its report, and SIGCHLD.
+                // SAFETY: exact fixed output array and initialized finite timeout; this does
+                // not rebase the raw expiry or use the legacy overflow-to-infinite fallback.
+                let got = unsafe {
+                    libc::kevent(
+                        self.queue.0.as_raw_fd(),
+                        std::ptr::null(),
+                        0,
+                        events.as_mut_ptr(),
+                        c_int::try_from(events.len()).map_err(|_| Error::Invalid("event width"))?,
+                        &raw const timeout,
+                    )
+                };
+                if got < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(io("waiting for held image", error));
+                }
+                remaining(expiry)?;
+                let got = usize::try_from(got)
+                    .map_err(|_| Error::Invalid("negative native event count"))?;
+                if got == 0 {
+                    return Err(Error::Deadline);
+                }
+                let mut result = ImageEvent {
+                    exec: false,
+                    exit: false,
+                    readable: false,
+                    waitable: false,
+                    raw_flags: 0,
+                    raw_fflags: 0,
+                    raw_data: 0,
+                };
+                for event in events
+                    .get(..got)
+                    .ok_or(Error::Invalid("oversized native event count"))?
+                {
+                    if event.flags & libc::EV_ERROR != 0 {
+                        return Err(io(
+                            "native image event",
+                            io::Error::from_raw_os_error(
+                                c_int::try_from(event.data)
+                                    .map_err(|_| Error::Invalid("event errno width"))?,
+                            ),
+                        ));
+                    }
+                    match event.filter {
+                        libc::EVFILT_PROC
+                            if event.ident
+                                == usize::try_from(pid)
+                                    .map_err(|_| Error::Invalid("image PID width"))? =>
+                        {
+                            result.exec |= event.fflags & libc::NOTE_EXEC != 0;
+                            result.exit |= event.fflags & libc::NOTE_EXIT != 0;
+                            result.raw_flags = event.flags;
+                            result.raw_fflags = event.fflags;
+                            result.raw_data = event.data;
+                        }
+                        libc::EVFILT_READ
+                            if self.report.and_then(|fd| usize::try_from(fd).ok())
+                                == Some(event.ident) =>
+                        {
+                            result.readable = true
+                        }
+                        libc::EVFILT_SIGNAL
+                            if event.ident
+                                == usize::try_from(libc::SIGCHLD)
+                                    .map_err(|_| Error::Invalid("signal width"))? =>
+                        {
+                            result.waitable = true
+                        }
+                        _ => return Err(Error::Invalid("foreign native image event")),
+                    }
+                }
+                return Ok(result);
+            }
+        }
+    }
+
+    /// A failed/invalid clock observation cannot grant a new native deadline.
+    #[derive(Debug, thiserror::Error)]
+    pub(crate) enum UptimeFailure {
+        #[error("CLOCK_UPTIME_RAW failed: {0}")]
+        Native(#[source] io::Error),
+        #[error("CLOCK_UPTIME_RAW returned negative/unrepresentable seconds {0}")]
+        Seconds(libc::time_t),
+        #[error("CLOCK_UPTIME_RAW returned invalid nanoseconds {0}")]
+        Nanoseconds(libc::c_long),
+        #[error("CLOCK_UPTIME_RAW duration overflow")]
+        Overflow,
+    }
+
+    /// Rust 1.99.1 Instant uses CLOCK_UPTIME_RAW on Apple. Use the SAME native clock to
+    /// transfer an absolute expiry between node and helper; no cross-clock rebase or tolerance.
+    pub(crate) fn uptime_raw() -> Result<Duration, UptimeFailure> {
+        let mut value = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: the fixed native clock is read-only. The fully initialized timespec is live and
+        // writable for exactly its ABI extent; errno is read only after the call reports failure.
+        if unsafe { libc::clock_gettime(libc::CLOCK_UPTIME_RAW, &raw mut value) } != 0 {
+            return Err(UptimeFailure::Native(io::Error::last_os_error()));
+        }
+        checked_uptime(value)
+    }
+    fn checked_uptime(value: libc::timespec) -> Result<Duration, UptimeFailure> {
+        let seconds =
+            u64::try_from(value.tv_sec).map_err(|_| UptimeFailure::Seconds(value.tv_sec))?;
+        if !(0..1_000_000_000).contains(&value.tv_nsec) {
+            return Err(UptimeFailure::Nanoseconds(value.tv_nsec));
+        }
+        let nanos =
+            u64::try_from(value.tv_nsec).map_err(|_| UptimeFailure::Nanoseconds(value.tv_nsec))?;
+        Duration::from_secs(seconds)
+            .checked_add(Duration::from_nanos(nanos))
+            .ok_or(UptimeFailure::Overflow)
+    }
+
+    // XNU f6217f891ac0 mach/message.h and mach/task_info.h: audit_token_t is eight
+    // unsigned words; TASK_AUDIT_TOKEN is flavor 15 and returns that many natural_t words.
+    #[repr(C)]
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct AuditToken {
+        words: [u32; 8],
+    }
+    const TASK_AUDIT_TOKEN: libc::task_flavor_t = 15;
+
+    // SAFETY: declarations match pinned mach/task.h, mach/mach_port.h and libproc.h.
+    // All pointers name live caller-owned scalars; proc_signal_with_audittoken returns errno directly.
+    unsafe extern "C" {
+        fn mach_task_self() -> libc::mach_port_t;
+        fn task_name_for_pid(
+            task: libc::mach_port_t,
+            pid: libc::pid_t,
+            name: *mut libc::mach_port_t,
+        ) -> libc::kern_return_t;
+        fn mach_port_deallocate(
+            task: libc::mach_port_t,
+            name: libc::mach_port_t,
+        ) -> libc::kern_return_t;
+    }
+
+    // SAFETY: pinned libproc.h declares one audit_token_t input and signal; the direct return is errno.
+    #[link(name = "proc")]
+    unsafe extern "C" {
+        fn proc_signal_with_audittoken(token: *mut AuditToken, signal: c_int) -> c_int;
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+    pub(crate) enum TokenFailure {
+        #[error("native member identity is not positive")]
+        InvalidIdentity,
+        #[error("{operation} failed with errno {code:?}, kind {kind:?}")]
+        Io {
+            operation: &'static str,
+            code: Option<i32>,
+            kind: io::ErrorKind,
+        },
+        #[error("native member birth changed or is unavailable (observed {observed:?})")]
+        Changed { observed: Option<u64> },
+        #[error("{operation} failed with Mach status {code}")]
+        Mach {
+            operation: &'static str,
+            code: libc::kern_return_t,
+        },
+        #[error("task audit query failed {query}, and owned right release failed {release}")]
+        QueryAndRelease {
+            query: libc::kern_return_t,
+            release: libc::kern_return_t,
+        },
+        #[error("native task audit token returned {got} words, expected {expected}")]
+        Length {
+            got: libc::mach_msg_type_number_t,
+            expected: libc::mach_msg_type_number_t,
+        },
+        #[error("task-name query returned no owned right")]
+        NoRight,
+    }
+
+    fn token_io(operation: &'static str, error: io::Error) -> TokenFailure {
+        TokenFailure::Io {
+            operation,
+            code: error.raw_os_error(),
+            kind: error.kind(),
+        }
+    }
+
+    /// A genuine native incarnation retained in the SAME Hold entry; no public token constructor.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct MemberToken {
+        pid: i32,
+        birth: u64,
+        token: AuditToken,
+    }
+    impl std::fmt::Debug for MemberToken {
+        fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            output
+                .debug_struct("MemberToken")
+                .field("pid", &self.pid)
+                .field("birth", &self.birth)
+                .finish_non_exhaustive()
+        }
+    }
+    impl MemberToken {
+        pub(crate) fn pid(&self) -> i32 {
+            self.pid
+        }
+        pub(crate) fn birth(&self) -> u64 {
+            self.birth
+        }
+    }
+
+    fn member_birth(pid: i32, expected: u64) -> Result<(), TokenFailure> {
+        let actual = rusage(pid).map_err(|error| token_io("reading native member birth", error))?;
+        if actual.is_none_or(|usage| usage.started != expected || usage.ended) {
+            return Err(TokenFailure::Changed {
+                observed: actual.map(|usage| usage.started),
+            });
+        }
+        Ok(())
+    }
+
+    /// Capture only a genuine task-name-derived token, joining the expected PID/birth on both sides.
+    /// A task-name port has no task-control rights; the acquired send right is released on every path.
+    pub(crate) fn capture_member(pid: i32, birth: u64) -> Result<MemberToken, TokenFailure> {
+        join_member_token(pid, birth, || member_birth(pid, birth), || task_audit(pid))
+    }
+
+    fn join_member_token(
+        pid: i32,
+        birth: u64,
+        mut observe: impl FnMut() -> Result<(), TokenFailure>,
+        capture: impl FnOnce() -> Result<AuditToken, TokenFailure>,
+    ) -> Result<MemberToken, TokenFailure> {
+        if pid <= 0 || birth == 0 {
+            return Err(TokenFailure::InvalidIdentity);
+        }
+        observe()?;
+        let token = capture()?;
+        observe()?;
+        Ok(MemberToken { pid, birth, token })
+    }
+
+    fn task_audit(pid: i32) -> Result<AuditToken, TokenFailure> {
+        let mut port: libc::mach_port_t = 0;
+        // SAFETY: mach_task_self names this process's task; task_name_for_pid writes only its live
+        // out-parameter. Success transfers one task-name send right, owned until deallocated below.
+        let status = unsafe { task_name_for_pid(mach_task_self(), pid, &raw mut port) };
+        if status != 0 {
+            return Err(TokenFailure::Mach {
+                operation: "task_name_for_pid",
+                code: status,
+            });
+        }
+        if port == 0 {
+            return Err(TokenFailure::NoRight);
+        }
+        let mut token = AuditToken { words: [0; 8] };
+        let expected: libc::mach_msg_type_number_t = 8;
+        let mut count = expected;
+        // SAFETY: the owned name port authorizes TASK_AUDIT_TOKEN. The initialized output is exactly
+        // eight natural_t words, and count describes its whole writable extent for the MIG call.
+        let query = unsafe {
+            libc::task_info(
+                port,
+                TASK_AUDIT_TOKEN,
+                (&raw mut token).cast::<i32>(),
+                &raw mut count,
+            )
+        };
+        // SAFETY: this is the one task-name send right acquired above; no early return or other
+        // operation transfers/releases it. Its name is not reused by this owner after this call.
+        let release = unsafe { mach_port_deallocate(mach_task_self(), port) };
+        if release != 0 {
+            return Err(TokenFailure::QueryAndRelease { query, release });
+        }
+        if query != 0 {
+            return Err(TokenFailure::Mach {
+                operation: "TASK_AUDIT_TOKEN",
+                code: query,
+            });
+        }
+        if count != expected {
+            return Err(TokenFailure::Length {
+                got: count,
+                expected,
+            });
+        }
+        Ok(token)
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) enum MemberSignal {
+        Continue,
+        Kill,
+    }
+
+    /// The kernel resolves the token's incarnation and checks signal authority while retaining the
+    /// exact proc reference. ESRCH/permission/changed identities remain typed failures, never PID fallback.
+    pub(crate) fn signal_member(
+        member: &MemberToken,
+        signal: MemberSignal,
+    ) -> Result<(), TokenFailure> {
+        let mut token = member.token;
+        let signal = match signal {
+            MemberSignal::Continue => libc::SIGCONT,
+            MemberSignal::Kill => libc::SIGKILL,
+        };
+        // SAFETY: token is a copy of the genuine kernel-produced token in the immutable native Hold
+        // receipt. libproc reads its full fixed ABI extent and forwards only the allowed signal above.
+        let error = unsafe { proc_signal_with_audittoken(&raw mut token, signal) };
+        if error != 0 {
+            return Err(token_io(
+                "proc_signal_with_audittoken",
+                io::Error::from_raw_os_error(error),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod controls {
+        use super::*;
+        use std::cell::Cell;
+
+        /// Hostile argc cannot make the earliest selector walk an unbounded pointer table.
+        #[test]
+        fn initial_argument_pointer_budget_is_checked_before_access() {
+            let two = size_of::<*const c_char>().checked_mul(3).unwrap();
+            assert_eq!(count(2, two).unwrap(), 2);
+            assert!(count(-1, two).is_err());
+            assert!(count(2, two - 1).is_err());
+            assert!(count(c_int::MAX, two).is_err());
+        }
+
+        /// A delayed receiver cannot obtain a fresh interval or an infinite expiry.
+        #[test]
+        fn transported_expiry_retains_original_authority_without_rebase() {
+            let expiry =
+                conservative_expiry(Duration::from_secs(10), Some(Duration::from_secs(3))).unwrap();
+            assert_eq!(expiry, Duration::from_secs(13));
+            assert_eq!(expiry.checked_sub(Duration::from_secs(14)), None);
+            assert!(conservative_expiry(Duration::MAX, Some(Duration::from_nanos(1))).is_err());
+            for left in [None, Some(Duration::ZERO), Some(Duration::MAX)] {
+                assert!(matches!(
+                    conservative_expiry(Duration::from_secs(10), left),
+                    Err(Error::Deadline)
+                ));
+            }
+        }
+
+        /// Capture does not grant a signal identity after a birth change between observations.
+        #[test]
+        fn changed_member_during_token_capture_never_yields_a_receipt() {
+            let reads = Cell::new(0);
+            let result = join_member_token(
+                7,
+                9,
+                || {
+                    reads.set(reads.get() + 1);
+                    if reads.get() == 1 {
+                        Ok(())
+                    } else {
+                        Err(TokenFailure::Changed { observed: Some(10) })
+                    }
+                },
+                || Ok(AuditToken { words: [0; 8] }),
+            );
+            assert!(matches!(
+                result,
+                Err(TokenFailure::Changed { observed: Some(10) })
+            ));
+            assert_eq!(reads.get(), 2);
+            let touched = Cell::new(false);
+            assert!(
+                join_member_token(
+                    -1,
+                    9,
+                    || {
+                        touched.set(true);
+                        Ok(())
+                    },
+                    || Ok(AuditToken { words: [0; 8] })
+                )
+                .is_err()
+            );
+            assert!(!touched.get());
+        }
     }
 }

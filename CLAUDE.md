@@ -169,6 +169,21 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   helper identity. Read failure, negative/invalid timespec or arithmetic overflow refuses.
   This read-only foreign call needs the existing file's isolation and SAFETY invariant;
   it changes no clock and grants no lifecycle, release or resource authority.
+  The opt-in `native-trusted-entry-measurement` path also reads the loader-owned
+  `_NSGetArgc`/`_NSGetArgv` before the first standard argv collection, with native
+  count/NUL/ARG_MAX bounds and fallible owned copies. Its measurement-only fresh
+  Hex entry uses prepared attributes/actions for SETEXEC plus START_SUSPENDED,
+  exact returned-PID storage, initialized RLIMIT_NPROC0 readback and descriptor
+  copies/flags. Finite kevent output and the original CLOCK_UPTIME_RAW expiry
+  observe one exact known controller. Genuine task-name/audit-token queries own
+  and release their Mach rights; token-fenced CONT/KILL never fall back to PID
+  signals and tokens are recaptured after exec. These public native interfaces
+  have no equivalent safe workspace wrapper; all reached unsafe blocks remain
+  in this existing sys file with explicit SAFETY obligations. The focused safe
+  process child grants no whole-scope Released or refund and never continues the
+  foreign image. Source pins and unresolved pre-main, image/TOCTOU, resource and
+  closed-worker obligations are in trusted-entry-native-component.md and
+  trusted-entry-measurement-source.md. No native result is asserted by registration.
 - `crates/hex-runtime/src/macos/helper_sys.rs`: the macOS box helper daemon's privileged syscalls (the
   `process` class's box-user mode, decision "each OS runs its own boxes natively"; step 2). The daemon,
   as root, starts a box's programs as the box's pool user: a `fork` whose child drops to the user

@@ -1939,3 +1939,6 @@ mod storage_tests {
         assert!(Pids::new(usize::MAX).is_err());
     }
 }
+
+#[cfg(feature = "native-trusted-entry-measurement")]
+pub mod trusted_entry;
