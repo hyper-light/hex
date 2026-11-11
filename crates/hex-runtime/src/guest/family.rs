@@ -13,7 +13,8 @@ pub(super) enum Proposal<'a> {
     Empty,
     AwaitAck(&'a PoolRecord),
     Prepare {
-        definition: GpuBacking,
+        pool: [u8; 32],
+        devices: Vec<hex_api::DeviceId>,
         current: Option<&'a PoolRecord>,
     },
     Drain {
@@ -54,11 +55,14 @@ impl GuestRuntime {
         if !unchanged && let Some(row) = pending_ack {
             return Ok(Proposal::AwaitAck(row));
         }
+        // Preserve selector/configuration/path checks before publication; the
+        // proposal retains only their derived key and exact device set.
         let definition = self
             .gpu_backing_definition_for(Some(&remaining))?
             .ok_or_else(|| route::invalid("GPU complement has no initialized configuration"))?;
         Ok(Proposal::Prepare {
-            definition,
+            pool: definition.pool,
+            devices: definition.devices,
             current,
         })
     }
@@ -168,11 +172,12 @@ impl GuestRuntime {
         };
         match self.gpu_proposal(&family, records, pools)? {
             Proposal::Prepare {
-                definition,
+                pool,
+                devices,
                 current: Some(row),
             } if row.phase == BackingPhase::Live
-                && row.key.pool == definition.pool
-                && row.devices == definition.devices =>
+                && row.key.pool == pool
+                && row.devices == devices =>
             {
                 Ok(Some(row))
             }
@@ -199,9 +204,10 @@ impl GuestRuntime {
             Proposal::Empty => return Ok(None),
             Proposal::AwaitAck(row) => return row.offer().map(Some),
             Proposal::Prepare {
-                definition,
+                pool,
+                devices,
                 current,
-            } => (definition.pool, definition.devices.as_slice(), *current),
+            } => (*pool, devices.as_slice(), *current),
             Proposal::Drain { current, pool } => (*pool, &[][..], Some(*current)),
         };
         let keys = self.turn_keys(&family.devices)?;
@@ -210,19 +216,16 @@ impl GuestRuntime {
             let matches = match (&proposal, actual) {
                 (
                     Proposal::Prepare {
-                        definition,
+                        pool,
+                        devices,
                         current,
                     },
                     Proposal::Prepare {
-                        definition: actual,
+                        pool: actual_pool,
+                        devices: actual_devices,
                         current: expected,
                     },
-                ) => {
-                    expected == *current
-                        && actual.pool == definition.pool
-                        && actual.cost == definition.cost
-                        && actual.devices == definition.devices
-                }
+                ) => expected == *current && actual_pool == *pool && actual_devices == *devices,
                 (
                     Proposal::Drain { current, pool },
                     Proposal::Drain {

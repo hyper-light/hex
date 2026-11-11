@@ -557,7 +557,7 @@ mod tests {
                 &[hex_api::DeviceId],
                 Option<&hex_core::record::PoolRecord>,
             ),
-            _: &mut dyn FnMut(&Records, &[hex_core::record::PoolRecord]) -> Result<(), Refusal>,
+            _: &mut crate::devices::PoolPreparationCheck<'_>,
         ) -> Result<hex_core::record::PoolRecord, Refusal> {
             panic!("box control must not prepare a pool")
         }

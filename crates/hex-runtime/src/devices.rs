@@ -372,6 +372,10 @@ pub struct CdiPlan<'a> {
 pub type Records = BTreeMap<BoxId, Result<BoxRecord, String>>;
 pub type PoolRecords = Vec<PoolRecord>;
 
+/// Borrowed validation under the existing family metadata fence. The explicit object lifetime
+/// permits the caller's stack captures; naming this callback adds no storage or ownership.
+pub type PoolPreparationCheck<'a> = dyn FnMut(&Records, &[PoolRecord]) -> Result<(), Refusal> + 'a;
+
 /// Two actual native command sources, consumed by the SAME canonical record/native owner.
 /// This is an internal borrowed launch input, never a peer-supplied payload or backend fallback.
 pub enum ManagedLaunch<'a> {
@@ -529,7 +533,7 @@ pub trait Books: Send + Sync {
         cost: hex_api::RuntimeCost,
         devices: &[DeviceId],
         family: (&[u8; 32], &[DeviceId], Option<&PoolRecord>),
-        validate: &mut dyn FnMut(&Records, &[PoolRecord]) -> Result<(), Refusal>,
+        validate: &mut PoolPreparationCheck<'_>,
     ) -> Result<PoolRecord, Refusal>;
     fn capacity(&self) -> Result<hex_api::Capacity, Refusal>;
     /// Direct current native observations from this Node's SAME facts provider. Never reenter
@@ -1720,7 +1724,7 @@ mod authority_tests {
             _: hex_api::RuntimeCost,
             _: &[DeviceId],
             _: (&[u8; 32], &[DeviceId], Option<&PoolRecord>),
-            _: &mut dyn FnMut(&Records, &[PoolRecord]) -> Result<(), Refusal>,
+            _: &mut PoolPreparationCheck<'_>,
         ) -> Result<PoolRecord, Refusal> {
             Err(invalid("fixture has no pool"))
         }

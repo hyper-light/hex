@@ -1,0 +1,38 @@
+{
+  "status": "SIGNED SOURCE CORRECTION / format parser+diff only / no compiler, test replay or native dispatch",
+  "parent": "2204deb897ecfe8e698d653306c03328f9ce3d52",
+  "role": "implementer shards-gpu",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "actual_before": {
+    "source": "8621a28d85fa05cf0a080aac342fdc77ce899815",
+    "outcome": "ROOT Windows dual-target strict compile101: Proposal retained GpuBacking at least272B versus40B Drain",
+    "raw_cli": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/cohort-8621a28d-mac-portability-8621/cli.log",
+    "bytes": 10085,
+    "sha256": "3aea1e4bdad23b2cca014c97a6bc6693a2bbced0abc3b8315db8adbfaef3db01",
+    "native": 0
+  },
+  "change": "Private Proposal::Prepare retains only derived pool key, exact owned devices Vec and current canonical row reference. Shared immutable initialized family still supplies cost/config. No Box/Arc/custom storage, lint allow, public API/wire/authority change.",
+  "preserved": "Existing gpu_backing_definition_for(Some(remaining)) validates same full selector/subset/config/output/path bounds and same v2 hash before proposal. Guarded callback recomputes exact proposed key/devices/current; same family.cost is used on canonical publication. ACK queue, pending reference/max-one current, freshness key+set, empty drain, native effect/turn boundaries unchanged.",
+  "test_port": "Only private field projections/tuple destructuring in existing12-cut unit changed; expected key/device/current/phase outcomes and all other unit bodies unchanged. No new implementation-mirroring test or rerun.",
+  "separate_alias": "L1 aa298cb1ad200e408f64c85338f5a95cdc7524f1 PoolPreparationCheck consumer port follows separately, not required for this representation-only delta.",
+  "checks": {
+    "scoped_rustfmt_parser": "exit0",
+    "git_diff_check": "exit0",
+    "after_compile": "NOT RUN",
+    "tests": "NOT RUN/replayed",
+    "native": "NOT RUN"
+  },
+  "prior_light": "ROOT ff765 first13 passed on older exact source; source/count/raw record in FAMILY-FF765-RESULTS.json. Not an after result of this correction or native/strict proof.",
+  "files": {
+    "crates/hex-runtime/src/guest/family.rs": {
+      "bytes": 10805,
+      "sha256": "f83d2c1fe9ec2d3189796fd6622a6efc0f33192b8a255ebfbf7b1a0c6d18f65a"
+    },
+    "crates/hex-runtime/src/guest/gpu_pool.rs": {
+      "bytes": 92983,
+      "sha256": "97c41e7ecf1900e3fc2570d973d72c5eec2b8dfa60fff504535c510da16fc663"
+    }
+  },
+  "remaining": "ROOT joined strict verification; observer input loader/CLI wiring, native fixed-worker plan/source/whole-scope proof, renderer/guest execution and Windows LDA join still open. No performance claim."
+}

@@ -1,0 +1,69 @@
+{
+  "requirement": "AC-T7.4.1",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "fixed_root": "8621a28d85fa05cf0a080aac342fdc77ce899815",
+  "parent": "52ddde6c86b9b6d3bce3b7b4ed3c6c76ca22f5f8",
+  "source_only": true,
+  "actual_before": {
+    "phase": "windows-x64-arm64-joined-strict",
+    "exit": 101,
+    "phase_sha256": "3d79081ab430edab37d92b6a5e11a4b637362d386cc07b9c55f03cf35d49499c",
+    "phase_bytes": 8318,
+    "cli": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/cohort-8621a28d-mac-portability-8621/cli.log",
+    "cli_sha256": "3aea1e4bdad23b2cca014c97a6bc6693a2bbced0abc3b8315db8adbfaef3db01",
+    "phase_bytes_independently_matched_from_CLI": [
+      {
+        "leading_characters_removed": 1,
+        "trailing_characters_removed": 1,
+        "bytes": 8318
+      }
+    ],
+    "cause": "clippy::type_complexity at devices.rs532, prepare_pool borrowed validator. Other guest Proposal size cause belongs to L2. This record does not fix/claim other causes.",
+    "outcome": "No Windows/Mac green; Mac phase unexecuted, native0. No semantic failure or new unit result inferred."
+  },
+  "exact_shared_contract": {
+    "path": "hex_runtime::devices::PoolPreparationCheck",
+    "declaration": "pub type PoolPreparationCheck<'a> = dyn FnMut(&Records, &[PoolRecord]) -> Result<(), Refusal> + 'a;",
+    "parameter": "validate: &mut PoolPreparationCheck<'_>",
+    "lifetime": "Explicit borrowed trait-object lifetime permits non-static caller stack captures. Same existing FnMut dispatch; no Box/Arc/heap/default/stub/allow or new ownership/state.",
+    "semantics": "Same synchronous pure callback under existing family metadata fence/turns. No callback invocation, snapshots, mutation, native/Store/Books reentry or transaction ordering changed."
+  },
+  "sources": [
+    {
+      "path": "crates/hex-runtime/src/devices.rs",
+      "sha256": "c6067b58699fbc802cd509713ec63ee5c43bec789faede8c6313632e9517bc4f",
+      "all_other_bytes_equal_parent": true
+    },
+    {
+      "path": "crates/hex-runtime/src/firecracker/native.rs",
+      "sha256": "51fb6c37ab851629aa99c6ed689098f9ea5deb3992af523d4ec499a108da10e5",
+      "all_other_bytes_equal_parent": true
+    },
+    {
+      "path": "crates/hex-node/src/node/backends.rs",
+      "sha256": "755588c15fdfde567bb81d292c144d20636bfbcef509dfa52a273ee91c80ed6e",
+      "all_other_bytes_equal_parent": true
+    }
+  ],
+  "outside_owner_ports": {
+    "L3": [
+      "crates/hex-node/src/recorded.rs common prepare_pool validate (currently uses &hex_runtime::devices::Records) and Recorded Books::prepare_pool multiline validator",
+      "Same Store callback parameter, where present; L3 owns those paths."
+    ],
+    "L2": [
+      "crates/hex-runtime/src/guest/shared_tests.rs Books::prepare_pool",
+      "crates/hex-runtime/src/guest/gpu_pool.rs test Books::prepare_pool"
+    ],
+    "ROOT": "Outside test-only Books owners: replace only validator parameter with &mut hex_runtime::devices::PoolPreparationCheck<'_> in Node/core consumers, or &mut crate::devices::PoolPreparationCheck<'_> within runtime. Existing closures/captures/return values remain unchanged; no metadata/wire/Cargo edge."
+  },
+  "validation": {
+    "installed_rustfmt": "parser/format exit0 for three named RS files, skip_children=true",
+    "source_identity": "All file bytes restored exactly to parent by undoing ONLY alias declaration +four signature substitutions. Callback bodies/holder/state/wait code untouched.",
+    "git_diff_check": "exit0",
+    "Cargo_clippy_tests": "NOT DISPATCHED; ROOT owns matched strict check. No replay of ff76513 passes.",
+    "native": "0"
+  },
+  "remaining": "ROOT joins matched L2 Proposal fix/L3 signature ports/outside fixtures and runs strict cohort. No R14/portability/native/completion inference from this compile-style correction."
+}

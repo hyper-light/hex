@@ -891,7 +891,7 @@ impl Books for Node {
         cost: RuntimeCost,
         devices: &[DeviceId],
         family: (&[u8; 32], &[DeviceId], Option<&PoolRecord>),
-        validate: &mut dyn FnMut(&Records, &[PoolRecord]) -> Result<(), Refusal>,
+        validate: &mut hex_runtime::devices::PoolPreparationCheck<'_>,
     ) -> Result<PoolRecord, Refusal> {
         let keys = self.attachments.conflict_ids(family.1)?;
         let _method = self.turns.try_take_pool_configuration(family.0, &keys)?;

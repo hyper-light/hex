@@ -160,10 +160,7 @@ impl Store {
         cost: RuntimeCost,
         devices: &[DeviceId],
         family: (&[u8; 32], &[DeviceId], Option<&PoolRecord>),
-        validate: &mut dyn FnMut(
-            &hex_runtime::devices::Records,
-            &[PoolRecord],
-        ) -> Result<(), Refusal>,
+        validate: &mut hex_runtime::devices::PoolPreparationCheck<'_>,
     ) -> Result<PoolRecord, Refusal> {
         let (configuration, conflicts, expected) = family;
         cost.check()?;

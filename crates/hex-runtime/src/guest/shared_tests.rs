@@ -246,7 +246,7 @@ impl Books for Owner {
         cost: hex_api::RuntimeCost,
         devices: &[hex_api::DeviceId],
         family: (&[u8; 32], &[hex_api::DeviceId], Option<&PoolRecord>),
-        validate: &mut dyn FnMut(&Records, &[PoolRecord]) -> Result<(), Refusal>,
+        validate: &mut crate::devices::PoolPreparationCheck<'_>,
     ) -> Result<PoolRecord, Refusal> {
         let snapshot = Books::pool_records(self)?;
         assert_eq!(snapshot.iter().find(|row| row.key.pool == pool), family.2);

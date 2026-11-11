@@ -1319,8 +1319,8 @@ mod handoff_tests {
     use super::*;
     use crate::devices::{Catalog, PoolRecords, Records};
     use hex_api::{
-        BackingKey, BackingOffer, BackingPhase, Capacity, Execution, GpuEligibility, ImageArch,
-        ImageOs, ImagePlatform, RouteKey, RouteReceipt, RuntimeCost,
+        BackingKey, BackingPhase, Capacity, Execution, GpuEligibility, ImageArch, ImageOs,
+        ImagePlatform, RouteKey, RouteReceipt, RuntimeCost,
     };
 
     pub(super) struct NoOwnerCalls;
@@ -1338,7 +1338,7 @@ mod handoff_tests {
             _: RuntimeCost,
             _: &[DeviceId],
             _: (&[u8; 32], &[DeviceId], Option<&PoolRecord>),
-            _: &mut dyn FnMut(&Records, &[PoolRecord]) -> Result<(), Refusal>,
+            _: &mut crate::devices::PoolPreparationCheck<'_>,
         ) -> Result<PoolRecord, Refusal> {
             panic!("read-only proof must not call Books")
         }

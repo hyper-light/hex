@@ -1,0 +1,30 @@
+{
+  "status": "SIGNED TYPE-ALIAS CONSUMER SOURCE ONLY / uncompiled / no run",
+  "parent": "4b73075fb3e53e1f51a0302cfbbdc28ce26f7cee",
+  "producer": "aa298cb1ad200e408f64c85338f5a95cdc7524f1",
+  "role": "implementer shards-gpu",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "delta": "Three existing guest fixture Books validator parameter types use required PoolPreparationCheck lifetime alias. Callback bodies/lifetimes/stack ownership and unit bodies unchanged; no heap/trait default/lint allowance or behavior change.",
+  "checks": {
+    "scoped_rustfmt_parser": "exit0",
+    "git_diff_check": "exit0",
+    "cargo": "NOT RUN",
+    "native": "NOT RUN"
+  },
+  "files": {
+    "crates/hex-runtime/src/guest/shared_tests.rs": {
+      "bytes": 37247,
+      "sha256": "0b3799059a6e11cfa02e81005256c76eb6feaafa09024f78e93fcb6ca4885960"
+    },
+    "crates/hex-runtime/src/guest/gpu_pool.rs": {
+      "bytes": 92966,
+      "sha256": "822d5293eb009d5996edf4b9567e316167d098312518f6176b03e285f4282b57"
+    },
+    "crates/hex-runtime/src/guest/books.rs": {
+      "bytes": 33619,
+      "sha256": "f0884ef8bc02c9f7e48fcbd1f449e5c8f55f5570688eea5b4d60227ad6567e40"
+    }
+  },
+  "scope": "ROOT owns public alias/outside callers and joined strict checks; representation-only4b730 proposal source remains separate; no replay of ff76513 passes."
+}

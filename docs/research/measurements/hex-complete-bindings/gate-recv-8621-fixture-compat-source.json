@@ -1,0 +1,62 @@
+{
+  "requirement": "AC-T7.4.1",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "fixed_root": "8621a28d85fa05cf0a080aac342fdc77ce899815",
+  "scope": "ONLY two cfg(test) recv tuple assertions plus exact unused cfg(test) BackingOffer import removal; import formatting only. No production/guard/oracle/deadline/Cargo/feature change.",
+  "actual_before": {
+    "log": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/remaining-8621-results-proof/cohort-8621a28d-linux-remaining-8621/shared-prepared-cancel-new.log",
+    "log_sha256": "d13394fa2fa3281b9370c716d5b5d318903bd76f57caa9d9ff381c2fecfc3d2f",
+    "cli": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/cohort-8621a28d-linux-remaining-8621/cli.log",
+    "cli_sha256": "dcc925f53155a1ec541ba0a09bc46ad99607b1a513f54266914f80e00f11bdd8",
+    "result": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/remaining-8621-results-proof/cohort-8621a28d-linux-remaining-8621/result.json",
+    "phase": "shared-prepared-cancel-new",
+    "exit": 101,
+    "tests_executed": 0,
+    "native_invocations": 0,
+    "cause": [
+      "E0308 linux/sys.rs840 and875: recv result (usize,usize) compared with scalar1.",
+      "unused BackingOffer in firecracker/native.rs1322 handoff_tests after required family signature port."
+    ],
+    "attribution": "Compiler/test compatibility only, not a semantic gate failure. Remaining24 units unexecuted; ff76513 passes retained separately."
+  },
+  "locked_primary_source": {
+    "package": "rustix1.1.5",
+    "Cargo_lock_checksum": "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d",
+    "archive": "/Users/adalundhe/.cargo/registry/cache/index.crates.io-1949cf8c6b5b557f/rustix-1.1.5.crate",
+    "archive_hash_equals_Cargo_lock": true,
+    "recv_source": "src/net/send_recv/mod.rs:30-75",
+    "recv_source_sha256": "8271eb7b5dd292ed46324d8e188e990f47bbdb20a35ca48905c0cf3f7fd3a899",
+    "buffer_source": "src/buffer.rs:134-145",
+    "buffer_source_sha256": "d5ce44cfd30941fa25d7b46b8039c2e028abc8e9cf20bfbf7dc6ebf3e4b56097",
+    "source_bytes_verified_against_archive": true,
+    "contract": "recv returns (Buf::Output, usize): initialized output bounded by buffer and received length before TRUNC. For &mut[u8;1], Buffer::Output=usize. DONTWAIT/one-byte stream without TRUNC requires BOTH lengths (1,1), not projection of one field."
+  },
+  "preservation": {
+    "sys_entire_delta_exactly_two_assertion_literals": true,
+    "native_entire_token_delta_exactly_one_test_import": true,
+    "sys_production_before_tests_sha256": "2905f34642d5080c5e8b4bb5a763eb2a833887e663cb8ae578a14d28d7b94e7c",
+    "sys_production_byte_equal": true,
+    "native_before_handoff_tests_sha256": "9a47130506be1f5745b78113468badd5cc81dfa7d160d3f3a4cdf273d3cc76f8",
+    "native_before_handoff_tests_byte_equal": true,
+    "oracles": "Repeated nonconsuming peek remains followed by AGAIN before release, then received byte[1]. Rejected wrong phase is still read as byte[3] with AGAIN on opposite endpoint. EOF/expired original deadline cases unchanged. No weaker expected result or new defaults."
+  },
+  "sources": [
+    {
+      "path": "crates/hex-runtime/src/linux/sys.rs",
+      "sha256": "f90284ac37e877201342f3c170f4ae091a82269f460fbc47815706dd73f055e4"
+    },
+    {
+      "path": "crates/hex-runtime/src/firecracker/native.rs",
+      "sha256": "f85999309d9fda2fcc9eaa54fb47e3b4f2e90e3332d7089cc1d333ec5e13b9c9"
+    }
+  ],
+  "validation": {
+    "installed_rustfmt": "parser/format exit0, skip_children=true on only two named files",
+    "git_diff_check": "exit0",
+    "build_test_clippy": "NOT DISPATCHED / no own replay",
+    "native": "0"
+  },
+  "owed": "ROOT matched compile and previously unexecuted units only; no ff76513 unchanged-pass replay. Gate native/causal mutation, resource/cleanup proofs and R14 remain ROOT-owned."
+}

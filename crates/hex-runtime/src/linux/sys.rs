@@ -837,7 +837,7 @@ mod tests {
         gate.release().unwrap();
         assert_eq!(
             rustix::net::recv(&child, &mut byte, rustix::net::RecvFlags::DONTWAIT).unwrap(),
-            1
+            (1, 1)
         );
         assert_eq!(byte, [1]);
     }
@@ -872,7 +872,7 @@ mod tests {
                 assert_eq!(
                     rustix::net::recv(&gate.socket, &mut byte, rustix::net::RecvFlags::DONTWAIT)
                         .unwrap(),
-                    1
+                    (1, 1)
                 );
                 assert_eq!(byte, [3], "even a rejected observation is nonconsuming");
                 assert_eq!(

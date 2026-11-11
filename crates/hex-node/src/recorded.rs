@@ -1136,7 +1136,7 @@ pub(crate) fn prepare_pool(
     cost: hex_api::RuntimeCost,
     devices: &[DeviceId],
     family: (&[u8; 32], &[DeviceId], Option<&PoolRecord>),
-    validate: &mut dyn FnMut(&hex_runtime::devices::Records, &[PoolRecord]) -> Result<(), Refusal>,
+    validate: &mut hex_runtime::devices::PoolPreparationCheck<'_>,
 ) -> Result<PoolRecord, Refusal> {
     store.prepare_pool_validated(pool, execution, cost, devices, family, validate)
 }
@@ -1378,10 +1378,7 @@ impl<R: Recover> hex_runtime::devices::Books for Recorded<R> {
         cost: hex_api::RuntimeCost,
         devices: &[DeviceId],
         family: (&[u8; 32], &[DeviceId], Option<&PoolRecord>),
-        validate: &mut dyn FnMut(
-            &hex_runtime::devices::Records,
-            &[PoolRecord],
-        ) -> Result<(), Refusal>,
+        validate: &mut hex_runtime::devices::PoolPreparationCheck<'_>,
     ) -> Result<PoolRecord, Refusal> {
         let catalog = self.runtime.device_catalog()?;
         let conflicts = match catalog.as_deref() {

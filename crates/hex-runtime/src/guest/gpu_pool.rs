@@ -1766,7 +1766,7 @@ mod tests {
         let family = runtime.gpu_backing_definition().unwrap().unwrap();
         let empty = Records::new();
         assert!(
-            matches!(runtime.gpu_proposal(&family, &empty, &[]).unwrap(), Proposal::Prepare { definition, current: None } if definition.devices == family.devices && definition.pool == family.pool)
+            matches!(runtime.gpu_proposal(&family, &empty, &[]).unwrap(), Proposal::Prepare { pool, devices, current: None } if devices == family.devices && pool == family.pool)
         );
         let mut parent = PoolRecord {
             version: hex_core::record::RECORD_VERSION,
@@ -1783,7 +1783,7 @@ mod tests {
             exit: None,
         };
         assert!(
-            matches!(runtime.gpu_proposal(&family, &empty, &[copy(&parent)]).unwrap(), Proposal::Prepare { definition, current: Some(_) } if definition.devices == family.devices)
+            matches!(runtime.gpu_proposal(&family, &empty, &[copy(&parent)]).unwrap(), Proposal::Prepare { devices, current: Some(_), .. } if devices == family.devices)
         );
         parent
             .accept_grant(&BackingGrant {
@@ -1833,24 +1833,25 @@ mod tests {
         parent.phase = BackingPhase::Released;
         parent.exit = Some(hex_api::Exit::Code(7));
         let remaining = vec![parent.devices[1]];
-        let subset = match runtime
+        let (subset_pool, subset_devices) = match runtime
             .gpu_proposal(&family, &records, &[copy(&parent)])
             .unwrap()
         {
             Proposal::Prepare {
-                definition,
+                pool,
+                devices,
                 current: None,
-            } => definition,
+            } => (pool, devices),
             _ => panic!("Released referenced parent did not expose exact complement"),
         };
-        assert_eq!(subset.devices, remaining);
-        assert_ne!(subset.pool, parent.key.pool);
+        assert_eq!(subset_devices, remaining);
+        assert_ne!(subset_pool, parent.key.pool);
         let mut current = PoolRecord {
             key: BackingKey {
-                pool: subset.pool,
+                pool: subset_pool,
                 generation: [9; 16],
             },
-            devices: subset.devices,
+            devices: subset_devices,
             phase: BackingPhase::Prepared,
             allocation: None,
             init: None,
@@ -1858,7 +1859,7 @@ mod tests {
             ..copy(&parent)
         };
         assert!(
-            matches!(runtime.gpu_proposal(&family, &records, &[copy(&parent), copy(&current)]).unwrap(), Proposal::Prepare { definition, current: Some(_) } if definition.devices == remaining)
+            matches!(runtime.gpu_proposal(&family, &records, &[copy(&parent), copy(&current)]).unwrap(), Proposal::Prepare { devices, current: Some(_), .. } if devices == remaining)
         );
         current
             .accept_grant(&BackingGrant {
@@ -1893,10 +1894,10 @@ mod tests {
             matches!(runtime.gpu_proposal(&family, &empty, &[copy(&parent), copy(&current)]).unwrap(), Proposal::AwaitAck(row) if row.key == parent.key)
         );
         assert!(
-            matches!(runtime.gpu_proposal(&family, &records, &[copy(&parent), copy(&current)]).unwrap(), Proposal::Prepare { current: Some(row), definition } if row.key == current.key && definition.devices == remaining)
+            matches!(runtime.gpu_proposal(&family, &records, &[copy(&parent), copy(&current)]).unwrap(), Proposal::Prepare { current: Some(row), devices, .. } if row.key == current.key && devices == remaining)
         );
         assert!(
-            matches!(runtime.gpu_proposal(&family, &empty, &[copy(&current)]).unwrap(), Proposal::Prepare { current: Some(row), definition } if row.key == current.key && definition.pool == family.pool)
+            matches!(runtime.gpu_proposal(&family, &empty, &[copy(&current)]).unwrap(), Proposal::Prepare { current: Some(row), pool, .. } if row.key == current.key && pool == family.pool)
         );
         current.phase = BackingPhase::Draining;
         assert!(
@@ -1908,7 +1909,7 @@ mod tests {
             matches!(runtime.gpu_proposal(&family, &empty, &[copy(&current)]).unwrap(), Proposal::AwaitAck(row) if row.key == current.key)
         );
         assert!(
-            matches!(runtime.gpu_proposal(&family, &empty, &[]).unwrap(), Proposal::Prepare { current: None, definition } if definition.pool == family.pool)
+            matches!(runtime.gpu_proposal(&family, &empty, &[]).unwrap(), Proposal::Prepare { current: None, pool, .. } if pool == family.pool)
         );
         // An uncharged Prepared can lose all unheld IDs to actual native work.
         // Empty is a drain/cancel proposal only, never a new GPU Pool/route.
@@ -1952,7 +1953,7 @@ mod tests {
         // Canonical max-one-current and max-one consumer are independent guards.
         let second = PoolRecord {
             key: BackingKey {
-                pool: subset.pool,
+                pool: subset_pool,
                 generation: [10; 16],
             },
             devices: vec![DeviceId {
@@ -2019,7 +2020,7 @@ mod tests {
             cost: hex_api::RuntimeCost,
             devices: &[hex_api::DeviceId],
             family: (&[u8; 32], &[hex_api::DeviceId], Option<&PoolRecord>),
-            validate: &mut dyn FnMut(&Records, &[PoolRecord]) -> Result<(), Refusal>,
+            validate: &mut crate::devices::PoolPreparationCheck<'_>,
         ) -> Result<PoolRecord, Refusal> {
             let snapshot = Books::pool_records(self)?;
             assert_eq!(snapshot.iter().find(|row| row.key.pool == pool), family.2);

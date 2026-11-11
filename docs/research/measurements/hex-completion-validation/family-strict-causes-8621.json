@@ -1,0 +1,42 @@
+{
+  "parent": "4cb960811fd7d5dd5b86fc33873ad5451f178845",
+  "role": "coordinator",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "pins": [
+    "52ddde6c86b9b6d3bce3b7b4ed3c6c76ca22f5f8",
+    "aa298cb1ad200e408f64c85338f5a95cdc7524f1",
+    "5631c52ac48da4ffa41a2bb9214c2fae1f11b7b4",
+    "4b73075fb3e53e1f51a0302cfbbdc28ce26f7cee",
+    "b861161ab0319d6b825bcfa6d514c5dfd1953918"
+  ],
+  "actual_before": "8621 Linux first test compiler101/zero units: two rustix recv tuple expected-value errors, unused import. Windows strict compiler101: validator type complexity, Proposal272B. Mac phase not executed.",
+  "changes": [
+    "exact initialized/received byte counts asserted(1,1) plus byte oracle/nonconsume unchanged",
+    "remove only unused test import",
+    "borrowed PoolPreparationCheck explicit lifetime alias across real producers and fixture implementations; no storage/ownership/default",
+    "private Proposal keeps derived pool and exact devices/current; complete original selector/config/hash checks still run, immutable family owns cost; no heap boxing/allow"
+  ],
+  "new_tests": "none; the affected existing pure family control may rerun for representation change; unexecuted24 controls still owed",
+  "scope_format": "named files only, skip_children",
+  "compiler_after": "UNRUN",
+  "native_after": "UNRUN",
+  "lock_unchanged": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+  "members": {
+    "crates/hex-node/src/node/backends.rs": "755588c15fdfde567bb81d292c144d20636bfbcef509dfa52a273ee91c80ed6e",
+    "crates/hex-node/src/recorded.rs": "07fac29ac54550bd80565de591f6e045450a1db11cda3c417a0ebe7734e6aa41",
+    "crates/hex-node/src/store/pool.rs": "1d394ed3b5f0650ea08ccfee4b61af96992e19016d0a38128911e7dd8bfc1fda",
+    "crates/hex-runtime/src/devices.rs": "c6067b58699fbc802cd509713ec63ee5c43bec789faede8c6313632e9517bc4f",
+    "crates/hex-runtime/src/firecracker/native.rs": "51fb6c37ab851629aa99c6ed689098f9ea5deb3992af523d4ec499a108da10e5",
+    "crates/hex-runtime/src/guest/books.rs": "dddbbe5c1661c45da9bbbbeeb52e57a48a2857a4f8e4d0dcf4f1f1d2f48c7a90",
+    "crates/hex-runtime/src/guest/family.rs": "f83d2c1fe9ec2d3189796fd6622a6efc0f33192b8a255ebfbf7b1a0c6d18f65a",
+    "crates/hex-runtime/src/guest/gpu_pool.rs": "ba38ea728654ff729013bb3f631bea97b382859f92f374ff57c5a998135f7848",
+    "crates/hex-runtime/src/guest/shared_tests.rs": "7b8b72edf111ad06b7eadba4e4131496154cf509cfec5af938f271f0ab4acc81",
+    "crates/hex-runtime/src/linux/sys.rs": "f90284ac37e877201342f3c170f4ae091a82269f460fbc47815706dd73f055e4",
+    "docs/research/measurements/hex-complete-bindings/gate-recv-8621-fixture-compat-source.json": "3c296c65bba3d4c7ddd4da8614cbf940a59ad42699a8fb4c6c166f38285a0a37",
+    "docs/research/measurements/hex-complete-bindings/pool-preparation-check-alias-source.json": "bab5497550dc5344283adab740fca2de1ba88ecf2a5e50794c3fa64b844c888c",
+    "docs/research/measurements/hex-complete-lifecycle/pool-preparation-alias-consumers-source.json": "649f0c32ce28bc1607864678d810eefc3aa77174135137f6799e061a47086414",
+    "docs/research/measurements/hex-complete-shards-gpu/POOL-PREPARATION-ALIAS-CONSUMER.json": "2fe3c59d2603d0cf2fb9f28cee7c6dd447278d23ec91acc368eeb4b3c4f78dd6",
+    "docs/research/measurements/hex-complete-shards-gpu/PROPOSAL-LAYOUT-SOURCE.json": "bbd77970f50a042df8823232b00e04f7f327ce06c59593c807b45731be892982"
+  }
+}
