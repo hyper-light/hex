@@ -373,28 +373,7 @@ impl Stream {
                 return Ok(None);
             }
             let conn = self.dial_named_before(Named { exec, stream }, deadline)?;
-            // The caller's own descriptor of the connection; this side's closes as `conn` drops.
-            let end = conn
-                .handle()
-                .try_clone_to_owned()
-                .map_err(os("handing a stdio connection to its caller"))?;
-            // HEX-RT-17: Shards waits around a non-blocking socket in its Stream wrapper. Only the raw descriptor
-            // outlives this handoff, so its caller's OwnedStream must block itself; the control connection stays evented.
-            #[cfg(unix)]
-            {
-                let flags = rustix::fs::fcntl_getfl(&end)
-                    .map_err(|e| Refusal::os("reading a stdio connection's mode", e))?;
-                rustix::fs::fcntl_setfl(&end, flags & !rustix::fs::OFlags::NONBLOCK)
-                    .map_err(|e| Refusal::os("making a caller's stdio connection wait", e))?;
-                Ok(Some(end))
-            }
-            #[cfg(windows)]
-            {
-                use std::os::windows::io::AsSocket;
-                hex_afunix::set_nonblocking(end.as_socket(), false)
-                    .map_err(os("making a caller's stdio connection wait"))?;
-                Ok(Some(end.into()))
-            }
+            caller_end(&*conn).map(Some)
         };
         Ok(hex_api::Given {
             stdin: dial(ask.stdin, stream::Stdio::In)?,
@@ -402,6 +381,70 @@ impl Stream {
             stderr: dial(ask.stderr, stream::Stdio::Err)?,
         })
     }
+}
+
+/// The caller's own end of a guest stdio connection: its descriptor, duplicated; this side's closes as the
+/// connection drops. HEX-RT-17: Shards waits around a non-blocking socket in its Stream wrapper. Only the raw
+/// descriptor outlives this handoff, so its caller's OwnedStream must block itself; the control connection
+/// stays evented.
+#[cfg(any(unix, windows))]
+fn caller_end(conn: &dyn Duplex) -> Result<hex_api::End, Refusal> {
+    let end = conn
+        .handle()
+        .try_clone_to_owned()
+        .map_err(os("handing a stdio connection to its caller"))?;
+    #[cfg(unix)]
+    {
+        let flags = rustix::fs::fcntl_getfl(&end)
+            .map_err(|e| Refusal::os("reading a stdio connection's mode", e))?;
+        rustix::fs::fcntl_setfl(&end, flags & !rustix::fs::OFlags::NONBLOCK)
+            .map_err(|e| Refusal::os("making a caller's stdio connection wait", e))?;
+        Ok(end)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsSocket;
+        hex_afunix::set_nonblocking(end.as_socket(), false)
+            .map_err(os("making a caller's stdio connection wait"))?;
+        Ok(end.into())
+    }
+}
+
+/// HEX-RT-17: an offered guest exec's streams, opened in this caller (a Windows node's, which can't lend its
+/// own across processes): each a borrowed CONNECT to the guest the offer names, taking no VM lifetime, named
+/// for the exec as the guest's own stdio dial names it, the caller's end handed off as its own.
+#[cfg(any(windows, test))]
+pub(crate) fn open_offered(
+    offer: &wire::StreamOffer,
+    _deadline: Option<ReplyDeadline>,
+) -> Result<hex_api::Given, Refusal> {
+    let identity = shards_api::Identity {
+        pid: offer.pid,
+        started: offer.started,
+        vsock: offer.vsock.clone(),
+    };
+    let exec = Exec {
+        conn: offer.token,
+        id: offer.exec,
+    };
+    let open = |on: bool, stream| -> Result<Option<hex_api::End>, Refusal> {
+        if !on {
+            return Ok(None);
+        }
+        // The dedicated control connection has already said hello, so this is one attempt at an
+        // already-listening guest, bounded by Shards' existing CONNECT handshake and the VM's life.
+        let conn = shards_api::connect_borrowed(&identity, stream::STDIO_PORT, Duration::ZERO)
+            .map_err(|why| shards::refusal("opening an offered guest stream", &why))?;
+        let mut conn = shards::ShardsStream(conn);
+        conn.write_all(&stream::name(Named { exec, stream }))
+            .map_err(os("naming an offered guest stream"))?;
+        caller_end(&conn).map(Some)
+    };
+    Ok(hex_api::Given {
+        stdin: open(offer.streams.stdin, stream::Stdio::In)?,
+        stdout: open(offer.streams.stdout, stream::Stdio::Out)?,
+        stderr: open(offer.streams.stderr, stream::Stdio::Err)?,
+    })
 }
 
 impl Transport for Stream {

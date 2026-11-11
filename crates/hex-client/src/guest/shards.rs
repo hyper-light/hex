@@ -13,7 +13,7 @@ use hex_api::{ConnectFailure, ConnectPhase, ConnectReply, IoKind, Refusal};
 use super::{Duplex, DuplexOwner, Link, own_duplex};
 
 /// A connection to one of the guest's ports, as Shards gives it.
-pub struct ShardsStream(Box<dyn shards_api::Stream>);
+pub struct ShardsStream(pub(crate) Box<dyn shards_api::Stream>);
 
 impl Read for ShardsStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
