@@ -74,7 +74,16 @@ impl Node {
         };
         let plan = match &authority {
             Some(authority) => self.attachments.guest_cdi(full, authority)?,
-            None => self.attachments.cdi(&full.devices)?,
+            None => {
+                if full
+                    .devices
+                    .iter()
+                    .any(|device| device.kind == DeviceKind::Gpu)
+                {
+                    guest::pci(full)?;
+                }
+                self.attachments.cdi(&full.devices)?
+            }
         };
         let edits = plan.edits()?;
         let resolved = match &authority {

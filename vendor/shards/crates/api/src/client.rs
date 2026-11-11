@@ -3643,6 +3643,10 @@ mod tests {
             pid, expected_started, failure: crate::ProcessFailure::Exited | crate::ProcessFailure::Os {
                 operation: crate::ProcessOperation::PidfdOpen | crate::ProcessOperation::RegisterExit | crate::ProcessOperation::ReadStat,
                 code: libc::ESRCH,
+            } | crate::ProcessFailure::Os {
+                // Reaped between its pidfd's open and its stat's: its /proc entry is gone.
+                operation: crate::ProcessOperation::OpenStat,
+                code: libc::ENOENT,
             }
         }) if pid == identity.pid && expected_started == identity.started),
             "{:?}",
@@ -3784,6 +3788,10 @@ mod tests {
             pid, expected_started, failure: crate::ProcessFailure::Exited | crate::ProcessFailure::Os {
                 operation: crate::ProcessOperation::PidfdOpen | crate::ProcessOperation::RegisterExit | crate::ProcessOperation::ReadStat,
                 code: libc::ESRCH,
+            } | crate::ProcessFailure::Os {
+                // Reaped between its pidfd's open and its stat's: its /proc entry is gone.
+                operation: crate::ProcessOperation::OpenStat,
+                code: libc::ENOENT,
             }
         }) if pid == identity.pid && expected_started == identity.started),
             "{:?}",
