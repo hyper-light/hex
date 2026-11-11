@@ -39,6 +39,10 @@ rustix.workspace = true
 windows-sys.workspace = true
 windows.workspace = true
 
+[features]
+# Read-only held-child phase witness for Node native tests; no execution authority.
+native-gate-test = []
+
 [dev-dependencies]
 proptest = "1.12.0"
 tempfile.workspace = true

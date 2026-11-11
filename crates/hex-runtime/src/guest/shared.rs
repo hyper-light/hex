@@ -1371,6 +1371,8 @@ impl GuestRuntime {
                 if pool::read(path)?.is_some() {
                     return Err(refused(key, LifecycleCause::Uncertain));
                 }
+                self.preflight_backing(&record)?;
+                transaction.check_unsubmitted_pool()?;
                 record.phase = BackingPhase::Released;
                 transaction.put_pool(&record)?;
                 return record.offer();

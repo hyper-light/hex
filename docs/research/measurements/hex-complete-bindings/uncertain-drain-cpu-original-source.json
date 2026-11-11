@@ -1,0 +1,51 @@
+{
+  "requirement": "AC-T7.4.1",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "fixed_root_base": "4980bf2c200363a6f7e1bd56da5d16d1426eb2b6",
+  "producer_parent": "3749736f808a7252902137fd891d29fe160b5289",
+  "source": {
+    "path": "crates/hex-node/src/scheduler/observer_cpu_tests.rs",
+    "sha256": "7eae4ac27d974a2b4e7c8b2cea61e42408f2fbbc14bac2cf30f41234fc823549"
+  },
+  "original_control": {
+    "name": "scheduler::observer_cpu_tests::uncertain_canonical_drain_keeps_cpu_progress_and_retains_original_charge",
+    "body_sha256": "27d26ad2a10a9d482eb1a4db0d260525a86c59e0de08fbbad62b673dbd0f1c0f",
+    "status": "SOURCE FIRST / UNRUN; no production remedy accompanies this control",
+    "preconditions": [
+      "Valid initialized native Process CPU plane with explicit 2000 millicpu/512 MiB model resources; actual canonical Draining GPU backing profile reserves 1000 millicpu/128 MiB and the exact configured ID.",
+      "No measured GPU DeviceInfo, no pressure readings, no invented GPU facts. Existing real Service refresh/Driver/Index path; model endpoints only.",
+      "Healthy snapshot must normalize before the actual Service.refresh invokes one canonical drain callback. Backing usage and native cleanup return exact-key Backing Uncertain; native CPU authority remains successful."
+    ],
+    "required_oracles": [
+      "Actual canonical drain callback count must equal one, not an earlier observer-only failure.",
+      "The SAME Driver rejects an unproved Released ACK without entering the endpoint again; exact backing remains not-Released. This does not independently measure each resource counter.",
+      "Qualified cleanup uncertainty must not block unrelated CPU refresh or facts; no fabricated GPU facts.",
+      "Actual returned create and delete Steps are delivered through Service.dispatch. Native model create=1/delete=1, observer create/delete=0, final simulated runtime list empty."
+    ]
+  },
+  "prior_control_preservation": {
+    "name": "failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_facts",
+    "original_body_sha256": "650168e41ffcf617fb124f3c9ba76482ea552debeeb4859de5ef9bd4da904fb5",
+    "current_after_removing_only_two_zero_counter_literal_ports_sha256": "650168e41ffcf617fb124f3c9ba76482ea552debeeb4859de5ef9bd4da904fb5",
+    "equal": true,
+    "fixture_extension": "One release callback counter plus qualified model backing_usage/release_backing methods. Existing Prepared-observation original does not invoke new lifecycle callbacks; its assertions and lifecycle delivery are unchanged."
+  },
+  "production_changes": "NONE; only the Linux cfg(test) observer_cpu_tests leaf plus this evidence record.",
+  "checks": {
+    "installed_rustfmt": "parser/format only; exit 0",
+    "git_diff_check": "exit 0",
+    "cargo_tests_clippy": "0 / NOT DISPATCHED; ROOT owns exact matched check",
+    "native_effects": "0 / no dispatch; model runtime only"
+  },
+  "R01_R16": {
+    "state_ownership": "Existing Service/Driver/two Index views and sole native Runtime authority; no new manager/provider/cache/DTO/ledger. Counted callbacks distinguish observation, cleanup and forbidden ACK.",
+    "wait_cache": "No new waits, retries, timers or cache. All control work is finite and synchronous model callbacks.",
+    "decision_reproduction": "New source observation from 374 cleanup error propagation is a hypothesis, not a reproduced defect. This original must actually execute before any remedy. Retain original source/body and ROOT logs.",
+    "portability": "Control lives behind the existing Linux-only observer_cpu_tests registration. No native/cross-platform result inferred.",
+    "performance": "No speed/allocation/fault/leak claim; ROOT R14 profiling remains owed.",
+    "operations": "No build/test/native dispatch, no runner/service/key/driver changes; signer and named source only. ROOT32 family cohort remains separately active and must not be duplicated."
+  },
+  "owed": "ROOT execute this one original separately at exact joined producer source; archive logs/results. Any relevant red must identify the actual path before narrow production remedy; no unchanged prior-control replay."
+}

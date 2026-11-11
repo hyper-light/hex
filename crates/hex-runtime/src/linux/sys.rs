@@ -216,6 +216,14 @@ pub struct HeldGate {
 }
 
 impl HeldGate {
+    /// Development-only observation of THIS child's cgroup/descriptor-isolation phase. Peek
+    /// preserves byte 2 for release's original handshake; it never sends authorization byte 1.
+    #[cfg(any(test, feature = "native-gate-test"))]
+    pub fn wait_isolated(&self) -> std::io::Result<()> {
+        held_receive(self.socket.as_raw_fd(), self.deadline, 2, true)?;
+        Ok(())
+    }
+
     pub fn release(self) -> std::io::Result<()> {
         // Acknowledges the child-side cgroup join and inherited-writer closure, including on the
         // legacy-clone fallback. The caller already owns the pidfd before any wait can fail.
@@ -489,6 +497,15 @@ fn held_ready(reader: RawFd) -> rustix::io::Result<()> {
 }
 
 fn held_wait(reader: RawFd, deadline: libc::timespec, expected: u8) -> rustix::io::Result<()> {
+    held_receive(reader, deadline, expected, false)
+}
+
+fn held_receive(
+    reader: RawFd,
+    deadline: libc::timespec,
+    expected: u8,
+    peek: bool,
+) -> rustix::io::Result<()> {
     let remaining = held_remaining(deadline)?;
     let mut fd = libc::pollfd {
         fd: reader,
@@ -509,12 +526,13 @@ fn held_wait(reader: RawFd, deadline: libc::timespec, expected: u8) -> rustix::i
     let mut byte = 0u8;
     // SAFETY: a single stack byte is writable; this is the retained gate reader. DONTWAIT bounds
     // the read even on an unexpected readiness transition; EOF or any other byte cancels.
+    // The private test observation may only PEEK; consuming production callers pass false.
     let read = unsafe {
         libc::recv(
             reader,
             std::ptr::from_mut(&mut byte).cast(),
             1,
-            libc::MSG_DONTWAIT,
+            libc::MSG_DONTWAIT | if peek { libc::MSG_PEEK } else { 0 },
         )
     };
     if read == 1 && byte == expected {
@@ -789,6 +807,91 @@ unsafe fn child_with_fd(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AC-T7.4.1: observing byte2 does not consume it, authorize execution or create another
+    /// deadline. Release retains its original consume2/send1 sequence after repeated peeks.
+    #[test]
+    fn observing_isolation_ack_peeks_without_consuming_or_authorizing_exec() {
+        let (parent, child) = rustix::net::socketpair(
+            rustix::net::AddressFamily::UNIX,
+            rustix::net::SocketType::STREAM,
+            rustix::net::SocketFlags::CLOEXEC,
+            None,
+        )
+        .unwrap();
+        let gate = HeldGate {
+            socket: parent,
+            deadline: held_deadline(Duration::from_secs(1)).unwrap(),
+        };
+        assert_eq!(
+            rustix::net::send(&child, &[2], rustix::net::SendFlags::DONTWAIT).unwrap(),
+            1
+        );
+        gate.wait_isolated().unwrap();
+        gate.wait_isolated().unwrap();
+        let mut byte = [0u8];
+        assert_eq!(
+            rustix::net::recv(&child, &mut byte, rustix::net::RecvFlags::DONTWAIT),
+            Err(rustix::io::Errno::AGAIN)
+        );
+        gate.release().unwrap();
+        assert_eq!(
+            rustix::net::recv(&child, &mut byte, rustix::net::RecvFlags::DONTWAIT).unwrap(),
+            1
+        );
+        assert_eq!(byte, [1]);
+    }
+
+    /// AC-T7.4.1: wrong phase, EOF or the original expired deadline are observation failure;
+    /// none may be accepted as isolation or send the foreign execution authorization byte.
+    #[test]
+    fn isolation_ack_wrong_byte_eof_and_expired_original_deadline_refuse() {
+        for mode in [0, 1, 2] {
+            let (parent, child) = rustix::net::socketpair(
+                rustix::net::AddressFamily::UNIX,
+                rustix::net::SocketType::STREAM,
+                rustix::net::SocketFlags::CLOEXEC,
+                None,
+            )
+            .unwrap();
+            let gate = HeldGate {
+                socket: parent,
+                deadline: if mode == 2 {
+                    libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    }
+                } else {
+                    held_deadline(Duration::from_secs(1)).unwrap()
+                },
+            };
+            if mode == 0 {
+                rustix::net::send(&child, &[3], rustix::net::SendFlags::DONTWAIT).unwrap();
+                assert!(gate.wait_isolated().is_err());
+                let mut byte = [0u8];
+                assert_eq!(
+                    rustix::net::recv(&gate.socket, &mut byte, rustix::net::RecvFlags::DONTWAIT)
+                        .unwrap(),
+                    1
+                );
+                assert_eq!(byte, [3], "even a rejected observation is nonconsuming");
+                assert_eq!(
+                    rustix::net::recv(&child, &mut byte, rustix::net::RecvFlags::DONTWAIT),
+                    Err(rustix::io::Errno::AGAIN)
+                );
+            } else if mode == 1 {
+                drop(child);
+                assert!(gate.wait_isolated().is_err());
+            } else {
+                rustix::net::send(&child, &[2], rustix::net::SendFlags::DONTWAIT).unwrap();
+                let error = gate.wait_isolated().unwrap_err();
+                assert_eq!(
+                    error.raw_os_error(),
+                    Some(rustix::io::Errno::TIMEDOUT.raw_os_error())
+                );
+            }
+        }
+    }
 
     /// AC-T7.4.1: the launch gate is finite, uses the caller's budget and never wraps a timespec.
     #[test]

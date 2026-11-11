@@ -594,4 +594,73 @@ mod tests {
             0
         );
     }
+
+    /// AC-T7.4.1: original new-feature edge. An unallocated cancellation ACK asks only about
+    /// native submission metadata, including on an in-process owner configured without a keeper.
+    /// This creates no native process/terminal result and opens/adopts/starts no native object.
+    #[test]
+    fn original_unallocated_released_without_keeper_checks_same_submission_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let native = runtime(dir.path());
+        assert!(native.holding.keeper.is_none() && native.boxes().unwrap().is_empty());
+        let fixed = hex_api::CapacityResources {
+            cpu_milli: 1000,
+            mem_bytes: shards_api::min_memory_mib(std::env::consts::ARCH) << 20,
+            disk_bytes: 0,
+        };
+        let cost = hex_api::RuntimeCost {
+            id: [0x81; 32],
+            floor: fixed,
+            ceiling: fixed,
+            quantum: hex_api::CapacityResources {
+                cpu_milli: 1000,
+                mem_bytes: 1,
+                disk_bytes: 1,
+            },
+            guest_overhead: hex_api::CapacityResources::default(),
+            overhead: hex_api::CapacityResources::default(),
+        };
+        native.check_vm_cost(&cost).unwrap();
+        let prepared = PoolRecord {
+            version: hex_core::record::RECORD_VERSION,
+            key: hex_api::BackingKey {
+                pool: [0x82; 32],
+                generation: [0x83; 16],
+            },
+            execution: hex_api::Execution::ShardsShared,
+            cost,
+            allocation: None,
+            devices: Vec::new(),
+            phase: hex_api::BackingPhase::Prepared,
+            init: None,
+            exit: None,
+        };
+        prepared.check().unwrap();
+        native
+            .preflight_managed(NativeRecord::Pool(&prepared))
+            .unwrap();
+        let mut cancelled = PoolRecord::decode(&prepared.encode().unwrap()).unwrap();
+        cancelled.phase = hex_api::BackingPhase::Released;
+        prepared.accepts(&cancelled).unwrap(); // Legal no-grant cancellation, not ScopeReleased.
+        cancelled.check().unwrap();
+        assert_eq!(cancelled.key, prepared.key);
+        assert_eq!(cancelled.cost, prepared.cost);
+        assert_eq!(cancelled.scope(), prepared.scope());
+        assert!(
+            cancelled.allocation.is_none() && cancelled.init.is_none() && cancelled.exit.is_none()
+        );
+        let before = cancelled.encode().unwrap();
+        assert!(dir.path().read_dir().unwrap().next().is_none());
+        let result = native.preflight_managed(NativeRecord::Pool(&cancelled));
+        assert!(native.boxes().unwrap().is_empty() && native.holding.keeper.is_none());
+        assert_eq!(cancelled.encode().unwrap(), before);
+        assert!(dir.path().read_dir().unwrap().next().is_none());
+        assert_eq!(
+            native
+                .feature_reads
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        result.unwrap(); // Original oracle: the same no-submission metadata shape must remain readable.
+    }
 }

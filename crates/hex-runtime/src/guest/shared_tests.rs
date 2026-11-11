@@ -46,10 +46,19 @@ struct Owner {
     launches: AtomicUsize,
     preparations: AtomicUsize,
     removals: AtomicUsize,
+    submission: Mutex<Submission>,
+    submission_checks: AtomicUsize,
     capacity_calls: AtomicUsize,
     finalized: AtomicUsize,
     fail_finalize: AtomicBool,
     native: triomphe::Arc<Native>,
+}
+
+#[derive(Clone, Copy)]
+enum Submission {
+    Absent,
+    Present,
+    Unavailable,
 }
 
 impl Owner {
@@ -60,6 +69,8 @@ impl Owner {
             launches: AtomicUsize::new(0),
             preparations: AtomicUsize::new(0),
             removals: AtomicUsize::new(0),
+            submission: Mutex::new(Submission::Absent),
+            submission_checks: AtomicUsize::new(0),
             capacity_calls: AtomicUsize::new(0),
             finalized: AtomicUsize::new(0),
             fail_finalize: AtomicBool::new(false),
@@ -71,11 +82,35 @@ impl Owner {
         let row = held.as_ref().unwrap();
         PoolRecord::decode(&row.encode().unwrap()).unwrap()
     }
+
+    // Model the SAME native owner's read-only metadata check, not a terminal
+    // scope witness. Both cancellation and its later ACK must invoke it.
+    fn check_native_unsubmitted(&self, key: BackingKey) -> Result<(), Refusal> {
+        self.submission_checks.fetch_add(1, Ordering::SeqCst);
+        match *self.submission.lock().unwrap() {
+            Submission::Absent if self.launches.load(Ordering::SeqCst) == 0 => Ok(()),
+            Submission::Unavailable => Err(Refusal::os(
+                "checking model native submission metadata",
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            )),
+            Submission::Absent | Submission::Present => {
+                Err(refused(key, LifecycleCause::Uncertain))
+            }
+        }
+    }
 }
 
 impl Transaction for Owner {
     fn check_unsubmitted_pool(&self) -> Result<(), Refusal> {
-        Err(refused(self.row().key, LifecycleCause::Uncertain))
+        let row = self.row();
+        if row.phase != BackingPhase::Prepared
+            || row.allocation.is_some()
+            || row.init.is_some()
+            || row.exit.is_some()
+        {
+            return Err(refused(row.key, LifecycleCause::Uncertain));
+        }
+        self.check_native_unsubmitted(row.key)
     }
     fn records(&self) -> Result<Records, Refusal> {
         Ok(self.boxes.lock().unwrap().clone())
@@ -117,9 +152,12 @@ impl Transaction for Owner {
         let row = held
             .as_ref()
             .ok_or_else(|| refused(*key, LifecycleCause::Uncertain))?;
-        if row.key != *key
-            || row.phase != BackingPhase::Released
-            || row.allocation.is_none()
+        if row.key != *key || row.phase != BackingPhase::Released {
+            return Err(refused(*key, LifecycleCause::Uncertain));
+        }
+        if row.allocation.is_none() && row.init.is_none() && row.exit.is_none() {
+            self.check_native_unsubmitted(*key)?;
+        } else if row.allocation.is_none()
             || row.exit != Some(hex_api::Exit::Code(7))
             || !self.native.released.load(Ordering::SeqCst)
             || self.finalized.load(Ordering::SeqCst) == 0
@@ -841,4 +879,70 @@ fn shared_index_ack_preserves_references_and_refuses_a_stale_generation() {
     assert_eq!(owner.launches.load(Ordering::SeqCst), 1);
     assert_eq!(owner.finalized.load(Ordering::SeqCst), 1);
     assert_eq!(owner.native.stops.load(Ordering::SeqCst), stops);
+}
+
+/// AC-T7.4.1: Prepared cancellation is a no-submission proof, not native scope
+/// release. Its explicit ACK rechecks the same owner before canonical removal.
+#[test]
+fn shared_prepared_cancel_and_ack_recheck_native_absence_without_a_scope_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, owner) = configured(dir.path());
+    let original = runtime.prepare_backing().unwrap();
+    let before = owner.row().encode().unwrap();
+    assert_eq!(original.phase, BackingPhase::Prepared);
+    assert_eq!(owner.row().allocation, None);
+    assert_eq!(owner.row().init, None);
+    assert_eq!(owner.row().exit, None);
+    assert!(pool::read(&dir.path().join("@guest")).unwrap().is_none());
+    for metadata in [Submission::Present, Submission::Unavailable] {
+        *owner.submission.lock().unwrap() = metadata;
+        assert!(runtime.release_backing(original.key).is_err());
+        assert_eq!(owner.row().encode().unwrap(), before);
+        assert_eq!(runtime.shared_key().unwrap(), Some(original.key));
+        assert_eq!(owner.removals.load(Ordering::SeqCst), 0);
+    }
+    *owner.submission.lock().unwrap() = Submission::Absent;
+    let cancelled = runtime.release_backing(original.key).unwrap();
+    assert_eq!(cancelled.key, original.key);
+    assert_eq!(cancelled.phase, BackingPhase::Released);
+    let row = owner.row();
+    assert_eq!(row.allocation, None);
+    assert_eq!(row.init, None);
+    assert_eq!(row.exit, None, "metadata absence fabricated a native end");
+    runtime.preflight_backing(&row).unwrap();
+    assert!(pool::read(&dir.path().join("@guest")).unwrap().is_none());
+    let checks = owner.submission_checks.load(Ordering::SeqCst);
+    assert_eq!(checks, 3);
+    assert!(Transaction::check_unsubmitted_pool(owner.as_ref()).is_err());
+    assert_eq!(owner.submission_checks.load(Ordering::SeqCst), checks);
+    let observed = runtime.capacity(Class::Oci).unwrap().unwrap();
+    observed.check().unwrap();
+    assert_eq!(observed.backings, [cancelled]);
+    let before_ack = row.encode().unwrap();
+    for metadata in [Submission::Present, Submission::Unavailable] {
+        *owner.submission.lock().unwrap() = metadata;
+        assert!(runtime.release_backing(original.key).is_err());
+        assert_eq!(owner.row().encode().unwrap(), before_ack);
+        assert_eq!(runtime.shared_key().unwrap(), Some(original.key));
+        assert_eq!(owner.removals.load(Ordering::SeqCst), 0);
+    }
+    *owner.submission.lock().unwrap() = Submission::Absent;
+    let ack = runtime.release_backing(original.key).unwrap();
+    assert_eq!(ack.key, original.key);
+    assert_eq!(ack.phase, BackingPhase::Released);
+    assert_eq!(owner.submission_checks.load(Ordering::SeqCst), 6);
+    assert!(owner.pool.lock().unwrap().is_none());
+    assert_eq!(runtime.shared_key().unwrap(), None);
+    let fresh = runtime.prepare_backing().unwrap();
+    assert_ne!(fresh.key, original.key);
+    assert_eq!(fresh.key.pool, original.key.pool);
+    assert_eq!(fresh.phase, BackingPhase::Prepared);
+    assert_eq!(owner.row().allocation, None);
+    assert_eq!(owner.removals.load(Ordering::SeqCst), 1);
+    assert_eq!(owner.preparations.load(Ordering::SeqCst), 2);
+    assert_eq!(owner.launches.load(Ordering::SeqCst), 0);
+    assert_eq!(owner.finalized.load(Ordering::SeqCst), 0);
+    assert_eq!(owner.native.stops.load(Ordering::SeqCst), 0);
+    assert!(!owner.native.released.load(Ordering::SeqCst));
+    assert!(owner.boxes.lock().unwrap().is_empty());
 }

@@ -161,7 +161,7 @@ fn native_presence_and_io_failure_propagate_without_publishing_or_removing() {
             );
         } else {
             assert!(
-                matches!(result, Err(Refusal::Os(message)) if message.contains("submission metadata") && message.contains("denied"))
+                matches!(result, Err(Refusal::Os { op, why }) if op == "reading this owner's native submission metadata" && why.contains("denied"))
             );
         }
         assert_eq!(pool_bytes(directory.path(), row.key), before);
@@ -345,7 +345,7 @@ fn cancelled_unallocated_ack_rechecks_native_metadata_and_fences_reused_generati
                 matches!(result, Err(Refusal::Backing { key: actual, cause: LifecycleCause::Busy }) if actual == key)
             ),
             2 => assert!(
-                matches!(result, Err(Refusal::Os(message)) if message.contains("native metadata for ACK") && message.contains("denied"))
+                matches!(result, Err(Refusal::Os { op, why }) if op == "reading cancelled owner's native metadata for ACK" && why.contains("denied"))
             ),
             other => panic!("unknown injected outcome {other}"),
         }

@@ -110,6 +110,8 @@ pub(crate) struct ManagedVm {
     identity: OnceLock<shards_api::Identity>,
     pending_path: Mutex<Option<PathBuf>>,
     phase: Mutex<ManagedPhase>,
+    #[cfg(test)]
+    isolation_ack: OnceLock<Mutex<Option<std::io::PipeWriter>>>,
     supervisor: Weak<Supervisor>,
     token: u64,
 }
@@ -446,6 +448,8 @@ impl Supervisor {
             identity: OnceLock::new(),
             pending_path: Mutex::new(Some(path)),
             phase: Mutex::new(phase),
+            #[cfg(test)]
+            isolation_ack: OnceLock::new(),
             supervisor: Arc::downgrade(self),
             token,
         })
@@ -477,6 +481,8 @@ impl Supervisor {
         publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
         self.same_managed(native)?;
+        #[cfg(test)]
+        let isolation_ack = native.take_isolation_ack()?;
         let _spawning = self.spawning()?;
         let gate = {
             let mut phase = native.phase.lock().map_err(poisoned)?;
@@ -509,6 +515,14 @@ impl Supervisor {
             } else {
                 return Err(native.uncertain());
             }
+        }
+        #[cfg(test)]
+        if let Some(writer) = isolation_ack {
+            // Held is registered in the SAME owner/token table and watcher above. The orphan
+            // sweep recognizes that exact PID; no owner/phase/table/reaper lock spans the probe.
+            // Without a per-launch probe the production spawning/gate behavior is unchanged.
+            drop(_spawning);
+            notify_isolation_ack(&gate, writer)?;
         }
         let identity = native.observe_identity()?;
         publish(identity)?;
@@ -1147,6 +1161,33 @@ fn managed_storage() -> Refusal {
     }
 }
 
+#[cfg(test)]
+fn notify_isolation_ack(
+    gate: &hex_runtime::linux::sys::HeldGate,
+    writer: std::io::PipeWriter,
+) -> Result<(), Refusal> {
+    gate.wait_isolated()
+        .map_err(|error| Refusal::os("observing this child's isolation acknowledgment", error))?;
+    write_isolation_ack(writer)
+}
+
+#[cfg(test)]
+fn write_isolation_ack(writer: std::io::PipeWriter) -> Result<(), Refusal> {
+    // Fresh, private NONBLOCK pipe; exactly one byte, one attempt, then owned writer closure.
+    // The notification carries observation only. It is never the held gate's authorization byte.
+    match rustix::io::write(&writer, &[2]) {
+        Ok(1) => Ok(()),
+        Ok(_) => Err(Refusal::os(
+            "notifying per-launch descriptor isolation",
+            Errno::IO,
+        )),
+        Err(error) => Err(Refusal::os(
+            "notifying per-launch descriptor isolation",
+            error,
+        )),
+    }
+}
+
 fn managed_table_invalid() -> Refusal {
     let message = "native supervisor publication has no unique reserved owner slot";
     let mut why = String::new();
@@ -1181,6 +1222,35 @@ fn managed_os(operation: shards_api::ProcessOperation, error: Errno) -> shards_a
 }
 
 impl ManagedVm {
+    /// Installs one private notification before spawn on this SAME preallocated receipt. A
+    /// duplicate (including after consumption), non-Reserved phase or native setup error refuses.
+    #[cfg(test)]
+    pub(crate) fn prepare_isolation_ack(&self) -> Result<std::io::PipeReader, Refusal> {
+        let phase = self.phase.lock().map_err(poisoned)?;
+        if !matches!(*phase, ManagedPhase::Reserved) || self.isolation_ack.get().is_some() {
+            return Err(self.uncertain());
+        }
+        let (reader, writer) = std::io::pipe()
+            .map_err(|error| Refusal::os("creating per-launch isolation acknowledgment", error))?;
+        let flags = rustix::fs::fcntl_getfl(&writer)
+            .map_err(|error| Refusal::os("observing isolation acknowledgment flags", error))?;
+        rustix::fs::fcntl_setfl(&writer, flags | rustix::fs::OFlags::NONBLOCK)
+            .map_err(|error| Refusal::os("bounding isolation acknowledgment write", error))?;
+        self.isolation_ack
+            .set(Mutex::new(Some(writer)))
+            .map_err(|_| self.uncertain())?;
+        Ok(reader)
+    }
+
+    #[cfg(test)]
+    fn take_isolation_ack(&self) -> Result<Option<std::io::PipeWriter>, Refusal> {
+        self.isolation_ack
+            .get()
+            .map(|ack| ack.lock().map_err(poisoned).map(|mut ack| ack.take()))
+            .transpose()
+            .map(Option::flatten)
+    }
+
     fn uncertain(&self) -> Refusal {
         match self.owner.as_ref() {
             OwnerRef::Box(id) => managed_uncertain(id),
@@ -1882,11 +1952,55 @@ mod tests {
             identity: OnceLock::new(),
             pending_path: Mutex::new(None),
             phase: Mutex::new(ManagedPhase::Absent),
+            isolation_ack: OnceLock::new(),
             supervisor: Weak::new(),
             token: 3,
         })
         .ok()
         .unwrap()
+    }
+
+    /// AC-T7.4.1: one owned notification on the same receipt, armed before spawn. No global FD,
+    /// late/duplicate preparation or second writer survives consumption; errors remain typed.
+    #[test]
+    fn per_launch_isolation_notification_is_single_owned_bounded_and_phase_checked() {
+        use std::io::Read as _;
+        let record = pool();
+        let native = pool_receipt(&record);
+        assert!(native.prepare_isolation_ack().is_err());
+        assert!(native.isolation_ack.get().is_none());
+        *native.phase.lock().unwrap() = ManagedPhase::Reserved;
+        let mut reader = native.prepare_isolation_ack().unwrap();
+        let same = triomphe::Arc::clone(&native);
+        assert!(same.prepare_isolation_ack().is_err());
+        let writer = native.take_isolation_ack().unwrap().unwrap();
+        assert!(
+            rustix::fs::fcntl_getfl(&writer)
+                .unwrap()
+                .contains(rustix::fs::OFlags::NONBLOCK)
+        );
+        assert!(same.take_isolation_ack().unwrap().is_none());
+        assert!(same.prepare_isolation_ack().is_err());
+        write_isolation_ack(writer).unwrap();
+        let mut byte = [0u8];
+        assert_eq!(reader.read(&mut byte).unwrap(), 1);
+        assert_eq!(byte, [2]);
+        assert_eq!(reader.read(&mut byte).unwrap(), 0);
+        // A failed notification cannot become success or leak a fresh writer.
+        let (read_only, actual_writer) = std::io::pipe().unwrap();
+        drop(actual_writer);
+        let wrong = std::io::PipeWriter::from(OwnedFd::from(read_only));
+        assert!(matches!(
+            write_isolation_ack(wrong),
+            Err(Refusal::Os {
+                op: "notifying per-launch descriptor isolation",
+                ..
+            })
+        ));
+        let late = pool_receipt(&record);
+        *late.phase.lock().unwrap() = ManagedPhase::Exited(Exit::Code(0));
+        assert!(late.prepare_isolation_ack().is_err());
+        assert!(late.isolation_ack.get().is_none());
     }
 
     /// AC-T7.4.1: a real Pool owner consumes the SAME init budget and token namespace as a Box.
