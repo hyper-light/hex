@@ -2172,11 +2172,34 @@ fn put_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             Ok(())
         }
         Refusal::Connect { port, failure } => {
+            w.reserve_fixed(
+                connect_refusal_bytes(*failure)
+                    .ok_or_else(|| Fault::value("connect refusal", "encoded size overflows"))?,
+            )?;
             w.u8(11);
             w.u32(*port);
             put_connect_failure(w, *failure)
         }
     }
+}
+
+/// A Connect refusal's body, exactly, reserved whole before any of it is written as a Backing
+/// refusal's is: its tag and port, the failure's tag, then its fixed-width fields, an option's tag
+/// before each optional one.
+fn connect_refusal_bytes(failure: ConnectFailure) -> Option<usize> {
+    const TAG: usize = size_of::<u8>();
+    let fields = match failure {
+        ConnectFailure::Closed => 0,
+        ConnectFailure::Expired { .. } | ConnectFailure::Reply(_) => TAG,
+        ConnectFailure::Io { kind, code, .. } => TAG
+            .checked_add(TAG)?
+            .checked_add(kind.named().map_or(0, |_| TAG))?
+            .checked_add(TAG)?
+            .checked_add(code.map_or(0, |_| size_of::<i32>()))?,
+    };
+    TAG.checked_add(size_of::<u32>())?
+        .checked_add(TAG)?
+        .checked_add(fields)
 }
 
 fn refusal(r: &mut Reader<'_>) -> Result<Refusal, Fault> {

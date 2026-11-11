@@ -1,6 +1,7 @@
 //! AC-T7.4.1: real production pool entrypoints over a controlled same-owner Books.
 //! Counters are model oracles; no native process, VM or renderer is started here.
 
+use super::super::tests::socket_fixture;
 use super::*;
 use crate::devices::{Books, PoolRecords, Records, Transaction};
 use hex_api::{Capacity, CapacityResources};
@@ -316,16 +317,6 @@ impl Books for Owner {
         assert!(devices.is_empty(), "these shared CPU controls claim no GPU");
         callback(self)
     }
-}
-
-// These two controls must reach the native model callback. Its real prepared
-// socket uses the platform's 103-byte minimum sun_path bound; a cohort's long
-// TMPDIR is not a valid socket fixture. TempDir still owns/removes this directory.
-fn socket_fixture() -> tempfile::TempDir {
-    #[cfg(unix)]
-    return tempfile::tempdir_in("/tmp").unwrap();
-    #[cfg(not(unix))]
-    tempfile::tempdir().unwrap()
 }
 
 fn configured(path: &Path) -> (GuestRuntime, Arc<Owner>) {

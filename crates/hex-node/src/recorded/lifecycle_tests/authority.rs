@@ -152,6 +152,14 @@ impl Runtime for Routed {
     }
 }
 impl Recover for Routed {
+    // The registered guest keeps only rows in the same Store: the host's cross-check is all of it.
+    fn preflight_retained(
+        &self,
+        records: &hex_runtime::devices::Records,
+        pools: &[PoolRecord],
+    ) -> Result<(), Refusal> {
+        self.host.preflight_retained(records, pools)
+    }
     fn owns_records(&self, spec: &BoxSpec) -> Result<bool, Refusal> {
         Ok(spec.class.class() == Class::Shards)
     }
@@ -235,6 +243,17 @@ fn registered_backend_uses_same_arc_store_and_turns_without_outer_record_or_reen
 fn shared_transactions_refuse_forged_claims_cross_identity_and_retained_device_reuse() {
     let dir = tempfile::tempdir().unwrap();
     let (gate, _, _) = fixture(0);
+    // A first device claim is checked against the canonical catalog (check_box_claims): GPU 7 is
+    // in it, so each refusal below is the claim's own, never a missing catalog.
+    let catalog = devices::Catalog::parse(
+        b"hex-devices-1\ngpu\t7\tfixture-gpu\t4096\thcs\tPCIROOT(0)#PCI(0700)\t\n",
+    )
+    .unwrap();
+    assert!(
+        gate.catalog
+            .set(devices::SharedCatalog::try_new(catalog).unwrap())
+            .is_ok()
+    );
     let node = Recorded::open(Backend(gate), dir.path()).unwrap();
     let device = DeviceId {
         kind: DeviceKind::Gpu,

@@ -87,8 +87,8 @@ impl Receipt<'_> {
 
     pub fn checked_readiness(&self) -> Result<(), Refusal> {
         match self {
-            Self::Pool(receipt) => receipt.checked_readiness().map(|_| ()),
-            Self::Selected(receipt) => receipt.checked_readiness().map(|_| ()),
+            Self::Pool(receipt) => receipt.checked_work_ready().map(|_| ()),
+            Self::Selected(receipt) => receipt.checked_work_ready().map(|_| ()),
         }
     }
 }

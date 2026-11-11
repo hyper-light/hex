@@ -694,7 +694,9 @@ mod release_frame {
 
     /// A node agent's stream, read as its agent reads it: frame by frame, an exec started and a start done.
     struct Narrow {
-        handle: std::net::UdpSocket,
+        /// Its readiness: a wake written is readable once written, on macOS too, where a loopback
+        /// datagram can arrive after its send returns, after the core's retry for room.
+        handle: Wake,
         room: Mutex<VecDeque<Room>>,
         during: Mutex<Option<During>>,
         inbound: Mutex<VecDeque<Written>>,
@@ -725,12 +727,12 @@ mod release_frame {
             };
             let bytes = wire::answer(id, answer, wire::MAX_MESSAGE).unwrap();
             self.inbound.lock().unwrap().push_back((bytes, ends));
-            self.handle.send(&[1]).unwrap();
+            self.handle.wake();
         }
 
         fn end(&self) {
             self.ended.store(true, Ordering::Release);
-            let _ = self.handle.send(&[1]);
+            self.handle.wake();
         }
 
         /// The agent reads one write's `bytes`: each request heard, and answered, once its frame is whole.
@@ -774,10 +776,7 @@ mod release_frame {
         fn reading(&self) {}
 
         fn handle(&self) -> Handle<'_> {
-            #[cfg(unix)]
-            return std::os::fd::AsFd::as_fd(&self.handle);
-            #[cfg(windows)]
-            std::os::windows::io::AsSocket::as_socket(&self.handle)
+            self.handle.handle()
         }
 
         fn frame(message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
@@ -785,7 +784,7 @@ mod release_frame {
         }
 
         fn recv(&self, _: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
-            while self.handle.recv(&mut [0u8; 1]).is_ok() {}
+            self.handle.drain();
             let mut came = false;
             loop {
                 let written = self.inbound.lock().unwrap().pop_front();
@@ -863,11 +862,8 @@ mod release_frame {
 
     /// A client of a `Narrow` stream whose agent's budget of programs is `programs`, as its hello would say.
     fn narrow(programs: usize) -> Core<Narrow> {
-        let handle = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-        handle.connect(handle.local_addr().unwrap()).unwrap();
-        handle.set_nonblocking(true).unwrap();
         let transport = Narrow {
-            handle,
+            handle: Wake::new().unwrap(),
             room: Mutex::new(VecDeque::new()),
             during: Mutex::new(None),
             inbound: Mutex::new(VecDeque::new()),

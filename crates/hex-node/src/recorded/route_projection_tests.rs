@@ -88,6 +88,13 @@ impl Recover for Projecting {
     fn end(&self, _: Option<ProcId>) -> Result<(), Refusal> {
         panic!("projection cannot end a scope")
     }
+    fn preflight_retained(
+        &self,
+        _: &hex_runtime::devices::Records,
+        _: &[PoolRecord],
+    ) -> Result<(), Refusal> {
+        panic!("projection cannot read native metadata")
+    }
     fn project_routes(
         &self,
         pools: &[PoolRecord],
