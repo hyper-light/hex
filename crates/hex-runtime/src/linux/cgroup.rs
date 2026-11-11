@@ -90,6 +90,10 @@ pub struct BoxRoot {
     /// slots apart, less those found gone or forgotten ([`BoxRoot::forget`]), so [`BoxRoot::get`] answers a name not
     /// among them without a lookup. At most [`MAX_BOXES`]; past it, `None`, and every name is looked up.
     named: Arc<Mutex<Option<BTreeSet<String>>>>,
+    /// The most cgroups under the root, boxes and slots together, past which a create is refused as
+    /// [`Refusal::Full`]: [`MAX_BOXES`], or fewer where a node fitted its bounds to its descriptor limit
+    /// ([`BoxRoot::at_most`]).
+    most: usize,
 }
 
 /// The cgroups a [`BoxRoot`] keeps names of ([`BoxRoot::names`]): shared with the root, so a name forgotten here is
@@ -161,6 +165,7 @@ impl BoxRoot {
             fd: Arc::new(fd),
             disks,
             named: Arc::new(Mutex::new(None)),
+            most: MAX_BOXES,
         };
         let named: BTreeSet<String> = root
             .boxes()?
@@ -278,8 +283,8 @@ impl BoxRoot {
         prepared: Option<(PathBuf, triomphe::Arc<OwnedFd>)>,
     ) -> Result<BoxCgroup, Refusal> {
         let writes = core::writes(bounds, &self.disks)?;
-        if self.count()? >= MAX_BOXES {
-            return Err(Refusal::Full(MAX_BOXES));
+        if self.count()? >= self.most {
+            return Err(Refusal::Full(self.most));
         }
         let (dir, pin) = match prepared {
             Some((directory, pin)) => {
@@ -443,14 +448,15 @@ impl BoxRoot {
     /// refill reads and writes once the cgroup's init is parked. The refill opens them when it makes the cgroup
     /// ([`BoxCgroup::open_ahead`]), so neither looks one up.
     pub fn ahead_files(&self) -> Vec<&'static str> {
-        let mut files: Vec<&'static str> = core::writes_all(&Bounds::default(), &self.disks)
-            .map(|ws| ws.iter().map(|w| w.file).collect())
-            .unwrap_or_default();
-        files.extend(BASELINE_FILES);
-        files.push("memory.peak");
-        files.sort_unstable();
-        files.dedup();
-        files
+        ahead_files(&self.disks)
+    }
+
+    /// This root holding at most `most` cgroups, boxes and slots together, never past [`MAX_BOXES`]: a node whose start
+    /// fitted its bounds to its descriptor limit holds no more boxes than it counted the descriptors of (hex-node's
+    /// `netns::fit`), each one more refused as [`Refusal::Full`].
+    pub fn at_most(mut self, most: usize) -> Self {
+        self.most = most.min(MAX_BOXES);
+        self
     }
 
     /// The cgroup `name` under the root, when it's there, opened relative to the root.
@@ -547,6 +553,19 @@ struct Opened(BTreeMap<&'static str, Option<(OwnedFd, bool)>>);
 
 /// The counters a box's usage is reported from, which [`BoxCgroup::baseline`] reads.
 const BASELINE_FILES: [&str; 4] = ["memory.events", "pids.events", "cpu.stat", "io.stat"];
+
+/// The files a cgroup made ahead opens ahead under a root whose `io` bounds apply to `disks` ([`BoxRoot::ahead_files`]),
+/// by name: what the refill opens, and what a node counts among its descriptors for each (hex-node's `netns`).
+pub fn ahead_files(disks: &[Dev]) -> Vec<&'static str> {
+    let mut files: Vec<&'static str> = core::writes_all(&Bounds::default(), disks)
+        .map(|ws| ws.iter().map(|w| w.file).collect())
+        .unwrap_or_default();
+    files.extend(BASELINE_FILES);
+    files.push("memory.peak");
+    files.sort_unstable();
+    files.dedup();
+    files
+}
 
 impl BoxCgroup {
     /// The cgroup at `dir`, wherever it is: an `oci` container's cgroup goes where its spec puts it,
@@ -1603,6 +1622,7 @@ mod tests {
             ),
             disks: Vec::new(),
             named: Arc::new(Mutex::new(Some(BTreeSet::new()))),
+            most: MAX_BOXES,
         };
         let id = BoxId::new("owned-managed").unwrap();
         let cg = root.create_managed(&id, &Bounds::default()).unwrap();

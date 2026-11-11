@@ -24,7 +24,7 @@ use std::process::Command;
 
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Program, Refusal, Runtime, Signal, Stdio};
 use hex_node::Node;
-use hex_node::netns::{FilesBound, Pools, open_descriptors};
+use hex_node::netns::{FilesBound, open_descriptors};
 use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 
 const TEST: &str = "a_node_starting_under_a_low_descriptor_limit_holds_its_own_or_refuses_typed";
@@ -38,8 +38,8 @@ const LOW: u64 = 2048;
 /// least node's: its fitted budget is a few dozen programs, which the case runs to the end of.
 const FIT: u64 = 256;
 /// What the least case leaves past the descriptors the copy holds as it lowers its limit: room for the node's start
-/// to open what it opens before it fits its bounds (its box root, store, keeper and key), never for the least node,
-/// whose one box, seed, exec seed, init, device program and pruned namespace hold 11 descriptors past those held.
+/// to open what it opens before it fits its bounds (its box roots, store, keeper and key), never for the least node,
+/// one box and one connection, whose descriptors past those held are more (`hex_node::netns::fit`).
 const LEAST_ROOM: u64 = 8;
 
 /// AC-T7.1.1. Do: start a node in a process whose soft descriptor limit is 2048 and its hard one as given; in one whose
@@ -140,11 +140,9 @@ fn start_under_a_low_limit(mode: &str) {
     let opened = Node::open(&own.join("hex-boxes-nofile"), state.path(), state.path());
     match mode {
         "soft" => {
-            let needed = FilesBound::needed(
-                Pools::rootless(hex_node::sizes::Sizes::now().expect("this host's sizes")),
-                held,
-            );
-            assert!(opened.is_ok(), "the node's start: {:?}", opened.err());
+            let node = opened.expect("the node's start");
+            // Its own at the bounds its start fitted, read after it.
+            let needed = FilesBound::needed(node.pools(), held);
             let limit = getrlimit(Resource::Nofile);
             assert_eq!(
                 limit.current,
@@ -208,6 +206,9 @@ fn runs_past_the_budget_are_refused(node: &Node, hard: u64) {
     };
     let held = open_descriptors(&getrlimit(Resource::Nofile)).expect("the node's descriptors");
     let count = ran.len();
+    eprintln!(
+        "hard limit {hard}: {count} runs within a budget of {budget}, {held} descriptors held at the refusal ({refused})"
+    );
     for (id, proc) in ran {
         let _ = node.signal(&id, Signal::KILL);
         drop(proc);
