@@ -2,8 +2,8 @@
 //! Hex's fleet's do: Linux all three, Windows OCI containers and Shards microVMs, macOS Shards
 //! microVMs alone (bench/sched/huawei_workload.md). Each workload's class and need are drawn against
 //! one node, a class it runs and a need inside its capacity, so every workload fits somewhere; GPU
-//! work is drawn only against a GPU node, and only as an OCI container, the one class a GPU can be
-//! given to there ([`Class::exposes`]).
+//! work is drawn against the host's per-device initialized eligibility and known readings, using
+//! the same device predicate as placement. A platform ceiling alone cannot grant an attachment.
 
 use crate::error::SimError;
 use crate::model::{
@@ -108,14 +108,14 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
             rng.range(1, most.min(of.max(1)))
         };
         let class = one_of(&mut rng, host.classes);
-        let wants_gpu = host.capacity.gpus > 0
-            && class.exposes(host.platform.os, DeviceKind::Gpu)
-            && rng.chance(500);
+        let gpu_room = gpu_room(host, class)?;
+        let wants_gpu = gpu_room > 0 && rng.chance(500);
         let need = Resources {
             cpu_milli: share(&mut rng, host.capacity.cpu_milli),
             mem_bytes: share(&mut rng, host.capacity.mem_bytes),
             gpus: if wants_gpu {
-                u32::try_from(rng.range(1, u64::from(host.capacity.gpus))).unwrap_or(1)
+                u32::try_from(rng.range(1, u64::from(gpu_room)))
+                    .map_err(|_| SimError::Config("generated GPU demand count"))?
             } else {
                 0
             },
@@ -727,6 +727,31 @@ pub fn by_owner(cluster: &mut Cluster, overheads: Overheads) -> Result<[u64; 3],
     Ok(got)
 }
 
+/// Count only actual eligible observations, never the class's static platform ceiling alone.
+/// The same one-device predicate as Index supplies counter quality/model/size semantics;
+/// this is a bound on generated demand, not another workload or identity picker.
+fn gpu_room(host: &NodeSpec, class: Class) -> Result<u32, SimError> {
+    if !host.classes.has(class) || !class.exposes(host.platform.os, DeviceKind::Gpu) {
+        return Ok(0);
+    }
+    let ask = crate::model::Ask::default();
+    let count = host
+        .devices
+        .iter()
+        .filter(|device| {
+            crate::model::fits_devices(
+                std::slice::from_ref(*device),
+                |_| device.available && device.classes.has(class),
+                1,
+                &ask,
+            )
+        })
+        .count();
+    u32::try_from(count)
+        .map(|count| count.min(host.capacity.gpus))
+        .map_err(|_| SimError::Config("generated GPU capability count"))
+}
+
 /// One of the classes `classes` holds, each alike (OCI when it holds none).
 fn one_of(rng: &mut Rng, classes: Classes) -> Class {
     let pick = rng.range(0, u64::from(classes.count().saturating_sub(1)));
@@ -771,7 +796,7 @@ mod tests {
     }
 
     /// T-T7.4.1's generator: one seed, one cluster; every workload fits an empty node, arrivals in
-    /// order; each class drawn, some nodes running only some, and GPU work only as OCI containers.
+    /// order; each class drawn, some nodes running only some, and GPU work within actual eligibility.
     #[test]
     fn a_seed_names_one_cluster_of_workloads_that_fit() {
         let a = cluster(3, &shape()).unwrap();
@@ -790,11 +815,50 @@ mod tests {
             assert!(a.workloads.iter().any(|w| w.class == class), "{class:?}");
         }
         assert!(a.nodes.iter().any(|n| n.classes != Classes::ALL));
-        assert!(
-            a.workloads
-                .iter()
-                .all(|w| w.need.gpus == 0 || w.class == Class::Oci)
+        assert!(a.workloads.iter().all(|w| {
+            w.need.gpus == 0
+                || a.nodes
+                    .iter()
+                    .any(|node| gpu_room(node, w.class).is_ok_and(|room| room >= w.need.gpus))
+        }));
+    }
+
+    /// AC-T7.4.1: generated demand follows initialized class masks and known pressure on each slot.
+    #[test]
+    fn generated_gpu_room_uses_mixed_initialized_classes_and_counter_quality() {
+        let mut host = NodeSpec::new(
+            NodeId(0),
+            Resources {
+                cpu_milli: 4_000,
+                mem_bytes: 4_096,
+                disk_bytes: 0,
+                gpus: 3,
+            },
         );
+        host.virt.kvm = true;
+        host.classes = Classes::ALL;
+        host.devices = vec![Device::gpu(ModelId::UNNAMED, 4_096); 3];
+        host.devices[0].classes = Classes::NONE.with(Class::Oci);
+        host.devices[1].classes = Classes::NONE.with(Class::Shards);
+        host.devices[2].classes = Classes::NONE.with(Class::Firecracker);
+        assert_eq!(gpu_room(&host, Class::Oci).unwrap(), 1);
+        assert_eq!(gpu_room(&host, Class::Shards).unwrap(), 1);
+        assert_eq!(gpu_room(&host, Class::Firecracker).unwrap(), 1);
+        host.devices[2].load.memory_used = None;
+        assert_eq!(gpu_room(&host, Class::Firecracker).unwrap(), 0);
+        assert_eq!(
+            host.capacity.gpus, 3,
+            "physical count is not fresh capability"
+        );
+        host.devices[1].available = false;
+        assert_eq!(gpu_room(&host, Class::Shards).unwrap(), 0);
+        host.devices[1].available = true;
+        host.devices[2].load.memory_used = Some(0);
+        host.devices[2].classes = Classes::ALL;
+        assert_eq!(gpu_room(&host, Class::Oci).unwrap(), 2);
+        assert_eq!(gpu_room(&host, Class::Shards).unwrap(), 2);
+        host.classes = Classes::NONE.with(Class::Oci);
+        assert_eq!(gpu_room(&host, Class::Shards).unwrap(), 0);
     }
 
     /// G2's kind rule (`huawei_trace.py`'s `classes_by_owner`): do owners of 5, 3, 3, 2 and 1

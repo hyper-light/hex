@@ -1,0 +1,40 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "a234f0a0a11afd4828c8ad5f019dfffa440e61e1",
+  "scope_extension": "ROOT explicitly granted generate.rs for actual8199 capability failure and meaningful mixed-class control, 2026-11-11. No other generator campaign/benchmark scope.",
+  "source": {
+    "path": "crates/hex-sim/src/generate.rs",
+    "sha256": "601fdb7e29b211c8f559731b1fb99ea3aee358d8e7b310e0a9ede53a5dceede5"
+  },
+  "actual_original": {
+    "source": "8199ca3443ecee06c819381afbd19534d2abaa25",
+    "test": "generate::tests::a_seed_names_one_cluster_of_workloads_that_fit",
+    "log_sha256": "58df64bede84907e61dc3299b707957b98b79528c937eec34182434dd80221a5",
+    "raw_sha256": "ef90398bba474797dda1ffc659f112a82f886ce3e16834d9a3221b1d3097d16c",
+    "witness": "WorkloadId13 Shards GPU2 cannot fit any empty generated host under actual initialized per-device masks. Other full regression outcomes preserved separately (190pass/3fail).",
+    "native": 0,
+    "source_changes": [],
+    "temp_entries": 0,
+    "reaped": true
+  },
+  "diagnosis": "cluster drew GPUcounts from host.capacity and Class.exposes static ceiling while unnamed_gpus deliberately has legacyOCI-only per-device eligibility. New static VM support does not initialize every physical adapter. Generator must ask actual eligibility, not hardcode oldOCI-only rule or declare allVMGPUs available.",
+  "remedy": [
+    "Count only same existing fits_devices one-slot predicate plus actual per-device class/availability and host class/platform ceiling, bounded by physical GPUcount. No copied model/counter predicate or additional identity picker.",
+    "Draw GPUcount from that actual class capacity; typed u32 conversion, no new fallback/budget/constant. CPU/class selection path retained.",
+    "Original every-workload-fits-emptyIndex assertion and positiveGPU/class/kind/arrival/determinism constraints unchanged. Replace obsolete hardcodedGPU=>ClassOci clause with actual per-node eligibility witness. Generated legacy devices currentlyremainOCI-only, but explicit Shards/FC physical masks can now supportGPU requirements.",
+    "Mixed-class new helpercontrol explicitly gives OCI,Shards,FC one eligible physical observation each, proves missing memorycounter/unavailable/absent host class grantsnone, and sharedclass mask preserves accurate counts. Pure fixture, not actual runtime/native initialization evidence."
+  ],
+  "new_control": "generate::tests::generated_gpu_room_uses_mixed_initialized_classes_and_counter_quality (UNRUN)",
+  "wait_cache_complexity": "No new cache/wait/queue/resource ledger. Linear scan over host physical observations using existing nonallocating fits predicate on borrowed one-slot slices, per actual generated workload. No performance/allocation-free claim; complete generator legacy allocation/formatting hazards and ROOT R14 profiling remain unchanged obligations.",
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "tests_after": "UNRUN",
+    "dispatches": 0,
+    "native": 0
+  },
+  "remaining": "ROOT exact generated original AFTER +new mixed-class control, plus a234 two fixtureafters if desired. No unmodified190 replay requested. All native/VM/GPU/fault/resource/full gates/main remain ROOT/native QA."
+}
