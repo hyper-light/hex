@@ -1,0 +1,158 @@
+{
+  "binary": [
+    {
+      "path": "target/debug/deps/hex_runtime-f32d8d7efe3211a6",
+      "bytes": 114400800,
+      "sha256": "38b6d9e45ec6e09924608d6b3fe408a5aa8d8fad848dcf7528944ec8dc83f499"
+    },
+    {
+      "path": "target/debug/deps/shards_api-f3d1956e21aa2da7",
+      "bytes": 23475736,
+      "sha256": "c6ed09258e645edd3988c9dcfa479887a65edcf957142fee96cc89e2c8c50a2c"
+    }
+  ],
+  "phases": [
+    {
+      "name": "new-sdk-native-image3",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "--manifest-path",
+        "vendor/shards/crates/api/Cargo.toml",
+        "--lib",
+        "--offline",
+        "native::tests::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 3323546,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "1707a4a484254f843026eb33ad5c604980053da8a7d4c1d360f535f4360c7cd9",
+      "bytes": 1456,
+      "expected_selected": 3,
+      "actual_counts": [
+        {
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "native::tests::native_preparation_refuses_missing_variant_and_unbound_paths",
+          "outcome": "ok"
+        },
+        {
+          "name": "native::tests::native_preparation_retains_exact_inputs_and_legacy_has_no_worker_plan",
+          "outcome": "ok"
+        },
+        {
+          "name": "native::tests::verified_native_image_retains_exact_file_and_refuses_hostile_content",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "new-guest-native-input2",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::cost::images::tests::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 3332566,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "fcc52c3bfae1fcc2650cb97c9a09db81dc263c1cb7cb5a7c4f7a4e9a1a98a817",
+      "bytes": 3213,
+      "expected_selected": 2,
+      "actual_counts": [
+        {
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "guest::cost::images::tests::native_evidence_joins_same_cost_and_real_preparation_without_rewriting",
+          "outcome": "ok"
+        },
+        {
+          "name": "guest::cost::images::tests::native_evidence_refuses_hostile_roles_lengths_and_present_prefixes",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "sdk-native-input-strict",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "clippy",
+        "--manifest-path",
+        "vendor/shards/crates/api/Cargo.toml",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 3396252,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "234234022165e5ad2bfd6c3bf4ac356121c8a8bbce9c2dcdfdcf3aee27e405eb",
+      "bytes": 871,
+      "test_outcomes": []
+    },
+    {
+      "name": "root-native-input-current-strict",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-runtime",
+        "-p",
+        "hex-node",
+        "-p",
+        "hex-cli",
+        "--all-targets",
+        "--locked",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 3400226,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "91a18ae0e715ca84d240c7e819703b511e4d269198d25888761dd30c5f793b69",
+      "bytes": 3477,
+      "test_outcomes": []
+    }
+  ],
+  "recorded_children_reaped": true
+}

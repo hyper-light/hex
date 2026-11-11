@@ -1,0 +1,26 @@
+   Compiling typenum v1.20.1
+   Compiling hybrid-array v0.4.15
+   Compiling autocfg v1.5.1
+   Compiling unsize v1.1.0
+   Compiling libc v0.2.191
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling const-oid v0.10.2
+   Compiling shards-abi v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-80e3aa9c-linux-native-image-producer-v3/source/vendor/shards/crates/abi)
+   Compiling digest v0.11.3
+   Compiling cpufeatures v0.3.1
+   Compiling cfg-if v1.0.5
+   Compiling sha2 v0.11.1
+   Compiling shards-testdir v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-80e3aa9c-linux-native-image-producer-v3/source/vendor/shards/crates/testdir)
+   Compiling triomphe v0.1.17
+   Compiling shards-api v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-80e3aa9c-linux-native-image-producer-v3/source/vendor/shards/crates/api)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.26s
+     Running unittests src/lib.rs (/home/adalundhe/.cache/hex-lead/cohort-80e3aa9c-linux-native-image-producer-v3/target/debug/deps/shards_api-f3d1956e21aa2da7)
+
+running 3 tests
+test native::tests::native_preparation_refuses_missing_variant_and_unbound_paths ... ok
+test native::tests::native_preparation_retains_exact_inputs_and_legacy_has_no_worker_plan ... ok
+test native::tests::verified_native_image_retains_exact_file_and_refuses_hostile_content ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 0.00s
+

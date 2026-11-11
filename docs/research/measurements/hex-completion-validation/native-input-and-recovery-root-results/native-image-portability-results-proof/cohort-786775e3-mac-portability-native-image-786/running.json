@@ -1,0 +1,40 @@
+{
+  "source": "786775e3b119c5163d49aa12662c0207cb25cc29",
+  "archive_sha256": "b6631496067c2cd5ad5a0e62286225663da1c64ff48c2838c1f827240d5f968d",
+  "scope": "ROOT786 native image input coherent API/runtime/node/CLI Windows x64+ARM64 and Mac arm64 strict, new Mac API file/preparation3; no old controls replay or native VM/GPU; no WindowsARM VM",
+  "target": "mac",
+  "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 19887,
+  "phases": [
+    {
+      "name": "windows-x64-arm64-joined-strict",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "-p",
+        "shards-api",
+        "-p",
+        "hex-runtime",
+        "-p",
+        "hex-node",
+        "-p",
+        "hex-cli",
+        "--all-targets",
+        "--locked",
+        "--no-deps",
+        "--target",
+        "x86_64-pc-windows-msvc",
+        "--target",
+        "aarch64-pc-windows-msvc",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 19892
+    }
+  ]
+}

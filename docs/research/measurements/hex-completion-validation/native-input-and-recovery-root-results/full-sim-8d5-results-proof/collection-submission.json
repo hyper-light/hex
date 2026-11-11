@@ -1,0 +1,15 @@
+{
+  "pid": 82656,
+  "argv": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--on",
+    "00aad8daff2fa3c9daa65d53c425d450",
+    "--needs",
+    "linux/amd64,cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--quiet",
+    "--",
+    "/usr/bin/nice -n 10 /usr/bin/python3 -B -c 'from pathlib import Path\nimport base64,hashlib,json\nroot=Path.home()/'\"'\"'.cache/hex-lead/full-sim-8d5-v2'\"'\"';items={}\nfor name in ['\"'\"'full-sim.log'\"'\"','\"'\"'result.json'\"'\"','\"'\"'running.json'\"'\"']:\n data=(root/name).read_bytes()\n if len(data)>1048576:raise ValueError('\"'\"'existing1MiB proofbound'\"'\"')\n items[name]={'\"'\"'bytes'\"'\"':len(data),'\"'\"'sha256'\"'\"':hashlib.sha256(data).hexdigest(),'\"'\"'base64'\"'\"':base64.b64encode(data).decode()}\ncg=Path('\"'\"'/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-full-sim-8d5-v2.scope'\"'\"')\nprint('\"'\"'HEX_FULL_SIM_COLLECTION '\"'\"'+json.dumps({'\"'\"'items'\"'\"':items,'\"'\"'scope_absent'\"'\"':not cg.exists(),'\"'\"'scope'\"'\"':str(cg)}),flush=True)\n'"
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "source": "786775e3b119c5163d49aa12662c0207cb25cc29",
+  "archive_sha256": "b6631496067c2cd5ad5a0e62286225663da1c64ff48c2838c1f827240d5f968d",
+  "scope": "ROOT coherent native-image API3/guest2 new controls and affected strict; real CLI wired; no repeated earlier controls, no native/VM/GPU or full private helper compile.",
+  "target": "linux",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 3134314,
+  "phases": [
+    {
+      "name": "new-sdk-native-image3",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "--manifest-path",
+        "vendor/shards/crates/api/Cargo.toml",
+        "--lib",
+        "--offline",
+        "native::tests::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 3137646,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "7584f63d850a8867c0b52b031f1f0a158d1ec3390929cc86d33aec81440c7244",
+      "bytes": 1337,
+      "expected_selected": 3,
+      "actual_counts": [],
+      "selection_verified": false,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [
+    "vendor/shards/Cargo.lock"
+  ],
+  "temp_entries": 0,
+  "native_invocations": 0,
+  "api_registry_cohort": {
+    "seed_sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+    "pruned_sha256": "dcbe9479bcbd6b91c7f1cbe46a59a482e78d8d097bd49a0af91c352880ee9c84",
+    "registry_packages": 15,
+    "all_registry_tuples_subset_of_exact_root_lock": true,
+    "private_lock_overlay_only": true
+  },
+  "exit": 1
+}

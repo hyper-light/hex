@@ -1,0 +1,261 @@
+
+running 198 tests
+test danger::tests::a_trip_with_no_microvm_in_the_cell_that_holds_it_is_refused ... ok
+test danger::tests::an_errno_is_not_a_trip ... ok
+test danger::tests::an_oci_trip_is_re_placed_anywhere_in_the_cell_as_the_first_microvm_that_holds_it ... ok
+test danger::tests::the_move_counts_both_overheads ... ok
+test facts::tests::a_cgroup_limit_caps_memory ... ok
+test facts::tests::cores_are_distinct_package_and_core_pairs ... ok
+test facts::tests::current_cgroup_charges_bound_available_memory ... ok
+test facts::tests::facts_make_the_node_each_os_can_be ... ok
+test facts::tests::initialized_classes_obey_platform_and_feature_filters ... ok
+test facts::tests::measured_own_usage_is_reconciled_once_before_reservations ... ok
+test facts::tests::meminfo_reads_total_and_available_in_bytes ... ok
+test facts::tests::offers_use_free_room_and_keep_hardware_totals ... ok
+test facts::tests::sysfs_words_read_as_the_kernel_writes_them ... ok
+test fair::tests::a_refused_workload_is_not_waiting ... ok
+test fair::tests::the_lowest_weighted_dominant_share_goes_first ... ok
+test generate::tests::a_seed_names_one_cluster_of_workloads_that_fit ... ok
+test generate::tests::generated_gpu_room_uses_mixed_initialized_classes_and_counter_quality ... ok
+test generate::tests::owners_go_whole_to_the_class_with_fewest_launches ... ok
+test index::pending_gpu_cleanup_tests::pending_gpu_room_survives_sibling_cleanup_then_returns_on_its_own_refund ... ok
+test index::pending_gpu_cleanup_tests::unavailable_gpu_refresh_distinguishes_foreign_unavailability_from_local_pending ... unavailable/pending GPU source control: local_pending=false, original=Key { cpu_milli: 8000, mem_bytes: 8589934592, gpus: 2, node: NodeId(0) }, repeated=Key { cpu_milli: 8000, mem_bytes: 8589934592, gpus: 2, node: NodeId(0) }, fresh=Admits; native_effect=false
+unavailable/pending GPU source control: local_pending=true, original=Key { cpu_milli: 8000, mem_bytes: 8589934592, gpus: 2, node: NodeId(0) }, repeated=Key { cpu_milli: 7900, mem_bytes: 8522825728, gpus: 1, node: NodeId(0) }, fresh=NoRoom; native_effect=false
+ok
+test index::route_offer_tests::a_prepared_gpu_backing_does_not_hide_an_eligible_native_oci_route ... mixed initialized/prepared route source control: cpu=Admits, gpu=Admits; native_effect=false
+ok
+test index::route_offer_tests::a_prepared_snapshot_cannot_roll_back_a_granted_backing_or_its_claims ... granted/prepared rollback source control: refresh=Err(Config("refreshed backing changes a retained grant or rolls back lifecycle")), before=Key { cpu_milli: 6900, mem_bytes: 7985954816, gpus: 0, node: NodeId(0) }, after=Key { cpu_milli: 6900, mem_bytes: 7985954816, gpus: 0, node: NodeId(0) }; native_effect=false
+ok
+test index::route_offer_tests::cold_claims_reserve_unobserved_ids_before_boot_without_fabricating_devices ... ok
+test index::route_offer_tests::committed_pending_recovery_keeps_receipt_charge_and_claim_bounds ... ok
+test index::route_offer_tests::committed_subset_recovery_keeps_released_parent_and_does_not_repick_current_remainder ... released parent recovery original: restored=Ok(Key { cpu_milli: 6900, mem_bytes: 7985954816, gpus: 1, node: NodeId(0) }); source=BackingKey { pool: [91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91, 91], generation: [92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92] }; current=BackingKey { pool: [97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97], generation: [98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98, 98] }; native_effect=false
+ok
+test index::route_offer_tests::exact_subset_has_one_consumer_and_cancellation_keeps_full_backing_reservation ... ok
+test index::route_offer_tests::healthy_independent_native_snapshot_distinguishes_held_full_pool_from_fresh_free_gpu ... ok
+test index::route_offer_tests::mac_linux_oci_is_not_compared_with_the_host_image_os ... ok
+test index::route_offer_tests::one_gpu_demand_can_select_an_exact_subset_of_a_two_gpu_observer ... two-GPU observer source control: complete=Admits, exact_one=Admits; native_effect=false
+ok
+test index::route_offer_tests::pending_gpu_reservations_keep_original_shape_across_refresh_and_backing_handoff ... pending GPU source control: before=NoRoom, after_refresh=NoRoom, already_committed_backing=NoRoom; native_effect=false
+ok
+test index::route_offer_tests::released_observer_siblings_require_new_observation_before_native_route_admission ... released sibling original: native=NoGpu; fresh physical observations=0; native_effect=false
+ok
+test index::route_offer_tests::released_scope_keeps_selected_identity_and_charge_until_new_physical_refresh ... ok
+test index::route_offer_tests::released_source_recovery_preserves_fresh_phase_and_single_consumer_guards ... ok
+test index::route_offer_tests::shared_backing_checks_below_exact_and_over_aggregate_payload_in_the_actual_index ... ok
+test index::route_offer_tests::two_cpu_shared_oci_and_one_gpu_dedicated_oci_pay_two_vm_envelopes ... ok
+test index::route_offer_tests::unavailable_route_keeps_committed_recovery_refund_and_backing_charge ... ok
+test index::route_offer_tests::windows_hcs_and_linux_oci_keep_distinct_image_routes ... ok
+test index::tests::a_class_the_node_cant_run_is_refused ... ok
+test index::tests::costed_vm_candidates_and_admission_charge_the_same_original_demand ... ok
+test index::tests::each_filter_refuses_what_it_names ... ok
+test index::tests::ids_out_of_order_are_refused ... ok
+test index::tests::image_os_matches_vm_guest_and_oci_host ... ok
+test index::tests::more_shapes_than_the_bound_are_refused_never_cut ... ok
+test index::tests::only_an_oci_container_is_given_a_gpu ... ok
+test index::tests::persisted_allocation_survives_cost_refresh_without_recalculation ... ok
+test index::tests::platform_gpus_and_devices_are_matched_against_node_and_class ... ok
+test index::tests::runtime_pool_checks_cpu_disk_and_gpu_dimensions ... ok
+test index::tests::runtime_pool_device_predicate_keeps_binding_semantics ... ok
+test index::tests::runtime_pool_empty_defaults_keep_host_model_and_replay_charges_on_restart ... ok
+test index::tests::runtime_pool_guard_removal_is_caught_by_independent_log_and_filter_oracles ... ok
+test index::tests::runtime_pool_invalid_masks_and_excess_count_are_typed_refusals ... ok
+test index::tests::runtime_pool_keeps_unpooled_native_room_and_global_host_limit ... ok
+test index::tests::runtime_pool_new_pool_checks_preexisting_host_backed_class_holds ... ok
+test index::tests::runtime_pool_r329_guest_bound_refuses_633_mib_but_admits_64 ... ok
+test index::tests::runtime_pool_refresh_preserves_class_charges_and_refuses_invalid_shrink_atomically ... ok
+test index::tests::runtime_pool_shared_classes_aggregate_and_delete_frees_exactly ... ok
+test index::tests::start_cost_changes_the_actual_pick_but_retains_packing_ties ... ok
+test index::tests::start_cost_empty_context_keeps_the_original_single_walk ... ok
+test index::tests::start_cost_image_terms_and_exclusions_share_the_admission_core ... ok
+test index::tests::start_cost_preserves_the_existing_gpu_load_preference ... ok
+test index::tests::taking_more_than_is_free_is_refused_and_changes_nothing ... ok
+test index::tests::the_less_loaded_gpu_wins ... ok
+test index::tests::unread_gpu_load_preserves_held_identity_and_independent_cpu_progress ... ok
+test index::tests::whole_best_fit_is_the_least_free_node_that_admits ... ok
+test index::tests::whole_fit_matches_brute_force ... ok
+test lb::model::the_model_catches_every_mutant ... ok
+test lb::model::the_model_holds_every_property ... ok
+test lb::tests::a_box_outlives_its_nodes_agent ... ok
+test lb::tests::a_box_that_waits_starts_once ... ok
+test lb::tests::a_budget_change_follows_what_is_held ... ok
+test lb::tests::a_declined_start_is_placed_again ... ok
+test lb::tests::a_deleted_start_is_never_placed_again ... ok
+test lb::tests::a_deleted_waiting_box_is_forgotten ... ok
+test lb::tests::a_link_that_drops_again_before_synced_loses_no_end ... ok
+test lb::tests::a_member_short_of_memory_is_walked_past ... ok
+test lb::tests::ahead_is_a_queued_boxs_place ... ok
+test lb::tests::an_ask_deleted_before_its_waits_are_sent_leaves_nothing ... ok
+test lb::tests::an_old_epochs_start_is_declined ... ok
+test lb::tests::an_old_generations_word_is_ignored ... ok
+test lb::tests::equals_take_turns ... ok
+test lb::tests::more_than_any_budget_is_never ... ok
+test lb::tests::no_node_takes_past_its_budget ... ok
+test lb::tests::outside_room_is_kept_off_new_boxes ... ok
+test lb::tests::starts_in_flight_never_herd ... ok
+test lb::tests::the_first_in_line_keeps_its_room ... ok
+test lb::tests::the_index_keeps_buckets_and_turns ... ok
+test lb::tests::the_pick_packs_a_box_onto_the_least_room_that_holds_it ... ok
+test membership::tests::suspicion_timeouts_shrink_from_max_to_min ... ok
+test membership::tests::the_node_scale_matches_memberlists ... ok
+test model::route_decode_tests::initialized_route_json_bounds_precede_shared_owner_construction ... ok
+test needs::tests::a_bad_spelling_names_the_bad_part ... ok
+test needs::tests::a_gpu_model_resolves_against_its_cluster ... ok
+test needs::tests::cpus_are_read_exactly_in_thousandths ... ok
+test needs::tests::sizes_are_binary_in_any_case_and_exact ... ok
+test needs::tests::the_spelling_reads_reservations_platform_class_and_devices ... ok
+test packing::tests::a_compressed_clock_gives_back_what_ended ... ok
+test packing::tests::a_memory_bound_load_strands_the_cpu_beside_spent_memory ... ok
+test packing::tests::a_node_no_workload_here_can_run_isnt_counted ... ok
+test packing::tests::a_pack_starts_at_its_arrival ... ok
+test packing::tests::a_seed_names_one_start_inside_the_day ... ok
+test packing::tests::alone_moves_each_need_to_its_new_class ... ok
+test packing::tests::every_refusal_is_counted_by_kind_with_the_load_at_the_first ... ok
+test packing::tests::stranded_is_free_capacity_no_shape_fits ... ok
+test packing::tests::the_seeds_are_what_the_claim_needs ... ok
+test peer::adversarial_device_recovery_tests::chosen_binding_is_atomic_with_demand_before_create_even_at_the_record_write ... binding-put when=None puts=1 row_present=true released_create=true actual_boxes=0 cleanup_rows=epoch_only cleanup_charge=0
+binding-put when=Some(Before) puts=1 row_present=false released_create=false actual_boxes=0 cleanup_rows=epoch_only cleanup_charge=0
+binding-put when=Some(After) puts=1 row_present=true released_create=false actual_boxes=0 cleanup_rows=epoch_only cleanup_charge=0
+ok
+test peer::adversarial_device_recovery_tests::exact_recovery_reserve_validates_stable_authority_and_is_atomic_on_refusal ... reserve-refusal case=missing typed=true charge_unchanged=true holders=0
+reserve-refusal case=range typed=true charge_unchanged=true holders=0
+reserve-refusal case=duplicate typed=true charge_unchanged=true holders=0
+reserve-refusal case=kind typed=true charge_unchanged=true holders=0
+reserve-refusal case=model typed=true charge_unchanged=true holders=0
+reserve-refusal case=total-size typed=true charge_unchanged=true holders=0
+reserve-refusal case=class-exposure typed=true charge_unchanged=true holders=0
+reserve-refusal case=os typed=true charge_unchanged=true holders=0
+reserve-refusal case=arch typed=true charge_unchanged=true holders=0
+reserve-refusal case=resource-room typed=true charge_unchanged=true holders=0
+reserve-refusal case=block-size typed=true charge_unchanged=true holders=0
+reserve-overlap typed=true charge_unchanged=true sibling_hold=[0] independent_hold=[1] cleanup_holders=0 cleanup_charge=0
+ok
+test peer::adversarial_device_recovery_tests::last_legal_device_index_roundtrips_and_releases_without_iterator_overflow ... last-index devices=65536 chosen=65535 held_query_ok=true cleanup_holders=0 cleanup_charge=0 native_gpu_effect=false
+ok
+test peer::adversarial_device_recovery_tests::legacy_cpu_only_row_recovers_with_empty_assignments_and_replay_does_not_create ... legacy-cpu restored=true held=[] replay_creates=0 cleanup_rows=epoch_only cleanup_charge=0
+ok
+test peer::adversarial_device_recovery_tests::missing_duplicate_out_of_range_and_overflow_claims_refuse_before_runtime_observation ... binding-refusal case=legacy-device typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged("runner Key { owner: 0, epoch: 1, seq: 0 } has no durable chosen-device binding")
+binding-refusal case=missing typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged("runner Key { owner: 0, epoch: 1, seq: 0 }: the configuration is refused: recovered binding count differs from demand")
+binding-refusal case=duplicate typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged("runner Key { owner: 0, epoch: 1, seq: 0 }: the configuration is refused: recovered binding count differs from demand")
+binding-refusal case=range typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged("runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\"synthetic binding has no matching synthetic slot\")")
+binding-refusal case=u16-overflow typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged("runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\"a demand's number\")")
+binding-refusal case=count-overflow typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged("runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\"a demand's number\")")
+binding-refusal case=excess-count typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged("runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\"runner binding count exceeds node devices\")")
+binding-refusal case=trailing typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged("runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\"trailing runner bindings\")")
+binding-refusal case=version typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged("runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\"invalid runner owner or binding version\")")
+binding-refusal case=representation typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged("runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\"a runner binding's representation\")")
+binding-refusal case=physical-missing typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged("runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\"a physical binding's device is missing\")")
+binding-refusal case=physical-overflow typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged("runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\"a demand's number\")")
+ok
+test peer::adversarial_device_recovery_tests::overlapping_recovery_claims_preserve_all_rows_until_the_whole_restore_is_valid ... binding-overlap typed_damaged=true bytes_unchanged=true observed=2 repaired_holds=[0]/[1] replay_creates=0 cleanup_rows=epoch_only cleanup_charge=0
+ok
+test peer::adversarial_device_recovery_tests::physical_binding_survives_unheld_device_removal_and_reindex_without_reselection ... physical-reindex old=Key { owner: 0, epoch: 1, seq: 0 } fresh=Key { owner: 0, epoch: 2, seq: 0 } old_before=[1] old_restored=[0] fresh_held=[1] physical_old=(Gpu,101) physical_fresh=(Gpu,102) collision=false cleanup_physical=0 cleanup_rows=epoch_only cleanup_charge=0 native_gpu_effect=false
+ok
+test peer::adversarial_device_recovery_tests::physical_replacement_wrong_shape_and_synthetic_downgrade_preserve_exact_state ... physical-refusal case=same-shape-replacement typed_damaged=true bytes_unchanged=true observations=0 result=Damaged("runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\"a physical binding's device is missing\")")
+physical-refusal case=model typed_damaged=true bytes_unchanged=true observations=0 result=Damaged("runner Key { owner: 0, epoch: 1, seq: 0 }: the configuration is refused: recovered GPU model or total size differs")
+physical-refusal case=total-size typed_damaged=true bytes_unchanged=true observations=0 result=Damaged("runner Key { owner: 0, epoch: 1, seq: 0 }: the configuration is refused: recovered GPU model or total size differs")
+physical-refusal case=kind typed_damaged=true bytes_unchanged=true observations=0 result=Damaged("runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\"a physical binding's device is missing\")")
+physical-refusal case=duplicate-catalog typed_damaged=true bytes_unchanged=true observations=0 result=Damaged("the configuration is refused: duplicate physical device identity")
+physical-refusal case=lost-physical-key typed_damaged=true bytes_unchanged=true observations=0 result=Damaged("runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\"a physical binding's device is missing\")")
+ok
+test peer::adversarial_device_recovery_tests::reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_twice ... device-recovery phase=initial-create load=[GpuLoad { busy_per_mille: Some(0), memory_used: Some(0) }, GpuLoad { busy_per_mille: Some(1000), memory_used: Some(0) }]
+device-recovery phase=recovered-fresh-create old=Key { owner: 0, epoch: 1, seq: 0 } held=[0]
+device-recovery PURE expected_old=[0] expected_fresh=[1] old=Key { owner: 0, epoch: 1, seq: 0 } fresh=Key { owner: 0, epoch: 2, seq: 0 } sibling=Key { owner: 0, epoch: 1, seq: 1 } progress=Key { owner: 0, epoch: 2, seq: 1 } before_held=[0] recovered_held=[0] old_after_fresh=[0] fresh_held=[1] collisions=[] before_assignments={Key { owner: 0, epoch: 1, seq: 0 }: [0], Key { owner: 0, epoch: 1, seq: 1 }: []} after_assignments={Key { owner: 0, epoch: 1, seq: 0 }: [0], Key { owner: 0, epoch: 1, seq: 1 }: [], Key { owner: 0, epoch: 2, seq: 0 }: [1], Key { owner: 0, epoch: 2, seq: 1 }: []} runtime_observations=[(Key { owner: 0, epoch: 1, seq: 0 }, [0]), (Key { owner: 0, epoch: 1, seq: 1 }, [])] sibling_survived=true progress_confirmed=true admitted_before_cleanup=[400, 2048, 0, 2] creates=4 deletes=4 cleanup_assignments=0 cleanup_own=0 cleanup_ran=0 cleanup_charge=0 cleanup_records=epoch_only old_runner_record="bindings1:0:1:s:0 running d1 session oci 100 512 1 0 linux x86_64 fixture-gpu 1024 0 0 0 0 0" native_gpu_effect=false
+ok
+test peer::adversarial_device_recovery_tests::recorded_device_specs_shares_valid_legacy_and_bad_binding_semantics ... recorded-specs legacy=None explicit_zero=Some_empty physical_key=101 reindex_preserved=true synthetic_none=true bad_claims=typed_Damaged catalog_unchanged=true records_writes=0 runtime_effects=0
+ok
+test peer::adversarial_device_recovery_tests::retained_gpu_recovery_ignores_transient_memory_and_session_hotness ... retained-transient runner_only=false memory_pressure=true expected=bootOk/held0 observed_refusal=None recovered_held=[0] fresh_verdict=Some(NoGpu) cleanup_assignments=0 cleanup_rows=epoch_only cleanup_charge=0
+retained-transient runner_only=false memory_pressure=false expected=bootOk/held0 observed_refusal=None recovered_held=[0] fresh_verdict=Some(Hot) cleanup_assignments=0 cleanup_rows=epoch_only cleanup_charge=0
+retained-transient runner_only=true memory_pressure=true expected=bootOk/held0 observed_refusal=None recovered_held=[0] fresh_verdict=Some(NoGpu) cleanup_assignments=0 cleanup_rows=epoch_only cleanup_charge=0
+retained-transient runner_only=true memory_pressure=false expected=bootOk/held0 observed_refusal=None recovered_held=[0] fresh_verdict=Some(Hot) cleanup_assignments=0 cleanup_rows=epoch_only cleanup_charge=0
+ok
+test peer::adversarial_device_recovery_tests::unavailable_device_refuses_fresh_work_while_sibling_and_retained_binding_progress ... availability all_false_verdict=NoRoom all_false_grants=0 foreign_idle_gpu=0 first_grant=[1] refreshed_old=[1] reboot_old=[1] fresh_progress=[0] physical_old=(Gpu,102) physical_fresh=(Gpu,101) cleanup_holders=0 cleanup_charge=0 cleanup_rows=epoch_only native_gpu_effect=false
+ok
+test peer::tests::a_damaged_record_is_refused ... ok
+test peer::tests::a_laptop_keeps_every_box_once_through_crashes ... ok
+test peer::tests::a_receiver_refuses_oci_on_a_shards_only_macos_laptop ... ok
+test peer::tests::a_restarted_owners_numbers_never_name_an_earlier_box ... ok
+test peer::tests::allocation_message_and_record_codec_rejects_forged_charge ... ok
+test peer::tests::combined_launch_changes_real_submit_and_persists_remote_aggregates ... ok
+test peer::tests::combined_launch_epoch_refuses_invalid_or_incompatible_observations ... ok
+test peer::tests::combined_launch_merge_is_bounded_authoritative_and_idempotent ... ok
+test peer::tests::combined_launch_survives_each_write_crash_without_resampling ... ok
+test peer::tests::full_demand_codec_and_record_budgets_refuse_invalid_input ... ok
+test peer::tests::full_demand_gpu_load_selects_the_idle_peer ... ok
+test peer::tests::full_demand_live_facts_refresh_preserves_reservations_and_filters ... ok
+test peer::tests::full_demand_macos_shards_laptop_waits_for_runtime_creation ... ok
+test peer::tests::full_demand_peer_codec_is_bounded_complete_and_name_based ... ok
+test peer::tests::full_demand_reboot_preserves_every_constraint_and_device_hold ... ok
+test peer::tests::full_demand_receiver_rechecks_os_arch_and_class ... ok
+test peer::tests::full_demand_receiver_reserves_devices_and_uses_lossless_local_ids ... ok
+test peer::tests::full_demand_runtime_feedback_survives_each_created_write_crash ... ok
+test peer::tests::full_demand_runtime_refusal_retries_without_erasing_constraints ... ok
+test peer::tests::p2p_keeps_every_box_once_through_crashes_and_dropped_links ... ok
+test peer::tests::remote_delete_committed_intent_is_not_lost_at_its_write ... ok
+test peer::tests::remote_delete_keeps_reservations_until_actual_delete_and_recovers_intent ... ok
+test peer::tests::remote_delete_pending_create_waits_for_backend_absence_proof ... ok
+test peer::tests::remote_owner_recovers_committed_released_source_without_fresh_repick ... remote committed pending original: restored=Ok(()); source=BackingKey { pool: [113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113], generation: [114, 114, 114, 114, 114, 114, 114, 114, 114, 114, 114, 114, 114, 114, 114, 114] }; current=BackingKey { pool: [115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115, 115], generation: [116, 116, 116, 116, 116, 116, 116, 116, 116, 116, 116, 116, 116, 116, 116, 116] }; local_runtime_queries=0; fresh_observations=0; native_effect=false
+ok
+test peer::tests::remote_readiness_is_durable_and_reconfirmed_after_owner_restart ... ok
+test peer::tests::replacing_on_silence_is_caught ... ok
+test peer::tests::routed_oci_receipt_commits_before_create_and_never_guesses_a_recovery_backend ... ok
+test peer::tests::runtime_allocation_survives_owner_receiver_and_profile_change ... ok
+test proximity::tests::a_kind_no_node_runs_is_refused_not_misplaced ... ok
+test proximity::tests::a_node_is_predicted_zero_from_itself ... ok
+test proximity::tests::blind_never_moves_from_itself ... ok
+test proximity::tests::every_policy_runs_every_job_deterministically ... ok
+test proximity::tests::hostile_recorded_workloads_are_refused ... ok
+test proximity::tests::jobs_and_nodes_are_the_recorded_ones ... ok
+test proximity::tests::kinds_are_g2s_by_owner_in_thirds ... ok
+test proximity::tests::proximity_and_the_oracle_place_nearer_than_blind ... ok
+test proximity::tests::proximity_beats_blind ... ok
+test proximity::tests::the_census_is_the_traces ... ok
+test replay::tests::a_trace_reads_as_its_cluster_and_legs ... ok
+test replay::tests::a_trace_reads_its_owners_groups_and_tenancy ... ok
+test replay::tests::ac_t7_5_2_linux_trace_nodes_derive_kvm_from_their_classes ... ok
+test replay::tests::an_overhead_by_size_charges_each_leg_its_own_size ... ok
+test replay::tests::any_text_is_read_or_refused ... ok
+test replay::tests::any_trace_shaped_text_is_read_or_refused ... ok
+test replay::tests::classes_are_read_and_default_to_every_class_and_oci ... ok
+test replay::tests::malformed_tenancy_is_refused_by_line ... ok
+test replay::tests::malformed_traces_are_refused_by_line ... ok
+test replay::tests::traces_past_their_bounds_are_refused ... ok
+test rng::tests::a_seed_names_one_sequence ... ok
+test rng::tests::range_stays_inside_its_bounds ... ok
+test start_cost::tests::start_cost_aggregates_restore_exactly_and_accept_measured_zero ... ok
+test start_cost::tests::start_cost_byte_priors_are_harmonic_and_unmeasured_terms_are_absent ... ok
+test start_cost::tests::start_cost_combined_launch_and_modeled_components_are_exclusive ... ok
+test start_cost::tests::start_cost_observations_are_by_class_with_empirical_prior ... ok
+test start_cost::tests::start_cost_resolution_and_stability_match_the_source ... ok
+test start_cost::tests::start_cost_terms_retain_kilns_units_and_warm_transfer ... ok
+test start_cost::tests::start_cost_warm_inputs_are_bounded_and_unambiguous ... ok
+test store::tests::a_gang_is_placed_whole_or_not_at_all ... ok
+test store::tests::a_node_is_never_overcommitted ... ok
+test store::tests::a_placement_from_a_stale_read_conflicts ... ok
+test store::tests::a_preemption_keeps_its_groups_budget ... ok
+test store::tests::records_past_the_bound_are_refused ... ok
+test store::tests::resubmits_and_repeated_reports_are_duplicates ... ok
+test swim::tests::the_gossip_room_is_what_the_datagram_leaves ... ok
+test trace::tests::nearest_rank_quantiles ... ok
+test trace::tests::the_hash_sees_order ... ok
+test vivaldi::tests::a_coordinate_converges_to_predict_a_peer ... ok
+test vivaldi::tests::an_unusable_sample_is_not_taken ... ok
+test vivaldi::tests::one_update_is_dabeks_figure_3 ... ok
+test vivaldi::tests::the_error_estimate_is_a_relative_error ... ok
+test vivaldi::tests::the_error_weight_remembers_one_round ... ok
+test vivaldi::tests::the_estimate_is_symmetric_and_nonnegative ... ok
+test vivaldi::tests::two_fresh_nodes_separate_and_replay ... ok
+test wan::tests::a_seed_names_one_set_of_coordinates ... ok
+test wan::tests::coordinates_learn_the_wan ... G3 coordinates 10 nodes, 18 rounds: Accuracy { median_relative_error: 0.06526815593974293, region_ranked_first: 32, region_trials: 32 }
+G3 coordinates 50 nodes, 276 rounds: Accuracy { median_relative_error: 0.05644087299310008, region_ranked_first: 9088, region_trials: 9088 }
+ok
+test wan::tests::out_of_bounds_configurations_are_refused ... ok
+test wan::tests::patience_runs_past_a_noise_uptick ... G3 seed 15: [1.0, 0.3608710412889989, 0.269142879185317, 0.2543014591855556, 0.2639672136857506, 0.28409937499231175, 0.2915792604171304]
+ok
+test wan::tests::the_census_is_the_traces ... ok
+test wan::tests::the_coordinates_held_are_the_last_rounds ... ok
+test wan::tests::the_region_matrix_is_symmetric_and_wide_area ... ok
+test wan::tests::true_round_trips_follow_the_model ... ok
+test wan::tests::unconverged_coordinates_fail_the_same_measure ... ok
+
+test result: ok. 198 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.87s
+

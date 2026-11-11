@@ -1,0 +1,42 @@
+{
+  "source": "786775e3b119c5163d49aa12662c0207cb25cc29",
+  "archive_sha256": "b6631496067c2cd5ad5a0e62286225663da1c64ff48c2838c1f827240d5f968d",
+  "scope": "ROOT coherent native-image API3/guest2 new controls and affected strict; real CLI wired; no repeated earlier controls, no native/VM/GPU or full private helper compile.",
+  "target": "linux",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 2841049,
+  "phases": [
+    {
+      "name": "new-sdk-native-image3",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "shards-api",
+        "--lib",
+        "--locked",
+        "native::tests::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2845882,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "ec1157d5ec9c86a8663d82c4a9dc9f398e34f6a93b75e45366411f9c5a875628",
+      "bytes": 119,
+      "expected_selected": 3,
+      "actual_counts": [],
+      "selection_verified": false,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_invocations": 0,
+  "exit": 1
+}

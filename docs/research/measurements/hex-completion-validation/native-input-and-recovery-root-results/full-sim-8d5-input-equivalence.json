@@ -1,0 +1,7 @@
+{
+  "source": "8d5bb0b4eb6a175532d73d889dc472b721660b41",
+  "root": "e990ff1ee953a12466551b678e7c7a9e60c552dc",
+  "relevant_paths": 103,
+  "all_equal": true,
+  "reason": "whole simulator regression after deep tuple/complement/committed recovery policy changes; prior190 pass was before final handoff; native inputs/gate test-only changes do not affect these pure core inputs"
+}

@@ -1,0 +1,29 @@
+   Compiling autocfg v1.5.1
+   Compiling unsize v1.1.0
+   Compiling shards-abi v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-786775e3-mac-portability-native-image-786-v2/source/vendor/shards/crates/abi)
+    Checking typenum v1.20.1
+    Checking hybrid-array v0.4.15
+    Checking crypto-common v0.2.2
+    Checking block-buffer v0.12.1
+    Checking windows-link v0.2.1
+    Checking const-oid v0.10.2
+    Checking digest v0.11.3
+    Checking windows-sys v0.61.2
+    Checking cpufeatures v0.3.1
+    Checking cfg-if v1.0.5
+    Checking sha2 v0.11.1
+    Checking triomphe v0.1.17
+    Checking shards-afunix v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-786775e3-mac-portability-native-image-786-v2/source/vendor/shards/crates/afunix)
+    Checking shards-testdir v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-786775e3-mac-portability-native-image-786-v2/source/vendor/shards/crates/testdir)
+    Checking shards-api v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-786775e3-mac-portability-native-image-786-v2/source/vendor/shards/crates/api)
+error: manual implementation of `.is_multiple_of()`
+   --> crates/api/src/physical/report/windows.rs:199:41
+    |
+199 |                 .checked_add(u128::from(left.subsec_nanos() % 1_000_000 != 0))
+    |                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace with: `!left.subsec_nanos().is_multiple_of(1_000_000)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#manual_is_multiple_of
+    = note: `-D clippy::manual-is-multiple-of` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::manual_is_multiple_of)]`
+
+error: could not compile `shards-api` (lib) due to 1 previous error

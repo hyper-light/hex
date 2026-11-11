@@ -1,0 +1,24 @@
+   Compiling typenum v1.20.1
+   Compiling hybrid-array v0.4.15
+   Compiling autocfg v1.5.1
+   Compiling unsize v1.1.0
+   Compiling libc v0.2.191
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling shards-abi v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-786775e3-linux-native-image-producer-v2/source/vendor/shards/crates/abi)
+   Compiling const-oid v0.10.2
+   Compiling digest v0.11.3
+   Compiling cpufeatures v0.3.1
+   Compiling cfg-if v1.0.5
+   Compiling sha2 v0.11.1
+   Compiling shards-testdir v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-786775e3-linux-native-image-producer-v2/source/vendor/shards/crates/testdir)
+   Compiling triomphe v0.1.17
+   Compiling shards-api v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-786775e3-linux-native-image-producer-v2/source/vendor/shards/crates/api)
+error[E0063]: missing fields `gpu` and `gpu_devices` in initializer of `GuestSpec`
+   --> /home/adalundhe/.cache/hex-lead/cohort-786775e3-linux-native-image-producer-v2/source/vendor/shards/crates/api/../../docs/research/measurements/managed-proc-main/reader-tests.rs:123:5
+    |
+123 |     crate::GuestSpec {
+    |     ^^^^^^^^^^^^^^^^ missing `gpu` and `gpu_devices`
+
+For more information about this error, try `rustc --explain E0063`.
+error: could not compile `shards-api` (lib test) due to 1 previous error

@@ -1,0 +1,33 @@
+{
+  "binary": [],
+  "phases": [
+    {
+      "name": "new-sdk-native-image3",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "shards-api",
+        "--lib",
+        "--locked",
+        "native::tests::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2845882,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "ec1157d5ec9c86a8663d82c4a9dc9f398e34f6a93b75e45366411f9c5a875628",
+      "bytes": 119,
+      "expected_selected": 3,
+      "actual_counts": [],
+      "selection_verified": false,
+      "test_outcomes": []
+    }
+  ],
+  "recorded_children_reaped": true
+}

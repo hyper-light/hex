@@ -1,0 +1,64 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.27
+   Compiling libc v0.2.191
+   Compiling rand_core v0.10.1
+   Compiling syn v3.0.9
+   Compiling cfg-if v1.0.5
+   Compiling getrandom v0.4.3
+   Compiling serde_core v1.0.229
+   Compiling rustix v1.1.5
+   Compiling thiserror v2.0.21
+   Compiling bitflags v2.13.2
+   Compiling autocfg v1.5.1
+   Compiling linux-raw-sys v0.12.1
+   Compiling num-traits v0.2.19
+   Compiling thiserror-impl v2.0.21
+   Compiling fastrand v2.5.0
+   Compiling zmij v1.0.23
+   Compiling serde v1.0.229
+   Compiling once_cell v1.21.4
+   Compiling tempfile v3.27.0
+   Compiling wait-timeout v0.2.1
+   Compiling serde_derive v1.0.229
+   Compiling cpufeatures v0.3.1
+   Compiling fnv v1.0.7
+   Compiling quick-error v1.2.3
+   Compiling bit-vec v0.10.1
+   Compiling serde_json v1.0.154
+   Compiling bit-set v0.11.1
+   Compiling rusty-fork v0.3.1
+   Compiling chacha20 v0.10.2
+   Compiling rand v0.10.3
+   Compiling rand_xorshift v0.5.0
+   Compiling unarray v0.1.4
+   Compiling regex-syntax v0.8.11
+   Compiling hyper-timing v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-8d5bb0b4-linux-remote-profile-mutation/source/vendor/hyper-raft/crates/hyper-timing)
+   Compiling memchr v2.8.3
+   Compiling core_detect v1.0.0
+   Compiling itoa v1.0.18
+   Compiling proptest v1.12.0
+   Compiling hyper-swim v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-8d5bb0b4-linux-remote-profile-mutation/source/vendor/hyper-raft/crates/hyper-swim)
+   Compiling hex-api v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-8d5bb0b4-linux-remote-profile-mutation/source/crates/hex-api)
+   Compiling hex-health v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-8d5bb0b4-linux-remote-profile-mutation/source/crates/hex-health)
+   Compiling triomphe v0.1.17
+   Compiling cap v0.1.2
+   Compiling hex-sim v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-8d5bb0b4-linux-remote-profile-mutation/source/crates/hex-sim)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 56.91s
+     Running unittests src/lib.rs (/home/adalundhe/.cache/hex-lead/cohort-8d5bb0b4-linux-remote-profile-mutation/target-mutant/debug/deps/hex_sim-1a26fbe8e182b00f)
+
+running 1 test
+test index::route_offer_tests::committed_pending_recovery_keeps_receipt_charge_and_claim_bounds ... 
+thread 'index::route_offer_tests::committed_pending_recovery_keeps_receipt_charge_and_claim_bounds' (3536810) panicked at crates/hex-sim/src/index/route_offer_tests.rs:1390:9:
+foreign profile
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    index::route_offer_tests::committed_pending_recovery_keeps_receipt_charge_and_claim_bounds
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 197 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p hex-sim --lib`

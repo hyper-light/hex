@@ -1,0 +1,51 @@
+{
+  "bytes": 354696,
+  "sha256": "fd5a533fff2eed4eb02a4c374dc570a887ce2d98c03470da656035b80c597cc5",
+  "members": {
+    "cohort-8d5bb0b4-linux-remote-profile-mutation/source-before.json": {
+      "bytes": 527920,
+      "sha256": "ef5708c33d12fbee161eb74aab51e6a3ce6195e956a6304c1b49855d8d2f1cdf"
+    },
+    "cohort-8d5bb0b4-linux-remote-profile-mutation/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-8d5bb0b4-linux-remote-profile-mutation/owned-scope-limits.json": {
+      "bytes": 263,
+      "sha256": "9ea94c8b9cec8106f0dede1d7bd51e6fd9cd7afb8b821a2cc3fac7bbb29b7ab9"
+    },
+    "cohort-8d5bb0b4-linux-remote-profile-mutation/mutant-source-pin.json": {
+      "bytes": 155,
+      "sha256": "6e5915548a0ad8a40b91af0266e48f96481eaaa82abaec452241686c6eacc831"
+    },
+    "cohort-8d5bb0b4-linux-remote-profile-mutation/mutant.log": {
+      "bytes": 2842,
+      "sha256": "4c09db0b2ed091a8af147399040924137093465512025950a08cf6a16aa2e954"
+    },
+    "cohort-8d5bb0b4-linux-remote-profile-mutation/running.json": {
+      "bytes": 2825,
+      "sha256": "780e7086788b91c3bbe09b0b9c8f5faf711b75659de3bb09a59e092efc7fcf55"
+    },
+    "cohort-8d5bb0b4-linux-remote-profile-mutation/restored.log": {
+      "bytes": 2395,
+      "sha256": "0376ff0dd2f28ea1cf06cc3b941833c1d0b966f9bc5a6e0868258c3bda3084a8"
+    },
+    "cohort-8d5bb0b4-linux-remote-profile-mutation/source-after.json": {
+      "bytes": 527920,
+      "sha256": "ef5708c33d12fbee161eb74aab51e6a3ce6195e956a6304c1b49855d8d2f1cdf"
+    },
+    "cohort-8d5bb0b4-linux-remote-profile-mutation/result.json": {
+      "bytes": 3306,
+      "sha256": "c1195ef8a3cdf6199295295b6251a5851ee061361e619da504d9c4c854dfd83b"
+    },
+    "cohort-8d5bb0b4-linux-remote-profile-mutation/collected-binaries.json": {
+      "bytes": 2720,
+      "sha256": "13fd33c34e4de861ce5a85ec5e1cf155804a6ecb22a85a93894f211d4a2496ac"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

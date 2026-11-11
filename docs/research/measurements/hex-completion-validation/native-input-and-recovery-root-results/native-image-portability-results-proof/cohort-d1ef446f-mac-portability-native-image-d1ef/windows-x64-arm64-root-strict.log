@@ -1,0 +1,79 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.27
+   Compiling quote v1.0.47
+   Compiling syn v3.0.9
+   Compiling version_check v0.9.5
+   Compiling generic-array v0.14.7
+   Compiling thiserror v2.0.21
+   Compiling serde_core v1.0.229
+   Compiling thiserror-impl v2.0.21
+   Compiling serde v1.0.229
+   Compiling serde_derive v1.0.229
+   Compiling syn v2.0.119
+   Compiling zmij v1.0.23
+   Compiling windows-implement v0.60.2
+   Compiling windows-interface v0.59.3
+   Compiling serde_json v1.0.154
+   Compiling getrandom v0.4.3
+   Compiling shards-abi v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-d1ef446f-mac-portability-native-image-d1ef/source/vendor/shards/crates/abi)
+   Compiling crc32fast v1.5.4
+   Compiling rustix v1.1.5
+    Checking windows-sys v0.61.2
+    Checking rand_core v0.10.1
+    Checking crypto-common v0.1.7
+    Checking block-buffer v0.10.4
+    Checking hex-afunix v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-d1ef446f-mac-portability-native-image-d1ef/source/crates/hex-afunix)
+    Checking windows-strings v0.5.1
+    Checking windows-result v0.4.1
+    Checking windows-core v0.62.2
+    Checking hex-api v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-d1ef446f-mac-portability-native-image-d1ef/source/crates/hex-api)
+    Checking digest v0.10.7
+    Checking memchr v2.8.3
+    Checking itoa v1.0.18
+    Checking cpufeatures v0.2.17
+    Checking sha2 v0.10.9
+    Checking simd-adler32 v0.3.10
+    Checking bitflags v2.13.2
+    Checking adler2 v2.0.1
+    Checking miniz_oxide v0.9.1
+    Checking hex-core v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-d1ef446f-mac-portability-native-image-d1ef/source/crates/hex-core)
+    Checking errno v0.3.14
+    Checking shards-afunix v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-d1ef446f-mac-portability-native-image-d1ef/source/vendor/shards/crates/afunix)
+    Checking filetime v0.2.29
+    Checking windows-threading v0.2.1
+    Checking windows-future v0.3.2
+    Checking tar v0.4.46
+    Checking shards-api v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-d1ef446f-mac-portability-native-image-d1ef/source/vendor/shards/crates/api)
+    Checking flate2 v1.1.11
+    Checking windows-collections v0.3.2
+    Checking windows-numerics v0.3.1
+    Checking windows v0.62.2
+    Checking hex-client v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-d1ef446f-mac-portability-native-image-d1ef/source/crates/hex-client)
+    Checking hex-gpu v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-d1ef446f-mac-portability-native-image-d1ef/source/crates/hex-gpu)
+    Checking socket2 v0.6.5
+    Checking hyper-timing v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-d1ef446f-mac-portability-native-image-d1ef/source/vendor/hyper-raft/crates/hyper-timing)
+    Checking hyper-swim v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-d1ef446f-mac-portability-native-image-d1ef/source/vendor/hyper-raft/crates/hyper-swim)
+    Checking hex-health v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-d1ef446f-mac-portability-native-image-d1ef/source/crates/hex-health)
+    Checking once_cell v1.21.4
+    Checking fastrand v2.5.0
+    Checking tempfile v3.27.0
+    Checking hex-sim v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-d1ef446f-mac-portability-native-image-d1ef/source/crates/hex-sim)
+    Checking hex-runtime v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-d1ef446f-mac-portability-native-image-d1ef/source/crates/hex-runtime)
+    Checking hex-node v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-d1ef446f-mac-portability-native-image-d1ef/source/crates/hex-node)
+    Checking hex-cli v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-d1ef446f-mac-portability-native-image-d1ef/source/crates/hex-cli)
+   Compiling num-traits v0.2.19
+    Checking hex-testkit v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-d1ef446f-mac-portability-native-image-d1ef/source/crates/hex-testkit)
+    Checking wait-timeout v0.2.1
+    Checking bit-vec v0.10.1
+    Checking quick-error v1.2.3
+    Checking fnv v1.0.7
+    Checking rusty-fork v0.3.1
+    Checking bit-set v0.11.1
+    Checking rand v0.10.3
+    Checking chacha20 v0.10.2
+    Checking rand_xorshift v0.5.0
+    Checking core_detect v1.0.0
+    Checking unarray v0.1.4
+    Checking regex-syntax v0.8.11
+    Checking proptest v1.12.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 10s

@@ -1,0 +1,172 @@
+{
+  "binary": [
+    {
+      "path": "target/debug/deps/shards_api-0d0ab55c49bed359",
+      "bytes": 5055032,
+      "sha256": "f10670e2ec5f3cbad0e4cc9545ce88f0b694af6bfaaab04e88fc6dd41690da9c"
+    }
+  ],
+  "phases": [
+    {
+      "name": "windows-x64-arm64-sdk-strict",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "--manifest-path",
+        "vendor/shards/crates/api/Cargo.toml",
+        "--all-targets",
+        "--offline",
+        "--no-deps",
+        "--target",
+        "x86_64-pc-windows-msvc",
+        "--target",
+        "aarch64-pc-windows-msvc",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 21819,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "3a1b9ac28debe54cc0351c32672edd6c95a2be3a2d8c53b49c46714640c85fb4",
+      "bytes": 1104,
+      "test_outcomes": []
+    },
+    {
+      "name": "windows-x64-arm64-root-strict",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-runtime",
+        "-p",
+        "hex-node",
+        "-p",
+        "hex-cli",
+        "--all-targets",
+        "--locked",
+        "--no-deps",
+        "--target",
+        "x86_64-pc-windows-msvc",
+        "--target",
+        "aarch64-pc-windows-msvc",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 21896,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "3ef3abb296fac9257b18f5e058de6ef9404adc14fc70a7241b038c14060cbda9",
+      "bytes": 4301,
+      "test_outcomes": []
+    },
+    {
+      "name": "mac-sdk-native-input-strict",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "--manifest-path",
+        "vendor/shards/crates/api/Cargo.toml",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 22524,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "91f1f57d6051f0b0d997684a9134a6ab78c14c291a8536b007810511208241ca",
+      "bytes": 911,
+      "test_outcomes": []
+    },
+    {
+      "name": "mac-root-native-input-strict",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-runtime",
+        "-p",
+        "hex-node",
+        "-p",
+        "hex-cli",
+        "--all-targets",
+        "--locked",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 22764,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "36b1f8e97c5c64ef00936428b54de9eb67d953f569a881d7f215aae80f33ba01",
+      "bytes": 3611,
+      "test_outcomes": []
+    },
+    {
+      "name": "mac-new-native-image-api3",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "--manifest-path",
+        "vendor/shards/crates/api/Cargo.toml",
+        "--lib",
+        "--locked",
+        "--offline",
+        "native::tests::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 23084,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "9cc58694db33ce63c48ac628cb613711bff1f7e26d021e10a7ff302a13cd33f2",
+      "bytes": 1444,
+      "expected_selected": 3,
+      "actual_counts": [
+        {
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "native::tests::native_preparation_refuses_missing_variant_and_unbound_paths",
+          "outcome": "ok"
+        },
+        {
+          "name": "native::tests::native_preparation_retains_exact_inputs_and_legacy_has_no_worker_plan",
+          "outcome": "ok"
+        },
+        {
+          "name": "native::tests::verified_native_image_retains_exact_file_and_refuses_hostile_content",
+          "outcome": "ok"
+        }
+      ]
+    }
+  ],
+  "recorded_children_reaped": true
+}
