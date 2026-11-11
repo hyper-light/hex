@@ -2,6 +2,8 @@
 //! The helper keeps native receipts only; canonical Store admission/physical claims remain in Node.
 use std::time::Duration;
 
+pub mod census;
+
 use crate::record::{NativeRecord, NativeScope, OwnerKey, OwnerRef, ProcId};
 use crate::wire::{Fault, Reader};
 use hex_api::{Exit, Refusal, Usage};
@@ -375,14 +377,20 @@ pub fn check_prepared_arguments<'a>(
 trait Output {
     fn raw(&mut self, bytes: &[u8]) -> Result<(), Fault>;
 }
-struct Count(usize);
+struct Count {
+    bytes: usize,
+    maximum: usize,
+}
 impl Output for Count {
     fn raw(&mut self, bytes: &[u8]) -> Result<(), Fault> {
-        self.0 = self
-            .0
+        self.bytes = self
+            .bytes
             .checked_add(bytes.len())
-            .filter(|n| *n <= MAX_MESSAGE)
-            .ok_or_else(|| bounded(usize::MAX))?;
+            .filter(|n| *n <= self.maximum)
+            .ok_or(Fault::Oversized {
+                bytes: usize::MAX,
+                bound: self.maximum,
+            })?;
         Ok(())
     }
 }
@@ -406,21 +414,27 @@ impl Output for Encoded {
     }
 }
 fn encode(write: impl Fn(&mut dyn Output) -> Result<(), Fault>) -> Result<Vec<u8>, Fault> {
-    let mut count = Count(0);
+    encode_bounded(MAX_MESSAGE, write)
+}
+fn encode_bounded(
+    maximum: usize,
+    write: impl Fn(&mut dyn Output) -> Result<(), Fault>,
+) -> Result<Vec<u8>, Fault> {
+    let mut count = Count { bytes: 0, maximum };
     write(&mut count)?;
     let mut bytes = Vec::new();
     bytes
-        .try_reserve_exact(count.0)
+        .try_reserve_exact(count.bytes)
         .map_err(|_| Fault::Storage {
             what: "managed helper message",
-            bound: count.0,
+            bound: count.bytes,
         })?;
     let mut encoded = Encoded {
         bytes,
-        size: count.0,
+        size: count.bytes,
     };
     write(&mut encoded)?;
-    if encoded.bytes.len() != count.0 {
+    if encoded.bytes.len() != count.bytes {
         return Err(invalid("managed message encoding size"));
     }
     Ok(encoded.bytes)

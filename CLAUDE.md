@@ -212,6 +212,11 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   functions, and std's own
   job-object support and its `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process creation are
   unstable; Rust can express none of them safely.
+  The guest observer also uses synchronous `WSAPoll`/`WSAGetLastError` on its two
+  borrowed output sockets. Only active endpoints enter the fixed stack array; the finite
+  deadline and native array remain owned for the call. No data, socket mode, timeout option,
+  asynchronous operation or handle ownership changes. These Winsock calls have no safe SDK wrapper.
+
 - `crates/hex-runtime/src/windows/wmi.rs`: the Windows node reads the optional features Hex's installer
   turns on (Containers, HypervisorPlatform) from WMI in process rather than starting PowerShell for them.
   On a thread of its own it initializes COM (`CoInitializeEx`, multithreaded, paired with

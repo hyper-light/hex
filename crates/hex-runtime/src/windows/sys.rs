@@ -12,7 +12,9 @@
 
 use std::io;
 use std::mem::{size_of, zeroed};
-use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, OwnedHandle};
+use std::os::windows::io::{
+    AsHandle, AsRawHandle, AsRawSocket, BorrowedHandle, BorrowedSocket, OwnedHandle,
+};
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
@@ -20,6 +22,10 @@ use windows_sys::Win32::Foundation::{
     DuplicateHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA,
     ERROR_NOT_ENOUGH_QUOTA, FILETIME, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
     INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
+use windows_sys::Win32::Networking::WinSock::{
+    INVALID_SOCKET, POLLERR, POLLHUP, POLLNVAL, POLLRDNORM, SOCKET, SOCKET_ERROR, WSAEINTR,
+    WSAGetLastError, WSAPOLLFD, WSAPoll,
 };
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
@@ -294,6 +300,107 @@ pub(crate) fn inheritable_copy(source: BorrowedHandle<'_>) -> io::Result<Inherit
     }
     // SAFETY: successful DuplicateHandle returned the unique copy owned by this process.
     Ok(InheritedHandle(unsafe { Handle::own(copied) }))
+}
+
+fn pair_timeout(left: std::time::Duration) -> io::Result<i32> {
+    // WSAPoll accepts signed milliseconds: round a positive fractional millisecond up, then cap
+    // at the native finite width. The caller rechecks its SAME absolute deadline after each wait.
+    let fractional = !left.subsec_nanos().is_multiple_of(1_000_000);
+    let millis = left
+        .as_millis()
+        .checked_add(u128::from(fractional))
+        .ok_or(io::ErrorKind::InvalidInput)?;
+    let maximum = u128::try_from(i32::MAX).map_err(|_| io::ErrorKind::InvalidInput)?;
+    i32::try_from(millis.min(maximum)).map_err(|_| io::ErrorKind::InvalidInput.into())
+}
+
+/// Wait for the caller's active endpoints in its exact two-socket observer. None omits a completed
+/// stream entirely from the native wait. No data is consumed, physical socket
+/// mode/timeout changed, handle duplicated or asynchronous I/O left pending. HUP/ERR is read-ready
+/// so the same caller observes its actual EOF/error; neither is a whole-scope termination fact.
+pub fn readable_pair(
+    sockets: [Option<BorrowedSocket<'_>>; 2],
+    patience: std::time::Duration,
+) -> io::Result<[bool; 2]> {
+    if patience == std::time::Duration::MAX {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let deadline = std::time::Instant::now()
+        .checked_add(patience)
+        .ok_or(io::ErrorKind::InvalidInput)?;
+    let mut descriptors = [WSAPOLLFD {
+        fd: INVALID_SOCKET,
+        events: POLLRDNORM,
+        revents: 0,
+    }; 2];
+    let mut positions = [0usize; 2];
+    let mut count = 0usize;
+    for (position, socket) in sockets.into_iter().enumerate() {
+        let Some(socket) = socket else {
+            continue;
+        };
+        let raw =
+            SOCKET::try_from(socket.as_raw_socket()).map_err(|_| io::ErrorKind::InvalidInput)?;
+        if raw == INVALID_SOCKET || descriptors.iter().any(|descriptor| descriptor.fd == raw) {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        descriptors
+            .get_mut(count)
+            .ok_or(io::ErrorKind::InvalidInput)?
+            .fd = raw;
+        *positions
+            .get_mut(count)
+            .ok_or(io::ErrorKind::InvalidInput)? = position;
+        count = count.checked_add(1).ok_or(io::ErrorKind::InvalidInput)?;
+    }
+    if count == 0 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let native_count = u32::try_from(count).map_err(|_| io::ErrorKind::InvalidInput)?;
+    let mut initial = true;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if !initial && left.is_zero() {
+            return Ok([false; 2]);
+        }
+        initial = false;
+        let timeout = pair_timeout(left)?;
+        for descriptor in &mut descriptors {
+            descriptor.revents = 0;
+        }
+        // SAFETY: exactly native_count initialized WSAPOLLFD records are writable on this stack; active
+        // borrowed live sockets outlast the call. timeout is nonnegative/finite, never INFINITE.
+        let returned = unsafe { WSAPoll(descriptors.as_mut_ptr(), native_count, timeout) };
+        if returned == SOCKET_ERROR {
+            // SAFETY: capture this thread's Winsock error immediately after the failed WSAPoll.
+            let code = unsafe { WSAGetLastError() };
+            if code == WSAEINTR {
+                continue;
+            }
+            return Err(io::Error::from_raw_os_error(code));
+        }
+        if returned == 0 {
+            continue;
+        }
+        if returned < 0
+            || u32::try_from(returned).map_err(|_| io::ErrorKind::InvalidData)? > native_count
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let mask = POLLRDNORM | POLLHUP | POLLERR;
+        let mut ready = [false; 2];
+        for (descriptor, position) in descriptors.iter().zip(positions).take(count) {
+            if descriptor.revents & POLLNVAL != 0 {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            *ready.get_mut(position).ok_or(io::ErrorKind::InvalidData)? =
+                descriptor.revents & mask != 0;
+        }
+        if ready == [false; 2] {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        return Ok(ready);
+    }
 }
 
 /// A member started suspended in its box's job.
@@ -1405,5 +1512,116 @@ mod report_handle_tests {
         let mut observed = String::new();
         reader.read_to_string(&mut observed).unwrap();
         assert_eq!(observed, "same private pipe");
+    }
+}
+
+#[cfg(test)]
+mod observer_socket_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::os::windows::io::AsSocket;
+    use std::time::Duration;
+
+    #[test]
+    fn observer_pair_preserves_finite_native_timeout_units() {
+        assert_eq!(pair_timeout(Duration::ZERO).unwrap(), 0);
+        assert_eq!(pair_timeout(Duration::from_nanos(1)).unwrap(), 1);
+        assert_eq!(pair_timeout(Duration::from_millis(1)).unwrap(), 1);
+        assert_eq!(
+            pair_timeout(Duration::from_millis(2) + Duration::from_nanos(1)).unwrap(),
+            3
+        );
+        assert_eq!(
+            pair_timeout(Duration::from_secs(u64::MAX)).unwrap(),
+            i32::MAX
+        );
+    }
+
+    /// AC-T7.4.1: the same caller waits for the actual stdout/stderr fact without consuming it.
+    /// This is a private loopback socket control, not AF_UNIX/GPU/VM or scope-release evidence.
+    #[test]
+    fn observer_pair_selects_data_or_eof_without_consuming_or_duplicating_sockets() {
+        fn pair() -> (TcpStream, TcpStream) {
+            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let peer = TcpStream::connect_timeout(
+                &listener.local_addr().unwrap(),
+                Duration::from_secs(10),
+            )
+            .unwrap();
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            peer.set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            (socket, peer)
+        }
+        let (mut stdout, stdout_peer) = pair();
+        let (mut stderr, mut stderr_peer) = pair();
+        assert_eq!(
+            readable_pair(
+                [Some(stdout.as_socket()), Some(stderr.as_socket())],
+                Duration::ZERO
+            )
+            .unwrap(),
+            [false, false]
+        );
+        assert!(
+            readable_pair(
+                [Some(stdout.as_socket()), Some(stdout.as_socket())],
+                Duration::ZERO
+            )
+            .is_err()
+        );
+        assert!(
+            readable_pair(
+                [Some(stdout.as_socket()), Some(stderr.as_socket())],
+                Duration::MAX
+            )
+            .is_err()
+        );
+        stderr_peer.write_all(b"R").unwrap();
+        assert_eq!(
+            readable_pair(
+                [Some(stdout.as_socket()), Some(stderr.as_socket())],
+                Duration::from_secs(10)
+            )
+            .unwrap(),
+            [false, true]
+        );
+        let mut byte = [0u8; 1];
+        stderr.read_exact(&mut byte).unwrap();
+        assert_eq!(byte, *b"R");
+        assert_eq!(
+            readable_pair(
+                [Some(stdout.as_socket()), Some(stderr.as_socket())],
+                Duration::ZERO
+            )
+            .unwrap(),
+            [false, false]
+        );
+        stdout_peer.shutdown(std::net::Shutdown::Write).unwrap();
+        let ready = readable_pair(
+            [Some(stdout.as_socket()), Some(stderr.as_socket())],
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(ready, [true, false]);
+        assert_eq!(stdout.read(&mut byte).unwrap(), 0);
+        assert_eq!(
+            readable_pair([None, Some(stderr.as_socket())], Duration::ZERO).unwrap(),
+            [false, false],
+            "completed stdout HUP must be unwatched"
+        );
+        stderr_peer.write_all(b"S").unwrap();
+        assert_eq!(
+            readable_pair([None, Some(stderr.as_socket())], Duration::from_secs(10)).unwrap(),
+            [false, true]
+        );
+        stderr.read_exact(&mut byte).unwrap();
+        assert_eq!(byte, *b"S");
+        assert!(readable_pair([None, None], Duration::ZERO).is_err());
     }
 }

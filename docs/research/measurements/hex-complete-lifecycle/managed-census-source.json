@@ -1,0 +1,18 @@
+{
+  "kind": "source-only append-only native helper census at the SAME owner",
+  "base": "c0a78f2578e3655fa9a947c5e39463319320dd11",
+  "tags": {
+    "helper_request": "0x0011",
+    "helper_answer": "0x800f"
+  },
+  "paths": {
+    "crates/hex-core/src/helper/managed.rs": "279c49016ae2c961072264b90b37bfa9925e181e2072f5002ae2c7d5960b6668",
+    "crates/hex-core/src/helper/managed/census.rs": "571c27e7dcd3ed4e71c23bf3d2e016e5df12056555b1d011bb49e07588745404"
+  },
+  "authority": "Flat read-only snapshot of existing ProcessBox table. No Store/grant/holder cache/manager; every key joined against canonical Box/Pool by shell before recovery callbacks. Existing runtimeMAX_BOXES supplied as native_bound, checked u32 body size; no separately invented table allowance.",
+  "encoding": "Share existing header, key/proc parser and count/reserve/write encoder; old encoder delegates to same bounded helper with unchanged MAX_MESSAGE. No legacy kinds/version/framing change. Wrong descriptors/count/truncation/order/duplicate owner/foreign helper refuses before accepted snapshot.",
+  "parser": "Original raw-word/take_while block copied byte-identically from HEAD; no argument parser/lifeline remedy or f1c oracle edits. Draft preserved privately.",
+  "new_controls": 2,
+  "checks": "Scoped rustfmt/diff-check only, new controls UNRUN; no new builds/tests/native dispatch. L4 helper namespace notified; no wire.rs edits.",
+  "remaining": "Persistent Mac helper shell/proxy/notifications/CPU/native producer unfinished. Original parser2 actual outcome still awaited. ROOT owns matched codec controls and all native/fault/resource/profile gates."
+}
