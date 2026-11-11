@@ -1,0 +1,107 @@
+{
+  "bytes": 641199,
+  "sha256": "adf4e4cd8a0f52809bd8eab6f379602c7bce5b409de2d6907b1c481eb9e16912",
+  "members": {
+    "cohort-45727a81-mac-route-contract-v1/running.json": {
+      "bytes": 1080,
+      "sha256": "b7eac91f671f662037844baa744ea5accf8c23bcb0ad3848cda21caea2892a89"
+    },
+    "cohort-45727a81-mac-route-contract-v1/result.json": {
+      "bytes": 1376,
+      "sha256": "995ef86bbf6029f7dd76687ddb572f3fcf9e8385b52f794794ed2af82ebcfbe2"
+    },
+    "cohort-45727a81-mac-route-contract-v1/source-before.json": {
+      "bytes": 307641,
+      "sha256": "74952fcdb1a17366e47461c248fc8adb40d5c48a839c0910bd43ccf06846036c"
+    },
+    "cohort-45727a81-mac-route-contract-v1/source-after.json": {
+      "bytes": 307641,
+      "sha256": "74952fcdb1a17366e47461c248fc8adb40d5c48a839c0910bd43ccf06846036c"
+    },
+    "cohort-45727a81-mac-route-contract-v1/api-route-controls.log": {
+      "bytes": 1108,
+      "sha256": "e9327702037bde1b9ff9a37899ef907d7c54bd475957ec5d4384cee572987fd6"
+    },
+    "cohort-45727a81-mac-route-contract-v1/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-45727a81-mac-route-contract-v1/collected-binaries.json": {
+      "bytes": 723,
+      "sha256": "828782410f1ed901d4278d9a2f50a88d3b07dcad290c6448e95f0bd69fccf281"
+    },
+    "cohort-9ccb495b-mac-route-contract-v1/running.json": {
+      "bytes": 2579,
+      "sha256": "29ca733f3db6b90d147a0650588484de53e2fc151b48496c9bdecc23f0fde7c9"
+    },
+    "cohort-9ccb495b-mac-route-contract-v1/result.json": {
+      "bytes": 2875,
+      "sha256": "953f470ee71eaca879639387367887b1491dcba22bbb1845c1d6588d9f655349"
+    },
+    "cohort-9ccb495b-mac-route-contract-v1/source-before.json": {
+      "bytes": 311516,
+      "sha256": "c99bc0e167ea3010b74696f0b880c563140eb106429a35a54080e48aef944b00"
+    },
+    "cohort-9ccb495b-mac-route-contract-v1/source-after.json": {
+      "bytes": 311516,
+      "sha256": "c99bc0e167ea3010b74696f0b880c563140eb106429a35a54080e48aef944b00"
+    },
+    "cohort-9ccb495b-mac-route-contract-v1/api-typed-holder-control.log": {
+      "bytes": 430,
+      "sha256": "c0dbc8f4cba82335c5737ec0b75d6df0bb3bfb7022a8684be0ff1f3d1bf4efac"
+    },
+    "cohort-9ccb495b-mac-route-contract-v1/client-backing-wait-control.log": {
+      "bytes": 2612,
+      "sha256": "4dde61781e80db706ab50e7b2df95bba926e7901480622125bcc7b2329232e3a"
+    },
+    "cohort-9ccb495b-mac-route-contract-v1/api-route-controls.log": {
+      "bytes": 1273,
+      "sha256": "17fc356be130e9b667aaa3d7f6d5227c2d47f1a61c6c91e2ac408c39c631098e"
+    },
+    "cohort-9ccb495b-mac-route-contract-v1/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-9ccb495b-mac-route-contract-v1/collected-binaries.json": {
+      "bytes": 2187,
+      "sha256": "765616a3e80546525278d4025e2ee2f0ecca34181645eec61754961fce1ba16f"
+    },
+    "cohort-2c8855b2-mac-route-contract-v1/running.json": {
+      "bytes": 1867,
+      "sha256": "f673c146bdd4b5f49ec582332892e021363ba106d735150077112c9277f089db"
+    },
+    "cohort-2c8855b2-mac-route-contract-v1/result.json": {
+      "bytes": 2163,
+      "sha256": "c59e20d82b24c88fefc4e8955c225a4199c1e30b3ddd77b57edfb295ad97aa3f"
+    },
+    "cohort-2c8855b2-mac-route-contract-v1/source-before.json": {
+      "bytes": 312202,
+      "sha256": "9ab868e385f5939b3e6e3c10396c61ecf58aae4a12443c928ca7cc3502b168d8"
+    },
+    "cohort-2c8855b2-mac-route-contract-v1/source-after.json": {
+      "bytes": 312202,
+      "sha256": "9ab868e385f5939b3e6e3c10396c61ecf58aae4a12443c928ca7cc3502b168d8"
+    },
+    "cohort-2c8855b2-mac-route-contract-v1/client-backing-wait-control.log": {
+      "bytes": 2666,
+      "sha256": "3832af96ce44877a520877d09d174db4d66f23fd97cb5366af037b5a94f112bc"
+    },
+    "cohort-2c8855b2-mac-route-contract-v1/core-pool-record-controls.log": {
+      "bytes": 2487,
+      "sha256": "5734e77915d502a4e365c78404617513e998fd4557ded5a78e0af9101e669037"
+    },
+    "cohort-2c8855b2-mac-route-contract-v1/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-2c8855b2-mac-route-contract-v1/collected-binaries.json": {
+      "bytes": 1464,
+      "sha256": "e301127564bfcafe2394d7b0d6b4a1348e58aa089ff38fd027abc7f22639888a"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}
