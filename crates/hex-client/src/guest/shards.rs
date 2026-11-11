@@ -144,8 +144,9 @@ impl Link for ShardsLink {
 }
 
 /// Shards' refusal as Hex's: a missing backend is the platform's, a bound is a spec's, a CONNECT's
-/// failure keeps its port, phase and cause (Shards R04); the rest is the guest's channel or its end,
-/// which Hex reads as an operating-system failure naming what it did.
+/// failure keeps its port, phase and cause (Shards R04), an owned guest's or a borrowed one's; the
+/// rest is the guest's channel or its end, which Hex reads as an operating-system failure naming
+/// what it did.
 pub fn refusal(op: &'static str, why: &shards_api::Refusal) -> Refusal {
     match why {
         shards_api::Refusal::NoBackend { os, arch } => Refusal::Platform {
@@ -187,7 +188,11 @@ pub fn refusal(op: &'static str, why: &shards_api::Refusal) -> Refusal {
                 why: reason,
             }
         }
-        shards_api::Refusal::Connect { port, failure } => Refusal::Connect {
+        shards_api::Refusal::Connect { port, failure }
+        | shards_api::Refusal::Borrowed {
+            port,
+            failure: shards_api::BorrowFailure::Channel(failure),
+        } => Refusal::Connect {
             port: *port,
             failure: connect_failure(failure),
         },
