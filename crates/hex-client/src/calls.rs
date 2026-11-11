@@ -2125,6 +2125,8 @@ impl<T: Transport> Core<T> {
         program.fits(&WIRE_EXEC_LIMIT)?;
         stdio.check()?;
         let name = launch.name();
+        // What a failed setup names when its kill can't confirm the program's end; the call takes `launch`.
+        let id = launch.id().try_clone()?;
         let (carried, asked) = (carried(&stdio), streams(stdio.ask));
         let ending = Arc::new(Ending::default());
         let shared = &*self.conn.shared;
@@ -2205,6 +2207,7 @@ impl<T: Transport> Core<T> {
                     release_before: caller,
                     exit: None,
                     given: None,
+                    kill_asked: false,
                 };
                 match settle(kept, ends) {
                     Ok(given) => {
@@ -2212,11 +2215,20 @@ impl<T: Transport> Core<T> {
                         Ok(Box::new(proc))
                     }
                     Err(why) => {
-                        let _ = match caller {
+                        // No caller will hold it, and unless its kill confirms its end it may still run:
+                        // the refusal is then its box's uncertain lifecycle, not the setup's or the kill's.
+                        proc.kill_asked = true;
+                        let killed = match caller {
                             Some(cap) => proc.kill_before(cap),
                             None => proc.kill(),
                         };
-                        Err(why)
+                        Err(match killed {
+                            Ok(()) => why,
+                            Err(_) => Refusal::Lifecycle {
+                                id,
+                                cause: hex_api::LifecycleCause::Uncertain,
+                            },
+                        })
                     }
                 }
             }
@@ -2270,6 +2282,14 @@ impl Launch {
         match self {
             Self::Exec(_) => "exec",
             Self::Run(_) => "run",
+        }
+    }
+
+    /// The box it starts its program in.
+    fn id(&self) -> &BoxId {
+        match self {
+            Self::Exec(id) => id,
+            Self::Run(spec) => &spec.id,
         }
     }
 }
@@ -2571,6 +2591,8 @@ struct RemoteProc<T: Transport> {
     exit: Option<Exit>,
     /// The caller's ends of the streams its exec asked for, until taken.
     given: Option<hex_api::Given>,
+    /// Asked to end because its setup failed: never released, which tells the agent to let it run on.
+    kill_asked: bool,
 }
 
 impl<T: Transport> RemoteProc<T> {
@@ -2741,7 +2763,8 @@ impl<T: Transport> Proc for RemoteProc<T> {
 impl<T: Transport> Drop for RemoteProc<T> {
     /// Let go before its end came: the agent is told, and lets the program run on as dropping an
     /// in-process `Proc` does. A release that can't be sent now (no room, or the connection gone) needs none: the
-    /// agent's disconnect rule has the program.
+    /// agent's disconnect rule has the program. One asked to end is never released: its end is its kill's, else
+    /// that rule's.
     fn drop(&mut self) {
         let shared = &self.conn.shared;
         let ended = self.exit.is_some()
@@ -2754,7 +2777,9 @@ impl<T: Transport> Drop for RemoteProc<T> {
         if let Ok(mut state) = shared.state() {
             state.programs.remove(&self.exec);
         }
-        if !ended && let Ok(bytes) = wire::request(self.exec, &Request::Release, wire::MAX_MESSAGE)
+        if !ended
+            && !self.kill_asked
+            && let Ok(bytes) = wire::request(self.exec, &Request::Release, wire::MAX_MESSAGE)
         {
             self.conn.send_now_before(&bytes, self.release_before);
         }
