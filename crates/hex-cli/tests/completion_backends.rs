@@ -17,9 +17,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio as HostStdio};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use hex_api::{BoxId, Class, DeviceId, Exit, Program, Runtime, Stdio};
+use hex_api::{
+    BackingPhase, BoxId, BoxSpec, Class, DeviceHolder, DeviceId, Exit, Program, Runtime, Stdio,
+};
 use hex_client::Client;
 use hex_core::schedule::{self as dto, Payload};
 use serde_json::{Value, json};
@@ -82,6 +84,91 @@ fn last_json(bytes: &[u8]) -> Value {
         .rev()
         .find_map(|line| serde_json::from_str(line).ok())
         .expect("native witness produced no JSON result")
+}
+
+#[derive(Debug)]
+enum OutputEnd {
+    Eof,
+    Limit,
+    Deadline,
+    Read(String),
+    Retain(String),
+}
+
+impl OutputEnd {
+    fn receipt(&self) -> Value {
+        match self {
+            Self::Eof => json!({"state":"eof"}),
+            Self::Limit => json!({"state":"limit"}),
+            Self::Deadline => json!({"state":"deadline"}),
+            Self::Read(error) => json!({"state":"read-error","error":error}),
+            Self::Retain(error) => json!({"state":"retain-error","error":error}),
+        }
+    }
+}
+
+struct OutputRead {
+    bytes: Vec<u8>,
+    end: OutputEnd,
+    at: Instant,
+}
+
+fn read_output(
+    mut reader: std::io::PipeReader,
+    mut retained: File,
+    limit: usize,
+    until: Instant,
+) -> OutputRead {
+    let mut bytes = Vec::new();
+    let mut buffer = Vec::new();
+    let prepared = bytes.try_reserve_exact(limit).and_then(|()| {
+        buffer.try_reserve_exact(
+            limit
+                .checked_add(1)
+                .expect("output bound checked before exec"),
+        )
+    });
+    if let Err(error) = prepared {
+        return OutputRead {
+            bytes,
+            end: OutputEnd::Read(format!("output allocation: {error}")),
+            at: Instant::now(),
+        };
+    }
+    buffer.resize(limit + 1, 0);
+    let mut end = loop {
+        if Instant::now() >= until {
+            break OutputEnd::Deadline;
+        }
+        // Read one byte beyond the retained prefix to distinguish a full budget
+        // from EOF. A bounded Take reader's zero would not establish pipe EOF.
+        let room = limit - bytes.len();
+        match reader.read(&mut buffer[..room + 1]) {
+            Ok(0) => break OutputEnd::Eof,
+            Ok(size) => {
+                let keep = size.min(room);
+                bytes.extend_from_slice(&buffer[..keep]);
+                if let Err(error) = retained.write_all(&buffer[..keep]) {
+                    break OutputEnd::Retain(error.to_string());
+                }
+                if size > room {
+                    break OutputEnd::Limit;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => break OutputEnd::Read(error.to_string()),
+        }
+    };
+    if let Err(error) = retained.sync_all() {
+        end = OutputEnd::Retain(format!("{end:?}; sync: {error}"));
+    }
+    // The terminal notification is sent only after this function has closed
+    // both owned handles; a notified worker has no remaining blocking IO.
+    OutputRead {
+        bytes,
+        end,
+        at: Instant::now(),
+    }
 }
 
 struct Service {
@@ -378,6 +465,41 @@ impl Lab {
             .unwrap()
             .expect("actual backend physical capacity");
         capacity.check().unwrap();
+        let spec: BoxSpec = serde_json::from_value(self.record(id)["spec"].clone()).unwrap();
+        let info = backend.inspect(id).unwrap();
+        assert_eq!(spec.id, *id, "original recorded workload identity");
+        assert_eq!(
+            spec.devices.as_slice(),
+            selected,
+            "original selected claims"
+        );
+        assert_eq!(
+            info.route, spec.route,
+            "retained route, not a new selection"
+        );
+        assert_eq!(info.class, spec.class.class(), "original workload class");
+        let expected = match spec.route.and_then(|route| route.backing) {
+            Some(key) => {
+                let backing = capacity
+                    .backings
+                    .iter()
+                    .find(|backing| backing.key == key)
+                    .expect("UNVERIFIED committed canonical backing is absent");
+                assert_eq!(backing.phase, BackingPhase::Live, "live canonical backing");
+                assert_eq!(
+                    backing.devices.len(),
+                    selected.len(),
+                    "complete original physical grant"
+                );
+                assert!(
+                    selected
+                        .iter()
+                        .all(|id| backing.devices.binary_search(id).is_ok())
+                );
+                DeviceHolder::Backing(key)
+            }
+            None => DeviceHolder::Box(id.try_clone().unwrap()),
+        };
         for device in selected {
             let rows: Vec<_> = capacity
                 .devices
@@ -387,7 +509,7 @@ impl Lab {
             assert_eq!(rows.len(), 1, "exact unique physical offer");
             assert_eq!(
                 rows[0].holder.as_ref(),
-                Some(id),
+                Some(&expected),
                 "single production holder authority"
             );
         }
@@ -395,12 +517,12 @@ impl Lab {
             capacity
                 .devices
                 .iter()
-                .filter(|row| row.holder.as_ref() == Some(id))
+                .filter(|row| row.holder.as_ref() == Some(&expected))
                 .count(),
             selected.len()
         );
         assert_eq!(
-            backend.inspect(id).unwrap().class,
+            info.class,
             self.class(),
             "actual class, not scheduler label"
         );
@@ -454,45 +576,237 @@ impl Lab {
         last_json(&bounded(&stdout, self.budget))
     }
 
-    fn exec(&self, id: &BoxId, field: &str, uuid: &str) -> Value {
+    fn exec<T>(&self, id: &BoxId, field: &str, uuid: &str, oracle: impl FnOnce(Value) -> T) -> T {
+        let began = Instant::now();
+        assert!(
+            !self.wait.is_zero() && self.budget > 0,
+            "positive caller output bounds"
+        );
+        let until = began
+            .checked_add(self.wait)
+            .expect("caller output deadline overflow before exec");
+        let limit = usize::try_from(self.budget)
+            .ok()
+            .filter(|limit| limit.checked_add(1).is_some())
+            .expect("caller output byte limit overflow before exec");
         let mut raw = serde_json::to_string(&self.input[field])
             .unwrap()
             .replace("@UUID@", uuid);
         raw = raw.replace("@BOX@", id.as_str());
         let program: Program = serde_json::from_str(&raw).unwrap();
         program.check().unwrap();
-        let output = self.scope.join(format!("exec-{field}.stdout"));
-        let error = self.scope.join(format!("exec-{field}.stderr"));
-        let mut proc = self
-            .backend()
-            .exec(
-                id,
-                program,
+        let backend = self.backend();
+        let prepared = (|| -> std::io::Result<_> {
+            let scope = tempfile::Builder::new()
+                .prefix(&format!("exec-{field}-"))
+                .tempdir_in(&self.scope)?
+                .keep();
+            journal(
+                json!({"event":"runtime-output-scope","box":id,"field":field,"path":scope,
+                "byte_limit_per_stream":self.budget,"deadline_origin":"before-pipe-setup"}),
+            );
+            let (stdout, out) = std::io::pipe()?;
+            let (stderr, err) = std::io::pipe()?;
+            let output = File::create(scope.join("stdout"))?;
+            let error = File::create(scope.join("stderr"))?;
+            Ok((
+                scope,
                 Stdio {
-                    stdout: Some(File::create(&output).unwrap().into()),
-                    stderr: Some(File::create(&error).unwrap().into()),
+                    stdout: Some(out),
+                    stderr: Some(err),
                     ..Stdio::null()
                 },
-            )
-            .unwrap();
-        journal(
-            json!({"event":"runtime-exec","box":id,"reported_pid":proc.pid(),"field":field,
-                       "note":"PID is remote/guest scoped; never signal it from host"}),
-        );
-        let end = proc.wait_for(self.wait).unwrap();
-        if end.is_none() {
-            proc.kill().unwrap();
-            assert!(
-                proc.wait_for(self.wait).unwrap().is_some(),
-                "owned Runtime Proc reaped"
+                [("stdout", stdout, output), ("stderr", stderr, error)],
+            ))
+        })();
+        let (scope, stdio, streams) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                journal(
+                    json!({"event":"runtime-output-setup-error","box":id,"field":field,
+                    "error":error.to_string(),"exec_started":false,"readers_started":0}),
+                );
+                panic!("UNVERIFIED output pipe setup: {error}");
+            }
+        };
+        // Exactly one terminal notice per stdout/stderr observer. There are no
+        // progress sends that could block draining while the caller waits for exit.
+        let (sent, received) = mpsc::sync_channel(2);
+        let mut workers: [Option<JoinHandle<()>>; 2] = [None, None];
+        let mut captured: [Option<OutputRead>; 2] = [None, None];
+        let mut errors = Vec::new();
+        for (index, (name, reader, retained)) in streams.into_iter().enumerate() {
+            let sent = sent.clone();
+            match std::thread::Builder::new()
+                .name(format!("completion-{name}"))
+                .spawn(move || {
+                    let output = read_output(reader, retained, limit, until);
+                    let _ = sent.send((index, output));
+                }) {
+                Ok(worker) => workers[index] = Some(worker),
+                Err(error) => {
+                    errors.push(format!("starting {name} observer: {error}"));
+                    break;
+                }
+            }
+        }
+        drop(sent);
+        let mut proc = None;
+        let mut end = None;
+        let mut proc_cleanup_uncertain = false;
+        if errors.is_empty() && Instant::now() < until {
+            match backend.exec(id, program, stdio) {
+                Ok(started) => {
+                    journal(
+                        json!({"event":"runtime-exec","box":id,"reported_pid":started.pid(),
+                        "field":field,"output_scope":scope,
+                        "note":"PID is remote/guest scoped; never signal it from host"}),
+                    );
+                    proc = Some(started);
+                }
+                Err(error) => {
+                    proc_cleanup_uncertain = true;
+                    errors.push(format!("exec: {error}"));
+                }
+            }
+        } else {
+            drop(stdio);
+            errors.push("caller deadline or observer setup prevented exec".to_owned());
+        }
+        if let Some(proc) = proc.as_mut() {
+            let left = until.saturating_duration_since(Instant::now());
+            let waited = if left.is_zero() {
+                proc.try_wait()
+            } else {
+                proc.wait_for(left)
+            };
+            match waited {
+                Ok(observed) => end = observed,
+                Err(error) => errors.push(format!("program end: {error}")),
+            }
+            proc_cleanup_uncertain = end.is_none();
+            if end != Some(Exit::Code(0)) {
+                errors.push(format!("successful program end not observed: {end:?}"));
+            }
+            if end.is_none() {
+                // Cleanup never starts another wait budget or changes an expired
+                // operation into success. Only this owned Proc may be signalled.
+                let kill = proc.kill();
+                let cleanup_end = proc.try_wait();
+                proc_cleanup_uncertain = !matches!(cleanup_end, Ok(Some(_)));
+                journal(
+                    json!({"event":"runtime-output-proc-cleanup","box":id,"field":field,
+                    "kill":format!("{kill:?}"),"end":format!("{cleanup_end:?}"),
+                    "after_deadline":Instant::now() >= until,
+                    "whole_native_scope_release":"not proved by Proc exit"}),
+                );
+            }
+        }
+        let expected = workers.iter().filter(|worker| worker.is_some()).count();
+        for _ in 0..expected {
+            match received.recv_timeout(until.saturating_duration_since(Instant::now())) {
+                Ok((index, output)) => captured[index] = Some(output),
+                Err(error) => {
+                    errors.push(format!("both output EOF notices: {error}"));
+                    break;
+                }
+            }
+        }
+        for (index, output) in received.try_iter() {
+            captured[index] = Some(output);
+        }
+        let mut pending = Vec::new();
+        for (index, name) in ["stdout", "stderr"].into_iter().enumerate() {
+            if let Some(worker) = workers[index].take() {
+                if captured[index].is_some() || worker.is_finished() {
+                    if worker.join().is_err() {
+                        errors.push(format!("{name} observer panicked"));
+                    }
+                } else {
+                    // A blocked portable pipe read cannot be safely cancelled
+                    // here. Retain uncertainty for ROOT's existing process guard.
+                    pending.push(name);
+                }
+            }
+            let observation = match &captured[index] {
+                Some(output) => {
+                    if !matches!(&output.end, OutputEnd::Eof) || output.at > until {
+                        errors.push(format!(
+                            "{name}: {:?} within caller deadline={}",
+                            output.end,
+                            output.at <= until
+                        ));
+                    }
+                    json!({"observed":true,"terminal":output.end.receipt(),
+                        "bytes":output.bytes.len(),"captured_prefix_sha256":format!("{:x}",Sha256::digest(&output.bytes)),
+                        "within_caller_deadline":output.at <= until})
+                }
+                None => {
+                    errors.push(format!("{name} EOF/observer completion unverified"));
+                    json!({"observed":false,"terminal":{"state":"uncertain"},
+                        "retained_prefix_may_still_be_written":pending.contains(&name)})
+                }
+            };
+            journal(
+                json!({"event":"runtime-output-stream","box":id,"field":field,
+                "stream":name,"path":scope.join(name),"observation":observation}),
             );
         }
-        assert_eq!(
-            end,
-            Some(Exit::Code(0)),
-            "actual bounded workload exit; see {error:?}"
+        let checked = if errors.is_empty() && Instant::now() < until {
+            Some(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                || oracle(last_json(&captured[0].as_ref().unwrap().bytes)),
+            )))
+        } else {
+            None
+        };
+        if Instant::now() >= until {
+            errors.push(
+                "caller absolute deadline expired before checked output completed".to_owned(),
+            );
+        }
+        // Keep the program/connection owner through both EOFs and the oracle;
+        // dropping it earlier must not truncate an offered stream's final copy.
+        drop(proc);
+        drop(backend);
+        let oracle_error = checked
+            .as_ref()
+            .and_then(|result| result.as_ref().err())
+            .map(|error| {
+                error
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| {
+                        error
+                            .downcast_ref::<&str>()
+                            .map(|message| (*message).to_owned())
+                    })
+                    .unwrap_or_else(|| "non-string oracle panic".to_owned())
+            });
+        journal(
+            json!({"event":"runtime-output-result","box":id,"field":field,"output_scope":scope,
+            "caller_budget_ns":self.wait.as_nanos().to_string(),"deadline_reset":false,
+            "program_end":format!("{end:?}"),"oracle_error":oracle_error,"errors":errors,
+            "unjoined_readers":pending,"reader_cleanup_uncertain":!pending.is_empty(),
+            "proc_cleanup_uncertain":proc_cleanup_uncertain,
+            "whole_native_scope_release":"separate canonical cleanup proof required"}),
         );
-        last_json(&bounded(&output, self.budget))
+        if Instant::now() >= until && errors.is_empty() {
+            journal(
+                json!({"event":"runtime-output-deadline","box":id,"field":field,
+                "phase":"final-receipt","output_scope":scope}),
+            );
+            errors
+                .push("caller absolute deadline expired while retaining final receipt".to_owned());
+        }
+        assert!(
+            errors.is_empty(),
+            "UNVERIFIED checked output: {errors:?}; {scope:?}"
+        );
+        match checked {
+            Some(Ok(value)) => value,
+            Some(Err(error)) => std::panic::resume_unwind(error),
+            None => panic!("UNVERIFIED output oracle did not run; {scope:?}"),
+        }
     }
 
     fn native_join(&self, id: &BoxId, selected: &[DeviceId]) -> (String, Value, Value) {
@@ -507,78 +821,84 @@ impl Lab {
         } else {
             Value::Null
         };
-        let inventory = if self.backend == "firecracker" {
-            self.exec(id, "inventory", "")
-        } else {
-            self.host("host_inventory", &[])
-        };
-        let mut matches = Vec::new();
-        for row in inventory["devices"]
-            .as_array()
-            .expect("independent actual host inventory")
-        {
-            if let Some(luid) = row["luid"].as_str() {
-                let mask = count(row, "node_mask");
-                assert!(
-                    mask > 0 && mask.is_power_of_two(),
-                    "linked LUID mask does not select one physical node"
-                );
-                assert_eq!(
-                    inventory["devices"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .filter(|device| device["luid"].as_str() == Some(luid))
-                        .count(),
-                    1,
-                    "LUID shared by multiple actual physical devices"
-                );
-            }
-            if let Some(pci) = row["pci"].as_array() {
-                assert_eq!(pci.len(), 4);
-                let domain = pci[0].as_u64().unwrap();
-                let bus = pci[1].as_u64().unwrap();
-                let device = pci[2].as_u64().unwrap();
-                let function = pci[3].as_u64().unwrap();
-                assert!(
-                    domain <= u64::from(u32::MAX) && bus <= 255 && device <= 31 && function <= 7
-                );
-                let key = (domain << 16) | (bus << 8) | (device << 3) | function;
-                let exact = if translation.is_null() {
-                    selected[0].key == key
-                } else {
-                    translation["native_key"] == json!(selected[0].key)
-                        && translation["guest_pci"] == row["pci"]
-                };
-                if exact {
+        let join = |inventory: Value| {
+            let mut matches = Vec::new();
+            for row in inventory["devices"]
+                .as_array()
+                .expect("independent actual host inventory")
+            {
+                if let Some(luid) = row["luid"].as_str() {
+                    let mask = count(row, "node_mask");
+                    assert!(
+                        mask > 0 && mask.is_power_of_two(),
+                        "linked LUID mask does not select one physical node"
+                    );
+                    assert_eq!(
+                        inventory["devices"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter(|device| device["luid"].as_str() == Some(luid))
+                            .count(),
+                        1,
+                        "LUID shared by multiple actual physical devices"
+                    );
+                }
+                if let Some(pci) = row["pci"].as_array() {
+                    assert_eq!(pci.len(), 4);
+                    let domain = pci[0].as_u64().unwrap();
+                    let bus = pci[1].as_u64().unwrap();
+                    let device = pci[2].as_u64().unwrap();
+                    let function = pci[3].as_u64().unwrap();
+                    assert!(
+                        domain <= u64::from(u32::MAX)
+                            && bus <= 255
+                            && device <= 31
+                            && function <= 7
+                    );
+                    let key = (domain << 16) | (bus << 8) | (device << 3) | function;
+                    let exact = if translation.is_null() {
+                        selected[0].key == key
+                    } else {
+                        translation["native_key"] == json!(selected[0].key)
+                            && translation["guest_pci"] == row["pci"]
+                    };
+                    if exact {
+                        matches.push(text(row, "uuid").to_owned());
+                    }
+                } else if row["metal_registry_id"].as_u64() == Some(selected[0].key) {
                     matches.push(text(row, "uuid").to_owned());
                 }
-            } else if row["metal_registry_id"].as_u64() == Some(selected[0].key) {
-                matches.push(text(row, "uuid").to_owned());
             }
+            assert_eq!(
+                matches.len(),
+                1,
+                "UNVERIFIED exact native-key-to-UUID join is missing/ambiguous"
+            );
+            (
+                matches.pop().unwrap(),
+                inventory["devices"].clone(),
+                translation,
+            )
+        };
+        if self.backend == "firecracker" {
+            self.exec(id, "inventory", "", join)
+        } else {
+            join(self.host("host_inventory", &[]))
         }
-        assert_eq!(
-            matches.len(),
-            1,
-            "UNVERIFIED exact native-key-to-UUID join is missing/ambiguous"
-        );
-        (
-            matches.pop().unwrap(),
-            inventory["devices"].clone(),
-            translation,
-        )
     }
 
     fn compute(&self, id: &BoxId, uuid: &str) -> Value {
-        let value = self.exec(id, "compute", uuid);
-        assert_eq!(text(&value, "uuid"), uuid);
-        let words = count(&value, "words");
-        assert!(words > 0);
-        assert_eq!(value["mismatches"], 0);
-        assert_eq!(count(&value, "prefill_mismatches"), words);
-        assert_eq!(value["hardware"], true);
-        assert_eq!(value["dispatch_completed"], true);
-        value
+        self.exec(id, "compute", uuid, |value| {
+            assert_eq!(text(&value, "uuid"), uuid);
+            let words = count(&value, "words");
+            assert!(words > 0);
+            assert_eq!(value["mismatches"], 0);
+            assert_eq!(count(&value, "prefill_mismatches"), words);
+            assert_eq!(value["hardware"], true);
+            assert_eq!(value["dispatch_completed"], true);
+            value
+        })
     }
 
     fn exercise(&mut self) {
@@ -690,9 +1010,10 @@ impl Lab {
                 "foreign positive must dispatch on host"
             );
             assert_eq!(positive["mismatches"], 0);
-            let denied = self.exec(&id, "reject", text(row, "uuid"));
-            assert_eq!(denied["refused"], true);
-            assert_eq!(denied["dispatches"], 0);
+            self.exec(&id, "reject", text(row, "uuid"), |denied| {
+                assert_eq!(denied["refused"], true);
+                assert_eq!(denied["dispatches"], 0);
+            });
         }
         self.emit(
             "foreign",
@@ -706,9 +1027,11 @@ impl Lab {
                 .iter()
                 .all(|row| text(row, "uuid") != wrong)
         );
-        let denied = self.exec(&id, "reject", &wrong);
-        assert_eq!(denied["refused"], true);
-        assert_eq!(denied["dispatches"], 0);
+        let denied = self.exec(&id, "reject", &wrong, |denied| {
+            assert_eq!(denied["refused"], true);
+            assert_eq!(denied["dispatches"], 0);
+            denied
+        });
         self.emit("wrong-id", denied);
         self.restart("scheduler");
         let status = self
@@ -833,7 +1156,7 @@ impl Lab {
             if capacity
                 .devices
                 .iter()
-                .any(|device| device.holder.as_ref() == Some(id))
+                .any(|device| device.holder.as_ref().and_then(DeviceHolder::box_id) == Some(id))
             {
                 return Err(format!("owned physical holder remains: {id}"));
             }
@@ -914,4 +1237,52 @@ fn completion_receipt_parser_uses_the_actual_last_json_result() {
             .name(),
         "oci"
     );
+}
+
+/// AC-T7.4.1: reaching the byte ceiling must still read a real zero from the pipe.
+#[test]
+fn completion_output_exact_limit_needs_real_pipe_eof() {
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    writer.write_all(b"x").unwrap();
+    drop(writer);
+    let retained = tempfile::tempfile().unwrap();
+    let until = Instant::now()
+        .checked_add(hex_api::conformance::PATIENCE)
+        .unwrap();
+    let output = read_output(reader, retained, 1, until);
+    assert!(matches!(output.end, OutputEnd::Eof));
+    assert_eq!(output.bytes, b"x");
+    assert!(output.at <= until);
+}
+
+/// AC-T7.4.1: over-limit data is refused, with only the admitted prefix retained.
+#[test]
+fn completion_output_over_limit_retains_bounded_prefix() {
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    let worker = std::thread::spawn(move || writer.write_all(b"xy"));
+    let mut retained = tempfile::tempfile().unwrap();
+    let until = Instant::now()
+        .checked_add(hex_api::conformance::PATIENCE)
+        .unwrap();
+    let output = read_output(reader, retained.try_clone().unwrap(), 1, until);
+    let written = worker.join();
+    std::io::Seek::rewind(&mut retained).unwrap();
+    let mut prefix = Vec::new();
+    let read = retained.read_to_end(&mut prefix);
+    assert!(written.unwrap().is_ok());
+    assert!(read.is_ok());
+    assert!(matches!(output.end, OutputEnd::Limit));
+    assert_eq!(output.bytes, b"x");
+    assert_eq!(prefix, b"x");
+}
+
+/// AC-T7.4.1: an expired caller cannot block waiting on a writer that remains open.
+#[test]
+fn completion_output_expired_deadline_does_not_wait_for_writer() {
+    let (reader, writer) = std::io::pipe().unwrap();
+    let retained = tempfile::tempfile().unwrap();
+    let output = read_output(reader, retained, 1, Instant::now());
+    drop(writer);
+    assert!(matches!(output.end, OutputEnd::Deadline));
+    assert!(output.bytes.is_empty());
 }

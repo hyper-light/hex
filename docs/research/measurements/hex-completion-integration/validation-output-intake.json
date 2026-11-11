@@ -1,0 +1,20 @@
+{
+  "source_pins": [
+    "b0a168a683f59f69481104714ee6ed664ff88a10",
+    "bcbcd080",
+    "51512fa428289e92d48a806383b0b10d87e89e28"
+  ],
+  "kind": "reviewed source only; matched tests unrun",
+  "scope": [
+    "only output EOF, deadline and oracle callbacks delta",
+    "typed Box|Backing holder oracle",
+    "complete artifact provenance driver including prior declared overlay and source snapshots"
+  ],
+  "not_imported": [
+    "Creating observer and native scope-history instrumentation from old parent; separate pending intake"
+  ],
+  "new_controls": {
+    "rust_pipe": 3,
+    "python_data_only": 6
+  }
+}

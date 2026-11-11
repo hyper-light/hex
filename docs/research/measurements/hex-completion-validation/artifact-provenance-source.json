@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "role": "implementer",
+  "owner": "01a1c7676cfc7297a41236a8e71ee188",
+  "source_parent": "bcbcd0806326905a209eb129e6f556ae4ea870a7",
+  "policy": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "policy_byte_equal_to": "ca3ab10c151aa5539e757f1cc76029746ccbb561",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "hex_claude_read_from": "7bcc5b87b1f04aa9ea88d396418b2f72c91d6f64",
+  "paths": {
+    "scripts/scheduler-completion/build.py": {
+      "sha256": "a745ad60d815ce5c54bbf4f5e9d51471cd46736d13157a6e0a55607ca3cd1eaa",
+      "bytes": 11519
+    },
+    "scripts/scheduler-completion/test_artifact_provenance.py": {
+      "sha256": "4bb4279fb90b00ab7dc8a72a819917d0f98e5eddaae76027bf5ac5c88230262d",
+      "bytes": 5443
+    },
+    "docs/research/measurements/hex-completion-validation/ARTIFACT-PROVENANCE.md": {
+      "sha256": "bbaeb6d69ada9e8fc04276a4f285517597f32a501193062257a851948b51ead5",
+      "bytes": 6512
+    }
+  },
+  "original_build_sha256": "7847471098c9a2e7f15762b5d117c566d82b2dfb8390c5b86d7d610ba1c02c71",
+  "peer_reproduction": {
+    "owner": "01a1c8aa92c87129a300ab8f333113bd",
+    "independent_verification": false,
+    "raw_receipt": "requested; no immutable full-hash receipt imported",
+    "shared_tool_reproduced": false
+  },
+  "new_data_test_count": 6,
+  "tests_executed": 0,
+  "cargo_invocations": 0,
+  "native_invocations": 0,
+  "mutation_campaigns": 0,
+  "local_metadata_checks": {
+    "git_diff_check_exit": 0
+  },
+  "foreign_paths_edited": [],
+  "remaining": "Source-only. New data controls, producer Cargo compatibility and peer raw verification unrun/pending; no readiness or native proof."
+}
