@@ -1,0 +1,19 @@
+{
+  "reason": "Original raw logs contain trailing blank-line diagnostics; preserve every byte via lossless gzip instead of trimming or a whitespace waiver. Originals remain in peer cache and prior signed Git checkpoint.",
+  "files": {
+    "r33-apple-hardware.log": {
+      "stored": "r33-apple-hardware.log.gz",
+      "raw_bytes": 724,
+      "raw_sha256": "2852579dfdd3127fce9bce93f8efd24bb9cf34e448e361f7acb2545097ce03ba",
+      "gzip_bytes": 424,
+      "gzip_sha256": "4683b53593962a8a1511618356b44d262a719b0f74db2a167a7d745cab07dbf5"
+    },
+    "r33-provider-unit.log": {
+      "stored": "r33-provider-unit.log.gz",
+      "raw_bytes": 1677,
+      "raw_sha256": "8e5c4ff196e3ae8f05f4ad590aba215339698b603105a18fe811ee50c5ad2cd5",
+      "gzip_bytes": 758,
+      "gzip_sha256": "26590a952fa5ae5ea0fbd21010c43196072f6295ad2e18f17c7501640524255c"
+    }
+  }
+}
