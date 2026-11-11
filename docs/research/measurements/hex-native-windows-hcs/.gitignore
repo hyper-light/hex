@@ -1,0 +1,4 @@
+runs/*/source.tar.gz
+runs/*/transport.tar.gz
+runs/*/*.log
+runs/*/raw/

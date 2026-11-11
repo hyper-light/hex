@@ -1,0 +1,234 @@
+{
+  "utc": "2026-11-11T06:27:23.6294119Z",
+  "processes": [
+    {
+      "record": "hcs-cpu-exec-v2\\scratch\\hex-device-BvutM3\\state\\keeper\\keeper.owner",
+      "pid": 9140,
+      "present": false,
+      "exact_recorded_process_absent": true,
+      "recorded_birth": "134388503006832387"
+    },
+    {
+      "record": "hcs-gpu-exec-v1\\scratch\\hex-device-WOCqWb\\state\\keeper\\keeper.owner",
+      "pid": 10520,
+      "present": false,
+      "exact_recorded_process_absent": true,
+      "recorded_birth": "134388501528491139"
+    },
+    {
+      "record": "hcs-gpu-exec-v2\\scratch\\hex-device-2pkdrR\\state\\keeper\\keeper.owner",
+      "pid": 16528,
+      "present": false,
+      "exact_recorded_process_absent": true,
+      "recorded_birth": "134388507913897105"
+    },
+    {
+      "record": "native-full-image-gpu-v1\\journal.json",
+      "pid": 15796,
+      "present": false,
+      "exact_recorded_process_absent": true,
+      "recorded_birth": "134388510203219089"
+    },
+    {
+      "record": "cached-image-import-v3\\result.json",
+      "pid": 16416,
+      "present": false,
+      "exact_recorded_process_absent": true,
+      "recorded_birth": "134388480816347837"
+    },
+    {
+      "record": "cached-release-v3\\result.json",
+      "pid": 6396,
+      "present": false,
+      "exact_recorded_process_absent": true,
+      "recorded_birth": "134388480398329103"
+    }
+  ],
+  "systems": [
+    {
+      "id": "wd-hexdeviceBvutM3-cpu-recovery",
+      "hr": "0x8037010e",
+      "absent": true
+    },
+    {
+      "id": "native-hcs-full-image-cpu-311010846a9341f286171e1d49010879",
+      "hr": "0x8037010e",
+      "absent": true
+    },
+    {
+      "id": "native-hcs-full-image-gpu-95ccc39064f44e1d87bbf1b5d6fd28b4",
+      "hr": "0x8037010e",
+      "absent": true
+    }
+  ],
+  "guard_receipts": [
+    {
+      "scope": "hcs-cpu-exec-v2",
+      "guard": {
+        "pid": 16784,
+        "exitCode": 0,
+        "activeAfter": 0,
+        "activeBeforeCleanup": 0,
+        "processes": 3,
+        "terminated": 0,
+        "residualsTerminated": false,
+        "timedOut": false,
+        "reaped": true,
+        "peakJobMemory": 8134656,
+        "user100ns": 156250,
+        "kernel100ns": 0
+      },
+      "phase": "DOS-alias-load-and-exact-test-list"
+    },
+    {
+      "scope": "hcs-cpu-exec-v2",
+      "guard": {
+        "pid": 15008,
+        "exitCode": 101,
+        "activeAfter": 0,
+        "activeBeforeCleanup": 1,
+        "processes": 5,
+        "terminated": 0,
+        "residualsTerminated": false,
+        "timedOut": false,
+        "reaped": true,
+        "peakJobMemory": 12333056,
+        "user100ns": 468750,
+        "kernel100ns": 1093750
+      },
+      "phase": "hcs-ordinary-cpu-full-image-recovery"
+    },
+    {
+      "scope": "hcs-gpu-exec-v1",
+      "guard": {
+        "pid": 4064,
+        "exitCode": 0,
+        "activeAfter": 0,
+        "activeBeforeCleanup": 0,
+        "processes": 3,
+        "terminated": 0,
+        "residualsTerminated": false,
+        "timedOut": false,
+        "reaped": true,
+        "peakJobMemory": 8175616,
+        "user100ns": 312500,
+        "kernel100ns": 0
+      },
+      "phase": "DOS-alias-load-and-exact-test-list"
+    },
+    {
+      "scope": "hcs-gpu-exec-v1",
+      "guard": {
+        "pid": 11392,
+        "exitCode": 101,
+        "activeAfter": 0,
+        "activeBeforeCleanup": 1,
+        "processes": 5,
+        "terminated": 0,
+        "residualsTerminated": false,
+        "timedOut": false,
+        "reaped": true,
+        "peakJobMemory": 11726848,
+        "user100ns": 468750,
+        "kernel100ns": 625000
+      },
+      "phase": "hcs-selected-gpu-compute-exclusion-recovery"
+    },
+    {
+      "scope": "hcs-gpu-exec-v2",
+      "guard": {
+        "pid": 17212,
+        "exitCode": 0,
+        "activeAfter": 0,
+        "activeBeforeCleanup": 0,
+        "processes": 3,
+        "terminated": 0,
+        "residualsTerminated": false,
+        "timedOut": false,
+        "reaped": true,
+        "peakJobMemory": 9252864,
+        "user100ns": 312500,
+        "kernel100ns": 0
+      },
+      "phase": "DOS-alias-load-and-exact-test-list"
+    },
+    {
+      "scope": "hcs-gpu-exec-v2",
+      "guard": {
+        "pid": 14384,
+        "exitCode": 101,
+        "activeAfter": 0,
+        "activeBeforeCleanup": 1,
+        "processes": 5,
+        "terminated": 0,
+        "residualsTerminated": false,
+        "timedOut": false,
+        "reaped": true,
+        "peakJobMemory": 12111872,
+        "user100ns": 468750,
+        "kernel100ns": 468750
+      },
+      "phase": "hcs-selected-only-compute-exclusion-recovery"
+    },
+    {
+      "scope": "hcsfixed1",
+      "guard": {
+        "pid": 3900,
+        "exitCode": 0,
+        "activeAfter": 0,
+        "activeBeforeCleanup": 1,
+        "processes": 144,
+        "terminated": 0,
+        "residualsTerminated": true,
+        "timedOut": false,
+        "reaped": true,
+        "peakJobMemory": 1068699648,
+        "user100ns": 935312500,
+        "kernel100ns": 371250000
+      },
+      "phase": "build"
+    },
+    {
+      "scope": "winpreflight1",
+      "guard": {
+        "pid": 16532,
+        "exitCode": 101,
+        "activeAfter": 0,
+        "activeBeforeCleanup": 1,
+        "processes": 155,
+        "terminated": 0,
+        "residualsTerminated": true,
+        "timedOut": false,
+        "reaped": true,
+        "peakJobMemory": 1071255552,
+        "user100ns": 390156250,
+        "kernel100ns": 215937500
+      },
+      "phase": "build"
+    },
+    {
+      "scope": "c579-node-cli-check-v1",
+      "guard": {
+        "pid": 16756,
+        "exitCode": 101,
+        "activeAfter": 0,
+        "activeBeforeCleanup": 1,
+        "processes": 64,
+        "terminated": 0,
+        "residualsTerminated": true,
+        "timedOut": false,
+        "reaped": true,
+        "peakJobMemory": 998461440,
+        "user100ns": 184843750,
+        "kernel100ns": 73593750
+      },
+      "phase": "node-cli-all-targets-compile"
+    }
+  ],
+  "stop_calls": 0,
+  "native_workloads": 0,
+  "complete_driver_com_leak_attribution": "UNVERIFIED",
+  "owned_keepers_processes_absent": true,
+  "recorded_hcs_systems_absent": true,
+  "completed_guard_jobs_empty_and_reaped": true
+}

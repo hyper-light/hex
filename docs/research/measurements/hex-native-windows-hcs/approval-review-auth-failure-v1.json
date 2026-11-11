@@ -1,0 +1,12 @@
+{
+  "utc": "2026-11-11T06:52:34.152325+00:00",
+  "action": "gits add -- docs/research/measurements/hex-native-windows-hcs",
+  "executed": false,
+  "result": "automatic approval review failed",
+  "reason": "access token could not be refreshed after logout/account change; review failure, not determination that action is unsafe",
+  "bypass_attempted": false,
+  "user_and_root_informed": true,
+  "next_new_driver_dispatch": "held until normal signing/review restored",
+  "evidence_preserved": true,
+  "last_signed_commit": "02c86c2f11cd3556a0a2374ae21cab825b759757"
+}

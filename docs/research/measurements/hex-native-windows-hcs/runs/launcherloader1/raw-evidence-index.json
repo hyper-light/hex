@@ -1,0 +1,35 @@
+{
+  "archive_sha256": "acd8b8c3d0d3b862c59fdc5a85416a589a2c128ca985c452543a04c06ac1ed84",
+  "archive_bytes": 5785,
+  "members": {
+    "cli.log": {
+      "bytes": 3653,
+      "sha256": "c404b2d37c98daa13bfbfae4bc9bed691773d59e810c43ffccae04f1526494fa"
+    },
+    "collection.cli.log": {
+      "bytes": 8667,
+      "sha256": "c7dc35f396d85b47f5c88df53b65c89aa272884659f593e2f0041256853dfbca"
+    },
+    "raw/journal.json": {
+      "bytes": 5085,
+      "sha256": "cc46f5b54e00bbbdf22c2ce10125f62c6fd601ede5f2a8235563d4a56a8fe65f"
+    },
+    "raw/output/launcher.exit.txt": {
+      "bytes": 13,
+      "sha256": "31c95fd3fd5eeb1ba7907684cb0ff7fbc75ea084a9f861f901efcff9a945d97d"
+    },
+    "raw/output/launcher.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "raw/output/launcher.stdout.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "raw/submitted-hcs.json": {
+      "bytes": 736,
+      "sha256": "1273585a0d157d2e8db5f03bcc991cc34a9b1ccfc3996cb5faaa9d37b46d8f5e"
+    }
+  },
+  "originals_retained_in_place": true
+}

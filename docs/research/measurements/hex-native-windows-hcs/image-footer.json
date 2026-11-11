@@ -1,0 +1,19 @@
+{
+  "script": "$ErrorActionPreference='Stop';[Diagnostics.Process]::GetCurrentProcess().PriorityClass='BelowNormal';$m=Get-Content -LiteralPath 'C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\image-metadata-v2\\manifest.json' -Raw|ConvertFrom-Json;$rows=@();foreach($layer in $m.layers){$req=[Net.HttpWebRequest]::Create('https://mcr.microsoft.com/v2/windows/server/blobs/'+$layer.digest);$req.Timeout=25000;$req.ReadWriteTimeout=25000;$req.AddRange(([long]$layer.size-8),([long]$layer.size-1));$resp=$req.GetResponse();try{if([int]$resp.StatusCode -ne 206 -or $resp.ContentLength -ne 8){throw 'server did not honor exact gzip footer range; no body read'};$bytes=New-Object byte[] 8;$stream=$resp.GetResponseStream();try{$n=0;while($n -lt 8){$got=$stream.Read($bytes,$n,8-$n);if($got -eq 0){throw 'short footer'};$n+=$got}}finally{$stream.Dispose()};$isize=[BitConverter]::ToUInt32($bytes,4);$minimum=[long]$isize;while($minimum -lt $layer.size){$minimum+=4294967296};$rows+=@{digest=$layer.digest;compressed_bytes=$layer.size;gzip_isize_mod2p32=$isize;uncompressed_minimum_from_size=$minimum;footer_hex=([BitConverter]::ToString($bytes));content_range=$resp.Headers['Content-Range'];status=[int]$resp.StatusCode}}finally{$resp.Dispose()}};[ordered]@{rows=$rows;compressed_bytes=($rows|Measure-Object -Property compressed_bytes -Sum).Sum;uncompressed_lower_bound_bytes=($rows|Measure-Object -Property uncompressed_minimum_from_size -Sum).Sum;exact_unpacked_disk_bytes='unknown: gzip ISIZE is modulo 2^32; NTFS import footprint requires independently bounded measurement, not assumed'}|ConvertTo-Json -Depth 8 -Compress",
+  "raw": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"runner\": \"f766f09294f2e17e3b8a631ffd4e6a4b\",\n  \"output\": \"Measure-Object : The property \\\"compressed_bytes\\\" cannot be found in the input for any objects.\\r\\nAt line:1 char:1269\\r\\n+ ... d_bytes=($rows|Measure-Object -Property compressed_bytes -Sum).Sum;un ...\\r\\n+                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\\r\\n    + CategoryInfo          : InvalidArgument: (:) [Measure-Object], PSArgumentException\\r\\n    + FullyQualifiedErrorId : GenericMeasurePropertyNotFound,Microsoft.PowerShell.Commands.MeasureObjectCommand\\r\\n\",\n  \"running\": false,\n  \"why\": \"windows/x86_64 · 30 of 32 cores idle · 110 GB free · room for 1 CPU, 4 GiB of memory, 12 GiB of disk\",\n  \"exit_code\": 1\n}"
+      }
+    ],
+    "structuredContent": {
+      "runner": "f766f09294f2e17e3b8a631ffd4e6a4b",
+      "output": "Measure-Object : The property \"compressed_bytes\" cannot be found in the input for any objects.\r\nAt line:1 char:1269\r\n+ ... d_bytes=($rows|Measure-Object -Property compressed_bytes -Sum).Sum;un ...\r\n+                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : InvalidArgument: (:) [Measure-Object], PSArgumentException\r\n    + FullyQualifiedErrorId : GenericMeasurePropertyNotFound,Microsoft.PowerShell.Commands.MeasureObjectCommand\r\n",
+      "running": false,
+      "why": "windows/x86_64 · 30 of 32 cores idle · 110 GB free · room for 1 CPU, 4 GiB of memory, 12 GiB of disk",
+      "exit_code": 1
+    },
+    "isError": false
+  }
+}

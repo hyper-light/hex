@@ -1,0 +1,7 @@
+{
+  "runner": "f766f09294f2e17e3b8a631ffd4e6a4b",
+  "output": "{\"path\":\"C:\\\\Windows\\\\System32\\\\tar.exe\",\"bytes\":92264,\"sha256\":\"a3ac62fd4cdf619a7c53f71ca3fe5fb42f72020975670ff29afe3603f6416a8e\",\"version\":\"3.8.9 (WinBuild.160101.0800)\",\"utc\":\"2026-11-11T04:56:16.6641784Z\"}\r\n",
+  "running": false,
+  "why": "windows/x86_64 · 28 of 32 cores idle · 97 GB free · room for 1 CPU, 4 GiB of memory, 12 GiB of disk",
+  "exit_code": 0
+}

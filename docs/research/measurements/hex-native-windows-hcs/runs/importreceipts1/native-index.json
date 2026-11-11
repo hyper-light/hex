@@ -1,0 +1,20 @@
+{
+  "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\import-receipts-v1",
+  "index": {
+    "owner.json": {
+      "bytes": 69,
+      "sha256": "9861d6bfb81f30f31b7d9e705d04621adf21debee9802c0d2a8f48770221368a"
+    },
+    "progress.json": {
+      "bytes": 2411,
+      "sha256": "31a508b574baeec7239dc247895acd7b3fc63a3e729fc238b4ffac7b38ba9a1b"
+    },
+    "result.json": {
+      "bytes": 6861,
+      "sha256": "0d6791291588e4a2e6f7dc7370a090ab11f51ef2bf1943a5399cf2273da4c61d"
+    }
+  },
+  "source_hashes": {},
+  "temp_files": [],
+  "utc": "2026-11-11T05:56:15.6640432Z"
+}

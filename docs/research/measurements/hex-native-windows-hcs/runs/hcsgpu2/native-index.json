@@ -1,0 +1,48 @@
+{
+  "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcs-gpu-exec-v2",
+  "index": {
+    "hcs.stderr.log": {
+      "bytes": 1378,
+      "sha256": "c53cd11b31d0b45e3838a9673834997f4998fbd74673030ded0bb1eff17a4bef"
+    },
+    "hcs.stdout.log": {
+      "bytes": 280,
+      "sha256": "6357f4e95f19377e99bc231870b61b60a34ebc705892480c9f71e214868566b7"
+    },
+    "list.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "list.stdout.log": {
+      "bytes": 280,
+      "sha256": "91b198f880ef198bcb77436349979866a5f00e6f41b86b2e317510708b66013b"
+    },
+    "result.json": {
+      "bytes": 17742,
+      "sha256": "f96e17b89a9f02f587f84825bd07810c52f6ad56ae3f13c6886e8c1d60b695c1"
+    },
+    "run.json": {
+      "bytes": 15667,
+      "sha256": "55c4995097d86e119c12e306e2507278a139d4d6d0f3937289d56b499fdd72ca"
+    },
+    "source-after-native.json": {
+      "bytes": 356899,
+      "sha256": "33aaeb056dd0c96594f384882ba47b65110d4e8da98cca81113b3813f128e5a7"
+    },
+    "source-before.json": {
+      "bytes": 356899,
+      "sha256": "33aaeb056dd0c96594f384882ba47b65110d4e8da98cca81113b3813f128e5a7"
+    },
+    "scratch/hex-device-2pkdrR/results/state-failure-before-cleanup.json": {
+      "bytes": 532,
+      "sha256": "a762a10a4690472d0d52c20b2bafd19d323e7f6fa4f9892d3d04a6a811cec68c"
+    },
+    "scratch/hex-device-2pkdrR/state/keeper/keeper.owner": {
+      "bytes": 24,
+      "sha256": "08e9dfa4473b8f6780d6c75a01e07f37b09d83796587d8edafc252e2cebe7775"
+    }
+  },
+  "source_hashes": {},
+  "temp_files": [],
+  "utc": "2026-11-11T06:19:43.3460347Z"
+}

@@ -1,0 +1,156 @@
+{
+  "utc": "2026-11-11T04:38:45.7693587Z",
+  "kind": "read-only retained input/log/allocation and exact owned ID absence",
+  "roots": {
+    "full-image-prep-v2": {
+      "allocation": null,
+      "allocation_error": "Exception calling \"Measure\" with \"2\" argument(s): \"Could not find a part of the path 'C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\Files\\Program Files\\WindowsApps\\Microsoft.DesktopAppInstaller_1.21.10121.0_neutral_split.scale-100_8wekyb3d8bbwe\\microsoft.system.package.metadata'.\"",
+      "index": {
+        "full-image-prep-v2/containerd.stderr.log": {
+          "bytes": 16039,
+          "sha256": "ff627324f85ccae3b206246da5fd311b6f2991c623a7ecdf5d00b47ed369e465"
+        },
+        "full-image-prep-v2/containerd.stdout.log": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "full-image-prep-v2/pull.stderr.log": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "full-image-prep-v2/pull.stdout.log": {
+          "bytes": 481492,
+          "sha256": "f0df16df8858e8514ed645bd72bbbb0767646e9df97826d90f937d3b2544794c"
+        },
+        "full-image-prep-v2/result.json": {
+          "bytes": 4053,
+          "sha256": "0a04a79ac0072e7ce5cee2769ea78d77ccc52e594b9d4d6e226e4bb075d2d91b"
+        },
+        "full-image-prep-v2/version.stderr.log": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "full-image-prep-v2/version.stdout.log": {
+          "bytes": 229,
+          "sha256": "606f767107a6776f30fb91b129c199e5a26ffac222c9e538387e693dd8681980"
+        }
+      }
+    },
+    "image-prep-controller-v2": {
+      "allocation": {
+        "entries": 5,
+        "files": 4,
+        "reparseEntries": 0,
+        "logicalBytes": 13130,
+        "allocatedFileBytesUpperBound": 13130
+      },
+      "allocation_error": null,
+      "index": {
+        "image-prep-controller-v2/body.ps1": {
+          "bytes": 11365,
+          "sha256": "853622462fef24f4df4a09094307ea97a09f0027c95e81834e806dc2ee8399de"
+        },
+        "image-prep-controller-v2/prepare.stderr.log": {
+          "bytes": 523,
+          "sha256": "4b54f272cafb9edeb3ca7bf243b31dd52f0b3cb8330b6b1c83a0e23ead933d3b"
+        },
+        "image-prep-controller-v2/prepare.stdout.log": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "image-prep-controller-v2/result.json": {
+          "bytes": 1242,
+          "sha256": "2c80ab165c291dafa25084283d5d3be64a38d5a9b97c08160571d9c4c7456e7c"
+        }
+      }
+    },
+    "native-cpu-callback-v1": {
+      "allocation": {
+        "entries": 7,
+        "files": 4,
+        "reparseEntries": 0,
+        "logicalBytes": 12587293,
+        "allocatedFileBytesUpperBound": 12587293
+      },
+      "allocation_error": null,
+      "index": {
+        "native-cpu-callback-v1/journal.json": {
+          "bytes": 3743,
+          "sha256": "5de6bc97d4c2f854cae1ecaa051e439705164f4ab8b827703062cfc05d30786b"
+        },
+        "native-cpu-callback-v1/submitted-hcs.json": {
+          "bytes": 607,
+          "sha256": "e4fed1b144806238991176741dbc8ead589498706934e15b673fe2e5896d54eb"
+        },
+        "native-cpu-callback-v1/output/cpu.txt": {
+          "bytes": 31,
+          "sha256": "f0e3ade82fbf85ad701d8daa843dc89a565a9e60d25cfce8a7ded82d5c509f04"
+        }
+      },
+      "exact_system_id": "native-hcs-cpu-73a3f2f0fd534167be28e1b09b4969ad",
+      "exact_system_absent": true,
+      "open_hr": "0x8037010e",
+      "scratch_mount_hr": "0x80070037"
+    },
+    "native-cpu-callback-v2": {
+      "allocation": {
+        "entries": 8,
+        "files": 5,
+        "reparseEntries": 0,
+        "logicalBytes": 12595821,
+        "allocatedFileBytesUpperBound": 12595821
+      },
+      "allocation_error": null,
+      "index": {
+        "native-cpu-callback-v2/journal.json": {
+          "bytes": 4084,
+          "sha256": "113d74f8af2c5bb270f734f90f3392e4a35ad11a46708d84369cb3ae7ab06eb3"
+        },
+        "native-cpu-callback-v2/submitted-hcs.json": {
+          "bytes": 602,
+          "sha256": "186d0c065dd6eb72d05f2b419a9df78aa48adfed4bc6a5ef135fcbb1143f74ea"
+        },
+        "native-cpu-callback-v2/output/cpu.txt": {
+          "bytes": 31,
+          "sha256": "f0e3ade82fbf85ad701d8daa843dc89a565a9e60d25cfce8a7ded82d5c509f04"
+        }
+      },
+      "exact_system_id": "native-hcs-cpu-43f72179d8484a3da95a383dc278d925",
+      "exact_system_absent": true,
+      "open_hr": "0x8037010e",
+      "scratch_mount_hr": "0x80070037"
+    },
+    "native-cpu-callback-v3": {
+      "allocation": {
+        "entries": 8,
+        "files": 5,
+        "reparseEntries": 0,
+        "logicalBytes": 13644965,
+        "allocatedFileBytesUpperBound": 13644965
+      },
+      "allocation_error": null,
+      "index": {
+        "native-cpu-callback-v3/journal.json": {
+          "bytes": 4140,
+          "sha256": "03a41499fa2cd81eb9a5f0f7e55c70baafbaeb071aefed430aa4bded59cf2c48"
+        },
+        "native-cpu-callback-v3/submitted-hcs.json": {
+          "bytes": 602,
+          "sha256": "c41201c93bd9a89cd75d539ca4762d35126048eefd45d5036893497e3a01de1d"
+        },
+        "native-cpu-callback-v3/output/cpu.txt": {
+          "bytes": 31,
+          "sha256": "f0e3ade82fbf85ad701d8daa843dc89a565a9e60d25cfce8a7ded82d5c509f04"
+        }
+      },
+      "exact_system_id": "native-hcs-cpu-c08328e976c14c9a8d7a58bc4c666746",
+      "exact_system_absent": true,
+      "open_hr": "0x8037010e",
+      "scratch_mount_hr": "0x80070037"
+    }
+  },
+  "total_bytes": 528814,
+  "native_gpu_dispatches": 0,
+  "new_container_workloads": 0,
+  "server_install_restart": 0
+}

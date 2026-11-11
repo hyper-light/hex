@@ -1,0 +1,67 @@
+{
+  "archive_sha256": "f88933cedec08bb1459e10e135ff52e2caf0d0868e481ea40849987f7d25b8ef",
+  "archive_bytes": 15656,
+  "members": {
+    "collection.cli.log": {
+      "bytes": 51757,
+      "sha256": "8831e0b18e5a92758cc982c8e24c872741607443ee55254b6475cf3f5af4eeaa"
+    },
+    "raw/cached-archive-producer.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "raw/cached-import.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "raw/cached-import.stdout.log": {
+      "bytes": 196,
+      "sha256": "2c8aaae5388439dc092112eef9ccc092e92e0bd9f35425fa9cedf58cc351ea71"
+    },
+    "raw/containerd.stderr.log": {
+      "bytes": 16055,
+      "sha256": "61d29de7f1cd7d4f672456ca16bd573a004b031ec0678076fab601cc9c8455aa"
+    },
+    "raw/containerd.stdout.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "raw/parent-paths.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "raw/parent-paths.stdout.log": {
+      "bytes": 599,
+      "sha256": "360bd58c4e944a592bc5a297ab32488386922476f30a171d451cb68085ac2e95"
+    },
+    "raw/remove-own-path-read.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "raw/remove-own-path-read.stdout.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "raw/result.json": {
+      "bytes": 19029,
+      "sha256": "d362cb46cd42c288c4e6761e7d7bfeb4f504c8f020691a7c0af821e80f9501d4"
+    },
+    "raw/snapshots-after.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "raw/snapshots-after.stdout.log": {
+      "bytes": 712,
+      "sha256": "43171ee6d0fe2481bffb183f60c9cf238cba807f7e84207524d294a4b770854e"
+    },
+    "raw/snapshots-before.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "raw/snapshots-before.stdout.log": {
+      "bytes": 534,
+      "sha256": "0577b34322fa52299d963b54dde315691c0769ff2068cf9b2240062b1fa5b0d3"
+    }
+  },
+  "originals_retained_in_place": true
+}

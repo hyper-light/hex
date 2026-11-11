@@ -1,0 +1,39 @@
+{
+  "archive_sha256": "9168580362125c614fbc6cb6d5ec9fdcca582d33d558af606d9fe5739d89bcb5",
+  "archive_bytes": 553710,
+  "members": {
+    "cli.log": {
+      "bytes": 4190,
+      "sha256": "f3928ccd67dc2b2ea6cd38b543177fe52c8c9f6631d2ed2357a55a2eb10b67d2"
+    },
+    "collection.cli.log": {
+      "bytes": 1058032,
+      "sha256": "3e57993367b0e1f9fa63e5eb00e61e10d5219ecfa92c675ceacb2958efd958e5"
+    },
+    "raw/check.stderr.log": {
+      "bytes": 3371,
+      "sha256": "1234fc9353dc687a4265fa45f56edd7567b651beaaa122113e00ab691c7e043f"
+    },
+    "raw/check.stdout.log": {
+      "bytes": 88468,
+      "sha256": "c0a6f9e559d0d13fc55f8b0682b0d06099b20e348d054102f64c28dad3ddcbfe"
+    },
+    "raw/result.json": {
+      "bytes": 2826,
+      "sha256": "61b7e6fca8642e1de59dab7dc521d1e9266847055f5af6aa960ade8006c56610"
+    },
+    "raw/run.json": {
+      "bytes": 1031,
+      "sha256": "2cebb2998ed0102d9889f6f3c00359eb3647a73b413fa2c72f63255878ecfd2b"
+    },
+    "raw/source-after.json": {
+      "bytes": 348554,
+      "sha256": "29d0d11df8cf1225a828d801b2ae063c36d4c6b2d92b0fe383bd1f3842d076e5"
+    },
+    "raw/source-before.json": {
+      "bytes": 348554,
+      "sha256": "29d0d11df8cf1225a828d801b2ae063c36d4c6b2d92b0fe383bd1f3842d076e5"
+    }
+  },
+  "originals_retained_in_place": true
+}

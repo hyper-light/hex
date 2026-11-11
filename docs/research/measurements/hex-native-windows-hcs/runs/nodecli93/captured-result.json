@@ -1,0 +1,50 @@
+{
+  "kind": "ROOT requested immutable L3 successor93 of frozen c579 Node/CLI all-target compile; no executable accepted/run",
+  "source_revision": "93abeaae82d97aaf64271e8fc29908538788bbb8",
+  "source_archive_sha256": "194b9647a3812c7ff44bb6362c8a6888fa28636cb289ec6ba25ac594f956bf73",
+  "source_manifest_before_sha256": "29d0d11df8cf1225a828d801b2ae063c36d4c6b2d92b0fe383bd1f3842d076e5",
+  "target": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\winpreflight2\\target",
+  "target_state": "reuse same exclusively owned target/cache from terminal same terminal93 lib-test build",
+  "needs": "cpus=1,mem=4g,disk=12g",
+  "phases": [
+    {
+      "guard": {
+        "pid": 17864,
+        "exitCode": 101,
+        "activeAfter": 0,
+        "activeBeforeCleanup": 1,
+        "processes": 70,
+        "terminated": 0,
+        "residualsTerminated": true,
+        "timedOut": false,
+        "reaped": true,
+        "peakJobMemory": 996864000,
+        "user100ns": 233281250,
+        "kernel100ns": 56718750
+      },
+      "command": [
+        "C:\\Users\\corph\\.rustup\\toolchains\\1.99.1-x86_64-pc-windows-msvc\\bin\\cargo.exe",
+        "check",
+        "-p",
+        "hex-node",
+        "-p",
+        "hex-cli",
+        "--all-targets",
+        "--locked",
+        "--message-format=json"
+      ],
+      "name": "node-cli-all-targets-compile",
+      "stdout_sha256": "c0a6f9e559d0d13fc55f8b0682b0d06099b20e348d054102f64c28dad3ddcbfe",
+      "stderr_sha256": "1234fc9353dc687a4265fa45f56edd7567b651beaaa122113e00ab691c7e043f"
+    }
+  ],
+  "native_tests": 0,
+  "hcs_calls": 0,
+  "gpu_dispatches": 0,
+  "runtime_clippy": "NOT RUN: excluded by ROOT due known unchanged lint failures",
+  "policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "exit_code": 1,
+  "source_unchanged": true,
+  "temp_entries": 0
+}

@@ -1,0 +1,10 @@
+{
+  "source_revision": "3d31cb88e28752144498cb91a694ae02546a2bff",
+  "compressed_archive_bytes": 28029358,
+  "compressed_archive_sha256": "7b5c0a92f477ce8822e53960880e6999152405ce9e51c164e27728e72f3dd634",
+  "tar_bytes": 54528000,
+  "file_count": 2483,
+  "logical_file_bytes": 52365327,
+  "ntfs_target_cache_peak": "UNMEASURED on this new SDK19 cohort",
+  "native_workloads_dispatched": 0
+}

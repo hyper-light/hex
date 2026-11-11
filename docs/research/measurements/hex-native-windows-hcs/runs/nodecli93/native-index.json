@@ -1,0 +1,32 @@
+{
+  "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\93-node-cli-check-v1",
+  "index": {
+    "check.stderr.log": {
+      "bytes": 3371,
+      "sha256": "1234fc9353dc687a4265fa45f56edd7567b651beaaa122113e00ab691c7e043f"
+    },
+    "check.stdout.log": {
+      "bytes": 88468,
+      "sha256": "c0a6f9e559d0d13fc55f8b0682b0d06099b20e348d054102f64c28dad3ddcbfe"
+    },
+    "result.json": {
+      "bytes": 2826,
+      "sha256": "61b7e6fca8642e1de59dab7dc521d1e9266847055f5af6aa960ade8006c56610"
+    },
+    "run.json": {
+      "bytes": 1031,
+      "sha256": "2cebb2998ed0102d9889f6f3c00359eb3647a73b413fa2c72f63255878ecfd2b"
+    },
+    "source-after.json": {
+      "bytes": 348554,
+      "sha256": "29d0d11df8cf1225a828d801b2ae063c36d4c6b2d92b0fe383bd1f3842d076e5"
+    },
+    "source-before.json": {
+      "bytes": 348554,
+      "sha256": "29d0d11df8cf1225a828d801b2ae063c36d4c6b2d92b0fe383bd1f3842d076e5"
+    }
+  },
+  "source_hashes": {},
+  "temp_files": [],
+  "utc": "2026-11-11T06:41:24.9961260Z"
+}

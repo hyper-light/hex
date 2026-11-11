@@ -1,0 +1,187 @@
+{
+  "owner": {
+    "birth": "134388501044479600",
+    "pid": 2856
+  },
+  "current_phase": "verified-read-only",
+  "kind": "read-only actual imported parent/DLL verification after original controller failure",
+  "reference": "mcr.microsoft.com/windows/server@sha256:a62109569303cfe0ab49b1618383615f0477cdc285529b98d9b7085902d0e745",
+  "original_release_sha256": "858a4e8f024194dca84b3235b4bacb7a34226fca8f3a367d3668206dce3e960e",
+  "original_body_sha256": "d362cb46cd42c288c4e6761e7d7bfeb4f504c8f020691a7c0af821e80f9501d4",
+  "original_error": "exact pinned two-layer image not established\r\nAt C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\image-cached-controller-v3\\body.ps1:114 char:26\r\n+ ... rs.Count -ne 2){throw 'exact pinned two-layer image not established'}\r\n+                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : OperationStopped: (exact pinned tw...not established:String) [], RuntimeException\r\n    + FullyQualifiedErrorId : exact pinned two-layer image not established\r\n \r\n",
+  "original_error_sha256": "9c45f9db02b5ca38f8ec79c5b0836da6ed65e89a1debbe8c3c9db6c675c8ac00",
+  "native_mount_sha256": "360bd58c4e944a592bc5a297ab32488386922476f30a171d451cb68085ac2e95",
+  "native_mount_text": "[\n    {\n        \"Type\": \"windows-layer\",\n        \"Source\": \"C:\\\\Users\\\\corph\\\\.cache\\\\hex-native-windows-hcs\\\\full-image-prep-v2\\\\root\\\\io.containerd.snapshotter.v1.windows\\\\snapshots\\\\4\",\n        \"Target\": \"\",\n        \"Options\": [\n            \"rw\",\n            \"parentLayerPaths=[\\\"C:\\\\\\\\Users\\\\\\\\corph\\\\\\\\.cache\\\\\\\\hex-native-windows-hcs\\\\\\\\full-image-prep-v2\\\\\\\\root\\\\\\\\io.containerd.snapshotter.v1.windows\\\\\\\\snapshots\\\\\\\\3\\\",\\\"C:\\\\\\\\Users\\\\\\\\corph\\\\\\\\.cache\\\\\\\\hex-native-windows-hcs\\\\\\\\full-image-prep-v2\\\\\\\\root\\\\\\\\io.containerd.snapshotter.v1.windows\\\\\\\\snapshots\\\\\\\\1\\\"]\"\n        ]\n    }\n]\n",
+  "legacy_wrapped_count": 1,
+  "decoded_parent_count": 2,
+  "layers": [
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1"
+  ],
+  "required_dlls": [
+    {
+      "name": "ntdll.dll",
+      "files": [
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3\\Files\\Windows\\System32\\ntdll.dll",
+          "sha256": "4092c01cb70e15a956d76ca43366a6e324f1154eab7bf7636fe13236215c578a",
+          "bytes": 2541688
+        },
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\Files\\Windows\\System32\\ntdll.dll",
+          "sha256": "cfb1a39a15036ee71daa52e428523c9e7bf83d85bb1b2f0a268d05c3b5392bdd",
+          "bytes": 2521984
+        }
+      ],
+      "present": true
+    },
+    {
+      "name": "gdi32.dll",
+      "files": [
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3\\Files\\Windows\\System32\\gdi32.dll",
+          "sha256": "ec840fa35631a34affe27e684f05db59ea152eb8f251058583e1f67ea2b0e767",
+          "bytes": 187456
+        },
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\Files\\Windows\\System32\\gdi32.dll",
+          "sha256": "dcb0e1ac8e4af783b906a8964471edfd53cdd216ff0daf893aa747009fb97e5a",
+          "bytes": 187392
+        }
+      ],
+      "present": true
+    },
+    {
+      "name": "dxgi.dll",
+      "files": [
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3\\Files\\Windows\\System32\\dxgi.dll",
+          "sha256": "3af979063569dac5a1609df7c55af28ae0a1b18221a56703690bec9037060c0f",
+          "bytes": 1316248
+        },
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\Files\\Windows\\System32\\dxgi.dll",
+          "sha256": "a5910a19cb0dc99b411bab8bcc6a3083675eca770feb108cf142fd2d7e1dace5",
+          "bytes": 1294752
+        }
+      ],
+      "present": true
+    },
+    {
+      "name": "d3d12.dll",
+      "files": [
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3\\Files\\Windows\\System32\\d3d12.dll",
+          "sha256": "038c378615f358b07b43f23b9a1d8f99925331be398ba6adbc25d82759aae8dd",
+          "bytes": 157544
+        },
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\Files\\Windows\\System32\\d3d12.dll",
+          "sha256": "2f19adf6ee6ae40c41524499cec619429fa9aa5d720c4123a2c8f1ef97ac53a9",
+          "bytes": 146080
+        }
+      ],
+      "present": true
+    },
+    {
+      "name": "d3dcompiler_47.dll",
+      "files": [
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3\\Files\\Windows\\System32\\d3dcompiler_47.dll",
+          "sha256": "1c060a8b8c3c6ef3b9a7434ac767fff4d0d880d0b33c1e7a60acdd750df44c74",
+          "bytes": 4669440
+        },
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\Files\\Windows\\System32\\d3dcompiler_47.dll",
+          "sha256": "5e2d8dd8c833cdfaeee031ed04638e981198bb35ed6c4469bd53fbe24538a91b",
+          "bytes": 4669440
+        }
+      ],
+      "present": true
+    }
+  ],
+  "known_owned_processes": [
+    {
+      "present": false,
+      "pid": 6396
+    },
+    {
+      "present": false,
+      "pid": 16416
+    },
+    {
+      "present": false,
+      "pid": 5656
+    },
+    {
+      "present": false,
+      "pid": 3812
+    },
+    {
+      "present": false,
+      "pid": 17328
+    },
+    {
+      "present": false,
+      "pid": 7680
+    },
+    {
+      "present": false,
+      "pid": 4900
+    },
+    {
+      "present": false,
+      "pid": 7508
+    }
+  ],
+  "charged_pre": {
+    "entries": 236321,
+    "files": 195419,
+    "directories": 40902,
+    "reparseEntries": 46,
+    "duplicateIds": 53359,
+    "retainedLogicalBytes": 22782679231,
+    "logicalBytesWithHardlinkDuplicates": 31660097763,
+    "allocatedBytes": 23026800200,
+    "regularFileAllocation": 22908548680,
+    "directoryAllocation": 118251520,
+    "reparseAllocation": 0,
+    "maximumUtf16Path": 367,
+    "elapsedMs": 30569
+  },
+  "charged_post": {
+    "entries": 397751,
+    "files": 329127,
+    "directories": 68624,
+    "reparseEntries": 60510,
+    "duplicateIds": 103353,
+    "retainedLogicalBytes": 31052738750,
+    "logicalBytesWithHardlinkDuplicates": 47982404179,
+    "allocatedBytes": 28686745704,
+    "regularFileAllocation": 28470460520,
+    "directoryAllocation": 216285184,
+    "reparseAllocation": 0,
+    "maximumUtf16Path": 367,
+    "elapsedMs": 41563
+  },
+  "original_guard": {
+    "pid": 17112,
+    "exitCode": 1,
+    "activeAfter": 0,
+    "activeBeforeCleanup": 1,
+    "processes": 21,
+    "terminated": 0,
+    "residualsTerminated": false,
+    "timedOut": false,
+    "reaped": true,
+    "peakJobMemory": 623607808,
+    "user100ns": 1155468750,
+    "kernel100ns": 4091718750
+  },
+  "verified_for_execution": true,
+  "new_imports": 0,
+  "server_starts": 0,
+  "native_gpu_dispatches": 0,
+  "exit_code": 0,
+  "utc": "2026-11-11T05:55:05.5091659Z"
+}

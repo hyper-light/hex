@@ -1,0 +1,39 @@
+{
+  "current_policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "fully_read_revision": "0c598386ca1f7c65c6e0634dba77983e4abffff2",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "assigned adversarial Windows/HCS native tester",
+  "agent": "01a1c8aa921b72c89b7272fba2926a9c",
+  "coordinator": "01a1aa77778471339bea3beff90d6bbd",
+  "ownership": [
+    "NEW docs/research/measurements/hex-native-windows-hcs/**",
+    "NEW crates/hex-cli/tests/native_windows_*",
+    "NEW crates/hex-gpu/tests/native_windows_*"
+  ],
+  "files": {
+    "AGENTS.md": {
+      "bytes": 1793,
+      "sha256": "f66d304c033ad4001d3d7347b67faa3bb3137d637860793e8e74f1eb6266db41",
+      "byte_equal_to_fully_read_revision": true
+    },
+    "docs/development-rules.md": {
+      "bytes": 11604,
+      "sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+      "byte_equal_to_fully_read_revision": true
+    },
+    "docs/development-evidence.md": {
+      "bytes": 3325,
+      "sha256": "61613a244106d95b2759b38c8b6660ff29a616983e7afd6e9faabdc38368fb63",
+      "byte_equal_to_fully_read_revision": true
+    },
+    "CLAUDE.md": {
+      "bytes": 17012,
+      "sha256": "fd1076b256516e0edab1b3655421d37cd934e93a8232f0125b96abcfb99ece5f",
+      "byte_equal_to_fully_read_revision": true
+    }
+  },
+  "root_policy_ack_preceded_first_edit_dispatch": true,
+  "source_production_base": "2c8855b220a36c57685e456a7b8c98d8368f7899",
+  "lld_fixture_source": "ed6d3e54db61fb8407418868ca086a479f2eeb5e",
+  "full_current_reread_after_context_loss_utc": "2026-11-11T04:36:00Z"
+}

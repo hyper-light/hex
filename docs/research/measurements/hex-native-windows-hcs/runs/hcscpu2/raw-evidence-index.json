@@ -1,0 +1,59 @@
+{
+  "archive_sha256": "282caf64982feaeb92775184faf8e2cad9e94ea61d4990468af80e62a7fd6cf4",
+  "archive_bytes": 509240,
+  "members": {
+    "cli.log": {
+      "bytes": 16332,
+      "sha256": "d554ac7ea39abd9145f0d1fff123eccdbf5b821e1a48a8857eaa0be903be0c79"
+    },
+    "collection.cli.log": {
+      "bytes": 903154,
+      "sha256": "d008cd0910821e69da0638d2d879cda51fcf93ba1e97eab03effb46e01221a2a"
+    },
+    "raw/hcs.stderr.log": {
+      "bytes": 894,
+      "sha256": "0dff39008f6a4b8e4fe090d15686693e34549576f83e794285cb03772cc80041"
+    },
+    "raw/hcs.stdout.log": {
+      "bytes": 258,
+      "sha256": "fb5b554a3ad02b1542822b22c1e2aaa66e6ff0e8b28c2cd66112262480d7453e"
+    },
+    "raw/list.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "raw/list.stdout.log": {
+      "bytes": 154,
+      "sha256": "1190899199e0f60df2708238817a79d7c04ea37620557f2b94eb5b4b7a05f6fc"
+    },
+    "raw/physical-cleanup-observation.json": {
+      "bytes": 544,
+      "sha256": "3ff042cbb1f7dc06498d25bd38d56f497828357bb24883d41d45b76e3b1e369e"
+    },
+    "raw/result.json": {
+      "bytes": 15037,
+      "sha256": "78e62b11f4358a18c708e96a409b40cbcee4e1d9a197db563185dd7e8a0f6028"
+    },
+    "raw/run.json": {
+      "bytes": 12981,
+      "sha256": "276f57cb002bc7ff5b50bd995417741657821cc4b65e7c047276ff56fbbb1138"
+    },
+    "raw/scratch/hex-device-BvutM3/bundle-cpu-recovery/config.json": {
+      "bytes": 828,
+      "sha256": "9986e36f5f2a16c93a668426e1ead48cd53b9db78be8e511bbb5d2eeb2d55b2b"
+    },
+    "raw/scratch/hex-device-BvutM3/state/keeper/keeper.owner": {
+      "bytes": 23,
+      "sha256": "0e6acd7733403ddc314bb0489ab30805a50c453ce7cd6cd5ff3c65b2e11eceb1"
+    },
+    "raw/source-after-native.json": {
+      "bytes": 322649,
+      "sha256": "4eccc885a65b2839ec45c17fd2aaecaf9e70bdd003d386d7f70353496b21da86"
+    },
+    "raw/source-before.json": {
+      "bytes": 322649,
+      "sha256": "4eccc885a65b2839ec45c17fd2aaecaf9e70bdd003d386d7f70353496b21da86"
+    }
+  },
+  "originals_retained_in_place": true
+}

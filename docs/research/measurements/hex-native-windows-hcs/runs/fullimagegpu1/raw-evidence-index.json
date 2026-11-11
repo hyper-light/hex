@@ -1,0 +1,23 @@
+{
+  "archive_sha256": "34e89e42c228a6c30b0c6c31da7f7d0f1e98c48a5a11f401042c230e4a28dc45",
+  "archive_bytes": 7015,
+  "members": {
+    "cli.log": {
+      "bytes": 5421,
+      "sha256": "cbe7a682bea4f2842630f1c126345ff0b03cd5ef84d00981889465d60bc4e961"
+    },
+    "collection.cli.log": {
+      "bytes": 14411,
+      "sha256": "874c88c931d46f9d2df60b91a59e97b61a7c64e17fb42f1573721d5ac74c1a5e"
+    },
+    "raw/journal.json": {
+      "bytes": 9452,
+      "sha256": "ddceedb65c6b7b3256d9bd4137daa1beac35e75cd8a524fdf3278d554fc19155"
+    },
+    "raw/submitted-hcs.json": {
+      "bytes": 1026,
+      "sha256": "b8a2b171be13f5dc7298075764bf1537736018e32955c1a8d3e29ae28e5a87af"
+    }
+  },
+  "originals_retained_in_place": true
+}

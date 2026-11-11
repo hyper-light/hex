@@ -1,0 +1,12 @@
+{
+  "utc": "2026-11-11T06:54:09.456027+00:00",
+  "original_failure": "approval-review-auth-failure-v1.json",
+  "user_steering": "Continue",
+  "action": "gits add -- docs/research/measurements/hex-native-windows-hcs",
+  "normal_approval_review": true,
+  "bypass": false,
+  "executed": true,
+  "exit_code": 0,
+  "new_workload_dispatches": 0,
+  "signing": "must be established by actual subsequent gits commit result"
+}

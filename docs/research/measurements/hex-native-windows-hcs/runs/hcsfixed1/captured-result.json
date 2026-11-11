@@ -1,0 +1,110 @@
+{
+  "source_revision": "985d7767232780f74ac95b2e2aa966130730b34d",
+  "source_archive_sha256": "a46ce6594ef3845316a081a136b3388858520b96702fc1603d7fa725a3081e66",
+  "policy_revision": "0c598386ca1f7c65c6e0634dba77983e4abffff2",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "assigned adversarial native Windows/HCS",
+  "owned_paths": [
+    "NEW docs/research/measurements/hex-native-windows-hcs/**",
+    "NEW crates/hex-cli/tests/native_windows_*",
+    "NEW crates/hex-gpu/tests/native_windows_*"
+  ],
+  "runner": "f766f09294f2e17e3b8a631ffd4e6a4b",
+  "needs": "cpus=1,mem=4g,disk=12g",
+  "root": "C:/Users/corph/.cache/hex-native-windows-hcs/hcsfixed1",
+  "priority": "BelowNormal",
+  "driver_pid": 16944,
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\r\nbinary: rustc\r\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\r\ncommit-date: 2026-10-13\r\nhost: x86_64-pc-windows-msvc\r\nrelease: 1.99.1\r\nLLVM version: 23.1.1\r\n",
+  "phases": [
+    {
+      "guard": {
+        "pid": 3900,
+        "exitCode": 0,
+        "activeAfter": 0,
+        "activeBeforeCleanup": 1,
+        "processes": 144,
+        "terminated": 0,
+        "residualsTerminated": true,
+        "timedOut": false,
+        "reaped": true,
+        "peakJobMemory": 1068699648,
+        "user100ns": 935312500,
+        "kernel100ns": 371250000
+      },
+      "command": [
+        "C:\\Users\\corph\\.rustup\\toolchains\\1.99.1-x86_64-pc-windows-msvc\\bin\\cargo.exe",
+        "test",
+        "-p",
+        "hex-cli",
+        "--test",
+        "native_windows_hcs_compute",
+        "--locked",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "name": "build",
+      "stdout_sha256": "d1a89c68880d0c3dad36f4ebd85a240be69579080a534083fd04ed2839f676b3",
+      "stderr_sha256": "4caf36f59a35fc4fb520bf95d211f70bd2e32ffb6be8e53f627ceafe82909d13"
+    }
+  ],
+  "native_tests": 0,
+  "boot": "2026-11-11T03:04:32.5000000Z",
+  "leaf_sha256": "c77f3fa077dc4f05372ce7b21523f09e2d9c725069005ff394c549d90914aab8",
+  "build_cohort": "new signed native HCS fixture cohort after reproduced missing-provider setup refusal; pinned existing LLD/flags, no production fix or linker/PDB cause conclusion",
+  "linker": "C:\\Users\\corph\\.rustup\\toolchains\\1.99.1-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\bin\\rust-lld.exe",
+  "linker_sha256": "53d7ea9474ddbb0f0eda351f2dace3259e77f1175537f64d321c232bc8d29b68",
+  "rustflags": "-C linker-flavor=lld-link -C target-feature=+crt-static",
+  "cargo_profile_dev_debug": "0",
+  "cargo_profile_test_debug": "0",
+  "policy_current_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "policy_fully_read_revision": "0c598386ca1f7c65c6e0634dba77983e4abffff2",
+  "policy_byte_equality_sha256": "6a658eef10e8802ed3d73ca09e5f5acf63b5f5c767c27196d429d73fba739388",
+  "target_initially_empty": true,
+  "target_canonical_before": "\\\\?\\C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\target",
+  "source_manifest_before_sha256": "33aaeb056dd0c96594f384882ba47b65110d4e8da98cca81113b3813f128e5a7",
+  "source_manifest_after_build_sha256": "33aaeb056dd0c96594f384882ba47b65110d4e8da98cca81113b3813f128e5a7",
+  "source_unchanged_before_native": true,
+  "artifact": {
+    "reason": "compiler-artifact",
+    "package_id": "path+file:///C:/Users/corph/.cache/hex-native-windows-hcs/hcsfixed1/source/crates/hex-cli#0.1.0",
+    "manifest_path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\source\\crates\\hex-cli\\Cargo.toml",
+    "target": {
+      "kind": [
+        "test"
+      ],
+      "crate_types": [
+        "bin"
+      ],
+      "name": "native_windows_hcs_compute",
+      "src_path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\source\\crates\\hex-cli\\tests\\native_windows_hcs_compute.rs",
+      "edition": "2024",
+      "doc": false,
+      "doctest": false,
+      "test": true
+    },
+    "profile": {
+      "opt_level": "3",
+      "debuginfo": 0,
+      "debug_assertions": true,
+      "overflow_checks": true,
+      "test": true
+    },
+    "features": [],
+    "filenames": [
+      "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\target\\debug\\deps\\native_windows_hcs_compute-8fdebf7e9f818e5d.exe",
+      "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\target\\debug\\deps\\native_windows_hcs_compute-8fdebf7e9f818e5d.pdb"
+    ],
+    "executable": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\target\\debug\\deps\\native_windows_hcs_compute-8fdebf7e9f818e5d.exe",
+    "fresh": false
+  },
+  "artifact_machine": "IMAGE_FILE_MACHINE_AMD64 0x8664",
+  "binary": "\\\\?\\C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\target\\debug\\deps\\native_windows_hcs_compute-8fdebf7e9f818e5d.exe",
+  "binary_sha256": "aaef9dedc0cda720e635dccd6ada7e0d79bc1c7868930f76d6f965d9b999abcf",
+  "artifact_verified_before_dispatch": true,
+  "production_base": "2c8855b220a36c57685e456a7b8c98d8368f7899",
+  "hcs_fixture_sha256": "ba68c1de4555a2efc7bf2014d7affb6c4b5eda766916eed0b60152e8ef57fa0a",
+  "native_dispatch": "none: freshly emitted artifact only; separate guarded execution required",
+  "source_unchanged_after_build": true,
+  "temp_entries": 0,
+  "exit_code": 0
+}

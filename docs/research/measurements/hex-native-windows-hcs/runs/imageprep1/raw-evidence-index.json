@@ -1,0 +1,11 @@
+{
+  "archive_sha256": "abf1f5fc009a7c42079becddd371cfa07ed28524114a3ae8a97ea1eec264ed04",
+  "archive_bytes": 903,
+  "members": {
+    "cli.log": {
+      "bytes": 1344,
+      "sha256": "0d2722ad644697930e7a9e328066281f007c3a7b9d2c24713c13e4fe337a0a8c"
+    }
+  },
+  "originals_retained_in_place": true
+}

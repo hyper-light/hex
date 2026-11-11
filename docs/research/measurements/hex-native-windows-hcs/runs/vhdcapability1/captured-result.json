@@ -1,0 +1,92 @@
+{
+  "utc": "2026-11-11T05:14:16.4724685Z",
+  "geometry": {
+    "clusterSectors": 8,
+    "sectorBytes": 512,
+    "freeClusters": 42826717,
+    "clusters": 242321745,
+    "serial": 1391038616,
+    "maximumName": 255,
+    "flags": 65482495,
+    "fs": "NTFS"
+  },
+  "current_token_selected_privileges": [
+    {
+      "name": "SeSecurityPrivilege",
+      "attributes": 0,
+      "enabled": false
+    },
+    {
+      "name": "SeBackupPrivilege",
+      "attributes": 2,
+      "enabled": true
+    },
+    {
+      "name": "SeRestorePrivilege",
+      "attributes": 2,
+      "enabled": true
+    },
+    {
+      "name": "SeManageVolumePrivilege",
+      "attributes": 0,
+      "enabled": false
+    },
+    {
+      "name": "SeCreateSymbolicLinkPrivilege",
+      "attributes": 0,
+      "enabled": false
+    }
+  ],
+  "api_exports": {
+    "CreateVirtualDisk": true,
+    "OpenVirtualDisk": true,
+    "AttachVirtualDisk": true,
+    "DetachVirtualDisk": true,
+    "GetVirtualDiskInformation": true,
+    "GetVirtualDiskPhysicalPath": true
+  },
+  "vhds": [
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-s4\\ctrd\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\blank.vhdx",
+      "sha256": "67a3974475c80752217719d36bcf282d4b2374a83387ba1716896f66d7433d10",
+      "information": {
+        "openError": 0,
+        "infoError": 0,
+        "virtualBytes": 21474836480,
+        "physicalBytes": 4194304,
+        "blockBytes": 1048576,
+        "sectorBytes": 512
+      }
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\blank.vhdx",
+      "sha256": "ea36b14a9e2ea129b5fd7c3e5af570b10f67501f9190bd6a7825666ad79bcfa0",
+      "information": {
+        "openError": 0,
+        "infoError": 0,
+        "virtualBytes": 21474836480,
+        "physicalBytes": 4194304,
+        "blockBytes": 1048576,
+        "sectorBytes": 512
+      }
+    }
+  ],
+  "service_state": [
+    {
+      "name": "StorSvc",
+      "status": "Running"
+    },
+    {
+      "name": "vds",
+      "status": "Stopped"
+    },
+    {
+      "name": "vmcompute",
+      "status": "Running"
+    }
+  ],
+  "binary_sha256": "f716940c584ed438a1f1836d4c65a33ebba609d3d36181162ac0077ac23d5494",
+  "create_attach_format_or_quota_calls": 0,
+  "privilege_changes": 0,
+  "service_driver_security_changes": 0
+}

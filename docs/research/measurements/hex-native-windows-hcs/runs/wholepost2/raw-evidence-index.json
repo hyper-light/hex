@@ -1,0 +1,19 @@
+{
+  "archive_sha256": "87740a6d1f7d498096712b70844801f0b49d759d813a08a13418267b97b19e0e",
+  "archive_bytes": 3635,
+  "members": {
+    "cli.log": {
+      "bytes": 8107,
+      "sha256": "050390d060dce54ebb115c4b151fe0c9fb534a72b7cb6fbc7d1861d9841a0e0b"
+    },
+    "collection.cli.log": {
+      "bytes": 11108,
+      "sha256": "30bfc5c2cdc935de7e4562f5aacdd92a35e3ab733dd4a02e5e21425f3f9a7fe3"
+    },
+    "raw/result.json": {
+      "bytes": 8105,
+      "sha256": "621060f92662eddfafa7c77b09372829da237379395b0abf52f4c24af6a95ec7"
+    }
+  },
+  "originals_retained_in_place": true
+}

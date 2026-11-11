@@ -1,0 +1,59 @@
+{
+  "archive_sha256": "5be7ab54ae72783b98d266cd7e58655613750ca536069fd0022cca4827ab769c",
+  "archive_bytes": 947836,
+  "members": {
+    "cli.log": {
+      "bytes": 12122,
+      "sha256": "c97d9c38466452d7c8bc7e4caa76cc24ece378c133da8e28bfea96f5b5695373"
+    },
+    "collection.cli.log": {
+      "bytes": 1913605,
+      "sha256": "db8f9a47cfb53aa0453466b54fa39e17b58eb27875375d5dd7c687402dd5a685"
+    },
+    "raw/build.stderr.log": {
+      "bytes": 6266,
+      "sha256": "e58be4d97f2a894c6c8f1ee14ffaf4c89046c581f4ca05d71b0cfe8506214723"
+    },
+    "raw/build.stdout.log": {
+      "bytes": 104008,
+      "sha256": "c8b377a70461c126d6dcce283fa99a0162f700423306eb0a135f145b4eb80183"
+    },
+    "raw/list.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "raw/list.stdout.log": {
+      "bytes": 12662,
+      "sha256": "d973cd3dde50331e0ddb7be374418de26cbb8dd840b5707598c8451c6e6f7832"
+    },
+    "raw/preflight.stderr.log": {
+      "bytes": 437,
+      "sha256": "b51a7a087796bd7113781b4e8b3218d7a1dfd44e9441dc0cd38304ae2131cadb"
+    },
+    "raw/preflight.stdout.log": {
+      "bytes": 718,
+      "sha256": "dd5f2588bc3d6bf7efe1b88e333b227bb25fa0d15df9e8ee0a084797f2268859"
+    },
+    "raw/result.json": {
+      "bytes": 10762,
+      "sha256": "cffdfedb44138b00e5b203a728a6ff3a35f6f4e1b7d546587800298e77115dd8"
+    },
+    "raw/run.json": {
+      "bytes": 6846,
+      "sha256": "b7f152f2516cb5b910fede190c382dcc1a61590421cf4ec31d8c174d12a74544"
+    },
+    "raw/source-after-build.json": {
+      "bytes": 348554,
+      "sha256": "29d0d11df8cf1225a828d801b2ae063c36d4c6b2d92b0fe383bd1f3842d076e5"
+    },
+    "raw/source-after-preflight.json": {
+      "bytes": 348554,
+      "sha256": "29d0d11df8cf1225a828d801b2ae063c36d4c6b2d92b0fe383bd1f3842d076e5"
+    },
+    "raw/source-before.json": {
+      "bytes": 348554,
+      "sha256": "29d0d11df8cf1225a828d801b2ae063c36d4c6b2d92b0fe383bd1f3842d076e5"
+    }
+  },
+  "originals_retained_in_place": true
+}

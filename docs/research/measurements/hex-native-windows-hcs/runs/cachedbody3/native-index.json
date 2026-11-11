@@ -1,0 +1,64 @@
+{
+  "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-image-import-v3",
+  "index": {
+    "cached-archive-producer.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "cached-import.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "cached-import.stdout.log": {
+      "bytes": 196,
+      "sha256": "2c8aaae5388439dc092112eef9ccc092e92e0bd9f35425fa9cedf58cc351ea71"
+    },
+    "containerd.stderr.log": {
+      "bytes": 16055,
+      "sha256": "61d29de7f1cd7d4f672456ca16bd573a004b031ec0678076fab601cc9c8455aa"
+    },
+    "containerd.stdout.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "parent-paths.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "parent-paths.stdout.log": {
+      "bytes": 599,
+      "sha256": "360bd58c4e944a592bc5a297ab32488386922476f30a171d451cb68085ac2e95"
+    },
+    "remove-own-path-read.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "remove-own-path-read.stdout.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "result.json": {
+      "bytes": 19029,
+      "sha256": "d362cb46cd42c288c4e6761e7d7bfeb4f504c8f020691a7c0af821e80f9501d4"
+    },
+    "snapshots-after.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "snapshots-after.stdout.log": {
+      "bytes": 712,
+      "sha256": "43171ee6d0fe2481bffb183f60c9cf238cba807f7e84207524d294a4b770854e"
+    },
+    "snapshots-before.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "snapshots-before.stdout.log": {
+      "bytes": 534,
+      "sha256": "0577b34322fa52299d963b54dde315691c0769ff2068cf9b2240062b1fa5b0d3"
+    }
+  },
+  "source_hashes": {},
+  "temp_files": [],
+  "utc": "2026-11-11T05:56:07.6460300Z"
+}
