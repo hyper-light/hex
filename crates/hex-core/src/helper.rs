@@ -21,6 +21,8 @@ use hex_api::{BoxId, Exit, Program};
 
 use crate::wire::{self, Fault, Reader, Writer};
 
+pub mod managed;
+
 /// Every helper message's first bytes: "HEX macOS helper".
 pub const MAGIC: [u8; 4] = *b"HEXM";
 /// The version this side speaks; it reads every one from [`FIRST`].
