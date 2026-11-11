@@ -2276,13 +2276,14 @@ fn the_relay_refuses_bytes_after_a_streams_in_band_end_before_acting_on_it() {
         sent.extend([7u8; 3]);
         sent
     };
-    let after_end = |answer: Answer| {
-        matches!(answer, Answer::Refused(Refusal::Invalid { why, .. }) if why == "3 bytes follow the stream's end")
-    };
+    let after_end = |answer: Answer| matches!(answer, Answer::Refused(Refusal::Invalid { why, .. }) if why == "3 bytes follow the stream's end");
     let stage = serve_unclosed(&staged, trailing(raw_stage(&[("d", hf::What::Dir)])));
     assert!(after_end(answer_in(stage.last().unwrap())));
     assert!(!staged.join("b").exists());
-    assert_eq!(stage_raw(&lab, &raw_stage(&[("d", hf::What::Dir)])), Answer::Done);
+    assert_eq!(
+        stage_raw(&lab, &raw_stage(&[("d", hf::What::Dir)])),
+        Answer::Done
+    );
     let removal = serve_unclosed(&staged, trailing(hf::open(hf::Op::Remove, "b").unwrap()));
     assert!(after_end(answer_in(removal.last().unwrap())));
     assert!(staged.join("b/d").is_dir());
