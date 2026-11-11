@@ -496,6 +496,7 @@ fn completion_publication_refusal_never_executes_marker() {
                 &native,
                 &program,
                 Stdio::null(),
+                None,
                 lab.config.gate(),
                 &mut |_| {
                     published = true;
@@ -546,6 +547,7 @@ fn completion_durable_publication_releases_and_reaps() {
                 &native,
                 &program,
                 Stdio::null(),
+                None,
                 lab.config.gate(),
                 &mut |identity| {
                     let result = (|| -> Check<()> {
@@ -634,21 +636,28 @@ fn parent_body(config: Config, scope: PathBuf) -> Check<()> {
                     .name(format!("gate-{suffix}"))
                     .spawn(move || {
                         supervisor
-                            .bind_managed(&native, &program, Stdio::null(), gate, &mut |identity| {
-                                ready
-                                    .send(identity.clone())
-                                    .map_err(|error| Refusal::Broken(error.to_string()))?;
-                                let (lock, changed) = &*stop;
-                                let stopped = lock
-                                    .lock()
-                                    .map_err(|error| Refusal::Broken(error.to_string()))?;
-                                drop(
-                                    changed
-                                        .wait_timeout_while(stopped, guard, |stopped| !*stopped)
-                                        .map_err(|error| Refusal::Broken(error.to_string()))?,
-                                );
-                                Err(Refusal::Broken("ROOT parent held publication".to_owned()))
-                            })
+                            .bind_managed(
+                                &native,
+                                &program,
+                                Stdio::null(),
+                                None,
+                                gate,
+                                &mut |identity| {
+                                    ready
+                                        .send(identity.clone())
+                                        .map_err(|error| Refusal::Broken(error.to_string()))?;
+                                    let (lock, changed) = &*stop;
+                                    let stopped = lock
+                                        .lock()
+                                        .map_err(|error| Refusal::Broken(error.to_string()))?;
+                                    drop(
+                                        changed
+                                            .wait_timeout_while(stopped, guard, |stopped| !*stopped)
+                                            .map_err(|error| Refusal::Broken(error.to_string()))?,
+                                    );
+                                    Err(Refusal::Broken("ROOT parent held publication".to_owned()))
+                                },
+                            )
                             .map(|_| ())
                     }),
             )?);
