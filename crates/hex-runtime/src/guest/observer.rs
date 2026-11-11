@@ -6,6 +6,10 @@ use hex_api::Refusal;
 pub(super) mod config;
 mod io;
 
+#[cfg(all(test, unix))]
+#[path = "observer/failure_tests.rs"]
+mod failure_tests;
+
 use io::{Captured, End};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

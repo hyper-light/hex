@@ -1,0 +1,114 @@
+{
+  "status": "ORIGINAL SOURCE CONTROL ONLY; production v4/prior controls unchanged; no compile/test/native run",
+  "parent": "2fbf09e6919e6a427cf2af3c8caa2d03af53415a",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": [
+    {
+      "path": "crates/hex-runtime/src/guest/observer.rs",
+      "sha256": "ed55bb4b10f6caf91de9fba8080a2f0f5ef4b19dd2616fea29c615022589d15b",
+      "bytes": 29803
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/observer/failure_tests.rs",
+      "sha256": "f16173de8bd30baee7826a531ccc686cfc13dece241f07204fb4886aba3e4323",
+      "bytes": 15106
+    }
+  ],
+  "protected": {
+    "observer_rs_except_new_cfg_test_registration_byte_identical": true,
+    "observer_original_sha256": "5b168ad9644158d9a20870b266dbaf0c6cd4697b3d5debe21cdf98f003d68c49",
+    "pool_v4_file_unchanged": true,
+    "pool_v4_sha256": "8336e297a1c0ce4576eea26cd8784fa4af4ddf0fed30336dad9df0a9a438b9f3"
+  },
+  "test": "guest::observer::failure_tests::known_guest_exit_and_typed_cleanup_failure_survive_the_same_vm_receipt",
+  "command": "cargo test -p hex-runtime --lib --locked guest::observer::failure_tests::known_guest_exit_and_typed_cleanup_failure_survive_the_same_vm_receipt -- --exact --test-threads=1",
+  "dependencies": {
+    "matched_ROOT_source": "dd4f01ccf33b6e58180576e041c59ddbd6b0120f",
+    "sdk": "1b93ea703d02e76b5d5c4c7461547429529a9f56",
+    "absolute_client_constructor": "5c10d010c3a60c09015f57162e570f8737075d76",
+    "same_remote_proc_drop_cap": "2a1b715497b33898d295ce7d326d3d07936c8e0f",
+    "duplex_owner": "948351166bf80adfc93eb405f6abcaf59859a6e3",
+    "runtime_consumer": "a29bf7e2d3527aedce62b04bb5011edb9253fb09"
+  },
+  "actual_paths_exercised": [
+    "real guest Client::connect_before, relay token/Hello, run_before, named stdout/stderr, actual RemoteProc/streams/wait_for/delete_before",
+    "one owned local-socket peer sends Started then Exited(Code7), actual independent stream EOFs, exact same guest BoxId typed Lifecycle::Uncertain Delete refusal",
+    "parent private observe persists its real SAME VM receipt after failure, never readiness/Live/absence/release"
+  ],
+  "actor_ownership": [
+    "three private Unix socket pairs; no socket pathname/SUN_LEN fixture",
+    "one explicit test worker, no production reader/reaper/manager",
+    "worker return value retains its own control endpoint until main captures refusal/receipt, avoiding peer EOF replacing typed cause",
+    "main closes own endpoint, joins worker, drops retained peer endpoint BEFORE every assertion",
+    "all peer partial reads/writes and retries consume SAME finite Budget.deadline, derived from existing recorded boot bound; no arbitrary timeout increase",
+    "zero-native-effect Guest fixture only fills unused Booted field and counts every accidental native call; no usable native identity is supplied"
+  ],
+  "oracle_preconditions": [
+    "actual Client setup completed, valid named token/Run identity, one exact-ID Delete",
+    "original deadline still remains, both EOFs retained, stderr bytes exact, Attempt Waiting stage",
+    "outer host route/allocation/physical IDs absent from ordinary guest Process Run",
+    "canonical model grant/allocation retained, native field calls0, no readiness or terminal parent phase"
+  ],
+  "durable_fact_contract": {
+    "snapshot_envelope_version": 1,
+    "exit_line": "observer-exit\\t1\\t<wire identity hex16>\\t<frame byte length decimal>\\t<canonical frame hex>\\n",
+    "failed_cleanup_line": "observer-cleanup\\tfailed\\t1\\t<wire identity hex16>\\t<frame byte length decimal>\\t<canonical refusal frame hex>\\n",
+    "frame": "existing wire::answer(header id0, Answer::Exited(Code7) or Answer::Refused(exact Lifecycle Uncertain))",
+    "frame_byte_bound": "wire::MAX_MESSAGE (128<<10 in matched ROOTdd4 source), not a new tuning cap",
+    "record_total_bound": "existing MAX_RECORD_BYTES (1<<20); eventual producer must reserve/check complete hex growth BEFORE effects",
+    "ROOTdd4_source_computed_wire_identity_hex16": "b39d1dd86922f8db",
+    "ROOTdd4_wire_identity_inputs": [
+      {
+        "path": "crates/hex-core/src/wire.rs",
+        "sha256": "5320facae6e7c07f45441291f45ee9ed45d9ca441ea9d92e105a8408c49f847c"
+      },
+      {
+        "path": "crates/hex-core/src/stream.rs",
+        "sha256": "a84b35c48613018101e045179e3aea40768ecb1fabfb3c5a0cd1a2ecc7cf6c33"
+      },
+      {
+        "path": "crates/hex-core/src/schedule.rs",
+        "sha256": "7509faf7dc3b5cc034dd35bd932acfd1429c7ca3677c9394f012701065b67b0c"
+      },
+      {
+        "path": "crates/hex-sim/src/peer.rs",
+        "sha256": "2134e452e0f80dae0b341cdd329c02ab38345946e953dbba6656d60ce29b47cd"
+      },
+      {
+        "path": "crates/hex-sim/src/model.rs",
+        "sha256": "f4051b6e125594a6a0247c619ee03031bc8af16a4d4c1f388bd0a3ac27688c74"
+      },
+      {
+        "path": "crates/hex-api/src/spec.rs",
+        "sha256": "6c209d5880bf1003f33c2aee26da0929e3b48dbc7b2ce299c1578c69e65f67ad"
+      },
+      {
+        "path": "crates/hex-api/src/id.rs",
+        "sha256": "8b18be8233dd5b98edede84c61f33387560fef53970b5fd42db6ad759b818dd3"
+      },
+      {
+        "path": "crates/hex-api/src/bounds.rs",
+        "sha256": "54876217b8f7494f7f23cedc2b4060dd14d884424a1d8192cd30f71dc0f030e8"
+      },
+      {
+        "path": "crates/hex-api/src/devices.rs",
+        "sha256": "7a8d0f8e63fc7521212115f4afad25c9c17ed328752e73ed2dfd0c3521d84ebb"
+      },
+      {
+        "path": "crates/hex-api/src/runtime.rs",
+        "sha256": "3819270656dabd993246dc9b95e8c401dc3f07504bb01e339597203f3a3bc413"
+      }
+    ],
+    "version_scope": "the selected immutable ROOT cohort must record its compiled wire identity; a different identity is never guessed/decoded as current",
+    "unknown_future_identity": "eventual snapshots stay opaque and bounded for diagnostic retention; cannot block same native scope cleanup or grant absence/release; NO implementation in this checkpoint"
+  },
+  "original_expected_failure": "after all actual-client preconditions, current v4 loses known Exited7 and typed failed Delete from durable receipt. This unit is UNRUN; source observation is not a live/native reproduction.",
+  "remaining": [
+    "ROOT compile and actual original selected1 before v5 remedy",
+    "persist original failure cause/failed stage plus cleanup outcome in the same receipt, with version/size/resource checks after relevant red",
+    "Windows equivalent transport and native VM/renderer/helper/guest resource proof remain unverified",
+    "no native GPU invocation, header/driver/artifact validation or actual guest process executed here"
+  ]
+}
