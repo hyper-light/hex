@@ -1,0 +1,28 @@
+{
+  "base": "219f804e88f80db3faa326027603b9fb1d0562a8",
+  "source": "eee80c129e44d35e957377c60629af088f4b2da3",
+  "root_before": "9dd6caa7ff4532b9519fd5b3c4d4a1833efc4ed3",
+  "paths": {
+    "vendor/shards/crates/api/src/lib.rs": {
+      "before": "201d841af6e3b614c34a9f7f4c69db6caaa2c52ebe2ddd59bbcd7ee3a8068ab0",
+      "after": "330ff5c870218a2fb121a1d242b409011d27e47a3ead8de9f656c6ffa159cbbe"
+    },
+    "vendor/shards/crates/api/src/client.rs": {
+      "before": "619891720bbca52677cba49530bb7389b635b4364dedf73b648c9baccc143190",
+      "after": "346ae377b105194964475f9bed3d9b0395676fd7cd782f70bda3500776153eca"
+    },
+    "vendor/shards/crates/api/Cargo.toml": {
+      "before": "be062eb3430d2778f875cb1895fbc3ae50e6cd0633dd0fc23882165c7d2dd5e9",
+      "after": "180955191fd09e4619c439746a05ec52d7d9a48c2601a1af571eadda50c98081"
+    },
+    "Cargo.lock": {
+      "before": "b416a7e0892d1825e0259351d2da56c7371d14ca85501cbba468753e222cf4ad",
+      "after": "5c0816b787c75b12c189fb3da78549eb1b0370a339056806d7a5e6161a810c03"
+    }
+  },
+  "scope": "Exact API lib/client delta preserving all previous Hex patches; ROOT-owned minimal Hex vendor dependency overlay. Peer upstream Cargo/main untouched; no compilation/native result",
+  "borrowed_unchanged": {
+    "pub fn connect_borrowed(": "2af4ac1dc68574b2bb2ce907305170f08c6573967a65b75e3e0d63593c942c15",
+    "fn handshake_until(": "b096d1119c22ae6e8a1a5d0011b2e9425a2eb9fa7979d1785022e8ad728ca343"
+  }
+}

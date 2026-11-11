@@ -35,3 +35,5 @@ Five exact upstream Rust fixture sources referenced by API include!/path attribu
 | crates/api/src/lib.rs | Retain typed native scope operations/errors before controller identity publication. | AC-T7.4.1: signed bb763aa3b175b755c8b85c2115722d6ad749088b permits cleanup of the same known scope without fabricating pid/start values. | 0011-preserve-typed-native-scope-errors-before-controller.patch |
 
 | crates/api/src/{client,lib,sim}.rs | Publish managed stop intent before inline completion; add model lifetime controls and correct simulator observation. | AC-T7.4.1: signed219f804e follows an actual74481869 inline-stop failure and the retained5d8 compilation failure. | 0012-publish-managed-stop-intent-before-synchronous-native.patch |
+
+| crates/api/{Cargo.toml,src/lib.rs,src/client.rs} | Pass the canonical fallibly allocated native receipt through managed launch/attach without a wrapper; use the stable checked atomic operation name. | AC-T7.4.1: signed eee80c12 API delta plus ROOT-owned exact triomphe unsize / unsize1.1.0 dependency overlay; upstream peer Cargo/main untouched. | 0013-transfer-the-same-fallibly-allocated-native-receipt-to-the.patch |

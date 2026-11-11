@@ -44,3 +44,7 @@ before recording because tomllib requires3.11. It changed no source. Reissuing
 with the already installed Homebrew Python succeeds; no interpreter installation
 or runner change was made. Policy revision/roles remain ca3ab10c / df2acf47 as
 recorded in the current ROOT receipt.
+
+## Fallible native receipt intake
+
+Signed upstream API delta219f->eee80c12 changes only managed ownership and the stable checked atomic operation name. ROOT applies that delta while preserving all earlier Hex patches. The minimal dependency overlay enables existing triomphe0.1.17 unsizing and exact unsize1.1.0 (8,060B crate/checksum4fa7a7a7...). It is a Hex vendor candidate change; the peer upstream manifests and main remain untouched. Exact source/lock hashes and unchanged borrowed function hashes are in fallible-receipt-intake.json. The reviewed private-workspace seed and its precise delta are retained in managed-receipt-Cargo.lock / managed-receipt-seed.json. See docs/design/managed-native-receipts.md for alternatives and remaining allocation/native proof. This intake is SOURCE ONLY until its own checks finish.

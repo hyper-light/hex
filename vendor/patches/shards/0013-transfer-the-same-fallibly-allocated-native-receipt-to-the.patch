@@ -1,0 +1,151 @@
+Subject: Transfer the same fallibly allocated native receipt to the managed SDK
+Why: AC-T7.4.1: signed eee80c12 API source consumes the canonical fallible native owner; ROOT minimal triomphe unsize plus pinned unsize1.1.0 overlay avoids an unchecked wrapper allocation. Peer upstream manifests/main unchanged.
+
+diff --git a/crates/api/Cargo.toml b/crates/api/Cargo.toml
+index 91bbceef45e56720438406450a87741266b6d798..8910f37c8562743918c5d94277b0d220c0ae712d 100644
+--- a/crates/api/Cargo.toml
++++ b/crates/api/Cargo.toml
+@@ -11,7 +11,8 @@ publish = false
+ [dependencies]
+ sha2 = "0.11"
+ shards-abi = { path = "../abi" }
+-triomphe = { version = "=0.1.17", default-features = false, features = ["std"] }
++triomphe = { version = "=0.1.17", default-features = false, features = ["std", "unsize"] }
++unsize = "=1.1.0"
+ 
+ [target.'cfg(unix)'.dependencies]
+ libc = { workspace = true }
+diff --git a/crates/api/src/client.rs b/crates/api/src/client.rs
+index c258e9c4ad9891960d5d97640d0f87020080ea78..a09da6ebda3597e5bf44008d0eaf712543fb75e8 100644
+--- a/crates/api/src/client.rs
++++ b/crates/api/src/client.rs
+@@ -1364,7 +1364,7 @@ fn managed_marker() -> Result<Vec<u8>, Refusal> {
+ 
+ /// The existing API protocol around a receipt the native owner already owns.
+ pub struct ManagedGuest {
+-    process: Arc<dyn crate::ManagedProcess>,
++    process: crate::ManagedReceipt,
+     shared: triomphe::Arc<Shared>,
+ }
+ 
+@@ -1460,7 +1460,7 @@ fn lossy_output(bytes: &[u8]) -> Result<String, Refusal> {
+ 
+ fn watch_managed(
+     shared: triomphe::Arc<Shared>,
+-    process: Arc<dyn crate::ManagedProcess>,
++    process: crate::ManagedReceipt,
+     writer: Option<io::PipeWriter>,
+ ) {
+     // This subscribes to the existing native receipt; it opens/reaps no PID.
+@@ -1488,7 +1488,7 @@ fn watch_managed(
+ 
+ fn managed_watch(
+     shared: &triomphe::Arc<Shared>,
+-    process: &Arc<dyn crate::ManagedProcess>,
++    process: &crate::ManagedReceipt,
+     writer: Option<io::PipeWriter>,
+     name: String,
+ ) -> Result<(), Refusal> {
+@@ -1568,10 +1568,10 @@ impl ManagedGuest {
+     pub fn try_clone(&self) -> Result<Self, Refusal> {
+         self.shared
+             .managed_owners
+-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
++            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
+             .map_err(|_| Refusal::Launch(crate::LaunchError::Count))?;
+         Ok(Self {
+-            process: Arc::clone(&self.process),
++            process: self.process.clone(),
+             shared: self.shared.clone(),
+         })
+     }
+@@ -1667,7 +1667,7 @@ impl Drop for ManagedGuest {
+         match self
+             .shared
+             .managed_owners
+-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
++            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+         {
+             Ok(1) => {}
+             Ok(_) => return,
+@@ -1917,25 +1917,25 @@ mod tests {
+             Ok(())
+         }
+     }
+-    struct ModelLauncher(Arc<ModelNative>);
++    struct ModelLauncher(triomphe::Arc<ModelNative>);
+     impl crate::ManagedLauncher for ModelLauncher {
+         fn launch(
+             &mut self,
+             _: &crate::PreparedBoot,
+             io: crate::LaunchIo,
+-        ) -> Result<Arc<dyn crate::ManagedProcess>, Refusal> {
++        ) -> Result<crate::ManagedReceipt, Refusal> {
+             self.0.state.lock().unwrap().io = Some(io);
+-            Ok(self.0.clone())
++            Ok(crate::managed_receipt(self.0.clone()))
+         }
+-        fn attach(&mut self, identity: &Identity) -> Result<Arc<dyn crate::ManagedProcess>, Refusal> {
++        fn attach(&mut self, identity: &Identity) -> Result<crate::ManagedReceipt, Refusal> {
+             assert_eq!(identity, &self.0.identity);
+-            Ok(self.0.clone())
++            Ok(crate::managed_receipt(self.0.clone()))
+         }
+     }
+-    fn managed_model(coordinate_stop: bool) -> (ManagedGuest, Arc<ModelNative>) {
++    fn managed_model(coordinate_stop: bool) -> (ManagedGuest, triomphe::Arc<ModelNative>) {
+         let socket = Path::new("/model/native/v");
+         let plan = prepare_boot(&spec(), Path::new("/model/never-executed"), socket, 0).unwrap();
+-        let native = Arc::new(ModelNative {
++        let native = triomphe::Arc::try_new(ModelNative {
+             identity: Identity {
+                 pid: 42,
+                 started: 7,
+@@ -1945,7 +1945,8 @@ mod tests {
+             changed: Condvar::new(),
+             coordinate_stop,
+             stops: std::sync::atomic::AtomicUsize::new(0),
+-        });
++        })
++        .unwrap();
+         let guest = boot_managed(plan, &mut ModelLauncher(native.clone())).unwrap();
+         (guest, native)
+     }
+diff --git a/crates/api/src/lib.rs b/crates/api/src/lib.rs
+index d5ab4c3db8a201ae2a1f9643ab0b00aeaea610ad..066583207c63f7a98704ee62bbc4fbfd9395a2ce 100644
+--- a/crates/api/src/lib.rs
++++ b/crates/api/src/lib.rs
+@@ -183,19 +183,24 @@ pub trait ManagedProcess: Send + Sync {
+     fn terminal(&self) -> Result<Option<ManagedEnd>, Refusal>;
+ }
+ 
++/// The SAME fallibly allocated native scope owner retained by its canonical slot.
++/// Unsizing below transfers a reference; it allocates no wrapper or owner.
++pub type ManagedReceipt = triomphe::Arc<dyn ManagedProcess>;
++
++pub fn managed_receipt<T: ManagedProcess + 'static>(owner: triomphe::Arc<T>) -> ManagedReceipt {
++    use unsize::CoerceUnsize;
++    owner.unsize(unsize::Coercion!(to dyn ManagedProcess))
++}
++
+ /// Borrowed synchronous launch/attach callbacks, usually over the caller's stack
+-/// transaction. The returned Arc must come from existing native receipt ownership
+-/// or fallible native storage, never a second process-box record/manager. The API
+-/// owns draining/presentation, the native receipt alone owns observation/reaping.
++/// transaction. The returned owner comes from the native slot, never a second
++/// process-box record/manager. The API owns draining/presentation, while that same
++/// native receipt alone owns observation/reaping.
+ pub trait ManagedLauncher {
+-    fn launch(
+-        &mut self,
+-        plan: &PreparedBoot,
+-        io: LaunchIo,
+-    ) -> Result<std::sync::Arc<dyn ManagedProcess>, Refusal>;
++    fn launch(&mut self, plan: &PreparedBoot, io: LaunchIo) -> Result<ManagedReceipt, Refusal>;
+     /// Reopen only this recorded identity/envelope, without creating a process or
+     /// replacing old stdio. Recovery has no historical output to manufacture.
+-    fn attach(&mut self, identity: &Identity) -> Result<std::sync::Arc<dyn ManagedProcess>, Refusal>;
++    fn attach(&mut self, identity: &Identity) -> Result<ManagedReceipt, Refusal>;
+ }
+ 
+ /// What a guest's kernel runs first.
