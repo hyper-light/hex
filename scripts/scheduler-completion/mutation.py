@@ -5,12 +5,12 @@ import argparse
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
 from pathlib import Path
 
-from evidence import InvalidEvidence, finite_positive, load_json, require, sha256
+from evidence import (InvalidEvidence, end_group, finite_positive, load_json, require, sha256, start_group,
+                      unwind_on_sigterm)
 
 
 def replacement(original, old, new):
@@ -24,31 +24,16 @@ def command(argv, root, name, timeout, cleanup_timeout):
             "exact argv array required, never a shell command")
     path = root / f"{name}.log"
     with path.open("xb") as log:
-        child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+        child = start_group(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         row = {"argv": argv, "pid": child.pid, "timed_out": False}
         try:
             child.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             row["timed_out"] = True
-            child.terminate()
-            try:
-                child.wait(timeout=cleanup_timeout)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait(timeout=cleanup_timeout)
-        except BaseException:
-            # Preserve cancellation while stopping only this exact owned child.
-            # Its descendants/VMs still require the native fixture's cleanup witnesses.
-            if child.poll() is None:
-                child.terminate()
-                try:
-                    child.wait(timeout=cleanup_timeout)
-                except subprocess.TimeoutExpired:
-                    child.kill()
-                    child.wait(timeout=cleanup_timeout)
-            raise
         finally:
-            row.update(exit=child.returncode, reaped=child.poll() is not None, log=str(path),
+            # Cancellation too: this exact session ends before the exception goes on. VMs and boxes
+            # outside it still require the native fixture's cleanup witnesses.
+            row.update(end_group(child, cleanup_timeout), exit=child.returncode, log=str(path),
                        sha256=sha256(path), native_cleanup="requires fixture's own native observers")
     return row
 
@@ -77,7 +62,8 @@ def execute(args):
         row = command(argv, args.output, name, args.timeout, args.cleanup_timeout)
         receipt["phases"].append({"name":name, **row})
         persist()
-        require(not row["timed_out"] and row["reaped"], f"{name} timed out/unreaped; not a meaningful guard control")
+        require(not row["timed_out"] and row["reaped"] and row["group_gone"],
+                f"{name} timed out/unreaped/left its process group; not a meaningful guard control")
         return row
     persist()
     try:
@@ -127,7 +113,7 @@ def main():
 if __name__ == "__main__":
     # SIGTERM becomes an ordinary unwind so byte restoration executes; SIGKILL is
     # still uncertain and ROOT can restore original.bytes only after hash review.
-    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(InterruptedError("ROOT cancellation")))
+    unwind_on_sigterm()
     try:
         sys.exit(main())
     except (InvalidEvidence, OSError, subprocess.SubprocessError) as error:

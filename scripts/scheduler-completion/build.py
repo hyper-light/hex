@@ -10,7 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from evidence import InvalidEvidence, TARGETS, finite_positive, hex_digest, require, sha256
+from evidence import (InvalidEvidence, TARGETS, end_group, finite_positive, hex_digest, require, sha256,
+                      start_group, unwind_on_sigterm)
 
 
 def git(repo,*argv):
@@ -118,7 +119,7 @@ def build(args):
     log=args.output/"cargo.jsonl";stderr=args.output/"cargo.stderr"
     receipt={"schema":"hex-completion-build-1","source":args.source,"tree":git(repo,"rev-parse","HEAD^{tree}"),
              "target":args.target,"package":args.package,"test":args.test,"command":argv,
-             "exit":None,"reaped":False,"timed_out":False,
+             "exit":None,"reaped":False,"group_signaled":False,"group_gone":False,"timed_out":False,
              "target_directory":{"path":str(target),"created_empty":True,"reused":False}}
     if overlay is not None:
         receipt["overlay"] = overlay
@@ -129,21 +130,18 @@ def build(args):
     def persist():
         (args.output/"build.json").write_text(json.dumps(receipt,indent=2)+"\n")
     with log.open("xb") as out,stderr.open("xb") as err:
-        child=subprocess.Popen(argv,cwd=repo,env=environment,stdin=subprocess.DEVNULL,stdout=out,stderr=err)
+        child=start_group(argv,cwd=repo,env=environment,stdin=subprocess.DEVNULL,stdout=out,stderr=err)
         receipt["pid"]=child.pid;persist()
         try:
             child.wait(timeout=args.timeout)
         except subprocess.TimeoutExpired:
             receipt["timed_out"]=True
-            child.terminate()
-            try:child.wait(timeout=args.cleanup_timeout)
-            except subprocess.TimeoutExpired:
-                child.kill();child.wait(timeout=args.cleanup_timeout)
         finally:
-            receipt.update(exit=child.returncode,reaped=child.poll() is not None,
+            receipt.update(end_group(child,args.cleanup_timeout),exit=child.returncode,
                            log_sha256=sha256(log),stderr_sha256=sha256(stderr))
             persist()
     require(child.returncode==0 and not receipt["timed_out"],"fixture build failed; retain exact source/log receipt")
+    require(receipt["group_gone"],"fixture build's process group is not gone; retain exact receipt")
     after = source_state(repo, args.source, overlay)
     (args.output / "source-after.json").write_text(json.dumps(after, indent=2) + "\n")
     receipt["source_after_sha256"] = sha256(args.output / "source-after.json")
@@ -194,6 +192,7 @@ def main():
 
 
 if __name__=="__main__":
+    unwind_on_sigterm()
     try:main()
     except (InvalidEvidence,OSError,subprocess.SubprocessError) as error:
         print(f"UNVERIFIED build: {error}",file=sys.stderr)

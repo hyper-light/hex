@@ -144,14 +144,18 @@ pub trait Recover: Runtime {
         Err(record.refusal(hex_api::LifecycleCause::Uncertain))
     }
 
-    /// Read-only cross-check of native metadata names against the complete retained cohort.
+    /// Read-only cross-check of native metadata names against the complete retained cohort. Every
+    /// runtime implements its own, one with no native metadata saying so: left to this default,
+    /// recovery is refused rather than go on unchecked (AC-T7.4.1).
     fn preflight_retained(
         &self,
         records: &hex_runtime::devices::Records,
         pools: &[PoolRecord],
     ) -> Result<(), Refusal> {
         let _ = (records, pools);
-        Ok(())
+        Err(broken(
+            "runtime has no cross-check of its native metadata against the retained cohort",
+        ))
     }
 
     /// Deferred native initialization is entered only after the complete read-only barrier.
@@ -2121,6 +2125,10 @@ impl Recover for hex_runtime::macos::MacRuntime {
         Ok(())
     }
 
+    fn preflight_unsubmitted(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        hex_runtime::macos::MacRuntime::preflight_unsubmitted(self, record)
+    }
+
     fn preflight_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
         hex_runtime::macos::MacRuntime::preflight_record(self, record)
     }
@@ -2748,29 +2756,143 @@ impl serve::Remote for GuestProgram {
 }
 
 #[cfg(test)]
-#[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_lifecycle_tests.rs"]
 mod lifecycle_tests;
 
 #[cfg(test)]
-#[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_pool_tests.rs"]
 mod pool_tests;
 
 #[cfg(test)]
-#[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_report_tests.rs"]
 mod report_tests;
 
 #[cfg(test)]
-#[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs"]
 mod handoff_tests;
 
 #[cfg(test)]
-#[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_unsubmitted_pool_tests.rs"]
 mod unsubmitted_pool_tests;
 
 #[cfg(test)]
-#[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_route_projection_tests.rs"]
 mod route_projection_tests;
 
 #[cfg(test)]
-#[path = "../../../docs/research/measurements/hex-completion-validation/shared-record-ownership-original/recorded_shared_outer_tests.rs"]
 mod shared_outer_original_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_unsubmitted_tests {
+    use super::*;
+    use hex_api::{
+        BackingKey, Bounds, CapacityResources, ClassSpec, DeviceKind, Execution, GpuEligibility,
+        ImageArch, ImageOs, ImagePlatform, LifecycleCause, Network, OciSpec, Rootfs, RouteKey,
+        RouteReceipt, RuntimeCost,
+    };
+
+    fn runtime() -> hex_runtime::macos::MacRuntime {
+        let model = hex_runtime::macos::machine_model().unwrap();
+        let rates = hex_core::watch::seed(&model);
+        hex_runtime::macos::MacRuntime::new(
+            rates.bytes,
+            rates.processes,
+            hex_core::watch::lateness_seed(&model),
+        )
+        .unwrap()
+    }
+
+    /// The row `preflight_handoff_turns` hands the adapter: a dedicated Box reserved on a still-held
+    /// source, its scope introduced, with no init, run or exit.
+    fn pending(root: &Path) -> BoxRecord {
+        let fixed = CapacityResources {
+            cpu_milli: 1000,
+            mem_bytes: shards_api::min_memory_mib(std::env::consts::ARCH) << 20,
+            disk_bytes: 0,
+        };
+        let cost = RuntimeCost {
+            id: [0x91; 32],
+            floor: fixed,
+            ceiling: fixed,
+            quantum: CapacityResources {
+                cpu_milli: 1,
+                mem_bytes: 1,
+                disk_bytes: 1,
+            },
+            overhead: CapacityResources::default(),
+            guest_overhead: CapacityResources::default(),
+        };
+        let spec = BoxSpec {
+            id: BoxId::new("pending-handoff").unwrap(),
+            class: ClassSpec::Shards(Box::new(OciSpec {
+                rootfs: Rootfs::Dir(root.to_path_buf()),
+                init: Program::of(&["/bin/true"]),
+                mounts: Vec::new(),
+                hostname: None,
+                network: Network::Private,
+                hosts: Vec::new(),
+            })),
+            bounds: Bounds {
+                cpu_max_milli: Some(1000),
+                memory_max: Some(hex_api::MIN_MEMORY),
+                ..Bounds::default()
+            },
+            owner: None,
+            devices: vec![DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 7,
+            }],
+            allocation: Some(cost.allocate(CapacityResources::default()).unwrap()),
+            route: Some(RouteReceipt {
+                key: RouteKey {
+                    class: Class::Shards,
+                    image: ImagePlatform {
+                        os: ImageOs::Linux,
+                        arch: ImageArch::Arm64,
+                    },
+                    execution: Execution::ShardsDedicated,
+                    gpu: GpuEligibility::Any,
+                },
+                backing: Some(BackingKey {
+                    pool: [0x92; 32],
+                    generation: [0x93; 16],
+                }),
+            }),
+        };
+        spec.check().unwrap();
+        let mut record = BoxRecord::new(spec, Phase::Creating, Vec::new());
+        record.native_scope = Some(hex_core::record::NativeScope::from_bytes([0x94; 16]));
+        record
+    }
+
+    /// AC-T7.4.1: original. Restarted with a dedicated Box's handoff pending, the macOS node's
+    /// preflight asks its host, through `Recover` as `WithGuest` does, to prove it holds no launch,
+    /// scope or receipt for that Box. With nothing in its native table, expect Ok for the
+    /// reservation and its cancellation (Deleting); with a slot of that id held, Uncertain.
+    #[test]
+    fn original_macos_pending_handoff_with_no_native_slot_passes_the_host_half() {
+        let root = tempfile::tempdir().unwrap();
+        let native = runtime();
+        let mut record = pending(root.path());
+        assert!(native.list().unwrap().is_empty());
+        let proved = Recover::preflight_unsubmitted(&native, &record);
+        assert!(
+            proved.is_ok(),
+            "nothing is retained for the Box, yet the host half refused: {proved:?}"
+        );
+        record.phase = Phase::Deleting;
+        Recover::preflight_unsubmitted(&native, &record).unwrap();
+        native
+            .create(BoxSpec {
+                id: record.spec.id.clone(),
+                class: ClassSpec::Process,
+                bounds: Bounds::default(),
+                owner: None,
+                devices: Vec::new(),
+                allocation: None,
+                route: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            Recover::preflight_unsubmitted(&native, &record),
+            Err(Refusal::Lifecycle { id, cause: LifecycleCause::Uncertain }) if id == record.spec.id
+        ));
+        assert_eq!(native.list().unwrap().len(), 1, "the check removed nothing");
+        native.delete(&record.spec.id).unwrap();
+        Recover::preflight_unsubmitted(&native, &record).unwrap();
+    }
+}

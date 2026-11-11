@@ -223,7 +223,7 @@ impl GuestRuntime {
             receipt.original.scope(),
             report,
         )?;
-        receipt.checked_readiness()?;
+        receipt.checked_work_ready()?;
         let identity = receipt.identity()?;
         managed::same_native(hex_core::record::NativeRecord::Pool(record), identity)?;
         let books = self

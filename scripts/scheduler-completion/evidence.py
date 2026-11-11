@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""AC-T7.3.1/4.1: fail-closed acceptance receipts; no native work is performed here."""
+"""AC-T7.3.1/4.1: fail-closed acceptance receipts, and the process-group ownership their drivers share;
+no native work is performed here."""
 
 import hashlib
 import json
 import math
+import os
 import re
+import signal
+import subprocess
+import time
 from pathlib import Path
 
 
@@ -70,6 +75,75 @@ def natural(value, positive=False):
 
 def finite_positive(value):
     return type(value) in (int, float) and math.isfinite(value) and value > 0
+
+
+def start_group(argv, **options):
+    """Start argv leading a session of its own: its process group (its PID) holds every descendant that
+    does not leave it, and end_group ends that whole group. A signal to the driver's own group no longer
+    reaches it, so drivers turn SIGTERM into an unwind that ends it first (unwind_on_sigterm)."""
+    # Windows has no process group to signal or probe: the descendants would go unwitnessed.
+    require(os.name == "posix", "ending a child's process group needs POSIX")
+    return subprocess.Popen(argv, start_new_session=True, **options)
+
+
+def group_alive(pgid):
+    """Signal 0 to the group: only ProcessLookupError says no process is left in it."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # a member this user may not signal is still there
+    return True
+
+
+def group_ended(child, budget):
+    """Reap the leader, then probe its group until no process is left, within `budget` seconds."""
+    deadline = time.monotonic() + budget
+    try:
+        child.wait(timeout=budget)
+    except subprocess.TimeoutExpired:
+        return False
+    # The other members are other parents' children: no wait or notification reaches them, so signal 0
+    # is probed at the cadence Popen.wait(timeout) polls its own child (CPython Lib/subprocess.py, _wait).
+    delay = 0.0005
+    while group_alive(child.pid):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        delay = min(delay * 2, remaining, 0.05)
+        time.sleep(delay)
+    return True
+
+
+def end_group(child, cleanup_timeout):
+    """End what is left of the group `child` leads (start_group), on every path: TERM, then KILL once it
+    outlasts `cleanup_timeout`, each phase bounded by it. Observed, never assumed: `reaped` is the leader
+    alone; `group_gone` holds only once signal 0 finds no process left in the group, and descendants that
+    left the group are outside that witness; `group_signaled` says the driver had to end something."""
+    signaled = False
+    for signum in (signal.SIGTERM, signal.SIGKILL):
+        if child.poll() is not None and not group_alive(child.pid):
+            break
+        try:
+            os.killpg(child.pid, signum)
+            signaled = True
+        except (ProcessLookupError, PermissionError):
+            pass
+        if group_ended(child, cleanup_timeout):
+            break
+    reaped = child.poll() is not None
+    return {"reaped": reaped, "group_signaled": signaled, "group_gone": reaped and not group_alive(child.pid)}
+
+
+def unwind_on_sigterm():
+    """SIGTERM (a guard's, or ROOT's cancellation) becomes one InterruptedError, an OSError the drivers
+    report as UNVERIFIED, so their finally ends the child's group before they exit. Later TERMs are
+    ignored: GNU timeout signals the driver and then its group, and that must not cut the cleanup short."""
+    def cancel(*_):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        raise InterruptedError("ROOT cancellation")
+    signal.signal(signal.SIGTERM, cancel)
 
 
 def artifact(root, row):
@@ -196,8 +270,8 @@ def check_run(root, receipt, byte_limit):
     require(proof in ("full", "selected"), "proof scope missing")
     require(receipt.get("scope") == ("root-native" if proof == "full" else "root-native-selected"),
             "light/model/compile receipt is not native proof")
-    require(receipt.get("exit") == 0 and receipt.get("timed_out") is False and receipt.get("reaped") is True,
-            "failed/unreaped native invocation")
+    require(receipt.get("exit") == 0 and receipt.get("timed_out") is False and receipt.get("reaped") is True and
+            receipt.get("group_gone") is True, "failed/unreaped native invocation, or its process group not gone")
     binary = artifact(root, receipt.get("binary"))
     require(binary.stat().st_size > 0, "empty binary")
     build_path=artifact(root,receipt.get("build"))
@@ -205,7 +279,7 @@ def check_run(root, receipt, byte_limit):
     require(build.get("schema")=="hex-completion-build-1" and build.get("source")==receipt["source"] and
             build.get("target")==receipt["target"] and build.get("test")=="completion_backends" and
             build.get("exit")==0 and build.get("timed_out") is False and build.get("reaped") is True and
-            build.get("source_unchanged") is True and
+            build.get("group_gone") is True and build.get("source_unchanged") is True and
             build.get("binary",{}).get("sha256")==receipt["binary"]["sha256"],
             "run is not tied to its actual successful pinned-source build")
     log = artifact(root, receipt.get("log"))
