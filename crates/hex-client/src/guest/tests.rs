@@ -604,6 +604,108 @@ impl shards_api::Guest for Patient {
     }
 }
 
+/// A guest whose relay answers the first dial and is then gone. Its `connect_before` stands for the
+/// retrying form, which would ask again until its deadline: so it answers only once, and is then expired.
+/// Its single attempt is closed unanswered, as the VMM's muxer closes a CONNECT nobody listens for.
+struct GoneRelay {
+    listener: TcpListener,
+    before: std::sync::Mutex<Vec<u32>>,
+    once: std::sync::Mutex<Vec<u32>>,
+}
+
+impl shards_api::Guest for GoneRelay {
+    fn process_exited(&self) -> Result<bool, shards_api::Refusal> {
+        Ok(false)
+    }
+
+    fn connect(
+        &self,
+        port: u32,
+        _: Duration,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        panic!("a link dials port {port} only within a deadline")
+    }
+
+    fn connect_before(
+        &self,
+        port: u32,
+        _: std::time::Instant,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        let mut before = self.before.lock().unwrap();
+        before.push(port);
+        if before.len() > 1 {
+            return Err(shards_api::Refusal::Connect {
+                port,
+                failure: shards_api::HandshakeError::Expired {
+                    phase: shards_api::HandshakePhase::Dial,
+                },
+            });
+        }
+        let conn = TcpStream::connect(self.listener.local_addr().unwrap()).unwrap();
+        Ok(Box::new(Looped(conn)))
+    }
+
+    fn connect_once_before(
+        &self,
+        port: u32,
+        _: std::time::Instant,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        self.once.lock().unwrap().push(port);
+        Err(shards_api::Refusal::Connect {
+            port,
+            failure: shards_api::HandshakeError::Closed,
+        })
+    }
+
+    fn stop(&self) -> Result<(), shards_api::Refusal> {
+        Ok(())
+    }
+
+    fn wait_for(&self, _: Duration) -> Result<Option<shards_api::End>, shards_api::Refusal> {
+        Ok(None)
+    }
+
+    fn identity(&self) -> Result<shards_api::Identity, shards_api::Refusal> {
+        Err(shards_api::Refusal::Unsupported {
+            what: "identity",
+            why: "a loopback stand-in names no VM".into(),
+        })
+    }
+}
+
+/// AC-T7.4.1: dial a guest whose relay answered the first dial and is then gone; expect the first dial
+/// through `connect_before`, which waits for the relay to listen, and each later dial one
+/// `connect_once_before` attempt, refused at once as closed unanswered, by type. The relay binds every
+/// port before it serves any, so a later port that refuses has no relay behind it.
+#[test]
+fn a_later_dial_to_a_gone_relay_is_one_attempt_refused_at_once() {
+    let guest = Arc::new(GoneRelay {
+        listener: TcpListener::bind("127.0.0.1:0").unwrap(),
+        before: std::sync::Mutex::new(Vec::new()),
+        once: std::sync::Mutex::new(Vec::new()),
+    });
+    let link = shards::ShardsLink::new(guest.clone(), Duration::from_secs(60));
+    link.dial(stream::CONTROL_PORT).unwrap();
+    for port in [stream::STDIO_PORT, stream::CONTROL_PORT] {
+        let refused = link.dial(port).err().unwrap();
+        assert!(
+            matches!(
+                refused,
+                hex_api::Refusal::Connect {
+                    port: p,
+                    failure: hex_api::ConnectFailure::Closed,
+                } if p == port
+            ),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(*guest.before.lock().unwrap(), [stream::CONTROL_PORT]);
+    assert_eq!(
+        *guest.once.lock().unwrap(),
+        [stream::STDIO_PORT, stream::CONTROL_PORT]
+    );
+}
+
 /// HEX-GUEST-33, AC-T7.4.1 (§2, CLAUDE.md §2): dial a booted guest three times with no caller deadline, the
 /// later two after its relay listens: expect each dial to reach Shards as `connect_before` with one finite
 /// absolute deadline, the link's bound from that dial's start; never a relative patience, as Shards' client
@@ -635,6 +737,83 @@ fn every_dial_carries_a_finite_deadline_after_the_first_listen() {
         assert!(
             earliest <= *at && *at <= latest,
             "deadline {at:?} is not the bound from its dial's start, [{earliest:?}, {latest:?}]"
+        );
+    }
+}
+
+/// HEX-GUEST-33, AC-T7.4.1 (CLAUDE.md §2): connect with no caller deadline, plainly and in the event form, through a
+/// Shards link whose guest takes the control connection and holds its relay's token until the link's bound has
+/// surely passed, then sends it and answers the hello: expect each connect refused by type at the link's own setup
+/// bound, the token's read with the dial, never connected late, as a relay that stays silent would hold it forever.
+#[test]
+fn a_relay_token_held_past_the_links_bound_refuses_the_connect() {
+    let mut seen = Vec::new();
+    for evented in [false, true] {
+        let guest = Arc::new(Patient {
+            listener: TcpListener::bind("127.0.0.1:0").unwrap(),
+            given: std::sync::Mutex::new(Vec::new()),
+            absolute: std::sync::Mutex::new(Vec::new()),
+        });
+        let listener = guest.listener.try_clone().unwrap();
+        let bound = CONNECT_CAP;
+        let relay = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            // The connect's setup began before its dial, so its deadline is at most the bound past this accept:
+            // hold the token until then, unless the connect gives up first and closes.
+            let past = Instant::now().checked_add(bound).unwrap();
+            loop {
+                let left = past.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                conn.set_read_timeout(Some(left)).unwrap();
+                match conn.peek(&mut [0u8; 1]) {
+                    Ok(0) => return false,
+                    Ok(_) => panic!("the client wrote before the relay's token"),
+                    Err(e) => assert!(
+                        matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock
+                                | std::io::ErrorKind::TimedOut
+                                | std::io::ErrorKind::Interrupted
+                        ),
+                        "{e}"
+                    ),
+                }
+            }
+            conn.set_read_timeout(None).unwrap();
+            if conn.write_all(&TOKEN.to_le_bytes()).is_err() {
+                return false;
+            }
+            // A connect that read the late token says hello: answer it, then hold until it goes.
+            if !matches!(conn.peek(&mut [0u8; 1]), Ok(n) if n > 0) {
+                return false;
+            }
+            let (h, _) = next_request(&mut conn);
+            send_answer(&mut conn, h.id, &Answer::Hello(agents_hello()));
+            let _ = conn.read(&mut [0u8; 1]);
+            true
+        });
+        let link = own_link(shards::ShardsLink::new(guest.clone(), bound)).unwrap();
+        let connected = if evented {
+            Client::connect_evented(link, Arc::new(|| {})).map(drop)
+        } else {
+            Client::connect(link).map(drop)
+        };
+        let late = relay.join().unwrap();
+        eprintln!(
+            "hex_guest_33_token evented={evented} bound={bound:?} connected={connected:?} late={late}"
+        );
+        seen.push((evented, connected, late));
+    }
+    for (evented, connected, late) in seen {
+        assert!(
+            matches!(&connected, Err(Refusal::Os { op, why }) if op.contains("token") && why.contains("setup bound")),
+            "evented={evented}: {connected:?}"
+        );
+        assert!(
+            !late,
+            "evented={evented}: connected on a token past its bound"
         );
     }
 }

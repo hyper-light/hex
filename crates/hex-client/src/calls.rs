@@ -133,24 +133,33 @@ enum ReplyBound {
     Caller(Duration),
     CallerAbsolute,
     Learned(Duration),
+    /// A guest link's own bound on a connection's setup, where its caller gave no deadline.
+    Link(Duration),
 }
 
 impl ReplyDeadline {
     pub(crate) fn caller(budget: Option<Duration>) -> Result<Option<Self>, Refusal> {
-        let Some(budget) = budget else {
-            return Ok(None);
-        };
-        let at = (!budget.is_zero())
-            .then(|| Instant::now().checked_add(budget))
+        budget
+            .map(|budget| Self::from_now(budget, ReplyBound::Caller(budget), "client reply budget"))
+            .transpose()
+    }
+
+    /// A link's own setup bound from now ([`crate::guest::Link::setup_bound`]): none where it has none.
+    pub(crate) fn link(bound: Option<Duration>) -> Result<Option<Self>, Refusal> {
+        bound
+            .map(|bound| Self::from_now(bound, ReplyBound::Link(bound), "guest link setup bound"))
+            .transpose()
+    }
+
+    fn from_now(span: Duration, source: ReplyBound, what: &'static str) -> Result<Self, Refusal> {
+        let at = (!span.is_zero())
+            .then(|| Instant::now().checked_add(span))
             .flatten()
             .ok_or_else(|| Refusal::Invalid {
-                what: "client reply budget",
+                what,
                 why: "it must be positive and fit a monotonic deadline".to_owned(),
             })?;
-        Ok(Some(Self {
-            at,
-            source: ReplyBound::Caller(budget),
-        }))
+        Ok(Self { at, source })
     }
 
     pub(crate) fn caller_before(at: Instant) -> Result<Self, Refusal> {
@@ -209,6 +218,9 @@ impl ReplyDeadline {
             }
             ReplyBound::Learned(wait) => {
                 format!("none came in {wait:?}, twice the slowest answer to a call of its kind")
+            }
+            ReplyBound::Link(bound) => {
+                format!("the guest link's own setup bound of {bound:?} expired")
             }
         };
         Refusal::Os { op, why }

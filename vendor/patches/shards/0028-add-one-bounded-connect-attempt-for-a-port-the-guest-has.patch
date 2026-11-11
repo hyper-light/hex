@@ -1,0 +1,371 @@
+Subject: Add one bounded connect attempt for a port the guest has listened on
+Why: AC-T7.4.1: connect_before asks again until its deadline, so since Hex bounded every dial (1f38ef8c) a later dial to a gone relay waited out the whole learned boot bound. connect_once_before dials once under the same absolute deadline: refused at once if nothing listens there, by the deadline if nothing answers. The simulator and the conformance suite agree.
+
+diff --git a/crates/api/src/client.rs b/crates/api/src/client.rs
+index da5a548637ca542d41dafc760ae68fb9dfc47dad..ecfd09ec46c9dd5d90bfb84ae56cafe18c3214fe 100644
+--- a/crates/api/src/client.rs
++++ b/crates/api/src/client.rs
+@@ -1933,6 +1933,19 @@ impl Guest for ManagedGuest {
+             },
+         )
+     }
++    fn connect_once_before(&self, port: u32, deadline: Instant) -> Result<Box<dyn Stream>, Refusal> {
++        allowed(&lock(&self.shared.state).managed_ports, port)?;
++        connect_with_budget(
++            &self.shared,
++            &self.process.identity()?.vsock,
++            port,
++            ConnectBudget::Once(deadline),
++            || {
++                self.end(&mut lock(&self.shared.state))
++                    .map(|end| end.map(Refusal::Ended))
++            },
++        )
++    }
+     fn stop(&self) -> Result<(), Refusal> {
+         // Native stop may complete inline and wake a concurrent waiter. Publish
+         // the request first; an uncertain native result cannot undo its effects.
+@@ -2017,6 +2030,8 @@ enum ConnectBudget {
+     /// Preserve the standalone API's documented zero/MAX behavior.
+     Standalone(Duration),
+     Before(Instant),
++    /// One dial under the deadline: a port the guest does not listen on now is refused at once.
++    Once(Instant),
+ }
+ 
+ fn connect_with_budget(
+@@ -2031,7 +2046,7 @@ fn connect_with_budget(
+     let began = Instant::now();
+     let deadline = match budget {
+         ConnectBudget::Standalone(patience) => began.checked_add(patience),
+-        ConnectBudget::Before(at) => Some(at),
++        ConnectBudget::Before(at) | ConnectBudget::Once(at) => Some(at),
+     };
+     let left = || deadline.map(|d| d.saturating_duration_since(Instant::now()));
+     let last = loop {
+@@ -2049,13 +2064,13 @@ fn connect_with_budget(
+                 }
+                 _ => handshake(vsock, port, None, &mut cost),
+             },
+-            ConnectBudget::Before(at) => {
++            ConnectBudget::Before(at) | ConnectBudget::Once(at) => {
+                 handshake_until(vsock, port, HandshakeWait::Until(at), &mut cost).map_err(Attempt::Absolute)
+             }
+         };
+         match attempt {
+             Ok(s) => {
+-                if let ConnectBudget::Before(at) = budget {
++                if let ConnectBudget::Before(at) | ConnectBudget::Once(at) = budget {
+                     // Identity observation and allocation spend the same cap;
+                     // a completed socket is never published after expiry.
+                     if let Some(refusal) = gone()? {
+@@ -2082,7 +2097,10 @@ fn connect_with_budget(
+             }
+             Err(Attempt::Refused(why)) => return Err(Refusal::Channel { port, why }),
+             Err(Attempt::Absolute(failure)) => {
+-                if !failure.retryable() || left().is_some_and(|l| l.is_zero()) {
++                if matches!(budget, ConnectBudget::Once(_))
++                    || !failure.retryable()
++                    || left().is_some_and(|l| l.is_zero())
++                {
+                     return Err(Refusal::Connect { port, failure });
+                 }
+             }
+@@ -2137,6 +2155,16 @@ impl Guest for ShardsGuest {
+             || Ok(self.gone(&mut lock(&self.shared.state))),
+         )
+     }
++    fn connect_once_before(&self, port: u32, deadline: Instant) -> Result<Box<dyn Stream>, Refusal> {
++        allowed(&self.ports, port)?;
++        connect_with_budget(
++            &self.shared,
++            &self.vsock,
++            port,
++            ConnectBudget::Once(deadline),
++            || Ok(self.gone(&mut lock(&self.shared.state))),
++        )
++    }
+ 
+     fn stop(&self) -> Result<(), Refusal> {
+         let mut state = lock(&self.shared.state);
+@@ -2507,6 +2535,137 @@ mod tests {
+         );
+     }
+ 
++    /// The VMM's muxer for a guest that no longer listens on port 5: each CONNECT is read and
++    /// closed unanswered, until the test's own sentinel line. It returns the CONNECTs it saw.
++    #[cfg(unix)]
++    fn unserved_muxer(listener: std::os::unix::net::UnixListener) -> std::thread::JoinHandle<usize> {
++        std::thread::Builder::new()
++            .name("unserved-muxer".into())
++            .spawn(move || {
++                let mut dials = 0;
++                for conn in listener.incoming() {
++                    let mut line = String::new();
++                    io::BufRead::read_line(&mut io::BufReader::new(conn.unwrap()), &mut line).unwrap();
++                    match line.as_str() {
++                        "sentinel\n" => break,
++                        // A dial its deadline ended before the CONNECT was written is a dial too.
++                        "CONNECT 5\n" | "" => dials += 1,
++                        other => panic!("not a CONNECT: {other:?}"),
++                    }
++                }
++                dials
++            })
++            .unwrap()
++    }
++
++    #[cfg(unix)]
++    fn sentinel(path: &Path) {
++        let mut stream = std::os::unix::net::UnixStream::connect(path).unwrap();
++        io::Write::write_all(&mut stream, b"sentinel\n").unwrap();
++    }
++
++    /// D215/AC-T7.4.1: dial once a port the guest no longer listens on; expect one dial,
++    /// refused at once as closed unanswered, and an absent socket refused in the dial. The
++    /// retrying form, against the same muxer, dials again until its deadline: the cost a
++    /// later dial to a gone relay must not pay.
++    #[cfg(unix)]
++    #[test]
++    fn single_attempt_to_an_unserved_port_is_refused_at_once_after_one_dial() {
++        let dir = shards_testdir::TempDir::new("api-once").unwrap();
++        let path = dir.join("v");
++        let shared = managed_shared(0, false, None).unwrap();
++
++        let muxer = unserved_muxer(std::os::unix::net::UnixListener::bind(&path).unwrap());
++        let at = Instant::now()
++            .checked_add(crate::conformance::PATIENCE.get())
++            .unwrap();
++        let once = connect_with_budget(&shared, &path, 5, ConnectBudget::Once(at), || Ok(None));
++        let returned = Instant::now();
++        sentinel(&path);
++        assert_eq!(muxer.join().unwrap(), 1, "one dial, never asked again");
++        assert!(
++            matches!(
++                once,
++                Err(Refusal::Connect {
++                    port: 5,
++                    failure: HandshakeError::Closed
++                })
++            ),
++            "{:?}",
++            once.as_ref().err()
++        );
++        assert!(returned < at, "refused at once, not at its deadline");
++
++        std::fs::remove_file(&path).unwrap();
++        let muxer = unserved_muxer(std::os::unix::net::UnixListener::bind(&path).unwrap());
++        let unserved = Instant::now()
++            .checked_add(crate::conformance::UNSERVED_PATIENCE)
++            .unwrap();
++        let before = connect_with_budget(&shared, &path, 5, ConnectBudget::Before(unserved), || Ok(None));
++        sentinel(&path);
++        assert!(muxer.join().unwrap() > 1, "the retrying form asks again");
++        assert!(
++            matches!(before, Err(Refusal::Connect { port: 5, .. })),
++            "{:?}",
++            before.as_ref().err()
++        );
++
++        std::fs::remove_file(&path).unwrap();
++        let absent = connect_with_budget(&shared, &path, 5, ConnectBudget::Once(at), || Ok(None));
++        assert!(
++            matches!(
++                absent,
++                Err(Refusal::Connect {
++                    port: 5,
++                    failure: HandshakeError::Io {
++                        phase: HandshakePhase::Dial,
++                        ..
++                    }
++                })
++            ),
++            "{:?}",
++            absent.as_ref().err()
++        );
++        assert!(!lock(&shared.state).ready);
++    }
++
++    /// D215/AC-T7.4.1: dial once a muxer that accepts and never answers; expect the CONNECT
++    /// refused by its deadline, in the read, and no second dial.
++    #[cfg(unix)]
++    #[test]
++    fn single_attempt_to_a_silent_listener_is_refused_by_its_deadline() {
++        let dir = shards_testdir::TempDir::new("api-silent").unwrap();
++        let path = dir.join("v");
++        // Never accepted: the kernel completes the connection and holds the CONNECT unread.
++        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
++        listener.set_nonblocking(true).unwrap();
++        let shared = managed_shared(0, false, None).unwrap();
++        let at = Instant::now()
++            .checked_add(crate::conformance::UNSERVED_PATIENCE)
++            .unwrap();
++        let silent = connect_with_budget(&shared, &path, 5, ConnectBudget::Once(at), || Ok(None));
++        assert!(Instant::now() >= at, "refused by, not before, its deadline");
++        assert!(
++            matches!(
++                silent,
++                Err(Refusal::Connect {
++                    port: 5,
++                    failure: HandshakeError::Expired {
++                        phase: HandshakePhase::Read
++                    }
++                })
++            ),
++            "{:?}",
++            silent.as_ref().err()
++        );
++        assert!(listener.accept().is_ok(), "its one connection");
++        assert!(
++            matches!(listener.accept(), Err(ref why) if why.kind() == io::ErrorKind::WouldBlock),
++            "no second dial"
++        );
++        assert!(!lock(&shared.state).ready);
++    }
++
+     /// D215: native observation spends the caller's absolute cap; an endpoint
+     /// which already exists must not get a late CONNECT after that cap expires.
+     #[cfg(unix)]
+diff --git a/crates/api/src/conformance.rs b/crates/api/src/conformance.rs
+index e20f8d37bf39770684cae32f6bb3885005a832d3..05eb4d7f508e60e0d3f830a0d210343f4aec49ec 100644
+--- a/crates/api/src/conformance.rs
++++ b/crates/api/src/conformance.rs
+@@ -77,6 +77,7 @@ pub fn run(s: &Subject<'_>) -> Result<(), Failure> {
+     more_vcpus_than_the_hypervisor_runs_are_refused_as_bounds(s)?;
+     a_served_port_carries_bytes_and_a_half_close(s)?;
+     an_unserved_port_is_refused(s)?;
++    a_single_attempt_is_refused_at_once_where_the_guest_does_not_listen(s)?;
+     stop_ends_it_and_later_connects_are_refused(s)?;
+     a_guest_that_powers_off_ends_as_power_off(s)?;
+     a_guest_its_client_lost_is_taken_back_by_attach(s)
+@@ -274,6 +275,41 @@ pub fn an_unserved_port_is_refused(s: &Subject<'_>) -> Result<(), Failure> {
+     Ok(())
+ }
+ 
++/// A single attempt (`connect_once_before`) to a port the guest serves connects; one to a port it
++/// doesn't serve is refused at once, closed unanswered, never asked again until its deadline.
++pub fn a_single_attempt_is_refused_at_once_where_the_guest_does_not_listen(
++    s: &Subject<'_>,
++) -> Result<(), Failure> {
++    const CASE: &str = "a single attempt is refused at once where the guest does not listen";
++    let guest = boot(CASE, s, &s.serving)?;
++    // Ready first: waiting for a boot is the retrying form's.
++    drop(
++        guest
++            .connect(s.port, s.patience)
++            .map_err(|e| fail(CASE, format!("connect to the served port: {e}")))?,
++    );
++    let at = Instant::now()
++        .checked_add(s.patience)
++        .ok_or_else(|| fail(CASE, "the patience is past a deadline"))?;
++    drop(
++        guest
++            .connect_once_before(s.port, at)
++            .map_err(|e| fail(CASE, format!("a single attempt to the served port: {e}")))?,
++    );
++    match guest.connect_once_before(s.unserved, at) {
++        Err(Refusal::Connect {
++            port,
++            failure: crate::HandshakeError::Closed,
++        }) if port == s.unserved => {}
++        other => return Err(fail(CASE, format!("port {}: {:?}", s.unserved, other.err()))),
++    }
++    if Instant::now() >= at {
++        return Err(fail(CASE, "refused only at its deadline, not at once"));
++    }
++    let _ = guest.stop();
++    Ok(())
++}
++
+ /// How long a real guest may take to boot and listen, to echo, or to end (`record::Learned`):
+ /// a hang guard, each wait returning at its fact. Recorded, the slowest of those waits by
+ /// the client as it is (`docs/research/platform-measurements.md` M463): macOS-HVF's, a boot
+diff --git a/crates/api/src/lib.rs b/crates/api/src/lib.rs
+index aec6b73dc67abde012a68799ee2a6c22271455c5..c7778dbd35f5cbe7486f7763e23761f4dda9055e 100644
+--- a/crates/api/src/lib.rs
++++ b/crates/api/src/lib.rs
+@@ -782,6 +782,15 @@ pub trait Guest: Send + Sync {
+     /// Synchronous OS calls/scheduling are not hard real-time bounded. A stream
+     /// completed after `deadline` is closed and refused before publication.
+     fn connect_before(&self, port: u32, deadline: Instant) -> Result<Box<dyn Stream>, Refusal>;
++    /// One dial to `port` under the same absolute deadline, never asked again: a guest that
++    /// does not listen there now (refused, absent, or closed unanswered) is refused at once,
++    /// and one that accepts but does not answer is refused by `deadline`. For a port the
++    /// guest has already been reached on; a first or boot dial uses
++    /// [`connect_before`](Guest::connect_before), which waits for the guest to listen. An
++    /// implementor without a single attempt of its own dials as `connect_before` does.
++    fn connect_once_before(&self, port: u32, deadline: Instant) -> Result<Box<dyn Stream>, Refusal> {
++        self.connect_before(port, deadline)
++    }
+     /// Ends it at once: its VM's process is killed (SIGKILL; on Windows, its process
+     /// ended), and its [`wait_for`](Guest::wait_for) then returns [`End::Stopped`]. Never
+     /// refused, as a VM left running is a leak. The VMM has no host-to-guest power-off
+diff --git a/crates/api/src/sim.rs b/crates/api/src/sim.rs
+index f2ae989daed27d6d343f56e67ddd1dc056b3edaf..b1efe9dafa09f69413bb641784d1b3e02452f3ca 100644
+--- a/crates/api/src/sim.rs
++++ b/crates/api/src/sim.rs
+@@ -334,6 +334,10 @@ impl Guest for SimGuest {
+         self.connect_with_budget(port, SimConnectBudget::Before(deadline))
+     }
+ 
++    fn connect_once_before(&self, port: u32, deadline: Instant) -> Result<Box<dyn Stream>, Refusal> {
++        self.connect_with_budget(port, SimConnectBudget::Once(deadline))
++    }
++
+     fn stop(&self) -> Result<(), Refusal> {
+         let mut state = lock(&self.shared);
+         state.end.get_or_insert(End::Stopped);
+@@ -372,6 +376,7 @@ impl Guest for SimGuest {
+ enum SimConnectBudget {
+     Standalone(Duration),
+     Before(Instant),
++    Once(Instant),
+ }
+ 
+ impl SimGuest {
+@@ -380,11 +385,15 @@ impl SimGuest {
+         // None: past `Instant`'s range (`Duration::MAX`): until the guest listens or ends.
+         let deadline = match budget {
+             SimConnectBudget::Standalone(patience) => Instant::now().checked_add(patience),
+-            SimConnectBudget::Before(at) => Some(at),
++            SimConnectBudget::Before(at) | SimConnectBudget::Once(at) => Some(at),
++        };
++        let absolute = match budget {
++            SimConnectBudget::Standalone(_) => None,
++            SimConnectBudget::Before(at) | SimConnectBudget::Once(at) => Some(at),
+         };
+         let mut state = lock(&self.shared);
+         loop {
+-            if matches!(budget, SimConnectBudget::Before(at) if Instant::now() >= at) {
++            if absolute.is_some_and(|at| Instant::now() >= at) {
+                 return Err(Refusal::Connect {
+                     port,
+                     failure: crate::HandshakeError::Expired {
+@@ -422,7 +431,7 @@ impl SimGuest {
+                 let ours = ours.boxed().map_err(|_| Refusal::Allocation {
+                     what: "connection storage",
+                 })?;
+-                if matches!(budget, SimConnectBudget::Before(at) if Instant::now() >= at) {
++                if absolute.is_some_and(|at| Instant::now() >= at) {
+                     return Err(Refusal::Connect {
+                         port,
+                         failure: crate::HandshakeError::Expired {
+@@ -434,10 +443,17 @@ impl SimGuest {
+                 self.shared.changed.notify_all();
+                 return Ok(ours);
+             }
++            if matches!(budget, SimConnectBudget::Once(_)) {
++                // As the VMM's muxer does, a CONNECT to a port nobody listens on closes unanswered.
++                return Err(Refusal::Connect {
++                    port,
++                    failure: crate::HandshakeError::Closed,
++                });
++            }
+             state = match deadline.map(|d| d.saturating_duration_since(Instant::now())) {
+                 Some(left) if left.is_zero() => {
+                     return Err(match budget {
+-                        SimConnectBudget::Before(_) => Refusal::Connect {
++                        SimConnectBudget::Before(_) | SimConnectBudget::Once(_) => Refusal::Connect {
+                             port,
+                             failure: crate::HandshakeError::Expired {
+                                 phase: crate::HandshakePhase::Dial,
