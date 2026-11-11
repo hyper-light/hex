@@ -1590,7 +1590,7 @@ mod tests {
     /// prepared typed pin; cache insertion, collisions and a reused path cannot change its owner.
     #[test]
     fn managed_creation_uses_one_prepared_pin_and_refuses_colliding_names() {
-        let tmp = TempDir::new("managed-create-pin").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let root = BoxRoot {
             dir: tmp.path().to_path_buf(),
             fd: Arc::new(
@@ -1661,7 +1661,7 @@ mod tests {
     /// over-bound or malformed bytes cannot credit an empty native scope after path replacement.
     #[test]
     fn managed_population_refuses_required_failures_and_never_follows_path_reuse() {
-        let tmp = TempDir::new("managed-population").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("scope");
         fs::create_dir(&dir).unwrap();
         let cg = pinned_managed_cgroup(&dir);
