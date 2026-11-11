@@ -401,7 +401,7 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
             // Prepared. Fresh GPU observation waits for its real Index/native grant.
             node.prepare_guest_backing()
                 .map_err(failed)?
-                .check()
+                .allocation()
                 .map_err(failed)?;
             node.recover_guest_backing().map_err(failed)?;
             say_recovered(&node.recover().map_err(failed)?);

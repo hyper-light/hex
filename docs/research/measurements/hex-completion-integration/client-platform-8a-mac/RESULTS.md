@@ -1,0 +1,7 @@
+# Native macOS compilation and scoped controls
+
+Exact signed8a421601a55cd902f4e5bc15ea04cf942dc216b7 on macOS arm64/b24, private source/target/cache/temp/Rust1.99.1 copy, admitted1CPU/4GiB/12GiB,nice10/jobs1/threads1. Seven selected tests passed, zero failed/ignored: new client owner1 and whole-adapter metadata barrier6. These are owner/private-file/SimRuntime controls, not a native Mac VM recovery or GPU invocation.
+
+Whole job exited1: client/runtime all-target Clippy101 had seven lints (three forbidden then_some fixture uses, one useless Option owner mapping, Ready Guest enum size, test-module item order, native-table return type complexity). Node/CLI all-target compile101 found ROOT startup calling nonexistent BackingOffer.check. ROOT corrected that to the existing allocation() validator, preserving exact provisioning/fixed-cost validation before native recovery. Named owners receive separate narrow lint corrections; no waivers or seven-test repeat.
+
+All four phase children reaped; temp0/source0diff/native backend0. Local dispatch CLI10952 and collector19843 reaped. Raw236506B SHA256805b898eafeae94988f451a0e30d659440979b67d68dd967d7f8334c054cc2f8; every archive member/source manifest independently verified on collection and again on intake. Exact original logs, commands and binary hashes remain lossless. No all-platform, native cleanup, full-gate or completion claim is made.
