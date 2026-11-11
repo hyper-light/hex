@@ -144,7 +144,58 @@ pub struct PhysicalDevice {
 #[serde(deny_unknown_fields)]
 pub struct BackendUnavailable {
     pub backend: crate::Class,
+    #[serde(with = "unavailable_cause")]
     pub cause: Refusal,
+}
+
+/// This diagnostic has only fixed-size backing identity and the existing three typed causes.
+/// General Refusal contains static names/text and deliberately has no serde implementation.
+mod unavailable_cause {
+    use super::*;
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Cause {
+        key: crate::BackingKey,
+        cause: crate::LifecycleCause,
+    }
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        value: &Refusal,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        if !BackendUnavailable::qualified(crate::Class::Firecracker, value) {
+            return Err(serde::ser::Error::custom(
+                "only qualified backing observation causes may be encoded",
+            ));
+        }
+        let Refusal::Backing { key, cause } = value else {
+            return Err(serde::ser::Error::custom(
+                "unavailable observation has no backing identity",
+            ));
+        };
+        Cause {
+            key: *key,
+            cause: *cause,
+        }
+        .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Refusal, D::Error> {
+        let value = Cause::deserialize(deserializer)?;
+        let cause = Refusal::Backing {
+            key: value.key,
+            cause: value.cause,
+        };
+        if !BackendUnavailable::qualified(crate::Class::Firecracker, &cause) {
+            return Err(de::Error::custom(
+                "only Pending, Busy or Uncertain backing observations may be decoded",
+            ));
+        }
+        Ok(cause)
+    }
 }
 
 impl BackendUnavailable {
@@ -719,6 +770,14 @@ mod unavailable_tests {
         };
         report.check().unwrap();
         assert_eq!(report.try_clone().unwrap(), report);
+        let encoded = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            serde_json::from_value::<PhysicalReport>(encoded.clone()).unwrap(),
+            report
+        );
+        let mut malformed = encoded;
+        malformed["unavailable"][0]["cause"]["cause"] = serde_json::json!("finished");
+        assert!(serde_json::from_value::<PhysicalReport>(malformed).is_err());
         assert!(report.devices.is_empty());
         let legacy: PhysicalReport =
             serde_json::from_str(r#"{"authority":"actual-native-owner","devices":[]}"#).unwrap();
@@ -735,13 +794,46 @@ mod unavailable_tests {
             what: "native physical report authority",
             why: "mismatch".into(),
         };
+        assert!(
+            serde_json::to_value(BackendUnavailable {
+                backend: crate::Class::Firecracker,
+                cause: invalid.clone(),
+            })
+            .is_err()
+        );
         assert_eq!(
             BackendUnavailable::from_refusal(crate::Class::Firecracker, invalid.clone())
                 .unwrap_err(),
             invalid
         );
+        for cause in [
+            crate::LifecycleCause::Pending,
+            crate::LifecycleCause::Busy,
+            crate::LifecycleCause::Uncertain,
+        ] {
+            let diagnostic = BackendUnavailable::from_refusal(
+                crate::Class::Firecracker,
+                Refusal::Backing {
+                    key: crate::BackingKey {
+                        pool: [1; 32],
+                        generation: [2; 16],
+                    },
+                    cause,
+                },
+            )
+            .unwrap();
+            let mut encoded = serde_json::to_value(&diagnostic).unwrap();
+            assert_eq!(
+                serde_json::from_value::<BackendUnavailable>(encoded.clone()).unwrap(),
+                diagnostic
+            );
+            encoded["cause"]["why"] = serde_json::json!("general refusal text must not decode");
+            assert!(serde_json::from_value::<BackendUnavailable>(encoded).is_err());
+        }
+        let first = BackendUnavailable::from_refusal(crate::Class::Firecracker, refused()).unwrap();
+        let second = BackendUnavailable::from_refusal(crate::Class::Shards, refused()).unwrap();
         let oversized = serde_json::json!({"authority":"actual-native-owner","devices":[],"unavailable":[
-            {"backend":"firecracker","cause":refused()}, {"backend":"shards","cause":refused()}, {"bad":"third must not decode"}
+            first, second, {"bad":"third must not decode"}
         ]});
         assert!(
             serde_json::from_value::<PhysicalReport>(oversized)
