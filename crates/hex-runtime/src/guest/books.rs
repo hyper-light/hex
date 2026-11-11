@@ -437,6 +437,16 @@ mod tests {
         }
     }
     impl Books for Owner {
+        fn with_handoff_transaction(
+            &self,
+            _: &hex_api::BoxId,
+            _: &hex_api::BackingKey,
+            _: &[hex_api::DeviceId],
+            _: &mut dyn FnMut(&dyn crate::devices::Transaction) -> Result<(), hex_api::Refusal>,
+        ) -> Result<(), hex_api::Refusal> {
+            panic!("existing test owner must not enter a subset handoff")
+        }
+
         fn pool_records(&self) -> Result<crate::devices::PoolRecords, Refusal> {
             Ok(Vec::new())
         }

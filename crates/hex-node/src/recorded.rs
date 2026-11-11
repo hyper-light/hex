@@ -243,6 +243,10 @@ struct Transaction<'a> {
 #[derive(Clone, Copy)]
 enum TransactionOwner<'a> {
     Box(&'a BoxId),
+    Handoff {
+        id: &'a BoxId,
+        source: &'a hex_api::BackingKey,
+    },
     Pool(&'a hex_api::BackingKey),
 }
 
@@ -293,6 +297,118 @@ fn broken(message: &'static str) -> Refusal {
     Refusal::Broken(why)
 }
 
+/// One retained route joins its SAME canonical source generation/profile. A reserved/cancelled
+/// dedicated Box cannot obtain native permission from a source still Live/Draining. Adapter
+/// preflight must additionally prove exact no-Intent for the unsubmitted cancellation shape.
+pub(crate) fn check_backing_reference(
+    record: &BoxRecord,
+    pool: &PoolRecord,
+) -> Result<(), Refusal> {
+    let bad = || uncertain(&record.spec.id);
+    let route = record.spec.route.ok_or_else(bad)?;
+    if route.backing != Some(pool.key)
+        || route.key.backend_class() != NativeRecord::Pool(pool).class()?
+        || pool.phase == hex_api::BackingPhase::Prepared
+    {
+        return Err(bad());
+    }
+    hex_api::RouteOffer {
+        key: route.key,
+        cost: record.spec.allocation.map(|allocation| allocation.cost),
+        backing: route.backing,
+    }
+    .check_backing_parts(pool.key, pool.cost, &pool.devices)?;
+    if route.key.execution == hex_api::Execution::ShardsShared {
+        return Ok(());
+    }
+    hex_api::BackingOffer::check_selection_parts(&pool.devices, &record.spec.devices)?;
+    match pool.phase {
+        hex_api::BackingPhase::Live | hex_api::BackingPhase::Draining
+            if matches!(record.phase, Phase::Creating | Phase::Deleting)
+                && record.init.is_none()
+                && record.run.is_none()
+                && record.exit.is_none() =>
+        {
+            Ok(())
+        }
+        hex_api::BackingPhase::Released if pool.allocation.is_some() && pool.exit.is_some() => {
+            Ok(())
+        }
+        _ => Err(bad()),
+    }
+}
+
+/// Bound the sole consuming Box reference without another holder table. This is a borrowed
+/// snapshot check under the existing source/Box turns, also shared by whole-owner preflight.
+pub(crate) fn check_single_consumer(
+    records: &hex_runtime::devices::Records,
+    source: hex_api::BackingKey,
+    id: &BoxId,
+) -> Result<(), Refusal> {
+    if records.len() > crate::store::TURNS {
+        return Err(Refusal::Full(crate::store::TURNS));
+    }
+    for (other, row) in records {
+        let row = row.as_ref().map_err(|_| uncertain(other))?;
+        if row.version != hex_core::record::RECORD_VERSION || row.spec.id != *other {
+            return Err(uncertain(other));
+        }
+        row.spec.check()?;
+        if other != id
+            && row.spec.route.is_some_and(|route| {
+                route.backing == Some(source)
+                    && route.key.execution != hex_api::Execution::ShardsShared
+            })
+        {
+            return Err(Refusal::Backing {
+                key: source,
+                cause: hex_api::LifecycleCause::Busy,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Keep the same source/Box guard while an adapter proves that a reserved/cancelled handoff
+/// has no boot Intent. Revalidate the canonical rows after acquisition; no global mutex spans
+/// metadata I/O or the adapter callback. Node and Recorded share this exact helper.
+pub(crate) fn preflight_handoff_turns<'a>(
+    turns: &'a Turns,
+    store: &Store,
+    record: &BoxRecord,
+    catalog: Option<&hex_runtime::devices::Catalog>,
+) -> Result<Option<(crate::turns::Turn<'a>, crate::turns::Turn<'a>)>, Refusal> {
+    let Some(route) = record.spec.route else {
+        return Ok(None);
+    };
+    let Some(source) = route.backing else {
+        return Ok(None);
+    };
+    if route.key.execution == hex_api::Execution::ShardsShared {
+        return Ok(None);
+    }
+    let pool = store
+        .read_pool(&source.pool)?
+        .ok_or_else(|| uncertain(&record.spec.id))?;
+    check_backing_reference(record, &pool)?;
+    if !matches!(
+        pool.phase,
+        hex_api::BackingPhase::Live | hex_api::BackingPhase::Draining
+    ) {
+        return Ok(None);
+    }
+    let keys = catalog
+        .ok_or_else(|| uncertain(&record.spec.id))?
+        .conflict_ids(&pool.devices)?;
+    let held = turns.try_take_handoff(&record.spec.id, &source, &keys)?;
+    if store.read_pool(&source.pool)?.as_ref() != Some(&pool)
+        || store.read_lifecycle(&record.spec.id)?.as_ref() != Some(record)
+    {
+        return Err(uncertain(&record.spec.id));
+    }
+    Ok(Some(held))
+}
+
 /// Whole retained-owner structural preflight shared by Node and Recorded. These are borrowed
 /// snapshots from their SAME Store, not a second ledger. Only Catalog::holder decides conflicting
 /// physical ownership, including its existing exact Box/Pool handoff rule.
@@ -327,6 +443,13 @@ pub(crate) fn preflight_records(
         .map_err(|_| Refusal::Exhausted {
             what: "retained physical claim preflight",
             bound: claim_bound,
+        })?;
+    let mut consumers = Vec::new();
+    consumers
+        .try_reserve_exact(records.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "retained consuming backing references",
+            bound: records.len(),
         })?;
     let mut add_claims = |devices: &[DeviceId]| -> Result<(), Refusal> {
         if claims
@@ -405,27 +528,26 @@ pub(crate) fn preflight_records(
                 .ok()
                 .and_then(|at| pools.get(at))
             {
-                if route.key.backend_class() != NativeRecord::Pool(pool).class()?
-                    || pool.phase == hex_api::BackingPhase::Prepared
-                {
-                    return Err(uncertain(id));
+                check_backing_reference(record, pool)?;
+                if !shared {
+                    consumers.push((key, id));
                 }
-                hex_api::RouteOffer {
-                    key: route.key,
-                    cost: record.spec.allocation.map(|allocation| allocation.cost),
-                    backing: Some(key),
-                }
-                .check_backing_parts(pool.key, pool.cost, &pool.devices)?;
-                if !shared && record.spec.devices != pool.devices {
-                    return Err(uncertain(id));
-                }
-            } else if shared || record.init.is_none() || record.native_scope.is_none() {
-                // A dedicated observer may outlive its old Released pool row only AFTER the new
-                // Box's own held native identity is canonical. A shared payload never owns that VM.
+            } else {
+                // Every immutable route reference retains its source row through Box removal.
                 return Err(uncertain(id));
             }
         }
         add_claims(&record.spec.devices)?;
+    }
+    consumers.sort_unstable_by_key(|(key, _)| *key);
+    if let Some(duplicate) = consumers.windows(2).find_map(|pair| match pair {
+        [left, right] if left.0 == right.0 => Some(left.0),
+        _ => None,
+    }) {
+        return Err(Refusal::Backing {
+            key: duplicate,
+            cause: hex_api::LifecycleCause::Uncertain,
+        });
     }
     scopes.sort_unstable();
     if scopes
@@ -455,22 +577,31 @@ pub(crate) fn preflight_records(
 impl Transaction<'_> {
     fn refused(&self, cause: hex_api::LifecycleCause) -> Refusal {
         match self.owner {
-            TransactionOwner::Box(id) => match id.try_clone() {
-                Ok(id) => Refusal::Lifecycle { id, cause },
-                Err(error) => error,
-            },
+            TransactionOwner::Box(id) | TransactionOwner::Handoff { id, .. } => {
+                match id.try_clone() {
+                    Ok(id) => Refusal::Lifecycle { id, cause },
+                    Err(error) => error,
+                }
+            }
             TransactionOwner::Pool(key) => Refusal::Backing { key: *key, cause },
         }
     }
     fn box_id(&self) -> Result<&BoxId, Refusal> {
         match self.owner {
-            TransactionOwner::Box(id) => Ok(id),
+            TransactionOwner::Box(id) | TransactionOwner::Handoff { id, .. } => Ok(id),
             TransactionOwner::Pool(_) => Err(self.refused(hex_api::LifecycleCause::Uncertain)),
         }
     }
     fn owns(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
         let identity = match (self.owner, record) {
             (TransactionOwner::Box(id), NativeRecord::Box(record)) => *id == record.spec.id,
+            (TransactionOwner::Handoff { id, source }, NativeRecord::Box(record)) => {
+                *id == record.spec.id
+                    && record.spec.route.is_some_and(|route| {
+                        route.backing == Some(*source)
+                            && route.key.execution != hex_api::Execution::ShardsShared
+                    })
+            }
             (TransactionOwner::Pool(key), NativeRecord::Pool(record)) => *key == record.key,
             _ => false,
         };
@@ -489,7 +620,7 @@ impl Transaction<'_> {
         operation: impl FnOnce(NativeRecord<'_>) -> Result<T, Refusal>,
     ) -> Result<T, Refusal> {
         match self.owner {
-            TransactionOwner::Box(id) => {
+            TransactionOwner::Box(id) | TransactionOwner::Handoff { id, .. } => {
                 let record = self
                     .store
                     .read_lifecycle(id)?
@@ -497,6 +628,21 @@ impl Transaction<'_> {
                 let native = NativeRecord::Box(&record);
                 self.owns(native)?;
                 record.spec.check()?;
+                if self
+                    .store
+                    .check_box_backing(&record)?
+                    .is_some_and(|phase| phase != hex_api::BackingPhase::Released)
+                    && let Some(route) = record
+                        .spec
+                        .route
+                        .filter(|route| route.key.execution != hex_api::Execution::ShardsShared)
+                    && let Some(key) = route.backing
+                {
+                    return Err(Refusal::Backing {
+                        key,
+                        cause: hex_api::LifecycleCause::Pending,
+                    });
+                }
                 operation(native)
             }
             TransactionOwner::Pool(key) => {
@@ -729,6 +875,12 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
     fn put(&self, record: &BoxRecord) -> Result<(), Refusal> {
         self.owns(NativeRecord::Box(record))?;
         if self.store.read_lifecycle(&record.spec.id)?.is_none() {
+            if record.spec.route.is_some_and(|route| {
+                route.backing.is_some() && route.key.execution != hex_api::Execution::ShardsShared
+            }) && !matches!(self.owner, TransactionOwner::Handoff { .. })
+            {
+                return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+            }
             check_box_claims(self.store, self.native.catalog, &record.spec)?;
         }
         self.store.put_lifecycle(record)
@@ -748,11 +900,27 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
     fn read_pool(&self, key: &hex_api::BackingKey) -> Result<Option<PoolRecord>, Refusal> {
         match self.owner {
             TransactionOwner::Pool(expected) if expected == key => {}
+            TransactionOwner::Handoff { source, .. } if source == key => {}
+            TransactionOwner::Box(id) => {
+                let current = self
+                    .store
+                    .read_lifecycle(id)?
+                    .ok_or_else(|| self.refused(hex_api::LifecycleCause::Uncertain))?;
+                if current.spec.route.and_then(|route| route.backing) != Some(*key) {
+                    return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+                }
+            }
             _ => return Err(self.refused(hex_api::LifecycleCause::Uncertain)),
         }
         let record = self.store.read_pool(&key.pool)?;
         if let Some(record) = &record {
-            self.owns(NativeRecord::Pool(record))?;
+            record.check()?;
+            if record.key != *key {
+                return Err(self.refused(hex_api::LifecycleCause::Uncertain));
+            }
+            if matches!(self.owner, TransactionOwner::Pool(_)) {
+                self.owns(NativeRecord::Pool(record))?;
+            }
         }
         Ok(record)
     }
@@ -792,6 +960,55 @@ pub(crate) fn transaction(
         store,
         owner: TransactionOwner::Box(id),
         devices,
+        native,
+    })
+}
+
+/// SAME Box transaction, with its immutable source available read-only. The caller owns source
+/// configuration then Box/full-P alias turns; no pool mutation/native callback reenters them.
+pub(crate) fn handoff_transaction(
+    store: &Store,
+    id: &BoxId,
+    source: &hex_api::BackingKey,
+    full_conflicts: &[DeviceId],
+    native: &Native<'_>,
+    callback: &mut dyn FnMut(&dyn hex_runtime::devices::Transaction) -> Result<(), Refusal>,
+) -> Result<(), Refusal> {
+    let refused = || Refusal::Backing {
+        key: *source,
+        cause: hex_api::LifecycleCause::Uncertain,
+    };
+    let pool = store.read_pool(&source.pool)?.ok_or_else(refused)?;
+    pool.check()?;
+    if pool.key != *source
+        || pool.allocation.is_none()
+        || !matches!(
+            pool.execution,
+            hex_api::Execution::ShardsDedicated | hex_api::Execution::Firecracker
+        )
+        || !matches!(
+            pool.phase,
+            hex_api::BackingPhase::Live
+                | hex_api::BackingPhase::Draining
+                | hex_api::BackingPhase::Released
+        )
+    {
+        return Err(refused());
+    }
+    hex_api::BackingOffer::check_selection_parts(&pool.devices, &pool.devices)?;
+    let catalog = native.catalog.ok_or_else(refused)?;
+    if catalog.conflict_ids(&pool.devices)?.as_slice() != full_conflicts {
+        return Err(refused());
+    }
+    let records = store.retained_records()?;
+    check_single_consumer(&records, *source, id)?;
+    if let Some(current) = records.get(id) {
+        check_backing_reference(current.as_ref().map_err(|_| uncertain(id))?, &pool)?;
+    }
+    callback(&Transaction {
+        store,
+        owner: TransactionOwner::Handoff { id, source },
+        devices: full_conflicts,
         native,
     })
 }
@@ -937,8 +1154,14 @@ impl<R: Recover> Recorded<R> {
         // Configuration validation is a complete second read-only pass. Native observations and
         // cleanup are deliberately deferred until every sibling and backing passes both passes.
         for (id, record) in &records {
-            self.runtime
-                .preflight_record(record.as_ref().map_err(|_| uncertain(id))?)?;
+            let record = record.as_ref().map_err(|_| uncertain(id))?;
+            let _handoff = preflight_handoff_turns(
+                &self.books.lifecycle,
+                &self.books.store,
+                record,
+                catalog.as_deref(),
+            )?;
+            self.runtime.preflight_record(record)?;
         }
         for record in &pools {
             self.runtime.preflight_pool(record)?;
@@ -992,6 +1215,9 @@ impl<R: Recover> Recorded<R> {
         match owner {
             TransactionOwner::Box(id) => {
                 transaction(&self.books.store, id, devices, &native, callback)
+            }
+            TransactionOwner::Handoff { id, source } => {
+                handoff_transaction(&self.books.store, id, source, devices, &native, callback)
             }
             TransactionOwner::Pool(key) => {
                 pool_transaction(&self.books.store, key, devices, &native, callback)
@@ -1064,6 +1290,23 @@ impl<R: Recover> hex_runtime::devices::Books for Recorded<R> {
             .lifecycle
             .try_take_pool_configuration(&pool, devices)?;
         prepare_pool(&self.books.store, pool, execution, cost, devices)
+    }
+    fn with_handoff_transaction(
+        &self,
+        id: &BoxId,
+        source: &hex_api::BackingKey,
+        full_conflicts: &[DeviceId],
+        callback: &mut dyn FnMut(&dyn hex_runtime::devices::Transaction) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        let _turns = self
+            .books
+            .lifecycle
+            .try_take_handoff(id, source, full_conflicts)?;
+        self.native_transaction(
+            TransactionOwner::Handoff { id, source },
+            full_conflicts,
+            callback,
+        )
     }
     fn with_pool_transaction(
         &self,
@@ -2317,3 +2560,7 @@ mod pool_tests;
 #[cfg(test)]
 #[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_report_tests.rs"]
 mod report_tests;
+
+#[cfg(test)]
+#[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs"]
+mod handoff_tests;

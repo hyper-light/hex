@@ -156,6 +156,14 @@ impl Store {
             }
             return Ok(record);
         }
+        // A missing old Pool row is not permission to rearm a configuration still named by a Box.
+        // Keep that immutable reference for whole-owner recovery; generate no replacement scope.
+        if let Some(source) = self.referenced_pool(&pool)? {
+            return Err(Refusal::Backing {
+                key: source,
+                cause: LifecycleCause::Uncertain,
+            });
+        }
         // Configured native owners share their existing MAX_BOXES slot bound. Scans and source
         // preparation are bounded here too; a grant is still admitted by the sole Index pool.
         if self.all_pools()?.len() >= TURNS {
@@ -216,6 +224,32 @@ impl Store {
         read_pool_file(file, pool).map(Some)
     }
 
+    /// Same canonical source/generation/profile and sole consuming reference, never a fresh
+    /// provider report. Its caller serializes publication on this Store's existing Pool turn.
+    pub(crate) fn check_box_backing(
+        &self,
+        record: &hex_core::record::BoxRecord,
+    ) -> Result<Option<BackingPhase>, Refusal> {
+        let Some(route) = record.spec.route else {
+            return Ok(None);
+        };
+        let Some(source) = route.backing else {
+            return Ok(None);
+        };
+        let pool = self
+            .read_pool(&source.pool)?
+            .ok_or_else(|| refused(source))?;
+        crate::recorded::check_backing_reference(record, &pool)?;
+        if route.key.execution != Execution::ShardsShared {
+            crate::recorded::check_single_consumer(
+                &self.retained_records()?,
+                source,
+                &record.spec.id,
+            )?;
+        }
+        Ok(Some(pool.phase))
+    }
+
     pub(crate) fn grant_pool(&self, grant: &BackingGrant) -> Result<PoolRecord, Refusal> {
         let _turn = self.turns.take_pool(&grant.key)?;
         let mut record = self
@@ -242,6 +276,26 @@ impl Store {
         self.publish_durable(&directory, &temporary, &final_path, &bytes)
     }
 
+    /// A strict bounded SAME-Store snapshot, not a reference cache. Unknown/incomplete rows
+    /// refuse; no old generation can be erased/rearmed because its source row disappeared.
+    fn referenced_pool(&self, pool: &[u8; 32]) -> Result<Option<BackingKey>, Refusal> {
+        for (id, row) in self.retained_records()? {
+            let row = row.map_err(Refusal::Broken)?;
+            if row.version != RECORD_VERSION || row.spec.id != id {
+                return Err(invalid(
+                    "retained backing reference has inconsistent identity",
+                ));
+            }
+            row.spec.check()?;
+            if let Some(source) = row.spec.route.and_then(|route| route.backing)
+                && source.pool == *pool
+            {
+                return Ok(Some(source));
+            }
+        }
+        Ok(None)
+    }
+
     /// Only exact Released state permits removal; a reused configuration's generation is untouched.
     pub(crate) fn remove_pool(&self, key: &BackingKey) -> Result<(), Refusal> {
         let _turn = self.turns.take_pool(key)?;
@@ -250,6 +304,16 @@ impl Store {
         };
         if record.key != *key || record.phase != BackingPhase::Released {
             return Err(refused(*key));
+        }
+        // Hold the SAME source metadata turn through the strict scan and unlink. Every reference
+        // publication takes it before its Box turn; a new reference cannot appear after this scan.
+        if self.referenced_pool(&key.pool)?.is_some() {
+            // Includes stale/conflicting generations: preserve their only source metadata for the
+            // global barrier instead of overwriting the evidence of an inconsistent join.
+            return Err(Refusal::Backing {
+                key: *key,
+                cause: LifecycleCause::Busy,
+            });
         }
         let directory = self.pool_directory()?;
         let (_, path) = scoped_paths(&directory, &name(&key.pool)?)?;

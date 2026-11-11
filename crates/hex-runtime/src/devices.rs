@@ -385,6 +385,15 @@ pub trait Books: Send + Sync {
         devices: &[DeviceId],
         callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
     ) -> Result<(), Refusal>;
+    /// One source Pool configuration turn, then the Box/full-source-conflict turns. The same
+    /// concrete Box transaction validates/persists its subset relation; no native effect is implicit.
+    fn with_handoff_transaction(
+        &self,
+        id: &BoxId,
+        source: &hex_api::BackingKey,
+        full_conflicts: &[DeviceId],
+        callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal>;
 }
 
 pub trait Transaction {
@@ -441,6 +450,19 @@ pub fn with_pool_transaction<T>(
 ) -> Result<T, Refusal> {
     transaction(books, operation, |books, callback| {
         books.with_pool_transaction(key, devices, callback)
+    })
+}
+
+/// The SAME callback-once stack facade, with the existing owner holding both handoff turn kinds.
+pub fn with_handoff_transaction<T>(
+    books: &std::sync::Weak<dyn Books>,
+    id: &BoxId,
+    source: &hex_api::BackingKey,
+    full_conflicts: &[DeviceId],
+    operation: impl FnOnce(&dyn Transaction) -> Result<T, Refusal>,
+) -> Result<T, Refusal> {
+    transaction(books, operation, |books, callback| {
+        books.with_handoff_transaction(id, source, full_conflicts, callback)
     })
 }
 
@@ -1202,6 +1224,16 @@ mod authority_tests {
         }
     }
     impl Books for Owner {
+        fn with_handoff_transaction(
+            &self,
+            _: &hex_api::BoxId,
+            _: &hex_api::BackingKey,
+            _: &[hex_api::DeviceId],
+            _: &mut dyn FnMut(&dyn crate::devices::Transaction) -> Result<(), hex_api::Refusal>,
+        ) -> Result<(), hex_api::Refusal> {
+            panic!("existing test owner must not enter a subset handoff")
+        }
+
         fn records(&self) -> Result<Records, Refusal> {
             Ok(Records::new())
         }

@@ -187,6 +187,20 @@ impl Turns {
         })
     }
 
+    /// One handoff owns the source configuration before the consuming Box and all full-P
+    /// conflict keys. Only the Box turn carries device exclusions, avoiding a self-conflict.
+    /// Nonblocking acquisition drops the source turn on every failed second acquisition.
+    pub(crate) fn try_take_handoff(
+        &self,
+        id: &BoxId,
+        source: &hex_api::BackingKey,
+        full_conflicts: &[DeviceId],
+    ) -> Result<(Turn<'_>, Turn<'_>), Refusal> {
+        let pool = self.try_take_pool(source, &[])?;
+        let boxed = self.try_take_devices(id, full_conflicts)?;
+        Ok((pool, boxed))
+    }
+
     pub(crate) fn try_take_pool_configuration(
         &self,
         pool: &[u8; 32],
@@ -560,5 +574,59 @@ mod tests {
             waiter.join().unwrap().unwrap();
         });
         assert_eq!(turns.patience(), None, "a measuring wait is never armed");
+    }
+}
+
+#[cfg(test)]
+mod handoff_controls {
+    use super::*;
+    use hex_api::{BackingKey, DeviceKind};
+
+    /// AC-T7.4.1: the selected S may be smaller, but a handoff holds the entire canonical P and
+    /// source configuration. A failed acquisition cannot leave either half owned.
+    #[test]
+    fn handoff_turn_holds_full_source_and_releases_both_on_failure_or_completion() {
+        let turns = Turns::new(
+            "handoff",
+            "test owners",
+            8,
+            Patience::measuring("test.handoff"),
+        );
+        let source = BackingKey {
+            pool: [1; 32],
+            generation: [2; 16],
+        };
+        let id = BoxId::new("consumer").unwrap();
+        let sibling = BoxId::new("sibling").unwrap();
+        let p = [
+            DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 3,
+            },
+            DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 5,
+            },
+        ];
+        let held = turns.try_take_handoff(&id, &source, &p).unwrap();
+        assert!(turns.try_take_pool(&source, &[]).is_err());
+        assert!(turns.try_take_devices(&sibling, &p[1..]).is_err());
+        assert!(turns.try_take_devices(&id, &[]).is_err());
+        drop(held);
+        let sibling_turn = turns.try_take_devices(&sibling, &p[1..]).unwrap();
+        assert!(turns.try_take_handoff(&id, &source, &p).is_err());
+        let source_turn = turns.try_take_pool(&source, &[]).unwrap();
+        drop(source_turn);
+        drop(sibling_turn);
+        drop(turns.try_take_handoff(&id, &source, &p).unwrap());
+        assert!(turns.held.lock().unwrap().boxes.is_empty());
+        let bounded = Turns::new(
+            "handoff",
+            "one test owner",
+            1,
+            Patience::measuring("test.handoff"),
+        );
+        assert!(bounded.try_take_handoff(&id, &source, &p).is_err());
+        assert!(bounded.held.lock().unwrap().boxes.is_empty());
     }
 }

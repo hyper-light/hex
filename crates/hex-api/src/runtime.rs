@@ -271,6 +271,26 @@ pub struct BackingOffer {
     pub devices: Vec<crate::DeviceId>,
 }
 impl BackingOffer {
+    /// A workload's exact selection is separate from its source observer's full grant. This
+    /// validates identity membership only; it never releases P or invents a fresh observation.
+    pub fn check_selection_parts(
+        provisioned: &[crate::DeviceId],
+        selected: &[crate::DeviceId],
+    ) -> Result<(), Refusal> {
+        check_provisioning(provisioned)?;
+        check_provisioning(selected)?;
+        if selected.is_empty()
+            || selected
+                .iter()
+                .any(|id| provisioned.binary_search(id).is_err())
+        {
+            return Err(invalid_route(
+                "dedicated workload selection must be a nonempty subset of its source grant",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn try_clone(&self) -> Result<Self, Refusal> {
         self.allocation()?;
         Ok(Self {
@@ -1912,5 +1932,28 @@ mod route_tests {
         backing.devices.push(id);
         assert!(backing.allocation().is_err());
         assert!(backing.try_clone().is_err());
+    }
+}
+
+#[cfg(test)]
+mod subset_selection_tests {
+    use super::*;
+
+    /// AC-T7.4.1: a source observer's full grant never enlarges or replaces the Box's exact IDs.
+    #[test]
+    fn exact_subset_membership_keeps_full_provisioning_authority_separate() {
+        let id = |key| crate::DeviceId {
+            kind: crate::DeviceKind::Gpu,
+            key,
+        };
+        let full = [id(1), id(2)];
+        BackingOffer::check_selection_parts(&full, &full).unwrap();
+        BackingOffer::check_selection_parts(&full, &[id(2)]).unwrap();
+        for selected in [vec![], vec![id(3)], vec![id(2), id(1)], vec![id(1), id(1)]] {
+            assert!(BackingOffer::check_selection_parts(&full, &selected).is_err());
+        }
+        assert!(BackingOffer::check_selection_parts(&[id(2), id(1)], &[id(1)]).is_err());
+        assert!(BackingOffer::check_selection_parts(&[], &[id(1)]).is_err());
+        assert_eq!(full, [id(1), id(2)]);
     }
 }

@@ -183,6 +183,15 @@ impl Store {
         self.turns.take(id)
     }
 
+    /// All reference publication paths share the same short metadata owner as Pool removal.
+    /// No reference can appear after its removal scan and before unlink. Source precedes Box.
+    fn claim_backing(&self, record: &BoxRecord) -> Result<Option<Turn<'_>>, Refusal> {
+        match record.spec.route.and_then(|route| route.backing) {
+            Some(key) => self.turns.take_pool(&key).map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// How many changes of a box's record have waited for a change of the same box to finish.
     pub fn waited(&self) -> u64 {
         self.turns.waited()
@@ -226,23 +235,34 @@ impl Store {
     /// Writes `record` whole, in its place: either the old file or the new one survives a crash of
     /// the node agent, and a record that must outlive the host ([`must_outlive_host`]) is fsynced too.
     pub fn put(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        let _source = self.claim_backing(record)?;
         let _turn = self.claim(&record.spec.id)?;
+        if let Some(current) = self.read_lifecycle(&record.spec.id)?
+            && current.spec.route.and_then(|route| route.backing)
+                != record.spec.route.and_then(|route| route.backing)
+        {
+            return Err(uncertain(&record.spec.id));
+        }
+        let _backing_phase = self.check_box_backing(record)?;
         self.write(record)
     }
 
     /// Claims an unused identity before a runtime effect. An unfinished or unreadable record owns
     /// its name too: retrying create cannot replace the only durable cleanup/binding identity.
     pub(crate) fn begin(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        let _source = self.claim_backing(record)?;
         let _turn = self.claim(&record.spec.id)?;
         if self.get(&record.spec.id)?.is_some() {
             return Err(Refusal::Exists(record.spec.id.try_clone()?));
         }
+        let _backing_phase = self.check_box_backing(record)?;
         self.write_fresh(record)
     }
 
     /// Publishes only the create still described by this immutable record. A concurrent delete's
     /// durable intent wins; an old completion must never turn Deleting back into Ready.
     pub(crate) fn made(&self, expected: &BoxRecord) -> Result<(), Refusal> {
+        let _source = self.claim_backing(expected)?;
         let _turn = self.claim(&expected.spec.id)?;
         let Some(Ok(mut record)) = self.get(&expected.spec.id)? else {
             return Err(Refusal::Broken(
@@ -257,6 +277,7 @@ impl Store {
             });
         }
         record.phase = Phase::Ready;
+        let _backing_phase = self.check_box_backing(&record)?;
         self.write(&record)
     }
 
@@ -273,7 +294,11 @@ impl Store {
     /// Preserves the immutable cleanup authority and concurrent accounting when a backend advances
     /// a record. A fresh native effect must first publish Creating; deletion never rolls back.
     pub(crate) fn put_lifecycle(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        // Only scoped reference writes take this short existing Store configuration turn, before
+        // the Box record turn. No method/native callback is held by this metadata mutex.
+        let _source = self.claim_backing(record)?;
         let _turn = self.claim(&record.spec.id)?;
+        let _backing_phase = self.check_box_backing(record)?;
         if record.version != hex_core::record::RECORD_VERSION {
             return Err(uncertain(&record.spec.id));
         }
@@ -356,8 +381,14 @@ impl Store {
         let Some(Ok(mut record)) = self.get(id)? else {
             return Ok(false);
         };
+        let source = record.spec.route.and_then(|route| route.backing);
         if !change(&mut record) {
             return Ok(false);
+        }
+        // Existing update callers change init, exit or abandoned accounting. They cannot introduce
+        // or erase a backing reference while owning only a Box turn (source-before-Box ordering).
+        if record.spec.route.and_then(|route| route.backing) != source {
+            return Err(uncertain(id));
         }
         self.write(&record)?;
         Ok(true)

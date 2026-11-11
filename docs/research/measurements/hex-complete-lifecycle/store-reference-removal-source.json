@@ -1,0 +1,86 @@
+{
+  "role": "implementer",
+  "base": "bd0a2a7a91b2db18301ae7b7e8fd5adcfec5879e",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": [
+    {
+      "path": "crates/hex-node/src/store.rs",
+      "bytes": 64542,
+      "sha256": "3039440b2b1a2dbd6f448f37d3ec7b5ab1aaa6a221b5319199faebfb22cf6cf5",
+      "base_sha256": "1b0d069d31f0f959b87d3eb2d162adcfb6226ad2683259af3d7595bbfe3f193c"
+    },
+    {
+      "path": "crates/hex-node/src/store/pool.rs",
+      "bytes": 21009,
+      "sha256": "a3527ed595bf7aa30fa5baa0991d622e7debc5e6075a83f8e25d65b0f924687c",
+      "base_sha256": "b58e9e169d92d222bdd9c6ff8c7578a8023b6c7f17d91993b56a03acf5dd2c54"
+    },
+    {
+      "path": "crates/hex-node/src/recorded.rs",
+      "bytes": 100267,
+      "sha256": "c3b21bcd720c9f06f562a7c1ee1624fa6ea5a741ecf8698d0b3c461bd3ae4707",
+      "base_sha256": "ed3fc53a46d3b4f164a18c74b77713c35300d25bdd71585f21bd7f0c1ae74ab2"
+    },
+    {
+      "path": "docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs",
+      "bytes": 21644,
+      "sha256": "c171f214322dc988f1b2139aff51b3a5ae6cdecdd9423abe8527f2dd5a9cd391",
+      "base_sha256": "60a25a1e2005271c1d563390add17d6736d13f82eb1fcf41e19d7e9b8453dc74"
+    }
+  ],
+  "original": {
+    "source": "c9b000e6a9ad397da72544d0c50d7642675e5689",
+    "sha256": "5ae2c99db205a592e35689b59c1d12ef3402d4e1e6523c631704ab894ac222e4",
+    "unchanged": true
+  },
+  "actual_original": {
+    "reported_by": "ROOT user message, actual7197, raw collection driver19568 active at receipt",
+    "passed": 0,
+    "failed": 1,
+    "ignored": 0,
+    "log_sha256": "1d8c31d5601950941f24f1ecc15a72b5a188f6041b9b903787239d7ee9c1b8e5",
+    "symptom": "removal erased a Creating Box immutable backing reference",
+    "cargo_pid": 2813282,
+    "reaped": true,
+    "temp": 0,
+    "source_diff": 0,
+    "native": 0,
+    "raw_independently_collected_by_L3": false
+  },
+  "new_controls": [
+    {
+      "path": "docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs",
+      "name": "concurrent_source_removal_and_reference_publication_keep_a_canonical_join",
+      "status": "UNRUN"
+    },
+    {
+      "path": "docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs",
+      "name": "malformed_retained_owner_never_frees_a_released_backing_reference",
+      "status": "UNRUN"
+    },
+    {
+      "path": "docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs",
+      "name": "ordinary_accounting_update_cannot_add_or_erase_a_backing_reference",
+      "status": "UNRUN"
+    },
+    {
+      "path": "docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs",
+      "name": "missing_source_rearm_refuses_a_retained_immutable_reference",
+      "status": "UNRUN"
+    }
+  ],
+  "validation": {
+    "scoped_rustfmt": 0,
+    "git_diff_check": 0,
+    "after_original": "UNRUN",
+    "new_controls": "UNRUN",
+    "compile": "UNRUN",
+    "clippy": "UNRUN",
+    "native": "UNRUN"
+  },
+  "remaining": [
+    "ROOT joins APIa56/Catalog/guest/bd0 before compiler/new controls/after c9b",
+    "all actual native termination/full-P effects/freshness/resource return remain ROOT/native lanes"
+  ]
+}

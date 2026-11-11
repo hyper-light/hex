@@ -1,0 +1,22 @@
+{
+  "base": "25d98e88be3b8173605ed7e8e1d109d309a278b6",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": {
+    "crates/hex-api/src/runtime.rs": "f9075cdefa475b6fa2755348441d45d4d96470b8b1296be6749edc00b2226804",
+    "crates/hex-runtime/src/devices.rs": "d208ae4dcd09617a42a0c235ad805afd6ec342227d787d48d1931f5a150c8e69"
+  },
+  "scope": "ROOT-approved exact subset API boundary only, before dependent native consumers. No production cardinality relaxation yet.",
+  "API": "BackingOffer::check_selection_parts(provisioned:&[DeviceId],selected:&[DeviceId])->Result<(),Refusal>; both bounded canonical sortedunique, S nonempty subsetP; membership only/no copies/provider/claims.",
+  "Books": "Required with_handoff_transaction(id,source,full_conflicts,callback) plus same weak generic callback-once stack facade. Actual Node/L3 Recorded implementations required before coherent checks; no default Unsupported/placeholder body.",
+  "ownership": "L1 Node/devices/FC/Index; L3 Recorded/Turns/Store/preflight; L2guest; ROOT registrations/outerfixture ports. Poolconfig turn emptydevices beforeBoxfullP avoids selfconflict; fullP charged/held until actual wholeReleased.",
+  "new_test": "exact_subset_membership_keeps_full_provisioning_authority_separate SOURCEONLY/UNRUN; original89ec unchanged",
+  "checks": {
+    "fmtparser": 0,
+    "compile": "UNRUN/unmatched until actual Books implementations joined",
+    "tests": "UNRUN",
+    "dispatches": 0,
+    "native_effects": 0
+  }
+}

@@ -342,6 +342,12 @@ impl Node {
         crate::recorded::preflight_records(&records, &pools, Some(self.attachments.as_ref()))?;
         for (id, record) in &records {
             let record = record.as_ref().map_err(|_| uncertain(id))?;
+            let _handoff = crate::recorded::preflight_handoff_turns(
+                &self.turns,
+                &self.store,
+                record,
+                Some(self.attachments.as_ref()),
+            )?;
             match record.spec.backend_class()? {
                 Class::Firecracker => firecracker
                     .ok_or_else(|| uncertain(id))?
@@ -657,6 +663,10 @@ fn native_argument(argument: &std::ffi::OsStr) -> Result<String, Refusal> {
 #[derive(Clone, Copy)]
 enum BookOwner<'a> {
     Box(&'a BoxId),
+    Handoff {
+        id: &'a BoxId,
+        source: &'a BackingKey,
+    },
     Pool(&'a BackingKey),
 }
 
@@ -668,9 +678,13 @@ impl Node {
         callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
     ) -> Result<(), Refusal> {
         let keys = self.attachments.conflict_ids(devices)?;
-        let _method = match owner {
-            BookOwner::Box(id) => self.turns.try_take_devices(id, &keys)?,
-            BookOwner::Pool(key) => self.turns.try_take_pool(key, &keys)?,
+        let (_pool, _method) = match owner {
+            BookOwner::Box(id) => (None, self.turns.try_take_devices(id, &keys)?),
+            BookOwner::Pool(key) => (None, self.turns.try_take_pool(key, &keys)?),
+            BookOwner::Handoff { id, source } => {
+                let (pool, boxed) = self.turns.try_take_handoff(id, source, &keys)?;
+                (Some(pool), boxed)
+            }
         };
         let _devices = self.hold_attachments(&keys)?;
         let launch =
@@ -702,6 +716,14 @@ impl Node {
             BookOwner::Pool(key) => {
                 crate::recorded::pool_transaction(&self.store, key, &keys, &native, callback)
             }
+            BookOwner::Handoff { id, source } => crate::recorded::handoff_transaction(
+                &self.store,
+                id,
+                source,
+                &keys,
+                &native,
+                callback,
+            ),
         }
     }
 }
@@ -753,6 +775,15 @@ impl Books for Node {
         callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
     ) -> Result<(), Refusal> {
         self.book_transaction(BookOwner::Pool(key), devices, callback)
+    }
+    fn with_handoff_transaction(
+        &self,
+        id: &BoxId,
+        source: &BackingKey,
+        full_conflicts: &[DeviceId],
+        callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        self.book_transaction(BookOwner::Handoff { id, source }, full_conflicts, callback)
     }
 }
 
