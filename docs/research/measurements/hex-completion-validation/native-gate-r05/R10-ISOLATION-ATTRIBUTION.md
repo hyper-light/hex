@@ -1,0 +1,15 @@
+# Inherited-FD guard mutation attribution
+
+This docs-only clarification follows signed consumer b0392150c089f16ba0e9816f156b5b808c1f2920 and ROOT's explicit R10 direction. Role: implementer. The retained full policy read is 7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506, rules SHA256 df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3. Historical proposals, source, manifests and raw evidence remain unchanged.
+
+Removing inherited-FD isolation and observing the resulting causal parent-death/gate failure is meaningful R10 evidence for that complete guard, including a mutation that retains both the child's own writer and a foreign writer. The complete guard test and consumer do not depend on a foreign-only mutation. No additional FD exposure, per-launch descriptor selection architecture or producer extension is requested to narrow that attribution.
+
+The result must be labelled as evidence for the whole inherited-FD isolation guard. Retention of both own and foreign writers does not identify which retained reference independently caused the failure. A specifically foreign-writer claim requires narrower evidence; that claim is optional and does not hold the general guard evidence. The earlier foreign-specific discussion describes this attribution limit, not a prerequisite for the current consumer or R10 guard test.
+
+Preserve the actual byte-2 acknowledgement and held-publication witnesses; the outer t0-before-spawn deadline with actual parent terminal P<D<G; kernel-observed sibling STOP; first exit127 before G; no authorization byte1 or canary; sibling continuation/exit127; and complete owned cleanup before assertions. Missing ACK/STOP, a missed window or compilation failure is not a semantic mutation result. Restored source must retain the same phase and terminal witnesses. ACK remains a pre-entry observation of join and unexpected-FD closure, not ppoll-PC or later child_with_fd setup evidence.
+
+Keep EOF/Open/error as separate raw notification-tail evidence. EOF is not an ACK or mutation phase prerequisite: requiring it would mask retained writers. The semantic discriminator remains the causal terminal/canary behavior after the required real phases.
+
+The test leaf remains byte-identical to b0392150: crates/hex-node/src/supervise/completion_native_gate_tests.rs, SHA256 da4ba641b6122a402007aa8939cddb6154dbe114ac437ce47073afdae7431241. The exact producer is 70fd4f7f1601c7e7fb13bc3a90b9e30108d3b876. ROOT reports that 8621a28d85fa05cf0a080aac342fdc77ce899815 contains that producer and the dev-only Linux feature edge; its first compiler attempt stopped at two rustix recv tuple assertions assigned to L1, with zero gate controls executed. This is coordinator-reported status, not an independently executed result or native acceptance claim.
+
+No source, oracle, budget, deadline, feature or dependency changes accompany this note. No build, test, native case, mutation or check dispatch occurred. ROOT retains matched compilation, native controls, mutation execution and all gate acceptance ownership.

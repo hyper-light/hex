@@ -25,6 +25,7 @@ use crate::store::Store;
 
 type Check<T> = Result<T, String>;
 const READY: &str = "hex-completion-gate-ready ";
+const IDENTITIES: &str = "hex-completion-gate-identities ";
 const PARENT_CASE: &str =
     "supervise::completion_native_gate_tests::completion_controller_parent_death_cancels_gate";
 
@@ -53,7 +54,7 @@ struct Config {
     guard_ms: u64,
     gate_budget_ms: u64,
     observation_ms: u64,
-    /// ROOT supplies the matching kernel ABI's ppoll syscall number, never a guessed architecture.
+    /// Historical pinned-config provenance only; the ACK oracle does not sample syscalls.
     gate_wait_syscall: u64,
     byte_limit: u64,
 }
@@ -132,9 +133,6 @@ impl Config {
     fn gate(&self) -> Duration {
         Duration::from_millis(self.gate_budget_ms)
     }
-    fn interval(&self) -> Duration {
-        Duration::from_millis(self.observation_ms)
-    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -186,20 +184,6 @@ fn deadline(budget: Duration) -> Check<Instant> {
     Instant::now()
         .checked_add(budget)
         .ok_or_else(|| "deadline overflow".to_owned())
-}
-
-fn until<F: FnMut() -> Check<bool>>(config: &Config, end: Instant, mut observed: F) -> Check<()> {
-    loop {
-        if observed()? {
-            return Ok(());
-        }
-        let left = end.saturating_duration_since(Instant::now());
-        need(
-            !left.is_zero(),
-            "owned observation guard expired; retain as harness uncertainty",
-        )?;
-        std::thread::sleep(config.interval().min(left));
-    }
 }
 
 fn poll_exit(fd: &OwnedFd, end: Instant) -> Check<()> {
@@ -602,19 +586,48 @@ fn exact_pidfd(identity: &shards_api::Identity, parent: u32) -> Check<OwnedFd> {
     Ok(pidfd)
 }
 
-fn wait_gate(config: &Config, identity: &shards_api::Identity) -> Check<()> {
-    until(config, deadline(config.guard())?, || {
-        let syscall = read_bounded(
-            &PathBuf::from(format!("/proc/{}/syscall", identity.pid)),
-            config.byte_limit,
+fn isolation_ack(reader: &mut std::io::PipeReader, end: Instant) -> Check<Instant> {
+    let flags = text(rustix::fs::fcntl_getfl(&*reader))?;
+    text(rustix::fs::fcntl_setfl(
+        &*reader,
+        flags | rustix::fs::OFlags::NONBLOCK,
+    ))?;
+    loop {
+        let left = end.saturating_duration_since(Instant::now());
+        need(
+            !left.is_zero(),
+            "actual isolation ACK window missed; retain uncertainty",
         )?;
-        let text = text(std::str::from_utf8(&syscall))?;
-        Ok(text
-            .split_whitespace()
-            .next()
-            .and_then(|number| number.parse::<u64>().ok())
-            == Some(config.gate_wait_syscall))
-    })
+        let mut byte = [0_u8];
+        match reader.read(&mut byte) {
+            Ok(0) => return Err("isolation notification ended before actual byte 2".to_owned()),
+            Ok(_) => {
+                let at = Instant::now();
+                if byte != [2] {
+                    return Err(format!(
+                        "unexpected isolation notification byte {}",
+                        byte[0]
+                    ));
+                }
+                return Ok(at);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                let left = end.saturating_duration_since(Instant::now());
+                need(!left.is_zero(), "actual isolation ACK guard expired")?;
+                let timeout = Timespec {
+                    tv_sec: text(i64::try_from(left.as_secs()))?,
+                    tv_nsec: i64::from(left.subsec_nanos()),
+                };
+                let mut fds = [PollFd::new(&*reader, PollFlags::IN | PollFlags::HUP)];
+                match rustix::event::poll(&mut fds, Some(&timeout)) {
+                    Ok(_) | Err(rustix::io::Errno::INTR) => {}
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
 }
 
 fn parent_body(config: Config, scope: PathBuf) -> Check<()> {
@@ -624,8 +637,16 @@ fn parent_body(config: Config, scope: PathBuf) -> Check<()> {
     let (ready_tx, ready_rx) = mpsc::sync_channel(2);
     let observed = (|| -> Check<()> {
         let mut identities = Vec::new();
+        let mut isolation_acks = Vec::new();
         for suffix in ["first", "sibling"] {
-            let (_, native, _, _, program) = lab.reserve(suffix)?;
+            let (record, native, marker, _, program) = lab.reserve(suffix)?;
+            let commitment = text(record.native_commitment())?;
+            let end = deadline(lab.config.guard())?;
+            let mut notification = text(native.prepare_isolation_ack())?;
+            need(
+                Instant::now() < end,
+                "pre-spawn isolation notification window missed",
+            )?;
             let supervisor = Arc::clone(&lab.supervisor);
             let stop = Arc::clone(&stop);
             let ready = ready_tx.clone();
@@ -643,12 +664,12 @@ fn parent_body(config: Config, scope: PathBuf) -> Check<()> {
                                 None,
                                 gate,
                                 &mut |identity| {
-                                    ready
-                                        .send(identity.clone())
-                                        .map_err(|error| Refusal::Broken(error.to_string()))?;
                                     let (lock, changed) = &*stop;
                                     let stopped = lock
                                         .lock()
+                                        .map_err(|error| Refusal::Broken(error.to_string()))?;
+                                    ready
+                                        .send(identity.clone())
                                         .map_err(|error| Refusal::Broken(error.to_string()))?;
                                     drop(
                                         changed
@@ -661,32 +682,113 @@ fn parent_body(config: Config, scope: PathBuf) -> Check<()> {
                             .map(|_| ())
                     }),
             )?);
-            // Start the sibling only AFTER the first bind owns its writer; otherwise
-            // the fork may never inherit the descriptor the isolation control targets.
-            let identity = text(ready_rx.recv_timeout(lab.config.guard()))?;
-            wait_gate(&lab.config, &identity)?;
+            let ack = isolation_ack(&mut notification, end);
+            let within_guard = ack.as_ref().is_ok_and(|at| *at < end);
+            let receipt = json!({
+                "suffix":suffix,"actual_byte_2_observed":ack.is_ok(),"within_guard":within_guard,
+                "notification":ack.as_ref().map(|at| format!("{at:?}")).map_err(String::as_str),
+                "eof_required_for_ack":false,
+                "native_scope":record.native_scope.as_ref().map(|scope| scope.bytes()),
+                "commitment":commitment,
+                "legacy_gate_wait_syscall_not_sampled":lab.config.gate_wait_syscall,
+                "legacy_observation_ms_not_polled":lab.config.observation_ms,
+            });
+            let bytes = text(serde_json::to_vec_pretty(&receipt))?;
+            need(
+                text(u64::try_from(bytes.len()))? <= lab.config.byte_limit,
+                "ACK receipt byte bound",
+            )?;
+            text(fs::write(
+                lab.scope.join(format!("{suffix}.isolation-ack.json")),
+                bytes,
+            ))?;
+            // Preserve actual ACK/error facts even if the later held-publication phase fails.
+            ack?;
+            need(
+                within_guard,
+                "actual isolation ACK arrived after its original guard",
+            )?;
+            let left = end.saturating_duration_since(Instant::now());
+            need(
+                !left.is_zero(),
+                "held publication notification window missed",
+            )?;
+            let identity = text(ready_rx.recv_timeout(left))?;
+            need(
+                Instant::now() < end,
+                "held publication notice arrived after its original guard",
+            )?;
+            need(
+                !text(marker.try_exists())?,
+                "stand-in ran while publication was held",
+            )?;
+            // The callback occurs only after the producer function returns and drops its writer.
+            // Take ONE nonblocking tail snapshot at that fence. Open is retained-FD evidence,
+            // not an ACK precondition: otherwise the target isolation mutant is masked.
+            let mut extra = [0_u8];
+            let tail = match notification.read(&mut extra) {
+                Ok(0) => Ok("eof"),
+                Ok(_) => Err(format!("extra isolation notification byte {}", extra[0])),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok("open"),
+                Err(error) => Err(error.to_string()),
+            };
+            let tail_receipt = json!({
+                "suffix":suffix,"pid":identity.pid,"started":identity.started,
+                "after_producer_drop_fence":true,"tail":&tail,"eof_required_for_ack":false,
+            });
+            let bytes = text(serde_json::to_vec_pretty(&tail_receipt))?;
+            need(
+                text(u64::try_from(bytes.len()))? <= lab.config.byte_limit,
+                "ACK tail receipt byte bound",
+            )?;
+            text(fs::write(
+                lab.scope.join(format!("{suffix}.isolation-tail.json")),
+                bytes,
+            ))?;
+            tail?;
+            // Start the sibling only after actual isolation and the first held publication.
+            // Its clone can then inherit the writer which the isolation control targets.
+            isolation_acks.push(json!({
+                "pid":identity.pid,"started":identity.started,
+                "actual_byte_2_observed":true,"publication_held":true,"within_guard":true,
+                "receipt":receipt,"tail_receipt":tail_receipt,
+            }));
             identities.push(identity);
         }
-        let sibling = identities.get(1).ok_or("sibling identity missing")?;
-        let pidfd = exact_pidfd(sibling, std::process::id())?;
-        text(rustix::process::pidfd_send_signal(&pidfd, Signal::STOP))?;
-        until(&lab.config, deadline(lab.config.guard())?, || {
-            Ok(text(rustix::process::waitid(
-                WaitId::PidFd(pidfd.as_fd()),
-                WaitIdOptions::STOPPED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
-            ))?
-            .is_some())
-        })?;
-        let identities: Vec<_> = identities
-            .into_iter()
+        let announced: Vec<_> = identities
+            .iter()
             .map(|identity| GateIdentity {
                 pid: identity.pid,
                 started: identity.started,
-                vsock: identity.vsock,
+                vsock: identity.vsock.clone(),
             })
             .collect();
+        let raw = text(serde_json::to_string(&json!({
+            "identities":&announced,"isolation_acks":&isolation_acks
+        })))?;
+        let mut output = std::io::stdout().lock();
+        // Complete a possible libtest prefix before this owned protocol line. The outer actor
+        // can acquire both exact pidfds before waiting for the kernel STOP notification.
+        text(writeln!(output, "\n{IDENTITIES}{raw}"))?;
+        text(output.flush())?;
+        drop(output);
+        let sibling = identities.get(1).ok_or("sibling identity missing")?;
+        let pidfd = exact_pidfd(sibling, std::process::id())?;
+        text(rustix::process::pidfd_send_signal(&pidfd, Signal::STOP))?;
+        // This exact owned parent process is killed/reaped by its outer controller at the ONE
+        // outer deadline. A kernel wait here needs no periodic probe or extra waiter thread.
+        // STOPPED|NOWAIT cannot consume the Supervisor's EXITED status.
+        let stopped = text(rustix::process::waitid(
+            WaitId::PidFd(pidfd.as_fd()),
+            WaitIdOptions::STOPPED | WaitIdOptions::NOWAIT,
+        ))?
+        .ok_or("exact sibling STOP status missing")?;
+        need(
+            stopped.stopped() && stopped.stopping_signal() == Some(Signal::STOP.as_raw()),
+            "exact sibling was not stopped by SIGSTOP",
+        )?;
         let raw = text(serde_json::to_string(
-            &json!({"identities":identities,"sibling_stopped":true}),
+            &json!({"identities":&announced,"isolation_acks":&isolation_acks,"sibling_stopped":true}),
         ))?;
         let mut output = std::io::stdout().lock();
         text(writeln!(output, "{READY}{raw}"))?;
@@ -726,17 +828,50 @@ fn parent_body(config: Config, scope: PathBuf) -> Check<()> {
     )
 }
 
-fn read_ready(
+fn read_phase(
     output: &mut std::process::ChildStdout,
     config: &Config,
     raw: &mut Vec<u8>,
+    cursor: &mut usize,
+    expected: &str,
+    end: Instant,
 ) -> Check<serde_json::Value> {
-    let end = deadline(config.guard())?;
     text(rustix::fs::fcntl_setfl(
         output.as_fd(),
         rustix::fs::OFlags::NONBLOCK,
     ))?;
     loop {
+        need(
+            Instant::now() < end,
+            "owned parent phase guard expired; retain as harness uncertainty",
+        )?;
+        while let Some(newline) = raw
+            .get(*cursor..)
+            .ok_or("invalid owned phase cursor")?
+            .iter()
+            .position(|byte| *byte == b'\n')
+        {
+            let next = (*cursor)
+                .checked_add(newline)
+                .and_then(|at| at.checked_add(1))
+                .ok_or("owned phase cursor overflow")?;
+            let line = text(std::str::from_utf8(
+                raw.get(*cursor..next).ok_or("invalid owned phase line")?,
+            ))?;
+            *cursor = next;
+            if let Some(value) = line.strip_prefix(expected) {
+                let value = text_result(value)?;
+                need(
+                    Instant::now() < end,
+                    "owned parent phase completed too late",
+                )?;
+                return Ok(value);
+            }
+            need(
+                !line.starts_with(IDENTITIES) && !line.starts_with(READY),
+                "owned parent phases are duplicated or out of order",
+            )?;
+        }
         let mut bytes = [0; 4096];
         match output.read(&mut bytes) {
             Ok(0) => return Err("owned parent ended before held-child readiness".to_owned()),
@@ -746,14 +881,6 @@ fn read_ready(
                     text(u64::try_from(raw.len()))? <= config.byte_limit,
                     "parent output byte budget exceeded",
                 )?;
-                let text = text(std::str::from_utf8(raw))?;
-                for line in text.split_inclusive('\n') {
-                    if line.ends_with('\n')
-                        && let Some(value) = line.strip_prefix(READY)
-                    {
-                        return text_result(value);
-                    }
-                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 let left = end.saturating_duration_since(Instant::now());
@@ -774,16 +901,24 @@ fn text_result(raw: &str) -> Check<serde_json::Value> {
     text(serde_json::from_str(raw))
 }
 
-fn child_end(child: &mut Child, config: &Config) -> Check<()> {
-    until(config, deadline(config.guard())?, || {
-        Ok(text(child.try_wait())?.is_some())
-    })
+fn child_end(child: &mut Child, pidfd: Option<&OwnedFd>, end: Instant) -> Check<()> {
+    // A previously reaped Child caches its status. Otherwise the retained exact pidfd supplies
+    // readiness and this SAME Child remains the sole consuming waiter for the parent process.
+    if text(child.try_wait())?.is_some() {
+        return Ok(());
+    }
+    poll_exit(
+        pidfd.ok_or("owned parent pidfd unavailable; retain uncertainty")?,
+        end,
+    )?;
+    text(child.wait())?;
+    Ok(())
 }
 
 /// AC-T7.1.2: parent death produces EOF before the gate deadline, with a stopped sibling
 /// unable to hide a foreign writer by exiting first. Only this fixture's exact PIDs are signaled.
 #[test]
-#[ignore = "ROOT only: same-binary controller parent, configured ppoll ABI and private delegated cgroup"]
+#[ignore = "ROOT only: same-binary controller parent, actual per-launch isolation ACK and private delegated cgroup"]
 fn completion_controller_parent_death_cancels_gate() {
     let result = (|| -> Check<()> {
         let config = Config::load()?;
@@ -814,10 +949,13 @@ fn completion_controller_parent_death_cancels_gate() {
             .stdin(ChildStdio::null())
             .stdout(ChildStdio::piped())
             .stderr(text(File::create(scope.join("parent.stderr")))?);
+        let began = Instant::now();
+        let outer_end = began
+            .checked_add(config.guard())
+            .ok_or("outer parent deadline overflow")?;
         text(rustix::process::set_child_subreaper(Some(
             rustix::process::getpid(),
         )))?;
-        let began = Instant::now();
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -827,31 +965,88 @@ fn completion_controller_parent_death_cancels_gate() {
                 ));
             }
         };
+        let parent_pidfd =
+            rustix::process::pidfd_open(Pid::from_child(&child), PidfdFlags::empty());
         let mut owned = Vec::new();
         let mut raw = Vec::new();
         let observed = (|| -> Check<()> {
+            let parent_fd = parent_pidfd.as_ref().map_err(|error| error.to_string())?;
             let mut output = child.stdout.take().ok_or("owned parent output missing")?;
-            let ready = read_ready(&mut output, &config, &mut raw)?;
-            need(
-                ready
-                    .get("sibling_stopped")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true),
-                "sibling stop was not observed",
+            let mut cursor = 0;
+            let announced = read_phase(
+                &mut output,
+                &config,
+                &mut raw,
+                &mut cursor,
+                IDENTITIES,
+                outer_end,
             )?;
-            let identities: Vec<GateIdentity> = text(serde_json::from_value(
-                ready
-                    .get("identities")
-                    .cloned()
-                    .ok_or("owned identities missing")?,
-            ))?;
+            let original_identities = announced
+                .get("identities")
+                .ok_or("announced owned identities missing")?;
+            let identities: Vec<GateIdentity> =
+                text(serde_json::from_value(original_identities.clone()))?;
             let identities: Vec<_> = identities.into_iter().map(GateIdentity::native).collect();
             need(identities.len() == 2, "exactly two held stand-ins required")?;
+            let acknowledgments = announced
+                .get("isolation_acks")
+                .and_then(serde_json::Value::as_array)
+                .ok_or("actual per-launch isolation acknowledgments missing")?;
+            need(
+                acknowledgments.len() == identities.len(),
+                "isolation ACK count mismatch",
+            )?;
+            for (identity, ack) in identities.iter().zip(acknowledgments) {
+                need(
+                    ack.get("pid").and_then(serde_json::Value::as_u64)
+                        == Some(u64::from(identity.pid))
+                        && ack.get("started").and_then(serde_json::Value::as_u64)
+                            == Some(identity.started)
+                        && ack
+                            .get("actual_byte_2_observed")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                        && ack
+                            .get("publication_held")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                        && ack.get("within_guard").and_then(serde_json::Value::as_bool)
+                            == Some(true),
+                    "isolation ACK was not the same actual held launch",
+                )?;
+            }
             for identity in &identities {
                 owned.push(exact_pidfd(identity, child.id())?);
             }
+            let ready = read_phase(
+                &mut output,
+                &config,
+                &mut raw,
+                &mut cursor,
+                READY,
+                outer_end,
+            )?;
+            need(
+                ready.get("identities") == Some(original_identities)
+                    && ready.get("isolation_acks") == announced.get("isolation_acks")
+                    && ready
+                        .get("sibling_stopped")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true),
+                "exact announced sibling stop was not observed",
+            )?;
+            for suffix in ["first", "sibling"] {
+                need(
+                    !text(scope.join(format!("{suffix}.marker")).try_exists())?,
+                    "stand-in marker appeared before owned parent death",
+                )?;
+            }
             text(child.kill())?;
-            child_end(&mut child, &config)?;
+            child_end(&mut child, Some(parent_fd), outer_end)?;
+            need(
+                Instant::now() < outer_end,
+                "parent terminal window missed; cannot exclude publication timeout",
+            )?;
             let first = owned.first().ok_or("first pidfd missing")?;
             let earliest_gate = began
                 .checked_add(config.gate())
@@ -912,7 +1107,9 @@ fn completion_controller_parent_death_cancels_gate() {
                 }
             }
         }
-        if let Err(error) = child_end(&mut child, &config) {
+        if let Err(error) = deadline(config.guard())
+            .and_then(|end| child_end(&mut child, parent_pidfd.as_ref().ok(), end))
+        {
             cleanup.push(error);
         }
         for fd in &owned {
