@@ -1024,6 +1024,7 @@ fn last_legal_device_index_roundtrips_and_releases_without_iterator_overflow() {
         [last]
     );
     let runner = Ran {
+        allocation: None,
         owner: NodeId(0),
         demand,
         workload: WorkloadId(0),
