@@ -1382,7 +1382,7 @@ impl GuestRuntime {
         record: &BoxRecord,
         source: &hex_core::record::PoolRecord,
     ) -> Result<(), Refusal> {
-        use hex_api::{BackingOffer, BackingPhase, Execution};
+        use hex_api::{BackingPhase, Execution};
         let id = &record.spec.id;
         if !matches!(
             record.phase,
@@ -1399,8 +1399,19 @@ impl GuestRuntime {
             return Err(super::books::uncertain(id)?);
         }
         self.check_allocation(&record.spec)?;
+        selected::Record::intent(record, &self.config)?;
         self.preflight_backing(source)?;
-        BackingOffer::check_selection_parts(&source.devices, &record.spec.devices)?;
+        record
+            .spec
+            .route
+            .ok_or(super::books::uncertain(id)?)?
+            .check_backing_parts(
+                record.spec.allocation.map(|allocation| allocation.cost),
+                source.key,
+                source.cost,
+                &source.devices,
+                &record.spec.devices,
+            )?;
         route::guest_spec(&record.spec)?;
         record.native_commitment()?;
         self.catalog_physical(&record.spec.devices)?;

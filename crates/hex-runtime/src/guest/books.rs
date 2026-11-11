@@ -168,32 +168,64 @@ impl GuestRuntime {
             Refusal::Broken("a dedicated guest needs the native record authority".into())
         })?;
         let id = spec.id.try_clone()?;
-        let keys = self.turn_keys(&spec.devices)?;
-        let (spec, expected_scope) = if let Some(key) = spec.route.and_then(|route| route.backing) {
-            let pending = devices::with_transaction(books, &id, &keys, |transaction| {
-                if transaction.read(&id)?.is_some() {
-                    return Err(Refusal::Exists(id.try_clone()?));
-                }
-                self.prepare_selected_create(&id)?;
-                let records = transaction.records()?;
-                if records.len() >= crate::MAX_BOXES {
-                    return Err(Refusal::Full(crate::MAX_BOXES));
-                }
-                let pools = transaction.pool_records()?;
-                self.gpu_catalog
-                    .as_ref()
-                    .ok_or(uncertain(&id)?)?
-                    .prepare(&spec, &records, &pools)?;
-                budget.remaining()?;
-                transaction.put(&BoxRecord::new(spec, Phase::Creating, Vec::new()))?;
-                transaction.read(&id)?.ok_or(uncertain(&id)?)
-            })?;
+        let source = spec
+            .route
+            .and_then(|route| route.backing)
+            .map(|key| {
+                self.authority()?
+                    .pool_records()?
+                    .into_iter()
+                    .find(|record| record.key == key)
+                    .ok_or(uncertain(&id)?)
+            })
+            .transpose()?;
+        let conflicts = source
+            .as_ref()
+            .map_or(spec.devices.as_slice(), |source| source.devices.as_slice());
+        let keys = self.turn_keys(conflicts)?;
+        let (spec, expected_scope) = if let Some(source) = &source {
+            let key = source.key;
+            spec.route.ok_or(uncertain(&id)?)?.check_backing_parts(
+                spec.allocation.map(|allocation| allocation.cost),
+                source.key,
+                source.cost,
+                &source.devices,
+                &spec.devices,
+            )?;
+            let commitment = source.native_commitment()?;
+            let pending =
+                devices::with_handoff_transaction(books, &id, &key, &keys, |transaction| {
+                    let current = transaction.read_pool(&key)?.ok_or(uncertain(&id)?)?;
+                    self.preflight_backing(&current)?;
+                    if current.native_commitment()? != commitment
+                        || current.phase != hex_api::BackingPhase::Live
+                    {
+                        return Err(uncertain(&id)?);
+                    }
+                    if transaction.read(&id)?.is_some() {
+                        return Err(Refusal::Exists(id.try_clone()?));
+                    }
+                    self.prepare_selected_create(&id)?;
+                    let records = transaction.records()?;
+                    if records.len() >= crate::MAX_BOXES {
+                        return Err(Refusal::Full(crate::MAX_BOXES));
+                    }
+                    let pools = transaction.pool_records()?;
+                    self.gpu_catalog
+                        .as_ref()
+                        .ok_or(uncertain(&id)?)?
+                        .prepare(&spec, &records, &pools)?;
+                    budget.remaining()?;
+                    transaction.put(&BoxRecord::new(spec, Phase::Creating, Vec::new()))?;
+                    transaction.read(&id)?.ok_or(uncertain(&id)?)
+                })?;
             // Release the Box/device turns BEFORE entering the SAME owner's
             // Pool transaction. Both canonical claims remain during handoff.
             let released = self.stop_gpu_for_handoff(key, &pending, budget)?;
             if released.key != key
                 || released.phase != hex_api::BackingPhase::Released
-                || released.devices != pending.spec.devices
+                || released.devices != source.devices
+                || released.cost != source.cost
             {
                 return Err(uncertain(&id)?);
             }
@@ -203,13 +235,24 @@ impl GuestRuntime {
             (spec, None)
         };
         budget.remaining()?;
-        devices::with_transaction(books, &id, &keys, |transaction| {
+        let complete = |transaction: &dyn devices::Transaction| {
             if expected_scope.is_some() {
+                let source = source.as_ref().ok_or(uncertain(&id)?)?;
+                let current_source = transaction.read_pool(&source.key)?.ok_or(uncertain(&id)?)?;
+                self.handoff_source_released(&current_source)?;
+                if current_source.phase != hex_api::BackingPhase::Released
+                    || current_source.exit.is_none()
+                    || current_source.native_commitment()? != source.native_commitment()?
+                {
+                    return Err(uncertain(&id)?);
+                }
                 let current = transaction.read(&id)?.ok_or(uncertain(&id)?)?;
                 if current.spec != spec
                     || current.native_scope != expected_scope
                     || current.phase != Phase::Creating
                     || current.init.is_some()
+                    || current.run.is_some()
+                    || current.exit.is_some()
                 {
                     return Err(uncertain(&id)?);
                 }
@@ -250,7 +293,13 @@ impl GuestRuntime {
             record.phase = Phase::Ready;
             transaction.put(&record)?;
             Ok(info)
-        })
+        };
+        match &source {
+            Some(source) => {
+                devices::with_handoff_transaction(books, &id, &source.key, &keys, complete)
+            }
+            None => devices::with_transaction(books, &id, &keys, complete),
+        }
     }
 
     pub(super) fn call_recorded<T>(
@@ -297,8 +346,31 @@ impl GuestRuntime {
         let snapshot = self
             .recorded_box(id)?
             .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
-        let keys = self.turn_keys(&snapshot.spec.devices)?;
-        devices::with_transaction(books, id, &keys, |transaction| {
+        let source = snapshot
+            .spec
+            .route
+            .and_then(|route| route.backing)
+            .map(|key| {
+                self.authority()?
+                    .pool_records()?
+                    .into_iter()
+                    .find(|record| record.key == key)
+                    .ok_or(uncertain(id)?)
+            })
+            .transpose()?;
+        let pending = source.as_ref().is_some_and(|source| {
+            matches!(
+                source.phase,
+                hex_api::BackingPhase::Live | hex_api::BackingPhase::Draining
+            )
+        });
+        let conflicts = if pending {
+            source.as_ref().ok_or(uncertain(id)?)?.devices.as_slice()
+        } else {
+            snapshot.spec.devices.as_slice()
+        };
+        let keys = self.turn_keys(conflicts)?;
+        let delete = |transaction: &dyn devices::Transaction| {
             let mut record = transaction
                 .read(id)?
                 .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
@@ -310,6 +382,19 @@ impl GuestRuntime {
             }
             record.phase = Phase::Deleting;
             transaction.put(&record)?;
+            if pending {
+                let source = source.as_ref().ok_or(uncertain(id)?)?;
+                let current = transaction.read_pool(&source.key)?.ok_or(uncertain(id)?)?;
+                if matches!(
+                    current.phase,
+                    hex_api::BackingPhase::Live | hex_api::BackingPhase::Draining
+                ) {
+                    self.handoff_unsubmitted(&record, &current)?;
+                    // P still owns all physical claims/charge. This reserved Box
+                    // was never submitted; no native call or fake release row.
+                    return transaction.remove(id);
+                }
+            }
             // Stop uses the immutable VM receipt, even if current bindings changed.
             // Failed/uncertain native observation leaves the sole holder in Deleting.
             self.delete_selected(id, transaction)?;
@@ -318,7 +403,13 @@ impl GuestRuntime {
             // The positive Released receipt survives any failed native finalization
             // or Store removal; remove it only after the canonical transaction did.
             self.forget_selected(id)
-        })
+        };
+        if pending {
+            let source = source.as_ref().ok_or(uncertain(id)?)?;
+            devices::with_handoff_transaction(books, id, &source.key, &keys, delete)
+        } else {
+            devices::with_transaction(books, id, &keys, delete)
+        }
     }
 
     pub(super) fn native_capacity(&self) -> Result<hex_api::Capacity, Refusal> {

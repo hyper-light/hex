@@ -1,0 +1,73 @@
+{
+  "status": "SOURCE ONLY actual handoff/cleanup consumer +new bounded pure proof control; rustfmt parser0/diffcheck0, no compile/test/native run",
+  "parent": "5c33713d79f9a3cbbf69ebce1eedb8c8386dacf2",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": [
+    {
+      "path": "crates/hex-runtime/src/guest/books.rs",
+      "sha256": "306ab08727238c11817cc38474bdd151763cf22a42bec526e80a9eb60511c3ad"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/dedicated.rs",
+      "sha256": "142d399b9155cd8ebae0a524166bad75d0692492654586d017842d5c7e08b000"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/gpu_pool.rs",
+      "sha256": "b5f24721d75a56e39e5644ab95c1605773f46b8176e549edd0ff9f586ac3df48"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/shared_tests.rs",
+      "sha256": "2cb1ee3ed22622725b436160a769bad8dedc9af56d97403f3f9a55b28d64c579"
+    }
+  ],
+  "dependencies": {
+    "API_handoff_facade": "a56fe683494544e9783f0d5e13e922d823ca8221",
+    "one_factual_profile_formula": "b2e5e185652cb87336eca993e8eec3aeb892045e",
+    "Store_Turns_owner": "bd0a2a7a91b2db18301ae7b7e8fd5adcfec5879e",
+    "ordinary_bound_source_join_and_ref_fence": "e4e1df2e1b6f35b91fde97b03d45e4f2ae0bfd57",
+    "Node_native_Books_producer": "61650e47dacd57fdae3fca3d96e09fbe128a9e5f",
+    "ROOT_cohort_base": "df290d2daf07ce232ce172c64b5054c4975a39c9",
+    "pending": "L1 Catalog factual subset/exclusive consumer pin not yet received; this source alone cannot fix Driver89ec actual NoGpu/cardinality or claim end-to-end subset readiness"
+  },
+  "production_contract": [
+    "capture one original Budget before canonical effects, no new native deadline",
+    "read-only source snapshot determines full-P conflict keys; under with_handoff_transaction revalidate exact commitment/profile and sourceLive, retain original Box S Creating via same Store",
+    "release those turns; original Pool Tx alone drains full P; never use BoxTx to mutate/reap source and never nest Pool transactions",
+    "positive original whole-scope Released, same local Released receipt/status and immutable source commitment precede reentry and BoxS launch",
+    "reentry validates same canonical Box scope/spec/Creating/init/run/exit None; native selected config/report uses only S, original P retains its key/charge/claims until positive release",
+    "pending Live/Draining cancellation uses full-P handoff guard, exact two-borrow no-Intent/no-slot proof, then removes only unsubmitted Box; source P remains charged/held",
+    "postReleased cleanup uses ordinary S turns plus e4 canonical source join and original native cleanup(None)/positive whole-scope end; missing Intent never fabricates Released",
+    "durable Creating row plus max-one source reference excludes second consumer across released turns; no long-held outer method-lock claim; per-Box native route reservation owns actual boot",
+    "no new record owner/resource formula/picker/holder ledger/cache; transient same-Store snapshots/path/catalog storage are fallible/bounded"
+  ],
+  "source_controls": [
+    {
+      "name": "guest::gpu_pool::tests::unsubmitted_handoff_requires_held_source_no_intent_and_no_route_slot",
+      "cases": [
+        "actual S strict subset P",
+        "P held/no local Intent succeeds read-only",
+        "same Box reserved route refuses",
+        "present exact Intent refuses",
+        "P Released/no Intent refuses",
+        "no native/GPU query and route table empty after owned model reservation drop"
+      ],
+      "status": "UNRUN"
+    }
+  ],
+  "test_compatibility": "three test-only Books fixtures implement new required handoff method with explicit panic-if-called oracles; they own ordinary/shared/observer-only rows and must never enter payload handoff. Preserve ROOT equivalent ports during merge.",
+  "preserved": [
+    "original ec368 whole test leaf exact",
+    "13c/3497 original oracles preserved; no old passed test rerun",
+    "CPU-only selected/ordinary paths use existing non-handoff transaction",
+    "full P release and original S/count/profile not rewritten"
+  ],
+  "remaining": [
+    "Catalog subset/exclusive semantics and native Node/Recorded global proof bridges are peer-source dependencies",
+    "new selected Box S VM must run fresh paid guest observer before payload; parent P readiness is insufficient, separate active source increment",
+    "lazy exact-subset Prepared pools, qualified (route,backing) lifetimes and fresh sibling observation remain required; no 2^N enumeration/stale facts",
+    "original Released(None) retry c2d63 separate and UNRUN; no preflight remedy in this source",
+    "actual native/helper/GPU/artifact/forbidden-effect proof and all performance/full gates remain ROOT"
+  ]
+}

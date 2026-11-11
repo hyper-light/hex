@@ -1,0 +1,10 @@
+{
+  "source": "b655f3dba843a17534261aacdb59b6d3e56c7f5c",
+  "root_parent": "04dd867b1a5e51ea7874a3e0f00a09a0097276be",
+  "ports": [
+    "Existing Root test-only Books handoff methods retained; duplicate parent method hunks excluded",
+    "New GPU privatefile control inserted before Cold after Root original c2d; c2d+22c mock unchanged"
+  ],
+  "preserved": "Root original C2,22c fixedRoot mock/v5f0b/5c hooks, no unrelated parent grant_pool body",
+  "validation": "source review/named rustfmt/diff only; selected newVM S readiness stillpending L2 coherent source; no native proof"
+}

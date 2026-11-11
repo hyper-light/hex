@@ -14,6 +14,24 @@ use super::{Booted, GuestRuntime, managed, observer, refusal};
 use crate::devices::{self, Transaction};
 
 impl GuestRuntime {
+    pub(super) fn handoff_source_released(&self, record: &PoolRecord) -> Result<(), Refusal> {
+        self.preflight_backing(record)?;
+        let bad = || refused(record.key, LifecycleCause::Uncertain);
+        if record.phase != BackingPhase::Released || record.exit.is_none() {
+            return Err(bad());
+        }
+        let definition = self.gpu_definition_for(record.key)?;
+        let receipt = pool::read(&definition.path)?.ok_or_else(bad)?;
+        receipt.matches(record)?;
+        let Phase::Released { status, .. } = receipt.phase else {
+            return Err(bad());
+        };
+        if record.exit != Some(super::shared::exit_of(status)) {
+            return Err(bad());
+        }
+        Ok(())
+    }
+
     /// Service calls this only AFTER its SAME Index observes this exact old
     /// Released generation. No retained Box may reference it during rearm.
     pub(super) fn acknowledge_gpu_release(&self, key: BackingKey) -> Result<BackingOffer, Refusal> {
@@ -77,13 +95,25 @@ impl GuestRuntime {
     ) -> Result<BackingOffer, Refusal> {
         let definition = self.gpu_definition_for(key)?;
         if boxed.spec.route.and_then(|route| route.backing) != Some(key)
-            || boxed.spec.devices != definition.devices
             || boxed.phase != hex_core::record::Phase::Creating
             || boxed.init.is_some()
+            || boxed.run.is_some()
+            || boxed.exit.is_some()
             || boxed.native_scope.is_none()
         {
             return Err(refused(key, LifecycleCause::Uncertain));
         }
+        boxed
+            .spec
+            .route
+            .ok_or(super::books::uncertain(&boxed.spec.id)?)?
+            .check_backing_parts(
+                boxed.spec.allocation.map(|allocation| allocation.cost),
+                key,
+                definition.cost,
+                &definition.devices,
+                &boxed.spec.devices,
+            )?;
         let keys = self.turn_keys(&definition.devices)?;
         let books = self
             .books
@@ -100,7 +130,10 @@ impl GuestRuntime {
                 .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
             if current.spec != boxed.spec
                 || current.native_scope != boxed.native_scope
+                || current.phase != hex_core::record::Phase::Creating
                 || current.init.is_some()
+                || current.run.is_some()
+                || current.exit.is_some()
             {
                 return Err(refused(key, LifecycleCause::Uncertain));
             }
@@ -108,6 +141,7 @@ impl GuestRuntime {
                 .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
             receipt.matches(&record)?;
             if record.phase == BackingPhase::Released {
+                self.handoff_source_released(&record)?;
                 return record.offer();
             }
             if record.phase != BackingPhase::Live && record.phase != BackingPhase::Draining {
@@ -603,6 +637,95 @@ mod tests {
         assert_eq!(standalone.0.load(Ordering::SeqCst), 0);
         assert_eq!(owner.queries.load(Ordering::SeqCst), 0);
         assert_eq!(owner.launches.load(Ordering::SeqCst), 0);
+    }
+
+    /// AC-T7.4.1: only a still-held source and a canonical unsubmitted Box may
+    /// use missing Intent as cancellation evidence. Released is never absence.
+    #[test]
+    fn unsubmitted_handoff_requires_held_source_no_intent_and_no_route_slot() {
+        use hex_api::{
+            Class, Execution, GpuEligibility, ImageOs, ImagePlatform, RouteKey, RouteReceipt,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (config, input, allocation) = observer::config::tests::fixture(dir.path());
+        let standalone = Arc::new(NoEffects(AtomicUsize::new(0)));
+        let catalog = devices::Catalog::parse(b"hex-devices-1\ngpu\t256\tunmeasured\t777\tshards-gpu\tpci:0000:01:00.0\t\ngpu\t512\tunmeasured\t777\tshards-gpu\tpci:0000:02:00.0\t\n").unwrap();
+        let runtime = GuestRuntime::new(standalone.clone(), config)
+            .recorded_at(dir.path().join("guest"))
+            .with_runtime_cost(allocation.cost)
+            .unwrap()
+            .with_gpu_catalog(triomphe::Arc::try_new(catalog).unwrap())
+            .with_gpu_observer(input)
+            .unwrap();
+        let definition = runtime.gpu_backing_definition().unwrap().unwrap();
+        let mut source = PoolRecord {
+            version: hex_core::record::RECORD_VERSION,
+            key: BackingKey {
+                pool: definition.pool,
+                generation: [7; 16],
+            },
+            execution: Execution::ShardsDedicated,
+            cost: allocation.cost,
+            allocation: Some(allocation),
+            devices: definition.devices,
+            phase: BackingPhase::Granted,
+            init: None,
+            exit: None,
+        };
+        let receipt = Receipt::intent(
+            PoolRecord::decode(&source.encode().unwrap()).unwrap(),
+            definition.physical,
+            &runtime.config,
+        )
+        .unwrap();
+        pool::write(&definition.path, &receipt).unwrap();
+        source.phase = BackingPhase::Draining;
+        source.init = Some(hex_core::record::ProcId {
+            pid: 42,
+            start_ticks: 7,
+        });
+        let mut spec =
+            super::super::tests::oci(hex_api::Rootfs::Dir(dir.path().to_path_buf()), Vec::new());
+        spec.bounds.cpu_max_milli = Some(hex_api::MIN_CPU_MILLI);
+        spec.bounds.memory_max = Some(hex_api::MIN_MEMORY);
+        spec.devices = vec![source.devices[0]];
+        spec.allocation = Some(allocation);
+        spec.route = Some(RouteReceipt {
+            key: RouteKey {
+                class: Class::Oci,
+                image: ImagePlatform {
+                    os: ImageOs::Linux,
+                    arch: super::super::route::host_platform().unwrap().arch,
+                },
+                execution: Execution::ShardsDedicated,
+                gpu: GpuEligibility::Required,
+            },
+            backing: Some(source.key),
+        });
+        let mut boxed =
+            hex_core::record::BoxRecord::new(spec, hex_core::record::Phase::Deleting, Vec::new());
+        boxed.native_scope = Some(hex_core::record::NativeScope::from_bytes([8; 16]));
+        runtime.handoff_unsubmitted(&boxed, &source).unwrap();
+        let pending = runtime
+            .reserve(&boxed.spec.id, Operation::Creating)
+            .unwrap();
+        assert!(runtime.handoff_unsubmitted(&boxed, &source).is_err());
+        drop(pending);
+        let path = runtime.selected_path(&boxed.spec.id).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let intent = super::super::selected::Record::intent(&boxed, &runtime.config).unwrap();
+        super::super::selected::write(&path, &intent).unwrap();
+        assert!(runtime.handoff_unsubmitted(&boxed, &source).is_err());
+        super::super::held::remove(&path).unwrap();
+        runtime.handoff_unsubmitted(&boxed, &source).unwrap();
+        source.phase = BackingPhase::Released;
+        source.exit = Some(hex_api::Exit::Code(0));
+        assert!(
+            runtime.handoff_unsubmitted(&boxed, &source).is_err(),
+            "missing Intent after Released cannot exclude submitted native effects"
+        );
+        assert_eq!(standalone.0.load(Ordering::SeqCst), 0);
+        assert!(runtime.dedicated.lock().unwrap().is_empty());
     }
 
     struct Cold {
