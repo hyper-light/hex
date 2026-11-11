@@ -39,12 +39,15 @@ extern int posix_spawnattr_setjetsam_ext(posix_spawnattr_t *, short, int, int, i
 #define FRAME_MAGIC UINT32_C(0x48585350) // private measurement frame, not a product protocol
 #define FRAME_VERSION UINT32_C(1)
 
-enum kind { READY = 1, PREEXEC_ERROR = 2, CANARY = 3, IMAGE_RESULT = 4, MEMORY_START = 5, UNEXPECTED_CHILD = 6 };
+enum kind { READY = 1, PREEXEC_ERROR = 2, CANARY = 3, IMAGE_RESULT = 4, MEMORY_START = 5, UNEXPECTED_CHILD = 6,
+    SPAWN_RETURNED = 7, RETURNED_CHILD_END = 8 };
 enum scenario { NORMAL = 0, MISSING = 1, BAD_SESSION = 2, MEMORY = 3 };
 struct frame {
     uint32_t magic, version, kind, failure;
     int32_t pid, operation_errno, fork_errno, spawn_errno, raise_errno, denied_errno;
     int32_t thread_create, thread_join, qos_self;
+    int32_t cleanup_errno, child_status;
+    uint32_t child_reaped;
     uint64_t birth, nproc_soft, nproc_hard;
 };
 _Static_assert(sizeof(struct frame) <= PIPE_BUF, "private typed frame must be one atomic pipe write");
@@ -53,6 +56,7 @@ struct prepared {
     posix_spawn_file_actions_t actions;
     bool attr_ready, actions_ready;
     int ready[2], report[2], gate[2], denied, nullfd, kq;
+    struct kevent child_signal;
     uint64_t deadline;
     char path[PATH_MAX], missing_path[PATH_MAX], fd_text[32], denied_text[32], deadline_text[32], memory_text[32];
     char *argv[8], *env[3];
@@ -179,6 +183,11 @@ static int prepare(struct prepared *p, enum scenario which, int memory_mib, uint
     struct kevent signal_event;
     EV_SET(&signal_event, SIGCHLD, EVFILT_SIGNAL, EV_ADD | EV_ENABLE | EV_CLEAR, 0, 0, NULL);
     if (kevent(p->kq, &signal_event, 1, NULL, 0, NULL) < 0) return errno;
+    // Darwin does not inherit a kqueue across fork. Prepare event storage now; the trampoline
+    // creates its private kernel observer before any spawn, without a userspace allocator.
+    EV_SET(&p->child_signal, SIGCHLD, EVFILT_SIGNAL, EV_ADD | EV_ENABLE | EV_CLEAR, 0, 0, NULL);
+    struct rusage_info_v4 warm_usage;
+    if ((error = native_usage(getpid(), &warm_usage))) return error;
     if ((error = posix_spawnattr_init(&p->attr))) return error;
     p->attr_ready = true;
     short flags = POSIX_SPAWN_SETEXEC | POSIX_SPAWN_START_SUSPENDED | POSIX_SPAWN_SETPGROUP |
@@ -213,12 +222,21 @@ static int prepare(struct prepared *p, enum scenario which, int memory_mib, uint
     return 0;
 }
 
+static int cleanup_native(pid_t pid, uint64_t *birth, int kq, uint64_t deadline,
+    bool *reaped, int *status, uint64_t *peak);
+
 // EXACT trusted child trampoline. SAFETY: all p storage/actions/strings are COW copies prepared
-// before fork. Only own private FD closes, setrlimit/setsid/getpid/read/write/clock and the prepared
-// public posix_spawn wrapper execute here; no allocator/format/locks/destructors. No UID/filter change.
+// before fork. Native queue/proc/wait/kill/FD operations only, plus setrlimit/setsid/getpid/read/write/
+// clock and prepared public posix_spawn. No allocator/format/locks/destructors/UID/filter change.
 static void trampoline(const struct prepared *p, enum scenario which) {
     (void)close(p->ready[0]); (void)close(p->report[0]); (void)close(p->gate[1]); (void)close(p->kq);
     struct frame f = { .magic = FRAME_MAGIC, .version = FRAME_VERSION, .kind = READY, .pid = getpid() };
+    int child_kq = kqueue();
+    if (child_kq < 0 || fcntl(child_kq, F_SETFD, FD_CLOEXEC) != 0 ||
+        kevent(child_kq, &p->child_signal, 1, NULL, 0, NULL) < 0) {
+        f.kind = PREEXEC_ERROR; f.operation_errno = errno;
+        (void)send_frame(p->ready[1], &f, p->deadline); _exit(126);
+    }
     struct rlimit zero = { .rlim_cur = 0, .rlim_max = 0 };
     if (setrlimit(RLIMIT_NPROC, &zero) != 0 || (which == BAD_SESSION && setsid() < 0)) {
         f.kind = PREEXEC_ERROR; f.operation_errno = errno;
@@ -235,7 +253,32 @@ static void trampoline(const struct prepared *p, enum scenario which) {
     if (n != 1 || permit != 'R') _exit(126);
     (void)close(p->gate[0]);
     const char *path = which == MISSING ? p->missing_path : p->path;
-    int error = posix_spawn(NULL, path, &p->actions, &p->attr, p->argv, p->env);
+    pid_t returned = -1;
+    int error = posix_spawn(&returned, path, &p->actions, &p->attr, p->argv, p->env);
+    if (error == 0 || returned > 0) {
+        struct rusage_info_v4 usage = {0};
+        siginfo_t owned = {0};
+        int identity_error = EINVAL;
+        if (returned > 0 && returned != getpid()) {
+            // The sole unreaped direct-child relationship is checked before any PID query.
+            identity_error = waitid(P_PID, (id_t)returned, &owned, WEXITED | WNOHANG | WNOWAIT) != 0 ?
+                errno : native_usage(returned, &usage);
+        }
+        struct frame child = { .magic = FRAME_MAGIC, .version = FRAME_VERSION,
+            .kind = SPAWN_RETURNED, .failure = 1, .pid = returned, .spawn_errno = error,
+            .operation_errno = identity_error, .birth = identity_error ? 0 : usage.ri_proc_start_abstime };
+        // Publish immediately. No positive PID/birth is invented when output/query is unavailable.
+        int published = send_frame(p->ready[1], &child, p->deadline);
+        bool reaped = false;
+        int status = 0; uint64_t peak = 0, birth = child.birth;
+        int cleaned = returned > 0 && returned != getpid() ?
+            cleanup_native(returned, &birth, child_kq, p->deadline, &reaped, &status, &peak) : EINVAL;
+        child.kind = RETURNED_CHILD_END; child.birth = birth;
+        child.cleanup_errno = cleaned; child.child_status = status; child.child_reaped = reaped;
+        child.operation_errno = published;
+        (void)send_frame(p->ready[1], &child, p->deadline);
+        f.failure = 1;
+    }
     f.kind = PREEXEC_ERROR; f.operation_errno = error;
     (void)send_frame(p->ready[1], &f, p->deadline);
     _exit(127); // success cannot return to this image; no atexit/Rust/native-owner destructor
@@ -291,23 +334,29 @@ static int terminal(pid_t pid, int kq, uint64_t deadline, int *status, uint64_t 
         if (ended.filter == EVFILT_PROC && ended.ident == (uintptr_t)pid) *exit_flags |= ended.fflags;
     }
 }
-static int cleanup(pid_t pid, uint64_t birth, int kq, uint64_t deadline, bool *reaped) {
+static int cleanup_native(pid_t pid, uint64_t *birth, int kq, uint64_t deadline,
+    bool *reaped, int *status, uint64_t *peak) {
     siginfo_t info = {0};
     if (waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT) != 0) return errno;
     if (info.si_pid != pid) {
         struct rusage_info_v4 usage;
         int error = native_usage(pid, &usage);
-        if (error || !usage.ri_proc_start_abstime || (birth && usage.ri_proc_start_abstime != birth)) return error ? error : ESTALE;
-        birth = usage.ri_proc_start_abstime;
+        if (error || !usage.ri_proc_start_abstime || (*birth && usage.ri_proc_start_abstime != *birth)) return error ? error : ESTALE;
+        *birth = usage.ri_proc_start_abstime;
         struct kevent change;
         EV_SET(&change, (uintptr_t)pid, EVFILT_PROC, EV_ADD | EV_ENABLE | EV_CLEAR, NOTE_EXIT | NOTE_EXITSTATUS, 0, NULL);
         if (kevent(kq, &change, 1, NULL, 0, NULL) < 0 && errno != ESRCH) return errno;
         // SAFETY: still this parent's exact unreaped direct child, joined to native birth.
         if (kill(pid, SIGKILL) != 0 && errno != ESRCH) return errno;
     }
-    int status = 0; uint64_t peak = 0; uint32_t exit_flags = 0;
-    int error = terminal(pid, kq, deadline, &status, &peak, &exit_flags);
+    uint32_t exit_flags = 0;
+    int error = terminal(pid, kq, deadline, status, peak, &exit_flags);
     if (!error) *reaped = true;
+    return error;
+}
+static int cleanup(pid_t pid, uint64_t birth, int kq, uint64_t deadline, bool *reaped) {
+    int status = 0; uint64_t peak = 0;
+    int error = cleanup_native(pid, &birth, kq, deadline, reaped, &status, &peak);
     fprintf(stderr, "CLEANUP pid=%d birth=%" PRIu64 " error=%d status=%d peak=%" PRIu64 " reaped=%d\n", pid, birth, error, status, peak, *reaped);
     return error;
 }
@@ -421,13 +470,46 @@ static int run_case(enum scenario which, int memory_mib, uint64_t deadline, cons
     if (ready.kind != READY || ready.pid != pid) { error = EPROTO; goto done; }
     if (write(p.gate[1], "R", 1) != 1) { error = errno ? errno : EIO; goto done; }
     (void)close(p.gate[1]); p.gate[1] = -1;
+    // The success path closes this CLOEXEC pipe. EOF alone supplies no exec witness; NOTE_EXEC/stop/canary
+    // below remain required. Reading here preserves a returned child's immediate receipt while
+    // its SAME direct-parent trampoline owns the finite native cleanup, before controller exit.
+    struct frame preexec = {0};
+    bool have_preexec = false, unexpected_return = false;
+    int ready_error = read_frame(p.ready[0], &preexec, deadline);
+    if (ready_error == 0) {
+        if (preexec.kind == SPAWN_RETURNED) {
+            unexpected_return = true;
+            fprintf(stderr, "RETURNED_CHILD case=%d pid=%d birth=%" PRIu64 " spawn_errno=%d identity_errno=%d\n",
+                which, preexec.pid, preexec.birth, preexec.spawn_errno, preexec.operation_errno);
+            if ((error = read_frame(p.ready[0], &preexec, deadline))) goto done;
+            fprintf(stderr, "RETURNED_CHILD_CLEANUP case=%d pid=%d birth=%" PRIu64 " cleanup_errno=%d status=%d reaped=%u publish_errno=%d\n",
+                which, preexec.pid, preexec.birth, preexec.cleanup_errno, preexec.child_status,
+                preexec.child_reaped, preexec.operation_errno);
+            if (preexec.kind != RETURNED_CHILD_END) { error = EPROTO; goto done; }
+            if ((error = read_frame(p.ready[0], &preexec, deadline))) goto done;
+        }
+        have_preexec = true;
+    } else if (ready_error != EPIPE) { error = ready_error; goto done; }
     struct kevent observed;
     do {
         if ((error = event(p.kq, deadline, &observed))) goto done;
     } while (observed.filter != EVFILT_PROC || observed.ident != (uintptr_t)pid);
     fprintf(stderr, "EVENT case=%d pid=%d fflags=%u data=%" PRIdPTR "\n", which, pid, observed.fflags, observed.data);
+    if (unexpected_return) { error = EPROTO; goto done; }
     if (which == NORMAL || which == MEMORY) {
-        if (!(observed.fflags & NOTE_EXEC)) { error = EPROTO; goto done; }
+        if (!(observed.fflags & NOTE_EXEC)) {
+            // Diagnostic only: this private reader is nonblocking. Drain at most the existing
+            // atomic PREEXEC_ERROR frame; do not spend the cleanup budget waiting for a report.
+            struct frame failure = preexec;
+            ssize_t count = have_preexec ? (ssize_t)sizeof(failure) : read(p.ready[0], &failure, sizeof(failure));
+            int diagnostic_error = count < 0 ? errno : 0;
+            bool complete = count == (ssize_t)sizeof(failure) && failure.magic == FRAME_MAGIC &&
+                failure.version == FRAME_VERSION && failure.kind == PREEXEC_ERROR && failure.pid == pid;
+            fprintf(stderr, "PREEXEC_DIAGNOSTIC case=%d child=%d bytes=%zd read_errno=%d complete=%d kind=%u pid=%d native_errno=%d\n",
+                which, pid, count, diagnostic_error, complete, failure.kind, failure.pid, failure.operation_errno);
+            error = EPROTO;
+            goto done;
+        }
         struct rusage_info_v4 after;
         bool stopped = false;
         if ((error = native_usage(pid, &after)) || (error = native_stop(pid, &stopped))) goto done;
@@ -455,8 +537,8 @@ static int run_case(enum scenario which, int memory_mib, uint64_t deadline, cons
         if ((which == NORMAL && result.kind != IMAGE_RESULT) || (which == MEMORY && result.kind != MEMORY_START)) { error = EPROTO; goto done; }
         fprintf(stderr, "IMAGE case=%d samepid=%d birth=%" PRIu64 " kind=%u nproc=%" PRIu64 "/%" PRIu64 " fork=%d spawn=%d raise=%d thread=%d/%d deny=%d qos=%d\n", which, result.pid, result.birth, result.kind, result.nproc_soft, result.nproc_hard, result.fork_errno, result.spawn_errno, result.raise_errno, result.thread_create, result.thread_join, result.denied_errno, result.qos_self);
     } else if (which == MISSING) {
-        struct frame failure;
-        if ((error = read_frame(p.ready[0], &failure, deadline))) goto done;
+        struct frame failure = preexec;
+        if (!have_preexec && (error = read_frame(p.ready[0], &failure, deadline))) goto done;
         fprintf(stderr, "NEGATIVE native_errno=%d kind=%u\n", failure.operation_errno, failure.kind);
         if (failure.kind != PREEXEC_ERROR || failure.operation_errno != ENOENT) { error = EPROTO; goto done; }
     }

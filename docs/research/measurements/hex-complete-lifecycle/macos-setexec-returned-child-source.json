@@ -1,0 +1,67 @@
+{
+  "base": "70b364aeb198b425a794878916f83321e41f0966",
+  "original_c_source": "9a5879b7726287ae7fd1216286787df887f5571c",
+  "diagnostic_predecessor": "9094958ecb34925b6a99e8572ebbddbd8631fb37",
+  "scope": "measurement-only combined existing ready-pipe errno diagnostic plus sole direct-parent unexpected-posix_spawn-return ownership; no production change",
+  "root_original_native_log_sha256": "3c1fd9d0de1f872d5fc05c499753d6e6606a4630ec432e3f9e980fa745a40a49",
+  "original_result": "NORMAL exit127 before NOTE_EXEC, controller98027/birth14402359308526 REAPED; native operation errno discarded; later3UNEXECUTED; no all-descendant proof",
+  "files": {
+    "docs/research/measurements/hex-complete-lifecycle/macos_setexec_preseal_control.c": {
+      "bytes": 33676,
+      "sha256": "abd8153e4ad8d48cf7205ca1692eb33722f4f23e75ed13099a5798faf16529d8"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/macos-setexec-preseal-control.md": {
+      "bytes": 16625,
+      "sha256": "88272693cc95e8e6aaa9c7661ed326976513ca9eb8058c2459e6e24d9ae9497a"
+    }
+  },
+  "primary": [
+    {
+      "path": "bsd/man/man2/kqueue.2",
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/man/man2/kqueue.2",
+      "bytes": 23602,
+      "sha256": "48302f5a7c664d9323dca51593253a30e7263161a6ea514fcb89cdcedd03d2a4",
+      "cache": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-scope-closure/bsd-man-man2-kqueue.2"
+    },
+    {
+      "path": "bsd/man/man2/wait.2",
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/man/man2/wait.2",
+      "bytes": 8764,
+      "sha256": "2178648ce5091cba439ca601216ec3f368ed64487f91385f68b65e7b5e5e5409",
+      "cache": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-scope-closure/bsd-man-man2-wait.2"
+    },
+    {
+      "path": "libsyscall/wrappers/libproc/libproc.c",
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/libsyscall/wrappers/libproc/libproc.c",
+      "bytes": 28996,
+      "sha256": "5c8a771427e04c5e1d55c4cdf5a077f3b52c5be4a091683b970084bfdda76df2",
+      "cache": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-scope-closure/libsyscall-wrappers-libproc-libproc.c"
+    },
+    {
+      "path": "bsd/kern/syscalls.master",
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/syscalls.master",
+      "bytes": 59004,
+      "sha256": "7e866891439ad5b3464777d2cacc3b82fc2e7f439fb5a8686c3e6f160d5aeab5",
+      "cache": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-scope-closure/bsd-kern-syscalls.master"
+    }
+  ],
+  "new_native_symbols": [],
+  "existing_native_operations_newly_reachable_in_trampoline": [
+    "kqueue/kevent/fcntl private CLOEXEC queue, event storage prepared before fork; parent queues not inherited by Darwin",
+    "waitid direct-child join then proc_pid_rusage/birth (warmed beforefork)",
+    "same shared native cleanup core wait/kill/terminal/reap, no format/heap/locks/destructors"
+  ],
+  "unchanged": [
+    "four fixed cuts; stop-first-failure",
+    "39.507s total absolute CLOCK_UPTIME_RAW budget",
+    "all exec/stop/canary/identity/NPROC/thread/FD/QoS/jetsam/memory/terminal oracles",
+    "no credential/root/filter/service/security mutation",
+    "main_cleanup only exact controller; unknown child cleanup remains unknown"
+  ],
+  "compile_native": "UNRUN by L3; ROOT reviews and dispatches only combined source after review",
+  "new_source_check": "git diff --check only",
+  "separate_dirty_production": "Recorded global route projector draft excluded from named commit",
+  "role": "implementer L3",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3"
+}

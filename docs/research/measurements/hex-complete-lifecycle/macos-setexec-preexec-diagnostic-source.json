@@ -1,0 +1,31 @@
+{
+  "base": "0597523f90fdc665e4f1d3393665544d47443bdf",
+  "original_c_source": "9a5879b7726287ae7fd1216286787df887f5571c",
+  "original_c_sha256": "243c975934baa363003cc0dec9b96724cad946a71a6f9bb7d58544a3acdb324b",
+  "scope": "measurement-only diagnostic: one nonblocking existing ready-pipe frame drain when NOTE_EXEC absent; original EPROTO and all oracles/guards/cleanup preserved",
+  "original_root_result": {
+    "source": "a6b20f34d815d41d5ae36233352e576f5c56b2c3",
+    "compiler_exit": 0,
+    "sdk": "installed26.5 explicit sysroot; OS26.4 not SDK equivalence",
+    "binary_sha256": "e540ab28276695bef3132d76c6b3626c547d8dc89c25f6f18b4dbb52f1c3777d",
+    "native_log_bytes": 437,
+    "native_log_sha256": "3c1fd9d0de1f872d5fc05c499753d6e6606a4630ec432e3f9e980fa745a40a49",
+    "normal": "exit127 before NOTE_EXEC; EPROTO100; exact child98027 birth14402359308526 positively reaped",
+    "later3": "UNEXECUTED",
+    "cause": "unknown; original existing PREEXEC_ERROR frame discarded"
+  },
+  "files": {
+    "docs/research/measurements/hex-complete-lifecycle/macos_setexec_preseal_control.c": {
+      "bytes": 29415,
+      "sha256": "2ece8cfd53f3fe23abed8016ab05e86bda7c5272cd005116bed7441fc2979a48"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/macos-setexec-preseal-control.md": {
+      "bytes": 12185,
+      "sha256": "74eae0a72d214178632c92fa94935f2cfd909cbac0697ff23268301045ad3bcb"
+    }
+  },
+  "new_source_check": "git diff --check only; no C compile or native execution by L3",
+  "new_unsafe_or_native_symbols": [],
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3"
+}

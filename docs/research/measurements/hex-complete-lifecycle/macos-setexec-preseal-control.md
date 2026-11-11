@@ -148,3 +148,84 @@ UNCOMPILED/UNRUN. R11: macOS arm64-only fixture, not portable product support pr
 R08/R14: no performance/latency/allocation/fault/competitor claim; ROOT owns those campaigns.
 R15/R16: source-only implementer, no jobs/native/extra agents/foreign process changes;
 ROOT reviews, admits, executes and preserves raw plus unresolved native/profile/full gates.
+
+Diagnostic successor after ROOT a6b2
+
+ROOT's exact original C body compiled with Clang21 and the explicitly recorded installed
+SDK26.5 (`macOS26.4` is the OS, not SDK equivalence). The first NORMAL child98027,
+birth14402359308526, ended127 before NOTE_EXEC. The existing readiness frame was READY;
+the parent retained EPROTO100 and positively reaped that exact child. Parent NPROC
+limits stayed10666/16000. No mechanism passed and the later three cuts did not execute.
+Full437-byte native log SHA-256:
+`3c1fd9d0de1f872d5fc05c499753d6e6606a4630ec432e3f9e980fa745a40a49`.
+The adjacent ROOT CLI receipt was read in full; removing its one appended framing
+newline reproduces that raw length/hash. ROOT retains the original source and raw.
+
+ROOT requested only observability of the already-written PREEXEC_ERROR frame. The
+successor adds one nonblocking read of that SAME ready pipe if NORMAL/MEMORY lacks
+NOTE_EXEC. It prints the byte count, read errno, framing/expected-child validity and
+native operation errno. Partial/absent/malformed output is a missing diagnostic,
+never an exec, ownership or success witness. It spends no additional waiting budget.
+EPROTO100, stop-first-failure, the original39.507s deadline, cleanup and every mechanism
+oracle are unchanged. No native errno or SETEXEC cause is inferred from the original
+discarded frame. The successor is source-only, UNCOMPILED/UNRUN by L3, with no new job,
+production code, native primitive, child, image, fallback or resource constant.
+
+Unexpected-return ownership completion before replay
+
+ROOT additionally identified an unexercised fixture ownership gap: SETEXEC can never
+be assumed to replace the controller merely because that flag was requested. A
+filter/implementation returning to this image might have created another child.
+The combined successor passes a real PID output to posix_spawn. Any zero return or
+positive returned PID enters a failure-only path. It validates the exact unreaped
+direct-child relationship before a native PID/birth query, publishes the returned
+PID/birth/query/spawn result immediately on the SAME private ready pipe, and keeps
+the trampoline as that child's sole terminal waiter. Nonpositive/self/unknown output
+confers no signal authority. Native cleanup still joins a fresh native birth before
+any signal, then requires positive wait/exit/native-rusage/reap. Its outcome/status
+is published separately; read, send, cleanup or deadline failure remains UNKNOWN.
+An unexpected return always fails the mechanism, including when cleanup succeeds.
+
+The existing cleanup algorithm is factored into a native-only core shared with its
+original parent/image diagnostic wrapper. No formatting, heap, locks, destructor,
+credential change, process enumeration or private syscall enters the trampoline.
+The parent now consumes pre-exec receipts before waiting for controller exit, so a
+late/hung child cleanup does not discard the immediate owned PID/birth evidence.
+Pipe EOF continues to supply no exec-success witness: the original NOTE_EXEC,
+same-birth stopped task, absent canary, explicit resume and all negative/terminal
+oracles remain mandatory. There are still four cuts, no retry and one unchanged
+39.507s absolute deadline; no native child is started by the implementation lane.
+
+One native observer is created in the trampoline BEFORE any possible spawn. All
+event storage is prepared before COW fork. The kernel queue descriptor cannot be
+prepared in the parent and reused: Apple's pinned kqueue manual explicitly says
+fork does not inherit it. The child creates/marks its own queue CLOEXEC and registers
+the preprepared passive SIGCHLD event; errors publish PREEXEC_ERROR before any
+foreign execution. This is the existing public kqueue/kevent primitive, not a new
+worker or signal-handler/mask change. proc_pid_rusage is warmed on the parent before
+fork and its pinned libproc body directly delegates to the proc-info syscall.
+Existing read/write/clock/FD/proc/wait/kill wrappers stay native-only in that child.
+Native call/queue behavior after fork still requires ROOT's actual matched run.
+
+Primary pin `apple-oss-distributions/xnu@f6217f891ac0bb64f3d375211650a4c1ff8ca1ea`:
+
+- [kqueue manual](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/man/man2/kqueue.2),
+  23602B, SHA48302f5a7c664d9323dca51593253a30e7263161a6ea514fcb89cdcedd03d2a4:
+  queue noninheritance and finite event timeout contract.
+- [wait manual](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/man/man2/wait.2),
+  8764B, SHA2178648ce5091cba439ca601216ec3f368ed64487f91385f68b65e7b5e5e5409:
+  positive PID chooses a direct child; WNOHANG/reap status; an exiting parent reparents
+  unreaped children, which is why this failure branch retains its waiter.
+- [libproc wrapper](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/libsyscall/wrappers/libproc/libproc.c),
+  28996B, SHA5c8a771427e04c5e1d55c4cdf5a077f3b52c5be4a091683b970084bfdda76df2:
+  proc_pid_rusage directly invokes its native proc-info entry, without allocation.
+- [public syscall table](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/syscalls.master),
+  59004B, SHA7e866891439ad5b3464777d2cacc3b82fc2e7f439fb5a8686c3e6f160d5aeab5:
+  kqueue/kevent public generated syscall entries. No private syscall is used.
+
+This is a newly completed measurement failure-ownership path, not a reproduced
+SETEXEC/filter behavior or a production release fix. Original9a587/909 source and
+a6b2 raw stay unchanged. a6b2 established only its exact controller reap; it supplied
+no all-descendant cleanup proof. The combined successor is UNCOMPILED/UNRUN, no new
+unsafe Rust/SDK/native production change or2ef intake. Actual HVF/Vulkan worker
+compatibility and a positively closed fixed member set remain separate prerequisites.
