@@ -1226,3 +1226,86 @@ fn the_readers_turn_wakes_fewer_threads_a_call_than_a_reading_thread() {
         caller + reader
     );
 }
+
+/// A box of `class`, `oci` or `firecracker`, of a container spec that names nothing on this host.
+fn container_box(id: &str, class: Class) -> hex_api::BoxSpec {
+    let oci = Box::new(hex_api::OciSpec {
+        rootfs: hex_api::Rootfs::Dir("/stand-in".into()),
+        init: Program::of(&["/bin/true"]),
+        mounts: Vec::new(),
+        hostname: None,
+        network: hex_api::Network::Private,
+        hosts: Vec::new(),
+    });
+    hex_api::BoxSpec {
+        id: BoxId::new(id).unwrap(),
+        bounds: hex_api::Bounds::default(),
+        class: match class {
+            Class::Firecracker => hex_api::ClassSpec::Firecracker(oci),
+            _ => hex_api::ClassSpec::Oci(oci),
+        },
+        owner: None,
+        devices: Vec::new(),
+        allocation: None,
+        route: None,
+    }
+}
+
+/// AC-T7.4.1: a box's class times its create, each (kind, class) a learned wait of its own; a class with no record
+/// yet measures, never borrowing another's. Do: through the node agent's socket, create an `oci` box the stand-in
+/// agent never answers, so the create runs out at the `oci` create's bound `b`; then create a `firecracker` box, which
+/// the agent answers only 4`b` after it reads it, a microVM's boot being slower than any OCI create recorded. Expect:
+/// the `oci` create refused as twice its slowest; the `firecracker` create answered.
+#[test]
+fn a_vm_create_slower_than_the_oci_record_is_not_refused_by_it() {
+    let (_dir, path, listener) = agent_socket();
+    let (measured, oci_bound) = std::sync::mpsc::channel::<Duration>();
+    let agent = std::thread::spawn(move || {
+        let conn = rustix::net::accept_with(&listener, SocketFlags::CLOEXEC).unwrap();
+        hello(&conn, 1);
+        let (_, request) = next_request(&conn);
+        assert!(
+            matches!(request, Request::Call(Call::Create(_))),
+            "{request:?}"
+        );
+        let b = oci_bound.recv().unwrap();
+        let (h, request) = next_request(&conn);
+        let Request::Call(Call::Create(spec)) = request else {
+            panic!("a create, not {request:?}")
+        };
+        // Held 4b, a span the client sends nothing in: the poll ends at its timeout, or at the client's end.
+        let mut quiet = [PollFd::new(&conn, PollFlags::IN)];
+        let _ = rustix::event::poll(&mut quiet, Some(&Timespec::try_from(b * 4).unwrap()));
+        let info = hex_api::BoxInfo {
+            id: spec.id,
+            class: Class::Firecracker,
+            state: hex_api::BoxState::Created,
+            bounds: spec.bounds,
+            allocation: None,
+            adopted: false,
+            membership: None,
+            exit: None,
+            abandoned: 0,
+            route: None,
+        };
+        let bytes = wire::answer(h.id, &Answer::Info(info), wire::MAX_MESSAGE).unwrap();
+        let _ = rustix::net::send(&conn, &bytes, SendFlags::NOSIGNAL);
+        conn
+    });
+    let client = Client::connect(&path).unwrap();
+    let began = std::time::Instant::now();
+    let oci = client.create(container_box("o", Class::Oci));
+    measured.send(began.elapsed()).unwrap();
+    let vm = client.create(container_box("v", Class::Firecracker));
+    eprintln!("client_class_waits oci={oci:?} vm={vm:?}");
+    assert!(
+        matches!(&oci, Err(Refusal::Os { why, .. }) if why.contains("twice the slowest")),
+        "{oci:?}"
+    );
+    assert!(
+        matches!(&vm, Ok(info) if info.class == Class::Firecracker),
+        "{vm:?}"
+    );
+    drop(client);
+    drop(agent.join().unwrap());
+}
