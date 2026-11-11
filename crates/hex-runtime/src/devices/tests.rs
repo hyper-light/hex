@@ -8,7 +8,6 @@ fn catalog() -> Catalog {
 
 fn spec(name: &str, key: u64) -> BoxSpec {
     BoxSpec {
-        route: None,
         id: BoxId::new(name).unwrap(),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(hex_api::OciSpec {
@@ -60,7 +59,7 @@ fn every_recorded_phase_retains_the_device_until_physical_removal() {
         let records = BTreeMap::from([(held.id.clone(), Ok(record))]);
         assert_eq!(
             catalog.holder(held.devices[0], &records).unwrap(),
-            Some(&held.id)
+            Some(hex_api::DeviceHolder::Box(held.id.try_clone().unwrap()))
         );
         assert!(catalog.prepare(&spec("next", 256), &records).is_err());
         assert!(catalog.prepare(&spec("neighbor", 512), &records).is_ok());
@@ -178,7 +177,7 @@ fn explicit_consistent_backend_aliases_keep_one_physical_entry_and_holder() {
     )]);
     assert_eq!(
         catalog.holder(held.devices[0], &records).unwrap(),
-        Some(&held.id)
+        Some(hex_api::DeviceHolder::Box(held.id.try_clone().unwrap()))
     );
     assert!(
         catalog

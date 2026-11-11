@@ -1,0 +1,75 @@
+{
+  "inputs": {
+    "crates/hex-api/src/devices.rs": {
+      "source": "c92ca3cba80b944e1d0d737a971bc4be507ed2e0",
+      "source_sha256": "7a8d0f8e63fc7521212115f4afad25c9c17ed328752e73ed2dfd0c3521d84ebb",
+      "integrated_sha256": "7a8d0f8e63fc7521212115f4afad25c9c17ed328752e73ed2dfd0c3521d84ebb"
+    },
+    "crates/hex-api/src/runtime.rs": {
+      "source": "c92ca3cba80b944e1d0d737a971bc4be507ed2e0",
+      "source_sha256": "32c7dcf4856d940bdb13cacb82bdf57104fe6893a46c5f17969b3a9a946bd451",
+      "integrated_sha256": "32c7dcf4856d940bdb13cacb82bdf57104fe6893a46c5f17969b3a9a946bd451"
+    },
+    "crates/hex-runtime/src/devices.rs": {
+      "source": "c92ca3cba80b944e1d0d737a971bc4be507ed2e0",
+      "source_sha256": "4f74d8b8d8727c70a2dc3a2bee714faf97fd8a9fbf29527922f4b535febacaa8",
+      "integrated_sha256": "65bba779927a4a9787f1e854a2c1a49251ca3ba3dae28a8cd317cc386787e5ad"
+    },
+    "crates/hex-runtime/src/devices/tests.rs": {
+      "source": "c92ca3cba80b944e1d0d737a971bc4be507ed2e0",
+      "source_sha256": "6d2a20defabc8698f0a7c06d6a7c2c6dc511284465ead02243779a23d03caa72",
+      "integrated_sha256": "6d2a20defabc8698f0a7c06d6a7c2c6dc511284465ead02243779a23d03caa72"
+    },
+    "crates/hex-runtime/src/firecracker/observations.rs": {
+      "source": "c92ca3cba80b944e1d0d737a971bc4be507ed2e0",
+      "source_sha256": "ee2b7a1110936017441284514c010d9bb6fd7ab7f2b7d4ebed5b11ad08a25807",
+      "integrated_sha256": "ee2b7a1110936017441284514c010d9bb6fd7ab7f2b7d4ebed5b11ad08a25807"
+    },
+    "crates/hex-node/src/placement/devices.rs": {
+      "source": "c92ca3cba80b944e1d0d737a971bc4be507ed2e0",
+      "source_sha256": "581cfa7c9904c1aa912eb0b6fa025a214e7059661b5bf56476c9ce15326ad6ae",
+      "integrated_sha256": "581cfa7c9904c1aa912eb0b6fa025a214e7059661b5bf56476c9ce15326ad6ae"
+    },
+    "crates/hex-node/src/placement/device_binding_tests.rs": {
+      "source": "c92ca3cba80b944e1d0d737a971bc4be507ed2e0",
+      "source_sha256": "5646aff7b77d408bd24de0164c3c64128c6d0bf7349f28c4c73f5f55ff67a8a0",
+      "integrated_sha256": "5646aff7b77d408bd24de0164c3c64128c6d0bf7349f28c4c73f5f55ff67a8a0"
+    },
+    "crates/hex-node/src/scheduler/capacity/devices.rs": {
+      "source": "c92ca3cba80b944e1d0d737a971bc4be507ed2e0",
+      "source_sha256": "721cc31361a236d8987226771fd3dc0f55b2ab5d7e8cebc4107386864304c7b9",
+      "integrated_sha256": "721cc31361a236d8987226771fd3dc0f55b2ab5d7e8cebc4107386864304c7b9"
+    },
+    "crates/hex-node/src/scheduler/device_offer_tests.rs": {
+      "source": "c92ca3cba80b944e1d0d737a971bc4be507ed2e0",
+      "source_sha256": "bf876dbabf1a93dc62db7af51ac1b3b5099029f67f0a43d5a63e434497b0e11c",
+      "integrated_sha256": "bf876dbabf1a93dc62db7af51ac1b3b5099029f67f0a43d5a63e434497b0e11c"
+    },
+    "crates/hex-core/src/wire.rs": {
+      "source": "a218f2d53a8726d751a87ecb950eb7f669e54526",
+      "source_sha256": "365fe02ccd9e03c20f70aa882bf3305afe453aa18931fa48da89e0457605d78c",
+      "integrated_sha256": "365fe02ccd9e03c20f70aa882bf3305afe453aa18931fa48da89e0457605d78c"
+    },
+    "crates/hex-core/src/wire/tests.rs": {
+      "source": "a218f2d53a8726d751a87ecb950eb7f669e54526",
+      "source_sha256": "7979df8737b240171f6e2987c812e9ea650011c28781ebf27757917447147aae",
+      "integrated_sha256": "7979df8737b240171f6e2987c812e9ea650011c28781ebf27757917447147aae"
+    },
+    "crates/hex-core/src/record.rs": {
+      "source": "d83a1eb097088b2b14033f6159f11cf40c0da22d",
+      "source_sha256": "91cb7082ba163abb6f442b2b201aacbcb39fbf594d551e0035e00762c4ccf5f9",
+      "integrated_sha256": "bcad9bf9492cd184fe78aa68c0ca47a549d1f74cc2e38e68ca58eadea2b9d6db"
+    },
+    "crates/hex-core/src/record/pool.rs": {
+      "source": "27f6c910d6d069a8d433a9e07cf970a504be702c",
+      "source_sha256": "bf69d384c25894bc1631c946235d15ee3d342c84e39f9e9e27703c6682aeb851",
+      "integrated_sha256": "bf69d384c25894bc1631c946235d15ee3d342c84e39f9e9e27703c6682aeb851"
+    }
+  },
+  "compatibility": [
+    "ROOT exact two conformance routeNone compile cause",
+    "public DeviceHolder reexport",
+    "restore two routeNone source fixture fields"
+  ],
+  "status": "source only; new controls UNRUN; actual pool/native initialization pending"
+}

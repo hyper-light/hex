@@ -86,12 +86,12 @@ impl Entry {
         }
     }
 
-    pub fn report(&self, holder: Option<&BoxId>) -> Result<DeviceInfo, Refusal> {
+    pub fn report(&self, holder: Option<hex_api::DeviceHolder>) -> Result<DeviceInfo, Refusal> {
         Ok(DeviceInfo {
             id: self.info.id,
             model: copy(&self.info.model)?,
             size: self.info.size,
-            holder: holder.map(BoxId::try_clone).transpose()?,
+            holder,
         })
     }
 }
@@ -639,11 +639,11 @@ impl Catalog {
 
     /// Creating, Ready and Deleting records all retain the resource. Only physical removal followed
     /// by record removal makes it free. Malformed records cannot be treated as empty capacity.
-    pub fn holder<'a>(
+    pub fn holder(
         &self,
         id: DeviceId,
-        records: &'a Records,
-    ) -> Result<Option<&'a BoxId>, Refusal> {
+        records: &Records,
+    ) -> Result<Option<hex_api::DeviceHolder>, Refusal> {
         let mut holder = None;
         for (box_id, record) in records {
             let record = record.as_ref().map_err(|_| {
@@ -667,7 +667,7 @@ impl Catalog {
                         "a physical device has multiple recorded holders".into(),
                     ));
                 }
-                holder = Some(box_id);
+                holder = Some(hex_api::DeviceHolder::Box(box_id.try_clone()?));
             }
         }
         Ok(holder)

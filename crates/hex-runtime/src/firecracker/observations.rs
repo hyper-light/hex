@@ -188,7 +188,9 @@ mod tests {
             .is_err()
         );
         let mut claimed = reading(7, Some(0), Some(0));
-        claimed.info.holder = Some(hex_api::BoxId::new("foreign").unwrap());
+        claimed.info.holder = Some(hex_api::DeviceHolder::Box(
+            hex_api::BoxId::new("foreign").unwrap(),
+        ));
         assert!(join(&[assignment], &report(vec![claimed])).is_err());
     }
 

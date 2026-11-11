@@ -44,15 +44,22 @@ pub(super) fn verify(
         .ok_or_else(|| invalid("device-bearing runtime reports no binding metadata"))?;
     report.check()?;
     if expected.iter().any(|claim| {
-        !report
-            .devices
-            .iter()
-            .any(|device| device.id == *claim && device.holder.as_ref() == Some(id))
-    }) || report
-        .devices
-        .iter()
-        .any(|device| device.holder.as_ref() == Some(id) && !expected.contains(&device.id))
-    {
+        !report.devices.iter().any(|device| {
+            device.id == *claim
+                && device
+                    .holder
+                    .as_ref()
+                    .and_then(hex_api::DeviceHolder::box_id)
+                    == Some(id)
+        })
+    }) || report.devices.iter().any(|device| {
+        device
+            .holder
+            .as_ref()
+            .and_then(hex_api::DeviceHolder::box_id)
+            == Some(id)
+            && !expected.contains(&device.id)
+    }) {
         return Err(
             bad("native device bindings disagree with the durable receiver assignment").into(),
         );

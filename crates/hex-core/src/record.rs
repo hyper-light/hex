@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::cgroup::Baseline;
 
+mod pool;
+pub use pool::{NativeRecord, NativeStage, OwnerKey, OwnerRef, PoolRecord};
+
 /// The record format's version; a record of another is refused, never guessed at.
 pub const RECORD_VERSION: u32 = 1;
 /// Largest record Hex reads: a spec with its mounts and program fits in a few kilobytes, so a
@@ -109,24 +112,10 @@ impl BoxRecord {
     /// The native keeper commits to the immutable scope and original workload/admission receipt.
     /// Mutable lifecycle/accounting fields do not change that cleanup identity.
     pub fn native_commitment(&self) -> Result<[u8; 32], Refusal> {
-        use sha2::Digest;
-        struct Commitment(sha2::Sha256);
-        impl std::io::Write for Commitment {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.update(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
         let scope = self
             .native_scope
             .ok_or_else(|| scope_refusal("native scope is absent"))?;
-        let mut commitment = Commitment(sha2::Sha256::new());
-        serde_json::to_writer(&mut commitment, &(scope, &self.spec))
-            .map_err(|_| scope_refusal("native scope/spec cannot be committed exactly"))?;
-        Ok(commitment.0.finalize().into())
+        commitment(&(scope, &self.spec))
     }
 
     pub fn new(spec: BoxSpec, phase: Phase, dirs: Vec<PathBuf>) -> Self {
@@ -193,6 +182,24 @@ impl BoxRecord {
         }
         Ok(r)
     }
+}
+
+fn commitment(value: &impl Serialize) -> Result<[u8; 32], Refusal> {
+    use sha2::Digest;
+    struct Commitment(sha2::Sha256);
+    impl std::io::Write for Commitment {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut commitment = Commitment(sha2::Sha256::new());
+    serde_json::to_writer(&mut commitment, value)
+        .map_err(|_| scope_refusal("native scope/spec cannot be committed exactly"))?;
+    Ok(commitment.0.finalize().into())
 }
 
 fn scope_refusal(message: &'static str) -> Refusal {

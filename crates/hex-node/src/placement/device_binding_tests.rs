@@ -140,9 +140,6 @@ impl Runtime for DeviceRuntime {
             disk_bytes: 0,
         };
         let report = Capacity {
-            routes: Vec::new(),
-            device_routes: Vec::new(),
-            backings: Vec::new(),
             cost: None,
             id: "device-driver-model-pool".to_owned(),
             total: room,
@@ -303,7 +300,10 @@ fn all_files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
 fn held(rt: &DeviceRuntime) -> BTreeMap<DeviceId, BoxId> {
     rt.report()
         .into_iter()
-        .filter_map(|info| info.holder.map(|id| (info.id, id)))
+        .filter_map(|info| match info.holder {
+            Some(hex_api::DeviceHolder::Box(id)) => Some((info.id, id)),
+            Some(hex_api::DeviceHolder::Backing(_)) | None => None,
+        })
         .collect()
 }
 
@@ -614,4 +614,130 @@ fn model_driver_refuses_recovered_metadata_disagreement_before_rows_or_init_then
     assert_eq!(counts, (2, 2, 3));
     assert_eq!(all_files(dir.path()).len(), 1);
     assert_eq!(all_files(cpu_dir.path()).len(), 1);
+}
+
+/// AC-T7.4.1: distinct exact GPU requests from one inseparable group serialize on the same
+/// production Turns keys before reading/publishing the single record authority. No native calls.
+#[test]
+fn concurrent_isolation_group_admission_keeps_one_creating_holder() {
+    use crate::turns::Turns;
+    use hex_core::patience::Patience;
+    use std::sync::mpsc::sync_channel;
+    let catalog = Arc::new(Catalog::parse(b"hex-devices-1\ngpu\t256\ta\t4096\tvfio\t0000:01:00.0\t7\ngpu\t512\tb\t4096\tvfio\t0000:02:00.0\t7\n").unwrap());
+    let turns = Arc::new(Turns::new(
+        "fixture group admission",
+        "fixture physical turns",
+        2,
+        Patience::measuring("fixture.group.turns"),
+    ));
+    let records = Arc::new(Mutex::new(Records::new()));
+    let made = Arc::new(AtomicUsize::new(0));
+    let refused = Arc::new(AtomicUsize::new(0));
+    let (holding, held) = sync_channel(1);
+    let (publish, publishing) = sync_channel(1);
+    let first = {
+        let (catalog, turns, records, made) = (
+            Arc::clone(&catalog),
+            Arc::clone(&turns),
+            Arc::clone(&records),
+            Arc::clone(&made),
+        );
+        std::thread::spawn(move || {
+            let keys = catalog.conflict_ids(&[GPU_A]).unwrap();
+            assert_eq!(keys, vec![GPU_A, GPU_B]);
+            let turn_ids = keys
+                .iter()
+                .map(|id| BoxId::new(&format!("device-{}-{}", id.kind.name(), id.key)).unwrap())
+                .collect::<Vec<_>>();
+            let _turns = turn_ids
+                .iter()
+                .map(|id| turns.take(id).unwrap())
+                .collect::<Vec<_>>();
+            let spec = BoxSpec {
+                id: BoxId::new("group-first").unwrap(),
+                bounds: hex_api::Bounds::default(),
+                class: hex_api::ClassSpec::Process,
+                owner: None,
+                allocation: None,
+                devices: vec![GPU_A],
+            };
+            let snapshot = records.lock().unwrap().clone();
+            catalog.prepare(&spec, &snapshot).unwrap();
+            holding.send(()).unwrap();
+            publishing
+                .recv_timeout(hex_api::conformance::patience())
+                .unwrap();
+            records.lock().unwrap().insert(
+                spec.id.clone(),
+                Ok(BoxRecord::new(spec, Phase::Creating, Vec::new())),
+            );
+            made.fetch_add(1, Ordering::SeqCst);
+        })
+    };
+    held.recv_timeout(hex_api::conformance::patience()).unwrap();
+    let (attempting, attempted) = sync_channel(1);
+    let second = {
+        let (catalog, turns, records, made, refused) = (
+            Arc::clone(&catalog),
+            Arc::clone(&turns),
+            Arc::clone(&records),
+            Arc::clone(&made),
+            Arc::clone(&refused),
+        );
+        std::thread::spawn(move || {
+            let keys = catalog.conflict_ids(&[GPU_B]).unwrap();
+            assert_eq!(keys, vec![GPU_A, GPU_B]);
+            let turn_ids = keys
+                .iter()
+                .map(|id| BoxId::new(&format!("device-{}-{}", id.kind.name(), id.key)).unwrap())
+                .collect::<Vec<_>>();
+            attempting.send(()).unwrap();
+            let guards = turn_ids
+                .iter()
+                .map(|id| turns.take(id))
+                .collect::<Result<Vec<_>, _>>();
+            let Ok(_guards) = guards else {
+                refused.fetch_add(1, Ordering::SeqCst);
+                return;
+            };
+            let spec = BoxSpec {
+                id: BoxId::new("group-second").unwrap(),
+                bounds: hex_api::Bounds::default(),
+                class: hex_api::ClassSpec::Process,
+                owner: None,
+                allocation: None,
+                devices: vec![GPU_B],
+            };
+            let snapshot = records.lock().unwrap().clone();
+            if catalog.prepare(&spec, &snapshot).is_err() {
+                refused.fetch_add(1, Ordering::SeqCst);
+                return;
+            }
+            records.lock().unwrap().insert(
+                spec.id.clone(),
+                Ok(BoxRecord::new(spec, Phase::Creating, Vec::new())),
+            );
+            made.fetch_add(1, Ordering::SeqCst);
+        })
+    };
+    attempted
+        .recv_timeout(hex_api::conformance::patience())
+        .unwrap();
+    publish.send(()).unwrap();
+    first.join().unwrap();
+    second.join().unwrap();
+    assert_eq!(made.load(Ordering::SeqCst), 1);
+    assert_eq!(refused.load(Ordering::SeqCst), 1);
+    let records = records.lock().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        catalog
+            .holder(GPU_B, &records)
+            .unwrap()
+            .unwrap()
+            .box_id()
+            .unwrap()
+            .as_str(),
+        "group-first"
+    );
 }

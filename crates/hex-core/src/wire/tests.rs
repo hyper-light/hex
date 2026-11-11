@@ -59,7 +59,7 @@ fn device_offer(device: DeviceId) -> DeviceInfo {
         id: device,
         model: "synthetic-private-model-é".to_owned(),
         size: u64::MAX,
-        holder: Some(id("synthetic-private-holder")),
+        holder: Some(DeviceHolder::Box(id("synthetic-private-holder"))),
     }
 }
 
@@ -227,7 +227,10 @@ fn device_codecs_refuse_invalid_keys_and_duplicate_ids_without_private_values() 
     let device = device_claims()[0];
     let claimed = Request::Call(Call::Create(Box::new(device_spec(vec![device, device]))));
     assert!(request(91, &claimed, MAX_MESSAGE).is_err());
-    let offered = Answer::Capacity(Some(device_capacity(vec![device_offer(device); 2])));
+    let offered = Answer::Capacity(Some(device_capacity(vec![
+        device_offer(device),
+        device_offer(device),
+    ])));
     assert!(answer(91, &offered, MAX_MESSAGE).is_err());
     for offer in [false, true] {
         let mut tail = Writer::new(MAX_MESSAGE);
@@ -643,6 +646,16 @@ fn requests() -> Vec<(u64, Request, usize)> {
         ),
         (15, run(), 2),
         (87, Request::Call(Call::PhysicalReport), 0),
+        (
+            201,
+            Request::Call(Call::InitializeBacking(route_wire_grant())),
+            0,
+        ),
+        (
+            202,
+            Request::Call(Call::ReleaseBacking(route_wire_key())),
+            0,
+        ),
     ]
 }
 
@@ -834,6 +847,10 @@ fn answers() -> Vec<(u64, Answer)> {
         out.push((6, Answer::Exited(exit)));
     }
     out.push((87, Answer::PhysicalReport(example_physical_report())));
+    out.push((
+        201,
+        Answer::BackingOffer(route_wire_backing(BackingPhase::Live)),
+    ));
     out
 }
 
@@ -942,7 +959,7 @@ fn physical_report_preserves_authority_unknowns_and_pressure_without_grants() {
     assert_eq!(header.kind, 0x0013);
     assert_eq!(decoded, req);
     let report = example_physical_report();
-    let expected = Answer::PhysicalReport(report.clone());
+    let expected = Answer::PhysicalReport(report.try_clone().unwrap());
     let bytes = answer(87, &expected, MAX_MESSAGE).unwrap();
     let (header, decoded) = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap();
     assert_eq!(header.kind, 0x800e);
@@ -958,11 +975,11 @@ fn physical_report_preserves_authority_unknowns_and_pressure_without_grants() {
     for end in 0..bytes.len() {
         assert!(read_answer(&received(&bytes[..end], 0), MAX_MESSAGE).is_err());
     }
-    let mut invalid = report.clone();
-    invalid.devices[0].info.holder = Some(id("not-a-telemetry-grant"));
+    let mut invalid = report.try_clone().unwrap();
+    invalid.devices[0].info.holder = Some(DeviceHolder::Box(id("not-a-telemetry-grant")));
     assert!(answer(87, &Answer::PhysicalReport(invalid), MAX_MESSAGE).is_err());
-    let mut invalid = report.clone();
-    invalid.devices.push(report.devices[0].clone());
+    let mut invalid = report.try_clone().unwrap();
+    invalid.devices.push(report.devices[0].try_clone().unwrap());
     assert!(answer(87, &Answer::PhysicalReport(invalid), MAX_MESSAGE).is_err());
 }
 
@@ -2058,4 +2075,1050 @@ fn scheduler_control_cannot_carry_a_descriptor_or_exceed_the_wire_bound() {
         Fault::Descriptors { .. }
     ));
     assert!(request(47, &request_value, HEADER_BYTES).is_err());
+}
+
+fn route_wire_key() -> BackingKey {
+    BackingKey {
+        pool: [0xa7; 32],
+        generation: [0x6d; 16],
+    }
+}
+
+fn route_wire_cost() -> RuntimeCost {
+    let fixed = CapacityResources {
+        cpu_milli: 1000,
+        mem_bytes: 4096,
+        disk_bytes: 4096,
+    };
+    RuntimeCost {
+        id: [0x31; 32],
+        floor: fixed,
+        ceiling: fixed,
+        quantum: CapacityResources {
+            cpu_milli: 1,
+            mem_bytes: 1,
+            disk_bytes: 1,
+        },
+        guest_overhead: CapacityResources::default(),
+        overhead: CapacityResources {
+            cpu_milli: 100,
+            mem_bytes: 512,
+            disk_bytes: 0,
+        },
+    }
+}
+
+fn route_wire_backing(phase: BackingPhase) -> BackingOffer {
+    BackingOffer {
+        key: route_wire_key(),
+        cost: route_wire_cost(),
+        phase,
+        // Administrator claims are not a measured catalog. Neither identity need appear there.
+        devices: vec![
+            DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 99,
+            },
+            DeviceId {
+                kind: DeviceKind::Gpu,
+                key: u64::MAX,
+            },
+        ],
+    }
+}
+
+fn route_wire_grant() -> BackingGrant {
+    let offer = route_wire_backing(BackingPhase::Prepared);
+    BackingGrant {
+        key: offer.key,
+        allocation: offer.allocation().unwrap(),
+        devices: offer.devices,
+    }
+}
+
+fn route_wire_route(execution: Execution) -> RouteOffer {
+    RouteOffer {
+        key: RouteKey {
+            class: match execution {
+                Execution::Firecracker => Class::Firecracker,
+                _ => Class::Oci,
+            },
+            image: ImagePlatform {
+                os: ImageOs::Linux,
+                arch: ImageArch::Arm64,
+            },
+            execution,
+            gpu: match execution {
+                Execution::ShardsDedicated => GpuEligibility::Required,
+                Execution::ShardsShared => GpuEligibility::None,
+                _ => GpuEligibility::Any,
+            },
+        },
+        cost: match execution {
+            Execution::Firecracker | Execution::ShardsDedicated => Some(route_wire_cost()),
+            _ => None,
+        },
+        backing: (execution == Execution::ShardsShared).then(route_wire_key),
+    }
+}
+
+fn route_wire_legacy_capacity() -> Capacity {
+    let mut capacity = device_capacity(vec![
+        DeviceInfo {
+            id: DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 4,
+            },
+            model: "private-model-first".into(),
+            size: 8192,
+            holder: None,
+        },
+        DeviceInfo {
+            id: DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 3,
+            },
+            model: "private-model-second".into(),
+            size: 8192,
+            holder: None,
+        },
+    ]);
+    capacity.total = CapacityResources {
+        cpu_milli: 8000,
+        mem_bytes: 1 << 20,
+        disk_bytes: 1 << 20,
+    };
+    capacity.free = capacity.total;
+    capacity
+}
+
+fn route_wire_capacity() -> Capacity {
+    let mut capacity = route_wire_legacy_capacity();
+    capacity.routes = vec![
+        route_wire_route(Execution::ShardsShared),
+        route_wire_route(Execution::ShardsDedicated),
+        route_wire_route(Execution::Firecracker),
+    ];
+    capacity.device_routes = vec![0b110, 0b100];
+    capacity.backings = vec![route_wire_backing(BackingPhase::Live)];
+    capacity
+}
+
+// Use the real old prefix and emit chosen new fields without the capacity validator, so invalid
+// cross-field inputs actually reach the public decoder rather than failing in a fixture builder.
+fn route_wire_capacity_bytes(
+    routes: &[RouteOffer],
+    masks: &[u64],
+    backings: &[BackingOffer],
+) -> Vec<u8> {
+    let mut prefix = answer(
+        201,
+        &Answer::Capacity(Some(route_wire_legacy_capacity())),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    prefix.truncate(prefix.len() - 3 * size_of::<u32>());
+    let mut w = Writer::new(MAX_MESSAGE);
+    w.raw(&prefix);
+    w.u32(u32::try_from(routes.len()).unwrap());
+    for route in routes {
+        put_route_offer(&mut w, *route).unwrap();
+    }
+    w.u32(u32::try_from(masks.len()).unwrap());
+    for mask in masks {
+        w.u64(*mask);
+    }
+    w.u32(u32::try_from(backings.len()).unwrap());
+    for backing in backings {
+        put_backing_offer(&mut w, backing).unwrap();
+    }
+    w.done().unwrap()
+}
+
+fn route_wire_assert_redacted(fault: &Fault) {
+    let text = format!("{fault:?}");
+    for private in [
+        "private-model-first",
+        "private-model-second",
+        "a7a7a7a7",
+        "6d6d6d6d",
+    ] {
+        assert!(!text.contains(private), "{text}");
+    }
+}
+
+/// The new tags and every backing phase carry the exact canonical generation and physical claims.
+#[test]
+fn route_wire_backing_calls_and_all_phases_roundtrip() {
+    for (tag, expected) in [
+        (
+            0x0014u16,
+            Request::Call(Call::InitializeBacking(route_wire_grant())),
+        ),
+        (
+            0x0015,
+            Request::Call(Call::ReleaseBacking(route_wire_key())),
+        ),
+    ] {
+        let bytes = request(201, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(&bytes[12..14], &tag.to_le_bytes());
+        assert_eq!(
+            read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            expected
+        );
+        assert_eq!(read_request_apart(&bytes, MAX_MESSAGE).unwrap().1, expected);
+        assert!(matches!(
+            read_request(&received(&bytes, 1), MAX_MESSAGE)
+                .unwrap_err()
+                .fault,
+            Fault::Descriptors {
+                want: 0,
+                got: 1,
+                ..
+            }
+        ));
+    }
+    for (phase, tag) in [
+        (BackingPhase::Prepared, 0),
+        (BackingPhase::Granted, 1),
+        (BackingPhase::Live, 2),
+        (BackingPhase::Draining, 3),
+        (BackingPhase::Released, 4),
+    ] {
+        let expected = Answer::BackingOffer(route_wire_backing(phase));
+        let bytes = answer(202, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(&bytes[12..14], &0x800fu16.to_le_bytes());
+        assert_eq!(&bytes[HEADER_BYTES..HEADER_BYTES + 32], &[0xa7; 32]);
+        assert_eq!(
+            &bytes[HEADER_BYTES + 32..HEADER_BYTES + BACKING_KEY_BYTES],
+            &[0x6d; 16]
+        );
+        assert_eq!(bytes[HEADER_BYTES + BACKING_KEY_BYTES + COST_BYTES], tag);
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            expected
+        );
+        assert!(matches!(
+            read_answer(&received(&bytes, 1), MAX_MESSAGE),
+            Err(Fault::Descriptors { .. })
+        ));
+    }
+}
+
+/// Fixed enum tags describe the original workload/image and initialized execution independently.
+#[test]
+fn route_wire_key_enum_tags_are_explicit_and_roundtrip() {
+    for (class, os, arch, execution, gpu, expected) in [
+        (
+            Class::Process,
+            ImageOs::Macos,
+            ImageArch::Arm64,
+            Execution::Native,
+            GpuEligibility::None,
+            [0, 2, 1, 0, 1],
+        ),
+        (
+            Class::Process,
+            ImageOs::Windows,
+            ImageArch::Amd64,
+            Execution::Native,
+            GpuEligibility::None,
+            [0, 1, 0, 0, 1],
+        ),
+        (
+            Class::Oci,
+            ImageOs::Windows,
+            ImageArch::Arm64,
+            Execution::Native,
+            GpuEligibility::Any,
+            [1, 1, 1, 0, 0],
+        ),
+        (
+            Class::Oci,
+            ImageOs::Linux,
+            ImageArch::Amd64,
+            Execution::ShardsShared,
+            GpuEligibility::None,
+            [1, 0, 0, 1, 1],
+        ),
+        (
+            Class::Oci,
+            ImageOs::Linux,
+            ImageArch::Arm64,
+            Execution::ShardsDedicated,
+            GpuEligibility::Required,
+            [1, 0, 1, 2, 2],
+        ),
+        (
+            Class::Firecracker,
+            ImageOs::Linux,
+            ImageArch::Amd64,
+            Execution::Firecracker,
+            GpuEligibility::Required,
+            [2, 0, 0, 3, 2],
+        ),
+        (
+            Class::Shards,
+            ImageOs::Linux,
+            ImageArch::Arm64,
+            Execution::ShardsDedicated,
+            GpuEligibility::None,
+            [3, 0, 1, 2, 1],
+        ),
+    ] {
+        let key = RouteKey {
+            class,
+            image: ImagePlatform { os, arch },
+            execution,
+            gpu,
+        };
+        let mut w = Writer::new(ROUTE_KEY_BYTES);
+        put_route_key(&mut w, key).unwrap();
+        let bytes = w.done().unwrap();
+        assert_eq!(bytes, expected);
+        assert_eq!(route_key(&mut Reader::new(&bytes)).unwrap(), key);
+        for end in 0..bytes.len() {
+            assert!(matches!(
+                route_key(&mut Reader::new(&bytes[..end])),
+                Err(Fault::Truncated { .. })
+            ));
+        }
+    }
+}
+
+/// Masks remain joined by position to the original unsorted physical list. Provisioning does not
+/// manufacture measured entries, and OCI shared/dedicated routes retain the original OCI class.
+#[test]
+fn route_wire_capacity_preserves_routes_masks_and_unmeasured_backings() {
+    let expected = Answer::Capacity(Some(route_wire_capacity()));
+    let bytes = answer(203, &expected, MAX_MESSAGE).unwrap();
+    let actual = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1;
+    assert_eq!(actual, expected);
+    let Answer::Capacity(Some(capacity)) = actual else {
+        panic!("capacity")
+    };
+    assert_eq!(
+        capacity
+            .devices
+            .iter()
+            .map(|d| d.id.key)
+            .collect::<Vec<_>>(),
+        [4, 3]
+    );
+    assert_eq!(capacity.device_routes, [6, 4]);
+    assert_eq!(capacity.routes[0].key.class, Class::Oci);
+    assert_eq!(capacity.routes[1].key.class, Class::Oci);
+    assert_eq!(capacity.backings[0].devices[1].key, u64::MAX);
+    assert!(
+        !capacity
+            .devices
+            .iter()
+            .any(|d| d.id == capacity.backings[0].devices[1])
+    );
+    let legacy = Answer::Capacity(Some(route_wire_legacy_capacity()));
+    let bytes = answer(204, &legacy, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        legacy
+    );
+}
+
+/// Both tails preserve the original class, caps, selected IDs and allocation beside the route.
+#[test]
+fn route_wire_spec_and_info_route_tails_roundtrip() {
+    for execution in [
+        Execution::Native,
+        Execution::ShardsShared,
+        Execution::ShardsDedicated,
+        Execution::Firecracker,
+    ] {
+        let route = route_wire_route(execution);
+        let mut spec = oci_spec();
+        if execution == Execution::Firecracker {
+            let ClassSpec::Oci(oci) = spec.class else {
+                panic!("OCI fixture")
+            };
+            spec.class = ClassSpec::Firecracker(oci);
+        }
+        if route.key.gpu == GpuEligibility::Required {
+            spec.devices.push(DeviceId {
+                kind: DeviceKind::Gpu,
+                key: u64::MAX,
+            });
+        }
+        if let Some(cost) = route.cost {
+            spec.bounds.cpu_max_milli = Some(1000);
+            spec.bounds.memory_max = Some(4096);
+            spec.allocation = Some(cost.allocate(CapacityResources::default()).unwrap());
+        }
+        let receipt = RouteReceipt {
+            key: route.key,
+            backing: route.backing,
+        };
+        spec.route = Some(receipt);
+        let expected = Request::Call(Call::Create(Box::new(spec.clone())));
+        let bytes = request(205, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            expected
+        );
+
+        let mut plain = spec.clone();
+        plain.route = None;
+        let plain = request(
+            205,
+            &Request::Call(Call::Create(Box::new(plain))),
+            MAX_MESSAGE,
+        )
+        .unwrap();
+        assert_eq!(plain.last(), Some(&0));
+        assert_eq!(&plain[..plain.len() - 1], &bytes[..plain.len() - 1]);
+        assert_eq!(bytes[plain.len() - 1], 1);
+
+        let expected = Answer::Info(BoxInfo {
+            class: spec.class.class(),
+            bounds: spec.bounds,
+            allocation: spec.allocation,
+            route: Some(receipt),
+            ..info()
+        });
+        let bytes = answer(206, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            expected
+        );
+    }
+}
+
+/// Backing failures are appended after Lifecycle, carrying exact generation and typed uncertainty.
+#[test]
+fn route_wire_backing_refusals_preserve_key_and_cause() {
+    for (cause, tag) in [
+        (LifecycleCause::Pending, 0),
+        (LifecycleCause::Uncertain, 1),
+        (LifecycleCause::Busy, 2),
+    ] {
+        let expected = Answer::Refused(Refusal::Backing {
+            key: route_wire_key(),
+            cause,
+        });
+        let bytes = answer(207, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(bytes.len(), HEADER_BYTES + 1 + BACKING_KEY_BYTES + 1);
+        assert_eq!(bytes[HEADER_BYTES], 10);
+        assert_eq!(bytes.last(), Some(&tag));
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            expected
+        );
+    }
+}
+
+/// Cross-field malformed masks/references must reach the decoder, not merely a fixture validator.
+#[test]
+fn route_wire_hostile_masks_references_and_duplicate_pools_refuse() {
+    let shared = route_wire_route(Execution::ShardsShared);
+    let native = route_wire_route(Execution::Native);
+    let backing = route_wire_backing(BackingPhase::Live);
+    for masks in [
+        vec![],
+        vec![1],
+        vec![1, 1, 1],
+        vec![2, 0],
+        vec![0, u64::MAX],
+    ] {
+        let bytes = route_wire_capacity_bytes(&[native], &masks, &[]);
+        let fault = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
+        assert!(matches!(
+            fault,
+            Fault::Value {
+                what: "capacity",
+                ..
+            }
+        ));
+        route_wire_assert_redacted(&fault);
+    }
+    for bytes in [
+        route_wire_capacity_bytes(&[shared], &[0, 0], &[]),
+        route_wire_capacity_bytes(&[native, native], &[1, 1], &[]),
+        route_wire_capacity_bytes(&[], &[0, 0], &[]),
+        route_wire_capacity_bytes(&[], &[], &[backing.try_clone().unwrap()]),
+    ] {
+        let fault = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
+        assert!(matches!(
+            fault,
+            Fault::Value {
+                what: "capacity",
+                ..
+            }
+        ));
+        route_wire_assert_redacted(&fault);
+    }
+    let mut transplanted = backing.try_clone().unwrap();
+    transplanted.key.generation[0] ^= 1;
+    let bytes = route_wire_capacity_bytes(&[shared], &[0, 0], &[transplanted]);
+    assert!(matches!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "capacity",
+            ..
+        })
+    ));
+    let mut competing = backing.try_clone().unwrap();
+    competing.key.generation[0] ^= 1;
+    let bytes = route_wire_capacity_bytes(&[shared], &[0, 0], &[backing, competing]);
+    assert!(matches!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "capacity",
+            ..
+        })
+    ));
+
+    let mutations: [fn(&mut Capacity); 3] = [
+        |c: &mut Capacity| c.device_routes[0] = 1 << c.routes.len(),
+        |c: &mut Capacity| {
+            c.routes[0].backing.as_mut().unwrap().generation[0] ^= 1;
+        },
+        |c: &mut Capacity| {
+            c.backings.push(c.backings[0].try_clone().unwrap());
+        },
+    ];
+    for mutate in mutations {
+        let mut invalid = route_wire_capacity();
+        mutate(&mut invalid);
+        assert!(matches!(
+            answer(208, &Answer::Capacity(Some(invalid)), MAX_MESSAGE),
+            Err(Fault::Value {
+                what: "capacity",
+                ..
+            })
+        ));
+    }
+}
+
+/// All new list counts are bounded before element parsing or reserve, including minimum-width
+/// bodies rather than the old one-byte-per-item approximation.
+#[test]
+fn route_wire_hostile_counts_and_minimum_bytes_refuse_before_parse() {
+    for (what, minimum, maximum) in [
+        ("routes", ROUTE_OFFER_MIN_BYTES, MAX_RUNTIME_ROUTES),
+        ("backings", BACKING_OFFER_MIN_BYTES, MAX_RUNTIME_ROUTES),
+        ("devices", size_of::<u64>(), MAX_DEVICES),
+    ] {
+        for (count, value_error) in [
+            (1u32, false),
+            (u32::try_from(maximum + 1).unwrap(), true),
+            (u32::MAX, true),
+        ] {
+            let bytes = count.to_le_bytes();
+            let mut reader = Reader::new(&bytes);
+            let mut parsed = false;
+            let result = reader.bounded_list(minimum, maximum, what, |_| {
+                parsed = true;
+                Ok(())
+            });
+            assert!(!parsed);
+            match result.unwrap_err() {
+                Fault::Value { what: got, .. } if value_error => assert_eq!(got, what),
+                Fault::Truncated { .. } if !value_error => {}
+                other => panic!("{other:?}"),
+            }
+        }
+        let mut bytes = 1u32.to_le_bytes().to_vec();
+        bytes.resize(4 + minimum - 1, 0);
+        let mut parsed = false;
+        let result = Reader::new(&bytes).bounded_list(minimum, maximum, what, |_| {
+            parsed = true;
+            Ok(())
+        });
+        assert!(matches!(result, Err(Fault::Truncated { .. })));
+        assert!(!parsed);
+    }
+
+    // Route/backing count bounds are also enforced through the actual Capacity decoder.
+    let mut prefix = answer(
+        209,
+        &Answer::Capacity(Some(route_wire_legacy_capacity())),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    prefix.truncate(prefix.len() - 3 * size_of::<u32>());
+    for count in [1u32, 65, u32::MAX] {
+        let mut bytes = prefix.clone();
+        bytes.extend(count.to_le_bytes());
+        assert!(read_answer(&received(&bytes, 0), MAX_MESSAGE).is_err());
+        let mut bytes = prefix.clone();
+        bytes.extend(0u32.to_le_bytes()); // no routes
+        bytes.extend(0u32.to_le_bytes()); // no masks
+        bytes.extend(count.to_le_bytes());
+        assert!(read_answer(&received(&bytes, 0), MAX_MESSAGE).is_err());
+    }
+}
+
+/// Unknown enum tags and semantically incompatible route shapes fail without echoing key bytes.
+#[test]
+fn route_wire_hostile_route_and_backing_tags_are_redacted() {
+    for at in 0..ROUTE_KEY_BYTES {
+        let mut bytes = [1, 0, 1, 0, 0];
+        bytes[at] = 255;
+        let fault = route_key(&mut Reader::new(&bytes)).unwrap_err();
+        assert!(matches!(fault, Fault::Value { .. }));
+        route_wire_assert_redacted(&fault);
+    }
+    for bytes in [
+        [0, 0, 0, 0, 2], // process cannot require a GPU
+        [1, 2, 1, 0, 0], // native OCI cannot claim a macOS image
+        [2, 1, 0, 3, 1], // Firecracker requires Linux
+        [1, 0, 0, 1, 2], // shared OCI cannot require a GPU
+        [1, 0, 0, 2, 1], // dedicated OCI requires selected GPUs
+    ] {
+        assert!(matches!(
+            route_key(&mut Reader::new(&bytes)),
+            Err(Fault::Value { what: "route", .. })
+        ));
+    }
+    for tag in [5, 255] {
+        let mut bytes = answer(
+            210,
+            &Answer::BackingOffer(route_wire_backing(BackingPhase::Live)),
+            MAX_MESSAGE,
+        )
+        .unwrap();
+        bytes[HEADER_BYTES + BACKING_KEY_BYTES + COST_BYTES] = tag;
+        let fault = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
+        assert!(matches!(
+            fault,
+            Fault::Value {
+                what: "backing.phase",
+                ..
+            }
+        ));
+        route_wire_assert_redacted(&fault);
+    }
+    let mut bytes = answer(
+        210,
+        &Answer::Refused(Refusal::Backing {
+            key: route_wire_key(),
+            cause: LifecycleCause::Uncertain,
+        }),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    *bytes.last_mut().unwrap() = 3;
+    let fault = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
+    assert!(matches!(
+        fault,
+        Fault::Value {
+            what: "backing.cause",
+            ..
+        }
+    ));
+    route_wire_assert_redacted(&fault);
+}
+
+/// Backing claims use the shared physical parser and canonical sorted-unique invariant.
+#[test]
+fn route_wire_backing_claims_reject_duplicates_order_bad_ids_and_counts() {
+    for grant in [false, true] {
+        let mut bytes = if grant {
+            request(
+                211,
+                &Request::Call(Call::InitializeBacking(route_wire_grant())),
+                MAX_MESSAGE,
+            )
+            .unwrap()
+        } else {
+            answer(
+                211,
+                &Answer::BackingOffer(route_wire_backing(BackingPhase::Live)),
+                MAX_MESSAGE,
+            )
+            .unwrap()
+        };
+        let minimum = if grant {
+            BACKING_GRANT_MIN_BYTES
+        } else {
+            BACKING_OFFER_MIN_BYTES
+        };
+        let first = HEADER_BYTES + minimum;
+        let original = bytes.clone();
+        let count_at = first - size_of::<u32>();
+        for count in [
+            1u32,
+            u32::try_from(MAX_DEVICES).unwrap(),
+            u32::try_from(MAX_DEVICES + 1).unwrap(),
+            u32::MAX,
+        ] {
+            bytes = original[..count_at].to_vec();
+            bytes.extend(count.to_le_bytes());
+            let result = if grant {
+                read_request(&received(&bytes, 0), MAX_MESSAGE)
+                    .map(|_| ())
+                    .map_err(|bad| bad.fault)
+            } else {
+                read_answer(&received(&bytes, 0), MAX_MESSAGE).map(|_| ())
+            };
+            assert!(result.is_err());
+        }
+        for kind in [255, 3] {
+            bytes = original.clone();
+            bytes[first] = kind; // kind=Net with key99 is valid; make its width invalid below.
+            if kind == 3 {
+                bytes[first + 1..first + 9].copy_from_slice(&u64::MAX.to_le_bytes());
+            }
+            let fault = if grant {
+                read_request(&received(&bytes, 0), MAX_MESSAGE)
+                    .unwrap_err()
+                    .fault
+            } else {
+                read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err()
+            };
+            assert!(matches!(fault, Fault::Value { .. }));
+            route_wire_assert_redacted(&fault);
+        }
+        for reversed in [false, true] {
+            bytes = original.clone();
+            let mut ids = bytes[first..first + 18].to_vec();
+            if reversed {
+                ids.rotate_left(9);
+            } else {
+                ids.copy_within(0..9, 9);
+            }
+            bytes[first..first + 18].copy_from_slice(&ids);
+            let fault = if grant {
+                read_request(&received(&bytes, 0), MAX_MESSAGE)
+                    .unwrap_err()
+                    .fault
+            } else {
+                read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err()
+            };
+            assert!(matches!(
+                fault,
+                Fault::Value {
+                    what: "backing",
+                    ..
+                }
+            ));
+        }
+    }
+}
+
+/// Dedicated routes cannot smuggle a changed original class, absent finite caps/allocation, or
+/// GPU-less required receipt; factual BoxInfo also cannot relabel the original class.
+#[test]
+fn route_wire_spec_and_info_inconsistent_route_receipts_refuse() {
+    let route = route_wire_route(Execution::ShardsDedicated);
+    let mut valid = oci_spec();
+    valid.bounds.cpu_max_milli = Some(1000);
+    valid.bounds.memory_max = Some(4096);
+    valid.allocation = Some(route_wire_grant().allocation);
+    valid.devices = vec![DeviceId {
+        kind: DeviceKind::Gpu,
+        key: 99,
+    }];
+    valid.route = Some(RouteReceipt {
+        key: route.key,
+        backing: None,
+    });
+    let good = request(
+        212,
+        &Request::Call(Call::Create(Box::new(valid.clone()))),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+
+    for change in 0..4 {
+        let mut bad = valid.clone();
+        match change {
+            0 => bad.allocation = None,
+            1 => bad.bounds.memory_max = None,
+            2 => bad.devices.clear(),
+            _ => bad.route.as_mut().unwrap().key.class = Class::Shards,
+        }
+        assert!(matches!(
+            request(
+                212,
+                &Request::Call(Call::Create(Box::new(bad))),
+                MAX_MESSAGE
+            ),
+            Err(Fault::Value { what: "route", .. })
+        ));
+    }
+    // Keep a valid encoded body and change only the committed original class.
+    let mut bad = good;
+    let route_at = bad.len() - (1 + ROUTE_KEY_BYTES + 1);
+    bad[route_at + 1] = 3; // Shards/Dedicated is valid alone, but differs from original OCI.
+    assert!(matches!(
+        read_request(&received(&bad, 0), MAX_MESSAGE)
+            .unwrap_err()
+            .fault,
+        Fault::Value { what: "route", .. }
+    ));
+
+    let bad_info = Answer::Info(BoxInfo {
+        class: Class::Process,
+        route: valid.route,
+        ..info()
+    });
+    assert!(matches!(
+        answer(212, &bad_info, MAX_MESSAGE),
+        Err(Fault::Value { what: "route", .. })
+    ));
+    let valid_info = Answer::Info(BoxInfo {
+        route: valid.route,
+        ..info()
+    });
+    let mut bad = answer(212, &valid_info, MAX_MESSAGE).unwrap();
+    let route_at = bad.len() - (1 + ROUTE_KEY_BYTES + 1);
+    bad[route_at + 1] = 3;
+    assert!(matches!(
+        read_answer(&received(&bad, 0), MAX_MESSAGE),
+        Err(Fault::Value { what: "route", .. })
+    ));
+}
+
+/// Every new body is bounded exactly, fully consumed and refused at every truncation; this covers
+/// no old suite and dispatches no native work.
+#[test]
+fn route_wire_new_messages_enforce_exact_bounds_truncation_and_trailing_bytes() {
+    for expected in [
+        Request::Call(Call::InitializeBacking(route_wire_grant())),
+        Request::Call(Call::ReleaseBacking(route_wire_key())),
+        Request::Call(Call::Create(Box::new({
+            let mut spec = oci_spec();
+            spec.route = Some(RouteReceipt {
+                key: route_wire_route(Execution::ShardsShared).key,
+                backing: Some(route_wire_key()),
+            });
+            spec
+        }))),
+    ] {
+        let bytes = request(213, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(request(213, &expected, bytes.len()).unwrap(), bytes);
+        assert!(matches!(
+            request(213, &expected, bytes.len() - 1),
+            Err(Fault::Oversized { .. })
+        ));
+        assert!(matches!(
+            read_request(&received(&bytes, 0), bytes.len() - 1)
+                .unwrap_err()
+                .fault,
+            Fault::Oversized { .. }
+        ));
+        for end in 0..bytes.len() {
+            assert!(read_request(&received(&bytes[..end], 0), MAX_MESSAGE).is_err());
+        }
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(read_request(&received(&trailing, 0), MAX_MESSAGE).is_err());
+    }
+    for expected in [
+        Answer::BackingOffer(route_wire_backing(BackingPhase::Live)),
+        Answer::Capacity(Some(route_wire_capacity())),
+        Answer::Info(BoxInfo {
+            route: Some(RouteReceipt {
+                key: route_wire_route(Execution::ShardsShared).key,
+                backing: Some(route_wire_key()),
+            }),
+            ..info()
+        }),
+        Answer::Refused(Refusal::Backing {
+            key: route_wire_key(),
+            cause: LifecycleCause::Pending,
+        }),
+    ] {
+        let bytes = answer(214, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(answer(214, &expected, bytes.len()).unwrap(), bytes);
+        assert!(matches!(
+            answer(214, &expected, bytes.len() - 1),
+            Err(Fault::Oversized { .. })
+        ));
+        assert!(matches!(
+            read_answer(&received(&bytes, 0), bytes.len() - 1),
+            Err(Fault::Oversized { .. })
+        ));
+        for end in 0..bytes.len() {
+            assert!(read_answer(&received(&bytes[..end], 0), MAX_MESSAGE).is_err());
+        }
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(read_answer(&received(&trailing, 0), MAX_MESSAGE).is_err());
+    }
+}
+
+/// A fixed backing grant cannot change its host charge or substitute a variable per-box profile.
+#[test]
+fn route_wire_fixed_backing_profiles_and_grants_are_revalidated() {
+    let valid = route_wire_grant();
+    for change in 0..3 {
+        let mut grant = valid.try_clone().unwrap();
+        match change {
+            0 => grant.allocation.resources.cpu_milli += 1,
+            1 => grant.allocation.cost.ceiling.mem_bytes += 1,
+            _ => grant.allocation.resources.mem_bytes = 0,
+        }
+        let mut raw = Writer::new(MAX_MESSAGE);
+        raw.header(kind::INITIALIZE_BACKING, 215);
+        put_backing_key(&mut raw, grant.key).unwrap();
+        put_resources(&mut raw, grant.allocation.resources);
+        put_cost(&mut raw, grant.allocation.cost).unwrap();
+        put_provisioning(&mut raw, &grant.devices).unwrap();
+        let bytes = raw.done().unwrap();
+        assert!(matches!(
+            read_request(&received(&bytes, 0), MAX_MESSAGE)
+                .unwrap_err()
+                .fault,
+            Fault::Value {
+                what: "backing",
+                ..
+            }
+        ));
+        assert!(matches!(
+            request(
+                215,
+                &Request::Call(Call::InitializeBacking(grant)),
+                MAX_MESSAGE
+            ),
+            Err(Fault::Value {
+                what: "backing",
+                ..
+            })
+        ));
+    }
+    let mut offer = route_wire_backing(BackingPhase::Prepared);
+    offer.cost.ceiling.cpu_milli += 1;
+    let mut raw = Writer::new(MAX_MESSAGE);
+    raw.header(kind::BACKING_OFFER, 215);
+    put_backing_key(&mut raw, offer.key).unwrap();
+    put_cost(&mut raw, offer.cost).unwrap();
+    raw.u8(0);
+    put_provisioning(&mut raw, &offer.devices).unwrap();
+    let bytes = raw.done().unwrap();
+    assert!(matches!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "backing",
+            ..
+        })
+    ));
+    assert!(matches!(
+        answer(215, &Answer::BackingOffer(offer), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "backing",
+            ..
+        })
+    ));
+}
+
+/// The holder discriminant extends the old option without freeing or relabeling a pool claim.
+#[test]
+fn route_wire_holder_tags_keep_legacy_box_and_exact_backing_generation() {
+    for (holder, expected) in [
+        (None, vec![0]),
+        (
+            Some(DeviceHolder::Box(id("box"))),
+            vec![1, 3, 0, 0, 0, b'b', b'o', b'x'],
+        ),
+        (Some(DeviceHolder::Backing(route_wire_key())), {
+            let mut bytes = vec![2];
+            bytes.extend([0xa7; 32]);
+            bytes.extend([0x6d; 16]);
+            bytes
+        }),
+    ] {
+        let mut w = Writer::new(MAX_MESSAGE);
+        put_device_holder(&mut w, holder.as_ref()).unwrap();
+        let bytes = w.done().unwrap();
+        assert_eq!(bytes, expected);
+        assert_eq!(device_holder(&mut Reader::new(&bytes)).unwrap(), holder);
+    }
+    let mut capacity = route_wire_capacity();
+    capacity.backings[0].devices = vec![capacity.devices[0].id];
+    capacity.devices[0].holder = Some(DeviceHolder::Backing(route_wire_key()));
+    capacity.devices[1].holder = Some(DeviceHolder::Box(id("native-box")));
+    let expected = Answer::Capacity(Some(capacity));
+    let bytes = answer(216, &expected, MAX_MESSAGE).unwrap();
+    let actual = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1;
+    assert_eq!(actual, expected);
+    let Answer::Capacity(Some(actual)) = actual else {
+        panic!("capacity")
+    };
+    assert!(
+        matches!(actual.devices[0].holder, Some(DeviceHolder::Backing(key)) if key == route_wire_key())
+    );
+    assert!(
+        matches!(&actual.devices[1].holder, Some(DeviceHolder::Box(key)) if key.as_str() == "native-box")
+    );
+}
+
+/// Missing or malformed owner bytes never become None; diagnostics expose no private BoxId.
+#[test]
+fn route_wire_holder_unknown_tags_partial_keys_and_bad_boxes_refuse() {
+    for tag in [3, 255] {
+        let fault = device_holder(&mut Reader::new(&[tag])).unwrap_err();
+        assert!(matches!(
+            fault,
+            Fault::Value {
+                what: "devices.holder",
+                ..
+            }
+        ));
+    }
+    let mut backing = vec![2];
+    backing.extend([0xa7; 32]);
+    backing.extend([0x6d; 16]);
+    for end in 0..backing.len() {
+        assert!(matches!(
+            device_holder(&mut Reader::new(&backing[..end])),
+            Err(Fault::Truncated { .. })
+        ));
+    }
+    for name in ["../private-holder", "private/holder"] {
+        let mut raw = Writer::new(MAX_MESSAGE);
+        raw.u8(1);
+        raw.string(name).unwrap();
+        let bytes = raw.done().unwrap();
+        let fault = device_holder(&mut Reader::new(&bytes)).unwrap_err();
+        assert!(matches!(
+            fault,
+            Fault::Value {
+                what: "devices.holder",
+                ..
+            }
+        ));
+        assert!(!format!("{fault:?}").contains("private"));
+    }
+    let mut raw = Writer::new(MAX_MESSAGE);
+    raw.u8(1);
+    raw.bytes(&[0xff]).unwrap();
+    let bytes = raw.done().unwrap();
+    assert!(matches!(
+        device_holder(&mut Reader::new(&bytes)),
+        Err(Fault::Value {
+            what: "devices.holder",
+            ..
+        })
+    ));
+}
+
+/// The factual provider remains holder-free even after catalog backing ownership becomes typed.
+#[test]
+fn route_wire_physical_reports_forbid_both_box_and_backing_holders() {
+    for holder in [
+        DeviceHolder::Box(id("private-telemetry-box")),
+        DeviceHolder::Backing(route_wire_key()),
+    ] {
+        let mut report = example_physical_report();
+        report.devices[0].info.holder = Some(holder);
+        let fault = answer(217, &Answer::PhysicalReport(report), MAX_MESSAGE).unwrap_err();
+        assert!(matches!(
+            fault,
+            Fault::Value {
+                what: "physical report",
+                ..
+            }
+        ));
+        route_wire_assert_redacted(&fault);
+        assert!(!format!("{fault:?}").contains("private-telemetry-box"));
+    }
 }

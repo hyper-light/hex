@@ -11,6 +11,18 @@ const FOREIGN: &str = "ffeeddccbbaa99887766554433221100";
 
 type Reports = Vec<(Route, Option<Capacity>)>;
 
+fn copy_reports(reports: &Reports) -> Reports {
+    reports
+        .iter()
+        .map(|(class, report)| {
+            (
+                *class,
+                report.as_ref().map(|report| report.try_clone().unwrap()),
+            )
+        })
+        .collect()
+}
+
 fn inputs() -> (Facts, Reports) {
     let memory = hex_api::MIN_MEMORY;
     let facts = Facts {
@@ -77,14 +89,14 @@ fn report(devices: Vec<DeviceInfo>) -> Capacity {
         disk_bytes: 0,
     };
     Capacity {
-        routes: Vec::new(),
-        device_routes: Vec::new(),
-        backings: Vec::new(),
         id: "fixture-native-pool".into(),
         total: room,
         free: room,
         devices,
         cost: None,
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
     }
 }
 
@@ -158,7 +170,7 @@ fn physical_rpc_facts_keep_unknowns_and_empty_native_inventory_cannot_grant() {
             .devices
             .iter()
             .map(|info| hex_api::PhysicalDevice {
-                info: info.clone(),
+                info: info.try_clone().unwrap(),
                 busy_per_mille: None,
                 memory_used_bytes: Some(info.size / 2),
             })
@@ -225,7 +237,7 @@ fn exact_measured_pci_metadata_load_and_report_order_reach_offers() {
     });
     let devices = &mut reports[0].1.as_mut().unwrap().devices;
     devices.reverse(); // Native order, not telemetry order, is the scheduler's device slot order.
-    let before_inputs = (facts.clone(), reports.clone());
+    let before_inputs = (facts.clone(), copy_reports(&reports));
     let mut cluster = service_cluster(&facts);
     let before_cluster = cluster.clone();
     let amd = cluster.model(&facts.gpus[1].model).unwrap();
@@ -276,7 +288,7 @@ fn complete_telemetry_without_backend_capability_offers_no_devices() {
         vec![(Route::Oci, None)],
         vec![(Route::Oci, Some(report(Vec::new())))],
     ] {
-        let before_inputs = (facts.clone(), reports.clone());
+        let before_inputs = (facts.clone(), copy_reports(&reports));
         let mut cluster = service_cluster(&facts);
         let before_cluster = cluster.clone();
         assert!(
@@ -328,10 +340,10 @@ fn mismatched_identity_model_memory_and_capacity_refuse_without_mutating_inputs(
             }
             BadInput::Model => report.devices[0].model = "other-model".into(),
             BadInput::Memory => report.devices[0].size += 1,
-            BadInput::Duplicate => report.devices.push(report.devices[0].clone()),
+            BadInput::Duplicate => report.devices.push(report.devices[0].try_clone().unwrap()),
             BadInput::PoolRoom => report.free.cpu_milli = report.total.cpu_milli + 1,
         }
-        let before_inputs = (facts.clone(), reports.clone());
+        let before_inputs = (facts.clone(), copy_reports(&reports));
         let mut cluster = service_cluster(&facts);
         let before_cluster = cluster.clone();
         let refused =
@@ -375,8 +387,10 @@ fn foreign_holders_are_unavailable_but_current_namespace_survives_for_recovery()
         let (facts, mut reports) = inputs();
         let report = reports[0].1.as_mut().unwrap();
         report.devices.truncate(1);
-        report.devices[0].holder = holder.clone();
-        let before_inputs = (facts.clone(), reports.clone());
+        report.devices[0].holder = holder
+            .as_ref()
+            .map(|id| hex_api::DeviceHolder::Box(id.try_clone().unwrap()));
+        let before_inputs = (facts.clone(), copy_reports(&reports));
         let mut cluster = service_cluster(&facts);
         let before_cluster = cluster.clone();
         let actual = offered(&reports, &facts, &mut cluster);
@@ -414,7 +428,7 @@ fn initialized_native_oci_routes_devices_and_uninitialized_class_reports_refuse(
     for route in [Route::Firecracker, Route::Shards] {
         let (facts, mut reports) = inputs();
         reports[0].0 = route;
-        let before_inputs = (facts.clone(), reports.clone());
+        let before_inputs = (facts.clone(), copy_reports(&reports));
         let mut cluster = service_cluster(&facts);
         let before_cluster = cluster.clone();
         let refused =
@@ -445,7 +459,7 @@ fn late_refusal_does_not_publish_partial_model_interning() {
     let mut gpu = gpu_reports[0].1.as_mut().unwrap().devices.remove(0);
     gpu.size += 1; // One later mismatching metadata field after a valid named native device.
     let reports = vec![(Route::Oci, Some(report(vec![block, gpu])))];
-    let before_inputs = (facts.clone(), reports.clone());
+    let before_inputs = (facts.clone(), copy_reports(&reports));
     let mut cluster = service_cluster(&facts);
     let before_cluster = cluster.clone();
     let refused = capacity::devices::offers(&reports, &facts, &mut cluster, NAMESPACE).unwrap_err();
@@ -454,10 +468,10 @@ fn late_refusal_does_not_publish_partial_model_interning() {
         "DEVICE_OFFER candidate late-refusal={refused:?}; facts={facts:?}; reports={reports:?}; cluster_before={before_cluster:?}; cluster_after={after_cluster:?}"
     );
     assert!(matches!(refused, Refusal::Invalid { .. }));
-    assert_eq!((facts.clone(), reports.clone()), before_inputs);
+    assert_eq!((facts.clone(), copy_reports(&reports)), before_inputs);
     // Preserve the failed snapshots intact. A separate repaired working copy proves that the
     // same ordinary bridge still accepts the intended devices; it does not erase a candidate red.
-    let mut repaired_reports = reports.clone();
+    let mut repaired_reports = copy_reports(&reports);
     repaired_reports[0].1.as_mut().unwrap().devices[1].size = facts.gpus[0].memory;
     let mut repaired_cluster = before_cluster.clone();
     let repaired = offered(&repaired_reports, &facts, &mut repaired_cluster);
@@ -483,11 +497,11 @@ fn backend_aliases_share_one_slot_and_require_exact_class_capability() {
     let (mut facts, mut reports) = inputs();
     facts.classes = Classes::ALL;
     facts.virt.kvm = true;
-    let mut native = reports[0].1.clone().unwrap();
+    let mut native = reports[0].1.as_ref().unwrap().try_clone().unwrap();
     native.devices.truncate(1);
     reports = Route::ALL
         .into_iter()
-        .map(|class| (class, Some(native.clone())))
+        .map(|class| (class, Some(native.try_clone().unwrap())))
         .collect();
     let mut cluster = service_cluster(&facts);
     let devices = offered(&reports, &facts, &mut cluster);
@@ -525,13 +539,17 @@ fn conflicting_backend_aliases_refuse_before_publishing_any_offer_or_model() {
     facts.classes = Classes::ALL;
     facts.virt.kvm = true;
     for alter in [0, 1, 2] {
-        let mut alias = reports[0].1.clone().unwrap();
+        let mut alias = reports[0].1.as_ref().unwrap().try_clone().unwrap();
         match alter {
-            0 => alias.devices[0].holder = Some(BoxId::new("foreign-holder").unwrap()),
+            0 => {
+                alias.devices[0].holder = Some(hex_api::DeviceHolder::Box(
+                    BoxId::new("foreign-holder").unwrap(),
+                ))
+            }
             1 => alias.devices[0].model = "wrong-model".into(),
             _ => alias.devices[0].size += 1,
         }
-        let mut both = reports.clone();
+        let mut both = copy_reports(&reports);
         both.push((Route::Firecracker, Some(alias)));
         let mut cluster = service_cluster(&facts);
         let before = cluster.clone();

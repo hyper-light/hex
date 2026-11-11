@@ -43,11 +43,11 @@ use std::sync::Mutex;
 
 use hex_api::{
     Allocation, BackingGrant, BackingKey, BackingOffer, BackingPhase, Bounds, BoxId, BoxInfo,
-    BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec, DeviceId,
-    DeviceInfo, DeviceKind, Execution, Exit, GpuEligibility, ImageArch, ImageOs, ImagePlatform,
-    IoRates, LifecycleCause, MAX_DEVICES, MAX_RUNTIME_ROUTES, Mount, Network, OciSpec,
-    PhysicalDevice, PhysicalReport, Program, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt,
-    RuntimeCost, Signal, Usage, User,
+    BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec, DeviceHolder,
+    DeviceId, DeviceInfo, DeviceKind, Execution, Exit, GpuEligibility, ImageArch, ImageOs,
+    ImagePlatform, IoRates, LifecycleCause, MAX_DEVICES, MAX_RUNTIME_ROUTES, Mount, Network,
+    OciSpec, PhysicalDevice, PhysicalReport, Program, Refusal, Rootfs, RouteKey, RouteOffer,
+    RouteReceipt, RuntimeCost, Signal, Usage, User,
 };
 
 use crate::netns;
@@ -534,7 +534,7 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
                     put_device_id(w, &device.id);
                     w.string(&device.model)?;
                     w.u64(device.size);
-                    w.option_with(device.holder.as_ref(), |w, id| w.string(id.as_str()))?;
+                    put_device_holder(w, device.holder.as_ref())?;
                 }
                 put_cost_option(w, capacity.cost)?;
                 put_capacity_routes(w, capacity)
@@ -877,13 +877,7 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                     let id = device_id(r)?;
                     let model = r.device_string("devices.model")?;
                     let size = r.u64()?;
-                    let holder = r.option(|r| {
-                        let bytes = r.bytes()?;
-                        let text = std::str::from_utf8(bytes)
-                            .map_err(|_| Fault::value("devices.holder", "is not UTF-8"))?;
-                        BoxId::new(text)
-                            .map_err(|_| Fault::value("devices.holder", "is not a valid box id"))
-                    })?;
+                    let holder = device_holder(r)?;
                     Ok(DeviceInfo {
                         id,
                         model,
@@ -1273,7 +1267,7 @@ const BACKING_GRANT_MIN_BYTES: usize =
 fn check_capacity(capacity: &Capacity) -> Result<(), Fault> {
     capacity
         .check()
-        .map_err(|_| Fault::value("capacity", "invalid resource, physical or routing receipt"))
+        .map_err(|e| Fault::value("capacity", e.to_string()))
 }
 
 fn check_spec_route(spec: &BoxSpec) -> Result<(), Fault> {
@@ -1326,7 +1320,10 @@ fn put_route_key(w: &mut Writer, key: RouteKey) -> Result<(), Fault> {
 }
 
 fn route_key(r: &mut Reader<'_>) -> Result<RouteKey, Fault> {
-    let class = class(r).map_err(|_| Fault::value("route.class", "unsupported tag"))?;
+    let class = class(r).map_err(|fault| match fault {
+        Fault::Value { .. } => Fault::value("route.class", "unsupported tag"),
+        other => other,
+    })?;
     let os = match r.u8()? {
         0 => ImageOs::Linux,
         1 => ImageOs::Windows,
@@ -1699,6 +1696,46 @@ fn device_id(r: &mut Reader<'_>) -> Result<DeviceId, Fault> {
     id.check()
         .map_err(|e| Fault::value("devices.id", e.to_string()))?;
     Ok(id)
+}
+
+fn put_device_holder(w: &mut Writer, holder: Option<&DeviceHolder>) -> Result<(), Fault> {
+    match holder {
+        None => {
+            w.reserve_fixed(1)?;
+            w.u8(0);
+            Ok(())
+        }
+        Some(DeviceHolder::Box(id)) => {
+            let bytes = 1usize
+                .checked_add(size_of::<u32>())
+                .and_then(|n| n.checked_add(id.as_str().len()))
+                .ok_or_else(|| Fault::value("devices.holder", "encoded box holder overflows"))?;
+            w.reserve_fixed(bytes)?;
+            w.u8(1);
+            w.string(id.as_str())
+        }
+        Some(DeviceHolder::Backing(key)) => {
+            w.reserve_fixed(1 + BACKING_KEY_BYTES)?;
+            w.u8(2);
+            put_backing_key(w, *key)
+        }
+    }
+}
+
+fn device_holder(r: &mut Reader<'_>) -> Result<Option<DeviceHolder>, Fault> {
+    match r.u8()? {
+        0 => Ok(None),
+        1 => {
+            let bytes = r.bytes()?;
+            let text = std::str::from_utf8(bytes)
+                .map_err(|_| Fault::value("devices.holder", "is not UTF-8"))?;
+            let id = BoxId::new(text)
+                .map_err(|_| Fault::value("devices.holder", "is not a valid box id"))?;
+            Ok(Some(DeviceHolder::Box(id)))
+        }
+        2 => backing_key(r).map(|key| Some(DeviceHolder::Backing(key))),
+        _ => Err(Fault::value("devices.holder", "unsupported holder tag")),
+    }
 }
 
 fn put_bounds(w: &mut Writer, b: &Bounds) {

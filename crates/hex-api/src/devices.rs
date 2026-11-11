@@ -87,20 +87,51 @@ impl DeviceId {
     }
 }
 
+/// The actual canonical owner; a pool is never disguised as a box or reported as free.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DeviceHolder {
+    Box(BoxId),
+    Backing(crate::runtime::BackingKey),
+}
+
+impl DeviceHolder {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        Ok(match self {
+            Self::Box(id) => Self::Box(id.try_clone()?),
+            Self::Backing(key) => Self::Backing(*key),
+        })
+    }
+
+    pub fn box_id(&self) -> Option<&BoxId> {
+        match self {
+            Self::Box(id) => Some(id),
+            Self::Backing(_) => None,
+        }
+    }
+
+    pub fn backing_key(&self) -> Option<crate::runtime::BackingKey> {
+        match self {
+            Self::Backing(key) => Some(*key),
+            Self::Box(_) => None,
+        }
+    }
+}
+
 /// A catalog fact: opaque model metadata, size in bytes where applicable, and its current holder.
 /// Neither free metadata nor a reported holder substitutes for runtime admission or attachment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceInfo {
     pub id: DeviceId,
     pub model: String,
     pub size: u64,
-    pub holder: Option<BoxId>,
+    pub holder: Option<DeviceHolder>,
 }
 
 /// A factual native snapshot around the existing catalog metadata. Each None counter remains
 /// unknown; Some(0) is an actual known zero. This grants no holder or attachment authority.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PhysicalDevice {
     pub info: DeviceInfo,
@@ -110,7 +141,7 @@ pub struct PhysicalDevice {
 
 /// A flat snapshot from the native Store/turn owner's one provider. Overlapping backend routes
 /// must name this same stable authority; telemetry does not report or grant a holder.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PhysicalReport {
     pub authority: String,
@@ -118,6 +149,28 @@ pub struct PhysicalReport {
 }
 
 impl PhysicalReport {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        let mut authority = String::new();
+        authority
+            .try_reserve_exact(self.authority.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "physical report authority",
+                bound: self.authority.len(),
+            })?;
+        authority.push_str(&self.authority);
+        let mut devices = Vec::new();
+        devices
+            .try_reserve_exact(self.devices.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "physical report entries",
+                bound: self.devices.len(),
+            })?;
+        for device in &self.devices {
+            devices.push(device.try_clone()?);
+        }
+        Ok(Self { authority, devices })
+    }
+
     pub fn check(&self) -> Result<(), Refusal> {
         let invalid = |why: &'static str| Refusal::Invalid {
             what: "native physical report",
@@ -144,6 +197,16 @@ impl PhysicalReport {
     }
 }
 
+impl PhysicalDevice {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        Ok(Self {
+            info: self.info.try_clone()?,
+            busy_per_mille: self.busy_per_mille,
+            memory_used_bytes: self.memory_used_bytes,
+        })
+    }
+}
+
 impl DeviceInfo {
     pub fn try_clone(&self) -> Result<Self, Refusal> {
         let mut model = String::new();
@@ -158,7 +221,11 @@ impl DeviceInfo {
             id: self.id,
             model,
             size: self.size,
-            holder: self.holder.as_ref().map(BoxId::try_clone).transpose()?,
+            holder: self
+                .holder
+                .as_ref()
+                .map(DeviceHolder::try_clone)
+                .transpose()?,
         })
     }
 
@@ -207,6 +274,47 @@ mod tests {
     use super::*;
     use crate::{Bounds, BoxSpec, Capacity, CapacityResources, ClassSpec, Program, Runtime, Stdio};
 
+    /// AC-T7.4.1: native pools are actual owners, while old box-holder JSON remains byte-compatible.
+    #[test]
+    fn physical_holder_preserves_legacy_box_and_exact_backing_generation() {
+        let owner: DeviceHolder = serde_json::from_str("\"old-box\"").unwrap();
+        assert_eq!(owner.box_id().unwrap().as_str(), "old-box");
+        assert_eq!(serde_json::to_string(&owner).unwrap(), "\"old-box\"");
+        let key = crate::runtime::BackingKey {
+            pool: [7; 32],
+            generation: [9; 16],
+        };
+        let owner = DeviceHolder::Backing(key);
+        let copied = owner.try_clone().unwrap();
+        assert_eq!(copied, owner);
+        assert!(owner.box_id().is_none());
+        assert_eq!(owner.backing_key(), Some(key));
+        assert_eq!(
+            serde_json::from_str::<DeviceHolder>(&serde_json::to_string(&owner).unwrap()).unwrap(),
+            owner
+        );
+        assert!(serde_json::from_str::<DeviceHolder>("{\"pool\":[],\"generation\":[]}").is_err());
+        let mut report = PhysicalReport {
+            authority: "one-native-owner".into(),
+            devices: vec![PhysicalDevice {
+                info: DeviceInfo {
+                    id: id(DeviceKind::Gpu, 7),
+                    model: "observed".into(),
+                    size: 1,
+                    holder: Some(owner),
+                },
+                busy_per_mille: None,
+                memory_used_bytes: None,
+            }],
+        };
+        assert!(
+            report.check().is_err(),
+            "telemetry cannot grant a Box or Backing holder"
+        );
+        report.devices[0].info.holder = None;
+        assert!(report.check().is_ok());
+    }
+
     /// AC-T7.4.1: unknown independent counters survive the public snapshot and confer no holder.
     #[test]
     fn physical_report_keeps_independent_unknown_counters_and_refuses_grants() {
@@ -232,14 +340,17 @@ mod tests {
         );
         assert_eq!(report.devices[0].busy_per_mille, None);
         assert_eq!(report.devices[0].memory_used_bytes, Some(0));
-        let mut malformed = report.clone();
-        malformed.devices[0].info.holder = Some(BoxId::new("not-a-grant").unwrap());
+        let mut malformed = report.try_clone().unwrap();
+        malformed.devices[0].info.holder =
+            Some(DeviceHolder::Box(BoxId::new("not-a-grant").unwrap()));
         assert!(malformed.check().is_err());
-        malformed = report.clone();
+        malformed = report.try_clone().unwrap();
         malformed.devices[0].busy_per_mille = Some(1001);
         assert!(malformed.check().is_err());
-        malformed = report.clone();
-        malformed.devices.push(report.devices[0].clone());
+        malformed = report.try_clone().unwrap();
+        malformed
+            .devices
+            .push(report.devices[0].try_clone().unwrap());
         assert!(malformed.check().is_err());
         malformed = report;
         malformed.authority.clear();
@@ -280,7 +391,9 @@ mod tests {
             id,
             model: "synthetic-private-model".to_owned(),
             size: u64::MAX,
-            holder: Some(BoxId::new("synthetic-private-holder").unwrap()),
+            holder: Some(DeviceHolder::Box(
+                BoxId::new("synthetic-private-holder").unwrap(),
+            )),
         }
     }
 

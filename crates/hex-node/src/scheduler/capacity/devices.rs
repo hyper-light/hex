@@ -31,7 +31,7 @@ fn collect_offers(
     struct Candidate<'a> {
         id: hex_api::DeviceId,
         device: Device,
-        holder: Option<&'a hex_api::BoxId>,
+        holder: Option<&'a hex_api::DeviceHolder>,
         order: usize,
     }
     let mut candidates: Vec<Candidate<'_>> = Vec::new();
@@ -124,10 +124,11 @@ fn collect_offers(
                     kind,
                     key: Some(offer.id.key),
                     available: observed
-                        && offer
-                            .holder
-                            .as_ref()
-                            .is_none_or(|holder| holder.as_str().starts_with(&own_prefix)),
+                        && offer.holder.as_ref().is_none_or(|holder| {
+                            holder
+                                .box_id()
+                                .is_some_and(|id| id.as_str().starts_with(&own_prefix))
+                        }),
                     classes: Classes::NONE.with(*class),
                     model,
                     size,

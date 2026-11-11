@@ -403,6 +403,29 @@ pub struct RouteReceipt {
     pub backing: Option<BackingKey>,
 }
 impl RouteReceipt {
+    /// One formula for candidate, durable admission and recovery. Shared payload limits are
+    /// unchanged; its separately granted backing pays the host envelope exactly once.
+    pub fn charged(
+        self,
+        workload: CapacityResources,
+        allocation: Option<Allocation>,
+    ) -> Result<CapacityResources, Refusal> {
+        self.key.check()?;
+        match (self.key.execution, allocation) {
+            (Execution::Native, None) => Ok(workload),
+            (Execution::ShardsShared, None) if self.backing.is_some() => {
+                Ok(CapacityResources::default())
+            }
+            (Execution::ShardsDedicated | Execution::Firecracker, Some(allocation)) => {
+                allocation.check(workload)?;
+                Ok(allocation.resources)
+            }
+            _ => Err(invalid_route(
+                "committed route and immutable charge disagree",
+            )),
+        }
+    }
+
     pub fn check(self, class: crate::Class, selected_gpu: bool) -> Result<(), Refusal> {
         self.key.check()?;
         if self.key.class != class || !self.key.gpu.accepts(selected_gpu) {
@@ -746,11 +769,10 @@ impl Capacity {
                     "selected physical identity is ineligible for the committed execution",
                 ));
             }
-            if device
-                .holder
-                .as_ref()
-                .is_some_and(|holder| holder != &spec.id)
-            {
+            if device.holder.as_ref().is_some_and(|holder| match holder {
+                crate::devices::DeviceHolder::Box(id) => id != &spec.id,
+                crate::devices::DeviceHolder::Backing(key) => receipt.backing != Some(*key),
+            }) {
                 return Err(Refusal::Lifecycle {
                     id: spec.id.try_clone()?,
                     cause: LifecycleCause::Busy,
