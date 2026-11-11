@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "3529353cca3c405d3f830f5967e08154ad5713ce",
+  "source": {
+    "path": "crates/hex-client/src/calls/budget_tests.rs",
+    "parent_sha256": "7b08b0838bb23034254190357d6feac84947d673928266aead024b72ce651552",
+    "sha256": "547cf4c9b9ea0f98e04538b81ff898990554e9d0d360fd8ad2207cb5af08e8cf"
+  },
+  "change": "Fixture only: convert read_request_apart Bad through bad.fault and the existing Fault -> Refusal mapping used by the server. Preserve Storage -> Exhausted and all other wire fault detail in Refusal::Invalid; no generic replacement error.",
+  "unchanged": "Production, public constructor oracle, phase assertions, deadlines, guards, transport, cleanup, test selectors and all other fixture bytes unchanged.",
+  "root_original": {
+    "cohort": "9e19",
+    "result": "Compiler E0277 at ordinary_hello_frame: no From<Bad> for Refusal, two diagnostics. Zero tests across four phases; strict phase unrun. ROOT reports Cargo reaped/no native; raw retained and collecting.",
+    "attribution": "ROOT message only; no local replay or collected raw claim."
+  },
+  "builds_executed": 0,
+  "tests_executed": 0,
+  "native_executed": 0,
+  "status": "SOURCE ONLY; no owner check dispatched"
+}

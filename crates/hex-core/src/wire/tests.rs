@@ -3384,11 +3384,12 @@ fn physical_report_unavailable_roundtrips_qualified_backing_causes() {
         ));
         // Whole-body preflight includes the new count and every scalar trailer.
         let mut short = Writer::new(bytes.len() - HEADER_BYTES - 1);
+        let initial_capacity = short.out.capacity();
         assert!(matches!(
             put_physical_report(&mut short, report),
             Err(Fault::Oversized { .. })
         ));
-        assert_eq!((short.out.len(), short.out.capacity()), (0, 0));
+        assert_eq!((short.out.len(), short.out.capacity()), (0, initial_capacity));
         assert!(matches!(
             read_answer(&received(&bytes, 1), MAX_MESSAGE),
             Err(Fault::Descriptors { .. })

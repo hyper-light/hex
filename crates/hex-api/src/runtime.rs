@@ -962,15 +962,14 @@ impl Capacity {
                 .find(|backing| backing.key == key)
                 .ok_or_else(|| invalid_route("committed backing is absent"))?;
             offer.check_backing(backing)?;
-            if spec.devices.len() != backing.devices.len()
-                || spec
-                    .devices
-                    .iter()
-                    .any(|id| backing.devices.binary_search(id).is_err())
-            {
-                return Err(invalid_route(
-                    "selected physical set differs from the complete backing grant",
-                ));
+            if offer.key.execution == Execution::ShardsShared {
+                if !spec.devices.is_empty() {
+                    return Err(invalid_route(
+                        "shared backing cannot grant selected physical devices",
+                    ));
+                }
+            } else {
+                BackingOffer::check_selection_parts(&backing.devices, &spec.devices)?;
             }
             if backing.phase != BackingPhase::Live {
                 return Err(Refusal::Backing {

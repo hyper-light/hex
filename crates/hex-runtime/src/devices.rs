@@ -941,12 +941,19 @@ impl Catalog {
                         .get(id)
                         .and_then(|record| record.as_ref().ok())
                         .ok_or_else(|| record_error(record.key))?;
-                    if boxed.phase != hex_core::record::Phase::Creating
-                        || boxed.init.is_some()
+                    if !matches!(
+                        boxed.phase,
+                        hex_core::record::Phase::Creating | hex_core::record::Phase::Deleting
+                    ) || boxed.init.is_some()
+                        || boxed.run.is_some()
+                        || boxed.exit.is_some()
                         || !self.handoff(&boxed.spec, record)?
                     {
                         return Err(record_error(record.key));
                     }
+                    // The pending Box is only a consuming reference. The original native
+                    // observer still owns every full-P conflict until its actual scope Released.
+                    holder = Some(hex_api::DeviceHolder::Backing(record.key));
                 }
                 Some(hex_api::DeviceHolder::Backing(_)) => return Err(record_error(record.key)),
             }
@@ -959,20 +966,25 @@ impl Catalog {
             return Ok(false);
         };
         if route.key.backend_class() != NativeRecord::Pool(pool).class()?
-            || spec.devices.len() != pool.devices.len()
-            || spec
-                .devices
-                .iter()
-                .any(|id| pool.devices.binary_search(id).is_err())
+            || route.key.execution == hex_api::Execution::ShardsShared
+            || pool.allocation.is_none()
+            || !matches!(
+                pool.phase,
+                hex_api::BackingPhase::Live
+                    | hex_api::BackingPhase::Draining
+                    | hex_api::BackingPhase::Released
+            )
+            || pool.phase == hex_api::BackingPhase::Released && pool.exit.is_none()
         {
             return Ok(false);
         }
-        hex_api::RouteOffer {
-            key: route.key,
-            cost: spec.allocation.map(|allocation| allocation.cost),
-            backing: route.backing,
-        }
-        .check_backing_parts(pool.key, pool.cost, &pool.devices)?;
+        route.check_backing_parts(
+            spec.allocation.map(|allocation| allocation.cost),
+            pool.key,
+            pool.cost,
+            &pool.devices,
+            &spec.devices,
+        )?;
         Ok(true)
     }
 
@@ -1000,6 +1012,33 @@ impl Catalog {
         pools: &[PoolRecord],
     ) -> Result<Vec<&'a Entry>, Refusal> {
         spec.check()?;
+        if let Some(source) = spec
+            .route
+            .filter(|route| route.key.execution != hex_api::Execution::ShardsShared)
+            .and_then(|route| route.backing)
+        {
+            let pool = pools
+                .iter()
+                .find(|pool| pool.key == source)
+                .ok_or_else(|| record_error(source))?;
+            if !self.handoff(spec, pool)? {
+                return Err(record_error(source));
+            }
+            for (other, record) in records {
+                let record = record.as_ref().map_err(|_| record_error(source))?;
+                if other != &spec.id
+                    && record.spec.route.is_some_and(|route| {
+                        route.backing == Some(source)
+                            && route.key.execution != hex_api::Execution::ShardsShared
+                    })
+                {
+                    return Err(Refusal::Backing {
+                        key: source,
+                        cause: hex_api::LifecycleCause::Busy,
+                    });
+                }
+            }
+        }
         let mut selected = Vec::new();
         selected
             .try_reserve_exact(spec.devices.len())
@@ -1015,12 +1054,31 @@ impl Catalog {
                     hex_api::DeviceHolder::Backing(key) => pools
                         .iter()
                         .find(|record| {
-                            record.key == key && record.phase == hex_api::BackingPhase::Live
+                            record.key == key
+                                && matches!(
+                                    record.phase,
+                                    hex_api::BackingPhase::Live | hex_api::BackingPhase::Draining
+                                )
                         })
                         .map(|pool| self.handoff(spec, pool))
                         .transpose()?
                         .unwrap_or(false),
-                    hex_api::DeviceHolder::Box(_) => false,
+                    hex_api::DeviceHolder::Box(id) => {
+                        id == spec.id
+                            && spec
+                                .route
+                                .and_then(|route| route.backing)
+                                .is_some_and(|key| {
+                                    pools.iter().any(|pool| {
+                                        pool.key == key
+                                            && pool.phase == hex_api::BackingPhase::Released
+                                    })
+                                })
+                            && records
+                                .get(&id)
+                                .and_then(|record| record.as_ref().ok())
+                                .is_some_and(|record| record.spec == *spec)
+                    }
                 };
                 if !handoff {
                     return Err(invalid("requested physical device is already held"));

@@ -2282,8 +2282,8 @@ fn ordinary_hello_frame(
                 if !input.is_empty() || !decoder.at_boundary() {
                     return Err(Refusal::Broken("bytes after ordinary Hello frame".into()));
                 }
-                let (header, request) =
-                    wire::read_request_apart(&message, wire::MAX_MESSAGE).map_err(Refusal::from)?;
+                let (header, request) = wire::read_request_apart(&message, wire::MAX_MESSAGE)
+                    .map_err(|bad| Refusal::from(bad.fault))?;
                 return Ok((header, request, captured));
             }
         }

@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "f548922547aa6f6d8116d415243bf3090b0c81fd",
+  "source": {
+    "path": "crates/hex-core/src/wire/tests.rs",
+    "parent_sha256": "1359d3132529aacca7715acf057a143953308389144cf98df84c1be857dbb764",
+    "sha256": "53fd4490c52858e30b7d3ee2af28a79dce4ae2e31be55bf8d34c9561a656c27e"
+  },
+  "producer": {
+    "path": "crates/hex-core/src/wire.rs",
+    "sha256": "9f0e456b8d0c030f58539f8bfa9bf9f3f584bec9ffa969d04e2928cc9706b138",
+    "unchanged": true
+  },
+  "change": "Unexecuted new fixture only: capture Writer::new initial capacity, then require unchanged capacity and length zero after short-body preflight refusal. Writer::new eagerly allocates HEADER_BYTES.min(bound), so zero capacity was an incorrect premise.",
+  "preserved": "Same exact short bound, expected Oversized refusal, output length zero, no buffer growth, same round-trip/oracle/other controls. c772 API/CPU ports and production code untouched.",
+  "root_review": "Correction requested during full f548 review, before execution of the new CPU diagnostic controls; not an observed production/native failure.",
+  "builds_executed": 0,
+  "tests_executed": 0,
+  "native_executed": 0,
+  "status": "SOURCE ONLY; no owner check dispatched"
+}

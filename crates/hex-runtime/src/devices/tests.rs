@@ -141,7 +141,7 @@ fn canonical_pool_holder_retains_grant_until_released_and_fences_exact_handoff()
     let boxes = Records::from([(selected.id.clone(), Ok(record))]);
     assert_eq!(
         catalog.holder(id, &boxes, &pools).unwrap(),
-        Some(DeviceHolder::Box(selected.id.clone()))
+        Some(DeviceHolder::Backing(pools[0].key))
     );
     selected
         .route
@@ -420,4 +420,117 @@ fn guest_recipe_is_separate_and_requires_exact_boot_owner_and_full_set() {
     let plan = catalog.guest_cdi(&selected, &authority).unwrap();
     assert_eq!(plan.edits().unwrap().device_nodes.len(), 1);
     assert!(catalog.cdi(&selected.devices).is_err());
+}
+
+/// AC-T7.4.1: a strict subset is one consuming reference while the original full source owns P.
+#[test]
+fn subset_handoff_keeps_full_pool_holder_and_one_consumer_until_scope_released() {
+    use hex_api::{
+        BackingPhase, DeviceHolder, Execution, GpuEligibility, ImageArch, ImageOs, ImagePlatform,
+        LifecycleCause, RouteKey, RouteReceipt,
+    };
+    let catalog = catalog();
+    let mut source = pool(BackingPhase::Live);
+    source.devices.push(DeviceId {
+        kind: DeviceKind::Gpu,
+        key: 512,
+    });
+    let key = source.key;
+    let p = source.devices.clone();
+    let mut selected = spec("subset", 256);
+    selected.bounds.cpu_max_milli = Some(hex_api::MIN_CPU_MILLI);
+    selected.bounds.memory_max = Some(hex_api::MIN_MEMORY);
+    selected.allocation = source.allocation;
+    selected.route = Some(RouteReceipt {
+        key: RouteKey {
+            class: hex_api::Class::Oci,
+            image: ImagePlatform {
+                os: ImageOs::Linux,
+                arch: ImageArch::Amd64,
+            },
+            execution: Execution::ShardsDedicated,
+            gpu: GpuEligibility::Required,
+        },
+        backing: Some(key),
+    });
+    assert_eq!(
+        catalog
+            .prepare(&selected, &Records::new(), std::slice::from_ref(&source))
+            .unwrap()
+            .len(),
+        1
+    );
+    let mut pending = BoxRecord::new(selected.clone(), Phase::Creating, Vec::new());
+    pending.native_scope = Some(hex_core::record::NativeScope::from_bytes([42; 16]));
+    let mut records = Records::from([(selected.id.clone(), Ok(pending))]);
+    for id in &p {
+        assert_eq!(
+            catalog
+                .holder(*id, &records, std::slice::from_ref(&source))
+                .unwrap(),
+            Some(DeviceHolder::Backing(key))
+        );
+    }
+    let mut sibling = selected.clone();
+    sibling.id = BoxId::new("disjoint-consumer").unwrap();
+    sibling.devices = vec![p[1]];
+    assert!(
+        matches!(catalog.prepare(&sibling, &records, std::slice::from_ref(&source)), Err(Refusal::Backing {key:got,cause:LifecycleCause::Busy}) if got==key)
+    );
+    records
+        .get_mut(&selected.id)
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .phase = Phase::Deleting;
+    source.phase = BackingPhase::Draining;
+    for id in &p {
+        assert_eq!(
+            catalog
+                .holder(*id, &records, std::slice::from_ref(&source))
+                .unwrap(),
+            Some(DeviceHolder::Backing(key))
+        );
+    }
+    source.phase = BackingPhase::Released;
+    source.exit = Some(hex_api::Exit::Code(0));
+    assert_eq!(
+        catalog
+            .holder(p[0], &records, std::slice::from_ref(&source))
+            .unwrap(),
+        Some(DeviceHolder::Box(selected.id.clone()))
+    );
+    assert_eq!(
+        catalog
+            .holder(p[1], &records, std::slice::from_ref(&source))
+            .unwrap(),
+        None
+    );
+    assert!(
+        catalog
+            .prepare(&selected, &records, std::slice::from_ref(&source))
+            .is_ok()
+    );
+    let mut changed = selected.clone();
+    if let ClassSpec::Oci(oci) = &mut changed.class {
+        oci.hostname = Some("changed".into());
+    }
+    assert!(
+        catalog
+            .prepare(&changed, &records, std::slice::from_ref(&source))
+            .is_err()
+    );
+    source.phase = BackingPhase::Live;
+    source.exit = None;
+    records
+        .get_mut(&selected.id)
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .phase = Phase::Ready;
+    assert!(
+        catalog
+            .holder(p[0], &records, std::slice::from_ref(&source))
+            .is_err()
+    );
 }
