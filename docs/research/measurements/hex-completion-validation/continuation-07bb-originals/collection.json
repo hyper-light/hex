@@ -1,0 +1,63 @@
+{
+  "bytes": 307124,
+  "sha256": "1704655cc517d436514bc6865f1c20509c52dd240ddcde065f01a1a78d17afee",
+  "members": {
+    "cohort-07bb8292-linux-joined-originals-07bb/source-before.json": {
+      "bytes": 444152,
+      "sha256": "793b5426b9404705b6721f4460e6608dd70edb15dcbd0b9157849073e51f0596"
+    },
+    "cohort-07bb8292-linux-joined-originals-07bb/public-registry-seed.json": {
+      "bytes": 29110,
+      "sha256": "658af6603c201e4940c5676e3cec5016e92fd8120a1cf0b24cbb1f9f7f80130a"
+    },
+    "cohort-07bb8292-linux-joined-originals-07bb/owned-scope-limits.json": {
+      "bytes": 261,
+      "sha256": "a19c9c0e3de3155b8da4703aca86b2e529042c7cd42c4b03365fcc0cda5fceca"
+    },
+    "cohort-07bb8292-linux-joined-originals-07bb/drop-original-after.log": {
+      "bytes": 3074,
+      "sha256": "0aa1e549e345bb20543353edb881a67f8c0c3042fe145d9772d799f474d740cf"
+    },
+    "cohort-07bb8292-linux-joined-originals-07bb/running.json": {
+      "bytes": 6073,
+      "sha256": "4d61de1868f6bc1888ef599306f55a7855921a4156053a632ceb59d393b96d81"
+    },
+    "cohort-07bb8292-linux-joined-originals-07bb/shards-adapter-original-authority.log": {
+      "bytes": 431,
+      "sha256": "912fd8e68ced8ac18a73341ed649f795bb8ee4ac7ccd76742619db6e9f903898"
+    },
+    "cohort-07bb8292-linux-joined-originals-07bb/vfio-canonical-full-id.log": {
+      "bytes": 1522,
+      "sha256": "0e1a5638b5bef3236ea8db7f7c2e4ea5e398db56dd723ddd49bed444d3df632f"
+    },
+    "cohort-07bb8292-linux-joined-originals-07bb/fc-exact-native-binding.log": {
+      "bytes": 458,
+      "sha256": "0034c0d025020b21adbc72a9f7b1b25e4f984339a7146005d9c640d50eda2c3a"
+    },
+    "cohort-07bb8292-linux-joined-originals-07bb/subset-original.log": {
+      "bytes": 1929,
+      "sha256": "eab2a96d184f87a18c101cc86a58dc480d8c7eb2c148dfdb1d42814329ed77dd"
+    },
+    "cohort-07bb8292-linux-joined-originals-07bb/cpu-observer-original.log": {
+      "bytes": 1397,
+      "sha256": "a97642da8f1b9eb9b8d5cadc9280341024935438262dab277f3f1474206f251e"
+    },
+    "cohort-07bb8292-linux-joined-originals-07bb/source-after.json": {
+      "bytes": 444152,
+      "sha256": "793b5426b9404705b6721f4460e6608dd70edb15dcbd0b9157849073e51f0596"
+    },
+    "cohort-07bb8292-linux-joined-originals-07bb/result.json": {
+      "bytes": 6423,
+      "sha256": "70e023f48d82213d5c1bb0d10dc8823894a4a1d0fe55e08b8f52818aadf5855b"
+    },
+    "cohort-07bb8292-linux-joined-originals-07bb/collected-binaries.json": {
+      "bytes": 6196,
+      "sha256": "ebe86b0980424497d71afb7afbe9bddf9bcd0ae5032d0cb3d233bb5e3d707c83"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}
