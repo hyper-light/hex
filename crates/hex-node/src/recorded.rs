@@ -1348,10 +1348,7 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
     }
 
     fn owns_records(&self, spec: &BoxSpec) -> Result<bool, Refusal> {
-        Ok(
-            self.route_for(spec)? == hex_runtime::guest::Side::Guest
-                && self.guest().uses_books(),
-        )
+        Ok(self.route_for(spec)? == hex_runtime::guest::Side::Guest && self.guest().uses_books())
     }
 
     fn runtime_for(&self, spec: &BoxSpec) -> Result<&dyn Runtime, Refusal> {

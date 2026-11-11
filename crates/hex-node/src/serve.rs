@@ -2043,7 +2043,9 @@ impl<O: Os> Shared<O> {
                 .map(|reply| Answer::Scheduled(Box::new(reply))),
             Call::Capacity(class) => host.capacity(class).map(Answer::Capacity),
             Call::PhysicalReport => host.physical_report().map(Answer::PhysicalReport),
-            Call::InitializeBacking(grant) => host.initialize_backing(grant).map(Answer::BackingOffer),
+            Call::InitializeBacking(grant) => {
+                host.initialize_backing(grant).map(Answer::BackingOffer)
+            }
             Call::ReleaseBacking(key) => host.release_backing(key).map(Answer::BackingOffer),
             Call::Create(spec) => host.create(*spec).map(Answer::Info),
             Call::Start(id) => host.start(&id).map(|()| Answer::Done),

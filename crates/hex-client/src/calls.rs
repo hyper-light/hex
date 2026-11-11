@@ -2195,7 +2195,10 @@ fn settle(stdio: Stdio, ends: hex_api::Given) -> Result<hex_api::Given, Refusal>
 }
 
 impl<T: Transport> Runtime for Core<T> {
-    fn initialize_backing(&self, grant: hex_api::BackingGrant) -> Result<hex_api::BackingOffer, Refusal> {
+    fn initialize_backing(
+        &self,
+        grant: hex_api::BackingGrant,
+    ) -> Result<hex_api::BackingOffer, Refusal> {
         grant.check()?;
         let key = grant.key;
         match self.plain(Call::InitializeBacking(grant))? {
@@ -2204,7 +2207,10 @@ impl<T: Transport> Runtime for Core<T> {
                 Ok(offer)
             }
             Answer::Refused(why) => Err(why),
-            _ => Err(Refusal::Backing { key, cause: hex_api::LifecycleCause::Uncertain }),
+            _ => Err(Refusal::Backing {
+                key,
+                cause: hex_api::LifecycleCause::Uncertain,
+            }),
         }
     }
 
@@ -2215,7 +2221,10 @@ impl<T: Transport> Runtime for Core<T> {
                 Ok(offer)
             }
             Answer::Refused(why) => Err(why),
-            _ => Err(Refusal::Backing { key, cause: hex_api::LifecycleCause::Uncertain }),
+            _ => Err(Refusal::Backing {
+                key,
+                cause: hex_api::LifecycleCause::Uncertain,
+            }),
         }
     }
 
