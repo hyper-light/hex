@@ -606,9 +606,21 @@ impl Holding {
             SlotState::Finishing(held) | SlotState::CancelFinishing(held) => {
                 SlotState::CleanupPending(held.clone())
             }
+            // A creator cancelled while finishing has already handed its box to cleanup (`ready`).
+            SlotState::CleanupPending(_) => return Ok(()),
             _ => return Err(inconsistent_slots()),
         };
         Ok(())
+    }
+
+    /// The uncertainty mark of a path that failed with `failure`. A refused mark leaves the slot
+    /// unmarked, so it returns beside `failure`, typed as the node's broken state.
+    fn uncertain_after(&self, id: OwnerRef<'_>, failure: &Refusal) -> Result<(), Refusal> {
+        self.uncertain(id).map_err(|mark| {
+            Refusal::Broken(format!(
+                "{failure}; its native slot's uncertainty couldn't be recorded ({mark})"
+            ))
+        })
     }
 
     /// Only a fresh assigned create returning before HcsCreateComputeSystem can take this path.
@@ -1771,7 +1783,7 @@ impl WinRuntime {
         let held = match made {
             Ok(held) => held,
             Err(error) => {
-                self.holding.uncertain(OwnerRef::Box(id))?;
+                self.holding.uncertain_after(OwnerRef::Box(id), &error)?;
                 return match self.holding.remove(id) {
                     Ok(()) => Err(error),
                     Err(cleanup) => Err(Refusal::Broken(format!(
@@ -1798,7 +1810,7 @@ impl WinRuntime {
                 ))
             }
             Err(error) => {
-                self.holding.uncertain(OwnerRef::Box(id))?;
+                self.holding.uncertain_after(OwnerRef::Box(id), &error)?;
                 match self.holding.remove(id) {
                     Ok(()) => Err(error),
                     Err(cleanup) => Err(Refusal::Broken(format!(
@@ -2932,6 +2944,42 @@ mod tests {
             boxes[at].1.state,
             SlotState::Finishing(Held::Process(_))
         ));
+    }
+
+    /// AC-T7.4.1: do cancel a create while it finishes, so its own readiness step hands the slot to
+    /// cleanup, then run its failure path's uncertainty mark; expect the mark satisfied, not refused
+    /// as broken state, and the slot keeping its job until a delete removes it.
+    #[test]
+    fn a_cancelled_finishing_slot_already_satisfies_its_failure_mark() {
+        let scratch = tempfile::tempdir().unwrap();
+        let rt = device_runtime(scratch.path());
+        let spec = process_box("cancelled-finishing");
+        let id = &spec.id;
+        rt.holding
+            .reserve(OwnerRef::Box(id), &[], None, None)
+            .unwrap();
+        let job = JobBox::create(id.clone(), &spec.bounds, NonZeroU32::MIN).unwrap();
+        assert!(
+            !rt.holding
+                .made(OwnerRef::Box(id), native_held(job).unwrap())
+                .unwrap()
+        );
+        assert!(rt.holding.remove(id).is_err()); // The cancel: its keeper handoff is pending.
+        assert!(!rt.holding.ready(OwnerRef::Box(id)).unwrap());
+        let failure = Refusal::os("finishing a box", "owned injected cancelled creation");
+        rt.holding
+            .uncertain_after(OwnerRef::Box(id), &failure)
+            .unwrap();
+        {
+            let boxes = rt.boxes().unwrap();
+            let at = slot_index(&boxes, id).unwrap();
+            assert!(matches!(
+                boxes[at].1.state,
+                SlotState::CleanupPending(Held::Process(_))
+            ));
+        }
+        rt.delete(id).unwrap();
+        assert!(rt.list().unwrap().is_empty());
     }
 
     /// HEX-INST-9 (native plan step 6): the installer's features are read when the runtime is made, so
