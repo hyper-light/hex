@@ -295,7 +295,8 @@ fn failed_cleanup_and_delete_intent_survive_smaller_budget_restart_until_exact_d
     );
     let rows = durable_placement_files(dir.path());
     assert_eq!(rows.len(), 5);
-    for (kind, prefix) in [("own", "deleting 0 "), ("ran", "0 running ")] {
+    // A ran row names its owner and its explicit device binding: none, for this CPU-only box.
+    for (kind, prefix) in [("own", "deleting 0 "), ("ran", "bindings1:0:0 running ")] {
         let value: serde_json::Value =
             serde_json::from_slice(rows.get(&format!("{}.rec", name(kind, uncertain))).unwrap())
                 .unwrap();
