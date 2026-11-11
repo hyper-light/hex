@@ -694,6 +694,9 @@ mod release_frame {
 
     /// A node agent's stream, read as its agent reads it: frame by frame, an exec started and a start done.
     struct Narrow {
+        /// Readable for good (a byte it sent itself, never read), so every wait reads `inbound`. A byte per answer left
+        /// the order to the OS: macOS loops a datagram back on another thread after `send` returns, so a client waiting
+        /// for room found the socket writable before the answer was readable, and wrote on without reading it.
         handle: std::net::UdpSocket,
         room: Mutex<VecDeque<Room>>,
         during: Mutex<Option<During>>,
@@ -725,12 +728,10 @@ mod release_frame {
             };
             let bytes = wire::answer(id, answer, wire::MAX_MESSAGE).unwrap();
             self.inbound.lock().unwrap().push_back((bytes, ends));
-            self.handle.send(&[1]).unwrap();
         }
 
         fn end(&self) {
             self.ended.store(true, Ordering::Release);
-            let _ = self.handle.send(&[1]);
         }
 
         /// The agent reads one write's `bytes`: each request heard, and answered, once its frame is whole.
@@ -785,7 +786,6 @@ mod release_frame {
         }
 
         fn recv(&self, _: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
-            while self.handle.recv(&mut [0u8; 1]).is_ok() {}
             let mut came = false;
             loop {
                 let written = self.inbound.lock().unwrap().pop_front();
@@ -865,6 +865,9 @@ mod release_frame {
     fn narrow(programs: usize) -> Core<Narrow> {
         let handle = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         handle.connect(handle.local_addr().unwrap()).unwrap();
+        handle.send(&[1]).unwrap();
+        // Blocking: returns once the byte has come, and leaves it there.
+        handle.peek(&mut [0u8; 1]).unwrap();
         handle.set_nonblocking(true).unwrap();
         let transport = Narrow {
             handle,
