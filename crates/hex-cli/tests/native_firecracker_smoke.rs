@@ -44,7 +44,8 @@ impl Inputs {
         assert!(!wait.is_zero());
         // A VM's create boots it: the client's learned create bound (twice the recorded slowest,
         // an OCI box's) would refuse it first, so every wait here measures and each call that
-        // makes a VM carries this test's explicit deadline instead.
+        // makes a VM carries this test's explicit deadline instead. Only until L4 gives each
+        // class its own answer patience; then this goes, and create_before alone remains.
         hex_core::patience::measure_all();
         Self { value, wait }
     }
