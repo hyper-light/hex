@@ -1,0 +1,109 @@
+{
+  "kind": "source-only-client-absolute-operation-producer",
+  "parent": "1a9a92bf1a657260b2684bb1982f5b3bfb46c00a",
+  "branch": "cp/t7-client-operation-deadlines",
+  "role": "implementer",
+  "policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "hex_claude_sha256": "0ea49a206966eb9484b4ce566a647e16c32a05f05db339e0a1f963c5c26a877e",
+  "files": [
+    {
+      "path": "crates/hex-client/src/calls.rs",
+      "bytes": 105594,
+      "sha256": "b50682e0f363ba63a717d7b3d547a7a0d3c7f7ccdb36768e44187f48a0dd6c94"
+    },
+    {
+      "path": "crates/hex-client/src/calls/budget_tests.rs",
+      "bytes": 55668,
+      "sha256": "feedf355b8e3329ba69882d9881838e493f6d26a2f3f8822804c2e9df20466a8"
+    },
+    {
+      "path": "docs/research/measurements/hex-completion-validation/client-operation-deadline/README.md",
+      "bytes": 8504,
+      "sha256": "e854902ace035d198875a12bacee5504728f458fc1a482ee7f1c91c989f9f95c"
+    }
+  ],
+  "protected_files": [
+    {
+      "path": "crates/hex-client/src/guest.rs",
+      "sha256": "6a9410629157e85ec4ddc507a09e34ac82e275c6ca9f28323e5145cb50a16c7c",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/guest/tests.rs",
+      "sha256": "8a6a0350d0139227686838ab31af5fdc902b1ddb564accfc00e22c1b76aaf70e",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/linux.rs",
+      "sha256": "173f09b21390698ba1d50641e289a017af14226bd6962b5e2e05ffd8cb9a124d",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/macos.rs",
+      "sha256": "54283c653f14360c0c2397c8862ad1d820da03053f79d0effde1b49f35a93c23",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/windows.rs",
+      "sha256": "1d5a98755b0439d38844c8a36a730dfc98c4fb01e626d87202e0900be421ee23",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/calls/tests.rs",
+      "sha256": "69b1aa8544e8805de9cafce874d228934b7ed2a1739bde882639a33982872dc8",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/windows/tests.rs",
+      "sha256": "a6d16d716683e5a277e75197a928e910061915d32dc6f879043a056f3f330d3b",
+      "unchanged": true
+    }
+  ],
+  "old_budget_leaf_prefix": {
+    "bytes": 41961,
+    "sha256": "9eceb6cac8273ee2498fd88aeeaf818ae6e70105a2d1aedc6bcf02d1e3a0aa3e",
+    "unchanged": true
+  },
+  "protected_engine_spans": [
+    {
+      "span": "caller",
+      "sha256": "814ca2de159146262eff4b2c866f2e272ed704ab8121ace4c606034174e1fcda",
+      "unchanged": true
+    },
+    {
+      "span": "connection engine",
+      "sha256": "aeaf784c606727f8afbec0546a8984d4bf1146144317be3226460d10718c2ab0",
+      "unchanged": true
+    },
+    {
+      "span": "remote proc",
+      "sha256": "68caf4e3456686e721aad125efbf00aae6c4583f4ec08d040519ab456120bf5c",
+      "unchanged": true
+    }
+  ],
+  "methods": [
+    "Core::run_before(BoxSpec,Program,Stdio,Instant)->Result<Box<dyn Proc>,Refusal>",
+    "Core::delete_before(&BoxId,Instant)->Result<(),Refusal>"
+  ],
+  "new_exact_tests": [
+    "absolute_operations_reject_expired_before_effects",
+    "absolute_operations_cap_unarmed_answers_without_link_defaults",
+    "absolute_delete_cap_covers_queued_sender",
+    "absolute_caller_limit_keeps_original_instant_and_smaller_bounds",
+    "absolute_run_caps_named_stdio_and_preserves_headers"
+  ],
+  "results": {
+    "scoped_rustfmt": "applied",
+    "git_whitespace": "0",
+    "compiler_invocations": 0,
+    "tests_executed": 0,
+    "native_executions": 0,
+    "gpu_dispatches": 0,
+    "child_processes_started": 0
+  },
+  "hold": "No checks until ROOT joined pin. See README for runtime/cleanup uncertainty and remaining gates.",
+  "producer_pin": "5fb4c1d13c1233a3c1057a5271e00be52a06bfc3",
+  "producer_unchanged_from_pin": true,
+  "fixture_successor": "Named control additionally reads complete Run frame and joins exact request ID to all three headers, before final assertions; producer unchanged."
+}

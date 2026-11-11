@@ -1130,3 +1130,372 @@ fn offered_expiry_releases_only_its_ownership_while_a_sibling_progresses() {
     assert!(matches!(outbound[1].1, Request::Call(Call::Start(_))));
     assert_eq!(outbound[2].1, Request::Release);
 }
+
+fn absolute_spec() -> BoxSpec {
+    BoxSpec {
+        id: BoxId::new("absolute-operation-control").unwrap(),
+        bounds: hex_api::Bounds::default(),
+        class: hex_api::ClassSpec::Process,
+        owner: None,
+        devices: Vec::new(),
+        allocation: None,
+        route: None,
+    }
+}
+
+/// A private, initially Measuring table so these controls never depend on other tests'
+/// process-wide census samples. It retains the existing Stalled I/O/cleanup fixture.
+struct AbsoluteStalled(Stalled);
+impl Transport for AbsoluteStalled {
+    type Reading = ();
+    fn answers() -> &'static [Patience; KINDS] {
+        static WAITS: [Patience; KINDS] =
+            [const { Patience::measuring("test.client_absolute.unarmed") }; KINDS];
+        &WAITS
+    }
+    fn reply_budget(&self) -> Option<Duration> {
+        self.0.reply_budget()
+    }
+    fn reading(&self) {}
+    fn handle(&self) -> Handle<'_> {
+        self.0.handle()
+    }
+    fn recv(&self, reading: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
+        self.0.recv(reading, take)
+    }
+    fn try_send(&self, bytes: &[u8], at: &mut usize, lent: &[Lent<'_>]) -> Result<bool, Sent> {
+        self.0.try_send(bytes, at, lent)
+    }
+    fn shutdown(&self) {
+        self.0.shutdown();
+    }
+}
+
+/// AC-T7.4.1: an expired absolute operation refuses before call/program IDs,
+/// writes, or stream setup; the same client remains usable by its owner.
+#[test]
+fn absolute_operations_reject_expired_before_effects() {
+    let (transport, request) = stalled(None);
+    let client = configured(AbsoluteStalled(transport));
+    let expired = Instant::now();
+    let run = client.run_before(
+        absolute_spec(),
+        Program::of(&["unused"]),
+        Stdio::null(),
+        expired,
+    );
+    let delete = client.delete_before(&BoxId::new("absolute-operation-control").unwrap(), expired);
+    assert!(matches!(run, Err(Refusal::Os { why, .. }) if why.contains("absolute")));
+    assert!(matches!(delete, Err(Refusal::Os { why, .. }) if why.contains("absolute")));
+    assert!(matches!(request.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    let state = client.conn.shared.state().unwrap();
+    assert_eq!(state.next, 0);
+    assert!(state.calls.is_empty() && state.programs.is_empty() && state.given.is_empty());
+    assert!(state.closed.is_none());
+}
+
+/// AC-T7.4.1: run/delete use the actual Core answer path with no configured Link
+/// cap and an unarmed Measuring wait. Caller expiry is not a learned sample.
+#[test]
+fn absolute_operations_cap_unarmed_answers_without_link_defaults() {
+    for run in [true, false] {
+        let (transport, request) = stalled(None);
+        let client = Arc::new(configured(AbsoluteStalled(transport)));
+        let control = Arc::clone(&client);
+        let (finished, answer) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let deadline = Instant::now().checked_add(CAP).unwrap();
+            let result = if run {
+                control
+                    .run_before(
+                        absolute_spec(),
+                        Program::of(&["unused"]),
+                        Stdio::null(),
+                        deadline,
+                    )
+                    .map(drop)
+            } else {
+                control.delete_before(&BoxId::new("absolute-operation-control").unwrap(), deadline)
+            };
+            let _ = finished.send(result);
+        });
+        let observed_send = request.recv_timeout(OBSERVE);
+        let result = answer.recv_timeout(OBSERVE);
+        // Every observation failure still closes this exact connection and joins its actor.
+        client.conn.shared.end(Refusal::Broken(
+            "absolute operation observation cleanup".into(),
+        ));
+        let joined = worker.join();
+        eprintln!(
+            "client_absolute run={run} observed_send={observed_send:?} result={result:?} joined={}",
+            joined.is_ok()
+        );
+        joined.unwrap();
+        observed_send.unwrap();
+        assert!(
+            matches!(result.unwrap(), Err(Refusal::Os { why, .. }) if why.contains("absolute") && !why.contains("twice"))
+        );
+        let state = client.conn.shared.state().unwrap();
+        assert!(state.calls.is_empty() && state.programs.is_empty() && state.given.is_empty());
+    }
+    assert!(
+        AbsoluteStalled::answers()
+            .iter()
+            .all(|wait| wait.deadline().is_none())
+    );
+}
+
+/// AC-T7.4.1: the same caller deadline bounds sender ownership without taking
+/// another sender's guard or positively reporting remote cleanup.
+#[test]
+fn absolute_delete_cap_covers_queued_sender() {
+    let (transport, request) = stalled(None);
+    let client = Arc::new(configured(AbsoluteStalled(transport)));
+    let whole = client.conn.shared.sending.lock(None).unwrap().unwrap();
+    let control = Arc::clone(&client);
+    let (finished, answer) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let deadline = Instant::now().checked_add(CAP).unwrap();
+        let _ = finished.send(
+            control.delete_before(&BoxId::new("absolute-operation-control").unwrap(), deadline),
+        );
+    });
+    let result = answer.recv_timeout(OBSERVE);
+    drop(whole);
+    if result.is_err() {
+        client
+            .conn
+            .shared
+            .end(Refusal::Broken("absolute queued-send cleanup".into()));
+    }
+    let joined = worker.join();
+    joined.unwrap();
+    assert!(matches!(result.unwrap(), Err(Refusal::Os { why, .. }) if why.contains("absolute")));
+    assert!(matches!(request.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    let state = client.conn.shared.state().unwrap();
+    assert!(state.calls.is_empty() && state.programs.is_empty() && state.given.is_empty());
+    assert!(state.closed.is_none());
+    assert!(
+        !client
+            .conn
+            .shared
+            .transport
+            .0
+            .closed
+            .load(Ordering::Acquire)
+    );
+}
+
+/// AC-T7.4.1: supplied instants survive unchanged; an earlier transport/learned
+/// bound may shorten authority, while no later/default bound can enlarge it.
+#[test]
+fn absolute_caller_limit_keeps_original_instant_and_smaller_bounds() {
+    let began = Instant::now();
+    let at = began.checked_add(OBSERVE).unwrap();
+    let absolute = ReplyDeadline::caller_before(at).unwrap();
+    assert_eq!(absolute.at(), at);
+    assert_eq!(absolute.limited_by(None).at(), at);
+    let earlier = began.checked_add(CAP).unwrap();
+    let configured = ReplyDeadline {
+        at: earlier,
+        source: ReplyBound::Caller(CAP),
+    };
+    let limited = absolute.limited_by(Some(configured));
+    assert_eq!(limited.at(), earlier);
+    let later = ReplyDeadline {
+        at,
+        source: ReplyBound::Caller(OBSERVE),
+    };
+    assert_eq!(limited.limited_by(Some(later)).at(), earlier);
+    let tied = absolute.limited_by(Some(later));
+    assert!(matches!(tied.source, ReplyBound::CallerAbsolute));
+    assert_eq!(
+        ReplyDeadline::combine(Some(absolute), began, None)
+            .unwrap()
+            .at(),
+        at
+    );
+    let learned = ReplyDeadline::combine(Some(absolute), began, Some(CAP)).unwrap();
+    assert_eq!(learned.at(), earlier);
+    assert!(matches!(learned.source, ReplyBound::Learned(_)));
+}
+
+struct AbsoluteNamedLink {
+    control: Mutex<Option<TcpStream>>,
+    stdio: Mutex<VecDeque<TcpStream>>,
+    deadlines: Arc<Mutex<Vec<(u32, Option<Instant>)>>>,
+}
+
+impl Link for AbsoluteNamedLink {
+    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+        self.dial_before(port, None)
+    }
+    fn dial_before(
+        &self,
+        port: u32,
+        deadline: Option<Instant>,
+    ) -> Result<Box<dyn Duplex>, Refusal> {
+        self.deadlines.lock().unwrap().push((port, deadline));
+        if deadline.is_some_and(|at| at <= Instant::now()) {
+            return Err(Refusal::os(
+                "absolute fixture dial",
+                io::ErrorKind::TimedOut,
+            ));
+        }
+        let stream = if port == hex_core::stream::CONTROL_PORT {
+            self.control.lock().unwrap().take()
+        } else {
+            self.stdio.lock().unwrap().pop_front()
+        };
+        stream
+            .map(|stream| Box::new(stream) as Box<dyn Duplex>)
+            .ok_or_else(|| Refusal::Broken("owned absolute fixture stream absent".into()))
+    }
+}
+
+fn absolute_pair() -> (TcpStream, TcpStream) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let client = TcpStream::connect_timeout(&listener.local_addr().unwrap(), OBSERVE).unwrap();
+    let peer = accept_before(
+        &listener,
+        &AtomicBool::new(false),
+        &Wake::new().unwrap(),
+        Instant::now().checked_add(OBSERVE).unwrap(),
+    )
+    .unwrap();
+    client.set_nodelay(true).unwrap();
+    peer.set_nodelay(true).unwrap();
+    (client, peer)
+}
+
+/// AC-T7.4.1: actual guest Stream run setup with no Link default writes all three
+/// native named headers under one caller cap. No server answers the Run, so the
+/// same cap must also bound its unarmed control answer and close the asked ends.
+#[test]
+fn absolute_run_caps_named_stdio_and_preserves_headers() {
+    use hex_core::stream::{self, Named};
+    let (control, mut control_peer) = absolute_pair();
+    control_peer.write_all(&11u64.to_le_bytes()).unwrap();
+    let mut named = VecDeque::new();
+    let mut peers = Vec::new();
+    for _ in 0..3 {
+        let (stream, peer) = absolute_pair();
+        named.push_back(stream);
+        peers.push(peer);
+    }
+    let deadlines = Arc::new(Mutex::new(Vec::new()));
+    let link = guest::own_link(AbsoluteNamedLink {
+        control: Mutex::new(Some(control)),
+        stdio: Mutex::new(named),
+        deadlines: Arc::clone(&deadlines),
+    })
+    .unwrap();
+    let transport = guest::Stream::dial(link).unwrap();
+    let client = Arc::new(configured(transport));
+    let control = Arc::clone(&client);
+    let (begun, began) = mpsc::sync_channel(1);
+    let (finished, answer) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let deadline = Instant::now().checked_add(CAP).unwrap();
+        let _ = begun.send(deadline);
+        let result = control
+            .run_before(
+                absolute_spec(),
+                Program::of(&["unused"]),
+                Stdio {
+                    ask: hex_api::Ask {
+                        stdin: true,
+                        stdout: true,
+                        stderr: true,
+                    },
+                    ..Stdio::null()
+                },
+                deadline,
+            )
+            .map(drop);
+        let _ = finished.send(result);
+    });
+    let original = began.recv_timeout(OBSERVE);
+    let result = answer.recv_timeout(OBSERVE);
+    if result.is_err() {
+        client
+            .conn
+            .shared
+            .end(Refusal::Broken("absolute named observation cleanup".into()));
+        let _ = control_peer.shutdown(Shutdown::Both);
+        for peer in &peers {
+            let _ = peer.shutdown(Shutdown::Both);
+        }
+    }
+    let joined = worker.join();
+    // All blocking reads below have a finite observation guard, after the actor joined.
+    let observed = (|| -> io::Result<Vec<Named>> {
+        let mut names = Vec::new();
+        for peer in &mut peers {
+            peer.set_read_timeout(Some(OBSERVE))?;
+            let mut name = [0; stream::NAME_BYTES];
+            peer.read_exact(&mut name)?;
+            names.push(
+                stream::read_name(&name).map_err(|error| io::Error::other(format!("{error:?}")))?,
+            );
+            if peer.read(&mut [0])? != 0 {
+                return Err(io::Error::other("unasked payload"));
+            }
+        }
+        Ok(names)
+    })();
+    let request_seen = control_peer
+        .set_read_timeout(Some(OBSERVE))
+        .and_then(|()| next_request(&mut control_peer));
+    let state_clean = {
+        let state = client.conn.shared.state().unwrap();
+        state.calls.is_empty()
+            && state.programs.is_empty()
+            && state.given.is_empty()
+            && state.closed.is_none()
+    };
+    let recorded = deadlines.lock().unwrap().clone();
+    let _ = control_peer.shutdown(Shutdown::Both);
+    for peer in &peers {
+        let _ = peer.shutdown(Shutdown::Both);
+    }
+    joined.unwrap();
+    let original = original.unwrap();
+    eprintln!(
+        "client_absolute named_deadlines={recorded:?} caller={original:?} result={result:?} observed={observed:?} request={request_seen:?}"
+    );
+    assert!(matches!(result.unwrap(), Err(Refusal::Os { why, .. }) if why.contains("caller")));
+    let names = observed.unwrap();
+    let (request_header, request) = request_seen.unwrap();
+    assert!(matches!(
+        request,
+        Request::Call(Call::Run {
+            streams: Streams {
+                stdin: true,
+                stdout: true,
+                stderr: true
+            },
+            ..
+        })
+    ));
+    assert_eq!(recorded.len(), 4);
+    assert_eq!(recorded[0], (stream::CONTROL_PORT, None));
+    let setup = recorded[1].1.unwrap();
+    assert!(
+        setup <= original
+            && recorded[1..]
+                .iter()
+                .all(|(port, at)| *port == stream::STDIO_PORT && *at == Some(setup))
+    );
+    assert_eq!(names.len(), 3);
+    assert!(
+        names
+            .iter()
+            .all(|name| name.exec.conn == 11 && name.exec.id == request_header.id)
+    );
+    assert_eq!(names[0].stream, stream::Stdio::In);
+    assert_eq!(names[1].stream, stream::Stdio::Out);
+    assert_eq!(names[2].stream, stream::Stdio::Err);
+    assert!(state_clean);
+}

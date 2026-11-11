@@ -131,6 +131,7 @@ pub struct ReplyDeadline {
 #[derive(Clone, Copy, Debug)]
 enum ReplyBound {
     Caller(Duration),
+    CallerAbsolute,
     Learned(Duration),
 }
 
@@ -150,6 +151,22 @@ impl ReplyDeadline {
             at,
             source: ReplyBound::Caller(budget),
         }))
+    }
+
+    fn caller_before(at: Instant) -> Result<Self, Refusal> {
+        let deadline = Self {
+            at,
+            source: ReplyBound::CallerAbsolute,
+        };
+        deadline.remaining("starting a client operation")?;
+        Ok(deadline)
+    }
+
+    fn limited_by(self, configured: Option<Self>) -> Self {
+        match configured {
+            Some(configured) if configured.at < self.at => configured,
+            _ => self,
+        }
     }
 
     /// The same instant may be lent to a connector; partial progress must never replace it.
@@ -186,6 +203,9 @@ impl ReplyDeadline {
         let why = match self.source {
             ReplyBound::Caller(budget) => {
                 format!("the caller's explicit reply budget of {budget:?} expired")
+            }
+            ReplyBound::CallerAbsolute => {
+                "the caller's explicit absolute reply deadline expired".to_owned()
             }
             ReplyBound::Learned(wait) => {
                 format!("none came in {wait:?}, twice the slowest answer to a call of its kind")
@@ -1885,6 +1905,50 @@ impl<T: Transport> Core<T> {
             .call(self.limits.message_bytes, request, with, program)
     }
 
+    fn call_before<'l>(
+        &self,
+        request: &Request,
+        with: impl FnOnce(u64) -> Result<&'l [Lent<'l>], Refusal>,
+        program: Option<Arc<Ending>>,
+        cap: ReplyDeadline,
+    ) -> Result<(u64, Answer), Refusal> {
+        let configured = ReplyDeadline::caller(self.conn.shared.transport.reply_budget())?;
+        self.conn.call_before(
+            self.limits.message_bytes,
+            request,
+            |exec, _| with(exec),
+            program,
+            Some(cap.limited_by(configured)),
+        )
+    }
+
+    /// Run with one original absolute deadline for control send/answer and stream setup.
+    /// A smaller configured or learned bound still wins. The returned program's lifetime and
+    /// caller-owned stdio have no deadline attached; use [`Proc::wait_for`] for completion.
+    /// An expired call does not prove whether the agent started or removed the workload.
+    pub fn run_before(
+        &self,
+        spec: BoxSpec,
+        program: Program,
+        stdio: Stdio,
+        deadline: Instant,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        let cap = ReplyDeadline::caller_before(deadline)?;
+        self.run_with_cap(spec, program, stdio, Some(cap))
+    }
+
+    /// Delete within the caller's original absolute operation deadline on this SAME connection.
+    /// A refusal or timeout leaves cleanup uncertain; it is never physical-absence evidence.
+    pub fn delete_before(&self, id: &BoxId, deadline: Instant) -> Result<(), Refusal> {
+        let cap = ReplyDeadline::caller_before(deadline)?;
+        let request = Request::Call(Call::Delete(id.try_clone()?));
+        match self.call_before(&request, |_| Ok(NONE), None, cap)?.1 {
+            Answer::Done => Ok(()),
+            Answer::Refused(why) => Err(why),
+            other => Err(unexpected("delete", &other)),
+        }
+    }
+
     /// CP-T7.4: scheduler control through this connection's existing bounded reader.
     pub fn schedule(
         &self,
@@ -1928,6 +1992,29 @@ impl<T: Transport> Core<T> {
         program: Program,
         stdio: Stdio,
     ) -> Result<Box<dyn Proc>, Refusal> {
+        self.spawn_before(launch, program, stdio, None)
+    }
+
+    fn run_with_cap(
+        &self,
+        spec: BoxSpec,
+        program: Program,
+        stdio: Stdio,
+        cap: Option<ReplyDeadline>,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        self.spawn_before(Launch::Run(Box::new(spec)), program, stdio, cap)
+    }
+
+    fn spawn_before(
+        &self,
+        launch: Launch,
+        program: Program,
+        stdio: Stdio,
+        caller: Option<ReplyDeadline>,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        if let Some(caller) = caller {
+            caller.remaining("starting a program operation")?;
+        }
         program.fits(&WIRE_EXEC_LIMIT)?;
         stdio.check()?;
         let name = launch.name();
@@ -1949,7 +2036,8 @@ impl<T: Transport> Core<T> {
                 stderr,
                 ..Stdio::null()
             };
-            let cap = ReplyDeadline::caller(shared.transport.reply_budget())?;
+            let configured = ReplyDeadline::caller(shared.transport.reply_budget())?;
+            let cap = caller.map_or(configured, |cap| Some(cap.limited_by(configured)));
             let (exec, answer) = self.conn.call_before(
                 self.limits.message_bytes,
                 &request,
@@ -1975,7 +2063,15 @@ impl<T: Transport> Core<T> {
             let request = Request::Call(launch.call(program, carried, asked));
             let (exec, answer) = {
                 let lent = lend(&stdio);
-                self.call(&request, |_| Ok(&lent[..]), Some(Arc::clone(&ending)))?
+                match caller {
+                    Some(cap) => self.call_before(
+                        &request,
+                        |_| Ok(&lent[..]),
+                        Some(Arc::clone(&ending)),
+                        cap,
+                    )?,
+                    None => self.call(&request, |_| Ok(&lent[..]), Some(Arc::clone(&ending)))?,
+                }
             };
             (exec, answer, stdio)
         };
@@ -2301,7 +2397,7 @@ impl<T: Transport> Runtime for Core<T> {
 
     /// One request, [`Call::Run`], its stdio as an exec's; its program's end comes once the agent has removed the box.
     fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
-        self.spawn(Launch::Run(Box::new(spec)), program, stdio)
+        self.run_with_cap(spec, program, stdio, None)
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
