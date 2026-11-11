@@ -16,6 +16,8 @@ use super::sys::{self, Handle};
 /// failure until its caller chooses the Hex or Shards API representation.
 pub(crate) enum ObserveError {
     Unpublished,
+    DeadlineOverflow,
+    UnexpectedWait(u32),
     Os {
         operation: Operation,
         source: std::io::Error,
@@ -34,6 +36,12 @@ impl ObserveError {
     pub(crate) fn refusal(self) -> Refusal {
         match self {
             Self::Unpublished => super::pending("the native job handle is not published"),
+            Self::DeadlineOverflow => {
+                super::pending("the finite process wait deadline is not representable")
+            }
+            Self::UnexpectedWait(_) => {
+                super::pending("an infinite native process wait returned without a terminal event")
+            }
             Self::Os { operation, source } => Refusal::os(
                 match operation {
                     Operation::Wait => "waiting on a program",
@@ -112,8 +120,16 @@ impl BoxProc {
         // One kernel event wait covers the caller's budget. A spurious early wake consumes only
         // the remaining time; the same receipt caches the one terminal observation.
         let deadline = Instant::now().checked_add(timeout);
+        if timeout != Duration::MAX && deadline.is_none() {
+            return Err(ObserveError::DeadlineOverflow);
+        }
         if self.poll_raw(millis(timeout))?.is_some() {
             return Ok(self.exit);
+        }
+        if timeout == Duration::MAX {
+            return Err(ObserveError::UnexpectedWait(
+                windows_sys::Win32::Foundation::WAIT_TIMEOUT,
+            ));
         }
         loop {
             let left = deadline.map_or(timeout, |d| d.saturating_duration_since(Instant::now()));
@@ -127,9 +143,13 @@ impl BoxProc {
     }
 }
 
-/// Milliseconds of `d` for a Windows wait, capped at `0xFFFF_FFFE` (`u32::MAX` is `INFINITE`, which a
-/// finite timeout must never become).
-fn millis(d: Duration) -> u32 {
+/// Duration::MAX requests an event-only wait (Win32 INFINITE). Every finite caller budget remains
+/// finite, capped below that sentinel. WaitForSingleObject's documented DWORD milliseconds define
+/// both constants; a finite kernel timeout alone is never scope release evidence.
+pub(super) fn millis(d: Duration) -> u32 {
+    if d == Duration::MAX {
+        return u32::MAX;
+    }
     u32::try_from(d.as_millis())
         .unwrap_or(0xFFFF_FFFE)
         .min(0xFFFF_FFFE)

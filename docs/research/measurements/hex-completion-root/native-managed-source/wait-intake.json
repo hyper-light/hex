@@ -1,0 +1,15 @@
+{
+  "source": "9eb0323277f3fd5ccc919f3861929e532106abf1",
+  "parent": "15203af1ca827225d7ec547600c258c494cc5a89",
+  "production_paths": {
+    "crates/hex-runtime/src/windows/managed.rs": {
+      "before": "a9dc8be01272ebe83ca1acefecd03ed32872b820c8870b3a55e74e5ad10e00b5",
+      "after": "2d4095cd5d0807a979f46d39fdb22c221641b23f08a995e38d9148289a1aebf9"
+    },
+    "crates/hex-runtime/src/windows/proc.rs": {
+      "before": "38906cf4d938535274e5dedc8cc76fe7c0397385728b240a6834d1e3233965c2",
+      "after": "823e6083a272df74241337acb12ce4894d4afa648dc6379044590d07d37ba872"
+    }
+  },
+  "scope": "New native managed wait feature completeness and original exact2 controls fixed at152; no new Windows native or whole-cohort check"
+}

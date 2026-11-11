@@ -354,6 +354,20 @@ fn io_cause(
 }
 fn observed(identity: Option<&Identity>, error: ObserveError) -> shards_api::Refusal {
     match error {
+        ObserveError::DeadlineOverflow => {
+            match super::copy_text("the finite native wait deadline is not representable") {
+                Ok(why) => shards_api::Refusal::Bounds {
+                    what: "managed native wait",
+                    why,
+                },
+                Err(_) => shards_api::Refusal::Allocation {
+                    what: "managed wait refusal",
+                },
+            }
+        }
+        ObserveError::UnexpectedWait(returned) => {
+            cause(identity, ProcessFailure::UnexpectedWait { returned })
+        }
         ObserveError::Unpublished => shards_api::Refusal::Launch(shards_api::LaunchError::Observer),
         ObserveError::State(_) => cause(
             identity,
@@ -446,6 +460,12 @@ impl ManagedProcess for JobBox {
         }
         let began = Instant::now();
         let deadline = began.checked_add(patience);
+        if patience != Duration::MAX && deadline.is_none() {
+            return Err(observed(
+                self.managed.get().map(|receipt| &receipt.identity),
+                ObserveError::DeadlineOverflow,
+            ));
+        }
         let receipt = self.managed.get();
         let identity = receipt.map(|receipt| &receipt.identity);
         let exit = match receipt {
@@ -485,13 +505,19 @@ impl ManagedProcess for JobBox {
             if left.is_zero() {
                 return Ok(None);
             }
-            let timeout = u32::try_from(left.as_millis())
-                .unwrap_or(u32::MAX)
-                .min(u32::MAX.saturating_sub(1));
+            let timeout = super::proc::millis(left);
             let ended = sys::wait(&process, timeout)
                 .map_err(|error| io_cause(identity, ProcessOperation::WaitForExit, error))?;
             drop(process);
-            if !ended && patience != Duration::MAX {
+            if !ended {
+                if patience == Duration::MAX {
+                    return Err(cause(
+                        identity,
+                        ProcessFailure::UnexpectedWait {
+                            returned: windows_sys::Win32::Foundation::WAIT_TIMEOUT,
+                        },
+                    ));
+                }
                 return Ok(None);
             }
             // A kernel exit event, not a timer probe, is followed by a fresh same-job membership

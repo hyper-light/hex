@@ -1,0 +1,10 @@
+{
+  "original": "c955a08cd735fa56130e6e160b25ba946a8cc091",
+  "fixed": "15203af1ca827225d7ec547600c258c494cc5a89",
+  "same_test_body_sha256": "00119de889b3ff2f0c921536e3f665559f88e3bca009af8a452a8e9fe7811fe2",
+  "original_result": "0 passed;2 failed;Cargo101;both intended assertions reached",
+  "fixed_result": "2 passed;0 failed/ignored/filtered;Cargo0",
+  "native_backend_invocations": 0,
+  "original_archive": "ca180961f701e62291348f28ace4e6fc01bbce5bd2f55c6bc7a02cdead0ca64a",
+  "fixed_archive": "db91b5b6740c272119f6c171458a2f24843dd98a9213612315e0a12fa6e128e6"
+}
