@@ -45,10 +45,14 @@ result = {
     "memory_input_basis": "explicit disposable input: existing ARM guest minimum64MiB, within admitted4GiB; no production allowance",
     "phases": [], "VM_GPU_invocations": 0,
 }
+result["installed_sdk_headers"] = {}
+for name in ["usr/include/errno.h", "usr/include/spawn.h", "usr/include/pthread/spawn.h", "usr/include/sys/event.h"]:
+    header = Path(sdk) / name
+    result["installed_sdk_headers"][name] = {"resolved": str(header.resolve(strict=True)), "sha256": sha(header), "bytes": header.stat().st_size}
 leaf = source / "macos_setexec_preseal_control.c"
 binary = root / "setexec-control"
 phases = [
-    ("compile", ["nice", "-n", "10", clang, "-std=c17", "-O0", "-Wall", "-Wextra", "-Werror", str(leaf), "-o", str(binary)], 90),
+    ("compile", ["nice", "-n", "10", clang, "-isysroot", sdk, "-std=c17", "-O0", "-Wall", "-Wextra", "-Werror", str(leaf), "-o", str(binary)], 90),
     ("native-four-cuts", ["nice", "-n", "10", str(binary), "--memory-mib", "64"], 60),
 ]
 for name, command, guard in phases:
