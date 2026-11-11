@@ -26,6 +26,7 @@ use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions, WaitIdStatus};
 
 use crate::store::Store;
 
+mod managed_preflight;
 mod run;
 pub use run::{Run, RunProc};
 

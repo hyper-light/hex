@@ -1,0 +1,26 @@
+{
+  "root_parent": "e852c1b5ba9e1e2c8eb122dfb5817cd4dc339748",
+  "runtime_source": "1a393c4581a11a8a44373be22ddb7de47982bfa3",
+  "node_deltas": [
+    "7587bce5f726347289d5b8bd48e0b455d6133d4b",
+    "7e11686b738060a7ff18fbe2e69e8b859195936a",
+    "6d4e60dd73b89935b1252f1fd8d0a55f145321d9"
+  ],
+  "scope": "same pinned cgroup/strict read-only native metadata and one existing Supervisor whole-owner barrier; same managed create/attach only",
+  "source_hashes": {
+    "crates/hex-runtime/src/linux/cgroup.rs": "74ff96e4070d5b8b75dec6213a7f853e0e474b019d3e34f30d6c5d6973812b5f",
+    "crates/hex-node/src/node/backends.rs": "03a0de3e63813f4067dd46fba898bcf1f6a79243e16d0d52a4984d7c082ba307",
+    "crates/hex-node/src/supervise.rs": "089c23c42ccff2c00794874c5f57bbc3a5938780ab5312a95c65c476cb36b406",
+    "crates/hex-node/src/supervise/managed_preflight.rs": "5f6dd56821be29980dd8aa5af44713d2cd938473c1e9523784fde21c4d8b3942"
+  },
+  "review": "ROOT read complete cgroup delta and whole new preflight module; original ordinary APIs remain separate",
+  "checks": "SOURCE ONLY; new private-file/pure controls and matched Linux compile still pending",
+  "native_calls": 0,
+  "remaining": [
+    "R01 inherited core writes/count/error formatting allocation not globally certified",
+    "new helper metadata fixture uses8192 memory while API bounds.check has existing minimum; source-only concern, await actual test before correction",
+    "scope/root absence is not itself whole-scope release/claim refund",
+    "actual native recovery/races/cleanup/mutations/resource/profile/alltarget gates remain owed"
+  ],
+  "policy": "7d7e0855/df2 coordinator"
+}

@@ -1,0 +1,44 @@
+{
+  "parent": "89ec0ff0a6a8e2b8a9ec9110007033a58c01a46b",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "full_read_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "policy_four_blobs_byte_equal": true,
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": {
+    "crates/hex-node/src/node/backends.rs": "5331983fd559381811f45c521640bc9d972b29e4432e0de1dd05e49249823ac3",
+    "crates/hex-node/src/supervise.rs": "8196feb86ab80852a02cde89099e22c4292ef653a4cb46c9674633de6aa787aa",
+    "crates/hex-node/src/supervise/managed_preflight.rs": "5f6dd56821be29980dd8aa5af44713d2cd938473c1e9523784fde21c4d8b3942"
+  },
+  "dependencies": {
+    "strict_native_cgroup_source_pin": "f4394fd1f66b1304aa52ee7b90d70cfbf03bce16",
+    "runtime/linux/cgroup.rs_sha256": "3333365d4cf3428aa8dafcb4d3b3e6b6998619a886a5fd32c1b839c2c9744006",
+    "included_predecessors": [
+      "fa3535bbf5270a7c0d1b9b69b518f63c20ac98f6",
+      "c90a41cdf07fbabfa51cfd73966dd491ea037fbe"
+    ],
+    "shared_preflight": "c89d0143edf513fc8eff17f12094a9e33ce01fd4"
+  },
+  "new_controls_unrun": [
+    "later_unmapped_native_scope_stops_the_readonly_whole_owner_barrier",
+    "retained_native_limits_members_and_leaf_scope_are_required_before_adoption",
+    "controller_exit_and_reused_birth_do_not_authorize_live_helper_cleanup",
+    "prepared_and_duplicate_incarnations_cannot_absorb_native_metadata",
+    "native_stat_command_bytes_do_not_replace_the_exact_birth_and_policy"
+  ],
+  "checks": {
+    "scoped_rustfmt": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "tests": "UNRUN",
+    "native_effects": 0,
+    "jobs_started": 0
+  },
+  "unchanged": "Ordinary process/sys/vfork/Stat::of/cgroup parsers/readers unchanged; only owned Supervisor module registration and initialized Node barrier",
+  "remaining": [
+    "ROOT coherent Linux compile/new5 pure-private-file controls",
+    "native cold/partial/escaped helper/PID-reuse/name/limits race and resource/fault proof",
+    "native create/attach fallible pin successor with L3; inherited ordinary BoxRoot::create not claimed R01-certified",
+    "actual backend/GPU/VM/cost/cleanup/full gates"
+  ]
+}

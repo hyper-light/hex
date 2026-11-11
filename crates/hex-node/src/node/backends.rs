@@ -151,7 +151,7 @@ impl Node {
         program.check()?;
         program.fits(&process::exec_limit())?;
         let scope = managed_native_scope_id(record)?;
-        let cgroup = self.vm_root(record)?.create(&scope, &bounds)?;
+        let cgroup = self.vm_root(record)?.create_managed(&scope, &bounds)?;
         let native = self
             .supervisor
             .reserve_managed(record, cgroup, plan.vsock())?;
@@ -180,7 +180,7 @@ impl Node {
         }
         let scope = managed_native_scope_id(record)?;
         let root = self.vm_root(record)?;
-        let cgroup = match root.get(&scope) {
+        let cgroup = match BoxCgroup::observe_managed(native_path(root.dir(), scope.as_str())?)? {
             Some(cgroup) => cgroup,
             None => BoxCgroup::at(native_path(root.dir(), scope.as_str())?),
         };
@@ -365,6 +365,40 @@ impl Node {
                 Execution::Native => return Err(refused()),
             }
         }
+        let bound = records
+            .len()
+            .checked_add(pools.len())
+            .ok_or(Refusal::Full(MAX_BOXES))?;
+        if bound > MAX_BOXES {
+            return Err(Refusal::Full(MAX_BOXES));
+        }
+        let mut managed = Vec::new();
+        managed
+            .try_reserve_exact(bound)
+            .map_err(|_| Refusal::Full(MAX_BOXES))?;
+        for (id, record) in &records {
+            let record = record.as_ref().map_err(|_| uncertain(id))?;
+            if matches!(
+                record.spec.backend_class()?,
+                Class::Firecracker | Class::Shards
+            ) && record.spec.route_execution() != Some(Execution::ShardsShared)
+            {
+                let native = NativeRecord::Box(record);
+                managed.push((native, Some(Self::managed_bounds(native)?)));
+            }
+        }
+        for record in &pools {
+            let native = NativeRecord::Pool(record);
+            let bounds = if record.allocation.is_some() {
+                Some(Self::managed_bounds(native)?)
+            } else {
+                None
+            };
+            managed.push((native, bounds));
+        }
+        let parent = native_path(self.root.dir(), ".vm")?;
+        self.supervisor
+            .preflight_managed(&native_path(&parent, &self.key)?, &managed)?;
         Ok((records, pools))
     }
 

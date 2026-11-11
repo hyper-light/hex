@@ -1,0 +1,29 @@
+{
+  "parent": "7e11686b738060a7ff18fbe2e69e8b859195936a",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": {
+    "path": "crates/hex-node/src/node/backends.rs",
+    "sha256": "03a0de3e63813f4067dd46fba898bcf1f6a79243e16d0d52a4984d7c082ba307"
+  },
+  "dependency": {
+    "pin": "1a393c4581a11a8a44373be22ddb7de47982bfa3",
+    "runtime/linux/cgroup.rs_sha256": "74ff96e4070d5b8b75dec6213a7f853e0e474b019d3e34f30d6c5d6973812b5f"
+  },
+  "change": "One managed-launch call uses SAME BoxRoot.create_managed, typed native pin/path preallocated before mkdir; ordinary Process/OCI/slot creation unchanged. Existing Creating scope/Store/Turns/Supervisor remains sole owner. Paired cold attach uses observe_managed7e11686b.",
+  "original_vm_io_and_controls_unchanged": true,
+  "checks": {
+    "scoped_rustfmt": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "tests": "UNRUN; L3 distinct original private-file constructor control is source-only, no mirror/replay",
+    "native_effects": 0,
+    "jobs_started": 0
+  },
+  "remaining": [
+    "Inherited core::writes/count fallback/error rendering allocations explicitly remain unverified, not a global R01 completion claim",
+    "ROOT coherent Linux compile, L3 new constructor1 and L1 cold5 controls",
+    "Actual native early-bound launch/scope/descriptor transfer/fault/cleanup/resource and full gates"
+  ]
+}

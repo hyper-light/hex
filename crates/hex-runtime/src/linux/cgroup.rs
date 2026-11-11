@@ -202,6 +202,51 @@ impl BoxRoot {
         self.make(id.as_str(), bounds, || Refusal::Exists(id.clone()))
     }
 
+    /// The managed VM path preallocates its SAME typed directory owner before mkdir. The initial
+    /// private root observation FD is replaced by the new child FD while that owner is still unique.
+    pub fn create_managed(&self, id: &BoxId, bounds: &Bounds) -> Result<BoxCgroup, Refusal> {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let parent = self.dir.as_os_str().as_bytes();
+        let room = parent
+            .len()
+            .checked_add(1)
+            .and_then(|size| size.checked_add(id.as_str().len()))
+            .ok_or(Refusal::Exhausted {
+                what: "managed cgroup path bytes",
+                bound: usize::MAX,
+            })?;
+        let mut path = Vec::new();
+        path.try_reserve_exact(room)
+            .map_err(|_| Refusal::Exhausted {
+                what: "managed cgroup path bytes",
+                bound: room,
+            })?;
+        path.extend_from_slice(parent);
+        if path.last() != Some(&b'/') {
+            path.push(b'/');
+        }
+        path.extend_from_slice(id.as_str().as_bytes());
+        let directory = PathBuf::from(std::ffi::OsString::from_vec(path));
+        let placeholder = self
+            .fd
+            .as_ref()
+            .try_clone()
+            .map_err(|error| managed_read_error("preparing a managed directory pin", error))?;
+        let pin = triomphe::Arc::try_new(placeholder).map_err(|_| Refusal::Exhausted {
+            what: "managed cgroup directory owner",
+            bound: size_of::<OwnedFd>(),
+        })?;
+        self.make_with_pin(
+            id.as_str(),
+            bounds,
+            || match id.try_clone() {
+                Ok(id) => Refusal::Exists(id),
+                Err(error) => error,
+            },
+            Some((directory, pin)),
+        )
+    }
+
     /// Makes slot `n`'s cgroup ([`reuse::name`]) with `bounds` in force: a cgroup that may be handed
     /// from box to box of one owner (goal 5 extended, step 6). Slots are numbered once each, so one that
     /// is there already is a fault, refused as one.
@@ -222,32 +267,86 @@ impl BoxRoot {
         bounds: &Bounds,
         exists: impl FnOnce() -> Refusal,
     ) -> Result<BoxCgroup, Refusal> {
+        self.make_with_pin(name, bounds, exists, None)
+    }
+
+    fn make_with_pin(
+        &self,
+        name: &str,
+        bounds: &Bounds,
+        exists: impl FnOnce() -> Refusal,
+        prepared: Option<(PathBuf, triomphe::Arc<OwnedFd>)>,
+    ) -> Result<BoxCgroup, Refusal> {
         let writes = core::writes(bounds, &self.disks)?;
         if self.count()? >= MAX_BOXES {
             return Err(Refusal::Full(MAX_BOXES));
         }
-        let dir = self.dir.join(name);
+        let (dir, pin) = match prepared {
+            Some((directory, pin)) => {
+                // BTreeSet cannot reserve this existing optimization's next insertion fallibly.
+                // Invalidate it before effects; all later names use the actual directory.
+                *self.named.lock().map_err(|_| {
+                    managed_read_error(
+                        "preparing managed cgroup names",
+                        "the existing name cache lock was poisoned",
+                    )
+                })? = None;
+                (directory, Some(pin))
+            }
+            None => (self.dir.join(name), None),
+        };
         looked_up();
         match rustix::fs::mkdirat(self.fd.as_fd(), name, Mode::from_raw_mode(0o777)) {
             Ok(()) => {}
             Err(rustix::io::Errno::EXIST) => return Err(exists()),
             Err(e) => return Err(os_err("making a box's cgroup", &dir, e)),
         }
-        self.made(name);
-        let cg = match self.child(name) {
-            Some(cg) => cg,
+        let managed = pin.is_some();
+        let cg = match pin {
+            Some(mut pin) => {
+                looked_up();
+                let fd = rustix::fs::openat(
+                    self.fd.as_fd(),
+                    name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|error| managed_read_error("opening the managed cgroup", error))?;
+                let slot = triomphe::Arc::get_mut(&mut pin).ok_or_else(|| {
+                    managed_read_error(
+                        "installing the managed cgroup pin",
+                        "the prepared owner is no longer unique",
+                    )
+                })?;
+                *slot = fd;
+                BoxCgroup {
+                    dir,
+                    fd: Some(DirectoryPin::Managed(pin)),
+                    opened: None,
+                }
+            }
             None => {
-                let _ = fs::remove_dir(&dir);
-                return Err(Refusal::Os {
-                    op: "opening a box's cgroup",
-                    why: format!("{} was made but couldn't be opened", dir.display()),
-                });
+                self.made(name);
+                match self.child(name) {
+                    Some(cg) => cg,
+                    None => {
+                        let _ = fs::remove_dir(&dir);
+                        return Err(Refusal::Os {
+                            op: "opening a box's cgroup",
+                            why: format!("{} was made but couldn't be opened", dir.display()),
+                        });
+                    }
+                }
             }
         };
         for w in writes {
             if let Err(e) = cg.write_bound(&w) {
-                // A box is made whole or not at all; its empty cgroup goes with the refusal.
-                let _ = fs::remove_dir(&cg.dir);
+                // The managed canonical Creating row retains cleanup authority on an incomplete
+                // native setup. Do not remove a possibly replaced pathname after this failure.
+                if !managed {
+                    // A box is made whole or not at all; its empty cgroup goes with the refusal.
+                    let _ = fs::remove_dir(&cg.dir);
+                }
                 return Err(e);
             }
         }
@@ -366,7 +465,7 @@ impl BoxRoot {
         .ok()?;
         Some(BoxCgroup {
             dir: self.dir.join(name),
-            fd: Some(Arc::new(fd)),
+            fd: Some(DirectoryPin::Shared(Arc::new(fd))),
             opened: None,
         })
     }
@@ -411,9 +510,34 @@ impl BoxRoot {
 #[derive(Debug, Clone)]
 pub struct BoxCgroup {
     dir: PathBuf,
-    fd: Option<Arc<OwnedFd>>,
+    fd: Option<DirectoryPin>,
     /// Its files opened ahead ([`BoxCgroup::open_ahead`]), so they're read and written without a lookup.
     opened: Option<Arc<Opened>>,
+}
+
+/// One directory owner in the existing slot. The legacy constructor keeps its original Arc and
+/// Option semantics; managed cold observation allocates its same typed owner fallibly. Changing
+/// the legacy child lookup's allocation failure into None would fabricate cgroup absence.
+#[derive(Debug, Clone)]
+enum DirectoryPin {
+    Shared(Arc<OwnedFd>),
+    Managed(triomphe::Arc<OwnedFd>),
+}
+impl AsFd for DirectoryPin {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        match self {
+            Self::Shared(fd) => fd.as_fd(),
+            Self::Managed(fd) => fd.as_fd(),
+        }
+    }
+}
+impl DirectoryPin {
+    fn try_clone(&self) -> std::io::Result<OwnedFd> {
+        match self {
+            Self::Shared(fd) => fd.as_ref().try_clone(),
+            Self::Managed(fd) => fd.as_ref().try_clone(),
+        }
+    }
 }
 
 /// A cgroup's files opened ahead, by name: each the descriptor and whether it was opened for writing, or `None` where
@@ -434,6 +558,30 @@ impl BoxCgroup {
             fd: None,
             opened: None,
         }
+    }
+
+    /// Read-only cold observation; never creates a root, changes controllers or adopts a process.
+    /// NOENT alone reports a missing path. Neither that result nor the pin is scope-release proof.
+    pub fn observe_managed(dir: PathBuf) -> Result<Option<Self>, Refusal> {
+        looked_up();
+        let fd = match rustix::fs::open(
+            &dir,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(error) => return Err(managed_read_error("observing a native cgroup", error)),
+        };
+        let pin = triomphe::Arc::try_new(fd).map_err(|_| Refusal::Exhausted {
+            what: "native cgroup directory owner",
+            bound: size_of::<OwnedFd>(),
+        })?;
+        Ok(Some(Self {
+            dir,
+            fd: Some(DirectoryPin::Managed(pin)),
+            opened: None,
+        }))
     }
 
     /// This cgroup with `files` opened now, each for reading and writing where the kernel lets it, else for reading:
@@ -562,6 +710,47 @@ impl BoxCgroup {
             .filter_map(|l| l.trim().parse().ok())
             .take(MAX_SIGNALLED)
             .collect())
+    }
+
+    /// Strict population observation from the SAME native directory pin. A missing, unreadable or
+    /// unparseable required counter refuses; false is a counter fact, never whole-scope release.
+    pub fn managed_populated(&self) -> Result<bool, Refusal> {
+        core::populated(&self.managed_read("cgroup.events", MAX_CGROUP_FILE)?).ok_or_else(|| {
+            managed_read_error("cgroup.events", "missing or malformed populated counter")
+        })
+    }
+
+    /// A complete, unambiguous membership observation from the SAME pinned native cgroup. Kernel
+    /// cgroup.procs may repeat a PID during migration/reuse; that observation is refused, not
+    /// silently deduplicated into ownership proof (cgroup-v2.rst, Organizing Processes).
+    pub fn managed_procs(&self) -> Result<Vec<u32>, Refusal> {
+        parse_managed_procs(
+            &self.managed_read("cgroup.procs", MAX_PROCS_FILE)?,
+            MAX_SIGNALLED,
+        )
+    }
+
+    /// Read-only verification of native cgroup limit values against their canonical allocation.
+    /// This observes limits, never rewrites them or treats a missing controller as an unlimited one.
+    pub fn check_managed_bounds(&self, bounds: &Bounds) -> Result<(), Refusal> {
+        bounds.check()?;
+        check_managed_limits(
+            bounds,
+            &self.managed_read("cpu.max", MAX_CGROUP_FILE)?,
+            &self.managed_read("memory.max", MAX_CGROUP_FILE)?,
+            &self.managed_read("memory.swap.max", MAX_CGROUP_FILE)?,
+        )?;
+        if let Some(expected) = bounds.pids_max {
+            let actual =
+                managed_limit("pids.max", &self.managed_read("pids.max", MAX_CGROUP_FILE)?)?;
+            if actual == 0 || actual > u64::from(expected) {
+                return Err(managed_read_error(
+                    "pids.max",
+                    "the native limit exceeds its canonical bound",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Whether any process runs in the box.
@@ -858,44 +1047,7 @@ impl BoxCgroup {
     /// Measured native backing usage, never a failed read represented as free host capacity. Only
     /// a directory already pinned by the native owner can supply it; a reused path is not authority.
     pub fn managed_usage(&self) -> Result<Usage, Refusal> {
-        if self.fd.is_none() {
-            return Err(managed_read_error(
-                "native backing usage",
-                "the native owner has no pinned cgroup directory",
-            ));
-        }
-        let read = |file: &'static str| {
-            let mut storage = Vec::new();
-            // The shared reader tests the bound after one chunk; reserve that possible last chunk
-            // too, so none of its appends can allocate on this path (ordinary reads are unchanged).
-            let bound = MAX_CGROUP_FILE
-                .checked_add(READ_CHUNK)
-                .ok_or(Refusal::Exhausted {
-                    what: "managed cgroup file bytes",
-                    bound: MAX_CGROUP_FILE,
-                })?;
-            storage
-                .try_reserve_exact(bound)
-                .map_err(|_| Refusal::Exhausted {
-                    what: "managed cgroup file bytes",
-                    bound,
-                })?;
-            let fd = self
-                .open_file(file, OFlags::RDONLY)
-                .map_err(|error| managed_read_error(file, error))?;
-            read_text(
-                MAX_CGROUP_FILE,
-                |buf, at| rustix::io::pread(fd.as_fd(), buf, at),
-                storage,
-            )
-            .map_err(|error| match error {
-                ReadFailure::Io(error) => managed_read_error(file, error),
-                ReadFailure::OverLimit(_) => {
-                    managed_read_error(file, "required counter file exceeds its read bound")
-                }
-                ReadFailure::Encoding(error) => managed_read_error(file, error),
-            })
-        };
+        let read = |file: &'static str| self.managed_read(file, MAX_CGROUP_FILE);
         core::managed_usage(&UsageFiles {
             memory_current: read("memory.current")?,
             memory_peak: read("memory.peak")?,
@@ -906,6 +1058,152 @@ impl BoxCgroup {
             io_stat: read("io.stat")?,
         })
     }
+
+    /// Shares the existing reader and its pre-reserved append bound with strict managed callers.
+    fn managed_read(&self, file: &'static str, maximum: usize) -> Result<String, Refusal> {
+        if self.fd.is_none() {
+            return Err(managed_read_error(
+                file,
+                "the native owner has no pinned cgroup directory",
+            ));
+        }
+        let mut storage = Vec::new();
+        // The shared reader tests its bound after one chunk; reserve that last chunk too. This
+        // keeps every append within the fallibly reserved storage without changing ordinary reads.
+        let bound = maximum.checked_add(READ_CHUNK).ok_or(Refusal::Exhausted {
+            what: "managed cgroup file bytes",
+            bound: maximum,
+        })?;
+        storage
+            .try_reserve_exact(bound)
+            .map_err(|_| Refusal::Exhausted {
+                what: "managed cgroup file bytes",
+                bound,
+            })?;
+        let fd = self
+            .open_file(file, OFlags::RDONLY)
+            .map_err(|error| managed_read_error(file, error))?;
+        read_text(
+            maximum,
+            |buf, at| rustix::io::pread(fd.as_fd(), buf, at),
+            storage,
+        )
+        .map_err(|error| match error {
+            ReadFailure::Io(error) => managed_read_error(file, error),
+            ReadFailure::OverLimit(_) => {
+                managed_read_error(file, "required native file exceeds its read bound")
+            }
+            ReadFailure::Encoding(error) => managed_read_error(file, error),
+        })
+    }
+}
+
+fn parse_managed_procs(text: &str, bound: usize) -> Result<Vec<u32>, Refusal> {
+    if !text.is_empty() && !text.ends_with('\n') {
+        return Err(managed_read_error(
+            "cgroup.procs",
+            "an unterminated native PID row is not a complete observation",
+        ));
+    }
+    let count = text.lines().count();
+    if count > bound {
+        return Err(Refusal::Exhausted {
+            what: "native cgroup membership",
+            bound,
+        });
+    }
+    let mut pids = Vec::new();
+    pids.try_reserve_exact(count)
+        .map_err(|_| Refusal::Exhausted {
+            what: "native cgroup membership",
+            bound: count,
+        })?;
+    for row in text.lines() {
+        if row.is_empty() || !row.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(managed_read_error(
+                "cgroup.procs",
+                "a native PID row is not positive decimal",
+            ));
+        }
+        let pid = row
+            .parse::<u32>()
+            .map_err(|error| managed_read_error("cgroup.procs", error))?;
+        let native =
+            usize::try_from(pid).map_err(|error| managed_read_error("cgroup.procs", error))?;
+        if native == 0 || native >= PID_MAX_LIMIT {
+            return Err(managed_read_error(
+                "cgroup.procs",
+                "a native PID is outside the kernel representation",
+            ));
+        }
+        pids.push(pid);
+    }
+    pids.sort_unstable();
+    if pids.windows(2).any(|pair| matches!(pair, [a,b] if a==b)) {
+        return Err(managed_read_error(
+            "cgroup.procs",
+            "a repeated native PID makes the observation ambiguous",
+        ));
+    }
+    Ok(pids)
+}
+
+fn managed_limit(file: &'static str, text: &str) -> Result<u64, Refusal> {
+    let word = text.trim();
+    if word.is_empty() || !word.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(managed_read_error(
+            file,
+            "the native bound is not a finite decimal value",
+        ));
+    }
+    word.parse()
+        .map_err(|error| managed_read_error(file, error))
+}
+
+fn check_managed_limits(
+    bounds: &Bounds,
+    cpu: &str,
+    memory: &str,
+    swap: &str,
+) -> Result<(), Refusal> {
+    let (Some(cpu_milli), Some(memory_max)) = (bounds.cpu_max_milli, bounds.memory_max) else {
+        return Err(managed_read_error(
+            "native backing bounds",
+            "canonical CPU and memory limits are required",
+        ));
+    };
+    let cpu = core::CpuMax::parse(cpu)
+        .ok_or_else(|| managed_read_error("cpu.max", "malformed native CPU bandwidth"))?;
+    let quota = cpu.quota_us.filter(|quota| *quota != 0).ok_or_else(|| {
+        managed_read_error("cpu.max", "a positive finite native CPU quota is required")
+    })?;
+    // cpu.max uses quota/period CPUs; the canonical allocation uses thousandths of a CPU.
+    let actual = u128::from(quota)
+        .checked_mul(1000)
+        .ok_or_else(|| managed_read_error("cpu.max", "native CPU ratio overflows"))?;
+    let admitted = u128::from(cpu_milli)
+        .checked_mul(u128::from(cpu.period_us))
+        .ok_or_else(|| managed_read_error("cpu.max", "canonical CPU ratio overflows"))?;
+    if cpu.period_us == 0 || actual > admitted {
+        return Err(managed_read_error(
+            "cpu.max",
+            "the native CPU limit exceeds its canonical bound",
+        ));
+    }
+    let memory = managed_limit("memory.max", memory)?;
+    if memory == 0 || memory > memory_max {
+        return Err(managed_read_error(
+            "memory.max",
+            "the native memory limit exceeds its canonical bound",
+        ));
+    }
+    if managed_limit("memory.swap.max", swap)? != 0 {
+        return Err(managed_read_error(
+            "memory.swap.max",
+            "the native VM scope permits memory outside its charged RAM bound",
+        ));
+    }
+    Ok(())
 }
 
 fn managed_read_error(file: &'static str, error: impl std::fmt::Display) -> Refusal {
@@ -1283,18 +1581,300 @@ mod tests {
     }
 
     fn pinned_managed_cgroup(dir: &Path) -> BoxCgroup {
-        BoxCgroup {
-            dir: dir.to_path_buf(),
-            fd: Some(Arc::new(
+        BoxCgroup::observe_managed(dir.to_path_buf())
+            .unwrap()
+            .unwrap()
+    }
+
+    /// AC-T7.1.2/R01: a managed create uses the original creation/bounds path and one fallibly
+    /// prepared typed pin; cache insertion, collisions and a reused path cannot change its owner.
+    #[test]
+    fn managed_creation_uses_one_prepared_pin_and_refuses_colliding_names() {
+        let tmp = TempDir::new("managed-create-pin").unwrap();
+        let root = BoxRoot {
+            dir: tmp.path().to_path_buf(),
+            fd: Arc::new(
                 rustix::fs::open(
-                    dir,
-                    OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+                    tmp.path(),
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
                     Mode::empty(),
                 )
                 .unwrap(),
-            )),
-            opened: None,
+            ),
+            disks: Vec::new(),
+            named: Arc::new(Mutex::new(Some(BTreeSet::new()))),
+        };
+        let id = BoxId::new("owned-managed").unwrap();
+        let cg = root.create_managed(&id, &Bounds::default()).unwrap();
+        assert!(root.named.lock().unwrap().is_none());
+        let copy = cg.clone();
+        match (&cg.fd, &copy.fd) {
+            (Some(DirectoryPin::Managed(a)), Some(DirectoryPin::Managed(b))) => {
+                assert!(triomphe::Arc::ptr_eq(a, b))
+            }
+            _ => panic!("managed creation used an ordinary or absent directory owner"),
         }
+        let path = tmp.path().join(id.as_str());
+        fs::write(path.join("cgroup.events"), "populated 1\n").unwrap();
+        let before = fs::read(path.join("cgroup.events")).unwrap();
+        assert!(
+            matches!(root.create_managed(&id, &Bounds::default()), Err(Refusal::Exists(actual)) if actual==id)
+        );
+        assert_eq!(fs::read(path.join("cgroup.events")).unwrap(), before);
+        fs::rename(&path, tmp.path().join("retained")).unwrap();
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("cgroup.events"), "populated 0\n").unwrap();
+        assert!(cg.managed_populated().unwrap());
+        assert!(
+            !BoxCgroup::observe_managed(path)
+                .unwrap()
+                .unwrap()
+                .managed_populated()
+                .unwrap()
+        );
+        let bad = BoxId::new("invalid-bounds").unwrap();
+        assert!(
+            root.create_managed(
+                &bad,
+                &Bounds {
+                    cpu_max_milli: Some(0),
+                    ..Bounds::default()
+                }
+            )
+            .is_err()
+        );
+        assert!(!tmp.path().join(bad.as_str()).exists());
+        // A fresh colliding symlink is never followed or removed by the managed create path.
+        let link = BoxId::new("collision-link").unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("retained"), tmp.path().join(link.as_str()))
+            .unwrap();
+        assert!(root.create_managed(&link, &Bounds::default()).is_err());
+        assert!(
+            fs::symlink_metadata(tmp.path().join(link.as_str()))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    /// AC-T7.1.2: required population facts use the pinned directory; unreadable, absent,
+    /// over-bound or malformed bytes cannot credit an empty native scope after path replacement.
+    #[test]
+    fn managed_population_refuses_required_failures_and_never_follows_path_reuse() {
+        let tmp = TempDir::new("managed-population").unwrap();
+        let dir = tmp.path().join("scope");
+        fs::create_dir(&dir).unwrap();
+        let cg = pinned_managed_cgroup(&dir);
+        assert!(cg.managed_populated().is_err());
+        for invalid in [
+            b"".as_slice(),
+            b"frozen 0\n",
+            b"populated unknown\n",
+            b"populated \xff\n",
+        ] {
+            fs::write(dir.join("cgroup.events"), invalid).unwrap();
+            assert!(cg.managed_populated().is_err());
+            assert_eq!(fs::read(dir.join("cgroup.events")).unwrap(), invalid);
+        }
+        fs::remove_file(dir.join("cgroup.events")).unwrap();
+        fs::create_dir(dir.join("cgroup.events")).unwrap();
+        assert!(cg.managed_populated().is_err());
+        fs::remove_dir(dir.join("cgroup.events")).unwrap();
+        fs::write(dir.join("cgroup.events"), vec![b'0'; MAX_CGROUP_FILE + 1]).unwrap();
+        assert!(cg.managed_populated().is_err());
+        fs::write(dir.join("cgroup.events"), "populated 0\nfrozen 0\n").unwrap();
+        assert!(!cg.managed_populated().unwrap());
+        fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+        assert!(cg.managed_populated().unwrap());
+        let retained = tmp.path().join("retained");
+        fs::rename(&dir, &retained).unwrap();
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("cgroup.events"), "populated 0\n").unwrap();
+        assert!(cg.managed_populated().unwrap());
+        assert!(BoxCgroup::at(dir.clone()).managed_populated().is_err());
+        assert!(!pinned_managed_cgroup(&dir).managed_populated().unwrap());
+    }
+
+    /// AC-T7.1.2/R01: cold observation creates no directory, refuses a final symlink/non-directory,
+    /// and a clone keeps the same fallibly allocated pin after its old path is reused.
+    #[test]
+    fn managed_observation_is_read_only_and_keeps_one_same_directory_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing");
+        assert!(
+            BoxCgroup::observe_managed(missing.clone())
+                .unwrap()
+                .is_none()
+        );
+        assert!(!missing.exists());
+        let file = tmp.path().join("not-a-directory");
+        fs::write(&file, b"preserved").unwrap();
+        assert!(BoxCgroup::observe_managed(file.clone()).is_err());
+        assert_eq!(fs::read(&file).unwrap(), b"preserved");
+        let dir = tmp.path().join("owned");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("cgroup.procs"), "11\n").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        assert!(BoxCgroup::observe_managed(link).is_err());
+        let first = BoxCgroup::observe_managed(dir.clone()).unwrap().unwrap();
+        let cloned = first.clone();
+        match (first.fd.as_ref(), cloned.fd.as_ref()) {
+            (Some(DirectoryPin::Managed(a)), Some(DirectoryPin::Managed(b))) => {
+                assert!(triomphe::Arc::ptr_eq(a, b))
+            }
+            _ => panic!("managed cold observation must own one fallible native pin"),
+        }
+        fs::rename(&dir, tmp.path().join("original")).unwrap();
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("cgroup.procs"), "99\n").unwrap();
+        drop(first);
+        assert_eq!(cloned.managed_procs().unwrap(), [11]);
+        assert_eq!(
+            BoxCgroup::observe_managed(dir)
+                .unwrap()
+                .unwrap()
+                .managed_procs()
+                .unwrap(),
+            [99]
+        );
+    }
+
+    /// AC-T7.1.2: every row participates in one complete membership observation. An ambiguous
+    /// duplicate (which a changing kernel listing permits) supplies no lifetime/absence proof.
+    #[test]
+    fn managed_membership_refuses_ambiguous_incomplete_or_over_bound_rows() {
+        assert_eq!(parse_managed_procs("", 2).unwrap(), Vec::<u32>::new());
+        assert_eq!(parse_managed_procs("11\n5\n", 2).unwrap(), [5, 11]);
+        for text in [
+            "0\n",
+            "-1\n",
+            "+1\n",
+            "0x1\n",
+            "1 \n",
+            "\n",
+            "5\n5\n",
+            "1\n01\n",
+            "5",
+            "4294967296\n",
+            "4194304\n",
+            "1\n2\n3\n",
+        ] {
+            assert!(parse_managed_procs(text, 2).is_err(), "accepted {text:?}");
+        }
+    }
+
+    /// AC-T7.1.2: equivalent native CPU periods are compared as exact ratios; unlimited,
+    /// malformed, missing or enlarged native limits cannot pass as the admitted hard envelope.
+    #[test]
+    fn managed_limits_compare_actual_ratios_and_retain_canonical_caps() {
+        let bounds = Bounds {
+            cpu_max_milli: Some(1000),
+            memory_max: Some(8192),
+            ..Bounds::default()
+        };
+        for cpu in [
+            "100000 100000\n",
+            "70000 70000\n",
+            "40000 100000\n",
+            "18446744073709551615 18446744073709551615\n",
+        ] {
+            check_managed_limits(&bounds, cpu, "4096\n", "0\n").unwrap();
+        }
+        for (cpu, memory, swap) in [
+            ("100001 100000\n", "4096\n", "0\n"),
+            ("max 100000\n", "4096\n", "0\n"),
+            ("0 100000\n", "4096\n", "0\n"),
+            ("1 0\n", "4096\n", "0\n"),
+            ("100000 100000 extra\n", "4096\n", "0\n"),
+            ("100000 100000\n", "max\n", "0\n"),
+            ("100000 100000\n", "8193\n", "0\n"),
+            ("100000 100000\n", "0\n", "0\n"),
+            ("100000 100000\n", "4096\n", "1\n"),
+            ("100000 100000\n", "4096\n", "max\n"),
+        ] {
+            assert!(check_managed_limits(&bounds, cpu, memory, swap).is_err());
+        }
+        assert!(
+            check_managed_limits(&Bounds::default(), "100000 100000\n", "4096\n", "0\n").is_err()
+        );
+        assert_eq!(bounds.cpu_max_milli, Some(1000));
+        assert_eq!(bounds.memory_max, Some(8192));
+    }
+
+    /// AC-T7.1.2/HEX-RT-15: strict metadata reads the actual pinned directory, never a replacement
+    /// name, and required read/encoding/parse failures remain refusals with ordinary procs intact.
+    #[test]
+    fn managed_metadata_keeps_pinned_identity_and_required_read_failures() {
+        fn files(dir: &Path) {
+            for (file, text) in [
+                ("cgroup.procs", "11\n5\n"),
+                ("cpu.max", "100000 100000\n"),
+                ("memory.max", "8192\n"),
+                ("memory.swap.max", "0\n"),
+                ("pids.max", "4\n"),
+            ] {
+                fs::write(dir.join(file), text).unwrap();
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("managed");
+        fs::create_dir(&dir).unwrap();
+        files(&dir);
+        let bounds = Bounds {
+            cpu_max_milli: Some(1000),
+            memory_max: Some(8192),
+            pids_max: Some(4),
+            ..Bounds::default()
+        };
+        let cg = pinned_managed_cgroup(&dir);
+        assert_eq!(cg.managed_procs().unwrap(), [5, 11]);
+        cg.check_managed_bounds(&bounds).unwrap();
+        let old = tmp.path().join("original");
+        fs::rename(&dir, &old).unwrap();
+        fs::create_dir(&dir).unwrap();
+        files(&dir);
+        fs::write(dir.join("cgroup.procs"), "99\n").unwrap();
+        assert_eq!(cg.managed_procs().unwrap(), [5, 11]);
+        assert!(BoxCgroup::at(dir).managed_procs().is_err());
+        for file in [
+            "cgroup.procs",
+            "cpu.max",
+            "memory.max",
+            "memory.swap.max",
+            "pids.max",
+        ] {
+            for damage in 0..4 {
+                files(&old);
+                let path = old.join(file);
+                fs::remove_file(&path).unwrap();
+                match damage {
+                    0 => {}
+                    1 => fs::create_dir(&path).unwrap(),
+                    2 => fs::write(&path, [0xff]).unwrap(),
+                    _ => fs::write(&path, "malformed\n").unwrap(),
+                }
+                if file == "cgroup.procs" {
+                    assert!(cg.managed_procs().is_err());
+                } else {
+                    assert!(cg.check_managed_bounds(&bounds).is_err());
+                }
+                if damage == 1 {
+                    fs::remove_dir(&path).unwrap();
+                }
+            }
+        }
+        files(&old);
+        fs::write(old.join("cgroup.procs"), "11\ninvalid\n5\n").unwrap();
+        assert_eq!(
+            cg.procs().unwrap(),
+            [11, 5],
+            "legacy filtering behavior is unchanged"
+        );
+        assert!(cg.managed_procs().is_err());
+        files(&old);
+        fs::write(old.join("pids.max"), "5\n").unwrap();
+        assert!(cg.check_managed_bounds(&bounds).is_err());
     }
 
     /// AC-T7.1.2/HEX-RT-15: native backing observation uses the pinned cgroup, never an unrelated
@@ -1428,7 +2008,7 @@ mod tests {
         .unwrap();
         let old = BoxCgroup {
             dir: dir.clone(),
-            fd: Some(Arc::new(fd)),
+            fd: Some(DirectoryPin::Shared(Arc::new(fd))),
             opened: None,
         };
         assert_eq!(old.populated_if_present(), Ok(Some(false)));

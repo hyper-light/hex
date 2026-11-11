@@ -1,0 +1,15 @@
+{
+  "status": "SOURCE ONLY / new managed typed-pin requirement, not a reproduced legacy native defect",
+  "base": "0c749eb8db63ced1636ec758948250d5884ad795",
+  "path": "crates/hex-runtime/src/linux/cgroup.rs",
+  "signature": "BoxRoot::create_managed(&self,id:&BoxId,bounds:&Bounds)->Result<BoxCgroup,Refusal>",
+  "contract": "Same existing creation/mkdir/limit loop. Fallible bounded path and typed triomphe::Arc<OwnedFd> allocated BEFORE mkdir using one private duplicate of this already initialized root descriptor; while still unique get_mut replaces that temporary FD with the actual new child FD, no post-effect owner allocation/wrapper/custom refcount. Child open is relative to SAME root and NOFOLLOW; collisions refuse, never adopt.",
+  "cache": "Invalidate SAME optional names optimization before effects; no BTreeSet insert or new cache. Mutex dropped before mkdir/open/write. Existing ordinary create/create_slot still use original Shared pin and cache logic, through the common helper. No performance claim.",
+  "failure": "New managed open/bound failure preserves canonical Creating uncertainty and any created native directory rather than removing a possibly replaced name. L1 must retain exact native scope/Store row and perform guarded recovery; this helper never releases claims by absence.",
+  "inherited_R01_gaps": "core::writes formatting/vector allocations, ordinary count fallback and preexisting error rendering remain inherited nonfallible allocations; not called allocation-safe production completion. New pin/path owner and managed name-cache path are fallible. No core bounds/parser changes outside L3 grant.",
+  "new_control": "managed_creation_uses_one_prepared_pin_and_refuses_colliding_names: private filesystem only, default bounds; same Arc pin after clone, cache invalidation, collision bytes unchanged, path reuse does not retarget, invalid bounds no child, symlink collision retained. UNRUN/no cgroup mount/controller/process work.",
+  "checks": "Scoped rustfmt parser0 only. ROOT matched Linux light/new1 and real native bounds/scope/fault/resource proof remain; no L3 check/native dispatch.",
+  "primary": "Existing LINUX-MANAGED-METADATA.md Linux v6.19 pin and pread/openat directory pin contract; existing c90 fallible typed native directory ownership and f439 strict events.",
+  "dependencies": "L1 Supervisor must call create_managed for managed launch and observe_managed for managed attach; ordinary process/OCI/slots stay original. Existing runtime triomphe dependency already ROOT-owned.",
+  "policy": "7d7e0855/rulesdf2 implementer; L1+ROOT notified lifetime/constructor seam lifecycle-v258/259, no new manager/ledger"
+}
