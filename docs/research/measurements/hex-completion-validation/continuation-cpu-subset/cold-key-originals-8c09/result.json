@@ -1,0 +1,83 @@
+{
+  "source": "8c0997ecf0939f9a3f58896af5b404bd4f519e19",
+  "archive_sha256": "e7a01d365e679b00ea9de40b13562558491862239519c00f38690f07196a1028",
+  "scope": "ROOT exactly two original GPU Intent/alias controls after narrow remedies, then current all-target strict lint; no replay of prior Driver3 or oldpasses, no VM/GPU/native backend effects",
+  "target": "linux",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 3047781,
+  "phases": [
+    {
+      "name": "cold_pending_gpu_source_keeps_exact_charged_provisioning_and_unrelated_shared_cpu",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "scheduler::capacity::initialized::tests::cold_pending_gpu_source_keeps_exact_charged_provisioning_and_unrelated_shared_cpu",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 3050817,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "93b1ccc2bc4d5859ed27ca7dadbe8fa3b1e21e3197f7b4eefd5acee482575143",
+      "bytes": 4756,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "live_uncertain_gpu_key_does_not_suppress_unrelated_shared_cpu_or_release_claims",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "scheduler::capacity::initialized::tests::live_uncertain_gpu_key_does_not_suppress_unrelated_shared_cpu_or_release_claims",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 3170756,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "6d267aadd8b5235c6f5b14cab91fff19449f1532e9755395facec8df935bb0af",
+      "bytes": 2181,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_invocations": 0,
+  "exit": 1
+}

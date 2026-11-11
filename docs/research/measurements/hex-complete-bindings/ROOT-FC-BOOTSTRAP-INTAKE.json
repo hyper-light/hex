@@ -1,0 +1,20 @@
+{
+  "parent": "dd4f01ccf33b6e58180576e041c59ddbd6b0120f",
+  "source_pins": [
+    "e5b524e3b06bc37d8129795500d0045a6b5de170",
+    "05cf4c7058fa5620f5c344ee55b6df15e8a08cba",
+    "a86c7bad427f6ba576d95b975275c09e0bfe0ed6",
+    "3c3d33021d61759a1f34f033384ed030c0714351",
+    "76fd3e832e779b089de4921135a11eb8c0c4049d",
+    "e20f5306e7abcc35c05c776157d9b559c6dc9956"
+  ],
+  "root_ports": "Runtime-only e5 intake: preserve ROOT typed physical_observations_before result propagation, sink fix, managed cgroup pins, CLI/wire ports,17e calls and948 Duplex owner. e5 Node grant/released producer atomic apply check refused without edits; owner is porting that full missing segment from fixed ROOT dd4.",
+  "sha256": {
+    "crates/hex-runtime/src/firecracker/native.rs": "46b3f0febe11663f98b71b7fdfb8ebc00c56bf8077254b12709ae4606465919f",
+    "crates/hex-runtime/src/firecracker/observations.rs": "e6821cc812b74646236929e3316f6ae67c7df43535406e9677b3404d9c991bbb",
+    "crates/hex-runtime/src/firecracker/pool.rs": "0f13974192ed503206face46f679394f4334834e62cfc5b911fd27c751f0ca42",
+    "crates/hex-runtime/src/firecracker/transport.rs": "ba2c9d915074c731bf09db86cede7e58e362c4738e23831ec364115d8d2e9d15",
+    "crates/hex-runtime/src/firecracker/vfio.rs": "7b95cbbfb18d20767e11a418132ba3e0bbe33615fa327c1ba16ed9dade3c24ff"
+  },
+  "checks": "Source reviewed and scoped diff check; new Runtime observation binding and VFIO identity controls unrun. No GPU/VM/backend execution proved by this intake."
+}

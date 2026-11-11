@@ -1,0 +1,11 @@
+{
+  "source": "d849acf8828e838f8fcd279ad2be4c8e7452851e",
+  "patch_source": "docs/research/measurements/hex-complete-lifecycle/macos-watcher-borrow-root-a39.patch",
+  "patch_sha256": "cbf69dc4df6d78736c07654b6a3ac69e90704c1afc78130d1707c84e8663dfab",
+  "base": "a39b9dd5c6cee5f5949291f0c82f25946892b64e",
+  "path": "crates/hex-runtime/src/macos/process.rs",
+  "before": "bc1efd17fb29665aa074c08e278dcd08c3b0faebf24f9243bf93ba8d38e2e77c",
+  "after": "61a1c3aad7c546c69ff4ec4657ad865233f9c48036e0c120859edc76b4d22723",
+  "cause": "Actual a39 production E0502: borrow native vm receipt across mutable finish. Snapshot same typed TriArc; no new allocation; validation/finish/failure order unchanged.",
+  "compile_after": "UNRUN"
+}

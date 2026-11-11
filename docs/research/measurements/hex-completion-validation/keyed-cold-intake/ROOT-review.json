@@ -1,0 +1,15 @@
+{
+  "role": "coordinator",
+  "base": "e070f992ce332329c05dbd2ae78ee82f93aa03da",
+  "pins": [
+    "d3b9c9e5cf38f10bd3d89575f7b943e1b14676cf",
+    "df878b321441e1ca96eefcd46bef87cd82445986"
+  ],
+  "review": "Full five-file mechanism and prefix-only fixture diff reviewed. Exact current key+phase Pending preserves charge-beforeboot without fake observation; retained historical offers do not gain permission. Released refund remains positive canonical authority. Two sibling prefixes now assert real full-P gpus0/NoRoom, terminal strictNoGpu unchanged.",
+  "after_status": "UNRUN",
+  "remaining": [
+    "Meaningful mutation/native effects",
+    "Qualified historical route and lazy remainders",
+    "Full target/audit/profile/gates"
+  ]
+}

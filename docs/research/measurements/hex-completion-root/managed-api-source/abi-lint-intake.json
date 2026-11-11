@@ -1,0 +1,16 @@
+{
+  "source": "9e6243da87d7ec18fb2e0591b4767f1b7b0a5d9a",
+  "parent": "eee80c129e44d35e957377c60629af088f4b2da3",
+  "root_before": "c0f9e646223e8d124dc912a13bf2c86c4dbbec64",
+  "path": "vendor/shards/crates/abi/src/gpu/probe.rs",
+  "before": "b1a585dc53eebd72172cf0fc777edc5ffa46c1c2a42bd9769261a031c4caee90",
+  "after": "1aa3291c38d422776483db7f0c6e602b21607cc81a539922c6658a49599c7813",
+  "actual_red": "L4 API0277 +leaf98b strict direct-target Clippy101 at ABI probe68/101",
+  "actual_log_sha256": "17b9d0379bc0ede2f21ff457703a75ca8676380034dd59d7defd40854759e6b3",
+  "changes": [
+    "equivalent fixed two-byte chunks after checked2N width",
+    "same native PCI guard as a single conditional"
+  ],
+  "checks": "SOURCE ONLY; L4 four passing model/pipe controls not repeated, strictClippy-only successor pending",
+  "api_rust_unchanged": true
+}

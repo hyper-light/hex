@@ -1,0 +1,30 @@
+{
+  "source": "b19c86d26c3d4c9f029118084f0461305808a4ad",
+  "upstream_private_base": "42c3193e",
+  "changed_paths": {
+    "crates/api/src/client.rs": "b1cb061d29af1fdaab8b8b732b90c14d336beef1807726f0797ff2b76cc22ab0",
+    "crates/api/src/lib.rs": "617b3936a27eed08f15798c11c8438d2fb38717c7e9fd87c19a88eaf8bdbb7b0",
+    "crates/api/src/physical.rs": "d57f6e157d28f147ea1347fe2fab51ccc191bec529732726483bc40a4b496a8f",
+    "crates/api/src/sim.rs": "34a31e3cf8d39d5be4a6c24111b552dde0be56ef0793daca51e90a73350b050c",
+    "crates/abi/src/gpu.rs": "6496855e1b885ba2a90b4abfe75dad0657a0353a31fda2c4e8ce4979209a0a76",
+    "crates/abi/src/gpu/probe.rs": "b1a585dc53eebd72172cf0fc777edc5ffa46c1c2a42bd9769261a031c4caee90"
+  },
+  "borrowed_connect_and_handshake_exact": true,
+  "source_only": true,
+  "composed_paths": {
+    "crates/api/src/client.rs": "410c639ba5687f9b6f15bfecf939b6c11c054e36ca30b85866e0ea9738b662ed",
+    "crates/api/src/lib.rs": "3e9a4ef0f57de25cebe8d05c3ad5b83c6637a3c5905ab2c6f27ef949812f61bf",
+    "crates/api/src/physical.rs": "d57f6e157d28f147ea1347fe2fab51ccc191bec529732726483bc40a4b496a8f",
+    "crates/api/src/sim.rs": "34a31e3cf8d39d5be4a6c24111b552dde0be56ef0793daca51e90a73350b050c",
+    "crates/abi/src/gpu.rs": "6496855e1b885ba2a90b4abfe75dad0657a0353a31fda2c4e8ce4979209a0a76",
+    "crates/abi/src/gpu/probe.rs": "b1a585dc53eebd72172cf0fc777edc5ffa46c1c2a42bd9769261a031c4caee90"
+  },
+  "vendor_check": {
+    "command": "/opt/homebrew/bin/python3 scripts/vendor.py check shards --from shards=/Users/adalundhe/.cache/hex-lead/shards-source.git",
+    "exit": 0,
+    "files": 43,
+    "patches": 10,
+    "differences": 0
+  },
+  "patch_sha256": "4e298e146bfdf648c18f196e39a84a9c86522f5017ef231fcc74f659db8640e7"
+}

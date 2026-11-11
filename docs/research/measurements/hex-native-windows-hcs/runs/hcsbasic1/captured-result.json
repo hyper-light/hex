@@ -1,0 +1,18 @@
+{
+  "owner": {
+    "birth": "134388526855967783",
+    "pid": 17972
+  },
+  "query": "{\"PropertyTypes\":[\"Basic\"]}",
+  "result": {
+    "hr": 0,
+    "json": "{\"Properties\":[{\"SupportedSchemaVersions\":[{\"Major\":2,\"Minor\":11}]}]}",
+    "resultFreed": true
+  },
+  "query_binary_sha256": "13b43eada2504adb48650f381a2cc529bc300da679d5d29e24bc57c7dccc060d",
+  "computecore_sha256": "e3202a3f676a815c0e96a12dfb33364d0486beb293a7298127f1ed78d3de93ab",
+  "compute_system_creates": 0,
+  "gpu_dispatches": 0,
+  "service_changes": 0,
+  "utc": "2026-11-11T06:38:06.5665842Z"
+}

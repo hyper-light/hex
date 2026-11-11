@@ -111,6 +111,9 @@ impl Lab {
     ) -> BoxSpec {
         let dir = self.bundle(&id, &Self::args(act), mounts);
         BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id,
             bounds,
             class: ClassSpec::Bundle(dir),
@@ -543,6 +546,9 @@ fn crash_child_node() {
     let id = BoxId::new(&format!("hex-crash-{phase}")).unwrap();
     let (dir, _) = crash_bundle(&root, id.as_str(), &lab.layers);
     rt.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(dir),

@@ -1,0 +1,36 @@
+{
+  "members": [
+    {
+      "id": "5d01fb94f886817b89b51fc30db043e8",
+      "name": "later-index-experiment.json",
+      "bytes": 323,
+      "sha": "c43511652f46862c97246e76da733e06dd74662ad0f48cee1697d3236d626748",
+      "gzip": false
+    },
+    {
+      "id": "379601a372688192acaa13e05a03ad3d",
+      "name": "later-peer-rank-experiment.json",
+      "bytes": 317,
+      "sha": "84afc69bf5da50aca20fa00655ad7d3f1a615f25b46f727d46a51409c6b9c4ed",
+      "gzip": false
+    },
+    {
+      "id": "b66ac14811c7806d9032b61b5a01ebc0",
+      "name": "original-a80-terminal-state-observation.json",
+      "bytes": 149,
+      "sha": "944c2752b82588f9ef36d0ef1ffa22ff03097d44a288e3cb0dcb6872b074c1fb",
+      "gzip": false
+    },
+    {
+      "id": "6f17b3aa12bb8ec39711ae3ca9574198",
+      "name": "initial-three-lane-queue-terminal.json",
+      "bytes": 1581,
+      "sha": "b8642cc3a7f7af15183279ae66549d583cfe7e14ee29930115c733ffd2af8e50",
+      "gzip": true
+    }
+  ],
+  "original_r78_exit_receipt": "UNAVAILABLE; missing in original retained inspection",
+  "a80_state_observation": "inactive/dead/MainPID0/empty ControlGroup only; not original exit code",
+  "initial_queue": "all three exit1; no performance acceptance",
+  "later_receipts": "independent experiments; not substitutes for original labels"
+}

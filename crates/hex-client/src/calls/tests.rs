@@ -2,6 +2,7 @@
 
 use super::*;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 type Opening = Box<dyn FnOnce(&wire::StreamOffer) + Send>;
 
@@ -10,6 +11,7 @@ struct Memory {
     outbound: Mutex<Vec<Vec<u8>>>,
     inbound: Mutex<VecDeque<Vec<u8>>>,
     offer: Mutex<Option<Result<(), Refusal>>>,
+    reply: Mutex<Option<Answer>>,
     opened: Mutex<Vec<wire::StreamOffer>>,
     program_stdio: Mutex<Option<Stdio>>,
     opening: Mutex<Option<Opening>>,
@@ -17,10 +19,14 @@ struct Memory {
 
 impl Memory {
     fn queue(&self, id: u64, answer: Answer) {
+        self.queue_borrowed(id, &answer);
+    }
+
+    fn queue_borrowed(&self, id: u64, answer: &Answer) {
         self.inbound
             .lock()
             .unwrap()
-            .push_back(wire::answer(id, &answer, wire::MAX_MESSAGE).unwrap());
+            .push_back(wire::answer(id, answer, wire::MAX_MESSAGE).unwrap());
         self.handle.send(&[1]).unwrap();
     }
 }
@@ -30,8 +36,12 @@ impl Transport for Memory {
     const MAKES_ASKED: bool = true;
 
     fn answers() -> &'static [Patience; KINDS] {
-        static ANSWERS: [Patience; KINDS] =
-            [const { Patience::measuring("test.deferred.answer") }; KINDS];
+        static ANSWERS: [Patience; KINDS] = {
+            let mut answers = [const { Patience::measuring("test.deferred.answer") }; KINDS];
+            answers[LegacyKind::COUNT + WaitKind::COUNT] =
+                Patience::measuring("test.refusal.capacity");
+            answers
+        };
         &ANSWERS
     }
 
@@ -72,6 +82,10 @@ impl Transport for Memory {
         assert!(lent.is_empty(), "a deferred guest call lends no handles");
         self.outbound.lock().unwrap().push(bytes.to_vec());
         *at = bytes.len();
+        if let Some(answer) = self.reply.lock().unwrap().as_ref() {
+            let (header, _) = sent_request(bytes);
+            self.queue_borrowed(header.id, answer);
+        }
         if self.offer.lock().unwrap().is_some() {
             let (header, request) = sent_request(bytes);
             match request {
@@ -120,17 +134,20 @@ fn client() -> Core<Memory> {
     handle.connect(handle.local_addr().unwrap()).unwrap();
     handle.set_nonblocking(true).unwrap();
     let client = Core {
-        conn: Arc::new(Conn {
-            shared: Arc::new(Shared::new(Memory {
+        conn: triomphe::Arc::try_new(Conn {
+            shared: Shared::try_new(Memory {
                 handle,
                 outbound: Mutex::new(Vec::new()),
                 inbound: Mutex::new(VecDeque::new()),
                 offer: Mutex::new(None),
+                reply: Mutex::new(None),
                 opened: Mutex::new(Vec::new()),
                 program_stdio: Mutex::new(None),
                 opening: Mutex::new(None),
-            })),
-        }),
+            })
+            .unwrap(),
+        })
+        .unwrap(),
         classes: Vec::new(),
         limits: Limits {
             connections: 1,
@@ -189,6 +206,50 @@ fn exec() -> Call {
             stderr: false,
         },
     }
+}
+
+/// AC-T7.4.1: factual native RPC preserves unknown counters, refuses the wrong reply type and
+/// propagates uncertainty without allocating a program or granting a physical holder.
+#[test]
+fn physical_report_uses_one_factual_rpc_and_preserves_typed_refusal() {
+    let client = client();
+    let report = hex_api::PhysicalReport {
+        unavailable: Vec::new(),
+        authority: "native-store".into(),
+        devices: vec![hex_api::PhysicalDevice {
+            info: hex_api::DeviceInfo {
+                id: hex_api::DeviceId {
+                    kind: hex_api::DeviceKind::Gpu,
+                    key: u64::MAX,
+                },
+                model: "native-model".into(),
+                size: 4096,
+                holder: None,
+            },
+            busy_per_mille: None,
+            memory_used_bytes: Some(0),
+        }],
+    };
+    let transport = &client.conn.shared.transport;
+    *transport.reply.lock().unwrap() = Some(Answer::PhysicalReport(report.try_clone().unwrap()));
+    assert_eq!(client.physical_report().unwrap(), report);
+    assert_eq!(
+        sent_request(&transport.outbound.lock().unwrap()[0]).1,
+        Request::Call(Call::PhysicalReport)
+    );
+    *transport.reply.lock().unwrap() = Some(Answer::Done);
+    assert!(matches!(client.physical_report(), Err(Refusal::Broken(_))));
+    let refusal = Refusal::Lifecycle {
+        id: BoxId::new("uncertain-device").unwrap(),
+        cause: hex_api::LifecycleCause::Uncertain,
+    };
+    *transport.reply.lock().unwrap() = Some(Answer::Refused(refusal.clone()));
+    assert_eq!(client.physical_report().unwrap_err(), refusal);
+    assert_eq!(transport.outbound.lock().unwrap().len(), 3);
+    let state = client.conn.shared.state().unwrap();
+    assert!(state.calls.is_empty());
+    assert!(state.programs.is_empty());
+    assert!(state.given.is_empty());
 }
 
 /// HEX-RT-17: cancel one unsent exec; expect no outbound request or completions, and only its reservation removed.
@@ -483,7 +544,9 @@ fn an_offer_is_intermediate_until_same_id_ready_and_the_programs_real_answer() {
     let client = client();
     let shared = &client.conn.shared;
     *shared.transport.offer.lock().unwrap() = Some(Ok(()));
-    let weak = Arc::downgrade(shared);
+    // The callback keeps a Weak test witness, never a strong cycle through Shared.
+    let observer = Arc::new(triomphe::Arc::clone(shared));
+    let weak = Arc::downgrade(&observer);
     *shared.transport.opening.lock().unwrap() = Some(Box::new(move |offer| {
         let shared = weak.upgrade().unwrap();
         let state = shared
@@ -603,4 +666,325 @@ fn a_failed_offer_open_releases_the_remote_preparation_and_local_reservation() {
     assert!(state.calls.is_empty());
     assert!(state.programs.is_empty());
     assert!(state.given.is_empty());
+}
+
+/// AC-T7.4.1: a new capacity wait appends after every historical runtime/scheduler wait.
+#[test]
+fn runtime_capacity_wait_appends_without_moving_existing_indexes() {
+    let waits = <Memory as Transport>::answers();
+    assert_eq!(KINDS, 28);
+    for (request, index) in [
+        (
+            Request::Hello {
+                build: String::new(),
+            },
+            0,
+        ),
+        (Request::Call(Call::List), 7),
+        (
+            Request::Call(Call::Schedule(Box::new(
+                hex_core::schedule::Command::Describe {
+                    from: 0,
+                    cluster: "pool".into(),
+                },
+            ))),
+            13,
+        ),
+        (
+            Request::Call(Call::Schedule(Box::new(
+                hex_core::schedule::Command::Status {
+                    key: hex_core::schedule::Key {
+                        owner: 0,
+                        epoch: 1,
+                        seq: 0,
+                    },
+                },
+            ))),
+            22,
+        ),
+        (Request::Call(Call::Capacity(Class::Oci)), 23),
+        (Request::Call(Call::PhysicalReport), 24),
+    ] {
+        assert!(
+            std::ptr::eq(kind_of(waits, &request).unwrap(), &waits[index]),
+            "{request:?}"
+        );
+    }
+}
+
+/// AC-T7.4.1: pool lifecycle waits append after all existing transport operation seeds.
+#[test]
+fn backing_lifecycle_waits_append_without_reordering_old_operations() {
+    let key = hex_api::BackingKey {
+        pool: [1; 32],
+        generation: [2; 16],
+    };
+    let fixed = hex_api::CapacityResources {
+        cpu_milli: hex_api::MIN_CPU_MILLI.into(),
+        mem_bytes: hex_api::MIN_MEMORY,
+        disk_bytes: 0,
+    };
+    let cost = hex_api::RuntimeCost {
+        id: [3; 32],
+        floor: fixed,
+        ceiling: fixed,
+        quantum: hex_api::CapacityResources {
+            cpu_milli: 1,
+            mem_bytes: 1,
+            disk_bytes: 1,
+        },
+        guest_overhead: hex_api::CapacityResources::default(),
+        overhead: hex_api::CapacityResources::default(),
+    };
+    let grant = hex_api::BackingGrant {
+        key,
+        allocation: cost
+            .allocate(hex_api::CapacityResources::default())
+            .unwrap(),
+        devices: Vec::new(),
+    };
+    let waits = <Memory as Transport>::answers();
+    assert!(std::ptr::eq(
+        kind_of(
+            waits,
+            &Request::Call(Call::InitializeBacking(triomphe::Arc::new(grant)))
+        )
+        .unwrap(),
+        &waits[25]
+    ));
+    assert!(std::ptr::eq(
+        kind_of(waits, &Request::Call(Call::ReleaseBacking(key))).unwrap(),
+        &waits[26]
+    ));
+    assert!(std::ptr::eq(
+        kind_of(waits, &Request::Call(Call::BackingUsage(key))).unwrap(),
+        &waits[27]
+    ));
+}
+
+/// AC-T7.4.1: the common synchronous timing point distinguishes an actual typed wire refusal.
+#[test]
+fn refusal_census_common_call_records_the_typed_wire_outcome() {
+    static REFUSED: AtomicBool = AtomicBool::new(false);
+    fn sink(name: &'static str, sample: hex_core::patience::Sample) {
+        if name == "test.refusal.capacity"
+            && matches!(sample, hex_core::patience::Sample::Refused(_))
+        {
+            REFUSED.store(true, Ordering::SeqCst);
+        }
+    }
+    assert!(hex_core::patience::census(sink));
+    let client = client();
+    let expected = Refusal::Exhausted {
+        what: "scheduler command publication",
+        bound: 1,
+    };
+    *client.conn.shared.transport.reply.lock().unwrap() = Some(Answer::Refused(expected.clone()));
+    assert_eq!(client.capacity(Class::Oci), Err(expected));
+    assert!(REFUSED.load(Ordering::SeqCst));
+    let patience = kind_of(
+        <Memory as Transport>::answers(),
+        &Request::Call(Call::Capacity(Class::Oci)),
+    )
+    .unwrap();
+    assert!(
+        patience.slowest().is_some(),
+        "refusals still update online learning"
+    );
+    assert_eq!(
+        patience.deadline(),
+        None,
+        "a measuring wait remains measuring"
+    );
+}
+
+#[cfg(target_os = "macos")]
+mod queued_deadline_probe {
+    use super::*;
+    use crate::macos::{Client, Socket};
+    use hex_core::{schedule, stream};
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    #[derive(Clone, Copy)]
+    enum Queued {
+        Complete,
+        Decoded,
+        PrefixOnly,
+        Absent,
+    }
+
+    fn next_native_request(peer: &mut UnixStream) -> (Header, Request) {
+        let mut prefix = [0u8; size_of::<u32>()];
+        peer.read_exact(&mut prefix).unwrap();
+        let length = usize::try_from(u32::from_be_bytes(prefix)).unwrap();
+        assert!(length <= wire::MAX_MESSAGE);
+        let mut bytes = prefix.to_vec();
+        bytes.resize(prefix.len() + length, 0);
+        peer.read_exact(&mut bytes[prefix.len()..]).unwrap();
+        sent_request(&bytes)
+    }
+
+    fn framed_answer(id: u64, answer: &Answer) -> Vec<u8> {
+        stream::frame(
+            &wire::answer(id, answer, wire::MAX_MESSAGE).unwrap(),
+            wire::MAX_MESSAGE,
+        )
+        .unwrap()
+    }
+
+    /// No Runtime is invoked: the stand-in negotiates the real native transport and echoes a typed reply.
+    fn expired_native_submit(queued: Queued) -> Option<Result<Answer, Refusal>> {
+        let cache = std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(".cache/hex-t7/client");
+        std::fs::create_dir_all(&cache).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("qd-")
+            .tempdir_in(&cache)
+            .unwrap();
+        let path = directory.path().join("node.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let request = Request::Call(Call::Schedule(Box::new(schedule::Command::Submit {
+            demand: "class:oci".into(),
+            payload: schedule::Payload {
+                spec: BoxSpec {
+                    route: None,
+                    allocation: None,
+                    devices: Vec::new(),
+                    id: BoxId::new("queued-deadline-probe").unwrap(),
+                    bounds: hex_api::Bounds::default(),
+                    class: hex_api::ClassSpec::Bundle(directory.path().join("unused-bundle")),
+                    owner: None,
+                },
+                start: true,
+            },
+        })));
+        let expected_request = wire::request(0, &request, wire::MAX_MESSAGE).unwrap();
+        let answer = Answer::Scheduled(Box::new(schedule::Reply {
+            key: Some(schedule::Key {
+                owner: 0,
+                epoch: 1,
+                seq: 0,
+            }),
+            tracked: true,
+            created: true,
+            ..schedule::Reply::default()
+        }));
+        let (written, queued_bytes) = std::sync::mpsc::sync_channel(1);
+        let (release, held) = std::sync::mpsc::sync_channel(1);
+        let agent = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let (header, hello) = next_native_request(&mut peer);
+            assert_eq!(
+                hello,
+                Request::Hello {
+                    build: wire::build()
+                }
+            );
+            let limits = Limits {
+                connections: 1,
+                message_bytes: wire::MAX_MESSAGE,
+                in_flight: 1,
+                programs: 1,
+            };
+            peer.write_all(&framed_answer(
+                header.id,
+                &Answer::Hello(wire::Hello {
+                    build: wire::build(),
+                    classes: vec![Class::Oci],
+                    limits,
+                    budgets: wire::Budgets {
+                        in_flight: 1,
+                        programs: 1,
+                    },
+                }),
+            ))
+            .unwrap();
+            let (header, submitted) = next_native_request(&mut peer);
+            assert_eq!(
+                wire::request(0, &submitted, wire::MAX_MESSAGE).unwrap(),
+                expected_request
+            );
+            let frame = framed_answer(header.id, &answer);
+            match queued {
+                Queued::Complete | Queued::Decoded => peer.write_all(&frame).unwrap(),
+                Queued::PrefixOnly => peer.write_all(&frame[..size_of::<u32>()]).unwrap(),
+                Queued::Absent => {}
+            }
+            // This event is after the actual complete/partial write, never before it.
+            written.send((header.id, answer)).unwrap();
+            held.recv().unwrap(); // Keep the real peer open until Caller::wait has returned.
+        });
+        let client = Client::connect(&path).unwrap();
+        let shared = client.shared();
+        let mut caller = Caller::new(shared, None).unwrap();
+        let frame =
+            Socket::frame(wire::request(caller.id, &request, wire::MAX_MESSAGE).unwrap()).unwrap();
+        assert!(caller.send(&frame, NONE, None, None).is_ok());
+        let (response_id, expected) = queued_bytes.recv().unwrap();
+        let observed = ready(shared.transport.handle(), false, None, Some(Duration::ZERO));
+        let decoded = if matches!(queued, Queued::Decoded) {
+            // The sole registered caller owns the otherwise free reader turn, as wait() would claim it.
+            let mut state = shared.state().unwrap();
+            assert!(!state.reading);
+            state.reading = true;
+            caller.mine = true;
+            drop(state);
+            assert!(shared.recv().unwrap());
+            !shared.state().unwrap().calls.contains_key(&caller.id)
+        } else {
+            false
+        };
+        // Evaluated after the write-completion event: at wait entry this deadline cannot be in the future.
+        let deadline = Instant::now();
+        let actual = caller.wait(Some(deadline));
+        let request_id = caller.id;
+        drop(caller);
+        release.send(()).unwrap();
+        agent.join().unwrap();
+        assert_eq!(response_id, request_id);
+        assert_eq!(observed.unwrap().read, !matches!(queued, Queued::Absent));
+        if matches!(queued, Queued::Decoded) {
+            assert!(
+                decoded,
+                "the real framed reply must have reached the caller's mailbox before wait"
+            );
+        }
+        if let Some(Ok(answer)) = &actual {
+            assert_eq!(answer, &expected);
+        }
+        actual
+    }
+
+    /// AC-T7.4.1: queue a complete native Submit reply before an expired wait; expect immediate completion,
+    /// as for an already decoded reply. Root's unchanged production baseline returns None here. This does
+    /// not establish the cause of the earlier physical Submit timeout.
+    #[test]
+    fn cp_t7_4_complete_submit_reply_queued_before_expired_native_wait_is_available() {
+        assert!(matches!(
+            expired_native_submit(Queued::Complete),
+            Some(Ok(Answer::Scheduled(_)))
+        ));
+    }
+
+    /// AC-T7.4.1: the identical native reply, decoded by the owned reader before wait, is collected even
+    /// with an expired deadline. Contrast raw queued bytes without changing its message or peer lifetime.
+    #[test]
+    fn cp_t7_4_decoded_submit_reply_is_collected_before_expired_native_deadline() {
+        assert!(matches!(
+            expired_native_submit(Queued::Decoded),
+            Some(Ok(Answer::Scheduled(_)))
+        ));
+    }
+
+    /// AC-T7.4.1: readable length bytes alone are not a complete reply and must not extend an expired wait.
+    #[test]
+    fn cp_t7_4_incomplete_native_reply_does_not_extend_expired_wait() {
+        assert!(expired_native_submit(Queued::PrefixOnly).is_none());
+    }
+
+    /// AC-T7.4.1: no queued bytes and an open peer yield no answer at an already expired deadline.
+    #[test]
+    fn cp_t7_4_absent_native_reply_does_not_extend_expired_wait() {
+        assert!(expired_native_submit(Queued::Absent).is_none());
+    }
 }

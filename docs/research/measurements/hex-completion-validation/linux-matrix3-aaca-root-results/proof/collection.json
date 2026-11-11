@@ -1,0 +1,176 @@
+{
+  "bytes": 768249,
+  "sha256": "d9dcea78c9bece8914f6205a254edd06250bf7294f3e6407919e2098b918d378",
+  "members": {
+    "cohort-aaca22b9-linux-linux-matrix3-aaca/source-before.json": {
+      "bytes": 599066,
+      "sha256": "acaede1a44778482d4e1bfc40e0fdc1b8bb808413577e6bae025d0c8a1635656"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca/owned-scope-limits.json": {
+      "bytes": 258,
+      "sha256": "9b363c09ea929f3198e9227771866314b20757062b148bda57a2f59b71924ce4"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca/aarch64-unknown-linux-gnu.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca/aarch64-unknown-linux-gnu.stderr": {
+      "bytes": 80,
+      "sha256": "1b056409e05db9ba61cb57d96f2e0aee7cb8c300370044e10480b3b1edc6f392"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca/running.json": {
+      "bytes": 2117,
+      "sha256": "8041dbd8c6a26cd2f2a38f43ac76c8a98ed14f73592848f498a2d64b7aee433a"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca/source-after.json": {
+      "bytes": 599066,
+      "sha256": "acaede1a44778482d4e1bfc40e0fdc1b8bb808413577e6bae025d0c8a1635656"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca/result.json": {
+      "bytes": 2224,
+      "sha256": "3ec8889c1f466edee0f3381e3a09e019f5423ee57a9f121be46c6e7311bcae8c"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca/event-evidence/journal.jsonl": {
+      "bytes": 677,
+      "sha256": "18c5d5b4ee1477dbf83e22ab38b2824cbdd4509a07d3a2b700ddd8bda9409f38"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca-v2/source-before.json": {
+      "bytes": 599066,
+      "sha256": "acaede1a44778482d4e1bfc40e0fdc1b8bb808413577e6bae025d0c8a1635656"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca-v2/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca-v2/owned-scope-limits.json": {
+      "bytes": 258,
+      "sha256": "3470dd16573790b69810d7d57bf553042db566f425c5403c8e327f05d1c5134c"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca-v2/aarch64-unknown-linux-gnu.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca-v2/aarch64-unknown-linux-gnu.stderr": {
+      "bytes": 4334,
+      "sha256": "e518904f3c91549f6364a9db2ba63a3907ab373d8c3818d5abea7d9869c632fa"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca-v2/running.json": {
+      "bytes": 4928,
+      "sha256": "bfeb1b5bec5ed36e5c08dfd7cf542e30b6d7715aebf35f6fb9e718f6c9764b8a"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca-v2/x86_64-unknown-linux-musl.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca-v2/x86_64-unknown-linux-musl.stderr": {
+      "bytes": 4081,
+      "sha256": "e964ecd9a7a6da9dce14a1cee0721333b80e1c2b02f37ce1e3467d5ed891a502"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca-v2/aarch64-unknown-linux-musl.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca-v2/aarch64-unknown-linux-musl.stderr": {
+      "bytes": 4081,
+      "sha256": "88b5958a66b5e86204713e8e07ab187b5fb301d7ed38be1ad575527103a3f93d"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca-v2/source-after.json": {
+      "bytes": 599066,
+      "sha256": "acaede1a44778482d4e1bfc40e0fdc1b8bb808413577e6bae025d0c8a1635656"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca-v2/result.json": {
+      "bytes": 5035,
+      "sha256": "d8c47af5f360cf75242d9f80b1992f152b930f534566135547c1ee9a31898b20"
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca-v2/event-evidence/journal.jsonl": {
+      "bytes": 2021,
+      "sha256": "33a69b8a762a39c09df1f522e2f23047d9391cf022f16ecf89ca8ab8e1471063"
+    },
+    "outer-closures.json": {
+      "bytes": 1766,
+      "sha256": "edbd41041aec3e46e818c6b9c04714345af17cc9cb17bbea0360f75449b427cd"
+    }
+  },
+  "closures": {
+    "cohort-aaca22b9-linux-linux-matrix3-aaca": {
+      "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-linux-matrix3-aaca-v1.scope",
+      "scope_absent": true,
+      "owners": [
+        {
+          "kind": "driver",
+          "recorded": {
+            "pid": 3707136,
+            "ppid": 3707043,
+            "start_ticks": 32603205
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        },
+        {
+          "kind": "cargo",
+          "recorded": {
+            "pid": 3710850,
+            "ppid": 3707136,
+            "start_ticks": 32603448
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        }
+      ]
+    },
+    "cohort-aaca22b9-linux-linux-matrix3-aaca-v2": {
+      "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-linux-matrix3-aaca-v2.scope",
+      "scope_absent": true,
+      "owners": [
+        {
+          "kind": "driver",
+          "recorded": {
+            "pid": 50899,
+            "ppid": 50811,
+            "start_ticks": 32637354
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        },
+        {
+          "kind": "cargo",
+          "recorded": {
+            "pid": 54258,
+            "ppid": 50899,
+            "start_ticks": 32637574
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        },
+        {
+          "kind": "cargo",
+          "recorded": {
+            "pid": 131206,
+            "ppid": 50899,
+            "start_ticks": 32642500
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        },
+        {
+          "kind": "cargo",
+          "recorded": {
+            "pid": 194478,
+            "ppid": 50899,
+            "start_ticks": 32646603
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        }
+      ]
+    }
+  },
+  "collector_exit": 0,
+  "collector_reaped": true,
+  "all_members_verified": true,
+  "source_archives_verified": true
+}

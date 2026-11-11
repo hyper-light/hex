@@ -174,6 +174,14 @@ struct Counted {
 }
 
 impl shards_api::Guests for Counted {
+    fn probe_gpu(
+        &self,
+        spec: &shards_api::GuestSpec,
+        patience: Duration,
+    ) -> Result<shards_api::GpuProbe, shards_api::Refusal> {
+        self.shards.probe_gpu(spec, patience)
+    }
+
     fn backend(&self) -> Result<shards_api::Backend, shards_api::Refusal> {
         self.shards.backend()
     }
@@ -252,6 +260,7 @@ fn the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux() {
         // Unset, the host's CPUs (`host_cpus`): the fastest run, as a vCPU costs nothing while it
         // idles.
         vcpus: std::env::var("HEX_GUEST_CPUS").map_or_else(|_| host_cpus(), |v| v.parse().unwrap()),
+        gpu: false,
         // Unset, Shards' least guest and twice this workload's measured peak (PEAK_MIB): the margin
         // C's guest_tree takes, stated as a factor, never below what was measured.
         memory_mib: number(
@@ -279,6 +288,9 @@ fn the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux() {
     let node = GuestRuntime::new(guests.clone(), config);
     let id = BoxId::new("oci-validation-lab").unwrap();
     node.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle.path().to_owned()),

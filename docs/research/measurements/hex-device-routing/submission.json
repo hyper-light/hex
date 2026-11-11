@@ -1,0 +1,15 @@
+{
+  "pid": 76248,
+  "argv": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--on",
+    "d1323898b255a3ed435eb83fa0f7b0cf",
+    "--needs",
+    "cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--quiet",
+    "--",
+    "/Users/adalundhe/.cache/hex-lead/python-3.13.18-20261026/python/bin/python3 -c '\nimport base64,hashlib,io,json,tarfile\nfrom pathlib import Path\nlead=Path.home()/'\"'\"'.cache/hex-lead'\"'\"'\nroots=['\"'\"'device-current-40d5c644-compile-v1'\"'\"','\"'\"'device-routing-0aa59e26-red-v1'\"'\"','\"'\"'device-routing-8fd2572b-green-v1'\"'\"']\nfiles={};readbacks={}\nfor name in roots:\n p=lead/name;r=json.loads((p/'\"'\"'result.json'\"'\"').read_text());assert r['\"'\"'exit'\"'\"']==(1 if '\"'\"'-red-'\"'\"' in name else 0) and r['\"'\"'temp_entries'\"'\"']==0\n manifest=json.loads((p/'\"'\"'source-hashes.json'\"'\"').read_text())\n actual={str(q.relative_to(p/'\"'\"'source'\"'\"')):hashlib.sha256(q.read_bytes()).hexdigest() for q in sorted((p/'\"'\"'source'\"'\"').rglob('\"'\"'*'\"'\"')) if q.is_file()}\n assert actual==manifest\n for phase in r['\"'\"'phases'\"'\"']:\n  assert phase['\"'\"'exit'\"'\"']==(101 if '\"'\"'-red-'\"'\"' in name else 0) and phase['\"'\"'reaped'\"'\"'] and not phase.get('\"'\"'timed_out'\"'\"')\n  raw=(p/(phase['\"'\"'name'\"'\"']+'\"'\"'.log'\"'\"')).read_bytes();assert hashlib.sha256(raw).hexdigest()==phase['\"'\"'sha256'\"'\"']\n  if '\"'\"'-red-'\"'\"' in name:\n   assert b'\"'\"'0 passed; 1 failed; 0 ignored;'\"'\"' in raw and b'\"'\"'actual route was bypassed: Some(Platform'\"'\"' in raw\n  elif phase['\"'\"'name'\"'\"']=='\"'\"'device-routing'\"'\"': assert b'\"'\"'1 passed; 0 failed; 0 ignored;'\"'\"' in raw\n  elif phase['\"'\"'name'\"'\"']=='\"'\"'device-driver-model'\"'\"': assert b'\"'\"'3 passed; 0 failed; 0 ignored;'\"'\"' in raw\n  files[name+'\"'\"'/'\"'\"'+phase['\"'\"'name'\"'\"']+'\"'\"'.log'\"'\"']=raw\n for leaf in ['\"'\"'result.json'\"'\"','\"'\"'run.json'\"'\"','\"'\"'source-hashes.json'\"'\"']: files[name+'\"'\"'/'\"'\"'+leaf]=(p/leaf).read_bytes()\n readbacks[name]={'\"'\"'revision'\"'\"':r['\"'\"'source'\"'\"'],'\"'\"'source_files'\"'\"':len(manifest),'\"'\"'source_unchanged'\"'\"':True,'\"'\"'result'\"'\"':r}\nfiles['\"'\"'READBACK.json'\"'\"']=(json.dumps(readbacks,indent=2)+'\"'\"'\\n'\"'\"').encode()\nfiles['\"'\"'MEMBERS.json'\"'\"']=(json.dumps({n:{'\"'\"'bytes'\"'\"':len(b),'\"'\"'sha256'\"'\"':hashlib.sha256(b).hexdigest()} for n,b in files.items()},indent=2)+'\"'\"'\\n'\"'\"').encode()\nb=io.BytesIO()\nwith tarfile.open(fileobj=b,mode='\"'\"'w:gz'\"'\"') as t:\n for n,raw in files.items():\n  m=tarfile.TarInfo(n);m.size=len(raw);m.mtime=0;t.addfile(m,io.BytesIO(raw))\nraw=b.getvalue();print(json.dumps({'\"'\"'sha256'\"'\"':hashlib.sha256(raw).hexdigest(),'\"'\"'bytes'\"'\"':len(raw),'\"'\"'archive'\"'\"':base64.b64encode(raw).decode()}))\n'"
+  ]
+}

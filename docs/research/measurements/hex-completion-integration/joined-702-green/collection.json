@@ -1,0 +1,55 @@
+{
+  "bytes": 233950,
+  "sha256": "bd4f7591b75d82e2a8fb0fdab244549402e0f5455c5ed51c84465c092868d038",
+  "members": {
+    "cohort-7022312e-linux-joined-new-controls-v1/source-before.json": {
+      "bytes": 326764,
+      "sha256": "e268dd2ce632423958fc76f168090e8c0f0741097e285f910300726493fcffe0"
+    },
+    "cohort-7022312e-linux-joined-new-controls-v1/public-registry-seed.json": {
+      "bytes": 29111,
+      "sha256": "e017b4a22def23ae32047ea3f158036e874fd1ee9cfcb407421d8104c722aa1b"
+    },
+    "cohort-7022312e-linux-joined-new-controls-v1/owned-scope-limits.json": {
+      "bytes": 261,
+      "sha256": "3ce394b779bf65d7dd36a53592cb0c111f418fc37f640b696a17787aad7984c9"
+    },
+    "cohort-7022312e-linux-joined-new-controls-v1/artifact-provenance-data-controls.log": {
+      "bytes": 104,
+      "sha256": "287cb2d00a1b04f3e9010bcae61e14955ce35df3dedaedd964cfb59197b7206b"
+    },
+    "cohort-7022312e-linux-joined-new-controls-v1/running.json": {
+      "bytes": 3787,
+      "sha256": "d22af052651306104aa1950b6e2ff8b8d46aa99cb4ac3db4a7287e592cd983e4"
+    },
+    "cohort-7022312e-linux-joined-new-controls-v1/service-route-normalization-controls.log": {
+      "bytes": 4000,
+      "sha256": "68a1aaf693cafc26d5127f7189e0da8a06cc17fecbdf217db3ce110e03e0ad82"
+    },
+    "cohort-7022312e-linux-joined-new-controls-v1/workload-output-eof-controls.log": {
+      "bytes": 1226,
+      "sha256": "d76f0014e3c7c142c757ca7be7c56e4abbc69df65fb33ec4ab7465ccaaf90c8b"
+    },
+    "cohort-7022312e-linux-joined-new-controls-v1/joined-production-check.log": {
+      "bytes": 3528,
+      "sha256": "7e6cfc8fb50d55ead238e590cea4425d19f6f36c9d758e32c1b7563cb3d9649b"
+    },
+    "cohort-7022312e-linux-joined-new-controls-v1/source-after.json": {
+      "bytes": 326764,
+      "sha256": "e268dd2ce632423958fc76f168090e8c0f0741097e285f910300726493fcffe0"
+    },
+    "cohort-7022312e-linux-joined-new-controls-v1/result.json": {
+      "bytes": 4043,
+      "sha256": "fbe5c0308931e6dd913cce2145b82f7e72a8cacc8b9fbcce32156cebb2f9a515"
+    },
+    "cohort-7022312e-linux-joined-new-controls-v1/collected-binaries.json": {
+      "bytes": 3552,
+      "sha256": "1914a465512f997f47361d0181caa3acbc52a737cb835cf5083fd4bf54ba73e6"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

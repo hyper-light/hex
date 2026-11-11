@@ -1,0 +1,492 @@
+{
+  "backend_baseline_restored": true,
+  "backend_eager_boot": true,
+  "binary_and_artifact_hashes": {
+    "hex": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-935f6b21/aarch64-apple-darwin/release/hex",
+      "sha256": "165141a6ae1eb165e2acf5ef0f368db0be597ee25ab885670657b979802959c6"
+    },
+    "initrd": {
+      "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-935f6b21-release-aarch64.cpio",
+      "sha256": "accb4146b88c412b1357d3d18f26aa81848740393db430607acdb3d8c721d03e"
+    },
+    "kernel": {
+      "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+      "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+    },
+    "linux_hex": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-935f6b21/aarch64-unknown-linux-musl/release/hex",
+      "sha256": "65e639fd9e7fd15ca2a3f89b068803dd4c3062f360dcd1584373635b24e1ee65"
+    },
+    "runtime_probe": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-probe-runtime-pools-935f6b21/aarch64-apple-darwin/release/hex-scheduler-runtime-probe",
+      "sha256": "15fa9d2e8d892af44a05dd96e440e556f37de8dc68e315d1946ddda55e0acae9"
+    },
+    "shards": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+      "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+    }
+  },
+  "comparison_or_performance_claim": false,
+  "environment": {
+    "box_cpu_milli": 1000,
+    "box_memory_mib": 64,
+    "cpu_count": 32,
+    "free_disk_bytes_before": 3032240238592,
+    "guest_cpus": 4,
+    "guest_memory_mib": 632,
+    "guest_shares_sha256": "4ffe98be838b87d9cd48e32d72dc7a673f5f69017dc1c7ab0a189982260baa32",
+    "machine": "arm64",
+    "os": "macOS-26.4-arm64-arm-64bit-Mach-O",
+    "path_sha256": "66f027960372b4109885e775bc4d3d0f2e91b060fcf607f0aa12af74fe110864"
+  },
+  "execution_policy": {
+    "execution_owner": "Hex root01a1aa77778471339bea3beff90d6bbd",
+    "immutable_shards_tool_source": "6bf5b15da904931b984ecd25662a8b8c571268bf",
+    "read_in_full": [
+      "AGENTS.md",
+      "docs/development-rules.md",
+      "docs/development-evidence.md",
+      "CLAUDE.md",
+      "/Users/adalundhe/g121-handoff.md"
+    ],
+    "receipt": "POLICY_READ",
+    "revision": "b39906bc7400d2917ea015680780afff1fb561c9",
+    "role": "coordinator",
+    "rules_sha256": "1ed0b1ad00e9228d813d1892d6f55cf330a5485647aff19527843ff8bf616b3d",
+    "task": "Hex actual runtime scheduler integration and census; no upstream Shards source edits",
+    "time_utc": "2026-11-10T08:03:15.875281+00:00"
+  },
+  "hex_version": "hex 0.1.0 (unknown commit)",
+  "kind": "actual-scheduler-wait-census",
+  "max_rows_per_process": 1048576,
+  "mode": "guest",
+  "n": 1000,
+  "native_ssh_login_grace_seconds": 120.0,
+  "outer_cancellation_policy": {
+    "bootstrap": 120.0,
+    "policy_sha256": "8708b80967e5517ae9137eb642600668ac02d164a4c2145ad8462a37889d424e",
+    "wait": 120.0,
+    "wait_rule": "operator outer cancellation budget; never a runtime timing seed"
+  },
+  "owned_guest_retired": {
+    "end": "Stopped",
+    "guest_stopped": true,
+    "pid": 21674,
+    "started": 12052723446423
+  },
+  "preparation_policy": {
+    "revision": "6bf5b15da904931b984ecd25662a8b8c571268bf",
+    "role": "implementer",
+    "rules_sha256": "0d936117dbc6663eb02829c3e921879cecdad3a8f503047588baa21dc82da936"
+  },
+  "profile": "release",
+  "profile_authority": "operator-declared; preserve build receipt and binary hash",
+  "receipts": {
+    "build": {
+      "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-935f6b21/fixture/receipts/build-release-935f6b21.json",
+      "sha256": "7712080d2af1ca17ea7fafdc77d03aead49ca9580374a3c2df09315052e974b7"
+    },
+    "deadline": {
+      "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-935f6b21/fixture/receipts/method-census-release-935f6b21.json",
+      "sha256": "b855a84a1ed832bb873a90ff94cd3a26412254aafe54c23c22a29092b5771ca5"
+    },
+    "policy": {
+      "path": "/Users/adalundhe/.cache/hex-lead/runtime-pools-935f6b21/fixture/receipts/policy-current.json",
+      "sha256": "fc7fa4d14a56ca75cf12eff0f1eee24c78b54a620d6920095d7080ee2230cf43"
+    }
+  },
+  "source": "/Users/adalundhe/.cache/hex-lead/snapshots/runtime-pools-935f6b21",
+  "source_revision": "935f6b21f98ebb11a58a605dc2447c0f6770910b",
+  "status": "passed",
+  "success_controls": {
+    "advertise": 2000,
+    "delete": 2000,
+    "describe": 2000,
+    "link_up": 1000,
+    "retry": 2000,
+    "status": 71623,
+    "submit": 2000
+  },
+  "transport": {
+    "address": "127.0.0.1",
+    "forced_senders": [
+      0,
+      1
+    ],
+    "host_key_pinned": true,
+    "os_assigned_port": 58093
+  },
+  "verified_physical_created": 2000,
+  "verified_physical_deleted": 2000,
+  "raw_report": "/Users/adalundhe/.cache/hx/e-nwlfkfzv/result.json",
+  "raw_report_sha256": "0abea13d110e3d6cd31e8106bfceec066960d831f6b422c387a294195fc6e37a",
+  "verified_census_files": 107546,
+  "census": {
+    "answer_rows_by_name": {
+      "client.answer.capacity": 11740,
+      "client.answer.create": 2000,
+      "client.answer.delete": 2000,
+      "client.answer.hello": 107541,
+      "client.answer.inspect": 6000,
+      "client.answer.list": 4004,
+      "client.answer.schedule.advertise": 2897,
+      "client.answer.schedule.delete": 2757,
+      "client.answer.schedule.describe": 6486,
+      "client.answer.schedule.hear_control": 14804,
+      "client.answer.schedule.hear_create": 1000,
+      "client.answer.schedule.hear_delete": 2970,
+      "client.answer.schedule.link_up": 1463,
+      "client.answer.schedule.retry": 2426,
+      "client.answer.schedule.status": 87527,
+      "client.answer.schedule.submit": 2732,
+      "client.answer.start": 2000,
+      "client.answer.usage": 3679,
+      "client.guest.answer.capacity": 11740,
+      "client.guest.answer.create": 2000,
+      "client.guest.answer.delete": 2000,
+      "client.guest.answer.hello": 2,
+      "client.guest.answer.inspect": 4000,
+      "client.guest.answer.list": 4004,
+      "guest.stage": 6000,
+      "store.turns": 8000
+    },
+    "malformed_files": [],
+    "missing_row_targets": {},
+    "missing_successful_single_call_rows": {},
+    "raw_multiplexed_rows_may_include_refusals": true,
+    "required_raw_answer_rows_per_kind": 1000,
+    "required_verified_successful_trials": 1000,
+    "seed_generation": "not performed; coordinator must review success/attempt provenance",
+    "successful_process_rows": {
+      "client.answer.capacity": 4004,
+      "client.answer.hello": 4004,
+      "client.answer.inspect": 2000,
+      "client.answer.list": 4004
+    },
+    "successful_single_call_rows": {
+      "client.answer.hello": 82623,
+      "client.answer.schedule.advertise": 2000,
+      "client.answer.schedule.delete": 2000,
+      "client.answer.schedule.describe": 2000,
+      "client.answer.schedule.link_up": 1000,
+      "client.answer.schedule.retry": 2000,
+      "client.answer.schedule.status": 71623,
+      "client.answer.schedule.submit": 2000
+    },
+    "truncated_files": []
+  },
+  "all_answer_distributions": {
+    "client.answer.capacity": {
+      "n": 11740,
+      "p50_ns": 259417,
+      "p90_ns": 4949417,
+      "p99_ns": 6878041,
+      "p999_ns": 8027625,
+      "max_ns": 12244125
+    },
+    "client.answer.create": {
+      "n": 2000,
+      "p50_ns": 46825209,
+      "p90_ns": 61349875,
+      "p99_ns": 79907417,
+      "p999_ns": 89685250,
+      "max_ns": 90383250
+    },
+    "client.answer.delete": {
+      "n": 2000,
+      "p50_ns": 2438666,
+      "p90_ns": 11892375,
+      "p99_ns": 27072250,
+      "p999_ns": 34511709,
+      "max_ns": 36299042
+    },
+    "client.answer.hello": {
+      "n": 107541,
+      "p50_ns": 40583,
+      "p90_ns": 61416,
+      "p99_ns": 92166,
+      "p999_ns": 166916,
+      "max_ns": 1684542
+    },
+    "client.answer.inspect": {
+      "n": 6000,
+      "p50_ns": 246000,
+      "p90_ns": 363250,
+      "p99_ns": 618625,
+      "p999_ns": 977416,
+      "max_ns": 1218792
+    },
+    "client.answer.list": {
+      "n": 4004,
+      "p50_ns": 300917,
+      "p90_ns": 4488125,
+      "p99_ns": 6579084,
+      "p999_ns": 7681625,
+      "max_ns": 10066583
+    },
+    "client.answer.schedule.advertise": {
+      "n": 2897,
+      "p50_ns": 22801584,
+      "p90_ns": 45771459,
+      "p99_ns": 65788875,
+      "p999_ns": 72122667,
+      "max_ns": 75788167
+    },
+    "client.answer.schedule.delete": {
+      "n": 2757,
+      "p50_ns": 18307709,
+      "p90_ns": 45375041,
+      "p99_ns": 71646375,
+      "p999_ns": 75870833,
+      "max_ns": 78272083
+    },
+    "client.answer.schedule.describe": {
+      "n": 6486,
+      "p50_ns": 720083,
+      "p90_ns": 8341541,
+      "p99_ns": 13538667,
+      "p999_ns": 18782500,
+      "max_ns": 23096458
+    },
+    "client.answer.schedule.hear_control": {
+      "n": 14804,
+      "p50_ns": 37769750,
+      "p90_ns": 63620708,
+      "p99_ns": 91206667,
+      "p999_ns": 108031583,
+      "max_ns": 116892750
+    },
+    "client.answer.schedule.hear_create": {
+      "n": 1000,
+      "p50_ns": 128168125,
+      "p90_ns": 172433208,
+      "p99_ns": 200952542,
+      "p999_ns": 216993167,
+      "max_ns": 217333292
+    },
+    "client.answer.schedule.hear_delete": {
+      "n": 2970,
+      "p50_ns": 44588000,
+      "p90_ns": 74632250,
+      "p99_ns": 110806666,
+      "p999_ns": 127992916,
+      "max_ns": 131081375
+    },
+    "client.answer.schedule.link_up": {
+      "n": 1463,
+      "p50_ns": 53459,
+      "p90_ns": 74875,
+      "p99_ns": 107625,
+      "p999_ns": 168250,
+      "max_ns": 261167
+    },
+    "client.answer.schedule.retry": {
+      "n": 2426,
+      "p50_ns": 100625,
+      "p90_ns": 484584,
+      "p99_ns": 902292,
+      "p999_ns": 5051500,
+      "max_ns": 5577958
+    },
+    "client.answer.schedule.status": {
+      "n": 87527,
+      "p50_ns": 53875,
+      "p90_ns": 81750,
+      "p99_ns": 310333,
+      "p999_ns": 521417,
+      "max_ns": 4330917
+    },
+    "client.answer.schedule.submit": {
+      "n": 2732,
+      "p50_ns": 36795875,
+      "p90_ns": 115805083,
+      "p99_ns": 143867542,
+      "p999_ns": 155691416,
+      "max_ns": 159022125
+    },
+    "client.answer.start": {
+      "n": 2000,
+      "p50_ns": 199292,
+      "p90_ns": 233791,
+      "p99_ns": 277916,
+      "p999_ns": 320500,
+      "max_ns": 334084
+    },
+    "client.answer.usage": {
+      "n": 3679,
+      "p50_ns": 276958,
+      "p90_ns": 353875,
+      "p99_ns": 540542,
+      "p999_ns": 913750,
+      "max_ns": 1120209
+    },
+    "client.guest.answer.capacity": {
+      "n": 11740,
+      "p50_ns": 185750,
+      "p90_ns": 294417,
+      "p99_ns": 556417,
+      "p999_ns": 1030750,
+      "max_ns": 6172541
+    },
+    "client.guest.answer.create": {
+      "n": 2000,
+      "p50_ns": 641292,
+      "p90_ns": 705667,
+      "p99_ns": 802792,
+      "p999_ns": 926292,
+      "max_ns": 4959959
+    },
+    "client.guest.answer.delete": {
+      "n": 2000,
+      "p50_ns": 441875,
+      "p90_ns": 558750,
+      "p99_ns": 909041,
+      "p999_ns": 1035250,
+      "max_ns": 1174875
+    },
+    "client.guest.answer.hello": {
+      "n": 2,
+      "p50_ns": 111125,
+      "p90_ns": 112583,
+      "p99_ns": 112583,
+      "p999_ns": 112583,
+      "max_ns": 112583
+    },
+    "client.guest.answer.inspect": {
+      "n": 4000,
+      "p50_ns": 170459,
+      "p90_ns": 316500,
+      "p99_ns": 551584,
+      "p999_ns": 654750,
+      "max_ns": 794875
+    },
+    "client.guest.answer.list": {
+      "n": 4004,
+      "p50_ns": 237625,
+      "p90_ns": 313166,
+      "p99_ns": 466083,
+      "p999_ns": 613458,
+      "max_ns": 1056708
+    },
+    "guest.stage": {
+      "n": 6000,
+      "p50_ns": 122166,
+      "p90_ns": 928750,
+      "p99_ns": 1319500,
+      "p999_ns": 1738250,
+      "max_ns": 2015209
+    },
+    "store.turns": {
+      "n": 8000,
+      "p50_ns": 270167,
+      "p90_ns": 704958,
+      "p99_ns": 9094041,
+      "p999_ns": 13929125,
+      "max_ns": 18798916
+    }
+  },
+  "verified_single_call_success_distributions": {
+    "client.answer.hello": {
+      "n": 82623,
+      "p50_ns": 40500,
+      "p90_ns": 61958,
+      "p99_ns": 92959,
+      "p999_ns": 161333,
+      "max_ns": 1684542
+    },
+    "client.answer.schedule.advertise": {
+      "n": 2000,
+      "p50_ns": 31824834,
+      "p90_ns": 50174208,
+      "p99_ns": 66990959,
+      "p999_ns": 72122667,
+      "max_ns": 75788167
+    },
+    "client.answer.schedule.delete": {
+      "n": 2000,
+      "p50_ns": 37869167,
+      "p90_ns": 47626917,
+      "p99_ns": 71978083,
+      "p999_ns": 75870833,
+      "max_ns": 78272083
+    },
+    "client.answer.schedule.describe": {
+      "n": 2000,
+      "p50_ns": 295542,
+      "p90_ns": 1032250,
+      "p99_ns": 6969166,
+      "p999_ns": 12140375,
+      "max_ns": 12485709
+    },
+    "client.answer.schedule.link_up": {
+      "n": 1000,
+      "p50_ns": 55125,
+      "p90_ns": 75709,
+      "p99_ns": 108917,
+      "p999_ns": 160625,
+      "max_ns": 261167
+    },
+    "client.answer.schedule.retry": {
+      "n": 2000,
+      "p50_ns": 288208,
+      "p90_ns": 498208,
+      "p99_ns": 948917,
+      "p999_ns": 5051500,
+      "max_ns": 5577958
+    },
+    "client.answer.schedule.status": {
+      "n": 71623,
+      "p50_ns": 54792,
+      "p90_ns": 84000,
+      "p99_ns": 319875,
+      "p999_ns": 594958,
+      "max_ns": 4330917
+    },
+    "client.answer.schedule.submit": {
+      "n": 2000,
+      "p50_ns": 79132125,
+      "p90_ns": 121404625,
+      "p99_ns": 145428833,
+      "p999_ns": 155691416,
+      "max_ns": 159022125
+    }
+  },
+  "verified_process_success_distributions": {
+    "client.answer.capacity": {
+      "n": 4004,
+      "p50_ns": 230583,
+      "p90_ns": 3853916,
+      "p99_ns": 5763959,
+      "p999_ns": 7694959,
+      "max_ns": 8027625
+    },
+    "client.answer.hello": {
+      "n": 4004,
+      "p50_ns": 35084,
+      "p90_ns": 55958,
+      "p99_ns": 86541,
+      "p999_ns": 138250,
+      "max_ns": 238750
+    },
+    "client.answer.inspect": {
+      "n": 2000,
+      "p50_ns": 292708,
+      "p90_ns": 426125,
+      "p99_ns": 627000,
+      "p999_ns": 802542,
+      "max_ns": 943875
+    },
+    "client.answer.list": {
+      "n": 4004,
+      "p50_ns": 300917,
+      "p90_ns": 4488125,
+      "p99_ns": 6579084,
+      "p999_ns": 7681625,
+      "max_ns": 10066583
+    }
+  },
+  "runouts": {},
+  "seed_generation": "NOT PERFORMED; root must explicitly review candidate935 representation versus restored63/cc before any calibration use",
+  "claim": "actual capacity fix + healthy wait samples at named935 source, under loaded host; no competitive timing result"
+}

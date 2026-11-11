@@ -1,0 +1,62 @@
+{
+  "role": "implementer",
+  "policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "ded2cc757452c3529d22db3f86c46d31809040df",
+  "source_only": true,
+  "production": {
+    "crates/hex-node/src/recorded.rs": "7d0b3cac08986c1f9e5a40048ef9da6ca5152f00ff5a0ff689d6794f48680b3f",
+    "crates/hex-runtime/src/windows/mod.rs": "d0df1b60ff9d17f78b57141850a25d7d072b49a971893141fd2e4669124d001e",
+    "crates/hex-runtime/src/windows/preflight.rs": "eab0c3012564481b9b7567417f5b5bf1a3941b6fb990a92e6e00f8ec11de2bdb",
+    "crates/hex-runtime/src/windows/keeper.rs": "da4c9536a1c05bf59ab539261c5f037745364aaa1e08a1b51664fb67d56217a8",
+    "crates/hex-runtime/src/windows/keeper/vm.rs": "1f4221ab473ba65ba9bef0cd2b0ddcbc56b7f21ff3af06908c7fa1ed313cf128",
+    "crates/hex-runtime/src/windows/oci/mod.rs": "2d1979d4e19342ff036a09f5f1ff13ca04af3c7288c20fd6174497d3d6418d0c",
+    "crates/hex-runtime/src/windows/oci/service.rs": "be4929aa4f26f5ecaf8907294c34f65e7783a4e1e5cf22bfd62b3919c2dd478c",
+    "crates/hex-runtime/src/macos/managed.rs": "ca9dc9920792c398ffd46220015682559c37595d7115d7ac88d5225cc81659bd",
+    "crates/hex-runtime/src/macos/managed/preflight.rs": "dd94e050379b7fb2c3305f023710f08809fcb4837a54042d1846d4a7dca4cbb2"
+  },
+  "test_paths": {
+    "crates/hex-runtime/src/windows/oci/sys.rs": "25ddda5fd7c64bfff4c8fa441d5c812597f9f8626afe6ce3870dfdd0df4d2334",
+    "docs/research/measurements/hex-complete-lifecycle/recorded_preflight_tests.rs": "eb4a9e2b3886c672720534eb17029071088cdaefc41ee626f1d1a4a7aa561f38",
+    "docs/research/measurements/hex-complete-lifecycle/recorded_adapter_preflight_tests.rs": "5569c4f76665d7b253327e53893a1fe78038d0268129d20de5515b506544b5d6"
+  },
+  "actual_prior": {
+    "original2": "416458dd actual2red; original test bodies retained",
+    "e52_84b": "ROOT174d actual9:8PASS/1FAIL/0ignored, log0cf6177e57fb2a31ccf603ac39adca5d49432828a6b75101874290dcdb7e4aa7. Original2+sixothersGREEN; uppercase original1RED. NOT platform extension proof.",
+    "scanner_remedy": "ded2cc757452c3529d22db3f86c46d31809040df separately sealed, green not yet attributed here"
+  },
+  "new_controls": {
+    "node_initialized_adapter_child": 6,
+    "windows_readonly_metadata": 4,
+    "outcome": "UNRUN; no L3 compiler/unit/native job"
+  },
+  "mac_parent_only_registers_preflight": true,
+  "fixture_original84b_is_byte_identical_prefix": true,
+  "api_document": "RECOVERY-PREFLIGHT-API.md",
+  "dependencies": [
+    "ROOT39a5/f714 native_routes+FC pure preflight and L2Guest299",
+    "L2e81 initialized-cost actual-red remedy and c7dc exact boot receipt readonly validation",
+    "L1Node/Supervisor read-only native preflight +deferred initialization composition (owner pending)",
+    "Existing shared c941/7f1/a357+API/wire/cost/provider cohort; no new dependency edge"
+  ],
+  "intake": "Apply only named deltas from e52/parent; preserve ROOT7 route_for calls, canonical outer allocation/route projections, 5f fixture/schema ports, shared Catalog/NativeRecord/Books. New Mac child registration ONLY, never import unsealed CPU/token/helper drafts. Windows oci/sys.rs changes ONE test marker unwrap required by fallible marker path, no native unsafe change.",
+  "semantics": "ALL Box/Pool structure and canonical claims/scopes/route joins, then ALL configured adapter metadata, then cross-owner native name join, only then deferred keeper/native initialization/recovery callbacks/Store mutation. Existing Store/catalog/keeper/native receipt owners only; no new ledger, provider, manager or OS effect during preflight.",
+  "gaps": [
+    "Cold active Mac native owner lacks persistent helper producer/proxy; preflight refuses before sibling adoption, not completion.",
+    "Native live kernel job/pgroup/helper/membership, scope release, crash/fault/effect proof remains ROOT work.",
+    "Released historical profile changes conservatively refuse; no terminal-phase-only skip introduced.",
+    "Dedicated GPU backing preparation/source callback wrapper depends on L2 new sealed producer.",
+    "Outliving orphan marker/keeper rows are retained/refused; no broad reclaim grant.",
+    "Legacy HCS marker does not contain an every-field original workload/native-incarnation commitment. Checks are exact for its actual schema; no stronger claim.",
+    "Inherited serde/BTreeMap/classes/legacy constructor and recovery-summary allocations remain review gaps; new bounded file buffers and path/storage checks are fallible, not whole-path allocation proof."
+  ],
+  "rules": {
+    "R01": "New native byte reader pre-reserves bound+1, fixed loop never grows; same reader for legacy strict/VM/HCS marker. New Windows marker/scratch and strict keeper paths fallible. No unsafe added; existing opaque native owner remains same.",
+    "R02_R03": "Existing HCS record/request/receipt/keeper schema and same native Scope reused. Integer field limits derive from native widths; directory work bounds derive existing per-owner canonical/temp rows and protocol-global files, never admission authority. Primary native mechanisms unchanged; existing research/manifests apply.",
+    "R04_R05_R06_R07_R12_R13": "Same Keeping mutex now explicit Configured->Running; preflight reads no locks/files in write mode and does not notify/resolve/adopt/watch. Native scope identity retains full record commitment, no PID/name substitution. No new waits, timers, cache, worker or manager.",
+    "R08_R14": "No speed/leak/resource/performance claim; ROOT profiling/baselines/full gates owed.",
+    "R09_R10": "Original2 and uppercase actual source/light reds preserved separately. Platform metadata/deferred startup is required source feature, not claimed reproduced native bug.",
+    "R11_R15": "Supported-target compile/Clippy/new controls and actual native effects unrun for new closure. ROOT owns joined validation and native agents own assigned campaigns; no duplicate job.",
+    "R16": "No runner/foreign PID/data/secrets change; unfinished Mac source privately snapshotted then restored after named commit. No extra agents/goals."
+  }
+}

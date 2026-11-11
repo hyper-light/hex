@@ -1,0 +1,36 @@
+{
+  "parent": "ce4c79c64a321e44dcd1f1cc2532708e0c5fe99b",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "client_RPC_successor": "17e11e644ea8d0e8df64a9f899d6e7fd7d25093f",
+  "previous_RPC_dependency": "66d18ca62f045bf388a4e5764baa562016f19d53",
+  "client_calls_sha256": "0d8bc48263c67cf4b253c3711c885b981345ece25b5d0bb64831b28e9c7874d6",
+  "same_public_methods": [
+    "capacity_before(Class,Instant)->Result<Option<Capacity>,Refusal>",
+    "physical_report_before(Instant)->Result<PhysicalReport,Refusal>",
+    "create_before(BoxSpec,Instant)->Result<BoxInfo,Refusal>"
+  ],
+  "review": "Metadata calls retain SAME caller/configured cap through existing Conn.call_before, validate and check remaining before success return. Creation receiver-side uncertainty is documented. No consumer/source signature change, wire, manager or lifetime timer.",
+  "consumer_production_sha256": {
+    "crates/hex-runtime/src/firecracker/native.rs": "46b3f0febe11663f98b71b7fdfb8ebc00c56bf8077254b12709ae4606465919f",
+    "crates/hex-runtime/src/firecracker/pool.rs": "192103deec4ad901ece4201da1078070ac23466ac8f98e107d174041ff6fe54d",
+    "crates/hex-runtime/src/firecracker/transport.rs": "ba2c9d915074c731bf09db86cede7e58e362c4738e23831ec364115d8d2e9d15"
+  },
+  "consumer_source": "76fd3e832e779b089de4921135a11eb8c0c4049d RPC/deadline consumer +ce4c79c64a321e44dcd1f1cc2532708e0c5fe99b unique duplex consumer, with earlier signed5c10 constructor dependency.",
+  "coherent_composition": "Use calls.rs17e successor; guest/duplex/copy/stage signed948351166bf80adfc93eb405f6abcaf59859a6e3. Its calls.rs was protected unchanged in that alias patch; do not overwrite the17e RPC successor with older whole-tree calls source.",
+  "protected_client_test_leaf": {
+    "path": "crates/hex-client/src/calls/budget_tests.rs",
+    "sha256": "9e49002f5ae2866ac9f523a231cf2abc4ffc365c5309a5cefeccb0854a848461",
+    "unchanged_from_66d": true
+  },
+  "checks": {
+    "production_edits": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "tests": "UNRUN",
+    "test_dispatches": 0,
+    "native_effects": 0
+  },
+  "limits": "Source correspondence only, no validation/timeout/native acceptance result. Required receiver-side cleanup/absence proof and R01 inherited Create Box allocation remain qualified; existing CPU/subset originals unchanged. Historical dependency manifests preserved rather than rewritten."
+}

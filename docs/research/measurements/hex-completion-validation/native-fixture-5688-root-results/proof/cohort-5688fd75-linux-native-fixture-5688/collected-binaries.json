@@ -1,0 +1,82 @@
+{
+  "binary": [
+    {
+      "path": "target/debug/deps/hex_runtime-f32d8d7efe3211a6",
+      "bytes": 114486992,
+      "sha256": "1ceb8409b87757ab39765bde46e833a9a777dec8d8bdde697463823276e1c39c"
+    }
+  ],
+  "phases": [
+    {
+      "name": "native-fixed-fixture-new2",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::native_fixture::tests::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 855618,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "ac690fe767f32c11b08ce1702bf40eba091f306a79a4d1a3fc8ae74a81377f37",
+      "bytes": 3568,
+      "expected_selected": 2,
+      "actual_counts": [
+        {
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "guest::native_fixture::tests::fallible_fixture_spec_preserves_existing_kernel_and_ordered_share_grammar",
+          "outcome": "ok"
+        },
+        {
+          "name": "guest::native_fixture::tests::fixed_native_fixture_uses_real_evidence_and_refuses_legacy_or_wrong_cost",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "fixture-and-observations-strict",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-runtime",
+        "-p",
+        "hex-node",
+        "-p",
+        "hex-cli",
+        "--all-targets",
+        "--locked",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 920579,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "8240400e0a195fa7e987077b4314048d4f94ec0638c1abf2c544c583c0612d3e",
+      "bytes": 3761,
+      "test_outcomes": []
+    }
+  ],
+  "recorded_children_reaped": true
+}

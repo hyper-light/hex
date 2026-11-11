@@ -1,0 +1,70 @@
+{
+  "requirement": "AC-T7.4.1",
+  "role": "ROOT coordinator",
+  "base_hex": "1a9a92bf1a657260b2684bb1982f5b3bfb46c00a",
+  "api_upstream": "33df95b08ad8f95bddeaa1c48acf0c64386e0eac",
+  "source_sdk_final": "b35100276cad014f08762e57450d76afb1958f5a",
+  "source_cleanup_production": "2d1f77f4bc16e6feebb2f215a745ead97ca7a499",
+  "source_original": "5ba9ca5022357807c7b70a9ffe31534475a4cc31",
+  "source_fixture_only": "b35100276cad014f08762e57450d76afb1958f5a",
+  "review": "Full six-source review and separate L4 read-only review retained. WAIT_OBJECT_0 returns storage ownership only, not scope release; wait failure retains uncertainty. No native/no-leak claim.",
+  "root_prefix_preserved": [
+    "backend_of byte exact",
+    "Windows ARM64 backend regression",
+    "shared-Venus bool tests and bounds both states",
+    "triomphe unsize metadata"
+  ],
+  "metadata_only": "Existing windows-sys Win32_System_Pipes feature. No registry versions/checksums/Cargo.lock changed.",
+  "ordinary_firecracker_port": "LaunchIo.gpu_report None for existing no-report construction. Original output-sink source/control remains pending separately.",
+  "files": [
+    {
+      "path": "vendor/shards/crates/api/src/lib.rs",
+      "sha256": "46e4f0412c085d8b0c7989d6e2f64f88499101a8103c9cb1ba671633e5160a18",
+      "byte_exact_source": false
+    },
+    {
+      "path": "vendor/shards/crates/api/src/client.rs",
+      "sha256": "fd5ad6eb01836a850750776ee8cab61a5e60036a67ea566262d0c8a473f9d7ef",
+      "byte_exact_source": false
+    },
+    {
+      "path": "vendor/shards/crates/api/src/physical.rs",
+      "sha256": "6b6ac108aa08450c1b160274ade17f73464d3ee3703cc1f1b7cbddcda60e3456",
+      "byte_exact_source": true
+    },
+    {
+      "path": "vendor/shards/crates/api/src/physical/report.rs",
+      "sha256": "d602df0fca7c491b8206207a2cdf7f13009390ebef77b3d22699b643ef236eb7",
+      "byte_exact_source": true
+    },
+    {
+      "path": "vendor/shards/crates/api/src/physical/report/unix.rs",
+      "sha256": "c9380da78262a82271d6af5f1600be33b195547dc56fa4cc6360a7249f223462",
+      "byte_exact_source": true
+    },
+    {
+      "path": "vendor/shards/crates/api/src/physical/report/windows.rs",
+      "sha256": "86e39096379f3524448098f81e5cba159017fb687a148c5338e4de2e3939d6c6",
+      "byte_exact_source": true
+    }
+  ],
+  "patch": {
+    "path": "vendor/patches/shards/0019-observe-scoped-gpu-report-completion-through-the-native-owner.patch",
+    "bytes": 55811,
+    "sha256": "a98b5aa8286495b34d20655adc33aefae53a45810de9e6c004f657bc9fd67109"
+  },
+  "vendor_verification": {
+    "files": 46,
+    "recorded_changes": 19,
+    "differences": 0,
+    "exit": 0
+  },
+  "tests_executed": 0,
+  "native_invocations": 0,
+  "remaining": [
+    "coherent Linux/macOS/Windows final writer carriage and SDK consumers",
+    "actual private Windows pending/cancel-error/late-completion/control receipts",
+    "same absolute connect_owned finite retry gap original control before remedy",
+    "full VMM/renderer/native scope and guest visibility/cleanup proof"
+  ]
+}

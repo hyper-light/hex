@@ -1,0 +1,103 @@
+{
+  "kind": "exact pinned Hex oci-launch image-loader diagnostic; expected EOF parse refusal2; NOT Runtime/Store/GPU pass",
+  "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\native-launcher-loader-v1",
+  "id": "native-hcs-loader-302ffbfe3806414d900d93876f5a374a",
+  "driver_pid": 14424,
+  "needs": "cpus=1,mem=4g,disk=12g",
+  "source_production_reference": "2c8855b220a36c57685e456a7b8c98d8368f7899",
+  "native_budget_ms": 5000,
+  "phases": [
+    {
+      "phase": "activate own scratch",
+      "hr": "0x00000000"
+    },
+    {
+      "phase": "prepare own scratch",
+      "hr": "0x00000000"
+    },
+    {
+      "closed": true,
+      "immediate_pending": true,
+      "callbacks": 1,
+      "result_document": null,
+      "phase": "actual native create callback",
+      "hr": "0x00000000"
+    },
+    {
+      "phase": "native start submitted",
+      "hr": "0x00000000"
+    },
+    {
+      "closed": true,
+      "immediate_pending": true,
+      "callbacks": 1,
+      "result_document": null,
+      "phase": "native start callback",
+      "hr": "0x00000000"
+    },
+    {
+      "phase": "native CPU process submitted",
+      "hr": "0x00000000"
+    },
+    {
+      "closed": true,
+      "immediate_pending": false,
+      "callbacks": 1,
+      "result_document": null,
+      "phase": "native CPU process callback",
+      "hr": "0x00000000"
+    },
+    {
+      "phase": "terminate own system submitted",
+      "hr": "0x00000000"
+    },
+    {
+      "closed": true,
+      "immediate_pending": true,
+      "callbacks": 1,
+      "result_document": "{\"Status\":0,\"ExitType\":\"ForcedExit\",\"Attribution\":[{\"SystemExit\":{\"Detail\":\"Terminate\",\"Initiator\":\"Client\"}}]}",
+      "phase": "terminate own system callback",
+      "hr": "0x00000000"
+    },
+    {
+      "phase": "unprepare own scratch",
+      "meaning": "existing Hex FilterHeld classification: container termination already removed filter; detachment still required",
+      "hr": "0x801f0010"
+    },
+    {
+      "phase": "deactivate own scratch",
+      "hr": "0x00000000"
+    }
+  ],
+  "state": "actual-pinned-launcher-child-exit-captured",
+  "system_absent_before": true,
+  "system_absent_after": true,
+  "prepared": false,
+  "activated": false,
+  "cleanup_errors": [],
+  "driver_binary_sha256": "b23ef322a757f46e0399d5bb4c623b49f2c6563db0960366d92a6e6459e70c71",
+  "launcher": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsllvm1\\target\\debug\\hex.exe",
+  "launcher_sha256": "ba4ef610609009d64aa1245ba98554924c1ea1df0e20e30daa07164a42135225",
+  "base_blank_sha256": "67a3974475c80752217719d36bcf282d4b2374a83387ba1716896f66d7433d10",
+  "volume": "\\\\?\\Volume{136e4c6d-6471-474e-91b2-fc8fddd918a5}",
+  "document_sha256": "1273585a0d157d2e8db5f03bcc991cc34a9b1ccfc3996cb5faaa9d37b46d8f5e",
+  "full_command": "C:\\Windows\\System32\\cmd.exe /d /v:on /c \"set /p native_hold= & C:\\hex\\hex.exe oci-launch <NUL >C:\\native-output\\launcher.stdout.log 2>C:\\native-output\\launcher.stderr.log & echo !errorlevel!>C:\\native-output\\launcher.exit.txt\"",
+  "expected_child_entrypoint": "C:\\hex\\hex.exe oci-launch",
+  "child_stdin": "NUL/EOF; expected Hex serve parser refusal2 if actual binary loads",
+  "child": {
+    "exit": 0,
+    "dotnet_exit": 0,
+    "reaped": true,
+    "birth": "2026-11-11T04:52:26.4011010Z",
+    "pid": 16708,
+    "held_on_private_stdin": true
+  },
+  "loader_exit_text": "-1073741515",
+  "loader_exit_code": -1073741515,
+  "loader_exit_hex": "0xc0000135",
+  "loader_stdout": "",
+  "loader_stderr": "",
+  "original_error": "actual pinned Hex oci-launch did not reach expected EOF parser refusal; exact loader exit retained",
+  "mount_path_after_detach_hr": "0x80070037",
+  "exit_code": 1
+}

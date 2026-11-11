@@ -1,0 +1,28 @@
+{
+  "cohort-bcd5d849-linux-shared-dedicated-control-bcd5": {
+    "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-shared-dedicated-control-bcd5.scope",
+    "scope_absent": true,
+    "owners": [
+      {
+        "kind": "driver",
+        "recorded": {
+          "pid": 1583653,
+          "ppid": 1583528,
+          "start_ticks": 32733741
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      },
+      {
+        "kind": "cargo",
+        "recorded": {
+          "pid": 1591703,
+          "ppid": 1583653,
+          "start_ticks": 32734100
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "status": "SOURCE ONLY / ORIGINAL CONTROL UNRUN; no remedy or native call",
+  "parent": "e028e005b00a8d5c0a6dcd7eae27faaaa36d3b44",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer shards-gpu",
+  "unit": "guest::gpu_pool::tests::with_guest_normalizes_native_oci_before_checked_shards_slots",
+  "request": "ONE ROOT-assigned actual WithGuest.capacity(Oci) control; preserve strict checked push and no actual nativeSome overwrite",
+  "inputs": "Explicit model native facts/canonical holders, scoped renderer/guest readiness; not native GPU execution evidence. Existing NativeReporting runtime adapter and SAME Cold Books/Transaction reused.",
+  "preconditions": [
+    "actual charged PoolRecord Live with same native identity/scope",
+    "durable exact report/readiness/complete observer attempt",
+    "actual checked_physical returns exact same-provider metadata +canonical Backing holder",
+    "Books.capacity returns same factual DeviceInfo",
+    "valid native OCI prefix contains catalog placeholder +None holder; routes/masks/room/id bounded"
+  ],
+  "oracles": [
+    "WithGuest.capacity(Oci) succeeds after normalization before strict push",
+    "native id/total/free/prefix routes/mask bits retained",
+    "checked actual DeviceInfo/canonical holder published once",
+    "actual native Some foreign-holder refuses; never overwritten",
+    "zero boot/probe external effects, launch/finalize/stop"
+  ],
+  "fixture_delta": "Cold existing defaults preserved (optional report/physical None, second shared row empty); only new case opts into positive Live native receipt and explicit same-owner reports. Every old test body equal after removing added default fields.",
+  "checks": {
+    "scoped_rustfmt_parser": "exit0",
+    "git_diff_check": "exit0",
+    "cargo": "NOT RUN",
+    "native": "NOT RUN"
+  },
+  "files": {
+    "crates/hex-runtime/src/guest/gpu_pool.rs": {
+      "parent_sha256": "38f5acea62d5741bd942ca37603afcf8eb65c092e5ab18e47ac6d667ee7146c1",
+      "sha256": "45e170d8a33e9f9d361a3ab82aa72083ff0210beef58b4c67133ef4eb066af1d",
+      "production_prefix_sha256": "0d206baf51827bd1be1c1ab901dab8c39da4f7ba4d1331758bc9d6ed7c5a3765",
+      "old_unit_bodies_equal_after_removing_default_fixture_fields": 6
+    },
+    "crates/hex-runtime/src/guest/tests.rs": {
+      "parent_sha256": "31d49f9ea9587e139c88cd2839ffb166a7b6837c137185f1fe5a470cd76a0591",
+      "sha256": "fb602e3b73ad68906a3f7b6820889dec9a4dcdf8fc120f90efd8310388d663fe"
+    },
+    "crates/hex-runtime/src/guest/device_routing_tests.rs": {
+      "parent_sha256": "5a2c57be60fc88a5803091d5f73d2d4aef480ac6788af46f2c9ddb0671141334",
+      "sha256": "95a282a25e27295c913f9ac563ed82c4885680458db3b2b249fb363060be4304"
+    }
+  },
+  "owed": "ROOT exact nonzero original reproduction before any normalizer remedy; production conflicts remain fatal; family consumer and native closed-set/renderer proof separate."
+}

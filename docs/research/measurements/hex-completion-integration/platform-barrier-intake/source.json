@@ -1,0 +1,62 @@
+{
+  "reviewed_source": "c89d0143edf513fc8eff17f12094a9e33ce01fd4",
+  "parent": "4ca7afe919849846696e47e921a01c2823383a93",
+  "source_only": true,
+  "hashes": {
+    "crates/hex-node/src/recorded.rs": {
+      "expected": "7d0b3cac08986c1f9e5a40048ef9da6ca5152f00ff5a0ff689d6794f48680b3f",
+      "actual": "7d0b3cac08986c1f9e5a40048ef9da6ca5152f00ff5a0ff689d6794f48680b3f"
+    },
+    "crates/hex-runtime/src/windows/mod.rs": {
+      "expected": "d0df1b60ff9d17f78b57141850a25d7d072b49a971893141fd2e4669124d001e",
+      "actual": "d0df1b60ff9d17f78b57141850a25d7d072b49a971893141fd2e4669124d001e"
+    },
+    "crates/hex-runtime/src/windows/preflight.rs": {
+      "expected": "eab0c3012564481b9b7567417f5b5bf1a3941b6fb990a92e6e00f8ec11de2bdb",
+      "actual": "eab0c3012564481b9b7567417f5b5bf1a3941b6fb990a92e6e00f8ec11de2bdb"
+    },
+    "crates/hex-runtime/src/windows/keeper.rs": {
+      "expected": "da4c9536a1c05bf59ab539261c5f037745364aaa1e08a1b51664fb67d56217a8",
+      "actual": "da4c9536a1c05bf59ab539261c5f037745364aaa1e08a1b51664fb67d56217a8"
+    },
+    "crates/hex-runtime/src/windows/keeper/vm.rs": {
+      "expected": "1f4221ab473ba65ba9bef0cd2b0ddcbc56b7f21ff3af06908c7fa1ed313cf128",
+      "actual": "1f4221ab473ba65ba9bef0cd2b0ddcbc56b7f21ff3af06908c7fa1ed313cf128"
+    },
+    "crates/hex-runtime/src/windows/oci/mod.rs": {
+      "expected": "2d1979d4e19342ff036a09f5f1ff13ca04af3c7288c20fd6174497d3d6418d0c",
+      "actual": "2d1979d4e19342ff036a09f5f1ff13ca04af3c7288c20fd6174497d3d6418d0c"
+    },
+    "crates/hex-runtime/src/windows/oci/service.rs": {
+      "expected": "be4929aa4f26f5ecaf8907294c34f65e7783a4e1e5cf22bfd62b3919c2dd478c",
+      "actual": "be4929aa4f26f5ecaf8907294c34f65e7783a4e1e5cf22bfd62b3919c2dd478c"
+    },
+    "crates/hex-runtime/src/macos/managed.rs": {
+      "expected": "ca9dc9920792c398ffd46220015682559c37595d7115d7ac88d5225cc81659bd",
+      "actual": "ca9dc9920792c398ffd46220015682559c37595d7115d7ac88d5225cc81659bd"
+    },
+    "crates/hex-runtime/src/macos/managed/preflight.rs": {
+      "expected": "dd94e050379b7fb2c3305f023710f08809fcb4837a54042d1846d4a7dca4cbb2",
+      "actual": "dd94e050379b7fb2c3305f023710f08809fcb4837a54042d1846d4a7dca4cbb2"
+    },
+    "crates/hex-runtime/src/windows/oci/sys.rs": {
+      "expected": "25ddda5fd7c64bfff4c8fa441d5c812597f9f8626afe6ce3870dfdd0df4d2334",
+      "actual": "b4cde161560384a31dd86cfbc9230692bcb7151838185f380af19fa19c6e612c"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/recorded_preflight_tests.rs": {
+      "expected": "eb4a9e2b3886c672720534eb17029071088cdaefc41ee626f1d1a4a7aa561f38",
+      "actual": "eb4a9e2b3886c672720534eb17029071088cdaefc41ee626f1d1a4a7aa561f38"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/recorded_adapter_preflight_tests.rs": {
+      "expected": "5569c4f76665d7b253327e53893a1fe78038d0268129d20de5515b506544b5d6",
+      "actual": "5569c4f76665d7b253327e53893a1fe78038d0268129d20de5515b506544b5d6"
+    }
+  },
+  "sys_retained_root_fixture_delta": "diff --git a/crates/hex-runtime/src/windows/oci/sys.rs b/crates/hex-runtime/src/windows/oci/sys.rs\nindex 11f394dd..f25c0054 100644\n--- a/crates/hex-runtime/src/windows/oci/sys.rs\n+++ b/crates/hex-runtime/src/windows/oci/sys.rs\n@@ -1813,6 +1813,7 @@ mod create_tests {\n             reclaim_failures: Vec::new(),\n         };\n         let spec = BoxSpec {\n+            route: None,\n             id: BoxId::new(\"pending-runtime\").unwrap(),\n             bounds: hex_api::Bounds::default(),\n             owner: None,\n@@ -1881,6 +1882,7 @@ mod create_tests {\n         CALLS.with_borrow(|calls| assert_eq!((calls.closed, calls.cancelled), (0, 1)));\n \n         let sibling = BoxSpec {\n+            route: None,\n             id: BoxId::new(\"independent-empty-job\").unwrap(),\n             bounds: hex_api::Bounds::default(),\n             owner: None,\n",
+  "new_controls": {
+    "node": 6,
+    "windows": 4,
+    "executed": 0
+  },
+  "native_invocations": 0
+}

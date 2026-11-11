@@ -1,0 +1,34 @@
+{
+  "parent": "a56fe683494544e9783f0d5e13e922d823ca8221",
+  "base": "25d98e88be3b8173605ed7e8e1d109d309a278b6",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": {
+    "crates/hex-api/src/devices.rs": "1870dbebf371cd7c0ab1afd88b81dd8ada714a8a7bb8e8c5ac50094bdad6900e",
+    "crates/hex-api/src/runtime.rs": "dee6a743e4f53102b603cd02d11eef26c9f0c0de1a2eb54258c6cce82c850d34",
+    "crates/hex-sim/src/model.rs": "61f99c48985db13e9690fd6e69907fddc652db0ae7e77fd41f848cfd85eee83a"
+  },
+  "actual_original": "ROOT25d9 CPU e5c0/1, healthy initial snapshot then FC callbacks2 yield BackingUncertain from refresh/facts, log58a60692d499dfbd42b9d960accc6f4954714d15661cd74e9a833fbd167451e7",
+  "approved_contract": {
+    "API": "PhysicalReport.unavailable:Vec<BackendUnavailable>, serde-default empty/skip empty; BackendUnavailable{backend:Class,cause:Refusal}; MAX_COUNT two existing VM classes, unique; ONLY Backing Pending/Busy/Uncertain qualified; from_refusal returns original invalid/nonqualified error unchanged. Existing report authority/metadata validation stays fatal.",
+    "clone": "No implicit Clone. Checked try_clone only copies scalar qualified Backing error; bounded vector reserves fallibly; report validates before copies.",
+    "deserialize": "Reuse SAME API bounded_values visitor with crate-only visibility, bound before extra element materialization. Existing refusal/message encoding/budgets unchanged.",
+    "model": "RuntimeRoutes.admit:Option<u64>, serde-default None=legacy all. Valid mask only existing offers up to64; share/check validate, admits(at) checked. Retained original receipts are not made fresh by None/empty substitution."
+  },
+  "ROOT_integration": [
+    "Reexport BackendUnavailable from hex-api lib.rs",
+    "Append PhysicalReport wire optional tail: bounded count, existing Class tag and existing refusal codec within existing message/alloc limit",
+    "Mechanical unavailable:Vec::new/admit:None outside literal ports",
+    "Peer/schedule offer availability projection must retain admit; no Capacity DTO or Runtime trait change"
+  ],
+  "new_control": "API qualified_vm_unavailable_is_bounded_unique_and_preserves_actual_report SOURCE ONLY/UNRUN; originalCPU/subset and old API tests unchanged except owned new-field literal compatibility",
+  "checks": {
+    "fmtparser": 0,
+    "compile": "UNRUN/actual consumers+Root ports required",
+    "tests": "UNRUN",
+    "dispatches": 0,
+    "native_effects": 0
+  },
+  "remaining": "No remedy claim yet. Native direct-provider/snapshot/Index/Service and L3Recorded consumers next, actual authority/CPU plane required; retain VM charge/claims/profile while fresh grants blocked. No empty-success fallback/zero telemetry or false cleanup credit."
+}

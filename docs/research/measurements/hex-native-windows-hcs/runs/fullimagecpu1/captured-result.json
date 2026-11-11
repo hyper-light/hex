@@ -1,0 +1,154 @@
+{
+  "kind": "independent full-image HCS native start/error-document control; NOT Hex Runtime/Store/GPU proof",
+  "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\native-full-image-cpu-v1",
+  "id": "native-hcs-full-image-cpu-311010846a9341f286171e1d49010879",
+  "driver_pid": 5648,
+  "needs": "cpus=1,mem=4g,disk=12g",
+  "source_production_reference": "2c8855b220a36c57685e456a7b8c98d8368f7899",
+  "native_budget_ms": 5000,
+  "phases": [
+    {
+      "phase": "activate own scratch",
+      "hr": "0x00000000"
+    },
+    {
+      "phase": "prepare own scratch",
+      "hr": "0x00000000"
+    },
+    {
+      "closed": true,
+      "immediate_pending": true,
+      "callbacks": 1,
+      "result_document": null,
+      "phase": "actual native create callback",
+      "hr": "0x00000000"
+    },
+    {
+      "phase": "native start submitted",
+      "hr": "0x00000000"
+    },
+    {
+      "closed": true,
+      "immediate_pending": true,
+      "callbacks": 1,
+      "result_document": "{\"Error\":-2147024249,\"ErrorMessage\":\"\",\"Attribution\":[{\"OperationFailure\":{\"Detail\":\"Start\"}}]}",
+      "phase": "native start callback",
+      "hr": "0x80070287"
+    },
+    {
+      "phase": "terminate own system submitted",
+      "hr": "0x80370110"
+    },
+    {
+      "phase": "unprepare own scratch",
+      "hr": "0x00000000"
+    },
+    {
+      "phase": "deactivate own scratch",
+      "hr": "0x00000000"
+    }
+  ],
+  "state": "created",
+  "system_absent_before": true,
+  "system_absent_after": true,
+  "prepared": false,
+  "activated": false,
+  "cleanup_errors": [
+    "Exception calling \"Okay\" with \"2\" argument(s): \"terminate own system submitted HRESULT=0x80370110\""
+  ],
+  "driver_binary_sha256": "faba83ca93d31489e026a35edc60bcbd34cb799ebd11dc9d3cfc88cfaaa272cd",
+  "image_receipt_sha256": "7ea4fec0d58399004a02737b2b47e59bf32ece71fbf44c0f670d084601d2e57d",
+  "image_reference": "mcr.microsoft.com/windows/server@sha256:a62109569303cfe0ab49b1618383615f0477cdc285529b98d9b7085902d0e745",
+  "layer_inputs": [
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1"
+  ],
+  "required_dlls": [
+    {
+      "name": "ntdll.dll",
+      "files": [
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3\\Files\\Windows\\System32\\ntdll.dll",
+          "sha256": "4092c01cb70e15a956d76ca43366a6e324f1154eab7bf7636fe13236215c578a",
+          "bytes": 2541688
+        },
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\Files\\Windows\\System32\\ntdll.dll",
+          "sha256": "cfb1a39a15036ee71daa52e428523c9e7bf83d85bb1b2f0a268d05c3b5392bdd",
+          "bytes": 2521984
+        }
+      ],
+      "present": true
+    },
+    {
+      "name": "gdi32.dll",
+      "files": [
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3\\Files\\Windows\\System32\\gdi32.dll",
+          "sha256": "ec840fa35631a34affe27e684f05db59ea152eb8f251058583e1f67ea2b0e767",
+          "bytes": 187456
+        },
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\Files\\Windows\\System32\\gdi32.dll",
+          "sha256": "dcb0e1ac8e4af783b906a8964471edfd53cdd216ff0daf893aa747009fb97e5a",
+          "bytes": 187392
+        }
+      ],
+      "present": true
+    },
+    {
+      "name": "dxgi.dll",
+      "files": [
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3\\Files\\Windows\\System32\\dxgi.dll",
+          "sha256": "3af979063569dac5a1609df7c55af28ae0a1b18221a56703690bec9037060c0f",
+          "bytes": 1316248
+        },
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\Files\\Windows\\System32\\dxgi.dll",
+          "sha256": "a5910a19cb0dc99b411bab8bcc6a3083675eca770feb108cf142fd2d7e1dace5",
+          "bytes": 1294752
+        }
+      ],
+      "present": true
+    },
+    {
+      "name": "d3d12.dll",
+      "files": [
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3\\Files\\Windows\\System32\\d3d12.dll",
+          "sha256": "038c378615f358b07b43f23b9a1d8f99925331be398ba6adbc25d82759aae8dd",
+          "bytes": 157544
+        },
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\Files\\Windows\\System32\\d3d12.dll",
+          "sha256": "2f19adf6ee6ae40c41524499cec619429fa9aa5d720c4123a2c8f1ef97ac53a9",
+          "bytes": 146080
+        }
+      ],
+      "present": true
+    },
+    {
+      "name": "d3dcompiler_47.dll",
+      "files": [
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3\\Files\\Windows\\System32\\d3dcompiler_47.dll",
+          "sha256": "1c060a8b8c3c6ef3b9a7434ac767fff4d0d880d0b33c1e7a60acdd750df44c74",
+          "bytes": 4669440
+        },
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\Files\\Windows\\System32\\d3dcompiler_47.dll",
+          "sha256": "5e2d8dd8c833cdfaeee031ed04638e981198bb35ed6c4469bd53fbe24538a91b",
+          "bytes": 4669440
+        }
+      ],
+      "present": true
+    }
+  ],
+  "base_blank_sha256": "ea36b14a9e2ea129b5fd7c3e5af570b10f67501f9190bd6a7825666ad79bcfa0",
+  "volume": "\\\\?\\Volume{617a69d5-c586-4de4-a607-f66df39e7bd8}",
+  "document_sha256": "774a9002bb6cdcd67f7804e78f2a2ced939c529463fb0348e7545c5080021337",
+  "original_error": "Exception calling \"Okay\" with \"2\" argument(s): \"native start callback HRESULT=0x80070287\"",
+  "mount_path_after_detach_hr": "0x80070037",
+  "exit_code": 1
+}

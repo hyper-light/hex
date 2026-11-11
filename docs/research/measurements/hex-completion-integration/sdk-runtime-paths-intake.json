@@ -1,0 +1,14 @@
+{
+  "owner_source": "aa7e028508383e58b55d622a299b263bfac064b0",
+  "owner_base": "9e6243da87d7ec18fb2e0591b4767f1b7b0a5d9a",
+  "root_before": "427f7112a59dc36c6238bad22c451b2b196146e2",
+  "preserved_function_bytes": {
+    "connect_borrowed": "2af4ac1dc68574b2bb2ce907305170f08c6573967a65b75e3e0d63593c942c15",
+    "arguments": "9e7c380be65a93959b0c9afd7dbc105a3e1553c24de86f5757cd7437c87b55b3"
+  },
+  "source_changes": "exact SDK owner delta: typed runtime roots shared by configured query and managed launch, host-managed-only marker, query-only GPU arguments and DifferentScope",
+  "compile": "source only; owner predecessor compiler fixture failure retained; joined ROOT check owed",
+  "policy_revision": "ca3ab10c151aa5539e757f1cc76029746ccbb561",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent_shards_binary": "no new binary installed; exact parent/VMM candidate still unbuilt"
+}

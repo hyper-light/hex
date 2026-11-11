@@ -14,7 +14,7 @@
 //! is `hex keep`, started by the node ([`super::WinRuntime`]); this module is the keeper's body and the
 //! node's handle on it.
 
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use hex_api::Refusal;
@@ -68,11 +68,35 @@ pub fn run(args: &Args) -> Result<(), Refusal> {
         sys::created(&me).map_err(|e| Refusal::os("reading the keeper's start time", e))?;
     write_ready(&args.ready, std::process::id(), created)
         .map_err(|e| Refusal::os("saying the keeper is ready", e))?;
-    // Until the stop is asked. No deadline: parity with Linux, where a box waits for its node.
-    if sys::wait(&stop, u32::MAX).map_err(|e| Refusal::os("waiting on the keeper's stop", e))? {
-        return Ok(());
+    let wake = super::oci::service::wake(&args.state)?;
+    let owner = hex_core::hcs::InitRecord {
+        pid: std::process::id(),
+        created,
+    };
+    let mut native = super::oci::service::Service::new();
+    loop {
+        // Reset before the scan: a request arriving during the scan retains its signal. Startup
+        // also drains requests a node committed before it could signal the keeper.
+        sys::reset(&wake).map_err(|e| Refusal::os("arming the keeper's native wake", e))?;
+        if let Err(error) = native.dispatch(&args.state, owner) {
+            // Preserve the keeper's existing job ownership on a service/storage refusal. This is
+            // a latest-error diagnostic, not a retry queue or a claim; the next request wakes us.
+            if std::fs::write(args.state.join("native-create.refusal"), error.to_string()).is_err()
+            {
+                // The requester also gets typed uncertainty when its receipt cannot be read.
+                // Diagnostic storage loss must not close unrelated boxes' keeper handles.
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "native create failed and its diagnostic could not be stored; claims remain held"
+                );
+            }
+        }
+        if sys::wait_either(&stop, &wake)
+            .map_err(|e| Refusal::os("waiting on keeper work or stop", e))?
+        {
+            return Ok(());
+        }
     }
-    Ok(())
 }
 
 /// The keeper's stop event's name, one per state folder (`Local\hex-keep-<hash of path>-stop`): the node
@@ -218,15 +242,102 @@ pub fn write_held(
 /// Box `id`'s recorded keeper handle, if any: which keeper holds it and its value there.
 pub fn read_held(state: &Path, id: &str) -> Option<Held> {
     let text = std::fs::read_to_string(held_file(state, id)).ok()?;
+    parse_held(&text, false)
+}
+
+fn parse_held(text: &str, strict: bool) -> Option<Held> {
     let mut p = text.split_whitespace();
-    Some(Held {
+    let held = Held {
         keeper_pid: p.next()?.parse().ok()?,
         keeper_created: p.next()?.parse().ok()?,
         value: p.next()?.parse().ok()?,
-    })
+    };
+    if strict
+        && (held.keeper_pid == 0
+            || held.keeper_created == 0
+            || held.value == 0
+            || p.next().is_some())
+    {
+        return None;
+    }
+    Some(held)
+}
+
+/// Same receipt parser, retaining missing/read/malformed as distinct outcomes for startup.
+pub(super) fn read_held_strict(state: &Path, id: &hex_api::BoxId) -> Result<Option<Held>, Refusal> {
+    // A decimal unsigned integer has no more digits than its bit width, plus two separators.
+    let bound = u32::BITS
+        .checked_add(u64::BITS)
+        .and_then(|bits| bits.checked_add(usize::BITS))
+        .and_then(|bits| bits.checked_add(2))
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or_else(|| super::allocation(usize::MAX))?;
+    let Some(bytes) = read_native_bytes(
+        &vm::path(state, hex_core::record::OwnerRef::Box(id))?,
+        bound,
+    )?
+    else {
+        return Ok(None);
+    };
+    let held = std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(|text| parse_held(text, true))
+        .ok_or_else(|| receipt_invalid("a legacy keeper receipt is malformed"))?;
+    Ok(Some(held))
+}
+
+/// Bounded fallible storage shared by legacy startup validation and the committed VM receipt.
+pub(super) fn read_native_bytes(path: &Path, bound: usize) -> Result<Option<Vec<u8>>, Refusal> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(Refusal::os("opening a native keeper receipt", error)),
+    };
+    let room = bound
+        .checked_add(1)
+        .ok_or_else(|| super::allocation(bound))?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(room)
+        .map_err(|_| super::allocation(room))?;
+    bytes.resize(room, 0);
+    let mut file = file.take(u64::try_from(room).map_err(|_| super::allocation(room))?);
+    let mut used = 0usize;
+    while used < room {
+        let tail = bytes
+            .get_mut(used..)
+            .ok_or_else(|| super::allocation(room))?;
+        let count = file
+            .read(tail)
+            .map_err(|error| Refusal::os("reading a native keeper receipt", error))?;
+        if count == 0 {
+            break;
+        }
+        used = used
+            .checked_add(count)
+            .ok_or_else(|| super::allocation(room))?;
+    }
+    if used > bound {
+        return Err(receipt_invalid(
+            "a native keeper receipt exceeds its field bound",
+        ));
+    }
+    bytes.truncate(used);
+    Ok(Some(bytes))
+}
+
+fn receipt_invalid(message: &'static str) -> Refusal {
+    match super::copy_text(message) {
+        Ok(why) => Refusal::Invalid {
+            what: "native keeper receipt",
+            why,
+        },
+        Err(error) => error,
+    }
 }
 
 /// Forgets box `id`'s keeper handle value (its job closed in the keeper).
 pub fn forget_held(state: &Path, id: &str) {
     let _ = std::fs::remove_file(held_file(state, id));
 }
+pub(super) mod vm;

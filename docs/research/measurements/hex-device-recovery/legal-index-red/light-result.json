@@ -1,0 +1,82 @@
+{
+  "source_revision": "63a699069fa5cd93d84810ac9b691dcb8c8d2a2f",
+  "fixed_base": "37021c35e64b2a8bab1d35f20f92a0042d874a44",
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "platform": "macOS-26.4-arm64-arm-64bit",
+  "architecture": "arm64",
+  "driver_pid": 23553,
+  "nice": "20",
+  "environment": {
+    "CARGO_HOME": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-max-index-01a1c640-63a69906-v3/cargo-home",
+    "CARGO_TARGET_DIR": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-max-index-01a1c640-63a69906-v3/target",
+    "CARGO_BUILD_JOBS": "1",
+    "RUST_TEST_THREADS": "1",
+    "RUSTUP_HOME": "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy",
+    "TMPDIR": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-max-index-01a1c640-63a69906-v3/tmp"
+  },
+  "native_gpu_effect": false,
+  "phases": [
+    {
+      "name": "max-index",
+      "exit_code": 101,
+      "counts": {
+        "passed": 0,
+        "failed": 1,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 167
+      },
+      "expected_selected_count": 1,
+      "log": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-max-index-01a1c640-63a69906-v3/proof/max-index.log",
+      "log_bytes": 4611,
+      "log_sha256": "19a406b559ed805c95366c25cc9878d96e25e792eb25994c8092db672b70073e",
+      "child_reaped": true,
+      "owned": {
+        "pid": 23559,
+        "start": "Tue Nov 10 10:02:13 2026",
+        "argv": [
+          "/Users/adalundhe/.cargo/bin/cargo",
+          "test",
+          "-p",
+          "hex-sim",
+          "--lib",
+          "--locked",
+          "peer::adversarial_device_recovery_tests::last_legal_device_index_roundtrips_and_releases_without_iterator_overflow",
+          "--",
+          "--exact",
+          "--test-threads=1",
+          "--nocapture"
+        ],
+        "driver_pid": 23553
+      },
+      "witnesses": [
+        "last-index devices=65536 chosen=65535 held_query_ok=false cleanup_holders=0 cleanup_charge=0 native_gpu_effect=false"
+      ]
+    }
+  ],
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "exit_code": 101,
+  "source_unchanged": true,
+  "child_reaped": true,
+  "source_sha256": {
+    "crates/hex-sim/src/model.rs": "c791e11dc7b6b5db064000e74798e2f6d6a60c58615b7118eabe73b65d493ad2",
+    "crates/hex-sim/src/index.rs": "6ed831fef6f0da14decb3a1aa5674d81d618abd6c81b8ae0e82c49010328d6e9",
+    "crates/hex-sim/src/peer.rs": "5bde294893f4b24242335b80e6ed0121a2ee5d543c7250e2a0c07fe660938f2b",
+    "crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs": "16385231291c21183db50d7c6a552b2a9ed3a5cc1a29f7de9870d3ae8f397020"
+  },
+  "parent_registered_sha256": "bd04680f7e3b187e7bc574e16894773cdb35395be05392435eff772fd2c4b9da",
+  "private_compatibility": {
+    "file": "crates/hex-sim/src/facts.rs",
+    "change": "only add key: None to existing explicit Device literal; ROOT owns actual identity bridge",
+    "original_sha256": "173953bcf2e4f0cf60e5ea49b3b1c88236c907f9ef669b8d569e91ddcf42e704",
+    "private_sha256": "466a9069cd6d2a2ca04f738aa0a8807faa65ac70f104a5e63f62ce1de6f04ae5"
+  },
+  "binaries": [
+    {
+      "path": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-max-index-01a1c640-63a69906-v3/target/debug/deps/hex_sim-9ebd5bc0b4cd9747",
+      "sha256": "63d1ce916345c3cd64d8883fabad3263a723590c68498f9426b961fa2ccb3b3a",
+      "bytes": 14986632
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "parent": "48bacdffb63afd84a37487b8775b5709e0097205",
+  "source": "106745e8bae1819ff47737746621acd4456dfc6e",
+  "observed_source": "853dbc3fa1902ee5a408c6582985d223a3677784",
+  "observed_clippy_exit": 101,
+  "observed_log_sha256": "4ccdfc36d1d4455a1337ba4713467d1ae068a0ccf797373b0f90d5f02f6b557d",
+  "actual_five_controls": "5passed/0failed/0ignored; no rerun in this lint-only intake",
+  "changes": [
+    "remove unused take_recovered wrapper, route five legacy test calls to existing allocation-aware method with None",
+    "same exact two-byte digest chunks via as_chunks::<2> with explicit empty remainder"
+  ],
+  "files": {
+    "crates/hex-sim/src/index.rs": {
+      "before": "def8c364052a25b8060016ca05fb0d03d856abb411d0a7c2c8289d8c01b50100",
+      "after": "9517720782e6749c90958d695b22d77839ca8a7df013252125613e7820ad75ac"
+    },
+    "crates/hex-sim/src/peer.rs": {
+      "before": "89867cfcbf0c4ad5dcd192e7a964f452e3485036c45cfa861afc97c0ce3d8124",
+      "after": "f7bb9e4742d9c9f45c1cd377e05ce78237c7853730d3104805cc919c66592ce4"
+    },
+    "crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs": {
+      "before": "1d46a4616d5ccd1bec37b5314525b1377a93744af00d71ded580717bc78aa5fd",
+      "after": "05cec9c8de22ccb9ed6632d0cbdf5f5b846ba869bc769d7ae77cfe45280c4b40"
+    }
+  },
+  "checks": "SOURCE ONLY pending strict Clippy; all original raw retained"
+}

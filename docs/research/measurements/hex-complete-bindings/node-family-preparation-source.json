@@ -1,0 +1,34 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "76d65691661c6c1ac576d2d9a7e2d2c27bb50fd4",
+  "source": {
+    "path": "crates/hex-node/src/node/backends.rs",
+    "sha256": "d320d7a610a09380285a9beabd2f908c6503ab249245a0c9cf14dff4557ee828"
+  },
+  "Books_signature": "b924aec5b7dfb98e4ce6ce11a767c51c7b3a0d48",
+  "scope": "NARROW Node Books::prepare_pool method and imports only; actual common helper signature explicitly agreed by L3, its signed body pending. No standalone stub or second authority.",
+  "producer": "SAME Node turns keyed F plus full-family catalog-expanded aliases and existing hold_attachments receipt. These guards remain while exact recorded::prepare_pool(store,pool,execution,cost,devices,family,validate) returns canonical PoolRecord. No new Arc/Box/map/manager/native callback.",
+  "settled_common_semantics": [
+    "SameR reuse exact canonical row. expectedSome changedR may stage Granted/Live->Draining, returns OLD row, never creates replacement.",
+    "Prepared changedR stays unchanged for actual adapter no-submission proof; phase alone insufficient. Draining/Released returnsOLD for native cleanup/existing IndexACK.",
+    "Only expectedNone after required ACK/removals permits newPrepared. Common helper strict snapshots/exact row/pure validation +SAME metadata fence is L3-owned."
+  ],
+  "preserved": [
+    "76d exclusive two-borrow noIntent proof control",
+    "280 shared native provider guard drop and independent FC/Shards merge",
+    "Canonical original class/route/allocation projection, Node render fullBoxSpec and ROOT outside ports untouched by this method delta",
+    "All existing native callbacks and Supervisor receipt owner unchanged"
+  ],
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compile": "UNRUN; joined L3 helper+backend consumers required",
+    "tests": "UNRUN",
+    "dispatches": 0,
+    "native": 0
+  },
+  "intake": "Apply narrow method/import delta, not full file. ROOT current native/routing/provider/preflight consumers remain canonical. New API/Index original controls/checks are separate cohort.",
+  "remaining": "L3 real helper, L1 FC and L2 actual consumers; canonical bounded lazy producer +phase-aware native release/Index ACK closure, matched targeted controls/full native proof ROOT-only."
+}

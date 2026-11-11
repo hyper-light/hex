@@ -1,0 +1,91 @@
+{
+  "result": "full archive collect0, raw byte identity and exact owned scope closure verified",
+  "archive": {
+    "source": "/Users/adalundhe/.cache/hex-native-firecracker/held451-acquired-root-measured-v1-01/held1596.tar",
+    "bytes": 474576896,
+    "sha256": "b5919c38358cbe1c57cd9b4968a04fe447c431356b4a7a4ca21ccb1c3bcd1507",
+    "committed": false
+  },
+  "inputs": {
+    "stage-command.json": {
+      "source": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/fc-collect-root-measured-v1/stage-command.json",
+      "bytes": 7240,
+      "sha256": "a0c076958a98ae28b80cd8f3db8c08fc94cfee877feab46b0f41f51cb46a4c32"
+    },
+    "stage-child.json": {
+      "source": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/fc-collect-root-measured-v1/stage-child.json",
+      "bytes": 15,
+      "sha256": "ca207911036b4cf991cfd8c7971cda88b4fcf341628baf2b6ce108ab60c89863"
+    },
+    "stage.cli.log": {
+      "source": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/fc-collect-root-measured-v1/stage.cli.log",
+      "bytes": 1379,
+      "sha256": "1b7b21eaa082bf2fd9af19f6d800b842990780842cafdc2e2b8c22bf1ddff823"
+    },
+    "stage.exit": {
+      "source": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/fc-collect-root-measured-v1/stage.exit",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "receiver-command.json": {
+      "source": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/fc-collect-root-measured-v1/receiver-command.json",
+      "bytes": 998,
+      "sha256": "6c19cf7aa27a13e153155b0b8792af39b3ea3acb5b7ab7b93779be15c480ac3a"
+    },
+    "receiver-child.json": {
+      "source": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/fc-collect-root-measured-v1/receiver-child.json",
+      "bytes": 15,
+      "sha256": "25a235142eb604d9221eb3e922abf0d04a8eb14dfea24890c9e1bb605a0c605e"
+    },
+    "receiver.cli.log": {
+      "source": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/fc-collect-root-measured-v1/receiver.cli.log",
+      "bytes": 693,
+      "sha256": "f5d51e52fd68cc07e41ba7920f77cf38b196ee3f9db571e3f7abc793360592f2"
+    },
+    "receiver.exit": {
+      "source": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/fc-collect-root-measured-v1/receiver.exit",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "local-cause.json": {
+      "source": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/fc-collect-root-measured-v1/local-cause.json",
+      "bytes": 289,
+      "sha256": "2f588c23f37aa9abacf06b13fdc4869ea85cbef1c440300300e55aa28a67c967"
+    },
+    "root-verified-closure.json": {
+      "source": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/fc-collect-root-measured-v1/root-verified-closure.json",
+      "bytes": 2734,
+      "sha256": "bde1dbc60ff926b65f585578fe38358056b21bdc16438e147b9474b77a5a83e9"
+    },
+    "peer-quiet-window.receipt": {
+      "source": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/fc-collect-peer-quiet-9eb151b4.receipt",
+      "bytes": 705,
+      "sha256": "15e3568a7ae86c82ac346f9f607bc5b8db77c79a47af9e61216287efd07bf115"
+    },
+    "acquisition-receipt.json": {
+      "source": "/Users/adalundhe/.cache/hex-native-firecracker/held451-acquired-root-measured-v1-01/acquisition-receipt.json",
+      "bytes": 743,
+      "sha256": "11fbb8afe623e1bcaafe0be17cdbf9724c2e4f99991c97ce0b945abf2d9c589f"
+    },
+    "command.json": {
+      "source": "/Users/adalundhe/.cache/hex-native-firecracker/held451-acquired-root-measured-v1-01/command.json",
+      "bytes": 3915,
+      "sha256": "04e5587d3110bf325dcdaae8d15025658ea857e0fabb82eadd8e4b8cc51e7d56"
+    },
+    "child.json": {
+      "source": "/Users/adalundhe/.cache/hex-native-firecracker/held451-acquired-root-measured-v1-01/child.json",
+      "bytes": 122,
+      "sha256": "6ced12977e01ae9e6c9579ba417d58f31efd749686c7caee3c84654f3cf91e6b"
+    },
+    "kiln.raw.log": {
+      "source": "/Users/adalundhe/.cache/hex-native-firecracker/held451-acquired-root-measured-v1-01/kiln.raw.log",
+      "bytes": 1956,
+      "sha256": "af3b4038c5d6cf6774a40c2920fdbad0e836fb4a59dd425f8fb3069753164759"
+    }
+  },
+  "materialized_compiled_VM_GPU": false,
+  "local_original_failure": "missing local cache parent after stage0; original orchestration1, unchanged receiver continuation0; no restage/export/guard change",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "coordinator"
+}

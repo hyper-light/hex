@@ -1,0 +1,14 @@
+{
+  "requirement": "AC-T7.4.1",
+  "canonical_source": "9d64a81d8326715af61bcd927f341fcf4666c203",
+  "files": {
+    "docs/research/measurements/hex-complete-lifecycle/recorded_lifecycle_tests.rs": "9835452995df046dba832feaa08de9f8e1c7f1ce5625a779508219490b3e2044",
+    "docs/research/measurements/hex-complete-lifecycle/recorded_authority_tests.rs": "4652ef889651bcd49e47e41eb4f8cf746e3a155cb143a17cad9746cf060451ae"
+  },
+  "reason": "ROOT omitted pre-existing path-included test closure while copying production. Exactdac compiler101 found missing include; tests0/native0. The first intake guard detected another canonical child and stopped before writing. This materializes the full unchanged two-file closure without disabling or stubbing modules.",
+  "original_log_sha256": "4808252f6fe26f142b1f2b638ae465cb59e9c7cc8824f7da15f200758da59fa8",
+  "cargo_pid": 50763,
+  "reaped": true,
+  "temp_entries": 0,
+  "checks": "joined compilation pending"
+}

@@ -1,0 +1,82 @@
+{
+  "ROOT_R14_measurement_and_next_admission": true,
+  "RuntimeCost": null,
+  "base_exporter_sha256": "83586fc225fbe7209eb250a6c8d21b8fb70dff97f82dd7dccb1f4f47bde00ad3",
+  "changed_measurement_source": true,
+  "export_collect_build_GPU_admitted": false,
+  "files": [
+    {
+      "bundle": "REVIEW.md",
+      "bytes": 7254,
+      "sha256": "73194a5ade15d63fa61f1858f6a6ed43223bae85197b7c835512bac5ec652279"
+    },
+    {
+      "bundle": "alternate_00aad_io.py",
+      "bytes": 5902,
+      "sha256": "e9a19c06d94bcac09930e89ed6e0823264e4a3697c883a4a70289be7931937c2"
+    },
+    {
+      "bundle": "context-diff-check1.retained.json",
+      "bytes": 11792,
+      "sha256": "fcf707b67ce92b730c55590a22e39ffae2369507d5644c519f7d24cfb14cb49b"
+    },
+    {
+      "bundle": "export_held451_objects.py",
+      "bytes": 28082,
+      "sha256": "1f89937a6171918295932c4aa3dbba5658b55218c19bbb7d8a4d902e41bab3ec"
+    },
+    {
+      "bundle": "held451-admission.export.template.json",
+      "bytes": 1220,
+      "sha256": "999e730fe9ffc512582160ff47137decc40568089caeb534065d5f82309a4709"
+    },
+    {
+      "bundle": "held451-export-controls.json",
+      "bytes": 2031149,
+      "sha256": "d5e8cc65e999c435c17efb5afe584233217b1a9fd164f5d6809aaefe9aa932de"
+    },
+    {
+      "bundle": "held451-export-inputs.json",
+      "bytes": 630519,
+      "sha256": "14e35dbed0d79273b963f8f27c1973d53ff997e6a02bd8b99fbe6c00deb91412"
+    },
+    {
+      "bundle": "held451-export.seal.json",
+      "bytes": 1089,
+      "sha256": "27102cb1c12a42dd247d97e820895cb1b63e961bcf6d67924400e4c4b75c031c"
+    },
+    {
+      "bundle": "instrumentation-from-83586.patch",
+      "bytes": 5026,
+      "sha256": "f1a0e762d098e03e17c4a9a7d99d93844e9aa52c4668629e7c3a1ea57dd9e755"
+    },
+    {
+      "bundle": "next-command.json",
+      "bytes": 5104,
+      "sha256": "c92b51abea5fba30fe195324819d197e1d4bbfef1f731c2cf73277f5d2747618"
+    },
+    {
+      "bundle": "source-validation.json",
+      "bytes": 8716,
+      "sha256": "7792e719d64db3035a47e96ae747723c5cdbe287dea76edd0858815f952ba4a0"
+    }
+  ],
+  "fsync_labels": [
+    "source_event",
+    "archive",
+    "manifest",
+    "output_directory"
+  ],
+  "measurement_exporter_sha256": "1f89937a6171918295932c4aa3dbba5658b55218c19bbb7d8a4d902e41bab3ec",
+  "metadata_whitespace_red_retained": true,
+  "original_fsync_frequency_order_and_guards_retained": true,
+  "parent_checkpoint": "b1445fc4df8ecf8847ae080f90f773a249656334",
+  "quiet_window_requested": false,
+  "remote_staged_or_run": false,
+  "runtime_seal_sha256": "27102cb1c12a42dd247d97e820895cb1b63e961bcf6d67924400e4c4b75c031c",
+  "same_timing_or_faster_algorithm_claim": false,
+  "schema": "hex-native-fc-explicit-measurement-copy-review-seal-v1",
+  "source_event_sample_limit": 3193,
+  "source_only": true,
+  "staged_or_run": false
+}

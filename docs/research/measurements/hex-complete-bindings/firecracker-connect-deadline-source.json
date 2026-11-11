@@ -1,0 +1,27 @@
+{
+  "parent": "e5c41692843008c49b88590ceaf58a8aa1094801",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": {
+    "crates/hex-runtime/src/firecracker/native.rs": "d25cac67d854b937c06ebdb3da20bcdf9048c93556484840f0ab6eb9e41e3eee",
+    "crates/hex-runtime/src/firecracker/pool.rs": "78dbaa627b3687128efbdf2da1b844a033f118247a6c8f09e499571c7e08c071"
+  },
+  "dependency": {
+    "client_producer": "5c10d010c3a60c09015f57162e570f8737075d76",
+    "client_original_controls": "dc057f2f7f38b971e072ce9ac8ccc9c6bd677f16",
+    "method": "hex_client::guest::Client::connect_before(LinkOwner,Instant)->Result<Client,Refusal>"
+  },
+  "behavior": "Three existing Firecracker client connection sites pass SAME original optional creation deadline through dial/relay token/Hello. Ordinary clients without creation budget retain Client::connect. Same native/Store/Turns/LinkOwner; no new owner/cache/DTO.",
+  "bounds": "Only an existing original Instant is propagated; no deadline extension/default/tuning constant. Client5c10 combines smaller caller/configured/learned budgets; no connection or Proc lifetime timer.",
+  "scope_limits": "This is a required finite-protocol feature increment, not a reproduced timing-defect remedy or whole-create completion claim. Later capacity/physical_report/create calls need matching original-deadline methods requested from existing L4 owner. FC staging already uses its per-operation StagingStream capped by same original creation deadline; filesystem/native wait/fault effects remain separately owed.",
+  "checks": {
+    "scoped_rustfmt": 0,
+    "diff_check": 0,
+    "compile": "UNRUN/matched ROOT client composition required",
+    "test_dispatches": 0,
+    "native_effects": 0
+  },
+  "unchanged": "Original sink test and sink remedy, ordinary client connection, stored specs/scopes/allocations, report observation policy and lifecycle cleanup unchanged",
+  "R01_R16": "No new allocation seam, state owner, wait/cache, protocol type or native effect. Existing same-client primary implementation pinned. No performance/native/portability proof; full R01-R16 source/light/native/profile gates remain coordinator-owned. Prior red/check sources preserved."
+}

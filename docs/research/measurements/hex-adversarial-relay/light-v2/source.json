@@ -1,0 +1,11 @@
+{
+  "base": "dc29e7dadb5d820bfa83e115280dc79574f9f68a",
+  "prior_private_source": "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-dc29-v1/source",
+  "checked_in_leaf_sha256": "4b77af2767f37cee1046126b70884d6e1b299f51eede3110e3230b3d533be225",
+  "private_leaf_with_original_candidate_sha256": "76357596f9872e887f8ab620d8cb4498e80219adaa2f22c1b318ca19b25d8063",
+  "candidate_function_sha256": "836d8ed336c5b80e27ee0594e4522ccb8608f1063267da6653820529be4b8699",
+  "registration": "same private-only parent registration as v1; original dc29 candidate appended as private child to corrected platform-aware fixture",
+  "root": "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v2",
+  "jobs": 1,
+  "test_threads": 1
+}

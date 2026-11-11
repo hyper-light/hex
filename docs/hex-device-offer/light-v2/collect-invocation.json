@@ -1,0 +1,18 @@
+{
+  "command": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--on",
+    "d1323898b255a3ed435eb83fa0f7b0cf",
+    "--needs",
+    "cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--timeout",
+    "120",
+    "--",
+    "nice -n 10 python3 -c 'import gzip,hashlib,io,json,pathlib,tarfile\nroot=pathlib.Path.home()/'\"'\"'.cache/hex-device-offer-01a1c640-a69d3426-v2'\"'\"'\nproof=root/'\"'\"'proof'\"'\"';source=root/'\"'\"'source'\"'\"'\ndata={('\"'\"'proof/'\"'\"'+p.name):p.read_bytes() for p in proof.iterdir() if p.is_file()}\nmanifest=json.loads((proof/'\"'\"'source.json'\"'\"').read_text())\nregistration=b'\"'\"'\\n#[path = \"device_offer_tests.rs\"]\\nmod device_offer_tests;\\n'\"'\"'\nparent='\"'\"'crates/hex-node/src/scheduler/tests.rs'\"'\"'\nafter={name:hashlib.sha256((source/name).read_bytes()).hexdigest() for name in manifest['\"'\"'files'\"'\"']}\nfor name,digest in manifest['\"'\"'files'\"'\"'].items():\n    if name!=parent:assert after[name]==digest,name\nassert (source/parent).read_bytes()==(proof/'\"'\"'parent-before.rs'\"'\"').read_bytes()+registration\nassert sorted(str(p.relative_to(source)) for p in source.rglob('\"'\"'*'\"'\"') if p.is_file())==sorted(manifest['\"'\"'files'\"'\"'])\ndata['\"'\"'proof/source-after.json'\"'\"']=(json.dumps({'\"'\"'files'\"'\"':after,'\"'\"'only_changed'\"'\"':parent,'\"'\"'all_others_match'\"'\"':True},indent=2)+'\"'\"'\\n'\"'\"').encode()\nselected=json.loads((source/'\"'\"'docs/hex-device-offer/pinned-sources.json'\"'\"').read_text())['\"'\"'sha256'\"'\"']\nselected['\"'\"'crates/hex-node/src/scheduler/device_offer_tests.rs'\"'\"']=manifest['\"'\"'files'\"'\"']['\"'\"'crates/hex-node/src/scheduler/device_offer_tests.rs'\"'\"']\nfor path,digest in selected.items():\n    raw=(source/path).read_bytes()\n    if path!=parent:assert hashlib.sha256(raw).hexdigest()==digest,path\n    data['\"'\"'source/'\"'\"'+path]=raw\ndata['\"'\"'driver.py'\"'\"']=(root/'\"'\"'driver.py'\"'\"').read_bytes()\ndata['\"'\"'driver-clippy-only.py'\"'\"']=(root/'\"'\"'driver-clippy-only.py'\"'\"').read_bytes()\nfor p in (root/'\"'\"'proof-clippy'\"'\"').iterdir():\n    if p.is_file():data['\"'\"'proof-clippy/'\"'\"'+p.name]=p.read_bytes()\nmanifest={name:{'\"'\"'bytes'\"'\"':len(raw),'\"'\"'sha256'\"'\"':hashlib.sha256(raw).hexdigest()} for name,raw in sorted(data.items())}\ndata['\"'\"'MANIFEST.json'\"'\"']=(json.dumps(manifest,indent=2)+'\"'\"'\\n'\"'\"').encode()\nout=io.BytesIO()\nwith gzip.GzipFile(fileobj=out,mode='\"'\"'wb'\"'\"',mtime=0) as gz,tarfile.open(fileobj=gz,mode='\"'\"'w'\"'\"') as archive:\n    for name,raw in sorted(data.items()):\n        member=tarfile.TarInfo(name);member.size=len(raw);member.mode=0o644;archive.addfile(member,io.BytesIO(raw))\nblob=out.getvalue();retained=root/'\"'\"'retained'\"'\"';retained.mkdir()\np=retained/'\"'\"'proof-v1.tar.gz'\"'\"'\nwith p.open('\"'\"'xb'\"'\"') as f:f.write(blob)\nprint(json.dumps({'\"'\"'path'\"'\"':str(p),'\"'\"'bytes'\"'\"':len(blob),'\"'\"'sha256'\"'\"':hashlib.sha256(blob).hexdigest(),'\"'\"'members'\"'\"':len(data)}))\n'"
+  ],
+  "exit": 0,
+  "stdout": "{\"path\": \"/Users/adalundhe/.cache/hex-device-offer-01a1c640-a69d3426-v2/retained/proof-v1.tar.gz\", \"bytes\": 301264, \"sha256\": \"7942278cafe5cf30152b74b4101c755d7c049cd1fb61e20a08ebf537bea5fa24\", \"members\": 31}\n",
+  "stderr": "\u001b[2m[kiln] on d1323898b255a3ed435eb83fa0f7b0cf \u00b7 macos/aarch64 \u00b7 29 of 32 cores idle \u00b7 47 GB free \u00b7 room for 1 CPU, 4 GiB of memory, 12 GiB of disk\u001b[0m\n"
+}

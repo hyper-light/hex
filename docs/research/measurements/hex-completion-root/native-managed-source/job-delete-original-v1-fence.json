@@ -1,0 +1,9 @@
+{
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "output": "{\"fenced\": true, \"exclusive_mkdir\": true, \"root\": \"/Users/adalundhe/.cache/hex-complete-lifecycle/01a1c767-job-delete-red-v1\", \"marker_sha256\": \"a4d114208f4312aa42e969b6999c18ce6595be231d01006b560d436433be57c1\", \"driver_guard\": \"root.mkdir(exist_ok=False) before stdin/extract/execute\", \"foreign_process_actions\": 0}\n",
+  "running": false,
+  "why": "macos/aarch64 \u00b7 31 of 32 cores idle \u00b7 59 GB free \u00b7 room for 1 CPU, 4 GiB of memory, 12 GiB of disk",
+  "exit_code": 0,
+  "original_v1": "UNKNOWN; runner restarted, exact owned root absent on resumed read-only collection",
+  "previous_collection": "r5 runner no answer within15s; r6 admission refused offline; no source/test outcome attribution"
+}

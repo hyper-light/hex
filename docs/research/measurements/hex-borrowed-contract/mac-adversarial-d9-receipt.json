@@ -1,0 +1,318 @@
+{
+  "exit": 0,
+  "reaped": true,
+  "archive_sha256": "acf74b3b92801c67c722c725495c27563ce9a47554b1c09786d49fbcdb9de065",
+  "bytes": 320510,
+  "readback": {
+    "borrowed-contract-17c99c58-mac-v1": {
+      "revision": "17c99c58494c25ad6b0e35e0ad9891888bcdf632",
+      "source_files": 1884,
+      "source_unchanged": true,
+      "result": {
+        "source": "17c99c58494c25ad6b0e35e0ad9891888bcdf632",
+        "transport_sha256": "4d43161b3d192346a71198874d24f425957593cb85f5f30fb896abb337b743f3",
+        "archive_sha256": "67bf87bf5df5c200bcaca398804b868e55a91f8fddddb6569b8427d9596ddb56",
+        "seed_lock_sha256": "1ecb41e738c4c4133a1968873e424efce5b2a65899dd8f40f37ac6aaffec8133",
+        "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "temp": "/Users/adalundhe/.cache/hbm-17c99c58",
+        "guard_seconds": 151.0,
+        "scope": "ROOT actual borrowed process/socket contract, no VM or device attachment",
+        "phases": [
+          {
+            "name": "build",
+            "command": [
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "test",
+              "--manifest-path",
+              "vendor/shards/Cargo.toml",
+              "-p",
+              "shards-api",
+              "--lib",
+              "--test",
+              "hex_borrowed_contract",
+              "--no-run",
+              "--message-format=json"
+            ],
+            "pid": 58443,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "750dd29c5756c7472a07a1ee00e0b2e78a6e368bd338c965b879b828fd8c8d56",
+            "bytes": 19340,
+            "required": true
+          },
+          {
+            "name": "new-test-clippy",
+            "command": [
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "clippy",
+              "--manifest-path",
+              "vendor/shards/Cargo.toml",
+              "-p",
+              "shards-api",
+              "--test",
+              "hex_borrowed_contract",
+              "--",
+              "-D",
+              "warnings"
+            ],
+            "pid": 58519,
+            "exit": 101,
+            "reaped": true,
+            "sha256": "2cc60ec7a819c796981665cccab430f8972b4a2d357dab450d03588767d39f04",
+            "bytes": 1672,
+            "required": true
+          }
+        ],
+        "registry_versions_equal_seed": true,
+        "binaries": {
+          "hex_borrowed_contract": {
+            "path": "/Users/adalundhe/.cache/hex-lead/borrowed-contract-17c99c58-mac-v1/target/debug/deps/hex_borrowed_contract-a190507c43aeed8d",
+            "sha256": "f64c9f05c39205422b165260ac7208cc4fb564d16618aa08b768c1f3379c4b4c"
+          },
+          "shards_api": {
+            "path": "/Users/adalundhe/.cache/hex-lead/borrowed-contract-17c99c58-mac-v1/target/debug/deps/shards_api-7ff633c7b382e1e6",
+            "sha256": "9e977b361b6f010ead4e0554d0f70c732c884251bb94786be76e38d4be7731b1"
+          }
+        },
+        "exit": 1,
+        "error": "new-test-clippy failed",
+        "source_unchanged": true,
+        "temp_entries": 0
+      },
+      "signed_source_equal": true
+    },
+    "borrowed-contract-0116e44b-mac-v1": {
+      "revision": "0116e44babbcb6bfa044395e20abaf3add941514",
+      "source_files": 1885,
+      "source_unchanged": true,
+      "result": {
+        "source": "0116e44babbcb6bfa044395e20abaf3add941514",
+        "transport_sha256": "08fa3a72683c7d66998e86c6f304603f40f702a43a5e969df5062f1559d1423f",
+        "archive_sha256": "cd5b4558bfb4897baa3535c1aa3480285cdb4330c931d54b1caf0249dd18a597",
+        "seed_lock_sha256": "1ecb41e738c4c4133a1968873e424efce5b2a65899dd8f40f37ac6aaffec8133",
+        "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "temp": "/Users/adalundhe/.cache/hbm-0116e44b",
+        "guard_seconds": 151.0,
+        "scope": "ROOT actual borrowed process/socket contract, no VM or device attachment",
+        "phases": [
+          {
+            "name": "build",
+            "command": [
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "test",
+              "--manifest-path",
+              "vendor/shards/Cargo.toml",
+              "-p",
+              "shards-api",
+              "--lib",
+              "--test",
+              "hex_borrowed_contract",
+              "--no-run",
+              "--message-format=json"
+            ],
+            "pid": 58980,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "9eb7ce392a08f94b0967002b09ab63aff9a0d615d4f434b6592310a99eeed4f6",
+            "bytes": 19339,
+            "required": true
+          },
+          {
+            "name": "new-test-clippy",
+            "command": [
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "clippy",
+              "--manifest-path",
+              "vendor/shards/Cargo.toml",
+              "-p",
+              "shards-api",
+              "--test",
+              "hex_borrowed_contract",
+              "--",
+              "-D",
+              "warnings"
+            ],
+            "pid": 59065,
+            "exit": 101,
+            "reaped": true,
+            "sha256": "fe102edc3ef330ec778e86ae79f0a44934aea2e81bb565d521a1bf272bdbbd0b",
+            "bytes": 1343,
+            "required": true
+          }
+        ],
+        "registry_versions_equal_seed": true,
+        "binaries": {
+          "hex_borrowed_contract": {
+            "path": "/Users/adalundhe/.cache/hex-lead/borrowed-contract-0116e44b-mac-v1/target/debug/deps/hex_borrowed_contract-a190507c43aeed8d",
+            "sha256": "1f3093cfa391d7e26c03f1c48aae4fb1d69aa5674cb4463b34e98d55d79686d5"
+          },
+          "shards_api": {
+            "path": "/Users/adalundhe/.cache/hex-lead/borrowed-contract-0116e44b-mac-v1/target/debug/deps/shards_api-7ff633c7b382e1e6",
+            "sha256": "3fcd8ada8e3375c5ac96f678e95a32841eac64f06dcfc8fd6604c6215ef4af7f"
+          }
+        },
+        "exit": 1,
+        "error": "new-test-clippy failed",
+        "source_unchanged": true,
+        "temp_entries": 0
+      },
+      "signed_source_equal": true
+    },
+    "borrowed-contract-d9d547c7-mac-v1": {
+      "revision": "d9d547c7d9211f6c42f1c2c884017a3981032889",
+      "source_files": 1915,
+      "source_unchanged": true,
+      "result": {
+        "source": "d9d547c7d9211f6c42f1c2c884017a3981032889",
+        "transport_sha256": "763e7ace73ec4a76b3beb9dda2f7e7284861986554480e790ee925e8c21c21ac",
+        "archive_sha256": "48b096f35d68336407ca111666e9c36798b40693294c9475a2d43912d901e27a",
+        "seed_lock_sha256": "1ecb41e738c4c4133a1968873e424efce5b2a65899dd8f40f37ac6aaffec8133",
+        "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "temp": "/Users/adalundhe/.cache/hbm-d9d547c7",
+        "guard_seconds": 151.0,
+        "scope": "ROOT actual borrowed process/socket contract, no VM or device attachment",
+        "phases": [
+          {
+            "name": "build",
+            "command": [
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "test",
+              "--manifest-path",
+              "vendor/shards/Cargo.toml",
+              "-p",
+              "shards-api",
+              "--lib",
+              "--test",
+              "hex_borrowed_contract",
+              "--no-run",
+              "--message-format=json"
+            ],
+            "pid": 59436,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "459aba4c47aceb54e1eb62147f81ad60b05ede89d2bf81660686c117c2027d77",
+            "bytes": 19339,
+            "required": true
+          },
+          {
+            "name": "new-test-clippy",
+            "command": [
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "clippy",
+              "--manifest-path",
+              "vendor/shards/Cargo.toml",
+              "-p",
+              "shards-api",
+              "--test",
+              "hex_borrowed_contract",
+              "--",
+              "-D",
+              "warnings"
+            ],
+            "pid": 59511,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "38829cb80a015891bedf4e7f1dd9170d1e2fd99ae216994b2529c0b30bf27f92",
+            "bytes": 808,
+            "required": true
+          },
+          {
+            "name": "finite-overflow",
+            "command": [
+              "/Users/adalundhe/.cache/hex-lead/borrowed-contract-d9d547c7-mac-v1/target/debug/deps/hex_borrowed_contract-a190507c43aeed8d",
+              "--ignored",
+              "--exact",
+              "root_borrowed_unrepresentable_patience_refuses_before_dial",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "pid": 59601,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "3fd50f99f516f02676e869d8afdad690a60955ceb58b8162e1d0ec90046fce8e",
+            "bytes": 282,
+            "required": true
+          },
+          {
+            "name": "post-handshake-death",
+            "command": [
+              "/Users/adalundhe/.cache/hex-lead/borrowed-contract-d9d547c7-mac-v1/target/debug/deps/hex_borrowed_contract-a190507c43aeed8d",
+              "--ignored",
+              "--exact",
+              "root_borrowed_target_death_before_ok_is_refused",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "pid": 59642,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "ae29d7a4691bad947ae849b7b6ce80d6ddf902499d70b72026ba79e6d587e9fd",
+            "bytes": 283,
+            "required": true
+          },
+          {
+            "name": "mutation-build",
+            "command": [
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "test",
+              "--manifest-path",
+              "/Users/adalundhe/.cache/hex-lead/borrowed-contract-d9d547c7-mac-v1/mutation-source/vendor/shards/Cargo.toml",
+              "-p",
+              "shards-api",
+              "--test",
+              "hex_borrowed_contract",
+              "--no-run",
+              "--message-format=json"
+            ],
+            "pid": 59654,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "d374c2551d270a6f71184ea8c9ee7cd3b312eef640b19dff96b23945b9cab4fb",
+            "bytes": 20448,
+            "required": true
+          },
+          {
+            "name": "missing-post-handshake-guard",
+            "command": [
+              "/Users/adalundhe/.cache/hex-lead/borrowed-contract-d9d547c7-mac-v1/mutation-target/debug/deps/hex_borrowed_contract-a190507c43aeed8d",
+              "--ignored",
+              "--exact",
+              "root_borrowed_target_death_before_ok_is_refused",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "pid": 59720,
+            "exit": 101,
+            "reaped": true,
+            "sha256": "6c2bb6e3a7decffd78ef33ec64d31c539f7f1628bd862997475515bdb2c77b90",
+            "bytes": 666,
+            "required": true
+          }
+        ],
+        "registry_versions_equal_seed": true,
+        "binaries": {
+          "hex_borrowed_contract": {
+            "path": "/Users/adalundhe/.cache/hex-lead/borrowed-contract-d9d547c7-mac-v1/target/debug/deps/hex_borrowed_contract-a190507c43aeed8d",
+            "sha256": "768bb4620b3f7e2b6fb7e7cd00381ade525809efe98f3e7deb8f2fb1ebcae167"
+          },
+          "shards_api": {
+            "path": "/Users/adalundhe/.cache/hex-lead/borrowed-contract-d9d547c7-mac-v1/target/debug/deps/shards_api-7ff633c7b382e1e6",
+            "sha256": "64b7cae3bbe92568742ef8f48b2024eae3527640922e97ea6c819ec642b4cb4f"
+          }
+        },
+        "mutation": {
+          "path": "vendor/shards/crates/api/src/client.rs",
+          "before_sha256": "f830c727377592f51d0c9bafb4e68ccaa5db28b5e1475f6da2ae4f238857b1dc",
+          "after_sha256": "9c75c947583cf1d81266bf0f4193152de390b8ba77bd28b9da7c8a2580d064e6",
+          "changed_files": [
+            "vendor/shards/crates/api/src/client.rs"
+          ]
+        },
+        "exit": 0,
+        "source_unchanged": true,
+        "temp_entries": 0
+      },
+      "signed_source_equal": true
+    }
+  }
+}

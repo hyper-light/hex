@@ -1,0 +1,11 @@
+{
+  "parent": "05957c024f4c2eb7aa50a3df5b2e183371ebcaa0",
+  "policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "source": {
+    "crates/hex-runtime/src/firecracker/native.rs": "56ea1dea108a350914bfabf0cbbc8391fa54bd49e7109eb7924196313c53ae27"
+  },
+  "change": "Remove unused pool_records read only from Firecracker list. Each listed box is inspected under its existing canonical transaction; listing does not grant or choose physical claims. Pool holder checks in create/capacity remain unchanged.",
+  "evidence": "ROOT exact88 Linux production check101, source unchanged/tmp0/native0; unused pools at native.rs724 observed. No local compile/test and no route semantic change."
+}

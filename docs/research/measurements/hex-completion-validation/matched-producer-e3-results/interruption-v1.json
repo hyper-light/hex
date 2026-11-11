@@ -1,0 +1,17 @@
+{
+  "source": "e3c28025188347a04e3298472f1a75dd95696a19",
+  "original_local_cli_pid": 58960,
+  "original_exit": 1,
+  "original_result": "b24 no longer has this run (runner restarted)",
+  "reconciliation": {
+    "runner": "b24c5c951260dcdfd0972f2aeaf3cf51",
+    "exit_code": 0,
+    "is_error": false,
+    "root_exists": false,
+    "regular_files": 0,
+    "target_exists": false,
+    "receipts": {}
+  },
+  "new_private_cohort": "cohort-e3c28025-mac-matched-producer-b24-v2",
+  "tests_executed_claim": null
+}

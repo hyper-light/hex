@@ -1,0 +1,57 @@
+{
+  "build_exit": 0,
+  "binary": "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v4/target/debug/deps/hex_node-1028f62b4e94535b",
+  "binary_sha256": "368c219a1604b7f79eeaf4f9ae53ea0a95f643b4e69a45a34d240bf71ff5aab0",
+  "tests": [
+    {
+      "name": "scheduler::tests::adversarial_relay_tests::cancellation_reconciles_lost_start_reply_without_losing_either_queued_lane",
+      "command": [
+        "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v4/target/debug/deps/hex_node-1028f62b4e94535b",
+        "--exact",
+        "scheduler::tests::adversarial_relay_tests::cancellation_reconciles_lost_start_reply_without_losing_either_queued_lane",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "log": "test-0.log",
+      "log_sha256": "a09e7ec500cfe3f17e8ba75743ccf212c4b28f3c85865df879c72bcafbbe6e48",
+      "log_bytes": 975
+    },
+    {
+      "name": "scheduler::tests::adversarial_relay_tests::delayed_start_stays_fenced_through_forget_restart_and_new_sender_epoch",
+      "command": [
+        "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v4/target/debug/deps/hex_node-1028f62b4e94535b",
+        "--exact",
+        "scheduler::tests::adversarial_relay_tests::delayed_start_stays_fenced_through_forget_restart_and_new_sender_epoch",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "log": "test-1.log",
+      "log_sha256": "02c5906c05806f76c41e3b8fbb3dade617326dca98cbdf16b20fe7e3c394d939",
+      "log_bytes": 619
+    },
+    {
+      "name": "scheduler::tests::adversarial_relay_tests::wrong_owner_start_has_no_effect_and_other_peer_and_later_stamp_progress",
+      "command": [
+        "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v4/target/debug/deps/hex_node-1028f62b4e94535b",
+        "--exact",
+        "scheduler::tests::adversarial_relay_tests::wrong_owner_start_has_no_effect_and_other_peer_and_later_stamp_progress",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "log": "test-2.log",
+      "log_sha256": "0ffd905bc3930e08fd258e15d9c9ad08b301accdc94d5bea8410db3bed318275",
+      "log_bytes": 716
+    }
+  ],
+  "selected": 3,
+  "passes": 3,
+  "nonzero": 0,
+  "scope": "actual native macOS test binary; Service/Order/Driver with SimRuntime effects; no native runtime box, SSH or VM",
+  "candidate_note": "original dc29 candidate retained separately in v3; final main leaf has 3 contract fixtures only",
+  "scoped_clippy_exit": 101,
+  "scoped_rustfmt_exit": 0,
+  "final_leaf_sha256": "b6524b2f9dabd3a3cd36c8aee71f3162421c3ebf6e607e6fcf72b554811e8e15"
+}

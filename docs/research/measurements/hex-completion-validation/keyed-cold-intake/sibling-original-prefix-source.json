@@ -1,0 +1,38 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "d3b9c9e5cf38f10bd3d89575f7b943e1b14676cf",
+  "scope": "ONLY original fixture prefix taxonomy correction explicitly ACKed by ROOT plus independently named healthy fresh native snapshot baseline. NO production change.",
+  "source": {
+    "path": "crates/hex-sim/src/index/route_offer_tests.rs",
+    "sha256": "20781735bd369c4a6aae74a1b9916ebc1dd91a38ae8ddcbd3b62dc97fd24a092"
+  },
+  "actual_original": {
+    "source": "d87bcf9b6a6bb6d6e669d5179b666a2ef38041c4",
+    "selected": 1,
+    "passed": 0,
+    "failed": 1,
+    "log_sha256": "b7ed97e6734b65177cc78f086101be439268a5ab4758bca04e6496c5e63cdc36",
+    "raw_sha256": "e5fa5d9f3164ee6e7c58d7dce9f4480a6a6a760c142f83502a5563b173b60642",
+    "witness": "FIRST assertion after take_routed, BEFORE Draining/Released: actual NoRoom vs expected NoGpu. Terminal stale sibling oracle never executed. Not a stale-offer reproduction.",
+    "native": 0
+  },
+  "diagnosis": "Both known matching GPU observations satisfy observed hardware eligibility, but full-P Live/Draining backing/Handoff owns every physical slot and free.gpus==0. Existing Verdict::NoRoom is the precise room refusal.",
+  "fixture_changes": [
+    "Exactly TWO pre-release expectations NoGpu -> NoRoom, each paired with free.gpus==0 assertion.",
+    "Final postReleased strict NoGpu branch byte-identical to original8d1; this is still an UNRUN relevant freshness oracle.",
+    "New healthy_independent_native_snapshot_distinguishes_held_full_pool_from_fresh_free_gpu: separately constructed model successful readings, no Box/Released parent => Admits; same full-P Live => NoRoom. Independent snapshot is not evidence that old samples became fresh."
+  ],
+  "original_terminal_body_sha256": "0240c04379d7ac73bdcc105a1ae43ccc3272058be083c951e55fc84320e62df2",
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compiler": "UNRUN",
+    "tests": "UNRUN",
+    "local_builds": 0,
+    "dispatches": 0,
+    "native": 0
+  },
+  "remaining": "ROOT matched original terminal oracle plus healthy baseline; no production sibling freshness remedy before actual result. No replay of prior12 positives. Lazy complement/coalescing source separate; native/profiling/full gates ROOT-owned."
+}

@@ -1,0 +1,28 @@
+{
+  "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\native-launcher-loader-v1",
+  "index": {
+    "journal.json": {
+      "bytes": 5085,
+      "sha256": "cc46f5b54e00bbbdf22c2ce10125f62c6fd601ede5f2a8235563d4a56a8fe65f"
+    },
+    "submitted-hcs.json": {
+      "bytes": 736,
+      "sha256": "1273585a0d157d2e8db5f03bcc991cc34a9b1ccfc3996cb5faaa9d37b46d8f5e"
+    },
+    "output/launcher.exit.txt": {
+      "bytes": 13,
+      "sha256": "31c95fd3fd5eeb1ba7907684cb0ff7fbc75ea084a9f861f901efcff9a945d97d"
+    },
+    "output/launcher.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "output/launcher.stdout.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "source_hashes": {},
+  "temp_files": [],
+  "utc": "2026-11-11T04:53:54.5336874Z"
+}

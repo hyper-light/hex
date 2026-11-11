@@ -1,0 +1,15 @@
+{
+  "r39-preflight-render-equals-tool-output": true,
+  "r39-tool-output.txt": {
+    "raw_bytes": 824,
+    "raw_sha256": "077271e02ed0bab95c82eb7c5a42f34d74978239f3ab298b8a7077add89acea1",
+    "stored": "r39-tool-output.txt.gz",
+    "stored_sha256": "adb33ef9f766155ad682b8515c4e604dcbf8b8e31d4c83969b9f3fb53022b60b"
+  },
+  "r40-tool-output.txt": {
+    "raw_bytes": 1558,
+    "raw_sha256": "0c3359e39ed6a4706ad16b66ab7ad9bf06ac0d7e4d7da20f936e0e49c1d9c87d",
+    "stored": "r40-tool-output.txt.gz",
+    "stored_sha256": "d144d0b7f9e1097c16ead64b277732a6cd4abfe8e53a635846026206c057f38d"
+  }
+}

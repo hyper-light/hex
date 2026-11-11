@@ -1,0 +1,713 @@
+{
+  "eligibility": "Root independently reconstructed all14000cold censusfiles/44000rows, every exact backend producer filename/ordered recorded-Popen closure/readyOCI+emptybaseline/guest record+receipt+Stopped identity, externally hashed artifacts/receipts and enumerated all files. Each profile contributes1000first completed and1000subsequent SDK Hellos with normal-source-order counts, zero marked Hello refusals/runouts/malformed/full/ambiguous rows. Existing1000warm borrower rows/profile retained. Release tail extension has2000physicalcycles and all86530rawfiles/262641rows reconstructed. Completed wire replies, typed refusals and censored bounds remain separate kinds.",
+  "evidence_sha256": {
+    "calibration-macos-bba3d814.json": "e4672b4b6873968c25041c61b8e88c1b90c1703f962e276376b00129bdd82c45",
+    "census-release-round2-bba3d814.json": "354299a41ea1b57813d4998df34d2f8223efe9289c1c5220e99b0a337e041448",
+    "cold-sdk-hello-debug-8f51140e.json": "08fadd212a826599e33e8f894772b1310c30f39a13d8f392548694a9c6fd90c1",
+    "cold-sdk-hello-release-8f51140e.json": "a481043658b233bbf0bfebd53d035908057d20f61e32b61dd9d2757598c0e3af",
+    "mac-seeds-validation-e2fb4f17.json": "c217a9fdb89adfb278ee7463cc87d30bb62dc9fc97c306e95a235d68974839a2"
+  },
+  "failure_status": "Original guest_loop3bootsvs2 remains unreproduced/uncorrected; this extension does not claim its cause. Original release Delete run-out is retained explicitly, not discarded or described as an answer. Final installed-wait behavior must pass actual armed fresh-node/local/SSH and combined gates.",
+  "host": "macOS arm64 d1323898b255a3ed435eb83fa0f7b0cf",
+  "kind": "root-reviewed-macos-cold-and-tail-extension",
+  "method": "existing per-operation/per-build-profile recorded maximum and online maximum, deadline TIMES_SLOWEST times max(recorded,seen); extend eligible cohorts and retain existing D9 censored lower bounds, no new floor, multiplier or algorithm",
+  "new_negative_evidence": "armed-submit-negative-df534d2f.json; candidate source record values unchanged pending root diagnosis",
+  "prior_candidate": "bbb3ef2114641d82742e153c98665ea6639b9a60 failed broader validation, retained unchanged as historical evidence",
+  "requirement": "AC-T7.4.1 / decision9",
+  "root_cold_capture_revision": "8f51140ef653d0b348597b02b241cc185a4aa54e",
+  "root_raw_verifier_revision": "1bb73f74",
+  "rows": {
+    "client.answer.capacity": {
+      "debug": {
+        "max_of": [
+          {
+            "answer_n": 12248,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 14254417
+          }
+        ],
+        "seed_ns": 14254417
+      },
+      "release": {
+        "max_of": [
+          {
+            "answer_n": 12453,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 13172125
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "uncensored extension completed non-refusal replies",
+            "ns": 12953708,
+            "statistics_ns": {
+              "max": 12953708,
+              "n": 12524,
+              "p50": 361667,
+              "p90": 5129584,
+              "p99": 7009583,
+              "p999": 9407375
+            }
+          }
+        ],
+        "seed_ns": 13172125
+      }
+    },
+    "client.answer.hello": {
+      "debug": {
+        "max_of": [
+          {
+            "answer_n": 110297,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 2607584
+          }
+        ],
+        "seed_ns": 2607584
+      },
+      "release": {
+        "max_of": [
+          {
+            "answer_n": 84605,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 829500
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "uncensored extension completed non-refusal replies",
+            "ns": 305917,
+            "statistics_ns": {
+              "max": 305917,
+              "n": 86525,
+              "p50": 38167,
+              "p90": 59500,
+              "p99": 94167,
+              "p999": 177541
+            }
+          }
+        ],
+        "seed_ns": 829500
+      }
+    },
+    "client.answer.schedule.advertise": {
+      "debug": {
+        "max_of": [
+          {
+            "answer_n": 2000,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 108619750
+          }
+        ],
+        "seed_ns": 108619750
+      },
+      "release": {
+        "max_of": [
+          {
+            "answer_n": 2000,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 78447792
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "uncensored extension completed non-refusal replies",
+            "ns": 88998417,
+            "statistics_ns": {
+              "max": 88998417,
+              "n": 2000,
+              "p50": 36243708,
+              "p90": 56716208,
+              "p99": 72142375,
+              "p999": 86116042
+            }
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "completed typed wire refusals; same existing online learner",
+            "ns": 249583,
+            "statistics_ns": {
+              "max": 249583,
+              "n": 1078,
+              "p50": 65167,
+              "p90": 83584,
+              "p99": 133333,
+              "p999": 243917
+            }
+          }
+        ],
+        "seed_ns": 88998417
+      }
+    },
+    "client.answer.schedule.delete": {
+      "debug": {
+        "max_of": [
+          {
+            "answer_n": 2000,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 125323459
+          }
+        ],
+        "seed_ns": 125323459
+      },
+      "release": {
+        "max_of": [
+          {
+            "answer_n": 2000,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 83190542
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "uncensored extension completed non-refusal replies",
+            "ns": 150082083,
+            "statistics_ns": {
+              "max": 150082083,
+              "n": 2000,
+              "p50": 39309625,
+              "p90": 89742042,
+              "p99": 118654000,
+              "p999": 135122334
+            }
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "completed typed wire refusals; same existing online learner",
+            "ns": 183958,
+            "statistics_ns": {
+              "max": 183958,
+              "n": 1434,
+              "p50": 51042,
+              "p90": 70250,
+              "p99": 104084,
+              "p999": 153291
+            }
+          },
+          {
+            "derivation": "existing decision9 census rule: selected record never lies below a slow-answer run-out; original source seed83190542 x unchanged TIMES_SLOWEST2 =166381084",
+            "evidence": "mac-seeds-validation-e2fb4f17.json",
+            "kind": "censored run-out lower bound, not a completed reply or online answer sample",
+            "log": {
+              "bytes": 132,
+              "path": "/Users/adalundhe/.cache/hx/e-nwsm3n4y/call.log",
+              "sha256": "9ce96b0615f333344486cdee8d0acef836a4bc94f4accbe6b4bc8ff0a50d0c8c"
+            },
+            "ns": 166381084
+          }
+        ],
+        "seed_ns": 166381084
+      }
+    },
+    "client.answer.schedule.describe": {
+      "debug": {
+        "max_of": [
+          {
+            "answer_n": 6243,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 22181708
+          }
+        ],
+        "seed_ns": 22181708
+      },
+      "release": {
+        "max_of": [
+          {
+            "answer_n": 6448,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 22866875
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "uncensored extension completed non-refusal replies",
+            "ns": 23338333,
+            "statistics_ns": {
+              "max": 23338333,
+              "n": 6519,
+              "p50": 937917,
+              "p90": 9730208,
+              "p99": 14849917,
+              "p999": 21729792
+            }
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "completed typed wire refusals; same existing online learner",
+            "ns": 212542,
+            "statistics_ns": {
+              "max": 212542,
+              "n": 1947,
+              "p50": 52208,
+              "p90": 69292,
+              "p99": 105208,
+              "p999": 203375
+            }
+          }
+        ],
+        "seed_ns": 23338333
+      }
+    },
+    "client.answer.schedule.hear_control": {
+      "debug": {
+        "max_of": [
+          {
+            "answer_n": 12213,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 119427250
+          }
+        ],
+        "seed_ns": 119427250
+      },
+      "release": {
+        "max_of": [
+          {
+            "answer_n": 12317,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 116103292
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "uncensored extension completed non-refusal replies",
+            "ns": 122932458,
+            "statistics_ns": {
+              "max": 122932458,
+              "n": 12415,
+              "p50": 41719042,
+              "p90": 67598458,
+              "p99": 95917000,
+              "p999": 111976500
+            }
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "completed typed wire refusals; same existing online learner",
+            "ns": 267750,
+            "statistics_ns": {
+              "max": 267750,
+              "n": 2431,
+              "p50": 36334,
+              "p90": 53584,
+              "p99": 100084,
+              "p999": 196666
+            }
+          }
+        ],
+        "seed_ns": 122932458
+      }
+    },
+    "client.answer.schedule.hear_create": {
+      "debug": {
+        "max_of": [
+          {
+            "answer_n": 1000,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 392913792
+          }
+        ],
+        "seed_ns": 392913792
+      },
+      "release": {
+        "max_of": [
+          {
+            "answer_n": 1000,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 213308750
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "uncensored extension completed non-refusal replies",
+            "ns": 244933375,
+            "statistics_ns": {
+              "max": 244933375,
+              "n": 1000,
+              "p50": 127048541,
+              "p90": 182385792,
+              "p99": 208289083,
+              "p999": 233175709
+            }
+          }
+        ],
+        "seed_ns": 244933375
+      }
+    },
+    "client.answer.schedule.hear_delete": {
+      "debug": {
+        "max_of": [
+          {
+            "answer_n": 2813,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 130079458
+          }
+        ],
+        "seed_ns": 130079458
+      },
+      "release": {
+        "max_of": [
+          {
+            "answer_n": 2705,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 132392000
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "uncensored extension completed non-refusal replies",
+            "ns": 152498583,
+            "statistics_ns": {
+              "max": 152498583,
+              "n": 2713,
+              "p50": 42946375,
+              "p90": 76778208,
+              "p99": 107441250,
+              "p999": 132518708
+            }
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "completed typed wire refusals; same existing online learner",
+            "ns": 87916,
+            "statistics_ns": {
+              "max": 87916,
+              "n": 132,
+              "p50": 43209,
+              "p90": 64834,
+              "p99": 79417,
+              "p999": 87916
+            }
+          }
+        ],
+        "seed_ns": 152498583
+      }
+    },
+    "client.answer.schedule.link_up": {
+      "debug": {
+        "max_of": [
+          {
+            "answer_n": 1000,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 250209
+          }
+        ],
+        "seed_ns": 250209
+      },
+      "release": {
+        "max_of": [
+          {
+            "answer_n": 1000,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 139333
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "uncensored extension completed non-refusal replies",
+            "ns": 144625,
+            "statistics_ns": {
+              "max": 144625,
+              "n": 1000,
+              "p50": 54708,
+              "p90": 77417,
+              "p99": 102417,
+              "p999": 127042
+            }
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "completed typed wire refusals; same existing online learner",
+            "ns": 125916,
+            "statistics_ns": {
+              "max": 125916,
+              "n": 814,
+              "p50": 43750,
+              "p90": 61333,
+              "p99": 84541,
+              "p999": 125916
+            }
+          }
+        ],
+        "seed_ns": 144625
+      }
+    },
+    "client.answer.schedule.retry": {
+      "debug": {
+        "max_of": [
+          {
+            "answer_n": 2000,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 16694750
+          }
+        ],
+        "seed_ns": 16694750
+      },
+      "release": {
+        "max_of": [
+          {
+            "answer_n": 2000,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 9766084
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "uncensored extension completed non-refusal replies",
+            "ns": 18684542,
+            "statistics_ns": {
+              "max": 18684542,
+              "n": 2000,
+              "p50": 211792,
+              "p90": 872042,
+              "p99": 10671084,
+              "p999": 12978250
+            }
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "completed typed wire refusals; same existing online learner",
+            "ns": 125750,
+            "statistics_ns": {
+              "max": 125750,
+              "n": 730,
+              "p50": 50083,
+              "p90": 64750,
+              "p99": 102083,
+              "p999": 125750
+            }
+          }
+        ],
+        "seed_ns": 18684542
+      }
+    },
+    "client.answer.schedule.status": {
+      "debug": {
+        "max_of": [
+          {
+            "answer_n": 74234,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 7264708
+          }
+        ],
+        "seed_ns": 7264708
+      },
+      "release": {
+        "max_of": [
+          {
+            "answer_n": 47850,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 4420667
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "uncensored extension completed non-refusal replies",
+            "ns": 7577917,
+            "statistics_ns": {
+              "max": 7577917,
+              "n": 49253,
+              "p50": 52750,
+              "p90": 89250,
+              "p99": 537166,
+              "p999": 5361708
+            }
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "completed typed wire refusals; same existing online learner",
+            "ns": 246333,
+            "statistics_ns": {
+              "max": 246333,
+              "n": 15129,
+              "p50": 44750,
+              "p90": 65916,
+              "p99": 97041,
+              "p999": 129916
+            }
+          }
+        ],
+        "seed_ns": 7577917
+      }
+    },
+    "client.answer.schedule.submit": {
+      "debug": {
+        "max_of": [
+          {
+            "answer_n": 2000,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 401317333
+          }
+        ],
+        "seed_ns": 401317333
+      },
+      "release": {
+        "max_of": [
+          {
+            "answer_n": 2000,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 162546792
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "uncensored extension completed non-refusal replies",
+            "ns": 228296000,
+            "statistics_ns": {
+              "max": 228296000,
+              "n": 2000,
+              "p50": 81841958,
+              "p90": 178264958,
+              "p99": 206427167,
+              "p999": 221083834
+            }
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "completed typed wire refusals; same existing online learner",
+            "ns": 148167,
+            "statistics_ns": {
+              "max": 148167,
+              "n": 166,
+              "p50": 70625,
+              "p90": 89834,
+              "p99": 117708,
+              "p999": 148167
+            }
+          }
+        ],
+        "seed_ns": 228296000
+      }
+    },
+    "client.guest.answer.capacity": {
+      "debug": {
+        "max_of": [
+          {
+            "answer_n": 12248,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 6826667
+          }
+        ],
+        "seed_ns": 6826667
+      },
+      "release": {
+        "max_of": [
+          {
+            "answer_n": 12453,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 5094833
+          },
+          {
+            "evidence": "census-release-round2-bba3d814.json",
+            "kind": "uncensored extension completed non-refusal replies",
+            "ns": 6849583,
+            "statistics_ns": {
+              "max": 6849583,
+              "n": 12524,
+              "p50": 211625,
+              "p90": 407375,
+              "p99": 691125,
+              "p999": 1128333
+            }
+          }
+        ],
+        "seed_ns": 6849583
+      }
+    },
+    "client.guest.answer.hello": {
+      "debug": {
+        "max_of": [
+          {
+            "answer_n": 1000,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 197042
+          },
+          {
+            "evidence": "cold-sdk-hello-debug-8f51140e.json",
+            "kind": "normal_first_completed_sdk_hello",
+            "ns": 295291,
+            "scope": "fresh ordinary backend process; per-row VM identity not proven; no dial/token/boot timing",
+            "statistics_ns": {
+              "max": 295291,
+              "n": 1000,
+              "p50": 187708,
+              "p90": 201250,
+              "p99": 235250,
+              "p999": 287458
+            }
+          },
+          {
+            "evidence": "cold-sdk-hello-debug-8f51140e.json",
+            "kind": "subsequent_completed_sdk_hello",
+            "ns": 252167,
+            "scope": "fresh ordinary backend process; per-row VM identity not proven; no dial/token/boot timing",
+            "statistics_ns": {
+              "max": 252167,
+              "n": 1000,
+              "p50": 146208,
+              "p90": 171875,
+              "p99": 207833,
+              "p999": 229459
+            }
+          }
+        ],
+        "seed_ns": 295291
+      },
+      "release": {
+        "max_of": [
+          {
+            "answer_n": 1000,
+            "evidence": "calibration-macos-bba3d814.json",
+            "kind": "prior eligible observed maximum",
+            "ns": 202583
+          },
+          {
+            "evidence": "cold-sdk-hello-release-8f51140e.json",
+            "kind": "normal_first_completed_sdk_hello",
+            "ns": 3022291,
+            "scope": "fresh ordinary backend process; per-row VM identity not proven; no dial/token/boot timing",
+            "statistics_ns": {
+              "max": 3022291,
+              "n": 1000,
+              "p50": 116792,
+              "p90": 132500,
+              "p99": 156083,
+              "p999": 2667584
+            }
+          },
+          {
+            "evidence": "cold-sdk-hello-release-8f51140e.json",
+            "kind": "subsequent_completed_sdk_hello",
+            "ns": 358791,
+            "scope": "fresh ordinary backend process; per-row VM identity not proven; no dial/token/boot timing",
+            "statistics_ns": {
+              "max": 358791,
+              "n": 1000,
+              "p50": 113750,
+              "p90": 132792,
+              "p99": 170458,
+              "p999": 343667
+            }
+          }
+        ],
+        "seed_ns": 3022291
+      }
+    }
+  },
+  "scope": "macOS native and macOS-host guest transports only. Guest SDK timer starts after dial/token; normal counts are not per-row VM identity and unobserved pre-Hello retries remain possible. No CONNECT/fullboot/workload/performance/resource-return or whole-goal claim. Linux/Windows and other waits unchanged.",
+  "status": "FAILED actual armed physical Submit at456592000ns after106complete localcycles; not ready to land",
+  "units": "nanoseconds"
+}

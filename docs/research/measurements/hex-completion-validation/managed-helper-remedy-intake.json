@@ -1,0 +1,27 @@
+{
+  "requirement": "AC-T7.4.1",
+  "role": "ROOTcoordinator",
+  "producer_base": "0ae64af581b745e098c801ac1761e8f615d80fba",
+  "narrow_remedy_source": "d0399768671643264a298397acdd4111a62986ea",
+  "original_test": "f1c6103c19bb2e87431b1f24d6630d54c34fd107",
+  "source_original_before_remedy": "Retained explicita310+0ae+f1composite actual2RED andindependent3PASS; rawd817be39 committed7e662ace. No nativeMac helper shell/CPUcontrolsintaken.",
+  "scope": "Pure append-only managed helper codec andnarrow checkedoption/value-role remediation only. Latercensus/shell drafts excluded; originallegacyhelperbody preservedexceptpubmod declaration.",
+  "standalone_test_prefix": "ROOT standard cfg(test) test-only lint allowances per CLAUDE, then exactoriginalf1bodySHA bc998fcbf2fd8e30f94ff99bd184f677e03df81ce54ee08c6a07da2aefc1f2b8; noassertion altered.",
+  "files": [
+    {
+      "path": "crates/hex-core/src/helper.rs",
+      "sha256": "04a3cf38c052cd5bfc741cfc12ac382d75363fe1077876a28e89f994c44aff17"
+    },
+    {
+      "path": "crates/hex-core/src/helper/managed.rs",
+      "sha256": "03059d17c28e27f6559244f68c79144e0de8b84c2ab7d7ab4113359a49d37616"
+    },
+    {
+      "path": "crates/hex-core/tests/managed_argument_original.rs",
+      "sha256": "86614c75a64a1697c799d333e170a579e87ae1fbe4537c417861096961f9b918"
+    }
+  ],
+  "tests_executed_after_remedy": 0,
+  "native_invocations": 0,
+  "remaining": "Sameoriginal2+newrole1 matchedgreen, boundedmessagesandparserhostile/fault/allocationaudit, actualpersistentMacownership/aggregateCPU/nativecleanup."
+}

@@ -1,0 +1,59 @@
+{
+  "requirement": "AC-T7.4.1",
+  "role": "ROOTcoordinator",
+  "sources": [
+    "e7dcda75252fe147b3630a54a1a43f9b68ff2f38",
+    "5698ba99f86b2479312bfd174814de692118b401",
+    "c480541b8469cecc449337e622e9dc50eb511f0e",
+    "70e71c7341c7e51a8d24bb6b4511c979bd8f913a"
+  ],
+  "review": "Eight production sources+new620linepool reviewed; same native owner/Store transaction, optional final-owned report descriptor, shared finite scope/fullset guard. Ordinary unsafe child delegates same body with None. No new manager.",
+  "root_ports": "Final L1 native source already includes ROOT LinkOwner ports; config keeps route None and adds actual QA-required drives[]/regression. Root devices.rs aliases/fixture registrations preserved by exact delta.",
+  "original_sink_control": "Writes both SAME existing vm_io sinks, drops/checksownedFDs before assertions; File::open(/dev/null) read-only body unchanged until actual red. No child/KVM/GPU effects.",
+  "files": [
+    {
+      "path": "crates/hex-node/src/node.rs",
+      "sha256": "d6dd295701e2c80bb1ebd2f07f4523c0d35a97dd41af60d5d46ffe457c7e509a"
+    },
+    {
+      "path": "crates/hex-node/src/node/backends.rs",
+      "sha256": "f3838c338d2226562b9b658558f809f9a15fa007784d5ddf476e966f21d41ae6"
+    },
+    {
+      "path": "crates/hex-node/src/supervise.rs",
+      "sha256": "30cbf17d9299e6c2527a93ce1a1a23fe6742c239b2b5c0636dc174c0450d4a58"
+    },
+    {
+      "path": "crates/hex-runtime/src/devices.rs",
+      "sha256": "d96174acff763c469f41a1625001428cc7ec80b353781ff0584d25196bcdc087"
+    },
+    {
+      "path": "crates/hex-runtime/src/firecracker/config.rs",
+      "sha256": "3fb98f7fde5b8a621002c85877bc677004da4288bbce26b01f7fb58042797f6c"
+    },
+    {
+      "path": "crates/hex-runtime/src/firecracker/native.rs",
+      "sha256": "ef9a30354468b4b1af8c5f86d128af3a1c58ffac0cc0977ba4a0300e492acda8"
+    },
+    {
+      "path": "crates/hex-runtime/src/firecracker/pool.rs",
+      "sha256": "d0894e2be99d3c97833f90c00e04db5194feee87f1bb56074624ecad44d9136d"
+    },
+    {
+      "path": "crates/hex-runtime/src/linux/process.rs",
+      "sha256": "f216d9cbe3d3d6663a0079ce67644acaf653f1b4c08d8b447c6b0ea0cdf18926"
+    },
+    {
+      "path": "crates/hex-runtime/src/linux/sys.rs",
+      "sha256": "cda48ba364da31f20b8963a30a365ca2f6231d1dd5c30902d64099d0ab3f98f2"
+    }
+  ],
+  "tests_executed": 0,
+  "native_invocations": 0,
+  "remaining": [
+    "original output-sink reproduction before remedy",
+    "matching SDK report/writer consumers and Linux compile",
+    "actual whole-owner cold native metadata barrier and Released refresh/rearm handshake successors",
+    "native scope/recovery/cleanup/profile and GPU guest execution"
+  ]
+}

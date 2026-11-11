@@ -207,6 +207,9 @@ impl Lab {
         let host = Arc::new(TestHost::default());
         host.sim
             .create(BoxSpec {
+                route: None,
+                allocation: None,
+                devices: Vec::new(),
                 id: BoxId::new("b").unwrap(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Process,
@@ -451,10 +454,10 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
         ),
         Hostile(
             "unknown kind",
-            with(12, [0x11, 0]),
+            with(12, [0x13, 0]),
             vec![],
             9,
-            "kind 0x0011 isn't a request this wire defines",
+            "kind 0x0013 isn't a request this wire defines",
         ),
         Hostile(
             "an answer kind",
@@ -873,6 +876,9 @@ fn a_list_longer_than_one_message_comes_whole() {
         lab.host
             .sim
             .create(BoxSpec {
+                route: None,
+                allocation: None,
+                devices: Vec::new(),
                 id: BoxId::new(&format!("many-{n:04}")).unwrap(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Process,

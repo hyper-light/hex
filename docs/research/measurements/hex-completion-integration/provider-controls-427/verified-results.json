@@ -1,0 +1,138 @@
+{
+  "source": "427f7112a59dc36c6238bad22c451b2b196146e2",
+  "actual": [
+    {
+      "source": "427f7112a59dc36c6238bad22c451b2b196146e2",
+      "archive_sha256": "d316315a83d3e6b761e5fe193a7fcd01ee15e48d0503bfd3ac89b836984a1696",
+      "scope": "ROOT 3 pure RPC/authority controls only after canonical fixture closure; strict Clippy held known Node warnings; no native backend execution",
+      "target": "mac",
+      "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+      "driver_pid": 54873,
+      "phases": [
+        {
+          "name": "rpc-control",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "-p",
+            "hex-node",
+            "--lib",
+            "--locked",
+            "scheduler::tests::device_offer_tests::physical_rpc_facts_keep_unknowns_and_empty_native_inventory_cannot_grant",
+            "--",
+            "--exact",
+            "--test-threads=1"
+          ],
+          "pid": 55250,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "d29556d9b342049a16e591e47cc04a0418840bfeb63b7e99b7f549d198c3c773",
+          "bytes": 3827,
+          "selected_one_passed": true
+        },
+        {
+          "name": "alias-control",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "-p",
+            "hex-node",
+            "--lib",
+            "--locked",
+            "placement::physical::tests::native_aliases_keep_one_owner_independent_unknowns_and_observed_pressure",
+            "--",
+            "--exact",
+            "--test-threads=1"
+          ],
+          "pid": 55829,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "656796df775a65db95efda045b1cd68779196a2d42f4319baa9ce39de57ec02e",
+          "bytes": 454,
+          "selected_one_passed": true
+        },
+        {
+          "name": "empty-control",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "-p",
+            "hex-node",
+            "--lib",
+            "--locked",
+            "placement::physical::tests::empty_native_inventory_preserves_its_authority",
+            "--",
+            "--exact",
+            "--test-threads=1"
+          ],
+          "pid": 55831,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "c0f168b8b4ef502d15a276157dd8ba858fba0120150d8b9f875e112fc334cc29",
+          "bytes": 428,
+          "selected_one_passed": true
+        }
+      ],
+      "source_changes": [],
+      "temp_entries": 0,
+      "native_invocations": 0,
+      "exit": 0
+    },
+    {
+      "source": "427f7112a59dc36c6238bad22c451b2b196146e2",
+      "archive_sha256": "d316315a83d3e6b761e5fe193a7fcd01ee15e48d0503bfd3ac89b836984a1696",
+      "scope": "ROOT Windows x64+arm64 runtime/node production Clippy only; no tests/native execution",
+      "target": "mac",
+      "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+      "driver_pid": 55246,
+      "phases": [
+        {
+          "name": "production-check",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+            "clippy",
+            "-p",
+            "hex-runtime",
+            "-p",
+            "hex-node",
+            "--lib",
+            "--locked",
+            "--target",
+            "x86_64-pc-windows-msvc",
+            "--target",
+            "aarch64-pc-windows-msvc",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "pid": 55498,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "523ea147eddc2196ab4adbaefb37b110e17d489967251a4f6aca021df4357357",
+          "bytes": 3673
+        }
+      ],
+      "source_changes": [],
+      "temp_entries": 0,
+      "tests_executed": 0,
+      "native_invocations": 0,
+      "exit": 0
+    }
+  ],
+  "scope_limit": "three distinct pure tests and Windowsx64/ARM64 production libClippy; no native GPU/VM/E2E or newer scope-cohort green claim",
+  "independent_collection_all_hashes": true
+}

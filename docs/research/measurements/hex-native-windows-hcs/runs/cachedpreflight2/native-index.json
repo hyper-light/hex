@@ -1,0 +1,32 @@
+{
+  "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-import-preflight-v2",
+  "index": {
+    "index.json": {
+      "bytes": 34,
+      "sha256": "bc5857ac9458293d5111ab85c952172cd7f56bceb4e3014ddc4cafac8927b313"
+    },
+    "list.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "list.stdout.log": {
+      "bytes": 24,
+      "sha256": "4d23bacf8057da244a2226ce5c3e230366302b605060707c9e4995ad33dd6d63"
+    },
+    "result.json": {
+      "bytes": 3513,
+      "sha256": "2807dde82219b011cb1f9b11bb3a2fc233ae341e4d68e6b88f5e174021869bc9"
+    },
+    "tar.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "tar.stdout.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "source_hashes": {},
+  "temp_files": [],
+  "utc": "2026-11-11T05:00:25.1347888Z"
+}

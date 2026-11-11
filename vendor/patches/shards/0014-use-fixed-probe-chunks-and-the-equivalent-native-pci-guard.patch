@@ -1,0 +1,33 @@
+Subject: Use fixed probe chunks and the equivalent native PCI guard
+Why: AC-T7.4.1: exact signed9e6243da follows L4 actual direct-target ABI Clippy101; fixed checked-width chunks and the identical PCI predicate, without weakening identity or native refusal behavior.
+
+diff --git a/crates/abi/src/gpu/probe.rs b/crates/abi/src/gpu/probe.rs
+index 553739812fe8b9fa513503e31939ed68c2adb1ae..ff25ef61a93ddd12974b648e39ea814893fbbceb 100644
+--- a/crates/abi/src/gpu/probe.rs
++++ b/crates/abi/src/gpu/probe.rs
+@@ -65,7 +65,9 @@ fn fixed_hex<const N: usize>(text: &str) -> Result<[u8; N], GpuProbeError> {
+         _ => None,
+     };
+     let mut uuid = [0; N];
+-    for (slot, pair) in uuid.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
++    // The checked exact 2*N length above rules out a trailing byte.
++    let (pairs, _) = text.as_bytes().as_chunks::<2>();
++    for (slot, pair) in uuid.iter_mut().zip(pairs) {
+         let high = pair
+             .first()
+             .copied()
+@@ -98,10 +100,10 @@ impl GpuProbe {
+             if resolved.physical != *selected || resolved.uuid == [0; 16] {
+                 return Err(GpuProbeError::Identity);
+             }
+-            if let Some(pci) = resolved.pci {
+-                if !matches!(pci, PhysicalGpu::Pci { .. }) || pci.check().is_err() {
+-                    return Err(GpuProbeError::Identity);
+-                }
++            if let Some(pci) = resolved.pci
++                && (!matches!(pci, PhysicalGpu::Pci { .. }) || pci.check().is_err())
++            {
++                return Err(GpuProbeError::Identity);
+             }
+             let matches = match resolved.physical {
+                 PhysicalGpu::Pci { .. } => resolved.pci == Some(resolved.physical),

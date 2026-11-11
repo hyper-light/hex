@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "parent": "7197ed5e86307e9db615f7ee7b9699b8a7cc7f98",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": {
+    "path": "crates/hex-core/src/wire.rs",
+    "sha256": "134a6153f84d30be8b69e42731ada6d2ef732e4741d4a129a48ec413cc6233bd",
+    "bytes": 92721,
+    "parent_sha256": "5320facae6e7c07f45441291f45ee9ed45d9ca441ea9d92e105a8408c49f847c"
+  },
+  "protected": [
+    {
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "38ae331369187698244c8d679e944e39937b27915f4c7612191e9d65604f3fc1",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-api/src/devices.rs",
+      "sha256": "7a8d0f8e63fc7521212115f4afad25c9c17ed328752e73ed2dfd0c3521d84ebb",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "a8f51f83a7b8ed2c43e0824f3af7aff5e967ba77159dde320841183559ea29b8",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+      "unchanged": true
+    }
+  ],
+  "same_body_codecs": {
+    "refusal": {
+      "sha256": "7457151cf1ac8c2280578157dd71d0aefbbd9c0f841397136b4ec1c0a2ba4709",
+      "unchanged": true
+    },
+    "exit": {
+      "sha256": "22a378baa77c2809623cc3aa3b218c9c15530207ab9e055ced26be0d85ac833f",
+      "unchanged": true
+    }
+  },
+  "public_helpers": [
+    "snapshot_refusal(&Refusal,usize)->Result<Vec<u8>,Fault>",
+    "snapshot_exit(Exit,usize)->Result<Vec<u8>,Fault>"
+  ],
+  "allocation_strategy": "same-codec checked counting with zero output allocation; fallible exact upfront reserve; all fixed-mode appends verify bound and capacity; no later reserve/growth",
+  "ordinary": "default mode unchanged body/layout behavior; source-derived IDENTITY changes normally",
+  "builds_executed": 0,
+  "tests_executed": 0,
+  "native_executed": 0,
+  "status": "source-only; three focused canonical/bounds controls defined, no checks executed",
+  "tests_source": {
+    "path": "crates/hex-core/src/wire/tests.rs",
+    "sha256": "0cbed043633e35d474fc4863b6fae8dc4e60c8e9f28319fc00f9249b10a8351c",
+    "bytes": 112688,
+    "parent_prefix_bytes": 108139,
+    "parent_prefix_sha256": "3cba2c21c0ec5f575df1ba0f2098e997be8ea63f0d718534fe145f807d867d0d",
+    "append_only": true
+  },
+  "test_names": [
+    "wire::tests::snapshot_refusal_and_exit_match_canonical_answer_bytes",
+    "wire::tests::snapshot_bounds_include_scalar_trailers_before_allocation",
+    "wire::tests::snapshot_fixed_writer_never_grows_after_reservation"
+  ],
+  "tests_defined": 3
+}

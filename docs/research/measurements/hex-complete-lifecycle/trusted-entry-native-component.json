@@ -1,0 +1,191 @@
+{
+  "status": "source-only native component; focused entry/driver still being implemented",
+  "base": "786775e3b119c5163d49aa12662c0207cb25cc29",
+  "role": "implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": [
+    {
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/rt.rs",
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-private-entry-20261111-v1/rust-rt.rs",
+      "bytes": 7541,
+      "sha256": "ff3d8dab421d35123cce1a8fc54e579ed9f5a13b55f34c39d92be9371394e426"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sys/pal/unix/mod.rs",
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-private-entry-20261111-v1/rust-pal-unix-mod.rs",
+      "bytes": 13904,
+      "sha256": "6c706c9a79d6a6ca3870a605800d7a74ba98cf41764c12cd4538a37812bba6aa"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sys/args/unix.rs",
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-private-entry-20261111-v1/rust-args-unix.rs",
+      "bytes": 7511,
+      "sha256": "68a9ad768fb1e8a6c33db1581e84e5c89ba994077119ef6dbde04fbf130046d2"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/man/man2/fork.2",
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-private-entry-20261111-v1/xnu-fork.2",
+      "bytes": 4666,
+      "sha256": "e9ab8f14990c2aa679887ecb15a317b2f0b37d096c2b3390c9008362a539c428"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/man/man2/posix_spawn.2",
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-private-entry-20261111-v1/xnu-posix_spawn.2",
+      "bytes": 10892,
+      "sha256": "0abbcdbe2fc62306f1d3b2aff6e00858ff03a0f0c20c312b9e58fb08caceb4f7"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sys/pal/unix/stack_overflow.rs",
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-private-entry-20261111-v1/rust-stack-overflow.rs",
+      "bytes": 30324,
+      "sha256": "8b5b1ed19a72016ef6e1df23872fecd67fe8b7687284d1ac91945b3b31f58df6"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/thread/mod.rs",
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-private-entry-20261111-v1/rust-thread-mod.rs",
+      "bytes": 10451,
+      "sha256": "0449be955ee28838a82b3c5d941c56eea1b9b8d1decff388ffac74ed40d8b064"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sys/thread/unix.rs",
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-private-entry-20261111-v1/rust-unix-thread.rs",
+      "bytes": 39328,
+      "sha256": "bce2afecbdd5eaf6f10f10e220a87ed12a8c24df798db6d77f866cfea8f86852"
+    },
+    {
+      "repository": "https://github.com/hyper-light/hex",
+      "revision": "b88416e9151068f7bf414eff45c9a37c926190d6",
+      "path": "crates/hex-cli/src/main.rs",
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-private-entry-20261111-v1/hex-main.rs",
+      "bytes": 5319,
+      "sha256": "368f8b0a6bfcc7a33e1ddc5097a1b78cb85ae461e93a1338682a6d36c304b549"
+    },
+    {
+      "repository": "https://github.com/hyper-light/hex",
+      "revision": "b88416e9151068f7bf414eff45c9a37c926190d6",
+      "path": "crates/hex-cli/Cargo.toml",
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-private-entry-20261111-v1/hex-cli-Cargo.toml",
+      "bytes": 3725,
+      "sha256": "22beaf702ce0a7f57417d58ae87bf510b7f2fb7e905376781b73493122660360"
+    },
+    {
+      "repository": "https://github.com/hyper-light/hex",
+      "revision": "b88416e9151068f7bf414eff45c9a37c926190d6",
+      "path": "crates/hex-runtime/Cargo.toml",
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-private-entry-20261111-v1/hex-runtime-Cargo.toml",
+      "bytes": 1575,
+      "sha256": "72fe9434aaf3640496635b10599adf75c3bf2f5ad7973595baa709ccdb954d5b"
+    },
+    {
+      "repository": "https://github.com/hyper-light/hex",
+      "revision": "b88416e9151068f7bf414eff45c9a37c926190d6",
+      "path": "crates/hex-node/Cargo.toml",
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-private-entry-20261111-v1/hex-node-Cargo.toml",
+      "bytes": 2178,
+      "sha256": "946276361fd88cd2448bdbdc72a557cea8f963c237e46c1caf66ee73a2b85a18"
+    },
+    {
+      "repository": "https://github.com/hyper-light/hex",
+      "revision": "b88416e9151068f7bf414eff45c9a37c926190d6",
+      "path": "crates/hex-runtime/src/macos/sys.rs",
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-private-entry-20261111-v1/hex-macos-sys.rs",
+      "bytes": 44893,
+      "sha256": "42dd2de55774ee45e03e844849a8cd63c00580f769eb14e49d08f6398e3dc7fd"
+    },
+    {
+      "repository": "https://github.com/hyper-light/hex",
+      "revision": "b88416e9151068f7bf414eff45c9a37c926190d6",
+      "path": "crates/hex-runtime/src/macos/helper_sys.rs",
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-private-entry-20261111-v1/hex-macos-helper-sys.rs",
+      "bytes": 20940,
+      "sha256": "c26b340752edbb2101ba4fa862d7e3da01e625fade33c678e051740e0c3e9e43"
+    },
+    {
+      "repository": "https://github.com/hyper-light/hex",
+      "revision": "b88416e9151068f7bf414eff45c9a37c926190d6",
+      "path": "crates/hex-gpu/src/apple/sys.rs",
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-private-entry-20261111-v1/hex-apple-gpu-sys.rs",
+      "bytes": 26032,
+      "sha256": "18380524e95aa91d0446c9b32df070b66d729c0cf053573ab56adfe0f1ef116f"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/rust-lang/rust/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sys/time/unix.rs",
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/trusted-entry-786-source-v1/rust-time-unix.rs",
+      "bytes": 4999,
+      "sha256": "2250ca181d117737d32734c50156a7a9e74852251a17bf70b2a002b8d6fbac43"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/Libc/71bbe350ab79eef58113991d817ccc6165061a64/include/crt_externs.h",
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/trusted-entry-786-source-v1/crt_externs.h",
+      "bytes": 1713,
+      "sha256": "570c931a6e130e96e023be387885630e5435c902e940eefb9462cb1121cbb9f0"
+    },
+    {
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-scope-closure/libsyscall-wrappers-spawn-posix_spawn.c",
+      "bytes": 80627,
+      "sha256": "15392bdbd233e899de34b238afdb2f991a71a24583dec92ae503cb42bc5f9fad",
+      "revision": "f6217f891ac0bb64f3d375211650a4c1ff8ca1ea"
+    },
+    {
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-scope-closure/libsyscall-wrappers-spawn-posix_spawn_filtering.c",
+      "bytes": 12335,
+      "sha256": "8769c78b6f96ebcf24187986586da99306df3056c746a3bd1cef341280521a07",
+      "revision": "f6217f891ac0bb64f3d375211650a4c1ff8ca1ea"
+    },
+    {
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-scope-closure/bsd-kern-kern_exec.c",
+      "bytes": 251651,
+      "sha256": "89531d33618b8361064236189212c3c96be1b32e098690b17802b6b15d932d1a",
+      "revision": "f6217f891ac0bb64f3d375211650a4c1ff8ca1ea"
+    },
+    {
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/mac-scope-closure/bsd-kern-kern_fork.c",
+      "bytes": 47686,
+      "sha256": "73b578159deebc71434185d3638ab1468f995a19c882e1902d001994bb0391c3",
+      "revision": "f6217f891ac0bb64f3d375211650a4c1ff8ca1ea"
+    },
+    {
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/xnu/osfmk-mach-task_info.h",
+      "bytes": 27248,
+      "sha256": "1c09d3ff0bb37b4c17da286f011c8ceb61962f610bd1304688bec4b90c556b81",
+      "revision": "f6217f891ac0bb64f3d375211650a4c1ff8ca1ea"
+    },
+    {
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/xnu/osfmk-mach-message.h",
+      "bytes": 61913,
+      "sha256": "ad64b7b413b42e196dc43a54a5978aa049b9133db1fe9369893f12ad4718c615",
+      "revision": "f6217f891ac0bb64f3d375211650a4c1ff8ca1ea"
+    },
+    {
+      "local": "/Users/adalundhe/.cache/hex-complete-lifecycle/research/xnu/libsyscall-wrappers-libproc-libproc.h",
+      "bytes": 7580,
+      "sha256": "37c7629819a18c5ef10d19a9bea00eb7e0bd31e0b127ecd2ae108c74f47c39e2",
+      "revision": "f6217f891ac0bb64f3d375211650a4c1ff8ca1ea"
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/hex-runtime/src/macos/sys.rs",
+      "bytes": 79612,
+      "sha256": "f36ac0c28b97225af83f8699659de8c47daeda875ea3e2b3fb98b7324f298c3e"
+    },
+    {
+      "path": "docs/research/measurements/hex-complete-lifecycle/trusted-entry-native-component.md",
+      "bytes": 5740,
+      "sha256": "c5050f453b89848dd006069588d20db7faf1ed136117bcfc0958e6bc85a91467"
+    }
+  ],
+  "new_pure_controls": 3,
+  "controls": "UNRUN",
+  "local_action": "scoped rustfmt parse/format only",
+  "build_test_native": false,
+  "helper_intake": false,
+  "feature_registration": "ROOT-owned native-trusted-entry-measurement",
+  "remaining": [
+    "entry/driver source",
+    "L2dea47 builder registration/cohort",
+    "actual parent/child execution",
+    "actual pre-main/image/TOCTOU/resource/closed-set proof"
+  ]
+}

@@ -157,6 +157,9 @@ fn box_user_mode_routes_through_the_helper() {
     let id = BoxId::new("b1").expect("box id");
 
     let spec = BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds {
             memory_max: Some(256 << 20),
@@ -374,6 +377,9 @@ fn a_box_user_programs_end_is_its_own_not_unknown() {
     .expect("a box-user runtime");
     let id = BoxId::new("bu-end").unwrap();
     rt.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Process,
@@ -433,6 +439,9 @@ fn a_box_user_program_is_killed_alone_through_its_proc() {
     .expect("a box-user runtime");
     let id = BoxId::new("bu-kill").unwrap();
     rt.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Process,
@@ -564,6 +573,9 @@ fn a_cap_kill_the_watcher_finds_reaped_is_counted_by_its_waiter() {
     let bound: u64 = 256 << 20;
     let _ = rt.delete(&id);
     rt.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds {
             memory_max: Some(bound),
@@ -702,6 +714,9 @@ fn a_member_its_own_programs_stopped_stays_stopped_when_the_watcher_continues_th
     let id = BoxId::new("mac-own-stop").expect("an id");
     let _ = rt.delete(&id);
     rt.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds {
             memory_max: Some(256 << 20),

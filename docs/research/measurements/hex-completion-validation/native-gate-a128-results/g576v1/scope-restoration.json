@@ -1,0 +1,24 @@
+{
+  "after": {
+    "cpu.max": "100000 100000\n",
+    "memory.max": "4294967296\n",
+    "memory.swap.max": "0\n",
+    "pids.max": "256\n"
+  },
+  "before": {
+    "cpu.max": "100000 100000\n",
+    "memory.max": "4294967296\n",
+    "memory.swap.max": "0\n",
+    "pids.max": "256\n"
+  },
+  "driver": {
+    "pid": 2237638,
+    "ppid": 2237637,
+    "start_ticks": 32240165
+  },
+  "procs": [
+    2237638
+  ],
+  "same_limits": true,
+  "subtree_control": ""
+}

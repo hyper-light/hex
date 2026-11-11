@@ -1,0 +1,148 @@
+[
+  {
+    "source": "1fdfb9ce5d4d2d17a69a9243b25c873b48ad0dfc",
+    "archive_sha256": "8861bc576d15c64e1473d61c49e4fd2468b757e945ba65ca195bbd5dfb116898",
+    "scope": "ROOT matched managed receipt/Books/provider/native source compilation ONLY; zero tests/native GPU/KVM/HCS/VM or backend execution",
+    "target": "linux",
+    "platform": "Linux-7.2.9-2-cachyos-x86_64-with-glibc2.44",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+    "driver_pid": 1558981,
+    "phases": [
+      {
+        "name": "production-check",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/usr/bin/cargo",
+          "check",
+          "-p",
+          "hex-runtime",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked"
+        ],
+        "pid": 1565741,
+        "exit": 0,
+        "reaped": true,
+        "sha256": "4a17e808f039ed949a29674b7ae550fed2bbdb25a148ddf4cb513484b99093b9",
+        "bytes": 3177
+      }
+    ],
+    "source_changes": [],
+    "temp_entries": 0,
+    "tests_executed": 0,
+    "native_invocations": 0,
+    "exit": 0
+  },
+  {
+    "source": "25fd0744c2625deabcbd642ab87cee2a461c04f9",
+    "archive_sha256": "d929241fa8a72e1cd4ef77749a180f3c34a070e5bf4a6758a0e6b313593a77a5",
+    "scope": "ROOT matched managed receipt/Books/provider/native source compilation ONLY; zero tests/native GPU/KVM/HCS/VM or backend execution",
+    "target": "linux",
+    "platform": "Linux-7.2.9-2-cachyos-x86_64-with-glibc2.44",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+    "driver_pid": 953233,
+    "phases": [
+      {
+        "name": "production-check",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/usr/bin/cargo",
+          "check",
+          "-p",
+          "hex-runtime",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked"
+        ],
+        "pid": 958063,
+        "exit": 101,
+        "reaped": true,
+        "sha256": "7f8b2066170d2f2cb001fc943890512cd1eb888780923a1371325f7060806ba7",
+        "bytes": 3875
+      }
+    ],
+    "source_changes": [],
+    "temp_entries": 0,
+    "tests_executed": 0,
+    "native_invocations": 0,
+    "exit": 1
+  },
+  {
+    "source": "26055540a98646beb62a49df3f04d856d8e1a07c",
+    "archive_sha256": "dfcd0302787705497843a6910c91f31ef464eb66b2d574924eb1e025fb77da73",
+    "scope": "ROOT registered Linux native gate libharness COMPILE ONLY; no test or native invocation; zero tests/native GPU/KVM/HCS/VM or backend execution",
+    "target": "linux",
+    "platform": "Linux-7.2.9-2-cachyos-x86_64-with-glibc2.44",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+    "driver_pid": 3098298,
+    "phases": [
+      {
+        "name": "production-check",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/usr/bin/cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--no-run",
+          "--locked"
+        ],
+        "pid": 3103088,
+        "exit": 101,
+        "reaped": true,
+        "sha256": "063d925ebb33b17f13f5647d1ecc4b24fc700b36cbea383f0730f3af517871b2",
+        "bytes": 4789
+      }
+    ],
+    "source_changes": [],
+    "temp_entries": 0,
+    "tests_executed": 0,
+    "native_invocations": 0,
+    "exit": 1
+  },
+  {
+    "source": "73229016b14adddcbabf5f523193677dfde70faa",
+    "archive_sha256": "ca35226fb4e8a3a16ccf05ef4fb54947882a79035a506f2762b6226176ee21a6",
+    "scope": "ROOT CLI initialized-backend factory compilation ONLY; zero tests/native GPU/KVM/HCS/VM or backend execution",
+    "target": "linux",
+    "platform": "Linux-7.2.9-2-cachyos-x86_64-with-glibc2.44",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+    "driver_pid": 2186523,
+    "phases": [
+      {
+        "name": "production-check",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/usr/bin/cargo",
+          "check",
+          "-p",
+          "hex-cli",
+          "--bin",
+          "hex",
+          "--locked"
+        ],
+        "pid": 2190862,
+        "exit": 0,
+        "reaped": true,
+        "sha256": "f93e2413e508044f66de465dfe661dc8a4f9d10f16fff818f3ee77d752a7b831",
+        "bytes": 3319
+      }
+    ],
+    "source_changes": [],
+    "temp_entries": 0,
+    "tests_executed": 0,
+    "native_invocations": 0,
+    "exit": 0
+  }
+]

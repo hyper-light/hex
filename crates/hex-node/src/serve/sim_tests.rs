@@ -64,17 +64,46 @@ struct SimState {
 }
 
 #[derive(Default)]
+struct WaitHooks {
+    next_lock: Option<Box<dyn FnOnce() + Send>>,
+    before_sleep: Option<Box<dyn FnOnce() + Send>>,
+    after_proc_check: Option<Box<dyn FnOnce() + Send>>,
+}
+
+#[derive(Default)]
 struct SimOs {
     state: Mutex<SimState>,
     changed: Condvar,
+    hooks: Mutex<WaitHooks>,
 }
 
 impl SimOs {
     fn lock(&self) -> MutexGuard<'_, SimState> {
+        let hook = self.hooks.lock().unwrap().next_lock.take();
+        if let Some(hook) = hook {
+            hook();
+        }
         self.state.lock().unwrap()
     }
 
+    fn before_sleep(&self) {
+        let hook = self.hooks.lock().unwrap().before_sleep.take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    fn after_proc_check(&self) {
+        let hook = self.hooks.lock().unwrap().after_proc_check.take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     fn poke(&self) {
+        // Socket predicates live behind their own locks/atomics. Join the waiter's state mutex
+        // before notifying, so a producer cannot signal after its scan but before it sleeps.
+        let _state = self.lock();
         self.changed.notify_all();
     }
 
@@ -181,6 +210,7 @@ impl Os for SimOs {
             if !events.is_empty() {
                 return Ok(());
             }
+            self.before_sleep();
             match deadline {
                 None => s = self.changed.wait(s).unwrap(),
                 Some(d) => {
@@ -336,13 +366,9 @@ struct SimProc {
     os: Arc<SimOs>,
 }
 
-impl Proc for SimProc {
-    fn pid(&self) -> u32 {
-        self.pid
-    }
-    fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
-        let s = self.os.lock();
-        Ok(if s.untold.contains(&self.pid) {
+impl SimProc {
+    fn exit_in(&self, s: &SimState) -> Option<Exit> {
+        if s.untold.contains(&self.pid) {
             None
         } else if s.proc_killed.contains(&self.pid) {
             Some(Exit::Signal(9))
@@ -350,21 +376,35 @@ impl Proc for SimProc {
             Some(Exit::Code(0))
         } else {
             None
-        })
+        }
+    }
+}
+
+impl Proc for SimProc {
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+    fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
+        let s = self.os.lock();
+        Ok(self.exit_in(&s))
     }
     /// Waits until its end can be told, at most `timeout`.
     fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
         let deadline = Instant::now().checked_add(timeout);
+        let mut s = self.os.lock();
         loop {
-            if let Some(exit) = self.try_wait()? {
+            if let Some(exit) = self.exit_in(&s) {
                 return Ok(Some(exit));
             }
+            self.os.after_proc_check();
             let left = deadline.map_or(timeout, |d| d.saturating_duration_since(Instant::now()));
             if left.is_zero() {
                 return Ok(None);
             }
-            let s = self.os.lock();
-            drop(self.os.changed.wait_timeout(s, left).unwrap());
+            self.os.before_sleep();
+            // The checked predicate and condvar registration share one guard; an end cannot
+            // arrive between a discarded predicate guard and a fresh sleep guard.
+            s = self.os.changed.wait_timeout(s, left).unwrap().0;
         }
     }
     fn kill(&mut self) -> Result<(), Refusal> {
@@ -572,6 +612,9 @@ impl SimHost {
         for id in [b(), g()] {
             host.sim
                 .create(BoxSpec {
+                    route: None,
+                    allocation: None,
+                    devices: Vec::new(),
                     id,
                     bounds: Bounds::default(),
                     class: ClassSpec::Process,
@@ -772,6 +815,9 @@ fn run(id: u64, name: &str) -> Vec<u8> {
         id,
         Call::Run {
             spec: Box::new(BoxSpec {
+                route: None,
+                allocation: None,
+                devices: Vec::new(),
                 id: BoxId::new(name).unwrap(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Process,
@@ -821,6 +867,158 @@ fn wait_until(what: &str, mut fact: impl FnMut() -> bool) {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::park_timeout(Duration::from_millis(1));
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ProducerStep {
+    LockBlocked,
+    LockOpen,
+    Finished,
+}
+
+fn pause_here() -> (
+    Box<dyn FnOnce() + Send>,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::SyncSender<()>,
+) {
+    let (entered, at) = std::sync::mpsc::sync_channel(1);
+    let (resume, go) = std::sync::mpsc::sync_channel(1);
+    (
+        Box::new(move || {
+            entered.send(()).unwrap();
+            go.recv_timeout(PATIENCE).unwrap();
+        }),
+        at,
+        resume,
+    )
+}
+
+fn observe_next_lock(os: &Arc<SimOs>, progress: std::sync::mpsc::SyncSender<ProducerStep>) {
+    let weak = Arc::downgrade(os);
+    os.hooks.lock().unwrap().next_lock = Some(Box::new(move || {
+        let os = weak.upgrade().unwrap();
+        let step = match os.state.try_lock() {
+            Ok(_) => ProducerStep::LockOpen,
+            Err(std::sync::TryLockError::WouldBlock) => ProducerStep::LockBlocked,
+            Err(error) => panic!("predicate mutex: {error}"),
+        };
+        progress.send(step).unwrap();
+    }));
+}
+
+/// HEX-SOCK-3: hold the waiter after its empty scan; a socket producer must join that predicate
+/// mutex before its notification can complete. An extra cleanup wake lets the red case terminate
+/// immediately, but cannot hide the observed early notification or substitute for the expected frame.
+#[test]
+fn predicate_wait_protocol_socket_put_cannot_notify_before_sleep_registration() {
+    let os = Arc::new(SimOs::default());
+    let sock = Sock::new(1);
+    os.watch(&Accept(Arc::clone(&sock), true), 7, Interest::Read)
+        .unwrap();
+    let (hook, at, resume) = pause_here();
+    os.hooks.lock().unwrap().before_sleep = Some(hook);
+    let waiter = {
+        let os = Arc::clone(&os);
+        std::thread::spawn(move || {
+            let mut events = Vec::new();
+            os.wait(&mut events, Some(PATIENCE)).unwrap();
+            events
+        })
+    };
+    at.recv_timeout(PATIENCE).unwrap();
+    let (progress, steps) = std::sync::mpsc::sync_channel(1);
+    observe_next_lock(&os, progress.clone());
+    let expected = hello();
+    let producer = {
+        let os = Arc::clone(&os);
+        let sock = Arc::clone(&sock);
+        let bytes = expected.clone();
+        std::thread::spawn(move || {
+            os.put(&sock, bytes);
+            progress.send(ProducerStep::Finished).unwrap();
+        })
+    };
+    let first = steps.recv_timeout(PATIENCE).unwrap();
+    let early = first != ProducerStep::LockBlocked;
+    if early {
+        os.hooks.lock().unwrap().next_lock = None;
+        resume.send(()).unwrap();
+        // Acquisition follows the waiter's atomic condvar unlock, so this rescue cannot itself
+        // fall into the demonstrated check-to-sleep gap. It is cleanup, never the asserted wake.
+        let _state = os.state.lock().unwrap();
+        os.changed.notify_all();
+    } else {
+        resume.send(()).unwrap();
+    }
+    let events = waiter.join().unwrap();
+    producer.join().unwrap();
+    assert!(events.contains(&Event::Ready {
+        token: 7,
+        readable: true,
+        writable: false,
+        hung_up: false
+    }));
+    let mut bytes = vec![0; wire::MAX_MESSAGE];
+    match os.recv(&Accept(sock, true), &mut bytes) {
+        Recv::Message { got, size, .. } => {
+            assert_eq!(size, expected.len());
+            assert_eq!(&bytes[..got], expected);
+        }
+        _ => panic!("the signalled frame was not readable"),
+    }
+    assert_eq!(
+        first,
+        ProducerStep::LockBlocked,
+        "socket wake finished inside the predicate-to-sleep gap"
+    );
+}
+
+/// HEX-SOCK-7: end a program between the wait predicate and its sleep. The predicate mutex must
+/// remain owned throughout that transition, so the producer cannot finish an unnoticed end there.
+#[test]
+fn predicate_wait_protocol_program_end_cannot_notify_before_sleep_registration() {
+    let os = Arc::new(SimOs::default());
+    os.lock().programs.insert(42, (7, false));
+    let (hook, at, resume) = pause_here();
+    os.hooks.lock().unwrap().after_proc_check = Some(hook);
+    let waiter = {
+        let os = Arc::clone(&os);
+        std::thread::spawn(move || SimProc { pid: 42, os }.wait_for(PATIENCE).unwrap())
+    };
+    at.recv_timeout(PATIENCE).unwrap();
+    let (progress, steps) = std::sync::mpsc::sync_channel(1);
+    observe_next_lock(&os, progress.clone());
+    let producer = {
+        let os = Arc::clone(&os);
+        std::thread::spawn(move || {
+            os.end(42);
+            progress.send(ProducerStep::Finished).unwrap();
+        })
+    };
+    let first = steps.recv_timeout(PATIENCE).unwrap();
+    if first == ProducerStep::LockOpen {
+        assert_eq!(
+            steps.recv_timeout(PATIENCE).unwrap(),
+            ProducerStep::Finished
+        );
+        let (hook, sleeping, go) = pause_here();
+        os.hooks.lock().unwrap().before_sleep = Some(hook);
+        resume.send(()).unwrap();
+        sleeping.recv_timeout(PATIENCE).unwrap();
+        go.send(()).unwrap();
+        let _state = os.state.lock().unwrap();
+        os.changed.notify_all();
+    } else {
+        resume.send(()).unwrap();
+    }
+    let exit = waiter.join().unwrap();
+    producer.join().unwrap();
+    assert_eq!(exit, Some(Exit::Code(0)));
+    assert_eq!(
+        first,
+        ProducerStep::LockBlocked,
+        "program end finished inside the predicate-to-sleep gap"
+    );
 }
 
 /// HEX-SOCK-3 (the core): a hello is answered with the node's build, the host's classes, the server's limits with

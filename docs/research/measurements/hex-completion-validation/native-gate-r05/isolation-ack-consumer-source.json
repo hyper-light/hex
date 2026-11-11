@@ -1,0 +1,116 @@
+{
+  "schema": 1,
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "82393cd7e0fc925ee42b6d2889dea0ccb8d5f708",
+  "source": {
+    "path": "crates/hex-node/src/supervise/completion_native_gate_tests.rs",
+    "parent_sha256": "d90413282f4fe9239d30e20a92749664168417452f4478dbb0c80f7f86277a43",
+    "sha256": "da4ba641b6122a402007aa8939cddb6154dbe114ac437ce47073afdae7431241",
+    "bytes": 49677
+  },
+  "producer_dependency": {
+    "commit": "70fd4f7f1601c7e7fb13bc3a90b9e30108d3b876",
+    "manifest": "docs/research/measurements/hex-complete-bindings/native-gate-ack-producer-source.json",
+    "manifest_sha256": "709eed9d32cd7a2ac130bd23626ba6b74fa59c6eb393a053b881a4f96e2d01bd",
+    "sources": [
+      {
+        "path": "crates/hex-runtime/src/linux/sys.rs",
+        "sha256": "9939b2babb5b77faa0e55586016c4c8a57a6c203d2ff8bf17b48919b925796a3"
+      },
+      {
+        "path": "crates/hex-node/src/supervise.rs",
+        "sha256": "5d0fa0971dc35f2e541b05d4e3db8fdd96efd03fa4d714b28d611d0f99ddbb1f"
+      }
+    ],
+    "verified": "Both exact source blobs independently match manifest; full two-source diff +integration/function-readback docs read. No producer source overlaid/edited here.",
+    "method": "cfg(test) ManagedVm::prepare_isolation_ack()->Result<PipeReader,Refusal> pre-spawn; inline one-shot writer; actual child-ready byte2 peek under SAME gate deadline, notify[2]/drop before publication; no table/phase/spawning lock held while waiting.",
+    "ROOT_metadata": "Runtime feature native-gate-test=[], Linux Node dev-edge hex-runtime workspace=true features=[native-gate-test]. Normal dependencies unchanged; ROOT owns exact snippet from L1 NATIVE-GATE-ACK-INTEGRATION.md."
+  },
+  "consumer": {
+    "event": "Call prepare before bind; bounded nonblocking read of ACTUAL byte2 on owned per-launch reader. EOF/error/wrong byte before ACK is failure; actual late ACK captured before window refusal. Same original per-launch end across reads/readiness/held notice, no refreshed interval.",
+    "publication": "Callback sends identity only after acquiring held-publication condition; never returns Ok in parent-death case; no gatebyte1 or raw gate descriptor exposed.",
+    "receipts": "Immediately retain ACK/time/error/originalScope+commitment in first/sibling.isolation-ack.json. After real held-publication callback (producer-writer-drop fence), take ONE nonblocking tail snapshot and retain in first/sibling.isolation-tail.json. EOF/Open are separate facts; Open does NOT prevent ACK/STOP phase. Extra/error is retained separately then fails control, never erases prior ACK. Same caller byte bound.",
+    "mutation_sensitivity": "Missing FD isolation can keep the notification writer in the child. EOF is NOT an ACK precondition. Tail Open after producer-drop fence is explicit retained-FD evidence, not a hidden missing-phase fallback. Existing parent-death/early127/stopped-sibling/canary oracle remains semantic discriminator.",
+    "identity": "stdout identity and stopped frames carry exactly matching per-launch ACK/held/pid/birth facts. Outer parses strict bool/u64 fields, same two identities, opens exact pidfds and never promotes string labels to custody.",
+    "poll_removal": "Removed generic until, interval helper and /proc syscall probe; no sleep/park/periodic probe/allow. Required historical config fields stay same shape/validation and are marked as NOT sampled/polled provenance in receipt only."
+  },
+  "causal_proof": "26b exact assertions: t0 before spawn, actual parent terminal P<D=t0+guard, G=t0+gate>D, callback starts>=t0 so timeout>=D cannot be EOF source before P; first127<G while sibling STOP, then CONT+sibling127, canaries absent before parent death and after native ends. Actual ACK replaces incidental ppoll sample only, no claim of program counter/full foreign-exec setup.",
+  "preserved": [
+    "Refused and durable-positive cases byte-identical",
+    "Original first127/G, still-stopped sibling, CONT/sibling127/canary terminal block byte-identical; added pre-kill canary check strengthens held phase",
+    "All observation branches retain same owned parent/native/cgroup/Store/subreaper cleanup before final assertion",
+    "Same guard/gate/observation/byte/pidfd config constraints, three ignored native selectors, no new default or oracle weakening",
+    "Production Supervisor/runtime/Cargo/client/wire untouched by L4; all new producer effects test-gated and ROOT dependency-owned"
+  ],
+  "protected": [
+    {
+      "path": "crates/hex-node/src/supervise.rs",
+      "sha256": "8fe7a2357cf2d6f64819b9edd7d7694bc153239af9875d23d316df10eae85cba",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-runtime/src/linux/sys.rs",
+      "sha256": "cda48ba364da31f20b8963a30a365ca2f6231d1dd5c30902d64099d0ab3f98f2",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-runtime/src/linux/process.rs",
+      "sha256": "f216d9cbe3d3d6663a0079ce67644acaf653f1b4c08d8b447c6b0ea0cdf18926",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-runtime/Cargo.toml",
+      "sha256": "8fb917dd6636429092811587f2e4dc6afb23b391b291e5e99eb5a8dcfd0559eb",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-node/Cargo.toml",
+      "sha256": "545fb02490d74781c05e1f233494b958398be0f0721f1bb5238a278a03f680db",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "2274b7d480ab9291716b0ea257f750e0e9c53fb8e86ab20bf600cbcc51b1dd59",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/calls/budget_tests.rs",
+      "sha256": "1a0be87518194ba141359eedfd0c1f124cb436d8a064098af9fd04c335e486ec",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "a8f51f83a7b8ed2c43e0824f3af7aff5e967ba77159dde320841183559ea29b8",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+      "unchanged": true
+    },
+    {
+      "path": "CLAUDE.md",
+      "sha256": "a093d49f0e51a0c9026996cb170980696dc375364b8d9f13866200c6232e0c2b",
+      "unchanged": true
+    }
+  ],
+  "native_selectors": [
+    "supervise::completion_native_gate_tests::completion_publication_refusal_never_executes_marker",
+    "supervise::completion_native_gate_tests::completion_durable_publication_releases_and_reaps",
+    "supervise::completion_native_gate_tests::completion_controller_parent_death_cancels_gate"
+  ],
+  "root_artifacts_to_retain": [
+    "first/sibling.creating.record.json (existing)",
+    "first/sibling.isolation-ack.json (actual bytes/time/error/scope/commitment)",
+    "first/sibling.isolation-tail.json (post-producer-drop one-shot tail/EOF/Open/error)",
+    "parent.stdout +parent.stderr +gate-result.json and original cleanup/resource manifests"
+  ],
+  "builds_executed": 0,
+  "tests_executed": 0,
+  "native_executed": 0,
+  "mutations_executed": 0,
+  "checks_dispatched": 0,
+  "status": "SOURCE ONLY; complete owned consumer source, requires exact70fd +ROOT dev metadata joined before compiler. No native/fault/mutation/fullgate acceptance; ROOT owns dispatch. R10actual7281 not replayed; filter-map3cc independent."
+}

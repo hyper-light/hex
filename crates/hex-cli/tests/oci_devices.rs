@@ -155,6 +155,9 @@ fn each_box_is_decided_by_its_policy(lab: &Lab, own: &Path) -> String {
     let kmsg = make(&node, "dev-kmsg", lab.bundle(Some(KMSG), None));
     let process = BoxId::new("dev-process").unwrap();
     node.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: process.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Process,
@@ -491,6 +494,9 @@ fn sweep(box_root: &Path) {
 fn make(node: &Node, id: &str, bundle: PathBuf) -> BoxId {
     let id = BoxId::new(id).unwrap();
     node.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle),
@@ -747,3 +753,9 @@ fn cache_dir() -> PathBuf {
     std::fs::create_dir_all(&cache).expect("cache dir");
     cache
 }
+
+#[path = "oci_devices/native_devices.rs"]
+mod native_devices;
+
+#[path = "oci_devices/native_scheduler.rs"]
+mod native_scheduler;

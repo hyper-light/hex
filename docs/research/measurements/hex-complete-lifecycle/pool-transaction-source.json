@@ -1,0 +1,47 @@
+{
+  "parent": "a3571e0873e32e5b1bec6fdafbb9e962d513d9af",
+  "role": "implementer",
+  "policy": "0c598386ca1f7c65c6e0634dba77983e4abffff2",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "production": {
+    "crates/hex-node/src/recorded.rs": "993fb898582274e4a5b6233424cf18cf38d940bcf1dbde9985628bca730d3c6f",
+    "crates/hex-node/src/store.rs": "8a7c22a4002a17ee285a062a3d77f0dc8c32353b1addc209fc86897b295a577b",
+    "crates/hex-node/src/store/pool.rs": "ad22e9225d9b1f0bfabdc2c70ef5e8d36d9178474b1fc6426e6d6d71ffb385a1",
+    "crates/hex-runtime/src/windows/mod.rs": "c20bce038342ed369316b5c2bd4c073ae49ce31e8d1df3570b0605e6a37a2b7f",
+    "crates/hex-runtime/src/windows/process.rs": "7e83af3c2aca95b30baa1e209ec184f8d13174fa1b076159fdf6eef537899760",
+    "crates/hex-runtime/src/windows/managed.rs": "32d296e98476536fe23fb454f17381566e16bef310da823b4663a6f078d3e701",
+    "crates/hex-runtime/src/windows/keeper/vm.rs": "9ff00ece8bb0f502461ab9fde7ef333a1d2473384807cf9764c2666409c889fe",
+    "crates/hex-runtime/src/windows/oci/mod.rs": "1cc2cde1b87334aa21dd9beaa677f7fb13e081f5a7222094634bc8e9ea34c3ee",
+    "crates/hex-runtime/src/windows/oci/launch.rs": "4c3f0fb954d0170e808b96bf8619411eca250a5436bcc63f1d8bb54fee29dd43",
+    "crates/hex-runtime/src/macos/mod.rs": "cec97e5672f9b26d6654d8fe482ca01588e6dc489059c242cbc142b1c3617dbc",
+    "crates/hex-runtime/src/macos/process.rs": "553e80e94007d7b3819e803d8aa3516105ebb4ba704ad84c1f5fa094de1724a9",
+    "crates/hex-runtime/src/macos/managed.rs": "2740dfae753400b761b201c63548c25104c41ee73e67fb161261faa0e747ece8"
+  },
+  "fixture_closure": {
+    "docs/research/measurements/hex-complete-lifecycle/recorded_pool_tests.rs": "857c1e3bdcca8db77701236a8bbf0ab60af9b59a4f0ee212c995c4a53cec4667",
+    "docs/research/measurements/hex-complete-lifecycle/recorded_lifecycle_tests.rs": "9835452995df046dba832feaa08de9f8e1c7f1ce5625a779508219490b3e2044",
+    "docs/research/measurements/hex-complete-lifecycle/recorded_authority_tests.rs": "199364bc35fce15a737a20d2e03579c11c932e13b6418b838a6e1238ed270401"
+  },
+  "dependency_overlay": {
+    "revision": "703469ec96157f9a75388eb3e70b9699bcbe6b74",
+    "path": "crates/hex-runtime/src/guest/books.rs",
+    "sha256": "68155d68d04914f1be9207303ca34935470d5f2b0989ff496f83e23e58557659",
+    "owned_edit": false
+  },
+  "checks": {
+    "scoped_rustfmt": 0,
+    "git_diff_check": 0,
+    "compiler": "UNRUN",
+    "unit": "UNRUN",
+    "clippy": "UNRUN",
+    "native": "UNRUN",
+    "dispatch": false
+  },
+  "new_source_controls": 6,
+  "remaining": [
+    "Mac aggregate CPU enforcement",
+    "Mac cold cleanup authority",
+    "matched L1 Node/Supervisor and L2 shared pool consumer composition",
+    "ROOT/tester native fault and full gates"
+  ]
+}

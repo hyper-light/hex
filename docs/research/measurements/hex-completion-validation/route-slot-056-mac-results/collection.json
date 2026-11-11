@@ -1,0 +1,51 @@
+{
+  "bytes": 235331,
+  "sha256": "3529e6a761658a60c6c056bd037f08f4ab9836ac33475ca8fb18390d110accfd",
+  "members": {
+    "cohort-056005d0-mac-route-slot-b24-v1/route-slot-reentrant-affected.log": {
+      "bytes": 717,
+      "sha256": "4fdd60ea3a69579e2624455ee37c097bf07635135de07639fd8450a496fdf675"
+    },
+    "cohort-056005d0-mac-route-slot-b24-v1/route-slot-new.log": {
+      "bytes": 4040,
+      "sha256": "2c36a0fb32ff6e95d20a883a9b83fe7370893730477f4508c95b5d87fae18143"
+    },
+    "cohort-056005d0-mac-route-slot-b24-v1/running.json": {
+      "bytes": 3448,
+      "sha256": "12c766bd3dc1e5bc68521b45406ba6b6f5708c768c892613a7333aa3cb48851b"
+    },
+    "cohort-056005d0-mac-route-slot-b24-v1/node-cli-native-harness-check.log": {
+      "bytes": 2085,
+      "sha256": "6b5fbee2ca8a73e4e3cec3631a45e7faf1a5c73522d24df9749163c318831f83"
+    },
+    "cohort-056005d0-mac-route-slot-b24-v1/result.json": {
+      "bytes": 3704,
+      "sha256": "a718ec48f57d4931dbdf6608461c81ce75d8401b6979d7e197768c222c8ddeb1"
+    },
+    "cohort-056005d0-mac-route-slot-b24-v1/client-runtime-native-clippy.log": {
+      "bytes": 2648,
+      "sha256": "32e9e7878b9620f62661ce607ddff1614a1b5a2b53377973e401b215b35a8d7a"
+    },
+    "cohort-056005d0-mac-route-slot-b24-v1/source-before.json": {
+      "bytes": 338973,
+      "sha256": "521876a6dd0d9e3f779e150e6c8273bf8570c395d739f2ff60f8ebf90847619f"
+    },
+    "cohort-056005d0-mac-route-slot-b24-v1/source-after.json": {
+      "bytes": 338973,
+      "sha256": "521876a6dd0d9e3f779e150e6c8273bf8570c395d739f2ff60f8ebf90847619f"
+    },
+    "cohort-056005d0-mac-route-slot-b24-v1/public-registry-seed.json": {
+      "bytes": 29092,
+      "sha256": "a3b054069beb140848548948af37419c2e7cbfd5ebe1f8d9a1f18c7bfbac7909"
+    },
+    "cohort-056005d0-mac-route-slot-b24-v1/collected-binaries.json": {
+      "bytes": 3044,
+      "sha256": "f6dc651d0497f4bfb7239e2b9566152ebbd7daac7f8c146b4b07eb983a9beecf"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

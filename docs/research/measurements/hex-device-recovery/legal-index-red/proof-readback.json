@@ -1,0 +1,64 @@
+{
+  "source_revision": "63a699069fa5cd93d84810ac9b691dcb8c8d2a2f",
+  "archive": "/Users/adalundhe/.cache/hex-lead/transfers/device-recovery-max-index-01a1c640-63a69906-v3/proof-bundle.tar.gz",
+  "archive_bytes": 111948,
+  "archive_sha256": "39c103f0dae1b9938616faa1db494431cf2a710b9056f2f0f7262df5374d66c9",
+  "member_count": 10,
+  "all_member_hashes_verified": true,
+  "source_unchanged": true,
+  "source_files": 1095,
+  "source_manifest_before_sha256": "24feeff97d3982e861d55b9639ff1e9ff0e50582463d691ce0dc675fc2f53e13",
+  "source_manifest_after_sha256": "24feeff97d3982e861d55b9639ff1e9ff0e50582463d691ce0dc675fc2f53e13",
+  "phases": [
+    {
+      "name": "max-index",
+      "counts": {
+        "passed": 0,
+        "failed": 1,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 167
+      },
+      "exit_code": 101,
+      "log_sha256": "19a406b559ed805c95366c25cc9878d96e25e792eb25994c8092db672b70073e"
+    }
+  ],
+  "chunks": [
+    {
+      "offset": 0,
+      "bytes": 16000,
+      "sha256": "d6e66a70079884e67ddd08f79a2fd8544bf75967dad0f2982ff9dcf1b2aea9d6"
+    },
+    {
+      "offset": 16000,
+      "bytes": 16000,
+      "sha256": "c08a9d65fc3f24991dd05303482fb1fb8a8e014963151dcd8d86ecefffdf0880"
+    },
+    {
+      "offset": 32000,
+      "bytes": 16000,
+      "sha256": "83a8ac4b6a5588d7674a97d4f294b74e0f834b1e483f2b6379565348af20f9f2"
+    },
+    {
+      "offset": 48000,
+      "bytes": 16000,
+      "sha256": "caa20992d65bd2f9eefc7dd99ee6f358fb26b180406734df51213429912c7695"
+    },
+    {
+      "offset": 64000,
+      "bytes": 16000,
+      "sha256": "918e45f3f3681087c5b142c25b5fd0e4ef21c4260850e4530735e5d84ecc6f01"
+    },
+    {
+      "offset": 80000,
+      "bytes": 16000,
+      "sha256": "63cb4d864e6ef275010df6b367c6a6f0bf42865cb06f99319efc721f879a8e06"
+    },
+    {
+      "offset": 96000,
+      "bytes": 15948,
+      "sha256": "c9826255a2602625c07b311454a72873fa4b0cba4f1f6ab6a51e1d2082b76fa9"
+    }
+  ],
+  "native_gpu_effect": false
+}

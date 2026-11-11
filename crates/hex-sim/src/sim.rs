@@ -235,7 +235,7 @@ pub struct Takeover {
 }
 
 /// A finished run: its report, the store as it ended, and what the clients and node agents saw.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Run {
     pub report: Report,
     pub store: Store,
@@ -263,7 +263,7 @@ pub struct Run {
 
 /// A slice's control plane as the run left it: what it holds in memory, kept so its cost can be
 /// measured (`AC-T7.11.4`).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ControlPlane(Plane);
 
 /// One run of a workload on a node, as its node agent saw it.
@@ -411,12 +411,12 @@ impl PartialOrd for Scheduled {
 /// How the cluster's nodes are split among the control plane's slices (H60): contiguous runs of node
 /// ids, one a shard, and the rule that routes a workload to one. Nothing in it changes during a run,
 /// so every shard, and the specification, computes the same slice for a workload.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Layout {
     parts: Vec<Part>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Part {
     /// The slice's first node id in the cluster: a node's id in the slice plus `lo` is its id there.
     lo: u32,
@@ -429,6 +429,36 @@ struct Part {
 }
 
 impl Layout {
+    /// Preserve initialized routes and retained index reservations in a fallible snapshot.
+    pub fn try_clone(&self) -> Result<Self, SimError> {
+        let mut parts = Vec::new();
+        parts
+            .try_reserve_exact(self.parts.len())
+            .map_err(|_| SimError::Full {
+                what: "layout snapshot slices",
+                bound: self.parts.len(),
+            })?;
+        for part in &self.parts {
+            let mut nodes = Vec::new();
+            nodes
+                .try_reserve_exact(part.nodes.len())
+                .map_err(|_| SimError::Full {
+                    what: "layout snapshot nodes",
+                    bound: part.nodes.len(),
+                })?;
+            for node in &part.nodes {
+                nodes.push(node.try_clone()?);
+            }
+            parts.push(Part {
+                lo: part.lo,
+                nodes,
+                empty: part.empty.try_clone()?,
+                classes: part.classes,
+            });
+        }
+        Ok(Self { parts })
+    }
+
     /// `shards` slices of `nodes`, slice `s` the ids from `s * n / shards` up to `(s + 1) * n / shards`.
     pub fn new(nodes: &[NodeSpec], shards: u32) -> Result<Self, SimError> {
         if shards == 0 {
@@ -549,7 +579,7 @@ impl Layout {
 
 /// What a slice's control plane holds in memory, lost when its shard crashes or is lost. Its node
 /// ids are the slice's own ([`Layout`]).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Plane {
     up: bool,
     epoch: u64,
@@ -817,7 +847,7 @@ impl ControlPlane {
 }
 
 /// A slice: its shard, its plane, and what runs on its nodes.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Slice {
     owner: u32,
     plane: Plane,

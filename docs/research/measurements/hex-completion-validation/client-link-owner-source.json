@@ -1,0 +1,410 @@
+{
+  "schema": "hex-completion-client-owner-source-1",
+  "role": "implementer",
+  "implementer": "01a1c7676cfc7297a41236a8e71ee188",
+  "coordinator": "01a1aa77778471339bea3beff90d6bbd",
+  "policy": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "policy_status": "FULL four current Shards policy files and exact-parent HexCLAUDE read; ROOT ACK/RELEASE received before edits, including Conn and three additional client test files.",
+  "source_parent": "d1ed4e1cf54d8d0a22da931d55832e4b38b202c9",
+  "source_commit": "9b242628f9d026ba27beef39010b63c02a058889",
+  "worktree": "/Users/adalundhe/.cache/hex-lead/worktrees/complete-client-owners",
+  "branch": "cp/t7-complete-client-owners",
+  "files": [
+    {
+      "original": {
+        "source": "d1ed4e1cf54d8d0a22da931d55832e4b38b202c9",
+        "path": "crates/hex-client/src/guest.rs",
+        "sha256": "9753dc9d0d2acda2f96c76822fbb02f8d59043972d920515a352721666d3dff7",
+        "bytes": 32484
+      },
+      "current": {
+        "source": "9b242628f9d026ba27beef39010b63c02a058889",
+        "path": "crates/hex-client/src/guest.rs",
+        "sha256": "6a9410629157e85ec4ddc507a09e34ac82e275c6ca9f28323e5145cb50a16c7c",
+        "bytes": 33015
+      }
+    },
+    {
+      "original": {
+        "source": "d1ed4e1cf54d8d0a22da931d55832e4b38b202c9",
+        "path": "crates/hex-client/src/guest/tests.rs",
+        "sha256": "6397b833c94768e10f945c286deebdad59e46f259172a1d49d1d162066e0aac6",
+        "bytes": 29611
+      },
+      "current": {
+        "source": "9b242628f9d026ba27beef39010b63c02a058889",
+        "path": "crates/hex-client/src/guest/tests.rs",
+        "sha256": "8a6a0350d0139227686838ab31af5fdc902b1ddb564accfc00e22c1b76aaf70e",
+        "bytes": 30997
+      }
+    },
+    {
+      "original": {
+        "source": "d1ed4e1cf54d8d0a22da931d55832e4b38b202c9",
+        "path": "crates/hex-client/src/calls.rs",
+        "sha256": "e0b110f5b3ed1c8733111765c197297f010985b4e9cc97076eafe5f8240102b6",
+        "bytes": 101552
+      },
+      "current": {
+        "source": "9b242628f9d026ba27beef39010b63c02a058889",
+        "path": "crates/hex-client/src/calls.rs",
+        "sha256": "d19ea2ff1b87c95a79c86b269778a32256d86737a594bc77b83187f74f768bae",
+        "bytes": 102125
+      }
+    },
+    {
+      "original": {
+        "source": "d1ed4e1cf54d8d0a22da931d55832e4b38b202c9",
+        "path": "crates/hex-client/src/calls/tests.rs",
+        "sha256": "206d43428590da685005c9c0d22f73fdb829bc7cfac190a3cb8c56711ae6e8ae",
+        "bytes": 35467
+      },
+      "current": {
+        "source": "9b242628f9d026ba27beef39010b63c02a058889",
+        "path": "crates/hex-client/src/calls/tests.rs",
+        "sha256": "d49ae0cf73b9c43f155c3a746dba36c7ad401ec66ff8540fe59d3980d3da57b1",
+        "bytes": 35515
+      }
+    },
+    {
+      "original": {
+        "source": "d1ed4e1cf54d8d0a22da931d55832e4b38b202c9",
+        "path": "crates/hex-client/src/calls/budget_tests.rs",
+        "sha256": "4a7b08522a752c3aea2abdc0a5241c52c0661471be5d17a6e24fe07d122b07be",
+        "bytes": 41559
+      },
+      "current": {
+        "source": "9b242628f9d026ba27beef39010b63c02a058889",
+        "path": "crates/hex-client/src/calls/budget_tests.rs",
+        "sha256": "9eceb6cac8273ee2498fd88aeeaf818ae6e70105a2d1aedc6bcf02d1e3a0aa3e",
+        "bytes": 41961
+      }
+    },
+    {
+      "original": {
+        "source": "d1ed4e1cf54d8d0a22da931d55832e4b38b202c9",
+        "path": "crates/hex-client/src/linux.rs",
+        "sha256": "945d715444a28a71ceea159e0c293b1a71283abc371be0a5048eba5dbeac6ab7",
+        "bytes": 10278
+      },
+      "current": {
+        "source": "9b242628f9d026ba27beef39010b63c02a058889",
+        "path": "crates/hex-client/src/linux.rs",
+        "sha256": "173f09b21390698ba1d50641e289a017af14226bd6962b5e2e05ffd8cb9a124d",
+        "bytes": 10253
+      }
+    },
+    {
+      "original": {
+        "source": "d1ed4e1cf54d8d0a22da931d55832e4b38b202c9",
+        "path": "crates/hex-client/src/macos.rs",
+        "sha256": "983dc1b6312f4473db98c2972eb27dad1a49494011c50e3111f92104c63473e6",
+        "bytes": 12249
+      },
+      "current": {
+        "source": "9b242628f9d026ba27beef39010b63c02a058889",
+        "path": "crates/hex-client/src/macos.rs",
+        "sha256": "54283c653f14360c0c2397c8862ad1d820da03053f79d0effde1b49f35a93c23",
+        "bytes": 12224
+      }
+    },
+    {
+      "original": {
+        "source": "d1ed4e1cf54d8d0a22da931d55832e4b38b202c9",
+        "path": "crates/hex-client/src/windows.rs",
+        "sha256": "6563fe67ba575311ceb89f28831e2244aa7dfecda4ff81330131c7a8d71e9e87",
+        "bytes": 9344
+      },
+      "current": {
+        "source": "9b242628f9d026ba27beef39010b63c02a058889",
+        "path": "crates/hex-client/src/windows.rs",
+        "sha256": "1d5a98755b0439d38844c8a36a730dfc98c4fb01e626d87202e0900be421ee23",
+        "bytes": 9319
+      }
+    },
+    {
+      "original": {
+        "source": "d1ed4e1cf54d8d0a22da931d55832e4b38b202c9",
+        "path": "crates/hex-client/src/windows/tests.rs",
+        "sha256": "94ab3598c54f5cf413a2a30a5a97e12f48cf5e1ba6750574a38320567b3b4389",
+        "bytes": 5885
+      },
+      "current": {
+        "source": "9b242628f9d026ba27beef39010b63c02a058889",
+        "path": "crates/hex-client/src/windows/tests.rs",
+        "sha256": "a6d16d716683e5a277e75197a928e910061915d32dc6f879043a056f3f330d3b",
+        "bytes": 5888
+      }
+    }
+  ],
+  "source_patch": {
+    "sha256": "209e829308817532ec57be8e5314639ab680c1b43e4e4a63a4db96675067fd11",
+    "bytes": 23811,
+    "insertions": 147,
+    "deletions": 69,
+    "hunks": [
+      "@@ -496,6 +496,9 @@ pub struct Shared<T: Transport> {",
+      "@@ -668,15 +671,19 @@ struct EndState {",
+      "@@ -1299,7 +1306,7 @@ impl<T: Transport> Drop for Caller<'_, T> {",
+      "@@ -1507,7 +1514,7 @@ impl<T: Transport> Conn<T> {",
+      "@@ -1518,7 +1525,7 @@ pub struct Core<T: Transport> {",
+      "@@ -1614,17 +1621,20 @@ impl<T: Transport> Core<T> {",
+      "@@ -1791,7 +1801,7 @@ impl<T: Transport> Core<T> {",
+      "@@ -1973,7 +1983,7 @@ impl<T: Transport> Core<T> {",
+      "@@ -2331,7 +2341,7 @@ impl<T: Transport> Runtime for Core<T> {",
+      "@@ -2350,7 +2360,7 @@ impl<T: Transport> RemoteProc<T> {",
+      "@@ -80,13 +80,14 @@ fn explicit_budget_caps_an_unarmed_core_hello() {",
+      "@@ -154,7 +155,11 @@ fn explicit_budget_caps_token_after_a_bounded_dial() {",
+      "@@ -188,9 +193,10 @@ fn explicit_budget_caps_token_after_a_bounded_dial() {",
+      "@@ -209,7 +215,7 @@ fn configured<T: Transport>(transport: T) -> Core<T> {",
+      "@@ -244,10 +250,12 @@ fn invalid_budgets_refuse_before_call_or_dial_effects() {",
+      "@@ -255,7 +263,7 @@ fn invalid_budgets_refuse_before_call_or_dial_effects() {",
+      "@@ -488,7 +496,7 @@ struct RecordedLink {",
+      "@@ -591,14 +599,16 @@ fn partial_token_progress_does_not_reset_the_absolute_deadline() {",
+      "@@ -627,8 +637,7 @@ fn partial_token_progress_does_not_reset_the_absolute_deadline() {",
+      "@@ -679,7 +688,7 @@ fn partial_token_progress_does_not_reset_the_absolute_deadline() {",
+      "@@ -743,13 +752,15 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(",
+      "@@ -847,7 +858,7 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(",
+      "@@ -134,8 +134,8 @@ fn client() -> Core<Memory> {",
+      "@@ -144,8 +144,10 @@ fn client() -> Core<Memory> {",
+      "@@ -21,7 +21,8 @@ use hex_core::stream::{self, Deframer, Exec, Named};",
+      "@@ -130,6 +131,20 @@ pub trait Link: Send + Sync + 'static {",
+      "@@ -187,7 +202,7 @@ pub type Client = Core<Stream>;",
+      "@@ -668,7 +683,7 @@ const READS_PER_READY: usize = 64;",
+      "@@ -734,11 +749,11 @@ impl Pump {",
+      "@@ -749,13 +764,13 @@ impl Client {",
+      "@@ -777,14 +792,14 @@ impl Stream {",
+      "@@ -30,16 +30,60 @@ impl Link for Loopback {",
+      "@@ -156,7 +200,7 @@ fn an_agent_of_another_wire_is_refused_at_the_hello() {",
+      "@@ -393,11 +437,12 @@ fn a_stdio_connection_waits_on_its_program_as_a_local_pipe_does() {",
+      "@@ -593,11 +638,9 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {",
+      "@@ -7,7 +7,6 @@ use std::io::{IoSlice, IoSliceMut};",
+      "@@ -245,7 +244,7 @@ impl Client {",
+      "@@ -8,7 +8,6 @@ use std::io::{IoSlice, IoSliceMut};",
+      "@@ -289,7 +288,7 @@ impl Client {",
+      "@@ -5,7 +5,6 @@",
+      "@@ -225,7 +224,7 @@ impl Client {",
+      "@@ -132,7 +132,7 @@ fn the_common_core_takes_windows_stream_handles_and_acknowledges_them() {"
+    ]
+  },
+  "public_contract": {
+    "namespace": "hex_client::guest",
+    "owner": "pub type LinkOwner = triomphe::Arc<dyn Link>;",
+    "constructor": "pub fn own_link<L: Link>(link: L) -> Result<LinkOwner, hex_api::Refusal>;",
+    "connect": "pub fn connect(link: LinkOwner) -> Result<Self, Refusal>;",
+    "evented": "pub fn connect_evented(link: LinkOwner, wants_room: std::sync::Arc<dyn Fn() + Send + Sync>) -> Result<(Self, Pump), Refusal>;",
+    "lifetime": "Link already requires static; no extra bound needed.",
+    "coercion": "Arc::try_new plus safe SDK CoerceUnsize/Coercion!(to dyn Link); consumes one typed reference, same allocation."
+  },
+  "internal_contract": {
+    "shared": "pub(crate) type SharedOwner<T> = triomphe::Arc<Shared<T>>; Shared::try_new(T)->Result<SharedOwner<T>,Refusal>",
+    "conn": "Existing Conn holds SharedOwner; Core/Deferred/RemoteProc hold triomphe::Arc<Conn<T>>, allocated fallibly before Hello.",
+    "pump": "Retains a clone of the SAME SharedOwner, not another Shared/connection state.",
+    "shutdown": "Existing Conn last-drop shutdown unchanged.",
+    "unrelated_owners": "stdArc callbacks, Wake/Ending/test counters, Books/Weak, Guest and ManagedReceipt unchanged."
+  },
+  "allocation_refusals": [
+    {
+      "what": "guest link owner",
+      "bound": "size_of::<L>()"
+    },
+    {
+      "what": "client shared state owner",
+      "bound": "size_of::<Shared<T>>()"
+    },
+    {
+      "what": "client connection owner",
+      "bound": "size_of::<Conn<T>>()"
+    }
+  ],
+  "diagnostic_bound_semantics": "Requested inline payload size, not allocator overhead, a host-resource credit or a new limit/default.",
+  "effects_and_uncertainty": {
+    "own_link": "No Link method called; caller constructs it before actual endpoint/guest effects; failure drops the supplied value normally.",
+    "shared": "Existing transport.reading initialization and field setup retained; owner allocation is fallible, error drops those values.",
+    "conn": "Allocation fails before Hello/request effects and runs existing Conn drop/shutdown on its supplied value.",
+    "scope": "No claim all other buffer/queue/refcount allocations are now fallible; no allocation-fault or native cleanup result."
+  },
+  "protected_regions": [
+    {
+      "name": "caller budget/deadline/readiness prefix",
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "870b87870afd4e74dcd104ab3c690d6e7aa9dea704537e1a6c643c29627c4e78",
+      "bytes": 20750,
+      "equal_parent": true
+    },
+    {
+      "name": "send/state/wake/ending machinery",
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "9037afb8268692d1610024bd99f8ba44ef08192dc932da11d0d9deb8cf714f66",
+      "bytes": 6218,
+      "equal_parent": true
+    },
+    {
+      "name": "shared state/caller algorithms",
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "4a22dea8d6acd2fcbcebcca7b770cce1932f7741cb229cfb188cede5c73ea951",
+      "bytes": 26752,
+      "equal_parent": true
+    },
+    {
+      "name": "connection call/reply algorithms",
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "d0f031ba70026a56fdeb235368966b7238695a538e8527086ce66fa1b27274e5",
+      "bytes": 9092,
+      "equal_parent": true
+    },
+    {
+      "name": "deferred send/cancel algorithms",
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "420ee7ad0ba75bcd0d38ba341cf92fc570c92b66215e399f443d800ad3f37fc7",
+      "bytes": 2811,
+      "equal_parent": true
+    },
+    {
+      "name": "guest calibration/census",
+      "path": "crates/hex-client/src/guest.rs",
+      "sha256": "6731b08788627c416505f4d542a88285f1d8b6fe9cdf9659a615e4edc155346b",
+      "bytes": 3165,
+      "equal_parent": true
+    },
+    {
+      "name": "guest bounded protocol read/write",
+      "path": "crates/hex-client/src/guest.rs",
+      "sha256": "1b418279d089c45c9f81bbd17f5fff4c025aa837e54e885b8baabb73c04555ea",
+      "bytes": 1668,
+      "equal_parent": true
+    },
+    {
+      "name": "guest named streams/transport",
+      "path": "crates/hex-client/src/guest.rs",
+      "sha256": "b57049fe242015a942124ed414c4784a00fb4699fda3a1597e259fd67cce4b07",
+      "bytes": 11002,
+      "equal_parent": true
+    },
+    {
+      "name": "guest backlog/cleanup/read fairness",
+      "path": "crates/hex-client/src/guest.rs",
+      "sha256": "20e7cb4d6638cadc530e5efcedfe9c2888c426035b28e336a4258bb2dd2267c1",
+      "bytes": 3424,
+      "equal_parent": true
+    },
+    {
+      "name": "guest event pump",
+      "path": "crates/hex-client/src/guest.rs",
+      "sha256": "95f0230455b6b861a8ccaf2be66cfa0f307f04ba90dbd58113e3cb2527f0539d",
+      "bytes": 1670,
+      "equal_parent": true
+    }
+  ],
+  "existing_primary_inputs": [
+    {
+      "source": "d1ed4e1cf54d8d0a22da931d55832e4b38b202c9",
+      "path": "vendor/shards/crates/api/src/lib.rs",
+      "sha256": "e40ab2537c73e21ec517baac69ea56e5cafead2606cd7c9ec67620c5adf2746a",
+      "bytes": 37392
+    },
+    {
+      "source": "d1ed4e1cf54d8d0a22da931d55832e4b38b202c9",
+      "path": "vendor/shards/crates/api/Cargo.toml",
+      "sha256": "180955191fd09e4619c439746a05ec52d7d9a48c2601a1af571eadda50c98081",
+      "bytes": 750
+    },
+    {
+      "source": "d1ed4e1cf54d8d0a22da931d55832e4b38b202c9",
+      "path": "Cargo.toml",
+      "sha256": "8b4f2bfcde5f8bc8cf34b964f6d6fca32be3236502b4d30354f51cc50af8c411",
+      "bytes": 6830
+    },
+    {
+      "source": "d1ed4e1cf54d8d0a22da931d55832e4b38b202c9",
+      "path": "Cargo.lock",
+      "sha256": "b804c0cb8bc42fdfd066233112b20953b87d6518420992cf30136ecb178afae4",
+      "bytes": 24228
+    }
+  ],
+  "local_dependency_primary_sources": [
+    {
+      "path": "/Users/adalundhe/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/triomphe-0.1.17/src/arc.rs",
+      "sha256": "68a8048894d2c02d7a13b7392a0a958a4bedcc54916c0cae1227af1b5f28d593",
+      "bytes": 49638
+    },
+    {
+      "path": "/Users/adalundhe/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/triomphe-0.1.17/src/lib.rs",
+      "sha256": "485510c8cbdf13d415214bf9997034ce15e37b56e91b3153e7a689e2cd86a8f4",
+      "bytes": 3196
+    }
+  ],
+  "dependency_source_scope": "Read-only already-installed pinned0.1.17 source, not a fresh registry/archive/build verification.",
+  "root_metadata_request": {
+    "versions": {
+      "triomphe": "=0.1.17",
+      "unsize": "=1.1.0"
+    },
+    "client_dependencies": {
+      "triomphe": "{ workspace = true, features = [unsize] }",
+      "unsize": "workspace=true after ROOT adds key, or direct exact1.1.0"
+    },
+    "lock": "Only existing package direct edges requested; no new registry version/checksum/framework.",
+    "modified_here": false
+  },
+  "ports": {
+    "owned_test_files": [
+      "guest/tests.rs",
+      "calls/tests.rs",
+      "calls/budget_tests.rs",
+      "windows/tests.rs"
+    ],
+    "test_counter_change": "Concrete dial/deadline observations retained in external standard Arcs after Link type erasure; assertions, timings, events and cleanup not weakened.",
+    "outside_root_tests": [
+      "crates/hex-node/src/relay/tests.rs",
+      "crates/hex-cli/tests/guest_tree.rs",
+      "crates/hex-cli/tests/node_socket.rs"
+    ],
+    "outside_production": "L1 FC Endpoint/consumer and L2 Booted/ShardsLink consumers owned by those lanes; exact shape sent before their edits, signed pin sent afterward."
+  },
+  "new_control": {
+    "name": "guest::tests::link_owner_retains_one_instance_without_dial_effects",
+    "source_status": "UNRUN",
+    "proof_if_executed": "No construction dial, same pointer across clones, retained dynamic dispatch, one final drop.",
+    "scope": "Pure counter/owner control; no socket/thread/guest/process or OOM injection."
+  },
+  "results": {
+    "classification": "SOURCE ONLY / uncompiled",
+    "scoped_rustfmt_exit": 0,
+    "scoped_rustfmt": "1.99.1 direct binary, edition2024, skip_children=true, nine admitted files only",
+    "whitespace_exit": 0,
+    "tests_executed": 0,
+    "cargo_clippy_build_commands": 0,
+    "native_api_vm_gpu_invocations": 0,
+    "remote_temp_created": false,
+    "runtime_children_started": 0,
+    "private_dependency_overlays": false,
+    "original_evidence_changed": false,
+    "prior_deadline_eof_artifact_batches_repeated": false
+  },
+  "documentation": {
+    "path": "docs/research/measurements/hex-completion-validation/client-link-owner.md",
+    "sha256": "f039c7638eac4c2b514aded7254165c393b7012a1b58f5f57b41be1dfbf6c816",
+    "bytes": 5341
+  },
+  "rules_account": {
+    "R01": "Three owner allocations return typed Exhausted; no new unsafe/panic or custom refcount. Other existing allocation paths explicitly unchanged.",
+    "R02": "Existing SDK safe coercion and pinned local Triomphe implementation inspected; shared existing seams, no new framework.",
+    "R03": "Diagnostic sizes derive from payload types; no new tuning/default cap.",
+    "R04": "Same Shared/Conn state and last-drop semantics; before-Hello allocation failure paths explicit.",
+    "R05": "Existing owner objects; no polling, cache, global manager or second holder.",
+    "R06": "Small constructors and reference type changes; no protocol redesign.",
+    "R07": "Comments document same-allocation coercion and shared state.",
+    "R08": "No performance claim; comparisons remain ROOT-owned.",
+    "R09": "Required fallible-owner feature; no fabricated live bug reproduction or OOM result.",
+    "R10": "Fixed input/output hashes and protected protocol regions retained; source control exists but unrun.",
+    "R11": "All three native OS constructors and guest path ported; matched target compilation/native results unverified.",
+    "R12": "One shared fallible owner implementation, no platform duplication beyond constructor calls.",
+    "R13": "Nine admitted source paths only; stdArc unrelated owners preserved.",
+    "R14": "No profiling/benchmarking; ROOT owns them.",
+    "R15": "Source-first signed checkpoint; ROOT owns Cargo/joined tests/native; no agents/goals/check replay.",
+    "R16": "Own isolated worktree and small docs; no cache/foreign data deletion or remote runtime processes."
+  },
+  "readiness": "Source closure complete, but ROOT Cargo/consumer/test integration and joined light compilation/execution owed. OOM cleanup/native/backend/full gates UNVERIFIED."
+}

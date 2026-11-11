@@ -1,0 +1,63 @@
+{
+  "bytes": 358678,
+  "sha256": "d60d3f3ba44ac61cd755625a3d967f535469d53b6349823cc6e6d7d3f5527a23",
+  "members": {
+    "cohort-80e3aa9c-linux-native-image-producer-v3/temporary-inventory.json": {
+      "bytes": 126,
+      "sha256": "c45f7e229590cb1483390bbbf205a010ff74abd6bea5030e030376fb958a30ad"
+    },
+    "cohort-80e3aa9c-linux-native-image-producer-v3/source-before.json": {
+      "bytes": 532268,
+      "sha256": "3c90ddf28b5e9884b2078effa68c97d007b3a61d1e6a3edf12322c2d99553484"
+    },
+    "cohort-80e3aa9c-linux-native-image-producer-v3/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-80e3aa9c-linux-native-image-producer-v3/owned-scope-limits.json": {
+      "bytes": 264,
+      "sha256": "f822c9ba28f06c85cb1395daa3a4e2c93b8f6550d0521b2e8e992b313350a3fb"
+    },
+    "cohort-80e3aa9c-linux-native-image-producer-v3/new-sdk-native-image3.log": {
+      "bytes": 1456,
+      "sha256": "1707a4a484254f843026eb33ad5c604980053da8a7d4c1d360f535f4360c7cd9"
+    },
+    "cohort-80e3aa9c-linux-native-image-producer-v3/running.json": {
+      "bytes": 4170,
+      "sha256": "bf07de25f508003eb63f8fd9cf5fce1a87c01c5cc9f55c2458146575fcd5fcf5"
+    },
+    "cohort-80e3aa9c-linux-native-image-producer-v3/new-guest-native-input2.log": {
+      "bytes": 3213,
+      "sha256": "fcc52c3bfae1fcc2650cb97c9a09db81dc263c1cb7cb5a7c4f7a4e9a1a98a817"
+    },
+    "cohort-80e3aa9c-linux-native-image-producer-v3/sdk-native-input-strict.log": {
+      "bytes": 871,
+      "sha256": "234234022165e5ad2bfd6c3bf4ac356121c8a8bbce9c2dcdfdcf3aee27e405eb"
+    },
+    "cohort-80e3aa9c-linux-native-image-producer-v3/root-native-input-current-strict.log": {
+      "bytes": 3477,
+      "sha256": "91a18ae0e715ca84d240c7e819703b511e4d269198d25888761dd30c5f793b69"
+    },
+    "cohort-80e3aa9c-linux-native-image-producer-v3/source-after.json": {
+      "bytes": 532366,
+      "sha256": "b3cc10e5ecdf1b3890c71f2b2d721ae3f6a5d4153297dda53bcd41a7863c2a63"
+    },
+    "cohort-80e3aa9c-linux-native-image-producer-v3/api-lock-cohort.json": {
+      "bytes": 296,
+      "sha256": "ee3322e8df2dbb468f44624e4a7c74d28d69742438b74c8538f6b24f95915a88"
+    },
+    "cohort-80e3aa9c-linux-native-image-producer-v3/result.json": {
+      "bytes": 4794,
+      "sha256": "2f72bf57464fc27fc407aee09f1299adcaf086697c0d828f2ab34f761ccd6e78"
+    },
+    "cohort-80e3aa9c-linux-native-image-producer-v3/collected-binaries.json": {
+      "bytes": 4114,
+      "sha256": "eebab88fef42f3be560029e7f3e9c0d4895d89f48bab02d0f02ee53a3e6bae49"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

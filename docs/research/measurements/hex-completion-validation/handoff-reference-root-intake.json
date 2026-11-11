@@ -1,0 +1,58 @@
+{
+  "requirement": "AC-T7.4.1",
+  "root_parent": "9454f17e8b3dacba7eb977ff13de65e4def96c8d",
+  "sources": [
+    {
+      "source": "a56fe683494544e9783f0d5e13e922d823ca8221",
+      "paths": [
+        "crates/hex-api/src/runtime.rs",
+        "crates/hex-runtime/src/devices.rs",
+        "docs/research/measurements/hex-complete-bindings/subset-api-boundary-source.json"
+      ],
+      "excluded": []
+    },
+    {
+      "source": "bd0a2a7a91b2db18301ae7b7e8fd5adcfec5879e",
+      "paths": [
+        "crates/hex-node/src/recorded.rs",
+        "crates/hex-node/src/store.rs",
+        "crates/hex-node/src/store/pool.rs",
+        "crates/hex-node/src/turns.rs",
+        "docs/research/measurements/hex-complete-lifecycle/recorded-handoff-source.json",
+        "docs/research/measurements/hex-complete-lifecycle/recorded-handoff-source.md",
+        "docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs"
+      ],
+      "excluded": [
+        "crates/hex-runtime/src/macos/managed/remote/controls.rs"
+      ]
+    },
+    {
+      "source": "e4e1df2e1b6f35b91fde97b03d45e4f2ae0bfd57",
+      "paths": [
+        "crates/hex-node/src/recorded.rs",
+        "crates/hex-node/src/store.rs",
+        "crates/hex-node/src/store/pool.rs",
+        "docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs",
+        "docs/research/measurements/hex-complete-lifecycle/store-reference-removal-source.json",
+        "docs/research/measurements/hex-complete-lifecycle/store-reference-removal-source.md"
+      ],
+      "excluded": []
+    },
+    {
+      "source": "61650e47dacd57fdae3fca3d96e09fbe128a9e5f",
+      "paths": [
+        "crates/hex-node/src/node/backends.rs",
+        "docs/research/measurements/hex-complete-bindings/502dc-node-handoff-source.json"
+      ],
+      "excluded": []
+    }
+  ],
+  "ports": "Four existing test-only Books owners explicitly reject unused handoff callbacks. Real Node/Recorded implementations acquire canonical source then Box/full-conflict turns; no production default.",
+  "validation": "Source review and named rustfmt/diff only; original7197 after and new handoff controls pending. No native claims. Mac controls excluded until coherent Mac producer intake.",
+  "remaining": [
+    "L1 Catalog/Index/FC and L2 guest subset consumers",
+    "no-Intent/native-owner read-only preflight bridge",
+    "sibling fresh re-observation",
+    "actual full-P teardown and selected-S native execution"
+  ]
+}

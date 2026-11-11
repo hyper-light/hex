@@ -1,0 +1,36 @@
+{
+  "kind": "source-only",
+  "role": "implementer",
+  "parent": "3b4dfa44dc4d79d13c419afb49e4a6bd5ef975a1",
+  "policy": "ca3ab10c151aa5539e757f1cc76029746ccbb561",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "dependencies": {
+    "route_API": "73547edda8a5188b0a40b3c2aa5d7a5da99be163",
+    "route_getters": "c9b03d4fc841a78d8c47994de5e5c442ccd578a2",
+    "SDK": "aa7e028508383e58b55d622a299b263bfac064b0",
+    "matched_ROOT_before_route_API": "25fd0744c2625deabcbd642ab87cee2a461c04f9"
+  },
+  "files": {
+    "crates/hex-runtime/src/guest/books.rs": "d2b07be3b2ac1ef9edab8ab7db6006153ab8336579bdf0e1a860a2869e87626b",
+    "crates/hex-runtime/src/guest/dedicated.rs": "3c5d8b9dbffe5e31d7e1a8f706fde6a3cf0133823bef3e3e03d0f8cd922c33c2",
+    "crates/hex-runtime/src/guest/device_routing_tests.rs": "5a2c57be60fc88a5803091d5f73d2d4aef480ac6788af46f2c9ddb0671141334",
+    "crates/hex-runtime/src/guest/gpu.rs": "86a2fd42c944b30bd18d6879d6888edbc2fd9689756252c609f4ad9ba90a8447",
+    "crates/hex-runtime/src/guest/mod.rs": "f3a27a1bda005f272fb8844f1799d63d552cf359410236b6307f953e6f7560ce",
+    "crates/hex-runtime/src/guest/rewrite.rs": "e1c8b356559db5881acfa03d7b9c8a85095aa7500e2a04cf8e033eb52fd70cb7",
+    "crates/hex-runtime/src/guest/route.rs": "8f384d46e92559dd0b1cccde9e78a6e0ec395942bb240fbf490a47032184d8c1",
+    "crates/hex-runtime/src/guest/selected.rs": "7217966dd9359db129297b1cff1e246ae5fda481f96607181a9474710550645b",
+    "crates/hex-runtime/src/guest/tests.rs": "f096aeb1e5b889c60625fc293e09030ae6f00c7de5e164bbf9eb138fab69caac"
+  },
+  "checks": {
+    "scoped_rustfmt": "pass",
+    "diff_check": "pass",
+    "compile": "unrun; dependency cohort owned by ROOT",
+    "new_controls": "source-only/unrun",
+    "native": "unrun"
+  },
+  "open": [
+    "Actual shared pool Store/native grant and managed boot; legacy shared CPU path is not charged/complete",
+    "Cold provisioning grant and native GPU join without requiring preboot measured eligibility",
+    "Native renderer/helper scope-empty proof; supported backend/native/full gates ROOT"
+  ]
+}

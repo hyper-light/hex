@@ -1,0 +1,82 @@
+{
+  "status": "SOURCE ONLY minimal checked-facts slot publication remedy after relevant original red; parser0/diff0/afterUNRUN",
+  "parent": "99cbe817b8ae5071c79230baa10a0d5628142a58",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "actual_before": {
+    "root_source": "8199ca3443ecee06c819381afbd19534d2abaa25",
+    "original": "dbff43145b2416f0753e61778702dbb0424de51c with setup-only c78 correction",
+    "name": "guest::shared::tests::checked_gpu_facts_create_a_missing_capacity_slot_and_refuse_conflicting_metadata",
+    "selection": "1selected/0pass/1fail/0ignored",
+    "cause": "exact semantic assertion: helper returned devices[] despite positive checked actual DeviceInfo input",
+    "log_sha256": "e05520c2dc384c2f588aa489d71f20445cb09a23ad17f5dbcc4c5373f34fab5f",
+    "raw_archive_sha256": "ef90398bba474797dda1ffc659f112a82f886ce3e16834d9a3221b1d3097d16c",
+    "raw_bytes": 345535,
+    "cleanup": "all Cargo reaped, temp0/source0diff/native0 per exact result"
+  },
+  "source": {
+    "path": "crates/hex-runtime/src/guest/shared.rs",
+    "sha256": "34a842c239e058222c3677fefdec87d3fd926a353f0c334567e71da266be638d"
+  },
+  "remedy": [
+    "only push_offer changes; checked metadata supplies a missing canonical slot and its new route bit",
+    "equal same-ID complete DeviceInfo coalesces; any model/size/holder conflict refuses without overwriting",
+    "bounded canonical unique eligible IDs and a transient sorted index detect duplicates; existing device order and native masks stay exact",
+    "count total device room with checked arithmetic before copying; reserve scratch once and fallibly clone only missing checked DeviceInfo",
+    "all fallible clones/reservations happen before first route/device/mask publication; allocation failure may reserve vector capacity but cannot change visible lengths/content/route/holder/profile fields",
+    "append known devices and paired zero masks, then OR only this route bit for exact eligible IDs; no fallible operation remains after first visible mutation"
+  ],
+  "R01_R05": [
+    "MAX_DEVICES and MAX_RUNTIME_ROUTES are existing protocol/index bounds, no new tuning cap",
+    "scratch indexes are ephemeral per call; no inventory cache/selection/holder ledger or new manager",
+    "empty eligibility creates no scratch index/clones and adds no observed GPU facts",
+    "all growth uses fallible reserve/clone; no unchecked arithmetic/indexing/new native wait or owner allocation",
+    "sort existing identity references once then binary-search; no per-input linear holder scan or repeated exact-reserve growth",
+    "allocations/copies/native resource measurements and fault injection remain ROOT; no performance or leak claim"
+  ],
+  "protected": [
+    {
+      "path": "crates/hex-runtime/src/guest/shared_tests.rs",
+      "sha256": "14a8637e359a65950f242c779ea7539fbf24f401c8e336c5457820988abfe238"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/gpu_pool.rs",
+      "sha256": "27039e31fd30b750bb9b86317e201ba76c6c2118f07d7d062bb2ff50ebdf9c28"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/mod.rs",
+      "sha256": "f240bd3a588d9a225739d691ee123e7e4558b50462733e6559933105a0ad0fab"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/physical.rs",
+      "sha256": "08e699e01af12dac3c25817e3ba301ddc0759e377938f4cde0775fabb6585810"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/books.rs",
+      "sha256": "306ab08727238c11817cc38474bdd151763cf22a42bec526e80a9eb60511c3ad"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/selected.rs",
+      "sha256": "36868ef01db5b7429b073af2d401c18277d06312aaa3137c22573b1667a068d1"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/observer/failure_tests.rs",
+      "sha256": "f16173de8bd30baee7826a531ccc686cfc13dece241f07204fb4886aba3e4323"
+    }
+  ],
+  "preserved": [
+    "original checked-facts assertions/three cases byte-identical",
+    "previous four8199 AFTER passes remain attributed only there; no own replay",
+    "all payload/outer class/allocation/route/original profile/claims and native/report path unchanged",
+    "metadata/holder conflicts fatal; no catalog placeholders, fake Prober, zero telemetry or fallback"
+  ],
+  "matching_native_boundary": "ROOT/L3 reviewing existing WinHolding.report catalog metadata and Recorded normalization ordering before guest augmentation. This helper keeps the strict conflict guard; source observation has no native reproduction here.",
+  "validation": "full relevant8199 original/AFTER logs read, full result JSON parsed, exact original/raw hashes verified locally; no own compile/test/native dispatch",
+  "after": "ROOT exact failed original +meaningful affected empty/alias case only; no unchanged four-pass replay absent new justification",
+  "remaining": [
+    "actual same-provider/Store normalization before augmentation at non-Linux owner seam",
+    "b924/8b family metadata guarded producer+Catalogd6e qualified tuple/lazy consumers",
+    "native renderer/GPU/helper/overhead/forbidden-effect/fault/full gates remain ROOT"
+  ]
+}

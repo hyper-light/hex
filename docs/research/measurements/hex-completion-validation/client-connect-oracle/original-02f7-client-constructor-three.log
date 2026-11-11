@@ -1,0 +1,69 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.27
+   Compiling quote v1.0.47
+   Compiling version_check v0.9.5
+   Compiling generic-array v0.14.7
+   Compiling syn v3.0.9
+   Compiling serde_core v1.0.229
+   Compiling rustix v1.1.5
+   Compiling errno v0.3.14
+   Compiling bitflags v2.13.2
+   Compiling serde v1.0.229
+   Compiling thiserror v2.0.21
+   Compiling zmij v1.0.23
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.21
+   Compiling shards-abi v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-02f7c4f1-mac-absolute-connect-after-v1/source/vendor/shards/crates/abi)
+   Compiling crc32fast v1.5.4
+   Compiling serde_json v1.0.154
+   Compiling getrandom v0.4.3
+   Compiling digest v0.10.7
+   Compiling cpufeatures v0.2.17
+   Compiling simd-adler32 v0.3.10
+   Compiling adler2 v2.0.1
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling miniz_oxide v0.9.1
+   Compiling sha2 v0.10.9
+   Compiling hex-api v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-02f7c4f1-mac-absolute-connect-after-v1/source/crates/hex-api)
+   Compiling xattr v1.6.1
+   Compiling filetime v0.2.29
+   Compiling once_cell v1.21.4
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling tar v0.4.46
+   Compiling flate2 v1.1.11
+   Compiling shards-api v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-02f7c4f1-mac-absolute-connect-after-v1/source/vendor/shards/crates/api)
+   Compiling hex-core v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-02f7c4f1-mac-absolute-connect-after-v1/source/crates/hex-core)
+   Compiling hex-client v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-02f7c4f1-mac-absolute-connect-after-v1/source/crates/hex-client)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.21s
+     Running unittests src/lib.rs (/Users/adalundhe/.cache/hex-lead/cohort-02f7c4f1-mac-absolute-connect-after-v1/target/debug/deps/hex_client-9867643a47bd7572)
+
+running 3 tests
+test guest::tests::absolute_connect_caps_partial_token_and_unanswered_hello ... client_connect_absolute form=Ordinary whole_token=false at=Instant { tv_sec: 285258, tv_nsec: 300892833 } observed=Ok((Instant { tv_sec: 285258, tv_nsec: 304240333 }, Err(Os { op: "reading the relay's token for the connection", why: "the caller's explicit absolute reply deadline expired" }))) read=1 stopped=Err(Os { code: 57, kind: NotConnected, message: "Socket is not connected" }) joined=true
+client_connect_absolute form=Ordinary whole_token=true at=Instant { tv_sec: 285258, tv_nsec: 331340541 } observed=Ok((Instant { tv_sec: 285258, tv_nsec: 308579083 }, Err(Os { op: "sending to the node agent", why: "none came in 590.582µs, twice the slowest answer to a call of its kind" }))) read=8 stopped=Err(Os { code: 57, kind: NotConnected, message: "Socket is not connected" }) joined=true
+
+thread 'guest::tests::absolute_connect_caps_partial_token_and_unanswered_hello' (8129435) panicked at crates/hex-client/src/guest/tests.rs:1035:63:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test guest::tests::absolute_connect_completes_and_evented_retains_the_same_link ... client_connect_positive form=Ordinary at=Instant { tv_sec: 285258, tv_nsec: 411252791 } observed=Ok(Ok(([Oci], None))) stopped=Err(Os { code: 57, kind: NotConnected, message: "Socket is not connected" }) joined=true
+
+thread 'guest::tests::absolute_connect_completes_and_evented_retains_the_same_link' (8129438) panicked at crates/hex-client/src/guest/tests.rs:1034:5:
+assertion `left == right` failed
+  left: 4
+ right: 56
+FAILED
+test guest::tests::absolute_connect_rejects_before_dial_and_preserves_smaller_caps ... ok
+
+failures:
+
+failures:
+    guest::tests::absolute_connect_caps_partial_token_and_unanswered_hello
+    guest::tests::absolute_connect_completes_and_evented_retains_the_same_link
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 74 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `-p hex-client --lib`

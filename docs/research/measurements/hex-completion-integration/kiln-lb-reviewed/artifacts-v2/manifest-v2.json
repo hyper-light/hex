@@ -1,0 +1,61 @@
+{
+  "previous_manifest": {
+    "path": "manifest-v1.json",
+    "sha256": "4b25100b225909a548719d9870bb44a8902c6ef1da2300b4c85a996d8e8dab6c"
+  },
+  "cohorts": [
+    {
+      "run": "r34",
+      "runner": "451397fcc585f7f7cb9aaf00e42064bb",
+      "source": "bfbfcae2f9d41724c83e47051a57468597b711a4",
+      "negative_source": "4a4b90e0fa8ac8483a93e40d2e3d6dbe0ef55123",
+      "reported_run_exit": 0,
+      "meaning": "Expected no-fabricated-idle-credit RED at4a4; exactbfb core/provider all-target clippy and23GPU+10reference(including10000histories)+2replay GREEN",
+      "raw_files": [
+        {
+          "path": "r34-raw/legacy-red.log",
+          "original_path": "/home/adalundhe/.cache/kiln-lb/int/hex-fixes-validation/legacy-red.log",
+          "bytes": 1283,
+          "sha256": "33415e8de33c186e7c2a2297f0b07e730077847bd9cdebd33c1cad29960e3cd0"
+        },
+        {
+          "path": "r34-raw/legacy-clippy.log",
+          "original_path": "/home/adalundhe/.cache/kiln-lb/int/hex-fixes-validation/legacy-clippy.log",
+          "bytes": 243,
+          "sha256": "38399422c32c34898dbdd58421c635b453b62bd47dfc635a7351b421f08a8dad"
+        },
+        {
+          "path": "r34-raw/legacy-gpu.log",
+          "original_path": "/home/adalundhe/.cache/kiln-lb/int/hex-fixes-validation/legacy-gpu.log",
+          "bytes": 2354,
+          "sha256": "7e18e92c537679b85c33c9c0aa7b489985d2ae01bdc7bbbff343154cda940125"
+        },
+        {
+          "path": "r34-raw/legacy-sched__reference.log",
+          "original_path": "/home/adalundhe/.cache/kiln-lb/int/hex-fixes-validation/legacy-sched__reference.log",
+          "bytes": 1097,
+          "sha256": "bb0b98e30b4f1d5bdceb357678a0a7177ea055853f09a4bcc988881767d32acc"
+        },
+        {
+          "path": "r34-raw/legacy-sched__replay.log",
+          "original_path": "/home/adalundhe/.cache/kiln-lb/int/hex-fixes-validation/legacy-sched__replay.log",
+          "bytes": 448,
+          "sha256": "1df5696354ec1fa18862801c1fe1757ed69fff6162766d892941e47b0455d3b3"
+        },
+        {
+          "path": "r34-raw/legacy-gpu-source.log",
+          "original_path": "/home/adalundhe/.cache/kiln-lb/int/legacy-gpu-source.log",
+          "bytes": 1582,
+          "sha256": "fa5c5503af911d0eb64dc6bad9682ac2232968e2dfc4d1c74abfb6c43a39a00f"
+        }
+      ],
+      "raw_test_summary": {
+        "legacy-gpu.log": "test result: ok. 23 passed; 0 failed;",
+        "legacy-sched__reference.log": "test result: ok. 10 passed; 0 failed;",
+        "legacy-sched__replay.log": "test result: ok. 2 passed; 0 failed;"
+      },
+      "provenance": "Existing raw Linux files copied through read-only MCP after run completion; transfer bytes and SHA256 verified locally; no test repeated"
+    }
+  ],
+  "limits": "Private unsigned commits. SHA256 artifact seal is not an author signature. Count-only admission compatibility remains explicit; zero fabricated idle/memory credit. Logical scheduling proof, not physical attachment, lifetime, cleanup or performance proof."
+}

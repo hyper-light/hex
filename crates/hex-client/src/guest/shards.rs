@@ -7,11 +7,11 @@ use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
 
-use super::{Duplex, Link};
+use super::{Duplex, DuplexOwner, Link, own_duplex};
 
 /// A connection to one of the guest's ports, as Shards gives it.
 pub struct ShardsStream(Box<dyn shards_api::Stream>);
@@ -33,8 +33,9 @@ impl Write for ShardsStream {
 }
 
 impl Duplex for ShardsStream {
-    fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
-        Ok(Box::new(Self(self.0.try_clone()?)))
+    fn try_clone(&self) -> io::Result<DuplexOwner> {
+        own_duplex(Self(self.0.try_clone()?))
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
@@ -62,15 +63,40 @@ impl Duplex for ShardsStream {
 /// `hex_runtime::guest::GuestRuntime::first_dial_bound`). Once one has, the guest's relay listens, so
 /// each later dial is one try (`Duration::ZERO`): a refusal then is the relay's end.
 pub struct ShardsLink {
-    guest: Arc<dyn shards_api::Guest>,
+    guest: ShardsGuest,
     first: Duration,
     listened: AtomicBool,
+}
+
+enum ShardsGuest {
+    Owned(Arc<dyn shards_api::Guest>),
+    Managed(shards_api::ManagedGuest),
+}
+
+impl ShardsGuest {
+    fn guest(&self) -> &dyn shards_api::Guest {
+        match self {
+            Self::Owned(guest) => guest.as_ref(),
+            Self::Managed(guest) => guest,
+        }
+    }
 }
 
 impl ShardsLink {
     pub fn new(guest: Arc<dyn shards_api::Guest>, first: Duration) -> Self {
         Self {
-            guest,
+            guest: ShardsGuest::Owned(guest),
+            first,
+            listened: AtomicBool::new(false),
+        }
+    }
+
+    /// AC-T7.4.1: retain the API's existing native/protocol receipt directly. The
+    /// caller uses ManagedGuest::try_clone when it also retains a boot handle;
+    /// adapting that handle needs no second Arc allocation or lifecycle owner.
+    pub fn managed(guest: shards_api::ManagedGuest, first: Duration) -> Self {
+        Self {
+            guest: ShardsGuest::Managed(guest),
             first,
             listened: AtomicBool::new(false),
         }
@@ -80,11 +106,12 @@ impl ShardsLink {
 impl Link for ShardsLink {
     fn identity(&self) -> Result<shards_api::Identity, Refusal> {
         self.guest
+            .guest()
             .identity()
             .map_err(|why| refusal("naming the guest's stream endpoint", &why))
     }
 
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         let patience = if self.listened.load(Ordering::Acquire) {
             Duration::ZERO
         } else {
@@ -92,10 +119,28 @@ impl Link for ShardsLink {
         };
         let stream = self
             .guest
+            .guest()
             .connect(port, patience)
             .map_err(|why| refusal("connecting to the guest", &why))?;
         self.listened.store(true, Ordering::Release);
-        Ok(Box::new(ShardsStream(stream)))
+        own_duplex(ShardsStream(stream))
+    }
+
+    fn dial_before(&self, port: u32, deadline: Option<Instant>) -> Result<DuplexOwner, Refusal> {
+        let Some(at) = deadline else {
+            return self.dial(port);
+        };
+        let cap = crate::calls::ReplyDeadline::caller_before(at)?;
+        cap.remaining("connecting to the guest within the original operation deadline")?;
+        let stream = self
+            .guest
+            .guest()
+            .connect_before(port, at)
+            .map_err(|why| refusal("connecting to the guest", &why))?;
+        let stream = own_duplex(ShardsStream(stream))?;
+        cap.remaining("retaining the guest connection within the original operation deadline")?;
+        self.listened.store(true, Ordering::Release);
+        Ok(stream)
     }
 }
 
@@ -114,6 +159,37 @@ pub fn refusal(op: &'static str, why: &shards_api::Refusal) -> Refusal {
             what: "the node's guest",
             why: format!("its {what}: {why}"),
         },
+        shards_api::Refusal::Gpu(why) => {
+            use shards_api::PhysicalGpuError;
+            let message = match why {
+                PhysicalGpuError::Syntax => "malformed native GPU selector",
+                PhysicalGpuError::PciAddress => "GPU PCI address fields are out of range",
+                PhysicalGpuError::MetalRegistry => "Metal registry identity is unavailable",
+                PhysicalGpuError::Count => "GPU count exceeds the native device address space",
+                PhysicalGpuError::Duplicate => "GPU selection repeats a native identity",
+                PhysicalGpuError::Allocation => {
+                    return Refusal::Exhausted {
+                        what: "physical GPU selection storage",
+                        bound: shards_api::physical::MAX_PHYSICAL_GPUS,
+                    };
+                }
+            };
+            let mut reason = String::new();
+            if reason.try_reserve_exact(message.len()).is_err() {
+                return Refusal::Exhausted {
+                    what: "physical GPU refusal text",
+                    bound: message.len(),
+                };
+            }
+            reason.push_str(message);
+            Refusal::Invalid {
+                what: "physical GPU selection",
+                why: reason,
+            }
+        }
         other => Refusal::os(op, other),
     }
 }
+
+#[cfg(test)]
+mod connect_original_tests;

@@ -1,0 +1,533 @@
+{
+  "calibration_eligibility": false,
+  "candidate_ready": false,
+  "cases": [
+    {
+      "backend_cleanup_error": null,
+      "backend_reaped": true,
+      "baseline": true,
+      "case": "trace-off",
+      "cleanup_error": null,
+      "error": null,
+      "identity": {
+        "pid": 82177,
+        "started": 12530419619354,
+        "vsock": "/Users/adalundhe/.cache/hx/e-hrrsr31d/guest-tmp/shards-api-98b2409509f8e4a6-0/v"
+      },
+      "kind": "diagnostic-physical-armed-trace",
+      "ledger": {
+        "bytes": 103758,
+        "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/pids.jsonl",
+        "sha256": "0aee4f4035313b51def4b40b0509757b31a8d41d85f2128aae2a3f85972d6a52"
+      },
+      "ledger_rows": 414,
+      "logs": [
+        {
+          "bytes": 2592,
+          "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/call.log",
+          "sha256": "05845e6055753f50258adeb6352ee812db0ac9b0b8190149103e7f5fcfcae21e"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/cold-node.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/hex-version.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/keygen-client-0.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/keygen-client-1.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/keygen-host-key.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/l.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 157,
+          "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/o.log",
+          "sha256": "7b33cfdd4ce3635a7dcca34a1dc82f86c5d99c2cd166dabe58078f853a6e72d2"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/pid-check.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/r.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/runtime-probe.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 166,
+          "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/sshd-4.log",
+          "sha256": "5996283b716c21b31ae4a02898e4c61243e24ac4d050ccd69764022bed49c646"
+        },
+        {
+          "bytes": 83,
+          "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/sshd-6.log",
+          "sha256": "51d2670636d644c2df52a5795243e0c2028210f3ebcee80eaac2300deb65cce9"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/sshd-effective.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "original_finish_failure": null,
+      "physical_created": 2,
+      "physical_deleted": 2,
+      "raw_result": {
+        "bytes": 7248,
+        "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/result.json",
+        "sha256": "a718ccee13f3712552dd5f837e404c1612f87cfe523cb6325609e472943c2d6b"
+      },
+      "receipt": {
+        "bytes": 617,
+        "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/owned-guest.json",
+        "sha256": "ab3ab47848e2f4e283dac288823fd6cbbf59e29a24fe01a56afedfa4f84e4329"
+      },
+      "record": {
+        "bytes": 131,
+        "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/cold-node.node-state/@guest",
+        "sha256": "7010ddea065eea9553dbad97c2f0620b51b90fd8e4193d11e5ff59ece7ed621b"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 82177,
+        "started": 12530419619354
+      },
+      "root_injection": null,
+      "runtime": {
+        "bytes": 961,
+        "path": "/Users/adalundhe/.cache/hx/e-hrrsr31d/runtime.json",
+        "sha256": "f76b0902c84d4e89b19093f7dbda4cdfa6b8fbb411f4bfa9b7c86a6c05049fc7"
+      },
+      "status": "passed"
+    },
+    {
+      "backend_cleanup_error": null,
+      "backend_reaped": true,
+      "baseline": null,
+      "case": "trace-on",
+      "cleanup_error": null,
+      "error": "call failed; see call.log in the private run directory",
+      "identity": {
+        "pid": 82408,
+        "started": 12530455716402,
+        "vsock": "/Users/adalundhe/.cache/hx/e-a8gdbp31/guest-tmp/shards-api-a005d718fef812e7-0/v"
+      },
+      "kind": "diagnostic-physical-armed-trace",
+      "ledger": {
+        "bytes": 63051,
+        "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/pids.jsonl",
+        "sha256": "ae62ba9e732c3b152516dbd66c6c84b192e5f48dd2a20abe94b3763deb9dae2c"
+      },
+      "ledger_rows": 252,
+      "logs": [
+        {
+          "bytes": 1585,
+          "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/call.log",
+          "sha256": "d2b42e0b2a1c28c25c7bd93554079bea5eb67c06251ede19a7919bd950fa23a8"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/cold-node.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/hex-version.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/keygen-client-0.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/keygen-client-1.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/keygen-host-key.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 21049,
+          "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/l.log",
+          "sha256": "583c3f566472c05e6a3c31e18211c8dffe746a92d170a7d4cc9cd16cf15bc60f"
+        },
+        {
+          "bytes": 95303,
+          "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/o.log",
+          "sha256": "0e4ad412025c615e2a967c913425c7e781c0e823b3952e61c9620062b1c43ba1"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/pid-check.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 16850,
+          "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/r.log",
+          "sha256": "97e13c3c8df274f1c16c683b38ede8ce57058becb8b740f2667a7e231fdd9e08"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/runtime-probe.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 83,
+          "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/sshd-4.log",
+          "sha256": "51d2670636d644c2df52a5795243e0c2028210f3ebcee80eaac2300deb65cce9"
+        },
+        {
+          "bytes": 83,
+          "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/sshd-6.log",
+          "sha256": "51d2670636d644c2df52a5795243e0c2028210f3ebcee80eaac2300deb65cce9"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/sshd-effective.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "original_finish_failure": null,
+      "physical_created": null,
+      "physical_deleted": null,
+      "raw_result": {
+        "bytes": 7066,
+        "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/result.json",
+        "sha256": "dc3e436555ec9b56cf6af551abb098df53cbac7afff0215eb094121c4b815932"
+      },
+      "receipt": {
+        "bytes": 617,
+        "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/owned-guest.json",
+        "sha256": "0f31a2b7177c941d03bc9b3bde2c09880927927b8a7750a0a1968dfb17e0f02e"
+      },
+      "record": {
+        "bytes": 131,
+        "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/cold-node.node-state/@guest",
+        "sha256": "170037d57bfa5e7a80486a9267bf52ebba1955bc99199b37d524de10123337c3"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 82408,
+        "started": 12530455716402
+      },
+      "root_injection": null,
+      "runtime": {
+        "bytes": 961,
+        "path": "/Users/adalundhe/.cache/hx/e-a8gdbp31/runtime.json",
+        "sha256": "165979489f7eee52f253c3bedcf430702002a0a1b475c20a4f382f95b12c0329"
+      },
+      "status": "failed"
+    },
+    {
+      "backend_cleanup_error": null,
+      "backend_reaped": true,
+      "baseline": null,
+      "case": "physical-fault-pre-ready",
+      "cleanup_error": "iteration lacks ready/class/empty-baseline and exact Stopped closure proof",
+      "error": "ROOT pre-ready parent receipt-boundary fault",
+      "identity": {
+        "pid": 82995,
+        "started": 12534214820120,
+        "vsock": "/Users/adalundhe/.cache/hx/e-r6a14ic4/guest-tmp/shards-api-f139ac43dde9a190-0/v"
+      },
+      "kind": "diagnostic-physical-armed-trace",
+      "ledger": {
+        "bytes": 1567,
+        "path": "/Users/adalundhe/.cache/hx/e-r6a14ic4/pids.jsonl",
+        "sha256": "b7b9d6642e8b8f8d8b888384885af0de74a8503015b550d97bccca63fe3d40bd"
+      },
+      "ledger_rows": 7,
+      "logs": [
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-r6a14ic4/cold-node.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-r6a14ic4/runtime-probe.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "original_finish_failure": null,
+      "physical_created": null,
+      "physical_deleted": null,
+      "raw_result": {
+        "bytes": 6712,
+        "path": "/Users/adalundhe/.cache/hx/e-r6a14ic4/result.json",
+        "sha256": "86b5df2a790d4a4c9e28c30f0c94c7f88fa73ca43d37c0280a4d468ab32b8d94"
+      },
+      "receipt": {
+        "bytes": 617,
+        "path": "/Users/adalundhe/.cache/hx/e-r6a14ic4/cold-recovery-receipt.json",
+        "sha256": "74501a96d1341165ba330bda78fa5f0e688f9d9309754cca05f76a2767222d2f"
+      },
+      "record": {
+        "bytes": 131,
+        "path": "/Users/adalundhe/.cache/hx/e-r6a14ic4/cold-node.node-state/@guest",
+        "sha256": "d25a5b1e4592100b667262a40b42869dd8cacb80cd7b79ef3d3c8f40aa1b44db"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 82995,
+        "started": 12534214820120
+      },
+      "root_injection": {
+        "case": "pre-ready",
+        "known_record": "/Users/adalundhe/.cache/hx/e-r6a14ic4/cold-node.node-state/@guest",
+        "trigger": "actual ready line read; before parent snapshot/receipt"
+      },
+      "runtime": {
+        "bytes": 961,
+        "path": "/Users/adalundhe/.cache/hx/e-r6a14ic4/runtime.json",
+        "sha256": "5a0057027d42daacbe25e1d93343ba187568fa6f41c6b43a4c822b7e49ce1a2f"
+      },
+      "status": "failed"
+    },
+    {
+      "backend_cleanup_error": "ROOT post-ready finish snapshot fault",
+      "backend_reaped": true,
+      "baseline": true,
+      "case": "physical-fault-post-ready",
+      "cleanup_error": "iteration lacks ready/class/empty-baseline and exact Stopped closure proof",
+      "error": null,
+      "identity": {
+        "pid": 83006,
+        "started": 12534219493428,
+        "vsock": "/Users/adalundhe/.cache/hx/e-8gggb2h_/guest-tmp/shards-api-74ea978fa7f26170-0/v"
+      },
+      "kind": "diagnostic-physical-armed-trace",
+      "ledger": {
+        "bytes": 380269,
+        "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/pids.jsonl",
+        "sha256": "231677956da03eda897e2c16d4c030cd6a1af93285e9a78afb964cd78c1bbd2e"
+      },
+      "ledger_rows": 1510,
+      "logs": [
+        {
+          "bytes": 23832,
+          "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/call.log",
+          "sha256": "5597b6cc6722e5e61ca83353be320e673d1694ca81c7ff11765b178a19e73e02"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/cold-node.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/hex-version.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/keygen-client-0.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/keygen-client-1.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/keygen-host-key.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/l.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 77,
+          "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/o.log",
+          "sha256": "4126cccf4234c059e7c0bbac4de6957e3a7c886bcef90c7d199937ba017f6fa9"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/pid-check.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/r.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/runtime-probe.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 83,
+          "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/sshd-14.log",
+          "sha256": "51d2670636d644c2df52a5795243e0c2028210f3ebcee80eaac2300deb65cce9"
+        },
+        {
+          "bytes": 166,
+          "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/sshd-4.log",
+          "sha256": "5996283b716c21b31ae4a02898e4c61243e24ac4d050ccd69764022bed49c646"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/sshd-effective.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "original_finish_failure": "ROOT post-ready finish snapshot fault",
+      "physical_created": 2,
+      "physical_deleted": 2,
+      "raw_result": {
+        "bytes": 7931,
+        "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/result.json",
+        "sha256": "75eb36ab983ceb21e046f43af7fffa501f554a46cf7cace7e743484447eb82bf"
+      },
+      "receipt": {
+        "bytes": 617,
+        "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/owned-guest.json",
+        "sha256": "f6d92e303fd68f3be2028758225b575305d450b584406c0547f0677a95ad50a0"
+      },
+      "record": {
+        "bytes": 131,
+        "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/cold-node.node-state/@guest",
+        "sha256": "3df944b9a2b35fc21dc792b65b51ae5ca40d783b268218420ee01b3bfaff2612"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 83006,
+        "started": 12534219493428
+      },
+      "root_injection": {
+        "case": "post-ready",
+        "trigger": "first original finish snapshot after ready/class/live capacity verification"
+      },
+      "runtime": {
+        "bytes": 961,
+        "path": "/Users/adalundhe/.cache/hx/e-8gggb2h_/runtime.json",
+        "sha256": "222e555fc7c4d8b7c2f1898e32ca8e775b9acf31122a12a1eeab7a07a9a5ac19"
+      },
+      "status": "failed"
+    },
+    {
+      "backend_cleanup_error": null,
+      "backend_reaped": true,
+      "baseline": null,
+      "case": "standalone-pre-ready",
+      "cleanup_error": "iteration lacks ready/class/empty-baseline and exact Stopped closure proof",
+      "error": "ROOT pre-ready parent receipt-boundary fault",
+      "identity": {
+        "pid": 83808,
+        "started": 12535547126996,
+        "vsock": "/Users/adalundhe/.cache/hx/e-zy27xn2k/guest-tmp/shards-api-04003025acadbe97-0/v"
+      },
+      "kind": "cold-node-seeded-validation",
+      "ledger": {
+        "bytes": 1567,
+        "path": "/Users/adalundhe/.cache/hx/e-zy27xn2k/pids.jsonl",
+        "sha256": "910c7b7c40b0a67053d730c9b60bd4c61f47eb21593abc9847d631af8c067dce"
+      },
+      "ledger_rows": 7,
+      "logs": [
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-zy27xn2k/cold-node.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-zy27xn2k/runtime-probe.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "original_finish_failure": null,
+      "physical_created": null,
+      "physical_deleted": null,
+      "raw_result": {
+        "bytes": 6561,
+        "path": "/Users/adalundhe/.cache/hx/e-zy27xn2k/result.json",
+        "sha256": "df0c6974209737e3320fc8e7d46d643886fe193db2b327ac2c7a3852233e1da6"
+      },
+      "receipt": {
+        "bytes": 617,
+        "path": "/Users/adalundhe/.cache/hx/e-zy27xn2k/cold-recovery-receipt.json",
+        "sha256": "a28fb35e0c4477d37e49c6b135b3c6dfcd3837fb7940baded266b29cf89a26cf"
+      },
+      "record": {
+        "bytes": 131,
+        "path": "/Users/adalundhe/.cache/hx/e-zy27xn2k/cold-node.node-state/@guest",
+        "sha256": "f7523bf7a05913bfe50cc646cc03b50420fbb23d51a0b691faff7caef908ba1c"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 83808,
+        "started": 12535547126996
+      },
+      "root_injection": {
+        "case": "pre-ready",
+        "known_record": "/Users/adalundhe/.cache/hx/e-zy27xn2k/cold-node.node-state/@guest",
+        "trigger": "actual ready line read; before parent snapshot/receipt"
+      },
+      "runtime": {
+        "bytes": 961,
+        "path": "/Users/adalundhe/.cache/hx/e-zy27xn2k/runtime.json",
+        "sha256": "a583c3c7e5065306f2f682b400ae193e63ff710d30dfbc0e94d8d338be64adbd"
+      },
+      "status": "failed"
+    }
+  ],
+  "compiled_source": "8cc99eb34e828439b3566ed0d16a84e97bbbb3ef",
+  "earlier_help_attempt": {
+    "exit": 2,
+    "log": {
+      "bytes": 144,
+      "path": "/Users/adalundhe/.cache/hex-lead/submit-trace-8cc99eb3/receipts/standalone-fault-entrypoint-help-aa2f0bdd.log",
+      "sha256": "65fc8953526465b00eb1a275e8286a09e688cf5ab3d99617c421082726e3fc1e"
+    },
+    "reason": "Cold-loop parser requires --n and --output; --help alone is not supported. Failed before Harness or guest."
+  },
+  "fault_fixture_source": "aa2f0bdd036cf60631bb0e72fc39234ccf20b911",
+  "finding": "Both physical injected faults and the old standalone entrypoint preserve original failures, reap exact backends and retain matching recorded Stopped identities. Standalone requested2 but stopped after1. Trace OFF passes; trace ON fails unrelated LinkUp289250ns after successful Submit110665333ns. Neither diagnostic reproduces the original armed Submit failure.",
+  "kind": "root-physical-diagnostic-fault-controls",
+  "production_fix": false,
+  "root_fixture_cherry": "1e31dc9d",
+  "scope": "Independent raw JSON/record/receipt/runtime/log/ledger hashes and identity joins, not a live verifier API query or resource leak/performance proof.",
+  "standalone_campaign": {
+    "bytes": 1432,
+    "path": "/Users/adalundhe/.cache/hex-lead/submit-trace-8cc99eb3/receipts/standalone-pre-ready-aa2f0bdd.json",
+    "sha256": "b8d5b74cf16814bc50287a6f604b08f7c14d1f5fe772eeb2a08523436a81765d"
+  }
+}

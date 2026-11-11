@@ -1,0 +1,95 @@
+[
+  {
+    "path": "crates/hex-sim/src/danger.rs",
+    "node_spec": 1,
+    "start": 0,
+    "lines": [
+      206
+    ]
+  },
+  {
+    "path": "crates/hex-sim/src/fair.rs",
+    "node_spec": 1,
+    "start": 0,
+    "lines": [
+      451
+    ]
+  },
+  {
+    "path": "crates/hex-sim/src/faults.rs",
+    "node_spec": 2,
+    "start": 0,
+    "lines": [
+      646,
+      865
+    ]
+  },
+  {
+    "path": "crates/hex-sim/src/generate.rs",
+    "node_spec": 4,
+    "start": 0,
+    "lines": [
+      65,
+      379,
+      568,
+      601
+    ]
+  },
+  {
+    "path": "crates/hex-sim/src/packing.rs",
+    "node_spec": 1,
+    "start": 0,
+    "lines": [
+      271
+    ]
+  },
+  {
+    "path": "crates/hex-sim/src/replay.rs",
+    "node_spec": 1,
+    "start": 0,
+    "lines": [
+      131
+    ]
+  },
+  {
+    "path": "crates/hex-sim/src/store.rs",
+    "node_spec": 1,
+    "start": 0,
+    "lines": [
+      677
+    ]
+  },
+  {
+    "path": "crates/hex-sim/tests/huawei.rs",
+    "node_spec": 1,
+    "start": 0,
+    "lines": [
+      83
+    ]
+  },
+  {
+    "path": "crates/hex-sim/tests/preempt.rs",
+    "node_spec": 1,
+    "start": 0,
+    "lines": [
+      147
+    ]
+  },
+  {
+    "path": "crates/hex-sim/tests/recorded.rs",
+    "node_spec": 1,
+    "start": 0,
+    "lines": [
+      46
+    ]
+  },
+  {
+    "path": "crates/hex-sim/tests/sim.rs",
+    "node_spec": 2,
+    "start": 0,
+    "lines": [
+      466,
+      476
+    ]
+  }
+]

@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Bounds, BoxId, Refusal};
+use crate::runtime::{Allocation, CapacityResources};
+use crate::{Bounds, BoxId, DeviceId, Refusal};
 
 /// What a box holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Class {
     /// Host processes in a resource bound: a cgroup on Linux, QoS and limits on macOS, a job object
@@ -15,6 +16,10 @@ pub enum Class {
     Process,
     /// An OCI container: namespaces, cgroups, seccomp, rootless through user namespaces (Linux).
     Oci,
+    /// A Linux KVM microVM run by an initialized Firecracker backend.
+    Firecracker,
+    /// A microVM run by an initialized Shards backend.
+    Shards,
 }
 
 impl Class {
@@ -22,6 +27,8 @@ impl Class {
         match self {
             Self::Process => "process",
             Self::Oci => "oci",
+            Self::Firecracker => "firecracker",
+            Self::Shards => "shards",
         }
     }
 }
@@ -36,18 +43,94 @@ pub struct BoxSpec {
     /// spec without it names no owner (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<BoxOwner>,
+    /// Exact identities requested from the runtime pool, never an implicit class-wide grant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<DeviceId>,
+    /// The original workload stays in `bounds`/`class`. This immutable receipt pays initialized
+    /// per-box runtime costs in the existing resource ledger until physical termination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocation: Option<Allocation>,
+    /// Actual initialized execution selected before admission, beside the original workload form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<crate::runtime::RouteReceipt>,
 }
 
 impl BoxSpec {
+    pub fn route_execution(&self) -> Option<crate::runtime::Execution> {
+        self.route.map(|receipt| receipt.key.execution)
+    }
+
+    /// Resolve only the original form or its validated immutable execution receipt.
+    pub fn backend_class(&self) -> Result<Class, Refusal> {
+        self.check()?;
+        Ok(match self.route_execution() {
+            None | Some(crate::runtime::Execution::Native) => self.class.class(),
+            Some(
+                crate::runtime::Execution::ShardsShared
+                | crate::runtime::Execution::ShardsDedicated,
+            ) => Class::Shards,
+            Some(crate::runtime::Execution::Firecracker) => Class::Firecracker,
+        })
+    }
+
     /// Whether every value it names is well formed, before anything is made: its bounds, its owner and
     /// a structured container's spec, each refused by its field's name (CLAUDE.md §3).
     pub fn check(&self) -> Result<(), Refusal> {
         self.bounds.check()?;
+        self.check_devices()?;
+        if let Some(route) = self.route {
+            route.check(
+                self.class.class(),
+                self.devices
+                    .iter()
+                    .any(|device| device.kind == crate::DeviceKind::Gpu),
+            )?;
+            if matches!(
+                route.key.execution,
+                crate::runtime::Execution::ShardsDedicated | crate::runtime::Execution::Firecracker
+            ) && (self.allocation.is_none()
+                || self.bounds.cpu_max_milli.is_none()
+                || self.bounds.memory_max.is_none())
+            {
+                return Err(crate::runtime::invalid_route(
+                    "dedicated execution requires finite original CPU/memory caps and its admitted allocation",
+                ));
+            }
+        }
+
+        if let Some(allocation) = self.allocation {
+            allocation.covers(CapacityResources {
+                cpu_milli: self.bounds.cpu_max_milli.map_or(0, u64::from),
+                mem_bytes: self.bounds.memory_max.unwrap_or(0),
+                disk_bytes: 0,
+            })?;
+        }
         if let Some(owner) = &self.owner {
             owner.check()?;
         }
-        if let ClassSpec::Oci(oci) = &self.class {
-            oci.check()?;
+        match &self.class {
+            ClassSpec::Oci(oci) | ClassSpec::Firecracker(oci) | ClassSpec::Shards(oci) => {
+                oci.check()?
+            }
+            ClassSpec::Process | ClassSpec::Bundle(_) => {}
+        }
+        Ok(())
+    }
+
+    /// The physical claims alone, also checked by the wire without changing its other field codecs.
+    pub fn check_devices(&self) -> Result<(), Refusal> {
+        crate::devices::check_ids(self.devices.iter().copied())
+    }
+
+    /// An adapter without device attachment refuses before creating any physical or durable state.
+    pub fn check_no_devices(&self, platform: &'static str) -> Result<(), Refusal> {
+        self.check()?;
+        if !self.devices.is_empty() {
+            return Err(Refusal::Platform {
+                what: "devices",
+                platform,
+                why: "this runtime does not attach physical device claims".to_owned(),
+            });
         }
         Ok(())
     }
@@ -61,8 +144,9 @@ impl BoxSpec {
             return Err(Refusal::Invalid {
                 what: "run",
                 why: format!(
-                    "box {} is an oci box, whose init is created and started",
-                    self.id
+                    "box {} is a {} box, whose init is created and started",
+                    self.id,
+                    self.class.class().name()
                 ),
             });
         }
@@ -145,6 +229,11 @@ pub enum ClassSpec {
     /// that already speak the runtime-spec: kiln's executor, which unpacks images into bundles, and the
     /// bench, which runs one bundle under every runtime.
     Bundle(PathBuf),
+    /// A guest workload in its own Firecracker microVM. Host kernel, initrd, binary and physical
+    /// attachment configuration belong to the initialized backend, never this peer payload.
+    Firecracker(Box<OciSpec>),
+    /// A guest workload run by Shards, with host configuration owned by its initialized backend.
+    Shards(Box<OciSpec>),
 }
 
 impl ClassSpec {
@@ -152,6 +241,8 @@ impl ClassSpec {
         match self {
             Self::Process => Class::Process,
             Self::Oci(_) | Self::Bundle(_) => Class::Oci,
+            Self::Firecracker(_) => Class::Firecracker,
+            Self::Shards(_) => Class::Shards,
         }
     }
 }
@@ -893,6 +984,53 @@ mod tests {
         let mut s = spec();
         s.rootfs = Rootfs::Layers(vec![std::ffi::OsStr::from_bytes(b"/layers/\xff").into()]);
         refused_naming(&s, "rootfs.layers[0]");
+    }
+
+    /// AC-T7.4.1: explicit backend variants preserve the workload and exact host claims in JSON;
+    /// the simulator creates their init and validates the same workload before accepting them.
+    #[test]
+    fn explicit_microvm_backends_roundtrip_and_validate_the_guest_workload() {
+        use crate::{BoxState, Runtime};
+        for (class, make) in [
+            (
+                Class::Firecracker,
+                ClassSpec::Firecracker as fn(Box<OciSpec>) -> ClassSpec,
+            ),
+            (
+                Class::Shards,
+                ClassSpec::Shards as fn(Box<OciSpec>) -> ClassSpec,
+            ),
+        ] {
+            let mut boxed = BoxSpec {
+                id: BoxId::new(class.name()).unwrap(),
+                bounds: Bounds::default(),
+                class: make(Box::new(spec())),
+                owner: None,
+                allocation: None,
+                route: None,
+                devices: vec![DeviceId {
+                    kind: crate::DeviceKind::Gpu,
+                    key: u64::MAX,
+                }],
+            };
+            assert_eq!(boxed.class.class(), class);
+            boxed.check().unwrap();
+            assert!(boxed.check_run().is_err());
+            let bytes = serde_json::to_vec(&boxed).unwrap();
+            assert_eq!(serde_json::from_slice::<BoxSpec>(&bytes).unwrap(), boxed);
+            boxed.devices.clear();
+            let runtime = crate::sim::SimRuntime::new();
+            let made = runtime.create(boxed.clone()).unwrap();
+            assert_eq!((made.class, made.state), (class, BoxState::Created));
+            runtime.start(&boxed.id).unwrap();
+            runtime.delete(&boxed.id).unwrap();
+            let mut bad = spec();
+            bad.init.args.clear();
+            boxed.class = make(Box::new(bad));
+            assert!(boxed.check().is_err());
+            assert!(runtime.create(boxed).is_err());
+            assert!(runtime.list().unwrap().is_empty());
+        }
     }
 
     fn refused_naming(s: &OciSpec, field: &str) {

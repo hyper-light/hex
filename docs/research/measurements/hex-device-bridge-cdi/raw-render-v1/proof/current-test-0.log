@@ -1,0 +1,6 @@
+
+running 1 test
+test bundle::device_edits::tests::added_input_and_encoded_output_are_bounded_with_exact_writer_boundary ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 321 filtered out; finished in 0.06s
+

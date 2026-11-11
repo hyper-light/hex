@@ -1,0 +1,38 @@
+{
+  "status": "TEST MOCK COMPILER BRIDGE ONLY, source/rustfmt0; no tests/native run",
+  "parent": "5a0a020b4f49073bc020818205739a893b059ac0",
+  "worktree": "/Users/adalundhe/.cache/hex-complete-shards/root-5a0a-mock-bridge-20261111-v1",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": {
+    "path": "crates/hex-runtime/src/guest/gpu_pool.rs",
+    "sha256": "3b4aac044735e8e35dc04afe9681960787d55375f949de50450ce88896af2f69"
+  },
+  "actual_compiler_red": {
+    "ROOT_source": "5a0a020b4f49073bc020818205739a893b059ac0",
+    "exit": 101,
+    "units_executed": 0,
+    "log_sha256": "712eaf38e657016753950fa73ca8df5a25ddc5c00f609bc4951570c513630094",
+    "cause": "c2 original unit initializer/counter used fields present in L2 5c fixture but absent ROOT Cold fixture; not production/native behavior defect"
+  },
+  "change": [
+    "test-only Cold.luid Option and launches atomic fields",
+    "physical_luid reads optional value; all existing initializers None preserve previous typed refusal",
+    "actual test-only Transaction.launch_managed increments launches before same prior refusal",
+    "two old initializer ports only; c2 body/oracle byte-identical"
+  ],
+  "preserved": {
+    "all_production_gpu_pool_bytes_identical": true,
+    "original_c2_body_sha256": "f5ccb63f831108108ea084aa954926dfc7239424fdaf39ee752e22515ac7b662",
+    "grant_pool_byte_identical": true,
+    "attach_and_finalize_byte_identical": true,
+    "other_assertions_unchanged": true,
+    "shared_preflight_unmodified": true
+  },
+  "remaining": [
+    "ROOT compile/new original c2 behavior before any Released(None) remedy",
+    "no old passed13c/3497/Driver replay",
+    "no unrelated parent grant_pool changes or production source import"
+  ]
+}

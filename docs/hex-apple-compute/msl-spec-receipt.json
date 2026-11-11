@@ -1,0 +1,12 @@
+{
+  "url": "https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf",
+  "bytes": 14564497,
+  "sha256": "41538b30d2f1140a5b2a0c84ce0a9f7b67bf0c707e224cfea0bfe5a44aa26cf5",
+  "pdf_pages_with_uint_32bit": [
+    202,
+    296,
+    297
+  ],
+  "pdf_pages": 384,
+  "web_fetch": "refused400-size14564497; read in memory with existing pdftotext, no install/no GPU/no binary build"
+}

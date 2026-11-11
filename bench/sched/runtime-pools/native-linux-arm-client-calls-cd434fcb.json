@@ -1,0 +1,228 @@
+{
+  "authority_inputs": {
+    "cold-node.node-state/@guest": {
+      "bytes": 131,
+      "sha256": "ab8f6a4865b4f912b8504a1cfcd4ed71f1323732d00cf0df07c78a32afbb5184"
+    },
+    "owned-guest.json": {
+      "bytes": 617,
+      "sha256": "8f918983c2a0e3c74925b9251d388c8816dc509421b444be0b63a6e64f2d9ae1"
+    },
+    "pids.jsonl": {
+      "bytes": 9652,
+      "sha256": "e644e3ba3f4683d481dc2101d35b234ce5b153971a451b1e711ab72224a399d9"
+    },
+    "result.json": {
+      "bytes": 8156,
+      "sha256": "c6abaf01948d1b762be21c1623e462737a3f30a0b273d7c84e03903b1b34afcd"
+    },
+    "runtime.json": {
+      "bytes": 965,
+      "sha256": "21edafd01429967c77fcaaa525cb4f8b69b74da52609649f7c6e66fc44ece384"
+    }
+  },
+  "census_entries": 0,
+  "declared_configuration": {
+    "binary": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+    "initrd": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-cc7c2190-release-aarch64.cpio",
+    "kernel": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+    "memory_mib": 632,
+    "shares": [
+      {
+        "dir": "/Users/adalundhe/.cache/hx/e-wk3dcv2r/guest-shares",
+        "read_only": true
+      }
+    ],
+    "vcpus": 4
+  },
+  "external_inputs": [
+    {
+      "bytes": 4554056,
+      "path": "/Users/adalundhe/.cache/hex-lead/target-queued-deadline-host-cd434fcb/aarch64-apple-darwin/release/hex",
+      "sha256": "07f4ce329095f22398bf96b6ef3e4a18cca05ca77331fefbad52e9a8ca7a21c8"
+    },
+    {
+      "bytes": 29845680,
+      "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-cc7c2190-release-aarch64.cpio",
+      "sha256": "5521b2304a5a6c2d9357fe4e1ac43f68ec817b685f8600115fa94f139eda778e"
+    },
+    {
+      "bytes": 19091968,
+      "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+      "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+    },
+    {
+      "bytes": 29845200,
+      "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-cc7c2190/aarch64-unknown-linux-musl/release/hex",
+      "sha256": "e2670cf5cf0b4ac32fa30f55b7027b3f95a942205c51aafe26169f5a7b9a276d"
+    },
+    {
+      "bytes": 1383840,
+      "path": "/Users/adalundhe/.cache/hex-lead/target-queued-deadline-probe-cd434fcb/aarch64-apple-darwin/release/hex-scheduler-runtime-probe",
+      "sha256": "5f338eac81707ccf0ad304b7147101204a7ec4847e21ce938b47ad98424703ac"
+    },
+    {
+      "bytes": 33588600,
+      "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+      "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+    },
+    {
+      "bytes": 2457,
+      "path": "/Users/adalundhe/.cache/hex-lead/queued-deadline-cd434fcb/receipts/build-release.json",
+      "sha256": "0af860fa12e479e6a886eabbfb855c409e7037d00f29492eb9487e02aa2faf5d"
+    },
+    {
+      "bytes": 424,
+      "path": "/Users/adalundhe/.cache/hex-lead/queued-deadline-cd434fcb/receipts/method-native-arm-client-calls-one-guest.json",
+      "sha256": "bd0656071a1bcc2c47b8385f31a03fea9f18f5bfe7c500790db831d515aa38ab"
+    },
+    {
+      "bytes": 2528,
+      "path": "/Users/adalundhe/.cache/hex-lead/queued-deadline-cd434fcb/receipts/policy-root-24f.json",
+      "sha256": "904842a1c281d1f4e9e7a6d0be5d3e591f58bb88e886e6c0dab62f71f514976b"
+    },
+    {
+      "bytes": 16106728,
+      "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/hex-client-unit-cd434fcb-aarch64-musl",
+      "sha256": "e5e331e2e847fe940a4cc78926facde03e4799c40038deca0193d91f5bd5b80c"
+    }
+  ],
+  "identity": {
+    "pid": 38286,
+    "started": 12653641955999,
+    "vsock": "/Users/adalundhe/.cache/hx/e-wk3dcv2r/guest-tmp/shards-api-0a68517ac2a0a18b-0/v"
+  },
+  "kind": "root-current-client-common-calls-native-Linux-ARM64",
+  "ledger_kinds": {
+    "call": 5,
+    "census-call-exit": 5,
+    "census-process-exit": 8,
+    "client-unit-owner": 1,
+    "cold-node": 1,
+    "native-arm64-client-common-calls-unit-in-owned-guest": 1,
+    "owned-guest": 1,
+    "reaped": 4,
+    "runtime-probe": 8
+  },
+  "ledger_rows": 34,
+  "limits": [
+    "Only calls::tests:: selected. Full client has Git/HOME/proc-dependent cases absent from the minimal one-binary rootfs; those are unrun, not skipped passes. Four macOS-specific queue probes excluded at compile time.",
+    "No stdout/stderr captured and no individual test count/result claim. Source/build/binary/filter and actual initCode0, retained until deletion, empty baseline, saved backend reap and exact guestStopped were checked.",
+    "Current cd434fcb client test ELF runs on native Linux ARM64 inside an owned HVF guest, with retained cc7 backend and existing Shards6bf/kernel/initrd. Not native AMD64/rootlab, Linux native transport suite, resource leak, timing, seed, competitive performance or full-goal proof."
+  ],
+  "ordered_backend_reap": [
+    {
+      "kind": "reaped",
+      "parent": 38281,
+      "pid": 38284,
+      "recorded_by": 38281,
+      "returncode": -15,
+      "run": "/Users/adalundhe/.cache/hx/e-wk3dcv2r"
+    }
+  ],
+  "other_evidence": [
+    {
+      "bytes": 1771,
+      "path": "/Users/adalundhe/.cache/hex-lead/queued-deadline-cd434fcb/receipts/native-arm-client-calls-one-guest.json",
+      "sha256": "d62bd342d2038b2093b3f04602233216b5861e952c3a5f132d73898429ecf489"
+    },
+    {
+      "bytes": 9931,
+      "path": "/Users/adalundhe/.cache/hex-lead/fixtures/root-drivers-fff9d0b9/native-client-calls-one-guest-cd434fcb.py",
+      "sha256": "0509ce2fcafa7631176bf7a443eedbea21103f0fc5a7a9c84382d0c99f0bed00"
+    },
+    {
+      "bytes": 2382,
+      "path": "/Users/adalundhe/.cache/hex-lead/logs/native-arm-client-build-cd434fcb.log",
+      "sha256": "483cf92aa3ffe0f9351369cd9cc44b8ea696e4b0043817ae7a09156dd33a94d3"
+    },
+    {
+      "bytes": 963,
+      "path": "/Users/adalundhe/.cache/hex-lead/logs/native-arm-client-build-cd434fcb.json",
+      "sha256": "f881fc4f04a99986ae3b669c9656b730762d1158f41dfc8adb7af1cb81c80e89"
+    },
+    {
+      "bytes": 2158,
+      "path": "/Users/adalundhe/.cache/hex-lead/logs/native-arm-client-calls-run-cd434fcb.log",
+      "sha256": "30bc64b9b585fefc59e2165a34ff13a2cce90c363a4e44b59ba8d8dff7923745"
+    },
+    {
+      "bytes": 2071,
+      "path": "/Users/adalundhe/.cache/hex-lead/queued-deadline-cd434fcb/receipts/argv-native-arm-client-calls-one-guest.json",
+      "sha256": "3770430ba3cac37d7777e57bb388ee5b256e33969363241d396dd55277eaab68"
+    }
+  ],
+  "policy": {
+    "revision": "7c26e5292161fc891a7c6c6525305464a3a044be",
+    "role": "coordinator",
+    "rules_sha256": "d634fcb944959ce1e40a9277d12b0905fcfcebf82d9da9832e826f790a349242"
+  },
+  "raw_result": {
+    "bytes": 8156,
+    "path": "/Users/adalundhe/.cache/hx/e-wk3dcv2r/result.json",
+    "sha256": "c6abaf01948d1b762be21c1623e462737a3f30a0b273d7c84e03903b1b34afcd"
+  },
+  "requirement": "AC-T7.4.1",
+  "retirement": {
+    "end": "Stopped",
+    "guest_stopped": true,
+    "pid": 38286,
+    "started": 12653641955999
+  },
+  "source_revision": "cd434fcbb2013ad3ae7a01c9cd67121e9c8cb83a",
+  "status": "passed bounded selected-module binary execution",
+  "unit_case": {
+    "actual_exit": {
+      "Code": 0
+    },
+    "artifact": {
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "hex-client",
+        "--manifest-path",
+        "/Users/adalundhe/.cache/hex-lead/snapshots/queued-deadline-fixed-cd434fcb/Cargo.toml",
+        "--lib",
+        "--no-run",
+        "--release",
+        "--locked",
+        "--target",
+        "aarch64-unknown-linux-musl",
+        "--message-format=json"
+      ],
+      "calls_sha256": "5346247fdd96a55ee9df136141e1d730e306124caa698170f17be177b32c5c83",
+      "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/hex-client-unit-cd434fcb-aarch64-musl",
+      "scope": "Cross build only; native Linux execution owed, four macOS-specific queue probes excluded",
+      "sha256": "e5e331e2e847fe940a4cc78926facde03e4799c40038deca0193d91f5bd5b80c",
+      "source": "/Users/adalundhe/.cache/hex-lead/snapshots/queued-deadline-fixed-cd434fcb",
+      "source_revision": "cd434fcbb2013ad3ae7a01c9cd67121e9c8cb83a",
+      "tests_sha256": "919840541dc7af7259ea8997c93b65fe1ca074f270c414f48e3f6439a263f021"
+    },
+    "baseline_restored": true,
+    "box_retained_after_init_exit": true,
+    "cpu_milli": 1000,
+    "init_args": [
+      "/hex",
+      "calls::tests::",
+      "--test-threads",
+      "1"
+    ],
+    "key": {
+      "epoch": 1,
+      "owner": 0,
+      "seq": 0
+    },
+    "memory_bytes": 67108864,
+    "output_limit": "common calls module only; no native Linux transport/full-client/Git staging test-count or individual-test claim",
+    "physical": "hex-place-8eeee98d5db5fb12cf816a822e8f51b8edf7c1ad1fb1e42446e8b5ff3f26bcb0-0-1-0",
+    "physical_deleted": true,
+    "rootfs": "/Users/adalundhe/.cache/hx/e-wk3dcv2r/native-client-unit-rootfs.tar",
+    "stderr_captured": false,
+    "stdout_captured": false,
+    "test_count": null
+  }
+}

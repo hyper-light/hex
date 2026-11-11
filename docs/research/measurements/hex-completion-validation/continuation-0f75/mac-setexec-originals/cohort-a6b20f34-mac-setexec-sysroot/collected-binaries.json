@@ -1,0 +1,64 @@
+{
+  "binary": [
+    {
+      "path": "setexec-control",
+      "bytes": 53776,
+      "sha256": "e540ab28276695bef3132d76c6b3626c547d8dc89c25f6f18b4dbb52f1c3777d"
+    }
+  ],
+  "phases": [
+    {
+      "name": "compile",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Library/Developer/CommandLineTools/usr/bin/clang",
+        "-isysroot",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "-std=c17",
+        "-O0",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "/Users/adalundhe/.cache/hex-lead/cohort-a6b20f34-mac-setexec-sysroot/source/macos_setexec_preseal_control.c",
+        "-o",
+        "/Users/adalundhe/.cache/hex-lead/cohort-a6b20f34-mac-setexec-sysroot/setexec-control"
+      ],
+      "external_guard_seconds": 90,
+      "pid": 98023,
+      "exit": 0,
+      "reaped": true,
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "native-four-cuts",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/cohort-a6b20f34-mac-setexec-sysroot/setexec-control",
+        "--memory-mib",
+        "64"
+      ],
+      "external_guard_seconds": 60,
+      "pid": 98026,
+      "exit": 1,
+      "reaped": true,
+      "bytes": 437,
+      "sha256": "3c1fd9d0de1f872d5fc05c499753d6e6606a4630ec432e3f9e980fa745a40a49",
+      "actual_case_results": [
+        {
+          "case": 0,
+          "error": 100,
+          "relevant": 0,
+          "main_cleanup": "REAPED"
+        }
+      ],
+      "expected_fixed_cases": 4,
+      "selection_verified": false
+    }
+  ],
+  "recorded_children_reaped": true
+}

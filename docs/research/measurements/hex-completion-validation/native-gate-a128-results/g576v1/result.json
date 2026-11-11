@@ -1,0 +1,134 @@
+{
+  "attempted": 3,
+  "cases": [
+    {
+      "cleanup": {
+        "empty": true,
+        "error": null,
+        "kill_needed": false,
+        "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-native-gate-a128-v1.scope/native-0",
+        "reaped": true
+      },
+      "completed_harness_counts": [
+        1,
+        0,
+        0
+      ],
+      "harness_status": "ok",
+      "observation": {
+        "argv": [
+          "/usr/bin/python3",
+          "/home/adalundhe/.cache/hex-lead/root-native-gate-baseline-a128-v1.py",
+          "--exec-phase",
+          "hex-root-native-gate-a128-v1.scope",
+          "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-native-gate-a128-v1.scope/native-0/actor",
+          "completion_publication_refusal_never_executes_marker",
+          "2237638",
+          "32240165",
+          "211185.42076102"
+        ],
+        "both_eof": true,
+        "created_pid": 2238106,
+        "error": null,
+        "identity": {
+          "pid": 2238106,
+          "ppid": 2237638,
+          "start_ticks": 32240194
+        },
+        "reaped": true,
+        "returncode": 0
+      },
+      "passed": true,
+      "selector": "completion_publication_refusal_never_executes_marker"
+    },
+    {
+      "cleanup": {
+        "empty": true,
+        "error": null,
+        "kill_needed": false,
+        "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-native-gate-a128-v1.scope/native-1",
+        "reaped": true
+      },
+      "completed_harness_counts": [
+        1,
+        0,
+        0
+      ],
+      "harness_status": "ok",
+      "observation": {
+        "argv": [
+          "/usr/bin/python3",
+          "/home/adalundhe/.cache/hex-lead/root-native-gate-baseline-a128-v1.py",
+          "--exec-phase",
+          "hex-root-native-gate-a128-v1.scope",
+          "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-native-gate-a128-v1.scope/native-1/actor",
+          "completion_durable_publication_releases_and_reaps",
+          "2237638",
+          "32240165",
+          "211188.335558487"
+        ],
+        "both_eof": true,
+        "created_pid": 2242637,
+        "error": null,
+        "identity": {
+          "pid": 2242637,
+          "ppid": 2237638,
+          "start_ticks": 32240486
+        },
+        "reaped": true,
+        "returncode": 0
+      },
+      "passed": true,
+      "selector": "completion_durable_publication_releases_and_reaps"
+    },
+    {
+      "cleanup": {
+        "empty": true,
+        "error": null,
+        "kill_needed": false,
+        "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-native-gate-a128-v1.scope/native-2",
+        "reaped": true
+      },
+      "completed_harness_counts": [
+        1,
+        0,
+        0
+      ],
+      "harness_status": "ok",
+      "observation": {
+        "argv": [
+          "/usr/bin/python3",
+          "/home/adalundhe/.cache/hex-lead/root-native-gate-baseline-a128-v1.py",
+          "--exec-phase",
+          "hex-root-native-gate-a128-v1.scope",
+          "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-native-gate-a128-v1.scope/native-2/actor",
+          "completion_controller_parent_death_cancels_gate",
+          "2237638",
+          "32240165",
+          "211190.936877155"
+        ],
+        "both_eof": true,
+        "created_pid": 2246798,
+        "error": null,
+        "identity": {
+          "pid": 2246798,
+          "ppid": 2237638,
+          "start_ticks": 32240746
+        },
+        "reaped": true,
+        "returncode": 0
+      },
+      "passed": true,
+      "selector": "completion_controller_parent_death_cancels_gate"
+    }
+  ],
+  "completed_selected": 3,
+  "driver_restored": true,
+  "errors": [],
+  "passed": 3,
+  "required": 3,
+  "schema": "hex-native-gate-baseline-c576-1",
+  "source": "c576d4c2a0a37d7722a81174b9ab1d7ff1434ad5",
+  "status": "PASS",
+  "vm_gpu_claim": false
+}

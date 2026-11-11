@@ -1,0 +1,16 @@
+    Checking typenum v1.20.1
+    Checking hybrid-array v0.4.15
+    Checking crypto-common v0.2.2
+    Checking block-buffer v0.12.1
+   Compiling shards-abi v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-80e3aa9c-linux-native-image-producer-v3/source/vendor/shards/crates/abi)
+    Checking const-oid v0.10.2
+    Checking digest v0.11.3
+    Checking unsize v1.1.0
+    Checking libc v0.2.191
+    Checking cpufeatures v0.3.1
+    Checking cfg-if v1.0.5
+    Checking sha2 v0.11.1
+    Checking triomphe v0.1.17
+    Checking shards-testdir v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-80e3aa9c-linux-native-image-producer-v3/source/vendor/shards/crates/testdir)
+    Checking shards-api v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-80e3aa9c-linux-native-image-producer-v3/source/vendor/shards/crates/api)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.38s

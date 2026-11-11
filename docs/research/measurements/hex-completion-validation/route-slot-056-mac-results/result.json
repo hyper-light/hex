@@ -1,0 +1,131 @@
+{
+  "source": "056005d0fe745c936e0c34dcdfdcf9a7075447da",
+  "archive_sha256": "4ee1292dac0b5993b0f103e25f20d695518e79bbef3842ba3185ab7e13ddcc2c",
+  "scope": "ROOT macARM64 new route-slot1 and affected reentrant1, changed-source Clippy and startup harness compile; prior7passes not repeated; no native backend/VM/GPU invocation",
+  "target": "mac",
+  "platform": "macOS-26.2-arm64-arm-64bit",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 30873,
+  "phases": [
+    {
+      "name": "route-slot-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::dedicated::tests::selected_slot_keeps_one_value_across_failed_reservation",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 30928,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "2c36a0fb32ff6e95d20a883a9b83fe7370893730477f4508c95b5d87fae18143",
+      "bytes": 4040,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "route-slot-reentrant-affected",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::dedicated::tests::selected_route_callback_cannot_block_independent_siblings",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 31132,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "4fdd60ea3a69579e2624455ee37c097bf07635135de07639fd8450a496fdf675",
+      "bytes": 717,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "client-runtime-native-clippy",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-client",
+        "-p",
+        "hex-runtime",
+        "--all-targets",
+        "--locked",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 31134,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "32e9e7878b9620f62661ce607ddff1614a1b5a2b53377973e401b215b35a8d7a",
+      "bytes": 2648,
+      "test_outcomes": []
+    },
+    {
+      "name": "node-cli-native-harness-check",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "check",
+        "-p",
+        "hex-node",
+        "-p",
+        "hex-cli",
+        "--all-targets",
+        "--locked"
+      ],
+      "pid": 31214,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "6b5fbee2ca8a73e4e3cec3631a45e7faf1a5c73522d24df9749163c318831f83",
+      "bytes": 2085,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_invocations": 0,
+  "exit": 1
+}

@@ -1,0 +1,4 @@
+
+thread 'supervise::completion_native_gate_tests::completion_controller_parent_death_cancels_gate' (2998306) panicked at crates/hex-node/src/supervise/completion_native_gate_tests.rs:1405:5:
+Err("exact pidfd exit guard expired")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

@@ -1,0 +1,119 @@
+{
+  "status": "source-only, new SDK3/Hex2/helper1 controls UNRUN; no native/check dispatch",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "hex_parent": "ae0efbdac2d1f06e2d73c0b6a9a676729fb2a624",
+  "api_parent": "0b4d55fdd54de261aecc4169d019f52a51bcf463",
+  "api_source": [
+    "7e306de84a999156b4b90c4b62efa6f1e2025e7c",
+    "4b0e3f4e3913047b5caf08e529f5f52c53102b95",
+    "68941d44c7c39d27f0e9ade5d1d0e7169af53002"
+  ],
+  "full_private_parent": "70b8eefddde6bf0dd2d9fcbc238fb3492c3d4f15",
+  "full_private_source": "04fbe8cc57054158ab66db57d8d1da4d3408f753",
+  "public_values": [
+    "ImageIdentity",
+    "NativeImages",
+    "NativeBoot",
+    "NativeStartup"
+  ],
+  "evidence_contract": "optional fixed four-role prefix in SAME bounded SHA-verified cost evidence; full original input bytes preserved; no-prefix legacyNone cannot grant native startup; malformed present refuses",
+  "shared_metadata_gap": "CLI normal shards-api = { path = \"../api\" } (already dev dependency), ROOT only; held shared manifests untouched; existing triomphe/unsize overlay retained",
+  "native_gaps": [
+    "actual image/cost acceptance",
+    "held exec consumption of SAME verified File",
+    "same-inode writes/path-reopen TOCTOU",
+    "bounded native transport",
+    "pre-main rootless seal",
+    "fixed roles/member durability/StartupClosed",
+    "scope/helper absence/final charge",
+    "actual renderer/guest compute/recovery/fault/profiling/full gates"
+  ],
+  "new_control_count": {
+    "api": 3,
+    "hex": 2,
+    "helpers": 1
+  },
+  "local_checks": [
+    "scoped rustfmt/parser",
+    "git diff --check",
+    "source/provenance hashes"
+  ],
+  "native_invocations": 0,
+  "build_or_test_dispatches": 0,
+  "files": [
+    {
+      "path": "crates/hex-runtime/src/guest/books.rs",
+      "bytes": 34524,
+      "sha256": "08936c46dafa1500b1b904d9407020a784f17e1e5bfc80418a12891f1ecfb0bd"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/cost.rs",
+      "bytes": 11119,
+      "sha256": "743d70eebb0deffd344e5d0f112ce710dc7374741180a7c6e837d3ad2fd77b91"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/cost/images.rs",
+      "bytes": 3375,
+      "sha256": "14247f8b003af8005131e9c922257bad9d6a6705fbdd95b692ac0750eb9881ef"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/cost/images/tests.rs",
+      "bytes": 6148,
+      "sha256": "6d63b39b5eb7144021f31cf644060d90fa536ccb7114ae349a30a18dd4b94458"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/dedicated.rs",
+      "bytes": 63146,
+      "sha256": "a9c2caf203099c90d1c6faca1e38cf5a975d35d7cbea9808951712a928066b6e"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/mod.rs",
+      "bytes": 54356,
+      "sha256": "4d0c50f2f98287354a2f576b79b0f3bec7db946def28ef80dec75babe42338d5"
+    },
+    {
+      "path": "docs/research/measurements/hex-complete-shards-gpu/NATIVE-IMAGE-PRODUCER-SOURCE.md",
+      "bytes": 9539,
+      "sha256": "e6e28d9f4eaa7976d236df071eadc41b353f270d0003e9b3d28d7613d62f8992"
+    },
+    {
+      "revision": "4b0e3f4e3913047b5caf08e529f5f52c53102b95",
+      "path": "crates/api/src/lib.rs",
+      "bytes": 41751,
+      "sha256": "9c9e7670c98cc4dcd24e5d4b977e7308f0a304b01852f32f2e6d12be579de69b"
+    },
+    {
+      "revision": "4b0e3f4e3913047b5caf08e529f5f52c53102b95",
+      "path": "crates/api/src/client.rs",
+      "bytes": 142884,
+      "sha256": "ec31f81168697e9f098da6b087f0990457f36243ab0e5df31b2e0a676948315c"
+    },
+    {
+      "revision": "4b0e3f4e3913047b5caf08e529f5f52c53102b95",
+      "path": "crates/api/src/said.rs",
+      "bytes": 6241,
+      "sha256": "92d158ad978037bfdfe313fd8a1b8ab4596a9c0feb4cccfdec695e9aadad0e48"
+    },
+    {
+      "revision": "4b0e3f4e3913047b5caf08e529f5f52c53102b95",
+      "path": "crates/api/src/native.rs",
+      "bytes": 11102,
+      "sha256": "d6b1ccc00ef4389ee3ca23833df07a0efa5e0d4554df90c3a71a3f67806f3a33"
+    },
+    {
+      "revision": "68941d44c7c39d27f0e9ade5d1d0e7169af53002",
+      "path": "crates/api/src/native/tests.rs",
+      "bytes": 6492,
+      "sha256": "49bc241504c920ae8998d4bddddc0e68a1e671b2172b8c7940e132f255b3eda0"
+    },
+    {
+      "revision": "f7f8b03b2e142a5e2bf42f610a297f991ac17f6f",
+      "path": "crates/shards/src/helpers.rs",
+      "bytes": 24178,
+      "sha256": "8d5338e0fb8ff391d8ce584f6aeb7b09339a8acba8f2f12d147bf2bc8d53ad63"
+    }
+  ],
+  "fixture_successor": "pure preparation socket path-root locator only; no actual socket created/dialed; controls UNRUN"
+}

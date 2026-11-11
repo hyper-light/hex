@@ -1,0 +1,155 @@
+{
+  "exit": 0,
+  "reaped": true,
+  "archive_sha256": "3aa060d51ee228129ac43417c90cf25eea1161807112266ce917607e0f12f4ca",
+  "bytes": 251762,
+  "readback": {
+    "device-windows-combined-9190738c-checks-v1": {
+      "revision": "9190738c332a442c91719aaa7857f9c3673a2769",
+      "source_files": 1848,
+      "source_unchanged": true,
+      "result": {
+        "source": "9190738c332a442c91719aaa7857f9c3673a2769",
+        "archive_sha256": "193b74ed66f6e7fce8d537b5c29ff965279c9b42cec6bf36239d6a58bedb5768",
+        "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "arch": "arm64",
+        "scope": "ROOT combined Windows completion/core markers with current API/native GPU model: pure HCS units and Windows ARM64 CLI compile, no native HCS/GPU attachment effect",
+        "phases": [
+          {
+            "name": "hcs-core",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "test",
+              "-p",
+              "hex-core",
+              "--lib",
+              "--locked",
+              "hcs::",
+              "--",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "pid": 49818,
+            "exit": 101,
+            "reaped": true,
+            "sha256": "21ee92cacf8e4d6a1258a150fe00e44bc4dbba3a273d5fb834f4f1594d803113",
+            "bytes": 3628,
+            "required_selected": false
+          }
+        ],
+        "exit": 1,
+        "temp_entries": 0
+      },
+      "signed_source_equal": true
+    },
+    "device-windows-combined-bd8e8bec-checks-v1": {
+      "revision": "bd8e8becc2541d4813ef7867d066a1abb08f8f2c",
+      "source_files": 1848,
+      "source_unchanged": true,
+      "result": {
+        "source": "bd8e8becc2541d4813ef7867d066a1abb08f8f2c",
+        "archive_sha256": "5314ed255f02b0ce7f4061f14de690b0a28b094f85deb4ef8ca4dc0537c1f43c",
+        "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "arch": "arm64",
+        "scope": "ROOT combined Windows completion/core markers with current API/native GPU model: pure HCS units and Windows ARM64 CLI compile, no native HCS/GPU attachment effect",
+        "phases": [
+          {
+            "name": "hcs-core",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "test",
+              "-p",
+              "hex-core",
+              "--lib",
+              "--locked",
+              "hcs::",
+              "--",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "pid": 50795,
+            "exit": 101,
+            "reaped": true,
+            "sha256": "f8b90bf75318d94c9b2f3631692508156b590fafd5b5876eef48f7106e982744",
+            "bytes": 8582,
+            "required_selected": false
+          }
+        ],
+        "exit": 1,
+        "temp_entries": 0
+      },
+      "signed_source_equal": true
+    },
+    "device-windows-combined-5473bc7a-checks-v1": {
+      "revision": "5473bc7afb21e51d607dc7cdec341590806bd9db",
+      "source_files": 1848,
+      "source_unchanged": true,
+      "result": {
+        "source": "5473bc7afb21e51d607dc7cdec341590806bd9db",
+        "archive_sha256": "d2f85c066224d082e72d958ba5af482d7986442965c1ecca1b1c31c62186a04a",
+        "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "arch": "arm64",
+        "scope": "ROOT combined Windows completion/core markers with current API/native GPU model: pure HCS units and Windows ARM64 CLI compile, no native HCS/GPU attachment effect",
+        "phases": [
+          {
+            "name": "hcs-core",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "test",
+              "-p",
+              "hex-core",
+              "--lib",
+              "--locked",
+              "hcs::",
+              "--",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "pid": 51209,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "da38fd95bab64e7227c2920dd9ae57b204ae9ee4792269ad944e91f74b530668",
+            "bytes": 7478,
+            "required_selected": true
+          },
+          {
+            "name": "cli-winarm-clippy",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "clippy",
+              "-p",
+              "hex-cli",
+              "--all-targets",
+              "--locked",
+              "--target",
+              "aarch64-pc-windows-msvc",
+              "--",
+              "-D",
+              "warnings"
+            ],
+            "pid": 51610,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "318403e83623988e8a8ce42f684a60e1bd353a357620b6ee077c991d90231503",
+            "bytes": 5148
+          }
+        ],
+        "exit": 0,
+        "temp_entries": 0
+      },
+      "signed_source_equal": true
+    }
+  }
+}

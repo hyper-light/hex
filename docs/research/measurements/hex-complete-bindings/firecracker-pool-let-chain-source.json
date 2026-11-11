@@ -1,0 +1,28 @@
+{
+  "parent": "21ae86e3b4c19b43afa14361d578d0a48ff30ae3",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": "crates/hex-runtime/src/firecracker/pool.rs",
+  "source_sha256": "0f13974192ed503206face46f679394f4334834e62cfc5b911fd27c751f0ca42",
+  "actual_original": {
+    "ROOT_source": "8285e0bfab24eff6e50f3fe8d32b3de393a19f3e",
+    "check": "strict Linux runtime Clippy",
+    "exit": 101,
+    "cause": "pool.rs263 clippy::collapsible_if around retained allocation comparison",
+    "log_path": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/linux-native-preflight-8285-results-proof/cohort-8285e0bf-linux-linux-native-preflight-v3/native-preflight-strict-clippy.log",
+    "verified_log_sha256": "76f29cbbe01affa308deccc97a12db4002465547bf5bffce3ee0930caa03761b"
+  },
+  "correction": "ONLY collapse Some(allocation) plus exact same cost.allocate comparison into short-circuit let-chain. None still does not evaluate allocate; same typed refusal/error propagation. All other source/test bytes identical; no allow/expect/oracle change.",
+  "only_intended_block_changed": true,
+  "root_results_preserved": "Earlier exact8285 metadata-after1+coldpreflight5+lazyhelper1+nativeLUIDmodel1+bootstrap2=10PASS/0FAIL/0IGNORE; NodeCLIcheck0, no native VM/GPU acceptance inferred. No repetition of those ten cases dispatched.",
+  "checks": {
+    "scoped_rustfmt_check": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "Clippy_green": "UNRUN/ROOT coherent lint-only successor",
+    "test_dispatches": 0,
+    "native_effects": 0
+  },
+  "originals": "CPU observer e5c/subset89ec/sink original controls and prior raw sources unchanged. This corrects only the actual style diagnostic; no behavior/performance claim."
+}

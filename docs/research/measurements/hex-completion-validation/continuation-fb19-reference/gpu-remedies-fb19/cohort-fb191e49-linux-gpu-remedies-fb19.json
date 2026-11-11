@@ -1,0 +1,125 @@
+{
+  "source": "fb191e49a6e8d169a2900ee2d32c1c4544f7311a",
+  "archive_sha256": "f7d928d907ed7a046cd2f6d360681e777caadfdfd5880e27729d767713d77afc",
+  "scope": "ROOT exactly two original GPU Intent/alias controls after narrow remedies, then current all-target strict lint; no replay of prior Driver3 or oldpasses, no VM/GPU/native backend effects",
+  "target": "linux",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 3879197,
+  "phases": [
+    {
+      "name": "intent-original-after",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::gpu_pool::tests::published_gpu_scope_with_retained_intent_recovers_without_a_second_launch",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 3883171,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "e88ce0eeaa11c86723efe14336ef13f93e72daa1d3781b960af8f07af0dd0ee0",
+      "bytes": 3428,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "guest::gpu_pool::tests::published_gpu_scope_with_retained_intent_recovers_without_a_second_launch",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "share-alias-original-after",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::observer::config::tests::observer_artifact_refuses_a_writable_parent_share_alias",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 3949033,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "315d9ed8c703568cf69312ef5444a7420e9f8293f6afe7954cdbd7a30013ca2c",
+      "bytes": 442,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "guest::observer::config::tests::observer_artifact_refuses_a_writable_parent_share_alias",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "joined-strict-clippy",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-core",
+        "-p",
+        "hex-client",
+        "-p",
+        "hex-runtime",
+        "-p",
+        "hex-node",
+        "-p",
+        "hex-cli",
+        "--all-targets",
+        "--locked",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 3949052,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "661d7d1c520c07ad340822205cf5e70087646bc50154af898640c346cfd7c2b1",
+      "bytes": 5117,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_invocations": 0,
+  "exit": 1
+}

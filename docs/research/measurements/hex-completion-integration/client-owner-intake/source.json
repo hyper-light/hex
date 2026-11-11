@@ -1,0 +1,39 @@
+{
+  "schema": "root-client-owner-intake-1",
+  "base": "92b661c68aefad2092d723a680ee2652446156f3",
+  "client_source": "9b242628f9d026ba27beef39010b63c02a058889",
+  "consumer_source": "5e7a587e047aaea056c5531136642a8a46151a14",
+  "registry_versions_and_checksums_unchanged": true,
+  "source_only": true,
+  "paths": {
+    "Cargo.lock": "18a1c5dd48ba3ee855841e67b59fa38512a15eb769df0b18835c8c828173f082",
+    "Cargo.toml": "048f4f18b804d3c3380c0190a5874dde12371f1edd94c0bcb0b24b9b388ad422",
+    "crates/hex-cli/tests/guest_tree.rs": "9fa19bac075ee02e6e92a4cb375e10b4358412838325ffa8e47c18d6bbcd7246",
+    "crates/hex-cli/tests/node_socket.rs": "a07d474146f23bc7939dcd965b4577a692f72990da0fd6219053ed1946d5893d",
+    "crates/hex-client/Cargo.toml": "86dded8fedcaf6ff3ddc47e117b20e950c047a4828761613842aec855d4c4609",
+    "crates/hex-client/src/calls.rs": "d19ea2ff1b87c95a79c86b269778a32256d86737a594bc77b83187f74f768bae",
+    "crates/hex-client/src/calls/budget_tests.rs": "9eceb6cac8273ee2498fd88aeeaf818ae6e70105a2d1aedc6bcf02d1e3a0aa3e",
+    "crates/hex-client/src/calls/tests.rs": "d49ae0cf73b9c43f155c3a746dba36c7ad401ec66ff8540fe59d3980d3da57b1",
+    "crates/hex-client/src/guest.rs": "6a9410629157e85ec4ddc507a09e34ac82e275c6ca9f28323e5145cb50a16c7c",
+    "crates/hex-client/src/guest/tests.rs": "8a6a0350d0139227686838ab31af5fdc902b1ddb564accfc00e22c1b76aaf70e",
+    "crates/hex-client/src/linux.rs": "173f09b21390698ba1d50641e289a017af14226bd6962b5e2e05ffd8cb9a124d",
+    "crates/hex-client/src/macos.rs": "54283c653f14360c0c2397c8862ad1d820da03053f79d0effde1b49f35a93c23",
+    "crates/hex-client/src/windows.rs": "1d5a98755b0439d38844c8a36a730dfc98c4fb01e626d87202e0900be421ee23",
+    "crates/hex-client/src/windows/tests.rs": "a6d16d716683e5a277e75197a928e910061915d32dc6f879043a056f3f330d3b",
+    "crates/hex-node/src/relay/tests.rs": "2d48a3ec8f20d995ea6f9e71e3e688f0e3687b4f65439d281fcc17131c65fc85",
+    "crates/hex-node/tests/relay_exec_bench.rs": "cbbaace6c7b082d85966d2b36e9d7b9fdc877449a056ea72faad490bd30daee2",
+    "crates/hex-runtime/src/firecracker/native.rs": "48b29d30d6e77da6e3b9a01a37b8e1244e2a6c5d9b8b77d04378f60721de2eb7",
+    "crates/hex-runtime/src/guest/dedicated.rs": "cedbaa930572cb3076900be5b1dd6a44e0a8bb54c2d02460fb645ff37ea1a12c",
+    "crates/hex-runtime/src/guest/mod.rs": "cd318e80badec2a2f5755bafca5b7960c7feb1236ca8ff97cce74b4d7ae7162b",
+    "crates/hex-runtime/src/guest/tests.rs": "e568e460be017b740a5b97f6185a306242d0bb980959b772032f9292aaef854e"
+  },
+  "root_ports": [
+    "crates/hex-node/src/relay/tests.rs",
+    "crates/hex-node/tests/relay_exec_bench.rs",
+    "crates/hex-cli/tests/node_socket.rs",
+    "crates/hex-cli/tests/guest_tree.rs",
+    "crates/hex-runtime/src/firecracker/native.rs"
+  ],
+  "tests_executed": 0,
+  "native_invocations": 0
+}

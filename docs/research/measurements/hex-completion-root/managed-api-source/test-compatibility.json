@@ -1,0 +1,49 @@
+{
+  "scope": "existing test doubles only; native effects unverified",
+  "edits": [
+    {
+      "path": "crates/hex-client/src/guest/tests.rs",
+      "impl": "impl shards_api::Guest for Patient {"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/tests.rs",
+      "impl": "impl shards_api::Guest for PlannedGuest {"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/tests.rs",
+      "impl": "impl shards_api::Guest for KeptGuest {"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/dedicated.rs",
+      "impl": "    impl shards_api::Guest for Controlled {"
+    },
+    {
+      "path": "crates/hex-node/tests/guest_loop.rs",
+      "impl": "impl shards_api::Guest for LoopGuest {"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/tests.rs",
+      "impl": "impl shards_api::Guests for NoGuest {"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/tests.rs",
+      "impl": "impl shards_api::Guests for Planned {"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/tests.rs",
+      "impl": "impl shards_api::Guests for KeptGuests {"
+    },
+    {
+      "path": "crates/hex-node/tests/guest_loop.rs",
+      "impl": "impl shards_api::Guests for Shared {"
+    },
+    {
+      "path": "crates/hex-cli/tests/guest_real.rs",
+      "impl": "impl shards_api::Guests for Counted {"
+    },
+    {
+      "path": "crates/hex-cli/tests/guest_validation.rs",
+      "impl": "impl shards_api::Guests for Counted {"
+    }
+  ]
+}

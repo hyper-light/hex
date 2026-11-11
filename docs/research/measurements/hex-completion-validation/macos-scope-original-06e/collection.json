@@ -1,0 +1,47 @@
+{
+  "bytes": 311691,
+  "sha256": "54c14f09e7fb568ffcc51d660365a111999201e20d57cce09ac175597f8bb9b6",
+  "members": {
+    "cohort-06e111ae-mac-mac-scope-06e/running.json": {
+      "bytes": 2598,
+      "sha256": "c8c51b89033c4a7b6a00a5ff2fab56847e5305c66d91c02e300e05ee57c5a717"
+    },
+    "cohort-06e111ae-mac-mac-scope-06e/result.json": {
+      "bytes": 2943,
+      "sha256": "9d66e893b005121ac3b093c6fe60609c4b30f4e5c23974c17cd1f22e9d38b59f"
+    },
+    "cohort-06e111ae-mac-mac-scope-06e/source-before.json": {
+      "bytes": 480613,
+      "sha256": "082d45a9cde345a25117024f786274d8b7953b592aa454021a74a6047aba51e9"
+    },
+    "cohort-06e111ae-mac-mac-scope-06e/mac-escape-native-original.log": {
+      "bytes": 3332,
+      "sha256": "14c6f6051e4cdf39358d6ef6914ee1532376e94fef040bccefbb649036df1ecc"
+    },
+    "cohort-06e111ae-mac-mac-scope-06e/source-after.json": {
+      "bytes": 480613,
+      "sha256": "082d45a9cde345a25117024f786274d8b7953b592aa454021a74a6047aba51e9"
+    },
+    "cohort-06e111ae-mac-mac-scope-06e/mac-scope-compile-only.log": {
+      "bytes": 5435,
+      "sha256": "f949e1c93896479501e9d9a090a6ed87041c881acd4798dd5122d61b0f849deb"
+    },
+    "cohort-06e111ae-mac-mac-scope-06e/mac-joined-strict-clippy.log": {
+      "bytes": 2620,
+      "sha256": "a98317c44a365c306c84edf321c5ae70cfac3d6cca7a7e0272d4ac7a189e02ea"
+    },
+    "cohort-06e111ae-mac-mac-scope-06e/public-registry-seed.json": {
+      "bytes": 202,
+      "sha256": "1328edbb1eb50f43c88ffca533b84d1b9e2a15ce42ceee344eee4086aaf13ffb"
+    },
+    "cohort-06e111ae-mac-mac-scope-06e/collected-binaries.json": {
+      "bytes": 2320,
+      "sha256": "dfdd51a23b548875141a19b1665a853d03aaea682e6a53c689f8efe5ab7ed613"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

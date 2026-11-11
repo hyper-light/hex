@@ -1,0 +1,108 @@
+{
+  "role": "coordinator",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": [
+    {
+      "revision": "c772f964f683880142eeed1c6d904c3938a09f03",
+      "paths": [
+        "crates/hex-api/src/devices.rs",
+        "crates/hex-api/src/runtime.rs",
+        "crates/hex-sim/src/model.rs",
+        "docs/research/measurements/hex-complete-bindings/cpu-unavailable-api-source.json"
+      ]
+    },
+    {
+      "revision": "cfb1adf5780b669542eb26648ff6085b4606a8e6",
+      "paths": [
+        "crates/hex-node/src/facts.rs",
+        "crates/hex-node/src/node/backends.rs",
+        "crates/hex-node/src/placement.rs",
+        "crates/hex-node/src/placement/physical.rs",
+        "crates/hex-node/src/scheduler.rs",
+        "crates/hex-node/src/scheduler/capacity.rs",
+        "crates/hex-node/src/scheduler/capacity/initialized.rs",
+        "crates/hex-sim/src/index.rs",
+        "crates/hex-sim/src/index/route_offer_tests.rs",
+        "crates/hex-sim/src/index/routes.rs",
+        "crates/hex-sim/src/model.rs",
+        "docs/research/measurements/hex-complete-bindings/cpu-unavailable-consumer-source.json"
+      ]
+    },
+    {
+      "revision": "944c065def8715b3912c3c8138e4c7ac1f3a60bb",
+      "paths": [
+        "crates/hex-node/src/facts.rs",
+        "docs/research/measurements/hex-complete-bindings/shared-observer-merge-source.json"
+      ]
+    },
+    {
+      "revision": "a0455e5cc34e0ede2138ef90e2a6090649f1c656",
+      "paths": [
+        "crates/hex-node/src/facts.rs",
+        "docs/research/measurements/hex-complete-bindings/shared-observer-role-source.json"
+      ]
+    },
+    {
+      "revision": "938de416e681fd1cbb2819ef1a2ccfa77148367b",
+      "paths": [
+        "crates/hex-node/src/node/backends.rs",
+        "docs/research/measurements/hex-complete-bindings/node-shared-observer-source.json"
+      ],
+      "port": "Only native_physical_report method; replaces superseded cfb inline merge"
+    },
+    {
+      "revision": "5c33713d79f9a3cbbf69ebce1eedb8c8386dacf2",
+      "paths": [
+        "crates/hex-runtime/src/guest/dedicated.rs",
+        "crates/hex-runtime/src/guest/physical.rs",
+        "docs/research/measurements/hex-complete-shards-gpu/cold-observer-review/HANDOFF-PHYSICAL-HOOKS.json"
+      ]
+    },
+    {
+      "revision": "4689ef77a31c51f00858611e016feaecf315852f",
+      "paths": [
+        "crates/hex-node/src/recorded.rs",
+        "docs/research/measurements/hex-complete-lifecycle/recorded-cpu-observations-source.json"
+      ],
+      "port": "Exact three physical-observation hunks; trait inserted without untaken Mac bind_native_books hook"
+    },
+    {
+      "revision": "f548922547aa6f6d8116d415243bf3090b0c81fd",
+      "paths": [
+        "crates/hex-core/src/wire.rs",
+        "crates/hex-core/src/wire/tests.rs",
+        "docs/research/measurements/hex-completion-validation/physical-unavailable-wire/README.md",
+        "docs/research/measurements/hex-completion-validation/physical-unavailable-wire/source.json"
+      ]
+    },
+    {
+      "revision": "280f175218eeadd8d3f49061f451a7536d9575b9",
+      "paths": [
+        "crates/hex-node/src/node/backends.rs",
+        "docs/research/measurements/hex-complete-bindings/node-shards-observer-source.json"
+      ]
+    }
+  ],
+  "outside_ports": [
+    "crates/hex-api/src/lib.rs",
+    "crates/hex-node/src/placement/backing_bootstrap_tests.rs",
+    "crates/hex-node/src/placement/physical.rs",
+    "crates/hex-sim/src/peer.rs",
+    "crates/hex-node/src/scheduler/device_offer_tests.rs",
+    "crates/hex-sim/src/index/route_offer_tests.rs",
+    "crates/hex-core/src/wire.rs",
+    "crates/hex-api/src/sim.rs",
+    "crates/hex-client/src/calls/tests.rs",
+    "crates/hex-client/src/calls/budget_tests.rs",
+    "crates/hex-runtime/src/firecracker/observations.rs"
+  ],
+  "semantics": "Legacy literals use unavailable empty/admit None; optional serde preserves old JSON. Peer NodeSpec immutable shared routes clone and serde retain admit without a new wire field. Physical wire uses real f548 bounded tail. No fake pressure/usage/native authority.",
+  "remaining": [
+    "Matched compile and original CPU regression after check",
+    "L2 composite OCI/HCS unavailable composition",
+    "No-Intent/native-owner preflight proof bridge",
+    "Subset fresh selection and actual native execution",
+    "All supported target/native/fault/profile/gates"
+  ]
+}

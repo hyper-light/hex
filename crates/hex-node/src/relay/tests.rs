@@ -28,14 +28,14 @@ struct Ports {
 }
 
 impl Link for Ports {
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
         let path = match port {
             stream::CONTROL_PORT => &self.control,
             stream::STDIO_PORT => &self.stdio,
             stream::files::FILES_PORT => &self.files,
             other => panic!("dialed port {other:#x}"),
         };
-        Ok(Box::new(UnixStream::connect(path).unwrap()))
+        hex_client::guest::own_duplex(UnixStream::connect(path).unwrap())
     }
 }
 
@@ -75,12 +75,13 @@ impl Lab {
         Self { dir, node }
     }
 
-    fn link(&self) -> Arc<dyn Link> {
-        Arc::new(Ports {
+    fn link(&self) -> hex_client::guest::LinkOwner {
+        hex_client::guest::own_link(Ports {
             control: self.dir.path().join("control.sock"),
             stdio: self.dir.path().join("stdio.sock"),
             files: self.dir.path().join("files.sock"),
         })
+        .unwrap()
     }
 }
 
@@ -273,11 +274,12 @@ impl Write for Told {
 }
 
 impl Duplex for Told {
-    fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
-        Ok(Box::new(Told {
+    fn try_clone(&self) -> io::Result<hex_client::guest::DuplexOwner> {
+        hex_client::guest::own_duplex(Told {
             conn: self.conn.try_clone()?,
             wrote: self.wrote.clone(),
-        }))
+        })
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
@@ -307,20 +309,20 @@ struct Held {
     control: PathBuf,
     stdio: PathBuf,
     wrote: Mutex<std::sync::mpsc::Sender<()>>,
-    held: Mutex<Option<UnixStream>>,
+    held: Arc<Mutex<Option<UnixStream>>>,
 }
 
 impl Link for Held {
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
         if port != stream::CONTROL_PORT {
-            return Ok(Box::new(UnixStream::connect(&self.stdio).unwrap()));
+            return hex_client::guest::own_duplex(UnixStream::connect(&self.stdio).unwrap());
         }
         let conn = UnixStream::connect(&self.control).unwrap();
         *self.held.lock().unwrap() = Some(conn.try_clone().unwrap());
-        Ok(Box::new(Told {
+        hex_client::guest::own_duplex(Told {
             conn,
             wrote: self.wrote.lock().unwrap().clone(),
-        }))
+        })
     }
 }
 
@@ -352,12 +354,14 @@ fn an_exec_whose_stream_never_comes_waits_for_its_host_and_goes_with_it() {
     let nowhere = lab.dir.path().join("nowhere.sock");
     let nowhere_listener = UnixListener::bind(&nowhere).unwrap();
     let (wrote, writes) = std::sync::mpsc::channel();
-    let link = Arc::new(Held {
+    let held = Arc::new(Mutex::new(None));
+    let link = hex_client::guest::own_link(Held {
         control: lab.dir.path().join("control.sock"),
         stdio: nowhere,
         wrote: Mutex::new(wrote),
-        held: Mutex::new(None),
-    });
+        held: Arc::clone(&held),
+    })
+    .unwrap();
     let node = lab.node.try_clone().unwrap();
     let agent = std::thread::spawn(move || {
         let first = hello(&node);
@@ -372,7 +376,7 @@ fn an_exec_whose_stream_never_comes_waits_for_its_host_and_goes_with_it() {
         answer(&second, h, &Answer::Exited(Exit::Code(0)));
         second
     });
-    let first = Client::connect(Arc::clone(&link) as Arc<dyn Link>).unwrap();
+    let first = Client::connect(link.clone()).unwrap();
     while writes.try_recv().is_ok() {}
     std::thread::scope(|scope| {
         let waiting = scope.spawn(|| exec_stdin(&first).map(|_| ()));
@@ -380,7 +384,7 @@ fn an_exec_whose_stream_never_comes_waits_for_its_host_and_goes_with_it() {
         // the end that follows on the same connection.
         let _stream = nowhere_listener.accept().unwrap();
         writes.recv().unwrap();
-        let host = link.held.lock().unwrap().take().unwrap();
+        let host = held.lock().unwrap().take().unwrap();
         host.shutdown(Shutdown::Write).unwrap();
         assert!(matches!(waiting.join().unwrap(), Err(Refusal::Broken(_))));
     });
@@ -624,8 +628,9 @@ impl Write for Late {
 }
 
 impl Duplex for Late {
-    fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
-        Ok(Box::new(self.conn.try_clone()?))
+    fn try_clone(&self) -> io::Result<hex_client::guest::DuplexOwner> {
+        hex_client::guest::own_duplex(self.conn.try_clone()?)
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
@@ -656,16 +661,16 @@ struct LatePorts {
 }
 
 impl Link for LatePorts {
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
         if port == stream::CONTROL_PORT {
-            return Ok(Box::new(
+            return hex_client::guest::own_duplex(
                 UnixStream::connect(self.dir.join("control.sock")).unwrap(),
-            ));
+            );
         }
-        Ok(Box::new(Late {
+        hex_client::guest::own_duplex(Late {
             conn: UnixStream::connect(self.dir.join("stdio.sock")).unwrap(),
             relay: Arc::clone(&self.relay),
-        }))
+        })
     }
 }
 
@@ -684,10 +689,13 @@ fn a_parked_exec_goes_to_the_node_when_its_set_is_whole() {
         answer(&conn, h, &Answer::Exited(Exit::Code(0)));
         conn
     });
-    let client = Client::connect(Arc::new(LatePorts {
-        dir: lab.dir.path().to_owned(),
-        relay: Arc::clone(&relay),
-    }))
+    let client = Client::connect(
+        hex_client::guest::own_link(LatePorts {
+            dir: lab.dir.path().to_owned(),
+            relay: Arc::clone(&relay),
+        })
+        .unwrap(),
+    )
     .unwrap();
     let mut proc = exec_stdin(&client).unwrap();
     assert_eq!(proc.wait_for(Duration::MAX).unwrap(), Some(Exit::Code(0)));
@@ -748,11 +756,12 @@ impl AsFd for CountingConn {
 }
 
 impl Duplex for CountingConn {
-    fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
-        Ok(Box::new(CountingConn {
+    fn try_clone(&self) -> io::Result<hex_client::guest::DuplexOwner> {
+        hex_client::guest::own_duplex(CountingConn {
             conn: self.conn.try_clone()?,
             moved: Arc::clone(&self.moved),
-        }))
+        })
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {

@@ -1,0 +1,63 @@
+[
+  {
+    "label": "canonical-node-dispatch",
+    "base": "cac05c31ab1f55ced33021a4a5682dc212f96543^",
+    "source": "cac05c31ab1f55ced33021a4a5682dc212f96543",
+    "patch_sha256": "3711ab496e6e70498c10a83346f1fca094bb842496a5dc4396407af2d552d94f",
+    "before": {
+      "crates/hex-node/src/node.rs": "a12d40c4b2c99451618897818006cd897c50c602da35255fed59629ff9b38a0b"
+    },
+    "after": {
+      "crates/hex-node/src/node.rs": "7cbf9c71a057bbd7a4b8dc4c77e96956b687e03cc67ed325857d69cdd2d02010"
+    },
+    "source_only": true
+  },
+  {
+    "label": "same-catalog-getter",
+    "base": "703469ec96157f9a75388eb3e70b9699bcbe6b74^",
+    "source": "703469ec96157f9a75388eb3e70b9699bcbe6b74",
+    "patch_sha256": "6377cb8fa09ab4526498c43231dd8c327fdbe5a7c7b95a590a35bf13876f2b83",
+    "before": {
+      "crates/hex-runtime/src/guest/books.rs": "d2b07be3b2ac1ef9edab8ab7db6006153ab8336579bdf0e1a860a2869e87626b"
+    },
+    "after": {
+      "crates/hex-runtime/src/guest/books.rs": "68155d68d04914f1be9207303ca34935470d5f2b0989ff496f83e23e58557659"
+    },
+    "source_only": true
+  },
+  {
+    "label": "backing-usage-api",
+    "base": "c92ca3cba80b944e1d0d737a971bc4be507ed2e0",
+    "source": "42de0312055be903378213d4f6f869c1149095f9",
+    "patch_sha256": "a1cdb76f7c11e20c231152f28f5abb942c25faea718ca66b6caa27dd3f6657e1",
+    "before": {
+      "crates/hex-api/src/runtime.rs": "32c7dcf4856d940bdb13cacb82bdf57104fe6893a46c5f17969b3a9a946bd451"
+    },
+    "after": {
+      "crates/hex-api/src/runtime.rs": "4317bd868726bcdc02767cc9f2e5c8332ba429b2647b6345afbd8b93c290a5a5"
+    },
+    "source_only": true
+  },
+  {
+    "label": "backing-usage-wire-and-fixture-fix",
+    "base": "a218f2d53a8726d751a87ecb950eb7f669e54526",
+    "source": "cd0647ce5a2f45c9918b39086fe9f30bab531e23",
+    "patch_sha256": "13f808379e20c79e2bd3e6b62f9667ce1e51ad5a041ef48401d068c1014ef493",
+    "before": {
+      "crates/hex-core/src/wire.rs": "365fe02ccd9e03c20f70aa882bf3305afe453aa18931fa48da89e0457605d78c",
+      "crates/hex-core/src/wire/tests.rs": "7979df8737b240171f6e2987c812e9ea650011c28781ebf27757917447147aae"
+    },
+    "after": {
+      "crates/hex-core/src/wire.rs": "2e7e5746569b3e3e3b36af5c73ee97a34a1d3af13d6b0166e94afca40f5f214e",
+      "crates/hex-core/src/wire/tests.rs": "bee84b04d913a8303e6642d26b85300915910b8917e3c75ff0d38a5349d33a81"
+    },
+    "source_only": true
+  },
+  {
+    "path": "crates/hex-node/src/node/backends.rs",
+    "source": "cac05c31ab1f55ced33021a4a5682dc212f96543",
+    "before": "2374b6867d3fbc426dca92431489d769e4e8abcf21249124f17892ededeafa6a",
+    "after": "876abecc7611c9175caeaa7335487eca45e205d32218e05272d6e74210a39b28",
+    "note": "Restores two earlier signed8cc route projections missing from ROOT source: dedicated OCI admitted at managed_bounds and PreparedBoot.class compared to backend_class. No other ROOT backend-only changes; full source compared before replacement. Initial atomic patch check failed before writes."
+  }
+]

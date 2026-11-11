@@ -1,0 +1,31 @@
+{
+  "status": "ORIGINAL SOURCE ONLY / UNRUN / no production remedy",
+  "parent": "2d828f39304762f0b0669e4407adb3f4b3fee484",
+  "role": "implementer shards-gpu",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "unit": "guest::shared::tests::shared_backing_rearms_only_after_original_scope_release_and_index_ack",
+  "trigger": "Existing actual shared Runtime receives original canonical grant; controlled native launch refuses after durable Intent. Controller-only outcome retains original charge; actual model scope Released enables finalize/canonical Released. Driver-style capacity observes exact Released before explicit release ACK; prepare must then produce same config/new incarnation without native launch.",
+  "required_preconditions": [
+    "exact original cost/allocation retained through first failed cleanup",
+    "launch counter1 and original scope/key",
+    "ScopeReleased model positive after Process-only refusal",
+    "canonical exitCode7 and finalize1",
+    "local receipt removed after original native finalization",
+    "capacity exactReleased old key before ACK",
+    "no replacement preparation before ACK"
+  ],
+  "oracle": "fresh.key differs from old key, same family/cost/resources, canonical Prepared/allocation-init-exitNone; exactly1 old removal and2 genuine model preparations; native launch still1/no extra stops/Box rows",
+  "fixture_delta": "Existing Owner extended with observed preparation/removal counters; first deterministic generation remains7, second real preparation gets8. Actual remove_pool model accepts only same Released/charged/ref-free/finalized scope; old case oracles unchanged. No arbitrary runtime timeout/production allowance added.",
+  "old_unit_bodies_byte_equal": 9,
+  "checks": {
+    "scoped_rustfmt_parser": "exit0",
+    "git_diff_check": "exit0",
+    "cargo": "NOT RUN; ROOT only new original once matched",
+    "native": "NOT RUN"
+  },
+  "file": "crates/hex-runtime/src/guest/shared_tests.rs",
+  "sha256": "1b88fc8bcee5a2b9d90c52cf51a7ec9905423c6f82a7b2edbe1120f25c712287",
+  "production": "all production source byte-identical to frozenRoot2d82; no shared_pool/release/prepare remedy",
+  "remaining": "ROOT exact nonzero relevant original before any shared CPU rearm behavior change; physical helper termination/native results separate."
+}

@@ -1,0 +1,27 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "fc383d7ddbc7d50d5b23a2a1ffdce1bea705eb50",
+  "actual_before": {
+    "source": "9ff17858bb55bcd0e076e249545d6d73ca36d18a",
+    "command": "cargo test -p hex-node --lib --locked scheduler::observer_cpu_tests::failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_facts -- --exact --nocapture --test-threads=1",
+    "compiler": 101,
+    "executed_tests": 0,
+    "raw_log_sha256": "1ee26dca6d7744cc1629c7fb99325d12b9b9e727371d821d691493167afc44b9",
+    "cause": "four E0277: BackendUnavailable Refusal field lacks intentional global serde traits",
+    "proof": "ROOT cpu-unavailable-9ff1-results-proof actual raw log/result read; no CPU post-remedy result inferred"
+  },
+  "source_sha256": "6fc8bc6a95f0ba496e3deac6dcb35e482e39a1f1821b313eabb264648164b923",
+  "change": "Field-local unavailable_cause serde adapter, fixed BackingKey + existing LifecycleCause only. Keeps public cause:Refusal and wire shape/contracts. Rejects general Refusal variants/text/unknown fields/causes, no global Refusal serde or static-name interner.",
+  "controls": "Existing new UNRUN unavailable control uses actual qualified adapter object rather than direct Refusal json!; checks allowed 3 cause roundtrip, generic serialization refusal, unknown cause/field rejection and count-before-third-element. Original CPU body unchanged.",
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "tests": "UNRUN",
+    "native": 0,
+    "dispatches": 0
+  },
+  "remaining": "ROOT coherent original/new controls, strict/platform/native/full acceptance. Subset dirty FC/Index/Node sources are excluded from this minimal successor."
+}

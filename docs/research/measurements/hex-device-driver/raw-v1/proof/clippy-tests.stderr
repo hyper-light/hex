@@ -1,0 +1,7 @@
+    Checking getrandom v0.4.3
+    Checking once_cell v1.21.4
+    Checking fastrand v2.5.0
+    Checking tempfile v3.27.0
+    Checking hex-testkit v0.1.0 (/Users/adalundhe/.cache/hex-device-driver-01a1c640-6483c6f2-v1/source/crates/hex-testkit)
+    Checking hex-node v0.1.0 (/Users/adalundhe/.cache/hex-device-driver-01a1c640-6483c6f2-v1/source/crates/hex-node)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.27s

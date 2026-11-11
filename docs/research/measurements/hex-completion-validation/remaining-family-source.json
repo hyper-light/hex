@@ -1,0 +1,62 @@
+{
+  "status": "SOURCE ONLY / controls unrun",
+  "source_parent": "829b55b33896428370f847e9c7db695fa3b27277",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "coordinator",
+  "owner_pins": [
+    "a1a3a19011e1dbb889d21118dc8875b9e1f49d2d",
+    "70fd4f7f1601c7e7fb13bc3a90b9e30108d3b876",
+    "02e2df50be0a6ccca24e56c025f39d8e094a121f",
+    "13e7b9be1d546260605e57ca042f30790ab4124c",
+    "03cc54af89b7a7876858b3060d16d73b0a43cbb8"
+  ],
+  "purpose": [
+    "repair two actual obsolete Os fixture patterns, op plus denied detail preserved",
+    "required read-only existing byte2 per-launch native-test witness; native gate authorization unchanged",
+    "shared Prepared cancellation requires same real native no-submission before Released metadata",
+    "new real Service uncertain-drain CPU progress original; production unchanged for hypothesis",
+    "new Windows no-keeper cancelled-ACK original, no native or production remedy"
+  ],
+  "manifest_edge": {
+    "hex-runtime": "native-gate-test=[] observational method feature",
+    "hex-node": "Linux-only dev-dependency enables same existing runtime package feature",
+    "production_dependency": "unchanged",
+    "new_packages": 0,
+    "Cargo.lock_sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+    "Cargo.lock_diff": [],
+    "metadata_resolution": "UNRUN; subsequent locked Cargo confirms actual graph"
+  },
+  "checks": {
+    "scoped_named_rustfmt": "0",
+    "compiler": "UNRUN",
+    "new_units": "UNRUN",
+    "native": "UNRUN"
+  },
+  "source_files": {
+    "crates/hex-node/Cargo.toml": "946276361fd88cd2448bdbdc72a557cea8f963c237e46c1caf66ee73a2b85a18",
+    "crates/hex-node/src/scheduler/observer_cpu_tests.rs": "7eae4ac27d974a2b4e7c8b2cea61e42408f2fbbc14bac2cf30f41234fc823549",
+    "crates/hex-node/src/supervise.rs": "5d0fa0971dc35f2e541b05d4e3db8fdd96efd03fa4d714b28d611d0f99ddbb1f",
+    "crates/hex-runtime/Cargo.toml": "72fe9434aaf3640496635b10599adf75c3bf2f5ad7973595baa709ccdb954d5b",
+    "crates/hex-runtime/src/guest/shared.rs": "868f3b67d1fc5828b851aeff9ca8d6689b10edcb37d88e5b65df35594eaef7ed",
+    "crates/hex-runtime/src/guest/shared_tests.rs": "f07ad7e07412cf4d3e561347f6012c6ad2135429d29788aac26abd12c4831496",
+    "crates/hex-runtime/src/linux/sys.rs": "9939b2babb5b77faa0e55586016c4c8a57a6c203d2ff8bf17b48919b925796a3",
+    "crates/hex-runtime/src/windows/preflight.rs": "a23e60a3a8f9e19e861edc1dcd1f5bdb4220aa98f58002746ec41dec4664f748",
+    "docs/research/measurements/hex-complete-lifecycle/recorded_unsubmitted_pool_tests.rs": "3adf7dac87f79885cda172f14bcf997ada314bc8f097296af58f4c87ae8c875d",
+    "docs/research/measurements/hex-complete-bindings/NATIVE-GATE-ACK-INTEGRATION.md": "d0000b8d04a76ce427617d7841b0af04691c1b96153e497bcf3cbd0377e3a170",
+    "docs/research/measurements/hex-complete-bindings/native-gate-ack-producer-source.json": "709eed9d32cd7a2ac130bd23626ba6b74fa59c6eb393a053b881a4f96e2d01bd",
+    "docs/research/measurements/hex-complete-bindings/native-gate-producer-function-readback.json": "1d7aae6408fff8ae3da575f270892ec47933c9060eb008bfeca821715bcd6fa0",
+    "docs/research/measurements/hex-complete-bindings/uncertain-drain-cpu-original-source.json": "cdc2b94c9811a586c3fb6649f4cb987a3e33b28760ecab677426893e630d80fb",
+    "docs/research/measurements/hex-complete-lifecycle/recorded-unsubmitted-os-pattern-source.json": "e0ce0a89df6a9c039cb5f8be5658e5db5a365052ed7412d137a48c2c617215f3",
+    "docs/research/measurements/hex-complete-lifecycle/windows-no-keeper-unallocated-original-source.json": "695c4c826a84aec416311daddab3cbe2c0d7bad7143665e0c28bc2abd60aaf53",
+    "docs/research/measurements/hex-complete-lifecycle/windows-no-keeper-unallocated-original.md": "a9a04cd71bd7a69e1d7c28162bcdc155663e36e96be97c7207cb95f782b66b47",
+    "docs/research/measurements/hex-complete-shards-gpu/SHARED-PREPARED-CANCEL-SOURCE.json": "e4d0ed78f765aa09e94d462442da8759d93e666aa42ea0439072b4cd13d6451a",
+    "docs/research/measurements/hex-complete-shards-gpu/SHARED-PREPARED-CANCEL-SOURCE.md": "acc84afeb762685ff6cc85b4a16902d26c63aca9418f5aaf2dca1860e8dadc1c"
+  },
+  "held": [
+    "Node native-gate consumer still pending L4; no old periodic probe waiver",
+    "No rerun of 13 ff765 passed units planned",
+    "No Mac helper production2ef, Windows ARM VM, host rebind/service or runner change",
+    "Windows cancelled no-keeper unit execution remains unverified until native host available"
+  ]
+}

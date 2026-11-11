@@ -1,0 +1,15 @@
+{
+  "producer": "cfd12a705c5f00e546160d2c14399a4bb4394098",
+  "producer_parent": "dd4f01ccf33b6e58180576e041c59ddbd6b0120f",
+  "root_parent": "07bb8292da12ef5294810402640baa5213fe1e9c",
+  "review": "Read full production delta and371-line original Driver fixture. Apply named delta only; ROOT observer-CPU registration and visibility, Runtime2a80, client97d and existing schema preserved.",
+  "source": {
+    "crates/hex-node/src/placement.rs": "981da425bae5ba71026d55f2d82c504b65564a0da94a21dfa3ecde541a770b1b",
+    "crates/hex-node/src/placement/backing_bootstrap_tests.rs": "23c5111dfe76f06af43a8e94f31aef76af1c8d41e39305f36a4bd16cf04eda0e",
+    "crates/hex-node/src/placement/tests.rs": "03592e493319cfa1cd04609a105b0784b0efadd9d9f979c99c076c3df8a87386",
+    "crates/hex-node/src/scheduler.rs": "e22ff9055720cc7d706ea8eae1d7dfcc0b0df1722dc8bf7a8b438e1617e5a0e7",
+    "crates/hex-sim/src/index/routes.rs": "51da36e1348299665d2a059a400fa388c85e15c832bcdd2da30a2674725cc8b2",
+    "crates/hex-sim/src/peer.rs": "95be79fff4a802f4756b4206755ce0bf8b0094a57c0540eea551db0487f3cc2d"
+  },
+  "checks": "Source-only; original three Driver backing controls and matched combined checks are pending. No native initialization or main merge claimed."
+}

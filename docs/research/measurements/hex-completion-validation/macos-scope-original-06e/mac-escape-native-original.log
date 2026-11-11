@@ -1,0 +1,30 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (/Users/adalundhe/.cache/hex-lead/cohort-06e111ae-mac-mac-scope-06e/target/debug/deps/hex_runtime-14fd602464dfe5b3)
+
+running 1 test
+test macos::process::scope_completion_tests::unobserved_escaped_descendant_prevents_scope_release ... OWNED actor spawned: role=controller child_id=91333
+OWNED actor native identity: role=controller pid=91333 birth=Ok(Some(Rusage { started: 14353033260682, ended: false, footprint: 163912, peak: 163912, cpu: 8539, user: 1378, child_cpu: 0, read_bytes: 0, written_bytes: 0 })) registered=Ok(())
+OWNED controller setup: child_id=91333 native=Rusage { started: 14353033260682, ended: false, footprint: 1884544, peak: 1884544, cpu: 196773, user: 93696, child_cpu: 0, read_bytes: 0, written_bytes: 0 }
+OWNED actor spawned: role=escape child_id=91334
+OWNED actor native identity: role=escape pid=91334 birth=Ok(Some(Rusage { started: 14353033512707, ended: false, footprint: 81992, peak: 98376, cpu: 4531, user: 223, child_cpu: 0, read_bytes: 0, written_bytes: 0 })) registered=Ok(())
+OWNED controller escrow: child_id=91334 native=Rusage { started: 14353033512707, ended: false, footprint: 262264, peak: 262264, cpu: 21586, user: 6658, child_cpu: 0, read_bytes: 0, written_bytes: 0 }
+OWNED forwarded child identity: pid=91334 started=14353033512707
+ROOT005 ORIGINAL scope facts: kernel_peer_pid=UNAVAILABLE controller_child_id=91333 controller=Birth { pid: 91333, started: 14353033260682, session: 91331 } exit=Some(Code(0)) native=Some(Rusage { started: 14353033260682, ended: true, footprint: 0, peak: 1933696, cpu: 273634, user: 99780, child_cpu: 0, read_bytes: 0, written_bytes: 0 }) group=[(91333, Some(Rusage { started: 14353033260682, ended: true, footprint: 0, peak: 1933696, cpu: 273634, user: 99780, child_cpu: 0, read_bytes: 0, written_bytes: 0 }))] full=false escaped=Birth { pid: 91334, started: 14353033512707, session: 91334 } native=Some(Rusage { started: 14353033512707, ended: false, footprint: 1884544, peak: 1884544, cpu: 181901, user: 68757, child_cpu: 0, read_bytes: 0, written_bytes: 0 }) observed=Ok(Some(ManagedEnd { status: Code(0), scope: Released }))
+OWNED escaped cleanup request: pid=91334 birth=14353033512707 lifeline=Some(Ok(())) wait=Ok(()) events=[Exit { pid: 91334, tag: 0, status: 0 }]
+OWNED actor cleanup: role=controller pid=91333 terminal=Some(Code(0)) reaped=Ok(())
+OWNED escaped cleanup after controller reap: pid=91334 birth=14353033512707 after=Ok(None) absence=true
+CLEANUP scope facts: controller=Ok(()) escaped_exit=true absence=true complete=true
+
+thread 'macos::process::scope_completion_tests::unobserved_escaped_descendant_prevents_scope_release' (26147526) panicked at crates/hex-runtime/src/macos/../../../../docs/research/measurements/hex-complete-lifecycle/macos_scope_completion_root005_tests.rs:525:5:
+live escaped birth was released from controller exit plus PGID observation
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    macos::process::scope_completion_tests::unobserved_escaped_descendant_prevents_scope_release
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 158 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p hex-runtime --lib`

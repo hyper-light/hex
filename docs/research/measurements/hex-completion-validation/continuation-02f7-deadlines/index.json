@@ -1,0 +1,174 @@
+[
+  {
+    "proof": "absolute-connect-after-02f7-results-proof",
+    "sha256": "cab320127b076f136c9fe6a0f60a526d4f8dbc91064d434d8fb58be2d228708e",
+    "phases": [
+      {
+        "name": "finite-original-after",
+        "exit": 0,
+        "counts": [
+          {
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0
+          }
+        ],
+        "log_sha256": "0ba7f52e95a52aa0e301fa7a34d8bcf06d5300d7012f2b0303849905a35c01dc"
+      },
+      {
+        "name": "native-observation-original-cap",
+        "exit": 0,
+        "counts": [
+          {
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0
+          }
+        ],
+        "log_sha256": "6539d0cb67a49366d22972a6f27bd6e55ef1bcce824044a54f32eb8210cc0e0e"
+      },
+      {
+        "name": "sim-absolute-real-bytes",
+        "exit": 0,
+        "counts": [
+          {
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0
+          }
+        ],
+        "log_sha256": "8f9aa77623893326380da7cb5a6bb79ad15caebc34db32b558da03be7f3c1cf5"
+      },
+      {
+        "name": "client-constructor-three",
+        "exit": 101,
+        "counts": [
+          {
+            "passed": 1,
+            "failed": 2,
+            "ignored": 0
+          }
+        ],
+        "log_sha256": "3b04ee6e4ac8861cb688f5200fd691dada999bdba243af3ba611d72a7b20e9aa"
+      },
+      {
+        "name": "api23-strict-clippy",
+        "exit": 0,
+        "counts": [],
+        "log_sha256": "e6538f0e6c3ceec7cbdbba8c6a7ecdada9bddf07503798f7e06350896cdf7f8c"
+      },
+      {
+        "name": "client-core-runtime-strict-clippy",
+        "exit": 101,
+        "counts": [],
+        "log_sha256": "0dd238623691bdca9de005c15282c5fe5ccf28b094d738d593a3f97c7b9ea7a7"
+      },
+      {
+        "name": "node-cli-check",
+        "exit": 0,
+        "counts": [],
+        "log_sha256": "fec61365d3eea19607bdadca9c663d9e918ab0c125431916040b0d59cd31a283"
+      }
+    ],
+    "temp_entries": 1,
+    "exit": 1
+  },
+  {
+    "proof": "linux-native-preflight-807-results-proof",
+    "sha256": "145474da025400a80d961f80e87f9732e76f701b75d41d644724ebba2dbf7761",
+    "phases": [
+      {
+        "name": "original-sink-after",
+        "exit": 0,
+        "counts": [
+          {
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0
+          }
+        ],
+        "log_sha256": "f3af57461fdb8d493aef7f17bb549636a4ba80936be47c34b1c06d1bd32dbc44"
+      },
+      {
+        "name": "managed_creation_uses_one_prepared_pin_and_refuses_colliding_names",
+        "exit": 0,
+        "counts": [
+          {
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0
+          }
+        ],
+        "log_sha256": "a8a7bf4965fa7d69fbcd430dc4b33d7d6b886f898270808a2d4c2aa4261504a2"
+      },
+      {
+        "name": "managed_population_refuses_required_failures_and_never_follows_path_reuse",
+        "exit": 0,
+        "counts": [
+          {
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0
+          }
+        ],
+        "log_sha256": "e9b159895a31544c73ccd86a48c442b47a293867926299a298dea6d7e1272abc"
+      },
+      {
+        "name": "managed_observation_is_read_only_and_keeps_one_same_directory_owner",
+        "exit": 0,
+        "counts": [
+          {
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0
+          }
+        ],
+        "log_sha256": "f594933f88cc379323c3a41874717f5b3682911071ab29993aef038d6f8bbf2e"
+      },
+      {
+        "name": "managed_membership_refuses_ambiguous_incomplete_or_over_bound_rows",
+        "exit": 0,
+        "counts": [
+          {
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0
+          }
+        ],
+        "log_sha256": "f472ba6c75cb6aef8f39fe2ea74751ae81819440b7fc1dd7b185f179ad010703"
+      },
+      {
+        "name": "managed_limits_compare_actual_ratios_and_retain_canonical_caps",
+        "exit": 0,
+        "counts": [
+          {
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0
+          }
+        ],
+        "log_sha256": "df131ee36501c177f3df7edca2942bdabbcc2e0cef17d8ee6dd32ea3ee7091e1"
+      },
+      {
+        "name": "managed_metadata_keeps_pinned_identity_and_required_read_failures",
+        "exit": 101,
+        "counts": [
+          {
+            "passed": 0,
+            "failed": 1,
+            "ignored": 0
+          }
+        ],
+        "log_sha256": "989a189c12da6acf2cc3edbfcd08dbcec5c70f6376ffbb2fd019f9a62b8903e2"
+      },
+      {
+        "name": "cold-whole-owner-preflight-five",
+        "exit": 101,
+        "counts": [],
+        "log_sha256": "eb900246536498adae5d457830ffdff87d1640d587e40377869f2e46feaaa8d3"
+      }
+    ],
+    "temp_entries": 0,
+    "exit": 1
+  }
+]

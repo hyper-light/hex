@@ -1,0 +1,147 @@
+{
+  "source": "9da455c2032d089d0839596c05390df26aecc5a4",
+  "archive_sha256": "a9fb8691e38a8a8582bdda51ee7f5efbaf282e61a75b3a08cc6295bdb5d9fcde",
+  "scope": "ROOT new actual Recorded<WithGuest>+Store ownership originals; model guest only, no native process/VM/GPU",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver": {
+    "pid": 950112,
+    "ppid": 950039,
+    "start_ticks": 32695625
+  },
+  "phases": [
+    {
+      "selector": "dedicated_owner_refusal_keeps_one_canonical_box_without_outer_reentry",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--offline",
+        "dedicated_owner_refusal_keeps_one_canonical_box_without_outer_reentry",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "observation": {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--offline",
+          "dedicated_owner_refusal_keeps_one_canonical_box_without_outer_reentry",
+          "--",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "both_eof": true,
+        "reaped": true,
+        "error": null,
+        "created_pid": 952390,
+        "identity": {
+          "pid": 952390,
+          "ppid": 950112,
+          "start_ticks": 32695781
+        },
+        "returncode": 101
+      },
+      "actual_counts": [
+        [
+          "FAILED",
+          "0",
+          "1",
+          "0"
+        ]
+      ],
+      "exact_one_completed": true,
+      "stdout": {
+        "bytes": 378,
+        "sha256": "99cf7d4598c8f76e089a5a362d5834c568188c18f4a847e144775c5e919e98e3"
+      },
+      "stderr": {
+        "bytes": 4293,
+        "sha256": "5849cecf534d0a477f0edb94608a123c92a75f5be703563cc4fcf9bf055f260c"
+      }
+    },
+    {
+      "selector": "original_shared_create_uncertainty_keeps_outer_box_and_same_pool_reference",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--offline",
+        "original_shared_create_uncertainty_keeps_outer_box_and_same_pool_reference",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "observation": {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--offline",
+          "original_shared_create_uncertainty_keeps_outer_box_and_same_pool_reference",
+          "--",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "both_eof": true,
+        "reaped": true,
+        "error": null,
+        "created_pid": 1066624,
+        "identity": {
+          "pid": 1066624,
+          "ppid": 950112,
+          "start_ticks": 32703006
+        },
+        "returncode": 101
+      },
+      "actual_counts": [
+        [
+          "FAILED",
+          "0",
+          "1",
+          "0"
+        ]
+      ],
+      "exact_one_completed": true,
+      "stdout": {
+        "bytes": 388,
+        "sha256": "e52d0566d8d5dc468f054a99c95e5ac968fcce7caafcafe59dc44361581ac36b"
+      },
+      "stderr": {
+        "bytes": 734,
+        "sha256": "65b99d6ac69f4d7106a95174de4cc85d8f63bc659f8b016cb15b92419ace502f"
+      }
+    }
+  ],
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_invocations": 0,
+  "event_errors": [],
+  "exit": 1
+}

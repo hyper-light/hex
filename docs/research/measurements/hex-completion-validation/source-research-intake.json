@@ -1,0 +1,110 @@
+{
+  "source_pins": [
+    "85d57d908ca8047068594cd4f4ef45aa521526e3",
+    "5c4d688d8f863882522713510fb59a012215890c"
+  ],
+  "files": [
+    {
+      "path": "docs/research/measurements/hex-complete-bindings/windows-node-identity-research.md",
+      "sha256": "a17ab3ea8218340a9dac684c4b4f3571de64a6538c4dba6d168cfcc18af5ac14",
+      "source": "85d57d908ca8047068594cd4f4ef45aa521526e3"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/ALTERNATE-00AAD-BUILDER-PLAN.md",
+      "sha256": "6829444822a4108c872c6dfe2d4207d0ee432cd71498d445458743421ef07d7f",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/alternate-00aad-host-controls.json",
+      "sha256": "582feff78c33a664f80e117e0970514114a34f4ca2760b0d51c9ad5c639f4017",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/alternate-00aad-path-comparison.cli.log",
+      "sha256": "6092bb39f5fee1acd8ba695e0b1160357744c56dc128c1e581f0fb0b2a4faa4e",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/alternate-00aad-path-comparison.command.json",
+      "sha256": "54253dfe3915c4ec5aa7500c6f5f5371f4d6356228ace9cca29e21f7a90771c7",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/alternate-00aad-path-comparison.input.json.gz",
+      "sha256": "d67302f89f9a0823b2b575a897bb255b5acb54269aeed4125fe4c4bb16dce15b",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/alternate-00aad-path-comparison.raw.json",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/alternate-00aad-path-comparison.summary.json",
+      "sha256": "e060c50924be60b57f4148a62e94d3a3ca1c952d01302f1cccd1bdb2c8e8b253",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/alternate-00aad-path-comparison2.cli.log",
+      "sha256": "47e8ee90a6a266a2e605702101798116f3c59cf079deaa16626c9e50eb81fc3d",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/alternate-00aad-path-comparison2.command.json",
+      "sha256": "f0fdc23ddc9ea0b2de716ec20a6c3099d68a568f3492ed10776d8fed45f68ace",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/alternate-00aad-path-comparison2.raw.json",
+      "sha256": "02779dec2630c46a8acfce3d1765ce92bd3997e2ca5ba17598463a12435f652f",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/alternate-00aad-path-comparison2.summary.json",
+      "sha256": "1d89d1b29bd289eeef2364f832d36271fbde225a408f50266e10cf4330b06ea8",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/alternate-00aad-plan.seal.json",
+      "sha256": "9346d7fc8134d3e31e85e17e0fe1a47a499646164b0d860cff48023967edbf54",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/alternate-00aad-probes.raw.json",
+      "sha256": "e12a28e6fc6f0d24369d559a4181b6114533b996f7df6b5ff6a38bdf4e640acd",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/alternate-00aad-retained-archive-inputs.json",
+      "sha256": "1f79a258499bad2ff1b3b8a675fd9e86aa89d9c4b46e42f6975036f15839f52e",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/alternate-00aad-source-validation.json",
+      "sha256": "d41374cecbaa4e9f27b77cbb77d67e228d11aafbc264f7b2d289870534f15f4e",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/alternate-00aad-transfer-plan.json",
+      "sha256": "1f2256b674733e1947af15070c7cd811ce2a06772f4fb4b2ddac865e6cb8bc41",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/alternate-host-identity.receipt.json",
+      "sha256": "73e9fb6175b1e3c128eb4a03ae39a4eeab32b5f68dd1e5493308f9c3908bc57a",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/alternate_00aad_adapter_contract.py",
+      "sha256": "935438e70c5be28cdc0f2caabe1be91bb416a95de742b55e3dd782291da8b0b4",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/alternate_00aad_compare_paths.py",
+      "sha256": "c1d5572f438110356b7da56f6cfead19209429216ffb558260b80871d81ca690",
+      "source": "5c4d688d8f863882522713510fb59a012215890c"
+    }
+  ],
+  "source_seal_members_verified": true,
+  "status": "Reviewed primary-source Windows join research and alternate artifact-only plan/adapter; source/metadata intake only. No SDK materialization, namespace, compile, VM or GPU effect.451 exports remain held through peer timing queue."
+}

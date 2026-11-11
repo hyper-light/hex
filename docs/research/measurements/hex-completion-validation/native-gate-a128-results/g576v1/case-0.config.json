@@ -1,0 +1,63 @@
+{
+  "byte_limit": 1048576,
+  "controller": {
+    "args": [
+      "/bin/sh",
+      "-c",
+      "printf '%s' \"$2\" > \"$1\"",
+      "hex-gate",
+      "@MARKER@",
+      "@TOKEN@"
+    ],
+    "cwd": null,
+    "env": [],
+    "user": null
+  },
+  "controller_sha256": "c157074818b094c84aaf31b8c80a1e149f234bb1c8c84a25e9a53e96afa30a29",
+  "delegated_parent": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-native-gate-a128-v1.scope/native-0",
+  "gate_budget_ms": 120000,
+  "gate_wait_syscall": 271,
+  "guard_ms": 60000,
+  "lab": "/home/adalundhe/.cache/hex-lead/cohort-c576d4c2-linux-loader-gate-c576/g576v1",
+  "observation_ms": 1,
+  "pidfd_budget": 2,
+  "spec": {
+    "allocation": null,
+    "bounds": {
+      "cpu_max_milli": 1000,
+      "cpu_weight": null,
+      "io_latency_us": null,
+      "io_max": null,
+      "io_weight": null,
+      "memory_high": null,
+      "memory_max": 67108864,
+      "pids_max": 256
+    },
+    "class": {
+      "firecracker": {
+        "hostname": null,
+        "hosts": [],
+        "init": {
+          "args": [
+            "/bin/sh",
+            "-c",
+            "exit 0"
+          ],
+          "cwd": null,
+          "env": [],
+          "user": null
+        },
+        "mounts": [],
+        "network": "private",
+        "rootfs": {
+          "dir": "/home/adalundhe/.cache/hex-lead/cohort-c576d4c2-linux-loader-gate-c576/g576v1/empty-rootfs"
+        }
+      }
+    },
+    "devices": [],
+    "id": "completion-gate-baseline",
+    "owner": null,
+    "route": null
+  },
+  "test_binary_sha256": "f8b10118b68414c0d9dc3faed95664bc8b248f7b27bd76e285dd0fbd2b8372d9"
+}

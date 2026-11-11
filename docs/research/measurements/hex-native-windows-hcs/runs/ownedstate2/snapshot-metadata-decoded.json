@@ -1,0 +1,222 @@
+{
+  "file": "docs/research/measurements/hex-native-windows-hcs/runs/ownedstate2/raw/io.containerd.snapshotter.v1.windows/metadata.db",
+  "bytes": 65536,
+  "sha256": "391ce09fe56632a48f9af17c0a1b51311f1971396773c2363a328aba18ae5d8b",
+  "page_size": 4096,
+  "valid_metas": [
+    {
+      "page": 0,
+      "root": 7,
+      "high": 12,
+      "transaction": 4,
+      "checksum": "7b201109d76e692c"
+    },
+    {
+      "page": 1,
+      "root": 10,
+      "high": 12,
+      "transaction": 3,
+      "checksum": "28b75be0ad152005"
+    }
+  ],
+  "chosen": {
+    "page": 0,
+    "root": 7,
+    "high": 12,
+    "transaction": 4,
+    "checksum": "7b201109d76e692c"
+  },
+  "rows": [
+    {
+      "path": [
+        "v1",
+        "parents",
+        "\u0001\u0000\u0002"
+      ],
+      "value": "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+      "hex": null,
+      "bytes": 125
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "createdat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e6a52e83209cffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "id"
+      ],
+      "value": null,
+      "hex": "01",
+      "bytes": 1
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "inodes"
+      ],
+      "value": null,
+      "hex": "00",
+      "bytes": 1
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "kind"
+      ],
+      "value": null,
+      "hex": "03",
+      "bytes": 1
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "size"
+      ],
+      "value": null,
+      "hex": "beaeff9a8d01",
+      "bytes": 6
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "updatedat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e6a52e83209cffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "createdat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e6a52ec5fe94ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "id"
+      ],
+      "value": null,
+      "hex": "02",
+      "bytes": 1
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "kind"
+      ],
+      "value": null,
+      "hex": "02",
+      "bytes": 1
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "parent"
+      ],
+      "value": "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+      "hex": null,
+      "bytes": 102
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "updatedat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e6a52ec5fe94ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "labels",
+        "containerd.io/snapshot.ref"
+      ],
+      "value": "sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+      "hex": null,
+      "bytes": 71
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "labels",
+        "containerd.io/snapshot/diff-id"
+      ],
+      "value": "sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+      "hex": null,
+      "bytes": 71
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "labels",
+        "containerd.io/snapshot.ref"
+      ],
+      "value": "sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+      "hex": null,
+      "bytes": 71
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "labels",
+        "containerd.io/snapshot/diff-id"
+      ],
+      "value": "sha256:4c77a873187ab2974036b801a24a6fd6fc18d93a00d96f813b8a82ee56fe1bc3",
+      "hex": null,
+      "bytes": 71
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "labels",
+        "containerd.io/snapshot/parent-chain-id"
+      ],
+      "value": "sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+      "hex": null,
+      "bytes": 71
+    }
+  ]
+}

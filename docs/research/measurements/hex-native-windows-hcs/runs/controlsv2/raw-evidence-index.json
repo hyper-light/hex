@@ -1,0 +1,63 @@
+{
+  "archive_sha256": "ffdf97b9eb1392e852c0f65309373f19b88f8d0d747d3033b6053956e956a6e0",
+  "archive_bytes": 130348,
+  "members": {
+    "cli.log": {
+      "bytes": 12157,
+      "sha256": "019c6fa16c7169ae6d171a15bd0840e0a12be957fdb483223b71f75c4d92ab29"
+    },
+    "collection.cli.log": {
+      "bytes": 425241,
+      "sha256": "0bfaf784fb7c50a443c98b4d66b7f6d9f9580efaa1d55d4480cb67883cbbbc83"
+    },
+    "raw/missing-store.stderr.log": {
+      "bytes": 1021,
+      "sha256": "5b7cba1ccd9f11385cdc9336d517725803fdb4521e52e8ff3758dc1079917dee"
+    },
+    "raw/missing-store.stdout.log": {
+      "bytes": 260,
+      "sha256": "88839ab4f49b43bf7c8fad0768dbb213b75e4fef44780cd2c39b57e8909e4619"
+    },
+    "raw/mutation-build.stderr.log": {
+      "bytes": 1859,
+      "sha256": "c5d69415a31e3b2c5e56f01476da9c7b809b6188e92e82c69d84dc772368b243"
+    },
+    "raw/mutation-build.stdout.log": {
+      "bytes": 33948,
+      "sha256": "e9e4051ee60cb2b470c19521351414502f4e26948224200f487e00d48f81fc13"
+    },
+    "raw/restored-build.stderr.log": {
+      "bytes": 181,
+      "sha256": "36dd32cba68f5da2de9e83230babb606f8d5deb4db3652af845afc5d2c2fc6e1"
+    },
+    "raw/restored-build.stdout.log": {
+      "bytes": 33918,
+      "sha256": "5bbb689b29a71be5dcbc35b7a67cee26670f0f4a4288706622bd35c3778bab46"
+    },
+    "raw/restored.stderr.log": {
+      "bytes": 807,
+      "sha256": "523b6b3409bb60197a275fe526266a1f50f26be4d17840de0d580169c1ea8d93"
+    },
+    "raw/restored.stdout.log": {
+      "bytes": 175,
+      "sha256": "203e358e1bc6279e2adb7fa7859654dd800c96ffd237424b8b41f6aa0210d590"
+    },
+    "raw/result.json": {
+      "bytes": 8589,
+      "sha256": "343e70d989325d71ba2d9608fbe9b447f9c26e1010ca6c704af5e237d45bd3a2"
+    },
+    "raw/run.json": {
+      "bytes": 8542,
+      "sha256": "f40544e943f2f78ecddcbe03dd638216fecf5923c1fd5c30d2e9a976fac7096d"
+    },
+    "raw/wrong-luid.stderr.log": {
+      "bytes": 735,
+      "sha256": "81220b734f0e3ee3522548c1f944d8dc1feeffbdd4771a765df04eaaababd67a"
+    },
+    "raw/wrong-luid.stdout.log": {
+      "bytes": 260,
+      "sha256": "203017281cd106f7de34495c8d90d8852e18c23c629aa1faa131858252ceec2a"
+    }
+  },
+  "originals_retained_in_place": true
+}

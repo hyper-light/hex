@@ -1,0 +1,14 @@
+{
+  "producer": "a29bf7e2d3527aedce62b04bb5011edb9253fb09",
+  "root_parent": "28f571a29ecf43a74846076645c678130276b226",
+  "adapter": "SAME ShardsGuest.connect_before receives the identical Instant after pre-effect expiry check; fallible unique facade and post-allocation deadline check. Standalone dial and zero/MAX behavior unchanged. Existing Patient fixture records absolute input; new actual-adapter loopback byte control unrun.",
+  "outside_port": "Recorded GuestProgram uses SAME EventedClient triomphe owner and matching clone.",
+  "source_hashes": {
+    "crates/hex-runtime/src/guest/mod.rs": "f240bd3a588d9a225739d691ee123e7e4558b50462733e6559933105a0ad0fab",
+    "crates/hex-runtime/src/guest/dedicated.rs": "1b7411ef442a89a77f23484728556869cfcc4dd8ba9c8492e2d948bb3c0f2473",
+    "crates/hex-node/src/recorded.rs": "8d1843769780f0bc9f1fcf433728620a6e8259a4b217c691171dde8789017c4a",
+    "crates/hex-client/src/guest/shards.rs": "3343ae45c24fd5eae4d4b7e4a4777783078cd5f74d5da8a917874a9f061013f1",
+    "crates/hex-client/src/guest/tests.rs": "d236c3b5bfc6028e4930453cf9841712f3b143d589a7f588498e7c456966a3ae"
+  },
+  "tests": "Source-only; no VM/GPU or matched compile yet."
+}

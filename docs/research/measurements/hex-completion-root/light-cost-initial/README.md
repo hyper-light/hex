@@ -1,0 +1,11 @@
+# Initial cost and runtime light checks
+
+ROOT coordinator 01a1aa77778471339bea3beff90d6bbd, policy 0342b85d9c808e3ced041a6c3ef0e9bf70438272, R01–R16 SHA256 df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3. Exact source archives were transferred with no sync to new private d132 paths, 1 CPU/4 GiB/12 GiB, requested nice10, jobs/threads1. No GPU/VM/native attachment invocation.
+
+Source e72b66838ed6a9ca7f1a2f8c30e98baf110d9464: API 39 passed/0 failed/0 ignored, wire 32/0/0 (315 filtered). API/core/client Clippy then exited101 on two newly added dynamic reservation-size additions denied by arithmetic_side_effects. No ABI or argument tests were run after that failure. ROOT5e291e07760b666747ebf56973a2fc6e87bca674 moves only the fixed optional tag size into compile-time native-width constants; successor check is separate. API39 is attributed only to e72. Cargo15435/15874/16254 and localCLI69460 completed/reaped, temporary entries0, all source files unchanged.
+
+Source d83ce73471505dfbe1965b28cf17437e9ab2b889: runtime guest harness failed compilation with three E0624 diagnostics before any test, because Booted::host_info was private to its child module. Owner-authorized ROOT4d8bbf8186c7a7a9fb2faa46b1924cfa59159668 made it pub(super). The attempted 4d8 check was refused before remote execution because Kiln CLI was disconnected; this was not a compile or test result. Cargo6868/localCLI16762 and refused localCLI70486 completed/reaped. The original private sources, targets and raw logs remain intact.
+
+raw.tar.gz is 360582 bytes, SHA256 2cc9ff0ea17f0785e92d14cd21abe6268dfd39925e5810a60aefab924a59f9bc. Every regular member hash, the complete input manifest against the literal local fixed Git archive, and unchanged post-source were independently verified by collect-proof.py. Binary hashes are in collected-binaries.json inside the archive. Raw log bytes remain compressed without whitespace normalization. Collection localCLI7839 completed/reaped0.
+
+These are focused light receipts, not a current complete workspace/native/backend gate. Runtime/native ownership, all supported targets, meaningful guard mutations/restores, actual compute/forbidden effects, recovery and comparative profiles remain required before landing.

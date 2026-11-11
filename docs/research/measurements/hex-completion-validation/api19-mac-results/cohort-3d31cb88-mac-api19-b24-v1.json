@@ -1,0 +1,42 @@
+{
+  "source": "3d31cb88e28752144498cb91a694ae02546a2bff",
+  "archive_sha256": "7b5c0a92f477ce8822e53960880e6999152405ce9e51c164e27728e72f3dd634",
+  "scope": "ROOT macARM64 API19 three new private-pipe report tests, APIalltargetClippy and changed-consumer harness compile; no priorSlot/7repeat and no nativebackend/VM/GPU",
+  "target": "mac",
+  "platform": "macOS-26.2-arm64-arm-64bit",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 36353,
+  "phases": [
+    {
+      "name": "api-private-report-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "shards-api",
+        "--lib",
+        "--locked",
+        "physical::report::tests::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 36493,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "ec1157d5ec9c86a8663d82c4a9dc9f398e34f6a93b75e45366411f9c5a875628",
+      "bytes": 119,
+      "expected_selected": 3,
+      "actual_counts": [],
+      "selection_verified": false,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_backend_invocations": 0,
+  "exit": 1
+}

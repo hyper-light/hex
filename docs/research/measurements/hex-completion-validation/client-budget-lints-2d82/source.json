@@ -1,0 +1,77 @@
+{
+  "schema": 1,
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "hex_claude_full_read_sha256": "a093d49f0e51a0c9026996cb170980696dc375364b8d9f13866200c6232e0c2b",
+  "parent": "2d828f39304762f0b0669e4407adb3f4b3fee484",
+  "source": {
+    "path": "crates/hex-client/src/calls/budget_tests.rs",
+    "parent_sha256": "1a0be87518194ba141359eedfd0c1f124cb436d8a064098af9fd04c335e486ec",
+    "sha256": "ea5ef9fc1344049ef68381ae288a919fbde3a408a89726c9f1e8e6dbdcee7180",
+    "bytes": 102138
+  },
+  "original_actual": {
+    "phase": "ROOT2d82 Linux runtime joined strict",
+    "exit": 101,
+    "raw_copy": "original-2d82-runtime-joined-strict.log",
+    "raw_sha256": "b9e510d20e4fc2135d4f9516d5a6458c517c37670ee3f5edd7d7e658e1370ff3",
+    "raw_bytes": 4964,
+    "verified_root_archive_sha256": "f7fd6c734027fd0fe0bfacc75059360dd38225802f86af30bf1c651fecfbfcf5",
+    "diagnostics": [
+      "test1319 type_complexity at shared port/optional deadline history",
+      "test2054 disallowed then_some eager ID in old-original selector",
+      "test2596 disallowed then_some eager ID in prepared successor"
+    ],
+    "separate_root_status": "ROOT reports five semantic cases PASS/Node production Clippy0; Windows joined strict has same owned causes. No replay or independent Windows raw claim."
+  },
+  "changes": [
+    "Meaningful private DialDeadlines alias names the exact existing shared actual-port/original-optional-deadline observation history; no wrapper/state/allocation change.",
+    "Only two Run-ID filter expressions use lazy then(|| *id) instead of then_some(*id). Same matching predicate and copied ID; no side-effect/oracle/guard/budget change."
+  ],
+  "source_integrity": "Reversing only alias+two lazy expressions reproduces complete parent byte-for-byte; all other test bodies/constants unchanged; no warning waiver.",
+  "protected": [
+    {
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "2274b7d480ab9291716b0ea257f750e0e9c53fb8e86ab20bf600cbcc51b1dd59",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/guest.rs",
+      "sha256": "893c281be8a3d4907d81bcffc36c0991a1d614108e3e68ecf7500e130887c6b3",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-node/src/supervise/completion_native_gate_tests.rs",
+      "sha256": "7a2997ee975e91f37ff6106a459b66c819ece6ca498faa63f9a753d0596355ce",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-runtime/src/linux/sys.rs",
+      "sha256": "cda48ba364da31f20b8963a30a365ca2f6231d1dd5c30902d64099d0ab3f98f2",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "a8f51f83a7b8ed2c43e0824f3af7aff5e967ba77159dde320841183559ea29b8",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+      "unchanged": true
+    },
+    {
+      "path": "CLAUDE.md",
+      "sha256": "a093d49f0e51a0c9026996cb170980696dc375364b8d9f13866200c6232e0c2b",
+      "unchanged": true
+    }
+  ],
+  "r10_attribution": "ROOT9b68 actual four-way same prepared source1a0be875 proof retained under signed7281b44c; no replay/new-binary claim. Five2d82 passes stay separately attributed, not replayed.",
+  "independent_work": "Native-gate ACK/events8239/causal26b work remains separate, no source or producer contract altered by this lint patch.",
+  "builds_executed": 0,
+  "tests_executed": 0,
+  "native_executed": 0,
+  "checks_dispatched": 0,
+  "status": "SOURCE ONLY; scoped rustfmt/source-integrity inspection, ROOT joined strict intake pending."
+}

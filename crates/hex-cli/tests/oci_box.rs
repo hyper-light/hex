@@ -444,6 +444,9 @@ impl Lab {
     /// A box whose init runs `args`.
     fn running(&self, id: BoxId, args: &[String]) -> BoxSpec {
         BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id,
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(self.bundle(args)),
@@ -454,6 +457,9 @@ impl Lab {
     /// A box whose init waits, in a network namespace of its own.
     fn networked(&self, id: BoxId) -> BoxSpec {
         BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id,
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(self.bundle_with(&Self::act(&Act::Wait), true)),
@@ -488,6 +494,9 @@ impl Fixture for Lab {
     }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id,
             bounds,
             class: ClassSpec::Bundle(self.bundle(&Self::act(&Act::Wait))),
@@ -497,6 +506,9 @@ impl Fixture for Lab {
 
     fn init(&self, id: BoxId, act: &Act) -> BoxSpec {
         BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id,
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(self.bundle(&Self::act(act))),
@@ -719,6 +731,9 @@ fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
     };
     let create = |node: &Node, id: &BoxId, dir: &Path| {
         node.create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(dir.to_owned()),
@@ -1018,6 +1033,9 @@ fn every_mount_kind_is_in_the_box_as_its_spec_asks(lab: &Lab, own: &Path) {
         let id = BoxId::new(&format!("kinds-{path}")).unwrap();
         let (pruned, shim) = (node.pruned_creates(), node.creates_through_shim());
         node.create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(dir),
@@ -1413,6 +1431,9 @@ fn mount_namespaces_made_each_way(lab: &Lab, own: &Path) {
         )
         .unwrap();
         let made = node.create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(dir),
@@ -1560,6 +1581,9 @@ fn procs_made_ahead_carry_their_masks(lab: &Lab, own: &Path) {
     // pid 1's command line.
     let view = |id: &BoxId| {
         node.create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(dir.clone()),
@@ -1737,6 +1761,9 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
     };
     let create = |id: &BoxId, dir: &Path| {
         node.create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(dir.to_path_buf()),
@@ -2038,6 +2065,9 @@ fn a_parked_init_takes_a_create_made_each_way(lab: &Lab, own: &Path) {
         .with_inits_ahead(1);
         let create = |id: &BoxId| {
             node.create(BoxSpec {
+                route: None,
+                allocation: None,
+                devices: Vec::new(),
                 id: id.clone(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Bundle(dir.clone()),
@@ -2217,6 +2247,9 @@ fn masked_directories_are_the_nodes_one_empty_filesystem(lab: &Lab, own: &Path) 
         let id = BoxId::new(&format!("maskdirs-{n}")).unwrap();
         let shim = node.creates_through_shim();
         node.create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(dir),
@@ -2339,6 +2372,9 @@ fn create_seeds_share_the_nodes_one_pruned_namespace(lab: &Lab, own: &Path) {
         )
         .unwrap();
         node.create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(dir),
@@ -2465,6 +2501,9 @@ fn a_bind_and_a_volume_are_present_the_host_unreachable(lab: &Lab, own: &Path) {
     .unwrap();
     let id = BoxId::new("vol").unwrap();
     node.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(dir.clone()),
@@ -2671,6 +2710,9 @@ fn classic_reasons_are_counted(lab: &Lab, own: &Path) {
         // The create routes classic at create (the counter bumps there) whether or not the classic path
         // then completes; delete cleans it up if it did.
         let _ = node.create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(dir),
@@ -2786,6 +2828,9 @@ fn create_and_start_container_hooks_run_in_the_containers_namespaces(lab: &Lab, 
     };
     let make = |id: &BoxId, dir: PathBuf| {
         node.create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(dir),
@@ -3018,6 +3063,9 @@ fn a_failing_create_container_hook_fails_the_create_naming_it(lab: &Lab, own: &P
     let id = BoxId::new("hooked-create-fails").unwrap();
     let refused = node
         .create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(dir),
@@ -3046,6 +3094,9 @@ fn a_failing_start_container_hook_fails_the_start_naming_it(lab: &Lab, own: &Pat
     let (dir, obs) = hooked_bundle(lab, serde_json::json!({"startContainer": failing_hook()}));
     let id = BoxId::new("hooked-start-fails").unwrap();
     node.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(dir),
@@ -3203,6 +3254,9 @@ fn rootfs_propagation_shows_in_the_box_not_the_agent(lab: &Lab, own: &Path) {
         let id = BoxId::new(&format!("prop-{prop}")).unwrap();
         let pruned = node.pruned_creates();
         node.create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(case.path().to_owned()),
@@ -3323,6 +3377,9 @@ fn an_init_that_refuses_or_dies_mid_build_leaves_nothing(lab: &Lab, own: &Path) 
         let id = BoxId::new("attach-fail").unwrap();
         let before = agent_mount_points();
         let refused = node.create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(dir.clone()),
@@ -3436,6 +3493,9 @@ fn an_init_that_refuses_or_dies_mid_build_leaves_nothing(lab: &Lab, own: &Path) 
         std::fs::write(dir.join("config.json"), config).unwrap();
         let id = BoxId::new("spec-inject").unwrap();
         node.create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(dir),
@@ -3639,6 +3699,9 @@ fn a_bundle_joining_a_namespace_by_path_runs_through_the_seam(lab: &Lab, own: &P
     .unwrap();
     let joiner = BoxId::new("join-path").unwrap();
     node.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: joiner.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(dir),
@@ -3695,6 +3758,9 @@ fn play_the_agent(dirs: &Path, exe: &str) -> ! {
     let id = BoxId::new("crash").unwrap();
     assert!(lab_rootfs.exists());
     let made = node.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle),
@@ -4255,6 +4321,9 @@ fn orphans_are_reaped(lab: &Lab, own: &Path) {
     );
     let id = BoxId::new("orphaner").unwrap();
     node.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Process,
@@ -4372,6 +4441,9 @@ fn held_record_write(lab: &Lab, own: &Path) {
     );
     let held = BoxId::new("held").unwrap();
     let held_spec = BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: held.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(OciSpec {
@@ -4548,6 +4620,9 @@ fn a_config_swapped_after_the_check_never_makes_the_container(lab: &Lab, own: &P
     let made = std::thread::scope(|s| {
         let made = s.spawn(|| {
             node.create(BoxSpec {
+                route: None,
+                allocation: None,
+                devices: Vec::new(),
                 id: id.clone(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Bundle(bundle.clone()),
@@ -4589,6 +4664,9 @@ fn a_config_swapped_after_the_check_never_makes_the_container(lab: &Lab, own: &P
     let made = std::thread::scope(|s| {
         let made = s.spawn(|| {
             node.create(BoxSpec {
+                route: None,
+                allocation: None,
+                devices: Vec::new(),
                 id: id.clone(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Bundle(bundle.clone()),
@@ -4711,6 +4789,9 @@ fn a_start_runs_the_checked_specs_hooks_not_the_bundle_swapped_after_create(lab:
         .keep();
     std::fs::write(bundle.join("config.json"), with_hook(&checked_mark)).unwrap();
     node.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle.clone()),
@@ -4760,6 +4841,9 @@ fn a_create_or_delete_of_a_box_being_made_waits_for_it(lab: &Lab, own: &Path) {
                 .success()
         );
         let spec = BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(bundle),
@@ -4876,6 +4960,9 @@ fn a_second_create_of_an_owned_box_being_made_waits_and_takes_no_slot(lab: &Lab,
     let (slots_before, given_before) = (slots(), given(&node));
     let waited = node.waited_for_a_box();
     let spec = BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle),
@@ -4890,6 +4977,9 @@ fn a_second_create_of_an_owned_box_being_made_waits_and_takes_no_slot(lab: &Lab,
         );
         let then = s.spawn(|| {
             node.create(BoxSpec {
+                route: None,
+                allocation: None,
+                devices: Vec::new(),
                 id: id.clone(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Bundle(lab.bundle(&wait)),
@@ -4981,6 +5071,9 @@ fn a_delete_racing_a_create_of_one_id_leaves_the_node_consistent(lab: &Lab, own:
         );
         let cgroup = box_root.join(OCI_BOXES).join(id.as_str());
         let spec = BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(bundle),
@@ -5120,6 +5213,9 @@ fn records_in_both_places_are_found_after_a_restart(lab: &Lab, own: &Path) {
         "the tmpfs boxes' records aren't synced"
     );
     node.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: on_disk.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(OciSpec {
@@ -5218,6 +5314,9 @@ fn created_through_a_seed_in_its_cgroup_and_namespaces(lab: &Lab, own: &Path) {
     let bundle = lab.bundle_with(&strings(&["/usr/bin/sleep", "600"]), true);
     let before = node.create_seeds().unwrap();
     node.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle),

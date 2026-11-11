@@ -1,0 +1,11 @@
+{
+  "source": "d912ff7aa3f34c7a2ca2731d659a42922e706a78",
+  "base": "cd0647ce5a2f45c9918b39086fe9f30bab531e23",
+  "path": "crates/hex-core/src/wire/tests.rs",
+  "before": "bee84b04d913a8303e6642d26b85300915910b8917e3c75ff0d38a5349d33a81",
+  "after": "7dc9d5276842817aa2c68b861d8b41abefb21d7be8b2863987554ea4e709af64",
+  "patch_sha256": "e418a7880f0a3d3d6549b42518c93308b77642a9526a4e6fe4e015600d84fb9c",
+  "cause": "Two positive specs used4KiB caps below existing1MiB Bounds API minimum; correct only test-local cost/caps and mutation offsets, no API/production change. Earlier class/backing source suspicions were not the immediate failure cause.",
+  "original_result": "378192 pool4pass/wire13pass2fail, raw preserved",
+  "checks": "Source only; ROOT narrow2+changedclientindex1+unrunproduction next"
+}

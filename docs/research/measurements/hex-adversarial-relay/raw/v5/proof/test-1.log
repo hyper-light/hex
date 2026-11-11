@@ -1,0 +1,7 @@
+
+running 1 test
+test scheduler::tests::adversarial_relay_tests::delayed_start_stays_fenced_through_forget_restart_and_new_sender_epoch ... delayed-start changed=Err(Broken("a retried peer sequence changed its message")); realm=Err(Invalid { what: "scheduler cluster", why: "peer belongs to a different configured cluster" }); sender=Err(Invalid { what: "scheduler sender", why: "unconfigured peer 3" }); restarted=true; old_key_absent=true; fenced_effects=(1, 1, 0); later_created=true; cleanup_leftovers=0; permits=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 129 filtered out; finished in 0.38s
+

@@ -1,0 +1,15 @@
+{
+  "source": "91370795d96e6cf8ed1f09cff83b90dc214a229c",
+  "test_native_status": "source only; joined checks unrun",
+  "exact_owned_files": [
+    "crates/hex-runtime/src/guest/books.rs",
+    "crates/hex-runtime/src/guest/dedicated.rs",
+    "crates/hex-runtime/src/guest/device_routing_tests.rs",
+    "crates/hex-runtime/src/guest/gpu.rs",
+    "crates/hex-runtime/src/guest/mod.rs",
+    "crates/hex-runtime/src/guest/rewrite.rs",
+    "crates/hex-runtime/src/guest/route.rs",
+    "crates/hex-runtime/src/guest/selected.rs",
+    "crates/hex-runtime/src/guest/tests.rs"
+  ]
+}

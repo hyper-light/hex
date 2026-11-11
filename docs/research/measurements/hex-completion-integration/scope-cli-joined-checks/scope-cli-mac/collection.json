@@ -1,0 +1,123 @@
+{
+  "bytes": 829947,
+  "sha256": "16465aa71a1c93a6b4e43bf00041aab8bed29e6ca50a833ce60253f738055c1d",
+  "members": {
+    "cohort-25fd0744-mac-compile-v1/running.json": {
+      "bytes": 993,
+      "sha256": "30a7369f5066996f402aee7c8f29cb69628f717031e01c8e8baeb4bcd11dedd6"
+    },
+    "cohort-25fd0744-mac-compile-v1/result.json": {
+      "bytes": 1247,
+      "sha256": "09d6d11b8f9dbbef9de7f30dec43832f99eb2838e717e158598d3cdb1c59c068"
+    },
+    "cohort-25fd0744-mac-compile-v1/source-before.json": {
+      "bytes": 299464,
+      "sha256": "e6930399c4c8a1357ca5b1df0131afb12ddf93d9deb71b55733be623ca3a3533"
+    },
+    "cohort-25fd0744-mac-compile-v1/source-after.json": {
+      "bytes": 299464,
+      "sha256": "e6930399c4c8a1357ca5b1df0131afb12ddf93d9deb71b55733be623ca3a3533"
+    },
+    "cohort-25fd0744-mac-compile-v1/production-check.log": {
+      "bytes": 3719,
+      "sha256": "f16cc21334c1ae00ae3406dea8de185044b56aa6fb0de9feb413eef5b53df200"
+    },
+    "cohort-25fd0744-mac-compile-v1/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-25fd0744-mac-compile-v1/collected-binaries.json": {
+      "bytes": 596,
+      "sha256": "5252c68f3c87a8a48a4fd31d0f1713d12ee8926735f16c1e18163d13ec4b9500"
+    },
+    "cohort-1fdfb9ce-mac-compile-v1/running.json": {
+      "bytes": 993,
+      "sha256": "09f9977c2aa9cf8b109e95b862b8fa23a9a00435d82dbbe215f48f20b85f8e78"
+    },
+    "cohort-1fdfb9ce-mac-compile-v1/result.json": {
+      "bytes": 1245,
+      "sha256": "019d8e75171e467f63a66c7200b16afb54789c8b876c0b159fd59575139d3fc9"
+    },
+    "cohort-1fdfb9ce-mac-compile-v1/source-before.json": {
+      "bytes": 299618,
+      "sha256": "d3ecc4ff5ca1f2dc9d80a11730aa8708a8ded6ec1806483d42fbda26e93b4eec"
+    },
+    "cohort-1fdfb9ce-mac-compile-v1/source-after.json": {
+      "bytes": 299618,
+      "sha256": "d3ecc4ff5ca1f2dc9d80a11730aa8708a8ded6ec1806483d42fbda26e93b4eec"
+    },
+    "cohort-1fdfb9ce-mac-compile-v1/production-check.log": {
+      "bytes": 3032,
+      "sha256": "90479df4fe725ad7d152c865cc94a94fe3dca184e2bebcf433058f322510e1ed"
+    },
+    "cohort-1fdfb9ce-mac-compile-v1/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-1fdfb9ce-mac-compile-v1/collected-binaries.json": {
+      "bytes": 594,
+      "sha256": "be675fc4057475b57d4554a7ddf9e6ba1165ad5f885def2d324d852fc942fcbf"
+    },
+    "cohort-1fdfb9ce-mac-windows-clippy-v1/running.json": {
+      "bytes": 1107,
+      "sha256": "5d5c82079a7f9d5629f31ccaa38f1b35a1694a114ab0a71fbda49dc357aeb6fa"
+    },
+    "cohort-1fdfb9ce-mac-windows-clippy-v1/result.json": {
+      "bytes": 1361,
+      "sha256": "dd118c23514a6dddb61daa89ef524bd13fef6ea64d4004895b923b6206b835d4"
+    },
+    "cohort-1fdfb9ce-mac-windows-clippy-v1/source-before.json": {
+      "bytes": 299618,
+      "sha256": "d3ecc4ff5ca1f2dc9d80a11730aa8708a8ded6ec1806483d42fbda26e93b4eec"
+    },
+    "cohort-1fdfb9ce-mac-windows-clippy-v1/source-after.json": {
+      "bytes": 299618,
+      "sha256": "d3ecc4ff5ca1f2dc9d80a11730aa8708a8ded6ec1806483d42fbda26e93b4eec"
+    },
+    "cohort-1fdfb9ce-mac-windows-clippy-v1/production-check.log": {
+      "bytes": 5182,
+      "sha256": "ce8a0f7eb7c37cc001c83cd25ad0d4d315b7af502afd37fc698127f17986a085"
+    },
+    "cohort-1fdfb9ce-mac-windows-clippy-v1/public-registry-seed.json": {
+      "bytes": 25211,
+      "sha256": "a2d55ceeaf67a0da2c0a16d485439089ad7b2b0e4922b4d7a4fdaa0423ec12ae"
+    },
+    "cohort-1fdfb9ce-mac-windows-clippy-v1/collected-binaries.json": {
+      "bytes": 754,
+      "sha256": "39c814c229b68535da8cd5c731d22364561ad3206e1500a28aa076dcdc2c266f"
+    },
+    "cohort-73229016-mac-cli-compile-v1/running.json": {
+      "bytes": 949,
+      "sha256": "dec8e276de2101f83514797f767128d508928b0cf16d65d6fa84221ff36815db"
+    },
+    "cohort-73229016-mac-cli-compile-v1/result.json": {
+      "bytes": 1201,
+      "sha256": "e61bad37bbda385dea0b44a4e78f60875a00401b07b1752eaa456ec650d78746"
+    },
+    "cohort-73229016-mac-cli-compile-v1/source-before.json": {
+      "bytes": 300980,
+      "sha256": "466732e4a2fb8f9efcbb6db55d4dd2a2bb7cd0636c355adf12c37c54d2d30322"
+    },
+    "cohort-73229016-mac-cli-compile-v1/source-after.json": {
+      "bytes": 300980,
+      "sha256": "466732e4a2fb8f9efcbb6db55d4dd2a2bb7cd0636c355adf12c37c54d2d30322"
+    },
+    "cohort-73229016-mac-cli-compile-v1/production-check.log": {
+      "bytes": 3169,
+      "sha256": "e0b80f14a7bfe3f0ba7436ad9e232225fa19af8b380156a0d817fa43c92abe98"
+    },
+    "cohort-73229016-mac-cli-compile-v1/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-73229016-mac-cli-compile-v1/collected-binaries.json": {
+      "bytes": 571,
+      "sha256": "001cf56cba9488a319c44a15a348546796961fbb85d01fd1a17b241e301ff397"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

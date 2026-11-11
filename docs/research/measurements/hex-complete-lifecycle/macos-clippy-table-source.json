@@ -1,0 +1,29 @@
+{
+  "kind": "source-only strict-Clippy cause corrections",
+  "actual_source": "8a421601a55cd902f4e5bc15ea04cf942dc216b7",
+  "old_producer_source": "c89d0143edf513fc8eff17f12094a9e33ce01fd4",
+  "actual_result": "new owner1 + adapter barrier6: 7 PASS; client/runtime all-target Clippy exit101; no native effects",
+  "raw_log_sha256": "854b685e59922f0ed86b6be0d0a683aba1d577c11f529561863e7752a04d63c8",
+  "changes": [
+    "Name the existing vector entries in NativeBoxEntries and retain the same Mutex/NativeArc owner",
+    "Move unchanged signal_one/killpg helpers before existing storage_tests; test oracles unchanged"
+  ],
+  "paths": [
+    {
+      "path": "crates/hex-runtime/src/macos/mod.rs",
+      "original_sha256": "cec97e5672f9b26d6654d8fe482ca01588e6dc489059c242cbc142b1c3617dbc",
+      "fixed_sha256": "6a5ecf335a6a4f12560d3990413d8217948e91c6fb0b858b9a7272868740b966",
+      "draft_sha256": "af51d2856cfbba0c7d693b2eb7656ba51916fe23a22c975b0b4b29698f3df321",
+      "restored_draft_sha256": "8d898d1549023d7dfc31fec71652db07daa1570b183d27c7c6fce8cadc306146"
+    },
+    {
+      "path": "crates/hex-runtime/src/macos/process.rs",
+      "original_sha256": "7536709325568b649ceb80bff80e785be980016de4b5da3b5e1ad1f78a3ed927",
+      "fixed_sha256": "47514b6f25472a3f96a1595de7b11c8f9ce45d63faaa25dece57edb4dbe9fab1",
+      "draft_sha256": "7ebd416bc4cb49bb8de099e72648fcbb612efa4cafc57cddb98345ba94a5f7ca",
+      "restored_draft_sha256": "5dae82fc565b6793569b5e5ef71b2b95fdaaf53c88a842a0f7a5824284c52ddf"
+    }
+  ],
+  "private_drafts": "/Users/adalundhe/.cache/hex-complete-lifecycle/snapshots/mac-clippy-7951f9b3",
+  "checks": "No local builds/tests/native; no repeats of seven controls. ROOT owns changed-cohort Clippy."
+}

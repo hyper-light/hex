@@ -1,0 +1,26 @@
+--- a/crates/hex-runtime/src/macos/process.rs
++++ b/crates/hex-runtime/src/macos/process.rs
+@@ -1314,8 +1314,9 @@
+                 // is left as it is for delete to clean up, its held members continued, since no read of this
+                 // watcher will continue them.
+                 Err(_) => {
+-                    if let Some(scope) = &self.state.vm {
+-                        if self.state.validate_vm_scope().is_ok() {
++                    let state = Arc::clone(&self.state);
++                    if let Some(scope) = &state.vm {
++                        if state.validate_vm_scope().is_ok() {
+                             self.finish();
+                         }
+                         scope.failed(shards_api::ProcessFailure::Poisoned {
+@@ -1331,8 +1332,9 @@
+             // fork or end, a start (exec) or a delete, each a kqueue event.
+             self.armed_at = next.map(|wait| (Instant::now(), wait));
+             if let Err(error) = self.state.kq.wait(next, None, &mut self.events) {
+-                if let Some(scope) = &self.state.vm {
+-                    if self.state.validate_vm_scope().is_ok() {
++                let state = Arc::clone(&self.state);
++                if let Some(scope) = &state.vm {
++                    if state.validate_vm_scope().is_ok() {
+                         self.finish();
+                     }
+                     scope.failed(super::proc::process_failure(

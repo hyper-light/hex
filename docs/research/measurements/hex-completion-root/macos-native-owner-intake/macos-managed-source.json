@@ -1,0 +1,28 @@
+{
+  "role": "implementer",
+  "agent": "01a1c7676cb570a88abb4acad962a2d9",
+  "policy": "ca3ab10c151aa5539e757f1cc76029746ccbb561",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "dependency": "25fd0744c2625deabcbd642ab87cee2a461c04f9",
+  "cli_dependency": "46cd9af390259654942f1e8386d601a9df1587fc",
+  "state": "source-only; pure controls unrun; native/test/compiler checks ROOT-owned",
+  "integration": "exact six named paths; Recorded differs from ROOT25fd only Mac Recover callbacks. Preserve ROOT outside route/allocation literals at newer API composition. No manifest/vendor/CLI changes by lane.",
+  "files": {
+    "crates/hex-runtime/src/macos/mod.rs": "29af932c71a56faa9eed379ca845449947ee2e81770875f97eb9bda0b2acbaf6",
+    "crates/hex-runtime/src/macos/sys.rs": "42dd2de55774ee45e03e844849a8cd63c00580f769eb14e49d08f6398e3dc7fd",
+    "crates/hex-runtime/src/macos/proc.rs": "6419a797afd11cc39cda44a7f8e159c2d1fdd1572f9d27fbda1c0f399ccbb9a1",
+    "crates/hex-runtime/src/macos/process.rs": "bc1efd17fb29665aa074c08e278dcd08c3b0faebf24f9243bf93ba8d38e2e77c",
+    "crates/hex-runtime/src/macos/managed.rs": "56c2a483b1d7f8ef53945474dbd15fa7a427bc32e69f4491b1a4aeacb67a162e",
+    "crates/hex-node/src/recorded.rs": "781f9050586c314d600e18439ecc7e16d086cb49b5da5b9d5e506a4dfef749b2"
+  },
+  "remaining_implementation": [
+    "aggregate native CPU cap at same watcher/helper seam",
+    "eventual cold cleanup without retained-child pin",
+    "exact real BackingRecord/NativeRecord extension separate checkpoint"
+  ],
+  "proof_owed": [
+    "matched compiler/Clippy/pure controls",
+    "helper scope/escape/VM/GPU/native-resource terminality",
+    "failure/death/cold/mutation/performance/portability/full gates"
+  ]
+}

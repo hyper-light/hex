@@ -1,0 +1,31 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running unittests src/lib.rs (/home/adalundhe/.cache/hex-lead/cohort-5a0a020b-linux-cpu-handoff-5a0a/target/debug/deps/hex_client-47bbd4ab177bef6c)
+
+running 1 test
+test calls::budget_tests::absolute_run_settle_error_does_not_renew_kill_answer_budget ... client_settle_phase phase=run_begin original=Instant { tv_sec: 197765, tv_nsec: 901143796 }
+client_settle_phase phase=setup_ends_returned exec=1 deadline=Instant { tv_sec: 197765, tv_nsec: 901143796 }
+client_settle_phase phase=send kind=0x000f id=1
+client_settle_phase phase=started id=1
+client_settle_phase phase=send kind=0x000c id=2
+client_settle_phase phase=kill_request exec=1
+client_settle_phase phase=cleanup_begin started=Ok((1, Instant { tv_sec: 197765, tv_nsec: 876366502 })) kill=Ok((2, 1, Instant { tv_sec: 197765, tv_nsec: 876406948 })) before=Err(Timeout)
+client_settle_phase phase=transport_closed
+client_settle_phase phase=end_returned
+client_settle_phase phase=pipe_closed join=begin
+client_settle_phase phase=worker_return result=Err(Broken("the node agent gave stdout's end, which its exec neither carried nor asked for"))
+client_settle_phase phase=joined ok=true
+client_settle_original original=Instant { tv_sec: 197765, tv_nsec: 901143796 } cap=25ms observation=100ms setup=Some((1, Ask { stdin: true, stdout: false, stderr: false }, ReplyDeadline { at: Instant { tv_sec: 197765, tv_nsec: 901143796 }, source: CallerAbsolute })) started=Ok((1, Instant { tv_sec: 197765, tv_nsec: 876366502 })) kill=Ok((2, 1, Instant { tv_sec: 197765, tv_nsec: 876406948 })) runs=[1] kills=[(2, 1)] exits=0 releases=0 before_cleanup=Err(Timeout) cleanup_at=Instant { tv_sec: 197766, tv_nsec: 1395407 } after_cleanup=Ok((Instant { tv_sec: 197766, tv_nsec: 1559484 }, Err(Broken("the node agent gave stdout's end, which its exec neither carried nor asked for")))) pipe_owned=true pipe_poisoned=false joined=true clean=Ok(true)
+
+thread 'calls::budget_tests::absolute_run_settle_error_does_not_renew_kill_answer_budget' (2712342) panicked at crates/hex-client/src/calls/budget_tests.rs:2108:5:
+original stream-settlement error return exceeded run_before authority while waiting for the ordinary Kill answer
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    calls::budget_tests::absolute_run_settle_error_does_not_renew_kill_answer_budget
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 90 filtered out; finished in 0.13s
+
+error: test failed, to rerun pass `-p hex-client --lib`

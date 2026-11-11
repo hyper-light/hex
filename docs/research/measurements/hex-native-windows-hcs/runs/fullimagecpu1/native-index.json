@@ -1,0 +1,16 @@
+{
+  "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\native-full-image-cpu-v1",
+  "index": {
+    "journal.json": {
+      "bytes": 10102,
+      "sha256": "72ad43d55282646176b3043f73657a554309cbbeb4fdede52c3e403c025607c5"
+    },
+    "submitted-hcs.json": {
+      "bytes": 809,
+      "sha256": "774a9002bb6cdcd67f7804e78f2a2ced939c529463fb0348e7545c5080021337"
+    }
+  },
+  "source_hashes": {},
+  "temp_files": [],
+  "utc": "2026-11-11T06:19:46.4546189Z"
+}

@@ -1,0 +1,23 @@
+{
+  "role": "coordinator",
+  "before": "e2f535824d0bd44fa6b315efccc5e5b9b1a4099e",
+  "symptom": "ACTUAL E0062 duplicate unavailable field in wire report constructor before any17 tests; corresponding coalescer same root-port defect",
+  "log_sha256": "1d9d94209cf03a5ca2b0448a476b224f8ad3a1af15b905a12e9c1f2a58d706b2",
+  "raw_sha256": "7110a2917b0d384aaa7d1d0bbfe237479ba1056428c35569a2788356416ee4c0",
+  "cause": "Root outside-default script recognized only field: syntax and missed preexisting shorthand field; producer deltas unchanged",
+  "correction": "Remove exactly two added empty defaults; retain decoded/coalesced unavailable values, not empty success",
+  "outside_port_paths_reviewed": [
+    "crates/hex-api/src/lib.rs",
+    "crates/hex-node/src/placement/backing_bootstrap_tests.rs",
+    "crates/hex-node/src/placement/physical.rs",
+    "crates/hex-sim/src/peer.rs",
+    "crates/hex-node/src/scheduler/device_offer_tests.rs",
+    "crates/hex-sim/src/index/route_offer_tests.rs",
+    "crates/hex-core/src/wire.rs",
+    "crates/hex-api/src/sim.rs",
+    "crates/hex-client/src/calls/tests.rs",
+    "crates/hex-client/src/calls/budget_tests.rs",
+    "crates/hex-runtime/src/firecracker/observations.rs"
+  ],
+  "checks": "source review/named rustfmt/diff only;17 case cohort had0execution, no passing claim; fresh source required"
+}

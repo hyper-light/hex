@@ -1,0 +1,18 @@
+{
+  "pid": 45953,
+  "command": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--on",
+    "f766f09294f2e17e3b8a631ffd4e6a4b",
+    "--needs",
+    "cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--quiet",
+    "--stdin",
+    "--",
+    "powershell.exe -NoProfile -NonInteractive -Command \"Invoke-Expression ([Console]::In.ReadToEnd())\""
+  ],
+  "script_sha256": "a77b0d74cb49da90a17418e4ba24ebe553693e38f0cfb6d72b8e31610389b36d",
+  "reason": "Windows runner reconnected; fresh current-boot identity required after offline; corrected explicit char[] Split overload"
+}

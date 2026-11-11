@@ -239,6 +239,17 @@ pub trait Loop: Send + Sync {
 
 /// What the socket needs of the runtime it serves, beyond the seam.
 pub trait Host: Runtime {
+    /// CP-T7.4: the optional live placement driver, using the normal worker admission.
+    fn schedule(
+        &self,
+        _command: hex_core::schedule::Command,
+    ) -> Result<hex_core::schedule::Reply, Refusal> {
+        Err(Refusal::Invalid {
+            what: "scheduler",
+            why: "this node has no configured placement driver".into(),
+        })
+    }
+
     /// Hands the host the core's loop, before the socket serves, so connections of its own (its guest's)
     /// are watched there ([`Source`]). By default it has none.
     fn attach(&self, lp: Arc<dyn Loop>) -> Result<(), Refusal> {
@@ -2027,6 +2038,22 @@ impl<O: Os> Shared<O> {
                     Err(r) => self.answer(conn, header.id, &Answer::Refused(r)),
                 };
             }
+            Call::Schedule(command) => host
+                .schedule(*command)
+                .map(|reply| Answer::Scheduled(Box::new(reply))),
+            Call::Capacity(class) => host.capacity(class).map(Answer::Capacity),
+            Call::PhysicalReport => host.physical_report().map(Answer::PhysicalReport),
+            Call::InitializeBacking(grant) => {
+                let grant = triomphe::Arc::try_unwrap(grant).map_err(|grant| Refusal::Backing {
+                    key: grant.key,
+                    cause: hex_api::LifecycleCause::Uncertain,
+                });
+                grant
+                    .and_then(|grant| host.initialize_backing(grant))
+                    .map(Answer::BackingOffer)
+            }
+            Call::ReleaseBacking(key) => host.release_backing(key).map(Answer::BackingOffer),
+            Call::BackingUsage(key) => host.backing_usage(&key).map(Answer::Usage),
             Call::Create(spec) => host.create(*spec).map(Answer::Info),
             Call::Start(id) => host.start(&id).map(|()| Answer::Done),
             Call::Signal { id, signal } => host.signal(&id, signal).map(|()| Answer::Done),

@@ -1,0 +1,8 @@
+{
+  "source": "bfa22498fa2b0d7ffb9516fc4743253ebd9a6897",
+  "test_native_status": "source only; joined checks unrun",
+  "exact_owned_files": [
+    "crates/hex-core/src/wire.rs",
+    "crates/hex-core/src/wire/tests.rs"
+  ]
+}

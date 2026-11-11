@@ -1,0 +1,29 @@
+{
+  "reviewed_source": "53f605ac",
+  "body_sha256": "abf9d137ff53a1826394eb4a0d6067462888e1c831202349b76e82164d34015c",
+  "controller_sha256": "0fe01b9b25180a13a2327dba74e7c1220b6527d26975df9eee4f532ad3c9ae3a",
+  "embedded_body_verified": true,
+  "review": "released concrete cached-only import once; no native workload or GPU conclusion",
+  "admission": "1CPU/4GiB/32GiB",
+  "working_set": {
+    "current_file_allocation": 23026771528,
+    "remaining_verified_inflated_tailtar": 5583841280,
+    "residual_within_requested_envelope": 5749125560,
+    "hard_ntfs_metadata_bound": false,
+    "metadata_staging_uncertainty": "explicit; measure and retain actual outcome, no invented allowance"
+  },
+  "rule_interpretation_correction": "R16 headroom/admission does not require a global hard NTFS quota; earlier ROOT exact metadata demand was overly strict",
+  "forbidden": [
+    "shared service/driver/security/quota changes",
+    "unchanged pull retry",
+    "deleting retained snapshots to force fit"
+  ],
+  "source_checks": [
+    "both scripts fully reviewed",
+    "controller embedded body byte-equal",
+    "checksummed cached blobs and original stopped DBs",
+    "committed original base before import",
+    "exact head, actual parent paths and DLL preflight after",
+    "held server native PID/birth and own cleanup"
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "bytes": 236506,
+  "sha256": "805b898eafeae94988f451a0e30d659440979b67d68dd967d7f8334c054cc2f8",
+  "members": {
+    "cohort-8a421601-mac-client-platform-b24-v1/new-adapter-global-barrier-mac.log": {
+      "bytes": 2534,
+      "sha256": "4482698dd2642e3a134bfdb64526e15bc8ebae9854f4dff1bc23c00b3e14acdc"
+    },
+    "cohort-8a421601-mac-client-platform-b24-v1/running.json": {
+      "bytes": 4803,
+      "sha256": "d23bcf104e385c41af797440a93dca0682b87f50cecd198d06f8db6f4356a643"
+    },
+    "cohort-8a421601-mac-client-platform-b24-v1/node-cli-native-harness-check.log": {
+      "bytes": 2200,
+      "sha256": "eee94bb0b5cbc1050353d0da48d10a0432d1bc2bf2c03944133e34f379f32b3f"
+    },
+    "cohort-8a421601-mac-client-platform-b24-v1/result.json": {
+      "bytes": 5061,
+      "sha256": "6ee959b76946d362185ea08212dc02eaf74b01e0608ce1866175b5c3ed8aabbe"
+    },
+    "cohort-8a421601-mac-client-platform-b24-v1/client-runtime-native-clippy.log": {
+      "bytes": 6914,
+      "sha256": "854b685e59922f0ed86b6be0d0a683aba1d577c11f529561863e7752a04d63c8"
+    },
+    "cohort-8a421601-mac-client-platform-b24-v1/source-before.json": {
+      "bytes": 337554,
+      "sha256": "65b7d1075642d210414c7d202d88d97f491b22deb90f8dd9ffe781339f31e749"
+    },
+    "cohort-8a421601-mac-client-platform-b24-v1/source-after.json": {
+      "bytes": 337554,
+      "sha256": "65b7d1075642d210414c7d202d88d97f491b22deb90f8dd9ffe781339f31e749"
+    },
+    "cohort-8a421601-mac-client-platform-b24-v1/client-owner-mac.log": {
+      "bytes": 2540,
+      "sha256": "099b09350b4622378603691f3fbc65957f283339195e548584d638b99ba1ee02"
+    },
+    "cohort-8a421601-mac-client-platform-b24-v1/public-registry-seed.json": {
+      "bytes": 29097,
+      "sha256": "b333d44e1926a108ffe730364cb8d74bd4ded40c41cb89eaed8367fba20393ec"
+    },
+    "cohort-8a421601-mac-client-platform-b24-v1/collected-binaries.json": {
+      "bytes": 4778,
+      "sha256": "202694e1aa15c1add40df8bebb6ba7b65bbe8283f4a7ec4ac8cf5416960be489"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

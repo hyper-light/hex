@@ -1,0 +1,45 @@
+{
+  "red": {
+    "kind": "root-verifier-owned-fifo-control",
+    "source": "53451b17c456f5eda0a24d86da7d3f2a35e00be3",
+    "fixture": "/Users/adalundhe/.cache/hex-lead/verifier-root-review/fifo-red-e3j44swm",
+    "child_pid": 53660,
+    "operator_outer_seconds": 120,
+    "budget_basis": "same existing administrative120s cancellation, not a filesystem latency threshold or seed",
+    "argv": [
+      "/Users/adalundhe/.cache/hex-lead/python-3.13.18-20261026/python/bin/python3",
+      "-I",
+      "/Users/adalundhe/.cache/hex-lead/verifier-root-review/verify_census-53451b17.py",
+      "--run",
+      "/Users/adalundhe/.cache/hex-lead/verifier-root-review/fifo-red-e3j44swm",
+      "--result",
+      "/Users/adalundhe/.cache/hex-lead/verifier-root-review/fifo-red-e3j44swm/result.json",
+      "--source",
+      "/Users/adalundhe/.cache/hex-lead/snapshots/refusal-census-bba3d814",
+      "--max-result-bytes",
+      "1",
+      "--max-ledger-rows",
+      "1",
+      "--output",
+      "/Users/adalundhe/.cache/hex-lead/verifier-root-review/fifo-red-e3j44swm/out.json"
+    ],
+    "exit": -9,
+    "timed_out": true,
+    "exact_owned_child_reaped": true,
+    "stdout": "",
+    "stderr": ""
+  },
+  "fixed": {
+    "kind": "root-verifier-nonregular-fix",
+    "verifier_sha256": "a1b650dafee625f17d619fffe47afd3bc97fb920d5e17717c48b98a93fb8987a",
+    "source_base": "53451b17 plus leaf O_NONBLOCK",
+    "operator_outer_seconds": 120,
+    "synthetic_exit": 0,
+    "owned_child_pid": 88252,
+    "fifo_exit": 1,
+    "fifo_stderr": "census verification refused: input must be a regular file\n",
+    "exact_owned_child_reaped": true,
+    "exit": 0
+  },
+  "fixed_synthetic_tests": "9/9,0.203s, root source a1b650da/f96bce8d, explicit owned FIFO rejected without writer, same original120s outer budget"
+}

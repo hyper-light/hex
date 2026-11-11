@@ -21,6 +21,7 @@ pub mod census;
 pub mod disk_probe;
 mod emptying;
 pub mod facts;
+pub mod placement;
 pub mod recorded;
 pub mod records;
 pub mod store;
@@ -55,3 +56,6 @@ pub use node::CrashPoint;
 #[cfg(target_os = "linux")]
 pub use node::{Node, OCI_BOXES, records_dir};
 pub use recorded::RecoverySummary;
+
+/// The live file-backed scheduler socket and authenticated peer shell.
+pub mod scheduler;

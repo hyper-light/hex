@@ -1,0 +1,78 @@
+{
+  "bytes": 389493,
+  "sha256": "3eded4f29c00d9b7fb063006c047890591552bac66e952414004cfa4d2281013",
+  "members": {
+    "cohort-bcd5d849-linux-shared-dedicated-control-bcd5/source-before.json": {
+      "bytes": 611085,
+      "sha256": "a6bb36cb252add695b78743426839f1933c273258649bc6f8ca6f7ceaeb01104"
+    },
+    "cohort-bcd5d849-linux-shared-dedicated-control-bcd5/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-bcd5d849-linux-shared-dedicated-control-bcd5/owned-scope-limits.json": {
+      "bytes": 266,
+      "sha256": "0c81e86f031a425bc0d8e966f8d36ed45b5eda14094f8bb636cda84447021847"
+    },
+    "cohort-bcd5d849-linux-shared-dedicated-control-bcd5/dedicated_owner_refusal_keeps_one_canonical_box_without_outer_reentry.stdout": {
+      "bytes": 235,
+      "sha256": "e4e00e0b2aad1993ca9b26a29ea31e56180f168e527dde890e3677a6fdb86f63"
+    },
+    "cohort-bcd5d849-linux-shared-dedicated-control-bcd5/dedicated_owner_refusal_keeps_one_canonical_box_without_outer_reentry.stderr": {
+      "bytes": 3738,
+      "sha256": "de4e150449ba00ffc2cf250eb2f18bb58f086c7854c9c7f15446975127189b1f"
+    },
+    "cohort-bcd5d849-linux-shared-dedicated-control-bcd5/running.json": {
+      "bytes": 2309,
+      "sha256": "f219e2cd6c002bfc15c0df4dbb10012a7cf8656c5713c226473bb20f7f93a098"
+    },
+    "cohort-bcd5d849-linux-shared-dedicated-control-bcd5/source-after.json": {
+      "bytes": 611085,
+      "sha256": "a6bb36cb252add695b78743426839f1933c273258649bc6f8ca6f7ceaeb01104"
+    },
+    "cohort-bcd5d849-linux-shared-dedicated-control-bcd5/result.json": {
+      "bytes": 2416,
+      "sha256": "cb742728d6544bd5146af1a65008e19b956675e6cbe05175f6e1a1fe7470ee06"
+    },
+    "cohort-bcd5d849-linux-shared-dedicated-control-bcd5/event-evidence/journal.jsonl": {
+      "bytes": 762,
+      "sha256": "77788de547e3216b90aed78c5a39c0aa17af2b90abf0e452ae3903c241cd8e73"
+    },
+    "outer-closures.json": {
+      "bytes": 688,
+      "sha256": "f4235ec7eb4471d83f98f5a10a179e34c8c17d9ec97b76fdf23b993ae6ac3950"
+    }
+  },
+  "closures": {
+    "cohort-bcd5d849-linux-shared-dedicated-control-bcd5": {
+      "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-shared-dedicated-control-bcd5.scope",
+      "scope_absent": true,
+      "owners": [
+        {
+          "kind": "driver",
+          "recorded": {
+            "pid": 1583653,
+            "ppid": 1583528,
+            "start_ticks": 32733741
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        },
+        {
+          "kind": "cargo",
+          "recorded": {
+            "pid": 1591703,
+            "ppid": 1583653,
+            "start_ticks": 32734100
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        }
+      ]
+    }
+  },
+  "collector_exit": 0,
+  "collector_reaped": true,
+  "all_members_verified": true,
+  "source_archives_verified": true
+}

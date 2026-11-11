@@ -1,0 +1,18 @@
+{
+  "command": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--on",
+    "d1323898b255a3ed435eb83fa0f7b0cf",
+    "--needs",
+    "cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--timeout",
+    "120",
+    "--",
+    "nice -n 10 python3 -c 'import gzip,hashlib,io,json,pathlib,tarfile\nroot=pathlib.Path.home()/'\"'\"'.cache/hex-device-driver-01a1c640-6483c6f2-v1'\"'\"'\nproof=root/'\"'\"'proof'\"'\"';source=root/'\"'\"'source'\"'\"'\ndata={('\"'\"'proof/'\"'\"'+p.name):p.read_bytes() for p in proof.iterdir() if p.is_file()}\nfor name,path in [('\"'\"'leaf.rs'\"'\"','\"'\"'crates/hex-node/src/placement/device_binding_tests.rs'\"'\"'),('\"'\"'placement.rs'\"'\"','\"'\"'crates/hex-node/src/placement.rs'\"'\"'),('\"'\"'placement-devices.rs'\"'\"','\"'\"'crates/hex-node/src/placement/devices.rs'\"'\"'),('\"'\"'runtime-catalog.rs'\"'\"','\"'\"'crates/hex-runtime/src/devices.rs'\"'\"')]:\n    data['\"'\"'source/'\"'\"'+name]=(source/path).read_bytes()\ndata['\"'\"'driver.py'\"'\"']=(root/'\"'\"'driver.py'\"'\"').read_bytes()\nmanifest={name:{'\"'\"'bytes'\"'\"':len(raw),'\"'\"'sha256'\"'\"':hashlib.sha256(raw).hexdigest()} for name,raw in sorted(data.items())}\ndata['\"'\"'MANIFEST.json'\"'\"']=(json.dumps(manifest,indent=2)+'\"'\"'\\n'\"'\"').encode()\nout=io.BytesIO()\nwith gzip.GzipFile(fileobj=out,mode='\"'\"'wb'\"'\"',mtime=0) as gz,tarfile.open(fileobj=gz,mode='\"'\"'w'\"'\"') as archive:\n    for name,raw in sorted(data.items()):\n        member=tarfile.TarInfo(name);member.size=len(raw);member.mode=0o644;archive.addfile(member,io.BytesIO(raw))\nblob=out.getvalue();retained=root/'\"'\"'retained'\"'\"';retained.mkdir()\np=retained/'\"'\"'proof-v1.tar.gz'\"'\"'\nwith p.open('\"'\"'xb'\"'\"') as f:f.write(blob)\nprint(json.dumps({'\"'\"'path'\"'\"':str(p),'\"'\"'bytes'\"'\"':len(blob),'\"'\"'sha256'\"'\"':hashlib.sha256(blob).hexdigest(),'\"'\"'members'\"'\"':len(data)}))\n'"
+  ],
+  "exit_code": 0,
+  "stdout": "{\"path\": \"/Users/adalundhe/.cache/hex-device-driver-01a1c640-6483c6f2-v1/retained/proof-v1.tar.gz\", \"bytes\": 51462, \"sha256\": \"7575d90f8a1257f3c51bdfd4bd352b7520252546f54ac2fa4b08ecf4d49e9ee8\", \"members\": 41}\n",
+  "stderr": "\u001b[2m[kiln] on d1323898b255a3ed435eb83fa0f7b0cf \u00b7 macos/aarch64 \u00b7 30 of 32 cores idle \u00b7 47 GB free \u00b7 room for 1 CPU, 4 GiB of memory, 12 GiB of disk\u001b[0m\n"
+}

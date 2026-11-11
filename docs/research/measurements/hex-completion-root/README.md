@@ -1,0 +1,298 @@
+# Scheduler completion integration (AC-T7.4.1)
+
+Ada requested four independent Kiln implementation agents, full implementation and a
+validated main merge. Her backend clarification covers Docker/OCI containers,
+Firecracker microVMs and Shards microVMs. This is active new work after the earlier
+goal clear; old stopped agents and their source/evidence remain preserved.
+
+ROOT coordinator: `01a1aa77778471339bea3beff90d6bbd`. Current policy read in full:
+Shards `0342b85d9c808e3ced041a6c3ef0e9bf70438272`, R01–R16 SHA-256
+`df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3`.
+All four implementers returned matching policy and ownership readbacks before edits;
+ROOT acknowledged them. Agents own production implementation and light checks.
+ROOT owns integration, actual native/VM/fault/mutation validation, audits,
+profiling, benchmarks, final gates and main merge/push.
+
+| Lane | Kiln agent | Owned behavior |
+| --- | --- | --- |
+| Bindings | `01a1c7676c2d7463b227be301180d1be` | Common physical selection, OCI attachment, Firecracker runtime |
+| Shards | `01a1c7676c7c76cb998cb12303110488` | Exact physical selector, guest/VMM/renderer integration |
+| Lifecycle | `01a1c7676cb570a88abb4acad962a2d9` | Durable create/cancel/recovery and physical cleanup |
+| Validation | `01a1c7676cfc7297a41236a8e71ee188` | Executable backend oracles, receipts, matrix/profile tooling |
+
+## First integration
+
+L1 source `e38544eca80aa952809147e9d46d5ec318368210` adds explicit
+`Class::{Firecracker,Shards}` and corresponding `ClassSpec` variants, carrying
+the same validated OCI workload. Host binaries, kernels and native mappings belong
+to initialized backend configuration; peer payloads carry exact host DeviceIds.
+ROOT integrated that source as `ff8b28ec6cb61b21d29e515ec67cdec081d2da6a`.
+
+ROOT extends the existing wire enum tags append-only: class tags 0/1 remain
+process/OCI, 2/3 are Firecracker/Shards; spec tags 0/1/2 remain process/OCI/bundle,
+3/4 are Firecracker/Shards. Both use the existing OCI codec, retaining exact
+claims. The source-derived wire identity changes, so mixed peers refuse their
+hello instead of misreading variants. Focused request/capacity/info coverage checks
+backend identity and host claims, and generated hostile-message coverage includes
+the new workload and info variants. This is a protocol implementation, not proof
+that a native adapter is initialized or that any GPU was attached.
+
+ROOT also supplies L4's Windows SDK dev-feature integration for the standalone
+explicit-adapter compute witness. The existing pinned `windows` 0.62.2 dependency
+is reused; the lockfile adds it only to hex-gpu's dependency list. This enables
+test compilation and does not execute GPU work.
+
+## Current results and outstanding work
+
+At this checkpoint the new integration is SOURCE ONLY. Scoped formatting and
+`git diff --check` pass; no new compile/test/native result is claimed. Existing
+evidence in the input tree retains its original source attribution. Downstream
+backend matches and actual runtime implementations are in progress in their
+owners' branches. ROOT will check the integrated exact source before readiness.
+
+Read-only runner inventory found the approved Linux GPU host adacachy2 offline
+and adacachy overloaded; no Linux validation was dispatched and no Fedora
+fallback was used. Jupiter reports Windows build26200, Containers and WHP
+enabled, and one AMD Radeon8060S. The retained image-layer path still exists.
+This preflight created no container/VM or GPU dispatch; it is not HCS attachment,
+compute, second-GPU isolation or resource-return proof.
+
+Complete native selection/binding, same-survivor recovery, correct cancellation,
+physical cleanup, supported-target builds, comparative profiles and combined gates
+remain required. Each backend must execute its actual runtime. A shared Shards
+GPU flag, pure pass, successful compilation or unavailable-device refusal cannot
+close another backend's obligation. No main merge or push has occurred for this
+new batch.
+
+## Firecracker readiness integration source
+
+The guest-init notification is opt-in from the host kernel command line:
+`hex.firecracker-ready` paired with positive `u32` milliseconds in
+`hex.firecracker-ready-ms`. Duplicate, unpaired, zero, oversized and malformed
+parameters refuse before node creation. Parameters after `--` are init arguments
+and cannot enable notification. There is no environment/default budget.
+
+Only after existing node-ready and relay-ready receipts (all listeners bound)
+does init connect to vsock HOST CID2. L1 owns the host's private per-VM Unix
+listener, bound before VM creation. Both sides use shared `stream::GUEST_READY`
+(`HEX_READY 1` followed by newline). Its length is **12 bytes**, correcting the
+earlier coordination prose's mistaken11. Readiness grants no device authority.
+
+Primary-source review caught another coordination error before compilation:
+CONTROL_PORT0x48455800 lies in Firecracker's reserved [2^30,2^31) host-initiated
+range and cannot receive a guest-origin notification. GUEST_READY_PORT clears
+bit30 from the assigned control-port value (0x08455800), keeping its low HEX bits
+while placing this separate notification outside that reserved and privileged
+range. Host listener naming uses this port; ordinary control traffic is unchanged.
+[Pinned Firecracker protocol](https://github.com/firecracker-microvm/firecracker/blob/500efc6bb169705f5d9417cb411e3f6723e051fe/docs/vsock.md#guest-initiated-connections)
+describes the `_PORT` Unix socket mapping and reserved range;
+[vsock(7)](https://man7.org/linux/man-pages/man7/vsock.7.html) defines HOST CID2.
+
+Guest connect/write share one checked absolute deadline; each partial write uses
+the remaining configured budget and MSG_NOSIGNAL, so a gone host cannot terminate
+PID1 by SIGPIPE. Errors never trigger a second connection or VM boot here.
+The existing socket2 0.6.5 source was inspected: connect_timeout uses nonblocking
+connect and Unix poll, including EINTR handling; ordinary send accepts explicit
+flags. Linux rustix's safe send supplies NOSIGNAL. Existing kernel-command-line
+limits are reused. Native guest/host protocol effects and timeout/physical cleanup
+remain unrun; the new parser unit source is not yet an executed result.
+
+## Physical API composition and shared dependencies
+
+The focused Shards API port comes from L2 signed upstream source
+`36d9254f91325c3251582c6477bde5a83cffd9b3`. Vendored code remains pinned to33df
+plus its existing seven recorded patches and the new incremental0008. The new
+`physical.rs` blob is exact SHA-256
+`f0881866e1602755b43af19b6c77da9941fff09c2699507cff83fa3f592bc1d5`.
+It carries native PCI, Metal registry and Windows LUID identities, validates the
+bounded duplicate-free set and writes checked process arguments. It does not
+implement the VMM/native join by itself. Borrowed connection/handshake source and
+tests remain unchanged by this port. The complete runtime still awaits the
+separately owned L1 catalog and L2 guest integration; no full compile or native
+physical-selection result is claimed here.
+
+The Hex client maps selector-storage exhaustion to typed Exhausted and permanent
+selector errors to Invalid. Existing shared gpu=false literals get an empty
+selection. Core sha2 reuses pinned0.10.9 for L3's same-receipt queued-document
+commitment; runtime socket2 reuses the existing workspace pin for L1's bounded
+Unix connection. These are dependency edges, not new dependency versions. The
+stream readiness test's constant comparison was expressed as a range check after
+L3's exact core Clippy reproduced assertions_on_constants; no production port,
+protocol or wait changed in that correction.
+
+## Typed retained-resource lifecycle boundary
+
+L1 signed source `ccd77b4b8a34d27de67c4d0aa643952ae8ac0dc1` introduces
+`Lifecycle { id, cause }` with distinct Pending, Uncertain and Busy meanings.
+ROOT exports the cause and adds refusal tag9 after all existing tags; the cause
+has checked tags0..2, and hostile unknown tags refuse. The differential classifier
+retains this outcome as Lifecycle. Deterministic and generated wire coverage now
+includes all causes and the exact BoxId. These source tests are not yet executed;
+physical absence/terminality remains a native backend obligation.
+
+## Shared guest record/recovery integration
+
+ROOT imports only exact `record.rs` and `recovery.rs` from L3 signed
+`bb205dbf76c5106a3375782cfaedbe328778cdeb`. Explicit Firecracker/Shards
+creation records intent before StartInit, and recovery checks the guest init
+without requiring an OCI host cgroup for the guest backend. L3 reported four
+focused model crash/recovery controls passing on its recorded composite with
+ROOT8c399; that is prior-source model evidence, not this full candidate or a
+native VM recovery pass. The separately owned HCS keeper source remains pending
+its publication/error controls and is not included in this selective import.
+
+## Exact c478 light result and stale wire oracle
+
+ROOT's admitted d132 private source `c478931d123d621671efe7f6eb7a316766b2e375`
+passed all36 API units. The wire suite executed30:29 passed,1 failed,0 ignored.
+The new lifecycle roundtrip/hostile-cause control passed. The old malformed-key
+fixture still classified GPU key2^48 as invalid, although accepted source62a679c0
+already changed the public GPU identity to native64-bit PCI/Metal keys. API
+`DeviceId::check` accepts that value by design. This was a stale fixture
+expectation, not a reproduced production attachment defect. The correction
+removes only that obsolete invalid input and adds positive request/capacity
+roundtrips at2^48,2^63 and u64::MAX. Existing malformed VFIO/network, duplicates,
+unknown tags and redaction controls remain intact. No production validation or
+limit is weakened. Original API/wire logs and source manifests are retained in
+private `cohort-c478931d-light-v1`; API log SHA372746189ac4ff6d402b9d06c63b99e8c0b3d92697390545b5cea198b558e048,
+wire log SHA1b2a441c17a1a0f3a14632bb52a2fca9bac98e7bd049752027557608535f69bd.
+Both recorded Cargo children93811/94525 were reaped, source unchanged, temp0;
+CLI51482 ended1. Later phases did not execute. The successor is source-only until
+its check; this failure is not counted as a passing wire suite.
+
+## Single Linux authority decision
+
+Source review found Linux CLI already serves one Arc<Node> with the native Store,
+method turns and device turns. Nesting another Recorded would duplicate payload
+and holder authority. The adapters instead keep a weak reference to that same
+Node; the native Node routes persisted classes before cgroup cleanup. A stack
+transaction callback keeps concrete turn receipts local and avoids introducing
+per-operation boxed owners. This design is for the actual Firecracker and Shards
+adapters, not a general scheduler framework. Existing kernel/VM effects remain
+owned by their native adapter and witnessed separately.
+
+Alternatives rejected: a second Recorded/store (conflicting recovery authority),
+a strong Arc back-reference (ownership cycle), or new boxed transactions (unchecked
+per-operation allocation). Rust1.99.1 documents [Weak as non-owning and intended
+for cycle-free back-references](https://doc.rust-lang.org/1.99.1/std/sync/struct.Weak.html);
+[Box::try_new remains nightly-only](https://doc.rust-lang.org/1.99.1/std/boxed/struct.Box.html#method.try_new).
+A borrowed [FnMut callback](https://doc.rust-lang.org/1.99.1/std/ops/trait.FnMut.html)
+can mutate the caller's stack result without a boxed closure. The concrete owner
+must invoke it exactly once, reject missing/dead authority, and release every
+acquired turn on every return. No allocation-free, lifetime or native-cleanup
+performance claim follows from this source design; ROOT owes fault/mutation and
+profile proof.
+
+## Successor light closure and resource accounting requirement
+
+Exact source b1de3c7edf385b5a1b752746aae0eefd001dcee7 passed31 wire,1 exact
+readiness,4 recovery-model and4 vendored physical/argument/compatibility units;
+API/core all-target native Clippy exited0. Prior unchanged API36 passed at c478.
+[The complete source/command/log/binary and raw-failure record](light-api-core/README.md)
+keeps these cohorts separate. No native backend or full-gate result is inferred.
+
+Runtime resource admission must also include the actual VM envelope before the
+scheduler chooses a candidate, not merely reject a small request after placement.
+The lane owners are deriving a shared initialized cost/immutable allocation
+receipt. Unknown host overhead is explicit and requires ROOT measurement; it is
+never guessed0. Workload bounds remain distinct from effective host reservation,
+with one record and no additional resource ledger. As a primary precedent,
+[Kubernetes Pod Overhead](https://kubernetes.io/docs/concepts/scheduling-eviction/pod-overhead/)
+sets runtime cost at admission and includes it in scheduling and cgroup limits.
+Its example numbers are not Hex constants. Exact fixed-VM versus within-reservation
+semantics, actual measurements and native enforcement remain open implementation
+and validation work here.
+
+## Client refusal adapter follow-up source
+
+The new physical-selector refusal adapter reserves fixed diagnostic text fallibly
+before copying it, with typed Exhausted fallback. Permanent selector errors and
+storage exhaustion remain different public categories. A focused adapter test
+covers both categories without booting a guest. This follow-up is source-only
+until its exact client check; prior API/core results keep their original pins.
+
+## Catalog authority source boundary
+
+ROOT imports exact `devices.rs` from L1 signed56a84a6ef59408b37f8c697193f6f411b80a25c2.
+It contains the agreed weak Books/stack Transaction callback seam, canonical
+conflict IDs and typed Shards/VFIO configuration. Its new controls remain unrun
+at this input pin. This selective import includes no Firecracker adapter, Node
+registration or native capability proof. The owner is extending normalized
+per-backend routes in a successor; mixed-route and boot authority semantics must
+be coherent before the real CLI is ready.
+
+## PID1 selected-renderer initialization source
+
+After mounting proc/sys/dev/shares and before starting the guest node, PID1 calls
+L2's exact signed57 `guest::gpu::initialize(state)`. Only paired immutable boot
+authority can generate its selected render-node CDI/catalog; CPU-only guests
+return None. This hook is not a native grant by itself. L1's dedicated GuestGpu
+route must independently validate boot authority, the exact box/full set and
+actual render-node identity before create, and host metadata must not be inferred
+from a virtio ordinal or zero telemetry. That complete route and native effects
+are still in progress; no current Linux compile or VM result is claimed for this
+hook.
+
+## First composed guest compile result
+
+Exact d83ce73471505dfbe1965b28cf17437e9ab2b889 runtime light check compiled dependencies
+then stopped at three E0624 call sites: the parent guest module called child
+Booted::host_info while it was private. No tests or native effects executed.
+Original guest.log SHA2562f1dc6160e335cd9e6df8672ee15570471fff22ec064ccfd7bc42f854f052ef7
+and source are preserved in private cohort-d83ce734-light-v1. Cargo6868 and local
+CLI16762 were reaped, temp0, source unchanged. L2 explicitly authorized the one-line
+pub(super) correction on integrated57 and carries it in its successor. This changes
+module visibility only; no native behavior defect or passing guest result is claimed
+from the original failure. The next check uses a new private exact source.
+
+## Common Shards ABI physical type source
+
+Per Shards ROOT's explicit decision, upstream source42c3193e5432bb3c58db284989393467711cfb91
+moves the native identity, error, parser and selection check into one core+alloc
+`shards_abi::gpu` module. API reexports that same Rust type; OS argument formatting
+stays in API as physical::argument. ROOT ports only these API/ABI changes as
+incremental0009, retaining all prior vendor changes. This changes the source-derived
+ABI identity and requires matching rebuilt API/VMM/guest artifacts for native
+validation. It is not adoption of a tested VMM or physical UUID enforcement result.
+The earlier36/0008 checks remain source-specific earlier proof; this new shared
+source is untested at the checkpoint. Borrowed connector source is unchanged.
+
+The visibility-only runtime successor4d8bbf81 validation was refused before remote
+execution because the CLI could not connect to the Kiln server. CLI70486 ended1;
+no remote Cargo/native effect or passing result is inferred. Original refusal is
+retained in private cohort-4d8bbf81-light-v1. No runner/server change or admission
+bypass was attempted; source integration continues independently.
+
+## Shared runtime-cost API and wire source
+
+ROOT imports exact API devices/runtime/sim/spec blobs from L1 signed
+cc4dae242599991de6c86419b7c166ffe425137e and exports RuntimeCost/Allocation.
+The cost has explicit evidence identity, floor/ceiling/positive physical quanta,
+guest kernel/relay overhead and host VMM overhead. The single checked formula
+rounds max(workload+guest overhead,floor) up to the declared unit, refuses above
+the initialized ceiling, and adds host overhead once. No numerical overhead or
+minimum is measured or invented by this source checkpoint. An immutable optional
+BoxSpec allocation stores the admitted resources and exact cost profile; its
+existing BoxRecord persists it without a duplicate charge field. Capacity.cost
+is optional for legacy native identity cost; VM adapters must supply verified
+initialized cost before placement.
+
+Wire messages append the optional cost/allocation AFTER the existing device
+fields. They retain every fixed-width resource and all32 identity bytes, reject
+invalid profiles/charges and truncated tails, and use the new source-derived
+wire identity. Fixed cost tails reserve fallibly before writing; a storage fault
+maps to typed Exhausted. Focused cost/allocation/truncation controls are source
+only. This is not proof of actual VM charging, measurement authenticity or native
+resource enforcement.
+
+The named compatibility manifest under cost-source records167 BoxSpec and11
+Capacity legacy literals in60 files. Only required None fields were added to
+newborn native/test specs and reports; struct-update expressions keep inherited
+values. The generic guest path rewrite explicitly preserves allocation along
+with identity/owner/devices. A backend may remove its already-paid outer host
+receipt only at its validated inner native-workload boundary, keeping the original
+receipt in the sole host record; generic rewriting must not silently discard it.
+L1 scheduler propagation, per-class initialized costs, retained exact charges and
+actual runtime constructors remain in progress. Runtime sha2 reuses workspace
+0.10.9 for the owner-supplied bounded boot binary/evidence hashing, adding no version.
+No compile/test/native result is yet claimed for this new API/wire cohort.

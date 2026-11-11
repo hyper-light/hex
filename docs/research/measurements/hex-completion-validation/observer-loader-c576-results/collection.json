@@ -1,0 +1,51 @@
+{
+  "bytes": 350345,
+  "sha256": "8f64e58e7dd3de47f7a1091365a647cda5170139cee1cae2a90c49e8e11531bf",
+  "members": {
+    "cohort-c576d4c2-linux-loader-gate-c576/source-before.json": {
+      "bytes": 517950,
+      "sha256": "1b6e7facc74f6c99c79ea8f5470cb2212ba53d62552c43c0f25fe19aaf70e46c"
+    },
+    "cohort-c576d4c2-linux-loader-gate-c576/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-c576d4c2-linux-loader-gate-c576/owned-scope-limits.json": {
+      "bytes": 256,
+      "sha256": "c7539d1ddcd8a685dbcc025e6a57c6693f317b7fcd1f546e70451e9be87563bd"
+    },
+    "cohort-c576d4c2-linux-loader-gate-c576/observer-loader-new3.log": {
+      "bytes": 3979,
+      "sha256": "8c3cbf634b073b8724042ab67f505fd50904ecb0ff01bcc41ddf349bb0f80e4e"
+    },
+    "cohort-c576d4c2-linux-loader-gate-c576/running.json": {
+      "bytes": 3005,
+      "sha256": "793e97a72fc021c917851045c7c145836253de33b97834f9524a618af40e67c9"
+    },
+    "cohort-c576d4c2-linux-loader-gate-c576/native-gate-matched-compile.log": {
+      "bytes": 1222,
+      "sha256": "1a03d2fb7d3946d7ae8ab7420494657d2166f689ee1898179853e1442c04c4d1"
+    },
+    "cohort-c576d4c2-linux-loader-gate-c576/observer-and-gate-strict.log": {
+      "bytes": 4387,
+      "sha256": "d2d7458c72f5a1463587d6fca3a972153158e98b0a6c8cbf663a1075d6ae81a0"
+    },
+    "cohort-c576d4c2-linux-loader-gate-c576/source-after.json": {
+      "bytes": 517950,
+      "sha256": "1b6e7facc74f6c99c79ea8f5470cb2212ba53d62552c43c0f25fe19aaf70e46c"
+    },
+    "cohort-c576d4c2-linux-loader-gate-c576/result.json": {
+      "bytes": 3263,
+      "sha256": "406caac5acad4fc93f4ab6c417b17fb12f607dc3eb7b922a7a6fec1391d8f16e"
+    },
+    "cohort-c576d4c2-linux-loader-gate-c576/collected-binaries.json": {
+      "bytes": 2945,
+      "sha256": "ce409b7afdccea1d4fca24d5aab120020409fa6249e37644ce5029a045d1f146"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

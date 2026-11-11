@@ -1,0 +1,18 @@
+{
+  "status": "SOURCE ONLY / no build/test/native/check dispatch",
+  "base": "b559317caf0738ae96c8d978dd1e8e50ef7d3217",
+  "path": "crates/hex-runtime/src/linux/cgroup.rs",
+  "sha256": "3333365d4cf3428aa8dafcb4d3b3e6b6998619a886a5fd32c1b839c2c9744006",
+  "constructor": "SAME observe_managed(dir)->Result<Option<BoxCgroup>> pinned directory c90; unchanged managed_read(\"cgroup.events\",MAX_CGROUP_FILE) fa353; no new dependency/core parser",
+  "signature": "BoxCgroup::managed_populated(&self)->Result<bool,Refusal>",
+  "behavior": "Existing core::populated parses actual required pinned file. Missing/read/encoding/parse/over-bound failure refuses; false is only an observed cgroup subtree population counter, never independently whole-scope release/claim cleanup. Path replacement cannot retarget the pin.",
+  "primary": "Existing LINUX-MANAGED-METADATA.md Linux v6.19 05f7e89ab9731565d8a62e3b5d1ec206485eeb0b, cgroup-v2.rst SHA9247d0325c2cec7aa6a3a9304053cf54acf5c0ee71eba1304d3810961feea0ce, cgroup.events populated includes descendant cgroups; notification not polled here.",
+  "legacy_bodies_unchanged": {
+    "pub fn procs(&self)": "b18719681944f5f33fb59581731f46375e04d2eb1405047891fb80472b5cf29f",
+    "pub fn populated(&self)": "02778c592a354304dbf6bab66d9c711e679053e0ed72e39f7813d226277ac305",
+    "pub fn usage(&self)": "4ebdf627b62147d049b5ef6e67f1cb59455efc10bd7dbf62ce966856d7dc58fc"
+  },
+  "new_control": "managed_population_refuses_required_failures_and_never_follows_path_reuse; UNRUN, private files only. Required missing/empty/malformed/invalid-UTF8/directory/over-bound refusals; actual0/1, pin reuse, unpinned refusal.",
+  "checks": "Scoped rustfmt parser0 only. No own check requested; ROOT matched light/new1 and native/fault proof remain. Existing fa353/c90/573 unchanged units not rerun.",
+  "policy": "7d7e0855 / rulesdf2 implementer; authorized strict managed section only"
+}

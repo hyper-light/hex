@@ -1,0 +1,28 @@
+{
+  "source": "bba3d814",
+  "stages": [
+    {
+      "binary_sha256": "66af754df3fa8f54f3d1c543a97f8417fd018f2d5bff4ecc4fbd322abdc63c93",
+      "cleanup_reaped": true,
+      "stage": "classifier-removed",
+      "expected_pass": false,
+      "calls_sha256": "6b7283af11c9dc346fc9221a1f855b0467302a00ca31fb9298c639c3db635d4d",
+      "result": "C:\\Users\\corph\\.cache\\hx\\wire-marker-8daf3415a93c41e7bde71536c3b8a80d\\result.json",
+      "case_status": "failed"
+    },
+    {
+      "binary_sha256": "9a783297832a4bbb33a669d1a610764648553f74435f4ea5c0903e86c86ad27d",
+      "cleanup_reaped": true,
+      "stage": "classifier-restored",
+      "expected_pass": true,
+      "calls_sha256": "c4e0b85841b1cc0b812894ce82d0c165d2f328f5cc9aece8300999dcc1968bac",
+      "result": "C:\\Users\\corph\\.cache\\hx\\wire-marker-3a9720452b5d4cd99fb5dc686fe1faa0\\result.json",
+      "case_status": "passed"
+    }
+  ],
+  "kind": "root-native-wire-classifier-mutation",
+  "runner": "f766f09294f2e17e3b8a631ffd4e6a4b",
+  "exit": 0,
+  "restored": true,
+  "root_run": "r476"
+}

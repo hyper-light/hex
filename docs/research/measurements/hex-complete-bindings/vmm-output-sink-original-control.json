@@ -1,0 +1,26 @@
+{
+  "parent": "c480541b8469cecc449337e622e9dc50eb511f0e",
+  "policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "sources": {
+    "crates/hex-runtime/src/firecracker/native.rs": "ef9a30354468b4b1af8c5f86d128af3a1c58ffac0cc0977ba4a0300e492acda8",
+    "crates/hex-runtime/src/firecracker/pool.rs": "efb11182cf6a55b9c3c34d8ce56eda0b97710a3a0b662f271ae5ef8342bcdeca"
+  },
+  "control": "firecracker::native::io_tests::configured_vmm_output_sinks_accept_bytes_and_close_on_drop",
+  "scope": "source-only original control requested by ROOT against exact vm_io. Opens/writes/drops own /dev/null sink descriptors only when ROOT executes it; no Config/child/cgroup/KVM/GPU. Both write results retained until exact owned descriptors dropped/absent, then asserted success.",
+  "hypothesis": "File::open provides RDONLY descriptors consumed as output PipeWriters; not yet an observed production/runtime failure.",
+  "source_preparation": "vm_io becomes associated (no self input used) and both existing call sites use Self::vm_io. Function body byte-identical after this signature change. Initial misplaced test module rejected by local rustfmt before commit; corrected at module scope, formatter final exit0. No compiler/test execution.",
+  "original_function_sha256": "b828f4685ea74a9620211ef6baeeacdd2934133096e6e2bb7ce289a62de0088a",
+  "function_body_preserved": true,
+  "checks": {
+    "scoped_rustfmt": 0,
+    "diff_check": 0,
+    "tests": "UNRUN / intended-red only",
+    "compile": "UNRUN",
+    "native_effects": 0,
+    "jobs_started": 0
+  },
+  "preserved_WIP": "/Users/adalundhe/.cache/hex-complete-bindings/cold-fc-before-io-control-c480541b-v1/manifest.json",
+  "remedy": "NOT IMPLEMENTED; File::open unchanged until ROOT actual intended control outcome."
+}

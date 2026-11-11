@@ -1,0 +1,29 @@
+{
+  "status": "SOURCE ONLY / UNCOMPILED until matched devices RouteProjection ec0a; no new check/native job",
+  "parent": "e06f9c65dc1c076e0cf0ebb7d25b96356a9bed58",
+  "dependency": "ec0a0ab6f2fe6266696979d8df2fdf6032178ff5 devices::RouteProjection; existing a56/b2 route and b8 subset definitions",
+  "role": "implementer shards-gpu",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "api": "GuestRuntime::project_routes(&self,pools:&[PoolRecord],introduced:Option<(Execution,&[DeviceId])>,projection:&mut devices::RouteProjection)->Result<(),Refusal>",
+  "behavior": "One shared guest_route_key/backing_route_keys constructor now supplies actual add_offers and projection. Configured dedicated CPU fixed form; exact retained shared-CPU OCI and dedicated-GPU OCI+Shards aliases; introduced forms only caller-proven absent target, never fabricated generation.",
+  "purity": "Factored ONE backing_configuration from existing preflight_backing; config/cost/envelope/key/subset only. Receipt IO remains solely subsequent preflight. Projection never invokes Books/capacity/provider/sys/native/receipt IO. Same bounded collector owns fallible transient tuple storage/global64.",
+  "control": "guest::gpu_pool::tests::pure_route_projection_keeps_retained_gpu_aliases_and_new_cpu_lifetime (UNRUN): valid historical Released P+Prepared subsetR, exact6 forms with introducedShared, repeated projection idempotent, replaced cost/foreign IDs refuse; malformed receipt rejects ordinary preflight but pure projection ignores file; model query/effect/launch/standalone counters0.",
+  "checks": {
+    "scoped_rustfmt_parser": "exit0",
+    "git_diff_check": "exit0",
+    "cargo": "NOT RUN; ROOT matched owner cohort only",
+    "native": "NOT RUN"
+  },
+  "files": {
+    "crates/hex-runtime/src/guest/shared.rs": {
+      "sha256": "07823561747b7f9cea660ed7ca5e237c5eac30322fd9b35ba9b9e34a42482dd0",
+      "parent_sha256": "34a842c239e058222c3677fefdec87d3fd926a353f0c334567e71da266be638d"
+    },
+    "crates/hex-runtime/src/guest/gpu_pool.rs": {
+      "sha256": "a4c18105bec3c4d30f524d0db4bf87344393844db5a845599543619ae571d670",
+      "parent_sha256": "27039e31fd30b750bb9b86317e201ba76c6c2118f07d7d062bb2ff50ebdf9c28"
+    }
+  },
+  "remaining": "Node/Recorded global collector wiring before Store publication owned L1/L3/ROOT; b924/8b lazy family consumer still subsequent source. No capacity/admission/native readiness claim."
+}

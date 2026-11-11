@@ -1,0 +1,30 @@
+{
+  "cohort-60dedf28-mac-trusted-entry-60de-mac": {
+    "owners": [
+      {
+        "kind": "driver",
+        "pid": 33852,
+        "pid_absent": true,
+        "query_exit": 1,
+        "observed": "",
+        "error": ""
+      },
+      {
+        "kind": "phase:entry-feature-strict",
+        "pid": 34271,
+        "pid_absent": true,
+        "query_exit": 1,
+        "observed": "",
+        "error": ""
+      }
+    ],
+    "groups": [
+      {
+        "phase": "entry-feature-strict",
+        "pgid": 34271,
+        "group_absent": true
+      }
+    ],
+    "scope_note": "Mac admitted build has no Linux hard Scope; exact owned Popen groups queried, no whole nativeScope proof"
+  }
+}

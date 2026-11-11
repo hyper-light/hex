@@ -1,0 +1,55 @@
+{
+  "cdi_revision": "98a7d735d9592c1ccca0130e06b0709f4b65ecbf",
+  "runtime_tools_module": "v0.9.1-0.20251114084447-edf4cb3d2116",
+  "runtime_tools_revision": "edf4cb3d21162a17b02e19637f7d7f8c6bd8523f",
+  "sources": [
+    {
+      "repo": "cncf-tags/container-device-interface",
+      "revision": "98a7d735d9592c1ccca0130e06b0709f4b65ecbf",
+      "path": "SPEC.md",
+      "url": "https://raw.githubusercontent.com/cncf-tags/container-device-interface/98a7d735d9592c1ccca0130e06b0709f4b65ecbf/SPEC.md",
+      "bytes": 16050,
+      "sha256": "014eece66eb577b250ca733a64c086c9fa07abf61e8989eded727f2618e4fc56"
+    },
+    {
+      "repo": "cncf-tags/container-device-interface",
+      "revision": "98a7d735d9592c1ccca0130e06b0709f4b65ecbf",
+      "path": "go.mod",
+      "url": "https://raw.githubusercontent.com/cncf-tags/container-device-interface/98a7d735d9592c1ccca0130e06b0709f4b65ecbf/go.mod",
+      "bytes": 726,
+      "sha256": "585da8db9d61587a837b5682d63140ac8e650d5b98e8d06dde6c9fd16aa3a433"
+    },
+    {
+      "repo": "cncf-tags/container-device-interface",
+      "revision": "98a7d735d9592c1ccca0130e06b0709f4b65ecbf",
+      "path": "pkg/cdi/container-edits.go",
+      "url": "https://raw.githubusercontent.com/cncf-tags/container-device-interface/98a7d735d9592c1ccca0130e06b0709f4b65ecbf/pkg/cdi/container-edits.go",
+      "bytes": 12400,
+      "sha256": "5bc83f07a076ae4d781ae0190c64216629dfe34d00d700ddf034ba4f0785266e"
+    },
+    {
+      "repo": "cncf-tags/container-device-interface",
+      "revision": "98a7d735d9592c1ccca0130e06b0709f4b65ecbf",
+      "path": "pkg/cdi/container-edits_unix.go",
+      "url": "https://raw.githubusercontent.com/cncf-tags/container-device-interface/98a7d735d9592c1ccca0130e06b0709f4b65ecbf/pkg/cdi/container-edits_unix.go",
+      "bytes": 3451,
+      "sha256": "866d5314df8f381305e9950023727c44f7264d5fe0d25a841105734c2ffbb8cf"
+    },
+    {
+      "repo": "cncf-tags/container-device-interface",
+      "revision": "98a7d735d9592c1ccca0130e06b0709f4b65ecbf",
+      "path": "pkg/cdi/oci.go",
+      "url": "https://raw.githubusercontent.com/cncf-tags/container-device-interface/98a7d735d9592c1ccca0130e06b0709f4b65ecbf/pkg/cdi/oci.go",
+      "bytes": 1942,
+      "sha256": "59d5cc60c8126e27c9b73658efa855da8a8d2561540f551290f37c4ed83291f2"
+    },
+    {
+      "repo": "opencontainers/runtime-tools",
+      "revision": "edf4cb3d21162a17b02e19637f7d7f8c6bd8523f",
+      "path": "generate/generate.go",
+      "url": "https://raw.githubusercontent.com/opencontainers/runtime-tools/edf4cb3d21162a17b02e19637f7d7f8c6bd8523f/generate/generate.go",
+      "bytes": 59608,
+      "sha256": "113572d199e3d3421eb92b264d06eed112f19aa64654d75efbfa681c5f689fae"
+    }
+  ]
+}

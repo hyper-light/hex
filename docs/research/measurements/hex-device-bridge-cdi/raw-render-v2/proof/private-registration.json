@@ -1,0 +1,13 @@
+{
+  "current": {
+    "before": {
+      "lib": "040e51eb13da41c9d4a7bfb4bf94e18065ba3b6c491edd2ad58e39e2763035a1",
+      "bundle": "e9f2eb4fc2cee296bb884e38c5de2e505814a6105627a4866ac609b2296cc022"
+    },
+    "after": {
+      "lib": "bd43106b1bc3be61e84ff5ee37fa909cc2d8c2e8a3068d211768ca9a1214d4f9",
+      "bundle": "ac675a373833361a75067be92a3c826e9dee91b38ebe4f18d3a6709e6b4492cc"
+    },
+    "private_changes": "lib.rs pub mod cdi; bundle::tests::render_legacy_capture (source retained)"
+  }
+}

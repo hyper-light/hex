@@ -1,0 +1,406 @@
+Microsoft PnP Utility
+
+Instance ID:                PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\4&35fe04f8&0&0041
+Device Description:         AMD Radeon(TM) 8060S Graphics
+Class Name:                 Display
+Class GUID:                 {4d36e968-e325-11ce-bfc1-08002be10318}
+Manufacturer Name:          Advanced Micro Devices, Inc.
+Status:                     Started
+Driver Name:                oem59.inf
+Extension Driver Names:     oem58.inf
+Interfaces:
+    Interface Path:         \\?\PCI#VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1#4&35fe04f8&0&0041#{5b45201d-f2f2-4f3b-85bb-30ff1f953599}
+    Interface Description:  Unknown
+    Interface Class GUID:   {5b45201d-f2f2-4f3b-85bb-30ff1f953599}
+    Interface Status:       Enabled
+    Interface Properties:
+        DEVPKEY_DeviceInterface_Enabled [Boolean]:
+            TRUE
+        DEVPKEY_Device_InstanceId [String]:
+            PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\4&35fe04f8&0&0041
+        DEVPKEY_DeviceInterface_ClassGuid [GUID]:
+            {5b45201d-f2f2-4f3b-85bb-30ff1f953599}
+        DEVPKEY_Device_ContainerId [GUID]:
+            {00000000-0000-0000-ffff-ffffffffffff}
+
+    Interface Path:         \\?\PCI#VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1#4&35fe04f8&0&0041#{7cffb67c-c8da-4515-a90a-e525a9e485b3}
+    Interface Description:  Unknown
+    Interface Class GUID:   {7cffb67c-c8da-4515-a90a-e525a9e485b3}
+    Interface Status:       Enabled
+    Interface Properties:
+        DEVPKEY_DeviceInterface_Enabled [Boolean]:
+            TRUE
+        DEVPKEY_Device_InstanceId [String]:
+            PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\4&35fe04f8&0&0041
+        DEVPKEY_DeviceInterface_ClassGuid [GUID]:
+            {7cffb67c-c8da-4515-a90a-e525a9e485b3}
+        DEVPKEY_Device_ContainerId [GUID]:
+            {00000000-0000-0000-ffff-ffffffffffff}
+
+    Interface Path:         \\?\PCI#VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1#4&35fe04f8&0&0041#{a13a7a93-11f0-4bd2-a9f5-6b5c5b88527d}\GPUPARAV
+    Interface Description:  Unknown
+    Interface Class GUID:   {a13a7a93-11f0-4bd2-a9f5-6b5c5b88527d}
+    Reference String:       GPUPARAV
+    Interface Status:       Enabled
+    Interface Properties:
+        DEVPKEY_DeviceInterface_Enabled [Boolean]:
+            TRUE
+        DEVPKEY_Device_InstanceId [String]:
+            PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\4&35fe04f8&0&0041
+        DEVPKEY_DeviceInterface_ClassGuid [GUID]:
+            {a13a7a93-11f0-4bd2-a9f5-6b5c5b88527d}
+        DEVPKEY_DeviceInterface_ReferenceString [String]:
+            GPUPARAV
+        DEVPKEY_Device_ContainerId [GUID]:
+            {00000000-0000-0000-ffff-ffffffffffff}
+
+    Interface Path:         \\?\PCI#VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1#4&35fe04f8&0&0041#{1024e4c9-47c9-48d3-b4a8-f9df78523b53}
+    Interface Description:  Unknown
+    Interface Class GUID:   {1024e4c9-47c9-48d3-b4a8-f9df78523b53}
+    Interface Status:       Enabled
+    Interface Properties:
+        DEVPKEY_DeviceInterface_Enabled [Boolean]:
+            TRUE
+        DEVPKEY_Device_InstanceId [String]:
+            PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\4&35fe04f8&0&0041
+        DEVPKEY_DeviceInterface_ClassGuid [GUID]:
+            {1024e4c9-47c9-48d3-b4a8-f9df78523b53}
+        DEVPKEY_Device_ContainerId [GUID]:
+            {00000000-0000-0000-ffff-ffffffffffff}
+
+    Interface Path:         \\?\PCI#VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1#4&35fe04f8&0&0041#{1ca05180-a699-450a-9a0c-de4fbe3ddd89}
+    Interface Description:  Unknown
+    Interface Class GUID:   {1ca05180-a699-450a-9a0c-de4fbe3ddd89}
+    Interface Status:       Enabled
+    Interface Properties:
+        DEVPKEY_DeviceInterface_Enabled [Boolean]:
+            TRUE
+        DEVPKEY_Device_InstanceId [String]:
+            PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\4&35fe04f8&0&0041
+        DEVPKEY_DeviceInterface_ClassGuid [GUID]:
+            {1ca05180-a699-450a-9a0c-de4fbe3ddd89}
+        DEVPKEY_Device_ContainerId [GUID]:
+            {00000000-0000-0000-ffff-ffffffffffff}
+
+    Interface Path:         \\?\PCI#VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1#4&35fe04f8&0&0041#{064092b3-625e-43bf-9eb5-dc845897dd59}\GPUPARAV
+    Interface Description:  Unknown
+    Interface Class GUID:   {064092b3-625e-43bf-9eb5-dc845897dd59}
+    Reference String:       GPUPARAV
+    Interface Status:       Enabled
+    Interface Properties:
+        DEVPKEY_DeviceInterface_Enabled [Boolean]:
+            TRUE
+        DEVPKEY_Device_InstanceId [String]:
+            PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\4&35fe04f8&0&0041
+        DEVPKEY_DeviceInterface_ClassGuid [GUID]:
+            {064092b3-625e-43bf-9eb5-dc845897dd59}
+        DEVPKEY_DeviceInterface_ReferenceString [String]:
+            GPUPARAV
+        DEVPKEY_Device_ContainerId [GUID]:
+            {00000000-0000-0000-ffff-ffffffffffff}
+
+    Interface Path:         \\?\PCI#VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1#4&35fe04f8&0&0041#{937ee9b6-0ed3-411c-982b-1f564afbabd3}
+    Interface Description:  Unknown
+    Interface Class GUID:   {937ee9b6-0ed3-411c-982b-1f564afbabd3}
+    Interface Status:       Enabled
+    Interface Properties:
+        DEVPKEY_DeviceInterface_Enabled [Boolean]:
+            TRUE
+        DEVPKEY_Device_InstanceId [String]:
+            PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\4&35fe04f8&0&0041
+        DEVPKEY_DeviceInterface_ClassGuid [GUID]:
+            {937ee9b6-0ed3-411c-982b-1f564afbabd3}
+        DEVPKEY_Device_ContainerId [GUID]:
+            {00000000-0000-0000-ffff-ffffffffffff}
+
+    Interface Path:         \\?\PCI#VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1#4&35fe04f8&0&0041#{adfd9567-4245-497e-8572-78d45c1622b8}
+    Interface Description:  Unknown
+    Interface Class GUID:   {adfd9567-4245-497e-8572-78d45c1622b8}
+    Interface Status:       Enabled
+    Interface Properties:
+        DEVPKEY_DeviceInterface_Enabled [Boolean]:
+            TRUE
+        DEVPKEY_Device_InstanceId [String]:
+            PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\4&35fe04f8&0&0041
+        DEVPKEY_DeviceInterface_ClassGuid [GUID]:
+            {adfd9567-4245-497e-8572-78d45c1622b8}
+        DEVPKEY_Device_ContainerId [GUID]:
+            {00000000-0000-0000-ffff-ffffffffffff}
+
+    Interface Path:         \\?\PCI#VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1#4&35fe04f8&0&0041#{44f38538-3bb5-4e5e-9acf-559c23c0e73e}
+    Interface Description:  Unknown
+    Interface Class GUID:   {44f38538-3bb5-4e5e-9acf-559c23c0e73e}
+    Interface Status:       Enabled
+    Interface Properties:
+        DEVPKEY_DeviceInterface_Enabled [Boolean]:
+            TRUE
+        DEVPKEY_Device_InstanceId [String]:
+            PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\4&35fe04f8&0&0041
+        DEVPKEY_DeviceInterface_ClassGuid [GUID]:
+            {44f38538-3bb5-4e5e-9acf-559c23c0e73e}
+        DEVPKEY_Device_ContainerId [GUID]:
+            {00000000-0000-0000-ffff-ffffffffffff}
+Properties:
+    DEVPKEY_Device_DeviceDesc [String]:
+        AMD Radeon(TM) 8060S Graphics
+    DEVPKEY_Device_HardwareIds [String List]:
+        PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1
+        PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043
+        PCI\VEN_1002&DEV_1586&CC_038000
+        PCI\VEN_1002&DEV_1586&CC_0380
+    DEVPKEY_Device_CompatibleIds [String List]:
+        PCI\VEN_1002&DEV_1586&REV_C1
+        PCI\VEN_1002&DEV_1586
+        PCI\VEN_1002&CC_038000
+        PCI\VEN_1002&CC_0380
+        PCI\VEN_1002
+        PCI\CC_038000&DT_1
+        PCI\CC_038000
+        PCI\CC_0380&DT_1
+        PCI\CC_0380
+    DEVPKEY_Device_Service [String]:
+        amduw23g-197030-d7add786
+    DEVPKEY_Device_Class [String]:
+        Display
+    DEVPKEY_Device_ClassGuid [GUID]:
+        {4d36e968-e325-11ce-bfc1-08002be10318}
+    DEVPKEY_Device_Driver [String]:
+        {4d36e968-e325-11ce-bfc1-08002be10318}\0000
+    DEVPKEY_Device_ConfigFlags [UINT32]:
+        0x00000000 (0)
+    DEVPKEY_Device_Manufacturer [String]:
+        Advanced Micro Devices, Inc.
+    DEVPKEY_Device_LocationInfo [String]:
+        PCI bus 196, device 0, function 0
+    DEVPKEY_Device_PDOName [String]:
+        \Device\NTPNP_PCI0026
+    DEVPKEY_Device_Capabilities [UINT32]:
+        0x00000000 (0)
+    DEVPKEY_Device_BusTypeGuid [GUID]:
+        {c8ebdfb0-b510-11d0-80e5-00a0c92542e3}
+    DEVPKEY_Device_LegacyBusType [UINT32]:
+        0x00000005 (5)
+    DEVPKEY_Device_BusNumber [UINT32]:
+        0x000000C4 (196)
+    DEVPKEY_Device_EnumeratorName [String]:
+        PCI
+    DEVPKEY_Device_Address [UINT32]:
+        0x00000000 (0)
+    DEVPKEY_Device_PowerData [Binary]:
+        38 00 00 00 01 00 00 00 89 00 00 00 00 00 00 00 
+        02 00 00 00 64 00 00 00 00 00 00 00 01 00 00 00 
+        00 00 00 00 00 00 00 00 00 00 00 00 04 00 00 00 
+        04 00 00 00 05 00 00 00
+    DEVPKEY_Device_RemovalPolicy [UINT32]:
+        0x00000001 (1)
+    DEVPKEY_Device_RemovalPolicyDefault [UINT32]:
+        0x00000001 (1)
+    DEVPKEY_Device_InstallState [UINT32]:
+        0x00000000 (0)
+    DEVPKEY_Device_BaseContainerId [GUID]:
+        {00000000-0000-0000-ffff-ffffffffffff}
+    DEVPKEY_NAME [String]:
+        AMD Radeon(TM) 8060S Graphics
+    DEVPKEY_Device_InstanceId [String]:
+        PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\4&35fe04f8&0&0041
+    DEVPKEY_Device_DevNodeStatus [UINT32]:
+        0x0180200A (25174026)
+    DEVPKEY_Device_ProblemCode [UINT32]:
+        0x00000000 (0)
+    DEVPKEY_Device_EjectionRelations [String List]:
+        PCI\VEN_1002&DEV_1640&SUBSYS_16401002&REV_00\4&35fe04f8&0&0141
+        PCI\VEN_1022&DEV_17E0&SUBSYS_17E01022&REV_00\4&35fe04f8&0&0241
+        PCI\VEN_1022&DEV_1587&SUBSYS_201F1043&REV_00\4&35fe04f8&0&0441
+        PCI\VEN_1022&DEV_15E2&SUBSYS_1FB31043&REV_70\4&35fe04f8&0&0541
+        PCI\VEN_1022&DEV_15E3&SUBSYS_1FB31043&REV_00\4&35fe04f8&0&0641
+        PCI\VEN_1022&DEV_164A&SUBSYS_164A1022&REV_00\4&35fe04f8&0&0741
+    DEVPKEY_Device_BusRelations [String List]:
+        SWD\DRIVERENUM\AMDOCL&5&2a56f61f&0
+        SWD\DRIVERENUM\AMDOGL&5&2a56f61f&0
+        SWD\DRIVERENUM\AMDUWP&5&2a56f61f&0
+        SWD\DRIVERENUM\AMDVLK&5&2a56f61f&0
+        SWD\DRIVERENUM\AMDWIN&5&2a56f61f&0
+        DISPLAY\AMDISP_01\5&2a56f61f&0&UID2952790016
+        DISPLAY\TMA0803\5&2a56f61f&0&UID256
+    DEVPKEY_Device_Parent [String]:
+        PCI\VEN_1022&DEV_150C&SUBSYS_150C1022&REV_00\3&11583659&0&41
+    DEVPKEY_Device_Children [String List]:
+        SWD\DRIVERENUM\AMDOCL&5&2a56f61f&0
+        SWD\DRIVERENUM\AMDOGL&5&2a56f61f&0
+        SWD\DRIVERENUM\AMDUWP&5&2a56f61f&0
+        SWD\DRIVERENUM\AMDVLK&5&2a56f61f&0
+        SWD\DRIVERENUM\AMDWIN&5&2a56f61f&0
+        DISPLAY\AMDISP_01\5&2a56f61f&0&UID2952790016
+        DISPLAY\TMA0803\5&2a56f61f&0&UID256
+    DEVPKEY_Device_Siblings [String List]:
+        PCI\VEN_1002&DEV_1640&SUBSYS_16401002&REV_00\4&35fe04f8&0&0141
+        PCI\VEN_1022&DEV_17E0&SUBSYS_17E01022&REV_00\4&35fe04f8&0&0241
+        PCI\VEN_1022&DEV_1587&SUBSYS_201F1043&REV_00\4&35fe04f8&0&0441
+        PCI\VEN_1022&DEV_15E2&SUBSYS_1FB31043&REV_70\4&35fe04f8&0&0541
+        PCI\VEN_1022&DEV_15E3&SUBSYS_1FB31043&REV_00\4&35fe04f8&0&0641
+        PCI\VEN_1022&DEV_164A&SUBSYS_164A1022&REV_00\4&35fe04f8&0&0741
+        ACPI\PNP0C02\4&35fe04f8&0
+    DEVPKEY_Device_SafeRemovalRequired [Boolean]:
+        FALSE
+    DEVPKEY_Device_ContainerId [GUID]:
+        {00000000-0000-0000-ffff-ffffffffffff}
+    DEVPKEY_Device_IsPresent [Boolean]:
+        TRUE
+    DEVPKEY_Device_HasProblem [Boolean]:
+        FALSE
+    {83da6326-97a6-4088-9453-a1923f573b29}[15] [Boolean]:
+        TRUE
+    DEVPKEY_Device_IsRebootRequired [Boolean]:
+        FALSE
+    DEVPKEY_Device_ReportedDeviceIdsHash [UINT32]:
+        0x37B712EB (934744811)
+    DEVPKEY_Device_InLocalMachineContainer [Boolean]:
+        TRUE
+    DEVPKEY_Device_Stack [String List]:
+        \Driver\amduw23g-197030-d7add786
+        \Driver\ACPI
+        \Driver\pci
+    {a8b865dd-2e3d-4094-ad97-e593a70c75d6}[26] [Boolean]:
+        FALSE
+    {3464f7a4-2444-40b1-980a-e0903cb6d912}[10] [UINT32]:
+        0x00000003 (3)
+    DEVPKEY_PciDevice_DeviceType [UINT32]:
+        0x00000003 (3)
+    DEVPKEY_PciDevice_BaseClass [UINT32]:
+        0x00000003 (3)
+    DEVPKEY_PciDevice_SubClass [UINT32]:
+        0x00000080 (128)
+    DEVPKEY_PciDevice_ProgIf [UINT32]:
+        0x00000000 (0)
+    DEVPKEY_PciDevice_CurrentPayloadSize [UINT32]:
+        0x00000001 (1)
+    DEVPKEY_PciDevice_MaxPayloadSize [UINT32]:
+        0x00000001 (1)
+    DEVPKEY_PciDevice_MaxReadRequestSize [UINT32]:
+        0x00000002 (2)
+    DEVPKEY_PciDevice_CurrentLinkSpeed [UINT32]:
+        0x00000004 (4)
+    DEVPKEY_PciDevice_CurrentLinkWidth [UINT32]:
+        0x00000010 (16)
+    DEVPKEY_PciDevice_MaxLinkSpeed [UINT32]:
+        0x00000004 (4)
+    DEVPKEY_PciDevice_MaxLinkWidth [UINT32]:
+        0x00000010 (16)
+    DEVPKEY_PciDevice_ExpressSpecVersion [UINT32]:
+        0x00000002 (2)
+    DEVPKEY_PciDevice_InterruptSupport [UINT32]:
+        0x00000007 (7)
+    DEVPKEY_PciDevice_InterruptMessageMaximum [UINT32]:
+        0x00000004 (4)
+    DEVPKEY_PciDevice_BarTypes [UINT32]:
+        0x01010101 (16843009)
+    DEVPKEY_PciDevice_AERCapabilityPresent [Boolean]:
+        FALSE
+    DEVPKEY_PciDevice_S0WakeupSupported [Boolean]:
+        TRUE
+    DEVPKEY_PciDevice_AcsSupport [UINT32]:
+        0x00000000 (0)
+    DEVPKEY_PciDevice_AriSupport [Boolean]:
+        FALSE
+    DEVPKEY_PciDevice_AcsCompatibleUpHierarchy [UINT32]:
+        0x00000003 (3)
+    DEVPKEY_PciDevice_AcsCapabilityRegister [UINT32]:
+        0x00000000 (0)
+    DEVPKEY_PciDevice_AtsSupport [Boolean]:
+        TRUE
+    DEVPKEY_PciDevice_RequiresReservedMemoryRegion [Boolean]:
+        FALSE
+    DEVPKEY_PciDevice_AtomicsSupported [Boolean]:
+        FALSE
+    DEVPKEY_PciDevice_SupportedLinkSubState [UINT32]:
+        0x00000000 (0)
+    DEVPKEY_PciDevice_OnPostPath [Boolean]:
+        TRUE
+    DEVPKEY_PciDevice_D3ColdSupport [UINT32]:
+        0x00000404 (1028)
+    DEVPKEY_PciDevice_UsbComponentRelation [Boolean]:
+        FALSE
+    DEVPKEY_PciDevice_SupportsDmwrOnEntireDeviceTree [Boolean]:
+        FALSE
+    DEVPKEY_PciDevice_IsTunneledDevice [Boolean]:
+        FALSE
+    DEVPKEY_Device_BusReportedDeviceDesc [String]:
+        Video Controller
+    DEVPKEY_Device_ConfigurationId [String]:
+        oem59.inf:PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1,ati2mtag_StrixHalo
+    DEVPKEY_Device_BiosDeviceName [String]:
+        \_SB.PCI0.GPPA.VGA
+    DEVPKEY_Device_ExtendedConfigurationIds [String List]:
+        oem58.inf:PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1,ati2mtag_StrixHalo,12/15/2025,32.0.22032.6002
+    {60b193cb-5276-4d0f-96fc-f173abad3ec6}[2] [UINT64]:
+        0x0000000000014E57 (85591)
+    {60b193cb-5276-4d0f-96fc-f173abad3ec6}[3] [UINT32]:
+        0x00000000 (0)
+    {80497100-8c73-48b9-aad9-ce387e19c56e}[6] [UINT32]:
+        0x00000000 (0)
+    {83da6326-97a6-4088-9453-a1923f573b29}[3] [String]:
+        oem59.inf:cb0ae4148b9b954a:ati2mtag_StrixHalo:32.0.22032.6002:PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1
+    {83da6326-97a6-4088-9453-a1923f573b29}[4] [String]:
+        oem1.inf:cb0ae4148b1b854b:ati2mtag_StrixHalo:32.0.12079.1014:PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1
+    {83da6326-97a6-4088-9453-a1923f573b29}[10] [String]:
+        PCI\VEN_1022&DEV_150C&SUBSYS_150C1022&REV_00\3&11583659&0&41
+    {83da6326-97a6-4088-9453-a1923f573b29}[18] [UINT32]:
+        0x00000002 (2)
+    {83da6326-97a6-4088-9453-a1923f573b29}[25] [UINT32]:
+        0x00000000 (0)
+    {83da6326-97a6-4088-9453-a1923f573b29}[26] [Binary]:
+        00
+    DEVPKEY_Device_InstallDate [FILETIME]:
+        10/14/2026 11:23:54
+    DEVPKEY_Device_FirstInstallDate [FILETIME]:
+        1/12/2026 22:32:22
+    DEVPKEY_Device_LastArrivalDate [FILETIME]:
+        11/8/2026 21:36:38
+    DEVPKEY_Device_LocationPaths [String List]:
+        PCIROOT(0)#PCI(0801)#PCI(0000)
+        ACPI(_SB_)#ACPI(PCI0)#ACPI(GPPA)#ACPI(VGA_)
+    DEVPKEY_Device_DriverDate [FILETIME]:
+        12/15/2025 0:00:00
+    DEVPKEY_Device_DriverVersion [String]:
+        32.0.22032.6002
+    DEVPKEY_Device_DriverDesc [String]:
+        AMD Radeon(TM) 8060S Graphics
+    DEVPKEY_Device_DriverInfPath [String]:
+        oem59.inf
+    DEVPKEY_Device_DriverInfSection [String]:
+        ati2mtag_StrixHalo
+    DEVPKEY_Device_MatchingDeviceId [String]:
+        PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1
+    DEVPKEY_Device_DriverProvider [String]:
+        Advanced Micro Devices, Inc.
+    DEVPKEY_Device_DriverRank [UINT32]:
+        0x00CF0000 (13565952)
+    {a8b865dd-2e3d-4094-ad97-e593a70c75d6}[20] [String List]:
+        oem58.inf
+    {a8b865dd-2e3d-4094-ad97-e593a70c75d6}[33] [String List]:
+        AMD External Events Utility
+    {f0e20f09-d97a-49a9-8046-bb6e22e6bb2e}[2] [Binary]:
+        04 00 00 00 00 00 00 00 03 00 00 00 53 00 00 00 
+        05 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 
+        99 99 99 99 00 00 00 00 00 00 00 00 00 00 00 00 
+        00 00 00 00 00 00 00 00 04 00 E0 FE 03 00 00 00 
+        B5 FF FF FF 00 00 00 00 00 C4 00 00 00 00 00 40 
+        03 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+        03 00 00 00 53 00 00 00 05 00 00 00 00 00 00 00 
+        01 00 00 00 00 00 00 00 66 66 66 66 00 00 00 00 
+        00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+        04 00 E0 FE 02 00 00 00 B4 FF FF FF 00 00 00 00 
+        00 C4 00 00 00 00 00 40 03 00 00 00 00 00 00 00 
+        00 00 00 00 00 00 00 00 03 00 00 00 B4 00 00 00 
+        0B 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 
+        99 99 99 99 00 00 00 00 00 00 00 00 00 00 00 00 
+        00 00 00 00 00 00 00 00 04 00 E0 FE 01 00 00 00 
+        B3 FF FF FF 00 00 00 00 00 C4 00 00 00 00 00 40 
+        03 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+        03 00 00 00 B4 00 00 00 0B 00 00 00 00 00 00 00 
+        01 00 00 00 00 00 00 00 66 66 66 66 00 00 00 00 
+        00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+        04 00 E0 FE 00 00 00 00 B2 FF FF FF 00 00 00 00 
+        00 C4 00 00 00 00 00 40 03 00 00 00 00 00 00 00 
+        00 00 00 00 00 00 00 00
+

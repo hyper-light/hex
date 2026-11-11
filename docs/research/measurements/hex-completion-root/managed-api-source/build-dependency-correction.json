@@ -1,0 +1,21 @@
+{
+  "source": "b87fb51c97d81793dd9e22e16314a0e04a5ac35a",
+  "actual_command": "cargo clippy -p hex-api -p hex-core -p hex-client -p hex-sim --all-targets --locked -- -D warnings",
+  "actual_exit": 101,
+  "rust_compilation_started": false,
+  "tests_executed": 0,
+  "actual_log_sha256": "28af341192b2aade7147bce8f7ee82505b7db9aeb73a2907b027de88090ff412",
+  "cause": "ROOT manually recorded lock omitted the published unsize1.1.0 build-dependency edge to existing autocfg1.5.1; package versions/checksums unchanged",
+  "crate_sha256": "4fa7a7a734c1a5664a662ddcea0b6c9472a21da8888c957c7f1eaa09dba7a939",
+  "changes": {
+    "Cargo.lock": {
+      "before": "5eae5bcd6fd914257b9d79b307b30dcab9fb192e0d0fc692ab98be7504dcfb4b",
+      "after": "78f1b9268a2ecbd5f1b3a610aed2190af59cd1f8c83c49a32b4727cb56077f36"
+    },
+    "docs/research/measurements/hex-completion-root/managed-api-source/managed-receipt-Cargo.lock": {
+      "before": "5bc1b78708a541fda67263a3af6ed4690b93ab05882532cffa6fbfb0a996b66b",
+      "after": "1e9ae2e5e95e103c27bce8e0f7294900984825d22c9926f770c63c872d547386"
+    }
+  },
+  "resolved_result": "pending exact successor check; previous refused original remains immutable"
+}

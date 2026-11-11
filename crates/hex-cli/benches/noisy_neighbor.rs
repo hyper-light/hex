@@ -83,6 +83,9 @@ mod linux {
         let victim = BoxId::new("victim").unwrap();
         let builder = BoxId::new("builder").unwrap();
         node.create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: victim.clone(),
             bounds: Bounds {
                 io_latency_us: Some(VICTIM_LATENCY_US),
@@ -93,6 +96,9 @@ mod linux {
         })
         .expect("victim box");
         node.create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: builder.clone(),
             bounds: Bounds {
                 io_weight: Some(BUILDER_IO_WEIGHT),

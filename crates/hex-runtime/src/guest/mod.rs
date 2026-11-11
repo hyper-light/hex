@@ -2,29 +2,66 @@
 //! guest per node, booted on the node's first `oci` create, running Hex's own Linux node agent, unchanged
 //! (CLAUDE.md §8). This runtime is a client of that node: it stages each box's root into the guest
 //! ([`hex_client::guest::stage`]), rewrites the spec to the guest's paths ([`rewrite`]), and forwards every
-//! call over [`hex_client::guest::Client`]. Where Shards has no backend (macOS x86_64, Windows arm64) the
-//! class is refused by name before anything is booted.
+//! call over [`hex_client::guest::Client`]. Shards' existing KVM/HVF/WHP adapters cover the supported
+//! hosts; the public seam recognizes them, and the actual backend checks host capabilities at boot.
 
+mod books;
+mod cost;
+mod dedicated;
+mod family;
+pub mod gpu;
+mod gpu_pool;
 pub mod held;
+mod managed;
+#[cfg(any(test, feature = "native-trusted-entry-measurement"))]
+pub(crate) mod native_fixture;
+mod observer;
+mod physical;
+mod pool;
 pub mod rewrite;
+mod route;
+pub mod selected;
+mod shared;
 pub mod shares;
+
+pub use observer::config::{
+    ENV_GPU_OBSERVER_FILE, ENV_GPU_OBSERVER_SHA256, GpuArtifact, GpuArtifactRole, GpuObserver,
+    GpuObserverInput,
+};
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use hex_api::{
     BoxId, BoxInfo, BoxSpec, Class, ClassSpec, Proc, Program, Refusal, Rootfs, Runtime, Signal,
     Stdio, Usage,
 };
+#[cfg(test)]
+use hex_client::guest::Link;
 use hex_client::guest::shards::{ShardsLink, refusal};
 use hex_client::guest::stage::{self, Item};
-use hex_client::guest::{Client, Link};
+use hex_client::guest::{Client, LinkOwner, own_link};
 use hex_core::stream::{self, files};
 
 use shares::Share;
+
+/// The existing evented connection owner, shared without an unchecked new Arc.
+pub type EventedClient = triomphe::Arc<Client>;
+
+fn evented_owner(client: Client) -> Result<EventedClient, Refusal> {
+    triomphe::Arc::try_new(client).map_err(|_| Refusal::Exhausted {
+        what: "guest evented client owner",
+        bound: std::mem::size_of::<Client>(),
+    })
+}
+
+pub use cost::{
+    ENV_COST_EVIDENCE, ENV_COST_FILE, ENV_COST_SHA256, GuestInputs, load_runtime_cost,
+    load_runtime_inputs,
+};
 
 /// The guest a node boots: its kernel and initramfs (whose `/init` is Hex's static `hex`), its vCPUs and
 /// memory (the node's to give, §1), and the host folders it shares.
@@ -36,6 +73,8 @@ pub struct GuestConfig {
     pub initrd: PathBuf,
     pub vcpus: u32,
     pub memory_mib: u64,
+    /// Enable Shards' existing shared Venus GPU; physical reservations still require mapping.
+    pub gpu: bool,
     pub shares: Vec<Share>,
     /// Where the guest's relay stages each box's root: [`stage::STAGED`], the guest's tmpfs.
     pub staged: String,
@@ -47,6 +86,8 @@ pub const ENV_KERNEL: &str = "HEX_GUEST_KERNEL";
 pub const ENV_INITRD: &str = "HEX_GUEST_INITRD";
 pub const ENV_CPUS: &str = "HEX_GUEST_CPUS";
 pub const ENV_MEMORY_MIB: &str = "HEX_GUEST_MEMORY_MIB";
+/// Explicit shared Venus enable; absent preserves the CPU-only guest configuration.
+pub const ENV_GPU: &str = "HEX_GUEST_GPU";
 
 impl GuestConfig {
     /// The guest named by the environment ([`GuestConfig::from_vars`] over the process's).
@@ -88,6 +129,17 @@ impl GuestConfig {
             initrd: path(ENV_INITRD),
             vcpus: number(&var, ENV_CPUS)?,
             memory_mib: number(&var, ENV_MEMORY_MIB)?,
+            gpu: match var(ENV_GPU) {
+                None => false,
+                Some(value) if value == "false" => false,
+                Some(value) if value == "true" => true,
+                Some(_) => {
+                    return Err(Refusal::Invalid {
+                        what: ENV_GPU,
+                        why: "expected true or false".to_owned(),
+                    });
+                }
+            },
             shares: shares::from_var(var(shares::ENV))?,
             staged: stage::STAGED.to_owned(),
         })
@@ -105,6 +157,8 @@ impl GuestConfig {
             cmdline: self.cmdline(),
             vcpus: self.vcpus,
             memory_mib: self.memory_mib,
+            gpu: self.gpu,
+            gpu_devices: Vec::new(),
             disks: Vec::new(),
             binary: Some(self.binary.clone()),
             ports: vec![stream::CONTROL_PORT, stream::STDIO_PORT, files::FILES_PORT],
@@ -121,20 +175,118 @@ impl GuestConfig {
 }
 
 impl GuestConfig {
-    fn cmdline(&self) -> String {
-        let modes: Vec<&str> = self
-            .shares
-            .iter()
-            .map(|s| if s.read_only { "ro" } else { "rw" })
-            .collect();
+    fn cmdline_parts(&self, mut emit: impl FnMut(&str)) {
         // `panic=-1`: a negative timeout reboots at once on a panic (kernel-parameters.txt, `panic=`;
         // kernel/panic.c `panic_timeout`), so the VM ends and the host sees it rather than a guest that
         // hangs.
-        let mut cmdline = "console=ttyS0 panic=-1".to_owned();
-        if !modes.is_empty() {
-            cmdline.push_str(&format!(" {}={}", shares::CMDLINE, modes.join(",")));
+        emit("console=ttyS0 panic=-1");
+        if !self.shares.is_empty() {
+            emit(" ");
+            emit(shares::CMDLINE);
+            emit("=");
+            let mut separated = false;
+            for share in &self.shares {
+                if separated {
+                    emit(",");
+                }
+                emit(if share.read_only { "ro" } else { "rw" });
+                separated = true;
+            }
         }
+    }
+
+    fn cmdline(&self) -> String {
+        let mut cmdline = String::new();
+        self.cmdline_parts(|part| cmdline.push_str(part));
         cmdline
+    }
+
+    #[cfg(any(test, feature = "native-trusted-entry-measurement"))]
+    pub(crate) fn try_spec(&self) -> Result<shards_api::GuestSpec, Refusal> {
+        let exhausted = |bound| Refusal::Exhausted {
+            what: "native fixture guest specification storage",
+            bound,
+        };
+        if self.shares.len() > shares::MAX_SHARES {
+            return Err(route::invalid(
+                "native fixture exceeds the configured share bound",
+            ));
+        }
+        let path = |path: &std::path::Path| -> Result<PathBuf, Refusal> {
+            let mut copy = OsString::new();
+            copy.try_reserve_exact(path.as_os_str().len())
+                .map_err(|_| exhausted(path.as_os_str().len()))?;
+            copy.push(path.as_os_str());
+            Ok(PathBuf::from(copy))
+        };
+        let mut count = Some(0usize);
+        self.cmdline_parts(|part| count = count.and_then(|count| count.checked_add(part.len())));
+        let mut cmdline = String::new();
+        let count = count.ok_or_else(|| exhausted(usize::MAX))?;
+        cmdline
+            .try_reserve_exact(count)
+            .map_err(|_| exhausted(count))?;
+        // The same immutable segment traversal was counted above. Every push
+        // fits this reservation; no formatting/allocation fallback is used.
+        self.cmdline_parts(|part| cmdline.push_str(part));
+        let mut shares = Vec::new();
+        shares
+            .try_reserve_exact(self.shares.len())
+            .map_err(|_| exhausted(shares::MAX_SHARES))?;
+        for share in &self.shares {
+            shares.push(shards_api::Share {
+                dir: path(&share.dir)?,
+                read_only: share.read_only,
+            });
+        }
+        let allowed = [stream::CONTROL_PORT, stream::STDIO_PORT, files::FILES_PORT];
+        let mut ports = Vec::new();
+        ports
+            .try_reserve_exact(allowed.len())
+            .map_err(|_| exhausted(allowed.len()))?;
+        ports.extend_from_slice(&allowed);
+        Ok(shards_api::GuestSpec {
+            kernel: path(&self.kernel)?,
+            init: shards_api::Init::Initrd(path(&self.initrd)?),
+            cmdline,
+            vcpus: self.vcpus,
+            memory_mib: self.memory_mib,
+            gpu: self.gpu,
+            gpu_devices: Vec::new(),
+            disks: Vec::new(),
+            binary: Some(path(&self.binary)?),
+            ports,
+            shares,
+        })
+    }
+
+    /// One existing fixed-VM cost/configuration check, shared by runtime
+    /// registration and the measurement's typed preparation, without an owner.
+    pub(crate) fn checked_runtime_allocation(
+        &self,
+        cost: hex_api::RuntimeCost,
+    ) -> Result<hex_api::Allocation, Refusal> {
+        cost.check()?;
+        let configured = selected::resources(self)?;
+        if cost.floor.cpu_milli != configured.cpu_milli
+            || cost.ceiling.cpu_milli != configured.cpu_milli
+            || cost.floor.mem_bytes != configured.mem_bytes
+            || cost.ceiling.mem_bytes != configured.mem_bytes
+        {
+            let why = "CPU/memory floor and ceiling must equal the configured VM";
+            let mut text = String::new();
+            text.try_reserve_exact(why.len())
+                .map_err(|_| Refusal::Exhausted {
+                    what: "Shards runtime cost refusal bytes",
+                    bound: why.len(),
+                })?;
+            text.push_str(why);
+            return Err(Refusal::Invalid {
+                what: "Shards runtime cost",
+                why: text,
+            });
+        }
+        cost.allocate(hex_api::CapacityResources::default())
     }
 }
 
@@ -154,10 +306,43 @@ where
 }
 
 /// The booted guest and the client of its node.
+enum GuestHandle {
+    Shared(Arc<dyn shards_api::Guest>),
+    Managed(shards_api::ManagedGuest),
+}
+
+impl std::ops::Deref for GuestHandle {
+    type Target = dyn shards_api::Guest;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Shared(guest) => guest.as_ref(),
+            Self::Managed(guest) => guest,
+        }
+    }
+}
+
+struct Owner {
+    id: BoxId,
+    class: Class,
+    allocation: Option<hex_api::Allocation>,
+    route: Option<hex_api::RouteReceipt>,
+}
+
 struct Booted {
-    guest: Arc<dyn shards_api::Guest>,
-    link: Arc<dyn Link>,
+    guest: GuestHandle,
+    link: LinkOwner,
     client: Client,
+    evented: Mutex<Option<EventedClient>>,
+    owner: Option<Owner>,
+    backing: Option<shared::Binding>,
+}
+
+fn booted_owner(booted: Booted) -> Result<triomphe::Arc<Booted>, Refusal> {
+    triomphe::Arc::try_new(booted).map_err(|_| Refusal::Exhausted {
+        what: "booted guest connection owner",
+        // One such connection owner per already-admitted VM, not another VM grant.
+        bound: 1,
+    })
 }
 
 /// The slowest recorded value of each wait that seeds a bound, by host class
@@ -250,7 +435,7 @@ pub trait Joins: Send + Sync {
 pub struct GuestRuntime {
     guests: Arc<dyn shards_api::Guests>,
     config: GuestConfig,
-    booted: Mutex<Option<Arc<Booted>>>,
+    booted: Mutex<Option<triomphe::Arc<Booted>>>,
     /// The slowest boot to ready this node has seen, the learned half of the first dial's bound.
     slowest: Mutex<Duration>,
     /// Guests stopped for hanging alive past the bound, never ready.
@@ -265,7 +450,14 @@ pub struct GuestRuntime {
     record: Option<PathBuf>,
     /// The event form's client of the guest's node: its answers are read by the node's loop, so a call
     /// through it holds no thread while the guest answers.
-    evented: Mutex<Option<Arc<Client>>>,
+    dedicated: Mutex<Vec<dedicated::Slot>>,
+    gpu_catalog: Option<crate::devices::SharedCatalog>,
+    books: OnceLock<Weak<dyn crate::devices::Books>>,
+    runtime_cost: Option<hex_api::RuntimeCost>,
+    native_images: Option<shards_api::NativeImages>,
+    native_paths: Option<shards_api::RuntimePaths>,
+    shared_pool: Mutex<Option<hex_api::BackingKey>>,
+    gpu_observer: Option<GpuObserver>,
     /// What joins each guest's evented connection to the node's loop ([`GuestRuntime::join_loop`]).
     joins: Mutex<Option<Arc<dyn Joins>>>,
 }
@@ -349,6 +541,11 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
 }
 
 impl GuestRuntime {
+    fn cpu_spec(&self) -> shards_api::GuestSpec {
+        let mut spec = self.config.spec();
+        spec.gpu = false;
+        spec
+    }
     /// The class over `guests`, booting `config`'s guest when first asked. A boot's first dial waits at
     /// most [`Self::first_dial_bound`] for the guest to listen ([`ShardsLink`]).
     pub fn new(guests: Arc<dyn shards_api::Guests>, config: GuestConfig) -> Self {
@@ -362,7 +559,14 @@ impl GuestRuntime {
             booted_binary: Mutex::new(None),
             warm: Mutex::new(Warm::default()),
             record: None,
-            evented: Mutex::new(None),
+            dedicated: Mutex::new(Vec::new()),
+            gpu_catalog: None,
+            books: OnceLock::new(),
+            runtime_cost: None,
+            native_images: None,
+            native_paths: None,
+            shared_pool: Mutex::new(None),
+            gpu_observer: None,
             joins: Mutex::new(None),
         }
     }
@@ -380,6 +584,9 @@ impl GuestRuntime {
     /// node calls it when it starts, before it accepts a box ([`WithGuest::new`]). Where Shards has no backend
     /// there is no guest to boot, and the `oci` class is refused at create by name (§5).
     pub fn boot(&self) -> Result<(), Refusal> {
+        if self.managed_shared() {
+            return self.recover_backing();
+        }
         if self.guests.backend().is_err() {
             return Ok(());
         }
@@ -400,25 +607,28 @@ impl GuestRuntime {
             return Ok(());
         };
         let guest: Arc<dyn shards_api::Guest> =
-            match self.guests.attach(&identity, &self.config.spec()) {
+            match self.guests.attach(&identity, &self.cpu_spec()) {
                 Ok(guest) => guest.into(),
                 Err(shards_api::Refusal::Gone { .. } | shards_api::Refusal::Ended(_)) => {
                     return held::remove(path);
                 }
                 Err(why) => return Err(refusal("taking back the node's guest", &why)),
             };
-        let link: Arc<dyn Link> = Arc::new(ShardsLink::new(
+        let link: LinkOwner = own_link(ShardsLink::new(
             Arc::clone(&guest),
             self.first_dial_bound()?,
-        ));
-        match Client::connect(Arc::clone(&link)) {
+        ))?;
+        match Client::connect(triomphe::Arc::clone(&link)) {
             Ok(client) => {
                 // The binary that booted it isn't known here: no warm-up is asked for it.
-                let b = Arc::new(Booted {
-                    guest,
+                let b = booted_owner(Booted {
+                    guest: GuestHandle::Shared(guest),
                     link,
                     client,
-                });
+                    evented: Mutex::new(None),
+                    owner: None,
+                    backing: None,
+                })?;
                 self.join(&b)?;
                 *self.lock()? = Some(b);
                 Ok(())
@@ -440,39 +650,66 @@ impl GuestRuntime {
         match self.running()? {
             Some(b) => self.join(&b),
             None => Ok(()),
+        }?;
+        for id in self.selected_ids()? {
+            if let Some(guest) = self.selected_running(&id)? {
+                self.join(&guest)?;
+            }
         }
+        Ok(())
     }
 
     /// Opens booted guest `b`'s evented connection and joins it to the loop, where one is given.
     fn join(&self, b: &Booted) -> Result<(), Refusal> {
+        self.join_with_deadline(b, None)
+    }
+
+    fn join_before(&self, b: &Booted, budget: managed::Budget) -> Result<(), Refusal> {
+        budget.remaining()?;
+        self.join_with_deadline(b, Some(budget.deadline()))?;
+        budget.remaining()?;
+        Ok(())
+    }
+
+    fn join_with_deadline(&self, b: &Booted, deadline: Option<Instant>) -> Result<(), Refusal> {
         let joins = self.joins.lock().map_err(poisoned)?.clone();
         let Some(joins) = joins else {
             return Ok(());
         };
         let (token, room) = joins.reserve()?;
-        let (client, pump) = Client::connect_evented(Arc::clone(&b.link), room)?;
-        *self.evented.lock().map_err(poisoned)? = Some(Arc::new(client));
+        let (client, pump) = match deadline {
+            Some(at) => Client::connect_evented_before(triomphe::Arc::clone(&b.link), room, at)?,
+            None => Client::connect_evented(triomphe::Arc::clone(&b.link), room)?,
+        };
+        let client = evented_owner(client)?;
+        if deadline.is_some_and(|at| Instant::now() >= at) {
+            return Err(Refusal::os(
+                "joining the guest within its original create budget",
+                std::io::ErrorKind::TimedOut,
+            ));
+        }
+        *b.evented.lock().map_err(poisoned)? = Some(client);
         joins.join(token, pump)
     }
 
     /// The event form's client of the running guest, joined to the loop: one whose connection ended while
     /// its guest runs is joined again first. `None` with no guest running.
-    pub fn evented(&self) -> Result<Option<Arc<Client>>, Refusal> {
+    pub fn evented(&self) -> Result<Option<EventedClient>, Refusal> {
         let Some(b) = self.running()? else {
             return Ok(None);
         };
-        let held = self.evented.lock().map_err(poisoned)?.clone();
+        let held = b.evented.lock().map_err(poisoned)?.clone();
         if let Some(client) = held.filter(|c| !c.closed()) {
             return Ok(Some(client));
         }
         self.join(&b)?;
-        Ok(self.evented.lock().map_err(poisoned)?.clone())
+        Ok(b.evented.lock().map_err(poisoned)?.clone())
     }
 
     /// A program's own evented control connection, held until its start/end or cancellation.
     /// Windows' caller-owned sockets cannot be lent through another process. Keeping their offered exec on
     /// its own control connection makes cancellation close every early stream without affecting other programs.
-    pub fn program_client(&self) -> Result<Option<Arc<Client>>, Refusal> {
+    pub fn program_client(&self) -> Result<Option<EventedClient>, Refusal> {
         let Some(b) = self.running()? else {
             return Ok(None);
         };
@@ -485,9 +722,10 @@ impl GuestRuntime {
                 Refusal::Broken("the guest program has no node event loop".to_owned())
             })?;
         let (token, room) = joins.reserve()?;
-        let (client, pump) = Client::connect_evented(Arc::clone(&b.link), room)?;
+        let (client, pump) = Client::connect_evented(triomphe::Arc::clone(&b.link), room)?;
+        let client = evented_owner(client)?;
         joins.join(token, pump)?;
-        Ok(Some(Arc::new(client)))
+        Ok(Some(client))
     }
 
     /// Records `guest` as the one this node holds, where a record is kept: one whose identity Shards can't
@@ -507,6 +745,11 @@ impl GuestRuntime {
     /// (HEX-GUEST-40). The running guest is never booted again for it: that would end its boxes. At most one
     /// warm-up is in flight, and a binary is warmed once. Called on each create: a stat, no polling.
     fn warm_if_changed(&self) -> Result<(), Refusal> {
+        // A profiled/native-owned runtime has no extra pool grant for a second
+        // VM. Optional warming is skipped; the shared backing never pays twice.
+        if self.runtime_cost.is_some() || self.uses_books() {
+            return Ok(());
+        }
         let Some(now) = binary_identity(&self.config.binary) else {
             return Ok(());
         };
@@ -522,6 +765,7 @@ impl GuestRuntime {
         least.vcpus = 1;
         least.memory_mib = shards_api::min_memory_mib(std::env::consts::ARCH);
         least.shares.clear();
+        least.gpu = false;
         let spec = least.spec();
         let guests = Arc::clone(&self.guests);
         let bound = self.first_dial_bound()?;
@@ -568,16 +812,19 @@ impl GuestRuntime {
         self.retired.load(Ordering::Relaxed)
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, Option<Arc<Booted>>>, Refusal> {
+    fn lock(&self) -> Result<MutexGuard<'_, Option<triomphe::Arc<Booted>>>, Refusal> {
         self.booted.lock().map_err(poisoned)
     }
 
     /// The guest, booted now if it isn't, or booted again if it ended (every box in it ended with it).
-    fn guest(&self) -> Result<Arc<Booted>, Refusal> {
+    fn guest(&self) -> Result<triomphe::Arc<Booted>, Refusal> {
+        if self.managed_shared() {
+            return self.shared_running();
+        }
         let mut booted = self.lock()?;
         if let Some(b) = booted.as_ref() {
             match b.guest.wait_for(Duration::ZERO) {
-                Ok(None) => return Ok(Arc::clone(b)),
+                Ok(None) => return Ok(triomphe::Arc::clone(b)),
                 Ok(Some(_)) | Err(_) => *booted = None,
             }
         }
@@ -592,12 +839,12 @@ impl GuestRuntime {
             let began = Instant::now();
             let guest: Arc<dyn shards_api::Guest> = self
                 .guests
-                .boot(&self.config.spec())
+                .boot(&self.cpu_spec())
                 .map_err(|why| refusal("booting the node's guest", &why))?
                 .into();
             let patience = bound.saturating_sub(began.elapsed());
-            let link: Arc<dyn Link> = Arc::new(ShardsLink::new(Arc::clone(&guest), patience));
-            match Client::connect(Arc::clone(&link)) {
+            let link: LinkOwner = own_link(ShardsLink::new(Arc::clone(&guest), patience))?;
+            match Client::connect(triomphe::Arc::clone(&link)) {
                 Ok(client) => {
                     self.learn(began.elapsed());
                     if let Err(why) = self.record(guest.as_ref()) {
@@ -606,14 +853,17 @@ impl GuestRuntime {
                         return Err(why);
                     }
                     *self.booted_binary.lock().map_err(poisoned)? = binary;
-                    let b = Arc::new(Booted {
-                        guest,
+                    let b = booted_owner(Booted {
+                        guest: GuestHandle::Shared(guest),
                         link,
                         client,
-                    });
+                        evented: Mutex::new(None),
+                        owner: None,
+                        backing: None,
+                    })?;
                     // The new guest's control connection joins the loop as the one before's did.
                     self.join(&b)?;
-                    *booted = Some(Arc::clone(&b));
+                    *booted = Some(triomphe::Arc::clone(&b));
                     return Ok(b);
                 }
                 Err(why) => {
@@ -640,17 +890,18 @@ impl GuestRuntime {
     }
 
     /// The guest if it is booted: a call about a box needs no boot, as there's no box before one.
-    fn running(&self) -> Result<Option<Arc<Booted>>, Refusal> {
+    fn running(&self) -> Result<Option<triomphe::Arc<Booted>>, Refusal> {
         Ok(self.lock()?.clone())
     }
 
     fn with<T>(
         &self,
         id: &BoxId,
-        call: impl FnOnce(&Client) -> Result<T, Refusal>,
+        call: impl FnOnce(&Booted) -> Result<T, Refusal>,
     ) -> Result<T, Refusal> {
-        match self.running()? {
-            Some(b) => call(&b.client),
+        let running = self.booted_for(id)?;
+        match running {
+            Some(b) => call(&b),
             None => Err(Refusal::NoSuchBox(id.clone())),
         }
     }
@@ -678,67 +929,133 @@ impl Drop for GuestRuntime {
         self.finish_warm();
         if let Ok(Some(b)) = self.booted.get_mut().map(Option::take) {
             let _ = b.guest.stop();
-            if let Some(path) = &self.record {
+            if matches!(&b.guest, GuestHandle::Shared(_))
+                && let Some(path) = &self.record
+            {
                 let _ = held::remove(path);
             }
         }
     }
 }
 
+/// AC-T7.4.1: configured vCPU/memory are ceilings, never host-room substitutes. Disk remains the
+/// actual guest's backing writable filesystem; PID plus start fences a replacement guest's pool.
+fn guest_capacity(
+    mut capacity: hex_api::Capacity,
+    config: &GuestConfig,
+    identity: &shards_api::Identity,
+) -> Result<hex_api::Capacity, Refusal> {
+    capacity.check()?;
+    let cpu = u64::from(config.vcpus)
+        .checked_mul(1000)
+        .ok_or_else(|| Refusal::Broken("guest CPU milli overflow".to_owned()))?;
+    let memory = config
+        .memory_mib
+        .checked_mul(1 << 20)
+        .ok_or_else(|| Refusal::Broken("guest memory bytes overflow".to_owned()))?;
+    capacity.id = format!("guest:{}:{}", identity.pid, identity.started);
+    capacity.total.cpu_milli = capacity.total.cpu_milli.min(cpu);
+    capacity.total.mem_bytes = capacity.total.mem_bytes.min(memory);
+    capacity.free.cpu_milli = capacity.free.cpu_milli.min(capacity.total.cpu_milli);
+    capacity.free.mem_bytes = capacity.free.mem_bytes.min(capacity.total.mem_bytes);
+    capacity.check()?;
+    Ok(capacity)
+}
+
 impl Runtime for GuestRuntime {
+    fn backing_usage(&self, key: &hex_api::BackingKey) -> Result<Usage, Refusal> {
+        GuestRuntime::backing_usage(self, key)
+    }
+    fn initialize_backing(
+        &self,
+        grant: hex_api::BackingGrant,
+    ) -> Result<hex_api::BackingOffer, Refusal> {
+        if self.shared_key()? == Some(grant.key) {
+            self.initialize_pool(grant)
+        } else {
+            self.initialize_gpu_pool(grant)
+        }
+    }
+
+    fn release_backing(&self, key: hex_api::BackingKey) -> Result<hex_api::BackingOffer, Refusal> {
+        if self.shared_key()? == Some(key) {
+            if self.pool_record(key)?.phase == hex_api::BackingPhase::Released {
+                self.acknowledge_shared_release(key)
+            } else {
+                self.release_pool(key)
+            }
+        } else {
+            self.release_gpu_backing(key)
+        }
+    }
+    fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
+        if !matches!(class, Class::Oci | Class::Shards) {
+            return Err(Refusal::Invalid {
+                what: "capacity class",
+                why: "the guest runs only oci".to_owned(),
+            });
+        }
+        if self.uses_books() && class == Class::Shards {
+            return self.native_capacity().map(Some);
+        }
+        if self.managed_shared() {
+            let mut capacity = self.authority()?.capacity()?;
+            self.add_offers(&mut capacity, class)?;
+            return Ok(Some(capacity));
+        }
+        let booted = self.guest()?;
+        let capacity = booted.client.capacity(Class::Oci)?.ok_or_else(|| {
+            Refusal::Broken("the guest node reported no resource pool".to_owned())
+        })?;
+        let identity = booted
+            .guest
+            .identity()
+            .map_err(|why| refusal("reading the guest pool identity", &why))?;
+        let capacity = guest_capacity(capacity, &self.config, &identity)?;
+        Ok(Some(capacity))
+    }
+
     fn classes(&self) -> Vec<Class> {
-        vec![Class::Oci]
+        if self.uses_books() && self.runtime_cost.is_some() {
+            vec![Class::Oci, Class::Shards]
+        } else {
+            vec![Class::Oci]
+        }
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        if let ClassSpec::Process = spec.class {
+        route::guest_spec(&spec)?;
+        if matches!(spec.class, ClassSpec::Process | ClassSpec::Firecracker(_)) {
             return Err(Refusal::Invalid {
                 what: "class",
                 why: "the node's guest runs the oci class; process boxes are the host's".to_owned(),
             });
         }
-        spec.check()?;
         // Refused as on any node, naming the field, before anything is mapped, staged or booted.
-        if let ClassSpec::Oci(oci) = &spec.class {
+        if let ClassSpec::Oci(oci) | ClassSpec::Shards(oci) = &spec.class {
             rewrite::check(oci)?;
         }
-        let id = spec.id.clone();
-        let known = match &spec.class {
-            ClassSpec::Oci(oci) => match &oci.rootfs {
-                Rootfs::Layers(paths) => self.digests.lock().map_err(poisoned)?.known(paths),
-                Rootfs::Dir(_) => rewrite::Known::new(),
-            },
-            _ => rewrite::Known::new(),
-        };
-        let rewritten = rewrite::rewrite(spec, &self.config.shares, &self.config.staged, &known)?;
-        let b = self.guest()?;
-        self.warm_if_changed()?;
-        // An id the guest's node already holds is refused as the node refuses it, before anything is
-        // staged: staging first would send a box's whole root only to be refused (CLAUDE.md §3).
-        match b.client.inspect(&id) {
-            Ok(_) => return Err(Refusal::Exists(id)),
-            Err(Refusal::NoSuchBox(_)) => {}
-            Err(why) => return Err(why),
+        if self.owns_record(&spec) {
+            return self.create_recorded(spec);
         }
-        let staged = self.stage(&b, &id, &rewritten.items)?;
-        self.digests.lock().map_err(poisoned)?.learn(staged);
-        b.client.create(rewritten.spec).inspect_err(|_| {
-            // The copy goes with the create that failed; a removal that fails leaves it for the
-            // next stage of this id, which removes it (above).
-            let _ = stage::unstage(b.link.as_ref(), &id);
-        })
+        if !spec.devices.is_empty() || matches!(spec.class, ClassSpec::Shards(_)) {
+            return Err(Refusal::Broken(
+                "a dedicated guest needs the initialized native record authority".into(),
+            ));
+        }
+        self.create_payload(spec)
     }
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
-        self.with(id, |c| c.start(id))
+        self.call_recorded(id, true, || self.with(id, |b| b.client.start(id)))
     }
 
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
-        self.with(id, |c| c.exec(id, program, stdio))
+        self.call_recorded(id, true, || {
+            self.with(id, |b| b.client.exec(id, program, stdio))
+        })
     }
 
-    /// The guest runs the `oci` class, whose spec's run is refused ([`BoxSpec::check_run`]); a run's `process` box
-    /// is the host's, refused here as its create is.
     fn run(
         &self,
         spec: BoxSpec,
@@ -748,40 +1065,143 @@ impl Runtime for GuestRuntime {
         spec.check_run()?;
         Err(Refusal::Invalid {
             what: "class",
-            why: "the node's guest runs the oci class; process boxes are the host's".to_owned(),
+            why: "the guest runs an explicit VM or OCI workload; process boxes are the host's"
+                .to_owned(),
         })
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
-        self.with(id, |c| c.signal(id, signal))
+        self.call_recorded(id, true, || self.with(id, |b| b.client.signal(id, signal)))
     }
 
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
-        self.with(id, |c| c.inspect(id))
+        self.call_recorded(id, false, || {
+            self.with(id, |b| self.project_info(b, b.client.inspect(id)?))
+        })
     }
 
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
-        self.with(id, |c| c.usage(id))
+        if let Some(usage) = self.native_usage(id)? {
+            return Ok(usage);
+        }
+        self.call_recorded(id, false, || self.with(id, |b| b.client.usage(id)))
     }
 
     fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
-        match self.running()? {
-            Some(b) => b.client.list(),
-            None => Ok(Vec::new()),
+        let mut boxes = match self.running()? {
+            Some(b) => {
+                let mut listed = b.client.list()?;
+                for info in &mut listed {
+                    self.project_info_in(&b, info)?;
+                }
+                listed
+            }
+            None => Vec::new(),
+        };
+        // Recovery attaches by each immutable receipt rather than by map/catalog order.
+        let ids = self.selected_ids()?;
+        for id in ids {
+            if let Some(b) = self.selected_running(&id)? {
+                let listed = b.client.list()?;
+                if listed.iter().any(|info| info.id != id) {
+                    return Err(Refusal::Broken(
+                        "a dedicated guest reports another box".into(),
+                    ));
+                }
+                boxes
+                    .try_reserve_exact(listed.len())
+                    .map_err(|_| Refusal::Exhausted {
+                        what: "guest box listing",
+                        bound: crate::MAX_BOXES,
+                    })?;
+                for info in listed {
+                    boxes.push(self.project_info(&b, info)?);
+                }
+            }
         }
+        Ok(boxes)
     }
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
-        let b = self
-            .running()?
-            .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+        if self.uses_books()
+            && let Some(record) = self.recorded_box(id)?
+            && self.owns_record(&record.spec)
+        {
+            return self.delete_recorded(id);
+        }
+        self.delete_payload(id)
+    }
+}
+
+impl GuestRuntime {
+    fn create_payload(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+        if !spec.devices.is_empty() || matches!(spec.class, ClassSpec::Shards(_)) {
+            return Err(Refusal::Broken(
+                "dedicated launch requires its canonical transaction".into(),
+            ));
+        }
+        if self.managed_shared() {
+            return self.create_shared(spec);
+        }
+        let rewritten = self.rewrite_spec(spec)?;
+        let b = self.guest()?;
+        self.warm_if_changed()?;
+        self.create_in(&b, rewritten)
+    }
+
+    fn delete_payload(&self, id: &BoxId) -> Result<(), Refusal> {
+        let Some(b) = self.booted_for(id)? else {
+            return if self.managed_shared() {
+                Ok(())
+            } else {
+                Err(Refusal::NoSuchBox(id.try_clone()?))
+            };
+        };
         b.client.delete(id)?;
         match stage::unstage(b.link.as_ref(), id) {
-            // A box staged nothing only if its spec named no root, which the class refuses; either
-            // way there is nothing left to remove.
             Ok(()) | Err(Refusal::NoSuchBox(_)) => Ok(()),
             Err(why) => Err(why),
         }
+    }
+
+    fn rewrite_spec(&self, mut spec: BoxSpec) -> Result<rewrite::Rewritten, Refusal> {
+        // The guest's native runtime executes the same OCI payload. The backend-explicit
+        // class belongs to the host endpoint and is retained by its durable BoxRecord.
+        // Host allocation/overhead is retained only by the canonical host record;
+        // the inner native OCI runtime enforces the unchanged workload bounds.
+        spec.allocation = None;
+        spec.route = None;
+        spec.class = match spec.class {
+            ClassSpec::Shards(oci) => ClassSpec::Oci(oci),
+            other => other,
+        };
+        let known = match &spec.class {
+            ClassSpec::Oci(oci) => match &oci.rootfs {
+                Rootfs::Layers(paths) => self.digests.lock().map_err(poisoned)?.known(paths),
+                Rootfs::Dir(_) => rewrite::Known::new(),
+            },
+            _ => rewrite::Known::new(),
+        };
+        rewrite::rewrite(spec, &self.config.shares, &self.config.staged, &known)
+    }
+
+    fn create_in(&self, b: &Booted, rewritten: rewrite::Rewritten) -> Result<BoxInfo, Refusal> {
+        let id = rewritten.spec.id.try_clone()?;
+        // An id the guest's node already holds is refused as the node refuses it, before anything is
+        // staged: staging first would send a box's whole root only to be refused (CLAUDE.md §3).
+        match b.client.inspect(&id) {
+            Ok(_) => return Err(Refusal::Exists(id)),
+            Err(Refusal::NoSuchBox(_)) => {}
+            Err(why) => return Err(why),
+        }
+        let staged = self.stage(b, &id, &rewritten.items)?;
+        self.digests.lock().map_err(poisoned)?.learn(staged);
+        let info = b.client.create(rewritten.spec).inspect_err(|_| {
+            // The copy goes with the create that failed; a removal that fails leaves it for the
+            // next stage of this id, which removes it (above).
+            let _ = stage::unstage(b.link.as_ref(), &id);
+        })?;
+        self.project_info(b, info)
     }
 }
 
@@ -799,7 +1219,13 @@ pub enum Side {
 pub fn by_class<P>(_host: &P, class: &ClassSpec) -> Result<Side, Refusal> {
     Ok(match class {
         ClassSpec::Process => Side::Host,
-        ClassSpec::Oci(_) | ClassSpec::Bundle(_) => Side::Guest,
+        ClassSpec::Oci(_) | ClassSpec::Bundle(_) | ClassSpec::Shards(_) => Side::Guest,
+        ClassSpec::Firecracker(_) => {
+            return Err(Refusal::Invalid {
+                what: "runtime backend",
+                why: "Firecracker requires its initialized backend endpoint".into(),
+            });
+        }
     })
 }
 
@@ -814,6 +1240,40 @@ pub struct WithGuest<P> {
 }
 
 impl<P: Runtime> WithGuest<P> {
+    /// The configured backend route, shared with recovery; it never selects a device.
+    pub fn route(&self, class: &ClassSpec) -> Result<Side, Refusal> {
+        if matches!(class, ClassSpec::Shards(_)) {
+            return Ok(Side::Guest);
+        }
+        (self.route)(&self.process, class)
+    }
+
+    /// Makers and recovery resolve the same immutable host receipt before any
+    /// native operation or method turn. A layer path is not image OS evidence.
+    pub fn route_for(&self, spec: &BoxSpec) -> Result<Side, Refusal> {
+        let host = route::host_platform()?;
+        if let Some(side) = route::committed_side(spec, host)? {
+            if side == Side::Host && !self.process.classes().contains(&spec.backend_class()?) {
+                return Err(route::invalid(
+                    "the committed native backend has not been initialized",
+                ));
+            }
+            return Ok(side);
+        }
+        if spec.class.class() == Class::Oci
+            && host.os != hex_api::ImageOs::Macos
+            && self.process.classes().contains(&Class::Oci)
+        {
+            return Err(route::invalid(
+                "legacy OCI is ambiguous between native and Linux guest execution",
+            ));
+        }
+        self.route(&spec.class)
+    }
+    pub fn bind_books(&self, books: Weak<dyn crate::devices::Books>) -> Result<(), Refusal> {
+        self.oci.bind_books(books)
+    }
+
     /// The host's own runtime, which runs the `process` class: a node's recovery takes its boxes back
     /// through it (native plan step 8).
     pub fn host(&self) -> &P {
@@ -823,6 +1283,21 @@ impl<P: Runtime> WithGuest<P> {
     /// The guest's runtime, which runs the `oci` class: a node's recovery asks it which boxes it still holds.
     pub fn guest(&self) -> &GuestRuntime {
         &self.oci
+    }
+
+    /// Construct the route before the existing Arc<Recorded<WithGuest<P>>> is
+    /// available. This performs no boot: register that SAME owner's Weak Books
+    /// and initialized cost/provider before dedicated admission or recovery.
+    pub fn configured(
+        process: P,
+        oci: GuestRuntime,
+        route: fn(&P, &ClassSpec) -> Result<Side, Refusal>,
+    ) -> Self {
+        Self {
+            process,
+            oci,
+            route,
+        }
     }
 
     /// The node's runtime, routed by class ([`by_class`]), its guest booted before it returns, so it accepts
@@ -839,21 +1314,19 @@ impl<P: Runtime> WithGuest<P> {
         route: fn(&P, &ClassSpec) -> Result<Side, Refusal>,
     ) -> Result<Self, Refusal> {
         oci.boot()?;
-        Ok(Self {
-            process,
-            oci,
-            route,
-        })
+        Ok(Self::configured(process, oci, route))
     }
 
     /// The runtime that makes a box of `spec`, as its `route` says. An id is one box's across both classes: the other
     /// side holding it refuses the box as [`Refusal::Exists`].
     fn maker(&self, spec: &BoxSpec) -> Result<&dyn Runtime, Refusal> {
-        let (this, other): (&dyn Runtime, &dyn Runtime) =
-            match (self.route)(&self.process, &spec.class)? {
-                Side::Host => (&self.process, &self.oci),
-                Side::Guest => (&self.oci, &self.process),
-            };
+        let (this, other): (&dyn Runtime, &dyn Runtime) = match self.route_for(spec)? {
+            Side::Host => (&self.process, &self.oci),
+            Side::Guest => (&self.oci, &self.process),
+        };
+        if self.oci.uses_books() {
+            return Ok(this);
+        }
         match other.inspect(&spec.id) {
             Ok(_) => Err(Refusal::Exists(spec.id.clone())),
             Err(Refusal::NoSuchBox(_)) => Ok(this),
@@ -864,6 +1337,16 @@ impl<P: Runtime> WithGuest<P> {
     /// The runtime holding `id`, or [`Refusal::NoSuchBox`]: the host's, asked first as it answers
     /// without a guest, then the guest's.
     fn holder(&self, id: &BoxId) -> Result<&dyn Runtime, Refusal> {
+        if self.oci.uses_books() {
+            let record = self
+                .oci
+                .recorded_box(id)?
+                .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+            return Ok(match self.route_for(&record.spec)? {
+                Side::Host => &self.process,
+                Side::Guest => &self.oci,
+            });
+        }
         match self.process.inspect(id) {
             Ok(_) => Ok(&self.process),
             Err(Refusal::NoSuchBox(_)) => match self.oci.inspect(id) {
@@ -876,11 +1359,58 @@ impl<P: Runtime> WithGuest<P> {
 }
 
 impl<P: Runtime> Runtime for WithGuest<P> {
+    fn backing_usage(&self, key: &hex_api::BackingKey) -> Result<Usage, Refusal> {
+        self.oci.backing_usage(key)
+    }
+    fn initialize_backing(
+        &self,
+        grant: hex_api::BackingGrant,
+    ) -> Result<hex_api::BackingOffer, Refusal> {
+        self.oci.initialize_backing(grant)
+    }
+
+    fn release_backing(&self, key: hex_api::BackingKey) -> Result<hex_api::BackingOffer, Refusal> {
+        self.oci.release_backing(key)
+    }
+    fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
+        match class {
+            Class::Process => self.process.capacity(class),
+            Class::Oci => {
+                // Windows runs its own OCI images as well as guest Linux images. Its initialized
+                // native pool (including exact device holders) must not disappear behind the guest.
+                if self.process.classes().contains(&Class::Oci)
+                    && let Some(mut native) = self.process.capacity(class)?
+                {
+                    if self.oci.managed_shared() {
+                        if !native.devices.is_empty() {
+                            let actual = self.oci.authority()?.capacity()?;
+                            actual.check()?;
+                            crate::devices::normalize_capacity_devices(
+                                &mut native.devices,
+                                &actual.devices,
+                            )?;
+                        }
+                        self.oci.add_offers(&mut native, class)?;
+                    }
+                    return Ok(Some(native));
+                }
+                self.oci.capacity(class)
+            }
+            Class::Shards => self.oci.capacity(class),
+            Class::Firecracker => self.process.capacity(class),
+        }
+    }
+
     fn classes(&self) -> Vec<Class> {
-        vec![Class::Process, Class::Oci]
+        if self.oci.classes().contains(&Class::Shards) {
+            vec![Class::Process, Class::Oci, Class::Shards]
+        } else {
+            vec![Class::Process, Class::Oci]
+        }
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+        spec.check()?;
         self.maker(&spec)?.create(spec)
     }
 
@@ -894,6 +1424,7 @@ impl<P: Runtime> Runtime for WithGuest<P> {
 
     /// A run's box is a `process` box ([`BoxSpec::check_run`]), made where a create of its spec would be.
     fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check()?;
         spec.check_run()?;
         self.maker(&spec)?.run(spec, program, stdio)
     }

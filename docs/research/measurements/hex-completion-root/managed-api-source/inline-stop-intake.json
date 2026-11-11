@@ -1,0 +1,9 @@
+{
+  "source": "219f804e88f80db3faa326027603b9fb1d0562a8",
+  "parent": "bb763aa3b175b755c8b85c2115722d6ad749088b",
+  "patch_sha256": "88e7b9956f191a35472017ae69128d70844ba13b912b3eddc9be418345e7f855",
+  "original_result": "74481869 model controls 1pass/1fail; inline stop returned PowerOff rather than Stopped",
+  "correction": "publish stop intent before calling native stop; retain uncertainty after possible side effects; simulator uses correct Shared lock argument",
+  "new_result": "not claimed by ROOT; owner focused green still pending",
+  "native_executed": false
+}

@@ -1,0 +1,873 @@
+{
+  "requirement": "AC-T7.4.1",
+  "role": "coordinator",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "archive_member_hashes_reverified": true,
+  "results": [
+    {
+      "proof": "strict-dbd4-results-proof",
+      "source": "dbd48b7ae80466ae4611de9f593a718cc86c3305",
+      "exit": 0,
+      "driver_pid": 2735810,
+      "phases": [
+        {
+          "name": "runtime-joined-strict",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "clippy",
+            "-p",
+            "hex-api",
+            "-p",
+            "hex-sim",
+            "-p",
+            "hex-core",
+            "-p",
+            "hex-client",
+            "-p",
+            "hex-runtime",
+            "--all-targets",
+            "--locked",
+            "--no-deps",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "pid": 2742610,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "5c1492b4513ca673dba98e03bb656f1b96fba06f1a0f47e3ae38441fc331de62",
+          "bytes": 3554,
+          "test_outcomes": []
+        }
+      ],
+      "source_changes": [],
+      "temp_entries": 0,
+      "raw_sha256": "c5b2d55acf10c052c8cc209dd366b31bfb3d87b4b510891731b40684beeaa082",
+      "raw_bytes": 337277
+    },
+    {
+      "proof": "portability-dbd4-results-proof",
+      "source": "dbd48b7ae80466ae4611de9f593a718cc86c3305",
+      "exit": 0,
+      "driver_pid": 2976,
+      "phases": [
+        {
+          "name": "windows-x64-arm64-joined-strict",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+            "clippy",
+            "-p",
+            "hex-api",
+            "-p",
+            "hex-sim",
+            "-p",
+            "hex-core",
+            "-p",
+            "hex-client",
+            "-p",
+            "hex-runtime",
+            "-p",
+            "hex-node",
+            "-p",
+            "hex-cli",
+            "--all-targets",
+            "--locked",
+            "--no-deps",
+            "--target",
+            "x86_64-pc-windows-msvc",
+            "--target",
+            "aarch64-pc-windows-msvc",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "pid": 3769,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "72c53b66e98055af1bef7a25136d1c4b8d25ffd42a9d087ac30a9ea0ed8aec37",
+          "bytes": 7399,
+          "test_outcomes": []
+        },
+        {
+          "name": "mac-joined-strict",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+            "clippy",
+            "-p",
+            "hex-api",
+            "-p",
+            "hex-sim",
+            "-p",
+            "hex-core",
+            "-p",
+            "hex-client",
+            "-p",
+            "hex-runtime",
+            "-p",
+            "hex-node",
+            "-p",
+            "hex-cli",
+            "--all-targets",
+            "--locked",
+            "--no-deps",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "pid": 4290,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "bc3443b0f52fde0d3499d4a7b3ae9e62a37a60e279843ae6d2399885f9ade3dc",
+          "bytes": 3840,
+          "test_outcomes": []
+        }
+      ],
+      "source_changes": [],
+      "temp_entries": 0,
+      "raw_sha256": "963bc14f5a58893e09f6ea4ecbcf01f9c88af66b805ab02f8f970b3be1e4e46d",
+      "raw_bytes": 321497
+    },
+    {
+      "proof": "family-ff76-results-proof",
+      "source": "ff765c021b842e02ea872abdec0809d802703d0b",
+      "exit": 1,
+      "driver_pid": 3257344,
+      "phases": [
+        {
+          "name": "qualified-api-new",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "-p",
+            "hex-api",
+            "--lib",
+            "--locked",
+            "qualified_route_history_and_current_selection_do_not_alias",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "pid": 3260480,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "bc3f7e40d452592f1c048a5a079d04c0dfee513146ba0b1c34b54bf82128dc8a",
+          "bytes": 937,
+          "expected_selected": 1,
+          "actual_counts": [
+            {
+              "passed": 1,
+              "failed": 0,
+              "ignored": 0
+            }
+          ],
+          "selection_verified": true,
+          "test_outcomes": [
+            {
+              "name": "runtime::route_tests::qualified_route_history_and_current_selection_do_not_alias",
+              "outcome": "ok"
+            }
+          ]
+        },
+        {
+          "name": "shared-rearm-after",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "-p",
+            "hex-runtime",
+            "--lib",
+            "--locked",
+            "shared_backing_rearms_only_after_original_scope_release_and_index_ack",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "pid": 3275278,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "4cd14e5f1ecdd4c45f887ad7c803b899203f3254823e6e192aed4e9096f97d49",
+          "bytes": 3435,
+          "expected_selected": 1,
+          "actual_counts": [
+            {
+              "passed": 1,
+              "failed": 0,
+              "ignored": 0
+            }
+          ],
+          "selection_verified": true,
+          "test_outcomes": [
+            {
+              "name": "guest::shared::tests::shared_backing_rearms_only_after_original_scope_release_and_index_ack",
+              "outcome": "ok"
+            }
+          ]
+        },
+        {
+          "name": "shared-stale-ack-new",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "-p",
+            "hex-runtime",
+            "--lib",
+            "--locked",
+            "shared_index_ack_preserves_references_and_refuses_a_stale_generation",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "pid": 3329064,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "7465e07bc93f2907d10b45598f5a3924fd3a41d49ef509707b478cd5e6cc8d18",
+          "bytes": 901,
+          "expected_selected": 1,
+          "actual_counts": [
+            {
+              "passed": 1,
+              "failed": 0,
+              "ignored": 0
+            }
+          ],
+          "selection_verified": true,
+          "test_outcomes": [
+            {
+              "name": "guest::shared::tests::shared_index_ack_preserves_references_and_refuses_a_stale_generation",
+              "outcome": "ok"
+            }
+          ]
+        },
+        {
+          "name": "catalog-complement-new",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "-p",
+            "hex-runtime",
+            "--lib",
+            "--locked",
+            "deterministic_family_complement_respects_current_claims_references_and_group_aliases",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "pid": 3329163,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "8beb91f142fb66a4ea9d40598d22f2f88f9fab3a71d2e89d53a411cc3b4eca47",
+          "bytes": 911,
+          "expected_selected": 1,
+          "actual_counts": [
+            {
+              "passed": 1,
+              "failed": 0,
+              "ignored": 0
+            }
+          ],
+          "selection_verified": true,
+          "test_outcomes": [
+            {
+              "name": "devices::tests::deterministic_family_complement_respects_current_claims_references_and_group_aliases",
+              "outcome": "ok"
+            }
+          ]
+        },
+        {
+          "name": "route-projection-word-new",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "-p",
+            "hex-runtime",
+            "--lib",
+            "--locked",
+            "devices::tests::route_projection_",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "pid": 3329227,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "0f000b99cba12d3248ad3b73a2a5f3fd2b2bdce3947565ec5f614757f6aa8d0d",
+          "bytes": 1000,
+          "expected_selected": 2,
+          "actual_counts": [
+            {
+              "passed": 2,
+              "failed": 0,
+              "ignored": 0
+            }
+          ],
+          "selection_verified": true,
+          "test_outcomes": [
+            {
+              "name": "devices::tests::route_projection_accepts_exact_word_and_refuses_overbound_without_fake_generation",
+              "outcome": "ok"
+            },
+            {
+              "name": "devices::tests::route_projection_unions_mixed_producers_and_distinct_lifetimes",
+              "outcome": "ok"
+            }
+          ]
+        },
+        {
+          "name": "fc-projection-new",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "-p",
+            "hex-runtime",
+            "--lib",
+            "--locked",
+            "pure_firecracker_projection_uses_configured_subset_rows_and_no_native_queries",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "pid": 3329268,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "7b84bd90849f480f2bc9afed924e08abeaee7ae9b44045691ea2af98dc5ce18a",
+          "bytes": 924,
+          "expected_selected": 1,
+          "actual_counts": [
+            {
+              "passed": 1,
+              "failed": 0,
+              "ignored": 0
+            }
+          ],
+          "selection_verified": true,
+          "test_outcomes": [
+            {
+              "name": "firecracker::native::handoff_tests::pure_firecracker_projection_uses_configured_subset_rows_and_no_native_queries",
+              "outcome": "ok"
+            }
+          ]
+        },
+        {
+          "name": "fc-family-new",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "-p",
+            "hex-runtime",
+            "--lib",
+            "--locked",
+            "firecracker::native::pool::tests::family_",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "pid": 3329360,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "1265ef664a7a059e27f5b632582d99dd3a7157b848232f2afee0798c3429aec5",
+          "bytes": 1150,
+          "expected_selected": 3,
+          "actual_counts": [
+            {
+              "passed": 3,
+              "failed": 0,
+              "ignored": 0
+            }
+          ],
+          "selection_verified": true,
+          "test_outcomes": [
+            {
+              "name": "firecracker::native::pool::tests::family_cold_and_empty_complements_preserve_exact_identity_without_facts",
+              "outcome": "ok"
+            },
+            {
+              "name": "firecracker::native::pool::tests::family_complement_keeps_parent_and_requires_ack_before_growing_a_live_scope",
+              "outcome": "ok"
+            },
+            {
+              "name": "firecracker::native::pool::tests::family_profile_current_and_consuming_reference_ambiguity_refuses",
+              "outcome": "ok"
+            }
+          ]
+        },
+        {
+          "name": "guest-subset-definition-new",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "-p",
+            "hex-runtime",
+            "--lib",
+            "--locked",
+            "retained_gpu_subsets_bind_exact_family_key_and_keep_legacy_full_set_path",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "pid": 3329374,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "7174acf9eb25c7dd7fbc9a45ceef9cd1e48af9d783e8be10eccd02917fec558b",
+          "bytes": 907,
+          "expected_selected": 1,
+          "actual_counts": [
+            {
+              "passed": 1,
+              "failed": 0,
+              "ignored": 0
+            }
+          ],
+          "selection_verified": true,
+          "test_outcomes": [
+            {
+              "name": "guest::gpu_pool::tests::retained_gpu_subsets_bind_exact_family_key_and_keep_legacy_full_set_path",
+              "outcome": "ok"
+            }
+          ]
+        },
+        {
+          "name": "guest-projection-new",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "-p",
+            "hex-runtime",
+            "--lib",
+            "--locked",
+            "pure_route_projection_keeps_retained_gpu_aliases_and_new_cpu_lifetime",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "pid": 3329474,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "8f4b0864049e59e69095127fe1b616fb9b9bb420e9d757374ef0a67c81d91a89",
+          "bytes": 904,
+          "expected_selected": 1,
+          "actual_counts": [
+            {
+              "passed": 1,
+              "failed": 0,
+              "ignored": 0
+            }
+          ],
+          "selection_verified": true,
+          "test_outcomes": [
+            {
+              "name": "guest::gpu_pool::tests::pure_route_projection_keeps_retained_gpu_aliases_and_new_cpu_lifetime",
+              "outcome": "ok"
+            }
+          ]
+        },
+        {
+          "name": "guest-family-new",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "-p",
+            "hex-runtime",
+            "--lib",
+            "--locked",
+            "lazy_gpu_family_preserves_subset_parent_and_coalescing_ack_barriers",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "pid": 3329573,
+          "exit": 0,
+          "reaped": true,
+          "sha256": "7fb432f9e3006d4786d9c44059fa46c85bfc2c41f7af0b11c2b594e07ba57795",
+          "bytes": 902,
+          "expected_selected": 1,
+          "actual_counts": [
+            {
+              "passed": 1,
+              "failed": 0,
+              "ignored": 0
+            }
+          ],
+          "selection_verified": true,
+          "test_outcomes": [
+            {
+              "name": "guest::gpu_pool::tests::lazy_gpu_family_preserves_subset_parent_and_coalescing_ack_barriers",
+              "outcome": "ok"
+            }
+          ]
+        },
+        {
+          "name": "store-family-new",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "-p",
+            "hex-node",
+            "--lib",
+            "--locked",
+            "store::pool::family_preparation::",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "pid": 3329578,
+          "exit": 101,
+          "reaped": true,
+          "sha256": "531e4065baf34bcfb72d64e98e6284a92ef37d5d3d412e98bb07f60c17a7643e",
+          "bytes": 2752,
+          "expected_selected": 5,
+          "actual_counts": [],
+          "selection_verified": false,
+          "test_outcomes": []
+        }
+      ],
+      "source_changes": [],
+      "temp_entries": 0,
+      "raw_sha256": "49948ed03f70bfbd2f68f154de8fea498b6c05e058a3c66f3a9a0b7198927959",
+      "raw_bytes": 345573
+    },
+    {
+      "proof": "remaining-8621-results-proof",
+      "source": "8621a28d85fa05cf0a080aac342fdc77ce899815",
+      "exit": 1,
+      "driver_pid": 4082911,
+      "phases": [
+        {
+          "name": "shared-prepared-cancel-new",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "-p",
+            "hex-runtime",
+            "--lib",
+            "--locked",
+            "shared_prepared_cancel_and_ack_recheck_native_absence_without_a_scope_end",
+            "--",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "pid": 4085296,
+          "exit": 101,
+          "reaped": true,
+          "sha256": "d13394fa2fa3281b9370c716d5b5d318903bd76f57caa9d9ff381c2fecfc3d2f",
+          "bytes": 4038,
+          "expected_selected": 1,
+          "actual_counts": [],
+          "selection_verified": false,
+          "test_outcomes": []
+        }
+      ],
+      "source_changes": [],
+      "temp_entries": 0,
+      "raw_sha256": "4238fac21f5f3e5a89f8bf24dbc491b309f3bdcf420bc4c8cf8dd6a43bd16697",
+      "raw_bytes": 342788
+    },
+    {
+      "proof": "portability-8621-results-proof",
+      "source": "8621a28d85fa05cf0a080aac342fdc77ce899815",
+      "exit": 1,
+      "driver_pid": 5957,
+      "phases": [
+        {
+          "name": "windows-x64-arm64-joined-strict",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+            "clippy",
+            "-p",
+            "hex-api",
+            "-p",
+            "hex-sim",
+            "-p",
+            "hex-core",
+            "-p",
+            "hex-client",
+            "-p",
+            "hex-runtime",
+            "-p",
+            "hex-node",
+            "-p",
+            "hex-cli",
+            "--all-targets",
+            "--locked",
+            "--no-deps",
+            "--target",
+            "x86_64-pc-windows-msvc",
+            "--target",
+            "aarch64-pc-windows-msvc",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "pid": 6111,
+          "exit": 101,
+          "reaped": true,
+          "sha256": "3d79081ab430edab37d92b6a5e11a4b637362d386cc07b9c55f03cf35d49499c",
+          "bytes": 8318,
+          "test_outcomes": []
+        }
+      ],
+      "source_changes": [],
+      "temp_entries": 0,
+      "raw_sha256": "27d038877368ca02a54dd97d17cf3db055053c23bc76bc076f13ce87c5088d40",
+      "raw_bytes": 325657
+    },
+    {
+      "proof": "mac-setexec-13d3-results-proof",
+      "source": "13d334ee464040fcbbf693dec3271cb9f18cfe42",
+      "exit": 1,
+      "driver_pid": 2905,
+      "phases": [
+        {
+          "name": "compile",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/Library/Developer/CommandLineTools/usr/bin/clang",
+            "-isysroot",
+            "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+            "-std=c17",
+            "-O0",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "/Users/adalundhe/.cache/hex-lead/cohort-13d334ee-mac-setexec-owned-return/source/macos_setexec_preseal_control.c",
+            "-o",
+            "/Users/adalundhe/.cache/hex-lead/cohort-13d334ee-mac-setexec-owned-return/setexec-control"
+          ],
+          "external_guard_seconds": 90,
+          "pid": 2912,
+          "exit": 0,
+          "reaped": true,
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "native-four-cuts",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/Users/adalundhe/.cache/hex-lead/cohort-13d334ee-mac-setexec-owned-return/setexec-control",
+            "--memory-mib",
+            "64"
+          ],
+          "external_guard_seconds": 60,
+          "pid": 2915,
+          "exit": 1,
+          "reaped": true,
+          "bytes": 581,
+          "sha256": "65d7e37920d23c892c14e62afe15b44fa7a58cfa483aaa2efbbbe82e49ccd5a6",
+          "actual_case_results": [
+            {
+              "case": 0,
+              "error": 100,
+              "relevant": 0,
+              "main_cleanup": "REAPED"
+            }
+          ],
+          "expected_fixed_cases": 4,
+          "selection_verified": false
+        }
+      ],
+      "source_changes": [],
+      "temp_entries": 0,
+      "raw_sha256": "cd0e731938ce6e9e0669ba5894f4ef9762aacd81cfd943c69d2f0da44ffa250f",
+      "raw_bytes": 2171
+    },
+    {
+      "proof": "mac-setexec-829b-results-proof",
+      "source": "829b55b33896428370f847e9c7db695fa3b27277",
+      "exit": 1,
+      "driver_pid": 5101,
+      "phases": [
+        {
+          "name": "compile",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/Library/Developer/CommandLineTools/usr/bin/clang",
+            "-isysroot",
+            "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+            "-std=c17",
+            "-O0",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "/Users/adalundhe/.cache/hex-lead/cohort-829b55b3-mac-setexec-fd-observation/source/macos_setexec_preseal_control.c",
+            "-o",
+            "/Users/adalundhe/.cache/hex-lead/cohort-829b55b3-mac-setexec-fd-observation/setexec-control"
+          ],
+          "external_guard_seconds": 90,
+          "pid": 5108,
+          "exit": 0,
+          "reaped": true,
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "native-four-cuts",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/Users/adalundhe/.cache/hex-lead/cohort-829b55b3-mac-setexec-fd-observation/setexec-control",
+            "--memory-mib",
+            "64"
+          ],
+          "external_guard_seconds": 60,
+          "pid": 5111,
+          "exit": 1,
+          "reaped": true,
+          "bytes": 966,
+          "sha256": "430882517ae142bd4482d2d99f76bfee834b0e595ff5cde334ba714430ad65fd",
+          "actual_case_results": [
+            {
+              "case": 0,
+              "error": 100,
+              "relevant": 0,
+              "main_cleanup": "REAPED"
+            }
+          ],
+          "expected_fixed_cases": 4,
+          "selection_verified": false
+        }
+      ],
+      "source_changes": [],
+      "temp_entries": 0,
+      "raw_sha256": "193dfd23f9fc1f47cc3c37e74aee4def2b67c40831ddf25076247eb6ca169d06",
+      "raw_bytes": 2254
+    },
+    {
+      "proof": "mac-setexec-4cb9-results-proof",
+      "source": "4cb960811fd7d5dd5b86fc33873ad5451f178845",
+      "exit": 1,
+      "driver_pid": 7159,
+      "phases": [
+        {
+          "name": "compile",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/Library/Developer/CommandLineTools/usr/bin/clang",
+            "-isysroot",
+            "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+            "-std=c17",
+            "-O0",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "/Users/adalundhe/.cache/hex-lead/cohort-4cb96081-mac-setexec-child-cloexec/source/macos_setexec_preseal_control.c",
+            "-o",
+            "/Users/adalundhe/.cache/hex-lead/cohort-4cb96081-mac-setexec-child-cloexec/setexec-control"
+          ],
+          "external_guard_seconds": 90,
+          "pid": 7166,
+          "exit": 0,
+          "reaped": true,
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "native-four-cuts",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/Users/adalundhe/.cache/hex-lead/cohort-4cb96081-mac-setexec-child-cloexec/setexec-control",
+            "--memory-mib",
+            "64"
+          ],
+          "external_guard_seconds": 60,
+          "pid": 7169,
+          "exit": 1,
+          "reaped": true,
+          "bytes": 5245,
+          "sha256": "fe8d3bdb67002c350a904edeac9f7673a086aca20665f65427ac17746478311e",
+          "actual_case_results": [
+            {
+              "case": 0,
+              "error": 0,
+              "relevant": 1,
+              "main_cleanup": "REAPED"
+            },
+            {
+              "case": 1,
+              "error": 0,
+              "relevant": 1,
+              "main_cleanup": "REAPED"
+            },
+            {
+              "case": 2,
+              "error": 0,
+              "relevant": 1,
+              "main_cleanup": "REAPED"
+            },
+            {
+              "case": 3,
+              "error": 0,
+              "relevant": 0,
+              "main_cleanup": "REAPED"
+            }
+          ],
+          "expected_fixed_cases": 4,
+          "selection_verified": false
+        }
+      ],
+      "source_changes": [],
+      "temp_entries": 0,
+      "raw_sha256": "10ebbe8f2e9b91b114d863d03e298a2ce6017ec4d95e37774e01599a64df9436",
+      "raw_bytes": 2706
+    }
+  ]
+}

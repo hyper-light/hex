@@ -1,0 +1,30 @@
+{
+  "source": "e852c1b5ba9e1e2c8eb122dfb5817cd4dc339748",
+  "binary_sha256": "63eeaa5e86d5ff70de2c97036a8514a6badb784e78de68f490a9bcc08a62787d",
+  "change": "ONLY short owned TMPDIR; same produced immutable binary, no build/source/timeout change",
+  "command": [
+    "nice",
+    "-n",
+    "10",
+    "/Users/adalundhe/.cache/hex-lead/cohort-e852c1b5-mac-observer-originals-b24-v1/target/debug/deps/shards_api-0d0ab55c49bed359",
+    "client::tests::finite_owned_retry_expiry_cannot_start_an_unbounded_handshake",
+    "--exact",
+    "--nocapture",
+    "--test-threads=1"
+  ],
+  "tmpdir": "/Users/adalundhe/.cache/hx-e852-v2",
+  "old_setup_log_sha256": "82f1850359d901758e2a4cff51ee9c153539e4c61ec5e294fa74ecc0f14a346d",
+  "native_backend_invocations": 0,
+  "pid": 59876,
+  "exit": 101,
+  "reaped": true,
+  "log_sha256": "db481f0e866b132e454e9276d4e997ba977dd2b5b02d150d2b68df915ccc13d3",
+  "counts": [
+    [
+      "0",
+      "1",
+      "0"
+    ]
+  ],
+  "temp_entries": 1
+}

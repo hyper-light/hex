@@ -1,0 +1,7 @@
+{
+  "root_parent": "5783c9b210b973504a9e855993579cd1fa6bda56",
+  "producer": "17e11e644ea8d0e8df64a9f899d6e7fd7d25093f",
+  "controls": "dd0b78e02a2b6bb8289da4bf75f26f84f3613a82",
+  "cfg_correction": "21ae86e3b4c19b43afa14361d578d0a48ff30ae3",
+  "checks": "Source reviewed; two new bootstrap controls and current strict lint still unrun. Ordinary create behavior uses the same shared validation path."
+}

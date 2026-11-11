@@ -1,0 +1,30 @@
+{
+  "source": "2af7dd6adabe4b949def667802d679f9a3ebbe05",
+  "actual_clippy_exit": 101,
+  "actual_errors": "E0433 crates/hex-sim/tests/sim.rs467/478; integration crate has no crate::model",
+  "log_sha256": "d48fe9bb4d4358cb9f53859edcaf3455b9784638f667837b28742fc6a174528b",
+  "owned_cargo_pid": 38475,
+  "child_reaped": true,
+  "source_unchanged": true,
+  "temp_entries": 0,
+  "change": "Only two mechanical None-cost array paths use the actual external hex_sim::model::Class",
+  "before": "7b8e58fd1e30d0e2381c770d28bd89a6f5e663e7a0fae7502a00da5064f9dcf5",
+  "after": "e56db5fa79903865faf000ec292d986ed7186662581e8d1da8be7292d6cd6bff",
+  "tests_executed": 0,
+  "clippy_success_claim": false,
+  "same_cause_static_inventory": {
+    "crates/hex-sim/tests/preempt.rs": {
+      "before": "69caed3ff062b64671f39db86dd3e08ffad8c8e6a82739f9a717ad7ff5e4e490",
+      "after": "1c0dddc2b87abb536090bcf69e01b8c0bffc0705f08644a8ad910062b1fd8ba0"
+    },
+    "crates/hex-sim/tests/huawei.rs": {
+      "before": "0d52b4d1bda86cfb986e5b47e4d57cac3a16bc7331131f1e9d4e2afbbb856e15",
+      "after": "03cd811fc4ee4050a485dbacd9ab09a62d8f4e8b9a8ac6cefb64ad0295d54cee"
+    },
+    "crates/hex-sim/tests/recorded.rs": {
+      "before": "0e1e8c7289f8e50237ec9bbeb23428517d33c0a15e86086a9880398188f77725",
+      "after": "fe159362d1890261bce605ddd0c264949fee77be9845a9e3b3047d84c3b4eb50"
+    }
+  },
+  "same_cause_note": "Three other integration targets used the identical invalid crate::model path; corrected in the same mechanical feature scope after exact E0433 in sim.rs. No result claimed for these other targets before their own check."
+}

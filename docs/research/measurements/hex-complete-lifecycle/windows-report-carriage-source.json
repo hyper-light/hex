@@ -1,0 +1,55 @@
+{
+  "kind": "source-only Windows final report carriage + Recorded callback controls",
+  "parent": "0ae64af581b745e098c801ac1761e8f615d80fba",
+  "shared_guard": "c480541b8469cecc449337e622e9dc50eb511f0e",
+  "recorded_guard": "1c936577",
+  "sdk_dependency": "5ba9ca5022357807c7b70a9ffe31534475a4cc31",
+  "vmm_consumer_source": "b128aaa5ca2e7a9da4d140f206610a952b1d57d5",
+  "dependencies_status": "SDK/full VMM source unaccepted/uncompiled by ROOT at this source checkpoint; no test/native attribution",
+  "paths": {
+    "crates/hex-node/src/recorded.rs": "a9390e033aa5ac6a4c1749deb7188a55e536479212ebe40006e10b35a62bfa54",
+    "crates/hex-runtime/src/windows/managed.rs": "5086ca63930a4b21cb4c65ac607de165192cabbe9734f5bdb21ab3e45188cfaf",
+    "crates/hex-runtime/src/windows/process.rs": "71d77da9d1fd22ca740f35c691bf2ceac9ba05cf9d42944ea0a9717b13037ac1",
+    "crates/hex-runtime/src/windows/sys.rs": "0c3468920d8369324c96f199390bce6d2c6366170af3d92f83b1d4f542bceac5",
+    "docs/research/measurements/hex-complete-lifecycle/recorded_report_tests.rs": "81d74d9c1cfe64bbb79db5ee367eb0749d4f55788c5ad2e967a063157d9bbc22",
+    "docs/research/measurements/hex-complete-lifecycle/WINDOWS-REPORT-CARRIAGE.md": "5ce517c6c59e08a6baf50c848d13af990a91d599638d2a81d14a905fbe5962b9"
+  },
+  "primary_sources": [
+    {
+      "repository": "MicrosoftDocs/win32",
+      "revision": "3aee48ac3f48e187d17bdfd56951741737331749",
+      "path": "desktop-src/ProcThread/inheritance.md",
+      "url": "https://raw.githubusercontent.com/MicrosoftDocs/win32/3aee48ac3f48e187d17bdfd56951741737331749/desktop-src/ProcThread/inheritance.md",
+      "bytes": 5986,
+      "sha256": "06d2869e60f4626615f24c4ab2a5ce32fea2196063fb53429e38bcfdbe527ee7"
+    },
+    {
+      "repository": "MicrosoftDocs/sdk-api",
+      "revision": "f45aa8129cb14704dd80402ce580fcb04c3505db",
+      "path": "sdk-api-src/content/handleapi/nf-handleapi-duplicatehandle.md",
+      "url": "https://raw.githubusercontent.com/MicrosoftDocs/sdk-api/f45aa8129cb14704dd80402ce580fcb04c3505db/sdk-api-src/content/handleapi/nf-handleapi-duplicatehandle.md",
+      "bytes": 18241,
+      "sha256": "06a16e0a81df22d14b0c5dac120bb5a663f025313777bd139e84f9541c3d87e9"
+    },
+    {
+      "repository": "MicrosoftDocs/sdk-api",
+      "revision": "d43984d7c322f7d7d35704d6d1ad36dc3539703b",
+      "path": "sdk-api-src/content/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute.md",
+      "url": "https://raw.githubusercontent.com/MicrosoftDocs/sdk-api/d43984d7c322f7d7d35704d6d1ad36dc3539703b/sdk-api-src/content/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute.md",
+      "bytes": 35611,
+      "sha256": "55b78482e83b886d2bb3288f5c99c5141625e29eee830839fde02eba73c72353"
+    }
+  ],
+  "checks": {
+    "scoped_rustfmt": 0,
+    "named_diff_check": 0,
+    "builds_tests_native": "UNRUN by L3; no new dispatch"
+  },
+  "new_controls": {
+    "Recorded real Store/counted callbacks": 2,
+    "Windows CRT golden/suffix": 1,
+    "Windows private duplicated pipe handle": 1
+  },
+  "root_integration": "Apply exact three Windows deltas and four-line Recorded fixture registration only on current matched source; preserve ROOT route_for/holder/projection/5f/schema ports. Include exact leaf. Requires existing windows-sys Foundation/Threading APIs, no new feature/version/dependency. Append rationale for private report DuplicateHandle/attribute-list use in ROOT CLAUDE as needed.",
+  "remaining": "Matched compilation/control execution, actual VMM-only allowlist and no-helper leakage, GPU output, whole-scope termination/cleanup/fault/profile; persistent Mac helper source remains separate unfinished work."
+}

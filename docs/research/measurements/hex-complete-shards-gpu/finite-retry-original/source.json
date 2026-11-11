@@ -1,0 +1,13 @@
+{
+  "source": "2ee4410fc5dbf89d168f7387dd1076b4eae55192",
+  "parent_sdk": "89936ab99a313f5aa05724d23d1a6d059f46acb2",
+  "root_parent": "b43a2ddb3c5cd7d6ffa326f21a754775350af87c",
+  "scope": "test-only SDK0022, old connect_owned implementation unchanged",
+  "production_prefix_sha256": "71b0d373a8a9936dff067908defd6a6f558e2f0aa0851a6484f737d46419c202",
+  "original_control": "client::tests::finite_owned_retry_expiry_cannot_start_an_unbounded_handshake",
+  "expected_witness": "real absent-path retry; callback held until actual original deadline expiry; no late native dial and finite error before cleanup-only accepted socket EOF",
+  "cleanup": "drop accepted owned socket/listener/sender then join owned thread before assertions",
+  "results": "UNRUN at intake",
+  "vendor_first_check": "46 files/22patches/0diff, metadata-row missing refusal; corrected required UPSTREAM row before repeat",
+  "policy": "7d7e0855/df2 coordinator"
+}

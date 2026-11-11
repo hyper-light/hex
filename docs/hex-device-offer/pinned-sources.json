@@ -1,0 +1,14 @@
+{
+  "production_pin": "07c68e378b741e3ce6008e1cd612b5e9d9bc3ed2",
+  "sha256": {
+    "crates/hex-node/src/scheduler/capacity/devices.rs": "c272a3c2c2259a2e843ad8b2ce804e134724765997314a9fe72c49afbb29b65a",
+    "crates/hex-node/src/scheduler/capacity.rs": "1c92096118ad8750c5064193ea01ad55815f35eef1b7c0040d7ed839fc1fa8ee",
+    "crates/hex-node/src/scheduler.rs": "aa7153cabf90516163dd9abf955453364081da2599d1161eb9fbd2f47603f963",
+    "crates/hex-node/src/scheduler/tests.rs": "44880daeca4b965320e6314e0d59786cd1533f712007ae4c14c1388384a230a3",
+    "crates/hex-sim/src/facts.rs": "345b47e22454eb2d67884d13e355040012262c487ea8900104e8b7f10d872e5d",
+    "crates/hex-sim/src/model.rs": "83fed13bdefe107745ae2e76ed700249586141f792265caa46d2665c086e013c",
+    "crates/hex-api/src/devices.rs": "20b347ced241ddd3dc8e7afc759f9e974c281f3c2152b0cbc65ec35babe845e6",
+    "crates/hex-api/src/runtime.rs": "8feda42c9efcaaea1ce9b81c4946766a1ea4d6330a5f2d8f6f016b3b9b8fa4c9",
+    "crates/hex-node/src/placement.rs": "63e45acba5cca6688f6730f37f681670a7b9fe9ad98ebe335001727fa4928e5e"
+  }
+}

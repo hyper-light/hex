@@ -1,0 +1,104 @@
+--- 83586/export_held451_objects.py
++++ measurement-v1/export_held451_objects.py
+@@ -2 +2 @@
+-"""SOURCE ONLY: exact readonly451 acquisition/export; not executed.
++"""SOURCE ONLY: changed measurement copy of frozen exporter83586; not executed.
+@@ -5,0 +6 @@
++Timing/counter overhead changes measurement source; no faster algorithm is claimed.
+@@ -31,0 +33,56 @@
++PROFILE_SAMPLE_LIMIT = COUNT * 2 + 1
++
++
++def measured_fsync(profile, label, fd):
++    started = time.monotonic_ns()
++    completed = False
++    try:
++        os.fsync(fd)
++        completed = True
++    finally:
++        elapsed = time.monotonic_ns() - started
++        counter = profile['fsync'][label]
++        counter['calls'] += 1
++        counter['total_ns'] += elapsed
++        if not completed:
++            counter['errors'] += 1
++        if label == 'source_event':
++            samples = profile['source_event_samples_ns']
++            if len(samples) < PROFILE_SAMPLE_LIMIT:
++                samples.append(elapsed)
++            else:
++                # Refuse the measurement, without suppressing fsync or its error.
++                profile['refusal'] = {'kind': 'SourceEventSamplesExceeded', 'limit': PROFILE_SAMPLE_LIMIT}
++
++
++def measured_phase(profile, label, function, *args):
++    started = time.monotonic_ns()
++    try:
++        return function(*args)
++    finally:
++        elapsed = time.monotonic_ns() - started
++        counter = profile['phases'][label]
++        counter['calls'] += 1
++        counter['total_ns'] += elapsed
++
++
++def finish_profile(profile, cpu_start, started):
++    samples = sorted(profile['source_event_samples_ns'])
++    profile['source_event_sample_count'] = len(samples)
++    profile['status'] = 'refused' if profile['refusal'] is not None else 'observed'
++    quantiles = {'p50': None, 'p90': None, 'p99': None, 'max': None}
++    if samples and profile['refusal'] is None:
++        # Nearest rank: ceil(n*p/100), one-based; no interpolation.
++        for percent in [50, 90, 99]:
++            rank = (len(samples) * percent + 100 - 1) // 100
++            quantiles['p' + str(percent)] = samples[rank - 1]
++        quantiles['max'] = samples[-1]
++    profile['source_event_quantiles_ns'] = quantiles
++    cpu_end = os.times()
++    profile['own_os_times_cpu_seconds'] = {
++        'start_user': cpu_start.user, 'start_system': cpu_start.system,
++        'end_user': cpu_end.user, 'end_system': cpu_end.system,
++        'user_delta': cpu_end.user - cpu_start.user,
++        'system_delta': cpu_end.system - cpu_start.system}
++    profile['worker_interval_ns'] = time.monotonic_ns() - started
++    return profile
+@@ -152 +209 @@
+-def export_objects(work, admission, inputs, deadline):
++def export_objects(work, admission, inputs, deadline, profile):
+@@ -179 +236 @@
+-            os.fsync(log.fileno())
++            measured_fsync(profile, 'source_event', log.fileno())
+@@ -228 +285 @@
+-        os.fsync(output.fileno())
++        measured_fsync(profile, 'archive', output.fileno())
+@@ -236 +293 @@
+-        os.fsync(stream.fileno())
++        measured_fsync(profile, 'manifest', stream.fileno())
+@@ -239 +296 @@
+-        os.fsync(directory_fd)
++        measured_fsync(profile, 'output_directory', directory_fd)
+@@ -294,0 +352,10 @@
++    profile_started = time.monotonic_ns()
++    cpu_start = os.times()
++    profile = {'schema': 'hex-native-fc-fsync-measurement-v1',
++               'base_source_sha256': '83586fc225fbe7209eb250a6c8d21b8fb70dff97f82dd7dccb1f4f47bde00ad3',
++               'source_event_sample_limit': PROFILE_SAMPLE_LIMIT, 'source_event_samples_ns': [],
++               'refusal': None,
++               'fsync': {label: {'calls': 0, 'errors': 0, 'total_ns': 0}
++                         for label in ['source_event', 'archive', 'manifest', 'output_directory']},
++               'phases': {label: {'calls': 0, 'total_ns': 0}
++                          for label in ['control_mappings_before', 'operation', 'control_mappings_after']}}
+@@ -301 +368,2 @@
+-        write_json(work / 'raw/control-mappings-before.json', control_mappings(controls, deadline))
++        write_json(work / 'raw/control-mappings-before.json',
++                   measured_phase(profile, 'control_mappings_before', control_mappings, controls, deadline))
+@@ -303 +371,2 @@
+-        receipt = operation(work, admission, inputs, deadline) if stage == 'export' else operation(work, admission, deadline)
++        receipt = (measured_phase(profile, 'operation', operation, work, admission, inputs, deadline, profile)
++                   if stage == 'export' else measured_phase(profile, 'operation', operation, work, admission, deadline))
+@@ -306 +375,2 @@
+-        write_json(work / 'raw/control-mappings-after.json', control_mappings(controls, deadline))
++        write_json(work / 'raw/control-mappings-after.json',
++                   measured_phase(profile, 'control_mappings_after', control_mappings, controls, deadline))
+@@ -313,0 +384 @@
++        result['measurement_profile'] = finish_profile(profile, cpu_start, profile_started)

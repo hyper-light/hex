@@ -1,0 +1,205 @@
+{
+  "task": "original actual ShardsLink typed Connect -> Hex adapter -> canonical refusal wire cause loss",
+  "status": "SOURCE_ONLY_UNRUN",
+  "role": "implementer",
+  "agent": "01a1c7676cfc7297a41236a8e71ee188",
+  "coordinator": "01a1aa77778471339bea3beff90d6bbd",
+  "parent": "d92faeaf24e2c847b781aadb3fefdefeb2cfd451",
+  "branch": "cp/t7-shards-connect-original",
+  "policy": {
+    "revision": "bff3015182ad754274f1048ce393ac12cb6cd91f",
+    "four_files": [
+      {
+        "path": "AGENTS.md",
+        "bytes": 1793,
+        "sha256": "f66d304c033ad4001d3d7347b67faa3bb3137d637860793e8e74f1eb6266db41",
+        "equal_7d7e": true,
+        "full_read": true
+      },
+      {
+        "path": "docs/development-rules.md",
+        "bytes": 11604,
+        "sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+        "equal_7d7e": true,
+        "full_read": true
+      },
+      {
+        "path": "docs/development-evidence.md",
+        "bytes": 3325,
+        "sha256": "61613a244106d95b2759b38c8b6660ff29a616983e7afd6e9faabdc38368fb63",
+        "equal_7d7e": true,
+        "full_read": true
+      },
+      {
+        "path": "CLAUDE.md",
+        "bytes": 17012,
+        "sha256": "fd1076b256516e0edab1b3655421d37cd934e93a8232f0125b96abcfb99ece5f",
+        "equal_7d7e": true,
+        "full_read": true
+      }
+    ],
+    "publication": "POLICY_READ before edits in commentary; initial keyed ROOT send returned connection dropped before answer, acceptance unknown"
+  },
+  "briefs": [
+    {
+      "path": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/CHARTER.md",
+      "bytes": 28675,
+      "sha256": "02d774afec053c49b373dd33e05ad56b43c7fd00ad3abf5640175b7003107087",
+      "full_read": true
+    },
+    {
+      "path": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/validation.md",
+      "bytes": 2466,
+      "sha256": "b0e80026a42c9cd4120e2663f73db53a05aa09ea9e04a64224cfb43eea6d1183",
+      "full_read": true
+    }
+  ],
+  "inputs": [
+    {
+      "path": "CLAUDE.md",
+      "git_blob": "76cfec1bbae9744a95da387ce45d106ad45b3b02",
+      "bytes": 33402,
+      "sha256": "fe9c0ec842967bc38bd40c8072713c070905a05ef18852f465e9818dc3106517"
+    },
+    {
+      "path": "crates/hex-client/src/guest/shards.rs",
+      "git_blob": "715e4129a8729ebfe863c6bcdee24f97b259062c",
+      "bytes": 6907,
+      "sha256": "3343ae45c24fd5eae4d4b7e4a4777783078cd5f74d5da8a917874a9f061013f1"
+    },
+    {
+      "path": "crates/hex-client/src/guest.rs",
+      "git_blob": "80799587679b08c578ea59df8dae15cbb93ce523",
+      "bytes": 35460,
+      "sha256": "893c281be8a3d4907d81bcffc36c0991a1d614108e3e68ecf7500e130887c6b3"
+    },
+    {
+      "path": "crates/hex-client/src/guest/tests.rs",
+      "git_blob": "d27b2484d9251d26adf3a917ecd458aa2c2cf866",
+      "bytes": 47765,
+      "sha256": "68ba6db123682e110827cd02315097edb61576fa51acb650bdefe2b9dab21626"
+    },
+    {
+      "path": "crates/hex-client/src/calls.rs",
+      "git_blob": "7d67fd068b73d1ab4bcd55286fa4c978bf33275c",
+      "bytes": 111824,
+      "sha256": "2274b7d480ab9291716b0ea257f750e0e9c53fb8e86ab20bf600cbcc51b1dd59"
+    },
+    {
+      "path": "crates/hex-api/src/runtime.rs",
+      "git_blob": "3234f063c7601c6da5ce792dfc00add5cd2a1fb4",
+      "bytes": 82258,
+      "sha256": "cf15451b4c60b1ff71955f509bd60c3699bc1a7be9e64713e53a5dd6b8447d44"
+    },
+    {
+      "path": "crates/hex-core/src/wire.rs",
+      "git_blob": "2721c6a300d5dfa15ba73c13e546235683508441",
+      "bytes": 95284,
+      "sha256": "9f0e456b8d0c030f58539f8bfa9bf9f3f584bec9ffa969d04e2928cc9706b138"
+    },
+    {
+      "path": "crates/hex-core/src/stream.rs",
+      "git_blob": "b4dd304750e459125d188f864d4c9f3aa8a078a5",
+      "bytes": 15832,
+      "sha256": "a84b35c48613018101e045179e3aea40768ecb1fabfb3c5a0cd1a2ecc7cf6c33"
+    },
+    {
+      "path": "vendor/shards/crates/api/src/lib.rs",
+      "git_blob": "aec6b73dc67abde012a68799ee2a6c22271455c5",
+      "bytes": 41388,
+      "sha256": "0418a60a58e000c5d660bac4667d73ad5c35848a278a46cc6acc760f8e5466e8"
+    },
+    {
+      "path": "crates/hex-client/Cargo.toml",
+      "git_blob": "cd57fe06908133c1994d585f9dabc612fd7f6ea8",
+      "bytes": 1040,
+      "sha256": "86dded8fedcaf6ff3ddc47e117b20e950c047a4828761613842aec855d4c4609"
+    },
+    {
+      "path": "Cargo.toml",
+      "git_blob": "49397e28bd6683f920af4787b2e40f5e6d6d5d85",
+      "bytes": 6880,
+      "sha256": "a8f51f83a7b8ed2c43e0824f3af7aff5e967ba77159dde320841183559ea29b8"
+    },
+    {
+      "path": "Cargo.lock",
+      "git_blob": "73929e0ebc7854d2edaef575d07e9958df2bb001",
+      "bytes": 24265,
+      "sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304"
+    }
+  ],
+  "outputs": [
+    {
+      "path": "crates/hex-client/src/guest/shards.rs",
+      "bytes": 6949,
+      "sha256": "4328d744a46667d3fa6ea6eed34ef54243b0864f26ac51517c0d8322dee8c3d2"
+    },
+    {
+      "path": "crates/hex-client/src/guest/shards/connect_original_tests.rs",
+      "bytes": 6112,
+      "sha256": "e4b5b55a359efda8662015891ffe56ece3a2b04d1beab05c21c195ddf7761660"
+    },
+    {
+      "path": "docs/research/measurements/hex-completion-validation/shards-connect-original/README.md",
+      "bytes": 5402,
+      "sha256": "3b688804c06b779f50ffd01096b5c281d7330b6af12317927c76ff9133cb9f2d"
+    }
+  ],
+  "owned_paths": [
+    "crates/hex-client/src/guest/shards.rs",
+    "crates/hex-client/src/guest/shards/connect_original_tests.rs",
+    "docs/research/measurements/hex-completion-validation/shards-connect-original/README.md",
+    "docs/research/measurements/hex-completion-validation/shards-connect-original/source.json"
+  ],
+  "registration": {
+    "parent_prefix_bytes": 6907,
+    "parent_prefix_sha256": "3343ae45c24fd5eae4d4b7e4a4777783078cd5f74d5da8a917874a9f061013f1",
+    "suffix": "\n#[cfg(test)]\nmod connect_original_tests;\n",
+    "only_cfg_test_registration": true
+  },
+  "oracle": {
+    "sdk_absolute_calls_required": 3,
+    "other_sdk_calls_required": 0,
+    "caller_port": "hex_core::stream::CONTROL_PORT",
+    "same_absolute_instant": true,
+    "modeled_failure": {
+      "variant": "Connect",
+      "phase": "Read",
+      "kind": "ConnectionRefused",
+      "code": 111
+    },
+    "nonvacuity": "Connect phase Write must change decoded refusal and canonical frame",
+    "semantic_assertion": "typed Connect and same-display legacy Channel must have distinct canonical frames",
+    "future_hex_variant_or_shadow_mapper": false,
+    "presentation_parsing": false,
+    "production_encoder_changes": false
+  },
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "-p",
+    "hex-client",
+    "--lib",
+    "guest::shards::connect_original_tests::shards_link_connect_cause_remains_distinct_from_legacy_channel_text_on_wire",
+    "--",
+    "--exact",
+    "--nocapture",
+    "--test-threads=1"
+  ],
+  "intended_selected": 1,
+  "tests_executed": 0,
+  "compile_executed": false,
+  "native_executed": 0,
+  "network_executed": 0,
+  "binary": null,
+  "result_log": null,
+  "source_format": "scoped rustfmt --edition 2024 new leaf only; not a compile/test",
+  "original_result": "unrun; source predicts final semantic canonical-frame collision, not a reproduced failure",
+  "limits": [
+    "deadline/call precondition miss is not typed-loss reproduction",
+    "non-collapse original does not certify every field of a future carrier",
+    "no supported-target/native/performance/readiness claim",
+    "ROOT owns original run and any remedy design"
+  ]
+}

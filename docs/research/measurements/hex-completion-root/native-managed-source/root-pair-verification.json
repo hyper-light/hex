@@ -1,0 +1,42 @@
+{
+  "job-delete-original-v2": {
+    "archive_sha256": "ca180961f701e62291348f28ace4e6fc01bbce5bd2f55c6bc7a02cdead0ca64a",
+    "all_members_verified": true,
+    "members": 7,
+    "source_revision": "c955a08cd735fa56130e6e160b25ba946a8cc091",
+    "summaries": [
+      "test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "child_pids": [
+      32430,
+      32788
+    ],
+    "all_recorded_children_reaped": true,
+    "test_body_sha256": "c59e16083635c8c622de208322d14f671b50f87a38accdf6a797ebd9e1d6384d",
+    "native_backend_invocations": 0,
+    "temp": {
+      "remaining_temp_entries": 0
+    }
+  },
+  "job-delete-fixed-v1": {
+    "archive_sha256": "db91b5b6740c272119f6c171458a2f24843dd98a9213612315e0a12fa6e128e6",
+    "all_members_verified": true,
+    "members": 7,
+    "source_revision": "15203af1ca827225d7ec547600c258c494cc5a89",
+    "summaries": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "child_pids": [
+      36055,
+      36058
+    ],
+    "all_recorded_children_reaped": true,
+    "test_body_sha256": "c59e16083635c8c622de208322d14f671b50f87a38accdf6a797ebd9e1d6384d",
+    "native_backend_invocations": 0,
+    "temp": {
+      "remaining_temp_entries": 0
+    }
+  },
+  "same_test_body_exact": true,
+  "limits": "Two actual standalone fake-kernel controls on exact extracted source. No Windows ABI, HCS, GPU, native whole-scope or final integrated result. MAX wait source successor remains unrun."
+}

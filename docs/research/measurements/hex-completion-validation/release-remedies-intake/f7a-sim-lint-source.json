@@ -1,0 +1,44 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "335e3819a059c54e7db006ed994d9d52d01f3c39",
+  "fixed_actual_source": "f7a08e5748e999ca6dba855143e8c7e581cfa44f",
+  "actual_lint_log_sha256": "ebdfe32afa6fb41f6b5d911ea3cd21d1ee0f4e59edc36c49ea267b4e895802fa",
+  "source": [
+    {
+      "path": "crates/hex-sim/src/index.rs",
+      "sha256": "e4b32dccf5fdbce7e01c4f61afb438f1380f9a343c29b8c60facede3a9b0fb3e"
+    },
+    {
+      "path": "crates/hex-sim/src/peer.rs",
+      "sha256": "c0738671cf581e9d697e100e9d69aba897beaa1a6ab2c0d097742ae909876a08"
+    },
+    {
+      "path": "crates/hex-sim/src/index/route_offer_tests.rs",
+      "sha256": "66f5e7606c3443e8df7cbaca1716119fdc80d035b4200f251958463bd3052bfe"
+    }
+  ],
+  "changes": [
+    "Option.map.flatten ->and_then same nullable bit derivation.",
+    "FitIndex::change receives the SAME checked charged delta and existing adding direction. All four old callsites exclusively supplied inverse add/subtract closures; checked free/used/count/route calculations and refusal checks still complete BEFORE slot mutations. No repeated resource derivation or new ledger.",
+    "Node::start groups already-paired immutable allocation+route parameters; the function immediately destructures them. No protocol/record field change.",
+    "ONE Msg-only large_enum_variant exception explicitly ROOT-approved, reason links exact design/alternative/profiling record. No panic/allocation/bounds exceptions.",
+    "Extend only the new UNRUN 335e positive control with ordered fresh snapshot ->same-key duplicateReleased ACK ->Admits and identical charge. Original relevant sibling body unchanged.",
+    "Fill retained freshness manifest raw hash from independently collected full collection.json."
+  ],
+  "layout_record": {
+    "path": "docs/research/measurements/hex-complete-bindings/PEER-MESSAGE-LAYOUT.md",
+    "sha256": "a8e728e0cb95fc0665ba4717b2d45df81590e7b4413ae81f3a7b1cfa6a61ab65"
+  },
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "Clippy_after": "UNRUN",
+    "tests": "UNRUN",
+    "local_builds": 0,
+    "dispatches": 0,
+    "native": 0
+  },
+  "remaining": "ROOT source review of one enum exception before intake, targeted freshness original/new ordered control +strict changed cohort; no previous keyed/old12 positive replay. No performance claim, R01 audit +R14 profiling and all native/full gates remain ROOT."
+}

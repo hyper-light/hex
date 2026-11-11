@@ -24,11 +24,10 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, Class, Exit, Program, Refusal, Runtime, Stdio};
-use hex_client::guest::{Client, Duplex, Link};
+use hex_client::guest::{Client, Link};
 use hex_core::stream::{self, Deframer};
 use hex_core::wire::{self, Answer, Call, Header, Limits, Request};
 
@@ -38,7 +37,7 @@ struct Loopback {
 }
 
 impl Link for Loopback {
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
         let addr = if port == stream::CONTROL_PORT {
             self.control
         } else {
@@ -46,7 +45,7 @@ impl Link for Loopback {
         };
         let conn = TcpStream::connect(addr).unwrap();
         conn.set_nodelay(true).unwrap();
-        Ok(Box::new(conn))
+        hex_client::guest::own_duplex(conn)
     }
 }
 
@@ -136,10 +135,11 @@ fn env(name: &str, default: usize) -> usize {
 fn guest_client_exec_start_and_throughput() {
     let control = TcpListener::bind("127.0.0.1:0").unwrap();
     let stdio = TcpListener::bind("127.0.0.1:0").unwrap();
-    let link = Arc::new(Loopback {
+    let link = hex_client::guest::own_link(Loopback {
         control: control.local_addr().unwrap(),
         stdio: stdio.local_addr().unwrap(),
-    });
+    })
+    .unwrap();
     std::thread::spawn(move || agent(control, stdio));
     let client = Client::connect(link).unwrap();
     let b = BoxId::new("b").unwrap();

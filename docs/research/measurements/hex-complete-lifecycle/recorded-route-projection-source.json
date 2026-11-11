@@ -1,0 +1,79 @@
+{
+  "base": "6b525ebc21e1c3c75cce88fd2b2b159e403f20e3",
+  "feature": "same Recorded family publication global encoding barrier; Windows conservative possible-form reservation never fresh eligibility",
+  "role": "implementer L3",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "dependencies": {
+    "shared_RouteProjection_native_route_keys": "ec0a0ab6f2fe6266696979d8df2fdf6032178ff5",
+    "real_guest_projector": "b3c05c9e58c86170c0c41d5c2322f173238bd7cd",
+    "latest_family_guest_consumer": "3bdb5707b806304df0a367401a328a7c5d8926ef",
+    "required_Books_family_boundary": "b924aec5b7dfb98e4ce6ce11a767c51c7b3a0d48",
+    "same_Store_fence_and_producer": "8b5534be5277e422c7cc6c949e6c3019fb8ecab0",
+    "Node_equivalent": "59363a0f5e8d669b2a0e7c86601f2d60c5dd0eaf",
+    "Node_plain_if_cause_fix": "9b9d5932ecb84fa4b417fd265a1f1e532fa62a50"
+  },
+  "unchanged_actual_availability": {
+    "crates/hex-runtime/src/windows/mod.rs:    fn capacity(&self, class: Class)": {
+      "sha256": "751f8897c4ff5b0507f088d622d97fb909e37c272c1567189f535f895e678c65",
+      "byte_identical": true
+    },
+    "crates/hex-runtime/src/windows/oci/sys.rs:pub fn available()": {
+      "sha256": "3c9411ab79f6887470c6b09d5b78cc05408a810301a91a15fa5dde51a29daeb8",
+      "byte_identical": true
+    }
+  },
+  "new_unsafe_native_symbols": [],
+  "new_availability_cache_or_state": false,
+  "API_once_lock": "same process-lifetime DLL/export result, declaration lifted for pure get; warm outside fence without HCS service query",
+  "Windows_projection": "conservative possible fixed native encoding forms; unknown API/features refuses before mutation; actual service eligibility unchanged",
+  "Mac_projection": "actual Runtime.capacity remains None; no invented explicit native prefix",
+  "files": {
+    "crates/hex-node/src/recorded.rs": {
+      "bytes": 109119,
+      "sha256": "c0c7747e8cfd55694119d21acf7483c5d57a046f08f5bc6225d6c839297d666b"
+    },
+    "crates/hex-runtime/src/windows/mod.rs": {
+      "bytes": 125029,
+      "sha256": "7d0426d07d3e6480f6b9fb1b7599e47a8ef88f4cc3229ab398c255f41b6a7035"
+    },
+    "crates/hex-runtime/src/windows/oci/mod.rs": {
+      "bytes": 58733,
+      "sha256": "cb4dd36ee42dcf3f3d050f899111631361c2b1890b555d14d6befd9eef99afe2"
+    },
+    "crates/hex-runtime/src/windows/oci/sys.rs": {
+      "bytes": 76391,
+      "sha256": "c8cd63436654824656c14e331f5f23d7a4a03d33b34f4ab86400ff0831ca6bfa"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/recorded_route_projection_tests.rs": {
+      "bytes": 8561,
+      "sha256": "a822f0c8eaac9da57b46259bf28bd65cfc0f3fd313d193709828cad102086639"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/recorded-route-projection.md": {
+      "bytes": 8825,
+      "sha256": "85af5a95f19eca7642291439e9c9c35646dc6f38ecd54d829550fa3ab209e383"
+    }
+  },
+  "new_units": {
+    "Recorded_Store_model": 2,
+    "Windows_pure_actual_offer_seam": 1
+  },
+  "checks": "scoped rustfmt parser/format0; git diff --check0; compiler/tests/nativeUNRUN, no L3 job",
+  "preserve_ROOT": [
+    "seven route_for calls",
+    "canonical authority fixture and metadata/holder/projection ports",
+    "normalized physical report and same Prober",
+    "outside schema literals/constructors"
+  ],
+  "separate_unimported": [
+    "2ef persistent Mac helper",
+    "6b525 measurement-only C native run held"
+  ],
+  "remaining": [
+    "ROOT matched source intake",
+    "new3 focused controls and strict platform compiler/lint",
+    "actual family/CLI startup/capability/native proof",
+    "native Mac CPU/cold scope/helper closure remains incomplete",
+    "full gates/main ROOTonly"
+  ]
+}

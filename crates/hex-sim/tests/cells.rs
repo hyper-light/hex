@@ -66,7 +66,7 @@ fn fed(topology: Topology, cell: Config, loss: Loss) -> FedConfig {
 
 /// What the specification fixes in every cell of a run (H67): its log one the serial specification
 /// makes, nothing lost or started twice, the hard filters held.
-fn check_cells(cells: &[CellRun], what: &str) {
+fn check_cells<'a>(cells: impl IntoIterator<Item = &'a CellRun>, what: &str) {
     for c in cells {
         let at = format!("{what}, region {} cell {}", c.region, c.cell);
         spec::check_slices(&c.cluster, &c.run).unwrap_or_else(|v| panic!("{at}: {v}"));
@@ -438,13 +438,7 @@ fn lose_region(model: NodeModel, cluster: &Cluster, lost: u32) -> (FedRun, [u64;
         at: 2 * SECOND,
     };
     let out = federation::run(cluster, &fed(REGIONS, config, loss)).unwrap();
-    let surviving: Vec<CellRun> = out
-        .cells
-        .iter()
-        .filter(|c| c.region != lost)
-        .cloned()
-        .collect();
-    check_cells(&surviving, "region lost");
+    check_cells(out.cells.iter().filter(|c| c.region != lost), "region lost");
     let (to, refused) = check_moved(cluster, &out, lost);
     println!(
         "T-T7.12.1 on {}: region {lost} lost, moved placed by class (OCI, Firecracker, Shards) \

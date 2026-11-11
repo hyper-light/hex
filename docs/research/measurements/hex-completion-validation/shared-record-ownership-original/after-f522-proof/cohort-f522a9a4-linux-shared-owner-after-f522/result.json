@@ -1,0 +1,361 @@
+{
+  "source": "f522a9a4e14a8654567fb19aa7ed85471910d9dd",
+  "archive_sha256": "213b9e56191cb3d3c3c4307b6109f44fa2654bcb8cfd350c785664896c9891a9",
+  "scope": "ROOT shared outer owner AFTER / meaningful prior-predicate mutation / independently built restoration; pure model, no native runtime/VM/GPU",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver": {
+    "pid": 2531587,
+    "ppid": 2531572,
+    "start_ticks": 32769736
+  },
+  "phases": [
+    {
+      "name": "after-shared1",
+      "cell": "after",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--offline",
+        "original_shared_create_uncertainty_keeps_outer_box_and_same_pool_reference",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "observation": {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--offline",
+          "original_shared_create_uncertainty_keeps_outer_box_and_same_pool_reference",
+          "--",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "both_eof": true,
+        "reaped": true,
+        "error": null,
+        "created_pid": 2539238,
+        "identity": {
+          "pid": 2539238,
+          "ppid": 2531587,
+          "start_ticks": 32770011
+        },
+        "returncode": 0
+      },
+      "actual_counts": [
+        [
+          "ok",
+          "1",
+          "0",
+          "0"
+        ]
+      ],
+      "expected_exit": 0,
+      "exact_completed": true,
+      "expected_semantic_outcome": true,
+      "stdout": {
+        "bytes": 240,
+        "sha256": "f6256239d6492c32d98f104371d7a55dfd146500b1c05f8e88b13be15edec612"
+      },
+      "stderr": {
+        "bytes": 3648,
+        "sha256": "de0c7b8a20837d397c11b74778d81d5d29482cfb7f2d545b3ae471e5ac8c9bf0"
+      },
+      "binary": {
+        "path": "/home/adalundhe/.cache/hex-lead/cohort-f522a9a4-linux-shared-owner-after-f522/target/debug/deps/hex_node-d6283f30893b31f3",
+        "bytes": 189645800,
+        "sha256": "65fd70761cfc3518a49bcd6ac455ef7cad5ac5c3b78c3d817802e830c79aff00"
+      },
+      "qualified": true
+    },
+    {
+      "name": "after-node-strict",
+      "cell": "after",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-node",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "observation": {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "clippy",
+          "-p",
+          "hex-node",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "both_eof": true,
+        "reaped": true,
+        "error": null,
+        "created_pid": 2857609,
+        "identity": {
+          "pid": 2857609,
+          "ppid": 2531587,
+          "start_ticks": 32777911
+        },
+        "returncode": 0
+      },
+      "actual_counts": [],
+      "expected_exit": 0,
+      "exact_completed": true,
+      "expected_semantic_outcome": true,
+      "stdout": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stderr": {
+        "bytes": 3236,
+        "sha256": "221f877e89c38c45018152cea0d876274f77fa622895b8eaa2405e3b43acf8e4"
+      },
+      "qualified": true
+    },
+    {
+      "name": "after-production",
+      "cell": "after",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "bash",
+        "scripts/check-production.sh"
+      ],
+      "observation": {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "bash",
+          "scripts/check-production.sh"
+        ],
+        "both_eof": true,
+        "reaped": true,
+        "error": null,
+        "created_pid": 2950976,
+        "identity": {
+          "pid": 2950976,
+          "ppid": 2531587,
+          "start_ticks": 32780062
+        },
+        "returncode": 0
+      },
+      "actual_counts": [],
+      "expected_exit": 0,
+      "exact_completed": true,
+      "expected_semantic_outcome": true,
+      "stdout": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stderr": {
+        "bytes": 1675,
+        "sha256": "ebb50088f8a967721455038617108ca839fe860c809154a195ccae555b866571"
+      },
+      "qualified": true
+    },
+    {
+      "name": "mutant-shared1",
+      "cell": "mutant",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--offline",
+        "original_shared_create_uncertainty_keeps_outer_box_and_same_pool_reference",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "observation": {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--offline",
+          "original_shared_create_uncertainty_keeps_outer_box_and_same_pool_reference",
+          "--",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "both_eof": true,
+        "reaped": true,
+        "error": null,
+        "created_pid": 3029584,
+        "identity": {
+          "pid": 3029584,
+          "ppid": 2531587,
+          "start_ticks": 32781457
+        },
+        "returncode": 101
+      },
+      "actual_counts": [
+        [
+          "FAILED",
+          "0",
+          "1",
+          "0"
+        ]
+      ],
+      "expected_exit": 101,
+      "exact_completed": true,
+      "expected_semantic_outcome": true,
+      "stdout": {
+        "bytes": 388,
+        "sha256": "e52d0566d8d5dc468f054a99c95e5ac968fcce7caafcafe59dc44361581ac36b"
+      },
+      "stderr": {
+        "bytes": 4254,
+        "sha256": "74757a3e8d1f4dceca70771e79962e11cddc0c64fdb87284e1035df31ebc16f5"
+      },
+      "binary": {
+        "path": "/home/adalundhe/.cache/hex-lead/cohort-f522a9a4-linux-shared-owner-after-f522/mutant/target/debug/deps/hex_node-d6283f30893b31f3",
+        "bytes": 189650680,
+        "sha256": "024d7a031d3fac1f36314ea36f3b132208aa584641bb9f059edc61318c066414"
+      },
+      "qualified": true
+    },
+    {
+      "name": "restored-shared1",
+      "cell": "restored",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--offline",
+        "original_shared_create_uncertainty_keeps_outer_box_and_same_pool_reference",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "observation": {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--offline",
+          "original_shared_create_uncertainty_keeps_outer_box_and_same_pool_reference",
+          "--",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "both_eof": true,
+        "reaped": true,
+        "error": null,
+        "created_pid": 3271680,
+        "identity": {
+          "pid": 3271680,
+          "ppid": 2531587,
+          "start_ticks": 32789560
+        },
+        "returncode": 0
+      },
+      "actual_counts": [
+        [
+          "ok",
+          "1",
+          "0",
+          "0"
+        ]
+      ],
+      "expected_exit": 0,
+      "exact_completed": true,
+      "expected_semantic_outcome": true,
+      "stdout": {
+        "bytes": 240,
+        "sha256": "f6256239d6492c32d98f104371d7a55dfd146500b1c05f8e88b13be15edec612"
+      },
+      "stderr": {
+        "bytes": 3783,
+        "sha256": "bc31935ee792a4779e234409fe13fdc55758a98398583fa50ddaf8d98ced0e9b"
+      },
+      "binary": {
+        "path": "/home/adalundhe/.cache/hex-lead/cohort-f522a9a4-linux-shared-owner-after-f522/restored/target/debug/deps/hex_node-d6283f30893b31f3",
+        "bytes": 189652096,
+        "sha256": "ca1555c808842d01b24e2340393128e0a5bf36696084a47034dfaaa6ec5591cd"
+      },
+      "qualified": true
+    }
+  ],
+  "source_cell_delta": {
+    "after": [],
+    "mutant": [
+      "crates/hex-node/src/recorded.rs"
+    ],
+    "restored": []
+  },
+  "source_hashes": {
+    "after": "0b072315087e20b1a407d41b2b53c81bbc73b1d17fd02152b473267e532fff82",
+    "mutant": "e4d63ef6328ddc498b1c8e74a5040080fe1c97c2cdb735dc69d6da05ca9553a5",
+    "restored": "0b072315087e20b1a407d41b2b53c81bbc73b1d17fd02152b473267e532fff82"
+  },
+  "source_changes": {
+    "after": [],
+    "mutant": [],
+    "restored": []
+  },
+  "temp_entries": {
+    "after": 0,
+    "mutant": 0,
+    "restored": 0
+  },
+  "native_invocations": 0,
+  "event_errors": [],
+  "restored_source_exact": true,
+  "exit": 0
+}

@@ -1,0 +1,23 @@
+{
+  "status": "SOURCE ONLY test fixture staging-order correction; all semantic assertions unchanged; no production remedy or check",
+  "parent": "d04c21f4c121111d54170e021dde897651bdac7b",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "original": "dbff43145b2416f0753e61778702dbb0424de51c",
+  "root_frozen_run": "f7a cohort in flight; preserve exact source/raw independently; no result inferred",
+  "source_observation": "Capacity::check_route_parts requires each backing to have an initialized route; the new original staged a backing then checked before push_offer appended that route",
+  "correction": "validate native prefix first, then stage canonical backing and call real publication seam, matching actual add_offers ordering",
+  "source": {
+    "path": "crates/hex-runtime/src/guest/shared_tests.rs",
+    "sha256": "14a8637e359a65950f242c779ea7539fbf24f401c8e336c5457820988abfe238"
+  },
+  "preserved": [
+    "all output/conflict/no-effect assertions exact",
+    "all earlier shared test prefix exact",
+    "all production exact",
+    "no claim of semantic reproduction from setup failure"
+  ],
+  "docs_correction": "D04 architecture attribution is ROOT coordinator direction within Ada authorized full implementation, not explicit architecture instruction from Ada",
+  "after": "UNRUN; no own test dispatched"
+}

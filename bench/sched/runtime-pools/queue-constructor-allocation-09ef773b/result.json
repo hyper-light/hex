@@ -1,0 +1,266 @@
+{
+  "requirement": "AC-T7.4.1",
+  "source_probe": "09ef773b04161d1431737c6868d631a0aff2b218",
+  "probe_parent": "ebf8d90af084aaf5380171680b200a9f6b7423d2",
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "run": "r671",
+  "role": "coordinator",
+  "method": "Three separate processes per mode/count, interleaved bounded then linked, peer counts1 and3. Same binary/real Queued/Pair vector; vector reserved before snapshots and retained after channel drop. No allocator resets; output formatting after all snapshots. /usr/bin/time -l surrounds each full process.",
+  "queued_size_bytes": 432,
+  "original_capacity": 131073,
+  "raw_archive": {
+    "path": "raw.tar.gz",
+    "sha256": "a04550cd64ed2e2e55803d40a4d08c82300df78ccf7ccc6bd25923e89899cf87"
+  },
+  "native_meta": {
+    "source": "09ef773b04161d1431737c6868d631a0aff2b218",
+    "binary": "/Users/adalundhe/.cache/hex-lead/queue-allocation-probe-target/debug/deps/hex_node-1028f62b4e94535b",
+    "sha256": "84962133cbd8236f276cb108d1e21c747ae7c9d84606916e5b18aa568ff2382c",
+    "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+    "uname": [
+      "Darwin",
+      "Adas-Mac-Studio.local",
+      "25.4.0",
+      "Darwin Kernel Version 25.4.0: Thu Mar 19 19:26:07 PDT 2026; root:xnu-12377.101.15~1/RELEASE_ARM64_T6031",
+      "arm64",
+      "arm"
+    ],
+    "driver_pid": 45405,
+    "samples": 3,
+    "scope": "actual Queued empty channel constructor; Rust layout and native process time/faults/RSS; not full Service or kernel charge"
+  },
+  "groups": [
+    {
+      "peers": 1,
+      "mode": "bounded",
+      "n": 3,
+      "samples": [
+        {
+          "sample": 0,
+          "allocations": 2,
+          "reallocations": 0,
+          "requested_bytes": 57672760,
+          "while_held_layout_bytes": 57672760,
+          "after_drop_layout_bytes": 0,
+          "native_time": {
+            "maximum resident set size": 61964288,
+            "peak memory footprint": 59408816,
+            "page reclaims": 3997,
+            "page faults": 0
+          }
+        },
+        {
+          "sample": 1,
+          "allocations": 2,
+          "reallocations": 0,
+          "requested_bytes": 57672760,
+          "while_held_layout_bytes": 57672760,
+          "after_drop_layout_bytes": 0,
+          "native_time": {
+            "maximum resident set size": 61964288,
+            "peak memory footprint": 59392408,
+            "page reclaims": 3997,
+            "page faults": 0
+          }
+        },
+        {
+          "sample": 2,
+          "allocations": 2,
+          "reallocations": 0,
+          "requested_bytes": 57672760,
+          "while_held_layout_bytes": 57672760,
+          "after_drop_layout_bytes": 0,
+          "native_time": {
+            "maximum resident set size": 61947904,
+            "peak memory footprint": 59392432,
+            "page reclaims": 3996,
+            "page faults": 0
+          }
+        }
+      ],
+      "requested_bytes_nearest_rank": {
+        "p50": 57672760,
+        "p90": 57672760,
+        "p99": 57672760,
+        "max": 57672760
+      }
+    },
+    {
+      "peers": 1,
+      "mode": "linked",
+      "n": 3,
+      "samples": [
+        {
+          "sample": 0,
+          "allocations": 1,
+          "reallocations": 0,
+          "requested_bytes": 512,
+          "while_held_layout_bytes": 512,
+          "after_drop_layout_bytes": 0,
+          "native_time": {
+            "maximum resident set size": 4079616,
+            "peak memory footprint": 1622376,
+            "page reclaims": 464,
+            "page faults": 0
+          }
+        },
+        {
+          "sample": 1,
+          "allocations": 1,
+          "reallocations": 0,
+          "requested_bytes": 512,
+          "while_held_layout_bytes": 512,
+          "after_drop_layout_bytes": 0,
+          "native_time": {
+            "maximum resident set size": 4079616,
+            "peak memory footprint": 1622376,
+            "page reclaims": 464,
+            "page faults": 0
+          }
+        },
+        {
+          "sample": 2,
+          "allocations": 1,
+          "reallocations": 0,
+          "requested_bytes": 512,
+          "while_held_layout_bytes": 512,
+          "after_drop_layout_bytes": 0,
+          "native_time": {
+            "maximum resident set size": 4079616,
+            "peak memory footprint": 1638784,
+            "page reclaims": 464,
+            "page faults": 0
+          }
+        }
+      ],
+      "requested_bytes_nearest_rank": {
+        "p50": 512,
+        "p90": 512,
+        "p99": 512,
+        "max": 512
+      }
+    },
+    {
+      "peers": 3,
+      "mode": "bounded",
+      "n": 3,
+      "samples": [
+        {
+          "sample": 0,
+          "allocations": 6,
+          "reallocations": 0,
+          "requested_bytes": 173018280,
+          "while_held_layout_bytes": 173018280,
+          "after_drop_layout_bytes": 0,
+          "native_time": {
+            "maximum resident set size": 177373184,
+            "peak memory footprint": 174866936,
+            "page reclaims": 11041,
+            "page faults": 0
+          }
+        },
+        {
+          "sample": 1,
+          "allocations": 6,
+          "reallocations": 0,
+          "requested_bytes": 173018280,
+          "while_held_layout_bytes": 173018280,
+          "after_drop_layout_bytes": 0,
+          "native_time": {
+            "maximum resident set size": 177373184,
+            "peak memory footprint": 174883344,
+            "page reclaims": 11041,
+            "page faults": 0
+          }
+        },
+        {
+          "sample": 2,
+          "allocations": 6,
+          "reallocations": 0,
+          "requested_bytes": 173018280,
+          "while_held_layout_bytes": 173018280,
+          "after_drop_layout_bytes": 0,
+          "native_time": {
+            "maximum resident set size": 177356800,
+            "peak memory footprint": 174866960,
+            "page reclaims": 11040,
+            "page faults": 0
+          }
+        }
+      ],
+      "requested_bytes_nearest_rank": {
+        "p50": 173018280,
+        "p90": 173018280,
+        "p99": 173018280,
+        "max": 173018280
+      }
+    },
+    {
+      "peers": 3,
+      "mode": "linked",
+      "n": 3,
+      "samples": [
+        {
+          "sample": 0,
+          "allocations": 3,
+          "reallocations": 0,
+          "requested_bytes": 1536,
+          "while_held_layout_bytes": 1536,
+          "after_drop_layout_bytes": 0,
+          "native_time": {
+            "maximum resident set size": 4079616,
+            "peak memory footprint": 1622376,
+            "page reclaims": 464,
+            "page faults": 0
+          }
+        },
+        {
+          "sample": 1,
+          "allocations": 3,
+          "reallocations": 0,
+          "requested_bytes": 1536,
+          "while_held_layout_bytes": 1536,
+          "after_drop_layout_bytes": 0,
+          "native_time": {
+            "maximum resident set size": 4079616,
+            "peak memory footprint": 1638784,
+            "page reclaims": 464,
+            "page faults": 0
+          }
+        },
+        {
+          "sample": 2,
+          "allocations": 3,
+          "reallocations": 0,
+          "requested_bytes": 1536,
+          "while_held_layout_bytes": 1536,
+          "after_drop_layout_bytes": 0,
+          "native_time": {
+            "maximum resident set size": 4079616,
+            "peak memory footprint": 1638784,
+            "page reclaims": 464,
+            "page faults": 0
+          }
+        }
+      ],
+      "requested_bytes_nearest_rank": {
+        "p50": 1536,
+        "p90": 1536,
+        "p99": 1536,
+        "max": 1536
+      }
+    }
+  ],
+  "decision": "Replace per-peer eager capacity buffers with linked channels while retaining the existing global permit for all queued and in-flight words. No bound is taken from a measured byte count.",
+  "sources": [
+    "https://doc.rust-lang.org/1.99.1/std/sync/mpsc/fn.sync_channel.html",
+    "https://doc.rust-lang.org/1.99.1/std/sync/mpsc/fn.channel.html",
+    "https://doc.rust-lang.org/1.99.1/std/sync/mpsc/struct.Sender.html#method.send"
+  ],
+  "limits": [
+    "Empty constructor mechanism only, not complete Service construction or loaded queue cost.",
+    "Cumulative requested Rust/System layouts are not allocator usable sizes, C allocations, copies or parent/kernel charges. Native time fields are retained verbatim in their platform-reported units.",
+    "n3 has little tail-resolution; p90/p99 are sample maxima. No latency/throughput, full-service leak freedom, competitive scheduler ratio, or cross-platform resource claim.",
+    "The fixed/source-changed scheduler still requires current-tree gates and actual physical validation; this isolated measurement is not final readiness."
+  ]
+}

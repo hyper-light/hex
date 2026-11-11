@@ -1,0 +1,7 @@
+{
+  "seed_sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+  "pruned_sha256": "dcbe9479bcbd6b91c7f1cbe46a59a482e78d8d097bd49a0af91c352880ee9c84",
+  "registry_packages": 15,
+  "all_registry_tuples_subset_of_exact_root_lock": true,
+  "private_lock_overlay_only": true
+}

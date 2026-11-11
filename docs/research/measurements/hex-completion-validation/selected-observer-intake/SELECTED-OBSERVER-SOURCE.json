@@ -1,0 +1,125 @@
+{
+  "status": "SIGNED SOURCE only; scoped rustfmt parser0/diffcheck0; no compile/test/native run by L2",
+  "parent": "bbf3c38ff4177334e352f09f1b813a13e59f3915",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": [
+    {
+      "path": "crates/hex-runtime/src/guest/observer.rs",
+      "sha256": "cfca536488e0cc8080dc7fbaece00b1aa57af4d027194668d445813571a871dd",
+      "bytes": 33735
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/observer/receipt.rs",
+      "sha256": "fe73742bccf18ce5b4eaaf64a3746144b04eb97280be75417b8909c4e64cd433",
+      "bytes": 2865
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/pool.rs",
+      "sha256": "b40b72aa8443ba603a21ab2cb3d1487f567cd85627706c890ead4f559e58a732",
+      "bytes": 22489
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/selected.rs",
+      "sha256": "36868ef01db5b7429b073af2d401c18277d06312aaa3137c22573b1667a068d1",
+      "bytes": 42105
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/dedicated.rs",
+      "sha256": "a9e49dc19e23272a537d6b0a3b3d6e98763b925b0555370baad6fc0fd9f0a7a2",
+      "bytes": 62441
+    }
+  ],
+  "minimal_dependencies": {
+    "prior_guest_handoff_consumer": "b655f3dba843a17534261aacdb59b6d3e56c7f5c",
+    "factual_receipt_profile_API": "b2e5e185652cb87336eca993e8eec3aeb892045e",
+    "Store_bound_source_and_turns": "e4e1df2e1b6f35b91fde97b03d45e4f2ae0bfd57",
+    "snapshot_encoder": "01fe011d72c6801e4494e903af6353baaf0688d4",
+    "native_selected_Client_setup": "a29bf7e2d3527aedce62b04bb5011edb9253fb09",
+    "absolute_SDK": "1b93ea703d02e76b5d5c4c7461547429529a9f56",
+    "ROOT_ShardLink_absolute_intake": "dd4f01ccf33b6e58180576e041c59ddbd6b0120f",
+    "scoped_client_constructors": "5c10d010c3a60c09015f57162e570f8737075d76",
+    "unique_duplex_owner": "948351166bf80adfc93eb405f6abcaf59859a6e3"
+  },
+  "new_real_path": [
+    "create_selected retains original canonical outer class/allocation/route/full S and same NativeScope before boot; verifies initialized observer artifact bytes/RO mappings/cost bounds",
+    "managed plan and private renderer report remain exact S and original scope; no new selector/picker/context",
+    "after same native identity/report publication, SAME paid selected VM connects under original Budget; actual ordinary guest Process observer runs before payload create_in",
+    "one private stack borrowed enum Pool(&mut pool::Receipt)|Selected(&mut selected::Record) shares existing run/drain/wait/delete/failure path; no fake PoolRecord/BoxRecord, Store/row/holder owner/reaper/thread/cache",
+    "same selected VM receipt persists configuration/full physical S/scope/native report plus actual attempt/streams/exit/original failure/cleanup/readiness before payload effects",
+    "create caches/usable reattach require same selected readiness, initialized config/queue/output bounds, current known successful outcome and native selector join",
+    "old GPU selected receipts lacking readiness remain cleanup-readable/held and cannot become usable by silently adding a result; CPU-only selected and ordinary behavior skip new observer"
+  ],
+  "encoding": {
+    "header": "hex-selected-guest 5 only when observer evidence/attempt exists",
+    "legacy": "selected1/2/3/4 readable; no observer means exact selected4 encoding, including CPU-only",
+    "new_rows": "readiness +observer attempt +same v5 bounded fact rows, ordered before existing native phase",
+    "bounds": "existing MAX_CONFIG_BYTES, same stream/readiness/three snapshot growth check before guest Program; no new tuning cap",
+    "opaque": "unknown bounded snapshot wire/version retains diagnostic bytes, denies usable selected readiness; same native cleanup remains independent",
+    "common_validation": "Attempt::matches_readiness factors existing Pool predicate without changing original success/EOF/config matching"
+  },
+  "protected": [
+    {
+      "path": "crates/hex-runtime/src/guest/mod.rs",
+      "sha256": "f240bd3a588d9a225739d691ee123e7e4558b50462733e6559933105a0ad0fab",
+      "byte_identical_to_parent": true
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/rewrite.rs",
+      "sha256": "e1c8b356559db5881acfa03d7b9c8a85095aa7500e2a04cf8e033eb52fd70cb7",
+      "byte_identical_to_parent": true
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/route.rs",
+      "sha256": "8f384d46e92559dd0b1cccde9e78a6e0ec395942bb240fbf490a47032184d8c1",
+      "byte_identical_to_parent": true
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/books.rs",
+      "sha256": "306ab08727238c11817cc38474bdd151763cf22a42bec526e80a9eb60511c3ad",
+      "byte_identical_to_parent": true
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/gpu_pool.rs",
+      "sha256": "b5f24721d75a56e39e5644ab95c1605773f46b8176e549edd0ff9f586ac3df48",
+      "byte_identical_to_parent": true
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/observer/facts.rs",
+      "sha256": "6574d79d0a8c8a2fec26a582c9c6532d3142e0fb8094a09e717e8ed0ed1158de",
+      "byte_identical_to_parent": true
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/observer/io.rs",
+      "sha256": "943afaa7e1fc12dfb7819f1c32a5e1870ce6c4f8e8ae2e0b91992baf41f68148",
+      "byte_identical_to_parent": true
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/observer/config.rs",
+      "sha256": "2433c313463f9d0f09711b7f7c31e65a78e95d5836c83d1461cb9111061e705d",
+      "byte_identical_to_parent": true
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/observer/failure_tests.rs",
+      "sha256": "f16173de8bd30baee7826a531ccc686cfc13dece241f07204fb4886aba3e4323",
+      "byte_identical_to_parent": true
+    }
+  ],
+  "original_ec368_whole_leaf_byte_identical": true,
+  "new_source_controls": [
+    "guest::selected::tests::selected_observer_receipt_requires_its_own_scope_set_and_complete_outcome",
+    "guest::selected::tests::selected_observer_opaque_facts_remain_cleanup_only_and_cpu_v4_unchanged"
+  ],
+  "checks": "both new controls UNRUN; ROOT should compose fixed source/API closure, nonzero-select exact new controls and affected common observer behavior only. No old passed13/Driver3/metadata campaign replay by L2.",
+  "R01_R16_limits": [
+    "all new borrowed owner/enum dispatch storage is on caller stack; the selected refusal identity is copied fallibly once before observer effects",
+    "same existing blocking notification/drain/deadline ownership; no reader/reaper/poll framework added",
+    "new selected codec checks version/count/bytes before parsed snapshot allocation; existing serialized Store/protocol/OS presentation seams remain recorded separately",
+    "native/artifact executable-loader-ICD closure, actual Driver/HVF/WHP/GPU/compute/foreign refusal/helper termination/resource profiles and all supported target checks remain ROOT, not proved by source/model values",
+    "existing payload staging/create operation policy is preserved; this increment spends original Budget through native/report/initial clients/observer, does not claim a new bounded payload RPC implementation",
+    "lazy exact subset backing generation/qualified route lifetime/fresh sibling provisioning and keyed Pending controls remain separate required work",
+    "original Released(None) retry c2d63/Root5a compile bridge22c045 preserved; no production preflight consistency remedy before actual relevant red",
+    "Mac no-fork candidate research bbf remains source-only; no upstream seal or actual whole-scope proof added"
+  ]
+}

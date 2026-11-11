@@ -1,0 +1,170 @@
+diff --git a/crates/hex-cli/tests/box_run_cli.rs b/crates/hex-cli/tests/box_run_cli.rs
+--- a/crates/hex-cli/tests/box_run_cli.rs
++++ b/crates/hex-cli/tests/box_run_cli.rs
+@@ -1,136 +1,145 @@
+ //! `hex box run` at the command line (AC-T7.1.1/AC-T7.1.2): it runs a program in a `process` box,
+ //! passes the program's exit status through, and a program over the box's memory bound is killed.
+ //!
+ //! A `process` box needs a cgroup v2 subtree the wrapper owns alone (its own cgroup, with the
+-//! controllers delegated). Each `hex box run` here is launched in its own transient
+-//! `systemd-run --user --scope -p Delegate=yes`, so the wrapper is alone in a delegated cgroup —
+-//! exactly how a kiln runner (with `Delegate=yes` on its unit) invokes it. Where `systemd --user`
+-//! isn't available the test records the skip (hex_testkit, which the gate prints) rather
+-//! than pass falsely. Run on a cgroup-v2 host (fedora).
++//! controllers delegated). ROOT may supply an absolute `HEX_BOX_RUN_DELEGATE_COMMAND` whose
++//! contract is to self-place in a fresh delegated child of the SAME capped scope before exec.
++//! Otherwise each call uses its existing `systemd-run --user --scope -p Delegate=yes` fallback.
++//! If neither is available the test records the skip; a configured delegate that fails is a failure.
+ #![cfg(target_os = "linux")]
+ #![allow(
+     clippy::unwrap_used,
+     clippy::expect_used,
+     clippy::panic,
+     clippy::indexing_slicing,
+     clippy::arithmetic_side_effects,
+     clippy::disallowed_macros
+ )]
+
+ use std::process::Command;
+
+ const HEX: &str = env!("CARGO_BIN_EXE_hex");
+
+ fn have_systemd() -> bool {
+     Command::new("systemd-run")
+         .arg("--version")
+         .output()
+         .map(|o| o.status.success())
+         .unwrap_or(false)
+ }
+
++/// A supplied ROOT delegate takes precedence; absence preserves the systemd prerequisite.
++fn have_delegate() -> bool {
++    std::env::var_os("HEX_BOX_RUN_DELEGATE_COMMAND").is_some() || have_systemd()
++}
++
++/// The delegate consumes an unchanged command argv, self-places, and execs without another scope.
++fn delegate_command() -> Command {
++    match std::env::var_os("HEX_BOX_RUN_DELEGATE_COMMAND") {
++        Some(path) => {
++            let path = std::path::PathBuf::from(path);
++            assert!(path.is_absolute(), "ROOT delegate command must be absolute");
++            Command::new(path)
++        }
++        None => {
++            let mut command = Command::new("systemd-run");
++            command.args(["--user", "--scope", "--quiet", "-p", "Delegate=yes", "--"]);
++            command
++        }
++    }
++}
++
+ /// Runs `hex box run <limits> -- program…` in its own delegated scope, capturing its output.
+ fn box_run(limits: &[&str], program: &[&str]) -> std::process::Output {
+-    let mut cmd = Command::new("systemd-run");
+-    cmd.args([
+-        "--user",
+-        "--scope",
+-        "--quiet",
+-        "-p",
+-        "Delegate=yes",
+-        "--",
+-        HEX,
+-        "box",
+-        "run",
+-    ]);
++    let mut cmd = delegate_command();
++    cmd.args([HEX, "box", "run"]);
+     cmd.args(limits).arg("--").args(program);
+     cmd.output().expect("run hex box run in a scope")
+ }
+
+ #[test]
+ fn box_run_boxes_a_program_and_passes_its_status() {
+-    if !have_systemd() {
++    if !have_delegate() {
+         hex_testkit::skip(
+             "box_run_boxes_a_program_and_passes_its_status",
+             "systemd --user",
+             "no delegated scope to run hex box run in; run on a cgroup-v2 host",
+         )
+         .expect("recording the skip");
+         return;
+     }
+
+     // Its stdout passes through and its exit status is the program's.
+     let out = box_run(
+         &[
+             "--memory-max",
+             "268435456",
+             "--cpu-weight",
+             "50",
+             "--io-weight",
+             "10",
+         ],
+         &["/bin/sh", "-c", "echo boxed; exit 7"],
+     );
+     assert_eq!(out.status.code(), Some(7), "status: {out:?}");
+     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "boxed");
+
+     // The program runs inside a box cgroup (a `.hexbox/<id>` path), not the host root.
+     let out = box_run(
+         &["--memory-max", "134217728"],
+         &[
+             "/bin/sh",
+             "-c",
+             "grep -o '[.]hexbox/[^ ]*' /proc/self/cgroup",
+         ],
+     );
+     assert!(out.status.success(), "{out:?}");
+     assert!(
+         String::from_utf8_lossy(&out.stdout).contains(".hexbox/"),
+         "cgroup: {:?}",
+         String::from_utf8_lossy(&out.stdout)
+     );
+
+     // A program over the box's memory bound is killed by the kernel (128 + SIGKILL = 137).
+     let out = box_run(
+         &["--memory-max", "67108864"],
+         &[HEX, "selftest-box", "hog", "536870912"],
+     );
+     assert_eq!(
+         out.status.code(),
+         Some(137),
+         "a 512 MiB hog in a 64 MiB box should be killed: {out:?}"
+     );
+
+     // An unknown flag is a typed refusal with the box-setup status (125), never a silent run.
+     let out = box_run(&["--frobnicate", "1"], &["/bin/true"]);
+     assert_eq!(out.status.code(), Some(125), "unknown flag: {out:?}");
+     assert!(String::from_utf8_lossy(&out.stderr).contains("unknown flag"));
+ }
+
+ /// HEX-INST-6's other side (native plan step 6; the lead, 2026-11-06): `hex box run` wraps a program
+ /// for its caller, so the program keeps the caller's descriptor limit, not the default a box the node
+ /// starts gets (1024:524288). Under a caller's limit of one less than the default's soft limit, soft, and
+ /// the default's soft limit, hard (1023:1024: below the default in both, a lowering any caller may make),
+ /// its program sees exactly that.
+ #[test]
+ fn box_run_keeps_its_callers_descriptor_limit() {
+-    if !have_systemd() {
++    if !have_delegate() {
+         eprintln!("SKIP: no systemd --user for a delegated scope; run on a cgroup-v2 host");
+         return;
+     }
+     let hard = hex_core::limits::NOFILE_SOFT;
+     let soft = hard - 1;
+-    let out = Command::new("systemd-run")
+-        .args(["--user", "--scope", "--quiet", "-p", "Delegate=yes", "--"])
++    let out = delegate_command()
+         .arg("prlimit")
+         .arg(format!("--nofile={soft}:{hard}"))
+         .args(["--", HEX, "box", "run", "--"])
+         .args(["/bin/sh", "-c", "echo $(ulimit -Sn):$(ulimit -Hn)"])
+         .output()
+         .expect("run hex box run under prlimit in a scope");
+     assert!(out.status.success(), "{out:?}");
+     assert_eq!(
+         String::from_utf8_lossy(&out.stdout).trim(),
+         format!("{soft}:{hard}")
+     );
+ }

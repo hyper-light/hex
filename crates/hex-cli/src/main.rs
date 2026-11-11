@@ -4,6 +4,22 @@ use std::io::Write;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    #[cfg(all(target_os = "macos", feature = "native-trusted-entry-measurement"))]
+    match hex_runtime::macos::trusted_entry::dispatch() {
+        Ok(Some(code)) => return ExitCode::from(code),
+        Ok(None) => {}
+        Err(failure) => {
+            if let Err(write_error) =
+                writeln!(std::io::stderr().lock(), "TRUSTED_ENTRY_ERROR {failure}")
+            {
+                let _ = writeln!(
+                    std::io::stdout().lock(),
+                    "TRUSTED_ENTRY_ERROR {failure}; DIAGNOSTIC_WRITE {write_error}"
+                );
+            }
+            return ExitCode::FAILURE;
+        }
+    }
     let args: Vec<Option<String>> = std::env::args_os()
         .skip(1)
         .map(|a| a.into_string().ok())
@@ -40,6 +56,14 @@ fn main() -> ExitCode {
     {
         let rest: Vec<String> = rest.iter().flatten().cloned().collect();
         return ExitCode::from(hex_cli::node::main(&rest));
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    if let [Some(first), rest @ ..] = args.as_slice()
+        && first == "schedule"
+        && rest.iter().all(Option::is_some)
+    {
+        let rest: Vec<String> = rest.iter().flatten().cloned().collect();
+        return ExitCode::from(hex_cli::schedule::main(&rest));
     }
     // `hex keep` is the Windows node's keeper, a passive process holding its boxes' job handles so they
     // outlive the node (hex_runtime::windows::keeper); it takes its state folder and ready path from the

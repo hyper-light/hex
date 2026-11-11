@@ -57,6 +57,9 @@ use crate::store::Store;
 use crate::supervise::{self, Forgotten, Live, Supervisor};
 use crate::turns::{Turn, Turns};
 
+mod attachments;
+mod backends;
+
 /// overlayfs's magic number (include/uapi/linux/magic.h): a node whose state is on overlayfs can't
 /// keep a layered box's writable layer there, since overlayfs can't be an overlay's upper layer.
 const OVERLAYFS_SUPER_MAGIC: i128 = 0x794c_7630;
@@ -131,6 +134,10 @@ pub const OCI_BOXES: &str = ".oci";
 
 /// A node agent over the `process` and `oci` classes.
 pub struct Node {
+    attachments: hex_runtime::devices::SharedCatalog,
+    attachment_turns: Turns,
+    backends: OnceLock<backends::Backends>,
+    prober: OnceLock<crate::facts::SharedProber>,
     /// The `process` boxes' cgroups, and the `oci` boxes' root among them ([`OCI_BOXES`]).
     root: BoxRoot,
     /// The `oci` boxes' cgroups: under the box root, but apart from the `process` boxes.
@@ -246,6 +253,9 @@ impl Node {
                 Some(ClassSpec::Oci(_) | ClassSpec::Bundle(_)) => {
                     Err(Refusal::NotRunning(id.clone(), "exec"))
                 }
+                Some(ClassSpec::Firecracker(_) | ClassSpec::Shards(_)) => {
+                    Err(backends::uncertain(id))
+                }
             },
         }
     }
@@ -314,7 +324,17 @@ impl Node {
         // Parked procs are a root node's, always (decision 8, parked procs; the lead, 2026-11-06; their off path went
         // by Ada's 2026-11-06 rule once bench/competitive/probes/parked_procs_ab.md decided them on): a rootless node's
         // devfs makes none, so it parks none.
+        let (attachments, attachment_turns) = attachments::catalog(&state_dir.join("devices"))?;
         let node = Self {
+            attachments: hex_runtime::devices::SharedCatalog::try_new(attachments).map_err(
+                |_| Refusal::Exhausted {
+                    what: "shared runtime device catalog owners",
+                    bound: 1,
+                },
+            )?,
+            attachment_turns,
+            backends: OnceLock::new(),
+            prober: OnceLock::new(),
             root,
             oci_boxes,
             devices,
@@ -774,6 +794,7 @@ impl Node {
                 _ => self.oci_boxes.get(id),
             },
             Class::Process => self.root.get(id),
+            Class::Firecracker | Class::Shards => None,
         }
     }
 
@@ -861,6 +882,20 @@ impl Node {
 
     fn info(&self, record: &BoxRecord, adopted: bool) -> Result<BoxInfo, Refusal> {
         let id = &record.spec.id;
+        if let Some(backend) = self
+            .backend(record.spec.backend_class()?)
+            .map_err(|_| backends::uncertain(id))?
+        {
+            let mut info = backend.inspect(id)?;
+            if info.class != record.spec.class.class()
+                || info.allocation != record.spec.allocation
+                || info.route != record.spec.route
+            {
+                return Err(backends::uncertain(id));
+            }
+            info.adopted = adopted;
+            return Ok(info);
+        }
         let state = match record.spec.class {
             // A process box runs when its cgroup holds a process; it has no `created` state.
             ClassSpec::Process => match self.root.get(id) {
@@ -888,11 +923,17 @@ impl Node {
                     Some(Err(_)) | None => BoxState::Empty,
                 }
             }
+            ClassSpec::Firecracker(_) | ClassSpec::Shards(_) => {
+                return Err(backends::uncertain(id));
+            }
         };
         let exit = match record.spec.class {
             ClassSpec::Process => None,
             // Read after the state, so an init that ended since is reaped here and reported.
             ClassSpec::Oci(_) | ClassSpec::Bundle(_) => self.init_exit(record, state)?,
+            ClassSpec::Firecracker(_) | ClassSpec::Shards(_) => {
+                return Err(backends::uncertain(id));
+            }
         };
         Ok(BoxInfo {
             membership: None,
@@ -905,6 +946,8 @@ impl Node {
                 state
             },
             bounds: record.spec.bounds.clone(),
+            allocation: record.spec.allocation,
+            route: record.spec.route,
             adopted,
             exit,
             abandoned: record
@@ -953,10 +996,25 @@ impl Node {
     /// either root, its container's state directory under the runtime directory and its rendered
     /// bundle under the bundles directory (goal 5 extended, step 5).
     pub fn recover(&self) -> Result<RecoverySummary, Refusal> {
+        let (records, pools) = self.retained_preflight()?;
+        self.recover_pools(&pools)?;
+        // No native cleanup may run until every persisted backend is known and its own lifecycle
+        // has been dispatched through the same Store/turn authority.
+        let mut summary = self.recover_backends(&records)?;
         // What a crash at a record write left: a temp file never renamed into place.
         self.store.remove_strays()?;
         let mut seen: BTreeMap<BoxId, Seen> = BTreeMap::new();
-        for (id, record) in self.store.all()? {
+        let mut backend_ids = BTreeSet::new();
+        for (id, record) in records {
+            if record.as_ref().is_ok_and(|record| {
+                record
+                    .spec
+                    .backend_class()
+                    .is_ok_and(|class| matches!(class, Class::Firecracker | Class::Shards))
+            }) {
+                backend_ids.insert(id);
+                continue;
+            }
             seen.entry(id).or_default().record = Some(record);
         }
         let slots: BTreeSet<u64> = slots_in(&self.oci_boxes)?.into_iter().collect();
@@ -968,6 +1026,9 @@ impl Node {
             .chain(self.oci_boxes.boxes()?)
         {
             if let Ok(id) = BoxId::new(&name) {
+                if backend_ids.contains(&id) {
+                    continue;
+                }
                 seen.entry(id).or_default();
             }
         }
@@ -980,6 +1041,9 @@ impl Node {
         }
         let bundles = ids_in(&self.bundles, "")?;
         for id in state_dirs.iter().chain(&bundles) {
+            if backend_ids.contains(id) {
+                continue;
+            }
             seen.entry(id.clone()).or_default();
         }
         for (id, s) in &mut seen {
@@ -1019,7 +1083,6 @@ impl Node {
                 s.init_alive = Some(init_alive(program));
             }
         }
-        let mut summary = RecoverySummary::default();
         // The slots no readable record names, idle or a create's caught before its record: ended and
         // removed first, so nothing of them is left (T-T7.1.2).
         for n in recovery::strays(&seen, &slots) {
@@ -1367,9 +1430,11 @@ impl Node {
         Ok(BoxInfo {
             membership: None,
             id,
-            class: Class::Oci,
+            class: record.spec.class.class(),
             state: BoxState::Created,
             bounds: record.spec.bounds,
+            allocation: record.spec.allocation,
+            route: record.spec.route,
             adopted: false,
             exit: None,
             abandoned: 0,
@@ -1392,9 +1457,10 @@ impl Node {
     /// checked against this host before anything is made: its root and each mount's source are there,
     /// and a layered root's writable layer can go where the node keeps bundles. What can't be is
     /// refused by name (CLAUDE.md §3).
-    fn render(&self, id: &BoxId, spec: &OciSpec) -> Result<Source, Refusal> {
-        let dir = self.bundles.join(id.as_str());
-        let rendered = bundle::render(
+    fn render(&self, full: &BoxSpec, spec: &OciSpec) -> Result<Source, Refusal> {
+        let dir = self.bundles.join(full.id.as_str());
+        let rendered = self.render_attachments(
+            full,
             spec,
             &Place {
                 dir: &dir,
@@ -1616,8 +1682,63 @@ impl Node {
 }
 
 impl Runtime for Node {
+    fn physical_report(&self) -> Result<hex_api::PhysicalReport, Refusal> {
+        self.native_physical_report()
+    }
+    fn initialize_backing(
+        &self,
+        grant: hex_api::BackingGrant,
+    ) -> Result<hex_api::BackingOffer, Refusal> {
+        grant.check()?;
+        self.pool_backend(&grant.key)?.initialize_backing(grant)
+    }
+    fn release_backing(&self, key: hex_api::BackingKey) -> Result<hex_api::BackingOffer, Refusal> {
+        self.pool_backend(&key)?.release_backing(key)
+    }
+    fn backing_usage(&self, key: &hex_api::BackingKey) -> Result<Usage, Refusal> {
+        self.pool_backend(key)?.backing_usage(key)
+    }
+    fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
+        if let Some(backend) = self.backend(class)? {
+            return backend.capacity(class);
+        }
+        // node_key is stable across this state directory's recovery, shared by both native classes.
+        let mut capacity = self.native_capacity()?;
+        if class == Class::Oci {
+            capacity.devices = self.attachment_capacity()?;
+        }
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => hex_api::ImageArch::Amd64,
+            "aarch64" => hex_api::ImageArch::Arm64,
+            _ => {
+                let reason = "architecture is outside Hex's supported native targets";
+                let mut why = String::new();
+                why.try_reserve_exact(reason.len())
+                    .map_err(|_| Refusal::Exhausted {
+                        what: "native architecture refusal bytes",
+                        bound: reason.len(),
+                    })?;
+                why.push_str(reason);
+                return Err(Refusal::Platform {
+                    what: "native image architecture",
+                    platform: std::env::consts::ARCH,
+                    why,
+                });
+            }
+        };
+        hex_runtime::devices::native_routes(
+            &mut capacity,
+            class,
+            hex_api::ImagePlatform {
+                os: hex_api::ImageOs::Linux,
+                arch,
+            },
+        )?;
+        Ok(Some(capacity))
+    }
+
     fn classes(&self) -> Vec<Class> {
-        vec![Class::Process, Class::Oci]
+        self.initialized_classes()
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
@@ -1625,6 +1746,21 @@ impl Runtime for Node {
         // and an owner not well formed, is refused by name whether or not the id is taken (HEX-RT-13,
         // HEX-RT-18); then an oci box's init is held to its class's exec bound (HEX-RT-14).
         spec.check()?;
+        if let Some(backend) = self.backend(spec.backend_class()?)? {
+            return backend.create(spec);
+        }
+        if spec.route.is_some() {
+            self.capacity(spec.class.class())?
+                .ok_or_else(|| backends::uncertain(&spec.id))?
+                .validate_route(&spec)?;
+        }
+        if !spec.devices.is_empty() && !matches!(&spec.class, ClassSpec::Oci(_)) {
+            return Err(Refusal::Platform {
+                what: "device attachment",
+                platform: "Linux node",
+                why: "physical claims require a structured OCI payload".into(),
+            });
+        }
         if let ClassSpec::Oci(oci) = &spec.class {
             oci.init.fits(&process::exec_limit())?;
         }
@@ -1634,17 +1770,45 @@ impl Runtime for Node {
         if self.record(&spec.id)?.is_some() || self.cgroup(&spec.id).is_some() {
             return Err(Refusal::Exists(spec.id));
         }
+        let _devices = self.hold_attachments(&spec.devices)?;
+        if !spec.devices.is_empty() {
+            self.attachments
+                .prepare(&spec, &self.store.all()?, &self.store.all_pools()?)?;
+        }
         let source = match &spec.class {
             ClassSpec::Process => return self.create_process(spec),
             ClassSpec::Bundle(bundle) => Source::Given(bundle.clone()),
-            ClassSpec::Oci(oci) => self.render(&spec.id, oci)?,
+            ClassSpec::Oci(oci) => self.render(&spec, oci)?,
+            ClassSpec::Firecracker(_) | ClassSpec::Shards(_) => {
+                return Err(backends::uncertain(&spec.id));
+            }
         };
+        let id = spec.id.clone();
+        let assigned = !spec.devices.is_empty();
+        if assigned {
+            self.store.put(&BoxRecord::new(
+                spec.clone(),
+                Phase::Creating,
+                vec![self.container_dir(&id), self.bundles.join(id.as_str())],
+            ))?;
+        }
         let made = self.create_oci(spec, source);
+        if assigned
+            && made.is_err()
+            && let Err(cleanup) = self.scrub(&id)
+        {
+            return Err(Refusal::Broken(format!(
+                "device-bearing create failed and physical cleanup remains uncertain: {cleanup}"
+            )));
+        }
         self.keep_peaks();
         made
     }
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+        if let Some(backend) = self.backend_record(id)? {
+            return backend.start(id);
+        }
         // An oci box's start is tried first, so the hot path reads only the container's state: a box with
         // no container under the oci root is a process box or no box, which the record then says (goal 3 plan
         // step 3: start costs one FIFO operation and the state read beside it). The init's end is watched
@@ -1678,6 +1842,9 @@ impl Runtime for Node {
                 Some(ClassSpec::Oci(_) | ClassSpec::Bundle(_)) => {
                     Err(Refusal::NotRunning(id.clone(), "start"))
                 }
+                Some(ClassSpec::Firecracker(_) | ClassSpec::Shards(_)) => {
+                    Err(backends::uncertain(id))
+                }
             },
             Err(e) => Err(e.into()),
         }
@@ -1690,6 +1857,9 @@ impl Runtime for Node {
         program: Program,
         mut stdio: Stdio,
     ) -> Result<Box<dyn Proc>, Refusal> {
+        if let Some(backend) = self.backend_record(id)? {
+            return backend.exec(id, program, stdio);
+        }
         let given = stdio.make_asked()?;
         let proc = self.exec_given(id, program, stdio)?;
         Ok(Box::new(hex_api::Asked::new(proc, given)))
@@ -1704,6 +1874,7 @@ impl Runtime for Node {
         program: Program,
         mut stdio: Stdio,
     ) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check_no_devices("linux")?;
         spec.check_run()?;
         let id = spec.id.clone();
         // Held until the run's box is whole and watched, as a create's turn is.
@@ -1757,6 +1928,9 @@ impl Runtime for Node {
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
+        if let Some(backend) = self.backend_record(id)? {
+            return backend.signal(id, signal);
+        }
         let cg = self
             .cgroup(id)
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
@@ -1776,6 +1950,9 @@ impl Runtime for Node {
     }
 
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
+        if let Some(backend) = self.backend_record(id)? {
+            return backend.usage(id);
+        }
         let cg = self
             .cgroup(id)
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
@@ -1806,6 +1983,8 @@ impl Runtime for Node {
                     class: Class::Process,
                     state: BoxState::Empty,
                     bounds: hex_api::Bounds::default(),
+                    allocation: None,
+                    route: None,
                     adopted: false,
                     exit: None,
                     abandoned: 0,
@@ -1816,6 +1995,9 @@ impl Runtime for Node {
     }
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        if let Some(backend) = self.backend_record(id)? {
+            return backend.delete(id);
+        }
         // After a create or delete of the box under way, so it removes what that one made, or finds it
         // gone, and scrubs nothing it's doing.
         let _turn: Turn<'_> = self.turns.take(id)?;
@@ -1838,6 +2020,10 @@ impl Node {
     /// is taken.
     fn delete_box(&self, id: &BoxId) -> Result<(), Refusal> {
         let record = self.record(id)?;
+        let devices = record
+            .as_ref()
+            .map_or(&[][..], |record| record.spec.devices.as_slice());
+        let _devices = self.hold_attachments(devices)?;
         if record.is_none() && self.cgroup(id).is_none() {
             return Err(Refusal::NoSuchBox(id.clone()));
         }
@@ -2381,10 +2567,13 @@ mod tests {
     fn ac_t7_1_3_a_reaped_init_keeps_its_identity_until_its_cgroup_drains() {
         let mut record = BoxRecord::new(
             BoxSpec {
+                route: None,
+                devices: Vec::new(),
                 id: BoxId::new("ended").unwrap(),
                 bounds: hex_api::Bounds::default(),
                 class: ClassSpec::Bundle(PathBuf::from("bundle")),
                 owner: None,
+                allocation: None,
             },
             Phase::Ready,
             Vec::new(),

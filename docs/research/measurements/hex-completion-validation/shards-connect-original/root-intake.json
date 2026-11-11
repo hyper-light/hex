@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "at_utc": "2026-11-11T18:36:31.393210+00:00",
+  "role": "coordinator",
+  "parent": "620b5f57737ae448a1d2ccdc6ec51e65a125c239",
+  "original_signed_source": "934626a10523d533b7fd81f86118141ee37a409e",
+  "original_parent": "d92faeaf24e2c847b781aadb3fefdefeb2cfd451",
+  "policy_revision": "bff3015182ad754274f1048ce393ac12cb6cd91f",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "full_read_retained": true,
+  "source_review": {
+    "complete_new_leaf_and_manifest_read": true,
+    "fixed_parent_input_hashes_verified": 12,
+    "current_inputs_equal_fixed_parent_except_separate_c0a_test": 11,
+    "original_output_hashes_verified": 3,
+    "original_registration_prefix_equal": true,
+    "only_cfg_test_registration_and_new_test": true,
+    "production_api_wire_cargo_changed": false,
+    "old_tests_changed": false
+  },
+  "status": "SOURCE_ONLY_ORIGINAL_UNRUN",
+  "selected_original": "guest::shards::connect_original_tests::shards_link_connect_cause_remains_distinct_from_legacy_channel_text_on_wire",
+  "reviewed_path": "Actual ShardsLink::dial_before -> SDK model refusal -> existing Hex adapter -> canonical borrowed refusal snapshot -> existing decoder/re-encoder",
+  "nonvacuity": "Three exact absolute SDK calls with same caller/port; changed phase must change decoded refusal and bytes before Connect-vs-same-text-Channel semantic assertion",
+  "limits": [
+    "Source prediction is not an executed red",
+    "Compile/precondition/positive-control failures cannot prove typed cause loss",
+    "Original non-collapse test does not certify all fields of a future typed carrier",
+    "No future carrier, shadow mapper, text parser or production remedy"
+  ],
+  "checks": {
+    "named_rustfmt_1_99_1": 0,
+    "builds": 0,
+    "tests": 0,
+    "remote_or_native": 0
+  },
+  "separate_c0a_test_sha256": "6206a12c7b75c6c64d50fefcfba24803cca137823ca76abd111822d0705aff07"
+}

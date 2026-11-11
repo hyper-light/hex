@@ -1,0 +1,78 @@
+{
+  "binary": [
+    {
+      "path": "target/debug/deps/hex_runtime-f32d8d7efe3211a6",
+      "bytes": 111658688,
+      "sha256": "00f6a24528d883a9e4627c4d6505824608d08d6efc734fc50f9ef90a0897900d"
+    }
+  ],
+  "phases": [
+    {
+      "name": "shared-rearm-original",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::shared::tests::shared_backing_rearms_only_after_original_scope_release_and_index_ack",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 1803030,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "1687a4f32b70fb90ffd0e43228c914e3cda217d52579e8ac5894827bfe24664f",
+      "bytes": 4383,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "runtime-joined-strict",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-api",
+        "-p",
+        "hex-sim",
+        "-p",
+        "hex-core",
+        "-p",
+        "hex-client",
+        "-p",
+        "hex-runtime",
+        "--all-targets",
+        "--locked",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 1869838,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "3258888e49f0b1934cd3566a32f27303f403098b00c6423e6b8b2d9fc12cf4a2",
+      "bytes": 4662,
+      "test_outcomes": []
+    }
+  ],
+  "recorded_children_reaped": true
+}

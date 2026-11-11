@@ -1,0 +1,12 @@
+{
+  "platform": "macOS-26.4-arm64-arm-64bit",
+  "machine": "arm64",
+  "needs": "cpus=1,mem=4g,disk=12g",
+  "nice": 20,
+  "jobs": 1,
+  "threads": 1,
+  "versions": {
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+  }
+}

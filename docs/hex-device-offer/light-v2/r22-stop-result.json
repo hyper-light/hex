@@ -1,0 +1,12 @@
+{
+  "job": "r22",
+  "source": "a69d34264f7eb6214ea108f964a9cdcbe25ccc3b",
+  "reason": "ROOT narrowed scope after job start; stop before unchanged six-test execution",
+  "response": {
+    "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+    "output": "Traceback (most recent call last):\n  File \"/Users/adalundhe/.cache/hex-device-offer-01a1c640-a69d3426-v2/driver.py\", line 34, in <module>\n    build=run('build',[str(cargo),'test','-p','hex-node','--lib','--locked','--offline','--no-run','--message-format=json'],True)\n  File \"/Users/adalundhe/.cache/hex-device-offer-01a1c640-a69d3426-v2/driver.py\", line 29, in run\n    try:child.wait(timeout=900)\n  File \"/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/subprocess.py\", line 1189, in wait\n    return self._wait(timeout=timeout)\n  File \"/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/subprocess.py\", line 1911, in _wait\n    time.sleep(delay)\nKeyboardInterrupt\n",
+    "running": false,
+    "exit_code": null
+  },
+  "subsequent_check": "light-v2/steering-stop.json shows recorded Cargo PID39653 absent and no test logs/list/summary"
+}

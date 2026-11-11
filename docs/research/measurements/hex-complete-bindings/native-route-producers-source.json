@@ -1,0 +1,24 @@
+{
+  "parent": "51870d7a811d21abdbe8bbdc56bf0f310e0f4e7e",
+  "role": "implementer",
+  "policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": {
+    "crates/hex-node/src/node.rs": "bad59084d42a1b028b4b0a1d3fb4535ab00226fa3264505d0473a2230bbb2933",
+    "crates/hex-node/src/node/backends.rs": "e594453336fb530fff87700c6b2ef15a7026a4628b710d30b6a98bb83bc646ba",
+    "crates/hex-node/src/scheduler/capacity/devices.rs": "1fa8d89e8fd08f2c5045138b68b669bdeb0b092b9995a58a13d86cd33577777a",
+    "crates/hex-runtime/src/devices.rs": "feeb1da2bff888c10b51e98150f8ab5cf2e2d8e64dadfe9b683b9c4405d87420",
+    "crates/hex-runtime/src/firecracker/mod.rs": "062fae2abe2dc566b06bfda972fbca87d5f245f3b25c8d390d30ee8bb1364200",
+    "crates/hex-runtime/src/firecracker/native.rs": "3acc5ff92e648954dcada9a2ecc35f9a191fc52181ba0e2dc822579c70a306e8"
+  },
+  "integration": "Apply exact owned deltas; preserve ROOT Node render/fullBoxSpec, all_pools attachment ports and other current integration fixes. native_routes is in existing registered runtime devices module. No metadata edge. L3 global preflight helper call remains next coherent increment.",
+  "controls": [
+    "native_container_and_process_keep_the_actual_platform_and_physical_mask (UNRUN)"
+  ],
+  "checks": {
+    "scoped_rustfmt": 0,
+    "git_diff_check": 0,
+    "tests": "UNRUN; no duplicate dispatch"
+  },
+  "evidence": "NATIVE-ROUTE-PRODUCERS.md"
+}

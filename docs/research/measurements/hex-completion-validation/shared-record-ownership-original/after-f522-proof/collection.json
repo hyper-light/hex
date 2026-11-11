@@ -1,0 +1,170 @@
+{
+  "bytes": 1343628,
+  "sha256": "a9cf0745b621873daa79d635a866afb72e55f67f86f33e3303ef38506aa0c8fc",
+  "members": {
+    "cohort-f522a9a4-linux-shared-owner-after-f522/source-before.json": {
+      "bytes": 619777,
+      "sha256": "1971b52939dbd3d5f27100e9573d8c10acbf70c563c5d77391f409140a758ff1"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/owned-scope-limits.json": {
+      "bytes": 260,
+      "sha256": "c71d1338a2ff40e02038acaa65d79b77adf465848bce93bc16be3a09157086ac"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/after-source-before.json": {
+      "bytes": 619777,
+      "sha256": "1971b52939dbd3d5f27100e9573d8c10acbf70c563c5d77391f409140a758ff1"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/mutant-source-before.json": {
+      "bytes": 619777,
+      "sha256": "78b08b65cc12e5f39b81344bd1301160517d307234dc6e98bc2648d94d8a666e"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/restored-source-before.json": {
+      "bytes": 619777,
+      "sha256": "1971b52939dbd3d5f27100e9573d8c10acbf70c563c5d77391f409140a758ff1"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/after-shared1.stdout": {
+      "bytes": 240,
+      "sha256": "f6256239d6492c32d98f104371d7a55dfd146500b1c05f8e88b13be15edec612"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/after-shared1.stderr": {
+      "bytes": 3648,
+      "sha256": "de0c7b8a20837d397c11b74778d81d5d29482cfb7f2d545b3ae471e5ac8c9bf0"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/running.json": {
+      "bytes": 9591,
+      "sha256": "d0e367656591abb2b5932c2208507c9c7286e12a2e42e8dc5db0b43cc46caf4f"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/after-node-strict.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/after-node-strict.stderr": {
+      "bytes": 3236,
+      "sha256": "221f877e89c38c45018152cea0d876274f77fa622895b8eaa2405e3b43acf8e4"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/after-production.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/after-production.stderr": {
+      "bytes": 1675,
+      "sha256": "ebb50088f8a967721455038617108ca839fe860c809154a195ccae555b866571"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/mutant-shared1.stdout": {
+      "bytes": 388,
+      "sha256": "e52d0566d8d5dc468f054a99c95e5ac968fcce7caafcafe59dc44361581ac36b"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/mutant-shared1.stderr": {
+      "bytes": 4254,
+      "sha256": "74757a3e8d1f4dceca70771e79962e11cddc0c64fdb87284e1035df31ebc16f5"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/restored-shared1.stdout": {
+      "bytes": 240,
+      "sha256": "f6256239d6492c32d98f104371d7a55dfd146500b1c05f8e88b13be15edec612"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/restored-shared1.stderr": {
+      "bytes": 3783,
+      "sha256": "bc31935ee792a4779e234409fe13fdc55758a98398583fa50ddaf8d98ced0e9b"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/after-source-after.json": {
+      "bytes": 619777,
+      "sha256": "1971b52939dbd3d5f27100e9573d8c10acbf70c563c5d77391f409140a758ff1"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/mutant-source-after.json": {
+      "bytes": 619777,
+      "sha256": "78b08b65cc12e5f39b81344bd1301160517d307234dc6e98bc2648d94d8a666e"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/restored-source-after.json": {
+      "bytes": 619777,
+      "sha256": "1971b52939dbd3d5f27100e9573d8c10acbf70c563c5d77391f409140a758ff1"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/result.json": {
+      "bytes": 9843,
+      "sha256": "c3b6485b84301ac140fda88565174c08506e77fe55a5e05d198443e8d1d0e380"
+    },
+    "cohort-f522a9a4-linux-shared-owner-after-f522/event-evidence/journal.jsonl": {
+      "bytes": 3248,
+      "sha256": "cc7891a31e45f540dc88c0f83110a14da923d939ccaaf1c3fbd6ccaa6953f6d3"
+    },
+    "outer-closures.json": {
+      "bytes": 1560,
+      "sha256": "19d3104ff11ff9bbaaf539b44e3158066df012896885750894caa087651a6d09"
+    }
+  },
+  "closures": {
+    "cohort-f522a9a4-linux-shared-owner-after-f522": {
+      "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-shared-owner-after-f522.scope",
+      "scope_absent": true,
+      "owners": [
+        {
+          "kind": "driver",
+          "recorded": {
+            "pid": 2531587,
+            "ppid": 2531572,
+            "start_ticks": 32769736
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        },
+        {
+          "kind": "cargo",
+          "recorded": {
+            "pid": 2539238,
+            "ppid": 2531587,
+            "start_ticks": 32770011
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        },
+        {
+          "kind": "cargo",
+          "recorded": {
+            "pid": 2857609,
+            "ppid": 2531587,
+            "start_ticks": 32777911
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        },
+        {
+          "kind": "cargo",
+          "recorded": {
+            "pid": 2950976,
+            "ppid": 2531587,
+            "start_ticks": 32780062
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        },
+        {
+          "kind": "cargo",
+          "recorded": {
+            "pid": 3029584,
+            "ppid": 2531587,
+            "start_ticks": 32781457
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        },
+        {
+          "kind": "cargo",
+          "recorded": {
+            "pid": 3271680,
+            "ppid": 2531587,
+            "start_ticks": 32789560
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        }
+      ]
+    }
+  },
+  "collector_exit": 0,
+  "collector_reaped": true,
+  "all_members_verified": true,
+  "source_archives_verified": true
+}

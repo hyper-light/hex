@@ -1,0 +1,120 @@
+{
+  "source": "fabd73020cdd1c6e201d8028fcca5d85f28ef18c",
+  "sealed_sha256": "06ba2ce2d7e577487e7e2df8ab8298aee2fe3f529e6422abc7ab24712a094fde",
+  "mutation": {
+    "attribution": "whole inherited-FD isolation guard; own and foreign references may remain",
+    "file": "crates/hex-runtime/src/linux/sys.rs",
+    "mutant_sha256": "a4a4df6d6b643ec22823a3006681171177b74de9d574ca3eec85d1d001c823ce",
+    "original_sha256": "f90284ac37e877201342f3c170f4ae091a82269f460fbc47815706dd73f055e4"
+  },
+  "artifacts": {
+    "baseline": {
+      "binary": "/home/adalundhe/.cache/hex-lead/gc5688v1/baseline/target/x86_64-unknown-linux-gnu/debug/deps/hex_node-56e249d479a053c2",
+      "bytes": 186300096,
+      "cargo_jsonl_sha256": "1c3edfce9ba60b58a2353e96e2b904d9a5d3e5cc25b12a52c5b696fef9234b0d",
+      "cargo_stderr_sha256": "661fbba41c0f831e2f4e49f9fc415a6f46115884de5fa7e29b6ae003edab7ab4",
+      "fresh": false,
+      "sha256": "49f9c7c87688790465c6727b46c098fb683c14d5772744b81bfa8860a7a4dcbb",
+      "source_after_sha256": "f8201a7fa568ab7de3cc136a533bf3cd4f96cc32eaadf0814fd7b6fb48014fc1"
+    },
+    "bypass": {
+      "binary": "/home/adalundhe/.cache/hex-lead/gc5688v1/bypass/target/x86_64-unknown-linux-gnu/debug/deps/hex_node-56e249d479a053c2",
+      "bytes": 186271856,
+      "cargo_jsonl_sha256": "11125987f254d1e60edffb77540e7e49fa61845bca032ab4dfb02173bbab8f07",
+      "cargo_stderr_sha256": "3f2854590e9ab84ad486143b5017c2e330fe1727f87965dd0d0eee8ff596115c",
+      "fresh": false,
+      "sha256": "e58bd1d034d0ed0f5ab2eb9c0bf9343d42aa9147d3c8392d06b1a016a801e5c3",
+      "source_after_sha256": "b46d38f60ef730407765ad035c837c835ef385fd38ebcb0196e027d9960a2352"
+    },
+    "restored": {
+      "binary": "/home/adalundhe/.cache/hex-lead/gc5688v1/restored/target/x86_64-unknown-linux-gnu/debug/deps/hex_node-56e249d479a053c2",
+      "bytes": 186300112,
+      "cargo_jsonl_sha256": "fddf09bc89c934553ee0b82129a7b17300740a55487c5ebd61b8a8ec38c08d3d",
+      "cargo_stderr_sha256": "a975f90990482827bac516796ed9770d738266e237782cae996edecd5dc27850",
+      "fresh": false,
+      "sha256": "ea3b39413a6aedbfb5e66ff2eb53b62bdc60f02d87ff645b849e967d5fc990e6",
+      "source_after_sha256": "f8201a7fa568ab7de3cc136a533bf3cd4f96cc32eaadf0814fd7b6fb48014fc1"
+    }
+  },
+  "baseline_restored_full_source_equal": true,
+  "results": {
+    "baseline": {
+      "libtest": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "parent_reaped_ns": "2421390663",
+      "first_terminal_observation_ns": "2421443532",
+      "observation": {
+        "Ok": null
+      },
+      "cleanup_uncertainty": [],
+      "external_closure": {
+        "driver": {
+          "pid": 2950153,
+          "ppid": 2950138,
+          "start_ticks": 32554962
+        },
+        "owned_driver_birth_absent": true,
+        "native_observation": {
+          "absent": true
+        },
+        "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-gate-baseline-fabd-v1.scope",
+        "scope_absent": true
+      }
+    },
+    "bypass": {
+      "libtest": {
+        "passed": 0,
+        "failed": 1,
+        "ignored": 0
+      },
+      "parent_reaped_ns": "2425818386",
+      "first_terminal_observation_ns": "62525009188",
+      "observation": {
+        "Err": "exact pidfd exit guard expired"
+      },
+      "cleanup_uncertainty": [],
+      "external_closure": {
+        "driver": {
+          "pid": 2996987,
+          "ppid": 2996895,
+          "start_ticks": 32557934
+        },
+        "owned_driver_birth_absent": true,
+        "native_observation": {
+          "absent": true
+        },
+        "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-gate-bypass-fabd-v1.scope",
+        "scope_absent": true
+      }
+    },
+    "restored": {
+      "libtest": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "parent_reaped_ns": "2469115005",
+      "first_terminal_observation_ns": "2469143278",
+      "observation": {
+        "Ok": null
+      },
+      "cleanup_uncertainty": [],
+      "external_closure": {
+        "driver": {
+          "pid": 3109041,
+          "ppid": 3108973,
+          "start_ticks": 32565059
+        },
+        "owned_driver_birth_absent": true,
+        "native_observation": {
+          "absent": true
+        },
+        "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-gate-restored-fabd-v1.scope",
+        "scope_absent": true
+      }
+    }
+  }
+}

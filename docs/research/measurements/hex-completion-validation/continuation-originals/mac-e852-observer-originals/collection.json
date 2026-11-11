@@ -1,0 +1,99 @@
+{
+  "bytes": 296765,
+  "sha256": "d216c534c822cd1b2778b920a203db83acdd7d01025376061c84796c58a13f91",
+  "members": {
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/route_wire_backing_calls_and_all_phases_roundtrip.log": {
+      "bytes": 889,
+      "sha256": "a37fa212afe4de9331977cd495f6b65d59da4c9e2b066412da2e3af39c5f4f57"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/node-cli-matched-check.log": {
+      "bytes": 2181,
+      "sha256": "35d568c0cd97505a7f0aba7c764c5d3d43505983f5fb1ce439cc7787a919ea7f"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/client-core-runtime-strict-clippy.log": {
+      "bytes": 4261,
+      "sha256": "4bcdd81ba9d38577986985a4f1b783def33454eef7c7e0832a5358c6fbb7b206"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/running.json": {
+      "bytes": 16151,
+      "sha256": "419c02ceff4dec6243fa8c55fa19c6ca1ce28a9d20dc1cb3a08d30fb680aad01"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/result.json": {
+      "bytes": 16783,
+      "sha256": "5d4b2fa58b02f2bc6e06dfcb5ab976510aa17a26ef0c7535066b36e68f4741a4"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/source-before.json": {
+      "bytes": 430885,
+      "sha256": "bc758436ba3b7c3602d016593762515463366e618f26fc2a6e8327630dee319f"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/source-after.json": {
+      "bytes": 430983,
+      "sha256": "ab5b3cf7fceb9c98541d5e3d7b80252866102c2104bf5dd8dcaaba837523848c"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/route_wire_backing_claims_reject_duplicates_order_bad_ids_and_counts.log": {
+      "bytes": 440,
+      "sha256": "73586ef4ae89752f66bc99a89300a96034623b8a09bf9e330d6fbd9723f140c3"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/api-lock-cohort.json": {
+      "bytes": 296,
+      "sha256": "ee3322e8df2dbb468f44624e4a7c74d28d69742438b74c8538f6b24f95915a88"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/route_wire_new_messages_enforce_exact_bounds_truncation_and_trailing_bytes.log": {
+      "bytes": 446,
+      "sha256": "b136623fec77f9dfa000937f53bbbdd789d4aa1fb535f16b03bdaab8c015bfa8"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/backing-wait-consumer.log": {
+      "bytes": 438,
+      "sha256": "48810f55422874a40eb1f41c14bb1b64dd8cb093797b400f6e52d4f100f7eb1d"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/api-finite-owned-original.log": {
+      "bytes": 1757,
+      "sha256": "82f1850359d901758e2a4cff51ee9c153539e4c61ec5e294fa74ecc0f14a346d"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/cold-gpu-new.log": {
+      "bytes": 904,
+      "sha256": "9a66011837e52c7f0ad606b7bb09466aab26c185cdd0606917578391a48529e5"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/selected-report-new.log": {
+      "bytes": 905,
+      "sha256": "45b48e0b7e2e512d876856ff1f7933f2db65bda0439e77092cb9c5f9f6cee08a"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/pool-reservation-new.log": {
+      "bytes": 896,
+      "sha256": "9aa0b917b5a62c36c0bf3088abb3dd444b9248c6cf8c8445326c0d36ccd51496"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/route_wire_fixed_backing_profiles_and_grants_are_revalidated.log": {
+      "bytes": 432,
+      "sha256": "f559b9f426dc1309da69c3536220af6fea7930348e4eed55209d2baaba9fb489"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/guest-observer-new-eight.log": {
+      "bytes": 2561,
+      "sha256": "75072c024faf49d9ae8b8d9f1a0106910d8575beeffeeefcf9d67360701e6f4a"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/pool-report-new.log": {
+      "bytes": 892,
+      "sha256": "7835105926b08502b2a2eed39e5dc9cb10f3378c71d04fc5148481e63734863b"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/selected-legacy-report-new.log": {
+      "bytes": 901,
+      "sha256": "17a6db2b2e9d8088851fb982852490c2cb1c6d8dbcfb221ebd226c1cf5311bdb"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/public-registry-seed.json": {
+      "bytes": 29092,
+      "sha256": "a3b054069beb140848548948af37419c2e7cbfd5ebe1f8d9a1f18c7bfbac7909"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/client-drop-original.log": {
+      "bytes": 3244,
+      "sha256": "e3d2818db4d03b8d4296495ef2c0bb86bcf815f5dbee1d6f3632d823e9dfe7c0"
+    },
+    "cohort-e852c1b5-mac-observer-originals-b24-v1/collected-binaries.json": {
+      "bytes": 16457,
+      "sha256": "5d15d16244ef6aae27b6a1eec0775ab4ccb5fd4b7127b862ed977fe145138b71"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

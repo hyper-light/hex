@@ -1,0 +1,32 @@
+{
+  "requirement": "AC-T7.4.1/R01",
+  "kind": "source only; no tests executed after intake",
+  "owned_signed_source": {
+    "crates/hex-api/src/runtime.rs": {
+      "source_revision": "27bb0960c2af58b66899b413d41829e2d870a2ca",
+      "sha256": "11bc6efca20f42e394555ebf613a12feeec112ceb3300dc40e44c5ce9a3fdb8e"
+    },
+    "crates/hex-sim/src/model.rs": {
+      "source_revision": "2d2a571a4032245643b32c665cd5ea8a47119d4e",
+      "sha256": "2376dd1db95895f2578a9e6e006af4436897c8e2bf8578fb9ccb0df7c31190f2"
+    },
+    "crates/hex-core/src/cgroup.rs": {
+      "source_revision": "573e8671f4415915fdfd366327a338bf1f83bf45",
+      "sha256": "1cb1047272a1c9010fe04d6fda6c24eb9ba9502ca9dbe91fdd879cb29ee03e01"
+    },
+    "crates/hex-runtime/src/linux/cgroup.rs": {
+      "source_revision": "573e8671f4415915fdfd366327a338bf1f83bf45",
+      "sha256": "162015adf83742c4016ac8b4cb5c5b4fad93eb9f75351f473d455c19779c6dcc"
+    }
+  },
+  "root_adaptations": {
+    "hex_sim_dev_dependency": "existing serde_json.workspace=true; lock dependency edge only, existing version/checksum unchanged"
+  },
+  "controls_pending": [
+    "three API route/claim sequence controls",
+    "one sim initialized route bounds control",
+    "three core strict usage controls",
+    "three Linux managed cgroup read controls"
+  ],
+  "unchanged_behavior": "ordinary cgroup usage/baseline semantics retained; checked managed usage only for backing accounting"
+}

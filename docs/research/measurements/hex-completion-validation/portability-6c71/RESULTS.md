@@ -1,0 +1,7 @@
+# ROOT current joined portability preflight
+
+Exact6c71c072957993cff77b8005b64d59e8d01b6784, admitted d132/macOS26.4arm64,1CPU4GiB12GiB/nice10/jobs1/threads1. Coordinator policy7d7e0855/rulesdf2. Requested strict all-targetClippy for API/Sim/core/client/runtime/node/CLI on both Windows x86_64 and aarch64, then nativeMac. First phase exited101 only at cfg(test) runtime_facts helper1327 whose solecaller is Linux-only. Neither Windows target is reported green; later Mac phase did NOT execute. Source-only exact gate correction assigned L1, no warning waiver or runtime change.
+
+Cargo93321, localCLI95198 and collector7158 terminal/reaped. Source changes0/temp0/testexecution0/nativecalls0. Raw311417B SHA90995f519d36d126ec59f691a91bdb3291c9b7e1cb925a0d70d88ff75d8de277 and allmembers/archive-versusGit independently checked. Full7699B loged6e520f02a29a2af7a8f7d5a617015d333215cfaaa3efb64567a3e0d22b100d and commands in result/raw. This is a cross compiler preflight, not native HCS/GPU/WindowsARM VM proof. NativeWindows original5de stillUNKNOWN/TLS delivery unavailable, ARM VM pause unchanged. Full7target/final gates owed.
+
+The queued upstreamSDK0b4 WindowsARM classification concern does not apply to CURRENT ROOT vendor: vendor0001 already recognizes x86_64|aarch64 WHP and0003 preserves conformance; current lib.rs backend regression already asserts ARM WHP. No duplicated classification fix/test campaign was started. Broader renderer/nodeMask and actualARM native support remain separate gaps.

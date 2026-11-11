@@ -54,15 +54,35 @@ impl Feed for hex_api::OwnedStream {
     }
 }
 
+/// Moves the same unique facade into the existing generic copier. UniqueArc itself has no
+/// Read/Write implementation; this adapter adds neither allocation nor native ownership.
+pub(crate) struct DuplexIo(pub(crate) crate::guest::DuplexOwner);
+
+impl Read for DuplexIo {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.0.read(bytes)
+    }
+}
+
+impl Write for DuplexIo {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
 /// A guest's stdio connection the client dialed itself, in process.
-impl Feed for Box<dyn crate::guest::Duplex> {
+impl Feed for DuplexIo {
     #[cfg(unix)]
     fn waited(&self) -> std::os::fd::BorrowedFd<'_> {
-        self.handle()
+        self.0.handle()
     }
 
     fn end_sending(&self) {
-        let _ = self.shutdown(std::net::Shutdown::Write);
+        let _ = self.0.shutdown(std::net::Shutdown::Write);
     }
 }
 

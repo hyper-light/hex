@@ -1,0 +1,9 @@
+[2m[kiln] on 00aad8daff2fa3c9daa65d53c425d450 · linux/x86_64 · 27 of 32 cores idle · 48 GB free · room for 1 CPU, 4 GiB of memory, 12 GiB of disk[0m
+  File "<string>", line 1
+    import
+          ^
+SyntaxError: Expected one or more names after 'import'
+/usr/bin/bash: line 2: from: command not found
+/usr/bin/bash: -c: line 3: syntax error near unexpected token `('
+/usr/bin/bash: -c: line 3: `packed=sys.stdin.buffer.read(1048577);assert len(packed)<=1048576'
+[2m[kiln] used memory not measured, 21 ms of CPU (counted by the system, 1.064 CPUs on average) over 20 ms; OOM kills not seen here[0m

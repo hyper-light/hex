@@ -1,0 +1,18 @@
+{
+  "parent": "fa7a3aa1f34e1c086d8ec64ac4e2ad31ba9a6800",
+  "source": {
+    "crates/hex-api/src/runtime.rs": "3819270656dabd993246dc9b95e8c401dc3f07504bb01e339597203f3a3bc413",
+    "crates/hex-sim/src/index/routes.rs": "3a52e756df0b16ad7cd70b679bcf5c1d1e2d8f091bda48329fc205b8f8c0e995"
+  },
+  "role": "implementer",
+  "policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "original_tests_sha256": "6e1c41eb5798595216f320a3e4d2188dcb33057caba0cab381d33a3a068d4e81",
+  "red_log_sha256": "1296bc314c6259869d9cfcf8543250e93b5427351750c137254f891b0c782f1e",
+  "checks": {
+    "scoped_rustfmt": 0,
+    "git_diff_check": 0,
+    "post_compile_tests": "UNRUN; ROOT owns targeted controls"
+  },
+  "evidence": "INDEX-PREPARED-ALTERNATIVE.md"
+}

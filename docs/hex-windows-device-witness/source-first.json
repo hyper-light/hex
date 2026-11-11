@@ -1,0 +1,10 @@
+{
+  "base": "d3e936d12f89397715f8a3b34a4ca69160252f78",
+  "status": "SOURCE_ONLY_UNCOMPILED_UNRUN",
+  "file": "crates/hex-cli/tests/windows_assigned_device.rs",
+  "bytes": 28593,
+  "sha256": "10b22f6e284aa1ad3c25876dc9bfb12e2c2ae42bbd91d5208776e7995c15797f",
+  "native_execution": "ROOT_ONLY_CURRENT_COMBINED_SOURCE_EXTERNAL_GUARD",
+  "case_single_requires_second_gpu": false,
+  "case_foreign_requires_actual_second_gpu": true
+}

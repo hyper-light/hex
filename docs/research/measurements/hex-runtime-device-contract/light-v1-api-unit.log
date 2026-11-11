@@ -1,0 +1,83 @@
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded serde_core v1.0.229
+  Downloaded itoa v1.0.18
+  Downloaded quote v1.0.47
+  Downloaded zmij v1.0.23
+  Downloaded thiserror-impl v2.0.21
+  Downloaded unicode-ident v1.0.27
+  Downloaded thiserror v2.0.21
+  Downloaded proc-macro2 v1.0.107
+  Downloaded serde_derive v1.0.229
+  Downloaded serde v1.0.229
+  Downloaded memchr v2.8.3
+  Downloaded serde_json v1.0.154
+  Downloaded syn v3.0.9
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.27
+   Compiling quote v1.0.47
+   Compiling syn v3.0.9
+   Compiling serde_core v1.0.229
+   Compiling zmij v1.0.23
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.154
+   Compiling thiserror v2.0.21
+   Compiling thiserror-impl v2.0.21
+   Compiling serde_derive v1.0.229
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling hex-api v0.1.0 (/Users/adalundhe/.cache/hex-runtime-device-contract/01a1c643-441ceb27-light-v1/source/crates/hex-api)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.89s
+     Running unittests src/lib.rs (/Users/adalundhe/.cache/hex-runtime-device-contract/01a1c643-441ceb27-light-v1/target/debug/deps/hex_api-8c5776156411f4aa)
+
+running 35 tests
+test bounds::tests::each_bound_out_of_the_kernels_range_is_refused_by_name ... ok
+test bounds::tests::the_kernels_own_extremes_are_accepted ... ok
+test conformance::tests::a_measuring_patience_waits_for_the_exit_past_the_first_look ... ok
+test conformance::tests::a_patience_ends_the_wait_for_an_exit_never_reported ... ok
+test conformance::tests::the_signal_case_waits_out_no_watch ... ok
+test devices::tests::an_unsupported_backend_refuses_claims_before_effects_and_still_cleans_up ... ok
+test devices::tests::claims_and_offers_check_the_full_index_space_and_duplicate_identity ... ok
+test devices::tests::device_json_preserves_legacy_empty_fields_and_lowercase_kinds ... 
+thread 'devices::tests::device_json_preserves_legacy_empty_fields_and_lowercase_kinds' (24864060) panicked at crates/hex-api/src/devices.rs:273:9:
+assertion `left == right` failed
+  left: "{\"id\":\"device-contract\",\"bounds\":{\"cpu_weight\":null,\"cpu_max_milli\":null,\"memory_max\":null,\"memory_high\":null,\"io_weight\":null,\"io_latency_us\":null,\"io_max\":null,\"pids_max\":null},\"class\":\"process\"}"
+ right: "{\"id\":\"device-contract\",\"bounds\":{},\"class\":\"process\"}"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test devices::tests::physical_key_domains_are_checked_without_truncation ... ok
+test differential::tests::a_box_shown_late_passes ... ok
+test differential::tests::a_class_with_no_record_seeds_from_the_slowest_of_any_class ... ok
+test differential::tests::a_learned_wait_starts_at_twice_its_record_and_only_rises ... ok
+test differential::tests::a_liveness_a_later_step_proves_waits_out_no_watch ... ok
+test differential::tests::a_program_that_ends_late_is_not_read_as_still_running ... ok
+test differential::tests::a_reread_waits_as_long_as_the_last_read_took ... ok
+test differential::tests::a_runtime_that_differs_from_the_simulator_fails_the_scenario_that_shows_it ... ok
+test differential::tests::the_simulator_passes_the_differential_suite ... ok
+test differential::tests::what_term_does_to_an_init_follows_the_fixture ... ok
+test id::tests::a_decoded_id_is_checked_like_a_made_one ... ok
+test id::tests::an_id_is_never_a_path_or_empty ... ok
+test id::tests::try_clone_preserves_the_exact_validated_identity ... ok
+test runtime::tests::a_box_info_without_abandoned_programs_reads_and_writes_as_before ... ok
+test runtime::tests::a_box_info_without_an_exit_reads_and_writes_as_before ... ok
+test runtime::tests::a_signal_number_outside_the_kernels_range_is_refused ... ok
+test sim::tests::only_kill_ends_an_oci_boxs_init ... ok
+test sim::tests::term_ends_the_init_where_the_class_says_it_does ... ok
+test sim::tests::the_simulator_passes_the_conformance_suite ... ok
+test sim::tests::the_simulator_refuses_past_its_box_bound ... ok
+test spec::tests::a_host_path_that_isnt_utf8_is_refused_by_its_name ... ok
+test spec::tests::a_per_string_bound_counts_in_the_os_unit ... ok
+test spec::tests::a_program_is_counted_as_execve_counts_it_and_refused_past_a_bound ... ok
+test spec::tests::a_program_that_cant_be_started_is_refused_before_it_is_tried ... ok
+test spec::tests::a_windows_block_counts_the_environment_alone_in_its_unit ... ok
+test spec::tests::a_windows_path_passes_where_its_form_is_absolute ... ok
+test spec::tests::an_oci_spec_with_a_value_that_cant_be_rendered_is_refused_by_its_name ... ok
+
+failures:
+
+failures:
+    devices::tests::device_json_preserves_legacy_empty_fields_and_lowercase_kinds
+
+test result: FAILED. 34 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 97.12s
+
+error: test failed, to rerun pass `-p hex-api --lib`

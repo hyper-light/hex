@@ -1,0 +1,816 @@
+{
+  "source_revision": "f3f19c07e658dcd8097bba3dbb2bcbc484d9d8d7",
+  "source_tree": "e52cf09b8455d4f370bfc80d98ebf4bad8c1dcea",
+  "scope": "ROOT combined validation of immutable owner/runner recovery payload agreement. Full current-source gates and final Linux rootlab remain separate.",
+  "policy_revision": "f9030566bc227d50770bba879bd1387ebffe410f",
+  "policy_rules_sha256": "d634fcb944959ce1e40a9277d12b0905fcfcebf82d9da9832e826f790a349242",
+  "role": "coordinator",
+  "unit_mutation_build": {
+    "source_revision": "f3f19c07e658dcd8097bba3dbb2bcbc484d9d8d7",
+    "tree": "e52cf09b8455d4f370bfc80d98ebf4bad8c1dcea",
+    "archive_sha256": "60c2fdb9241242520aa595cf17113aa8a7502c9b85d5ff272c407b33ee73be83",
+    "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+    "exit": 0,
+    "phases": [
+      {
+        "label": "combined-node",
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin"
+        ],
+        "exit": 0,
+        "expected": 0,
+        "log_sha256": "960c58f443c2e0fe8253df21652bcdf4e914455b3919e170d3f9c397cd3ef153",
+        "pid": 5230,
+        "reaped": true,
+        "rows_sha256": "72c113b9f160efc8d82d0c3dd4aa5b74dc9c81e0aebd58deee7d8f9fb5531160"
+      },
+      {
+        "label": "guard-removed-start",
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "placement::tests::adversarial_bounds_tests::contradictory_recovered_start_intent_refuses_without_executing_init",
+          "--",
+          "--exact",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "exit": 101,
+        "expected": 101,
+        "log_sha256": "2f1863dfae4d2b599c35fe2a601674eae687d3a64ce50791f22441b3831f623b",
+        "pid": 6020,
+        "reaped": true,
+        "rows_sha256": "6332c30bb935fac2125ba1e661c06e5be0e0e84df91244cf5bff103df11c31bf"
+      },
+      {
+        "label": "restored-start",
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "placement::tests::adversarial_bounds_tests::contradictory_recovered_start_intent_refuses_without_executing_init",
+          "--",
+          "--exact",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "exit": 0,
+        "expected": 0,
+        "log_sha256": "2a56f97ce38eb848ad0db43a5eca8f6e2c54d71e73daa9e539bc15557fbf7745",
+        "pid": 6065,
+        "reaped": true,
+        "rows_sha256": "72c113b9f160efc8d82d0c3dd4aa5b74dc9c81e0aebd58deee7d8f9fb5531160"
+      },
+      {
+        "label": "guard-removed-spec",
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "placement::tests::adversarial_bounds_tests::equal_start_spec_disagreement_refuses_before_callbacks_without_rendering_payload",
+          "--",
+          "--exact",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "exit": 101,
+        "expected": 101,
+        "log_sha256": "2761960dab7a1c7158f57f1fd741eabe68c64712527fe87a2109a998535657e3",
+        "pid": 6207,
+        "reaped": true,
+        "rows_sha256": "6332c30bb935fac2125ba1e661c06e5be0e0e84df91244cf5bff103df11c31bf"
+      },
+      {
+        "label": "restored-spec",
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "placement::tests::adversarial_bounds_tests::equal_start_spec_disagreement_refuses_before_callbacks_without_rendering_payload",
+          "--",
+          "--exact",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "exit": 0,
+        "expected": 0,
+        "log_sha256": "8e31e7820a9aa8855388cf6764d0bfa6d9defb8306608eba4ccda884b942df39",
+        "pid": 6332,
+        "reaped": true,
+        "rows_sha256": "72c113b9f160efc8d82d0c3dd4aa5b74dc9c81e0aebd58deee7d8f9fb5531160"
+      },
+      {
+        "label": "node-clippy",
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "clippy",
+          "-p",
+          "hex-node",
+          "--all-targets",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit": 0,
+        "expected": 0,
+        "log_sha256": "1552889bdf421da90736e946ecde0cb7b368e50575b497155210f4c820f7d1be",
+        "pid": 6405,
+        "reaped": true,
+        "rows_sha256": "72c113b9f160efc8d82d0c3dd4aa5b74dc9c81e0aebd58deee7d8f9fb5531160"
+      },
+      {
+        "label": "host-debug",
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "build",
+          "-p",
+          "hex-cli",
+          "--bin",
+          "hex",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin"
+        ],
+        "exit": 0,
+        "expected": 0,
+        "log_sha256": "7e73f04af2b67bde714f2afa9d738ce1bbaf91176276a6f865265a5162c463d6",
+        "pid": 6574,
+        "reaped": true,
+        "rows_sha256": "72c113b9f160efc8d82d0c3dd4aa5b74dc9c81e0aebd58deee7d8f9fb5531160"
+      }
+    ],
+    "host": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-recovery-f3f19c07/aarch64-apple-darwin/debug/hex",
+      "sha256": "9ac5d7473dfe1111913c7aa76d5f07d2b403ab8ef17e9dbf9b9a4682090c7c11",
+      "bytes": 19092440
+    },
+    "scope": "ROOT combined native unit/Clippy, exact guard-removal effect controls and debug host build; native OCI proof and final full gates remain separate."
+  },
+  "combined_node": "test result: ok. 139 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.71s",
+  "native": {
+    "kind": "ROOT independent actual OCI recovery readback",
+    "source_revision": "f3f19c07e658dcd8097bba3dbb2bcbc484d9d8d7",
+    "cases": [
+      {
+        "label": "before",
+        "result_sha256": "6d4e1d7d383e3b5ba983fa506ddf78e57bc745f98e0308fecae635761ffbe211",
+        "observed": {
+          "boot_ready": true,
+          "diagnostic": "",
+          "key": {
+            "epoch": 1,
+            "owner": 0,
+            "seq": 0
+          },
+          "owner_start": false,
+          "physical": "hex-place-a73ae64f5cf28b08895c28bac9bce8d6d623e86d2833b0fa0bb4f6797cc29882-0-1-0",
+          "physical_state": "running",
+          "process_exit": null,
+          "records_after": {
+            "epoch.rec": "202449ad28ec5faedbaf8c7a3a10a1ba61fd8b1346fbd0d108f6d88401d09787",
+            "own-0-1-0.rec": "f4cb2e248a97f3d8ec02c3e3481a70a05e1320ad03cc07b45089aa3c6cdb8ed5",
+            "ran-0-1-0.rec": "7900fca892ce25413f973865fecf517f95ca01a8871aed61868d516b5d9e12cb"
+          },
+          "records_before": {
+            "epoch.rec": "bc23cd460cf1ed2cfedb8be48f8bf3f4930b372333550f7dc20e5a5652dee590",
+            "own-0-1-0.rec": "f4cb2e248a97f3d8ec02c3e3481a70a05e1320ad03cc07b45089aa3c6cdb8ed5",
+            "ran-0-1-0.rec": "7900fca892ce25413f973865fecf517f95ca01a8871aed61868d516b5d9e12cb"
+          },
+          "runner_start": true,
+          "sibling_unchanged": true
+        },
+        "controls": {
+          "actual_sibling_progress": true,
+          "empty_baseline": true,
+          "matching_rows_recovered": true,
+          "repaired_physical_state": "running"
+        },
+        "retirement": {
+          "pid": 9119,
+          "started": 12807428242556,
+          "vsock": "/Users/adalundhe/.cache/hx/e-gzeih0vy/guest-tmp/shards-api-c4d137e03d6c9470-0/v",
+          "receipt_sha256": "ef6f97af8ba35029827f4f0e43d80d1108783e4898f2a10901301c6a2359686a",
+          "record_sha256": "e26d76181f28e308c4265a4ac36674cbc701d33617132740247080a838262186",
+          "recorded_terminal": "Stopped",
+          "live_API_check": "not performed by verifier"
+        },
+        "ledger_rows": 66,
+        "owned_backend": {
+          "census": null,
+          "hex_sha256": "ff0a1cec8c8269c37de5a0000b3b8ad5346308eec339b4dcd1e5a8ec6d1c57e2",
+          "kind": "real",
+          "parent": 9086,
+          "pid": 9090,
+          "profile": "debug",
+          "recorded_by": 9086,
+          "run": "/Users/adalundhe/.cache/hx/e-gzeih0vy",
+          "source_revision": "8767f0d9c03f37c64c9c86301bceaa878f7eb495"
+        },
+        "external_inputs": [
+          {
+            "path": "/Users/adalundhe/.cache/hex-lead/target-capacity-8767f0d9-binaries/aarch64-apple-darwin/debug/hex",
+            "sha256": "ff0a1cec8c8269c37de5a0000b3b8ad5346308eec339b4dcd1e5a8ec6d1c57e2"
+          },
+          {
+            "path": "/Users/adalundhe/.cache/hex-lead/capacity-8767f0d9-build/initramfs-8767f0d9-aarch64.cpio",
+            "sha256": "618f399b1e9018d45f5014ce18c5756405e8d05fbd43a65484236aebc21e36ba"
+          },
+          {
+            "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+            "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+          },
+          {
+            "path": "/Users/adalundhe/.cache/hex-lead/target-capacity-8767f0d9-binaries/aarch64-unknown-linux-musl/release/hex",
+            "sha256": "5caf88d7c6f5d904586e9857e0c58c0d59db07bb811e16632b1520ebbba6c564"
+          },
+          {
+            "path": "/Users/adalundhe/.cache/hex-lead/target-capacity-8767f0d9-binaries/aarch64-apple-darwin/debug/hex-scheduler-runtime-probe",
+            "sha256": "e3cc9b630489075be4b5cfd1c70aec99d055f1adbd60a36e003aa3be397d41e6"
+          },
+          {
+            "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+            "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+          },
+          {
+            "path": "/Users/adalundhe/.cache/hex-lead/recovery-f3f19c07-native/build-before.json",
+            "sha256": "c0432b5c9059ee47c4b017237960f5fa4e48d56fcea97ff7e8407baecf23c6cc"
+          },
+          {
+            "path": "/Users/adalundhe/.cache/hex-lead/capacity-8767f0d9-physical-smoke/method-debug-physical.json",
+            "sha256": "df36d461ecec4207b7bbacf6a78eaba39667063f3d8eebb72c0e0322e2de84fa"
+          },
+          {
+            "path": "/Users/adalundhe/.cache/hex-lead/recovery-f3f19c07-native/policy.json",
+            "sha256": "4cfbcf0180d4b0d71e78dabf86f5a9a97dfcf70ead4444b06d3d25d371846ed6"
+          }
+        ],
+        "private_evidence_hashes": {
+          "call.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "observed-before-cleanup.json": {
+            "bytes": 841,
+            "sha256": "f43d7dc9c912064edf390b19deddf3e2dcfc94499c8cb45b928379ce63b3cbe7"
+          },
+          "owned-guest.json": {
+            "bytes": 617,
+            "sha256": "ef6f97af8ba35029827f4f0e43d80d1108783e4898f2a10901301c6a2359686a"
+          },
+          "pids.jsonl": {
+            "bytes": 15631,
+            "sha256": "0fb54c7f50d5724f8de73ebc0499c0f76f69c2585b9e01d1806e990e4b8e4a1f"
+          },
+          "real.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "real.node-state/@guest": {
+            "bytes": 130,
+            "sha256": "e26d76181f28e308c4265a4ac36674cbc701d33617132740247080a838262186"
+          },
+          "request.json": {
+            "bytes": 56,
+            "sha256": "21a6cd483e0590989d3019dd69703b1d456f120b2890acb3f9df26e377ef3a55"
+          },
+          "result.json": {
+            "bytes": 4441,
+            "sha256": "6d4e1d7d383e3b5ba983fa506ddf78e57bc745f98e0308fecae635761ffbe211"
+          },
+          "runtime-probe.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "runtime.json": {
+            "bytes": 952,
+            "sha256": "6e727c4aed519d5ae18e6fd968fff897bc249040c49970aa2aba11435de78865"
+          },
+          "sibling.json": {
+            "bytes": 309,
+            "sha256": "17fa5ccc8f696c5b5c0fcfb2f20d16470aa57e1d91e359b0e22ea54b87b201c7"
+          },
+          "sibling.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "sibling.state/placements/epoch.rec": {
+            "bytes": 175,
+            "sha256": "8176a109825806309e6e6a17af93d0578727748c860bd08f7e487b805acb056d"
+          },
+          "sibling.state/scheduler.lock": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "sibling.state/transport/epoch.rec": {
+            "bytes": 1,
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
+          },
+          "target-conflicted.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "target-repaired.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "target.json": {
+            "bytes": 306,
+            "sha256": "3504f5a93187f877a5f2051704d581055e2b5e2bec53c59b31e29659e178b230"
+          },
+          "target.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "target.state/placements/epoch.rec": {
+            "bytes": 175,
+            "sha256": "1d263bd85c4e837be5c1cb75e29be9fe79efa523add5520a0c92bd365e0fc89b"
+          },
+          "target.state/scheduler.lock": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "target.state/transport/epoch.rec": {
+            "bytes": 1,
+            "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+          }
+        }
+      },
+      {
+        "label": "after",
+        "result_sha256": "2de98c86932eb7fbefd23d5623a9843212acdcfefc56bc8b1036496be5a8350a",
+        "observed": {
+          "boot_ready": false,
+          "diagnostic": "hex schedule: the node agent's state is unusable: placement records: Damaged(\"owned and runner rows disagree on payload for Key { owner: 0, epoch: 1, seq: 0 }\")\n",
+          "key": {
+            "epoch": 1,
+            "owner": 0,
+            "seq": 0
+          },
+          "owner_start": false,
+          "physical": "hex-place-ed622ce88ad9d084a7d416c098cdecd2d34939a8d71c178116fd28bf95d96709-0-1-0",
+          "physical_state": "created",
+          "process_exit": 1,
+          "records_after": {
+            "epoch.rec": "808f91617e630b7285bd089d336e59ebc8c214d0bbbdb83e7273a69ca909b138",
+            "own-0-1-0.rec": "c81c8b18bcf32bd0e12efd4b474ac94e835da2d58611d556060810ec852dbd65",
+            "ran-0-1-0.rec": "5b60033dcf6bc15438e5bfd6d78b76481361cb111c092265195d51b5d844cef4"
+          },
+          "records_before": {
+            "epoch.rec": "808f91617e630b7285bd089d336e59ebc8c214d0bbbdb83e7273a69ca909b138",
+            "own-0-1-0.rec": "c81c8b18bcf32bd0e12efd4b474ac94e835da2d58611d556060810ec852dbd65",
+            "ran-0-1-0.rec": "5b60033dcf6bc15438e5bfd6d78b76481361cb111c092265195d51b5d844cef4"
+          },
+          "runner_start": true,
+          "sibling_unchanged": true
+        },
+        "controls": {
+          "actual_sibling_progress": true,
+          "empty_baseline": true,
+          "matching_rows_recovered": true,
+          "repaired_physical_state": "created"
+        },
+        "retirement": {
+          "pid": 9197,
+          "started": 12807467429168,
+          "vsock": "/Users/adalundhe/.cache/hx/e-d3idf7i1/guest-tmp/shards-api-57c1211b6f03d06f-0/v",
+          "receipt_sha256": "f1ffda3f6d6a3c3059ee9378d8688e9402175c57a5570676df7799048a7c636b",
+          "record_sha256": "eb7c329303f0c5d267988c688c1640490f515eb3e2df0c90f4f5f086f3502bd8",
+          "recorded_terminal": "Stopped",
+          "live_API_check": "not performed by verifier"
+        },
+        "ledger_rows": 67,
+        "owned_backend": {
+          "census": null,
+          "hex_sha256": "9ac5d7473dfe1111913c7aa76d5f07d2b403ab8ef17e9dbf9b9a4682090c7c11",
+          "kind": "real",
+          "parent": 9178,
+          "pid": 9193,
+          "profile": "debug",
+          "recorded_by": 9178,
+          "run": "/Users/adalundhe/.cache/hx/e-d3idf7i1",
+          "source_revision": "f3f19c07e658dcd8097bba3dbb2bcbc484d9d8d7"
+        },
+        "external_inputs": [
+          {
+            "path": "/Users/adalundhe/.cache/hex-lead/target-recovery-f3f19c07/aarch64-apple-darwin/debug/hex",
+            "sha256": "9ac5d7473dfe1111913c7aa76d5f07d2b403ab8ef17e9dbf9b9a4682090c7c11"
+          },
+          {
+            "path": "/Users/adalundhe/.cache/hex-lead/capacity-8767f0d9-build/initramfs-8767f0d9-aarch64.cpio",
+            "sha256": "618f399b1e9018d45f5014ce18c5756405e8d05fbd43a65484236aebc21e36ba"
+          },
+          {
+            "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+            "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+          },
+          {
+            "path": "/Users/adalundhe/.cache/hex-lead/target-capacity-8767f0d9-binaries/aarch64-unknown-linux-musl/release/hex",
+            "sha256": "5caf88d7c6f5d904586e9857e0c58c0d59db07bb811e16632b1520ebbba6c564"
+          },
+          {
+            "path": "/Users/adalundhe/.cache/hex-lead/target-capacity-8767f0d9-binaries/aarch64-apple-darwin/debug/hex-scheduler-runtime-probe",
+            "sha256": "e3cc9b630489075be4b5cfd1c70aec99d055f1adbd60a36e003aa3be397d41e6"
+          },
+          {
+            "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+            "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+          },
+          {
+            "path": "/Users/adalundhe/.cache/hex-lead/recovery-f3f19c07-native/build-after.json",
+            "sha256": "a0b908ba942b91ef3097ee717da28202f98e69e7f078625e19864b5e06cd37b9"
+          },
+          {
+            "path": "/Users/adalundhe/.cache/hex-lead/capacity-8767f0d9-physical-smoke/method-debug-physical.json",
+            "sha256": "df36d461ecec4207b7bbacf6a78eaba39667063f3d8eebb72c0e0322e2de84fa"
+          },
+          {
+            "path": "/Users/adalundhe/.cache/hex-lead/recovery-f3f19c07-native/policy.json",
+            "sha256": "4cfbcf0180d4b0d71e78dabf86f5a9a97dfcf70ead4444b06d3d25d371846ed6"
+          }
+        ],
+        "private_evidence_hashes": {
+          "call.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "observed-before-cleanup.json": {
+            "bytes": 1003,
+            "sha256": "510de5cbc19d1b9fb95e2d03963e6068681c176aef298fb2dbcb7ae0264fc6f5"
+          },
+          "owned-guest.json": {
+            "bytes": 617,
+            "sha256": "f1ffda3f6d6a3c3059ee9378d8688e9402175c57a5570676df7799048a7c636b"
+          },
+          "pids.jsonl": {
+            "bytes": 15761,
+            "sha256": "3505c2375e3c69c962a53f68d4ba1bf68498463e13a6a1a337eb436a7bd1e6fa"
+          },
+          "real.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "real.node-state/@guest": {
+            "bytes": 130,
+            "sha256": "eb7c329303f0c5d267988c688c1640490f515eb3e2df0c90f4f5f086f3502bd8"
+          },
+          "request.json": {
+            "bytes": 56,
+            "sha256": "21a6cd483e0590989d3019dd69703b1d456f120b2890acb3f9df26e377ef3a55"
+          },
+          "result.json": {
+            "bytes": 4593,
+            "sha256": "2de98c86932eb7fbefd23d5623a9843212acdcfefc56bc8b1036496be5a8350a"
+          },
+          "runtime-probe.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "runtime.json": {
+            "bytes": 943,
+            "sha256": "181f45274059415d93ff444258c78bd0f68825a29ebf6b56ab34c80d98b2233d"
+          },
+          "sibling.json": {
+            "bytes": 309,
+            "sha256": "4cb92a8e92e4a0508057ece29dfc8c1ba68d779b5906cd73a34d20c1af168982"
+          },
+          "sibling.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "sibling.state/placements/epoch.rec": {
+            "bytes": 175,
+            "sha256": "1006046d1bbcb22b79e1ea148a81f17c310e4205c3661be950e9309915b6bd89"
+          },
+          "sibling.state/scheduler.lock": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "sibling.state/transport/epoch.rec": {
+            "bytes": 1,
+            "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
+          },
+          "target-conflicted.log": {
+            "bytes": 161,
+            "sha256": "af4135fe1588db0f2a34c0454ddc3127c42e351b4f5ae0dc392d6029beb759e0"
+          },
+          "target-repaired.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "target.json": {
+            "bytes": 306,
+            "sha256": "7fc6a16f5557a54eb051a7a0c7905c3e2a4fec173c8aa31b44fe26b687693b83"
+          },
+          "target.log": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "target.state/placements/epoch.rec": {
+            "bytes": 175,
+            "sha256": "f43aec4a7687ca22b711038ebb61ba1358c11afd445d5af86e0404edc1971a56"
+          },
+          "target.state/scheduler.lock": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "target.state/transport/epoch.rec": {
+            "bytes": 1,
+            "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+          }
+        }
+      }
+    ],
+    "scope": "Actual native OCI start/refusal and sibling progress inside owned ARM Linux guests, full ledger/record/config/artifact/retirement readback; no performance/security-exploit or native AMD64/rootlab claim"
+  },
+  "windows": {
+    "tests": {
+      "argv": [
+        "+1.99.1",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--target",
+        "x86_64-pc-windows-msvc"
+      ],
+      "source_revision": "f3f19c07e658dcd8097bba3dbb2bcbc484d9d8d7",
+      "exit": 0,
+      "stdout_sha256": "c70771196df9c652e20b6a1d67bb3a1ef33e849d9343c8cff3b93e334014ef8d",
+      "stderr_sha256": "57ceb1a5b18ef0ed353909ff1a719832db78daf4bd1353e038b52873cac4f5d4",
+      "summary": [
+        "test result: ok. 133 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.88s"
+      ]
+    },
+    "clippy": {
+      "argv": [
+        "+1.99.1",
+        "clippy",
+        "-p",
+        "hex-node",
+        "--all-targets",
+        "--locked",
+        "--target",
+        "x86_64-pc-windows-msvc",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "source_revision": "f3f19c07e658dcd8097bba3dbb2bcbc484d9d8d7",
+      "exit": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "360fab1b7190e24e0ef050a885521b17c50f7ed570ad129ca206f7af03588c58",
+      "summary": []
+    },
+    "source_readback": "windows-source-readback.json"
+  },
+  "raw_archives": {
+    "root-mac-unit-mutation-native.tar.gz": "6f8c7234a50aff7297b82f56c78f5337395037cf03bf6ab48fe4a8830486099f",
+    "native-windows.tar.gz": "cb6a2008584f0f567ec3bc6f9b765e7067293415ddfb6cf49a640225450b848d",
+    "seven-target-workspace-f3.tar.gz": "6369aa6893199b668ee792f39f98cac05888093b211408cd3336c667abab9ecb"
+  },
+  "known_negatives": [
+    "Original bounds807 recovered create-only init as Running through SimRuntime; equal-start BoxSpec mismatch also booted and inspected before fix. Both original reds preserved in parent lane record.",
+    "First Windows PATH tar extraction failed and first test stopped before marker/compile; System32 native tar with verified identical input archive succeeded in a new v2 directory. Original partial source retained. The precise initial tar error text was not retained in local stdout; do not infer a more specific cause.",
+    "First ROOT proof collector encountered a generated Python import cache in the canonical source. V2 records generated-cache hashes separately; all1073 remaining files match restored test source and local tracked bytes. No test rerun for collection.",
+    "Initial local diff parser mistook the +++ filename header for an added line. Corrected hunk parser verifies one deletion-only guard hunk; no test/source changed."
+  ],
+  "verifier_dependencies": {
+    "bench/sched/runtime-pools/census/verify_cold_census.py": "8794db963b533759c69fd47457e4d077ff4a598c8f33cdf05f7e99a8f24b210d",
+    "bench/sched/runtime-pools/census/verify_census.py": "a1b650dafee625f17d619fffe47afd3bc97fb920d5e17717c48b98a93fb8987a"
+  },
+  "pending": [
+    "final native Linux AMD64 gates and rootlab on final integration",
+    "full scheduler goal acceptance and main-first gated push",
+    "live device bridge and newly reproduced device-identity recovery gap, tracked in separate implementation lanes; these completed gates do not establish that feature"
+  ],
+  "limits": [
+    "Native effect proof is OCI inside owned ARM Linux guests, not native AMD64, Firecracker, WHP or GPU attachment.",
+    "Host changed to f3 while guest/probe/static/initrd intentionally retained87 with all8wire inputs identical. No new Shards tool/kernel adopted.",
+    "No profiling, allocation-free, leak-free, competitive ratio or original Submit-timeout cause claim. Windows ARM paused and unverified."
+  ],
+  "rules": {
+    "R01": {
+      "proof": "Equality uses existing checked map/Option/key parsing and typed Stop. Current native node Clippy passes on Mac/Windows.",
+      "limit": "Existing standard container/string allocation behavior is not a whole-process OOM or universal panic-freedom proof."
+    },
+    "R02": {
+      "proof": "Existing Rows immutable Payload ownership, atomic core+payload replacement and Driver recovery callback order are primary source evidence. Accepted live before reproductions precede the narrow guard; no broader architecture selected."
+    },
+    "R03": {
+      "proof": "No production constants, waits, seeds or authority increased. Existing fixture caller CPU/memory/deadline inputs retained explicitly."
+    },
+    "R04": {
+      "proof": "Same-key owner and runner must agree before any recovery callback; full payload including spec/start compared. Typed Damaged carries Key/cause and hides content. Matching authorized resume and create-only recovery preserved."
+    },
+    "R05": {
+      "proof": "Guard uses existing Rows eager collection; no polling, cache, manager, new protocol or OS seam. Existing persisted rows remain authority; disagreement does not merge or rewrite them."
+    },
+    "R06": {
+      "proof": "One locally visible equality guard; complete validation returns before Driver iteration invokes Runtime."
+    },
+    "R07": {
+      "proof": "One comment explains the pre-callback ordering invariant; no line-by-line narration."
+    },
+    "R08": {
+      "proof": "No performance claim or competitive success from functional checks.",
+      "limit": "4-5x broad target unmeasured for this correction; existing capacity constructor record is separate."
+    },
+    "R09": {
+      "proof": "Original exact start/spec baseline reds preserved before implementation. ROOT additionally reproduced actual native OCI unauthorized init start with the old host."
+    },
+    "R10": {
+      "proof": "Original source/logs, fixed combined139, independent guard-removal101 and restored0, actual OCI before/after, all133 native ledger rows, artifact/record/config/receipt hashes and exact owned backend reaps retained."
+    },
+    "R11": {
+      "proof": "Native Mac139 units and Clippy; native Windows133 and Clippy; actual OCI in ARM guest. ROOT r703 exactf3 full seven-target lint/format/production/native workspace/vendor completed0:943passed/0failed/13ignored; all named crash/filter/nonvacuity/packing assertions passed.",
+      "limit": "Final native Linux/rootlab remains required. The live device bridge is incomplete; the class/device model passes do not prove native attachment. Other actual backend/WindowsARM coverage remains unverified."
+    },
+    "R12": {
+      "proof": "One portable Rows path, unchanged API/wire/runtime adapters. No OS-specific duplicate or installed helper."
+    },
+    "R13": {
+      "proof": "Full payload equality at existing seam is the smallest complete check; no repair heuristics or new lifecycle manager."
+    },
+    "R14": {
+      "proof": "ROOT owns profiling. This correctness change makes no resource/performance inference from tests.",
+      "limit": "Whole service allocation/copy/pagefault/parent/kernel comparison not performed for this guard."
+    },
+    "R15": {
+      "proof": "Proper Kiln agents supplied isolated source/light evidence with current policy readback. ROOT reviewed/composed, executed mutation/native campaigns and current integration gates. Agents held after checkpoints; none merged main."
+    },
+    "R16": {
+      "proof": "No laptop builds/tests/benches; admitted private remote jobs and targets, exact owned Popen and guest retirement. Original source/evidence/final artifacts preserved, no runner changes or paused VM activity. Shared local space fell below30GiB during remote validation; ROOT reclaimed only verified inactive Hex Cargo relocatable objects/known incremental files under exclusive locks, no-open-file inventories and metadata rechecks. Final binaries/rlibs/source/evidence preserved; free restored34,220,851,200B (~31.9GiB).",
+      "limit": "Other writers can consume the restored floor buffer; continue monitoring and hold dependent laptop builds below30GiB."
+    }
+  },
+  "storage_reclamation": {
+    "reclaim-compiler-intermediates-v2-20261110.json": {
+      "sha256": "b475f89e64a4fec6b5e9a20caf69835209b589caac82391e98f90e3705ac7f1b",
+      "scope": "Old inactive Cargo intermediates only. Exclusive flock and no open candidate build files; final binaries/rlibs/source/evidence preserved. Prior dual-lock probe self-conflicted on macOS; independent flock and lockf each acquired.",
+      "free_before": 29322526720,
+      "free_after": 30784868352,
+      "groups": 7,
+      "deleted_files": 12014,
+      "logical_bytes": 2062207332
+    },
+    "reclaim-scheduler-intermediates-20261110.json": {
+      "sha256": "81a4972c03faef8ec47d5a501db26d90c63e33295dd5d0200d1c519527424938",
+      "scope": "Inactive scheduler Cargo intermediates only; exclusive lock+open-file inventory; source/final binaries/evidence preserved",
+      "free_before": 30751588352,
+      "free_after": 34220851200,
+      "groups": 8,
+      "deleted_files": 11038,
+      "logical_bytes": 3892674718
+    }
+  },
+  "seven_target_workspace_gate": {
+    "source_revision": "f3f19c07e658dcd8097bba3dbb2bcbc484d9d8d7",
+    "tree": "e52cf09b8455d4f370bfc80d98ebf4bad8c1dcea",
+    "exit": 0,
+    "counts": {
+      "passed": 943,
+      "failed": 0,
+      "ignored": 13
+    },
+    "summaries": [
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 35.91s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.40s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.25s",
+      "test result: ok. 17 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 16.51s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s",
+      "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 302 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 4.55s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 139 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.63s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 60 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s",
+      "test result: ok. 158 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.73s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.43s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.42s",
+      "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.83s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 650.60s",
+      "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.01s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.09s",
+      "test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 5.49s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 330.61s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s",
+      "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s",
+      "test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 58.40s",
+      "test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 129.51s",
+      "test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 22.56s",
+      "test result: ok. 10 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "named_assertion_tests": {
+      "p2p_keeps_every_box_once_through_crashes_and_dropped_links": true,
+      "a_laptop_keeps_every_box_once_through_crashes": true,
+      "replacing_on_silence_is_caught": true,
+      "ten_thousand_crash_seeds_lose_and_double_nothing": true,
+      "the_hard_filters_keep_every_placement_in_bounds": true,
+      "boxes_land_only_where_their_platform_class_and_devices_are": true,
+      "the_recorded_workload_strands_at_least_30_percent_less_than_best_fit": true
+    },
+    "scope": "Full seven-target lint/format/production/native Mac workspace/vendor at exactf3. Not actual AMD64 Linux/rootlab. Passing class/filter model assertions do not prove the live device attachment bridge."
+  }
+}

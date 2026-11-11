@@ -11,7 +11,7 @@
 //! (CLAUDE.md §9): the shell (`hex_runtime::macos`) lists the members, reads their footprints, waits, stops and
 //! kills; this says when to read next, whether to end the box, and which members run.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::TryReserveError;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
@@ -276,8 +276,8 @@ struct Grows {
     before: Option<u64>,
     /// The rate it grows at, in bytes a second, as its runs show it; `None` until one has.
     rate: Option<u64>,
-    /// The read that last found it running; one the latest didn't is dropped.
-    read: u64,
+    /// Input order makes duplicate native identities retain their original last-update semantics.
+    order: usize,
 }
 
 /// One box under the rule: its bounds, the rates it is read at, and what its reads have found.
@@ -297,7 +297,9 @@ pub struct Watch {
     last_running: u64,
     /// Each running member's footprints and rate, by pid and start: the hold reckons each member by its own
     /// ([`Watch::runs`]). Bounded by the box's running members, the last read's.
-    grows: BTreeMap<(u32, u64), Grows>,
+    grows: Vec<((u32, u64), Grows)>,
+    /// The next flat snapshot, reserved before any read state changes and swapped after preparation.
+    scratch: Vec<((u32, u64), Grows)>,
 }
 
 impl Watch {
@@ -309,7 +311,8 @@ impl Watch {
             peak: 0,
             reads: 0,
             last_running: 0,
-            grows: BTreeMap::new(),
+            grows: Vec::new(),
+            scratch: Vec::new(),
         }
     }
 
@@ -319,9 +322,46 @@ impl Watch {
     }
 
     /// One read of the box: its members as listed now.
-    pub fn read(&mut self, members: &[Member]) -> Read {
+    pub fn read(&mut self, members: &[Member]) -> Result<Read, TryReserveError> {
+        self.reserve_members(members.iter().filter(|m| m.life == Life::Running).count())?;
         // A count, so saturating: 2^64 reads are never made.
-        self.reads = self.reads.saturating_add(1);
+        let reads = self.reads.saturating_add(1);
+        for (order, m) in members
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.life == Life::Running)
+        {
+            let old = self
+                .grows
+                .binary_search_by_key(&(m.pid, m.started), |(key, _)| *key)
+                .ok()
+                .and_then(|at| self.grows.get(at))
+                .map(|(_, grows)| grows);
+            self.scratch.push((
+                (m.pid, m.started),
+                Grows {
+                    footprint: m.footprint,
+                    before: old.map(|grows| grows.footprint),
+                    rate: old.and_then(|grows| grows.rate),
+                    order,
+                },
+            ));
+        }
+        // One bulk sort, without allocating or shifting a prefix for every first-snapshot member.
+        self.scratch
+            .sort_unstable_by_key(|(key, grows)| (*key, grows.order));
+        self.scratch.dedup_by(|later, earlier| {
+            if later.0 != earlier.0 {
+                return false;
+            }
+            earlier.1.before = Some(earlier.1.footprint);
+            earlier.1.footprint = later.1.footprint;
+            earlier.1.order = later.1.order;
+            true
+        });
+        std::mem::swap(&mut self.grows, &mut self.scratch);
+        self.scratch.clear();
+        self.reads = reads;
         // Saturating, as a footprint summed past 2^64 bytes is past any bound.
         let footprint = members
             .iter()
@@ -336,23 +376,6 @@ impl Watch {
             .all(|m| m.armed);
         let taking_on = running > self.last_running;
         self.last_running = running;
-        let reads = self.reads;
-        for m in members.iter().filter(|m| m.life == Life::Running) {
-            self.grows
-                .entry((m.pid, m.started))
-                .and_modify(|g| {
-                    g.before = Some(g.footprint);
-                    g.footprint = m.footprint;
-                    g.read = reads;
-                })
-                .or_insert(Grows {
-                    footprint: m.footprint,
-                    before: None,
-                    rate: None,
-                    read: reads,
-                });
-        }
-        self.grows.retain(|_, g| g.read == reads);
         self.peak = self.peak.max(footprint);
         let verdict = if running == 0 {
             self.ending = None;
@@ -376,12 +399,20 @@ impl Watch {
             next(&self.limit, &self.rates, footprint, processes)
                 .map_or(Verdict::Events, Verdict::Wait)
         };
-        Read {
+        Ok(Read {
             verdict,
             footprint,
             processes,
             running,
-        }
+        })
+    }
+    /// Reserve both bounded snapshots before a shell starts native effects. Failure changes no
+    /// verdict, learned rate or membership; successfully reserved spare capacity may be retained.
+    pub fn reserve_members(&mut self, count: usize) -> Result<(), TryReserveError> {
+        self.scratch
+            .try_reserve(count.saturating_sub(self.scratch.len()))?;
+        self.grows
+            .try_reserve(count.saturating_sub(self.grows.len()))
     }
 
     /// The bound the box is past, memory's first.
@@ -423,7 +454,7 @@ impl Watch {
     /// the recorded rate, in bytes a second.
     pub fn rate(&self) -> u64 {
         let recorded = self.rates.bytes.get();
-        self.grows.values().fold(0u64, |sum, g| {
+        self.grows.iter().fold(0u64, |sum, (_, g)| {
             sum.saturating_add(g.rate.unwrap_or(recorded))
         })
     }
@@ -436,9 +467,12 @@ impl Watch {
     /// no read before it to grow from.
     pub fn ran(&mut self, runs: &[Run]) {
         for run in runs.iter().filter(|run| run.shown) {
+            let at = self.grows.partition_point(|(key, _)| key.0 < run.pid);
             for g in self
                 .grows
-                .range_mut((run.pid, 0)..=(run.pid, u64::MAX))
+                .iter_mut()
+                .skip(at)
+                .take_while(|(key, _)| key.0 == run.pid)
                 .map(|(_, g)| g)
             {
                 let Some(before) = g.before else {
@@ -475,12 +509,13 @@ impl Watch {
         order: &[u32],
         lateness: Duration,
         run: &mut Vec<u32>,
-    ) -> Option<Duration> {
+    ) -> Result<Option<Duration>, TryReserveError> {
+        run.try_reserve(order.len().saturating_sub(run.len()))?;
         run.clear();
         let recorded = self.rates.bytes.get();
         let (Verdict::Wait(wait), Some(bound)) = (read.verdict, self.limit.memory) else {
             run.extend_from_slice(order);
-            return None;
+            return Ok(None);
         };
         let span = wait.saturating_add(lateness).as_nanos();
         let mut left = u128::from(
@@ -489,9 +524,12 @@ impl Watch {
                 .saturating_sub(read.footprint),
         );
         for &pid in order {
+            let at = self.grows.partition_point(|(key, _)| key.0 < pid);
             let rate = self
                 .grows
-                .range((pid, 0)..=(pid, u64::MAX))
+                .iter()
+                .skip(at)
+                .take_while(|(key, _)| key.0 == pid)
                 .fold(0u64, |sum, (_, g)| {
                     sum.saturating_add(g.rate.unwrap_or(recorded))
                 });
@@ -504,11 +542,11 @@ impl Watch {
                 run.push(pid);
             }
         }
-        if run.len() < order.len() {
+        Ok(if run.len() < order.len() {
             Some(FLOOR)
         } else {
             None
-        }
+        })
     }
 }
 
@@ -560,21 +598,30 @@ pub struct Changes {
 }
 
 /// What changed from listing `before` to listing `now`, a member being its pid and start time.
-pub fn changes(before: &[Member], now: &[Member]) -> Changes {
-    let was: BTreeSet<(u32, u64)> = before.iter().map(|m| (m.pid, m.started)).collect();
-    let is: BTreeSet<(u32, u64)> = now.iter().map(|m| (m.pid, m.started)).collect();
-    Changes {
-        added: now
-            .iter()
-            .filter(|m| !was.contains(&(m.pid, m.started)))
-            .map(|m| m.pid)
-            .collect(),
-        gone: before
-            .iter()
-            .filter(|m| m.life == Life::Running && !is.contains(&(m.pid, m.started)))
-            .copied()
-            .collect(),
+pub fn changes(before: &[Member], now: &[Member]) -> Result<Changes, TryReserveError> {
+    let mut was = Vec::new();
+    let mut is = Vec::new();
+    let mut changed = Changes::default();
+    was.try_reserve_exact(before.len())?;
+    is.try_reserve_exact(now.len())?;
+    changed.added.try_reserve_exact(now.len())?;
+    changed.gone.try_reserve_exact(before.len())?;
+    was.extend(before.iter().map(|m| (m.pid, m.started)));
+    is.extend(now.iter().map(|m| (m.pid, m.started)));
+    was.sort_unstable();
+    is.sort_unstable();
+    for member in now {
+        if was.binary_search(&(member.pid, member.started)).is_err() {
+            changed.added.push(member.pid);
+        }
     }
+    for member in before {
+        if member.life == Life::Running && is.binary_search(&(member.pid, member.started)).is_err()
+        {
+            changed.gone.push(*member);
+        }
+    }
+    Ok(changed)
 }
 
 #[cfg(test)]
@@ -588,6 +635,48 @@ mod tests {
 
     const MIB: u64 = 1 << 20;
     const GIB: u64 = 1 << 30;
+
+    /// AC-T7.4.1/R01: a deterministic real capacity-overflow refusal cannot change lifecycle facts.
+    /// This exercises Vec's checked allocation boundary, not host OOM or a native failure campaign.
+    #[test]
+    fn allocation_refusal_preserves_the_previous_read_and_rates() {
+        let mut watch = Watch::new(
+            Limit {
+                memory: Some(MIB),
+                processes: None,
+            },
+            rates(),
+        );
+        watch.read(&[member(1, 2 * MIB, Life::Running)]).unwrap();
+        let before = watch.clone();
+        assert!(watch.reserve_members(usize::MAX).is_err());
+        assert_eq!(watch, before);
+        assert!(watch.ending().is_some());
+        assert_eq!(watch.reads(), 1);
+    }
+
+    /// AC-T7.4.1: bulk sorting preserves native incarnation and original duplicate-update order.
+    #[test]
+    fn bulk_growth_keeps_incarnations_and_input_order() {
+        let mut watch = Watch::new(Limit::default(), rates());
+        let mut first = member(7, 4, Life::Running);
+        first.started = 1;
+        let mut last = first;
+        last.footprint = 10;
+        let mut other = member(7, 20, Life::Running);
+        other.started = 2;
+        watch.read(&[other, first, last]).unwrap();
+        watch.ran(&[Run {
+            pid: 7,
+            over: Duration::from_secs(1),
+            across: true,
+            shown: true,
+        }]);
+        assert_eq!(watch.rate(), rates().bytes.get() + 6);
+        watch.read(&[other]).unwrap();
+        assert_eq!(watch.rate(), rates().bytes.get());
+        assert_eq!(watch.grows.len(), 1);
+    }
 
     /// RESULT.md's: 256 GiB/s, and a process rate high enough not to matter here.
     fn rates() -> Rates {
@@ -664,8 +753,8 @@ mod tests {
                 .map(|(f, pid)| member(pid, *f, Life::Running))
                 .collect()
         };
-        let _ = w.read(&at(before));
-        let read = w.read(&at(after));
+        let _ = w.read(&at(before)).unwrap();
+        let read = w.read(&at(after)).unwrap();
         let runs: Vec<Run> = (1u32..)
             .take(after.len())
             .map(|pid| Run {
@@ -702,14 +791,17 @@ mod tests {
         assert!(matches!(read.verdict, Verdict::Wait(_)));
         let mut run = Vec::new();
         assert_eq!(
-            w.runs(&read, &[1, 2], Duration::from_micros(1), &mut run),
+            w.runs(&read, &[1, 2], Duration::from_micros(1), &mut run)
+                .unwrap(),
             Some(FLOOR)
         );
         assert_eq!(run, [2]);
         assert_eq!(w.rate(), 51_052_631_000);
         let (still, read) = across(256 * MIB, &[39 * MIB, 0], &[39 * MIB, 0], ms);
         assert_eq!(
-            still.runs(&read, &[1, 2], Duration::from_secs(86_400), &mut run),
+            still
+                .runs(&read, &[1, 2], Duration::from_secs(86_400), &mut run)
+                .unwrap(),
             None
         );
         assert_eq!(run, [1, 2]);
@@ -733,10 +825,10 @@ mod tests {
                 member(3, 0, Life::Running),
             ]
         };
-        let _ = w.read(&three(10 * MIB, MIB));
+        let _ = w.read(&three(10 * MIB, MIB)).unwrap();
         w.ran(&read_run(2, Duration::from_micros(100)));
         assert_eq!(w.rate(), 2 * fast);
-        let _ = w.read(&three(10 * MIB, MIB));
+        let _ = w.read(&three(10 * MIB, MIB)).unwrap();
         w.ran(&read_run(1, Duration::from_micros(100)));
         assert_eq!(w.rate(), fast);
     }
@@ -751,13 +843,13 @@ mod tests {
         let late = lateness_seed("Mac16,9");
         let (mut w, read) = across(256 * MIB, &[100 * MIB, 0], &[110 * MIB, 0], ms);
         let mut run = Vec::new();
-        let _ = w.runs(&read, &[1, 2], late, &mut run);
+        let _ = w.runs(&read, &[1, 2], late, &mut run).unwrap();
         assert_eq!(run, [2]);
         let two = [
             member(1, 110 * MIB, Life::Running),
             member(2, 0, Life::Running),
         ];
-        let read = w.read(&two);
+        let read = w.read(&two).unwrap();
         w.ran(&[Run {
             pid: 1,
             over: ms,
@@ -765,12 +857,12 @@ mod tests {
             shown: false,
         }]);
         assert_eq!(w.rate(), per_second(10 * MIB, ms));
-        let _ = w.runs(&read, &[1, 2], late, &mut run);
+        let _ = w.runs(&read, &[1, 2], late, &mut run).unwrap();
         assert_eq!(run, [2]);
-        let read = w.read(&two);
+        let read = w.read(&two).unwrap();
         w.ran(&read_run(1, ms));
         assert_eq!(w.rate(), 0);
-        let _ = w.runs(&read, &[1, 2], late, &mut run);
+        let _ = w.runs(&read, &[1, 2], late, &mut run).unwrap();
         assert_eq!(run, [1, 2]);
     }
 
@@ -788,10 +880,12 @@ mod tests {
             (11 * MIB, 0),
             (12 * MIB, per_second(MIB, ms)),
         ] {
-            let _ = w.read(&[
-                member(1, footprint, Life::Running),
-                member(2, 0, Life::Running),
-            ]);
+            let _ = w
+                .read(&[
+                    member(1, footprint, Life::Running),
+                    member(2, 0, Life::Running),
+                ])
+                .unwrap();
             w.ran(&read_run(1, ms));
             assert_eq!(w.rate(), rate, "at {footprint}");
         }
@@ -806,9 +900,9 @@ mod tests {
     fn a_member_no_run_has_shown_is_reckoned_at_the_recorded_rate() {
         let ms = Duration::from_millis(1);
         let mut w = Watch::new(limit(256 * MIB), RECORDED);
-        let _ = w.read(&[member(1, MIB, Life::Running)]);
+        let _ = w.read(&[member(1, MIB, Life::Running)]).unwrap();
         let both = [member(1, MIB, Life::Running), member(2, 0, Life::Running)];
-        let read = w.read(&both);
+        let read = w.read(&both).unwrap();
         assert_eq!(read.verdict, Verdict::Wait(FLOOR));
         w.ran(&[Run {
             pid: 1,
@@ -819,11 +913,15 @@ mod tests {
         assert_eq!(w.rate(), RECORDED.bytes.get());
         let mut run = Vec::new();
         // 319 MiB of headroom to the bar lasts 6.55 ms at the recorded rate; the floor is 250 µs of it.
-        let _ = w.runs(&read, &[1, 2], Duration::from_millis(7), &mut run);
+        let _ = w
+            .runs(&read, &[1, 2], Duration::from_millis(7), &mut run)
+            .unwrap();
         assert_eq!(run, [1]);
-        let _ = w.runs(&read, &[1, 2], Duration::from_millis(6), &mut run);
+        let _ = w
+            .runs(&read, &[1, 2], Duration::from_millis(6), &mut run)
+            .unwrap();
         assert_eq!(run, [1, 2]);
-        let _ = w.read(&both);
+        let _ = w.read(&both).unwrap();
         w.ran(&read_run(2, ms));
         assert_eq!(w.rate(), 0);
     }
@@ -841,9 +939,15 @@ mod tests {
         let (w, read) = across(960 * MIB, &[0, 0, 0, 0], &[fast, slow, fast, slow], ms);
         let mut run = Vec::new();
         let late = Duration::from_secs(1);
-        assert_eq!(w.runs(&read, &[1, 2, 3, 4], late, &mut run), Some(FLOOR));
+        assert_eq!(
+            w.runs(&read, &[1, 2, 3, 4], late, &mut run).unwrap(),
+            Some(FLOOR)
+        );
         assert_eq!(run, [1, 2, 4]);
-        assert_eq!(w.runs(&read, &[3, 4, 1, 2], late, &mut run), Some(FLOOR));
+        assert_eq!(
+            w.runs(&read, &[3, 4, 1, 2], late, &mut run).unwrap(),
+            Some(FLOOR)
+        );
         assert_eq!(run, [3, 4, 2]);
     }
 
@@ -860,7 +964,8 @@ mod tests {
         );
         let mut run = Vec::new();
         assert_eq!(
-            w.runs(&read, &[1, 2], lateness_seed("Mac16,9"), &mut run),
+            w.runs(&read, &[1, 2], lateness_seed("Mac16,9"), &mut run)
+                .unwrap(),
             Some(FLOOR)
         );
         assert!(run.is_empty());
@@ -873,19 +978,25 @@ mod tests {
     fn only_a_memory_wait_holds_members() {
         let mut run = Vec::new();
         let mut w = Watch::new(limit(256 * MIB), RECORDED);
-        let over = w.read(&[member(1, 300 * MIB, Life::Running)]);
+        let over = w.read(&[member(1, 300 * MIB, Life::Running)]).unwrap();
         assert!(matches!(over.verdict, Verdict::End(_)));
-        assert_eq!(w.runs(&over, &[1], Duration::MAX, &mut run), None);
+        assert_eq!(w.runs(&over, &[1], Duration::MAX, &mut run).unwrap(), None);
         assert_eq!(run, [1]);
         let mut idle = Watch::new(limit(256 * MIB), RECORDED);
-        let none = idle.read(&[]);
+        let none = idle.read(&[]).unwrap();
         assert_eq!(none.verdict, Verdict::Idle);
-        assert_eq!(idle.runs(&none, &[], Duration::MAX, &mut run), None);
+        assert_eq!(
+            idle.runs(&none, &[], Duration::MAX, &mut run).unwrap(),
+            None
+        );
         assert!(run.is_empty());
         let mut one = Watch::new(limit(256 * MIB), RECORDED);
-        let events = one.read(&[armed(1, MIB, Life::Running)]);
+        let events = one.read(&[armed(1, MIB, Life::Running)]).unwrap();
         assert_eq!(events.verdict, Verdict::Events);
-        assert_eq!(one.runs(&events, &[1], Duration::MAX, &mut run), None);
+        assert_eq!(
+            one.runs(&events, &[1], Duration::MAX, &mut run).unwrap(),
+            None
+        );
         assert_eq!(run, [1]);
     }
 
@@ -912,7 +1023,7 @@ mod tests {
                 .collect();
             let late = Duration::from_micros(late_us);
             let mut run = Vec::new();
-            let wait = w.runs(&read, &order, late, &mut run);
+            let wait = w.runs(&read, &order, late, &mut run).unwrap();
             let Verdict::Wait(read_wait) = read.verdict else {
                 prop_assert_eq!(&run, &order);
                 prop_assert_eq!(wait, None);
@@ -1079,16 +1190,16 @@ mod tests {
         };
         let mut w = Watch::new(limit, rates());
         assert_eq!(
-            w.read(&[armed(1, MIB, Life::Running)]).verdict,
+            w.read(&[armed(1, MIB, Life::Running)]).unwrap().verdict,
             Verdict::Events
         );
         assert_eq!(
-            w.read(&[armed(1, MIB, Life::Running)]).verdict,
+            w.read(&[armed(1, MIB, Life::Running)]).unwrap().verdict,
             Verdict::Events
         );
         let mut u = Watch::new(limit, rates());
-        let _ = u.read(&[member(1, MIB, Life::Running)]); // taking on -> floor
-        let unarmed = u.read(&[member(1, MIB, Life::Running)]).verdict;
+        let _ = u.read(&[member(1, MIB, Life::Running)]).unwrap(); // taking on -> floor
+        let unarmed = u.read(&[member(1, MIB, Life::Running)]).unwrap().verdict;
         assert_eq!(
             unarmed,
             Verdict::Wait(next(&limit, &rates(), MIB, 1).unwrap())
@@ -1106,8 +1217,8 @@ mod tests {
         };
         let mut w = Watch::new(limit, rates());
         let two = [armed(1, MIB, Life::Running), armed(2, MIB, Life::Running)];
-        let _ = w.read(&two); // taking on 0 -> 2: floor
-        let steady = w.read(&two).verdict;
+        let _ = w.read(&two).unwrap(); // taking on 0 -> 2: floor
+        let steady = w.read(&two).unwrap().verdict;
         assert_eq!(
             steady,
             Verdict::Wait(next(&limit, &rates(), 2 * MIB, 2).unwrap())
@@ -1126,16 +1237,16 @@ mod tests {
         // An armed member and its forked (unarmed) child: two running members, so headroom.
         let mut w = Watch::new(limit, rates());
         let pair = [armed(1, MIB, Life::Running), member(2, MIB, Life::Running)];
-        let _ = w.read(&pair);
-        let with_fork = w.read(&pair).verdict;
+        let _ = w.read(&pair).unwrap();
+        let with_fork = w.read(&pair).unwrap().verdict;
         assert_eq!(
             with_fork,
             Verdict::Wait(next(&limit, &rates(), 2 * MIB, 2).unwrap())
         );
         // Only the unarmed fork remains (the armed member exited): one running member, unarmed -> headroom.
         let mut u = Watch::new(limit, rates());
-        let _ = u.read(&[member(2, MIB, Life::Running)]);
-        let lone_fork = u.read(&[member(2, MIB, Life::Running)]).verdict;
+        let _ = u.read(&[member(2, MIB, Life::Running)]).unwrap();
+        let lone_fork = u.read(&[member(2, MIB, Life::Running)]).unwrap().verdict;
         assert_eq!(
             lone_fork,
             Verdict::Wait(next(&limit, &rates(), MIB, 1).unwrap())
@@ -1149,17 +1260,17 @@ mod tests {
         let none = Limit::default();
         let mut w = Watch::new(none, rates());
         assert_eq!(
-            w.read(&[member(1, MIB, Life::Running)]).verdict,
+            w.read(&[member(1, MIB, Life::Running)]).unwrap().verdict,
             Verdict::Wait(FLOOR)
         );
         assert_eq!(
-            w.read(&[member(1, MIB, Life::Running)]).verdict,
+            w.read(&[member(1, MIB, Life::Running)]).unwrap().verdict,
             Verdict::Events
         );
         let mut t = Watch::new(none, rates());
         let two = [member(1, MIB, Life::Running), member(2, MIB, Life::Running)];
-        let _ = t.read(&two);
-        assert_eq!(t.read(&two).verdict, Verdict::Events);
+        let _ = t.read(&two).unwrap();
+        assert_eq!(t.read(&two).unwrap().verdict, Verdict::Events);
     }
 
     /// HEX-MAC-1: a read past the memory bound ends the box with the footprint it reached; a read while
@@ -1174,12 +1285,14 @@ mod tests {
             },
             rates(),
         );
-        let under = w.read(&[member(10, 60 * MIB, Life::Running)]);
+        let under = w.read(&[member(10, 60 * MIB, Life::Running)]).unwrap();
         assert_eq!(under.verdict, Verdict::Wait(FLOOR));
-        let past = w.read(&[
-            member(10, 50 * MIB, Life::Running),
-            member(11, 20 * MIB, Life::Running),
-        ]);
+        let past = w
+            .read(&[
+                member(10, 50 * MIB, Life::Running),
+                member(11, 20 * MIB, Life::Running),
+            ])
+            .unwrap();
         assert_eq!(
             past.verdict,
             Verdict::End(Over::Memory {
@@ -1189,12 +1302,16 @@ mod tests {
         );
         assert_eq!(w.peak(), 70 * MIB);
         // One started as the kill went out: it is killed too, and the end isn't decided twice.
-        let late = w.read(&[member(10, 0, Life::Held), member(12, MIB, Life::Running)]);
+        let late = w
+            .read(&[member(10, 0, Life::Held), member(12, MIB, Life::Running)])
+            .unwrap();
         assert_eq!(late.verdict, Verdict::Kill);
-        let empty = w.read(&[member(10, 0, Life::Held)]);
+        let empty = w.read(&[member(10, 0, Life::Held)]).unwrap();
         assert_eq!(empty.verdict, Verdict::Idle);
         assert_eq!(w.ending(), None);
-        let again = w.read(&[member(10, 0, Life::Held), member(13, MIB, Life::Running)]);
+        let again = w
+            .read(&[member(10, 0, Life::Held), member(13, MIB, Life::Running)])
+            .unwrap();
         assert!(matches!(again.verdict, Verdict::Wait(_)), "{again:?}");
         assert_eq!(w.reads(), 5);
     }
@@ -1210,19 +1327,23 @@ mod tests {
             },
             rates(),
         );
-        let held = w.read(&[
-            member(20, 0, Life::Held),
-            member(21, MIB, Life::Running),
-            member(22, 0, Life::Ended),
-        ]);
+        let held = w
+            .read(&[
+                member(20, 0, Life::Held),
+                member(21, MIB, Life::Running),
+                member(22, 0, Life::Ended),
+            ])
+            .unwrap();
         assert_eq!((held.processes, held.running), (2, 1));
         assert!(matches!(held.verdict, Verdict::Wait(_)), "{held:?}");
-        let past = w.read(&[
-            member(20, 0, Life::Held),
-            member(21, MIB, Life::Running),
-            member(22, 0, Life::Ended),
-            member(23, MIB, Life::Running),
-        ]);
+        let past = w
+            .read(&[
+                member(20, 0, Life::Held),
+                member(21, MIB, Life::Running),
+                member(22, 0, Life::Ended),
+                member(23, MIB, Life::Running),
+            ])
+            .unwrap();
         assert_eq!(
             past.verdict,
             Verdict::End(Over::Processes { count: 3, bound: 2 })
@@ -1243,7 +1364,7 @@ mod tests {
             ..member(31, MIB, Life::Running)
         };
         let now = [member(30, MIB, Life::Running), reused];
-        let c = changes(&before, &now);
+        let c = changes(&before, &now).unwrap();
         assert_eq!(c.added, vec![31]);
         assert_eq!(c.gone, vec![member(31, MIB, Life::Running)]);
     }
@@ -1415,7 +1536,7 @@ mod tests {
                 let mut w = Watch::new(limit, rates);
                 let mut peak = 0u64;
                 for i in 0..series.len() {
-                    let read = w.read(&series[i]);
+                    let read = w.read(&series[i]).unwrap();
                     prop_assert_eq!(read.verdict, oracle(limit, rates, &series, i), "read {}", i);
                     peak = peak.max(read.footprint);
                     let armed_rule = read.running == 1

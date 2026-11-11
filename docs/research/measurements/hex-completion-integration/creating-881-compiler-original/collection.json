@@ -1,0 +1,43 @@
+{
+  "bytes": 235912,
+  "sha256": "a7fc4b4027ec82f715e2932d4faf94438c10443191895d2f2df78365eab7cb32",
+  "members": {
+    "cohort-881827db-linux-creating-evidence-v1/source-before.json": {
+      "bytes": 333078,
+      "sha256": "edb3d48b864c7658a43d99a2170f3fa353ef496ff4064e078cc8fb23e644d971"
+    },
+    "cohort-881827db-linux-creating-evidence-v1/public-registry-seed.json": {
+      "bytes": 29301,
+      "sha256": "d2b2bb5bd3b50ee48d654721e398e546d932d5bb6f56e146196347560db82194"
+    },
+    "cohort-881827db-linux-creating-evidence-v1/owned-scope-limits.json": {
+      "bytes": 262,
+      "sha256": "d224e907306aa3f17b7774a39567aa598a6de5c07537ce1290ce211fccaca550"
+    },
+    "cohort-881827db-linux-creating-evidence-v1/creating-evidence-private-file-controls.log": {
+      "bytes": 3932,
+      "sha256": "fe5ee77d7d6876c7cc33fa626dcda03a0908d96ce9baaf561aff36357c3e46cc"
+    },
+    "cohort-881827db-linux-creating-evidence-v1/running.json": {
+      "bytes": 1090,
+      "sha256": "3f772d62f5f4d569dbb53e11c1a8efa499625beeafbd04d86ded7a21f82ed58e"
+    },
+    "cohort-881827db-linux-creating-evidence-v1/source-after.json": {
+      "bytes": 333078,
+      "sha256": "edb3d48b864c7658a43d99a2170f3fa353ef496ff4064e078cc8fb23e644d971"
+    },
+    "cohort-881827db-linux-creating-evidence-v1/result.json": {
+      "bytes": 1440,
+      "sha256": "4c8d84f7775d65f38d7da302ccc39007975aae4de98f0ecdf533fea628040a6a"
+    },
+    "cohort-881827db-linux-creating-evidence-v1/collected-binaries.json": {
+      "bytes": 748,
+      "sha256": "78485f12a2425becbeaa01be2d75af2d491c8bc9189ee6bbbf62c01689d4661a"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

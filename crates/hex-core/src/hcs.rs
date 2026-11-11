@@ -231,6 +231,18 @@ pub fn containers_off(what_is_missing: &str) -> Refusal {
     }
 }
 
+/// The HCS device assignment forms: a whole interface class or one exact device location.
+/// HCS Device/DeviceType schema 2.2 and hcsshim 7d4e89bc's hcsoci/hcsdoc_wcow.go distinguish
+/// DeviceInstance/LocationPath from ClassGuid/InterfaceClassGuid; neither implies GpuMirror.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignedDevice {
+    ClassGuid(String),
+    LocationPath(String),
+}
+
+#[cfg(test)]
+mod device_instance_tests;
+
 /// A Windows container, every value checked: what its HCS document and its init need.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Container {
@@ -240,8 +252,8 @@ pub struct Container {
     pub scratch: Scratch,
     /// Host folders mapped in, in order.
     pub mounts: Vec<MappedDir>,
-    /// Device interface classes granted, each a GUID in upper case without braces.
-    pub devices: Vec<String>,
+    /// Device assignments in caller order; class GUIDs normalized, location paths kept exact.
+    pub devices: Vec<AssignedDevice>,
     pub hostname: Option<String>,
     /// Lines to add to the container's `hosts` file, a name and its address.
     pub hosts: Vec<(String, String)>,
@@ -406,10 +418,34 @@ pub fn class_guid(field: &str, id: &str) -> Result<String, Refusal> {
             .all(|(g, n)| g.len() == n && g.chars().all(|c| c.is_ascii_hexdigit()));
     if !ok {
         return Err(invalid(format!(
-            "{field} {id:?} isn't a device interface class GUID"
+            "{field} isn't a device interface class GUID"
         )));
     }
     Ok(bare.to_ascii_uppercase())
+}
+
+/// LocationPath is an opaque HCS string, not a filesystem path. Its caller-owned text must fit
+/// the existing config byte budget before duplication; HCS validates the actual device identity.
+fn location_path(field: &str, id: &str) -> Result<String, Refusal> {
+    if id.len() > crate::bundle::MAX_CONFIG_BYTES {
+        return Err(invalid(format!(
+            "{field} exceeds the config.json byte bound"
+        )));
+    }
+    if id.is_empty() || id.contains('\0') {
+        return Err(invalid(format!(
+            "{field} must be nonempty and contain no NUL"
+        )));
+    }
+    let mut exact = String::new();
+    exact
+        .try_reserve_exact(id.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "HCS device location path bytes",
+            bound: id.len(),
+        })?;
+    exact.push_str(id);
+    Ok(exact)
 }
 
 /// The container a [`Program`] runs as in a Windows container: its command line quoted as the C runtime
@@ -655,16 +691,20 @@ pub fn from_bundle(config: &Value) -> Result<Container, Refusal> {
                     &format!("{field}.idType"),
                     d.get("idType").unwrap_or(&Value::Null),
                 )?;
-                if id_type != "class" && id_type != "vpci-class-guid" {
-                    return Err(unsupported(
+                let id_field = format!("{field}.id");
+                let id = d.get("id").unwrap_or(&Value::Null);
+                match id_type {
+                    "class" | "vpci-class-guid" => {
+                        class_guid(&id_field, string(&id_field, id)?).map(AssignedDevice::ClassGuid)
+                    }
+                    // hcsshim 7d4e89bc internal/uvm/virtual_device.go's exact OCI extension.
+                    "vpci-location-path" => location_path(&id_field, string(&id_field, id)?)
+                        .map(AssignedDevice::LocationPath),
+                    _ => Err(unsupported(
                         &format!("{field}.idType"),
-                        "a device is granted only by its interface class (config-windows.md:31)",
-                    ));
+                        "a device assignment requires a class GUID or an exact location path",
+                    )),
                 }
-                class_guid(
-                    &format!("{field}.id"),
-                    string(&format!("{field}.id"), d.get("id").unwrap_or(&Value::Null))?,
-                )
             })
             .collect::<Result<Vec<_>, _>>()?,
         None => Vec::new(),
@@ -996,8 +1036,8 @@ pub enum Lifetime {
 }
 
 /// The HCS v2 document for `container` on `storage`, Hex's launcher folder `launcher` mapped read-only at
-/// [`LAUNCHER_DIR`] (note §2): schema 2.1, no hosting system, terminated when its last handle closes
-/// unless it outlives its node (`lifetime`).
+/// [`LAUNCHER_DIR`] (note §2): schema 2.1, or 2.2 when an exact DeviceInstance needs it; no hosting
+/// system, terminated when its last handle closes unless it outlives its node (`lifetime`).
 pub fn document(
     container: &Container,
     storage: &Storage,
@@ -1029,7 +1069,14 @@ pub fn document(
                 container
                     .devices
                     .iter()
-                    .map(|g| json!({"Type": "ClassGuid", "InterfaceClassGuid": g}))
+                    .map(|device| match device {
+                        AssignedDevice::ClassGuid(guid) => {
+                            json!({"Type": "ClassGuid", "InterfaceClassGuid": guid})
+                        }
+                        AssignedDevice::LocationPath(path) => {
+                            json!({"Type": "DeviceInstance", "LocationPath": path})
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .into(),
             );
@@ -1046,9 +1093,20 @@ pub fn document(
             obj.insert("Processor".to_owned(), json!({ k: v }));
         }
     }
+    // DeviceInstance and LocationPath first appear in HCS schema 2.2. Existing class-only and
+    // device-free documents keep their established 2.1 output (Microsoft HCS schema reference).
+    let minor = if container
+        .devices
+        .iter()
+        .any(|device| matches!(device, AssignedDevice::LocationPath(_)))
+    {
+        2
+    } else {
+        1
+    };
     json!({
         "Owner": OWNER,
-        "SchemaVersion": {"Major": 2, "Minor": 1},
+        "SchemaVersion": {"Major": 2, "Minor": minor},
         "ShouldTerminateOnLastHandleClosed": lifetime == Lifetime::EndsWithNode,
         "Container": c,
     })
@@ -1183,7 +1241,68 @@ pub struct BoxRecord {
     pub started: bool,
     #[serde(default)]
     pub init: Option<InitRecord>,
+    /// Exact physical bindings selected before HCS create; recovery never rebinds an ID by lookup alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<DeviceBinding>,
+    /// `folder` names either Hex's prepared folder or the caller's already-mounted volume.
+    #[serde(default, skip_serializing_if = "RecordStorage::is_owned")]
+    pub storage: RecordStorage,
+    /// A pending native create is not proven cancelled by a temporarily absent system.
+    #[serde(default, skip_serializing_if = "NativeCreate::is_created")]
+    pub creation: NativeCreate,
 }
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordStorage {
+    #[default]
+    OwnedFolder,
+    BorrowedVolume,
+}
+
+impl RecordStorage {
+    fn is_owned(&self) -> bool {
+        *self == Self::OwnedFolder
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeCreate {
+    /// Legacy markers predate pending-create retention and keep their existing semantics.
+    #[default]
+    Created,
+    Pending,
+    /// The owned operation completed with a native error. A system handle may still have been
+    /// returned; cleanup must terminate that exact system before releasing its physical claims.
+    Failed {
+        code: u32,
+        #[serde(default)]
+        owner: create::SystemOwner,
+    },
+}
+
+impl NativeCreate {
+    fn is_created(&self) -> bool {
+        *self == Self::Created
+    }
+
+    pub fn terminal(self) -> bool {
+        !matches!(self, Self::Pending)
+    }
+}
+
+pub mod create;
+
+/// The immutable administrator binding used by one native container, retained in its scratch marker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceBinding {
+    pub id: hex_api::DeviceId,
+    pub location: String,
+}
+
+#[cfg(test)]
+mod device_binding_record_tests;
 
 /// A box's init as its record names it: its pid and its creation time (100 ns units since 1601, as
 /// `GetProcessTimes` gives it), so a process given that pid since is never taken for it.
@@ -1207,12 +1326,166 @@ pub const RECORD_FIXED: usize = 130;
 /// more.
 pub const MAX_RECORD: usize = RECORD_FIXED + 3 * 6 * FOLDER_UNITS + hex_api::BoxId::MAX_LEN;
 
-/// A box's record as its marker holds it, refused by name past [`MAX_RECORD`]: such a box names a path
-/// past Windows' longest, so it can't be made, and no node would read its record back.
+/// The legacy marker budget plus one existing OCI configuration budget for the complete new field.
+/// Both read and write use this checked sum; neither device count nor a location selects a new limit.
+pub fn record_bound() -> Result<usize, Refusal> {
+    MAX_RECORD
+        .checked_add(crate::bundle::MAX_CONFIG_BYTES)
+        .ok_or_else(|| Refusal::Invalid {
+            what: "box record",
+            why: "native marker byte bound overflows this platform".to_owned(),
+        })
+}
+
+struct RecordBytes {
+    bytes: Vec<u8>,
+    bound: usize,
+    failure: Option<std::io::ErrorKind>,
+}
+
+impl std::io::Write for RecordBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let size = self.bytes.len().checked_add(bytes.len());
+        let kind = if size.is_none_or(|size| size > self.bound) {
+            Some(std::io::ErrorKind::FileTooLarge)
+        } else if self.bytes.try_reserve(bytes.len()).is_err() {
+            Some(std::io::ErrorKind::OutOfMemory)
+        } else {
+            None
+        };
+        if let Some(kind) = kind {
+            self.failure = Some(kind);
+            return Err(kind.into());
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn record_json(value: &impl Serialize, bound: usize) -> Result<Vec<u8>, Refusal> {
+    let mut out = RecordBytes {
+        bytes: Vec::new(),
+        bound,
+        failure: None,
+    };
+    if serde_json::to_writer(&mut out, value).is_err() {
+        return Err(match out.failure {
+            Some(std::io::ErrorKind::OutOfMemory) => Refusal::Exhausted {
+                what: "box record bytes",
+                bound,
+            },
+            Some(std::io::ErrorKind::FileTooLarge) => Refusal::Invalid {
+                what: "box record",
+                why: "encoded record exceeds its derived byte bound".to_owned(),
+            },
+            _ => Refusal::Broken("native scratch record could not encode".to_owned()),
+        });
+    }
+    Ok(out.bytes)
+}
+
+fn record_devices(record: &BoxRecord) -> Result<usize, Refusal> {
+    if record.devices.is_empty() {
+        return Ok(0);
+    }
+    if record.devices.len() > hex_api::MAX_DEVICES {
+        return Err(Refusal::Invalid {
+            what: "box record devices",
+            why: "count exceeds the u16 device index space".to_owned(),
+        });
+    }
+    let mut ids = Vec::new();
+    ids.try_reserve_exact(record.devices.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "box record device identities",
+            bound: record.devices.len(),
+        })?;
+    for device in &record.devices {
+        device.id.check()?;
+        if device.location.is_empty() || device.location.contains('\0') {
+            return Err(Refusal::Invalid {
+                what: "box record devices",
+                why: "location is empty or contains NUL".to_owned(),
+            });
+        }
+        ids.push(device.id);
+    }
+    ids.sort_unstable();
+    if ids.windows(2).any(|pair| pair.first() == pair.last()) {
+        return Err(Refusal::Invalid {
+            what: "box record devices",
+            why: "duplicate physical identity".to_owned(),
+        });
+    }
+    // The field key, comma and colon are part of the additional configuration budget too.
+    let extra = record_json(&record.devices, crate::bundle::MAX_CONFIG_BYTES)?
+        .len()
+        .checked_add(b",\"devices\":".len())
+        .ok_or_else(|| Refusal::Invalid {
+            what: "box record devices",
+            why: "encoded field size overflows".to_owned(),
+        })?;
+    if extra > crate::bundle::MAX_CONFIG_BYTES {
+        return Err(Refusal::Invalid {
+            what: "box record devices",
+            why: "encoded bindings exceed the configuration byte bound".to_owned(),
+        });
+    }
+    Ok(extra)
+}
+
+fn record_extra(record: &BoxRecord) -> Result<usize, Refusal> {
+    let mut extra = record_devices(record)?;
+    let mut add = |value: usize| -> Result<(), Refusal> {
+        extra = extra.checked_add(value).ok_or_else(|| Refusal::Invalid {
+            what: "box record",
+            why: "native metadata byte count overflows".to_owned(),
+        })?;
+        Ok(())
+    };
+    if record.storage == RecordStorage::BorrowedVolume {
+        if !record.made.is_empty() || record.folder.is_empty() || record.folder.contains('\0') {
+            return Err(Refusal::Invalid {
+                what: "box record storage",
+                why: "borrowed volume cannot own created paths and must name a nonempty NUL-free volume".to_owned(),
+            });
+        }
+        add(record_json(&record.storage, crate::bundle::MAX_CONFIG_BYTES)?.len())?;
+        add(b",\"storage\":".len())?;
+    }
+    if record.creation != NativeCreate::Created {
+        if record.devices.is_empty() || record.system.is_none() {
+            return Err(Refusal::Invalid {
+                what: "box record creation",
+                why: "pending assigned create requires exact bindings and its system identity"
+                    .to_owned(),
+            });
+        }
+        add(record_json(&record.creation, crate::bundle::MAX_CONFIG_BYTES)?.len())?;
+        add(b",\"creation\":".len())?;
+    }
+    if extra > crate::bundle::MAX_CONFIG_BYTES {
+        return Err(Refusal::Invalid {
+            what: "box record",
+            why: "native metadata exceeds the configuration byte bound".to_owned(),
+        });
+    }
+    Ok(extra)
+}
+
+/// A box's marker: its original path budget and a separate configuration budget for exact bindings.
 pub fn write_record(record: &BoxRecord) -> Result<Vec<u8>, Refusal> {
-    let bytes = serde_json::to_vec(record)
-        .map_err(|e| Refusal::Broken(format!("a box record didn't encode: {e}")))?;
-    if bytes.len() > MAX_RECORD {
+    let extra = record_extra(record)?;
+    let bytes = record_json(record, record_bound()?)?;
+    if bytes
+        .len()
+        .checked_sub(extra)
+        .is_none_or(|size| size > MAX_RECORD)
+    {
         return Err(Refusal::Invalid {
             what: "oci spec",
             why: format!(
@@ -1224,18 +1497,29 @@ pub fn write_record(record: &BoxRecord) -> Result<Vec<u8>, Refusal> {
     Ok(bytes)
 }
 
-/// Reads a box's record from `bytes`, refused past [`MAX_RECORD`] or malformed.
+/// Reads a box's record from `bytes`, refused past [`record_bound`] or malformed.
 pub fn read_record(bytes: &[u8]) -> Result<BoxRecord, Refusal> {
-    if bytes.len() > MAX_RECORD {
+    let bound = record_bound()?;
+    if bytes.len() > bound {
         return Err(Refusal::Invalid {
             what: "box record",
-            why: format!("past {MAX_RECORD} bytes"),
+            why: format!("past {bound} bytes"),
         });
     }
-    serde_json::from_slice(bytes).map_err(|e| Refusal::Invalid {
+    let record: BoxRecord = serde_json::from_slice(bytes).map_err(|_| Refusal::Invalid {
         what: "box record",
-        why: e.to_string(),
-    })
+        why: "malformed native scratch record".to_owned(),
+    })?;
+    // The same per-field budgets apply to reads. Canonicalization validates sizes without changing
+    // the durable input bytes or granting a different binding.
+    write_record(&record).map_err(|error| match error {
+        Refusal::Invalid { .. } => Refusal::Invalid {
+            what: "box record",
+            why: format!("invalid fields or past {MAX_RECORD} legacy bytes"),
+        },
+        other => other,
+    })?;
+    Ok(record)
 }
 
 /// What a starting node does with a box's record before it reads its own: reclaim the scratch (its box
@@ -1286,6 +1570,8 @@ pub enum TakeBack {
 /// Why a recorded box isn't taken back, so the node's recovery ends what is left of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lost {
+    CreationPending,
+    CreationFailed(u32),
     /// It ended with the node that made it: that runtime's boxes don't outlive their node.
     EndsWithNode,
     /// HCS holds no compute system of its id.
@@ -1299,6 +1585,11 @@ pub enum Lost {
 /// T-T7.1.2): only while HCS holds its system; as made only if no start was asked; and once started, only
 /// with the very init it recorded, told from a process given that pid since by its creation time.
 pub fn take_back(record: &BoxRecord, found: Found) -> Result<TakeBack, Lost> {
+    match record.creation {
+        NativeCreate::Pending => return Err(Lost::CreationPending),
+        NativeCreate::Failed { code, .. } => return Err(Lost::CreationFailed(code)),
+        NativeCreate::Created => {}
+    }
     if !record.outlives {
         return Err(Lost::EndsWithNode);
     }
@@ -1398,6 +1689,9 @@ mod tests {
     /// The record of an outliving box `x` whose node made its scratch folder and sandbox.
     fn outliving(init: Option<InitRecord>) -> BoxRecord {
         BoxRecord {
+            storage: RecordStorage::OwnedFolder,
+            creation: NativeCreate::Created,
+            devices: Vec::new(),
             folder: r"C:\b\x-scratch".to_owned(),
             made: vec![
                 r"C:\b\x-scratch".to_owned(),
@@ -1448,6 +1742,9 @@ mod tests {
     #[test]
     fn a_box_whose_start_its_node_didnt_finish_isnt_taken_back() {
         let r = BoxRecord {
+            storage: RecordStorage::OwnedFolder,
+            creation: NativeCreate::Created,
+            devices: Vec::new(),
             started: true,
             ..outliving(None)
         };
@@ -1509,6 +1806,9 @@ mod tests {
     fn the_longest_record_a_box_writes_is_its_bound() {
         let path = "\u{1}".repeat(FOLDER_UNITS);
         let worst = BoxRecord {
+            storage: RecordStorage::OwnedFolder,
+            creation: NativeCreate::Created,
+            devices: Vec::new(),
             folder: path.clone(),
             made: vec![path.clone(), path.clone()],
             outlives: false,
@@ -1637,7 +1937,12 @@ mod tests {
         let c = from_bundle(&bundle()).unwrap();
         assert_eq!(c.layers, vec![r"D:\layers\app", r"D:\layers\base"]);
         assert_eq!(c.scratch, Scratch::Folder(r"D:\boxes\b1".to_owned()));
-        assert_eq!(c.devices, vec!["5B45201D-F2F2-4F3B-85BB-30FF1F953599"]);
+        assert_eq!(
+            c.devices,
+            vec![AssignedDevice::ClassGuid(
+                "5B45201D-F2F2-4F3B-85BB-30FF1F953599".to_owned()
+            )]
+        );
         assert_eq!(
             c.mounts,
             vec![
@@ -1707,7 +2012,7 @@ mod tests {
                 b["windows"]["resources"]["memory"]["limit"] = json!(4096)
             }),
             ("windows.devices[0].idType", |b| {
-                b["windows"]["devices"][0]["idType"] = json!("vpci-location-path")
+                b["windows"]["devices"][0]["idType"] = json!("vpci-instance-id")
             }),
             ("windows.devices[0].id", |b| {
                 b["windows"]["devices"][0]["id"] = json!("COM1")
@@ -2205,6 +2510,9 @@ mod tests {
             seen in proptest::option::of((0u64..3, any::<bool>())),
         ) {
             let record = BoxRecord {
+                storage: RecordStorage::OwnedFolder,
+                creation: NativeCreate::Created,
+                devices: Vec::new(),
                 folder: r"C:\b\x".to_owned(),
                 made: vec![],
                 outlives,
@@ -2245,6 +2553,9 @@ mod tests {
             init in proptest::option::of((any::<u32>(), any::<u64>())),
         ) {
             let record = BoxRecord {
+                storage: RecordStorage::OwnedFolder,
+                creation: NativeCreate::Created,
+                devices: Vec::new(),
                 folder,
                 made,
                 outlives,

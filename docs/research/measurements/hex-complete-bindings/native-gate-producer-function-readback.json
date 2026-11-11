@@ -1,0 +1,38 @@
+[
+  {
+    "region": "held child",
+    "sha256": "9c1cfabb1e2dcbda5ef8ee268f144c909d040c367e28d82d416c48797cf10710",
+    "byte_equal": true
+  },
+  {
+    "region": "child ready sender",
+    "sha256": "b0c5c2fa5ff9b8bda8ccd759e7bd4dc9912b60dcef8e22351273ed83e674a9f7",
+    "byte_equal": true
+  },
+  {
+    "region": "spawn held",
+    "sha256": "dff6890ec1fc610398004340212059d6d31d4f1f77556960964b88642ae8a2a6",
+    "byte_equal": true
+  },
+  {
+    "region": "FD allowlist close",
+    "sha256": "542ecc0d789d5e02d86ae66ceb604d214fa1de2caea8985fb1113fd21ac17970",
+    "byte_equal": true
+  },
+  {
+    "region": "production consume-mode wait body",
+    "source_comparison": "old held_wait body == new held_receive body with private false-mode flags reduced and new explanation comment excluded",
+    "sha256": "53348ed73ae453d5b285d15cd5cc008bf2aef501789aefa493010387fe523ea8",
+    "byte_equal_after_explicit_mode_reduction": true
+  },
+  {
+    "region": "ordinary child wrapper +shared child_with_fd execution body",
+    "sha256": "3a8980cf88c3f409cdd6b0464b4655025ff4dc313edffe49a923d9099775e729",
+    "byte_equal": true
+  },
+  {
+    "region": "HeldGate.release consume2/send1",
+    "sha256": "56502f2f6dc00267c01f5591bf2ff154f4de04fb69e60388a7bcd2993088b3bc",
+    "byte_equal": true
+  }
+]

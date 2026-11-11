@@ -1,0 +1,9 @@
+{
+  "parent": "97d6774c954b058a5242095017e1e35ab24ac52d",
+  "originals": [
+    "89ec0ff0a6a8e2b8a9ec9110007033a58c01a46b",
+    "3497b8e27a22440af48ea715ca0928e32444832c",
+    "e5c41692843008c49b88590ceaf58a8aa1094801"
+  ],
+  "checks": "Source-only original controls, unrun; no production remedy. Scheduler registration port preserves current ROOT module paths. CPU helper visibility is test-only. Writable-share alias control preserves original config production prefix."
+}

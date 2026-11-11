@@ -1,0 +1,133 @@
+{
+  "status": "SOURCE ONLY; not compiled, tested or natively executed; ROOT must compose named dependencies and registrations",
+  "base": "786775e3b119c5163d49aa12662c0207cb25cc29",
+  "native_component": "cfd222a8971295fdb90409a906d0fecda20d1e3d",
+  "role": "L3 implementer",
+  "coordinator": "01a1aa77778471339bea3beff90d6bbd",
+  "policy": {
+    "revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+    "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+    "full_read_after_resume": true,
+    "existing_narrow_release_retained": true
+  },
+  "files": [
+    {
+      "path": "crates/hex-runtime/src/macos/process/trusted_entry.rs",
+      "bytes": 48518,
+      "sha256": "976902dddf4a5b4dfe218344ecd655ff631b960dd0f9a2d22a26a6475fd80ff0"
+    },
+    {
+      "path": "crates/hex-runtime/src/macos/process/trusted_entry/tests.rs",
+      "bytes": 7051,
+      "sha256": "548f8d21161e0add428dcfbf62e0960b8d13e124cab3bda4be55f258686869f3"
+    },
+    {
+      "path": "docs/research/measurements/hex-complete-lifecycle/trusted-entry-measurement-source.md",
+      "bytes": 13364,
+      "sha256": "4500aee7347ed84b1957a950e7f5f08243f0a35f8bac6e1ea4ec832c5fadc553"
+    }
+  ],
+  "native_sys": {
+    "path": "crates/hex-runtime/src/macos/sys.rs",
+    "bytes": 79612,
+    "sha256": "f36ac0c28b97225af83f8699659de8c47daeda875ea3e2b3fb98b7324f298c3e"
+  },
+  "required_builder": "dea47d8425cccfa5a498414950909bcd3ea0f20c",
+  "builder_join": "5688fd7516d260732796fbc53b45a8e66a2c46a5",
+  "current_root_dependency_blobs": [
+    {
+      "revision": "fabd73020cdd1c6e201d8028fcca5d85f28ef18c",
+      "path": "crates/hex-runtime/src/guest/native_fixture.rs",
+      "bytes": 2003,
+      "sha256": "9f92717bc333fcfe606b1d0f1f3409accc4e98582d571eb11b3c2087c2275f38"
+    },
+    {
+      "revision": "fabd73020cdd1c6e201d8028fcca5d85f28ef18c",
+      "path": "crates/hex-runtime/src/guest/mod.rs",
+      "bytes": 58341,
+      "sha256": "9504db37c550b9d354de7fc293122af64b634452b9a816675b4de2b632fbf8e1"
+    },
+    {
+      "revision": "fabd73020cdd1c6e201d8028fcca5d85f28ef18c",
+      "path": "vendor/shards/crates/api/src/native.rs",
+      "bytes": 11102,
+      "sha256": "d6b1ccc00ef4389ee3ca23833df07a0efa5e0d4554df90c3a71a3f67806f3a33"
+    },
+    {
+      "revision": "fabd73020cdd1c6e201d8028fcca5d85f28ef18c",
+      "path": "crates/hex-runtime/Cargo.toml",
+      "bytes": 1704,
+      "sha256": "8e24302b1e0d37bd79ba73e94adf3cdcac3611724ae4df6e931bc8b46e3b8909"
+    },
+    {
+      "revision": "fabd73020cdd1c6e201d8028fcca5d85f28ef18c",
+      "path": "crates/hex-cli/Cargo.toml",
+      "bytes": 3889,
+      "sha256": "febc8f3f2e0da14fe6149f31696cede0b816338f4a9f613c67b1c2477cd98560"
+    }
+  ],
+  "signatures": {
+    "dispatch": "pub fn dispatch() -> Result<Option<u8>, Failure>",
+    "run": "pub fn run(Input<'_>, &mut dyn FnMut(&Identity) -> Result<(), Refusal>) -> Result<Report, Failure>"
+  },
+  "root_owned_registrations": [
+    "macos/process.rs child module",
+    "macos/mod.rs reexport",
+    "earliest CLI branch before every standard argument reader",
+    "preserve existing Runtime/CLI native-trusted-entry-measurement feature and guest::native_fixture registration"
+  ],
+  "new_caller_controls": [
+    "fixed_carrier_preserves_original_typed_rights_and_deadline",
+    "malformed_carrier_cannot_select_defaults_or_gain_extra_rights",
+    "report_requires_exact_identity_scope_seal_and_unique_fd_observations",
+    "native_exec_budget_counts_pointer_arrays_and_both_terminators",
+    "bounded_error_record_preserves_primary_cleanup_and_raw_write_failure"
+  ],
+  "new_caller_control_status": "UNRUN",
+  "new_component_controls": 3,
+  "component_control_status": "UNRUN",
+  "local_actions": [
+    "source reads/edits",
+    "scoped rustfmt parse/format",
+    "diff metadata and hashes"
+  ],
+  "build": false,
+  "typecheck": false,
+  "clippy": false,
+  "test": false,
+  "native": false,
+  "policy_gate": false,
+  "new_unsafe_symbols_in_leaf": [],
+  "native_unsafe_inventory": "See exact cfd222 trusted-entry-native-component.md/json; no full2ef/helper_sys import",
+  "native_owner": "existing ProcessBox::prepared/Scope::new Child/Controller and sole retained BoxProc; no ordinary watcher started in this measurement",
+  "holds_and_cleanup": [
+    "durable caller Identity before initial trusted Hex CONT",
+    "final foreign image observed held after exact NOTE_EXEC/same birth/fresh genuine task audit token",
+    "no foreign Continue exists in source",
+    "parent operation errors cannot bypass known-controller cleanup attempt",
+    "unexpected SETEXEC returned child is bound to preallocated sole direct-parent BoxProc before lookup/publication",
+    "original, cleanup and diagnostic failures retained with same receipts",
+    "no ScopeReleased, canonical terminal/removal or Index refund"
+  ],
+  "bounds": {
+    "input_arguments": "22 fixed + 3 per existing MAX_SHARES",
+    "argv_report": "actual kern.argmax including string NUL and pointer-array terminators",
+    "decimal_digits": "u64 representation maximum 20",
+    "report_chunk_bytes": "POSIX PIPE_BUF minimum512",
+    "deadline": "same raw expiry sampled before remaining original Instant; no rebase/tolerance/default",
+    "fault_records": 1,
+    "parent_diagnostic_slots": "cleanup start/end/drain"
+  },
+  "remaining": [
+    "ROOT exact coherent compile/strict/pure controls",
+    "ROOT actual admitted trusted-entry measurement and raw/cleanup receipts",
+    "std/dyld/pre-main unknown threads or descendants",
+    "actual held image/immutable bytes/TOCTOU closure",
+    "fixed workers and full helper source remain held separately",
+    "GPU artifacts/services, HVF/Vulkan workload compatibility",
+    "aggregate CPU/memory and profiles/final helper charge/cold recovery/whole scope absence",
+    "seven-target gates and all performance/allocation/fault claims"
+  ],
+  "historical_evidence_attribution": "ROOT C8cd data remains at original C source; escaped-descendant06e relevant RED remains unremedied by this measurement; builder2 and producer5 passes retain their ROOT source attribution",
+  "shared_box_ownership": "CURRENT fabd source hypothesis remains ORIGINAL-only in separate work; no production predicate change or replay"
+}

@@ -5,6 +5,8 @@
 
 use std::collections::BTreeMap;
 
+#[cfg(unix)]
+use super::super::own_duplex;
 use super::*;
 use hex_core::stream::files::{LIMITS, Step, Unpack};
 
@@ -193,7 +195,7 @@ struct Budgeted {
 
 #[cfg(unix)]
 impl super::super::Link for Budgeted {
-    fn dial(&self, _port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, _port: u32) -> Result<DuplexOwner, Refusal> {
         use std::os::unix::net::UnixStream;
         let (near, mut far) = UnixStream::pair().unwrap();
         let (entries, bytes) = self.budget;
@@ -218,7 +220,7 @@ impl super::super::Link for Budgeted {
             let done = wire::answer(0, &Answer::Done, wire::MAX_MESSAGE).unwrap();
             let _ = far.write_all(&hex_core::stream::frame(&done, wire::MAX_MESSAGE).unwrap());
         });
-        Ok(Box::new(near))
+        own_duplex(near)
     }
 }
 
@@ -265,7 +267,7 @@ struct RefusesAtOpening {
 
 #[cfg(unix)]
 impl super::super::Link for RefusesAtOpening {
-    fn dial(&self, _port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, _port: u32) -> Result<DuplexOwner, Refusal> {
         use std::os::unix::net::UnixStream;
         let (near, mut far) = UnixStream::pair().unwrap();
         let report = self.sent_after.clone();
@@ -286,7 +288,7 @@ impl super::super::Link for RefusesAtOpening {
             let _ = far.read_to_end(&mut rest);
             report.send(rest.len()).unwrap();
         });
-        Ok(Box::new(near))
+        own_duplex(near)
     }
 }
 

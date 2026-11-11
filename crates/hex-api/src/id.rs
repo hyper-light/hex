@@ -37,8 +37,53 @@ impl BoxId {
         Ok(Self(s.to_owned()))
     }
 
+    /// AC-T7.4.1: validates and copies a native scope name before any OS effect.
+    /// Error construction and the validated identity each reserve their storage fallibly.
+    pub fn try_new(s: &str) -> Result<Self, Refusal> {
+        if s.is_empty()
+            || s.len() > Self::MAX_LEN
+            || s.starts_with('.')
+            || !s
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'+' | b'-' | b'.'))
+        {
+            let message = "expected 1 to 128 ASCII name characters, not starting with '.'";
+            let mut why = String::new();
+            why.try_reserve_exact(message.len())
+                .map_err(|_| Refusal::Exhausted {
+                    what: "box id refusal bytes",
+                    bound: message.len(),
+                })?;
+            why.push_str(message);
+            return Err(Refusal::Invalid {
+                what: "box id",
+                why,
+            });
+        }
+        let mut name = String::new();
+        name.try_reserve_exact(s.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "box id",
+                bound: s.len(),
+            })?;
+        name.push_str(s);
+        Ok(Self(name))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Copies an already validated identity when a feature's ownership transfer must be fallible.
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        let mut copy = String::new();
+        copy.try_reserve_exact(self.0.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "box id",
+                bound: self.0.len(),
+            })?;
+        copy.push_str(&self.0);
+        Ok(Self(copy))
     }
 }
 
@@ -65,12 +110,23 @@ impl From<BoxId> for String {
 mod tests {
     use super::*;
 
+    /// AC-T7.3.1: a runtime offer can own its record's validated holder without infallible cloning.
+    #[test]
+    fn try_clone_preserves_the_exact_validated_identity() {
+        let original = BoxId::new("device-holder.1_2+3").unwrap();
+        let copy = original.try_clone().unwrap();
+        assert_eq!(copy, original);
+        assert_eq!(copy.as_str(), "device-holder.1_2+3");
+    }
+
     #[test]
     fn an_id_is_never_a_path_or_empty() {
         for bad in ["", ".", "..", ".hidden", "a/b", "a\0b", "über", "a b"] {
             assert!(BoxId::new(bad).is_err(), "{bad:?} accepted");
+            assert!(BoxId::try_new(bad).is_err(), "{bad:?} copied");
         }
         assert!(BoxId::new(&"x".repeat(129)).is_err());
+        assert!(BoxId::try_new(&"x".repeat(129)).is_err());
         for good in [
             "a",
             "leg-1.2_3+x",
@@ -78,6 +134,7 @@ mod tests {
             &"x".repeat(128),
         ] {
             assert_eq!(BoxId::new(good).unwrap().as_str(), good);
+            assert_eq!(BoxId::try_new(good).unwrap().as_str(), good);
         }
     }
 

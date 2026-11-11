@@ -1,0 +1,71 @@
+{
+  "bytes": 328822,
+  "sha256": "bb7382e2a29b81cfff97350e1d260d76c8352f16d5df452d5ef8763569fd6ee8",
+  "members": {
+    "cohort-c6a64f4b-mac-portability-c6a/running.json": {
+      "bytes": 1422,
+      "sha256": "b37fa6ca7231bda0f31521093aad0ee11ea8fbf6bcfa19a7c0f6af8d5edacd33"
+    },
+    "cohort-c6a64f4b-mac-portability-c6a/result.json": {
+      "bytes": 1766,
+      "sha256": "b1e96d4953978ec104f32c0347a5a9f6696ce47b42998a550b5013c1b6c96d84"
+    },
+    "cohort-c6a64f4b-mac-portability-c6a/source-before.json": {
+      "bytes": 508771,
+      "sha256": "debae0119beb158ebb575cfb5606b1956cf672d9175a10c09d9d7d47aa9b63ad"
+    },
+    "cohort-c6a64f4b-mac-portability-c6a/source-after.json": {
+      "bytes": 508771,
+      "sha256": "debae0119beb158ebb575cfb5606b1956cf672d9175a10c09d9d7d47aa9b63ad"
+    },
+    "cohort-c6a64f4b-mac-portability-c6a/windows-x64-arm64-joined-strict.log": {
+      "bytes": 8276,
+      "sha256": "10ebb7a9e398e58069146d53322f80edfb1c65fb20c4594e6cb122c8cddcfb60"
+    },
+    "cohort-c6a64f4b-mac-portability-c6a/public-registry-seed.json": {
+      "bytes": 202,
+      "sha256": "1328edbb1eb50f43c88ffca533b84d1b9e2a15ce42ceee344eee4086aaf13ffb"
+    },
+    "cohort-c6a64f4b-mac-portability-c6a/collected-binaries.json": {
+      "bytes": 994,
+      "sha256": "a8c6e3fc7a27966432beebb06a4bc3255f4410171613513d6becf434c032d33d"
+    },
+    "cohort-8cd01464-mac-setexec-memory-only/running.json": {
+      "bytes": 3678,
+      "sha256": "9086146dcd07fa0618ce709f1db303d7eb76674ef116e993cba8394e247dd92d"
+    },
+    "cohort-8cd01464-mac-setexec-memory-only/result.json": {
+      "bytes": 4128,
+      "sha256": "6d697ac77451a14f4a565f2dcd5cb0f06e8c3ca894273b20c3131c4b2d03c51d"
+    },
+    "cohort-8cd01464-mac-setexec-memory-only/source-before.json": {
+      "bytes": 540,
+      "sha256": "267293a3dff6970dfccb18d154cf9a5767f08f9b55248d68e1dd85096a11fe47"
+    },
+    "cohort-8cd01464-mac-setexec-memory-only/source-after.json": {
+      "bytes": 540,
+      "sha256": "267293a3dff6970dfccb18d154cf9a5767f08f9b55248d68e1dd85096a11fe47"
+    },
+    "cohort-8cd01464-mac-setexec-memory-only/pure-exit-decoder.log": {
+      "bytes": 66,
+      "sha256": "fd2d24351aeaa75c84501de78e9d4d67d57440f7a114547d5e047a4032c82031"
+    },
+    "cohort-8cd01464-mac-setexec-memory-only/compile.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "cohort-8cd01464-mac-setexec-memory-only/native-memory-only.log": {
+      "bytes": 1654,
+      "sha256": "c9affe6f8bb9b187b9f98dd3b8b7bd0d8e1b0df2f31e3c95298f302a9669e074"
+    },
+    "cohort-8cd01464-mac-setexec-memory-only/collected-binaries.json": {
+      "bytes": 2248,
+      "sha256": "22393d959216d8b6aa09d35db1c7d6632643d6f5c443b38291ecb4a08600a717"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

@@ -1,0 +1,20 @@
+{
+  "source_revision": "f3f19c07e658dcd8097bba3dbb2bcbc484d9d8d7",
+  "source_sha256": {
+    "crates/hex-node/src/scheduler/cache.rs": "95f56618ac0e7c581d4ed7d74e467693d996745231da72eefdce413282f23d9e",
+    "crates/hex-node/src/placement/tests.rs": "660834c609cda43bc29ab44bb617dc9940f36d649b16c72cfc52a291690e9cfe",
+    "crates/hex-node/src/placement/rows.rs": "72c113b9f160efc8d82d0c3dd4aa5b74dc9c81e0aebd58deee7d8f9fb5531160",
+    "crates/hex-node/src/scheduler.rs": "63db21fb3050ee10212404f3a4897bbfd026b3a4f6ffad65ab2a838412290b9c",
+    "crates/hex-node/src/placement/budget.rs": "f2f490bae247e846c002d74319c56f22ff5bdb54bf7f13430579c25fd70f79ed",
+    "crates/hex-node/src/placement/adversarial_lifetime_tests.rs": "dafcb6d6c108432f96de2bc436c5e53436c05c739223f5c59e41a7e7635b5006",
+    "crates/hex-node/src/scheduler/tests.rs": "1c1ca914af557c81953ad4b0999b1322ec4e98e6eefa93c698a642b91906d887",
+    "crates/hex-node/src/placement/adversarial_bounds_tests.rs": "b02e662366dcbb44360db1c87a39f0c7410d3d7512e25ed2b3b32f68f3a7a54e",
+    "crates/hex-node/src/placement.rs": "4146cb447351386aeddcdb4bedf18418a3cef2a8af537a39dbc34d7a7df1df86",
+    "crates/hex-node/src/scheduler/adversarial_relay_tests.rs": "667b734a44c1ac87389e3dd8ebc56b522c7c753a39b9bda662a79ede59a9c7fb",
+    "crates/hex-node/src/scheduler/order.rs": "aec2f43bca91fd3137b8aa8b9cf32930b34ac621fce981cde7da16b43ba9ffa7",
+    "crates/hex-node/src/placement/recovery_payload_guard_tests.rs": "f495e2f687087c6c0b05768590534b90c947d7f23d873463c99c6b152476d7d9",
+    "crates/hex-sim/src/peer.rs": "3bdec78b35be0c93c491ad65b5b268b312702c56a98202cae01bfe510903c120",
+    "crates/hex-node/src/records.rs": "c5b9d353075c178fd7ccd4aa9774c2a6ab73f37afb02b3fea9e3ff237a0ec866"
+  },
+  "sha256": "cb6a2008584f0f567ec3bc6f9b765e7067293415ddfb6cf49a640225450b848d"
+}

@@ -184,8 +184,9 @@ impl Write for Vsock {
 }
 
 impl Duplex for Vsock {
-    fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
-        Ok(Box::new(Self(self.0.try_clone()?)))
+    fn try_clone(&self) -> io::Result<hex_client::guest::DuplexOwner> {
+        hex_client::guest::own_duplex(Self(self.0.try_clone()?))
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
@@ -290,6 +291,7 @@ fn init() -> Result<(), (u8, String)> {
     leave_rootfs(t0).map_err(fail)?;
     mount_all().map_err(fail)?;
     mount_shares().map_err(fail)?;
+    let ready_budget = firecracker_ready_budget(&kernel_cmdline().map_err(fail)?).map_err(fail)?;
     std::fs::write("/sys/fs/cgroup/cgroup.subtree_control", CONTROLLERS).map_err(|e| {
         fail(format!(
             "enabling the cgroup controllers {CONTROLLERS}: {e}"
@@ -299,6 +301,10 @@ fn init() -> Result<(), (u8, String)> {
     let exe = std::env::current_exe().map_err(|e| fail(format!("finding /init: {e}")))?;
     let socket = Path::new(RUN).join("node.sock");
     let state = Path::new(STATE);
+    // AC-T7.4.1: only immutable host boot authority can materialize the selected renderer's
+    // guest catalog; do this before the node reads its configured attachment routes.
+    let _ = hex_runtime::guest::gpu::initialize(state)
+        .map_err(|why| fail(format!("initializing guest GPU authority: {why}")))?;
     let node = start(
         &exe,
         &[
@@ -328,6 +334,13 @@ fn init() -> Result<(), (u8, String)> {
         Some(format!("{t0} {mounted} {node_ready}")),
     )
     .map_err(fail)?;
+    if let Some(budget) = ready_budget {
+        notify_firecracker_ready(budget).map_err(|e| {
+            fail(format!(
+                "notifying Firecracker that the guest is ready: {e}"
+            ))
+        })?;
+    }
     let mut out = std::io::stdout().lock();
     let _ = out
         .write_all(b"hex guest ready\n")
@@ -481,6 +494,91 @@ const SHARES: &str = "/run/hex/shares";
 const CMDLINE_BOUND: u64 = 2048;
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 const CMDLINE_BOUND: u64 = 512;
+
+/// The host supplies its finite boot budget; neither a user environment variable nor
+/// init arguments after `--` can enable a host notification.
+fn firecracker_ready_budget(cmdline: &str) -> Result<Option<Duration>, String> {
+    let (mut enabled, mut budget) = (false, None);
+    for word in cmdline.split_whitespace().take_while(|word| *word != "--") {
+        if word == "hex.firecracker-ready" {
+            if enabled {
+                return Err("hex.firecracker-ready is given twice".to_owned());
+            }
+            enabled = true;
+        } else if let Some(value) = word.strip_prefix("hex.firecracker-ready-ms=") {
+            let millis = value
+                .parse::<u32>()
+                .ok()
+                .filter(|ms| *ms != 0)
+                .filter(|_| value.bytes().all(|byte| byte.is_ascii_digit()))
+                .ok_or_else(|| {
+                    "hex.firecracker-ready-ms needs positive u32 milliseconds".to_owned()
+                })?;
+            if budget
+                .replace(Duration::from_millis(u64::from(millis)))
+                .is_some()
+            {
+                return Err("hex.firecracker-ready-ms is given twice".to_owned());
+            }
+        } else if word.starts_with("hex.firecracker-ready") {
+            return Err("invalid Firecracker readiness parameter".to_owned());
+        }
+    }
+    match (enabled, budget) {
+        (false, None) => Ok(None),
+        (true, Some(budget)) => Ok(Some(budget)),
+        _ => Err("Firecracker readiness requires its flag and finite budget together".to_owned()),
+    }
+}
+
+fn kernel_cmdline() -> Result<String, String> {
+    let bound = usize::try_from(CMDLINE_BOUND)
+        .map_err(|_| "kernel command line bound exceeds usize".to_owned())?;
+    let mut cmdline = String::new();
+    cmdline
+        .try_reserve_exact(bound)
+        .map_err(|_| "allocating the bounded kernel command line".to_owned())?;
+    std::fs::File::open("/proc/cmdline")
+        .and_then(|file| file.take(CMDLINE_BOUND).read_to_string(&mut cmdline))
+        .map_err(|e| format!("reading /proc/cmdline: {e}"))?;
+    if !cmdline.ends_with('\n') {
+        return Err("kernel command line is truncated".to_owned());
+    }
+    Ok(cmdline)
+}
+
+fn notify_firecracker_ready(budget: Duration) -> io::Result<()> {
+    let expired = || io::Error::from(io::ErrorKind::TimedOut);
+    let deadline = std::time::Instant::now()
+        .checked_add(budget)
+        .ok_or_else(expired)?;
+    let socket = Socket::new(Domain::VSOCK, Type::STREAM.cloexec(), None)?;
+    // VMADDR_CID_HOST is 2 (vsock(7)); the host bound this VM's private UDS before boot.
+    socket.connect_timeout(&SockAddr::vsock(2, stream::GUEST_READY_PORT), budget)?;
+    let mut pending = stream::GUEST_READY;
+    while !pending.is_empty() {
+        let left = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or_else(expired)?;
+        socket.set_write_timeout(Some(left))?;
+        // Closing the host's readiness listener must return BrokenPipe, not kill PID1 by SIGPIPE.
+        match rustix::net::send(&socket, pending, rustix::net::SendFlags::NOSIGNAL) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(sent) => {
+                pending = pending
+                    .get(sent..)
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+            }
+            Err(rustix::io::Errno::INTR) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if std::time::Instant::now() >= deadline {
+        return Err(expired());
+    }
+    Ok(())
+}
 
 /// The shares the kernel's command line names, in tag order. Only the kernel's own parameters count:
 /// what follows `--` is init's arguments.
@@ -640,6 +738,42 @@ fn reap(node: u32, relay: u32) -> String {
 mod tests {
     use super::*;
     use rustix::mount::MountFlags;
+
+    /// AC-T7.4.1: only the host's paired kernel parameters authorize a bounded readiness
+    /// notification; init arguments and environment defaults never enable it.
+    #[test]
+    fn firecracker_readiness_requires_paired_finite_kernel_parameters() {
+        for text in [
+            "",
+            "quiet",
+            "quiet -- hex.firecracker-ready hex.firecracker-ready-ms=1",
+        ] {
+            assert_eq!(firecracker_ready_budget(text).unwrap(), None);
+        }
+        for millis in [1u32, u32::MAX] {
+            let text = format!(
+                "quiet hex.firecracker-ready-ms={millis} hex.firecracker-ready -- hex.firecracker-ready-ms=bad"
+            );
+            assert_eq!(
+                firecracker_ready_budget(&text).unwrap(),
+                Some(Duration::from_millis(u64::from(millis)))
+            );
+        }
+        for text in [
+            "hex.firecracker-ready",
+            "hex.firecracker-ready-ms=1",
+            "hex.firecracker-ready hex.firecracker-ready-ms=0",
+            "hex.firecracker-ready hex.firecracker-ready-ms=-1",
+            "hex.firecracker-ready hex.firecracker-ready-ms=+1",
+            "hex.firecracker-ready hex.firecracker-ready-ms=4294967296",
+            "hex.firecracker-ready hex.firecracker-ready-ms=",
+            "hex.firecracker-ready hex.firecracker-ready-ms=1 hex.firecracker-ready",
+            "hex.firecracker-ready hex.firecracker-ready-ms=1 hex.firecracker-ready-ms=1",
+            "hex.firecracker-ready=1 hex.firecracker-ready-ms=1",
+        ] {
+            assert!(firecracker_ready_budget(text).is_err(), "{text}");
+        }
+    }
 
     /// HEX-GUEST-9 (docs/design/shards-guest.md §4, amended 2026-11-06): `init` mounts `/proc`, `/sys`,
     /// cgroup2, `devtmpfs` and a tmpfs `/run`, and the node's state lives on that tmpfs, never a disk;

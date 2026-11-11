@@ -1,0 +1,19 @@
+{
+  "requirement": "AC-T7.4.1",
+  "role": "coordinator",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "owned_producer": "95351a35e82d0799119600e6e9e9ad682ff93083",
+  "ROOT_cli_delta": "two requested environment names plus optional exact-SHA input -> same existing with_gpu_observer after runtime cost before registration/recovery",
+  "review": "ROOT read full new loader/schema/three controls and existing constructor; L1 independent read-only review pending, no known blocker",
+  "actual_loader_controls": "UNRUN; no native/artifact executable or paid profile acceptance",
+  "files": {
+    "crates/hex-cli/src/node.rs": "b7e228027e18f7bcc9bfb2dbc560a09cf6f5948fe9fe862cbfc790f7e492b3bf",
+    "crates/hex-runtime/src/guest/mod.rs": "3a0beeb7d64a4f259ed2316be1e3a004114d86e42aca44a82d09964b504e631f",
+    "crates/hex-runtime/src/guest/observer/config.rs": "6c13bc3a8ba51c4bb71657ccc133f40b99b532ba1760b15341277a56134f513e",
+    "crates/hex-runtime/src/guest/observer/config/load.rs": "e25a7983eefaf75c3d1f0ae78bc70cfe8ee3a653f95cc240c45e5ae81521c699",
+    "crates/hex-runtime/src/guest/observer/config/load/tests.rs": "db18ddb653f60213adf01b60a9b44c35da43dd009abc11b222f868c63ad5b2a4",
+    "docs/research/measurements/hex-complete-shards-gpu/OBSERVER-INITIALIZATION-SOURCE.json": "aef0387b15bebc1fab344984f23d8fa2ab5449c2d85930e000a91dd19ff43620",
+    "docs/research/measurements/hex-complete-shards-gpu/OBSERVER-INITIALIZATION-SOURCE.md": "c88fbd701d6e0b36b56562ef442e751a6abb9a8a9a025b64397af44532d093ad"
+  }
+}

@@ -8,6 +8,488 @@ use super::*;
 use hex_api::{Bounds, BoxOwner, BoxSpec, IoRates, Mount, Network, OciSpec, Program, Rootfs, User};
 use proptest::prelude::*;
 
+fn device_claims() -> Vec<DeviceId> {
+    vec![
+        DeviceId {
+            kind: DeviceKind::Net,
+            key: u64::from(u32::MAX),
+        },
+        DeviceId {
+            kind: DeviceKind::Gpu,
+            key: 0x1234_5678_abcd,
+        },
+        DeviceId {
+            kind: DeviceKind::Block,
+            key: u64::MAX,
+        },
+        DeviceId {
+            kind: DeviceKind::Vfio,
+            key: 0,
+        },
+    ]
+}
+
+fn device_spec(devices: Vec<DeviceId>) -> BoxSpec {
+    BoxSpec {
+        allocation: None,
+        route: None,
+        id: id("device-wire"),
+        bounds: Bounds::default(),
+        class: ClassSpec::Process,
+        owner: None,
+        devices,
+    }
+}
+
+fn device_capacity(devices: Vec<DeviceInfo>) -> Capacity {
+    Capacity {
+        cost: None,
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        id: "physical-pool".to_owned(),
+        total: CapacityResources::default(),
+        free: CapacityResources::default(),
+        devices,
+    }
+}
+
+fn device_offer(device: DeviceId) -> DeviceInfo {
+    DeviceInfo {
+        id: device,
+        model: "synthetic-private-model-é".to_owned(),
+        size: u64::MAX,
+        holder: Some(DeviceHolder::Box(id("synthetic-private-holder"))),
+    }
+}
+
+// Keep all preceding fields exactly as the real codec writes them; replace only the device tail.
+fn with_device_tail(offer: bool, tail: &[u8]) -> Vec<u8> {
+    let mut bytes = if offer {
+        answer(
+            91,
+            &Answer::Capacity(Some(device_capacity(Vec::new()))),
+            MAX_MESSAGE,
+        )
+        .unwrap()
+    } else {
+        request(
+            91,
+            &Request::Call(Call::Create(Box::new(device_spec(Vec::new())))),
+            MAX_MESSAGE,
+        )
+        .unwrap()
+    };
+    // Replace the device list while retaining valid absent charge/route receipts. Capacity
+    // additionally ends with three empty u32 lists; a spec ends with one route option.
+    let following = if offer { 1 + 3 * size_of::<u32>() } else { 2 };
+    bytes.truncate(bytes.len() - size_of::<u32>() - following);
+    bytes.extend_from_slice(tail);
+    bytes.extend(std::iter::repeat_n(0, following));
+    bytes
+}
+
+fn read_device_tail(offer: bool, tail: &[u8]) -> Fault {
+    let bytes = with_device_tail(offer, tail);
+    if offer {
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err()
+    } else {
+        read_request(&received(&bytes, 0), MAX_MESSAGE)
+            .unwrap_err()
+            .fault
+    }
+}
+
+/// AC-T7.3.1/HEX-SOCK-1: fixed device tags and LE keys; catalog/claim order and shared kinds survive.
+#[test]
+fn device_claims_and_offers_roundtrip_with_explicit_tags_and_catalog_order() {
+    let devices = device_claims();
+    let mut encoded = Writer::new(MAX_MESSAGE);
+    for device in &devices {
+        put_device_id(&mut encoded, device);
+    }
+    let mut expected = Vec::new();
+    for (tag, key) in [
+        (3, u64::from(u32::MAX)),
+        (0, 0x1234_5678_abcd),
+        (2, u64::MAX),
+        (1, 0),
+    ] {
+        expected.push(tag);
+        expected.extend_from_slice(&key.to_le_bytes());
+    }
+    assert_eq!(encoded.done().unwrap(), expected);
+    let claimed = Request::Call(Call::Create(Box::new(device_spec(devices.clone()))));
+    let bytes = request(91, &claimed, MAX_MESSAGE).unwrap();
+    assert_eq!(&bytes[12..14], &kind::CREATE.to_le_bytes());
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        claimed
+    );
+    assert_eq!(
+        request(
+            91,
+            &read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            MAX_MESSAGE
+        )
+        .unwrap(),
+        bytes
+    );
+    let mut offers: Vec<_> = devices.into_iter().map(device_offer).collect();
+    offers[1].holder = None;
+    offers[2].model.clear(); // Opaque metadata has no invented naming grammar.
+    let offered = Answer::Capacity(Some(device_capacity(offers)));
+    let bytes = answer(91, &offered, MAX_MESSAGE).unwrap();
+    assert_eq!(&bytes[12..14], &kind::CAPACITY_ANSWER.to_le_bytes());
+    let decoded = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1;
+    assert_eq!(decoded, offered);
+    assert_eq!(answer(91, &decoded, MAX_MESSAGE).unwrap(), bytes);
+}
+
+/// AC-T7.4.1: a native Metal registry identity uses all64 bits; the wire does not reinterpret
+/// it as a narrow PCI address. The initialized adapter validates the physical correspondence.
+#[test]
+fn native_gpu_keys_roundtrip_without_pci_width_assumptions() {
+    for key in [1 << 48, 1 << 63, u64::MAX] {
+        let gpu = DeviceId {
+            kind: DeviceKind::Gpu,
+            key,
+        };
+        let claimed = Request::Call(Call::Create(Box::new(device_spec(vec![gpu]))));
+        let bytes = request(91, &claimed, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            claimed
+        );
+        let offered = Answer::Capacity(Some(device_capacity(vec![device_offer(gpu)])));
+        let bytes = answer(91, &offered, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            offered
+        );
+    }
+}
+
+/// AC-T7.3.1: malformed claims and offers refuse on both sides, rather than narrowing an identity.
+#[test]
+fn device_codecs_refuse_invalid_keys_and_duplicate_ids_without_private_values() {
+    for device in [
+        DeviceId {
+            kind: DeviceKind::Vfio,
+            key: 1 << 32,
+        },
+        DeviceId {
+            kind: DeviceKind::Net,
+            key: 0,
+        },
+        DeviceId {
+            kind: DeviceKind::Net,
+            key: 1 << 32,
+        },
+    ] {
+        let claimed = Request::Call(Call::Create(Box::new(device_spec(vec![device]))));
+        assert!(matches!(
+            request(91, &claimed, MAX_MESSAGE),
+            Err(Fault::Value {
+                what: "devices",
+                ..
+            })
+        ));
+        let offered = Answer::Capacity(Some(device_capacity(vec![device_offer(device)])));
+        assert!(matches!(
+            answer(91, &offered, MAX_MESSAGE),
+            Err(Fault::Value {
+                what: "capacity",
+                ..
+            })
+        ));
+        for offer in [false, true] {
+            let mut tail = Writer::new(MAX_MESSAGE);
+            tail.u32(1);
+            put_device_id(&mut tail, &device);
+            if offer {
+                tail.string("synthetic-private-model").unwrap();
+                tail.u64(1);
+                tail.u8(0);
+            }
+            let error = read_device_tail(offer, &tail.done().unwrap());
+            assert!(matches!(
+                error,
+                Fault::Value {
+                    what: "devices.id",
+                    ..
+                }
+            ));
+            assert!(!error.to_string().contains("synthetic-private"));
+            assert!(!error.to_string().contains(&device.key.to_string()));
+        }
+    }
+    let device = device_claims()[0];
+    let claimed = Request::Call(Call::Create(Box::new(device_spec(vec![device, device]))));
+    assert!(request(91, &claimed, MAX_MESSAGE).is_err());
+    let offered = Answer::Capacity(Some(device_capacity(vec![
+        device_offer(device),
+        device_offer(device),
+    ])));
+    assert!(answer(91, &offered, MAX_MESSAGE).is_err());
+    for offer in [false, true] {
+        let mut tail = Writer::new(MAX_MESSAGE);
+        tail.u32(2);
+        for _ in 0..2 {
+            put_device_id(&mut tail, &device);
+            if offer {
+                tail.string("synthetic-private-model").unwrap();
+                tail.u64(1);
+                tail.u8(0);
+            }
+        }
+        let error = read_device_tail(offer, &tail.done().unwrap());
+        assert!(matches!(error, Fault::Value { ref why, .. } if why.contains("duplicate")));
+        assert!(!error.to_string().contains("synthetic-private"));
+    }
+}
+
+/// AC-T7.3.1/HEX-SOCK-2: reject hostile counts before reserving or visiting list elements.
+#[test]
+fn device_lists_refuse_oversized_and_truncated_counts_before_visiting_elements() {
+    for offer in [false, true] {
+        for count in [u32::try_from(MAX_DEVICES + 1).unwrap(), u32::MAX] {
+            assert!(matches!(
+                read_device_tail(offer, &count.to_le_bytes()),
+                Fault::Value {
+                    what: "devices",
+                    ..
+                }
+            ));
+            let bytes = count.to_le_bytes();
+            let mut reader = Reader::new(&bytes);
+            let mut visits = 0;
+            assert!(
+                reader
+                    .device_list::<DeviceId>(if offer { 22 } else { 9 }, |_| {
+                        visits += 1;
+                        panic!("oversized count visited an element")
+                    })
+                    .is_err()
+            );
+            assert_eq!(visits, 0);
+            assert_eq!(reader.at(), 4);
+        }
+        for count in [1, u32::try_from(MAX_DEVICES).unwrap()] {
+            assert!(matches!(
+                read_device_tail(offer, &count.to_le_bytes()),
+                Fault::Truncated { .. }
+            ));
+        }
+        let oversized: Vec<_> = (0..=MAX_DEVICES)
+            .map(|key| DeviceId {
+                kind: DeviceKind::Block,
+                key: key as u64,
+            })
+            .collect();
+        let error = if offer {
+            answer(
+                91,
+                &Answer::Capacity(Some(device_capacity(
+                    oversized.into_iter().map(device_offer).collect(),
+                ))),
+                MAX_MESSAGE,
+            )
+            .unwrap_err()
+        } else {
+            request(
+                91,
+                &Request::Call(Call::Create(Box::new(device_spec(oversized)))),
+                MAX_MESSAGE,
+            )
+            .unwrap_err()
+        };
+        assert!(matches!(error, Fault::Value { .. }));
+    }
+    // A valid API list can exceed this transport's independent byte bound; the writer refuses early.
+    let claimed = Request::Call(Call::Create(Box::new(device_spec(
+        (0..MAX_DEVICES)
+            .map(|key| DeviceId {
+                kind: DeviceKind::Block,
+                key: key as u64,
+            })
+            .collect(),
+    ))));
+    assert!(matches!(
+        request(91, &claimed, MAX_MESSAGE),
+        Err(Fault::Oversized {
+            bound: MAX_MESSAGE,
+            ..
+        })
+    ));
+}
+
+/// AC-T7.3.1/HEX-SOCK-2: unknown tags/invalid holder data are refusals, never default grants or echoes.
+#[test]
+fn device_unknown_tags_and_invalid_metadata_diagnostics_are_redacted() {
+    for offer in [false, true] {
+        for tag in [4, u8::MAX] {
+            let mut tail = Writer::new(MAX_MESSAGE);
+            tail.u32(1);
+            tail.u8(tag);
+            tail.u64(1);
+            if offer {
+                tail.string("synthetic-private-model").unwrap();
+                tail.u64(1);
+                tail.u8(0);
+            }
+            let error = read_device_tail(offer, &tail.done().unwrap());
+            assert!(matches!(
+                error,
+                Fault::Value {
+                    what: "devices.kind",
+                    ..
+                }
+            ));
+            assert!(!error.to_string().contains("synthetic-private"));
+        }
+    }
+    let device = device_claims()[0];
+    let mut tail = Writer::new(MAX_MESSAGE);
+    tail.u32(1);
+    put_device_id(&mut tail, &device);
+    tail.string("synthetic-private-model").unwrap();
+    tail.u64(1);
+    tail.u8(1);
+    tail.string("../synthetic-private-holder").unwrap();
+    let error = read_device_tail(true, &tail.done().unwrap());
+    assert!(matches!(
+        error,
+        Fault::Value {
+            what: "devices.holder",
+            ..
+        }
+    ));
+    assert!(!error.to_string().contains("synthetic-private"));
+    let mut tail = Writer::new(MAX_MESSAGE);
+    tail.u32(1);
+    put_device_id(&mut tail, &device);
+    tail.bytes(&[0xff]).unwrap();
+    tail.u64(1);
+    tail.u8(0);
+    assert!(matches!(
+        read_device_tail(true, &tail.done().unwrap()),
+        Fault::Value {
+            what: "devices.model",
+            ..
+        }
+    ));
+}
+
+/// AC-T7.4.1: capacity travels as a typed call/answer, including native host fallback.
+#[test]
+fn runtime_capacity_roundtrip_and_invalid_room_refused() {
+    let request = Request::Call(Call::Capacity(Class::Oci));
+    let bytes = super::request(42, &request, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        request
+    );
+    let capacity = hex_api::Capacity {
+        cost: None,
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        devices: Vec::new(),
+        id: "guest:123:456".into(),
+        total: hex_api::CapacityResources {
+            cpu_milli: 2_000,
+            mem_bytes: 632 << 20,
+            disk_bytes: 8 << 30,
+        },
+        free: hex_api::CapacityResources {
+            cpu_milli: 2_000,
+            mem_bytes: 600 << 20,
+            disk_bytes: 7 << 30,
+        },
+    };
+    for value in [None, Some(capacity.try_clone().unwrap())] {
+        let expected = Answer::Capacity(value);
+        let bytes = answer(42, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            expected
+        );
+    }
+    let mut malformed = answer(
+        42,
+        &Answer::Capacity(Some(capacity.try_clone().unwrap())),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    // Header, Some tag, pool string, total resources and free CPU precede free memory.
+    let free_memory =
+        HEADER_BYTES + 1 + size_of::<u32>() + capacity.id.len() + RESOURCE_BYTES + size_of::<u64>();
+    malformed[free_memory..free_memory + 8]
+        .copy_from_slice(&(capacity.total.mem_bytes + 1).to_le_bytes());
+    assert!(read_answer(&received(&malformed, 0), MAX_MESSAGE).is_err());
+    let mut bad = capacity;
+    bad.free.mem_bytes = bad.total.mem_bytes + 1;
+    assert!(answer(42, &Answer::Capacity(Some(bad)), MAX_MESSAGE).is_err());
+}
+
+/// AC-T7.4.1/HEX-SOCK-1: the chosen backend and exact host claims cross the socket together.
+#[test]
+fn device_backend_identity_survives_create_capacity_and_inspect() {
+    let ClassSpec::Oci(workload) = oci_spec().class else {
+        panic!("the fixture is an OCI workload");
+    };
+    for (class, tag, spec_tag, form) in [
+        (Class::Oci, 1, 1, ClassSpec::Oci(workload.clone())),
+        (
+            Class::Firecracker,
+            2,
+            3,
+            ClassSpec::Firecracker(workload.clone()),
+        ),
+        (Class::Shards, 3, 4, ClassSpec::Shards(workload.clone())),
+    ] {
+        let spec = BoxSpec {
+            class: form,
+            devices: device_claims(),
+            ..oci_spec()
+        };
+        let create = Request::Call(Call::Create(Box::new(spec.clone())));
+        let bytes = request(93, &create, MAX_MESSAGE).unwrap();
+        let decoded = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1;
+        assert_eq!(decoded, create);
+        let mut reader = Reader::new(&bytes[HEADER_BYTES..]);
+        assert_eq!(box_id(&mut reader).unwrap(), spec.id);
+        assert_eq!(super::bounds(&mut reader).unwrap(), spec.bounds);
+        assert_eq!(reader.u8().unwrap(), spec_tag);
+
+        let capacity = Request::Call(Call::Capacity(class));
+        let bytes = request(94, &capacity, MAX_MESSAGE).unwrap();
+        assert_eq!(&bytes[HEADER_BYTES..], &[tag]);
+        assert_eq!(
+            read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            capacity
+        );
+        let expected = Answer::Info(BoxInfo { class, ..info() });
+        let bytes = answer(95, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            expected
+        );
+    }
+    for tag in [4, u8::MAX] {
+        let mut bytes =
+            request(94, &Request::Call(Call::Capacity(Class::Oci)), MAX_MESSAGE).unwrap();
+        bytes[HEADER_BYTES] = tag;
+        assert!(matches!(
+            read_request(&received(&bytes, 0), MAX_MESSAGE)
+                .unwrap_err()
+                .fault,
+            Fault::Value { what: "class", .. }
+        ));
+    }
+}
+
 fn id(s: &str) -> BoxId {
     BoxId::new(s).unwrap()
 }
@@ -45,6 +527,9 @@ fn program() -> Program {
 
 fn oci_spec() -> BoxSpec {
     BoxSpec {
+        allocation: None,
+        route: None,
+        devices: Vec::new(),
         id: id("oci-1"),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(OciSpec {
@@ -65,6 +550,8 @@ fn oci_spec() -> BoxSpec {
 
 fn info() -> BoxInfo {
     BoxInfo {
+        allocation: None,
+        route: None,
         membership: None,
         id: id("b-1"),
         class: Class::Oci,
@@ -84,6 +571,9 @@ fn requests() -> Vec<(u64, Request, usize)> {
         (
             2,
             Request::Call(Call::Create(Box::new(BoxSpec {
+                allocation: None,
+                route: None,
+                devices: Vec::new(),
                 id: b.clone(),
                 bounds: bounds(),
                 class: ClassSpec::Bundle(PathBuf::from("/run/bundle-sleep")),
@@ -95,6 +585,9 @@ fn requests() -> Vec<(u64, Request, usize)> {
         (
             4,
             Request::Call(Call::Create(Box::new(BoxSpec {
+                allocation: None,
+                route: None,
+                devices: Vec::new(),
                 id: id("p"),
                 bounds: Bounds::default(),
                 class: ClassSpec::Process,
@@ -152,6 +645,20 @@ fn requests() -> Vec<(u64, Request, usize)> {
             1,
         ),
         (15, run(), 2),
+        (87, Request::Call(Call::PhysicalReport), 0),
+        (
+            201,
+            Request::Call(Call::InitializeBacking(triomphe::Arc::new(
+                route_wire_grant(),
+            ))),
+            0,
+        ),
+        (
+            202,
+            Request::Call(Call::ReleaseBacking(route_wire_key())),
+            0,
+        ),
+        (203, Request::Call(Call::BackingUsage(route_wire_key())), 0),
     ]
 }
 
@@ -159,6 +666,9 @@ fn requests() -> Vec<(u64, Request, usize)> {
 fn run() -> Request {
     Request::Call(Call::Run {
         spec: Box::new(BoxSpec {
+            allocation: None,
+            route: None,
+            devices: Vec::new(),
             id: id("r"),
             bounds: bounds(),
             class: ClassSpec::Process,
@@ -228,6 +738,18 @@ fn refusals() -> Vec<Refusal> {
             why: "ENOENT".to_owned(),
         },
         Refusal::Broken("a lock was poisoned".to_owned()),
+        Refusal::Lifecycle {
+            id: id("retained-box"),
+            cause: LifecycleCause::Pending,
+        },
+        Refusal::Lifecycle {
+            id: id("retained-box"),
+            cause: LifecycleCause::Uncertain,
+        },
+        Refusal::Lifecycle {
+            id: id("retained-box"),
+            cause: LifecycleCause::Busy,
+        },
     ]
 }
 
@@ -272,6 +794,8 @@ fn answers() -> Vec<(u64, Answer)> {
                 infos: vec![
                     info(),
                     BoxInfo {
+                        allocation: None,
+                        route: None,
                         membership: None,
                         id: id("p"),
                         class: Class::Process,
@@ -325,6 +849,11 @@ fn answers() -> Vec<(u64, Answer)> {
     ] {
         out.push((6, Answer::Exited(exit)));
     }
+    out.push((87, Answer::PhysicalReport(example_physical_report())));
+    out.push((
+        201,
+        Answer::BackingOffer(route_wire_backing(BackingPhase::Live)),
+    ));
     out
 }
 
@@ -357,6 +886,297 @@ fn every_answer_reads_back_as_written() {
     }
 }
 
+fn example_runtime_cost() -> RuntimeCost {
+    let mib = 1 << 20;
+    RuntimeCost {
+        id: [7; 32],
+        floor: CapacityResources {
+            cpu_milli: 1000,
+            mem_bytes: 64 * mib,
+            disk_bytes: 0,
+        },
+        ceiling: CapacityResources {
+            cpu_milli: 4000,
+            mem_bytes: 1024 * mib,
+            disk_bytes: 1 << 30,
+        },
+        quantum: CapacityResources {
+            cpu_milli: 1000,
+            mem_bytes: mib,
+            disk_bytes: 1,
+        },
+        guest_overhead: CapacityResources {
+            cpu_milli: 0,
+            mem_bytes: mib,
+            disk_bytes: 0,
+        },
+        overhead: CapacityResources {
+            cpu_milli: 100,
+            mem_bytes: mib,
+            disk_bytes: 0,
+        },
+    }
+}
+
+fn example_physical_report() -> PhysicalReport {
+    PhysicalReport {
+        authority: "native-store-owner".into(),
+        unavailable: Vec::new(),
+        devices: vec![
+            PhysicalDevice {
+                info: DeviceInfo {
+                    id: DeviceId {
+                        kind: DeviceKind::Gpu,
+                        key: u64::MAX,
+                    },
+                    model: "private-native-model".into(),
+                    size: 4096,
+                    holder: None,
+                },
+                busy_per_mille: None,
+                memory_used_bytes: Some(8192),
+            },
+            PhysicalDevice {
+                info: DeviceInfo {
+                    id: DeviceId {
+                        kind: DeviceKind::Gpu,
+                        key: 256,
+                    },
+                    model: "another-native-model".into(),
+                    size: 8192,
+                    holder: None,
+                },
+                busy_per_mille: Some(0),
+                memory_used_bytes: None,
+            },
+        ],
+    }
+}
+
+/// AC-T7.4.1: the split scheduler reads the same native authority without inventing idle counters,
+/// losing observed pressure or treating a factual reply as a descriptor/holder grant.
+#[test]
+fn physical_report_preserves_authority_unknowns_and_pressure_without_grants() {
+    let req = Request::Call(Call::PhysicalReport);
+    let bytes = request(87, &req, MAX_MESSAGE).unwrap();
+    let (header, decoded) = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap();
+    assert_eq!(header.kind, 0x0013);
+    assert_eq!(decoded, req);
+    let report = example_physical_report();
+    let expected = Answer::PhysicalReport(report.try_clone().unwrap());
+    let bytes = answer(87, &expected, MAX_MESSAGE).unwrap();
+    let (header, decoded) = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap();
+    assert_eq!(header.kind, 0x800e);
+    assert_eq!(decoded, expected);
+    assert!(matches!(
+        read_answer(&received(&bytes, 1), MAX_MESSAGE),
+        Err(Fault::Descriptors { .. })
+    ));
+    assert!(matches!(
+        answer(87, &expected, HEADER_BYTES),
+        Err(Fault::Oversized { .. })
+    ));
+    for end in 0..bytes.len() {
+        assert!(read_answer(&received(&bytes[..end], 0), MAX_MESSAGE).is_err());
+    }
+    let mut invalid = report.try_clone().unwrap();
+    invalid.devices[0].info.holder = Some(DeviceHolder::Box(id("not-a-telemetry-grant")));
+    assert!(answer(87, &Answer::PhysicalReport(invalid), MAX_MESSAGE).is_err());
+    let mut invalid = report.try_clone().unwrap();
+    invalid.devices.push(report.devices[0].try_clone().unwrap());
+    assert!(answer(87, &Answer::PhysicalReport(invalid), MAX_MESSAGE).is_err());
+}
+
+/// AC-T7.4.1: hostile counts and impossible loads refuse before another list element is allocated,
+/// without echoing native model metadata in the diagnostic.
+#[test]
+fn physical_report_refuses_truncated_counts_and_invalid_counter_units() {
+    for count in [1, u32::try_from(MAX_DEVICES + 1).unwrap()] {
+        let mut w = Writer::new(MAX_MESSAGE);
+        w.header(kind::PHYSICAL_REPORT_ANSWER, 88);
+        w.string("native-owner").unwrap();
+        w.u32(count);
+        assert!(read_answer(&received(&w.done().unwrap(), 0), MAX_MESSAGE).is_err());
+    }
+    let mut w = Writer::new(MAX_MESSAGE);
+    w.header(kind::PHYSICAL_REPORT_ANSWER, 88);
+    w.string("native-owner").unwrap();
+    w.u32(1);
+    put_device_id(&mut w, &example_physical_report().devices[0].info.id);
+    w.string("private-native-model").unwrap();
+    w.u64(4096);
+    w.u8(1);
+    w.u16(1001);
+    w.u8(0);
+    let fault = read_answer(&received(&w.done().unwrap(), 0), MAX_MESSAGE).unwrap_err();
+    assert!(matches!(
+        fault,
+        Fault::Value {
+            what: "physical report",
+            ..
+        }
+    ));
+    assert!(!fault.to_string().contains("private-native-model"));
+}
+
+/// AC-T7.4.1: peer capacity and admitted work retain the same exact cost profile/host charge;
+/// neither a truncated receipt nor an invalid profile may silently become native identity cost.
+#[test]
+fn runtime_cost_and_admitted_allocation_survive_the_wire() {
+    let cost = example_runtime_cost();
+    let allocation = cost
+        .allocate(CapacityResources {
+            cpu_milli: 250,
+            mem_bytes: 16 << 20,
+            disk_bytes: 3,
+        })
+        .unwrap();
+    let mut spec = device_spec(device_claims());
+    spec.allocation = Some(allocation);
+    let claimed = Request::Call(Call::Create(Box::new(spec.clone())));
+    let bytes = request(55, &claimed, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        claimed
+    );
+    for end in 0..bytes.len() {
+        assert!(read_request(&received(&bytes[..end], 0), MAX_MESSAGE).is_err());
+    }
+    let mut capacity = device_capacity(Vec::new());
+    capacity.total = CapacityResources {
+        cpu_milli: 8000,
+        mem_bytes: 2 << 30,
+        disk_bytes: 2 << 30,
+    };
+    capacity.free = capacity.total;
+    capacity.cost = Some(cost);
+    let offered = Answer::Capacity(Some(capacity.try_clone().unwrap()));
+    let bytes = answer(55, &offered, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        offered
+    );
+    for end in 0..bytes.len() {
+        assert!(read_answer(&received(&bytes[..end], 0), MAX_MESSAGE).is_err());
+    }
+    for invalid in [
+        RuntimeCost {
+            id: [0; 32],
+            ..cost
+        },
+        RuntimeCost {
+            quantum: CapacityResources::default(),
+            ..cost
+        },
+    ] {
+        let mut malformed = capacity.try_clone().unwrap();
+        malformed.cost = Some(invalid);
+        assert!(answer(55, &Answer::Capacity(Some(malformed)), MAX_MESSAGE).is_err());
+    }
+    spec.allocation = Some(Allocation {
+        resources: CapacityResources::default(),
+        cost,
+    });
+    assert!(matches!(
+        request(
+            55,
+            &Request::Call(Call::Create(Box::new(spec))),
+            MAX_MESSAGE
+        ),
+        Err(Fault::Value {
+            what: "allocation",
+            ..
+        })
+    ));
+    assert_eq!(
+        Refusal::from(Fault::Storage {
+            what: "wire allocation receipt",
+            bound: COST_BYTES
+        }),
+        Refusal::Exhausted {
+            what: "wire allocation receipt",
+            bound: COST_BYTES
+        }
+    );
+}
+
+/// AC-T7.4.1: inspect/list carry the original receipt, including after exit. A native
+/// process observation is not permission to replace that receipt with today's cost.
+#[test]
+fn retained_box_allocations_survive_inspect_and_mixed_list_messages() {
+    let allocation = example_runtime_cost()
+        .allocate(CapacityResources {
+            cpu_milli: 250,
+            mem_bytes: 16 << 20,
+            disk_bytes: 3,
+        })
+        .unwrap();
+    let mut retained = info();
+    retained.state = BoxState::Empty;
+    retained.exit = Some(Exit::Code(0));
+    retained.allocation = Some(allocation);
+    for expected in [
+        Answer::Info(retained.clone()),
+        Answer::Boxes {
+            infos: vec![info(), retained.clone(), info()],
+            more: false,
+        },
+    ] {
+        let bytes = answer(56, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            expected
+        );
+        for end in 0..bytes.len() {
+            assert!(read_answer(&received(&bytes[..end], 0), MAX_MESSAGE).is_err());
+        }
+    }
+    retained.allocation = Some(Allocation {
+        resources: CapacityResources::default(),
+        ..allocation
+    });
+    assert!(matches!(
+        answer(56, &Answer::Info(retained), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "allocation",
+            ..
+        })
+    ));
+}
+
+/// AC-T7.4.1: retained-resource lifecycle causes survive the wire as distinct typed outcomes;
+/// an unknown cause cannot become absence, success or a default retry decision.
+#[test]
+fn lifecycle_causes_preserve_box_identity_and_reject_unknown_tags() {
+    for cause in [
+        LifecycleCause::Pending,
+        LifecycleCause::Uncertain,
+        LifecycleCause::Busy,
+    ] {
+        let refused = Answer::Refused(Refusal::Lifecycle {
+            id: id("retained-box"),
+            cause,
+        });
+        let bytes = answer(41, &refused, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            refused
+        );
+        for tag in [3, u8::MAX] {
+            let mut invalid = bytes.clone();
+            *invalid.last_mut().unwrap() = tag;
+            let error = read_answer(&received(&invalid, 0), MAX_MESSAGE).unwrap_err();
+            assert!(matches!(
+                error,
+                Fault::Value {
+                    what: "lifecycle cause",
+                    ..
+                }
+            ));
+        }
+    }
+}
+
 /// HEX-SOCK-2: a given answer carries a descriptor for each stream it names, and is refused, naming the count,
 /// with any other.
 #[test]
@@ -372,7 +1192,7 @@ fn a_given_answer_carries_a_descriptor_for_each_stream_it_names() {
     let bytes = answer(14, &given, MAX_MESSAGE).unwrap();
     assert_eq!(
         read_answer(&received(&bytes, 2), MAX_MESSAGE).map(|(_, a)| a),
-        Ok(given.clone())
+        Ok(given)
     );
     for fds in [0, 1, 3] {
         assert_eq!(
@@ -541,9 +1361,25 @@ fn a_message_of_another_wire_is_refused_naming_both_wires() {
 #[test]
 fn the_wire_identity_is_its_definitions_digest_line_endings_aside() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let wire = std::fs::read(dir.join("wire.rs")).unwrap();
-    let stream = std::fs::read(dir.join("stream.rs")).unwrap();
-    assert_eq!(identity(&[&wire, &stream]), IDENTITY);
+    let paths = [
+        "wire.rs",
+        "stream.rs",
+        "schedule.rs",
+        "../../hex-sim/src/peer.rs",
+        "../../hex-sim/src/model.rs",
+        "../../hex-api/src/spec.rs",
+        "../../hex-api/src/id.rs",
+        "../../hex-api/src/bounds.rs",
+        "../../hex-api/src/devices.rs",
+        "../../hex-api/src/runtime.rs",
+    ];
+    let mut sources: Vec<Vec<u8>> = paths
+        .iter()
+        .map(|p| std::fs::read(dir.join(p)).unwrap())
+        .collect();
+    let digest =
+        |sources: &[Vec<u8>]| identity(&sources.iter().map(Vec::as_slice).collect::<Vec<_>>());
+    assert_eq!(digest(&sources), IDENTITY);
     let crlf = |bytes: &[u8]| -> Vec<u8> {
         let mut out = Vec::new();
         for &b in bytes.iter().filter(|&&b| b != b'\r') {
@@ -554,10 +1390,15 @@ fn the_wire_identity_is_its_definitions_digest_line_endings_aside() {
         }
         out
     };
-    assert_eq!(identity(&[&crlf(&wire), &crlf(&stream)]), IDENTITY);
-    let mut more = wire.clone();
-    more.push(b' ');
-    assert_ne!(identity(&[&more, &stream]), IDENTITY);
+    assert_eq!(
+        digest(&sources.iter().map(|s| crlf(s)).collect::<Vec<_>>()),
+        IDENTITY
+    );
+    for changed in 0..sources.len() {
+        sources[changed].push(b' ');
+        assert_ne!(digest(&sources), IDENTITY);
+        sources[changed].pop();
+    }
 }
 
 /// HEX-SOCK-2: a list longer than one message carries is split into messages within the bound, each
@@ -566,6 +1407,8 @@ fn the_wire_identity_is_its_definitions_digest_line_endings_aside() {
 fn a_long_list_is_split_into_messages_within_the_bound() {
     let infos: Vec<BoxInfo> = (0..5_000)
         .map(|n| BoxInfo {
+            allocation: None,
+            route: None,
             membership: None,
             id: id(&format!("box-{n:06}")),
             ..info()
@@ -697,16 +1540,15 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
     let run = run();
     let bytes = request(15, &run, MAX_MESSAGE).unwrap();
     assert_eq!(&bytes[12..14], &0x000fu16.to_le_bytes());
+    let (header, decoded) = read_request(&received(&bytes, 2), MAX_MESSAGE).unwrap();
     assert_eq!(
-        read_request(&received(&bytes, 2), MAX_MESSAGE).unwrap(),
-        (
-            Header {
-                kind: 0x000f,
-                id: 15
-            },
-            run.clone()
-        )
+        header,
+        Header {
+            kind: 0x000f,
+            id: 15
+        }
     );
+    assert_eq!(decoded, run);
     for fds in [0, 1, 3] {
         assert_eq!(
             read_request(&received(&bytes, fds), MAX_MESSAGE)
@@ -727,7 +1569,7 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x0011, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x0017, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -736,7 +1578,7 @@ fn unknown_kinds_are_refused() {
             "{got:?}"
         );
     }
-    for kind in [0u16, 0x0001, 0x000b, 0x8000, 0x800c, 0xffff] {
+    for kind in [0u16, 0x0001, 0x000b, 0x8000, 0xffff] {
         let mut bytes = answer(5, &Answer::Done, MAX_MESSAGE).unwrap();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         assert!(matches!(
@@ -854,7 +1696,8 @@ fn hostile_values_are_refused_by_name() {
         Fault::Truncated { .. }
     ));
     let mut info = answer(2, &Answer::Info(info()), MAX_MESSAGE).unwrap();
-    let adopted = info.len() - 1 - 8 - 6; // abandoned's 8, the exit's 5 and option byte, then adopted
+    // None route/allocation tags follow abandoned's eight bytes and the exit's five plus tag.
+    let adopted = info.len() - 2 - 8 - 6 - 1;
     info[adopted] = 2;
     assert!(matches!(
         read_answer(&received(&info, 0), MAX_MESSAGE),
@@ -984,7 +1827,7 @@ fn any_spec() -> impl Strategy<Value = BoxSpec> {
         proptest::collection::vec((any_text(), any_text()), 0..3),
     )
         .prop_map(|(rootfs, init, mounts, hostname, host, hosts)| {
-            ClassSpec::Oci(Box::new(OciSpec {
+            Box::new(OciSpec {
                 rootfs,
                 init,
                 mounts: mounts
@@ -1002,15 +1845,23 @@ fn any_spec() -> impl Strategy<Value = BoxSpec> {
                     Network::Private
                 },
                 hosts,
-            }))
+            })
         });
+    let workload = (0u8..3, oci).prop_map(|(backend, spec)| match backend {
+        0 => ClassSpec::Oci(spec),
+        1 => ClassSpec::Firecracker(spec),
+        _ => ClassSpec::Shards(spec),
+    });
     let class = prop_oneof![
         Just(ClassSpec::Process),
         any_path().prop_map(ClassSpec::Bundle),
-        oci,
+        workload,
     ];
     let owner = proptest::option::of(("\\PC{0,16}", any::<bool>()));
     (any_id(), any_bounds(), class, owner).prop_map(|(id, bounds, class, owner)| BoxSpec {
+        allocation: None,
+        route: None,
+        devices: Vec::new(),
         id,
         bounds,
         class,
@@ -1029,7 +1880,7 @@ fn any_exit() -> impl Strategy<Value = Exit> {
 fn any_info() -> impl Strategy<Value = BoxInfo> {
     (
         any_id(),
-        any::<bool>(),
+        0u8..4,
         0u8..3,
         any_bounds(),
         any::<bool>(),
@@ -1037,10 +1888,17 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
         any::<u64>(),
     )
         .prop_map(
-            |(id, oci, state, bounds, adopted, exit, abandoned)| BoxInfo {
+            |(id, backend, state, bounds, adopted, exit, abandoned)| BoxInfo {
+                allocation: None,
+                route: None,
                 membership: None,
                 id,
-                class: if oci { Class::Oci } else { Class::Process },
+                class: match backend {
+                    0 => Class::Process,
+                    1 => Class::Oci,
+                    2 => Class::Firecracker,
+                    _ => Class::Shards,
+                },
                 state: match state {
                     0 => BoxState::Empty,
                     1 => BoxState::Running,
@@ -1079,6 +1937,15 @@ fn any_refusal() -> impl Strategy<Value = Refusal> {
         }),
         (name, any_text()).prop_map(|(op, why)| Refusal::Os { op, why }),
         any_text().prop_map(Refusal::Broken),
+        (
+            any_id(),
+            proptest::sample::select(vec![
+                LifecycleCause::Pending,
+                LifecycleCause::Uncertain,
+                LifecycleCause::Busy
+            ])
+        )
+            .prop_map(|(id, cause)| Refusal::Lifecycle { id, cause }),
     ]
 }
 
@@ -1129,7 +1996,7 @@ proptest! {
     /// HEX-SOCK-1: bodies of random bytes behind a valid header, so every kind's decoder meets them, are a
     /// message or a typed refusal, never a panic.
     #[test]
-    fn any_body_behind_a_header_is_read_or_refused(kind in prop_oneof![0u16..0x0011, 0x8000u16..0x800c], body in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..4) {
+    fn any_body_behind_a_header_is_read_or_refused(kind in prop_oneof![0u16..0x0013, 0x8000u16..0x800e], body in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..4) {
         let mut bytes = header(kind, 3);
         bytes.extend_from_slice(&body);
         let _ = read_request(&received(&bytes, fds), MAX_MESSAGE);
@@ -1187,6 +2054,1512 @@ fn an_exec_whose_stdio_travels_apart_carries_no_descriptors() {
                 got: 0,
                 ..
             },
+            ..
+        })
+    ));
+}
+
+/// CP-T7.4: scheduling shares descriptor validation and message admission with Runtime calls.
+#[test]
+fn scheduler_control_cannot_carry_a_descriptor_or_exceed_the_wire_bound() {
+    let request_value = Request::Call(Call::Schedule(Box::new(crate::schedule::Command::Retry)));
+    let bytes = request(47, &request_value, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request_apart(&bytes, MAX_MESSAGE).unwrap().1,
+        request_value
+    );
+    let received = Received {
+        bytes: &bytes,
+        size: bytes.len(),
+        descriptors: 1,
+        descriptors_cut: false,
+    };
+    assert!(matches!(
+        read_request(&received, MAX_MESSAGE).unwrap_err().fault,
+        Fault::Descriptors { .. }
+    ));
+    assert!(request(47, &request_value, HEADER_BYTES).is_err());
+}
+
+fn route_wire_key() -> BackingKey {
+    BackingKey {
+        pool: [0xa7; 32],
+        generation: [0x6d; 16],
+    }
+}
+
+fn route_wire_shared_key() -> BackingKey {
+    BackingKey {
+        pool: [0x19; 32],
+        generation: [0x2a; 16],
+    }
+}
+
+fn route_wire_shared_backing(phase: BackingPhase) -> BackingOffer {
+    BackingOffer {
+        key: route_wire_shared_key(),
+        cost: route_wire_cost(),
+        phase,
+        devices: Vec::new(),
+    }
+}
+
+fn route_wire_cost() -> RuntimeCost {
+    let fixed = CapacityResources {
+        cpu_milli: 1000,
+        mem_bytes: 4096,
+        disk_bytes: 4096,
+    };
+    RuntimeCost {
+        id: [0x31; 32],
+        floor: fixed,
+        ceiling: fixed,
+        quantum: CapacityResources {
+            cpu_milli: 1,
+            mem_bytes: 1,
+            disk_bytes: 1,
+        },
+        guest_overhead: CapacityResources::default(),
+        overhead: CapacityResources {
+            cpu_milli: 100,
+            mem_bytes: 512,
+            disk_bytes: 0,
+        },
+    }
+}
+
+fn route_wire_backing(phase: BackingPhase) -> BackingOffer {
+    BackingOffer {
+        key: route_wire_key(),
+        cost: route_wire_cost(),
+        phase,
+        // Administrator claims are not a measured catalog. Neither identity need appear there.
+        devices: vec![
+            DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 99,
+            },
+            DeviceId {
+                kind: DeviceKind::Gpu,
+                key: u64::MAX,
+            },
+        ],
+    }
+}
+
+fn route_wire_grant() -> BackingGrant {
+    let offer = route_wire_backing(BackingPhase::Prepared);
+    BackingGrant {
+        key: offer.key,
+        allocation: offer.allocation().unwrap(),
+        devices: offer.devices,
+    }
+}
+
+fn route_wire_route(execution: Execution) -> RouteOffer {
+    RouteOffer {
+        key: RouteKey {
+            class: match execution {
+                Execution::Firecracker => Class::Firecracker,
+                _ => Class::Oci,
+            },
+            image: ImagePlatform {
+                os: ImageOs::Linux,
+                arch: ImageArch::Arm64,
+            },
+            execution,
+            gpu: match execution {
+                Execution::ShardsDedicated => GpuEligibility::Required,
+                Execution::ShardsShared => GpuEligibility::None,
+                _ => GpuEligibility::Any,
+            },
+        },
+        cost: match execution {
+            Execution::Firecracker | Execution::ShardsDedicated => Some(route_wire_cost()),
+            _ => None,
+        },
+        backing: match execution {
+            Execution::ShardsShared => Some(route_wire_shared_key()),
+            Execution::ShardsDedicated => Some(route_wire_key()),
+            Execution::Native | Execution::Firecracker => None,
+        },
+    }
+}
+
+fn route_wire_legacy_capacity() -> Capacity {
+    let mut capacity = device_capacity(vec![
+        DeviceInfo {
+            id: DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 4,
+            },
+            model: "private-model-first".into(),
+            size: 8192,
+            holder: None,
+        },
+        DeviceInfo {
+            id: DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 3,
+            },
+            model: "private-model-second".into(),
+            size: 8192,
+            holder: None,
+        },
+    ]);
+    capacity.total = CapacityResources {
+        cpu_milli: 8000,
+        mem_bytes: 1 << 20,
+        disk_bytes: 1 << 20,
+    };
+    capacity.free = capacity.total;
+    capacity
+}
+
+fn route_wire_capacity() -> Capacity {
+    let mut capacity = route_wire_legacy_capacity();
+    capacity.routes = vec![
+        route_wire_route(Execution::ShardsShared),
+        route_wire_route(Execution::ShardsDedicated),
+        route_wire_route(Execution::Firecracker),
+    ];
+    capacity.device_routes = vec![0b110, 0b100];
+    capacity.backings = vec![
+        route_wire_backing(BackingPhase::Live),
+        route_wire_shared_backing(BackingPhase::Live),
+    ];
+    capacity
+}
+
+// Use the real old prefix and emit chosen new fields without the capacity validator, so invalid
+// cross-field inputs actually reach the public decoder rather than failing in a fixture builder.
+fn route_wire_capacity_bytes(
+    routes: &[RouteOffer],
+    masks: &[u64],
+    backings: &[BackingOffer],
+) -> Vec<u8> {
+    let mut prefix = answer(
+        201,
+        &Answer::Capacity(Some(route_wire_legacy_capacity())),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    prefix.truncate(prefix.len() - 3 * size_of::<u32>());
+    let mut w = Writer::new(MAX_MESSAGE);
+    w.raw(&prefix);
+    w.u32(u32::try_from(routes.len()).unwrap());
+    for route in routes {
+        put_route_offer(&mut w, *route).unwrap();
+    }
+    w.u32(u32::try_from(masks.len()).unwrap());
+    for mask in masks {
+        w.u64(*mask);
+    }
+    w.u32(u32::try_from(backings.len()).unwrap());
+    for backing in backings {
+        put_backing_offer(&mut w, backing).unwrap();
+    }
+    w.done().unwrap()
+}
+
+fn route_wire_assert_redacted(fault: &Fault) {
+    let text = format!("{fault:?}");
+    for private in [
+        "private-model-first",
+        "private-model-second",
+        "a7a7a7a7",
+        "6d6d6d6d",
+    ] {
+        assert!(!text.contains(private), "{text}");
+    }
+}
+
+/// The new tags and every backing phase carry the exact canonical generation and physical claims.
+#[test]
+fn route_wire_backing_calls_and_all_phases_roundtrip() {
+    for (tag, expected) in [
+        (
+            0x0014u16,
+            Request::Call(Call::InitializeBacking(triomphe::Arc::new(
+                route_wire_grant(),
+            ))),
+        ),
+        (
+            0x0015,
+            Request::Call(Call::ReleaseBacking(route_wire_key())),
+        ),
+        (0x0016, Request::Call(Call::BackingUsage(route_wire_key()))),
+    ] {
+        let bytes = request(201, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(&bytes[12..14], &tag.to_le_bytes());
+        assert_eq!(&bytes[HEADER_BYTES..HEADER_BYTES + 32], &[0xa7; 32]);
+        assert_eq!(
+            &bytes[HEADER_BYTES + 32..HEADER_BYTES + BACKING_KEY_BYTES],
+            &[0x6d; 16]
+        );
+        if tag != 0x0014 {
+            assert_eq!(bytes.len(), HEADER_BYTES + BACKING_KEY_BYTES);
+        }
+        assert_eq!(
+            read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            expected
+        );
+        assert_eq!(read_request_apart(&bytes, MAX_MESSAGE).unwrap().1, expected);
+        assert!(matches!(
+            read_request(&received(&bytes, 1), MAX_MESSAGE)
+                .unwrap_err()
+                .fault,
+            Fault::Descriptors {
+                want: 0,
+                got: 1,
+                ..
+            }
+        ));
+    }
+    for (phase, tag) in [
+        (BackingPhase::Prepared, 0),
+        (BackingPhase::Granted, 1),
+        (BackingPhase::Live, 2),
+        (BackingPhase::Draining, 3),
+        (BackingPhase::Released, 4),
+    ] {
+        let expected = Answer::BackingOffer(route_wire_backing(phase));
+        let bytes = answer(202, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(&bytes[12..14], &0x800fu16.to_le_bytes());
+        assert_eq!(&bytes[HEADER_BYTES..HEADER_BYTES + 32], &[0xa7; 32]);
+        assert_eq!(
+            &bytes[HEADER_BYTES + 32..HEADER_BYTES + BACKING_KEY_BYTES],
+            &[0x6d; 16]
+        );
+        assert_eq!(bytes[HEADER_BYTES + BACKING_KEY_BYTES + COST_BYTES], tag);
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            expected
+        );
+        assert!(matches!(
+            read_answer(&received(&bytes, 1), MAX_MESSAGE),
+            Err(Fault::Descriptors { .. })
+        ));
+    }
+    let expected = Answer::Usage(Usage {
+        memory_bytes: 4096,
+        memory_peak_bytes: 8192,
+        oom_kills: 0,
+        pids: 2,
+        pids_refused: 0,
+        cpu_usec: 77,
+        io_read_bytes: 17,
+        io_write_bytes: 19,
+    });
+    let bytes = answer(203, &expected, MAX_MESSAGE).unwrap();
+    assert_eq!(&bytes[12..14], &0x8005u16.to_le_bytes());
+    assert_eq!(bytes.len(), HEADER_BYTES + size_of::<[u64; 8]>());
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        expected
+    );
+}
+
+/// Fixed enum tags describe the original workload/image and initialized execution independently.
+#[test]
+fn route_wire_key_enum_tags_are_explicit_and_roundtrip() {
+    for (class, os, arch, execution, gpu, expected) in [
+        (
+            Class::Process,
+            ImageOs::Macos,
+            ImageArch::Arm64,
+            Execution::Native,
+            GpuEligibility::None,
+            [0, 2, 1, 0, 1],
+        ),
+        (
+            Class::Process,
+            ImageOs::Windows,
+            ImageArch::Amd64,
+            Execution::Native,
+            GpuEligibility::None,
+            [0, 1, 0, 0, 1],
+        ),
+        (
+            Class::Oci,
+            ImageOs::Windows,
+            ImageArch::Arm64,
+            Execution::Native,
+            GpuEligibility::Any,
+            [1, 1, 1, 0, 0],
+        ),
+        (
+            Class::Oci,
+            ImageOs::Linux,
+            ImageArch::Amd64,
+            Execution::ShardsShared,
+            GpuEligibility::None,
+            [1, 0, 0, 1, 1],
+        ),
+        (
+            Class::Oci,
+            ImageOs::Linux,
+            ImageArch::Arm64,
+            Execution::ShardsDedicated,
+            GpuEligibility::Required,
+            [1, 0, 1, 2, 2],
+        ),
+        (
+            Class::Firecracker,
+            ImageOs::Linux,
+            ImageArch::Amd64,
+            Execution::Firecracker,
+            GpuEligibility::Required,
+            [2, 0, 0, 3, 2],
+        ),
+        (
+            Class::Shards,
+            ImageOs::Linux,
+            ImageArch::Arm64,
+            Execution::ShardsDedicated,
+            GpuEligibility::None,
+            [3, 0, 1, 2, 1],
+        ),
+    ] {
+        let key = RouteKey {
+            class,
+            image: ImagePlatform { os, arch },
+            execution,
+            gpu,
+        };
+        let mut w = Writer::new(ROUTE_KEY_BYTES);
+        put_route_key(&mut w, key).unwrap();
+        let bytes = w.done().unwrap();
+        assert_eq!(bytes, expected);
+        assert_eq!(route_key(&mut Reader::new(&bytes)).unwrap(), key);
+        for end in 0..bytes.len() {
+            assert!(matches!(
+                route_key(&mut Reader::new(&bytes[..end])),
+                Err(Fault::Truncated { .. })
+            ));
+        }
+    }
+}
+
+/// Masks remain joined by position to the original unsorted physical list. Provisioning does not
+/// manufacture measured entries, and OCI shared/dedicated routes retain the original OCI class.
+#[test]
+fn route_wire_capacity_preserves_routes_masks_and_unmeasured_backings() {
+    let expected = Answer::Capacity(Some(route_wire_capacity()));
+    let bytes = answer(203, &expected, MAX_MESSAGE).unwrap();
+    let actual = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1;
+    assert_eq!(actual, expected);
+    let Answer::Capacity(Some(capacity)) = actual else {
+        panic!("capacity")
+    };
+    assert_eq!(
+        capacity
+            .devices
+            .iter()
+            .map(|d| d.id.key)
+            .collect::<Vec<_>>(),
+        [4, 3]
+    );
+    assert_eq!(capacity.device_routes, [6, 4]);
+    assert_eq!(capacity.routes[0].key.class, Class::Oci);
+    assert_eq!(capacity.routes[1].key.class, Class::Oci);
+    assert_eq!(capacity.backings.len(), 2);
+    assert!(capacity.backings[1].devices.is_empty());
+    assert_eq!(capacity.routes[0].backing, Some(capacity.backings[1].key));
+    assert_eq!(capacity.routes[1].backing, Some(capacity.backings[0].key));
+    assert_eq!(capacity.backings[0].devices[1].key, u64::MAX);
+    assert!(
+        !capacity
+            .devices
+            .iter()
+            .any(|d| d.id == capacity.backings[0].devices[1])
+    );
+    let legacy = Answer::Capacity(Some(route_wire_legacy_capacity()));
+    let bytes = answer(204, &legacy, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        legacy
+    );
+}
+
+/// Both tails preserve the original class, caps, selected IDs and allocation beside the route.
+#[test]
+fn route_wire_spec_and_info_route_tails_roundtrip() {
+    for execution in [
+        Execution::Native,
+        Execution::ShardsShared,
+        Execution::ShardsDedicated,
+        Execution::Firecracker,
+    ] {
+        let route = route_wire_route(execution);
+        let mut spec = oci_spec();
+        if execution == Execution::Firecracker {
+            let ClassSpec::Oci(oci) = spec.class else {
+                panic!("OCI fixture")
+            };
+            spec.class = ClassSpec::Firecracker(oci);
+        }
+        if route.key.gpu == GpuEligibility::Required {
+            spec.devices.push(DeviceId {
+                kind: DeviceKind::Gpu,
+                key: u64::MAX,
+            });
+        }
+        if let Some(mut cost) = route.cost {
+            // Routed specs pass Bounds::check as well as the receipt's numeric codec.
+            cost.floor.mem_bytes = hex_api::MIN_MEMORY;
+            cost.ceiling.mem_bytes = hex_api::MIN_MEMORY;
+            spec.bounds.cpu_max_milli = Some(1000);
+            spec.bounds.memory_max = Some(hex_api::MIN_MEMORY);
+            spec.allocation = Some(cost.allocate(CapacityResources::default()).unwrap());
+        }
+        let receipt = RouteReceipt {
+            key: route.key,
+            backing: route.backing,
+        };
+        spec.route = Some(receipt);
+        spec.check().expect("valid routed spec baseline");
+        let expected = Request::Call(Call::Create(Box::new(spec.clone())));
+        let bytes = request(205, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            expected
+        );
+
+        let mut plain = spec.clone();
+        plain.route = None;
+        let plain = request(
+            205,
+            &Request::Call(Call::Create(Box::new(plain))),
+            MAX_MESSAGE,
+        )
+        .unwrap();
+        assert_eq!(plain.last(), Some(&0));
+        assert_eq!(&plain[..plain.len() - 1], &bytes[..plain.len() - 1]);
+        assert_eq!(bytes[plain.len() - 1], 1);
+
+        let expected = Answer::Info(BoxInfo {
+            class: spec.class.class(),
+            bounds: spec.bounds,
+            allocation: spec.allocation,
+            route: Some(receipt),
+            ..info()
+        });
+        let bytes = answer(206, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            expected
+        );
+    }
+}
+
+/// Backing failures are appended after Lifecycle, carrying exact generation and typed uncertainty.
+#[test]
+fn route_wire_backing_refusals_preserve_key_and_cause() {
+    for (cause, tag) in [
+        (LifecycleCause::Pending, 0),
+        (LifecycleCause::Uncertain, 1),
+        (LifecycleCause::Busy, 2),
+    ] {
+        let expected = Answer::Refused(Refusal::Backing {
+            key: route_wire_key(),
+            cause,
+        });
+        let bytes = answer(207, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(bytes.len(), HEADER_BYTES + 1 + BACKING_KEY_BYTES + 1);
+        assert_eq!(bytes[HEADER_BYTES], 10);
+        assert_eq!(bytes.last(), Some(&tag));
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            expected
+        );
+    }
+}
+
+/// Cross-field malformed masks/references must reach the decoder, not merely a fixture validator.
+#[test]
+fn route_wire_hostile_masks_references_and_duplicate_pools_refuse() {
+    let shared = route_wire_route(Execution::ShardsShared);
+    let native = route_wire_route(Execution::Native);
+    let backing = route_wire_shared_backing(BackingPhase::Live);
+    for masks in [
+        vec![],
+        vec![1],
+        vec![1, 1, 1],
+        vec![2, 0],
+        vec![0, u64::MAX],
+    ] {
+        let bytes = route_wire_capacity_bytes(&[native], &masks, &[]);
+        let fault = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
+        assert!(matches!(
+            fault,
+            Fault::Value {
+                what: "capacity",
+                ..
+            }
+        ));
+        route_wire_assert_redacted(&fault);
+    }
+    for bytes in [
+        route_wire_capacity_bytes(&[shared], &[0, 0], &[]),
+        route_wire_capacity_bytes(&[native, native], &[1, 1], &[]),
+        route_wire_capacity_bytes(&[], &[0, 0], &[]),
+        route_wire_capacity_bytes(&[], &[], &[backing.try_clone().unwrap()]),
+    ] {
+        let fault = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
+        assert!(matches!(
+            fault,
+            Fault::Value {
+                what: "capacity",
+                ..
+            }
+        ));
+        route_wire_assert_redacted(&fault);
+    }
+    let mut transplanted = backing.try_clone().unwrap();
+    transplanted.key.generation[0] ^= 1;
+    let bytes = route_wire_capacity_bytes(&[shared], &[0, 0], &[transplanted]);
+    assert!(matches!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "capacity",
+            ..
+        })
+    ));
+    let mut competing = backing.try_clone().unwrap();
+    competing.key.generation[0] ^= 1;
+    let bytes = route_wire_capacity_bytes(&[shared], &[0, 0], &[backing, competing]);
+    assert!(matches!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "capacity",
+            ..
+        })
+    ));
+
+    let mutations: [fn(&mut Capacity); 3] = [
+        |c: &mut Capacity| c.device_routes[0] = 1 << c.routes.len(),
+        |c: &mut Capacity| {
+            c.routes[0].backing.as_mut().unwrap().generation[0] ^= 1;
+        },
+        |c: &mut Capacity| {
+            c.backings.push(c.backings[0].try_clone().unwrap());
+        },
+    ];
+    for mutate in mutations {
+        let mut invalid = route_wire_capacity();
+        mutate(&mut invalid);
+        assert!(matches!(
+            answer(208, &Answer::Capacity(Some(invalid)), MAX_MESSAGE),
+            Err(Fault::Value {
+                what: "capacity",
+                ..
+            })
+        ));
+    }
+}
+
+/// All new list counts are bounded before element parsing or reserve, including minimum-width
+/// bodies rather than the old one-byte-per-item approximation.
+#[test]
+fn route_wire_hostile_counts_and_minimum_bytes_refuse_before_parse() {
+    for (what, minimum, maximum) in [
+        ("routes", ROUTE_OFFER_MIN_BYTES, MAX_RUNTIME_ROUTES),
+        ("backings", BACKING_OFFER_MIN_BYTES, MAX_RUNTIME_ROUTES),
+        ("devices", size_of::<u64>(), MAX_DEVICES),
+    ] {
+        for (count, value_error) in [
+            (1u32, false),
+            (u32::try_from(maximum + 1).unwrap(), true),
+            (u32::MAX, true),
+        ] {
+            let bytes = count.to_le_bytes();
+            let mut reader = Reader::new(&bytes);
+            let mut parsed = false;
+            let result = reader.bounded_list(minimum, maximum, what, |_| {
+                parsed = true;
+                Ok(())
+            });
+            assert!(!parsed);
+            match result.unwrap_err() {
+                Fault::Value { what: got, .. } if value_error => assert_eq!(got, what),
+                Fault::Truncated { .. } if !value_error => {}
+                other => panic!("{other:?}"),
+            }
+        }
+        let mut bytes = 1u32.to_le_bytes().to_vec();
+        bytes.resize(4 + minimum - 1, 0);
+        let mut parsed = false;
+        let result = Reader::new(&bytes).bounded_list(minimum, maximum, what, |_| {
+            parsed = true;
+            Ok(())
+        });
+        assert!(matches!(result, Err(Fault::Truncated { .. })));
+        assert!(!parsed);
+    }
+
+    // Route/backing count bounds are also enforced through the actual Capacity decoder.
+    let mut prefix = answer(
+        209,
+        &Answer::Capacity(Some(route_wire_legacy_capacity())),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    prefix.truncate(prefix.len() - 3 * size_of::<u32>());
+    for count in [1u32, 65, u32::MAX] {
+        let mut bytes = prefix.clone();
+        bytes.extend(count.to_le_bytes());
+        assert!(read_answer(&received(&bytes, 0), MAX_MESSAGE).is_err());
+        let mut bytes = prefix.clone();
+        bytes.extend(0u32.to_le_bytes()); // no routes
+        bytes.extend(0u32.to_le_bytes()); // no masks
+        bytes.extend(count.to_le_bytes());
+        assert!(read_answer(&received(&bytes, 0), MAX_MESSAGE).is_err());
+    }
+}
+
+/// Unknown enum tags and semantically incompatible route shapes fail without echoing key bytes.
+#[test]
+fn route_wire_hostile_route_and_backing_tags_are_redacted() {
+    for at in 0..ROUTE_KEY_BYTES {
+        let mut bytes = [1, 0, 1, 0, 0];
+        bytes[at] = 255;
+        let fault = route_key(&mut Reader::new(&bytes)).unwrap_err();
+        assert!(matches!(fault, Fault::Value { .. }));
+        route_wire_assert_redacted(&fault);
+    }
+    for bytes in [
+        [0, 0, 0, 0, 2], // process cannot require a GPU
+        [1, 2, 1, 0, 0], // native OCI cannot claim a macOS image
+        [2, 1, 0, 3, 1], // Firecracker requires Linux
+        [1, 0, 0, 1, 2], // shared OCI cannot require a GPU
+        [1, 0, 0, 2, 1], // dedicated OCI requires selected GPUs
+    ] {
+        assert!(matches!(
+            route_key(&mut Reader::new(&bytes)),
+            Err(Fault::Value { what: "route", .. })
+        ));
+    }
+    for tag in [5, 255] {
+        let mut bytes = answer(
+            210,
+            &Answer::BackingOffer(route_wire_backing(BackingPhase::Live)),
+            MAX_MESSAGE,
+        )
+        .unwrap();
+        bytes[HEADER_BYTES + BACKING_KEY_BYTES + COST_BYTES] = tag;
+        let fault = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
+        assert!(matches!(
+            fault,
+            Fault::Value {
+                what: "backing.phase",
+                ..
+            }
+        ));
+        route_wire_assert_redacted(&fault);
+    }
+    let mut bytes = answer(
+        210,
+        &Answer::Refused(Refusal::Backing {
+            key: route_wire_key(),
+            cause: LifecycleCause::Uncertain,
+        }),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    *bytes.last_mut().unwrap() = 3;
+    let fault = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
+    assert!(matches!(
+        fault,
+        Fault::Value {
+            what: "backing.cause",
+            ..
+        }
+    ));
+    route_wire_assert_redacted(&fault);
+}
+
+/// Backing claims use the shared physical parser and canonical sorted-unique invariant.
+#[test]
+fn route_wire_backing_claims_reject_duplicates_order_bad_ids_and_counts() {
+    for grant in [false, true] {
+        let mut bytes = if grant {
+            request(
+                211,
+                &Request::Call(Call::InitializeBacking(triomphe::Arc::new(
+                    route_wire_grant(),
+                ))),
+                MAX_MESSAGE,
+            )
+            .unwrap()
+        } else {
+            answer(
+                211,
+                &Answer::BackingOffer(route_wire_backing(BackingPhase::Live)),
+                MAX_MESSAGE,
+            )
+            .unwrap()
+        };
+        let minimum = if grant {
+            BACKING_GRANT_MIN_BYTES
+        } else {
+            BACKING_OFFER_MIN_BYTES
+        };
+        let first = HEADER_BYTES + minimum;
+        let original = bytes.clone();
+        let count_at = first - size_of::<u32>();
+        for count in [
+            1u32,
+            u32::try_from(MAX_DEVICES).unwrap(),
+            u32::try_from(MAX_DEVICES + 1).unwrap(),
+            u32::MAX,
+        ] {
+            bytes = original[..count_at].to_vec();
+            bytes.extend(count.to_le_bytes());
+            let result = if grant {
+                read_request(&received(&bytes, 0), MAX_MESSAGE)
+                    .map(|_| ())
+                    .map_err(|bad| bad.fault)
+            } else {
+                read_answer(&received(&bytes, 0), MAX_MESSAGE).map(|_| ())
+            };
+            assert!(result.is_err());
+        }
+        for kind in [255, 3] {
+            bytes = original.clone();
+            bytes[first] = kind; // kind=Net with key99 is valid; make its width invalid below.
+            if kind == 3 {
+                bytes[first + 1..first + 9].copy_from_slice(&u64::MAX.to_le_bytes());
+            }
+            let fault = if grant {
+                read_request(&received(&bytes, 0), MAX_MESSAGE)
+                    .unwrap_err()
+                    .fault
+            } else {
+                read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err()
+            };
+            assert!(matches!(fault, Fault::Value { .. }));
+            route_wire_assert_redacted(&fault);
+        }
+        for reversed in [false, true] {
+            bytes = original.clone();
+            let mut ids = bytes[first..first + 18].to_vec();
+            if reversed {
+                ids.rotate_left(9);
+            } else {
+                ids.copy_within(0..9, 9);
+            }
+            bytes[first..first + 18].copy_from_slice(&ids);
+            let fault = if grant {
+                read_request(&received(&bytes, 0), MAX_MESSAGE)
+                    .unwrap_err()
+                    .fault
+            } else {
+                read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap_err()
+            };
+            assert!(matches!(
+                fault,
+                Fault::Value {
+                    what: "backing",
+                    ..
+                }
+            ));
+        }
+    }
+}
+
+/// Dedicated routes cannot smuggle a changed original class, absent finite caps/allocation, or
+/// GPU-less required receipt; factual BoxInfo also cannot relabel the original class.
+#[test]
+fn route_wire_spec_and_info_inconsistent_route_receipts_refuse() {
+    let route = route_wire_route(Execution::ShardsDedicated);
+    let mut cost = route.cost.unwrap();
+    cost.floor.mem_bytes = hex_api::MIN_MEMORY;
+    cost.ceiling.mem_bytes = hex_api::MIN_MEMORY;
+    let mut valid = oci_spec();
+    valid.bounds.cpu_max_milli = Some(1000);
+    valid.bounds.memory_max = Some(hex_api::MIN_MEMORY);
+    valid.allocation = Some(cost.allocate(CapacityResources::default()).unwrap());
+    valid.devices = vec![DeviceId {
+        kind: DeviceKind::Gpu,
+        key: 99,
+    }];
+    valid.route = Some(RouteReceipt {
+        key: route.key,
+        backing: route.backing,
+    });
+    valid.check().expect("valid dedicated spec baseline");
+    let good = request(
+        212,
+        &Request::Call(Call::Create(Box::new(valid.clone()))),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    assert!(read_request(&received(&good, 0), MAX_MESSAGE).is_ok());
+
+    for change in 0..4 {
+        let mut bad = valid.clone();
+        match change {
+            0 => bad.allocation = None,
+            1 => bad.bounds.memory_max = None,
+            2 => bad.devices.clear(),
+            _ => bad.route.as_mut().unwrap().key.class = Class::Shards,
+        }
+        assert!(matches!(
+            request(
+                212,
+                &Request::Call(Call::Create(Box::new(bad))),
+                MAX_MESSAGE
+            ),
+            Err(Fault::Value { what: "route", .. })
+        ));
+    }
+    // Keep a valid encoded body and change only the committed original class.
+    let mut bad = good;
+    let route_bytes = 1 + ROUTE_KEY_BYTES + 1 + BACKING_KEY_BYTES;
+    let route_at = bad.len() - route_bytes;
+    assert_eq!(bad[route_at], 1);
+    assert_eq!(bad[route_at + 1], class_tag(Class::Oci));
+    assert_eq!(bad[route_at + 1 + ROUTE_KEY_BYTES], 1);
+    bad[route_at + 1] = 3; // Shards/Dedicated is valid alone, but differs from original OCI.
+    assert!(matches!(
+        read_request(&received(&bad, 0), MAX_MESSAGE)
+            .unwrap_err()
+            .fault,
+        Fault::Value { what: "route", .. }
+    ));
+
+    let bad_info = Answer::Info(BoxInfo {
+        class: Class::Process,
+        route: valid.route,
+        ..info()
+    });
+    assert!(matches!(
+        answer(212, &bad_info, MAX_MESSAGE),
+        Err(Fault::Value { what: "route", .. })
+    ));
+    let valid_info = Answer::Info(BoxInfo {
+        route: valid.route,
+        ..info()
+    });
+    let mut bad = answer(212, &valid_info, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bad, 0), MAX_MESSAGE).unwrap().1,
+        valid_info
+    );
+    let route_at = bad.len() - route_bytes;
+    assert_eq!(bad[route_at], 1);
+    assert_eq!(bad[route_at + 1], class_tag(Class::Oci));
+    assert_eq!(bad[route_at + 1 + ROUTE_KEY_BYTES], 1);
+    bad[route_at + 1] = 3;
+    assert!(matches!(
+        read_answer(&received(&bad, 0), MAX_MESSAGE),
+        Err(Fault::Value { what: "route", .. })
+    ));
+}
+
+/// Every new body is bounded exactly, fully consumed and refused at every truncation; this covers
+/// no old suite and dispatches no native work.
+#[test]
+fn route_wire_new_messages_enforce_exact_bounds_truncation_and_trailing_bytes() {
+    for expected in [
+        Request::Call(Call::InitializeBacking(triomphe::Arc::new(
+            route_wire_grant(),
+        ))),
+        Request::Call(Call::ReleaseBacking(route_wire_key())),
+        Request::Call(Call::BackingUsage(route_wire_key())),
+        Request::Call(Call::Create(Box::new({
+            let mut spec = oci_spec();
+            spec.route = Some(RouteReceipt {
+                key: route_wire_route(Execution::ShardsShared).key,
+                backing: Some(route_wire_shared_key()),
+            });
+            spec
+        }))),
+    ] {
+        let bytes = request(213, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(request(213, &expected, bytes.len()).unwrap(), bytes);
+        assert!(matches!(
+            request(213, &expected, bytes.len() - 1),
+            Err(Fault::Oversized { .. })
+        ));
+        assert!(matches!(
+            read_request(&received(&bytes, 0), bytes.len() - 1)
+                .unwrap_err()
+                .fault,
+            Fault::Oversized { .. }
+        ));
+        for end in 0..bytes.len() {
+            assert!(read_request(&received(&bytes[..end], 0), MAX_MESSAGE).is_err());
+        }
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(read_request(&received(&trailing, 0), MAX_MESSAGE).is_err());
+    }
+    for expected in [
+        Answer::BackingOffer(route_wire_backing(BackingPhase::Live)),
+        Answer::Capacity(Some(route_wire_capacity())),
+        Answer::Info(BoxInfo {
+            route: Some(RouteReceipt {
+                key: route_wire_route(Execution::ShardsShared).key,
+                backing: Some(route_wire_shared_key()),
+            }),
+            ..info()
+        }),
+        Answer::Refused(Refusal::Backing {
+            key: route_wire_key(),
+            cause: LifecycleCause::Pending,
+        }),
+    ] {
+        let bytes = answer(214, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(answer(214, &expected, bytes.len()).unwrap(), bytes);
+        assert!(matches!(
+            answer(214, &expected, bytes.len() - 1),
+            Err(Fault::Oversized { .. })
+        ));
+        assert!(matches!(
+            read_answer(&received(&bytes, 0), bytes.len() - 1),
+            Err(Fault::Oversized { .. })
+        ));
+        for end in 0..bytes.len() {
+            assert!(read_answer(&received(&bytes[..end], 0), MAX_MESSAGE).is_err());
+        }
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(read_answer(&received(&trailing, 0), MAX_MESSAGE).is_err());
+    }
+}
+
+/// A fixed backing grant cannot change its host charge or substitute a variable per-box profile.
+#[test]
+fn route_wire_fixed_backing_profiles_and_grants_are_revalidated() {
+    let valid = route_wire_grant();
+    for change in 0..3 {
+        let mut grant = valid.try_clone().unwrap();
+        match change {
+            0 => grant.allocation.resources.cpu_milli += 1,
+            1 => grant.allocation.cost.ceiling.mem_bytes += 1,
+            _ => grant.allocation.resources.mem_bytes = 0,
+        }
+        let mut raw = Writer::new(MAX_MESSAGE);
+        raw.header(kind::INITIALIZE_BACKING, 215);
+        put_backing_key(&mut raw, grant.key).unwrap();
+        put_resources(&mut raw, grant.allocation.resources);
+        put_cost(&mut raw, grant.allocation.cost).unwrap();
+        put_provisioning(&mut raw, &grant.devices).unwrap();
+        let bytes = raw.done().unwrap();
+        assert!(matches!(
+            read_request(&received(&bytes, 0), MAX_MESSAGE)
+                .unwrap_err()
+                .fault,
+            Fault::Value {
+                what: "backing",
+                ..
+            }
+        ));
+        assert!(matches!(
+            request(
+                215,
+                &Request::Call(Call::InitializeBacking(triomphe::Arc::new(grant))),
+                MAX_MESSAGE
+            ),
+            Err(Fault::Value {
+                what: "backing",
+                ..
+            })
+        ));
+    }
+    let mut offer = route_wire_backing(BackingPhase::Prepared);
+    offer.cost.ceiling.cpu_milli += 1;
+    let mut raw = Writer::new(MAX_MESSAGE);
+    raw.header(kind::BACKING_OFFER, 215);
+    put_backing_key(&mut raw, offer.key).unwrap();
+    put_cost(&mut raw, offer.cost).unwrap();
+    raw.u8(0);
+    put_provisioning(&mut raw, &offer.devices).unwrap();
+    let bytes = raw.done().unwrap();
+    assert!(matches!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "backing",
+            ..
+        })
+    ));
+    assert!(matches!(
+        answer(215, &Answer::BackingOffer(offer), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "backing",
+            ..
+        })
+    ));
+}
+
+/// The holder discriminant extends the old option without freeing or relabeling a pool claim.
+#[test]
+fn route_wire_holder_tags_keep_legacy_box_and_exact_backing_generation() {
+    for (holder, expected) in [
+        (None, vec![0]),
+        (
+            Some(DeviceHolder::Box(id("box"))),
+            vec![1, 3, 0, 0, 0, b'b', b'o', b'x'],
+        ),
+        (Some(DeviceHolder::Backing(route_wire_key())), {
+            let mut bytes = vec![2];
+            bytes.extend([0xa7; 32]);
+            bytes.extend([0x6d; 16]);
+            bytes
+        }),
+    ] {
+        let mut w = Writer::new(MAX_MESSAGE);
+        put_device_holder(&mut w, holder.as_ref()).unwrap();
+        let bytes = w.done().unwrap();
+        assert_eq!(bytes, expected);
+        assert_eq!(device_holder(&mut Reader::new(&bytes)).unwrap(), holder);
+    }
+    let mut capacity = route_wire_capacity();
+    capacity.backings[0].devices = vec![capacity.devices[0].id];
+    capacity.devices[0].holder = Some(DeviceHolder::Backing(route_wire_key()));
+    capacity.devices[1].holder = Some(DeviceHolder::Box(id("native-box")));
+    let expected = Answer::Capacity(Some(capacity));
+    let bytes = answer(216, &expected, MAX_MESSAGE).unwrap();
+    let actual = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1;
+    assert_eq!(actual, expected);
+    let Answer::Capacity(Some(actual)) = actual else {
+        panic!("capacity")
+    };
+    assert!(
+        matches!(actual.devices[0].holder, Some(DeviceHolder::Backing(key)) if key == route_wire_key())
+    );
+    assert!(
+        matches!(&actual.devices[1].holder, Some(DeviceHolder::Box(key)) if key.as_str() == "native-box")
+    );
+}
+
+/// Missing or malformed owner bytes never become None; diagnostics expose no private BoxId.
+#[test]
+fn route_wire_holder_unknown_tags_partial_keys_and_bad_boxes_refuse() {
+    for tag in [3, 255] {
+        let fault = device_holder(&mut Reader::new(&[tag])).unwrap_err();
+        assert!(matches!(
+            fault,
+            Fault::Value {
+                what: "devices.holder",
+                ..
+            }
+        ));
+    }
+    let mut backing = vec![2];
+    backing.extend([0xa7; 32]);
+    backing.extend([0x6d; 16]);
+    for end in 0..backing.len() {
+        assert!(matches!(
+            device_holder(&mut Reader::new(&backing[..end])),
+            Err(Fault::Truncated { .. })
+        ));
+    }
+    for name in ["../private-holder", "private/holder"] {
+        let mut raw = Writer::new(MAX_MESSAGE);
+        raw.u8(1);
+        raw.string(name).unwrap();
+        let bytes = raw.done().unwrap();
+        let fault = device_holder(&mut Reader::new(&bytes)).unwrap_err();
+        assert!(matches!(
+            fault,
+            Fault::Value {
+                what: "devices.holder",
+                ..
+            }
+        ));
+        assert!(!format!("{fault:?}").contains("private"));
+    }
+    let mut raw = Writer::new(MAX_MESSAGE);
+    raw.u8(1);
+    raw.bytes(&[0xff]).unwrap();
+    let bytes = raw.done().unwrap();
+    assert!(matches!(
+        device_holder(&mut Reader::new(&bytes)),
+        Err(Fault::Value {
+            what: "devices.holder",
+            ..
+        })
+    ));
+}
+
+/// The factual provider remains holder-free even after catalog backing ownership becomes typed.
+#[test]
+fn route_wire_physical_reports_forbid_both_box_and_backing_holders() {
+    for holder in [
+        DeviceHolder::Box(id("private-telemetry-box")),
+        DeviceHolder::Backing(route_wire_key()),
+    ] {
+        let mut report = example_physical_report();
+        report.devices[0].info.holder = Some(holder);
+        let fault = answer(217, &Answer::PhysicalReport(report), MAX_MESSAGE).unwrap_err();
+        assert!(matches!(
+            fault,
+            Fault::Value {
+                what: "physical report",
+                ..
+            }
+        ));
+        route_wire_assert_redacted(&fault);
+        assert!(!format!("{fault:?}").contains("private-telemetry-box"));
+    }
+}
+
+/// AC-T7.4.1: retained snapshots use exactly the ordinary current Answer bytes,
+/// including every refusal variant, canonical id zero and the existing exit tags.
+#[test]
+fn snapshot_refusal_and_exit_match_canonical_answer_bytes() {
+    let mut inputs = refusals();
+    for cause in [
+        LifecycleCause::Pending,
+        LifecycleCause::Busy,
+        LifecycleCause::Uncertain,
+    ] {
+        inputs.push(Refusal::Backing {
+            key: route_wire_key(),
+            cause,
+        });
+    }
+    for refusal in inputs {
+        let ordinary = Answer::Refused(refusal);
+        let expected = answer(0, &ordinary, MAX_MESSAGE).unwrap();
+        let Answer::Refused(refusal) = &ordinary else {
+            panic!("owned refusal fixture changed its variant");
+        };
+        let snapshot = snapshot_refusal(refusal, MAX_MESSAGE).unwrap();
+        assert_eq!(snapshot, expected);
+        let mut header = Reader::new(&snapshot);
+        assert_eq!(header.header().unwrap(), (IDENTITY, kind::REFUSED, 0));
+    }
+    for exit in [
+        Exit::Code(0),
+        Exit::Code(-7),
+        Exit::Code(i32::MAX),
+        Exit::Signal(9),
+        Exit::Unknown,
+    ] {
+        let expected = answer(0, &Answer::Exited(exit), MAX_MESSAGE).unwrap();
+        assert_eq!(snapshot_exit(exit, MAX_MESSAGE).unwrap(), expected);
+    }
+}
+
+/// AC-T7.4.1: every shorter bound refuses before snapshot allocation; in
+/// particular, an Exhausted usize trailer cannot grow beyond a fitting string.
+#[test]
+fn snapshot_bounds_include_scalar_trailers_before_allocation() {
+    let mut inputs = refusals();
+    inputs.push(Refusal::Backing {
+        key: route_wire_key(),
+        cause: LifecycleCause::Uncertain,
+    });
+    for refusal in inputs {
+        let ordinary = Answer::Refused(refusal);
+        let expected = answer(0, &ordinary, MAX_MESSAGE).unwrap();
+        let Answer::Refused(refusal) = &ordinary else {
+            panic!("owned refusal fixture changed its variant");
+        };
+        assert_eq!(snapshot_refusal(refusal, expected.len()).unwrap(), expected);
+        for bound in 0..expected.len() {
+            assert!(matches!(
+                snapshot_refusal(refusal, bound),
+                Err(Fault::Oversized { .. })
+            ));
+        }
+    }
+    for exit in [Exit::Code(7), Exit::Signal(9), Exit::Unknown] {
+        let expected = answer(0, &Answer::Exited(exit), MAX_MESSAGE).unwrap();
+        for bound in 0..expected.len() {
+            assert!(matches!(
+                snapshot_exit(exit, bound),
+                Err(Fault::Oversized { .. })
+            ));
+        }
+        assert_eq!(snapshot_exit(exit, expected.len()).unwrap(), expected);
+    }
+    let refusal = Refusal::Exhausted {
+        what: "owned snapshot scalar trailer",
+        bound: usize::MAX,
+    };
+    let snapshot = snapshot_refusal(&refusal, MAX_MESSAGE).unwrap();
+    let mut count = Writer::counting(snapshot.len() - 1);
+    count.header(kind::REFUSED, 0);
+    put_refusal(&mut count, &refusal).unwrap();
+    assert_eq!((count.out.len(), count.out.capacity()), (0, 0));
+    assert!(matches!(count.counted(), Err(Fault::Oversized { .. })));
+}
+
+/// AC-T7.4.1: exact write mode refuses before an append can allocate, including
+/// a missing reserve and a scalar overrun; storage failures retain their typed mapping.
+#[test]
+fn snapshot_fixed_writer_never_grows_after_reservation() {
+    let exit = Exit::Code(7);
+    let expected = answer(0, &Answer::Exited(exit), MAX_MESSAGE).unwrap();
+    let mut output = Writer::fixed(expected.len()).unwrap();
+    let allocated = output.out.capacity();
+    output.header(kind::EXITED, 0);
+    put_exit(&mut output, exit);
+    assert_eq!(output.out, expected);
+    output.u64(0);
+    assert_eq!(output.out.capacity(), allocated);
+    assert_eq!(output.out.len(), expected.len());
+    assert!(matches!(output.done(), Err(Fault::Oversized { .. })));
+
+    // Drop the reserved buffer to challenge the independent capacity guard.
+    let mut missing = Writer::fixed(expected.len()).unwrap();
+    missing.out = Vec::new();
+    missing.header(kind::EXITED, 0);
+    put_exit(&mut missing, exit);
+    assert_eq!((missing.out.len(), missing.out.capacity()), (0, 0));
+    let fault = missing.done().unwrap_err();
+    assert!(matches!(fault, Fault::Storage { .. }));
+    assert!(matches!(Refusal::from(fault), Refusal::Exhausted { .. }));
+    // Vec rejects this capacity arithmetically; it makes no huge allocation.
+    assert!(matches!(
+        Writer::fixed(usize::MAX),
+        Err(Fault::Storage { .. })
+    ));
+}
+
+fn physical_unavailable(backend: Class, cause: LifecycleCause) -> BackendUnavailable {
+    BackendUnavailable::from_refusal(
+        backend,
+        Refusal::Backing {
+            key: route_wire_key(),
+            cause,
+        },
+    )
+    .unwrap()
+}
+
+/// Qualified observer failures append to, rather than replace, actual native identity and load.
+#[test]
+fn physical_report_unavailable_roundtrips_qualified_backing_causes() {
+    assert_eq!(PHYSICAL_UNAVAILABLE_BYTES, 51);
+    for cause in [
+        LifecycleCause::Pending,
+        LifecycleCause::Busy,
+        LifecycleCause::Uncertain,
+    ] {
+        let mut report = example_physical_report();
+        let legacy = answer(
+            220,
+            &Answer::PhysicalReport(report.try_clone().unwrap()),
+            MAX_MESSAGE,
+        )
+        .unwrap();
+        report.unavailable = vec![
+            physical_unavailable(Class::Firecracker, cause),
+            physical_unavailable(Class::Shards, cause),
+        ];
+        let expected = Answer::PhysicalReport(report);
+        let bytes = answer(220, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(&bytes[..legacy.len()], legacy);
+        assert_eq!(&bytes[legacy.len()..legacy.len() + 4], &2u32.to_le_bytes());
+        assert_eq!(
+            bytes.len(),
+            legacy.len() + 4 + 2 * PHYSICAL_UNAVAILABLE_BYTES
+        );
+        let Answer::PhysicalReport(report) = &expected else {
+            panic!("owned physical report changed its variant");
+        };
+        for (at, observation) in report.unavailable.iter().enumerate() {
+            let start = legacy.len() + 4 + at * PHYSICAL_UNAVAILABLE_BYTES;
+            assert_eq!(bytes[start], class_tag(observation.backend));
+            let canonical = snapshot_refusal(&observation.cause, MAX_MESSAGE).unwrap();
+            assert_eq!(
+                &bytes[start + 1..start + PHYSICAL_UNAVAILABLE_BYTES],
+                &canonical[HEADER_BYTES..]
+            );
+        }
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            expected
+        );
+        assert_eq!(answer(220, &expected, bytes.len()).unwrap(), bytes);
+        assert!(matches!(
+            answer(220, &expected, bytes.len() - 1),
+            Err(Fault::Oversized { .. })
+        ));
+        // Whole-body preflight includes the new count and every scalar trailer.
+        let mut short = Writer::new(bytes.len() - HEADER_BYTES - 1);
+        let initial_capacity = short.out.capacity();
+        assert!(matches!(
+            put_physical_report(&mut short, report),
+            Err(Fault::Oversized { .. })
+        ));
+        assert_eq!((short.out.len(), short.out.capacity()), (0, initial_capacity));
+        assert!(matches!(
+            read_answer(&received(&bytes, 1), MAX_MESSAGE),
+            Err(Fault::Descriptors { .. })
+        ));
+    }
+}
+
+/// Counts and qualified fixed-size entries are checked before list reservation or refusal names.
+#[test]
+fn physical_report_unavailable_rejects_hostile_counts_and_entries() {
+    let mut report = example_physical_report();
+    let legacy = answer(
+        221,
+        &Answer::PhysicalReport(report.try_clone().unwrap()),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    report.unavailable = vec![
+        physical_unavailable(Class::Firecracker, LifecycleCause::Pending),
+        physical_unavailable(Class::Shards, LifecycleCause::Uncertain),
+    ];
+    let bytes = answer(221, &Answer::PhysicalReport(report), MAX_MESSAGE).unwrap();
+    let entry = legacy.len() + size_of::<u32>();
+    let refused = |bytes: &[u8]| {
+        let fault = read_answer(&received(bytes, 0), MAX_MESSAGE).unwrap_err();
+        route_wire_assert_redacted(&fault);
+        assert!(!format!("{fault:?}").contains("private-unavailable"));
+        fault
+    };
+    for count in [3u32, u32::MAX] {
+        let mut raw = legacy.clone();
+        raw.extend_from_slice(&count.to_le_bytes());
+        assert!(matches!(
+            refused(&raw),
+            Fault::Value {
+                what: "physical report.unavailable",
+                ..
+            }
+        ));
+    }
+    for count in [1usize, 2] {
+        let mut raw = legacy.clone();
+        raw.extend_from_slice(&u32::try_from(count).unwrap().to_le_bytes());
+        raw.resize(entry + count * PHYSICAL_UNAVAILABLE_BYTES - 1, 0);
+        assert!(matches!(refused(&raw), Fault::Truncated { need, .. }
+            if need == entry + count * PHYSICAL_UNAVAILABLE_BYTES));
+    }
+    for tag in [0, 1, 4, u8::MAX] {
+        let mut raw = bytes.clone();
+        raw[entry] = tag;
+        assert!(matches!(refused(&raw), Fault::Value { .. }));
+    }
+    // A well-formed variable refusal body would intern this name if the tag guard were absent.
+    const PRIVATE_NAME: &str = "private-unavailable-name";
+    assert!(!KEPT.lock().unwrap().contains(PRIVATE_NAME));
+    for tag in (0..=9).chain([11, u8::MAX]) {
+        let mut body = Writer::new(MAX_MESSAGE);
+        body.u8(class_tag(Class::Firecracker));
+        body.u8(tag);
+        body.string(PRIVATE_NAME).unwrap();
+        body.string("private-unavailable-reason").unwrap();
+        let mut raw = legacy.clone();
+        raw.extend_from_slice(&1u32.to_le_bytes());
+        raw.extend_from_slice(&body.done().unwrap());
+        assert!(matches!(
+            refused(&raw),
+            Fault::Value {
+                what: "physical report.unavailable",
+                ..
+            }
+        ));
+    }
+    assert!(!KEPT.lock().unwrap().contains(PRIVATE_NAME));
+    for cause in [3, u8::MAX] {
+        let mut raw = bytes.clone();
+        raw[entry + PHYSICAL_UNAVAILABLE_BYTES - 1] = cause;
+        assert!(matches!(
+            refused(&raw),
+            Fault::Value {
+                what: "backing.cause",
+                ..
+            }
+        ));
+    }
+    let mut duplicate = bytes.clone();
+    duplicate[entry + PHYSICAL_UNAVAILABLE_BYTES] = duplicate[entry];
+    assert!(matches!(
+        refused(&duplicate),
+        Fault::Value {
+            what: "physical report",
+            ..
+        }
+    ));
+    for observation in [
+        BackendUnavailable {
+            backend: Class::Oci,
+            cause: Refusal::Backing {
+                key: route_wire_key(),
+                cause: LifecycleCause::Pending,
+            },
+        },
+        BackendUnavailable {
+            backend: Class::Shards,
+            cause: Refusal::Broken("private-unavailable-reason".into()),
+        },
+    ] {
+        let mut invalid = example_physical_report();
+        invalid.unavailable.push(observation);
+        let mut output = Writer::new(MAX_MESSAGE);
+        assert!(matches!(
+            put_physical_report(&mut output, &invalid),
+            Err(Fault::Value {
+                what: "physical report",
+                ..
+            })
+        ));
+        assert!(output.out.is_empty());
+    }
+}
+
+/// Missing and explicit-empty tails retain legacy meaning; partial/new trailing data is refused.
+#[test]
+fn physical_report_unavailable_preserves_legacy_bytes_and_message_bounds() {
+    let mut report = PhysicalReport {
+        authority: "native".into(),
+        devices: Vec::new(),
+        unavailable: Vec::new(),
+    };
+    let legacy = answer(
+        222,
+        &Answer::PhysicalReport(report.try_clone().unwrap()),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    assert_eq!(&legacy[12..14], &0x800eu16.to_le_bytes());
+    assert_eq!(
+        &legacy[HEADER_BYTES..],
+        b"\x06\x00\x00\x00native\x00\x00\x00\x00"
+    );
+    let mut explicit_empty = legacy.clone();
+    explicit_empty.extend_from_slice(&0u32.to_le_bytes());
+    for raw in [&legacy, &explicit_empty] {
+        assert_eq!(
+            read_answer(&received(raw, 0), MAX_MESSAGE).unwrap().1,
+            Answer::PhysicalReport(report.try_clone().unwrap())
+        );
+    }
+    report
+        .unavailable
+        .push(physical_unavailable(Class::Shards, LifecycleCause::Busy));
+    let bytes = answer(222, &Answer::PhysicalReport(report), MAX_MESSAGE).unwrap();
+    // The exact old boundary is intentionally valid. Every nonempty proper prefix of the new
+    // count/body is incomplete; it must not silently downgrade a diagnostic to legacy-empty.
+    for end in legacy.len() + 1..bytes.len() {
+        assert!(matches!(
+            read_answer(&received(&bytes[..end], 0), MAX_MESSAGE),
+            Err(Fault::Truncated { .. })
+        ));
+    }
+    explicit_empty.push(0);
+    assert!(matches!(
+        read_answer(&received(&explicit_empty, 0), MAX_MESSAGE),
+        Err(Fault::Leftover { bytes: 1, .. })
+    ));
+    let mut bad_authority = bytes;
+    bad_authority[HEADER_BYTES + size_of::<u32>()] = 0;
+    assert!(matches!(
+        read_answer(&received(&bad_authority, 0), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "physical report",
             ..
         })
     ));

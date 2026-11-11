@@ -1,0 +1,44 @@
+{
+  "kind": "source-only",
+  "role": "implementer",
+  "policy_read": "ca3ab10c151aa5539e757f1cc76029746ccbb561",
+  "current_policy_equal": "0c598386ca1f7c65c6e0634dba77983e4abffff2",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "api_dependency": "42de0312055be903378213d4f6f869c1149095f9",
+  "sources": {
+    "crates/hex-sim/src/model.rs": "f4004b4b7d43ca60ea553a65d70effab98c16506c90d358f42a3ca75e732e499",
+    "crates/hex-sim/src/index.rs": "f614f3dd42b7a8505ca080d3c960e74d61ae8886b4f43afb0ad55cedd6f6db02",
+    "crates/hex-sim/src/index/routes.rs": "520162860ad895054674f47a274a86732e6e8188dadfd9daaf53b9cec017438b",
+    "crates/hex-sim/src/index/route_offer_tests.rs": "8ee6fcfc96d2e0c4dc3ddca2f2c18189c2c8bb90c34e71676a179fe257adaebf",
+    "crates/hex-sim/src/peer.rs": "1059b83e019fdc05b46e6f23eb10f49456fd5d890acd189c6ff17913d35d0f37",
+    "crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs": "a9f3b5edd755ed8359b4867b1cb95f686eef3e04246d5622c01825d232cf053b",
+    "crates/hex-sim/src/facts.rs": "ac97f1c1307a9c1e2401913b85ce72944517c94553fdd60ae510d09286a15688",
+    "crates/hex-sim/src/lb/index.rs": "f3fc05e9e1604c1be3c4e646b665854e5e10be907001ad6ccf79a31e0d1bec7c",
+    "crates/hex-sim/src/start_cost.rs": "1a32f688ef7b94ba0eabe306549f437321442a183144f4819f3581c8951ccedb",
+    "crates/hex-node/src/placement.rs": "035d66d8efee0ed8e8c8ceb2017e2346481d5a54ded8c81486e9b8123ae92f90",
+    "crates/hex-node/src/placement/tests.rs": "2c2622abc37a1247abc35404b2fd514e718a12626e86896c099c13dcac9d03f5"
+  },
+  "checks": {
+    "scoped_format": "pass",
+    "diff": "pass",
+    "new_index_controls": "unrun",
+    "new_peer_control": "unrun",
+    "pending_gpu_control": "intended-red/source-observation/unrun",
+    "compile": "unrun",
+    "native": "unrun"
+  },
+  "original_route_red": {
+    "source": "40f+1740 only",
+    "cargo": 55507,
+    "passed": 0,
+    "failed": 3,
+    "log_sha256": "d437b2a6249deea6c9485e1e6553ea8e9e5adbef55c89c88db5b1886c1fac0cd"
+  },
+  "outside_ports": [
+    "NodeSpec.routes None",
+    "Ask.runtime_class None/native_only false",
+    "Msg::Start.route None",
+    "faults.rs FitIndex.try_clone typed propagation",
+    "hex-sim triomphe normal dependency ROOT"
+  ]
+}

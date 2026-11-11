@@ -1,0 +1,7 @@
+{
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "output": "{\"kind\": \"owned compiled test ELF data-only readback\", \"binaries\": [{\"path\": \"/Users/adalundhe/.cache/hex-lead/cohort-718105e7-mac-trusted-entry-7181-mac/target/debug/deps/hex_runtime-2f15a26ff7c2fd7c\", \"bytes\": 25770976, \"sha256\": \"25b10015f58c8a07d3f6d89410be566089710d01385e17bc9926c258e80f0cc1\", \"device\": 16777234, \"inode\": 33962478, \"stable_open_handle\": true}, {\"path\": \"/Users/adalundhe/.cache/hex-lead/cohort-1233804b-mac-trusted-entry-1233-mac/target/debug/deps/hex_runtime-2f15a26ff7c2fd7c\", \"bytes\": 25771184, \"sha256\": \"8a93536a4123ef8c4f1ba214fecd3a910ac1eca1e8f87d76cc30fbd7baa91ff5\", \"device\": 16777234, \"inode\": 33977339, \"stable_open_handle\": true}]}\n",
+  "running": false,
+  "why": "macos/aarch64 \u00b7 30 of 32 cores idle \u00b7 59 GB free \u00b7 room for 1 CPU, 4 GiB of memory, 12 GiB of disk",
+  "exit_code": 0
+}

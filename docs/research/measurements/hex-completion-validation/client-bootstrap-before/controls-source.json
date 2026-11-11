@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "source_parent": "17e11e644ea8d0e8df64a9f899d6e7fd7d25093f",
+  "source_path": "crates/hex-client/src/calls/budget_tests.rs",
+  "source_sha256": "a8dcf1b04f583181d171ab8ef562873d604474a284bffc2180c835deb6eec071",
+  "bytes": 69271,
+  "original_prefix_bytes": 62114,
+  "original_prefix_sha256": "9e49002f5ae2866ac9f523a231cf2abc4ffc365c5309a5cefeccb0854a848461",
+  "append_only": true,
+  "tests_defined": 2,
+  "test_names": [
+    "calls::budget_tests::absolute_bootstrap_preserves_requests_and_typed_answers",
+    "calls::budget_tests::absolute_bootstrap_caps_unarmed_answer_waits"
+  ],
+  "tests_executed": 0,
+  "builds_executed": 0,
+  "native_executed": 0,
+  "fixture": "existing Offers/Stalled actual wire parser/queue, private measuring answer census, no relative cap",
+  "cleanup": "end ONLY owned Shared connection and join actor BEFORE assertions on every observation path",
+  "guard_ms": {
+    "caller": 25,
+    "external_observation": 100
+  },
+  "unproved": "postvalidation expiry injection and full receiver/native effects; no dispatch by L4",
+  "status": "source-only, ROOT exact two controls and compilation pending"
+}

@@ -54,7 +54,7 @@ pub fn start(
     stdio: [OwnedHandle; 3],
 ) -> Result<(Handle, u32), Refusal> {
     if job.stopping() {
-        return Err(Refusal::NotRunning(job.id().clone(), "exec"));
+        return Err(Refusal::NotRunning(job.id()?.try_clone()?, "exec"));
     }
     let launcher = system
         .create_process(&hcs::launcher_parameters(user).to_string(), PATIENCE)
@@ -67,7 +67,7 @@ pub fn start(
                 .map_err(|e| os("handing the launcher its box's job and streams", e))
         };
         Ok::<_, Refusal>(Launch {
-            job: dup(job.job(), Some(sys::JOB_ACCESS))?,
+            job: dup(job.job()?, Some(sys::JOB_ACCESS))?,
             stdio: [
                 dup(stdio[0].as_handle(), None)?,
                 dup(stdio[1].as_handle(), None)?,
@@ -107,7 +107,7 @@ pub fn start(
                 .map_err(|e| os("opening a program started in a container", e))?;
             // The launcher holds the member's handle until its stdin closes, so `pid` is the member; it
             // must be in the box's job, or the box would not bound it.
-            if !sys::in_job(&member, job.job()).map_err(|e| os("checking a program's job", e))? {
+            if !sys::in_job(&member, job.job()?).map_err(|e| os("checking a program's job", e))? {
                 let _ = sys::terminate_process(&opened, UNANSWERED);
                 return Err(Refusal::Broken(format!(
                     "the program Hex's launcher started (pid {pid}) isn't in its box's job"

@@ -1,0 +1,16 @@
+{
+  "base": "dc29e7dadb5d820bfa83e115280dc79574f9f68a",
+  "archive_sha256": "1a09691abb13c7d6255f3adc15f1bb4353ee4db5cad587f86f97061055374103",
+  "leaf_sha256": "dde421b8a909902f1870cb3b8024ee3ac32a8d81151f038677eae22c872e6a9b",
+  "parent_before_sha256": "697e9c098a4d8689e22c765fb1ad445451c2bc0a72aa29407b403aeca642f697",
+  "parent_after_sha256": "58a87fd5e8aae1dec14ddaef201e8c3fea8915911662df362fa98440f3649c20",
+  "registration": "private copy ONLY: path attribute and child module appended to scheduler/tests.rs",
+  "source": "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-dc29-v1/source",
+  "target": "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-dc29-v1/target",
+  "cargo_home": "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-dc29-v1/cargo",
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "needs": "cpus=1,mem=4g,disk=12g",
+  "jobs": 1,
+  "test_threads": 1,
+  "nice": 10
+}

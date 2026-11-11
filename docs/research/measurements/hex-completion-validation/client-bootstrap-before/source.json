@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "parent": "807168c38996fdfda096c0ae9c748bb4167777ec",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": {
+    "path": "crates/hex-client/src/calls.rs",
+    "sha256": "0d8bc48263c67cf4b253c3711c885b981345ece25b5d0bb64831b28e9c7874d6",
+    "bytes": 108989,
+    "parent_sha256": "a4b1f9fcfe8fc0dff0a2bb6036f7ef589a9ef7365306674e2dc159a485a10ed6",
+    "unchanged": false
+  },
+  "protected": [
+    {
+      "path": "crates/hex-client/src/guest.rs",
+      "sha256": "6a9410629157e85ec4ddc507a09e34ac82e275c6ca9f28323e5145cb50a16c7c",
+      "bytes": 33015,
+      "parent_sha256": "6a9410629157e85ec4ddc507a09e34ac82e275c6ca9f28323e5145cb50a16c7c",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "a8f51f83a7b8ed2c43e0824f3af7aff5e967ba77159dde320841183559ea29b8",
+      "bytes": 6880,
+      "parent_sha256": "a8f51f83a7b8ed2c43e0824f3af7aff5e967ba77159dde320841183559ea29b8",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+      "bytes": 24265,
+      "parent_sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+      "unchanged": true
+    }
+  ],
+  "builds_executed": 0,
+  "tests_executed": 0,
+  "native_executed": 0,
+  "status": "source-only; two appended wrapper controls, zero executed",
+  "review_successor_of": "66d18ca62f045bf388a4e5764baa562016f19d53",
+  "metadata_authority": "single caller/configured effective cap retained through transport and validation; postcheck before metadata return",
+  "inherited_allocation_gap": "existing Call::Create Box::new allocation, no blanket allocation safety claim",
+  "owned_controls": {
+    "source_path": "crates/hex-client/src/calls/budget_tests.rs",
+    "source_sha256": "a8dcf1b04f583181d171ab8ef562873d604474a284bffc2180c835deb6eec071",
+    "bytes": 69271,
+    "original_prefix_bytes": 62114,
+    "original_prefix_sha256": "9e49002f5ae2866ac9f523a231cf2abc4ffc365c5309a5cefeccb0854a848461",
+    "append_only": true
+  }
+}

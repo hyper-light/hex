@@ -1,0 +1,238 @@
+{
+  "source": "5de0ea4cb4a30f3cdcfce8ff1c62499d1379028c",
+  "archive_sha256": "72f52a6ad052d60420ba8ff61de0fef481734528cf7ad29b672d8c180d771fc6",
+  "scope": "ROOT pure Windows PCI grammar/ADL current correspondence/facts qualification, API20lint-only andGPUstrictClippy; no actualWindowsCM/KMT/GPU/HCS or prior report3 repeat",
+  "target": "mac",
+  "platform": "macOS-26.2-arm64-arm-64bit",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 42658,
+  "phases": [
+    {
+      "name": "windows-identity-parser-three",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-gpu",
+        "--lib",
+        "--locked",
+        "windows_identity::tests::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 42818,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "8f705895ecdbf2d29503315385bd389497d37e3e4b600c9ed65f279496b52dbb",
+      "bytes": 1222,
+      "expected_selected": 3,
+      "actual_counts": [
+        {
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "windows_identity::tests::complete_single_and_nonzero_segment_properties_are_checked",
+          "outcome": "ok"
+        },
+        {
+          "name": "windows_identity::tests::every_actual_alias_must_have_the_same_current_luid",
+          "outcome": "ok"
+        },
+        {
+          "name": "windows_identity::tests::truncated_or_unterminated_properties_never_supply_a_default",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "windows-adl-mapping-affected-thirteen",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-gpu",
+        "--lib",
+        "--locked",
+        "adl::tests::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 43450,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "84d52252524a6b2a3f323f87cd236f7b7e7b40cbb9483a10b9defdc365a9479f",
+      "bytes": 1227,
+      "expected_selected": 13,
+      "actual_counts": [
+        {
+          "passed": 12,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": false,
+      "test_outcomes": [
+        {
+          "name": "adl::tests::a_count_past_adls_bound_is_refused_and_none_is_none",
+          "outcome": "ok"
+        },
+        {
+          "name": "adl::tests::a_gpu_gone_or_disabled_reads_gone",
+          "outcome": "ok"
+        },
+        {
+          "name": "adl::tests::a_sample_is_two_adl_calls_a_gpu",
+          "outcome": "ok"
+        },
+        {
+          "name": "adl::tests::adls_refusals_at_open_are_kept",
+          "outcome": "ok"
+        },
+        {
+          "name": "adl::tests::an_asleep_gpu_reads_asleep_and_its_memory",
+          "outcome": "ok"
+        },
+        {
+          "name": "adl::tests::jupiters_five_adapters_are_one_gpu",
+          "outcome": "ok"
+        },
+        {
+          "name": "adl::tests::missing_or_conflicting_native_properties_cannot_publish_a_guessed_gpu",
+          "outcome": "ok"
+        },
+        {
+          "name": "adl::tests::native_alias_loss_withholds_fresh_counters_and_retains_the_original_receipt",
+          "outcome": "ok"
+        },
+        {
+          "name": "adl::tests::native_segments_precede_grouping_and_keep_exact_alias_counter_pairs",
+          "outcome": "ok"
+        },
+        {
+          "name": "adl::tests::rows_are_grouped_other_vendors_passed_over_and_garbage_skipped",
+          "outcome": "ok"
+        },
+        {
+          "name": "adl::tests::the_drivers_release_else_its_packaging_version",
+          "outcome": "ok"
+        },
+        {
+          "name": "adl::tests::what_adl_doesnt_document_is_refused_by_type",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "windows-native-qualification-one",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "facts::gpu_identity_tests::current_windows_join_qualifies_only_that_devices_fresh_offer",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 43452,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "7d43850b89c201d321ae7b1dc4df919100df168836290137057985c061184183",
+      "bytes": 3314,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "facts::gpu_identity_tests::current_windows_join_qualifies_only_that_devices_fresh_offer",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "api20-native-clippy-only",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "--manifest-path",
+        "vendor/shards/crates/api/Cargo.toml",
+        "--all-targets",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 43676,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "21f8eaaedae0d1220978f569d8ccc44b044d3bae2850c5ee6869e21b0861844d",
+      "bytes": 2848,
+      "test_outcomes": []
+    },
+    {
+      "name": "gpu-native-clippy",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-gpu",
+        "--all-targets",
+        "--locked",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 43704,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "787d33b84db68ddedb7339389771b736aa346cd1c51acc8f74e24d9d0a4a6a77",
+      "bytes": 460,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [
+    "vendor/shards/Cargo.lock"
+  ],
+  "temp_entries": 0,
+  "native_backend_invocations": 0,
+  "api_registry_cohort": {
+    "seed_sha256": "18a1c5dd48ba3ee855841e67b59fa38512a15eb769df0b18835c8c828173f082",
+    "pruned_sha256": "dcbe9479bcbd6b91c7f1cbe46a59a482e78d8d097bd49a0af91c352880ee9c84",
+    "registry_packages": 15,
+    "all_registry_tuples_subset_of_exact_root_lock": true,
+    "private_lock_overlay_only": true
+  },
+  "exit": 1
+}

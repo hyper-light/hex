@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "hex_claude_full_read_sha256": "a093d49f0e51a0c9026996cb170980696dc375364b8d9f13866200c6232e0c2b",
+  "parent": "d33dc93f54d69b78133d23b578f78287981f4764",
+  "source": {
+    "path": "crates/hex-client/src/calls/budget_tests.rs",
+    "sha256": "1a0be87518194ba141359eedfd0c1f124cb436d8a064098af9fd04c335e486ec",
+    "bytes": 102068,
+    "parent_prefix_sha256": "9a376262305f7add3585b385b67802b8bd5909336ee451a08e779f0dccd97585",
+    "parent_prefix_bytes": 89982,
+    "unchanged_original_prefix": true,
+    "append_sha256": "1469d539a91857cc804c086e0c9391b9ad8adaef4adccc81e864f523e0650674",
+    "append_bytes": 12086
+  },
+  "selector": "calls::budget_tests::prepared_actor_settle_error_retains_original_kill_answer_authority",
+  "tests_added": 1,
+  "guard_constants": "unchanged prefix: CAP25ms / OBSERVE100ms; no new wait policy, seed or retry",
+  "fixture": "Private SettleAligned over SAME Offers/Stalled memory protocol, Core/run_before and real local pipe ends. No public API/production method change or native/VM/GPU manager.",
+  "preparation": "Actual spec/program/stdio, wrong-end Given and retained peer, channels/reserves/wake/Core and actor constructed before anchor. Owned actor signals ready and awaits releasable barrier.",
+  "clock": "Ready actor creates exactly ONE25ms deadline immediately before run_before, publishing exact Instant through preallocated try_send; result timestamp/try_send occur immediately after operation before any diagnostic. Existing readiness wait uses preallocated wake and same original at.",
+  "phase": "Require one actual Run, matching setup Ask/at, delivered Started before at, actual committed Kill same exec before at. Missing phase is logged UNVERIFIED/fails after cleanup; no semantic result inferred.",
+  "oracle": "No Exit/other answer/Release, reply_budgetNone, exact original stdout stream-settlement Broken, returned before owned cleanup and at/after original expiry.",
+  "cleanup": "Always drop owned start sender, end ONLY own connection, recover/take/close own retained/unconsumed ends, join worker BEFORE first diagnostic and every assertion. Same persistent closed-read error after real queued data prevents lost wake join.",
+  "protected": [
+    {
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "2274b7d480ab9291716b0ea257f750e0e9c53fb8e86ab20bf600cbcc51b1dd59",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/guest.rs",
+      "sha256": "893c281be8a3d4907d81bcffc36c0991a1d614108e3e68ecf7500e130887c6b3",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/guest/tests.rs",
+      "sha256": "68ba6db123682e110827cd02315097edb61576fa51acb650bdefe2b9dab21626",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-core/src/patience.rs",
+      "sha256": "3b0b0902568a369dd8ae345f91f043c7cac5bf4b3c886accfb8d4aa3b6ea5709",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "a8f51f83a7b8ed2c43e0824f3af7aff5e967ba77159dde320841183559ea29b8",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+      "unchanged": true
+    },
+    {
+      "path": "CLAUDE.md",
+      "sha256": "a093d49f0e51a0c9026996cb170980696dc375364b8d9f13866200c6232e0c2b",
+      "unchanged": true
+    }
+  ],
+  "root_comparison": {
+    "pre69a_source": "5a0a020b4f49073bc020818205739a893b059ac0",
+    "pre69a_calls_sha256": "38ae331369187698244c8d679e944e39937b27915f4c7612191e9d65604f3fc1",
+    "after69a_source": "69a5c7b956162039e9e030a74012c316d30ec5b7",
+    "after69a_calls_sha256": "2274b7d480ab9291716b0ea257f750e0e9c53fb8e86ab20bf600cbcc51b1dd59",
+    "fixture_in_all_three": "Exact SAME appended fixture/source hash; its preexisting prefix equals5a0 and69a. Apply only this append/new docs to pre69a, not production ancestors. New source does not call remedy-private methods.",
+    "mutation": "mutation-hook.json removes only cleanup Kill cap, source-only predicted hash",
+    "acceptance": "ROOT executes SAME named successor before/after/mutation with phase/result/source/binary/cleanup witnesses; no successor result relabelled as old original green."
+  },
+  "historical": "5a0 original red remains raw3c63,231d old-original phase miss raw3263 remainsUNVERIFIED,d33 preserved; neither altered or replayed here.",
+  "builds_executed": 0,
+  "tests_executed": 0,
+  "native_executed": 0,
+  "mutations_executed": 0,
+  "status": "SOURCE ONLY; scoped rustfmt and source-integrity inspection, no owner check/dispatch. ROOT matched compilation/execution pending."
+}

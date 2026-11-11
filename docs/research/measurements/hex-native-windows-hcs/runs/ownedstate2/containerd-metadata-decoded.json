@@ -1,0 +1,588 @@
+{
+  "file": "docs/research/measurements/hex-native-windows-hcs/runs/ownedstate2/raw/io.containerd.metadata.v1.bolt/meta.db",
+  "bytes": 131072,
+  "sha256": "1874a57aa5915be302f83318873c9c4c57d3bea9a76c3e0ef466963339fc6eef",
+  "page_size": 4096,
+  "valid_metas": [
+    {
+      "page": 0,
+      "root": 17,
+      "high": 26,
+      "transaction": 22,
+      "checksum": "d3f7edfef47aca3e"
+    },
+    {
+      "page": 1,
+      "root": 26,
+      "high": 27,
+      "transaction": 23,
+      "checksum": "a3d05420056996e5"
+    }
+  ],
+  "chosen": {
+    "page": 1,
+    "root": 26,
+    "high": 27,
+    "transaction": 23,
+    "checksum": "a3d05420056996e5"
+  },
+  "rows": [
+    {
+      "path": [
+        "v1",
+        "version"
+      ],
+      "value": null,
+      "hex": "08",
+      "bytes": 1
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "leases",
+        "994438900-hxAJ",
+        "createdat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e2d73b5e3ae0ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:58b297594fae8487acb87861188616be04290bce96e6531d21161e836082b2f2",
+        "createdat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e31b27861420ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:58b297594fae8487acb87861188616be04290bce96e6531d21161e836082b2f2",
+        "size"
+      ],
+      "value": null,
+      "hex": "98ffe89a10",
+      "bytes": 5
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:58b297594fae8487acb87861188616be04290bce96e6531d21161e836082b2f2",
+        "updatedat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e31b27a053a8ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:620d54468172e4e8185670f4830dfd5bbf4f20dc2b1852b3327a3c51b8d727c6",
+        "createdat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e2d827786118ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:620d54468172e4e8185670f4830dfd5bbf4f20dc2b1852b3327a3c51b8d727c6",
+        "size"
+      ],
+      "value": null,
+      "hex": "aa0c",
+      "bytes": 2
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:620d54468172e4e8185670f4830dfd5bbf4f20dc2b1852b3327a3c51b8d727c6",
+        "updatedat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e2d827903db0ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:a62109569303cfe0ab49b1618383615f0477cdc285529b98d9b7085902d0e745",
+        "createdat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e2d818ebb960ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:a62109569303cfe0ab49b1618383615f0477cdc285529b98d9b7085902d0e745",
+        "size"
+      ],
+      "value": null,
+      "hex": "aa09",
+      "bytes": 2
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:a62109569303cfe0ab49b1618383615f0477cdc285529b98d9b7085902d0e745",
+        "updatedat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e2d8196b4874ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:e5dcf3bc996337655b83ea98c2e05a33a75e36a0357b01d7d433dbabcd1509a7",
+        "createdat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e34102eedc50ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:e5dcf3bc996337655b83ea98c2e05a33a75e36a0357b01d7d433dbabcd1509a7",
+        "size"
+      ],
+      "value": null,
+      "hex": "aebefdb121",
+      "bytes": 5
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:e5dcf3bc996337655b83ea98c2e05a33a75e36a0357b01d7d433dbabcd1509a7",
+        "updatedat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e6a52eb5efa4ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "leases",
+        "994438900-hxAJ",
+        "content",
+        "sha256:58b297594fae8487acb87861188616be04290bce96e6531d21161e836082b2f2"
+      ],
+      "value": "",
+      "hex": null,
+      "bytes": 0
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "leases",
+        "994438900-hxAJ",
+        "content",
+        "sha256:620d54468172e4e8185670f4830dfd5bbf4f20dc2b1852b3327a3c51b8d727c6"
+      ],
+      "value": "",
+      "hex": null,
+      "bytes": 0
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "leases",
+        "994438900-hxAJ",
+        "content",
+        "sha256:a62109569303cfe0ab49b1618383615f0477cdc285529b98d9b7085902d0e745"
+      ],
+      "value": "",
+      "hex": null,
+      "bytes": 0
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "leases",
+        "994438900-hxAJ",
+        "content",
+        "sha256:e5dcf3bc996337655b83ea98c2e05a33a75e36a0357b01d7d433dbabcd1509a7"
+      ],
+      "value": "",
+      "hex": null,
+      "bytes": 0
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "leases",
+        "994438900-hxAJ",
+        "labels",
+        "containerd.io/gc.expire"
+      ],
+      "value": "2026-11-11T20:15:19-08:00",
+      "hex": null,
+      "bytes": 25
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "snapshots",
+        "windows",
+        "extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "createdat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e6a52ece335cffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "snapshots",
+        "windows",
+        "extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "name"
+      ],
+      "value": "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+      "hex": null,
+      "bytes": 125
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "snapshots",
+        "windows",
+        "extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "parent"
+      ],
+      "value": "sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+      "hex": null,
+      "bytes": 71
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "snapshots",
+        "windows",
+        "extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "updatedat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e6a52ece335cffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "snapshots",
+        "windows",
+        "sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "createdat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e68006beeb68ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "snapshots",
+        "windows",
+        "sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "name"
+      ],
+      "value": "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+      "hex": null,
+      "bytes": 102
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "snapshots",
+        "windows",
+        "sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "updatedat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e68006beeb68ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:58b297594fae8487acb87861188616be04290bce96e6531d21161e836082b2f2",
+        "labels",
+        "containerd.io/distribution.source.mcr.microsoft.com"
+      ],
+      "value": "windows/server",
+      "hex": null,
+      "bytes": 14
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:620d54468172e4e8185670f4830dfd5bbf4f20dc2b1852b3327a3c51b8d727c6",
+        "labels",
+        "containerd.io/distribution.source.mcr.microsoft.com"
+      ],
+      "value": "windows/server",
+      "hex": null,
+      "bytes": 14
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:a62109569303cfe0ab49b1618383615f0477cdc285529b98d9b7085902d0e745",
+        "labels",
+        "containerd.io/distribution.source.mcr.microsoft.com"
+      ],
+      "value": "windows/server",
+      "hex": null,
+      "bytes": 14
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:a62109569303cfe0ab49b1618383615f0477cdc285529b98d9b7085902d0e745",
+        "labels",
+        "containerd.io/gc.ref.content.config"
+      ],
+      "value": "sha256:620d54468172e4e8185670f4830dfd5bbf4f20dc2b1852b3327a3c51b8d727c6",
+      "hex": null,
+      "bytes": 71
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:a62109569303cfe0ab49b1618383615f0477cdc285529b98d9b7085902d0e745",
+        "labels",
+        "containerd.io/gc.ref.content.l.0"
+      ],
+      "value": "sha256:e5dcf3bc996337655b83ea98c2e05a33a75e36a0357b01d7d433dbabcd1509a7",
+      "hex": null,
+      "bytes": 71
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:a62109569303cfe0ab49b1618383615f0477cdc285529b98d9b7085902d0e745",
+        "labels",
+        "containerd.io/gc.ref.content.l.1"
+      ],
+      "value": "sha256:58b297594fae8487acb87861188616be04290bce96e6531d21161e836082b2f2",
+      "hex": null,
+      "bytes": 71
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:e5dcf3bc996337655b83ea98c2e05a33a75e36a0357b01d7d433dbabcd1509a7",
+        "labels",
+        "containerd.io/distribution.source.mcr.microsoft.com"
+      ],
+      "value": "windows/server",
+      "hex": null,
+      "bytes": 14
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "content",
+        "blob",
+        "sha256:e5dcf3bc996337655b83ea98c2e05a33a75e36a0357b01d7d433dbabcd1509a7",
+        "labels",
+        "containerd.io/uncompressed"
+      ],
+      "value": "sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+      "hex": null,
+      "bytes": 71
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "leases",
+        "994438900-hxAJ",
+        "snapshots",
+        "windows",
+        "extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d"
+      ],
+      "value": "",
+      "hex": null,
+      "bytes": 0
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "leases",
+        "994438900-hxAJ",
+        "snapshots",
+        "windows",
+        "sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc"
+      ],
+      "value": "",
+      "hex": null,
+      "bytes": 0
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "snapshots",
+        "windows",
+        "extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "labels",
+        "containerd.io/snapshot.ref"
+      ],
+      "value": "sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+      "hex": null,
+      "bytes": 71
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "snapshots",
+        "windows",
+        "extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "labels",
+        "containerd.io/snapshot/diff-id"
+      ],
+      "value": "sha256:4c77a873187ab2974036b801a24a6fd6fc18d93a00d96f813b8a82ee56fe1bc3",
+      "hex": null,
+      "bytes": 71
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "snapshots",
+        "windows",
+        "extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "labels",
+        "containerd.io/snapshot/parent-chain-id"
+      ],
+      "value": "sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+      "hex": null,
+      "bytes": 71
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "snapshots",
+        "windows",
+        "sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "children",
+        "extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d"
+      ],
+      "value": "",
+      "hex": null,
+      "bytes": 0
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "snapshots",
+        "windows",
+        "sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "labels",
+        "containerd.io/snapshot.ref"
+      ],
+      "value": "sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+      "hex": null,
+      "bytes": 71
+    },
+    {
+      "path": [
+        "v1",
+        "hex-native-hcs-full-image-v2",
+        "snapshots",
+        "windows",
+        "sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "labels",
+        "containerd.io/snapshot/diff-id"
+      ],
+      "value": "sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+      "hex": null,
+      "bytes": 71
+    }
+  ]
+}

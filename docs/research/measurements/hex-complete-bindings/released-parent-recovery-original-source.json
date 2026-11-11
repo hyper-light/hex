@@ -1,0 +1,29 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "c8378325c634b629160e23f7ab0d29856633bdbc",
+  "source": {
+    "path": "crates/hex-sim/src/index/route_offer_tests.rs",
+    "sha256": "63ac13f6bd6c5cdc193dacef9314af08e543f6ebdc26ec269121d640065cabc3"
+  },
+  "scope": "ONE new ORIGINAL bounded pure Index control; production unchanged from c837. No semantic recovery remedy.",
+  "control": "index::route_offer_tests::committed_subset_recovery_keeps_released_parent_and_does_not_repick_current_remainder",
+  "source_hypothesis": "Routes.holds_inner requiresLive even for exact committed dedicated Box recovery; persistedS may need its originalReleased parent while fresh currentR is Prepared. This is not an actual red until ROOT runs intended control.",
+  "fixture": "Synthetic originalP2 Released +canonical newR1 Prepared exactsubsetdisjointfrompersistedBoxS1. Retained old facts can validate Sidentity but R has no new route mask/freshreading. SameIndex/holder/charge authority, no native call.",
+  "oracles": [
+    "Healthy current tuple lookup resolvesR and freshworkloadNoGpu before restore.",
+    "Actual take_recovered_routed consumes originalP tuple/allocation+exactS index, mustnotrepick currentR, duplicatecharge originalP or bypassoriginalBoxresources.",
+    "GrantR chargescompleteRprofile/ID while retainingS, freshNoGpu until actualRreadiness/facts. Scleanup refunds onlyS and leavesRcharged."
+  ],
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compiled": "UNRUN",
+    "selected_cases": 0,
+    "tests": "ORIGINAL UNRUN",
+    "native": 0,
+    "dispatches": 0
+  },
+  "remaining": "ROOT intended exact control before recovery diagnosis/remedy. No original sibling/keyed/test oracle changed. Real lazy metadata/native/coalescing/profiling/full gates remain separate."
+}

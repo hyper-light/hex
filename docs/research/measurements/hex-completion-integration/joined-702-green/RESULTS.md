@@ -1,0 +1,5 @@
+# Joined702 new controls
+
+Exact signed source7022312e819424c0b7a18871865287038135e7ce on Linux1CPU/4GiB/12GiB, private source/target/cache/temp, owned delegated user scope. Artifact provenance data6, Service normalized routes2 and actual standard-pipe EOF3:11 passed,0 failed,0 ignored. Node/CLI production check0. This is not GPU/VM/backend native effect proof; standard-pipe controls do not establish full workload output. No previously passed controls repeated.
+
+All4 child PIDs1022574/1022802/1294622/1426418 reaped; source before/after identical; temp0. Logs: artifact287cb2d00a1b04f3e9010bcae61e14955ce35df3dedaedd964cfb59197b7206b; Service68a1aaf693cafc26d5127f7189e0da8a06cc17fecbdf217db3ce110e03e0ad82; EOFd76f0014e3c7c142c757ca7be7c56e4abbc69df65fb33ec4ab7465ccaaf90c8b; production7e6cfc8fb50d55ead238e590cea4425d19f6f36c9d758e32c1b7563cb3d9649b. Archive233950B SHA bd4f7591b75d82e2a8fb0fdab244549402e0f5455c5ed51c84465c092868d038; all members independently reverified on collection and intake. Original failures remain in earlier archives. Later native-producer and retained-cost changes are not tested by this cohort.

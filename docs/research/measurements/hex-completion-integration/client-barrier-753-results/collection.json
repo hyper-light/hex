@@ -1,0 +1,71 @@
+{
+  "bytes": 241976,
+  "sha256": "4716a0e132923d4b47d62d37680e4103b486eee1f8fda1f9d942617d2cd5129d",
+  "members": {
+    "cohort-753818b3-linux-client-barrier-v1/source-before.json": {
+      "bytes": 337054,
+      "sha256": "93317ce54f030caf25896b254dd42812d743966d416231cb93959a7b87149898"
+    },
+    "cohort-753818b3-linux-client-barrier-v1/public-registry-seed.json": {
+      "bytes": 29298,
+      "sha256": "06944e5cea61efde8a6814560db34e837484c42ba643779ffc92eaadb5d3f851"
+    },
+    "cohort-753818b3-linux-client-barrier-v1/owned-scope-limits.json": {
+      "bytes": 259,
+      "sha256": "2740f51b8b404ff9da7cab7f6030dc4dc75129166906cdc2e6b337668a538e25"
+    },
+    "cohort-753818b3-linux-client-barrier-v1/link-owner-new.log": {
+      "bytes": 2524,
+      "sha256": "7241b238983d028ef0245911cbae1db79bc7444def04c4da2501672594c0ecd4"
+    },
+    "cohort-753818b3-linux-client-barrier-v1/running.json": {
+      "bytes": 8192,
+      "sha256": "74196bc36ddbfa4285b478ccc4ecad1a140847a1ebb9f23ec04455ef837aea30"
+    },
+    "cohort-753818b3-linux-client-barrier-v1/affected-owner-1.log": {
+      "bytes": 438,
+      "sha256": "bda1a1879d534a0f719a6e122951cf69627ee73341eb1238c1c9e5551a1f139f"
+    },
+    "cohort-753818b3-linux-client-barrier-v1/affected-owner-2.log": {
+      "bytes": 423,
+      "sha256": "dbebcad211619eff6bff326fbaf5a9e1ca910e8dec597a402c7aeb4f2f69338b"
+    },
+    "cohort-753818b3-linux-client-barrier-v1/affected-owner-3.log": {
+      "bytes": 416,
+      "sha256": "ddf3441b16631fa610e9147d31e8caba9b3890dc1fd42e7f98347217b38f67ef"
+    },
+    "cohort-753818b3-linux-client-barrier-v1/affected-weak-offer-witness.log": {
+      "bytes": 440,
+      "sha256": "1a613d6552b56ab14af9f047a654538bf042d089ed4ffc92cd8829c24eac46d8"
+    },
+    "cohort-753818b3-linux-client-barrier-v1/new-adapter-global-barrier.log": {
+      "bytes": 2626,
+      "sha256": "3b9c9e5bca51a50e603e095c0802f308c7d4b7b9effeff70198840734b1718bb"
+    },
+    "cohort-753818b3-linux-client-barrier-v1/client-clippy.log": {
+      "bytes": 1924,
+      "sha256": "504f5409423a820e0d90bf2c2fff4435a8897ce3a4ef8dc2581d13ac1f711f20"
+    },
+    "cohort-753818b3-linux-client-barrier-v1/joined-all-target-harness-check.log": {
+      "bytes": 2168,
+      "sha256": "b632887d574bccb727c7dbe423475b952b6cf76dde190ca521886378dfe24f5d"
+    },
+    "cohort-753818b3-linux-client-barrier-v1/source-after.json": {
+      "bytes": 337054,
+      "sha256": "93317ce54f030caf25896b254dd42812d743966d416231cb93959a7b87149898"
+    },
+    "cohort-753818b3-linux-client-barrier-v1/result.json": {
+      "bytes": 8450,
+      "sha256": "3be55e6e4c0b007040dea30666a4a65ae9e7bea4a183b3addad0568e5bb99d97"
+    },
+    "cohort-753818b3-linux-client-barrier-v1/collected-binaries.json": {
+      "bytes": 8122,
+      "sha256": "1f8b6603f3d02134cef6b438f4cd17ec86856bcb72072c29cc34a350b0a4fcfc"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

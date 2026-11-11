@@ -1,0 +1,112 @@
+{
+  "schema": 1,
+  "parent": "dc057f2f7f38b971e072ce9ac8ccc9c6bd677f16",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": [
+    {
+      "path": "crates/hex-client/src/guest.rs",
+      "bytes": 35460,
+      "sha256": "893c281be8a3d4907d81bcffc36c0991a1d614108e3e68ecf7500e130887c6b3",
+      "parent_sha256": "2ef517db4289f03b13536860fa8ede1a606b9017b2edbcb623975710978f1aad",
+      "unchanged": false
+    },
+    {
+      "path": "crates/hex-client/src/guest/shards.rs",
+      "bytes": 6147,
+      "sha256": "3411d8c2d2c4fd8f338271aaa4bcf26d03cbcd8454e647ffb0da7f13d7066557",
+      "parent_sha256": "3fb501d9144f76ceccb6928472b0eba5f1201f51d22807e65b9fdfbefe58f040",
+      "unchanged": false
+    },
+    {
+      "path": "crates/hex-client/src/copy.rs",
+      "bytes": 6063,
+      "sha256": "ee30ad82c52ea5ce5af5cf5da1ba0d6a9dc30304389642686451e67023fb325d",
+      "parent_sha256": "5207f3b94b0e823655e0df2ab9c0ae6c4eb8431575c00f17ffe8a861f0fbff93",
+      "unchanged": false
+    },
+    {
+      "path": "crates/hex-client/src/guest/stage.rs",
+      "bytes": 65962,
+      "sha256": "f303bd4a6d2619d2efc912d15c60947fa6e9f3a559fb00ac5e6709df38d9c1c8",
+      "parent_sha256": "ee35abc916c11fb7ac32477344d23fe2ed517c03eaad3d8f7a8b8eb53bdd7e8b",
+      "unchanged": false
+    },
+    {
+      "path": "crates/hex-client/src/guest/tests.rs",
+      "bytes": 42190,
+      "sha256": "99d572366b221b2e3ad403c5b1ab130ecaa316f685dceb2c36f3f37ceb2cbf2a",
+      "parent_sha256": "d07624dab713e61c5b239fa8a9226dfbe5b39f023d13de46aa7e3f23cc9f570d",
+      "unchanged": false
+    },
+    {
+      "path": "crates/hex-client/src/calls/budget_tests.rs",
+      "bytes": 61983,
+      "sha256": "7c68173767f4e333ba9d7af04fd2928062288348ce3bff31ad0eff7e29e1b045",
+      "parent_sha256": "9e49002f5ae2866ac9f523a231cf2abc4ffc365c5309a5cefeccb0854a848461",
+      "unchanged": false
+    },
+    {
+      "path": "crates/hex-client/src/guest/stage/tests.rs",
+      "bytes": 11529,
+      "sha256": "6468125e1aabbd60da48cca253f7b193c5d0351f69ceb1e4326d960c03b4058c",
+      "parent_sha256": "026d08bb323c1cb6591a76de8d3d69192f6690c5c7daf5adddf98a7a8e249869",
+      "unchanged": false
+    }
+  ],
+  "protected": [
+    {
+      "path": "crates/hex-client/src/calls.rs",
+      "bytes": 105809,
+      "sha256": "c8be19d3ccc38bcdd0dd3803a01ed02b0ab2ca343c5de19e50368f5a61a21d07",
+      "parent_sha256": "c8be19d3ccc38bcdd0dd3803a01ed02b0ab2ca343c5de19e50368f5a61a21d07",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 6880,
+      "sha256": "a8f51f83a7b8ed2c43e0824f3af7aff5e967ba77159dde320841183559ea29b8",
+      "parent_sha256": "a8f51f83a7b8ed2c43e0824f3af7aff5e967ba77159dde320841183559ea29b8",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.lock",
+      "bytes": 24265,
+      "sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+      "parent_sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+      "unchanged": true
+    }
+  ],
+  "original_drop_function": {
+    "from_anchor_to_eof_sha256": "9f0c22da88b5544cc2233dcd7397e974168e65b7e2a71084e359974cbd768895",
+    "unchanged": true
+  },
+  "primary": {
+    "locked_version": "0.1.17",
+    "locked_package_sha256": "0d15f4f5898bcfc5d8a8e45ed30b2f108d710c1a2e5489dbf80e078f707181bc",
+    "file": "triomphe-0.1.17/src/unique_arc.rs",
+    "file_sha256": "088b5e350e42839a2d763d588cd770c998ee8590fe777a4d26cb845e2696619a",
+    "try_new_line": 61,
+    "safe_unsize_support_line": 328,
+    "archive_present": true,
+    "archive_sha256": "0d15f4f5898bcfc5d8a8e45ed30b2f108d710c1a2e5489dbf80e078f707181bc",
+    "local_file_matches_locked_archive": true
+  },
+  "unported_outside_paths": [
+    "crates/hex-cli/src/guest.rs",
+    "crates/hex-cli/tests/guest_tree.rs",
+    "crates/hex-cli/tests/node_socket.rs",
+    "crates/hex-client/tests/guest_client_bench.rs",
+    "crates/hex-node/src/relay.rs",
+    "crates/hex-node/src/relay/files.rs",
+    "crates/hex-node/src/relay/tests.rs",
+    "crates/hex-node/tests/relay_exec_bench.rs",
+    "crates/hex-runtime/src/firecracker/transport.rs",
+    "crates/hex-runtime/src/guest/tests.rs"
+  ],
+  "builds_executed": 0,
+  "tests_executed": 0,
+  "native_executed": 0,
+  "status": "source-only, focused control pending"
+}

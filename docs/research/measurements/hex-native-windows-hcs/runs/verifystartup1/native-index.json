@@ -1,0 +1,16 @@
+{
+  "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\verify-startup-diagnostic-v1",
+  "index": {
+    "progress.json": {
+      "bytes": 4333,
+      "sha256": "6166ae7bee51e33a807b040606074ffa0c3ebad08701ccca9abfdb1910677188"
+    },
+    "result.json": {
+      "bytes": 4333,
+      "sha256": "6166ae7bee51e33a807b040606074ffa0c3ebad08701ccca9abfdb1910677188"
+    }
+  },
+  "source_hashes": {},
+  "temp_files": [],
+  "utc": "2026-11-11T05:56:14.3343083Z"
+}

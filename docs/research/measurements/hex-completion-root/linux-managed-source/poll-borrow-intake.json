@@ -1,0 +1,30 @@
+{
+  "source": "b76d53160896e25e439b0a527b4f1624ef2cf6fe",
+  "parent": "ed22ee9f68b58f70d77959f8f212da6159887426",
+  "applied_delta_only": true,
+  "observations_ed22_not_imported": true,
+  "actual_before_source": "b6ad2be77d72dfb65ef6f090be2298a7f5dd3f2b",
+  "actual_linux_libcheck_exit": 101,
+  "actual_errors": [
+    "FC native652 PollFd::new expected reference, BorrowedFd supplied",
+    "FC transport308 same cause"
+  ],
+  "actual_log_sha256": "f4f2cedb2fe94ba370f8d6c282b1524b1247ab520a09b6c555ecc3526d91c1d7",
+  "recorded_cargo_pid": 2531967,
+  "child_reaped": true,
+  "tests_executed": 0,
+  "native_invocations": 0,
+  "source_unchanged": true,
+  "temp_entries": 0,
+  "files": {
+    "crates/hex-runtime/src/firecracker/native.rs": {
+      "before": "d79d72361053bfbcaf9103dde6c5fe33ea78d2855f2bdf3d42e42597b10e2c8c",
+      "after": "7d1cd1db41b5a18b71f713aed05d348ff5f945782179e300a40e7236528eb4d7"
+    },
+    "crates/hex-runtime/src/firecracker/transport.rs": {
+      "before": "0ce19e87a06cd9a10aaa6f9cdbf2c37d82f577d2f0f90d727b457fa4d1bf4b1d",
+      "after": "4d29edebbc09bff09dd455afe1fdc71efc10ef84e402fb300ca2df23d5e8deff"
+    }
+  },
+  "fix": "Bind each BorrowedFd for the full poll array lifetime; no behavior change or claimed green"
+}

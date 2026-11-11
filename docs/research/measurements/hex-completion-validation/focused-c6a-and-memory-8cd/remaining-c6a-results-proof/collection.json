@@ -1,0 +1,107 @@
+{
+  "bytes": 350752,
+  "sha256": "e2007ff9221f69cb9e38b2c2e8df40593ee8c29a7bbe24ffab222ba592253061",
+  "members": {
+    "cohort-c6a64f4b-linux-remaining-c6a/source-before.json": {
+      "bytes": 508771,
+      "sha256": "debae0119beb158ebb575cfb5606b1956cf672d9175a10c09d9d7d47aa9b63ad"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/owned-scope-limits.json": {
+      "bytes": 253,
+      "sha256": "90dc9073b660407a8195d33633dee5ead79aa3c7be2341eee24ce804b4c99df7"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/compact-family-affected.log": {
+      "bytes": 3386,
+      "sha256": "9f5c66e62103f798e62d962948d0ab3220aee1f70292d21da57a5ada454e260e"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/running.json": {
+      "bytes": 18521,
+      "sha256": "0d4d6381e019e22c67f381ec33ce50aa26ffb56dd80c425eb93e75a3f91390d6"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/shared-prepared-cancel-new.log": {
+      "bytes": 446,
+      "sha256": "86d9da08f59dbfc2976db49a22b56fbb18d85efa42e6698ac2df992add438c3f"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/gate-peek-protocol-new.log": {
+      "bytes": 437,
+      "sha256": "b9f7c5bc4176439a222eaf23503485fd3258ea57fffb69c6e0441d1b07e4db7b"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/gate-negative-protocol-new.log": {
+      "bytes": 435,
+      "sha256": "26b379b861cb75ae6149a22a110ff3402470d4fb76e95d0baea438d31492ba91"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/node-ack-ownership-new.log": {
+      "bytes": 1418,
+      "sha256": "0bba9053cf1338182df9cadca9cdfeac80817014d12fd18251ba75f9fcb0c020"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/store-family-new.log": {
+      "bytes": 867,
+      "sha256": "e6b614a0a9bb3084ab00c812c78504b8d001245d33de5ee6bfc96342b6488a4e"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/prepared-pool-native-new.log": {
+      "bytes": 930,
+      "sha256": "64e414eb23fa37af9926404350eb48c06bbf0e3230796eca171f2c650efd4695"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/global-projection-new.log": {
+      "bytes": 561,
+      "sha256": "f4d54053ac98f3618426cb6c66b8cb3223c994744b1b9e868faf1da6e14d813a"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/node-native-projection-new.log": {
+      "bytes": 456,
+      "sha256": "2c14a07bd9b7f88e4a7ac76c242ba499afb44856256f1870c3d16fde79b0d188"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/supervisor-unsubmitted-new.log": {
+      "bytes": 461,
+      "sha256": "31aed043a4c719fa05d082724b29f2ce99e7a3e7081119d1799082f1e94a996d"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/supervisor-cancel-ack-new.log": {
+      "bytes": 462,
+      "sha256": "245229f8c45512ef3fe53637d1d768858302abf1dfe20a5cf6eedc9a1999b876"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/qualified-normalization-new.log": {
+      "bytes": 465,
+      "sha256": "e4c50119e05a3a06a2e691c5ee08bb39a3a4955192681d7e527ad4ba8dfa3039"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/driver-drain-new.log": {
+      "bytes": 464,
+      "sha256": "ad6c23577c8ed95a163a3bf12f8042b6c5e926cd15a5204f4fac67542ff346ae"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/draining-action-new.log": {
+      "bytes": 444,
+      "sha256": "88d0206a80ad2b8d35fa43d532af91ecdeb04baef68f4221706ae9687d05c267"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/released-parent-recovery-original.log": {
+      "bytes": 1915,
+      "sha256": "53410138ac3f59a407af591a7b743761beed2abb474c401005cae73b55238484"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/uncertain-drain-cpu-original.log": {
+      "bytes": 1406,
+      "sha256": "530fa19f0d82933c7fee9b1652660c4810be8890f1047cfc811a5e4afcbf307e"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/runtime-production-strict.log": {
+      "bytes": 2878,
+      "sha256": "85bf82127d8a7b267e395f811fb8d0cbae5c054955817bc527b6ab04350aad39"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/source-after.json": {
+      "bytes": 508771,
+      "sha256": "debae0119beb158ebb575cfb5606b1956cf672d9175a10c09d9d7d47aa9b63ad"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/result.json": {
+      "bytes": 18777,
+      "sha256": "918993a7172a7f62e8392eb0c68630d2430f1420a1c9111f5f85c70f29252ad3"
+    },
+    "cohort-c6a64f4b-linux-remaining-c6a/collected-binaries.json": {
+      "bytes": 18503,
+      "sha256": "1d1f39170802ddbcfa3916d6acb27b1bcdd608c976b693800484f97174f3f331"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

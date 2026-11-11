@@ -1,0 +1,15 @@
+{
+  "source": "aaca22b9c05ce0b9011d2d3096611cfab01f71c6",
+  "matrix": "first aarch64GNU Cargo101; stderr80B SHA1b056409e05db9ba61cb57d96f2e0aee7cb8c300370044e10480b3b1edc6f392; other two targets unattempted",
+  "normal_metadata_mcp": "refused before runner/query: not connected to kiln server",
+  "normal_metadata_cli": "exit1 same refusal before query; 2026-11-11T14:14:52.059093Z",
+  "cause": "UNCLASSIFIED until actual80B full log is collected",
+  "recorded": "driver3707136/birth32603205, Cargo3710850/birth32603448 reaped/bothEOF/source0diff/temp0/native0 per returned result",
+  "external_scope_closure": "UNVERIFIED pending normal transport",
+  "forbidden_actions": "no bypass, SSH, runner/service/restart/security/setup action",
+  "subsequent_agents_send": {
+    "delivered": false,
+    "status": 403,
+    "reason": "e301 instance/main certificate superseded/revoked2026-11-11T14:15:17Z, checked14:15:20Z"
+  }
+}

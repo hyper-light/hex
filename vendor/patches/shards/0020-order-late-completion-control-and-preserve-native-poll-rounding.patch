@@ -1,0 +1,51 @@
+diff --git a/crates/api/src/client.rs b/crates/api/src/client.rs
+index 23fdae2078c2243f8d7fc4660badd2cba79f0516..c8c99812987d5f12cedf5a5e5ef74151291581a3 100644
+--- a/crates/api/src/client.rs
++++ b/crates/api/src/client.rs
+@@ -2298,9 +2298,9 @@ mod tests {
+             deadline: Instant::now().checked_add(patience).unwrap(),
+         };
+         let (receiver, mut writer) = crate::physical::report::Receiver::new(request).unwrap();
+-        // Model two exact failed native cancellation calls: the deadline-bound
+-        // caller's, then the observer's. A real overlapped read remains pending.
+-        receiver.fail_cancel_calls_for_test(2);
++        // Caller error, first observer error, then the old observer's retry
++        // after last-drop. New native-event waiting does not need that retry.
++        receiver.fail_cancel_calls_for_test(3);
+         let shared = managed_shared(0, true, Some(receiver)).unwrap();
+         let native = triomphe::Arc::try_new(ModelNative {
+             identity: Identity {
+@@ -2331,8 +2331,9 @@ mod tests {
+         // Collect every oracle before asserting: even an old stuck-watcher
+         // regression must close this fixture's writer and join its own worker.
+         let report = guest.take_gpu_report(patience);
+-        drop(guest);
+-        let owners = shared.managed_owners.load(Ordering::Acquire);
++        // The observer must first enter its error path while an API owner still
++        // exists; otherwise Requested at its first failure can mask the old gap.
++        native.publish(crate::TerminalScope::Released);
+         let (cleanup_before, uncertainty_timed_out) = {
+             let state = lock(&shared.state);
+             let (state, timed) = shared
+@@ -2343,6 +2344,8 @@ mod tests {
+                 .unwrap_or_else(PoisonError::into_inner);
+             (state.report_cleanup, timed.timed_out())
+         };
++        drop(guest);
++        let owners = shared.managed_owners.load(Ordering::Acquire);
+         // No API owner exists and no Shared notification is sent here. The OS
+         // alone completes its pending read as this owned writer writes/closes.
+         let wrote = writer.write_all(b"later kernel completion");
+diff --git a/crates/api/src/physical/report/unix.rs b/crates/api/src/physical/report/unix.rs
+index b311712b56313ca8da64b6cc489ba780ee554d53..8f7f913161322bed57d653ae082c76dbcf0d1750 100644
+--- a/crates/api/src/physical/report/unix.rs
++++ b/crates/api/src/physical/report/unix.rs
+@@ -82,7 +82,7 @@ impl Reader {
+             }
+             let millis = left
+                 .as_millis()
+-                .checked_add(u128::from(left.subsec_nanos() % 1_000_000 != 0))
++                .checked_add(u128::from(!left.subsec_nanos().is_multiple_of(1_000_000)))
+                 .ok_or(Refusal::GpuProbe(GpuProbeError::Count))?;
+             let timeout = i32::try_from(millis).unwrap_or(i32::MAX);
+             let mut event = libc::pollfd {

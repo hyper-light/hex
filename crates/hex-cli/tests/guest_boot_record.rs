@@ -42,6 +42,7 @@ fn boot_to_ready_and_stop() {
         kernel: given("HEX_GUEST_KERNEL"),
         initrd: given("HEX_GUEST_INITRD"),
         vcpus: host_cpus(),
+        gpu: false,
         // Shards' least guest and twice HEX-GUEST-19's measured peak, as guest_real sizes it.
         memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH) + 2 * 284,
         shares: Vec::new(),

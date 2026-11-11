@@ -1,0 +1,35 @@
+{
+  "parent": "a86c7bad427f6ba576d95b975275c09e0bfe0ed6",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": {
+    "crates/hex-runtime/src/firecracker/native.rs": "04d39d44e87222ab208795fe27b53d7e3120d4cee81a2cb9076fc85bbd3a0b88",
+    "crates/hex-runtime/src/firecracker/vfio.rs": "7b95cbbfb18d20767e11a418132ba3e0bbe33615fa327c1ba16ed9dade3c24ff"
+  },
+  "scope": "Required R01 increment in the new VFIO feature; not a reproduced native/OOM defect claim. Native selection/companion/class/IOMMU/driver checks and open sequence retained.",
+  "changes": [
+    "Reuse existing FC native path/text fallible copy helpers through private pub(super) visibility; no new public API/owner/parser.",
+    "Explicit VFIO group path joins, selected SBDF copies, canonical address formatting, u32 group formatting and pci_ physical-key formatting reserve fallibly.",
+    "Canonical identity still uses SAME hex_gpu PciAddress parser/Display and Identity::key; no second identity parser/picker/cache."
+  ],
+  "bounds": {
+    "canonical_SBDF": "ffff:ff:1f.7 length12: existing Linux domain16 bound plus bus8/device5/function3",
+    "group_name": "u32 maximum ten decimal digits",
+    "function_id": "existing pci_ prefix +u64 maximum sixteen hexadecimal digits",
+    "paths": "existing fallible checked FC path helper, no new path format/default"
+  },
+  "new_control": "firecracker::vfio::tests::native_function_names_keep_canonical_full_physical_identity",
+  "expected": "canonical01:00.0 maps pci_100, maximum native address maps pci_ffffffff, maximum group retains exact decimal, noncanonical forms refuse; pure only",
+  "checks": {
+    "scoped_rustfmt": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "new_control": "UNRUN",
+    "test_dispatches": 0,
+    "native_effects": 0
+  },
+  "originals": "Existing VFIO authority tests and all runtime behavior guards retain original assertions. Sink/CPU observer/subset originals unchanged; immutable earlier source receipts preserved.",
+  "remaining": "Std filesystem enumeration/canonicalization and shared error-render allocation internals remain unproven; coordinated DuplexOwner source still pending. This is not global R01/zero-allocation proof. Actual VFIO hardware/driver/native execution/fault, full target gates, allocation profiles and comparative evidence remain ROOT/native QA work.",
+  "R02_R16": "Existing official Linux/Firecracker native formats and original source authority are reused; no architecture, tuning constant, wait/cache/queue/retry or native effect added. Exact same selected identities, holders, scope and costs persist. No performance, native, portability or completion claim."
+}

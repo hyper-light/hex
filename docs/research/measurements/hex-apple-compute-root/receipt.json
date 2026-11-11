@@ -1,0 +1,388 @@
+{
+  "exit": 0,
+  "reaped": true,
+  "archive_sha256": "cded12ef996cf4b935a387466da3fe0d4ebc7c7a4cc3b1726386bca672cc5950",
+  "bytes": 293804,
+  "readback": {
+    "device-guest-bridge-df9f6633-checks-v1": {
+      "revision": "df9f66337ddb0f5d60d8f9936ceabf865269de28",
+      "source_files": 1744,
+      "source_unchanged": true,
+      "result": {
+        "source": "df9f66337ddb0f5d60d8f9936ceabf865269de28",
+        "archive_sha256": "cfa788f7711fd51199975e39c0eb622a567152b012e920273b59e523c97528cf",
+        "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "arch": "arm64",
+        "scope": "ROOT GPU facts/GuestConfig bridge and supported-target compile; final phase reproduces stale backend conformance only, no native attachment effect",
+        "phases": [
+          {
+            "name": "metal-facts",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "test",
+              "-p",
+              "hex-node",
+              "--lib",
+              "--locked",
+              "facts::gpu_identity_tests::",
+              "--",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "pid": 44754,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "188f3f4c0674913169ad63b5c3131ea85f9dcadcb6fcb271e1f61fc6a91036d2",
+            "bytes": 5018,
+            "required_selected": true
+          },
+          {
+            "name": "guest-spec",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "test",
+              "-p",
+              "hex-runtime",
+              "--lib",
+              "--locked",
+              "guest::tests::the_guests_spec_names_its_init_ports_and_shares",
+              "--",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "pid": 45454,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "a73eb830e1c5bf653e4f33e8b34c196c844da665eae40f3794f4bab6331a3192",
+            "bytes": 2002,
+            "required_selected": true
+          },
+          {
+            "name": "guest-vars",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "test",
+              "-p",
+              "hex-runtime",
+              "--lib",
+              "--locked",
+              "guest::tests::every_missing_guest_input_is_named_in_one_refusal",
+              "--",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "pid": 45513,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "e64cfd10338320a298f4b38d6cba09a4ed83b100287e8c1be5197237e54e582f",
+            "bytes": 417,
+            "required_selected": true
+          },
+          {
+            "name": "cli-native-clippy",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "clippy",
+              "-p",
+              "hex-cli",
+              "--all-targets",
+              "--locked",
+              "--",
+              "-D",
+              "warnings"
+            ],
+            "pid": 45515,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "cdb73f520c0ae7c01e1d77f5f8668ab58ab5b46671f7fad38c4a2cdcf6694913",
+            "bytes": 2949
+          },
+          {
+            "name": "node-linux-clippy",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "clippy",
+              "-p",
+              "hex-node",
+              "--all-targets",
+              "--locked",
+              "--target",
+              "aarch64-unknown-linux-musl",
+              "--",
+              "-D",
+              "warnings"
+            ],
+            "pid": 45602,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "f2f3ebc24b3ab7370f0246e6e51a0426bbf69ef36029dd3bc1e1941e7cf0a35d",
+            "bytes": 3381
+          },
+          {
+            "name": "backend-conformance-red",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "test",
+              "-p",
+              "hex-runtime",
+              "--lib",
+              "--locked",
+              "guest::tests::device_routing_tests::conformance_accepts_every_supported_host_backend",
+              "--",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "pid": 45841,
+            "exit": 101,
+            "reaped": true,
+            "sha256": "41db51007d19f6c9dca5f242b9d5c2f700c2691129156693c001535771c12b19",
+            "bytes": 1040
+          }
+        ],
+        "exit": 1,
+        "temp_entries": 0
+      },
+      "signed_source_equal": true
+    },
+    "device-backend-green-03f19b89-checks-v1": {
+      "revision": "03f19b891417f2f87de331baf359c1fdb612c5e4",
+      "source_files": 1786,
+      "source_unchanged": true,
+      "result": {
+        "source": "03f19b891417f2f87de331baf359c1fdb612c5e4",
+        "archive_sha256": "174eff9fc1c467927900985d29aa2020bb961fc1f82006dd60bf86c444028654",
+        "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "arch": "arm64",
+        "scope": "ROOT supported backend conformance correction and Windows ARM64 CLI compile; no actual VM or GPU attachment effect",
+        "phases": [
+          {
+            "name": "backend-conformance",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "test",
+              "-p",
+              "hex-runtime",
+              "--lib",
+              "--locked",
+              "guest::tests::device_routing_tests::",
+              "--",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "pid": 46339,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "a30a1f088942a01f5a0eb974ca07f76099826392e0b4f6314b303ab7325ce134",
+            "bytes": 5797,
+            "required_selected": true
+          },
+          {
+            "name": "cli-winarm-clippy",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "clippy",
+              "-p",
+              "hex-cli",
+              "--all-targets",
+              "--locked",
+              "--target",
+              "aarch64-pc-windows-msvc",
+              "--",
+              "-D",
+              "warnings"
+            ],
+            "pid": 47050,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "9f8eab1b2a6d02c8f384adde7a4b48f5ad59b4beadbd01d08418948d9d3dc67c",
+            "bytes": 4341
+          }
+        ],
+        "exit": 0,
+        "temp_entries": 0
+      },
+      "signed_source_equal": true
+    },
+    "apple-compute-native-d3e936d1-checks-v1": {
+      "revision": "d3e936d12f89397715f8a3b34a4ca69160252f78",
+      "source_files": 1790,
+      "source_unchanged": true,
+      "result": {
+        "source": "d3e936d12f89397715f8a3b34a4ca69160252f78",
+        "archive_sha256": "5cb02578d6bea308af1dc218a49149a50614a5a6a52fe6b41c0765a3c069b3c7",
+        "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "registry_id": 4294968831,
+        "page_bytes": 16384,
+        "elements": 4096,
+        "rounds": 1,
+        "native_guard_seconds": 151.0,
+        "guard_source": "twice the slowest existing validation_run record",
+        "phases": [
+          {
+            "name": "compile-original",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "test",
+              "-p",
+              "hex-gpu",
+              "--test",
+              "apple_compute",
+              "--no-run",
+              "--locked",
+              "--message-format=json"
+            ],
+            "expected_exit": 0,
+            "guard_seconds": 151.0,
+            "pid": 48246,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "a05e4fbabcb91b72c4aef09eb5c4950e5998bfe013ff08d3642a24ff268f7b96",
+            "bytes": 26703,
+            "required": true
+          },
+          {
+            "name": "selected-compute",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/apple-compute-native-d3e936d1-checks-v1/target/debug/deps/apple_compute-eaad80c70827c01d",
+              "--ignored",
+              "--exact",
+              "root_selected_metal_device_executes_checked_kernel",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "expected_exit": 0,
+            "guard_seconds": 151.0,
+            "pid": 48425,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "85313188807698fe944ca8459f04bf9a5b8173ab0563d8b4614825790f6b1f61",
+            "bytes": 642,
+            "required": true
+          },
+          {
+            "name": "wrong-identity",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/apple-compute-native-d3e936d1-checks-v1/target/debug/deps/apple_compute-eaad80c70827c01d",
+              "--ignored",
+              "--exact",
+              "root_selected_metal_device_executes_checked_kernel",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "expected_exit": 101,
+            "guard_seconds": 151.0,
+            "pid": 48427,
+            "exit": 101,
+            "reaped": true,
+            "sha256": "a87dd6a11394df12d1ba080f2b29763c29c2d4078e8c4b1e6cf946b14c9c32d6",
+            "bytes": 861,
+            "required": true
+          },
+          {
+            "name": "compile-mutation",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "test",
+              "-p",
+              "hex-gpu",
+              "--test",
+              "apple_compute",
+              "--no-run",
+              "--locked",
+              "--message-format=json"
+            ],
+            "expected_exit": 0,
+            "guard_seconds": 151.0,
+            "pid": 48428,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "3dea9a5c222f43a9d05aea38940da09fe5a9b72ac737d295320cc5f474774db1",
+            "bytes": 26666,
+            "required": true
+          },
+          {
+            "name": "missing-gpu-write",
+            "command": [
+              "nice",
+              "-n",
+              "10",
+              "/Users/adalundhe/.cache/hex-lead/apple-compute-native-d3e936d1-checks-v1/mutation-target/debug/deps/apple_compute-eaad80c70827c01d",
+              "--ignored",
+              "--exact",
+              "root_selected_metal_device_executes_checked_kernel",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "expected_exit": 101,
+            "guard_seconds": 151.0,
+            "pid": 48641,
+            "exit": 101,
+            "reaped": true,
+            "sha256": "1374f40238fc35be22781248a923480dd74179a165206e2f6c589e6f360108ff",
+            "bytes": 99278,
+            "required": true
+          }
+        ],
+        "compile-original_binary": {
+          "path": "/Users/adalundhe/.cache/hex-lead/apple-compute-native-d3e936d1-checks-v1/target/debug/deps/apple_compute-eaad80c70827c01d",
+          "sha256": "ec1a535028672fd9b230eaf7c9e62064e378991d510b50e668d432c066eb65f0"
+        },
+        "wrong_registry_id": 9223372041149744639,
+        "mutation": {
+          "changed": [
+            "crates/hex-gpu/tests/apple_compute.rs"
+          ],
+          "before_sha256": "7762d5a476ec827a768d68d503217041806c6566cae65501f0a515d7f735cdbb",
+          "after_sha256": "0f9a3981dbbaf879b0ef3b19897851c020a2acd27509c19365fe66e4157f29f0"
+        },
+        "compile-mutation_binary": {
+          "path": "/Users/adalundhe/.cache/hex-lead/apple-compute-native-d3e936d1-checks-v1/mutation-target/debug/deps/apple_compute-eaad80c70827c01d",
+          "sha256": "4451f8d7e52af50dc172b74322855aabb7a8e4ebba8aa00312f267eb580eea63"
+        },
+        "exit": 0,
+        "source_unchanged": true,
+        "temp_entries": 0
+      },
+      "signed_source_equal": true
+    }
+  }
+}

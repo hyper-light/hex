@@ -1,0 +1,11 @@
+{
+  "status": "SOURCE ONLY; no new test/compiler/native result",
+  "base": "f4394fd1f66b1304aa52ee7b90d70cfbf03bce16",
+  "path": "crates/hex-node/src/recorded.rs",
+  "required_cohort": "L1 9b8f6043686e9d3b2541a42b5f0643562af5d03d devices::Books::physical_luid +facts::physical_luid; existing L1204c and L3KMT/1ca. No floating/private stubs.",
+  "signature": "Recorded<R>:devices::Books::physical_luid(&self,id:DeviceId)->Result<[u8;8],Refusal>",
+  "contract": "Delegate directly to this Recorded authority's SAME initialized books.prober via L1 factual method. No Recover/WithGuest callback, capacity/report recursion, second Gpus/catalog/owner, selection/holder/cache/wire/schema field or provider lock across remote I/O. Missing initialization refuses; native mapping errors retain claims. LUID bytes are current-boot evidence only, never stable DeviceId or ordinal/PCI cast.",
+  "integration": "Apply only8line method next to Books::physical_devices in ROOT recorded.rs, preserve Root7 route_for calls, canonical5f fixture, all route/allocation/holder projections and guarded report launcher. L2 consumes SAME authority in-process; native correspondence/physical node-mask proof remains owed.",
+  "validation": "Scoped rustfmt parser0 only. Trivial forwarding has no implementation-mirroring extra test. ROOT joins exact Books/facts/provider and existing controls; no duplicate old16/new1/native campaign.",
+  "policy": "7d7e0855 / rulesdf2 implementer, acknowledged Recorded scope"
+}

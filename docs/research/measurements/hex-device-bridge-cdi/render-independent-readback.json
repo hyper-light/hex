@@ -1,0 +1,69 @@
+[
+  {
+    "version": "v1",
+    "run": "r17",
+    "source": "661cbd8140bdcc5510b20e6535790690997ca33e",
+    "summary_sha256": "50955835578b8210330e4b839f05630773fd5611896854480f3548aa32af9568",
+    "private_registration_only": true,
+    "d4d_baseline_matches_signed_source": true,
+    "outside_private_capture_matches_signed_bundle": true,
+    "counted_test_logs": 27,
+    "passed": 27,
+    "failed": 0,
+    "all_recorded_test_children_reaped": true,
+    "baseline_files_equal": 12,
+    "binary_sha256": "363509208a3f28464249139b4e364761936b1928ee112613ccba46f6a382bc8d",
+    "checks": {
+      "baseline-build": 0,
+      "current-build": 0,
+      "legacy-byte-comparison": 0,
+      "clippy-lib": 101,
+      "clippy-tests": 101,
+      "rustfmt": 0
+    }
+  },
+  {
+    "version": "v2",
+    "run": "r18",
+    "source": "74f889be4a7022163e7cf1f7f6edddfebfcf1f73",
+    "summary_sha256": "8b7f019e4d6e01b5f0a90eb43bf00528db0136718d90b242e4f0bdff3493d54b",
+    "private_registration_only": true,
+    "d4d_baseline_matches_signed_source": true,
+    "outside_private_capture_matches_signed_bundle": true,
+    "counted_test_logs": 26,
+    "passed": 26,
+    "failed": 0,
+    "all_recorded_test_children_reaped": true,
+    "baseline_files_equal": 12,
+    "binary_sha256": "8f353ddda1c8596b8aae8c23f7e40c56e4826e2a339b556f8944132e4cc24390",
+    "checks": {
+      "current-build": 0,
+      "legacy-byte-comparison": 0,
+      "clippy-lib": 101,
+      "clippy-tests": 101,
+      "rustfmt": 0
+    }
+  },
+  {
+    "version": "v3",
+    "run": "r19",
+    "source": "2a059b5c56f9561a225c8172c808679c269e8ea1",
+    "summary_sha256": "b3e29c6e8c7456d5334676bb6d3f3dcd47510f53811bafcec74c337f433c793c",
+    "private_registration_only": true,
+    "d4d_baseline_matches_signed_source": true,
+    "outside_private_capture_matches_signed_bundle": true,
+    "counted_test_logs": 26,
+    "passed": 26,
+    "failed": 0,
+    "all_recorded_test_children_reaped": true,
+    "baseline_files_equal": 12,
+    "binary_sha256": "79e54e7bf21be9f33e29b7cb50fce51d26eb595433068302bf5432a9f0318c0e",
+    "checks": {
+      "current-build": 0,
+      "legacy-byte-comparison": 0,
+      "clippy-lib": 0,
+      "clippy-tests": 0,
+      "rustfmt": 0
+    }
+  }
+]

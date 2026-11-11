@@ -1,0 +1,36 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "b2e5e185652cb87336eca993e8eec3aeb892045e",
+  "source": {
+    "crates/hex-api/src/runtime.rs": "12c011b563aa977c82f1387598aec5415a505aa42748a9b2ef86ce8645c832c1",
+    "crates/hex-runtime/src/devices.rs": "0e658fb70d3de13f5dbd66f786fa46b32933888ff8be5ae58102e8e4d33e7354",
+    "crates/hex-runtime/src/devices/tests.rs": "284021926eee710cd9c263fd26905e7f35aaf4446faf2a3c45e358cd8a02f4db"
+  },
+  "dependencies": [
+    "a56/b2 factual selection helper",
+    "L3 bd0/e4/aece canonical Store/Turns/reference checks",
+    "Node616 producer"
+  ],
+  "contract": [
+    "Capacity fresh validation accepts exact canonical S subset full backing grant P; initialized offer Required GPU rule unchanged.",
+    "Catalog.handoff consumes SAME RouteReceipt.check_backing_parts factual profile/subset formula; Any factual receipt is not fresh offer permission.",
+    "Only one dedicated consuming lifetime per source key, even disjoint S; no parallel holder cache/table.",
+    "Catalog reports Backing(P) for every conflicting full-P slot while source Live/Draining, including BoxCreating or no-init/run/exit Deleting reference. Released source permits exact existing Box S only; changed immutable Box spec refuses.",
+    "Native effects still require common Store/native guard plus positive whole source Released, not this metadata helper alone."
+  ],
+  "test_notes": [
+    "New subset_handoff_keeps_full_pool_holder_and_one_consumer_until_scope_released UNRUN.",
+    "Existing canonical_pool_holder test changes ONE expected Box to Backing per explicit new holder authority contract, strengthening full-scope ownership. Its prior source/actual green is retained at parent/frozenRoot; no existing original CPU/subset/c9 oracle changes."
+  ],
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "tests": "UNRUN",
+    "native": 0,
+    "dispatches": 0
+  },
+  "remaining": "Index cardinality/sole-consumer and complete FC native handoff source increment is still dirty/unsealed, not included. Fresh selected guest readiness/lazy sibling re-provisioning, actual native hardware/cost/gates remain open/ROOT-owned; no lane completion claim."
+}

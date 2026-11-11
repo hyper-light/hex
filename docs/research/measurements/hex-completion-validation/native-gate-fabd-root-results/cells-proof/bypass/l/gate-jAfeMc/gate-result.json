@@ -1,0 +1,10 @@
+{
+  "case": "controller-parent-death",
+  "cleanup_uncertainty": [],
+  "observation": {
+    "Err": "exact pidfd exit guard expired"
+  },
+  "schema": "hex-completion-native-gate-1",
+  "scope": "root-native-standin",
+  "vm_gpu_claim": false
+}

@@ -1,0 +1,51 @@
+{
+  "bytes": 315677,
+  "sha256": "0535147d2866cf6fef84df54165edf471343c3818e780ae88a0364c3a12cf9cd",
+  "members": {
+    "cohort-fb2fef5a-linux-handoff-after-fb2f/source-before.json": {
+      "bytes": 460140,
+      "sha256": "c0410bdbbcfdd87b70c54fdabba87e39c47da37cf29cc6f012a979f2f6857e2d"
+    },
+    "cohort-fb2fef5a-linux-handoff-after-fb2f/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-fb2fef5a-linux-handoff-after-fb2f/owned-scope-limits.json": {
+      "bytes": 258,
+      "sha256": "af940e6bf7adf7303184f784801bdf3fa652c83b0c7978e43115725d3258e948"
+    },
+    "cohort-fb2fef5a-linux-handoff-after-fb2f/factual-receipt-new.log": {
+      "bytes": 982,
+      "sha256": "627c03d14472a03ffb6efbad7922ef246f20ddbba3bb44c910b3265af7bcfd62"
+    },
+    "cohort-fb2fef5a-linux-handoff-after-fb2f/running.json": {
+      "bytes": 3234,
+      "sha256": "f53fb9d30d3c3354dbfce9b8f9f700b9fbaaf1cb68be77f3eac0c6fe5c1a3edf"
+    },
+    "cohort-fb2fef5a-linux-handoff-after-fb2f/store-reference-original-after.log": {
+      "bytes": 3398,
+      "sha256": "388ba5be21386315d82ecaecc3c109126142105cdf5965f6cee37857261b9bd4"
+    },
+    "cohort-fb2fef5a-linux-handoff-after-fb2f/handoff-recorded-corrected-fixtures.log": {
+      "bytes": 2930,
+      "sha256": "73d89799d6eedaa40c89f6cc5a8ba04de1e77cf17d8a3edcc653dd169b33be28"
+    },
+    "cohort-fb2fef5a-linux-handoff-after-fb2f/source-after.json": {
+      "bytes": 460140,
+      "sha256": "c0410bdbbcfdd87b70c54fdabba87e39c47da37cf29cc6f012a979f2f6857e2d"
+    },
+    "cohort-fb2fef5a-linux-handoff-after-fb2f/result.json": {
+      "bytes": 4324,
+      "sha256": "6db1cfb7a28cf46e3693e12efa4378a1eaa690b0bd9b2fb7682004829d9c249a"
+    },
+    "cohort-fb2fef5a-linux-handoff-after-fb2f/collected-binaries.json": {
+      "bytes": 3807,
+      "sha256": "96d3300fd93c4c7d95722fc5af46284ee5d44bed30842770c7dc38b8c3602c49"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

@@ -1,0 +1,41 @@
+{
+  "parent": "3c3d33021d61759a1f34f033384ed030c0714351",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": {
+    "crates/hex-runtime/src/firecracker/native.rs": "46b3f0febe11663f98b71b7fdfb8ebc00c56bf8077254b12709ae4606465919f",
+    "crates/hex-runtime/src/firecracker/pool.rs": "192103deec4ad901ece4201da1078070ac23466ac8f98e107d174041ff6fe54d",
+    "crates/hex-runtime/src/firecracker/transport.rs": "128d25462c410ed8e2f9e146d1265c0483fc41f5887e510920df4c0746ee0dd0"
+  },
+  "dependencies": {
+    "connect": "5c10d010c3a60c09015f57162e570f8737075d76",
+    "connect_original_controls": "dc057f2f7f38b971e072ce9ac8ccc9c6bd677f16",
+    "same_Core_RPCs": "66d18ca62f045bf388a4e5764baa562016f19d53"
+  },
+  "scope": "Required full creation/observation protocol deadline propagation at existing client/FC seams, after exact signed producer; not a reproduced timing-bug remedy or actual acceptance claim.",
+  "RPCs": "Creation/observer budget Some(at) calls capacity_before, physical_report_before, create_before on SAME Client. Ordinary None calls retain existing Runtime methods. The original configured/learned operation bound may only shorten at.",
+  "transport": "Readiness now takes original Instant directly. Attachment GET takes original optional Instant and min with its configured per-operation timeout. No relative-duration conversion can extend the original caller Instant. Existing stage Link/StagingStream already caps original creation Instant.",
+  "authority": "Same canonical Box/Pool transaction, NativeScope, selected set, allocation, native receipt and single LinkOwner. No new Runtime method, wire tag/DTO, connection/Proc lifetime timer, owner/cache/retry or budget default.",
+  "limits": "Ordinary bounded cleanup continues with explicitly configured stop_timeout after failure; timeout alone never proves native termination or claim release. Standard filesystem/Store/native syscall interruption and actual scheduler/native walltime/fault acceptance remain unverified, not a hard universal deadline claim.",
+  "original_test_bodies": {
+    "native_io": {
+      "unchanged": true,
+      "sha256": "17843935fddac08dcaa0a9de43d32ad9d714750f42f404e169e2dd555d9ba2f2"
+    },
+    "transport_HTTP": {
+      "unchanged": true,
+      "sha256": "ea6bf2c843c0d5cb315f03198510333240f3c91ea26520c76a405aa28f273086"
+    }
+  },
+  "checks": {
+    "scoped_rustfmt": 0,
+    "diff_check": 0,
+    "compile": "UNRUN/requires coherent client5c10+66d source",
+    "focused_controls": "UNRUN/L4 controls+ROOT matched validation",
+    "test_dispatches": 0,
+    "native_effects": 0
+  },
+  "remaining": "DuplexOwner exact signed producer/consumer still next; CPU observer e5c/subset89ec controls unchanged and no remedy before actual result. Cold-barrier/sink green, target gates, real VM/GPU, allocation/fault/performance evidence remain owed.",
+  "R01_R16": "No new allocation/wait type/architecture/tuning constant; original deadline and existing typed checked RPCs reused. No global R01/performance/portability/native completion claim. Required source policy and signed named-path provenance retained; no laptop/duplicate check."
+}

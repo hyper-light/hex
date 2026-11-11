@@ -5,7 +5,6 @@
 use std::io::Write as _;
 use std::os::windows::io::AsSocket;
 use std::path::Path;
-use std::sync::Arc;
 
 use hex_afunix::{self as socket, Socket as Raw};
 use hex_api::Refusal;
@@ -33,6 +32,21 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.kill"),
     Patience::measuring("client.answer.exec_streams"),
     Patience::measuring("client.answer.run"),
+    Patience::measuring("client.answer.schedule.describe"),
+    Patience::measuring("client.answer.schedule.advertise"),
+    Patience::measuring("client.answer.schedule.submit"),
+    Patience::measuring("client.answer.schedule.hear_create"),
+    Patience::measuring("client.answer.schedule.hear_delete"),
+    Patience::measuring("client.answer.schedule.hear_control"),
+    Patience::measuring("client.answer.schedule.link_up"),
+    Patience::measuring("client.answer.schedule.retry"),
+    Patience::measuring("client.answer.schedule.delete"),
+    Patience::measuring("client.answer.schedule.status"),
+    Patience::measuring("client.answer.capacity"),
+    Patience::measuring("client.answer.physical_report"),
+    Patience::measuring("client.answer.initialize_backing"),
+    Patience::measuring("client.answer.release_backing"),
+    Patience::measuring("client.answer.backing_usage"),
 ];
 
 pub type Client = Core<Socket>;
@@ -210,7 +224,7 @@ impl Client {
         })?;
         raw.set_nonblocking(true)
             .map_err(|e| Refusal::os("making the node agent's socket non-blocking", e))?;
-        Core::hello(Arc::new(Shared::new(Socket { raw })))
+        Core::hello(Shared::try_new(Socket { raw })?)
     }
 }
 

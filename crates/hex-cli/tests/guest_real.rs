@@ -26,6 +26,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Network, OciSpec, Program, Rootfs, Runtime};
@@ -55,6 +56,9 @@ fn act(act: &Act) -> Program {
 impl OciBoxes {
     fn box_spec(&self, id: BoxId, bounds: Bounds, init: &Act) -> BoxSpec {
         BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id,
             bounds,
             class: ClassSpec::Oci(Box::new(OciSpec {
@@ -143,6 +147,7 @@ fn the_oci_class_holds_its_contract_through_a_real_shards_guest() {
         // Unset, the host's CPUs (`host_cpus`): the fastest run, as a vCPU costs nothing while it
         // idles.
         vcpus: std::env::var("HEX_GUEST_CPUS").map_or_else(|_| host_cpus(), |v| v.parse().unwrap()),
+        gpu: false,
         // Unset, Shards' least guest and twice this workload's measured peak (PEAK_MIB): the margin
         // C's guest_tree takes, stated as a factor, never below what was measured.
         memory_mib: number(
@@ -182,6 +187,14 @@ struct Counted {
 }
 
 impl shards_api::Guests for Counted {
+    fn probe_gpu(
+        &self,
+        spec: &shards_api::GuestSpec,
+        patience: Duration,
+    ) -> Result<shards_api::GpuProbe, shards_api::Refusal> {
+        self.shards.probe_gpu(spec, patience)
+    }
+
     fn backend(&self) -> Result<shards_api::Backend, shards_api::Refusal> {
         self.shards.backend()
     }

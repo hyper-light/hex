@@ -11,8 +11,8 @@ use super::ffi::{
     ADL_MAX_PATH, AdapterInfo, AdapterInfoArray, AdlMemoryInfo2, AdlPmLogDataBuffer,
     AdlVersionsInfoX2,
 };
-use super::{Calls, Found, open};
-use crate::{Absent, Gpu, Load, PciAddress, Skipped, Unread, Vendor};
+use super::{Calls, Found, open as native_open};
+use crate::{Absent, Gpu, Identity, Load, PciAddress, Skipped, Unread, Vendor};
 
 const INVALID_ADL_IDX: c_int = -5;
 const DISABLED_ADAPTER: c_int = -10;
@@ -52,10 +52,16 @@ fn row(index: c_int, bus: c_int) -> AdapterInfo {
     } else {
         format!("&{:02}", index + 1)
     };
+    // Other buses below are synthetic distinct PNP instances, not renamed Jupiter aliases.
+    let instance_tail = if bus == 196 {
+        "0041".to_owned()
+    } else {
+        format!("0041B{bus}")
+    };
     AdapterInfo {
         i_adapter_index: index,
         str_udid: text(&format!(
-            "PCI_VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1_4&35FE04F8&0&0041{suffix}A"
+            "PCI_VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1_4&35FE04F8&0&{instance_tail}{suffix}A"
         )),
         i_bus_number: bus,
         i_device_number: 0,
@@ -65,7 +71,7 @@ fn row(index: c_int, bus: c_int) -> AdapterInfo {
         str_display_name: text(""),
         _i_exist: 1,
         str_pnp_string: text(&format!(
-            "PCI\\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\\4&35FE04F8&0&0041{suffix}"
+            "PCI\\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\\4&35FE04F8&0&{instance_tail}{suffix}"
         )),
         ..AdapterInfo::default()
     }
@@ -81,6 +87,7 @@ struct Adl {
     table_size: c_int,
     vram_mb: Result<c_int, c_int>,
     calls: u32,
+    native: Vec<(String, Result<PciAddress, Unread>)>,
 }
 
 /// jupiter's ADL as recorded.
@@ -100,6 +107,7 @@ fn jupiter() -> Adl {
         table_size: 2052,
         vram_mb: Ok(73),
         calls: 0,
+        native: Vec::new(),
     }
 }
 
@@ -115,7 +123,41 @@ impl Adl {
     }
 }
 
+// The recording supplies native properties separately from ADL. Production never uses this
+// fixture-only single-segment value; it always calls Configuration Manager.
+fn open(mut adl: Adl) -> Result<Found<Adl>, Absent> {
+    if adl.native.is_empty() {
+        adl.native = adl
+            .rows
+            .iter()
+            .map(|row| {
+                let instance = super::ffi::adl_string(&row.str_pnp_string)
+                    .unwrap_or("")
+                    .to_owned();
+                let pci = (|| {
+                    Some(PciAddress {
+                        domain: 0,
+                        bus: u8::try_from(row.i_bus_number).ok()?,
+                        device: u8::try_from(row.i_device_number).ok()?,
+                        function: u8::try_from(row.i_function_number).ok()?,
+                    })
+                })()
+                .ok_or(Unread::Malformed);
+                (instance, pci)
+            })
+            .collect();
+    }
+    native_open(adl)
+}
+
 impl Calls for Adl {
+    fn physical_address(&mut self, instance: &str) -> Result<PciAddress, Unread> {
+        self.native
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(instance))
+            .map(|(_, result)| *result)
+            .unwrap_or(Err(Unread::Gone))
+    }
     fn count(&mut self) -> Result<c_int, c_int> {
         self.calls += 1;
         self.count
@@ -172,7 +214,7 @@ fn the_8060s() -> Gpu {
         vendor: Vendor::Amd,
         model: "AMD Radeon(TM) 8060S Graphics".to_owned(),
         memory_total_bytes: 4_294_967_296,
-        pci: PciAddress::parse("0000:c4:00.0").unwrap(),
+        identity: Identity::Pci(PciAddress::parse("0000:c4:00.0").unwrap()),
         driver_version: "25.20.32.06".to_owned(),
     }
 }
@@ -184,7 +226,15 @@ fn the_8060s() -> Gpu {
 fn jupiters_five_adapters_are_one_gpu() {
     let found = open(jupiter()).unwrap();
     assert_eq!(found.gpus, vec![the_8060s()]);
-    assert_eq!(found.amd.adapters, vec![0]);
+    assert_eq!(
+        found
+            .amd
+            .adapters
+            .iter()
+            .map(|a| a.index)
+            .collect::<Vec<_>>(),
+        vec![0]
+    );
     assert!(found.skipped.is_empty());
 }
 
@@ -285,9 +335,21 @@ fn rows_are_grouped_other_vendors_passed_over_and_garbage_skipped() {
     adl.rows = vec![row(0, 197), row(1, 196), row(2, 197), intel, garbled];
     adl.count = Ok(5);
     let found = open(adl).unwrap();
-    let order: Vec<String> = found.gpus.iter().map(|g| g.pci.to_string()).collect();
+    let order: Vec<String> = found
+        .gpus
+        .iter()
+        .map(|g| g.pci().unwrap().to_string())
+        .collect();
     assert_eq!(order, ["0000:c4:00.0", "0000:c5:00.0"]);
-    assert_eq!(found.amd.adapters, vec![1, 0]);
+    assert_eq!(
+        found
+            .amd
+            .adapters
+            .iter()
+            .map(|a| a.index)
+            .collect::<Vec<_>>(),
+        vec![1, 0]
+    );
     assert_eq!(
         found.skipped,
         vec![Skipped::Adl {
@@ -372,4 +434,108 @@ fn a_missing_adl_is_refused_with_what_was_tried() {
         super::sys::absent(error),
         Absent::NoLibrary { tried, .. } if tried == NAMES
     ));
+}
+
+/// AC-T7.3.1: two full native identities with the same segment-less BDF remain independent.
+#[test]
+fn native_segments_precede_grouping_and_keep_exact_alias_counter_pairs() {
+    let mut adl = jupiter();
+    adl.count = Ok(2);
+    adl.rows.truncate(2);
+    adl.native = adl
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(n, row)| {
+            (
+                super::ffi::adl_string(&row.str_pnp_string)
+                    .unwrap()
+                    .to_owned(),
+                Ok(PciAddress {
+                    domain: u32::try_from(n).unwrap() + 41,
+                    bus: 196,
+                    device: 0,
+                    function: 0,
+                }),
+            )
+        })
+        .collect();
+    let mut found = open(adl).unwrap();
+    assert_eq!(found.gpus.len(), 2);
+    for (n, gpu) in found.gpus.iter().enumerate() {
+        let aliases = found.amd.aliases(gpu.identity).unwrap();
+        assert_eq!(aliases.len(), 1);
+        assert_eq!(
+            aliases[0].instance(),
+            super::ffi::adl_string(&found.amd.calls.rows[n].str_pnp_string).unwrap()
+        );
+        assert_eq!(
+            aliases[0].udid(),
+            super::ffi::adl_string(&found.amd.calls.rows[n].str_udid).unwrap()
+        );
+        assert_eq!(found.amd.adapters[n].index, i32::try_from(n).unwrap());
+    }
+    assert_eq!(sample(&mut found).len(), 2);
+}
+
+/// AC-T7.3.1: missing native correspondence is per-device uncertainty, never a guessed segment.
+#[test]
+fn missing_or_conflicting_native_properties_cannot_publish_a_guessed_gpu() {
+    let mut missing = jupiter();
+    missing.native = missing
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                super::ffi::adl_string(&row.str_pnp_string)
+                    .unwrap()
+                    .to_owned(),
+                Err(Unread::Gone),
+            )
+        })
+        .collect();
+    let found = open(missing).unwrap();
+    assert!(found.gpus.is_empty());
+    assert_eq!(found.skipped.len(), 5);
+    let mut conflict = jupiter();
+    conflict.rows[1].str_adapter_name = text("contradictory physical metadata");
+    let found = open(conflict).unwrap();
+    assert!(found.gpus.is_empty());
+    assert_eq!(
+        found.skipped,
+        vec![Skipped::Adl {
+            adapter: 0,
+            why: Unread::Ambiguous
+        }]
+    );
+}
+
+/// AC-T7.3.1: sampling keeps the same identity/aliases; a changed native join never repicks.
+#[test]
+fn native_alias_loss_withholds_fresh_counters_and_retains_the_original_receipt() {
+    let mut found = open(jupiter()).unwrap();
+    let identity = found.gpus[0].identity;
+    assert_eq!(found.amd.aliases(identity).unwrap().len(), 5);
+    found.amd.calls.native[2].1 = Err(Unread::WindowsCm { code: 37 });
+    let before = found.amd.calls.calls;
+    assert_eq!(
+        sample(&mut found),
+        vec![Load {
+            busy_percent: Err(Unread::WindowsCm { code: 37 }),
+            memory_used_bytes: Err(Unread::WindowsCm { code: 37 }),
+        }]
+    );
+    assert_eq!(found.amd.calls.calls, before);
+    assert_eq!(found.gpus[0].identity, identity);
+    assert_eq!(
+        found.amd.aliases(identity).unwrap_err(),
+        Unread::WindowsCm { code: 37 }
+    );
+    found.amd.calls.native[2].1 = Ok(PciAddress {
+        domain: 9,
+        bus: 196,
+        device: 0,
+        function: 0,
+    });
+    assert_eq!(sample(&mut found)[0].busy_percent, Err(Unread::Ambiguous));
 }

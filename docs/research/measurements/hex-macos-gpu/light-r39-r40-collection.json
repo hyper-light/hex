@@ -1,0 +1,60 @@
+{
+  "archive_bytes": 382995,
+  "archive_sha256": "5348f6dd62ed54abde20c741713ccfcac11b322781e1805cdd76ec7b3b207dd6",
+  "checks": [
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "hex-gpu",
+        "--lib",
+        "--locked",
+        "--",
+        "--test-threads=1"
+      ],
+      "elapsed_s": 22.69806408882141,
+      "exit": 0,
+      "label": "pure-lib",
+      "log_bytes": 2646,
+      "log_sha256": "e349e73ccb21816c8658c1847e8d15fe756a6255ee37c94b51a42d887966258b",
+      "pid": 42142,
+      "reaped": true,
+      "test_results": [
+        [
+          "18",
+          "0",
+          "0"
+        ]
+      ]
+    },
+    {
+      "argv": [
+        "cargo",
+        "clippy",
+        "-p",
+        "hex-gpu",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "elapsed_s": 1.218984842300415,
+      "exit": 0,
+      "label": "native-clippy",
+      "log_bytes": 513,
+      "log_sha256": "43acfb665e78d93d6e342d0de845b89a74194c8c36d40d1fc42a8e4c99c0b081",
+      "pid": 42378,
+      "reaped": true,
+      "test_results": []
+    }
+  ],
+  "members": 12,
+  "native_gpu_executed": false,
+  "private_collection": "/Users/adalundhe/.cache/hex-lead/transfers/macos-gpu-01a1c640-0e625a45-light-v2",
+  "source_before_after_equal": true,
+  "source_files": 1707,
+  "source_matches_git": true,
+  "temp_entries": 0
+}

@@ -1,0 +1,122 @@
+{
+  "archive": "/Users/adalundhe/.cache/hex-lead/transfers/device-recovery-identity-01a1c640-9bbb62b2-v2/proof-bundle.tar.gz",
+  "archive_sha256": "bdbe3bd98a964e7f636c75d53fef8877d62a0adbe2809ac96f33a80751a75b48",
+  "archive_bytes": 116712,
+  "member_count": 16,
+  "all_member_hashes_verified": true,
+  "source_unchanged": true,
+  "source_manifest_before_sha256": "6afeb062b517083f1f712bc76b0d6d4d17d4b778b0fa3ce6dde43b9a319acc9d",
+  "source_manifest_after_sha256": "6afeb062b517083f1f712bc76b0d6d4d17d4b778b0fa3ce6dde43b9a319acc9d",
+  "source_revision": "9bbb62b2ef0a8e516b471d506888e1a08c49920f",
+  "source_files": 1095,
+  "logs": [
+    [
+      "index-units.log",
+      2331,
+      "358afb8398018d88e85d310eb2addf277e5bb1f68a9070ffb17e7cdbd95f6e08"
+    ],
+    [
+      "lane-leaf.log",
+      12129,
+      "17cc88d385823f49cbdacd25e5da5fbc78bb02903a389cbf303b8d9cba8a8c9f"
+    ],
+    [
+      "lib-clippy.log",
+      770,
+      "b4e870bdb9ba2b14be3a32861f395fe3e0542c571b2b17fea888d91b4e7c2627"
+    ],
+    [
+      "peer-units.log",
+      2322,
+      "da2595461cfba6b70d924b4bcf40d0fccf611d18cce0fbab9193e169faad0d58"
+    ]
+  ],
+  "exit_code": 0,
+  "phases": [
+    {
+      "name": "lane-leaf",
+      "exit_code": 0,
+      "counts": {
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 158
+      },
+      "log_sha256": "17cc88d385823f49cbdacd25e5da5fbc78bb02903a389cbf303b8d9cba8a8c9f"
+    },
+    {
+      "name": "peer-units",
+      "exit_code": 0,
+      "counts": {
+        "passed": 24,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 143
+      },
+      "log_sha256": "da2595461cfba6b70d924b4bcf40d0fccf611d18cce0fbab9193e169faad0d58"
+    },
+    {
+      "name": "index-units",
+      "exit_code": 0,
+      "counts": {
+        "passed": 25,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 142
+      },
+      "log_sha256": "358afb8398018d88e85d310eb2addf277e5bb1f68a9070ffb17e7cdbd95f6e08"
+    },
+    {
+      "name": "lib-clippy",
+      "exit_code": 0,
+      "counts": null,
+      "log_sha256": "b4e870bdb9ba2b14be3a32861f395fe3e0542c571b2b17fea888d91b4e7c2627"
+    }
+  ],
+  "chunks": [
+    {
+      "offset": 0,
+      "bytes": 16000,
+      "sha256": "1150beeb54f82e570416591fd76b443b9376b5dfcc82d6e6ff418ecd06608cb2"
+    },
+    {
+      "offset": 16000,
+      "bytes": 16000,
+      "sha256": "97c27871bb68154447221555a644bdd6361850e3be45f6cf7df440b554f7e32e"
+    },
+    {
+      "offset": 32000,
+      "bytes": 16000,
+      "sha256": "85126378fa5243851d3fe490353178b492cd6896c7bdfaa62a51f2bc534cdfa2"
+    },
+    {
+      "offset": 48000,
+      "bytes": 16000,
+      "sha256": "d256c867799e932a122e754e2a6935e35461eb4a11cfe0d16f03135781dc67a0"
+    },
+    {
+      "offset": 64000,
+      "bytes": 16000,
+      "sha256": "c5a44584b419497aef616b58caa3760f43401033368ccfffe5b6183bc9d0d686"
+    },
+    {
+      "offset": 80000,
+      "bytes": 16000,
+      "sha256": "d92fb26c72575914a41c461f89eb288bd10b3ccbf748e1a26c62a73f4a05c42f"
+    },
+    {
+      "offset": 96000,
+      "bytes": 16000,
+      "sha256": "a507a07abc6bc9c626db8b2f4944c109c6e08db1393bfd13618f74d1b8b321b6"
+    },
+    {
+      "offset": 112000,
+      "bytes": 4712,
+      "sha256": "e9caca94cb47739ff6c61c6476eb66af418b22214e4909974fb25720cfe4dca4"
+    }
+  ],
+  "native_gpu_effect": false
+}

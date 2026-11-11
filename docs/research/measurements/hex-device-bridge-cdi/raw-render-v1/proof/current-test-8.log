@@ -1,0 +1,6 @@
+
+running 1 test
+test bundle::device_edits::tests::unsupported_native_edits_refuse_instead_of_emitting_ignored_fields ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 321 filtered out; finished in 0.00s
+

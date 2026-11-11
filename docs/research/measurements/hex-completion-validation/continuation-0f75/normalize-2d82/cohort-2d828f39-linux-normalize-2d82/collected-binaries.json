@@ -1,0 +1,268 @@
+{
+  "binary": [
+    {
+      "path": "target/debug/deps/hex_node-f609691efba91410",
+      "bytes": 182825472,
+      "sha256": "528c3344f9ecbe13365b56c3e6cc566aeca8b406e8da9bfbd56699599023213e"
+    },
+    {
+      "path": "target/debug/deps/hex_runtime-f32d8d7efe3211a6",
+      "bytes": 111618136,
+      "sha256": "8dedffb002275b860658b568b513e8cc08c08bdf4c47f52c3b2147e7b0f3d54a"
+    }
+  ],
+  "phases": [
+    {
+      "name": "withguest-normalization-after",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::gpu_pool::tests::with_guest_normalizes_native_oci_before_checked_shards_slots",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2500521,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "4cd40a6789b122718d5daac778a51407414d0a4654f2017a5951eb5baf67dda5",
+      "bytes": 3388,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "guest::gpu_pool::tests::with_guest_normalizes_native_oci_before_checked_shards_slots",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "empty-native-prefix-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::shared::tests::empty_native_oci_prefix_adds_guest_route_without_native_facts_query",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2617707,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "0ac97b4dd026171f4b14990a76faac9477c74fbd10009a17695b8586b8672e6d",
+      "bytes": 441,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "guest::shared::tests::empty_native_oci_prefix_adds_guest_route_without_native_facts_query",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "same-owner-native-metadata-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "devices::capacity_metadata_tests::current_metadata_replaces_placeholders_without_erasing_or_inventing_holders",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2617866,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "e9b56100885869bf17bfb98fdeb2e3b171dc2bd7ec715bb475d630def00d33c6",
+      "bytes": 461,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "devices::capacity_metadata_tests::current_metadata_replaces_placeholders_without_erasing_or_inventing_holders",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "invalid-native-metadata-atomic-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "devices::capacity_metadata_tests::invalid_current_identity_or_owner_refuses_before_any_metadata_publication",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2617919,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "707760722d4d36c69f46dd0b903109981b787878d86b1add04bdd523c74ba723",
+      "bytes": 459,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "devices::capacity_metadata_tests::invalid_current_identity_or_owner_refuses_before_any_metadata_publication",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "recorded-native-metadata-affected",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "recorded::lifecycle_tests::authority::native_offers_require_same_provider_identity_and_use_actual_metadata_without_holders",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2618060,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "4fc80460029a18cf765d4773901ae2445d2a91617c187d2d08ea68c111da12db",
+      "bytes": 1455,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "recorded::lifecycle_tests::authority::native_offers_require_same_provider_identity_and_use_actual_metadata_without_holders",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "runtime-joined-strict",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-api",
+        "-p",
+        "hex-sim",
+        "-p",
+        "hex-core",
+        "-p",
+        "hex-client",
+        "-p",
+        "hex-runtime",
+        "--all-targets",
+        "--locked",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 2796512,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "b9e510d20e4fc2135d4f9516d5a6458c517c37670ee3f5edd7d7e658e1370ff3",
+      "bytes": 4964,
+      "test_outcomes": []
+    },
+    {
+      "name": "node-production-strict",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 2881544,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "d4459081ca1c37fd5445565546475e1355f63ad8585e7cf12656d8987979537c",
+      "bytes": 225,
+      "test_outcomes": []
+    }
+  ],
+  "recorded_children_reaped": true
+}

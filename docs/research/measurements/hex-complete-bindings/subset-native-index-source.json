@@ -1,0 +1,55 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "d7bf8d3dacc71f6956df13b4a78bb2e6ae466650",
+  "fixed_root": "25d98e88be3b8173605ed7e8e1d109d309a278b6",
+  "source": {
+    "crates/hex-runtime/src/firecracker/native.rs": "779a620e5bb314bc02fb0d630f0241fe5d5884cc3110b8a2e1b6cf582a75815e",
+    "crates/hex-runtime/src/firecracker/pool.rs": "df2d5e7dc5d46508beaf6b788983956ecedee73f91980f13c047f46dc9f26042",
+    "crates/hex-sim/src/index.rs": "d7db228933dffcccef94daad7d031ba41ef6c64443409f624f39fd7293f563b8",
+    "crates/hex-sim/src/index/routes.rs": "a440ed5da831c14cea9d00162d2d1d914f53c9919b9c6897b816fb900da24114",
+    "crates/hex-sim/src/index/route_offer_tests.rs": "ded41accb5646e02398afc3cc3f6d51fbce3f91eea299bbdc33ab5c35b14fa42"
+  },
+  "actual_before": {
+    "original": "one_gpu_demand_can_select_an_exact_subset_of_a_two_gpu_observer",
+    "result": "actual1 selected/0pass/1fail; full2=Admits, exact1=NoGpu",
+    "log_sha256": "eab2a96d184f87a18c101cc86a58dc480d8c7eb2c148dfdb1d42814329ed77dd",
+    "body": "UNCHANGED"
+  },
+  "dependencies": [
+    "API a56/b2/fc383 exact membership/factual profile",
+    "Catalog fc383 fullP owner/sole consumer",
+    "L3 bd0/e4/aece Store/Turns guards/source retention",
+    "Node616 SAME Books producer; next Node two-borrow proof successor",
+    "L2 b655 separate Shards subset consumers"
+  ],
+  "behavior": [
+    "SAME Index chooses exactly requested S within P, preserving original model/count/load/cost constraints. One dedicated consumer per full source key; pending cancellation refunds only Box allocation and returns fullP to original backing owner.",
+    "FC validates exact isolation plan before draining, persists fresh Box native_scope/Creating under source/fullP guard, then releases all Box/device turns before SAME Pool transaction drains original fullP.",
+    "Reentry checks canonical source commitment/key/profile/fullP/init/Released/exit plus exact local positive release receipt before Box-onlyS native effects. Actual new selected guest driver/VMM assignment path remains the existing perBox boot/readiness/native_observations path.",
+    "FC no-submission proof borrows both canonical records under shared guard, requires Creating/Deleting init/run/exitNone, scope and immutable profile/fullP/S match, empty dirs plus exact missing private incarnation path. Released never permits this inference.",
+    "Pending cancellation under the same guard removes only the consuming Box reference, leaving original P/native receipt/charge intact. After Released ordinary BoxS native scope termination/absence proof is still required.",
+    "No new child table/reaper/manager/holder/provider/ledger, no fabricated device telemetry. Config/test helper visibility only shares same observer hash/fixture."
+  ],
+  "new_controls": {
+    "positive": "exact_subset_has_one_consumer_and_cancellation_keeps_full_backing_reservation UNRUN",
+    "fc_private_file": "unsubmitted_subset_proof_refuses_intent_collision_and_released_source UNRUN; all Books/native callbacks panic if entered",
+    "new_original_hypothesis": "released_observer_siblings_require_new_observation_before_native_route_admission UNRUN/intended source concern only; observe_backing freshness production UNCHANGED, no accepted red/remedy"
+  },
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compiler": "UNRUN",
+    "tests": "UNRUN",
+    "native_invocations": 0,
+    "dispatches": 0
+  },
+  "remaining": [
+    "New sibling-sample freshness control requires ROOT actual result before any new remedy. Lazy sibling/subset provisioning and Shards actual fresh selectedS observation remain open required work.",
+    "Mixed multi-GPU IOMMU groups cannot silently expand S; current plan refuses an unselected GPU before drain. Native single-GPU routability/whole-group authority requires actual initialization/isolated hardware verification; no driver mutation allowed here.",
+    "Node two-borrow proof caller source is separately queued, preserving Root616/938/280 and Supervisor d085. Dirty private Node old draft is NOT part of this checkpoint.",
+    "Approved host native VFIO current prerequisites unavailable, no GPU/KVM execution claim. Hardware/VM/cost measurements/faults/profiling/full gates/main merges remain ROOT/nativeQA-owned."
+  ],
+  "r01_r16": "Typed errors, fallible bounded existing IDs/claims/record copies, checked arithmetic, original operation deadlines retained, no postspawn owners; current whole-owner and held native process receipts used. New no-Intent metadata proof is explicitly not independent native absence proof. Source-first original red/controls/provenance captured; portability/native/performance/mutation checks UNRUN/owed, no unchecked item claimed passed."
+}

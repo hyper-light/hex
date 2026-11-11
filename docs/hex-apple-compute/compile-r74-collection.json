@@ -1,0 +1,63 @@
+{
+  "archive_bytes": 234796,
+  "archive_sha256": "90c2abbe3cfaef526b2384e535fdce26ddd61b5e33e184f702c49ca55e2e3404",
+  "binaries": {
+    "target/debug/deps/apple_compute-eaad80c70827c01d": {
+      "bytes": 1421024,
+      "sha256": "2fd16f23f91401719c1cad9deecb17656f249419d3fa5a2688461942e4c0acdd"
+    }
+  },
+  "checks": [
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "hex-gpu",
+        "--test",
+        "apple_compute",
+        "--no-run",
+        "--locked"
+      ],
+      "elapsed_s": 25.630627155303955,
+      "exit": 0,
+      "label": "compile-witness",
+      "log_bytes": 1368,
+      "log_sha256": "b5fb4af4b9eedcdcd2ef554c5d8b60f86ff23f28525bdec4c36c32bfc01a71de",
+      "pid": 47037,
+      "reaped": true,
+      "test_results": []
+    },
+    {
+      "argv": [
+        "cargo",
+        "clippy",
+        "-p",
+        "hex-gpu",
+        "--test",
+        "apple_compute",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "elapsed_s": 1.1443049907684326,
+      "exit": 0,
+      "label": "test-clippy",
+      "log_bytes": 519,
+      "log_sha256": "34c7375a3a1d8b3dc0918e530119d741ce47dc599bd9d6e6e2f65de80d25d9ff",
+      "pid": 47215,
+      "reaped": true,
+      "test_results": []
+    }
+  ],
+  "members": 10,
+  "native_gpu_executed": false,
+  "private_collection": "/Users/adalundhe/.cache/hex-lead/transfers/apple-compute-01a1c640-18eccf40-compile-v1",
+  "source_before_after_equal": true,
+  "source_commit": "18eccf40bad6c9b85241036cf72161e372255176",
+  "source_files": 1744,
+  "source_matches_git": true,
+  "temp_entries": 0,
+  "tests_executed": 0
+}

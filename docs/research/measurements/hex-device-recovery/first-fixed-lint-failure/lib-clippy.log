@@ -1,0 +1,18 @@
+    Checking thiserror v2.0.21
+    Checking serde_core v1.0.229
+    Checking hyper-timing v0.1.0 (/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-identity-01a1c640-9bc06bf9-v1/source/vendor/hyper-raft/crates/hyper-timing)
+    Checking hyper-swim v0.1.0 (/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-identity-01a1c640-9bc06bf9-v1/source/vendor/hyper-raft/crates/hyper-swim)
+    Checking serde v1.0.229
+    Checking hex-health v0.1.0 (/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-identity-01a1c640-9bc06bf9-v1/source/crates/hex-health)
+    Checking hex-sim v0.1.0 (/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-identity-01a1c640-9bc06bf9-v1/source/crates/hex-sim)
+error: using `contains()` instead of `iter().any()` is more efficient
+    --> crates/hex-sim/src/index.rs:1145:12
+     |
+1145 |         if holders.iter().any(|holder| *holder == Some(workload))
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `holders.contains(&Some(workload))`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#manual_contains
+     = note: `-D clippy::manual-contains` implied by `-D clippy::all`
+     = help: to override `-D clippy::all` add `#[allow(clippy::manual_contains)]`
+
+error: could not compile `hex-sim` (lib) due to 1 previous error

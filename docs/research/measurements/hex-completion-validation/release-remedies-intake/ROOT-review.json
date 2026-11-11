@@ -1,0 +1,16 @@
+{
+  "role": "coordinator",
+  "base": "58e7d82d812adb3aa6a74ee027df8815106a04b2",
+  "review": "Read complete named diffs and unchanged checked resource updates at all four Index callers, message pair and explicit Copy representation decision. Phase equality exits before observation invalidation, duplicateReleased ack control follows actual fresh fixture refresh. Narrow Pool missing local identity permits cleanup-only canonical nativeNone; no usableGuest authority. Qualified capacity failure contributes no fresh GPU bits and keeps exact native prefix/claims. Two Intent fixtures copy configured exact selectorS, no measured fact. Correct factual-slot selector guest::shared::tests; earlierzero selection unexecuted.",
+  "style_exception": "ONLY clippy::large_enum_variant on fixed nonrecursive Copy Msg; no panic/bounds/uncheckedallocation allowance, no performance claim. Full audit/profile obligation retained.",
+  "after_status": "UNRUN",
+  "source_hashes": {
+    "crates/hex-sim/src/index.rs": "e4b32dccf5fdbce7e01c4f61afb438f1380f9a343c29b8c60facede3a9b0fb3e",
+    "crates/hex-sim/src/index/routes.rs": "9f10e824d5abe04c718d8c68c40fe272508b0645ce0b6ea1b8d87506b725c774",
+    "crates/hex-sim/src/peer.rs": "c0738671cf581e9d697e100e9d69aba897beaa1a6ab2c0d097742ae909876a08",
+    "crates/hex-sim/src/index/route_offer_tests.rs": "66f5e7606c3443e8df7cbaca1716119fdc80d035b4200f251958463bd3052bfe",
+    "crates/hex-runtime/src/guest/shared.rs": "9b5280e75282d1218f9aecc3cff1154848c15ef26bd788c4c7e9b70b2f052ea6",
+    "crates/hex-runtime/src/guest/shared_tests.rs": "b0a53dafef89ced781d7eb77c715ae1748ab8d31a269d9db156fcb4de409fa63",
+    "crates/hex-runtime/src/guest/gpu_pool.rs": "38f5acea62d5741bd942ca37603afcf8eb65c092e5ab18e47ac6d667ee7146c1"
+  }
+}

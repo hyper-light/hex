@@ -31,17 +31,20 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 #[cfg(all(debug_assertions, target_os = "linux"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 use std::time::Duration;
 
 use hex_api::{BoxId, Refusal};
 use hex_core::patience::Patience;
-use hex_core::record::BoxRecord;
+use hex_core::record::{BoxRecord, Phase};
 
 use crate::turns::{Turn, Turns};
+
+mod pool;
+use pool::scoped_paths;
 
 /// How many subdirectories the runtime directory's records are spread over, by their box's id: 64, the shard's
 /// name two hex digits of [`SHARD_MASK`]. Each create makes its box's record file and each delete removes it, and
@@ -97,6 +100,10 @@ pub struct Store {
 
 #[derive(Debug, Default)]
 struct Synced {
+    // The existing preparation owner fences strict metadata snapshots through publication.
+    // Ordinary writes share it; preparation takes it exclusively, without waiting. It holds no
+    // inventory/native callback and creates no second reference or resource authority.
+    pool_preparation: RwLock<()>,
     files: AtomicU64,
     dirs: AtomicU64,
 }
@@ -111,6 +118,11 @@ pub struct Syncs {
 }
 
 impl Store {
+    /// The existing owner's persistent state directory, also its native capacity volume.
+    pub(crate) fn directory(&self) -> &Path {
+        &self.disk
+    }
+
     /// Opens the store over the node's state directory `disk`, for the records that must outlive the
     /// host, and `run`, a directory of the node's own under its runtime directory for the rest, making
     /// each when it's missing. `run` is readable by the node alone: a record holds its box's spec, an
@@ -172,6 +184,37 @@ impl Store {
         self.turns.take(id)
     }
 
+    /// All reference publication paths share the same short metadata owner as Pool removal.
+    /// No reference can appear after its removal scan and before unlink. Source precedes Box.
+    fn claim_backing(&self, record: &BoxRecord) -> Result<Option<Turn<'_>>, Refusal> {
+        match record.spec.route.and_then(|route| route.backing) {
+            Some(key) => self.turns.take_pool(&key).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn changing_metadata(&self) -> Result<RwLockReadGuard<'_, ()>, Refusal> {
+        self.synced.pool_preparation.try_read().map_err(|error| {
+            metadata_refusal(match error {
+                TryLockError::WouldBlock => {
+                    "a backing preparation owns the Store metadata snapshot"
+                }
+                TryLockError::Poisoned(_) => "the Store metadata preparation fence is poisoned",
+            })
+        })
+    }
+
+    fn preparing_metadata(&self) -> Result<RwLockWriteGuard<'_, ()>, Refusal> {
+        self.synced.pool_preparation.try_write().map_err(|error| {
+            metadata_refusal(match error {
+                TryLockError::WouldBlock => {
+                    "a Store metadata mutation prevents backing preparation"
+                }
+                TryLockError::Poisoned(_) => "the Store metadata preparation fence is poisoned",
+            })
+        })
+    }
+
     /// How many changes of a box's record have waited for a change of the same box to finish.
     pub fn waited(&self) -> u64 {
         self.turns.waited()
@@ -215,8 +258,144 @@ impl Store {
     /// Writes `record` whole, in its place: either the old file or the new one survives a crash of
     /// the node agent, and a record that must outlive the host ([`must_outlive_host`]) is fsynced too.
     pub fn put(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        let _metadata = self.changing_metadata()?;
+        let _source = self.claim_backing(record)?;
         let _turn = self.claim(&record.spec.id)?;
+        if let Some(current) = self.read_lifecycle(&record.spec.id)?
+            && current.spec.route.and_then(|route| route.backing)
+                != record.spec.route.and_then(|route| route.backing)
+        {
+            return Err(uncertain(&record.spec.id));
+        }
+        let _backing_phase = self.check_box_backing(record)?;
         self.write(record)
+    }
+
+    /// Claims an unused identity before a runtime effect. An unfinished or unreadable record owns
+    /// its name too: retrying create cannot replace the only durable cleanup/binding identity.
+    pub(crate) fn begin(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        let _metadata = self.changing_metadata()?;
+        let _source = self.claim_backing(record)?;
+        let _turn = self.claim(&record.spec.id)?;
+        if self.get(&record.spec.id)?.is_some() {
+            return Err(Refusal::Exists(record.spec.id.try_clone()?));
+        }
+        let _backing_phase = self.check_box_backing(record)?;
+        self.write_fresh(record)
+    }
+
+    /// Publishes only the create still described by this immutable record. A concurrent delete's
+    /// durable intent wins; an old completion must never turn Deleting back into Ready.
+    pub(crate) fn made(&self, expected: &BoxRecord) -> Result<(), Refusal> {
+        let _metadata = self.changing_metadata()?;
+        let _source = self.claim_backing(expected)?;
+        let _turn = self.claim(&expected.spec.id)?;
+        let Some(Ok(mut record)) = self.get(&expected.spec.id)? else {
+            return Err(Refusal::Broken(
+                "a create lost its durable record".to_owned(),
+            ));
+        };
+        if record.spec != expected.spec || record.phase != Phase::Creating {
+            return Err(Refusal::Invalid {
+                what: "box lifecycle",
+                why: "create completion disagrees with the retained identity or deletion intent"
+                    .to_owned(),
+            });
+        }
+        record.phase = Phase::Ready;
+        let _backing_phase = self.check_box_backing(&record)?;
+        self.write(&record)
+    }
+
+    /// The initialized adapters share this store under the node's existing method/device turns.
+    /// Record turns stay short and separate; none is reacquired through a public store mutation.
+    pub(crate) fn read_lifecycle(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
+        match self.get(id)? {
+            Some(Ok(record)) if &record.spec.id == id => Ok(Some(record)),
+            None => Ok(None),
+            Some(_) => Err(uncertain(id)),
+        }
+    }
+
+    /// Preserves the immutable cleanup authority and concurrent accounting when a backend advances
+    /// a record. A fresh native effect must first publish Creating; deletion never rolls back.
+    pub(crate) fn put_lifecycle(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        let _metadata = self.changing_metadata()?;
+        // Only scoped reference writes take this short existing Store configuration turn, before
+        // the Box record turn. This short record mutation holds no native callback.
+        let _source = self.claim_backing(record)?;
+        let _turn = self.claim(&record.spec.id)?;
+        let _backing_phase = self.check_box_backing(record)?;
+        if record.version != hex_core::record::RECORD_VERSION {
+            return Err(uncertain(&record.spec.id));
+        }
+        record.spec.check()?;
+        let Some(mut current) = self.read_lifecycle(&record.spec.id)? else {
+            return if record.phase == Phase::Creating {
+                self.write_fresh(record)
+            } else {
+                Err(uncertain(&record.spec.id))
+            };
+        };
+        if current.version != record.version
+            || current.spec != record.spec
+            || current.dirs != record.dirs
+            || !matches!(
+                (current.phase, record.phase),
+                (Phase::Creating, _)
+                    | (Phase::Ready, Phase::Ready | Phase::Deleting)
+                    | (Phase::Deleting, Phase::Deleting)
+            )
+        {
+            return Err(uncertain(&record.spec.id));
+        }
+        if current.native_scope.is_none()
+            && managed_scope_required(&current)
+            && (current.init != record.init
+                || (current.phase == Phase::Creating && record.phase == Phase::Ready))
+        {
+            return Err(uncertain(&record.spec.id));
+        }
+        // A VMM's pid/start is introduced while Creating, before its guest is Ready (the
+        // Firecracker native create caller). Slot/run are likewise lifetime identities; their
+        // later removal or substitution cannot authorize cleanup of a different native object.
+        // Native process first-exec tracing uses Store::update and does not enter this VM seam.
+        let introducing = current.phase == Phase::Creating && record.phase != Phase::Deleting;
+        let init = lifecycle_fact(current.init, record.init, introducing, &record.spec.id)?;
+        let slot = lifecycle_fact(current.slot, record.slot, introducing, &record.spec.id)?;
+        let run = lifecycle_fact(current.run, record.run, introducing, &record.spec.id)?;
+        let exit = lifecycle_fact(current.exit, record.exit, true, &record.spec.id)?;
+        // Scope is introduced only by write_fresh before the first canonical publication. An old
+        // legacy row can never gain authority over an already-alive native scope by an update.
+        let native_scope = lifecycle_fact(
+            current.native_scope,
+            record.native_scope,
+            false,
+            &record.spec.id,
+        )?;
+        current.phase = record.phase;
+        current.init = init;
+        current.slot = slot;
+        current.run = run;
+        current.exit = exit;
+        current.native_scope = native_scope;
+        // Both writers count monotonically: publishing a backend completion cannot discard a
+        // disconnect counted by the existing socket owner while native I/O was in flight.
+        current.abandoned = current.abandoned.max(record.abandoned);
+        self.write(&current)
+    }
+
+    /// The caller owns the shared native method/device receipts and has proved physical cleanup.
+    /// A retained Ready or unreadable record cannot be dropped by a delayed remove.
+    pub(crate) fn remove_lifecycle(&self, id: &BoxId) -> Result<(), Refusal> {
+        let _metadata = self.changing_metadata()?;
+        let _turn = self.claim(id)?;
+        if let Some(record) = self.read_lifecycle(id)?
+            && record.phase != Phase::Deleting
+        {
+            return Err(uncertain(id));
+        }
+        self.unlink(id)
     }
 
     /// Changes `id`'s record by `change`, which says whether it changed anything, and writes it if it
@@ -226,20 +405,57 @@ impl Store {
         id: &BoxId,
         change: impl FnOnce(&mut BoxRecord) -> bool,
     ) -> Result<bool, Refusal> {
+        let _metadata = self.changing_metadata()?;
         let _turn = self.claim(id)?;
         let Some(Ok(mut record)) = self.get(id)? else {
             return Ok(false);
         };
+        let source = record.spec.route.and_then(|route| route.backing);
         if !change(&mut record) {
             return Ok(false);
+        }
+        // Existing update callers change init, exit or abandoned accounting. They cannot introduce
+        // or erase a backing reference while owning only a Box turn (source-before-Box ordering).
+        if record.spec.route.and_then(|route| route.backing) != source {
+            return Err(uncertain(id));
         }
         self.write(&record)?;
         Ok(true)
     }
 
+    fn write_fresh(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        if record.native_scope.is_some() {
+            return Err(uncertain(&record.spec.id));
+        }
+        if !managed_scope_required(record) {
+            return self.write(record);
+        }
+        if record.phase != Phase::Creating {
+            return Err(uncertain(&record.spec.id));
+        }
+        let scope = fresh_scope()?;
+        self.write_encoded(record, record.encode_fresh_scope(scope)?, true)
+    }
+
     fn write(&self, record: &BoxRecord) -> Result<(), Refusal> {
-        let bytes = record.encode()?;
-        let (dir, durable) = self.place(record);
+        self.write_encoded(record, record.encode()?, record.native_scope.is_some())
+    }
+
+    fn write_encoded(
+        &self,
+        record: &BoxRecord,
+        bytes: Vec<u8>,
+        scoped: bool,
+    ) -> Result<(), Refusal> {
+        let (dir, durable) = if scoped {
+            (self.disk.as_path(), true)
+        } else {
+            self.place(record)
+        };
+        if scoped {
+            let (temporary, final_path) = scoped_paths(dir, record.spec.id.as_str())?;
+            return self.publish_durable(dir, &temporary, &final_path, &bytes);
+        }
         #[cfg(target_os = "linux")]
         let dir_fd = if durable { &self.disk_fd } else { &self.run_fd };
         // A non-durable record goes to its shard of the runtime directory: a name under it on linux, where
@@ -329,10 +545,24 @@ impl Store {
             final_path.as_str(),
         )
         .map_err(|e| Refusal::os("renaming a record into place", e))?;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(all(not(target_os = "linux"), not(windows)))]
         fs::rename(&tmp, &final_path)
             .map_err(|e| Refusal::os("renaming a record into place", e))?;
+        #[cfg(windows)]
+        if scoped {
+            hex_runtime::windows::sys::replace_durable(&tmp, &final_path)
+                .map_err(|e| Refusal::os("publishing the scoped record with write-through", e))?;
+        } else {
+            fs::rename(&tmp, &final_path)
+                .map_err(|e| Refusal::os("renaming a record into place", e))?;
+        }
         if durable {
+            #[cfg(windows)]
+            if scoped {
+                // The scoped Windows path has already requested write-through publication. It did
+                // not fsync a directory; leave that counter unchanged and retain native fault proof.
+                return Ok(());
+            }
             self.sync_dir(dir)?;
         }
         Ok(())
@@ -356,7 +586,12 @@ impl Store {
     /// directories are gone before its record is, so a removal a host crash undoes leaves a record
     /// recovery scrubs again.
     pub fn remove(&self, id: &BoxId) -> Result<(), Refusal> {
+        let _metadata = self.changing_metadata()?;
         let _turn = self.claim(id)?;
+        self.unlink(id)
+    }
+
+    fn unlink(&self, id: &BoxId) -> Result<(), Refusal> {
         for file in self.files(id) {
             match fs::remove_file(file) {
                 Ok(()) => {}
@@ -370,10 +605,35 @@ impl Store {
     /// Every record the store holds, by box id; an id whose file can't be read is included with its
     /// reason. A stray temp file (a crash mid-write) is ignored: its rename never completed.
     pub fn all(&self) -> Result<BTreeMap<BoxId, Result<BoxRecord, String>>, Refusal> {
+        self.scan_records(false)
+    }
+
+    /// Recovery must see every retained canonical name, including a conflicting duplicate in
+    /// another Store directory. No overwritten/unknown `.json` row may disappear before cleanup.
+    pub(crate) fn retained_records(
+        &self,
+    ) -> Result<BTreeMap<BoxId, Result<BoxRecord, String>>, Refusal> {
+        self.scan_records(true)
+    }
+
+    fn scan_records(
+        &self,
+        retained: bool,
+    ) -> Result<BTreeMap<BoxId, Result<BoxRecord, String>>, Refusal> {
         let mut out = BTreeMap::new();
         for dir in self.listed() {
-            for (id, path) in records_in(&dir)? {
-                let record = match fs::read(path) {
+            for (id, path) in records_in(&dir, retained)? {
+                if retained && (out.len() >= TURNS || out.contains_key(&id)) {
+                    return Err(uncertain(&id));
+                }
+                let bytes = if retained {
+                    let file = File::open(&path)
+                        .map_err(|error| Refusal::os("opening a retained record", error))?;
+                    Ok(read_record_bytes(file)?)
+                } else {
+                    fs::read(path)
+                };
+                let record = match bytes {
                     Ok(bytes) => BoxRecord::decode(&bytes),
                     Err(e) => Err(format!("reading the record: {e}")),
                 };
@@ -387,6 +647,7 @@ impl Store {
     /// under its box's turn, so a write under way keeps its own; how many it removed. Recovery's, so a
     /// crash at a record write leaves nothing behind (T-T7.1.2).
     pub fn remove_strays(&self) -> Result<usize, Refusal> {
+        let _metadata = self.changing_metadata()?;
         let mut removed = 0usize;
         for dir in self.listed() {
             let entries = fs::read_dir(&dir).map_err(|e| Refusal::os("listing records", e))?;
@@ -428,6 +689,108 @@ impl Store {
             .map_err(|e| Refusal::os("flushing the record directory", e))?;
         self.synced.dirs.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+}
+
+/// The same bounded file reader for scoped Pool rows and whole-owner retained Box preflight.
+/// Reserve before reading; a torn/oversized row remains a decoder refusal, never an absent owner.
+fn read_record_bytes(mut file: File) -> Result<Vec<u8>, Refusal> {
+    use std::io::Read;
+    let bound = hex_core::record::MAX_RECORD_BYTES;
+    let room = bound.checked_add(1).ok_or(Refusal::Exhausted {
+        what: "retained record bytes",
+        bound,
+    })?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(room)
+        .map_err(|_| Refusal::Exhausted {
+            what: "retained record bytes",
+            bound: room,
+        })?;
+    bytes.resize(room, 0);
+    let mut used = 0usize;
+    while used < room {
+        let tail = bytes.get_mut(used..).ok_or(Refusal::Exhausted {
+            what: "retained record bytes",
+            bound: room,
+        })?;
+        let read = file
+            .read(tail)
+            .map_err(|error| Refusal::os("reading a retained record", error))?;
+        if read == 0 {
+            break;
+        }
+        used = used.checked_add(read).ok_or(Refusal::Exhausted {
+            what: "retained record bytes",
+            bound: room,
+        })?;
+    }
+    bytes.truncate(used);
+    Ok(bytes)
+}
+
+fn retained_identity_error(message: &'static str) -> Refusal {
+    let mut why = String::new();
+    if why.try_reserve_exact(message.len()).is_err() {
+        return Refusal::Exhausted {
+            what: "retained identity refusal bytes",
+            bound: message.len(),
+        };
+    }
+    why.push_str(message);
+    Refusal::Invalid {
+        what: "retained record identity",
+        why,
+    }
+}
+
+fn metadata_refusal(message: &'static str) -> Refusal {
+    let mut why = String::new();
+    if why.try_reserve_exact(message.len()).is_err() {
+        return Refusal::Exhausted {
+            what: "Store metadata refusal bytes",
+            bound: message.len(),
+        };
+    }
+    why.push_str(message);
+    Refusal::Os {
+        op: "entering the retained owner metadata fence",
+        why,
+    }
+}
+
+fn fresh_scope() -> Result<hex_core::record::NativeScope, Refusal> {
+    let mut bytes = [0u8; 16];
+    // One checked OS fill for BOTH canonical owner kinds; no PID/time/path fallback or retry loop.
+    // Early-boot entropy may block. The node's external startup lifetime guard remains required.
+    getrandom::fill(&mut bytes)
+        .map_err(|error| Refusal::os("creating a fresh native scope identity", error))?;
+    Ok(hex_core::record::NativeScope::from_bytes(bytes))
+}
+
+/// A stale absence preserves an observed fact; two different positive facts are uncertainty.
+fn lifecycle_fact<T: Copy + PartialEq>(
+    current: Option<T>,
+    proposed: Option<T>,
+    introducing: bool,
+    id: &BoxId,
+) -> Result<Option<T>, Refusal> {
+    match (current, proposed) {
+        (Some(known), Some(other)) if known != other => Err(uncertain(id)),
+        (None, Some(_)) if !introducing => Err(uncertain(id)),
+        (Some(known), _) => Ok(Some(known)),
+        (None, next) => Ok(next),
+    }
+}
+
+fn uncertain(id: &BoxId) -> Refusal {
+    match id.try_clone() {
+        Ok(id) => Refusal::Lifecycle {
+            id,
+            cause: hex_api::LifecycleCause::Uncertain,
+        },
+        Err(error) => error,
     }
 }
 
@@ -493,11 +856,29 @@ fn temp_file(dir: &Path, id: &BoxId) -> PathBuf {
     dir.join(format!(".{id}.tmp"))
 }
 
+/// Canonical writers use `.json`. Other ASCII casing must refuse at startup even on Windows,
+/// where a case-insensitive filesystem can resolve it to the same durable object.
+fn retained_json_name(name: &std::ffi::OsStr) -> bool {
+    Path::new(name)
+        .extension()
+        .is_some_and(|extension| extension.as_encoded_bytes().eq_ignore_ascii_case(b"json"))
+}
+
 /// The records in `dir`, each box's id with its file: every `<id>.json`, nothing else.
-fn records_in(dir: &Path) -> Result<Vec<(BoxId, PathBuf)>, Refusal> {
+fn records_in(dir: &Path, retained: bool) -> Result<Vec<(BoxId, PathBuf)>, Refusal> {
     let mut out = Vec::new();
     let entries = fs::read_dir(dir).map_err(|e| Refusal::os("listing records", e))?;
+    // Same bounded canonical/temporary/owner-metadata scan budget as the Pool directory. This
+    // limits startup work; it grants no extra boxes or native ownership.
+    let scan_bound = TURNS.checked_mul(3).ok_or(Refusal::Full(TURNS))?;
+    let mut scanned = 0usize;
     for entry in entries {
+        if retained {
+            if scanned >= scan_bound {
+                return Err(Refusal::Full(TURNS));
+            }
+            scanned = scanned.checked_add(1).ok_or(Refusal::Full(TURNS))?;
+        }
         let entry = entry.map_err(|e| Refusal::os("listing records", e))?;
         let name = entry.file_name();
         let Some(id) = name
@@ -505,8 +886,19 @@ fn records_in(dir: &Path) -> Result<Vec<(BoxId, PathBuf)>, Refusal> {
             .and_then(|n| n.strip_suffix(".json"))
             .and_then(|n| BoxId::new(n).ok())
         else {
+            if retained && retained_json_name(&name) {
+                return Err(retained_identity_error(
+                    "a retained Box record has no valid canonical BoxId name",
+                ));
+            }
             continue;
         };
+        if retained {
+            if out.len() >= TURNS {
+                return Err(Refusal::Full(TURNS));
+            }
+            out.try_reserve(1).map_err(|_| Refusal::Full(TURNS))?;
+        }
         out.push((id, entry.path()));
     }
     Ok(out)
@@ -518,7 +910,14 @@ fn records_in(dir: &Path) -> Result<Vec<(BoxId, PathBuf)>, Refusal> {
 /// describes nothing left to remove after a host crash; nor does one naming none (a `process` box's).
 /// A rendered bundle's writable layer on disk makes its record durable.
 fn must_outlive_host(record: &BoxRecord) -> bool {
-    record.dirs.iter().any(|dir| !on_tmpfs(dir))
+    record.native_scope.is_some() || record.dirs.iter().any(|dir| !on_tmpfs(dir))
+}
+
+fn managed_scope_required(record: &BoxRecord) -> bool {
+    matches!(
+        record.spec.class.class(),
+        hex_api::Class::Shards | hex_api::Class::Firecracker
+    ) || (record.spec.class.class() == hex_api::Class::Oci && record.spec.allocation.is_some())
 }
 
 /// tmpfs's magic number (include/uapi/linux/magic.h, `TMPFS_MAGIC`).
@@ -571,10 +970,13 @@ mod tests {
 
     fn record(id: &str) -> BoxRecord {
         let spec = BoxSpec {
+            route: None,
+            devices: Vec::new(),
             id: BoxId::new(id).unwrap(),
             bounds: Bounds::default(),
             class: ClassSpec::Process,
             owner: None,
+            allocation: None,
         };
         BoxRecord::new(spec, Phase::Ready, vec![])
     }
@@ -582,6 +984,101 @@ mod tests {
     /// A store over `<dir>/state` and `<dir>/run`, its two places.
     fn store_in(dir: &Path) -> Store {
         Store::open(&dir.join("state"), &dir.join("run")).unwrap()
+    }
+
+    /// AC-T7.4.1/T-T7.1.2: a failed create retains its physical identity; neither an equal retry
+    /// nor a different payload at the same name may overwrite it before cleanup.
+    #[test]
+    fn lifecycle_begin_preserves_unfinished_identity_and_refuses_recycled_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let mut first = record("retained");
+        first.phase = Phase::Creating;
+        store.begin(&first).unwrap();
+        let mut replacement = first.clone();
+        replacement.spec.bounds.memory_max = Some(4096);
+        for attempt in [&first, &replacement] {
+            assert!(matches!(store.begin(attempt), Err(Refusal::Exists(_))));
+            assert_eq!(store.get(&first.spec.id).unwrap(), Some(Ok(first.clone())));
+        }
+        store.remove(&first.spec.id).unwrap();
+        store.begin(&replacement).unwrap();
+        assert_eq!(store.get(&first.spec.id).unwrap(), Some(Ok(replacement)));
+    }
+
+    /// AC-T7.4.1/T-T7.1.2: a delayed native create cannot erase cancellation, and cannot publish a
+    /// changed physical payload. Independent fields recorded while it ran survive publication.
+    #[test]
+    fn lifecycle_completion_keeps_deletion_intent_and_immutable_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let mut first = record("completing");
+        first.phase = Phase::Creating;
+        store.begin(&first).unwrap();
+        let mut wrong = first.clone();
+        wrong.spec.bounds.memory_max = Some(4096);
+        assert!(store.made(&wrong).is_err());
+        store
+            .update(&first.spec.id, |r| {
+                r.abandoned = 7;
+                true
+            })
+            .unwrap();
+        store.made(&first).unwrap();
+        let ready = store.get(&first.spec.id).unwrap().unwrap().unwrap();
+        assert_eq!(ready.phase, Phase::Ready);
+        assert_eq!(ready.abandoned, 7);
+        store
+            .update(&first.spec.id, |r| {
+                r.phase = Phase::Deleting;
+                true
+            })
+            .unwrap();
+        let deleting = store.get(&first.spec.id).unwrap();
+        assert!(store.made(&first).is_err());
+        assert_eq!(store.get(&first.spec.id).unwrap(), deleting);
+    }
+
+    /// AC-T7.4.1/T-T7.1.2: both VM adapters update the sole Store with unchanged payload/cleanup
+    /// authority. Metadata written by the socket while native I/O runs survives publication.
+    #[test]
+    fn lifecycle_transactions_preserve_authority_accounting_and_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let mut original = record("shared-backend");
+        original.phase = Phase::Creating;
+        store.put_lifecycle(&original).unwrap();
+        store
+            .update(&original.spec.id, |r| {
+                r.abandoned = 11;
+                true
+            })
+            .unwrap();
+        let mut changed = original.clone();
+        changed.spec.bounds.memory_max = Some(8192);
+        assert!(store.put_lifecycle(&changed).is_err());
+        changed = original.clone();
+        changed.dirs.push(PathBuf::from("foreign-cleanup"));
+        assert!(store.put_lifecycle(&changed).is_err());
+        original.phase = Phase::Ready;
+        original.init = Some(hex_core::record::ProcId {
+            pid: 7,
+            start_ticks: 9,
+        });
+        store.put_lifecycle(&original).unwrap();
+        let ready = store.read_lifecycle(&original.spec.id).unwrap().unwrap();
+        assert_eq!(ready.spec, original.spec);
+        assert_eq!(ready.abandoned, 11);
+        assert_eq!(ready.init, original.init);
+        assert!(store.remove_lifecycle(&original.spec.id).is_err());
+        original.phase = Phase::Deleting;
+        store.put_lifecycle(&original).unwrap();
+        let deleting = store.get(&original.spec.id).unwrap();
+        original.phase = Phase::Ready;
+        assert!(store.put_lifecycle(&original).is_err());
+        assert_eq!(store.get(&original.spec.id).unwrap(), deleting);
+        store.remove_lifecycle(&original.spec.id).unwrap();
+        assert!(store.read_lifecycle(&original.spec.id).unwrap().is_none());
     }
 
     /// The names of the records in the runtime record directory `run`'s shards, sorted.

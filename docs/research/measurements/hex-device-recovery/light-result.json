@@ -1,0 +1,76 @@
+{
+  "source_revision": "44a2df3bb8aeac1ed8ae405c3e933b88ee3f6abe",
+  "fixed_base": "37021c35e64b2a8bab1d35f20f92a0042d874a44",
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "platform": "macOS-26.4-arm64-arm-64bit",
+  "machine": "arm64",
+  "driver_pid": 16056,
+  "nice": "20",
+  "environment": {
+    "CARGO_HOME": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-01a1c640-44a2df3b-v1/cargo-home",
+    "CARGO_TARGET_DIR": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-01a1c640-44a2df3b-v1/target",
+    "CARGO_BUILD_JOBS": "1",
+    "RUST_TEST_THREADS": "1",
+    "RUSTUP_HOME": "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy",
+    "TMPDIR": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-01a1c640-44a2df3b-v1/tmp"
+  },
+  "selected_test": "peer::adversarial_device_recovery_tests::reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_twice",
+  "expected_selected_count": 1,
+  "native_gpu_effect": false,
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "argv": [
+    "/Users/adalundhe/.cargo/bin/cargo",
+    "test",
+    "-p",
+    "hex-sim",
+    "--lib",
+    "--locked",
+    "peer::adversarial_device_recovery_tests::reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_twice",
+    "--",
+    "--exact",
+    "--test-threads=1",
+    "--nocapture"
+  ],
+  "exit_code": 101,
+  "counts": {
+    "passed": 0,
+    "failed": 1,
+    "ignored": 0,
+    "measured": 0,
+    "filtered_out": 158
+  },
+  "log": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-01a1c640-44a2df3b-v1/proof/selected-device-recovery.log",
+  "log_bytes": 5218,
+  "log_sha256": "6cbaa37df4769f9a3a4471561eaff2b9c52f5c0585161f3fa4f4b1db9c9b8a52",
+  "source_unchanged": true,
+  "child_reaped": true,
+  "owned": {
+    "pid": 16062,
+    "start": "Tue Nov 10 09:24:08 2026",
+    "argv": [
+      "/Users/adalundhe/.cargo/bin/cargo",
+      "test",
+      "-p",
+      "hex-sim",
+      "--lib",
+      "--locked",
+      "peer::adversarial_device_recovery_tests::reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_twice",
+      "--",
+      "--exact",
+      "--test-threads=1",
+      "--nocapture"
+    ],
+    "driver_pid": 16056
+  },
+  "witnesses": [
+    "test peer::adversarial_device_recovery_tests::reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_twice ... device-recovery PURE expected_old=[0] expected_fresh=[1] old=Key { owner: 0, epoch: 1, seq: 0 } fresh=Key { owner: 0, epoch: 2, seq: 0 } sibling=Key { owner: 0, epoch: 1, seq: 1 } progress=Key { owner: 0, epoch: 2, seq: 1 } before_held=[0] recovered_held=[1] old_after_fresh=[1] fresh_held=[0] collisions=[0] before_assignments={Key { owner: 0, epoch: 1, seq: 0 }: [0], Key { owner: 0, epoch: 1, seq: 1 }: []} after_assignments={Key { owner: 0, epoch: 1, seq: 0 }: [0], Key { owner: 0, epoch: 1, seq: 1 }: [], Key { owner: 0, epoch: 2, seq: 0 }: [0], Key { owner: 0, epoch: 2, seq: 1 }: []} runtime_observations=[(Key { owner: 0, epoch: 1, seq: 0 }, [0]), (Key { owner: 0, epoch: 1, seq: 1 }, [])] sibling_survived=true progress_confirmed=true admitted_before_cleanup=[400, 2048, 0, 2] creates=4 deletes=4 cleanup_assignments=0 cleanup_own=0 cleanup_ran=0 cleanup_charge=0 cleanup_records=epoch_only old_runner_record=\"0 running d1 session oci 100 512 1 0 linux x86_64 fixture-gpu 1024 0 0 0 0 0\" native_gpu_effect=false"
+  ],
+  "binaries": [
+    {
+      "path": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-01a1c640-44a2df3b-v1/target/debug/deps/hex_sim-9ebd5bc0b4cd9747",
+      "sha256": "b27e191583ee83b9c7f953aa8c8824410a0dbd1a804208319299e1e94d799e2c",
+      "bytes": 13872808
+    }
+  ]
+}

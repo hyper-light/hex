@@ -1,0 +1,64 @@
+{
+  "schema": 1,
+  "parent": "28f571a29ecf43a74846076645c678130276b226",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "owned_source": {
+    "path": "crates/hex-client/src/guest/tests.rs",
+    "sha256": "1e4d1e2d55c5cf8ff48c4df0f14d5eeb699b3bbe8557e97c26d4db83f85089b5",
+    "bytes": 46351,
+    "parent_sha256": "60761a7c7a28e401501230433bfb2a8a9cc59ef5d4ab2b2cead5730183546304"
+  },
+  "root_original": {
+    "source": "02f7c4f1ce6989303e307e0a8328fe3f3295aa30",
+    "log_sha256": "3b04ee6e4ac8861cb688f5200fd691dada999bdba243af3ba611d72a7b20e9aa",
+    "log_copy": "original-02f7-client-constructor-three.log",
+    "passed": 1,
+    "failed": 2,
+    "ignored": 0,
+    "attribution": "ROOT actual, L4 read/hash verified; no replay"
+  },
+  "changed_names": [
+    "guest::tests::absolute_connect_caps_partial_token_and_unanswered_hello",
+    "guest::tests::absolute_connect_completes_and_evented_retains_the_same_link"
+  ],
+  "third_passed_case": {
+    "name": "guest::tests::absolute_connect_rejects_before_dial_and_preserves_smaller_caps",
+    "source_sha256": "bd564083a028f991516155e6e03e58434765885f422c1708d7902d28da41471d",
+    "unchanged": true,
+    "no_rerun": true
+  },
+  "protected": [
+    {
+      "path": "crates/hex-client/src/guest.rs",
+      "sha256": "893c281be8a3d4907d81bcffc36c0991a1d614108e3e68ecf7500e130887c6b3",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "42ce7c212677453c8caed09f4d15034cc0c70f49e235fe099ef19ab8dc825daa",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/calls/budget_tests.rs",
+      "sha256": "a892505c8ff87433c992725743b09c5be085e40e5bd900db15c5f65084dfd9f8",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-core/src/stream.rs",
+      "sha256": "a84b35c48613018101e045179e3aea40768ecb1fabfb3c5a0cd1a2ecc7cf6c33",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-core/src/patience.rs",
+      "sha256": "3b0b0902568a369dd8ae345f91f043c7cac5bf4b3c886accfb8d4aa3b6ea5709",
+      "unchanged": true
+    }
+  ],
+  "successor_tests_executed": 0,
+  "builds_executed": 0,
+  "native_executed": 0,
+  "missing_committed_hello": "UNVERIFIED withheld-answer witness; test remains a harness miss, never counted as withheld-answer success",
+  "status": "source-only; ROOT only two failed selectors pending"
+}

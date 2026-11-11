@@ -1,0 +1,51 @@
+{
+  "bytes": 320298,
+  "sha256": "71ffcfeaa2137a52993a42f9992140e628ba42204e6d7eea8adfc68379f33334",
+  "members": {
+    "cohort-231d59eb-linux-subset-settle-231d/source-before.json": {
+      "bytes": 467025,
+      "sha256": "0b514d3b43f6ec9556eac63f814c7153d356cf47b87224785a840e651311c11e"
+    },
+    "cohort-231d59eb-linux-subset-settle-231d/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-231d59eb-linux-subset-settle-231d/owned-scope-limits.json": {
+      "bytes": 258,
+      "sha256": "3f14f1cbd933c85acf121446ac1e67532ecfa6cf1b8689a5f5ac8623aeb1efe2"
+    },
+    "cohort-231d59eb-linux-subset-settle-231d/cpu-progress-delivered-after.log": {
+      "bytes": 4092,
+      "sha256": "2f0b3f685bacf51ad7f5d5f73375b497c66025c002f599c6965f5dff2fd86368"
+    },
+    "cohort-231d59eb-linux-subset-settle-231d/running.json": {
+      "bytes": 2952,
+      "sha256": "4b6a459569550424bb01ca61ff4d666c9c9b17dc40c52919341faf7b2383d6ed"
+    },
+    "cohort-231d59eb-linux-subset-settle-231d/settle-original-after.log": {
+      "bytes": 2005,
+      "sha256": "3263881d357316be22844c98fa55dbc6bb26fe790be6ae65926369a6ca02f1a8"
+    },
+    "cohort-231d59eb-linux-subset-settle-231d/released-none-original.log": {
+      "bytes": 1293,
+      "sha256": "f0439d9b0b462abfe1baed53fdef19816d9522d146393902325e549fb5d08ff2"
+    },
+    "cohort-231d59eb-linux-subset-settle-231d/source-after.json": {
+      "bytes": 467025,
+      "sha256": "0b514d3b43f6ec9556eac63f814c7153d356cf47b87224785a840e651311c11e"
+    },
+    "cohort-231d59eb-linux-subset-settle-231d/result.json": {
+      "bytes": 3302,
+      "sha256": "d2196ca2f9867bdca9f0ebd8da7b3a2c583bbbf755dc650dd7ae674fc0a61c3c"
+    },
+    "cohort-231d59eb-linux-subset-settle-231d/collected-binaries.json": {
+      "bytes": 2969,
+      "sha256": "068eea680733decc57eabcd9d17b37bf945e889b5fa21423ac179acf34d358e6"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

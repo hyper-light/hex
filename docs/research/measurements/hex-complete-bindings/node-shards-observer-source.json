@@ -1,0 +1,22 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "938de416e681fd1cbb2819ef1a2ccfa77148367b",
+  "source_sha256": "c472b0a52486576e5b9aae0ff60737867b20a857db2a519ed364cf88f149ef6b",
+  "required": [
+    "5c33713d79f9a3cbbf69ebce1eedb8c8386dacf2 actual Shards physical_observations",
+    "944c065def8715b3912c3c8138e4c7ac1f3a60bb shared helper",
+    "a0455e5cc34e0ede2138ef90e2a6090649f1c656 readiness/native counter role"
+  ],
+  "scope": "ONLY native_physical_report adds configured Shards hook through SAME merge AFTER actual native Prober guard drops and independently after FC hook. Qualified FC failure is a report diagnostic and does not early-return or skip Shards. No provider/RPC/capacity recursion, constructor, render or turn edits.",
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "tests": "UNRUN",
+    "native": 0,
+    "dispatches": 0
+  },
+  "pending": "Two-borrow preflight proof source saved separately in lane cache node-proof-preseal-938.rs; not part of this tiny producer. Preserve current Root cfb consumer/616/Supervisor/source integration. Full native/gates remain ROOT-owned."
+}

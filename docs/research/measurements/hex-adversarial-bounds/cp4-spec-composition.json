@@ -1,0 +1,16 @@
+{
+  "before_manifest_sha256": "07d058491c2de25036aa6758d36c0669a43a5e4e90831c5427fbe4276f3b92cd",
+  "after_manifest_sha256": "4e4dca1fbe891db3d53063d10e7e16de797f6b1d7166a040854eace6d125c198",
+  "non_documentation_input_count": 904,
+  "changed_non_documentation_inputs": [
+    {
+      "path": "crates/hex-node/src/placement/rows.rs",
+      "before_sha256": "f0c584d23ac41bf0dff816d2a59d6419c9e6c09e9d7bba1ce1b2c47f1b07f58b",
+      "after_sha256": "72c113b9f160efc8d82d0c3dd4aa5b74dc9c81e0aebd58deee7d8f9fb5531160"
+    }
+  ],
+  "fixture_sha256": "b02e662366dcbb44360db1c87a39f0c7410d3d7512e25ed2b3b32f68f3a7a54e",
+  "parent_sha256": "c1b7e1d5e209a85d95dc4058cb35319965c0cb1979b9e644ed1f67c76aff19d1",
+  "guard_commit": "ee64211cfa2ccd2c8bc0d9bc7104059543c2b00d",
+  "local_production_sha256": "f0c584d23ac41bf0dff816d2a59d6419c9e6c09e9d7bba1ce1b2c47f1b07f58b"
+}

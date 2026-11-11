@@ -94,6 +94,9 @@ mod tests {
         store
             .put(&BoxRecord::new(
                 BoxSpec {
+                    route: None,
+                    allocation: None,
+                    devices: Vec::new(),
                     id: kept.clone(),
                     bounds: Bounds::default(),
                     class: ClassSpec::Process,

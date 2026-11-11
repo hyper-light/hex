@@ -1,0 +1,25 @@
+{
+  "kind": "reviewed source-only join",
+  "source_pins": [
+    "f714a707208d1af6596634c30800a9d7b8941cff",
+    "299d35c5",
+    "b8651d17",
+    "434ae2edb904a1c9c07502854e0ea5dcc76f6135",
+    "856d66fdb533533b902a7cc6bd6454570ee46ca9"
+  ],
+  "preserved": [
+    "ROOT Node attachment prepare uses SAME all_pools",
+    "ROOT Node test route literal",
+    "typed holder branch already equivalent to lane source"
+  ],
+  "new_validation": [
+    "native routes actual platform/mask helper one control UNRUN",
+    "two original shared tests short owned socket directory; assertions unchanged, targeted rerun pending",
+    "C corrected guard compile-only delegated to native FC owner"
+  ],
+  "limits": [
+    "global preflight effect barrier depends on L3 still being sealed",
+    "FC cold pool/report/guest driver path unfinished",
+    "HTTP probe late-success check does not interrupt in-progress dribbled stdlib read; L4 source review underway"
+  ]
+}

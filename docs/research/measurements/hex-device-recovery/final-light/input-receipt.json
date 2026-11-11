@@ -1,0 +1,24 @@
+{
+  "source_revision": "d2e061d452ed82de907c465e68cf9e3495fdf148",
+  "fixed_base": "37021c35e64b2a8bab1d35f20f92a0042d874a44",
+  "archive_sha256": "39be1b6e5294a3a26b07aa751cf6d0aa69ca79b10d9f21588fe25d5cc00a1e21",
+  "archive_bytes": 6383837,
+  "source_sha256": {
+    "crates/hex-sim/src/model.rs": "83fed13bdefe107745ae2e76ed700249586141f792265caa46d2665c086e013c",
+    "crates/hex-sim/src/index.rs": "e2cf5a4d3df7ecf7bdc9ca9a06bd505e6388d60a9a0e3f81bc1aeb13769bb76a",
+    "crates/hex-sim/src/peer.rs": "c80c214d8201fd37f7765000b040b355510879924c641121b9468649edb908cb",
+    "crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs": "cba863d57b17fa1a2d2d0100f7a25888b2bb911fbc3d8c4b3f5ff5b1cdbe6afa"
+  },
+  "source_stream": "git archive gzip in memory; no local bulk archive",
+  "local_bulk_transfer": false,
+  "remote_base": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-final-01a1c640-d2e061d4-v5",
+  "source_members": 1325,
+  "temporary_registration": "\n#[cfg(test)]\n#[path = \"peer/adversarial_device_recovery_tests.rs\"]\nmod adversarial_device_recovery_tests;\n",
+  "parent_registered_sha256": "a7777d81db6c633d9c9e3866f191f8402df7880d57578c13eb70be3ccca42eaa",
+  "private_compatibility": {
+    "file": "crates/hex-sim/src/facts.rs",
+    "change": "only add key: None and, when present, available: true to existing explicit Device literal; ROOT owns actual identity bridge",
+    "original_sha256": "173953bcf2e4f0cf60e5ea49b3b1c88236c907f9ef669b8d569e91ddcf42e704",
+    "private_sha256": "345b47e22454eb2d67884d13e355040012262c487ea8900104e8b7f10d872e5d"
+  }
+}

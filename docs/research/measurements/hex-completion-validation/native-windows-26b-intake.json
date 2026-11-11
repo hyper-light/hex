@@ -1,0 +1,17 @@
+{
+  "source": "26b405e89480ac88d7aa5e7ccbbecf063ee3824d",
+  "role": "ROOTcoordinator",
+  "owned_scope": "docs/research/measurements/hex-native-windows-hcs/",
+  "files_from_exact_source": 496,
+  "added_paths": 496,
+  "changed_existing": [],
+  "independent_verification": {
+    "all_source_blobs_read_at_fixed_git_revision": true,
+    "raw_archives": 66,
+    "raw_members": 319,
+    "compressed_bytes": 7674010,
+    "all_archive_and_member_bytes_sha256_equal_recorded_indexes": true
+  },
+  "attribution": "Native executions/results are assigned-tester observations; ROOT independently verified retained original archive/member hashes, not re-executed cases. Fixed2c native source and c579/93 lightcohorts remain distinct from currentRoot and main.",
+  "status": "ActualhostGPU and controls pass; selectedHCScompute/recovery UNVERIFIED. OriginalCachedImportcontroller remainsred despiteactualhead andlaterverification. Current5dechangedcompiler/control/nativejoin awaits ownreceipts. No finalreadiness/performance/leakfreeclaim."
+}

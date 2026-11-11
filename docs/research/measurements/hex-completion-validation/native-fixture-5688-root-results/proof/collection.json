@@ -1,0 +1,47 @@
+{
+  "bytes": 373012,
+  "sha256": "620f019980efb8717224700f000491498e235b36fa63ef6ee4ad01686d435d59",
+  "members": {
+    "cohort-5688fd75-linux-native-fixture-5688/source-before.json": {
+      "bytes": 571020,
+      "sha256": "f7c76cd784c18ae468e0f96c3319b10c413c04cd795fab3f3aaa2dc82a6c800f"
+    },
+    "cohort-5688fd75-linux-native-fixture-5688/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-5688fd75-linux-native-fixture-5688/owned-scope-limits.json": {
+      "bytes": 259,
+      "sha256": "341b244c737a3141e8f8a3618bb6893b148e0b03d1c868966a1daf92fea0eebc"
+    },
+    "cohort-5688fd75-linux-native-fixture-5688/native-fixed-fixture-new2.log": {
+      "bytes": 3568,
+      "sha256": "ac690fe767f32c11b08ce1702bf40eba091f306a79a4d1a3fc8ae74a81377f37"
+    },
+    "cohort-5688fd75-linux-native-fixture-5688/running.json": {
+      "bytes": 2298,
+      "sha256": "b6f7dbf68df6bb9831ab93e96a2042c099e72c58ef7eaf18b4903b8a41c72086"
+    },
+    "cohort-5688fd75-linux-native-fixture-5688/fixture-and-observations-strict.log": {
+      "bytes": 3761,
+      "sha256": "8240400e0a195fa7e987077b4314048d4f94ec0638c1abf2c544c583c0612d3e"
+    },
+    "cohort-5688fd75-linux-native-fixture-5688/source-after.json": {
+      "bytes": 571020,
+      "sha256": "f7c76cd784c18ae468e0f96c3319b10c413c04cd795fab3f3aaa2dc82a6c800f"
+    },
+    "cohort-5688fd75-linux-native-fixture-5688/result.json": {
+      "bytes": 2554,
+      "sha256": "7195e856ff51b6fddc2c64c4d9b10a3b0d7c256867fb459e02ae27476fa96ab0"
+    },
+    "cohort-5688fd75-linux-native-fixture-5688/collected-binaries.json": {
+      "bytes": 2048,
+      "sha256": "a96190678232ad1c141991e0da4e64c4df0a9d4750a564ecd4b1e2ac850bdbc7"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

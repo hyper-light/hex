@@ -1,0 +1,20 @@
+{
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "parent": "507a32513a4dc6504ca57b25b123dbb46c7bda8d",
+  "source_scope": "ONLY native_metadata thin consumer; preserve ROOT projections/7route_for/physical-report/otherports; no family cohort import required for this delta",
+  "shared_producer": "b7645ef30f8eb08e0a11b4712a8ba8be72bd82d6",
+  "guest_caller": "892dfe65b68652f2ea2170a383e3c0a911e88cd8",
+  "original": "6fb9a981 at ROOT740d relevantRED0/1; canonical preconditions passed",
+  "original_log_sha256": "038ebf62ed5871650397c63be5abd3d6d90116c14fd2a2da0f77398c7f43a4ec",
+  "behavior": "Keep report.check before/after. Reject ANY raw Prober row with holderSome BEFORE shared normalization. Shared helper replaces exact-ID actualmetadata, preserves existing Some when rawNone, refuses conflicting positive holders; no second algorithm/provider/ledger/recursion. L2 canonical Books pre-add_offers ordering is a separate actual caller.",
+  "local_metadata": "scoped rustfmt/diff0; no compile/test/native dispatch",
+  "after_status": "UNRUN; ROOT matched narrow shared cohort only, do not replay prior unchanged controls",
+  "r01": "Shared producer reserves/copies before publication; raw rejection uses existing fallible broken(). No whole-store allocation or performance completion claim.",
+  "source": {
+    "path": "crates/hex-node/src/recorded.rs",
+    "bytes": 102714,
+    "sha256": "9597fe0458ad0d2eb50b096ca93ff334532f02d36ffc74af7b313e12da2b0330"
+  }
+}

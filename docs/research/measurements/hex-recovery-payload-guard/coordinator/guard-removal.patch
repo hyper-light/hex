@@ -1,0 +1,19 @@
+--- fixed
++++ guard-removed
+@@ -312,16 +312,6 @@
+                     return Err(bad("record key suffix"));
+                 }
+                 let key = Key { owner, epoch, seq };
+-                // Recovery must validate the immutable local payload before any runtime callback.
+-                if self
+-                    .held
+-                    .get(&name("own", key))
+-                    .is_some_and(|own| own.payload != s.payload)
+-                {
+-                    return Err(bad(format!(
+-                        "owned and runner rows disagree on payload for {key:?}"
+-                    )));
+-                }
+                 Ok((key, s.payload.clone().ok_or_else(|| bad("ran payload"))?))
+             })
+             .collect()

@@ -1,0 +1,14 @@
+diff --git a/crates/hex-runtime/src/windows/managed.rs b/crates/hex-runtime/src/windows/managed.rs
+index feada95c..4e135c23 100644
+--- a/crates/hex-runtime/src/windows/managed.rs
++++ b/crates/hex-runtime/src/windows/managed.rs
+@@ -61,7 +61,8 @@ pub(super) fn check_cost(runtime: &WinRuntime, cost: &RuntimeCost) -> Result<(),
+         Ok(cpu
+             .checked_mul(10_000)
+             .ok_or_else(|| pending("native CPU cost conversion overflows"))?
+-            % denominator
++            .checked_rem(denominator)
++            .ok_or_else(|| pending("native CPU denominator is zero"))?
+             == 0)
+     };
+     if !exact(host.cpu_milli)? || !exact(cost.quantum.cpu_milli)? {

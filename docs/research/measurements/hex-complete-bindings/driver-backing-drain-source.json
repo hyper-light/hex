@@ -1,0 +1,52 @@
+{
+  "requirement": "AC-T7.4.1",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "base": "4980bf2c200363a6f7e1bd56da5d16d1426eb2b6",
+  "sources": [
+    {
+      "path": "crates/hex-node/src/placement.rs",
+      "sha256": "eae90abb67c31842f761a8a007d51e67640c044b617dd11dccc4fa051e4150f4"
+    },
+    {
+      "path": "crates/hex-node/src/scheduler.rs",
+      "sha256": "3d0c400565e4339962d8758032e6955dd345f3900e102b0f8119512f4f840a4c"
+    },
+    {
+      "path": "crates/hex-node/src/placement/backing_bootstrap_tests.rs",
+      "sha256": "216bfac4026664dcfbfddcf6d7e320806e476ef08704c8c071621be3451d2ba8"
+    },
+    {
+      "path": "crates/hex-node/src/scheduler/tests.rs",
+      "sha256": "834c7443236213d7609becbf2d4e32adff7b139c986a1e930cb218e8dc0fb377"
+    }
+  ],
+  "mechanism": [
+    "Runtimes.draining_backings accepts actual canonical valid receipts from real endpoint reports; fallible MAX_RUNTIME_ROUTES64 vector, deduplicates key, conflicting repeated receipt refuses. No holder grant from telemetry.",
+    "Service BackingActions keeps Draining cleanup independent of fresh telemetry mask, alongside old Prepared and Released actions; no new ledger/queue/cache/provider/DTO/wire.",
+    "Driver.drain_backing observes exact Draining into BOTH existing Index views while same operation receipt excludes concurrent dispatch. Core lock released before native Runtime.release_backing callback. Native refusal retains full original charge/claims.",
+    "Returned native receipt must equal original key/profile/full physical selected set and positive Released phase. Wrong metadata refuses/fatally blocks admission; wrong/native-only controller result cannot refund. Fallible dual-view observe remains atomic.",
+    "Service invokes SEPARATE Driver.release_backing ACK only after drain_backing observed Released/refund. Existing ACK enforces both Index views consumed the original receipt before native metadata removal/rearm. One final ordinary snapshot refresh; no recursive next-generation boot."
+  ],
+  "controls": [
+    "placement::tests::backing_bootstrap_tests::canonical_draining_cleanup_refunds_only_exact_release_before_separate_ack (new real Driver/control,5 model replies: positive,Uncertain,wronggeneration,wrongselection,stillDraining)",
+    "scheduler::tests::canonical_draining_action_is_not_filtered_by_unavailable_fresh_gpu_observation (new actual action parser/control)"
+  ],
+  "control_nonvacuity": "Callbacks count cleanup and separate ACK; assert same operation held and core lock available; initial exact grant real Driver; both Index views unreleased during cleanup; no ACK on wrong/uncertain reply. Pure runtime callbacks/private file rows only, no native VM witness. Old3 bootstrap control bodies/oracles unchanged except explicit existing AckOnly fixture mode field.",
+  "validation": {
+    "rustfmt": "installed scoped parser/format0",
+    "diff": "git diff --check0",
+    "Cargo": "UNRUN; ROOT owns exact matched check, no repetition of old controls",
+    "native": "0/no dispatch/effects"
+  },
+  "allocation_wait_review": "No new wait/retry/cache. New transient action list bounded by existing protocol64 and before native effects. Full receipt copies fallible; operation/core/metadata owner tables unchanged. Existing allocation/refusal/row publication seams and broad R14 profile remain owed; no performance or allocation-free claim.",
+  "dependencies": "Runtime phase-aware cleanup/ACK: FC9075c7ac432a17b5a1d78d2220d15bd8d7850bdc; L2 actual guest3bdb5707/3896f3 (sharedCPU legacy rearm original/remedy remains separately assigned), canonical family8b/Node59363/Tx8641+L3 059752/70b +Node1aee/431.",
+  "intake": "Fixed4980 named four-file delta, preserves root normalizer/cost/wire/current external ports; no whole lane overwrite or manifests. No unowned code.",
+  "remaining": [
+    "ROOT focused2 controls/strict all-target checks and native effect/fault/mutation/resource proof owed.",
+    "Uncertain native cleanup still returns its typed error under existing Service error behavior, with full charge/claims retained; this source does not silently consume failure or claim new unrelated-CPU progress on cleanup errors. Any broader composition concern needs an actual bounded original.",
+    "Actual ordinary refresh drives only one current generation pass; adapter metadata prepare on next snapshot supplies new R after ACK; no native start before same Index grant.",
+    "Original committed recovery05048 remains unrun/no Index remedy; API/wire/module metadata and final CLI/native integration are ROOT-owned."
+  ]
+}

@@ -2,14 +2,54 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Bounds, BoxId, BoxSpec, Class, Program, Stdio};
+use crate::{Bounds, BoxId, BoxSpec, Class, DeviceInfo, Program, Stdio};
 
 /// A runtime: boxes of one or more classes on one node. Calls are synchronous and short (a create
 /// takes milliseconds); waiting for a program is [`Proc`]'s, with a deadline. Every refusal is
 /// typed and says what and why (CLAUDE.md §3).
 pub trait Runtime: Send + Sync {
+    /// Direct native envelope counters from the SAME canonical backing owner. Inner guest usage
+    /// cannot credit host room; an unread or uninitialized native scope remains a typed refusal.
+    fn backing_usage(&self, key: &BackingKey) -> Result<Usage, Refusal> {
+        Err(Refusal::Backing {
+            key: *key,
+            cause: LifecycleCause::Pending,
+        })
+    }
+
+    /// Admit and initialize this exact real pool backing through the same native owner. A capacity
+    /// report is not a grant, and the default uninitialized adapter performs no effects.
+    fn initialize_backing(&self, grant: BackingGrant) -> Result<BackingOffer, Refusal> {
+        Err(Refusal::Backing {
+            key: grant.key,
+            cause: LifecycleCause::Pending,
+        })
+    }
+    fn release_backing(&self, key: BackingKey) -> Result<BackingOffer, Refusal> {
+        Err(Refusal::Backing {
+            key,
+            cause: LifecycleCause::Pending,
+        })
+    }
+
     /// The classes it runs.
     fn classes(&self) -> Vec<Class>;
+
+    /// One factual snapshot from the native Store/turn owner over the existing client/wire seam.
+    /// An uninitialized observation API refuses explicitly and grants no physical capability.
+    fn physical_report(&self) -> Result<crate::devices::PhysicalReport, Refusal> {
+        Err(Refusal::Platform {
+            what: "native physical report",
+            platform: std::env::consts::OS,
+            why: "this runtime has no initialized native facts provider".into(),
+        })
+    }
+
+    /// AC-T7.4.1: the resource pool backing this class. `None` explicitly selects the caller's
+    /// same-host physical budget; a guest must report its own pool rather than host capacity.
+    fn capacity(&self, _class: Class) -> Result<Option<Capacity>, Refusal> {
+        Ok(None)
+    }
 
     /// Makes a box with its bounds in force. A `process` box is empty when this returns; an `oci`
     /// box's init is made and waits for [`Runtime::start`], [`BoxState::Created`].
@@ -48,6 +88,1062 @@ pub trait Runtime: Send + Sync {
 
     /// Ends every process in the box and removes it, with any writable layer it owns.
     fn delete(&self, id: &BoxId) -> Result<(), Refusal>;
+}
+
+/// CPU milli, memory bytes and writable-volume bytes; devices are not inferred from a pool.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityResources {
+    pub cpu_milli: u64,
+    pub mem_bytes: u64,
+    pub disk_bytes: u64,
+}
+
+impl CapacityResources {
+    pub fn holds(self, need: Self) -> bool {
+        self.cpu_milli >= need.cpu_milli
+            && self.mem_bytes >= need.mem_bytes
+            && self.disk_bytes >= need.disk_bytes
+    }
+
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        Some(Self {
+            cpu_milli: self.cpu_milli.checked_add(other.cpu_milli)?,
+            mem_bytes: self.mem_bytes.checked_add(other.mem_bytes)?,
+            disk_bytes: self.disk_bytes.checked_add(other.disk_bytes)?,
+        })
+    }
+
+    pub fn checked_sub(self, other: Self) -> Option<Self> {
+        Some(Self {
+            cpu_milli: self.cpu_milli.checked_sub(other.cpu_milli)?,
+            mem_bytes: self.mem_bytes.checked_sub(other.mem_bytes)?,
+            disk_bytes: self.disk_bytes.checked_sub(other.disk_bytes)?,
+        })
+    }
+}
+
+/// Initialized per-box cost, fixed to reviewed source/config/measurement evidence by `id`.
+/// Bounds describe the actual guest envelope. `guest_overhead` pays kernel/relay resources inside
+/// that envelope; `overhead` pays the VMM on its host, outside it. Neither has an invented default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeCost {
+    pub id: [u8; 32],
+    pub floor: CapacityResources,
+    pub ceiling: CapacityResources,
+    /// Explicit positive physical/API unit in every dimension, including unchanged units of one.
+    pub quantum: CapacityResources,
+    pub guest_overhead: CapacityResources,
+    pub overhead: CapacityResources,
+}
+
+/// The immutable host charge admitted for the original workload, with its exact cost profile.
+/// Persisted in BoxSpec and its existing BoxRecord, never a second resource ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Allocation {
+    pub resources: CapacityResources,
+    pub cost: RuntimeCost,
+}
+
+/// Snapshot route eligibility is a fixed u64 word, not a tuning or an inventory cache.
+pub const MAX_RUNTIME_ROUTES: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageOs {
+    Linux,
+    Windows,
+    Macos,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageArch {
+    Amd64,
+    Arm64,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImagePlatform {
+    pub os: ImageOs,
+    pub arch: ImageArch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Execution {
+    Native,
+    ShardsShared,
+    ShardsDedicated,
+    Firecracker,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuEligibility {
+    Any,
+    None,
+    Required,
+}
+impl GpuEligibility {
+    pub fn accepts(self, selected: bool) -> bool {
+        match self {
+            Self::Any => true,
+            Self::None => !selected,
+            Self::Required => selected,
+        }
+    }
+    fn overlaps(self, other: Self) -> bool {
+        [false, true]
+            .into_iter()
+            .any(|selected| self.accepts(selected) && other.accepts(selected))
+    }
+}
+
+/// The original workload form and image platform, with its actual initialized execution path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteKey {
+    pub class: crate::Class,
+    pub image: ImagePlatform,
+    pub execution: Execution,
+    pub gpu: GpuEligibility,
+}
+impl RouteKey {
+    pub fn backend_class(self) -> crate::Class {
+        match self.execution {
+            Execution::Native => self.class,
+            Execution::ShardsShared | Execution::ShardsDedicated => crate::Class::Shards,
+            Execution::Firecracker => crate::Class::Firecracker,
+        }
+    }
+
+    pub fn check(self) -> Result<(), Refusal> {
+        let valid = match (self.class, self.execution) {
+            (crate::Class::Process, Execution::Native) => self.gpu == GpuEligibility::None,
+            (crate::Class::Oci, Execution::Native) => self.image.os != ImageOs::Macos,
+            (crate::Class::Oci, Execution::ShardsShared) => {
+                self.image.os == ImageOs::Linux && self.gpu == GpuEligibility::None
+            }
+            (crate::Class::Oci, Execution::ShardsDedicated) => {
+                self.image.os == ImageOs::Linux && self.gpu == GpuEligibility::Required
+            }
+            (crate::Class::Shards, Execution::ShardsDedicated)
+            | (crate::Class::Firecracker, Execution::Firecracker) => {
+                self.image.os == ImageOs::Linux
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(invalid_route(
+                "route class, image platform, execution or device mode disagree",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Pool configuration identity and the Store-generated native incarnation; neither PID nor path
+/// supplies this authority. The original profile remains in the same durable backing record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackingKey {
+    pub pool: [u8; 32],
+    pub generation: [u8; 16],
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackingPhase {
+    Prepared,
+    Granted,
+    Live,
+    Draining,
+    Released,
+}
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackingOffer {
+    pub key: BackingKey,
+    pub cost: RuntimeCost,
+    pub phase: BackingPhase,
+    /// Exact administrator-provisioned claims. These IDs supply no model, memory or load facts.
+    #[serde(deserialize_with = "deserialize_provisioning")]
+    pub devices: Vec<crate::DeviceId>,
+}
+impl BackingOffer {
+    /// A workload's exact selection is separate from its source observer's full grant. This
+    /// validates identity membership only; it never releases P or invents a fresh observation.
+    pub fn check_selection_parts(
+        provisioned: &[crate::DeviceId],
+        selected: &[crate::DeviceId],
+    ) -> Result<(), Refusal> {
+        check_provisioning(provisioned)?;
+        check_provisioning(selected)?;
+        if selected.is_empty()
+            || selected
+                .iter()
+                .any(|id| provisioned.binary_search(id).is_err())
+        {
+            return Err(invalid_route(
+                "dedicated workload selection must be a nonempty subset of its source grant",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        self.allocation()?;
+        Ok(Self {
+            key: self.key,
+            cost: self.cost,
+            phase: self.phase,
+            devices: copy_provisioning(&self.devices)?,
+        })
+    }
+
+    /// Aggregate inner reservations must fit the SAME fixed profile, including its kernel/relay
+    /// and host allowances and quantization. A residual host debit alone is not guest admission.
+    pub fn check_inner(&self, used: CapacityResources) -> Result<(), Refusal> {
+        let granted = self.allocation()?;
+        if self.cost.allocate(used)? != granted {
+            return Err(invalid_route(
+                "aggregate payload differs from its fixed backing grant",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn allocation(&self) -> Result<Allocation, Refusal> {
+        check_provisioning(&self.devices)?;
+        self.cost.check()?;
+        if self.cost.floor != self.cost.ceiling {
+            return Err(invalid_route(
+                "a backing must name its exact configured native envelope",
+            ));
+        }
+        self.cost.allocate(CapacityResources::default())
+    }
+}
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackingGrant {
+    pub key: BackingKey,
+    pub allocation: Allocation,
+    #[serde(deserialize_with = "deserialize_provisioning")]
+    pub devices: Vec<crate::DeviceId>,
+}
+
+fn deserialize_provisioning<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<crate::DeviceId>, D::Error> {
+    bounded_values(
+        deserializer,
+        crate::MAX_DEVICES,
+        "physical claim count exceeds its address space",
+    )
+}
+
+/// Count before decoding another value; an excessive next element is never materialized. These
+/// vectors have protocol/address-space bounds, not input-selected allocation hints. Doubling a
+/// checked capacity up to that exact bound gives amortized growth; an empty sequence allocates none.
+pub(crate) fn bounded_values<'de, D, T>(
+    deserializer: D,
+    bound: usize,
+    refused: &'static str,
+) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    use serde::de::{DeserializeSeed, Error, SeqAccess, Visitor};
+    struct EndOnly(&'static str);
+    impl<'de> DeserializeSeed<'de> for EndOnly {
+        type Value = ();
+        fn deserialize<D: serde::Deserializer<'de>>(self, _: D) -> Result<(), D::Error> {
+            Err(D::Error::custom(self.0))
+        }
+    }
+    struct Values<T> {
+        bound: usize,
+        refused: &'static str,
+        element: std::marker::PhantomData<T>,
+    }
+    impl<'de, T: serde::Deserialize<'de>> Visitor<'de> for Values<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a bounded runtime route or physical-claim sequence")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            if seq.size_hint().is_some_and(|count| count > self.bound) {
+                return Err(A::Error::custom(self.refused));
+            }
+            let mut values: Vec<T> = Vec::new();
+            loop {
+                if values.len() == self.bound {
+                    if seq.next_element_seed(EndOnly(self.refused))?.is_some() {
+                        return Err(A::Error::custom(self.refused));
+                    }
+                    break;
+                }
+                let Some(value) = seq.next_element::<T>()? else {
+                    break;
+                };
+                if values.len() == values.capacity() {
+                    let capacity = values
+                        .capacity()
+                        .checked_mul(2)
+                        .unwrap_or(self.bound)
+                        .max(1)
+                        .min(self.bound);
+                    let additional = capacity
+                        .checked_sub(values.len())
+                        .ok_or_else(|| A::Error::custom(self.refused))?;
+                    values
+                        .try_reserve_exact(additional)
+                        .map_err(|_| A::Error::custom("runtime sequence allocation refused"))?;
+                }
+                values.push(value);
+            }
+            Ok(values)
+        }
+    }
+    deserializer.deserialize_seq(Values::<T> {
+        bound,
+        refused,
+        element: std::marker::PhantomData,
+    })
+}
+impl BackingGrant {
+    pub fn check(&self) -> Result<(), Refusal> {
+        check_provisioning(&self.devices)?;
+        self.allocation.check(CapacityResources::default())?;
+        if self.allocation.cost.floor != self.allocation.cost.ceiling {
+            return Err(invalid_route(
+                "a backing grant must name its exact configured native envelope",
+            ));
+        }
+        Ok(())
+    }
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        self.check()?;
+        Ok(Self {
+            key: self.key,
+            allocation: self.allocation,
+            devices: copy_provisioning(&self.devices)?,
+        })
+    }
+}
+
+fn check_provisioning(devices: &[crate::DeviceId]) -> Result<(), Refusal> {
+    if devices.len() > crate::MAX_DEVICES {
+        return Err(Refusal::Exhausted {
+            what: "native backing physical claims",
+            bound: crate::MAX_DEVICES,
+        });
+    }
+    for id in devices {
+        id.check()?;
+    }
+    if devices
+        .windows(2)
+        .any(|pair| matches!(pair, [a,b] if a >= b))
+    {
+        return Err(invalid_route(
+            "backing physical claims must be canonical sorted unique identities",
+        ));
+    }
+    Ok(())
+}
+
+fn copy_provisioning(devices: &[crate::DeviceId]) -> Result<Vec<crate::DeviceId>, Refusal> {
+    let mut copied = Vec::new();
+    copied
+        .try_reserve_exact(devices.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "native backing physical claims",
+            bound: crate::MAX_DEVICES,
+        })?;
+    copied.extend_from_slice(devices);
+    Ok(copied)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteOffer {
+    pub key: RouteKey,
+    pub cost: Option<RuntimeCost>,
+    pub backing: Option<BackingKey>,
+}
+impl RouteOffer {
+    /// A dedicated route may hand off its observer's exact physical grant. Its dynamic envelope
+    /// extends the SAME evidence-pinned profile; a different pool/profile is not a substitute.
+    pub fn check_backing(self, backing: &BackingOffer) -> Result<(), Refusal> {
+        self.check_backing_parts(backing.key, backing.cost, &backing.devices)
+    }
+
+    pub fn check_backing_parts(
+        self,
+        key: BackingKey,
+        profile: RuntimeCost,
+        devices: &[crate::DeviceId],
+    ) -> Result<(), Refusal> {
+        self.check()?;
+        if matches!(
+            self.key.execution,
+            Execution::ShardsDedicated | Execution::Firecracker
+        ) && self.key.gpu != GpuEligibility::Required
+        {
+            return Err(invalid_route(
+                "initialized backing route requires explicit selected-GPU eligibility",
+            ));
+        }
+        check_backing_profile(
+            self.key.execution,
+            self.cost,
+            self.backing,
+            key,
+            profile,
+            devices,
+        )
+    }
+
+    pub fn check(self) -> Result<(), Refusal> {
+        self.key.check()?;
+        match (self.key.execution, self.cost, self.backing) {
+            (Execution::Native, None, None) | (Execution::ShardsShared, None, Some(_)) => Ok(()),
+            (Execution::ShardsDedicated | Execution::Firecracker, Some(cost), _) => cost.check(),
+            _ => Err(invalid_route(
+                "route charge differs from its actual execution topology",
+            )),
+        }
+    }
+}
+
+fn check_backing_profile(
+    execution: Execution,
+    cost: Option<RuntimeCost>,
+    backing: Option<BackingKey>,
+    key: BackingKey,
+    profile: RuntimeCost,
+    devices: &[crate::DeviceId],
+) -> Result<(), Refusal> {
+    if backing != Some(key) {
+        return Err(invalid_route("route references another backing generation"));
+    }
+    check_provisioning(devices)?;
+    profile.check()?;
+    if let Some(cost) = cost {
+        cost.check()?;
+    }
+    if profile.floor != profile.ceiling {
+        return Err(invalid_route(
+            "backing profile is not its fixed configured envelope",
+        ));
+    }
+    match (execution, cost) {
+        (Execution::ShardsShared, None) if devices.is_empty() => Ok(()),
+        (Execution::ShardsDedicated | Execution::Firecracker, Some(cost))
+            if !devices.is_empty()
+                && cost.id == profile.id
+                && cost.floor == profile.floor
+                && cost.quantum == profile.quantum
+                && cost.overhead == profile.overhead
+                && cost.guest_overhead == profile.guest_overhead
+                && cost.ceiling.holds(profile.ceiling) =>
+        {
+            Ok(())
+        }
+        _ => Err(invalid_route(
+            "route and backing disagree about topology, profile or physical grant",
+        )),
+    }
+}
+
+/// Immutable chosen route beside the original BoxSpec. This factual receipt never relabels the
+/// workload class and cannot alone initialize a backing, assert native readiness or grant devices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteReceipt {
+    pub key: RouteKey,
+    pub backing: Option<BackingKey>,
+}
+impl RouteReceipt {
+    /// Validate a factual retained receipt against its original source; this does not advertise
+    /// a fresh initialized offer or turn a legacy Any eligibility key into new GPU capability.
+    pub fn check_backing_parts(
+        self,
+        cost: Option<RuntimeCost>,
+        key: BackingKey,
+        profile: RuntimeCost,
+        provisioned: &[crate::DeviceId],
+        selected: &[crate::DeviceId],
+    ) -> Result<(), Refusal> {
+        self.check(
+            self.key.class,
+            selected.iter().any(|id| id.kind == crate::DeviceKind::Gpu),
+        )?;
+        check_backing_profile(
+            self.key.execution,
+            cost,
+            self.backing,
+            key,
+            profile,
+            provisioned,
+        )?;
+        if self.key.execution == Execution::ShardsShared {
+            check_provisioning(selected)?;
+            if !selected.is_empty() {
+                return Err(invalid_route(
+                    "shared backing has no selected physical grant",
+                ));
+            }
+            Ok(())
+        } else {
+            BackingOffer::check_selection_parts(provisioned, selected)
+        }
+    }
+
+    /// One formula for candidate, durable admission and recovery. Shared payload limits are
+    /// unchanged; its separately granted backing pays the host envelope exactly once.
+    pub fn charged(
+        self,
+        workload: CapacityResources,
+        allocation: Option<Allocation>,
+    ) -> Result<CapacityResources, Refusal> {
+        self.key.check()?;
+        match (self.key.execution, allocation) {
+            (Execution::Native, None) => Ok(workload),
+            (Execution::ShardsShared, None) if self.backing.is_some() => {
+                Ok(CapacityResources::default())
+            }
+            (Execution::ShardsDedicated | Execution::Firecracker, Some(allocation)) => {
+                allocation.check(workload)?;
+                Ok(allocation.resources)
+            }
+            _ => Err(invalid_route(
+                "committed route and immutable charge disagree",
+            )),
+        }
+    }
+
+    pub fn check(self, class: crate::Class, selected_gpu: bool) -> Result<(), Refusal> {
+        self.key.check()?;
+        if self.key.class != class || !self.key.gpu.accepts(selected_gpu) {
+            return Err(invalid_route(
+                "committed route differs from the original workload or selected devices",
+            ));
+        }
+        match (self.key.execution, self.backing) {
+            (Execution::Native, Some(_)) | (Execution::ShardsShared, None) => Err(invalid_route(
+                "committed route has an invalid backing relationship",
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
+pub(crate) fn invalid_route(why: &'static str) -> Refusal {
+    let mut owned = String::new();
+    if owned.try_reserve_exact(why.len()).is_err() {
+        return Refusal::Exhausted {
+            what: "runtime route refusal bytes",
+            bound: why.len(),
+        };
+    }
+    owned.push_str(why);
+    Refusal::Invalid {
+        what: "initialized runtime route",
+        why: owned,
+    }
+}
+
+fn invalid_cost(why: &'static str) -> Refusal {
+    Refusal::Invalid {
+        what: "runtime allocation",
+        why: why.into(),
+    }
+}
+
+impl RuntimeCost {
+    pub fn check(self) -> Result<(), Refusal> {
+        if self.id == [0; 32]
+            || !self.ceiling.holds(self.floor)
+            || !self.ceiling.holds(self.guest_overhead)
+            || self.quantum.cpu_milli == 0
+            || self.quantum.mem_bytes == 0
+            || self.quantum.disk_bytes == 0
+        {
+            return Err(invalid_cost(
+                "missing cost identity, inconsistent bounds or zero quantum",
+            ));
+        }
+        self.ceiling
+            .checked_add(self.overhead)
+            .ok_or_else(|| invalid_cost("host ceiling overflows"))?;
+        Ok(())
+    }
+
+    /// One formula for candidate fit, receiver admission, durable recovery and runtime checks.
+    pub fn allocate(self, workload: CapacityResources) -> Result<Allocation, Refusal> {
+        self.check()?;
+        let inside = workload
+            .checked_add(self.guest_overhead)
+            .ok_or_else(|| invalid_cost("workload plus guest allowance overflows"))?;
+        let round = |value: u64, floor: u64, quantum: u64| {
+            let value = value.max(floor);
+            let remainder = value.checked_rem(quantum)?;
+            if remainder == 0 {
+                Some(value)
+            } else {
+                value.checked_add(quantum.checked_sub(remainder)?)
+            }
+        };
+        let guest = CapacityResources {
+            cpu_milli: round(
+                inside.cpu_milli,
+                self.floor.cpu_milli,
+                self.quantum.cpu_milli,
+            )
+            .ok_or_else(|| invalid_cost("CPU quantization overflows"))?,
+            mem_bytes: round(
+                inside.mem_bytes,
+                self.floor.mem_bytes,
+                self.quantum.mem_bytes,
+            )
+            .ok_or_else(|| invalid_cost("memory quantization overflows"))?,
+            disk_bytes: round(
+                inside.disk_bytes,
+                self.floor.disk_bytes,
+                self.quantum.disk_bytes,
+            )
+            .ok_or_else(|| invalid_cost("disk quantization overflows"))?,
+        };
+        if !self.ceiling.holds(guest) {
+            return Err(invalid_cost(
+                "workload and guest allowance exceed the initialized runtime ceiling",
+            ));
+        }
+        Ok(Allocation {
+            resources: guest
+                .checked_add(self.overhead)
+                .ok_or_else(|| invalid_cost("host charge overflows"))?,
+            cost: self,
+        })
+    }
+}
+
+impl Allocation {
+    /// Recheck the original durable demand rather than recalculating against a newer cost profile.
+    pub fn check(self, workload: CapacityResources) -> Result<(), Refusal> {
+        if self.cost.allocate(workload)? != self {
+            return Err(invalid_cost(
+                "charge disagrees with its immutable workload and cost profile",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Actual VM configuration is derived from the admitted host charge, paying host overhead once.
+    pub fn guest(self) -> Result<CapacityResources, Refusal> {
+        self.cost.check()?;
+        let guest = self
+            .resources
+            .checked_sub(self.cost.overhead)
+            .ok_or_else(|| invalid_cost("host charge cannot hold its VMM allowance"))?;
+        if !guest.holds(self.cost.floor)
+            || !self.cost.ceiling.holds(guest)
+            || guest.cpu_milli.checked_rem(self.cost.quantum.cpu_milli) != Some(0)
+            || guest.mem_bytes.checked_rem(self.cost.quantum.mem_bytes) != Some(0)
+            || guest.disk_bytes.checked_rem(self.cost.quantum.disk_bytes) != Some(0)
+        {
+            return Err(invalid_cost(
+                "admitted guest envelope violates the initialized bounds or units",
+            ));
+        }
+        Ok(guest)
+    }
+
+    /// BoxSpec has workload caps, while its scheduler row also retains the full original demand.
+    /// A reservation may exceed those caps; it may never shrink them to fit the VM.
+    pub fn covers(self, workload: CapacityResources) -> Result<(), Refusal> {
+        let inside = workload
+            .checked_add(self.cost.guest_overhead)
+            .ok_or_else(|| invalid_cost("workload plus guest allowance overflows"))?;
+        if !self.guest()?.holds(inside) {
+            return Err(invalid_cost(
+                "admitted guest envelope does not cover unchanged workload caps",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A stable resource-pool identity and its physical ceiling/current room. Reservations remain the
+/// scheduler's authority; these facts do not grant resources or guess unread measurements.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Capacity {
+    pub id: String,
+    pub total: CapacityResources,
+    pub free: CapacityResources,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<DeviceInfo>,
+    /// None is the legacy native identity cost. A VM adapter must supply its verified profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<RuntimeCost>,
+    /// Actual initialized execution routes. Empty retains only unambiguous legacy native behavior.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Capacity::deserialize_routes"
+    )]
+    pub routes: Vec<RouteOffer>,
+    /// One eligibility word paired with each canonical DeviceInfo above. Bit positions are local
+    /// to this snapshot's routes; persisted physical identity is ALWAYS the DeviceId, never a bit.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Capacity::deserialize_device_routes"
+    )]
+    pub device_routes: Vec<u64>,
+    /// Real pool backing offers/receipts from the same native owner, not synthetic workload rows.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Capacity::deserialize_backings"
+    )]
+    pub backings: Vec<BackingOffer>,
+}
+
+impl Capacity {
+    /// Serde field entrypoint also used by the scheduler's SAME immutable route view.
+    pub fn deserialize_routes<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<RouteOffer>, D::Error> {
+        bounded_values(
+            deserializer,
+            MAX_RUNTIME_ROUTES,
+            "runtime route count exceeds the 64-bit mask",
+        )
+    }
+
+    /// One word per existing canonical device; no second inventory is decoded here.
+    pub fn deserialize_device_routes<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<u64>, D::Error> {
+        bounded_values(
+            deserializer,
+            crate::MAX_DEVICES,
+            "device eligibility count exceeds its address space",
+        )
+    }
+
+    /// A backing must have a referencing initialized route, so the SAME route bound applies.
+    pub fn deserialize_backings<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<BackingOffer>, D::Error> {
+        bounded_values(
+            deserializer,
+            MAX_RUNTIME_ROUTES,
+            "runtime backing count exceeds the route mask",
+        )
+    }
+
+    /// Copy an owned snapshot without unchecked allocation. Validation remains explicit: copying
+    /// scalar facts cannot turn a malformed report into an initialized capability.
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        let mut id = String::new();
+        id.try_reserve_exact(self.id.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "runtime capacity identity",
+                bound: self.id.len(),
+            })?;
+        id.push_str(&self.id);
+        let mut devices = Vec::new();
+        devices
+            .try_reserve_exact(self.devices.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "runtime capacity devices",
+                bound: self.devices.len(),
+            })?;
+        for device in &self.devices {
+            devices.push(device.try_clone()?);
+        }
+        let mut backings = Vec::new();
+        backings
+            .try_reserve_exact(self.backings.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "runtime capacity backings",
+                bound: self.backings.len(),
+            })?;
+        for backing in &self.backings {
+            backings.push(backing.try_clone()?);
+        }
+        Ok(Self {
+            id,
+            total: self.total,
+            free: self.free,
+            devices,
+            cost: self.cost,
+            routes: copy_capacity_values(&self.routes, "runtime capacity routes")?,
+            device_routes: copy_capacity_values(
+                &self.device_routes,
+                "runtime capacity eligibility",
+            )?,
+            backings,
+        })
+    }
+
+    pub fn check(&self) -> Result<(), Refusal> {
+        if self.id.is_empty()
+            || self.free.cpu_milli > self.total.cpu_milli
+            || self.free.mem_bytes > self.total.mem_bytes
+            || self.free.disk_bytes > self.total.disk_bytes
+        {
+            return Err(Refusal::Invalid {
+                what: "runtime capacity",
+                why: "pool identity is empty or free resources exceed their totals".to_owned(),
+            });
+        }
+        if let Some(cost) = self.cost {
+            cost.check()?;
+            if !self
+                .total
+                .holds(cost.allocate(CapacityResources::default())?.resources)
+            {
+                return Err(invalid_cost(
+                    "minimum initialized runtime charge exceeds its physical pool",
+                ));
+            }
+        }
+        crate::devices::check_ids(self.devices.iter().map(|device| device.id))?;
+        self.check_routes()
+    }
+}
+
+fn copy_capacity_values<T: Copy>(values: &[T], what: &'static str) -> Result<Vec<T>, Refusal> {
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(values.len())
+        .map_err(|_| Refusal::Exhausted {
+            what,
+            bound: values.len(),
+        })?;
+    copy.extend_from_slice(values);
+    Ok(copy)
+}
+
+impl Capacity {
+    /// Validate an already chosen fresh-admission receipt against this native owner's actual
+    /// initialized offer. This verifies identity/eligibility; it never chooses another route/device.
+    /// Recovery/cleanup use the original canonical record and native scope, not today's offer.
+    pub fn validate_route(&self, spec: &crate::BoxSpec) -> Result<RouteOffer, Refusal> {
+        self.check()?;
+        spec.check()?;
+        let receipt = spec
+            .route
+            .ok_or_else(|| invalid_route("fresh routed admission has no committed receipt"))?;
+        let (at, offer) = self
+            .routes
+            .iter()
+            .enumerate()
+            .find(|(_, offer)| offer.key == receipt.key && offer.backing == receipt.backing)
+            .ok_or_else(|| {
+                invalid_route("committed execution is not an initialized native offer")
+            })?;
+        if let Some(key) = receipt.backing {
+            let backing = self
+                .backings
+                .iter()
+                .find(|backing| backing.key == key)
+                .ok_or_else(|| invalid_route("committed backing is absent"))?;
+            offer.check_backing(backing)?;
+            if offer.key.execution == Execution::ShardsShared {
+                if !spec.devices.is_empty() {
+                    return Err(invalid_route(
+                        "shared backing cannot grant selected physical devices",
+                    ));
+                }
+            } else {
+                BackingOffer::check_selection_parts(&backing.devices, &spec.devices)?;
+            }
+            if backing.phase != BackingPhase::Live {
+                return Err(Refusal::Backing {
+                    key,
+                    cause: LifecycleCause::Pending,
+                });
+            }
+        }
+        match (offer.cost, spec.allocation) {
+            (Some(cost), Some(allocation)) if allocation.cost == cost => {}
+            (None, None) => {}
+            _ => {
+                return Err(invalid_route(
+                    "committed charge differs from the initialized execution",
+                ));
+            }
+        }
+        let bit = u32::try_from(at)
+            .ok()
+            .and_then(|at| 1u64.checked_shl(at))
+            .ok_or_else(|| invalid_route("route eligibility bit overflows"))?;
+        let mut indexed = Vec::new();
+        indexed
+            .try_reserve_exact(self.devices.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "route physical eligibility entries",
+                bound: crate::MAX_DEVICES,
+            })?;
+        indexed.extend(self.devices.iter().zip(&self.device_routes));
+        indexed.sort_unstable_by_key(|(device, _)| device.id);
+        for id in &spec.devices {
+            let (device, mask) = indexed
+                .binary_search_by_key(id, |(device, _)| device.id)
+                .ok()
+                .and_then(|at| indexed.get(at))
+                .ok_or_else(|| {
+                    invalid_route("selected physical identity is absent from the initialized route")
+                })?;
+            if **mask & bit == 0 {
+                return Err(invalid_route(
+                    "selected physical identity is ineligible for the committed execution",
+                ));
+            }
+            if device.holder.as_ref().is_some_and(|holder| match holder {
+                crate::devices::DeviceHolder::Box(id) => id != &spec.id,
+                crate::devices::DeviceHolder::Backing(key) => receipt.backing != Some(*key),
+            }) {
+                return Err(Refusal::Lifecycle {
+                    id: spec.id.try_clone()?,
+                    cause: LifecycleCause::Busy,
+                });
+            }
+        }
+        Ok(*offer)
+    }
+
+    pub fn check_routes(&self) -> Result<(), Refusal> {
+        Self::check_route_parts(
+            self.total,
+            self.devices.len(),
+            &self.routes,
+            &self.device_routes,
+            &self.backings,
+        )
+    }
+
+    /// The scheduler's normalized offer view uses this same validation without another catalog.
+    pub fn check_route_parts(
+        total: CapacityResources,
+        device_count: usize,
+        routes: &[RouteOffer],
+        device_routes: &[u64],
+        backings: &[BackingOffer],
+    ) -> Result<(), Refusal> {
+        if routes.len() > MAX_RUNTIME_ROUTES || backings.len() > MAX_RUNTIME_ROUTES {
+            return Err(Refusal::Exhausted {
+                what: "initialized runtime routes/backings",
+                bound: MAX_RUNTIME_ROUTES,
+            });
+        }
+        if routes.is_empty() {
+            if !device_routes.is_empty() || !backings.is_empty() {
+                return Err(invalid_route(
+                    "legacy capacity cannot imply route or backing eligibility",
+                ));
+            }
+            return Ok(());
+        }
+        if device_routes.len() != device_count {
+            return Err(invalid_route(
+                "route masks must pair with the canonical physical device list",
+            ));
+        }
+        let valid_bits = if routes.len() == MAX_RUNTIME_ROUTES {
+            u64::MAX
+        } else {
+            let count = u32::try_from(routes.len())
+                .map_err(|_| invalid_route("route word width overflows"))?;
+            1u64.checked_shl(count)
+                .and_then(|value| value.checked_sub(1))
+                .ok_or_else(|| invalid_route("route word width overflows"))?
+        };
+        if device_routes.iter().any(|mask| mask & !valid_bits != 0) {
+            return Err(invalid_route(
+                "device eligibility references an absent initialized route",
+            ));
+        }
+        let active = |route: &RouteOffer| {
+            route.backing.is_none_or(|key| {
+                backings
+                    .iter()
+                    .find(|backing| backing.key == key)
+                    .is_some_and(|backing| backing.phase == BackingPhase::Live)
+            })
+        };
+        for (at, route) in routes.iter().enumerate() {
+            route.check()?;
+            if routes.iter().take(at).any(|previous| {
+                (previous.key == route.key && previous.backing == route.backing)
+                    || active(previous)
+                        && active(route)
+                        && previous.key.class == route.key.class
+                        && previous.key.image == route.key.image
+                        && previous.key.gpu.overlaps(route.key.gpu)
+            }) {
+                return Err(invalid_route(
+                    "initialized execution routes have ambiguous workload predicates",
+                ));
+            }
+            if let Some(key) = route.backing {
+                let backing = backings
+                    .iter()
+                    .find(|backing| backing.key == key)
+                    .ok_or_else(|| invalid_route("route references an absent canonical backing"))?;
+                route.check_backing(backing)?;
+            }
+            if let Some(cost) = route.cost
+                && !total.holds(cost.allocate(CapacityResources::default())?.resources)
+            {
+                return Err(invalid_route(
+                    "route minimum charge exceeds its physical resource pool",
+                ));
+            }
+        }
+        for (at, backing) in backings.iter().enumerate() {
+            let allocation = backing.allocation()?;
+            if !total.holds(allocation.resources) {
+                return Err(invalid_route(
+                    "backing charge exceeds its physical resource pool",
+                ));
+            }
+            if backings
+                .iter()
+                .take(at)
+                .any(|previous| previous.key.pool == backing.key.pool)
+            {
+                return Err(invalid_route(
+                    "one pool has multiple competing backing generations",
+                ));
+            }
+            let mut backend = None;
+            for route in routes
+                .iter()
+                .filter(|route| route.backing == Some(backing.key))
+            {
+                let actual = route.key.backend_class();
+                if backend.is_some_and(|previous| previous != actual) {
+                    return Err(invalid_route(
+                        "backing aliases disagree about the actual backend",
+                    ));
+                }
+                backend = Some(actual);
+            }
+            if backend.is_none() {
+                return Err(invalid_route("backing has no initialized backend route"));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A program started in a box.
@@ -205,6 +1301,9 @@ pub struct BoxInfo {
     pub class: Class,
     pub state: BoxState,
     pub bounds: Bounds,
+    /// The existing native record's immutable admitted charge, independent of today's profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocation: Option<Allocation>,
     /// Taken back after its node agent restarted, rather than made by this one.
     pub adopted: bool,
     /// How a macOS `process` box holds its members (the helper's box user, or the rootless process
@@ -223,6 +1322,8 @@ pub struct BoxInfo {
     /// Added after the first release, so absent on the wire means 0 (append-only, CLAUDE.md).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub abandoned: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<RouteReceipt>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -247,6 +1348,12 @@ pub struct Usage {
 /// Why a request was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
+    #[error("native backing {key:?}: {cause:?}")]
+    Backing {
+        key: BackingKey,
+        cause: LifecycleCause,
+    },
+
     #[error("{what} isn't valid: {why}")]
     Invalid { what: &'static str, why: String },
     #[error("no box {0}")]
@@ -270,6 +1377,21 @@ pub enum Refusal {
     Os { op: &'static str, why: String },
     #[error("the node agent's state is unusable: {0}")]
     Broken(String),
+    /// The named box retains its resources while an operation is pending or its physical result
+    /// is uncertain. Busy names exclusive lifecycle ownership, never absence or completion.
+    #[error("box {id}: {cause}")]
+    Lifecycle { id: BoxId, cause: LifecycleCause },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(rename_all = "lowercase")]
+pub enum LifecycleCause {
+    #[error("native operation is pending")]
+    Pending,
+    #[error("physical termination or absence has not been proved")]
+    Uncertain,
+    #[error("another operation owns this box's lifecycle")]
+    Busy,
 }
 
 impl Refusal {
@@ -285,6 +1407,97 @@ impl Refusal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn resources(cpu_milli: u64, mem_bytes: u64, disk_bytes: u64) -> CapacityResources {
+        CapacityResources {
+            cpu_milli,
+            mem_bytes,
+            disk_bytes,
+        }
+    }
+
+    fn cost() -> RuntimeCost {
+        // Fixture data exercises the formula, not measured hardware allowances.
+        RuntimeCost {
+            id: [1; 32],
+            floor: resources(1000, 64 << 20, 0),
+            ceiling: resources(4000, 256 << 20, 1 << 30),
+            quantum: resources(1000, 1 << 20, 1),
+            guest_overhead: resources(50, 3 << 20, 7),
+            overhead: resources(25, 5 << 20, 11),
+        }
+    }
+
+    /// AC-T7.4.1: admission and runtime pay guest/kernel and host/VMM costs once, preserving workload.
+    #[test]
+    fn runtime_cost_quantizes_guest_then_adds_host_allowance_exactly_once() {
+        let cost = cost();
+        let workload = resources(1500, (65 << 20) + 1, 100);
+        let allocation = cost.allocate(workload).unwrap();
+        assert_eq!(allocation.guest().unwrap(), resources(2000, 69 << 20, 107));
+        assert_eq!(allocation.resources, resources(2025, 74 << 20, 118));
+        allocation.check(workload).unwrap();
+        allocation.covers(workload).unwrap();
+        assert!(allocation.check(resources(1500, 65 << 20, 100)).is_err());
+        assert_eq!(workload, resources(1500, (65 << 20) + 1, 100));
+        let encoded = serde_json::to_vec(&allocation).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Allocation>(&encoded).unwrap(),
+            allocation
+        );
+        let mut changed = allocation;
+        changed.resources.mem_bytes += 1;
+        assert!(changed.guest().is_err());
+        assert!(changed.check(workload).is_err());
+    }
+
+    /// AC-T7.4.1: CPU-only dedicated Shards boxes pay the entire configured VM before placement.
+    #[test]
+    fn fixed_guest_floor_and_ceiling_refuse_workloads_that_cannot_fit_with_guest_overhead() {
+        let mut cost = cost();
+        cost.floor = resources(4000, 256 << 20, 1 << 30);
+        cost.ceiling = cost.floor;
+        let small = resources(10, 1 << 20, 0);
+        let allocation = cost.allocate(small).unwrap();
+        assert_eq!(allocation.guest().unwrap(), cost.floor);
+        assert_eq!(
+            allocation.resources,
+            resources(4025, 261 << 20, (1 << 30) + 11)
+        );
+        assert!(cost.allocate(cost.floor).is_err());
+        assert!(allocation.covers(cost.floor).is_err());
+    }
+
+    /// AC-T7.4.1: every absent/zero unit, ceiling violation and overflow is a typed refusal.
+    #[test]
+    fn runtime_cost_refuses_unknown_profile_bad_units_ceiling_and_arithmetic_overflow() {
+        for quantum in [resources(0, 1, 1), resources(1, 0, 1), resources(1, 1, 0)] {
+            let mut changed = cost();
+            changed.quantum = quantum;
+            assert!(matches!(
+                changed.allocate(resources(1, 1, 1)),
+                Err(Refusal::Invalid {
+                    what: "runtime allocation",
+                    ..
+                })
+            ));
+        }
+        let mut changed = cost();
+        changed.id = [0; 32];
+        assert!(changed.check().is_err());
+        changed = cost();
+        changed.floor.cpu_milli = 5000;
+        assert!(changed.check().is_err());
+        assert!(cost().allocate(resources(u64::MAX, 1, 1)).is_err());
+        assert!(cost().allocate(resources(4000, 1, 1)).is_err());
+        changed = cost();
+        changed.ceiling.disk_bytes = u64::MAX;
+        assert!(changed.check().is_err());
+        changed.overhead.disk_bytes = 0;
+        changed.guest_overhead.disk_bytes = 0;
+        changed.quantum.disk_bytes = 2;
+        assert!(changed.allocate(resources(1, 1, u64::MAX)).is_err());
+    }
 
     #[test]
     fn a_signal_number_outside_the_kernels_range_is_refused() {
@@ -304,6 +1517,8 @@ mod tests {
         assert_eq!(info.exit, None);
         assert!(!serde_json::to_string(&info).unwrap().contains("exit"));
         let ended = BoxInfo {
+            allocation: None,
+            route: None,
             membership: None,
             exit: Some(Exit::Signal(9)),
             ..info
@@ -327,5 +1542,701 @@ mod tests {
         };
         let back: BoxInfo = serde_json::from_str(&serde_json::to_string(&left).unwrap()).unwrap();
         assert_eq!(back.abandoned, 2);
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    /// AC-T7.4.1/R01: count/hint checks precede decoding an excessive value and fallible Vec growth.
+    #[test]
+    fn route_sequence_bounds_refuse_before_visiting_the_excess_value() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static VISITED: AtomicUsize = AtomicUsize::new(0);
+        #[derive(Debug)]
+        struct Counted {
+            _value: u64,
+        }
+        impl<'de> Deserialize<'de> for Counted {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                VISITED.fetch_add(1, Ordering::SeqCst);
+                Ok(Self {
+                    _value: u64::deserialize(deserializer)?,
+                })
+            }
+        }
+        let empty: Vec<Counted> = bounded_values(
+            &mut serde_json::Deserializer::from_str("[]"),
+            MAX_RUNTIME_ROUTES,
+            "route bound",
+        )
+        .unwrap();
+        assert_eq!((empty.len(), empty.capacity()), (0, 0));
+        for count in [MAX_RUNTIME_ROUTES, MAX_RUNTIME_ROUTES + 1] {
+            VISITED.store(0, Ordering::SeqCst);
+            let json = format!("[{}]", vec!["0"; count].join(","));
+            let result: Result<Vec<Counted>, _> = bounded_values(
+                &mut serde_json::Deserializer::from_str(&json),
+                MAX_RUNTIME_ROUTES,
+                "route bound",
+            );
+            assert_eq!(result.is_ok(), count == MAX_RUNTIME_ROUTES);
+            assert_eq!(VISITED.load(Ordering::SeqCst), MAX_RUNTIME_ROUTES);
+        }
+        VISITED.store(0, Ordering::SeqCst);
+        let hostile = serde::de::value::SeqDeserializer::<_, serde::de::value::Error>::new(
+            std::iter::repeat_n(0u64, usize::MAX),
+        );
+        let result: Result<Vec<Counted>, _> =
+            bounded_values(hostile, MAX_RUNTIME_ROUTES, "route bound");
+        assert!(result.is_err());
+        assert_eq!(VISITED.load(Ordering::SeqCst), 0);
+    }
+
+    /// AC-T7.4.1/R01: actual new Capacity fields use the count guard before model validation.
+    #[test]
+    fn capacity_route_json_fields_refuse_counts_before_materializing_a_report() {
+        let route = serde_json::to_value(RouteOffer {
+            key: key(ImageOs::Windows, Execution::Native, GpuEligibility::Any),
+            cost: None,
+            backing: None,
+        })
+        .unwrap();
+        let backing = serde_json::to_value(BackingOffer {
+            key: BackingKey {
+                pool: [1; 32],
+                generation: [2; 16],
+            },
+            cost: cost(),
+            phase: BackingPhase::Prepared,
+            devices: Vec::new(),
+        })
+        .unwrap();
+        for (field, value, count, cause) in [
+            ("routes", route, MAX_RUNTIME_ROUTES + 1, "route count"),
+            (
+                "device_routes",
+                serde_json::json!(0),
+                crate::MAX_DEVICES + 1,
+                "eligibility count",
+            ),
+            ("backings", backing, MAX_RUNTIME_ROUTES + 1, "backing count"),
+        ] {
+            let mut input = serde_json::to_value(capacity()).unwrap();
+            input[field] = serde_json::Value::Array(vec![value; count]);
+            let error = serde_json::from_value::<Capacity>(input).unwrap_err();
+            assert!(error.to_string().contains(cause), "{field}: {error}");
+        }
+        let empty = serde_json::to_value(capacity()).unwrap();
+        let parsed: Capacity = serde_json::from_value(empty).unwrap();
+        assert!(
+            parsed.routes.is_empty()
+                && parsed.backings.is_empty()
+                && parsed.device_routes.is_empty()
+        );
+    }
+
+    /// AC-T7.4.1/R01: nested grants/offers cannot allocate an unbounded provisioning claim list.
+    #[test]
+    fn backing_json_claims_obey_the_same_device_address_space_before_allocation() {
+        let grant = BackingGrant {
+            key: BackingKey {
+                pool: [1; 32],
+                generation: [2; 16],
+            },
+            allocation: cost().allocate(CapacityResources::default()).unwrap(),
+            devices: Vec::new(),
+        };
+        let claims: Vec<_> = (0..crate::MAX_DEVICES)
+            .map(|key| serde_json::json!({"kind":"gpu","key":key}))
+            .collect();
+        let mut input = serde_json::to_value(&grant).unwrap();
+        input["devices"] = serde_json::Value::Array(claims);
+        let parsed: BackingGrant = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(parsed.devices.len(), crate::MAX_DEVICES);
+        input["devices"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"kind":"gpu","key":crate::MAX_DEVICES}));
+        let error = serde_json::from_value::<BackingGrant>(input.clone()).unwrap_err();
+        assert!(error.to_string().contains("physical claim count"));
+        let mut offer = serde_json::to_value(BackingOffer {
+            key: grant.key,
+            cost: cost(),
+            phase: BackingPhase::Prepared,
+            devices: Vec::new(),
+        })
+        .unwrap();
+        offer["devices"] = input["devices"].take();
+        let error = serde_json::from_value::<BackingOffer>(offer).unwrap_err();
+        assert!(error.to_string().contains("physical claim count"));
+    }
+
+    fn platform(os: ImageOs) -> ImagePlatform {
+        ImagePlatform {
+            os,
+            arch: ImageArch::Arm64,
+        }
+    }
+    fn key(os: ImageOs, execution: Execution, gpu: GpuEligibility) -> RouteKey {
+        RouteKey {
+            class: crate::Class::Oci,
+            image: platform(os),
+            execution,
+            gpu,
+        }
+    }
+    fn cost() -> RuntimeCost {
+        let fixed = CapacityResources {
+            cpu_milli: 1000,
+            mem_bytes: crate::MIN_MEMORY,
+            disk_bytes: 0,
+        };
+        RuntimeCost {
+            id: [1; 32],
+            floor: fixed,
+            ceiling: fixed,
+            quantum: CapacityResources {
+                cpu_milli: 1,
+                mem_bytes: 1,
+                disk_bytes: 1,
+            },
+            guest_overhead: CapacityResources::default(),
+            overhead: CapacityResources::default(),
+        }
+    }
+    fn capacity() -> Capacity {
+        Capacity {
+            id: "native-owner".into(),
+            total: CapacityResources {
+                cpu_milli: 4000,
+                mem_bytes: crate::MIN_MEMORY * 4,
+                disk_bytes: 4096,
+            },
+            free: CapacityResources::default(),
+            devices: Vec::new(),
+            cost: None,
+            routes: Vec::new(),
+            device_routes: Vec::new(),
+            backings: Vec::new(),
+        }
+    }
+    /// AC-T7.4.1: original OCI form can identify a real Linux guest on Mac and alongside Windows HCS.
+    #[test]
+    fn typed_oci_routes_preserve_workload_form_and_distinguish_platform_and_charge() {
+        let backing = BackingOffer {
+            key: BackingKey {
+                pool: [2; 32],
+                generation: [3; 16],
+            },
+            cost: cost(),
+            phase: BackingPhase::Prepared,
+            devices: Vec::new(),
+        };
+        let mut c = capacity();
+        c.backings.push(backing.try_clone().unwrap());
+        c.routes = vec![
+            RouteOffer {
+                key: key(ImageOs::Windows, Execution::Native, GpuEligibility::Any),
+                cost: None,
+                backing: None,
+            },
+            RouteOffer {
+                key: key(
+                    ImageOs::Linux,
+                    Execution::ShardsShared,
+                    GpuEligibility::None,
+                ),
+                cost: None,
+                backing: Some(backing.key),
+            },
+            RouteOffer {
+                key: key(
+                    ImageOs::Linux,
+                    Execution::ShardsDedicated,
+                    GpuEligibility::Required,
+                ),
+                cost: Some(cost()),
+                backing: None,
+            },
+        ];
+        c.check().unwrap();
+        assert_eq!(c.routes[1].key.class, crate::Class::Oci);
+        assert!(
+            key(ImageOs::Macos, Execution::Native, GpuEligibility::Any)
+                .check()
+                .is_err()
+        );
+        assert!(
+            RouteReceipt {
+                key: c.routes[2].key,
+                backing: None
+            }
+            .check(crate::Class::Oci, true)
+            .is_ok()
+        );
+        assert!(
+            RouteReceipt {
+                key: c.routes[2].key,
+                backing: None
+            }
+            .check(crate::Class::Shards, true)
+            .is_err()
+        );
+        assert!(
+            RouteReceipt {
+                key: c.routes[2].key,
+                backing: None
+            }
+            .check(crate::Class::Oci, false)
+            .is_err()
+        );
+    }
+    /// AC-T7.4.1: eligibility refers to one canonical device list; absent/high/ambiguous routes refuse.
+    #[test]
+    fn route_masks_backing_references_and_ambiguous_predicates_are_checked() {
+        let mut c = capacity();
+        let native = RouteOffer {
+            key: key(ImageOs::Linux, Execution::Native, GpuEligibility::Any),
+            cost: None,
+            backing: None,
+        };
+        c.routes.push(native);
+        c.device_routes.push(1);
+        assert!(c.check().is_err());
+        c.devices.push(crate::DeviceInfo {
+            id: crate::DeviceId {
+                kind: crate::DeviceKind::Gpu,
+                key: 7,
+            },
+            model: "actual".into(),
+            size: 10,
+            holder: None,
+        });
+        c.check().unwrap();
+        c.routes.push(native);
+        assert!(c.check().is_err(), "duplicate exact RouteKey must refuse");
+        c.routes.pop();
+        c.device_routes[0] = 2;
+        assert!(c.check().is_err());
+        c.device_routes[0] = 1;
+        c.routes.push(RouteOffer {
+            key: key(
+                ImageOs::Linux,
+                Execution::ShardsDedicated,
+                GpuEligibility::Required,
+            ),
+            cost: Some(cost()),
+            backing: None,
+        });
+        assert!(c.check().is_err());
+        c.routes = vec![RouteOffer {
+            key: key(
+                ImageOs::Linux,
+                Execution::ShardsShared,
+                GpuEligibility::None,
+            ),
+            cost: None,
+            backing: Some(BackingKey {
+                pool: [2; 32],
+                generation: [3; 16],
+            }),
+        }];
+        assert!(c.check().is_err());
+    }
+    /// AC-T7.4.1: caller-supplied execution/allocation/backing cannot grant a route before effects.
+    #[test]
+    fn committed_route_rejects_forged_execution_cost_and_unready_backing() {
+        let mut c = capacity();
+        let offered = RouteOffer {
+            key: key(
+                ImageOs::Linux,
+                Execution::ShardsDedicated,
+                GpuEligibility::Required,
+            ),
+            cost: Some(cost()),
+            backing: None,
+        };
+        c.routes.push(offered);
+        let id = crate::DeviceId {
+            kind: crate::DeviceKind::Gpu,
+            key: 7,
+        };
+        c.devices.push(crate::DeviceInfo {
+            id,
+            model: "actual".into(),
+            size: 10,
+            holder: None,
+        });
+        c.device_routes.push(1);
+        let mut spec = crate::BoxSpec {
+            id: crate::BoxId::new("fresh-route").unwrap(),
+            class: crate::ClassSpec::Oci(Box::new(crate::OciSpec {
+                rootfs: crate::Rootfs::Dir(std::env::current_dir().unwrap()),
+                init: crate::Program::of(&["/bin/true"]),
+                mounts: Vec::new(),
+                hostname: None,
+                network: crate::Network::Private,
+                hosts: Vec::new(),
+            })),
+            bounds: crate::Bounds {
+                cpu_max_milli: Some(crate::MIN_CPU_MILLI),
+                memory_max: Some(crate::MIN_MEMORY),
+                ..crate::Bounds::default()
+            },
+            owner: None,
+            devices: vec![id],
+            allocation: Some(cost().allocate(CapacityResources::default()).unwrap()),
+            route: Some(RouteReceipt {
+                key: offered.key,
+                backing: None,
+            }),
+        };
+        c.validate_route(&spec).unwrap();
+        let mut forged = cost();
+        forged.id = [9; 32];
+        spec.allocation = Some(forged.allocate(CapacityResources::default()).unwrap());
+        assert!(c.validate_route(&spec).is_err());
+        spec.allocation = Some(cost().allocate(CapacityResources::default()).unwrap());
+        spec.route.as_mut().unwrap().key.execution = Execution::Native;
+        assert!(c.validate_route(&spec).is_err());
+        spec.route = Some(RouteReceipt {
+            key: offered.key,
+            backing: None,
+        });
+        c.device_routes[0] = 0;
+        assert!(c.validate_route(&spec).is_err());
+        c.device_routes[0] = 1;
+        let backing = BackingOffer {
+            key: BackingKey {
+                pool: [2; 32],
+                generation: [3; 16],
+            },
+            cost: cost(),
+            phase: BackingPhase::Granted,
+            devices: vec![id],
+        };
+        c.backings.push(backing.try_clone().unwrap());
+        c.routes[0].backing = Some(backing.key);
+        spec.route.as_mut().unwrap().backing = Some(backing.key);
+        assert!(
+            matches!(c.validate_route(&spec), Err(Refusal::Backing { key, cause:LifecycleCause::Pending }) if key == backing.key)
+        );
+        c.backings[0].phase = BackingPhase::Live;
+        c.validate_route(&spec).unwrap();
+        c.backings[0].cost.id = [8; 32];
+        assert!(
+            c.check_routes().is_err(),
+            "live unrelated cost cannot grant an observer route"
+        );
+        c.backings[0].cost = cost();
+        c.backings[0].devices[0].key = 8;
+        assert!(
+            c.validate_route(&spec).is_err(),
+            "free metadata cannot replace the physical grant"
+        );
+        c.backings[0].devices = vec![id, crate::DeviceId { key: 8, ..id }];
+        c.validate_route(&spec).unwrap();
+        assert_eq!(
+            spec.devices,
+            vec![id],
+            "a source's larger grant must not enlarge the exact Box selection"
+        );
+    }
+    /// AC-T7.4.1: current and historical incarnations use the complete existing key/backing tuple.
+    #[test]
+    fn qualified_route_history_and_current_selection_do_not_alias() {
+        let parent = BackingKey {
+            pool: [2; 32],
+            generation: [3; 16],
+        };
+        let current = BackingKey {
+            pool: [4; 32],
+            generation: [5; 16],
+        };
+        let id = crate::DeviceId {
+            kind: crate::DeviceKind::Gpu,
+            key: 8,
+        };
+        let historical = RouteOffer {
+            key: key(
+                ImageOs::Linux,
+                Execution::ShardsDedicated,
+                GpuEligibility::Required,
+            ),
+            cost: Some(cost()),
+            backing: Some(parent),
+        };
+        let fresh = RouteOffer {
+            backing: Some(current),
+            ..historical
+        };
+        let mut c = capacity();
+        c.routes = vec![historical, fresh];
+        c.backings = vec![
+            BackingOffer {
+                key: parent,
+                cost: cost(),
+                phase: BackingPhase::Released,
+                devices: vec![crate::DeviceId { key: 7, ..id }, id],
+            },
+            BackingOffer {
+                key: current,
+                cost: cost(),
+                phase: BackingPhase::Live,
+                devices: vec![id],
+            },
+        ];
+        c.devices.push(crate::DeviceInfo {
+            id,
+            model: "current actual fixture GPU".into(),
+            size: 10,
+            holder: Some(crate::DeviceHolder::Backing(current)),
+        });
+        c.device_routes = vec![2];
+        c.check().unwrap();
+        let mut spec = crate::BoxSpec {
+            id: crate::BoxId::new("qualified-current").unwrap(),
+            class: crate::ClassSpec::Oci(Box::new(crate::OciSpec {
+                rootfs: crate::Rootfs::Dir(std::env::current_dir().unwrap()),
+                init: crate::Program::of(&["/bin/true"]),
+                mounts: Vec::new(),
+                hostname: None,
+                network: crate::Network::Private,
+                hosts: Vec::new(),
+            })),
+            bounds: crate::Bounds {
+                cpu_max_milli: Some(crate::MIN_CPU_MILLI),
+                memory_max: Some(crate::MIN_MEMORY),
+                ..crate::Bounds::default()
+            },
+            owner: None,
+            devices: vec![id],
+            allocation: Some(cost().allocate(CapacityResources::default()).unwrap()),
+            route: Some(RouteReceipt {
+                key: fresh.key,
+                backing: fresh.backing,
+            }),
+        };
+        assert_eq!(c.validate_route(&spec).unwrap(), fresh);
+        spec.route.as_mut().unwrap().backing = Some(parent);
+        assert!(
+            matches!(c.validate_route(&spec), Err(Refusal::Backing { key, cause: LifecycleCause::Pending }) if key == parent)
+        );
+        spec.route.as_mut().unwrap().backing = Some(BackingKey {
+            generation: [9; 16],
+            ..current
+        });
+        assert!(
+            c.validate_route(&spec).is_err(),
+            "no RouteKey-only fallback"
+        );
+        c.routes.push(fresh);
+        assert!(
+            c.check().is_err(),
+            "duplicate exact qualified tuple refuses"
+        );
+        c.routes.pop();
+        c.backings[0].phase = BackingPhase::Live;
+        assert!(
+            c.check().is_err(),
+            "history cannot become a competing fresh predicate"
+        );
+        c.backings[0].phase = BackingPhase::Released;
+        c.routes[1].cost.as_mut().unwrap().id = [9; 32];
+        assert!(
+            c.check().is_err(),
+            "qualified cost still matches its actual backing"
+        );
+    }
+
+    /// AC-T7.4.1: cold provisioning reserves identity refs without inventing native metadata.
+    #[test]
+    fn cold_backing_claims_are_explicit_unique_and_not_measured_fresh_devices() {
+        let id = crate::DeviceId {
+            kind: crate::DeviceKind::Gpu,
+            key: 7,
+        };
+        let mut c = capacity();
+        c.routes.push(RouteOffer {
+            key: RouteKey {
+                class: crate::Class::Firecracker,
+                image: platform(ImageOs::Linux),
+                execution: Execution::Firecracker,
+                gpu: GpuEligibility::Required,
+            },
+            cost: Some(cost()),
+            backing: Some(BackingKey {
+                pool: [2; 32],
+                generation: [3; 16],
+            }),
+        });
+        let mut backing = BackingOffer {
+            key: BackingKey {
+                pool: [2; 32],
+                generation: [3; 16],
+            },
+            cost: cost(),
+            phase: BackingPhase::Prepared,
+            devices: vec![id],
+        };
+        c.backings.push(backing.try_clone().unwrap());
+        c.check().unwrap();
+        assert!(
+            c.devices.is_empty(),
+            "provisioning must not fabricate DeviceInfo/model/size/load"
+        );
+        let copied = c.try_clone().unwrap();
+        assert_eq!(copied, c);
+        let grant = BackingGrant {
+            key: backing.key,
+            allocation: backing.allocation().unwrap(),
+            devices: vec![id],
+        };
+        grant.check().unwrap();
+        assert_eq!(grant.devices, backing.devices);
+        backing.devices.push(id);
+        assert!(backing.allocation().is_err());
+        assert!(backing.try_clone().is_err());
+    }
+}
+
+#[cfg(test)]
+mod subset_selection_tests {
+    use super::*;
+
+    /// AC-T7.4.1: a source observer's full grant never enlarges or replaces the Box's exact IDs.
+    #[test]
+    fn exact_subset_membership_keeps_full_provisioning_authority_separate() {
+        let id = |key| crate::DeviceId {
+            kind: crate::DeviceKind::Gpu,
+            key,
+        };
+        let full = [id(1), id(2)];
+        BackingOffer::check_selection_parts(&full, &full).unwrap();
+        BackingOffer::check_selection_parts(&full, &[id(2)]).unwrap();
+        for selected in [vec![], vec![id(3)], vec![id(2), id(1)], vec![id(1), id(1)]] {
+            assert!(BackingOffer::check_selection_parts(&full, &selected).is_err());
+        }
+        assert!(BackingOffer::check_selection_parts(&[id(2), id(1)], &[id(1)]).is_err());
+        assert!(BackingOffer::check_selection_parts(&[], &[id(1)]).is_err());
+        assert_eq!(full, [id(1), id(2)]);
+    }
+}
+
+#[cfg(test)]
+mod factual_backing_receipt_tests {
+    use super::*;
+    use crate::{Class, DeviceId, DeviceKind};
+
+    /// AC-T7.4.1: a factual legacy receipt is validated without widening initialized offers.
+    #[test]
+    fn factual_any_receipt_keeps_profile_subset_and_fresh_offer_rules_distinct() {
+        let floor = CapacityResources {
+            cpu_milli: 1000,
+            mem_bytes: crate::MIN_MEMORY,
+            disk_bytes: 0,
+        };
+        let profile = RuntimeCost {
+            id: [1; 32],
+            floor,
+            ceiling: floor,
+            quantum: CapacityResources {
+                cpu_milli: 1,
+                mem_bytes: 1,
+                disk_bytes: 1,
+            },
+            guest_overhead: CapacityResources::default(),
+            overhead: CapacityResources::default(),
+        };
+        let key = BackingKey {
+            pool: [2; 32],
+            generation: [3; 16],
+        };
+        let p = [7, 8].map(|key| DeviceId {
+            kind: DeviceKind::Gpu,
+            key,
+        });
+        let receipt = RouteReceipt {
+            key: RouteKey {
+                class: Class::Shards,
+                image: ImagePlatform {
+                    os: ImageOs::Linux,
+                    arch: ImageArch::Amd64,
+                },
+                execution: Execution::ShardsDedicated,
+                gpu: GpuEligibility::Any,
+            },
+            backing: Some(key),
+        };
+        receipt
+            .check_backing_parts(Some(profile), key, profile, &p, &p[..1])
+            .unwrap();
+        let offer = RouteOffer {
+            key: receipt.key,
+            cost: Some(profile),
+            backing: Some(key),
+        };
+        assert!(offer.check_backing_parts(key, profile, &p).is_err());
+        RouteOffer {
+            key: RouteKey {
+                gpu: GpuEligibility::Required,
+                ..offer.key
+            },
+            ..offer
+        }
+        .check_backing_parts(key, profile, &p)
+        .unwrap();
+        assert!(
+            receipt
+                .check_backing_parts(Some(profile), key, profile, &p, &[])
+                .is_err()
+        );
+        assert!(
+            receipt
+                .check_backing_parts(
+                    Some(profile),
+                    key,
+                    profile,
+                    &p,
+                    &[DeviceId {
+                        kind: DeviceKind::Gpu,
+                        key: 9
+                    }]
+                )
+                .is_err()
+        );
+        assert!(
+            receipt
+                .check_backing_parts(
+                    Some(profile),
+                    key,
+                    RuntimeCost {
+                        id: [4; 32],
+                        ..profile
+                    },
+                    &p,
+                    &p[..1]
+                )
+                .is_err()
+        );
+        let shared = RouteReceipt {
+            key: RouteKey {
+                class: Class::Oci,
+                execution: Execution::ShardsShared,
+                gpu: GpuEligibility::None,
+                ..receipt.key
+            },
+            backing: Some(key),
+        };
+        shared
+            .check_backing_parts(None, key, profile, &[], &[])
+            .unwrap();
+        assert!(
+            shared
+                .check_backing_parts(None, key, profile, &[], &p[..1])
+                .is_err()
+        );
     }
 }

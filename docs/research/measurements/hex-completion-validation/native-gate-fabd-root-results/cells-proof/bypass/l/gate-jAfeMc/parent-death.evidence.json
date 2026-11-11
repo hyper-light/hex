@@ -1,0 +1,746 @@
+{
+  "cleanup_uncertainty": [],
+  "clock": "original std::time::Instant; event times are observer return/check times, not kernel timestamps",
+  "events": [
+    {
+      "D": {
+        "instant_debug": "Instant { tv_sec: 214246, tv_nsec: 132020090 }",
+        "ns_since_t0_decimal": "60000000000"
+      },
+      "G": {
+        "instant_debug": "Instant { tv_sec: 214306, tv_nsec: 132020090 }",
+        "ns_since_t0_decimal": "120000000000"
+      },
+      "event": "origin",
+      "gate_budget_ms": 120000,
+      "guard_ms": 60000,
+      "owner_pid": 2998120,
+      "owner_started": 32558006,
+      "t0": {
+        "instant_debug": "Instant { tv_sec: 214186, tv_nsec: 132020090 }",
+        "ns_since_t0_decimal": "0"
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214186, tv_nsec: 132191069 }",
+        "ns_since_t0_decimal": "170979"
+      },
+      "event": "parent_owned",
+      "pid": 3002013,
+      "pidfd_open": {
+        "Ok": null
+      },
+      "started": 32558256
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214186, tv_nsec: 132211217 }",
+        "ns_since_t0_decimal": "191127"
+      },
+      "event": "identities_wait_begin"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214188, tv_nsec: 557378557 }",
+        "ns_since_t0_decimal": "2425358467"
+      },
+      "event": "identities_received",
+      "frame": {
+        "identities": [
+          {
+            "pid": 3005782,
+            "started": 32558498,
+            "vsock": "/home/adalundhe/.cache/hex-lead/gc5688v1/bypass/l/gate-jAfeMc/first.sock"
+          },
+          {
+            "pid": 3005784,
+            "started": 32558499,
+            "vsock": "/home/adalundhe/.cache/hex-lead/gc5688v1/bypass/l/gate-jAfeMc/sibling.sock"
+          }
+        ],
+        "isolation_acks": [
+          {
+            "actual_byte_2_observed": true,
+            "pid": 3005782,
+            "publication_held": true,
+            "receipt": {
+              "actual_byte_2_observed": true,
+              "commitment": [
+                167,
+                130,
+                218,
+                228,
+                60,
+                212,
+                58,
+                159,
+                51,
+                130,
+                46,
+                198,
+                160,
+                123,
+                187,
+                182,
+                136,
+                145,
+                73,
+                123,
+                3,
+                74,
+                128,
+                15,
+                236,
+                169,
+                116,
+                68,
+                42,
+                83,
+                170,
+                57
+              ],
+              "eof_required_for_ack": false,
+              "legacy_gate_wait_syscall_not_sampled": 271,
+              "legacy_observation_ms_not_polled": 1,
+              "native_scope": [
+                139,
+                69,
+                174,
+                228,
+                68,
+                26,
+                234,
+                126,
+                20,
+                209,
+                41,
+                73,
+                20,
+                221,
+                174,
+                254
+              ],
+              "notification": {
+                "Ok": "Instant { tv_sec: 214188, tv_nsec: 551680980 }"
+              },
+              "suffix": "first",
+              "within_guard": true
+            },
+            "started": 32558498,
+            "tail_receipt": {
+              "after_producer_drop_fence": true,
+              "eof_required_for_ack": false,
+              "pid": 3005782,
+              "started": 32558498,
+              "suffix": "first",
+              "tail": {
+                "Ok": "open"
+              }
+            },
+            "within_guard": true
+          },
+          {
+            "actual_byte_2_observed": true,
+            "pid": 3005784,
+            "publication_held": true,
+            "receipt": {
+              "actual_byte_2_observed": true,
+              "commitment": [
+                127,
+                83,
+                1,
+                237,
+                109,
+                200,
+                246,
+                38,
+                186,
+                162,
+                150,
+                23,
+                181,
+                168,
+                99,
+                44,
+                192,
+                127,
+                100,
+                10,
+                112,
+                30,
+                159,
+                72,
+                80,
+                215,
+                90,
+                192,
+                44,
+                51,
+                6,
+                145
+              ],
+              "eof_required_for_ack": false,
+              "legacy_gate_wait_syscall_not_sampled": 271,
+              "legacy_observation_ms_not_polled": 1,
+              "native_scope": [
+                23,
+                62,
+                179,
+                236,
+                131,
+                217,
+                169,
+                211,
+                174,
+                199,
+                5,
+                79,
+                208,
+                129,
+                137,
+                1
+              ],
+              "notification": {
+                "Ok": "Instant { tv_sec: 214188, tv_nsec: 557127077 }"
+              },
+              "suffix": "sibling",
+              "within_guard": true
+            },
+            "started": 32558499,
+            "tail_receipt": {
+              "after_producer_drop_fence": true,
+              "eof_required_for_ack": false,
+              "pid": 3005784,
+              "started": 32558499,
+              "suffix": "sibling",
+              "tail": {
+                "Ok": "open"
+              }
+            },
+            "within_guard": true
+          }
+        ]
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214188, tv_nsec: 557493762 }",
+        "ns_since_t0_decimal": "2425473672"
+      },
+      "count": 2,
+      "event": "exact_native_pidfds_owned"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214188, tv_nsec: 557556309 }",
+        "ns_since_t0_decimal": "2425536219"
+      },
+      "event": "stopped_phase_received",
+      "frame": {
+        "identities": [
+          {
+            "pid": 3005782,
+            "started": 32558498,
+            "vsock": "/home/adalundhe/.cache/hex-lead/gc5688v1/bypass/l/gate-jAfeMc/first.sock"
+          },
+          {
+            "pid": 3005784,
+            "started": 32558499,
+            "vsock": "/home/adalundhe/.cache/hex-lead/gc5688v1/bypass/l/gate-jAfeMc/sibling.sock"
+          }
+        ],
+        "isolation_acks": [
+          {
+            "actual_byte_2_observed": true,
+            "pid": 3005782,
+            "publication_held": true,
+            "receipt": {
+              "actual_byte_2_observed": true,
+              "commitment": [
+                167,
+                130,
+                218,
+                228,
+                60,
+                212,
+                58,
+                159,
+                51,
+                130,
+                46,
+                198,
+                160,
+                123,
+                187,
+                182,
+                136,
+                145,
+                73,
+                123,
+                3,
+                74,
+                128,
+                15,
+                236,
+                169,
+                116,
+                68,
+                42,
+                83,
+                170,
+                57
+              ],
+              "eof_required_for_ack": false,
+              "legacy_gate_wait_syscall_not_sampled": 271,
+              "legacy_observation_ms_not_polled": 1,
+              "native_scope": [
+                139,
+                69,
+                174,
+                228,
+                68,
+                26,
+                234,
+                126,
+                20,
+                209,
+                41,
+                73,
+                20,
+                221,
+                174,
+                254
+              ],
+              "notification": {
+                "Ok": "Instant { tv_sec: 214188, tv_nsec: 551680980 }"
+              },
+              "suffix": "first",
+              "within_guard": true
+            },
+            "started": 32558498,
+            "tail_receipt": {
+              "after_producer_drop_fence": true,
+              "eof_required_for_ack": false,
+              "pid": 3005782,
+              "started": 32558498,
+              "suffix": "first",
+              "tail": {
+                "Ok": "open"
+              }
+            },
+            "within_guard": true
+          },
+          {
+            "actual_byte_2_observed": true,
+            "pid": 3005784,
+            "publication_held": true,
+            "receipt": {
+              "actual_byte_2_observed": true,
+              "commitment": [
+                127,
+                83,
+                1,
+                237,
+                109,
+                200,
+                246,
+                38,
+                186,
+                162,
+                150,
+                23,
+                181,
+                168,
+                99,
+                44,
+                192,
+                127,
+                100,
+                10,
+                112,
+                30,
+                159,
+                72,
+                80,
+                215,
+                90,
+                192,
+                44,
+                51,
+                6,
+                145
+              ],
+              "eof_required_for_ack": false,
+              "legacy_gate_wait_syscall_not_sampled": 271,
+              "legacy_observation_ms_not_polled": 1,
+              "native_scope": [
+                23,
+                62,
+                179,
+                236,
+                131,
+                217,
+                169,
+                211,
+                174,
+                199,
+                5,
+                79,
+                208,
+                129,
+                137,
+                1
+              ],
+              "notification": {
+                "Ok": "Instant { tv_sec: 214188, tv_nsec: 557127077 }"
+              },
+              "suffix": "sibling",
+              "within_guard": true
+            },
+            "started": 32558499,
+            "tail_receipt": {
+              "after_producer_drop_fence": true,
+              "eof_required_for_ack": false,
+              "pid": 3005784,
+              "started": 32558499,
+              "suffix": "sibling",
+              "tail": {
+                "Ok": "open"
+              }
+            },
+            "within_guard": true
+          }
+        ],
+        "kernel_stop": {
+          "pid": 3005784,
+          "returned_at_instant_debug": "Instant { tv_sec: 214188, tv_nsec: 557314146 }",
+          "signal_sent": true,
+          "started": 32558499,
+          "waitid": {
+            "Ok": {
+              "debug": "WaitIdStatus { stopped: true, exited: false, killed: false, trapped: false, dumped: false, continued: false, stopping_signal: 19 }",
+              "exit_status": null,
+              "si_code": 5,
+              "si_errno": 0,
+              "si_signo": 17,
+              "stopped": true,
+              "stopping_signal": 19,
+              "terminating_signal": null
+            }
+          }
+        },
+        "sibling_stopped": true
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214188, tv_nsec: 557592487 }",
+        "ns_since_t0_decimal": "2425572397"
+      },
+      "event": "canary_before_parent_death",
+      "exists": {
+        "Ok": false
+      },
+      "suffix": "first"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214188, tv_nsec: 557597025 }",
+        "ns_since_t0_decimal": "2425576935"
+      },
+      "event": "canary_before_parent_death",
+      "exists": {
+        "Ok": false
+      },
+      "suffix": "sibling"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214188, tv_nsec: 557604238 }",
+        "ns_since_t0_decimal": "2425584148"
+      },
+      "event": "parent_kill_returned",
+      "result": {
+        "Ok": null
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214188, tv_nsec: 557838476 }",
+        "ns_since_t0_decimal": "2425818386"
+      },
+      "event": "parent_terminal_reap_returned",
+      "status": {
+        "Ok": {
+          "code": null,
+          "raw_wait_status": 9,
+          "signal": 9
+        }
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214188, tv_nsec: 557843796 }",
+        "ns_since_t0_decimal": "2425823706"
+      },
+      "before_D": true,
+      "event": "parent_D_check"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214188, tv_nsec: 557847152 }",
+        "ns_since_t0_decimal": "2425827062"
+      },
+      "end": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 557846631 }",
+        "ns_since_t0_decimal": "62425826541"
+      },
+      "event": "first_terminal_wait_begin"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 657029278 }",
+        "ns_since_t0_decimal": "62525009188"
+      },
+      "event": "first_terminal_notification",
+      "result": {
+        "Err": "exact pidfd exit guard expired"
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 657080022 }",
+        "ns_since_t0_decimal": "62525059932"
+      },
+      "event": "observation_finished",
+      "result": {
+        "Err": "exact pidfd exit guard expired"
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 657083739 }",
+        "ns_since_t0_decimal": "62525063649"
+      },
+      "event": "cleanup_parent_probe",
+      "status": {
+        "Ok": {
+          "code": null,
+          "raw_wait_status": 9,
+          "signal": 9
+        }
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 657097746 }",
+        "ns_since_t0_decimal": "62525077656"
+      },
+      "event": "cleanup_parent_terminal_reap",
+      "status": {
+        "Ok": {
+          "code": null,
+          "raw_wait_status": 9,
+          "signal": 9
+        }
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 657110269 }",
+        "ns_since_t0_decimal": "62525090179"
+      },
+      "event": "cleanup_native_continue",
+      "index": 0,
+      "result": {
+        "Ok": null
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 657115679 }",
+        "ns_since_t0_decimal": "62525095589"
+      },
+      "event": "cleanup_native_kill",
+      "index": 0,
+      "result": {
+        "Ok": null
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 657214524 }",
+        "ns_since_t0_decimal": "62525194434"
+      },
+      "event": "cleanup_native_terminal_notification",
+      "index": 0,
+      "result": {
+        "Ok": null
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 657232638 }",
+        "ns_since_t0_decimal": "62525212548"
+      },
+      "event": "cleanup_native_waitid",
+      "index": 0,
+      "status": {
+        "Ok": {
+          "debug": "WaitIdStatus { stopped: false, exited: false, killed: true, trapped: false, dumped: false, continued: false, terminating_signal: 9 }",
+          "exit_status": null,
+          "si_code": 2,
+          "si_errno": 0,
+          "si_signo": 17,
+          "stopped": false,
+          "stopping_signal": null,
+          "terminating_signal": 9
+        }
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 657248046 }",
+        "ns_since_t0_decimal": "62525227956"
+      },
+      "event": "cleanup_native_continue",
+      "index": 1,
+      "result": {
+        "Ok": null
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 657252244 }",
+        "ns_since_t0_decimal": "62525232154"
+      },
+      "event": "cleanup_native_kill",
+      "index": 1,
+      "result": {
+        "Ok": null
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 657370465 }",
+        "ns_since_t0_decimal": "62525350375"
+      },
+      "event": "cleanup_native_terminal_notification",
+      "index": 1,
+      "result": {
+        "Ok": null
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 657376446 }",
+        "ns_since_t0_decimal": "62525356356"
+      },
+      "event": "cleanup_native_waitid",
+      "index": 1,
+      "status": {
+        "Ok": {
+          "debug": "WaitIdStatus { stopped: false, exited: false, killed: true, trapped: false, dumped: false, continued: false, terminating_signal: 9 }",
+          "exit_status": null,
+          "si_code": 2,
+          "si_errno": 0,
+          "si_signo": 17,
+          "stopped": false,
+          "stopping_signal": null,
+          "terminating_signal": 9
+        }
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 657395011 }",
+        "ns_since_t0_decimal": "62525374921"
+      },
+      "event": "cleanup_native_lease",
+      "result": {
+        "Ok": null
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 671816800 }",
+        "ns_since_t0_decimal": "62539796710"
+      },
+      "event": "cleanup_native_scope_store",
+      "result": {
+        "Ok": null
+      },
+      "suffix": "first"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 677090816 }",
+        "ns_since_t0_decimal": "62545070726"
+      },
+      "event": "cleanup_native_scope_store",
+      "result": {
+        "Ok": null
+      },
+      "suffix": "sibling"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 677227481 }",
+        "ns_since_t0_decimal": "62545207391"
+      },
+      "event": "cleanup_subreaper_restore",
+      "result": {
+        "Ok": null
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 677233663 }",
+        "ns_since_t0_decimal": "62545213573"
+      },
+      "event": "canary_after_cleanup",
+      "exists": {
+        "Ok": false
+      },
+      "suffix": "first"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 677238051 }",
+        "ns_since_t0_decimal": "62545217961"
+      },
+      "event": "canary_after_cleanup",
+      "exists": {
+        "Ok": false
+      },
+      "suffix": "sibling"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 677240115 }",
+        "ns_since_t0_decimal": "62545220025"
+      },
+      "event": "cleanup_complete",
+      "uncertainty": []
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214248, tv_nsec: 677283716 }",
+        "ns_since_t0_decimal": "62545263626"
+      },
+      "event": "existing_receipts_written",
+      "gate_result": {
+        "Ok": null
+      },
+      "parent_stdout": {
+        "Ok": null
+      }
+    }
+  ],
+  "observation": {
+    "Err": "exact pidfd exit guard expired"
+  },
+  "schema": "hex-parent-death-observations-1",
+  "vm_gpu_claim": false
+}

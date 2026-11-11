@@ -1,0 +1,48 @@
+{
+  "source": "4f0a80e592c0d5cec66adf7f711a653591f3bb76",
+  "archive_sha256": "21d83e1fc8d1dc5f1b6eb4bac26b3c71f7985c1408d01f625317cebbcb360e05",
+  "scope": "ROOT single new exact peer remote-owner committed pending original; production unchanged, no previous pass replay or remedy; no native/VM/GPU.",
+  "target": "linux",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 3556847,
+  "phases": [
+    {
+      "name": "remote-committed-pending-original",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-sim",
+        "--lib",
+        "--locked",
+        "remote_owner_recovers_committed_released_source_without_fresh_repick",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 3563089,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "60474064306d52b1a41f3e0a01ed6018aa3c4cfc854793322439ec3fd54bbd15",
+      "bytes": 3630,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_invocations": 0,
+  "exit": 1
+}

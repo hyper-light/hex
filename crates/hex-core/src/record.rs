@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::cgroup::Baseline;
 
+mod pool;
+pub use pool::{NativeRecord, NativeStage, OwnerKey, OwnerRef, PoolRecord};
+
 /// The record format's version; a record of another is refused, never guessed at.
 pub const RECORD_VERSION: u32 = 1;
 /// Largest record Hex reads: a spec with its mounts and program fits in a few kilobytes, so a
@@ -48,6 +51,26 @@ pub struct BoxRecord {
     /// version 1, so a record without it is a box made by create (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<ProcId>,
+    /// One native VM lifetime, introduced by Store's fresh OS entropy fill before any native/boot
+    /// intent effect. A legacy missing value supplies no authority to adopt or stop a native scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_scope: Option<NativeScope>,
+}
+
+/// An opaque 128-bit native incarnation. The core accepts injected bytes and performs no OS call;
+/// the Store shell alone creates fresh production values. Neither PID, time nor path is identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct NativeScope([u8; 16]);
+
+impl NativeScope {
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
 }
 
 /// A cgroup that may be handed from box to box of one owner ([`crate::reuse`]).
@@ -86,6 +109,15 @@ pub struct ProcId {
 }
 
 impl BoxRecord {
+    /// The native keeper commits to the immutable scope and original workload/admission receipt.
+    /// Mutable lifecycle/accounting fields do not change that cleanup identity.
+    pub fn native_commitment(&self) -> Result<[u8; 32], Refusal> {
+        let scope = self
+            .native_scope
+            .ok_or_else(|| scope_refusal("native scope is absent"))?;
+        commitment(&(scope, &self.spec))
+    }
+
     pub fn new(spec: BoxSpec, phase: Phase, dirs: Vec<PathBuf>) -> Self {
         Self {
             version: RECORD_VERSION,
@@ -97,25 +129,43 @@ impl BoxRecord {
             abandoned: 0,
             slot: None,
             run: None,
+            native_scope: None,
         }
+    }
+
+    /// A fresh Store write adds its generated scope without cloning the original workload or
+    /// allocating a parallel record. The flattened source has no scope field in this case.
+    pub fn encode_fresh_scope(&self, scope: NativeScope) -> Result<Vec<u8>, Refusal> {
+        if self.native_scope.is_some() || self.phase != Phase::Creating {
+            let message = "only a fresh Creating record can introduce a native scope";
+            let mut why = String::new();
+            why.try_reserve_exact(message.len())
+                .map_err(|_| Refusal::Exhausted {
+                    what: "scope refusal bytes",
+                    bound: message.len(),
+                })?;
+            why.push_str(message);
+            return Err(Refusal::Invalid {
+                what: "native scope introduction",
+                why,
+            });
+        }
+        #[derive(Serialize)]
+        struct Fresh<'a> {
+            #[serde(flatten)]
+            original: &'a BoxRecord,
+            native_scope: NativeScope,
+        }
+        encode_record(&Fresh {
+            original: self,
+            native_scope: scope,
+        })
     }
 
     /// The record's file: refused past [`MAX_RECORD_BYTES`], which [`BoxRecord::decode`] would refuse
     /// to read back, so a box whose spec is that large is never made.
     pub fn encode(&self) -> Result<Vec<u8>, Refusal> {
-        let mut out = serde_json::to_vec(self)
-            .map_err(|e| Refusal::Broken(format!("encoding a record: {e}")))?;
-        out.push(b'\n');
-        if out.len() > MAX_RECORD_BYTES {
-            return Err(Refusal::Invalid {
-                what: "box spec",
-                why: format!(
-                    "its record is {} bytes, over the {MAX_RECORD_BYTES} the node agent reads back",
-                    out.len()
-                ),
-            });
-        }
-        Ok(out)
+        encode_record(self)
     }
 
     /// A record from its file's bytes, or why they aren't one.
@@ -134,9 +184,61 @@ impl BoxRecord {
     }
 }
 
+fn commitment(value: &impl Serialize) -> Result<[u8; 32], Refusal> {
+    use sha2::Digest;
+    struct Commitment(sha2::Sha256);
+    impl std::io::Write for Commitment {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut commitment = Commitment(sha2::Sha256::new());
+    serde_json::to_writer(&mut commitment, value)
+        .map_err(|_| scope_refusal("native scope/spec cannot be committed exactly"))?;
+    Ok(commitment.0.finalize().into())
+}
+
+fn scope_refusal(message: &'static str) -> Refusal {
+    let mut why = String::new();
+    if why.try_reserve_exact(message.len()).is_err() {
+        return Refusal::Exhausted {
+            what: "scope refusal bytes",
+            bound: message.len(),
+        };
+    }
+    why.push_str(message);
+    Refusal::Invalid {
+        what: "native scope",
+        why,
+    }
+}
+
+fn encode_record(record: &impl Serialize) -> Result<Vec<u8>, Refusal> {
+    let mut out = serde_json::to_vec(record)
+        .map_err(|e| Refusal::Broken(format!("encoding a record: {e}")))?;
+    out.push(b'\n');
+    if out.len() > MAX_RECORD_BYTES {
+        return Err(Refusal::Invalid {
+            what: "box spec",
+            why: format!(
+                "its record is {} bytes, over the {MAX_RECORD_BYTES} the node agent reads back",
+                out.len()
+            ),
+        });
+    }
+    Ok(out)
+}
+
 /// One step that changes the machine or the records; the shell does them in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
+    /// Persist exact backend intent before dispatching a guest create whose native effects may
+    /// survive the caller. Its runtime owns the guest, not an OCI cgroup/state directory here.
+    MarkCreating,
     /// Write the bundle rendered from the box's [`hex_api::OciSpec`] into a directory of its own.
     RenderBundle,
     /// Make the box's cgroup and write its bounds.
@@ -177,6 +279,9 @@ pub fn create_steps(class: &ClassSpec) -> &'static [Step] {
             Step::StartInit,
             Step::MarkReady,
         ],
+        ClassSpec::Firecracker(_) | ClassSpec::Shards(_) => {
+            &[Step::MarkCreating, Step::StartInit, Step::MarkReady]
+        }
     }
 }
 
@@ -210,10 +315,13 @@ mod tests {
 
     fn record() -> BoxRecord {
         let spec = BoxSpec {
+            route: None,
+            devices: Vec::new(),
             id: BoxId::new("r1").unwrap(),
             bounds: Bounds::default(),
             class: ClassSpec::Process,
             owner: None,
+            allocation: None,
         };
         BoxRecord::new(
             spec,
@@ -328,7 +436,82 @@ mod tests {
         ));
     }
 
+    /// AC-T7.4.1: fresh scope encoding preserves the original workload and legacy None encoding.
+    #[test]
+    fn native_scope_is_an_append_only_pure_incarnation() {
+        let mut original = record();
+        original.phase = Phase::Creating;
+        let legacy = original.encode().unwrap();
+        assert!(
+            !String::from_utf8(legacy.clone())
+                .unwrap()
+                .contains("native_scope")
+        );
+        assert_eq!(BoxRecord::decode(&legacy).unwrap().native_scope, None);
+        let scope = NativeScope::from_bytes([0x31; 16]);
+        let encoded = original.encode_fresh_scope(scope).unwrap();
+        let decoded = BoxRecord::decode(&encoded).unwrap();
+        assert_eq!(decoded.spec, original.spec);
+        assert_eq!(decoded.phase, Phase::Creating);
+        assert_eq!(decoded.native_scope, Some(scope));
+        assert_eq!(decoded.native_scope.unwrap().bytes(), &[0x31; 16]);
+        assert_eq!(original.native_scope, None);
+        assert_eq!(original.encode().unwrap(), legacy);
+        assert!(
+            decoded
+                .encode_fresh_scope(NativeScope::from_bytes([0x32; 16]))
+                .is_err()
+        );
+        original.phase = Phase::Ready;
+        assert!(original.encode_fresh_scope(scope).is_err());
+    }
+
+    /// AC-T7.4.1: malformed scope width cannot decode as a legacy record without scope.
+    #[test]
+    fn malformed_native_scope_never_falls_back_to_none() {
+        let mut original = record();
+        original.phase = Phase::Creating;
+        let bytes = original
+            .encode_fresh_scope(NativeScope::from_bytes([7; 16]))
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for width in [0, 1, 15, 17, 32] {
+            let mut malformed = value.clone();
+            malformed["native_scope"] = serde_json::json!(vec![7u8; width]);
+            assert!(BoxRecord::decode(&serde_json::to_vec(&malformed).unwrap()).is_err());
+        }
+    }
+
+    /// AC-T7.4.1: accounting/phase updates retain cleanup identity; another scope or workload cannot.
+    #[test]
+    fn native_scope_commitment_binds_scope_and_original_allocation() {
+        let mut original = record();
+        assert!(original.native_commitment().is_err());
+        original.native_scope = Some(NativeScope::from_bytes([1; 16]));
+        let commitment = original.native_commitment().unwrap();
+        let mut next = original.clone();
+        next.phase = Phase::Deleting;
+        next.abandoned = 11;
+        next.exit = Some(Exit::Code(0));
+        assert_eq!(next.native_commitment().unwrap(), commitment);
+        next.native_scope = Some(NativeScope::from_bytes([2; 16]));
+        assert_ne!(next.native_commitment().unwrap(), commitment);
+        next.native_scope = original.native_scope;
+        next.spec.bounds.memory_max = Some(4096);
+        assert_ne!(next.native_commitment().unwrap(), commitment);
+    }
+
     proptest! {
+        #[test]
+        fn native_scope_every_injected_bitpattern_roundtrips_without_interpreting_its_bits(bytes in any::<[u8; 16]>()) {
+            let mut original = record();
+            original.phase = Phase::Creating;
+            let scope = NativeScope::from_bytes(bytes);
+            let decoded = BoxRecord::decode(&original.encode_fresh_scope(scope).unwrap()).unwrap();
+            prop_assert_eq!(decoded.native_scope, Some(scope));
+            prop_assert_eq!(scope.bytes(), &bytes);
+        }
+
         // Hostile input (CLAUDE.md §6): any bytes are a record or a reason, never a panic.
         #[test]
         fn any_bytes_decode_to_a_record_or_a_reason(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {

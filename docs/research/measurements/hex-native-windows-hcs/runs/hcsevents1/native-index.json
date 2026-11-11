@@ -1,0 +1,16 @@
+{
+  "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\owned-hcs-events-v1",
+  "index": {
+    "progress.json": {
+      "bytes": 6879,
+      "sha256": "6e0f5634fdc26e09a38775eac26eb4b807149347aa5cf0e9315db96549de77c4"
+    },
+    "result.json": {
+      "bytes": 6879,
+      "sha256": "6e0f5634fdc26e09a38775eac26eb4b807149347aa5cf0e9315db96549de77c4"
+    }
+  },
+  "source_hashes": {},
+  "temp_files": [],
+  "utc": "2026-11-11T06:32:38.4546029Z"
+}

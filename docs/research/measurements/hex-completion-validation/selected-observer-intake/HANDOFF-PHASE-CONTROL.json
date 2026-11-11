@@ -1,0 +1,44 @@
+{
+  "status": "SOURCE ONLY test addition; scoped rustfmt parser0/diff0; UNRUN, no test/native dispatch",
+  "parent": "f3fe91875b0987202f1357a04845623f6f02e118",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": {
+    "path": "crates/hex-runtime/src/guest/gpu_pool.rs",
+    "sha256": "4bfd504d306f7cef97fa6e7778e1b1bbe2eed3ca4b28dff412ace7c79180a14d"
+  },
+  "new_control": {
+    "name": "guest::gpu_pool::tests::pending_handoff_preflight_covers_creating_deleting_and_both_held_source_phases",
+    "sha256": "0656909c4dfb8dd6c209edc9bfb8d41d44fe4e6c7af0a8e203bc3b48c3af2bf3",
+    "status": "UNRUN"
+  },
+  "coverage": [
+    "actual public GuestRuntime preflight_backing and handoff_unsubmitted, not just a structural model",
+    "valid full-P Live receipt includes exact-scope renderer model report plus completed own configuration guest-observer evidence/facts",
+    "Creating and Deleting against Live and Draining both reach explicit two-borrow no-Intent proof",
+    "ordinary Deleting without Intent remains rejected; the canonical caller must choose the guarded proof instead",
+    "a present exact selected Intent rejects proof in each pending pair",
+    "Released is never an unsubmitted proof; ordinary Deleting/no receipt stays strict",
+    "S remains strict one-of-two P, original allocation retained, no native effect/route owner"
+  ],
+  "limits": [
+    "runtime crate cannot exercise Node chooser without a dependency cycle; L1 owns actual Node preflight branch selection/control",
+    "model reports/artifacts are not native driver/renderer/workload/termination evidence",
+    "no existing Released(None) rejection remedy in this source"
+  ],
+  "preserved": {
+    "production_prefix_sha256": "0d206baf51827bd1be1c1ab901dab8c39da4f7ba4d1331758bc9d6ed7c5a3765",
+    "prior_b655_original_unit_sha256": "41f47b552f14194a9d5940bedabb94a34fc1a7a8cf322f05ecab8065f7c10616",
+    "all_prior_Cold_fixture_and_tests_suffix": "byte-identical to parent",
+    "ec368_failure_leaf_sha256": "f16173de8bd30baee7826a531ccc686cfc13dece241f07204fb4886aba3e4323",
+    "selected_283_observer": "unchanged"
+  },
+  "dependencies": [
+    "a56 handoff API",
+    "b2 factual check_backing_parts",
+    "bd0/e4 canonical source guard and read-only join",
+    "L1 Node chooser chooses explicit proof for pending source, ordinary validation after Released"
+  ],
+  "after_checks": "ROOT matched check only; no own run"
+}

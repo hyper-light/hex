@@ -1,0 +1,16 @@
+{
+  "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcs-service-basic-v1",
+  "index": {
+    "owner.json": {
+      "bytes": 60,
+      "sha256": "4d75dd14a45bec4dfd4afe19a0c39c0d161ea8717a532931b4f27ba8fa6eaa0b"
+    },
+    "result.json": {
+      "bytes": 718,
+      "sha256": "de4bbdfb658f21d2953919f970c561019e1859706778a7acc84331cad93e4e41"
+    }
+  },
+  "source_hashes": {},
+  "temp_files": [],
+  "utc": "2026-11-11T06:41:26.4101997Z"
+}

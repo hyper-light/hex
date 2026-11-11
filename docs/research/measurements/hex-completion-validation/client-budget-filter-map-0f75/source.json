@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "0f752b1078192ce4596021839118b80014dd25f6",
+  "source": {
+    "path": "crates/hex-client/src/calls/budget_tests.rs",
+    "parent_sha256": "ea5ef9fc1344049ef68381ae288a919fbde3a408a89726c9f1e8e6dbdcee7180",
+    "sha256": "ff18d88cb47276b5deac52cacc3d11f3589123de31e44a1d59ec123604e68bee",
+    "bytes": 102158
+  },
+  "original_actual": {
+    "root_source": "0f752b1078192ce4596021839118b80014dd25f6",
+    "phase": "runtime-joined-strict",
+    "exit": 101,
+    "cargo_pid": 1869838,
+    "cargo_reaped": true,
+    "raw_sha256": "3258888e49f0b1934cd3566a32f27303f403098b00c6423e6b8b2d9fc12cf4a2",
+    "raw_bytes": 4662,
+    "raw_copy": "original-0f75-runtime-joined-strict.log",
+    "verified_archive_sha256": "e1f8d5b78a04a63e007981d450e3c54cf3e5888ac7192fc5384500d025b69159",
+    "diagnostics": "Only two filter_map_bool_then errors at2056/2596; original type-complexity alias cause resolved. Full terminal log read after local collection/result existed."
+  },
+  "change": "Only both actual Run ID selections use filter(matching Run).map(copy same id). Preserves input order, exact predicate and copied ID, no closure side effects or new allocation/state. DialDeadlines alias stays exact.",
+  "source_integrity": "Applying exactly two filter+map substitutions reproduces complete new file byte-for-byte; no other source delta, waiver, oracle/guard/CAP25/OBSERVE100/selector/cleanup change.",
+  "protected": [
+    {
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "2274b7d480ab9291716b0ea257f750e0e9c53fb8e86ab20bf600cbcc51b1dd59",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-node/src/supervise/completion_native_gate_tests.rs",
+      "sha256": "7a2997ee975e91f37ff6106a459b66c819ece6ca498faa63f9a753d0596355ce",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-runtime/src/linux/sys.rs",
+      "sha256": "cda48ba364da31f20b8963a30a365ca2f6231d1dd5c30902d64099d0ab3f98f2",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "a8f51f83a7b8ed2c43e0824f3af7aff5e967ba77159dde320841183559ea29b8",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+      "unchanged": true
+    },
+    {
+      "path": "CLAUDE.md",
+      "sha256": "a093d49f0e51a0c9026996cb170980696dc375364b8d9f13866200c6232e0c2b",
+      "unchanged": true
+    }
+  ],
+  "history": "Original87c7/2d82 lint causes and all original semantic/R10 four-way proof logs retained separately; no semantic regression or new-current-binary pass inferred. Native-gate ACK contract/8239 work independent and not changed.",
+  "builds_executed": 0,
+  "tests_executed": 0,
+  "native_executed": 0,
+  "checks_dispatched": 0,
+  "status": "SOURCE ONLY, scoped rustfmt/source integrity only; ROOT next joined strict intake, no own check or replay."
+}

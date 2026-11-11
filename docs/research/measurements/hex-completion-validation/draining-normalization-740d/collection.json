@@ -1,0 +1,47 @@
+{
+  "bytes": 329739,
+  "sha256": "a75d5a43043f16cd082c962b152e8b59aa9a118215d490fd307b12b65705d2ad",
+  "members": {
+    "cohort-740d38f6-linux-draining-normalization-740d/source-before.json": {
+      "bytes": 483417,
+      "sha256": "379b90ef5c548b10d7e13eeba2c2187b9941555718df82f68e161885dd86f0fb"
+    },
+    "cohort-740d38f6-linux-draining-normalization-740d/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-740d38f6-linux-draining-normalization-740d/owned-scope-limits.json": {
+      "bytes": 267,
+      "sha256": "41563a2e59c087c54a597645c3597f98c5ea3042a7571acc8d850dcd1ac94652"
+    },
+    "cohort-740d38f6-linux-draining-normalization-740d/store-draining-first-reference-after.log": {
+      "bytes": 3931,
+      "sha256": "b34ca664537017d66ff48e5189ef44a137cd57ab33a577b6d24d9ef040ab8251"
+    },
+    "cohort-740d38f6-linux-draining-normalization-740d/running.json": {
+      "bytes": 2287,
+      "sha256": "f5e2ee565e12df285e89c5d9c034076cfc8542876b47fc6404cf2a82deef352c"
+    },
+    "cohort-740d38f6-linux-draining-normalization-740d/withguest-normalization-original.log": {
+      "bytes": 1698,
+      "sha256": "038ebf62ed5871650397c63be5abd3d6d90116c14fd2a2da0f77398c7f43a4ec"
+    },
+    "cohort-740d38f6-linux-draining-normalization-740d/source-after.json": {
+      "bytes": 483417,
+      "sha256": "379b90ef5c548b10d7e13eeba2c2187b9941555718df82f68e161885dd86f0fb"
+    },
+    "cohort-740d38f6-linux-draining-normalization-740d/result.json": {
+      "bytes": 2732,
+      "sha256": "efa5107123dfc4f95067bd0ca53da7a6d2b08cc95e9c3a6635c7838a044365eb"
+    },
+    "cohort-740d38f6-linux-draining-normalization-740d/collected-binaries.json": {
+      "bytes": 2372,
+      "sha256": "836bee9d1ffb122fab813f9d20c639417fa41a7954335a8eb4728ee86f2414ff"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

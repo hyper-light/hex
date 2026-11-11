@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "26b7820f22d5bc98eb2c443cbe3bf587f0e5ae55",
+  "fixed_code_base": "e028e005b00a8d5c0a6dcd7eae27faaaa36d3b44",
+  "source": {
+    "path": "crates/hex-node/src/supervise/completion_native_gate_tests.rs",
+    "parent_sha256": "7a2997ee975e91f37ff6106a459b66c819ece6ca498faa63f9a753d0596355ce",
+    "sha256": "d90413282f4fe9239d30e20a92749664168417452f4478dbb0c80f7f86277a43",
+    "bytes": 43404
+  },
+  "status": "SOURCE ONLY/PARTIAL acknowledged event-wait step. Gate /proc oracle+until/sleep unchanged and still known strict R05 blocker. NO compiler/test/native check owed by lane; ROOT must not rerun strict before matched producer/gate closure.",
+  "changes": {
+    "child_end": "One cached Child::try_wait status read, then retained exact parent pidfd poll_exit(end), then SAME Child::wait sole consuming reap. Open parent pidfd once after spawn; no PID reopen/parallel reaper.",
+    "STOP": "Existing killable controller-parent publishes identities on bounded stdout before SIGSTOP; blocks on exact waitid(STOPPED|NOWAIT) only, validates CLD_STOPPED + SIGSTOP; emits stopped phase with exact same identities. No extra worker or global signal-mask framework.",
+    "framing": "Reuse existing readiness reader as read_phase with explicit original absolute end + cumulative cursor. Complete lines only, same total byte bound, encountered unexpected/duplicate phases refuse, no periodic probing or relative phase reset.",
+    "deadline": "Existing began anchored before spawn (and before setting subreaper, so overflow cannot leave altered state) defines outer_end=began+unchanged guard. Both identity/STOP phases and exact parent terminal/reap use SAME end; terminal after end is uncertain, not accepted. Cleanup retains existing separate finite cleanup guard and uncertainty recording.",
+    "cleanup": "Identity pidfds acquired before blocking on STOP-ready; every observation branch still kills/reaps owned parent and uses exact known native pidfds/cgroup/Store/subreaper cleanup before final assertion. Failed parent pidfd acquisition is recorded; no unbounded fallback or foreign PID guess."
+  },
+  "preserved": [
+    "Actual ppoll wait_gate body unchanged; no gate oracle weakening/change while cfgtest producer contract pending",
+    "Refusal and durable-positive cases byte-identical; early first127/stopped sibling/CONT+sibling127/canary oracles byte-identical",
+    "Same required guard/gate/observation/byte/pidfd config and all3 ignored registrations; no defaults, allow, sleep alias or manager",
+    "Production Supervisor/runtime/Cargo/wire/client source unchanged; R10actual7281 not replayed"
+  ],
+  "producer_coordination": "L1 confirmed exact join -> unexpected FD closure -> ready2 -> held_wait1 -> foreign child_with_fd order. ROOT dev-only cfgtest feature/registration contract pending before L1 per-launch ACK extension; identity phase here is NOT claimed to be that ACK.",
+  "protected": [
+    {
+      "path": "crates/hex-node/src/supervise.rs",
+      "sha256": "8fe7a2357cf2d6f64819b9edd7d7694bc153239af9875d23d316df10eae85cba",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-runtime/src/linux/sys.rs",
+      "sha256": "cda48ba364da31f20b8963a30a365ca2f6231d1dd5c30902d64099d0ab3f98f2",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-runtime/src/linux/process.rs",
+      "sha256": "f216d9cbe3d3d6663a0079ce67644acaf653f1b4c08d8b447c6b0ea0cdf18926",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-node/Cargo.toml",
+      "sha256": "545fb02490d74781c05e1f233494b958398be0f0721f1bb5238a278a03f680db",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-runtime/Cargo.toml",
+      "sha256": "8fb917dd6636429092811587f2e4dc6afb23b391b291e5e99eb5a8dcfd0559eb",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "2274b7d480ab9291716b0ea257f750e0e9c53fb8e86ab20bf600cbcc51b1dd59",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/calls/budget_tests.rs",
+      "sha256": "1a0be87518194ba141359eedfd0c1f124cb436d8a064098af9fd04c335e486ec",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "a8f51f83a7b8ed2c43e0824f3af7aff5e967ba77159dde320841183559ea29b8",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+      "unchanged": true
+    },
+    {
+      "path": "CLAUDE.md",
+      "sha256": "a093d49f0e51a0c9026996cb170980696dc375364b8d9f13866200c6232e0c2b",
+      "unchanged": true
+    }
+  ],
+  "builds_executed": 0,
+  "tests_executed": 0,
+  "native_executed": 0,
+  "checks_dispatched": 0,
+  "remaining": "Reviewed cfgtest per-launch prepared ACK + exact causal oracle replacement and removal of final until/interval helper; then ROOT matched compiler/native before/after/missing-FD-isolation mutation. No live R05/fullgate claim."
+}

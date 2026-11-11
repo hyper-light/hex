@@ -1,0 +1,75 @@
+{
+  "source": "8d5bb0b4eb6a175532d73d889dc472b721660b41",
+  "archive_sha256": "71c4c03ee832846140f4de22b1a321141dd6fe3e3d8c2841db6dad4af1e50361",
+  "scope": "ROOT single new exact peer remote-owner committed pending original; production unchanged, no previous pass replay or remedy; no native/VM/GPU.",
+  "target": "linux",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 3440899,
+  "phases": [
+    {
+      "name": "mutant",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-sim",
+        "--lib",
+        "--locked",
+        "index::route_offer_tests::committed_pending_recovery_keeps_receipt_charge_and_claim_bounds",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "source_routes_sha256": "e9fbf5d8aafdf9b12755a1d07f91ce21842a61a4beb53a9cd098ba267033b1c6",
+      "test_sha256": "795f0d8ee79eaa8226905c5dc22bdc142942be1f8f1ab03cbfb3a48142a9a614",
+      "target": "/home/adalundhe/.cache/hex-lead/cohort-8d5bb0b4-linux-remote-profile-mutation/target-mutant",
+      "pid": 3446047,
+      "exit": 101,
+      "reaped": true,
+      "bytes": 2842,
+      "sha256": "4c09db0b2ed091a8af147399040924137093465512025950a08cf6a16aa2e954",
+      "actual_counts": [
+        {
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "foreign_profile_diagnostic": true
+    },
+    {
+      "name": "restored",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-sim",
+        "--lib",
+        "--locked",
+        "index::route_offer_tests::committed_pending_recovery_keeps_receipt_charge_and_claim_bounds",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "source_routes_sha256": "cda46b5fee827aaab61a9e2fcf7f1e9b7085c596017cbd7de3d3d2ebabb399fc",
+      "test_sha256": "795f0d8ee79eaa8226905c5dc22bdc142942be1f8f1ab03cbfb3a48142a9a614",
+      "target": "/home/adalundhe/.cache/hex-lead/cohort-8d5bb0b4-linux-remote-profile-mutation/target-restored",
+      "pid": 3536813
+    }
+  ],
+  "purpose": "R10 one exact existing profile-enforcement guard omitted, same unmodified pure unit; restored original source/test then separate empty target. No native/VM/GPU/benchmark.",
+  "restoration": {
+    "attempted": true,
+    "verified": true
+  }
+}

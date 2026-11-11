@@ -1,0 +1,67 @@
+{
+  "source": "b1de3c7edf385b5a1b752746aae0eefd001dcee7",
+  "archive_sha256": "cdba6daf917756a6515a264823ae0fdfe9a296da80a6e05a6fc95e2d2033cb24",
+  "source_manifest_sha256": "9ccaf289f2c6c5f0bb0cf052f8260ddbe38bc94a9c0812fd06ee7c742ce899f8",
+  "policy": "0342b85d9c808e3ced041a6c3ef0e9bf70438272",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "resource_envelope": "cpus=1,mem=4g,disk=12g; nice10/jobs1/threads1",
+  "scope": "compile-only one Windows-target integration-test Clippy; ZERO tests or GPU/native/VM/profile invocations",
+  "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+  "arch": "arm64",
+  "command": [
+    "nice",
+    "-n",
+    "10",
+    "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+    "clippy",
+    "-p",
+    "hex-gpu",
+    "--test",
+    "completion_windows_compute",
+    "--locked",
+    "--target",
+    "x86_64-pc-windows-msvc",
+    "-j1",
+    "--",
+    "-D",
+    "warnings"
+  ],
+  "test_target_compiled": "completion_windows_compute",
+  "executed_test_count": 0,
+  "native_gpu_dispatch_count": 0,
+  "native_vm_invocation_count": 0,
+  "owned_source_sha256": "c77f3fa077dc4f05372ce7b21523f09e2d9c725069005ff394c549d90914aab8",
+  "timed_out": false,
+  "exit": 0,
+  "reaped": true,
+  "pid": 95604,
+  "log_sha256": "f5f885a78b40365c79d705cbc144cabce9dbe1dc8ffcbd4fe7cc2ec07dbcace4",
+  "log_bytes": 1991,
+  "source_unchanged": true,
+  "temp_entries": 0,
+  "compiler_artifacts": {
+    "x86_64-pc-windows-msvc/debug/deps/libcompletion_windows_compute-e4ba286d167b3437.rmeta": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "x86_64-pc-windows-msvc/debug/deps/completion_windows_compute-e4ba286d167b3437.d": {
+      "sha256": "7ac8e0e4d8c8ea9966d9d4a759753ffdf321794c17bd72ee4a322d38729c4597",
+      "bytes": 917
+    },
+    "x86_64-pc-windows-msvc/debug/.fingerprint/hex-gpu-e4ba286d167b3437/dep-test-integration-test-completion_windows_compute": {
+      "sha256": "55fd34b43efcb6a63104be37b00b40330fa55e58cef2f0a8d631ce3956e74e7b",
+      "bytes": 344
+    },
+    "x86_64-pc-windows-msvc/debug/.fingerprint/hex-gpu-e4ba286d167b3437/test-integration-test-completion_windows_compute": {
+      "sha256": "4691e3e89c3f386310c6aacb615d74c9903343e9d7dfea95d51a29a795770fea",
+      "bytes": 16
+    },
+    "x86_64-pc-windows-msvc/debug/.fingerprint/hex-gpu-e4ba286d167b3437/test-integration-test-completion_windows_compute.json": {
+      "sha256": "2308de65044746ea98c473b6bfd6a4358f9c5d7c76fdf22e57c0db8cca7d871b",
+      "bytes": 815
+    }
+  },
+  "check_passed": true
+}

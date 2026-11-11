@@ -1,0 +1,228 @@
+{
+  "source": "07bb8292da12ef5294810402640baa5213fe1e9c",
+  "archive_sha256": "be9ab565551d7b0940db0fdf7afee6e89aff55270f811a71a9bdd42e88436e0d",
+  "scope": "ROOT matched ProcDrop after remedy, new Shards adapter/FC binding and identity features, three untouched original subset/CPU uncertainty/share alias controls; prior ten passes not repeated; model and owned private sockets/files only, no VM/GPU/native backend effects",
+  "target": "linux",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 5010,
+  "phases": [
+    {
+      "name": "drop-original-after",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-client",
+        "--lib",
+        "--locked",
+        "calls::budget_tests::absolute_run_error_return_does_not_renew_drop_sender_budget",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 7022,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "0aa1e549e345bb20543353edb881a67f8c0c3042fe145d9772d799f474d740cf",
+      "bytes": 3074,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "shards-adapter-original-authority",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-client",
+        "--lib",
+        "--locked",
+        "guest::tests::shards_link_carries_the_original_absolute_deadline_and_bytes",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 61971,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "912fd8e68ced8ac18a73341ed649f795bb8ee4ac7ccd76742619db6e9f903898",
+      "bytes": 431,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "guest::tests::shards_link_carries_the_original_absolute_deadline_and_bytes",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "vfio-canonical-full-id",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "firecracker::vfio::tests::native_function_names_keep_canonical_full_physical_identity",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 62525,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "0e1a5638b5bef3236ea8db7f7c2e4ea5e398db56dd723ddd49bed444d3df632f",
+      "bytes": 1522,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "firecracker::vfio::tests::native_function_names_keep_canonical_full_physical_identity",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "fc-exact-native-binding",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "firecracker::observations::tests::observer_needs_exact_driver_set_and_real_native_container_binding",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 88934,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "0034c0d025020b21adbc72a9f7b1b25e4f984339a7146005d9c640d50eda2c3a",
+      "bytes": 458,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "firecracker::observations::tests::observer_needs_exact_driver_set_and_real_native_container_binding",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "subset-original",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-sim",
+        "--lib",
+        "--locked",
+        "index::route_offer_tests::one_gpu_demand_can_select_an_exact_subset_of_a_two_gpu_observer",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 88950,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "eab2a96d184f87a18c101cc86a58dc480d8c7eb2c148dfdb1d42814329ed77dd",
+      "bytes": 1929,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "cpu-observer-original",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "scheduler::observer_cpu_tests::failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_facts",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 162953,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "a97642da8f1b9eb9b8d5cadc9280341024935438262dab277f3f1474206f251e",
+      "bytes": 1397,
+      "expected_selected": 1,
+      "actual_counts": [],
+      "selection_verified": false,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_invocations": 0,
+  "exit": 1
+}

@@ -1,0 +1,43 @@
+{
+  "status": "ORIGINAL UNIT SOURCE ONLY, UNRUN; no production preflight remedy/no native job",
+  "parent": "5c33713d79f9a3cbbf69ebce1eedb8c8386dacf2",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "worktree": "/Users/adalundhe/.cache/hex-complete-shards/released-none-original-20261111-v1",
+  "branch": "cp/t7-shards-released-none-original",
+  "sources": [
+    {
+      "path": "crates/hex-runtime/src/guest/gpu_pool.rs",
+      "sha256": "5f373b6081fde800fca48915166f08dbefdfe8c723703d24d6e9398dafb25951"
+    }
+  ],
+  "production_gpu_pool_unchanged": true,
+  "production_shared_preflight_unchanged_sha256": "b1f9d4f77afe4ef936d3865ae593a1150a746a706f24d1c5a262dccfd4e6c1f5",
+  "test": "guest::gpu_pool::tests::released_gpu_receipt_without_identity_finishes_original_published_scope",
+  "repeatable_command": "cargo test -p hex-runtime --lib --locked guest::gpu_pool::tests::released_gpu_receipt_without_identity_finishes_original_published_scope -- --exact --test-threads=1",
+  "matched_shared_scaffold": "df290d2daf07ce232ce172c64b5054c4975a39c9",
+  "required_parent_snapshot_dependency": "01fe011d72c6801e4494e903af6353baaf0688d4",
+  "cut": "canonical original key/scope/grant Draining+initSome; local durable Released(identityNone,Code7); SAME native model already positive whole Released; no new boot/probe/guest execution",
+  "preconditions": [
+    "receipt codec/provenance matches exact canonical scope before recover",
+    "retained physical IDs/allocation/key/init exact",
+    "model native receipt supplies actual explicit terminal ScopeReleased independently of controller identity; no native hardware absence claim"
+  ],
+  "oracles": [
+    "cleanup-only canonical attach reached; original native finalized exactly once",
+    "same canonical key/init/claims/allocation retained through final Released, exitCode7",
+    "no stop required for already positive terminal, no standalone boot/probe/provider query/native launch"
+  ],
+  "expected_original_symptom": "current read-only preflight rejects local Released(None)+canonical initSome before cleanup-only attach; NOT yet reproduced",
+  "preserved": [
+    "old13c/3497/ec368 checkpoints retained and unchanged",
+    "no new Box/native/holder/record owner, no guessed PID/vsock authority",
+    "no preflight or usable Running/report behavior changed"
+  ],
+  "remaining": [
+    "ROOT reproduce this new original before narrow Released(None) preflight consistency remedy",
+    "no old passed13c/3497/Driver controls repeat",
+    "native terminal/finalization semantics remain ROOT/L3 proof"
+  ]
+}

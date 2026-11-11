@@ -13,6 +13,19 @@ use super::helper_client::Helper;
 use super::process::Members;
 use super::sys::{Event, Kqueue};
 
+pub(super) fn process_failure(
+    operation: shards_api::ProcessOperation,
+    error: std::io::Error,
+) -> shards_api::ProcessFailure {
+    match error.raw_os_error() {
+        Some(code) => shards_api::ProcessFailure::Os { operation, code },
+        None => shards_api::ProcessFailure::UnrepresentedIo {
+            operation,
+            kind: error.kind(),
+        },
+    }
+}
+
 /// A program the node spawned into a box, by pid.
 pub struct BoxProc {
     pid: i32,
@@ -25,6 +38,58 @@ pub struct BoxProc {
     /// took its exit event. Its reap then waits for the zombie the same exit path makes.
     exiting: bool,
     events: Vec<Event>,
+    reaping: Reaping,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Reaping {
+    Ordinary,
+    Retained,
+    Borrowed { started: u64 },
+}
+
+pub(super) struct Prepared {
+    kq: Kqueue,
+    events: Vec<Event>,
+}
+
+impl Prepared {
+    pub(super) fn new() -> Result<Self, Refusal> {
+        let mut events = Vec::new();
+        events
+            .try_reserve_exact(super::sys::EVENTS)
+            .map_err(|_| Refusal::Exhausted {
+                what: "native controller events",
+                bound: super::sys::EVENTS,
+            })?;
+        let kq = Kqueue::new()
+            .map_err(|error| Refusal::os("preparing the native controller observer", error))?;
+        kq.child_completions()
+            .map_err(|error| Refusal::os("observing waitable native child completion", error))?;
+        Ok(Self { kq, events })
+    }
+
+    pub(super) fn bind(
+        self,
+        pid: i32,
+        members: Option<Members>,
+        reaping: Reaping,
+    ) -> (BoxProc, std::io::Result<()>) {
+        let observed = self
+            .kq
+            .watch_one(pid, 0, !matches!(reaping, Reaping::Borrowed { .. }));
+        let exiting = matches!(observed, Ok(true)) && !matches!(reaping, Reaping::Borrowed { .. });
+        let process = BoxProc {
+            pid,
+            kq: self.kq,
+            members,
+            exit: None,
+            exiting,
+            events: self.events,
+            reaping,
+        };
+        (process, observed.map(|_| ()))
+    }
 }
 
 impl BoxProc {
@@ -45,6 +110,7 @@ impl BoxProc {
             exit: None,
             exiting,
             events: Vec::with_capacity(1),
+            reaping: Reaping::Ordinary,
         })
     }
 
@@ -58,6 +124,9 @@ impl BoxProc {
     /// event fires once, so a reap that found nothing on it would wait out the caller's whole budget. An
     /// end its node can't collect (reaped elsewhere, e.g. by a box delete) is [`Exit::Unknown`].
     fn reap(&mut self, exiting: bool) -> Result<Option<Exit>, Refusal> {
+        if self.reaping != Reaping::Ordinary {
+            return self.observe_retained(exiting);
+        }
         if self.exit.is_some() {
             return Ok(self.exit);
         }
@@ -111,6 +180,158 @@ impl BoxProc {
         }
         // Stopped or continued again past the reports a child holds at once: it still runs.
         Ok(None)
+    }
+
+    fn observation_refusal(&self) -> Refusal {
+        if let Some(members) = &self.members {
+            return members.uncertain();
+        }
+        let text = "native controller observation has no canonical member owner";
+        let mut why = String::new();
+        if why.try_reserve_exact(text.len()).is_err() {
+            return Refusal::Exhausted {
+                what: "native controller refusal bytes",
+                bound: text.len(),
+            };
+        }
+        why.push_str(text);
+        Refusal::Invalid {
+            what: "native controller ownership",
+            why,
+        }
+    }
+
+    fn observe_retained(&mut self, exiting: bool) -> Result<Option<Exit>, Refusal> {
+        self.observe_retained_raw(exiting)
+            .map_err(|_| self.observation_refusal())
+    }
+
+    fn observe_retained_raw(
+        &mut self,
+        exiting: bool,
+    ) -> Result<Option<Exit>, shards_api::ProcessFailure> {
+        use shards_api::{ProcessFailure, ProcessOperation};
+        if self.exit.is_some() {
+            return Ok(self.exit);
+        }
+        if let Reaping::Borrowed { started } = self.reaping {
+            let actual = super::sys::rusage(self.pid)
+                .map_err(|error| process_failure(ProcessOperation::ProcPidRusage, error))?;
+            return match actual {
+                Some(actual) if actual.started != started => Err(ProcessFailure::DifferentStart {
+                    observed: actual.started,
+                }),
+                Some(actual) if actual.ended || exiting => {
+                    self.exit = Some(Exit::Unknown);
+                    Ok(self.exit)
+                }
+                Some(_) => Ok(None),
+                None => Err(ProcessFailure::InvalidStartRecord),
+            };
+        }
+        let pid = Pid::from_raw(self.pid).ok_or(ProcessFailure::PidOutOfRange {
+            operation: ProcessOperation::PollExit,
+        })?;
+        let options = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG;
+        for _ in 0..REPORTS {
+            match rustix::process::waitid(WaitId::Pid(pid), options) {
+                Ok(Some(report)) if ended(&report) => {
+                    let exit = exit_of(&report);
+                    let peak = super::sys::rusage(self.pid)
+                        .map_err(|error| process_failure(ProcessOperation::ProcPidRusage, error))?
+                        .map(|usage| usage.peak);
+                    if let Some(members) = &self.members {
+                        members.ended(self.pid, matches!(exit, Exit::Signal(signal) if signal == Signal::KILL.number()), peak)
+                            .map_err(|_| ProcessFailure::Poisoned { what: "native controller accounting" })?;
+                    }
+                    self.exit = Some(exit);
+                    return Ok(self.exit);
+                }
+                Ok(Some(_)) => {
+                    // XNU only reaps SZOMB with WEXITED. Consume other reports without WEXITED,
+                    // so a concurrent exit cannot release this native incarnation.
+                    rustix::process::waitid(
+                        WaitId::Pid(pid),
+                        WaitIdOptions::STOPPED | WaitIdOptions::CONTINUED | WaitIdOptions::NOHANG,
+                    )
+                    .map_err(|error| process_failure(ProcessOperation::PollExit, error.into()))?;
+                }
+                Ok(None) => return Ok(None),
+                Err(error) => {
+                    return Err(process_failure(ProcessOperation::PollExit, error.into()));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    pub(super) fn native_poll(&mut self) -> Result<Option<Exit>, shards_api::ProcessFailure> {
+        if !self.exiting && self.exit.is_none() {
+            self.kq
+                .wait(None, Some(Duration::ZERO), &mut self.events)
+                .map_err(|error| {
+                    process_failure(shards_api::ProcessOperation::KeventExit, error)
+                })?;
+            self.exiting = ended_in(&self.events, self.pid);
+        }
+        self.observe_retained_raw(self.exiting)
+    }
+
+    pub(super) fn wait_scope(
+        &mut self,
+        pids: &[i32],
+        patience: Duration,
+    ) -> Result<bool, shards_api::ProcessFailure> {
+        use shards_api::{ProcessFailure, ProcessOperation};
+        for &pid in pids {
+            let gone = self
+                .kq
+                .watch_one(pid, 0, false)
+                .map_err(|error| process_failure(ProcessOperation::RegisterExit, error))?;
+            match super::sys::rusage(pid)
+                .map_err(|error| process_failure(ProcessOperation::ProcPidRusage, error))?
+            {
+                Some(usage) if usage.ended => return Ok(true),
+                Some(_) if !gone => {}
+                _ => return Err(ProcessFailure::InvalidStartRecord),
+            }
+        }
+        let timeout = if patience == Duration::MAX {
+            None
+        } else {
+            Some(patience)
+        };
+        self.kq
+            .wait(None, timeout, &mut self.events)
+            .map_err(|error| process_failure(ProcessOperation::KeventExit, error))?;
+        self.exiting |= ended_in(&self.events, self.pid);
+        if self.events.is_empty() && patience == Duration::MAX {
+            return Err(ProcessFailure::UnexpectedWait { returned: 0 });
+        }
+        Ok(!self.events.is_empty())
+    }
+
+    pub(super) fn finalize_retained(&mut self) -> Result<(), shards_api::ProcessFailure> {
+        use shards_api::{ProcessFailure, ProcessOperation};
+        if self.exit.is_none() {
+            return Err(ProcessFailure::InvalidStartRecord);
+        }
+        if self.reaping != Reaping::Retained {
+            return Ok(());
+        }
+        let pid = Pid::from_raw(self.pid).ok_or(ProcessFailure::PidOutOfRange {
+            operation: ProcessOperation::PollExit,
+        })?;
+        let report = rustix::process::waitid(
+            WaitId::Pid(pid),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
+        )
+        .map_err(|error| process_failure(ProcessOperation::PollExit, error.into()))?;
+        if !report.as_ref().is_some_and(ended) {
+            return Err(ProcessFailure::InvalidStartRecord);
+        }
+        self.reaping = Reaping::Ordinary;
+        Ok(())
     }
 }
 

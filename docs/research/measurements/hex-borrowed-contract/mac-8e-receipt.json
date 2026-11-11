@@ -1,0 +1,126 @@
+{
+  "exit": 0,
+  "reaped": true,
+  "archive_sha256": "9663496d8a25659f292def7abe996b2e503e58de32b0528f6d007ee84e0a9ae1",
+  "bytes": 98945,
+  "readback": {
+    "borrowed-contract-8e5703b1-mac-v1": {
+      "revision": "8e5703b13c8649c8cfbc95d6650163c173fad4ca",
+      "source_files": 1869,
+      "source_unchanged": true,
+      "result": {
+        "source": "8e5703b13c8649c8cfbc95d6650163c173fad4ca",
+        "transport_sha256": "c9ae9e379c992a62781f9a9ffea810893606f25b8a9ae8cb2a67883c4086473d",
+        "archive_sha256": "ca6f14fce19c5197721780f2e0783155396c1baea462dee966ff737367ad3291",
+        "seed_lock_sha256": "1ecb41e738c4c4133a1968873e424efce5b2a65899dd8f40f37ac6aaffec8133",
+        "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+        "temp": "/Users/adalundhe/.cache/hbm-8e5703b1",
+        "guard_seconds": 151.0,
+        "scope": "ROOT actual borrowed process/socket contract, no VM or device attachment",
+        "phases": [
+          {
+            "name": "build",
+            "command": [
+              "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+              "test",
+              "--manifest-path",
+              "vendor/shards/Cargo.toml",
+              "-p",
+              "shards-api",
+              "--lib",
+              "--test",
+              "hex_borrowed_contract",
+              "--no-run",
+              "--message-format=json"
+            ],
+            "pid": 56645,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "19f812bbb7ccb6a84fd1a6b0bb40824e4a7b021e28b789e4744cecca3efa72fd",
+            "bytes": 19339,
+            "required": true
+          },
+          {
+            "name": "canonical-borrowed",
+            "command": [
+              "/Users/adalundhe/.cache/hex-lead/borrowed-contract-8e5703b1-mac-v1/target/debug/deps/shards_api-7ff633c7b382e1e6",
+              "client::borrowed_tests::",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "pid": 56720,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "cf6dafef5a9f1b1e1135616a402ac232727bd734b97872fb6de1abc26026a66a",
+            "bytes": 889,
+            "required": true
+          },
+          {
+            "name": "owned-zero",
+            "command": [
+              "/Users/adalundhe/.cache/hex-lead/borrowed-contract-8e5703b1-mac-v1/target/debug/deps/shards_api-7ff633c7b382e1e6",
+              "--exact",
+              "client::tests::a_patience_of_zero_dials_once",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "pid": 56721,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "a1e75e501f0c4138c0e55f10f2cf3db2ff6bec5f81fd2be75c2ce58a15f4490f",
+            "bytes": 170,
+            "required": true
+          },
+          {
+            "name": "owned-max",
+            "command": [
+              "/Users/adalundhe/.cache/hex-lead/borrowed-contract-8e5703b1-mac-v1/target/debug/deps/shards_api-7ff633c7b382e1e6",
+              "--exact",
+              "client::tests::a_patience_of_max_dials_until_the_guest_listens",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "pid": 56736,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "9071294223c008ef869d1ec35279eee8e165a6febc11e2d5f6eae99f63cee98a",
+            "bytes": 188,
+            "required": true
+          },
+          {
+            "name": "public-lifetime",
+            "command": [
+              "/Users/adalundhe/.cache/hex-lead/borrowed-contract-8e5703b1-mac-v1/target/debug/deps/hex_borrowed_contract-a190507c43aeed8d",
+              "--ignored",
+              "--exact",
+              "root_borrowed_drop_preserves_target_and_socket_and_dead_target_refuses",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "pid": 56744,
+            "exit": 0,
+            "reaped": true,
+            "sha256": "87a5d7c357b846dfa0c80fe2fc53ea496b389c831f1aa7a3a1f9448bf945959f",
+            "bytes": 318,
+            "required": true
+          }
+        ],
+        "registry_versions_equal_seed": true,
+        "binaries": {
+          "hex_borrowed_contract": {
+            "path": "/Users/adalundhe/.cache/hex-lead/borrowed-contract-8e5703b1-mac-v1/target/debug/deps/hex_borrowed_contract-a190507c43aeed8d",
+            "sha256": "7b54457d6efac5d3fcf901742c8af54cf9d32f9fe3c31c1e4f4500935fd449ac"
+          },
+          "shards_api": {
+            "path": "/Users/adalundhe/.cache/hex-lead/borrowed-contract-8e5703b1-mac-v1/target/debug/deps/shards_api-7ff633c7b382e1e6",
+            "sha256": "bfcd10155ea3f2d89e72960798244baef3d51a19266aad0a858846fc9ee6c733"
+          }
+        },
+        "exit": 0,
+        "source_unchanged": true,
+        "temp_entries": 0
+      },
+      "signed_source_equal": true
+    }
+  }
+}

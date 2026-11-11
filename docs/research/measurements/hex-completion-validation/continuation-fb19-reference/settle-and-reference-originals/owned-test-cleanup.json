@@ -1,0 +1,32 @@
+{
+  "owned_pid": 2059947,
+  "expected_birth": 30607552,
+  "expected_unit": "hex-root-settle-original-9b44-v1.scope",
+  "driver_result": {
+    "exit": 1,
+    "source_changes": [],
+    "temp_entries": 0
+  },
+  "phases": [
+    {
+      "name": "settle-error-original",
+      "pid": 2011513,
+      "exit": -15,
+      "reaped": true,
+      "timed_out": true,
+      "sha256": "c7e268fcce9d18a7a2bd6e8f15343c17f80b5466da81eb24860e4c19ae7176ef",
+      "actual_counts": []
+    }
+  ],
+  "actual_birth": 30607552,
+  "exe": "/home/adalundhe/.cache/hex-lead/cohort-9b44967e-linux-settle-original-9b44/target/debug/deps/hex_client-47bbd4ab177bef6c",
+  "exe_sha256": "5e106b8400faabb746ec8a708a53b27a96832977b2aeb04337e28dce15b706ad",
+  "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-settle-original-9b44-v1.scope\n",
+  "action": "SIGTERM through pidfd for recorded owned cohort member",
+  "terminal_event": true,
+  "unit_after": {
+    "exit": 0,
+    "stdout": "LoadState=not-found\nActiveState=inactive\nSubState=dead\nControlGroup=\n",
+    "stderr": ""
+  }
+}

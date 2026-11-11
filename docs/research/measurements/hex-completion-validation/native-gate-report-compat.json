@@ -1,0 +1,8 @@
+{
+  "original_source": "807168c38996fdfda096c0ae9c748bb4167777ec",
+  "actual_log_sha256": "eb900246536498adae5d457830ffdff87d1640d587e40377869f2e46feaaa8d3",
+  "diagnostics": "three ignored CPU-nativegate bind_managed calls lacked new optional ManagedReport argument, yielding E0061/E0282",
+  "change": "explicit None for these CPU/no-GPU-report fixtures only; original gate/budget/publication/callback/oracles unchanged",
+  "new_checks": "pending",
+  "native_invocations": 0
+}

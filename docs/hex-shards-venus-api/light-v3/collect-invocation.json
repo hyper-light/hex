@@ -1,0 +1,18 @@
+{
+  "command": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--on",
+    "d1323898b255a3ed435eb83fa0f7b0cf",
+    "--needs",
+    "cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--timeout",
+    "120",
+    "--",
+    "nice -n 10 python3 -c 'import gzip,hashlib,io,json,pathlib,tarfile\nroot=pathlib.Path.home()/'\"'\"'.cache/hex-shards-venus-api-01a1c640-3f2e9fb1-v3'\"'\"'\nproof=root/'\"'\"'proof'\"'\"';source=root/'\"'\"'source'\"'\"'\nmanifest=json.loads((proof/'\"'\"'source.json'\"'\"').read_text())\nafter={path:hashlib.sha256((source/path).read_bytes()).hexdigest() for path in manifest['\"'\"'files'\"'\"']}\nassert after==manifest['\"'\"'files'\"'\"']\nextra=set(str(p.relative_to(source)) for p in source.rglob('\"'\"'*'\"'\"') if p.is_file())-set(after)\nassert extra=={'\"'\"'vendor/shards/Cargo.lock'\"'\"'},extra\ndata={'\"'\"'proof/'\"'\"'+p.name:p.read_bytes() for p in proof.iterdir() if p.is_file()}\ndata['\"'\"'proof/source-after.json'\"'\"']=(json.dumps({'\"'\"'files'\"'\"':after,'\"'\"'only_private_generated_file'\"'\"':'\"'\"'vendor/shards/Cargo.lock'\"'\"'},indent=2)+'\"'\"'\\n'\"'\"').encode()\ndata['\"'\"'proof/private-Cargo.lock'\"'\"']=(source/'\"'\"'vendor/shards/Cargo.lock'\"'\"').read_bytes()\nfor path in manifest['\"'\"'files'\"'\"']:\n    if path.startswith('\"'\"'vendor/shards/crates/api/'\"'\"') or path in manifest.get('\"'\"'fixture_files'\"'\"',{}):\n        data['\"'\"'source/'\"'\"'+path]=(source/path).read_bytes()\ndata['\"'\"'driver.py'\"'\"']=(root/'\"'\"'driver.py'\"'\"').read_bytes()\nmembers={name:{'\"'\"'bytes'\"'\"':len(raw),'\"'\"'sha256'\"'\"':hashlib.sha256(raw).hexdigest()} for name,raw in sorted(data.items())}\ndata['\"'\"'MANIFEST.json'\"'\"']=(json.dumps(members,indent=2)+'\"'\"'\\n'\"'\"').encode()\nout=io.BytesIO()\nwith gzip.GzipFile(fileobj=out,mode='\"'\"'wb'\"'\"',mtime=0) as gz,tarfile.open(fileobj=gz,mode='\"'\"'w'\"'\"') as archive:\n    for name,raw in sorted(data.items()):\n        member=tarfile.TarInfo(name);member.size=len(raw);member.mode=0o644;archive.addfile(member,io.BytesIO(raw))\nraw=out.getvalue();retained=root/'\"'\"'retained'\"'\"';retained.mkdir();p=retained/'\"'\"'proof.tar.gz'\"'\"'\nwith p.open('\"'\"'xb'\"'\"') as f:f.write(raw)\nprint(json.dumps({'\"'\"'path'\"'\"':str(p),'\"'\"'bytes'\"'\"':len(raw),'\"'\"'sha256'\"'\"':hashlib.sha256(raw).hexdigest(),'\"'\"'members'\"'\"':len(data)}))\n'"
+  ],
+  "exit": 0,
+  "stdout": "{\"path\": \"/Users/adalundhe/.cache/hex-shards-venus-api-01a1c640-3f2e9fb1-v3/retained/proof.tar.gz\", \"bytes\": 88737, \"sha256\": \"cebc6d7b067525e51d164c81574034d0c4f0c9e4b1edbed19062ecc48eaaf7e6\", \"members\": 39}\n",
+  "stderr": "\u001b[2m[kiln] on d1323898b255a3ed435eb83fa0f7b0cf \u00b7 macos/aarch64 \u00b7 29 of 32 cores idle \u00b7 47 GB free \u00b7 room for 1 CPU, 4 GiB of memory, 12 GiB of disk\u001b[0m\n"
+}

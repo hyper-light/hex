@@ -1,0 +1,42 @@
+{
+  "method": "ROOT single bounded current-host read-only CM PRESENT exact-PNP to actual adapter-arrival KMT query; no compute,HCS,VM or settings changes",
+  "runner": "f766f09294f2e17e3b8a631ffd4e6a4b",
+  "envelope": "1CPU/4GiB/12GiB BelowNormal; outer60s",
+  "v1": "PowerShell parser failure BEFORE script; no native query",
+  "v2": "outer exit1: one actual nonempty symbolic-link KMT success and successful owned close, then two empty-token query errors from wrapper Split overload; not a full join/compute pass",
+  "v3": "CLI refused before dispatch because Jupiter went offline; no native invocation",
+  "owned_local_cli": [
+    {
+      "pid": 41617,
+      "exit": 1,
+      "reaped": true
+    },
+    {
+      "pid": 53426,
+      "exit": 1,
+      "reaped": true
+    }
+  ],
+  "actual_kmt_opened": 1,
+  "actual_kmt_closed": 1,
+  "raw_sha256": {
+    "windows-current-join-readonly.ps1": "386ae39f4b155666606aba2eba06ac7591d6fc4412831e87b1c36efabb5e7b03",
+    "windows-join-v1-command-failure.json": "810e14a9886ce4ee4dbcbe082ffb40242a815682cff9c2379cac91cc71aec99f",
+    "windows-current-join-readonly-v2.ps1": "c33481a85cfd508f55f2d2031f819782205e4b948bbdcb6caecef9c2c53428c5",
+    "windows-current-join-readonly-v2-submission.json": "e0fdd3a1db756b0f89a4961dba8fd8c930c45f16ac1b5091da432922573c997d",
+    "windows-current-join-readonly-v2.cli.log": "e390a3131657d42136fdd2baa1941f741f5e2f3c4e06cd2201a0c47affd4888a",
+    "windows-current-join-readonly-v2.cli.exit": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+    "windows-current-join-readonly-v3.ps1": "590508e3f4e87e67a07f28710f94cd91d1f31b5f810ba6fafdb35176ccd5141e",
+    "windows-current-join-readonly-v3-submission.json": "cd16c8eca48857638f498522710b34e79c06cf0d0dbed991a32d657ce8cd7330",
+    "windows-current-join-readonly-v3.cli.log": "2743aa25e6300ac9908b7d021a3b2089b22328ad47ee83ed00a4aca0647007cf",
+    "windows-current-join-readonly-v3.cli.exit": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+  },
+  "reuse": "LUID is only an observed fact at this invocation; re-resolve after offline/reboot before future compute",
+  "unverified": [
+    "corrected whole interface-list wrapper execution",
+    "host native compute",
+    "HCS native selected compute",
+    "physical second-GPU negative",
+    "full callback/cleanup/resource restoration and Windows ARM native"
+  ]
+}

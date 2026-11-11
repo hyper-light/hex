@@ -1,0 +1,23 @@
+{
+  "kind": "cause remedy for actual original option/value2 regression",
+  "base": "52a2aa59d49caff9b5b19635f854a3635a32ec50",
+  "original_composite": "ROOT a3109551 + exact0ae64af581b745e098c801ac1761e8f615d80fba core helper files +unchangedf1c standalone control",
+  "actual_result": "2selected/0PASS/2FAIL/0ignored exit101; backend0, source0diff/tmp0/reaped; independent codec3PASS is separate",
+  "original_log_sha256": "352f89e213d9e0d145a7c21f1dea567a339a3ec2155b28501179122f3876476c",
+  "original_raw_archive_sha256": "d817be398fe583baa8c6d93793edf6af2bfb573e29f437039591ed6756709657",
+  "original_raw_archive_bytes": 236279,
+  "original_tests": "docs/research/measurements/hex-complete-lifecycle/managed_argument_tests.rs",
+  "original_tests_sha256_unchanged": "bc998fcbf2fd8e30f94ff99bd184f677e03df81ce54ee08c6a07da2aefc1f2b8",
+  "production_path": "crates/hex-core/src/helper/managed.rs",
+  "production_sha256": "8c1824722ea9bc248ca54cf093f076a5be40a88f2feee245fdabf747cea4881d",
+  "primary_producer": {
+    "revision": "5ba9ca5022357807c7b70a9ffe31534475a4cc31",
+    "path": "crates/api/src/client.rs",
+    "sha256": "9186bafd767120f2c9889bfb6261d69dbf6494cbe185dcec0e424d5d07745637",
+    "seams": "arguments and prepare_boot emit finite direct-boot option/value vocabulary and one actual host-managed marker; no guest -- separator or pre-rendered report/lifeline"
+  },
+  "change": "One public pure check_prepared_arguments shares role-only validation with actual Launch.check and upcoming Mac shell. Values are opaque, option-shaped literals allowed, actual report/lifeline or unsupported option positions refused; no numeric/path/VMM parsing, no digit scan/timeout. Require one actual management marker. Core has no Shards dependency.",
+  "tests": "Unchanged original2 retained for ROOT exact same regression green. Added1 pure role-vocabulary/opaque-values/forged-marker/actual-report/lifeline/unknown-position control UNRUN. Independent original codec3 not repeated by L3.",
+  "checks": "Scoped rustfmt/named diff-check only; no builds/tests/native by L3. Larger Mac shared-check consumer draft excluded.",
+  "remaining": "ROOT matched original2+new1 execution, guard mutation and persistent helper/native/effect/resource acceptance. Source-only, no native-correctness or readiness claim."
+}

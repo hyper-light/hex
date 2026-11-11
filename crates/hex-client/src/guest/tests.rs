@@ -20,24 +20,68 @@ struct Loopback {
 }
 
 impl Link for Loopback {
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         let addr = match port {
             stream::CONTROL_PORT => self.control,
             stream::STDIO_PORT => self.stdio,
             other => panic!("dialed port {other:#x}"),
         };
-        Ok(Box::new(TcpStream::connect(addr).unwrap()))
+        own_duplex(TcpStream::connect(addr).unwrap())
     }
 }
 
-fn listeners() -> (TcpListener, TcpListener, Arc<dyn Link>) {
+fn listeners() -> (TcpListener, TcpListener, LinkOwner) {
     let control = TcpListener::bind("127.0.0.1:0").unwrap();
     let stdio = TcpListener::bind("127.0.0.1:0").unwrap();
-    let link = Arc::new(Loopback {
+    let link = own_link(Loopback {
         control: control.local_addr().unwrap(),
         stdio: stdio.local_addr().unwrap(),
-    });
+    })
+    .unwrap();
     (control, stdio, link)
+}
+
+/// AC-T7.4.1: owning a link makes no dial; clones retain the same link until the last drop.
+#[test]
+fn link_owner_retains_one_instance_without_dial_effects() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Counted {
+        dials: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+    impl Link for Counted {
+        fn dial(&self, _: u32) -> Result<DuplexOwner, Refusal> {
+            self.dials.fetch_add(1, Ordering::SeqCst);
+            Err(Refusal::Broken("owned test dial".into()))
+        }
+    }
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let dials = Arc::new(AtomicUsize::new(0));
+    let drops = Arc::new(AtomicUsize::new(0));
+    let owner = own_link(Counted {
+        dials: Arc::clone(&dials),
+        drops: Arc::clone(&drops),
+    })
+    .unwrap();
+    let retained = owner.clone();
+    assert!(triomphe::Arc::ptr_eq(&owner, &retained));
+    assert_eq!(dials.load(Ordering::SeqCst), 0);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        retained.dial(stream::CONTROL_PORT),
+        Err(Refusal::Broken(_))
+    ));
+    assert_eq!(dials.load(Ordering::SeqCst), 1);
+    drop(owner);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    drop(retained);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
 /// The next framed request on `conn`, waiting on the fact: its bytes, or its end, which fails the test.
@@ -156,7 +200,7 @@ fn an_agent_of_another_wire_is_refused_at_the_hello() {
         send_answer(&mut conn, h.id, &Answer::Refused(Refusal::NoSuchBox(id)));
         (rest, conn)
     });
-    let refused = Client::connect(Arc::clone(&link)).err();
+    let refused = Client::connect(link.clone()).err();
     let Some(Refusal::Invalid { what: "wire", why }) = &refused else {
         panic!("refused for its wire, not {refused:?}")
     };
@@ -325,12 +369,13 @@ impl Write for Recorded {
 }
 
 impl Duplex for Recorded {
-    fn try_clone(&self) -> std::io::Result<Box<dyn Duplex>> {
-        Ok(Box::new(Recorded {
+    fn try_clone(&self) -> std::io::Result<DuplexOwner> {
+        own_duplex(Recorded {
             conn: self.conn.try_clone()?,
             port: self.port,
             bounds: Arc::clone(&self.bounds),
-        }))
+        })
+        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
@@ -368,17 +413,17 @@ struct Recording {
 }
 
 impl Link for Recording {
-    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         let addr = if port == stream::CONTROL_PORT {
             self.control
         } else {
             self.stdio
         };
-        Ok(Box::new(Recorded {
+        own_duplex(Recorded {
             conn: TcpStream::connect(addr).unwrap(),
             port,
             bounds: Arc::clone(&self.bounds),
-        }))
+        })
     }
 }
 
@@ -393,11 +438,12 @@ fn a_stdio_connection_waits_on_its_program_as_a_local_pipe_does() {
         TcpListener::bind("127.0.0.1:0").unwrap(),
     );
     let bounds = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let link = Arc::new(Recording {
+    let link = own_link(Recording {
         control: control.local_addr().unwrap(),
         stdio: stdio.local_addr().unwrap(),
         bounds: Arc::clone(&bounds),
-    });
+    })
+    .unwrap();
     let agent = std::thread::spawn(move || {
         let (mut conn, _) = control.accept().unwrap();
         hello(&mut conn);
@@ -497,9 +543,14 @@ impl shards_api::Stream for Looped {
 struct Patient {
     listener: TcpListener,
     given: std::sync::Mutex<Vec<Duration>>,
+    absolute: std::sync::Mutex<Vec<Instant>>,
 }
 
 impl shards_api::Guest for Patient {
+    fn process_exited(&self) -> Result<bool, shards_api::Refusal> {
+        Ok(false)
+    }
+
     fn connect(
         &self,
         _port: u32,
@@ -508,6 +559,33 @@ impl shards_api::Guest for Patient {
         self.given.lock().unwrap().push(patience);
         let conn = TcpStream::connect(self.listener.local_addr().unwrap()).unwrap();
         Ok(Box::new(Looped(conn)))
+    }
+
+    fn connect_before(
+        &self,
+        port: u32,
+        at: std::time::Instant,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        self.absolute.lock().unwrap().push(at);
+        let left = at
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or(shards_api::Refusal::Connect {
+                port,
+                failure: shards_api::HandshakeError::Expired {
+                    phase: shards_api::HandshakePhase::Dial,
+                },
+            })?;
+        let stream = self.connect(port, left)?;
+        if std::time::Instant::now() >= at {
+            return Err(shards_api::Refusal::Connect {
+                port,
+                failure: shards_api::HandshakeError::Expired {
+                    phase: shards_api::HandshakePhase::ClearTimeouts,
+                },
+            });
+        }
+        Ok(stream)
     }
 
     fn stop(&self) -> Result<(), shards_api::Refusal> {
@@ -534,6 +612,7 @@ fn the_first_dial_waits_for_the_guest_and_later_ones_try_once() {
     let guest = Arc::new(Patient {
         listener: TcpListener::bind("127.0.0.1:0").unwrap(),
         given: std::sync::Mutex::new(Vec::new()),
+        absolute: std::sync::Mutex::new(Vec::new()),
     });
     let first = Duration::from_millis(354);
     let link = shards::ShardsLink::new(guest.clone(), first);
@@ -580,6 +659,8 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {
             init: shards_api::Init::Executable("init".into()),
             cmdline: String::new(),
             vcpus: 1,
+            gpu: false,
+            gpu_devices: Vec::new(),
             memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
             disks: vec![],
             shares: vec![],
@@ -587,11 +668,9 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {
             binary: None,
         })
         .unwrap();
-    let transport = Stream::dial(Arc::new(shards::ShardsLink::new(
-        Arc::from(guest),
-        Duration::MAX,
-    )))
-    .unwrap();
+    let transport =
+        Stream::dial(own_link(shards::ShardsLink::new(Arc::from(guest), Duration::MAX)).unwrap())
+            .unwrap();
     let given = transport
         .asks(
             1,
@@ -786,4 +865,525 @@ fn the_event_form_takes_no_pipe_of_the_callers_own() {
         agent.join().unwrap(),
         Request::Call(Call::Inspect(BoxId::new("b").unwrap()))
     );
+}
+
+/// AC-T7.4.1: permanent selector mistakes and temporary storage exhaustion retain distinct
+/// public categories; the adapter never turns either into an opaque operating-system retry.
+#[test]
+fn physical_gpu_refusals_preserve_retry_category() {
+    for cause in [
+        shards_api::PhysicalGpuError::Syntax,
+        shards_api::PhysicalGpuError::Duplicate,
+    ] {
+        assert!(matches!(
+            shards::refusal("booting", &shards_api::Refusal::Gpu(cause)),
+            Refusal::Invalid {
+                what: "physical GPU selection",
+                ..
+            }
+        ));
+    }
+    assert!(
+        matches!(shards::refusal("booting", &shards_api::Refusal::Gpu(shards_api::PhysicalGpuError::Allocation)),
+        Refusal::Exhausted { what: "physical GPU selection storage", bound } if bound == shards_api::physical::MAX_PHYSICAL_GPUS)
+    );
+}
+
+// Caller policies for these stand-ins, not production waits or calibration inputs.
+const CONNECT_CAP: Duration = Duration::from_millis(25);
+const CONNECT_OBSERVE: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Copy, Debug)]
+enum ConnectForm {
+    Ordinary,
+    Evented,
+}
+
+fn connect_form(
+    form: ConnectForm,
+    link: LinkOwner,
+    at: Instant,
+) -> Result<(Client, Option<Pump>), Refusal> {
+    match form {
+        ConnectForm::Ordinary => Client::connect_before(link, at).map(|client| (client, None)),
+        ConnectForm::Evented => Client::connect_evented_before(link, Arc::new(|| {}), at)
+            .map(|(client, pump)| (client, Some(pump))),
+    }
+}
+
+#[derive(Default)]
+struct ConnectTrace {
+    dials: Mutex<Vec<(u32, Option<Instant>)>>,
+    read: std::sync::atomic::AtomicUsize,
+    written: Mutex<Vec<u8>>,
+    native_clones: std::sync::atomic::AtomicUsize,
+    facade_drops: std::sync::atomic::AtomicUsize,
+}
+
+struct ConnectLink {
+    socket: Mutex<Option<TcpStream>>,
+    budget: Option<Duration>,
+    trace: Arc<ConnectTrace>,
+}
+
+impl Link for ConnectLink {
+    fn reply_budget(&self) -> Option<Duration> {
+        self.budget
+    }
+
+    fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
+        self.dial_before(port, None)
+    }
+
+    fn dial_before(&self, port: u32, at: Option<Instant>) -> Result<DuplexOwner, Refusal> {
+        self.trace.dials.lock().unwrap().push((port, at));
+        let socket = self
+            .socket
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| Refusal::Broken("constructor probe has no connection".into()))?;
+        own_duplex(ConnectSocket {
+            socket,
+            trace: Arc::clone(&self.trace),
+        })
+    }
+}
+
+struct ConnectSocket {
+    socket: TcpStream,
+    trace: Arc<ConnectTrace>,
+}
+
+impl Drop for ConnectSocket {
+    fn drop(&mut self) {
+        self.trace
+            .facade_drops
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Read for ConnectSocket {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        let n = self.socket.read(bytes)?;
+        self.trace
+            .read
+            .fetch_add(n, std::sync::atomic::Ordering::SeqCst);
+        Ok(n)
+    }
+}
+
+impl Write for ConnectSocket {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let n = self.socket.write(bytes)?;
+        self.trace
+            .written
+            .lock()
+            .unwrap()
+            .extend_from_slice(&bytes[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.socket.flush()
+    }
+}
+
+impl Duplex for ConnectSocket {
+    fn try_clone(&self) -> io::Result<DuplexOwner> {
+        self.trace
+            .native_clones
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        own_duplex(Self {
+            socket: self.socket.try_clone()?,
+            trace: Arc::clone(&self.trace),
+        })
+        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
+    }
+
+    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        self.socket.shutdown(how)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.socket.set_write_timeout(timeout)
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.socket.set_read_timeout(timeout)
+    }
+
+    fn handle(&self) -> Handle<'_> {
+        Duplex::handle(&self.socket)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> io::Result<()> {
+        self.socket.set_nonblocking(on)
+    }
+}
+
+fn connect_link(
+    socket: Option<TcpStream>,
+    budget: Option<Duration>,
+) -> (LinkOwner, Arc<ConnectTrace>) {
+    let trace = Arc::new(ConnectTrace::default());
+    let link = own_link(ConnectLink {
+        socket: Mutex::new(socket),
+        budget,
+        trace: Arc::clone(&trace),
+    })
+    .unwrap();
+    (link, trace)
+}
+
+fn connect_pair() -> (TcpStream, TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client =
+        TcpStream::connect_timeout(&listener.local_addr().unwrap(), CONNECT_OBSERVE).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (peer, _) = listener.accept().unwrap();
+    (client, peer)
+}
+
+#[derive(Debug)]
+struct ConstructorHello {
+    header: Option<Header>,
+    written: Vec<u8>,
+    pending: bool,
+    buffered: usize,
+}
+
+fn constructor_hello(trace: &ConnectTrace) -> ConstructorHello {
+    let written = trace.written.lock().unwrap();
+    assert!(written.len() <= stream::MAX_FRAME);
+    let mut decoder = Deframer::new(wire::MAX_MESSAGE);
+    let mut consumed = 0;
+    let mut header = None;
+    // take() first consumes the length prefix, then the body. Every nonempty
+    // step must make progress, so captured bytes also bound the step count.
+    for _ in 0..written.len() {
+        if consumed == written.len() {
+            break;
+        }
+        let (took, message) = decoder.take(&written[consumed..]).unwrap();
+        assert!(took > 0 && took <= written.len() - consumed);
+        consumed += took;
+        if let Some(message) = message {
+            assert!(
+                header.is_none(),
+                "constructor emitted more than one message"
+            );
+            assert_eq!(consumed, written.len(), "bytes after the complete Hello");
+            let (got, request) = wire::read_request_apart(&message, wire::MAX_MESSAGE).unwrap();
+            assert!(matches!(request, Request::Hello { build } if build == wire::build()));
+            header = Some(got);
+        }
+    }
+    assert_eq!(consumed, written.len());
+    ConstructorHello {
+        header,
+        written: written.clone(),
+        pending: decoder.in_frame(),
+        buffered: decoder.buffered(),
+    }
+}
+
+/// AC-T7.4.1: both public constructors reject expired/invalid authority before dial,
+/// preserve an exact absolute instant with no Link budget, and honor a smaller configured cap.
+#[test]
+fn absolute_connect_rejects_before_dial_and_preserves_smaller_caps() {
+    for form in [ConnectForm::Ordinary, ConnectForm::Evented] {
+        let (link, trace) = connect_link(None, None);
+        let expired = connect_form(form, link, Instant::now()).map(drop);
+        assert!(matches!(expired, Err(Refusal::Os { .. })), "{expired:?}");
+        assert!(trace.dials.lock().unwrap().is_empty());
+
+        for invalid in [Duration::ZERO, Duration::MAX] {
+            let (link, trace) = connect_link(None, Some(invalid));
+            let at = Instant::now().checked_add(CONNECT_OBSERVE).unwrap();
+            let refused = connect_form(form, link, at).map(drop);
+            assert!(
+                matches!(
+                    refused,
+                    Err(Refusal::Invalid {
+                        what: "client reply budget",
+                        ..
+                    })
+                ),
+                "{refused:?}"
+            );
+            assert!(trace.dials.lock().unwrap().is_empty());
+        }
+
+        let (link, trace) = connect_link(None, None);
+        let at = Instant::now().checked_add(CONNECT_OBSERVE).unwrap();
+        let refused = connect_form(form, link, at).map(drop);
+        assert!(matches!(refused, Err(Refusal::Broken(_))));
+        assert_eq!(
+            *trace.dials.lock().unwrap(),
+            [(stream::CONTROL_PORT, Some(at))]
+        );
+
+        let (link, trace) = connect_link(None, Some(CONNECT_CAP));
+        let at = Instant::now().checked_add(CONNECT_OBSERVE).unwrap();
+        let before = Instant::now();
+        let refused = connect_form(form, link, at).map(drop);
+        let after = Instant::now();
+        assert!(matches!(refused, Err(Refusal::Broken(_))));
+        let dials = trace.dials.lock().unwrap();
+        assert_eq!(dials.len(), 1);
+        let (port, selected) = dials[0];
+        let selected = selected.unwrap();
+        assert_eq!(port, stream::CONTROL_PORT);
+        assert!(before.checked_add(CONNECT_CAP).unwrap() <= selected);
+        assert!(selected <= after.checked_add(CONNECT_CAP).unwrap());
+        assert!(selected < at);
+    }
+}
+
+/// AC-T7.4.1: actual partial token reads and the hello send/wait consume the same
+/// original cap even when Link has no default budget. Both constructor forms are covered.
+#[test]
+fn absolute_connect_caps_partial_token_and_unanswered_hello() {
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+
+    let mut observations = Vec::with_capacity(4);
+    for form in [ConnectForm::Ordinary, ConnectForm::Evented] {
+        for whole_token in [false, true] {
+            let (socket, mut peer) = connect_pair();
+            let token = TOKEN.to_le_bytes();
+            let prefix = if whole_token { &token[..] } else { &token[..1] };
+            peer.write_all(prefix).unwrap();
+            let (link, trace) = connect_link(Some(socket), None);
+            let at = Instant::now().checked_add(CONNECT_CAP).unwrap();
+            let (finished, answer) = mpsc::sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                let result = connect_form(form, link, at).map(drop);
+                let _ = finished.send((Instant::now(), result));
+            });
+            // No assertion may bypass this owned socket close and actor join.
+            let observed = answer.recv_timeout(CONNECT_OBSERVE);
+            let stopped = peer.shutdown(Shutdown::Both);
+            drop(peer);
+            let joined = worker.join();
+            let read = trace.read.load(Ordering::SeqCst);
+            observations.push((
+                form,
+                whole_token,
+                at,
+                observed,
+                stopped,
+                joined.is_ok(),
+                read,
+                trace,
+            ));
+        }
+    }
+    let mut uncommitted = Vec::with_capacity(2);
+    // All four owned peers are closed and actors joined before any assertion.
+    for (form, whole_token, at, observed, stopped, joined, read, trace) in observations {
+        let hello = constructor_hello(&trace);
+        eprintln!(
+            "client_connect_absolute form={form:?} whole_token={whole_token} at={at:?} observed={observed:?} read={read} stopped={stopped:?} joined={joined} hello={hello:?}"
+        );
+        assert!(joined);
+        let (returned, result) = observed.expect("constructor did not return before owned cleanup");
+        assert_eq!(
+            read,
+            if whole_token { stream::TOKEN_BYTES } else { 1 },
+            "missing actual read progress is a harness miss"
+        );
+        assert!(matches!(result, Err(Refusal::Os { .. })), "{result:?}");
+        assert_eq!(
+            *trace.dials.lock().unwrap(),
+            [(stream::CONTROL_PORT, Some(at))]
+        );
+        if whole_token {
+            if let Some(header) = hello.header {
+                assert_eq!(header.id, 1);
+                assert!(!hello.pending && hello.buffered == 0);
+                eprintln!(
+                    "client_connect_hello form={form:?} phase=committed_hello withheld_answer_proof=true"
+                );
+            } else {
+                let phase = if hello.written.is_empty() {
+                    "learned_before_send"
+                } else {
+                    "learned_during_incomplete_send"
+                };
+                eprintln!(
+                    "client_connect_hello form={form:?} phase={phase} withheld_answer_proof=false status=UNVERIFIED written={:02x?}",
+                    hello.written
+                );
+                assert!(
+                    matches!(&result, Err(Refusal::Os { op: "sending to the node agent", why }) if why.contains("twice")),
+                    "uncommitted Hello must be explained by its smaller learned send bound: {result:?}"
+                );
+                uncommitted.push((form, phase));
+            }
+        } else {
+            assert!(hello.written.is_empty());
+            assert!(
+                matches!(&result, Err(Refusal::Os { why, .. }) if why.contains("absolute"))
+                    && returned >= at
+            );
+        }
+    }
+    assert!(
+        uncommitted.is_empty(),
+        "UNVERIFIED withheld-answer phase: no complete actual Hello; harness witness miss, not a production timeout failure: {uncommitted:?}"
+    );
+}
+
+/// AC-T7.4.1: a complete real hello reaches both constructors; the event form keeps
+/// the same Link owner in its existing Pump and stores no caller deadline as a lifetime cap.
+#[test]
+fn absolute_connect_completes_and_evented_retains_the_same_link() {
+    use std::sync::mpsc;
+
+    for form in [ConnectForm::Ordinary, ConnectForm::Evented] {
+        let (socket, mut peer) = connect_pair();
+        peer.write_all(&TOKEN.to_le_bytes()).unwrap();
+        // The fresh Shared's first request is 1; independently decode its actual Hello below.
+        send_answer(&mut peer, 1, &Answer::Hello(agents_hello()));
+        let (link, trace) = connect_link(Some(socket), None);
+        let same_link = triomphe::Arc::clone(&link);
+        let at = Instant::now().checked_add(CONNECT_OBSERVE).unwrap();
+        let (finished, answer) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let result = connect_form(form, link, at).map(|(client, pump)| {
+                let evented = pump.as_ref().map(|pump| {
+                    (
+                        triomphe::Arc::ptr_eq(&pump.shared.transport.link, &same_link),
+                        pump.shared.transport.reply_budget,
+                        pump.shared.transport.token,
+                    )
+                });
+                (client.classes(), evented)
+            });
+            let _ = finished.send(result);
+        });
+        let observed = answer.recv_timeout(CONNECT_OBSERVE);
+        let stopped = peer.shutdown(Shutdown::Both);
+        drop(peer);
+        let joined = worker.join();
+        eprintln!(
+            "client_connect_positive form={form:?} at={at:?} observed={observed:?} stopped={stopped:?} joined={}",
+            joined.is_ok()
+        );
+        joined.unwrap();
+        let (classes, evented) = observed.unwrap().unwrap();
+        assert_eq!(classes, vec![Class::Oci]);
+        match form {
+            ConnectForm::Ordinary => assert_eq!(evented, None),
+            ConnectForm::Evented => assert_eq!(evented, Some((true, None, TOKEN))),
+        }
+        let hello = constructor_hello(&trace);
+        eprintln!("client_connect_positive_hello form={form:?} hello={hello:?}");
+        assert!(!hello.pending && hello.buffered == 0);
+        assert_eq!(
+            hello
+                .header
+                .expect("positive requires a complete actual Hello")
+                .id,
+            1
+        );
+        assert_eq!(
+            *trace.dials.lock().unwrap(),
+            [(stream::CONTROL_PORT, Some(at))]
+        );
+    }
+}
+
+/// AC-T7.4.1: the actual Shards adapter rejects before effects, then carries the
+/// identical absolute authority and bytes through the existing unique facade.
+#[test]
+fn shards_link_carries_the_original_absolute_deadline_and_bytes() {
+    let guest = Arc::new(Patient {
+        listener: TcpListener::bind("127.0.0.1:0").unwrap(),
+        given: std::sync::Mutex::new(Vec::new()),
+        absolute: std::sync::Mutex::new(Vec::new()),
+    });
+    let link = shards::ShardsLink::new(guest.clone(), Duration::from_secs(1));
+    assert!(
+        link.dial_before(stream::CONTROL_PORT, Some(Instant::now()))
+            .is_err()
+    );
+    assert!(guest.absolute.lock().unwrap().is_empty());
+    assert!(guest.given.lock().unwrap().is_empty());
+    let at = Instant::now().checked_add(Duration::from_secs(1)).unwrap();
+    let mut stream = link.dial_before(stream::CONTROL_PORT, Some(at)).unwrap();
+    let (mut peer, _) = guest.listener.accept().unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    stream.write_all(b"exact operation authority").unwrap();
+    let mut bytes = [0u8; 25];
+    peer.read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"exact operation authority");
+    assert_eq!(*guest.absolute.lock().unwrap(), [at]);
+}
+
+/// AC-T7.4.1: moving the unique facade through the existing copier adapter clones
+/// no native stream; an explicit native clone retains I/O until its own final drop.
+#[test]
+fn duplex_owner_preserves_io_and_explicit_native_clone_lifetime() {
+    use std::sync::atomic::Ordering;
+
+    let (socket, mut peer) = connect_pair();
+    socket.set_read_timeout(Some(CONNECT_OBSERVE)).unwrap();
+    socket.set_write_timeout(Some(CONNECT_OBSERVE)).unwrap();
+    peer.set_read_timeout(Some(CONNECT_OBSERVE)).unwrap();
+    peer.set_write_timeout(Some(CONNECT_OBSERVE)).unwrap();
+    let trace = Arc::new(ConnectTrace::default());
+    let owner = own_duplex(ConnectSocket {
+        socket,
+        trace: Arc::clone(&trace),
+    })
+    .unwrap();
+    let before_move = std::ptr::from_ref(&*owner);
+    let mut moved = DuplexIo(owner);
+    let same_facade = std::ptr::addr_eq(before_move, std::ptr::from_ref(&*moved.0));
+    let clones_before = trace.native_clones.load(Ordering::SeqCst);
+    let input_sent = peer.write_all(b"in");
+    let mut input = [0; 2];
+    let input_read = moved.read_exact(&mut input);
+    let output_sent = moved.write_all(b"out");
+    let mut output = [0; 3];
+    let output_read = peer.read_exact(&mut output);
+    let clone = moved.0.try_clone();
+    drop(moved);
+    let first_drop = trace.facade_drops.load(Ordering::SeqCst);
+    let final_write = match clone {
+        Ok(mut clone) => {
+            let sent = clone.write_all(b"last");
+            drop(clone);
+            sent
+        }
+        Err(why) => Err(why),
+    };
+    let mut last = [0; 4];
+    let last_read = peer.read_exact(&mut last);
+    let eof = peer.read(&mut [0]);
+    drop(peer);
+    let clones = trace.native_clones.load(Ordering::SeqCst);
+    let drops = trace.facade_drops.load(Ordering::SeqCst);
+    eprintln!(
+        "client_duplex_owner same={same_facade} clones_before={clones_before} clones={clones} first_drop={first_drop} drops={drops} eof={eof:?}"
+    );
+    // All owned facade/peer handles are gone before any result assertion.
+    input_sent.unwrap();
+    input_read.unwrap();
+    output_sent.unwrap();
+    output_read.unwrap();
+    final_write.unwrap();
+    last_read.unwrap();
+    assert!(same_facade);
+    assert_eq!(clones_before, 0);
+    assert_eq!(clones, 1);
+    assert_eq!(first_drop, 1);
+    assert_eq!(drops, 2);
+    assert_eq!(input, *b"in");
+    assert_eq!(output, *b"out");
+    assert_eq!(last, *b"last");
+    assert_eq!(eof.unwrap(), 0);
 }

@@ -1,0 +1,47 @@
+{
+  "requirement": "AC-T7.4.1",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "base": "a6b20f34d815d41d5ae36233352e576f5c56b2c3",
+  "sources": [
+    {
+      "path": "crates/hex-runtime/src/linux/sys.rs",
+      "sha256": "9939b2babb5b77faa0e55586016c4c8a57a6c203d2ff8bf17b48919b925796a3"
+    },
+    {
+      "path": "crates/hex-node/src/supervise.rs",
+      "sha256": "5d0fa0971dc35f2e541b05d4e3db8fdd96efd03fa4d714b28d611d0f99ddbb1f"
+    }
+  ],
+  "approved_seam": {
+    "runtime": "HeldGate::wait_isolated(&self)->std::io::Result<()>; cfg(any(test,feature=\"native-gate-test\"))",
+    "Node": "ManagedVm::prepare_isolation_ack(&self)->Result<std::io::PipeReader,Refusal>; cfg(test) only; exact SAME preallocated ManagedVm",
+    "notification": "exact single byte [2], then own writer closure; observing isolation only, never authorization byte [1]"
+  },
+  "protocol_and_ownership": [
+    "Child production join ->held_close_unexpected ->held_ready(byte2) ->held_wait(byte1) unchanged. No extra child descriptor/allowlist member, no raw parent FD argv, no global FD/storage.",
+    "Runtime peek uses SAME retained socket and original absolute gate deadline through SAME held_receive core; no reset, retry, timer, byte consumption, send1 or AsFd export. Production held_wait remains signature-preserving false-mode wrapper; release body byte-identical.",
+    "Inline cfg(test) OnceLock<Mutex<Option<PipeWriter>>> on SAME fallibly allocated receipt. Fresh pipe +owned writer NONBLOCK before spawn. Reserved phase required; duplicate preparation fails even after take. No second Native/Store/holder owner.",
+    "bind takes optional writer before spawn; ownership and watcher registration complete, then test-only Some probe drops spawning reaper read guard before wait. No table/phase/owner/reaper mutex held over probe. Held PID already recognized by existing managed_pid ownership lookup. Production/None path retains original guard and publication/gate ordering.",
+    "After peek validates real child byte2, one nonblocking one-byte notification attempt; writer drops on success/error. Wrong byte, EOF, expired original gate or FD/write error is typed, never observation success. Gate drops/cancels on failure; SAME Supervisor owns cleanup/uncertainty.",
+    "Reader is notification-only; no authority to gate execution, publish records, signal unrelated PID or assert whole-scope release. Peeking queued byte2 does not claim PC currently in ppoll."
+  ],
+  "causal_validation_contract": "L4 exact26b7820f source inventory: t0 before actor spawn, parent actual terminal P<D=t0+guard, first127<G=t0+gate, unchanged publication refusal/canaries, actual sibling STOP while first exit, exact PID/birth/parent/pidfd/scope cleanup. Probe writer can be inherited by a missing-FD-isolation mutant: do NOT require EOF as a prepared-phase precondition. ACK byte is phase witness; EOF/extra bytes are separately retained evidence after causal oracle/cleanup. Mutation must reach actual ACK/STOP and fail relevant early terminal/retained-writer guard, not compilation/precondition miss.",
+  "new_controls": [
+    "linux::sys::tests::observing_isolation_ack_peeks_without_consuming_or_authorizing_exec",
+    "linux::sys::tests::isolation_ack_wrong_byte_eof_and_expired_original_deadline_refuse",
+    "supervise::tests::per_launch_isolation_notification_is_single_owned_bounded_and_phase_checked"
+  ],
+  "control_scope": "Runtime socketpair protocol and Node inline-receipt/pipe ownership only; no fork/VM/GPU/cgroup; all UNRUN. Original native gate leaf source/oracles/budgets untouched by L1.",
+  "R01_R05_R14": "No production owner allocation/table or deadline added. Test-only kernel pipe/FD cost is bounded one reader+one writer per native receipt before effects; all create/fcntl/wait/write failures typed. Existing Drop/close and native reaper semantics retain their own audit/native evidence obligations. No speed/size/allocation-free/leak-free claim.",
+  "validation": {
+    "rustfmt": "installed scoped rustfmt parser/format0",
+    "diff": "git diff --check0",
+    "function_source_readback": "attached exact hashes/equality for held child, ready sender, allowlist, spawn, ordinary child, release; original receive body identical after explicit false-mode flag reduction",
+    "tests": "UNRUN/no own dispatch; ROOT must add actual feature metadata before compile",
+    "native": "UNRUN; no syscall/proc sample/campaign or forbidden host change by lane"
+  },
+  "integration": "ROOT owns exact dev-only Cargo feature/edge snippet in NATIVE-GATE-ACK-INTEGRATION.md, no dependency version/new crate/lock edge. L4 consumer must call prepare_isolation_ack before bind and consume real [2] event without requiring pre-termination EOF.",
+  "remaining": "ROOT coherent compilation/light protocol controls, L4 signed causal oracle replacement, ROOT actual control+meaningful native FD mutation/cleanup/full gates/R14. Family production9075/3749 and committed recovery original05048 remain separate fixed cohorts."
+}

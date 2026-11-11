@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "source_parent": "5c10d010c3a60c09015f57162e570f8737075d76",
+  "fixed_root_parent": "e852c1b5ba9e1e2c8eb122dfb5817cd4dc339748",
+  "role": "implementer",
+  "source": {
+    "path": "crates/hex-client/src/guest/tests.rs",
+    "bytes": 42096,
+    "sha256": "d07624dab713e61c5b239fa8a9226dfbe5b39f023d13de46aa7e3f23cc9f570d",
+    "original_prefix_bytes": 30997,
+    "original_prefix_sha256": "8a6a0350d0139227686838ab31af5fdc902b1ddb564accfc00e22c1b76aaf70e",
+    "append_only": true
+  },
+  "selected_test_names": [
+    "guest::tests::absolute_connect_rejects_before_dial_and_preserves_smaller_caps",
+    "guest::tests::absolute_connect_caps_partial_token_and_unanswered_hello",
+    "guest::tests::absolute_connect_completes_and_evented_retains_the_same_link"
+  ],
+  "tests_defined": 3,
+  "tests_executed": 0,
+  "builds_executed": 0,
+  "native_executed": 0,
+  "protected_original_drop_sha256": "9e49002f5ae2866ac9f523a231cf2abc4ffc365c5309a5cefeccb0854a848461",
+  "caller_fixture_cap_ms": 25,
+  "observation_guard_ms": 100,
+  "missing_read_progress": "harness miss, not production bug or pass",
+  "macos_hello": "existing measured learned bound may expire before caller; no calibration/table mutation",
+  "status": "source only, ROOT joined check pending"
+}

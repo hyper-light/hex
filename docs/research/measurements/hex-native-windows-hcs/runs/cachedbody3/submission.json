@@ -1,0 +1,8 @@
+{
+  "kind": "read-only collection of terminal owned native scope; no new workload",
+  "reaped": true,
+  "pid": 52821,
+  "exit": 0,
+  "source_sha256": "ea1db30f72aed308b90ddbb68f51802adc4638c936a1dfdd6216f38c35b4a222",
+  "raw_sha256": "8831e0b18e5a92758cc982c8e24c872741607443ee55254b6475cf3f5af4eeaa"
+}

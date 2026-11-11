@@ -1,0 +1,25 @@
+test_accepts_exact_real_case_shape (test_evidence.EvidenceBehavior.test_accepts_exact_real_case_shape) ... ok
+test_checks_artifact_bytes_and_hash (test_evidence.EvidenceBehavior.test_checks_artifact_bytes_and_hash) ... ok
+test_guard_replacement_is_exact_and_restorable (test_evidence.EvidenceBehavior.test_guard_replacement_is_exact_and_restorable) ... ok
+test_matrix_never_promotes_missing_hardware (test_evidence.EvidenceBehavior.test_matrix_never_promotes_missing_hardware) ... ok
+test_median_confidence_uses_binomial_bounds (test_evidence.EvidenceBehavior.test_median_confidence_uses_binomial_bounds) ... ok
+test_nonlinux_firecracker_requires_peer_route (test_evidence.EvidenceBehavior.test_nonlinux_firecracker_requires_peer_route) ... ok
+test_preserves_selected_only_gaps (test_evidence.EvidenceBehavior.test_preserves_selected_only_gaps) ... ok
+test_profiles_reject_nan_and_negative_values (test_evidence.EvidenceBehavior.test_profiles_reject_nan_and_negative_values) ... ok
+test_rejects_duplicate_or_nonfinite_json (test_evidence.EvidenceBehavior.test_rejects_duplicate_or_nonfinite_json) ... ok
+test_rejects_foreign_access (test_evidence.EvidenceBehavior.test_rejects_foreign_access) ... ok
+test_rejects_ignored_only (test_evidence.EvidenceBehavior.test_rejects_ignored_only) ... ok
+test_rejects_missing_capability (test_evidence.EvidenceBehavior.test_rejects_missing_capability) ... ok
+test_rejects_missing_native_join (test_evidence.EvidenceBehavior.test_rejects_missing_native_join) ... ok
+test_rejects_native_cleanup_gap (test_evidence.EvidenceBehavior.test_rejects_native_cleanup_gap) ... ok
+test_rejects_recovery_repick (test_evidence.EvidenceBehavior.test_rejects_recovery_repick) ... ok
+test_rejects_symlink_or_path_escape (test_evidence.EvidenceBehavior.test_rejects_symlink_or_path_escape) ... ok
+test_rejects_unpoisoned_outputs (test_evidence.EvidenceBehavior.test_rejects_unpoisoned_outputs) ... ok
+test_rejects_vacuous_wrong_id (test_evidence.EvidenceBehavior.test_rejects_vacuous_wrong_id) ... ok
+test_rejects_zero_selected (test_evidence.EvidenceBehavior.test_rejects_zero_selected) ... ok
+test_tail_distribution_preserves_observed_samples (test_evidence.EvidenceBehavior.test_tail_distribution_preserves_observed_samples) ... ok
+
+----------------------------------------------------------------------
+Ran 20 tests in 0.002s
+
+OK

@@ -1,0 +1,20 @@
+{
+  "items": {
+    "full-sim.log": {
+      "bytes": 27019,
+      "sha256": "53858331147adc660c95fe7549beffe4f934f9e9c63cd3f948df08387ead10fc"
+    },
+    "result.json": {
+      "bytes": 883,
+      "sha256": "d010434cedffbc5c5b7bce1800f7934dc9a6a0c897255b6dea7344fe6a832caa"
+    },
+    "running.json": {
+      "bytes": 544,
+      "sha256": "71b762b13e295bce7311732c6c2cbf2de9c3d3c02d00c843f52fccb6ec2b6c79"
+    }
+  },
+  "scope_absent": true,
+  "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-full-sim-8d5-v2.scope",
+  "collector_reaped": true,
+  "collector_exit": 0
+}

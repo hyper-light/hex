@@ -1,0 +1,740 @@
+{
+  "kind": "actual-scheduler-wait-census",
+  "status": "passed",
+  "source_revision": "bba3d814cfa8373d589482dfbaa38b9bfa792d03",
+  "profile": "release",
+  "mode": "guest",
+  "n": 1,
+  "verified_physical_created": 2,
+  "verified_physical_deleted": 2,
+  "verified_oversized_refusals": 2,
+  "backend_baseline_restored": true,
+  "owned_guest_retired": {
+    "end": "Stopped",
+    "guest_stopped": true,
+    "pid": 40163,
+    "started": 12280706051490
+  },
+  "environment": {
+    "box_cpu_milli": 1000,
+    "box_memory_mib": 633,
+    "cpu_count": 32,
+    "free_disk_bytes_before": 3014872739840,
+    "guest_cpus": 4,
+    "guest_memory_mib": 632,
+    "guest_shares_sha256": "1e8a5a8ef594e919dcc2b1fa2e1546f5bed0bdfce79410f90998f5e7c6a58f39",
+    "machine": "arm64",
+    "os": "macOS-26.4-arm64-arm-64bit",
+    "path_sha256": "fc1eebdda3ae92cef120aebbddd33817c1f3239b1adb5984d94910cfb38b3bd7"
+  },
+  "binary_and_artifact_hashes": {
+    "hex": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-refusal-bba3d814/aarch64-apple-darwin/release/hex",
+      "sha256": "73ed6e291c3141f29be481c39f0ade540842ef67e2a02efe29ef514e3617621f"
+    },
+    "initrd": {
+      "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-cc7c2190-release-aarch64.cpio",
+      "sha256": "5521b2304a5a6c2d9357fe4e1ac43f68ec817b685f8600115fa94f139eda778e"
+    },
+    "kernel": {
+      "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+      "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+    },
+    "linux_hex": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-cc7c2190/aarch64-unknown-linux-musl/release/hex",
+      "sha256": "e2670cf5cf0b4ac32fa30f55b7027b3f95a942205c51aafe26169f5a7b9a276d"
+    },
+    "runtime_probe": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-probe-refusal-bba3d814/aarch64-apple-darwin/release/hex-scheduler-runtime-probe",
+      "sha256": "a6e47c156b3aa8d6ec17a8c7d5c0ce3ac4fead706cf41251c315b7313ef350fe"
+    },
+    "shards": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+      "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+    }
+  },
+  "receipts": {
+    "build": {
+      "path": "/Users/adalundhe/.cache/hex-lead/refusal-census-bba3d814/receipts/build-hello-release-fa5.json",
+      "sha256": "3355234fd399f3979b60a46ca96aa4e9587e958e1c475a9585f41a54c9fccbbb"
+    },
+    "deadline": {
+      "path": "/Users/adalundhe/.cache/hex-lead/refusal-census-bba3d814/receipts/method-hello-release-fa5.json",
+      "sha256": "b59971fd0de38250554b443488bbdb8def79c4c54da1db362b81a4d5ccaf5b46"
+    },
+    "policy": {
+      "path": "/Users/adalundhe/.cache/hex-lead/refusal-census-bba3d814/receipts/policy-f5.json",
+      "sha256": "00fca9fa1a05d72fe197d633a7426d6e3ec9b4ea4bc44899e0556cd9b761f960"
+    }
+  },
+  "success_controls": {
+    "advertise": 2,
+    "delete": 4,
+    "describe": 2,
+    "link_up": 1,
+    "retry": 4,
+    "status": 141,
+    "submit": 4
+  },
+  "guest_hello": {
+    "binary": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-guest-hello-root-fa5c7e4e/release/hex-guest-hello-census",
+      "sha256": "a57a54f24f6f43104b13e47bd2a86b895728bd92ead695dfd3e2093e535d218e"
+    },
+    "census": {
+      "path": "/Users/adalundhe/.cache/hx/e-z3x0e8ih/census/owned-guest-hello.tsv",
+      "producer": "existing SDK hooks only",
+      "row_bound": 1048576
+    },
+    "class_validated_hellos": 1000,
+    "declaration_authority": "source revision/profile are operator supplied; root verifies build receipt",
+    "declared_config": {
+      "binary": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+      "initrd": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-cc7c2190-release-aarch64.cpio",
+      "kernel": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+      "memory_mib": 632,
+      "shares": [
+        {
+          "dir": "/Users/adalundhe/.cache/hx/e-z3x0e8ih/guest-shares",
+          "read_only": true
+        }
+      ],
+      "vcpus": 4
+    },
+    "dial_budget_nanos": 120000000000,
+    "error": null,
+    "expected_class": "oci",
+    "guest_lifecycle_owned": false,
+    "hello_wait": "SDK measuring; root must own subprocess outer cancellation, kill/reap and guest cleanup",
+    "hello_wire_successes": 1000,
+    "identity": {
+      "pid": 40163,
+      "started": 12280706051490,
+      "vsock": "/Users/adalundhe/.cache/hx/e-z3x0e8ih/guest-tmp/shards-api-1e9bb54e11b0f0d0-0/v"
+    },
+    "iterations": 1000,
+    "kind": "actual-guest-sdk-hello-census",
+    "last_advertised_classes": [
+      "process",
+      "oci"
+    ],
+    "owned_root": "/Users/adalundhe/.cache/hx/e-z3x0e8ih",
+    "owned_vsock_root": null,
+    "profile": "release",
+    "receipt": "/Users/adalundhe/.cache/hx/e-z3x0e8ih/owned-guest.json",
+    "receipt_sha256": "480ebda38afb89a05b43b99e7af22c4b41e6056438d442e5b63db556a0b55010",
+    "record": "/Users/adalundhe/.cache/hx/e-z3x0e8ih/real.node-state/@guest",
+    "record_sha256": "f6f0b1fab22b6ff4ba2251ec6b32ad43c92799b0ae6997c9f3b572f171efdad1",
+    "resource_counts": "FD/task/allocator return is not proved by this identity/physical control",
+    "root_physical_baseline_unchanged": true,
+    "root_post_drop_same_identity_live_capacity": true,
+    "seed_installation": "not performed",
+    "source_base": "bba3d814cfa8373d589482dfbaa38b9bfa792d03",
+    "source_revision": "fa5c7e4eb1fe47b1f4c2b3d31cd00cd473badf72",
+    "status": "completed",
+    "workload_success": "not exercised by Hello"
+  },
+  "raw_report": "/Users/adalundhe/.cache/hx/e-z3x0e8ih/result.json",
+  "raw_report_sha256": "bef82ca27d3fb2fe7450145981c65a7a363abd55941e1d35bca1d33dc21d0492",
+  "verification_report": "/Users/adalundhe/.cache/hx/e-z3x0e8ih/root-verified-refusal-census.json",
+  "verification_report_sha256": "c14409aaad5ee4ce05efe2438660e8984b07847ed3980d3d777c1ce3848573b1",
+  "verified_census_files": 201,
+  "verified_census_rows": 1511,
+  "ledger": {
+    "bytes": 135283,
+    "physical_control_events": {
+      "local": 1,
+      "remote": 1
+    },
+    "rows": 435,
+    "sha256": "4fddfa8db97949ea6cb2fdf4b3819651257103d98c95c08e607b05f8adf0ea9f"
+  },
+  "owned_identity_reconstruction": {
+    "live_API_check": "not performed by verifier",
+    "pid": 40163,
+    "receipt_sha256": "480ebda38afb89a05b43b99e7af22c4b41e6056438d442e5b63db556a0b55010",
+    "record_sha256": "f6f0b1fab22b6ff4ba2251ec6b32ad43c92799b0ae6997c9f3b572f171efdad1",
+    "recorded_terminal": "Stopped",
+    "started": 12280706051490,
+    "vsock": "/Users/adalundhe/.cache/hx/e-z3x0e8ih/guest-tmp/shards-api-1e9bb54e11b0f0d0-0/v"
+  },
+  "distributions_ns": {
+    "filename_call_exit_success": {
+      "client.answer.hello": {
+        "max": 76167,
+        "n": 158,
+        "p50": 30750,
+        "p90": 42166,
+        "p99": 65750,
+        "p999": 76167
+      },
+      "client.answer.schedule.advertise": {
+        "max": 20851958,
+        "n": 2,
+        "p50": 19697375,
+        "p90": 20851958,
+        "p99": 20851958,
+        "p999": 20851958
+      },
+      "client.answer.schedule.delete": {
+        "max": 43818791,
+        "n": 4,
+        "p50": 14862208,
+        "p90": 43818791,
+        "p99": 43818791,
+        "p999": 43818791
+      },
+      "client.answer.schedule.describe": {
+        "max": 458250,
+        "n": 2,
+        "p50": 123416,
+        "p90": 458250,
+        "p99": 458250,
+        "p999": 458250
+      },
+      "client.answer.schedule.link_up": {
+        "max": 53792,
+        "n": 1,
+        "p50": 53792,
+        "p90": 53792,
+        "p99": 53792,
+        "p999": 53792
+      },
+      "client.answer.schedule.retry": {
+        "max": 436791,
+        "n": 4,
+        "p50": 68416,
+        "p90": 436791,
+        "p99": 436791,
+        "p999": 436791
+      },
+      "client.answer.schedule.status": {
+        "max": 313208,
+        "n": 141,
+        "p50": 37333,
+        "p90": 52166,
+        "p99": 281625,
+        "p999": 313208
+      },
+      "client.answer.schedule.submit": {
+        "max": 111165667,
+        "n": 4,
+        "p50": 10581958,
+        "p90": 111165667,
+        "p99": 111165667,
+        "p999": 111165667
+      }
+    },
+    "filename_process_exit_success": {
+      "client.answer.capacity": {
+        "max": 471458,
+        "n": 12,
+        "p50": 238583,
+        "p90": 410541,
+        "p99": 471458,
+        "p999": 471458
+      },
+      "client.answer.hello": {
+        "max": 101584,
+        "n": 12,
+        "p50": 33792,
+        "p90": 64291,
+        "p99": 101584,
+        "p999": 101584
+      },
+      "client.answer.inspect": {
+        "max": 390084,
+        "n": 2,
+        "p50": 228334,
+        "p90": 390084,
+        "p99": 390084,
+        "p999": 390084
+      },
+      "client.answer.list": {
+        "max": 4357917,
+        "n": 12,
+        "p50": 264042,
+        "p90": 4356542,
+        "p99": 4357917,
+        "p999": 4357917
+      },
+      "client.guest.answer.hello": {
+        "max": 202583,
+        "n": 1000,
+        "p50": 83709,
+        "p90": 102083,
+        "p99": 134458,
+        "p999": 149791
+      }
+    },
+    "legacy_unmarked_unclassified": {},
+    "non_refusal_wire_answers": {
+      "client.answer.capacity": {
+        "max": 4162959,
+        "n": 25,
+        "p50": 235958,
+        "p90": 410541,
+        "p99": 4162959,
+        "p999": 4162959
+      },
+      "client.answer.create": {
+        "max": 50710208,
+        "n": 2,
+        "p50": 41496291,
+        "p90": 50710208,
+        "p99": 50710208,
+        "p999": 50710208
+      },
+      "client.answer.delete": {
+        "max": 5389584,
+        "n": 2,
+        "p50": 3377250,
+        "p90": 5389584,
+        "p99": 5389584,
+        "p999": 5389584
+      },
+      "client.answer.hello": {
+        "max": 101584,
+        "n": 195,
+        "p50": 31209,
+        "p90": 42833,
+        "p99": 76167,
+        "p999": 101584
+      },
+      "client.answer.inspect": {
+        "max": 390084,
+        "n": 4,
+        "p50": 233000,
+        "p90": 390084,
+        "p99": 390084,
+        "p999": 390084
+      },
+      "client.answer.list": {
+        "max": 4357917,
+        "n": 12,
+        "p50": 264042,
+        "p90": 4356542,
+        "p99": 4357917,
+        "p999": 4357917
+      },
+      "client.answer.schedule.advertise": {
+        "max": 20851958,
+        "n": 2,
+        "p50": 19697375,
+        "p90": 20851958,
+        "p99": 20851958,
+        "p999": 20851958
+      },
+      "client.answer.schedule.delete": {
+        "max": 43818791,
+        "n": 4,
+        "p50": 14862208,
+        "p90": 43818791,
+        "p99": 43818791,
+        "p999": 43818791
+      },
+      "client.answer.schedule.describe": {
+        "max": 4290750,
+        "n": 7,
+        "p50": 539375,
+        "p90": 4290750,
+        "p99": 4290750,
+        "p999": 4290750
+      },
+      "client.answer.schedule.hear_control": {
+        "max": 67097625,
+        "n": 12,
+        "p50": 28852541,
+        "p90": 55327042,
+        "p99": 67097625,
+        "p999": 67097625
+      },
+      "client.answer.schedule.hear_create": {
+        "max": 93952208,
+        "n": 1,
+        "p50": 93952208,
+        "p90": 93952208,
+        "p99": 93952208,
+        "p999": 93952208
+      },
+      "client.answer.schedule.hear_delete": {
+        "max": 45053583,
+        "n": 3,
+        "p50": 41606875,
+        "p90": 45053583,
+        "p99": 45053583,
+        "p999": 45053583
+      },
+      "client.answer.schedule.link_up": {
+        "max": 53792,
+        "n": 1,
+        "p50": 53792,
+        "p90": 53792,
+        "p99": 53792,
+        "p999": 53792
+      },
+      "client.answer.schedule.retry": {
+        "max": 436791,
+        "n": 4,
+        "p50": 68416,
+        "p90": 436791,
+        "p99": 436791,
+        "p999": 436791
+      },
+      "client.answer.schedule.status": {
+        "max": 313208,
+        "n": 141,
+        "p50": 37333,
+        "p90": 52166,
+        "p99": 281625,
+        "p999": 313208
+      },
+      "client.answer.schedule.submit": {
+        "max": 111165667,
+        "n": 4,
+        "p50": 10581958,
+        "p90": 111165667,
+        "p99": 111165667,
+        "p999": 111165667
+      },
+      "client.answer.start": {
+        "max": 209709,
+        "n": 2,
+        "p50": 209208,
+        "p90": 209709,
+        "p99": 209709,
+        "p999": 209709
+      },
+      "client.answer.usage": {
+        "max": 346625,
+        "n": 4,
+        "p50": 234500,
+        "p90": 346625,
+        "p99": 346625,
+        "p999": 346625
+      },
+      "client.guest.answer.capacity": {
+        "max": 389625,
+        "n": 25,
+        "p50": 189250,
+        "p90": 351041,
+        "p99": 389625,
+        "p999": 389625
+      },
+      "client.guest.answer.create": {
+        "max": 9493333,
+        "n": 2,
+        "p50": 645250,
+        "p90": 9493333,
+        "p99": 9493333,
+        "p999": 9493333
+      },
+      "client.guest.answer.delete": {
+        "max": 772333,
+        "n": 2,
+        "p50": 372833,
+        "p90": 772333,
+        "p99": 772333,
+        "p999": 772333
+      },
+      "client.guest.answer.hello": {
+        "max": 202583,
+        "n": 1002,
+        "p50": 83750,
+        "p90": 102875,
+        "p99": 134458,
+        "p999": 149791
+      },
+      "client.guest.answer.inspect": {
+        "max": 487083,
+        "n": 2,
+        "p50": 156042,
+        "p90": 487083,
+        "p99": 487083,
+        "p999": 487083
+      },
+      "client.guest.answer.list": {
+        "max": 379709,
+        "n": 12,
+        "p50": 227791,
+        "p90": 329500,
+        "p99": 379709,
+        "p999": 379709
+      },
+      "guest.stage": {
+        "max": 1206125,
+        "n": 6,
+        "p50": 135833,
+        "p90": 1206125,
+        "p99": 1206125,
+        "p999": 1206125
+      },
+      "store.turns": {
+        "max": 429834,
+        "n": 8,
+        "p50": 187458,
+        "p90": 429834,
+        "p99": 429834,
+        "p999": 429834
+      }
+    },
+    "raw_unmarked": {
+      "client.answer.capacity": {
+        "max": 4162959,
+        "n": 25,
+        "p50": 235958,
+        "p90": 410541,
+        "p99": 4162959,
+        "p999": 4162959
+      },
+      "client.answer.create": {
+        "max": 50710208,
+        "n": 2,
+        "p50": 41496291,
+        "p90": 50710208,
+        "p99": 50710208,
+        "p999": 50710208
+      },
+      "client.answer.delete": {
+        "max": 5389584,
+        "n": 2,
+        "p50": 3377250,
+        "p90": 5389584,
+        "p99": 5389584,
+        "p999": 5389584
+      },
+      "client.answer.hello": {
+        "max": 101584,
+        "n": 195,
+        "p50": 31209,
+        "p90": 42833,
+        "p99": 76167,
+        "p999": 101584
+      },
+      "client.answer.inspect": {
+        "max": 390084,
+        "n": 4,
+        "p50": 233000,
+        "p90": 390084,
+        "p99": 390084,
+        "p999": 390084
+      },
+      "client.answer.list": {
+        "max": 4357917,
+        "n": 12,
+        "p50": 264042,
+        "p90": 4356542,
+        "p99": 4357917,
+        "p999": 4357917
+      },
+      "client.answer.schedule.advertise": {
+        "max": 20851958,
+        "n": 2,
+        "p50": 19697375,
+        "p90": 20851958,
+        "p99": 20851958,
+        "p999": 20851958
+      },
+      "client.answer.schedule.delete": {
+        "max": 43818791,
+        "n": 4,
+        "p50": 14862208,
+        "p90": 43818791,
+        "p99": 43818791,
+        "p999": 43818791
+      },
+      "client.answer.schedule.describe": {
+        "max": 4290750,
+        "n": 7,
+        "p50": 539375,
+        "p90": 4290750,
+        "p99": 4290750,
+        "p999": 4290750
+      },
+      "client.answer.schedule.hear_control": {
+        "max": 67097625,
+        "n": 12,
+        "p50": 28852541,
+        "p90": 55327042,
+        "p99": 67097625,
+        "p999": 67097625
+      },
+      "client.answer.schedule.hear_create": {
+        "max": 93952208,
+        "n": 1,
+        "p50": 93952208,
+        "p90": 93952208,
+        "p99": 93952208,
+        "p999": 93952208
+      },
+      "client.answer.schedule.hear_delete": {
+        "max": 45053583,
+        "n": 3,
+        "p50": 41606875,
+        "p90": 45053583,
+        "p99": 45053583,
+        "p999": 45053583
+      },
+      "client.answer.schedule.link_up": {
+        "max": 53792,
+        "n": 1,
+        "p50": 53792,
+        "p90": 53792,
+        "p99": 53792,
+        "p999": 53792
+      },
+      "client.answer.schedule.retry": {
+        "max": 436791,
+        "n": 4,
+        "p50": 68416,
+        "p90": 436791,
+        "p99": 436791,
+        "p999": 436791
+      },
+      "client.answer.schedule.status": {
+        "max": 313208,
+        "n": 141,
+        "p50": 37333,
+        "p90": 52166,
+        "p99": 281625,
+        "p999": 313208
+      },
+      "client.answer.schedule.submit": {
+        "max": 111165667,
+        "n": 4,
+        "p50": 10581958,
+        "p90": 111165667,
+        "p99": 111165667,
+        "p999": 111165667
+      },
+      "client.answer.start": {
+        "max": 209709,
+        "n": 2,
+        "p50": 209208,
+        "p90": 209709,
+        "p99": 209709,
+        "p999": 209709
+      },
+      "client.answer.usage": {
+        "max": 346625,
+        "n": 4,
+        "p50": 234500,
+        "p90": 346625,
+        "p99": 346625,
+        "p999": 346625
+      },
+      "client.guest.answer.capacity": {
+        "max": 389625,
+        "n": 25,
+        "p50": 189250,
+        "p90": 351041,
+        "p99": 389625,
+        "p999": 389625
+      },
+      "client.guest.answer.create": {
+        "max": 9493333,
+        "n": 2,
+        "p50": 645250,
+        "p90": 9493333,
+        "p99": 9493333,
+        "p999": 9493333
+      },
+      "client.guest.answer.delete": {
+        "max": 772333,
+        "n": 2,
+        "p50": 372833,
+        "p90": 772333,
+        "p99": 772333,
+        "p999": 772333
+      },
+      "client.guest.answer.hello": {
+        "max": 202583,
+        "n": 1002,
+        "p50": 83750,
+        "p90": 102875,
+        "p99": 134458,
+        "p999": 149791
+      },
+      "client.guest.answer.inspect": {
+        "max": 487083,
+        "n": 2,
+        "p50": 156042,
+        "p90": 487083,
+        "p99": 487083,
+        "p999": 487083
+      },
+      "client.guest.answer.list": {
+        "max": 379709,
+        "n": 12,
+        "p50": 227791,
+        "p90": 329500,
+        "p99": 379709,
+        "p999": 379709
+      },
+      "guest.stage": {
+        "max": 1206125,
+        "n": 6,
+        "p50": 135833,
+        "p90": 1206125,
+        "p99": 1206125,
+        "p999": 1206125
+      },
+      "store.turns": {
+        "max": 429834,
+        "n": 8,
+        "p50": 187458,
+        "p90": 429834,
+        "p99": 429834,
+        "p999": 429834
+      }
+    },
+    "run_out": {},
+    "wire_refused": {
+      "client.answer.inspect": {
+        "max": 197709,
+        "n": 2,
+        "p50": 172083,
+        "p90": 197709,
+        "p99": 197709,
+        "p999": 197709
+      },
+      "client.answer.schedule.describe": {
+        "max": 31833,
+        "n": 1,
+        "p50": 31833,
+        "p90": 31833,
+        "p99": 31833,
+        "p999": 31833
+      },
+      "client.answer.schedule.hear_control": {
+        "max": 35125,
+        "n": 2,
+        "p50": 27750,
+        "p90": 35125,
+        "p99": 35125,
+        "p999": 35125
+      },
+      "client.answer.schedule.status": {
+        "max": 60750,
+        "n": 20,
+        "p50": 46459,
+        "p90": 55958,
+        "p99": 60750,
+        "p999": 60750
+      },
+      "client.guest.answer.inspect": {
+        "max": 130750,
+        "n": 2,
+        "p50": 104208,
+        "p90": 130750,
+        "p99": 130750,
+        "p999": 130750
+      }
+    }
+  },
+  "outcome_scope": "bounded structural reconstruction; wire answer and process exit are not workload success or seed eligibility",
+  "legacy_wire_outcomes_unclassified": false,
+  "verification_method": "root verifier a1b650da; exact per-file SHA/count/typed marker and filename attribution reconstruction",
+  "seed_installation": "not performed; root eligibility/calibration and remaining host coverage review required",
+  "claim": "Actual physical/SDK controls and structural reconstruction; no workload-success claim from wire rows, quiet speed, allocation or leak-freedom claim"
+}

@@ -1,0 +1,18 @@
+{
+  "pid": 49306,
+  "argv": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--on",
+    "451397fcc585f7f7cb9aaf00e42064bb",
+    "--needs",
+    "linux/amd64,cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--quiet",
+    "--timeout",
+    "60",
+    "--",
+    "/usr/bin/nice -n 10 /usr/bin/python3 -B -c 'import os,json,hashlib,tarfile,io,gzip,base64,stat\nfrom pathlib import Path,PurePosixPath\nroot=Path('\"'\"'/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01'\"'\"');names=['\"'\"'launcher-final.json'\"'\"','\"'\"'worker-final.json'\"'\"','\"'\"'output/export-receipt.json'\"'\"','\"'\"'scope.json'\"'\"','\"'\"'raw/source-records.jsonl'\"'\"','\"'\"'raw/control-mappings-before.json'\"'\"','\"'\"'raw/control-mappings-after.json'\"'\"','\"'\"'raw/worker.log'\"'\"','\"'\"'admission.json'\"'\"','\"'\"'launcher-child.json'\"'\"','\"'\"'launch.json'\"'\"','\"'\"'output/manifest.json'\"'\"'];buf=io.BytesIO();manifest={};total=0\nassert not root.is_symlink() and root.stat().st_uid==os.getuid()\nwith tarfile.open(fileobj=buf,mode='\"'\"'w:gz'\"'\"') as tar:\n for name in names:\n  p=root/name\n  assert not p.is_symlink() and stat.S_ISREG(p.stat().st_mode) and p.stat().st_uid==os.getuid()\n  with p.open('\"'\"'rb'\"'\"') as f:data=f.read(16777217)\n  total+=len(data);assert len(data)<=16777216 and total<=16777216\n  manifest[name]={'\"'\"'bytes'\"'\"':len(data),'\"'\"'sha256'\"'\"':hashlib.sha256(data).hexdigest()};m=tarfile.TarInfo(name);m.size=len(data);m.mode=0o444;tar.addfile(m,io.BytesIO(data))\nfinal=json.loads((root/'\"'\"'launcher-final.json'\"'\"').read_text());worker=json.loads((root/'\"'\"'worker-final.json'\"'\"').read_text());assert final['\"'\"'exit_code'\"'\"']==0 and final['\"'\"'child_reaped'\"'\"'] and final['\"'\"'child_owned_birth_absent'\"'\"'] and not final['\"'\"'owned_scope_members'\"'\"'];assert hashlib.sha256((root/'\"'\"'launcher-final.json'\"'\"').read_bytes()).hexdigest()=='\"'\"'547bcc96f6dfbd25ed147f00d08407406871164be29d9cb57ef75f256511b662'\"'\"'\ncg=Path(worker['\"'\"'scope_path'\"'\"']);assert '\"'\"'hex-native-fc-held451-export-measured-v1-01.scope'\"'\"' in cg.parts and not cg.exists()\npid=final['\"'\"'child'\"'\"']['\"'\"'PID'\"'\"'];p=Path('\"'\"'/proc'\"'\"')/str(pid)/'\"'\"'stat'\"'\"';current=p.read_text().rsplit('\"'\"')'\"'\"',1)[1].split()[19] if p.exists() else None;assert current!=final['\"'\"'child'\"'\"']['\"'\"'birth'\"'\"']\nraw=buf.getvalue();print('\"'\"'HEX_PROFILE_METADATA '\"'\"'+json.dumps({'\"'\"'bytes'\"'\"':len(raw),'\"'\"'sha256'\"'\"':hashlib.sha256(raw).hexdigest(),'\"'\"'members'\"'\"':manifest,'\"'\"'scope_absent'\"'\"':True,'\"'\"'same_parent_birth_absent'\"'\"':True,'\"'\"'archive_or_original_source_read'\"'\"':False,'\"'\"'base64'\"'\"':base64.b64encode(raw).decode()}),flush=True)\n'"
+  ],
+  "code_sha256": "9f322929e3b9b153fae2fc8ba72d7f69e8c5b859a3a761ac03ed9586b1d55215"
+}

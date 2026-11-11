@@ -1,0 +1,56 @@
+[2m[kiln] on d1323898b255a3ed435eb83fa0f7b0cf · macos/aarch64 · 29 of 32 cores idle · 48 GB free · room for 1 CPU, 4 GiB of memory, 12 GiB of disk[0m
+{
+  "platform": "macOS-26.4-arm64-arm-64bit",
+  "arch": "arm64",
+  "archive_sha256": "553c2f2e6329700b6dcd1e1154ce59765c16a5d2ef4815ec2d93a313db35fb5b",
+  "fixture_sha256": "073ccb09cbdbc4fc922de351c15cf216e7ad3ca0b7914afd76f636f6a59bc3c3",
+  "source_hashes_sha256": "f7df3c6204d50fc00ab35ef4dd88f1adf56d3c7337f29609f3c21e07dd1f80d3",
+  "temporary_registration": {
+    "path": "crates/hex-node/src/placement/tests.rs",
+    "before_sha256": "00fb45393f5543e27ee1286e10a8a21657da45dea31f91055bf8443c154b2ea4",
+    "after_sha256": "c1b7e1d5e209a85d95dc4058cb35319965c0cb1979b9e644ed1f67c76aff19d1",
+    "appended": "\n#[path = \"adversarial_bounds_tests.rs\"]\nmod adversarial_bounds_tests;\n"
+  },
+  "command": [
+    "nice",
+    "-n",
+    "10",
+    "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+    "test",
+    "-p",
+    "hex-node",
+    "--lib",
+    "--locked",
+    "placement::tests::adversarial_bounds_tests::",
+    "--",
+    "--nocapture",
+    "--test-threads=1"
+  ],
+  "expected_selected_count": 2,
+  "root": "/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp2-v1",
+  "owned_paths": [
+    "/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp2-v1/source",
+    "/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp2-v1/target",
+    "/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp2-v1/cache",
+    "/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp2-v1/temp"
+  ],
+  "scope": "native macOS libtest execution, private filesystem and SimRuntime only; no native runtime or VM effects",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "owned_cargo_pid": 98443,
+  "exit_code": 101,
+  "log_sha256": "4789df2b6e242a8bcba1531f5d9f37bab3ca06e1125098f04b4a035cd7494557",
+  "log_bytes": 5741,
+  "selected_lines": [
+    "test placement::tests::adversarial_bounds_tests::contradictory_recovered_start_intent_refuses_without_executing_init ... contradictory-start expected=Damaged/starts0/Created observed=None/starts1/Running creates=2 deletes_before_cleanup=0 cleanup_boxes=0",
+    "test placement::tests::adversarial_bounds_tests::excess_ignored_entry_refuses_before_crash_cleanup_and_recovers_at_zero_admission ... ok"
+  ],
+  "summaries": [
+    "test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 127 filtered out; finished in 0.62s"
+  ],
+  "selected_count_matches": true,
+  "remaining_temp_entries": 0,
+  "cleanup_witnesses": [
+    "test placement::tests::adversarial_bounds_tests::contradictory_recovered_start_intent_refuses_without_executing_init ... contradictory-start expected=Damaged/starts0/Created observed=None/starts1/Running creates=2 deletes_before_cleanup=0 cleanup_boxes=0"
+  ]
+}

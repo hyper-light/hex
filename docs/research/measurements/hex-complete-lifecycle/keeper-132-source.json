@@ -1,0 +1,57 @@
+{
+  "shared_source": "132a003963e500a21506a108a226144b68292c4e",
+  "role": "implementer",
+  "policy_revision": "ca3ab10c151aa5539e757f1cc76029746ccbb561",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "production": {
+    "crates/hex-core/src/hcs.rs": {
+      "original_revision": "d042eff16ca63ec368d3cef532d00d59198ec7a3",
+      "original_sha256": "e6f0918b75258e2ef75d585d07eb4022f0c1b10a094110654f25eea1537872f4",
+      "final_sha256": "e6f0918b75258e2ef75d585d07eb4022f0c1b10a094110654f25eea1537872f4",
+      "overlay": null
+    },
+    "crates/hex-core/src/hcs/create.rs": {
+      "original_revision": "d042eff16ca63ec368d3cef532d00d59198ec7a3",
+      "original_sha256": "5c5b6517ddb15ddc96d81cea8890bc5b79ba588b69fe99b9b87ca53507ce5118",
+      "final_sha256": "5c5b6517ddb15ddc96d81cea8890bc5b79ba588b69fe99b9b87ca53507ce5118",
+      "overlay": null
+    },
+    "crates/hex-runtime/src/windows/keeper.rs": {
+      "original_revision": "d042eff16ca63ec368d3cef532d00d59198ec7a3",
+      "original_sha256": "1e58c1162c4d12bda7baa229b98204f445e2ab796d51e7aa434bf3bc5d2cf463",
+      "final_sha256": "1e58c1162c4d12bda7baa229b98204f445e2ab796d51e7aa434bf3bc5d2cf463",
+      "overlay": null
+    },
+    "crates/hex-runtime/src/windows/mod.rs": {
+      "original_revision": "d042eff16ca63ec368d3cef532d00d59198ec7a3",
+      "original_sha256": "425c9978b788a47d9da1d4217f67a507e6d4ad83b840f05bc635ec5c0c9b7308",
+      "final_sha256": "820c629ecd009a2d2821a742ad3174a9cc681edf93ebd09ef9c7b1b44b957ab3",
+      "overlay": "BoxInfo.allocation None literal for ordinary legacy native route"
+    },
+    "crates/hex-runtime/src/windows/oci/mod.rs": {
+      "original_revision": "d042eff16ca63ec368d3cef532d00d59198ec7a3",
+      "original_sha256": "4c01819517de709b8da92ec6868bfd1c387acab4a5485a02d2065651f570248d",
+      "final_sha256": "b5a287dd634a4df4aad4f08b96280fc437736364e59b66db95f5fc1f0946d3d7",
+      "overlay": "BoxInfo.allocation None literal for ordinary legacy native route"
+    },
+    "crates/hex-runtime/src/windows/oci/service.rs": {
+      "original_revision": "d042eff16ca63ec368d3cef532d00d59198ec7a3",
+      "original_sha256": "9ad010339c5c2f2535944c36931a27340f14e0e9ac6b98254e8b541469900540",
+      "final_sha256": "9ad010339c5c2f2535944c36931a27340f14e0e9ac6b98254e8b541469900540",
+      "overlay": null
+    },
+    "crates/hex-runtime/src/windows/oci/sys.rs": {
+      "original_revision": "64db27811d6fe460c04e6191230c456b9c44da11",
+      "original_sha256": "470f7208ed97ffb30cbac3c63c8f7b6fff9524f0d34f55c59088d712a31644c8",
+      "final_sha256": "470f7208ed97ffb30cbac3c63c8f7b6fff9524f0d34f55c59088d712a31644c8",
+      "overlay": null
+    },
+    "crates/hex-runtime/src/windows/sys.rs": {
+      "original_revision": "d042eff16ca63ec368d3cef532d00d59198ec7a3",
+      "original_sha256": "66335476374c0de27399e33fd0b1e502e695b7e398b550b386e30b19d8df073b",
+      "final_sha256": "66335476374c0de27399e33fd0b1e502e695b7e398b550b386e30b19d8df073b",
+      "overlay": null
+    }
+  },
+  "combined_validation": "SOURCE ONLY; no new test/native claim; prior actual SAME4 service green applies unchanged service.rs/d042 and separate KMT5/0 applies64db scan only"
+}

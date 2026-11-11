@@ -336,6 +336,9 @@ fn wait_for(wait: &Patience, fact: impl FnMut() -> bool, what: &str) {
 fn make(node: &Node, id: &str, bundle: PathBuf) -> BoxId {
     let id = BoxId::new(id).unwrap();
     node.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle),

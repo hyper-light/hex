@@ -1,0 +1,307 @@
+{
+  "active_check": null,
+  "bundle": {
+    "bytes": 485710,
+    "files": 15,
+    "path": "/Users/adalundhe/.cache/hex-lead/lanes/windows-device-01a1c640-88876436-compile-v2/proof-bundle.tar.gz",
+    "sha256": "0d6d7d175a325b9a73836030d36490a22efa4645db61ac6f701cb6e60c83151e"
+  },
+  "chunk_count": 41,
+  "chunks": [
+    {
+      "bytes": 12000,
+      "offset": 0,
+      "sha256": "ed6ab802825533cf33ca115f7cf8818dabab923bc9fdf94445ef33ebc11f22df"
+    },
+    {
+      "bytes": 12000,
+      "offset": 12000,
+      "sha256": "9c291ec88b0ca1b8eafa9b5ea076d708a8a6a50456c0321dce5d85bde417d18f"
+    },
+    {
+      "bytes": 12000,
+      "offset": 24000,
+      "sha256": "878c8b2ce03175f8fb1227f0cba0f0404bae7b101731dfdf7bbdc72774496aad"
+    },
+    {
+      "bytes": 12000,
+      "offset": 36000,
+      "sha256": "05efc4cf4618623f138cfa2ab7dd563c2688fa886dde42c633241d88d1c2e85e"
+    },
+    {
+      "bytes": 12000,
+      "offset": 48000,
+      "sha256": "1b68668097822cfda23860a023cf1784a306477dd1b24380fd71479008581ee6"
+    },
+    {
+      "bytes": 12000,
+      "offset": 60000,
+      "sha256": "65caf9004e0f41b921a99d2e36e19bd355750d81ad7ddd1b1dfd58436143bbe3"
+    },
+    {
+      "bytes": 12000,
+      "offset": 72000,
+      "sha256": "e206149de8400498f0111b6dcf241298681315f5cec77cbf4d423037562a113f"
+    },
+    {
+      "bytes": 12000,
+      "offset": 84000,
+      "sha256": "8bd3b6aca1c83d6be6a0b5aabd83d09113a9972a477caae6621b6203dda046a4"
+    },
+    {
+      "bytes": 12000,
+      "offset": 96000,
+      "sha256": "fdba2d68f668aff1d392af372444575d8e3c01d9544623c7b445bac680e37d67"
+    },
+    {
+      "bytes": 12000,
+      "offset": 108000,
+      "sha256": "bb995a37b49f0da974b4c3a5de80fbdeb92fba0a9cfdfdaecf1e7e697445e8d3"
+    },
+    {
+      "bytes": 12000,
+      "offset": 120000,
+      "sha256": "e0c12973fe3128509509730c0c91ae936f42cb4f4607a4c412aec363486734b1"
+    },
+    {
+      "bytes": 12000,
+      "offset": 132000,
+      "sha256": "4cc70b1a7edf4b48f2257cc8a8ac57a7f5b01d792cce2cbeaef09a3049cb7fac"
+    },
+    {
+      "bytes": 12000,
+      "offset": 144000,
+      "sha256": "5d4bf998b88a1b40d5bcf6cc98bcbde21378bd9de1625c51d42649e10fa36761"
+    },
+    {
+      "bytes": 12000,
+      "offset": 156000,
+      "sha256": "e90c44fce9e67f6c8746e63ab9e5e9c91e1ad211f3bd415c7094a59fa56b620d"
+    },
+    {
+      "bytes": 12000,
+      "offset": 168000,
+      "sha256": "40bfe6b4a1b99b0464b500fce9e7bdeb508930f07b7bdaa69ef0a545712b02ea"
+    },
+    {
+      "bytes": 12000,
+      "offset": 180000,
+      "sha256": "21a4cfe430df09119d928db2e139d271316017d04fb185371e64fa9ddeec1fb8"
+    },
+    {
+      "bytes": 12000,
+      "offset": 192000,
+      "sha256": "064ffffc719be31bba505ba1e5dedd53d1f50b82176a76f8bafd03225f7f48c4"
+    },
+    {
+      "bytes": 12000,
+      "offset": 204000,
+      "sha256": "6721cbbacacba42763e7f49a00f06c76f4e3952e444467860d289db00650218f"
+    },
+    {
+      "bytes": 12000,
+      "offset": 216000,
+      "sha256": "532cc1d5e8bc1f25960a9bf3a47749bc630544b28ad440b6e14b269c1e755896"
+    },
+    {
+      "bytes": 12000,
+      "offset": 228000,
+      "sha256": "1b3459312df95c6de88a79e9c32ae31ac2d6186e8e4b4cb5103dabb8ffce387c"
+    },
+    {
+      "bytes": 12000,
+      "offset": 240000,
+      "sha256": "1b0b6b67763f22e818260173d2cecfebf936a95cd6327f1cca6f50cc9ff9c6b4"
+    },
+    {
+      "bytes": 12000,
+      "offset": 252000,
+      "sha256": "5dfe6bd9819e695a21da15291f96fd3862b7a6c338297478291ebf3aae3b3dbd"
+    },
+    {
+      "bytes": 12000,
+      "offset": 264000,
+      "sha256": "f96e4938af5cd18bbcc3cee395e80343bab44d54d3ff9109a49e4a801b2e5187"
+    },
+    {
+      "bytes": 12000,
+      "offset": 276000,
+      "sha256": "4f8889ae7658631af8734064402d1230a4d2e0ef8d7d4e190374dcff79da969a"
+    },
+    {
+      "bytes": 12000,
+      "offset": 288000,
+      "sha256": "323acb5282b8b914a4742925e20f2bd2bc804fbedbd93c4b24dbdf3ef162b14c"
+    },
+    {
+      "bytes": 12000,
+      "offset": 300000,
+      "sha256": "99ca2279f473d09170bfc4aa85113435f28cf28a11e73002cdb103d0b27444cb"
+    },
+    {
+      "bytes": 12000,
+      "offset": 312000,
+      "sha256": "ec1deff30299057a2ec093d6b1b8d5a8de39f97dc8cab7b6f9ff08ab84ed7b3e"
+    },
+    {
+      "bytes": 12000,
+      "offset": 324000,
+      "sha256": "2afc8d3cad98801ccc916ad8892a3548172479c5a58b66a48087d01f6a5b27df"
+    },
+    {
+      "bytes": 12000,
+      "offset": 336000,
+      "sha256": "579be65a1c7a1330bed6d6e58464475cb1aa36b5fa5ef54ef71de7b0e089a04b"
+    },
+    {
+      "bytes": 12000,
+      "offset": 348000,
+      "sha256": "ffc550c98ce44cbb9087e632b6bfb6ab1a084f39e51689ccdc940c83ef69a6ad"
+    },
+    {
+      "bytes": 12000,
+      "offset": 360000,
+      "sha256": "3f3f67dcd9146f9de20157eb0cafa4a119e2f13a11df1495b818504873a525de"
+    },
+    {
+      "bytes": 12000,
+      "offset": 372000,
+      "sha256": "729ad0a7d033f8d613a07346f71d228b3f63ebb33102b5a53c61b06d45151567"
+    },
+    {
+      "bytes": 12000,
+      "offset": 384000,
+      "sha256": "0b381aed5861b3d502ec263fa0045e47bdffd715e02065a0098270d2bed1aed0"
+    },
+    {
+      "bytes": 12000,
+      "offset": 396000,
+      "sha256": "f4bd2b0bf3e1b8a545f116b8546696a8c0c99428ff99814d143b7b784cbe1c1b"
+    },
+    {
+      "bytes": 12000,
+      "offset": 408000,
+      "sha256": "7d6d9aadc56b9ada6f0bf8c1d5c31bbc1e78a0efc51cc48df43048aeaf410175"
+    },
+    {
+      "bytes": 12000,
+      "offset": 420000,
+      "sha256": "4693004a9e605f58db1927f569d0eed2bcd9bb3635807da151bc7429a91205e3"
+    },
+    {
+      "bytes": 12000,
+      "offset": 432000,
+      "sha256": "ddd363de2d0b38fb4f07fb58a1d68f72d805dddae899e299ede6e3bb62fe301d"
+    },
+    {
+      "bytes": 12000,
+      "offset": 444000,
+      "sha256": "fc22f3b7ed3a2dfff1bfc082c602c7c8a6a6d12d579684035533a0be240af925"
+    },
+    {
+      "bytes": 12000,
+      "offset": 456000,
+      "sha256": "4ec38a08c01420785fe6d710287dcffcbe1c4d0ee2cc028d5f46aa66df8d94b5"
+    },
+    {
+      "bytes": 12000,
+      "offset": 468000,
+      "sha256": "7aa3f330758676c3a3a0ad0c0e394e1c5f807ce4969393366c272e12b1e1b08d"
+    },
+    {
+      "bytes": 5710,
+      "offset": 480000,
+      "sha256": "331e76cb313d3a42d0206a38c9bfe9b32a213d2421e49aad21b8625b9b20ceed"
+    }
+  ],
+  "collector_failures_preserved": [
+    {
+      "correction": "Accumulate initial and subsequent Kiln output fragments",
+      "effect": "No chunk appended; offset remained zero",
+      "error": "SyntaxError: Unexpected end of JSON input",
+      "stage": "initial chunk-reader"
+    },
+    {
+      "correction": "Use a named file for final receipt verification",
+      "effect": "Bundle hash and safe extraction completed before stray terminator",
+      "error": "NameError: name 'PY' is not defined",
+      "stage": "post-extraction diagnostic"
+    },
+    {
+      "correction": "Use a named file for final receipt verification",
+      "effect": "Schema printed before stray terminator; no source/build effect",
+      "error": "NameError: name 'PY' is not defined",
+      "stage": "schema-only diagnostic"
+    }
+  ],
+  "members_verified": 14,
+  "runs": {
+    "r96": {
+      "archive_bytes": 9390528,
+      "archive_sha256": "825c690cfd80363cf91f1a02a2402d12271698a2abfa2d55bb384973db90638c",
+      "compiler": {
+        "argv": [
+          "cargo",
+          "clippy",
+          "-p",
+          "hex-cli",
+          "--test",
+          "windows_assigned_device",
+          "--target",
+          "x86_64-pc-windows-msvc",
+          "--locked",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "elapsed_s": 113.45417404174805,
+        "exit": 101,
+        "label": "windows-test-clippy",
+        "log_bytes": 6686,
+        "log_sha256": "c1789e127500676bfdba640d98cdb1fb0064b5353a32f04973ecde7719dd3864",
+        "pid": 53536,
+        "reaped": true,
+        "test_results": []
+      },
+      "native_executed": false,
+      "source": "f07bc72bb152106322c844ef299e29e56eebba54",
+      "source_files_equal_to_signed_git": 1794,
+      "temp_entries": 0,
+      "tests_executed": 0
+    },
+    "r97": {
+      "archive_bytes": 9391144,
+      "archive_sha256": "1ffdb405e5c2766451f8d7e0880f6eb8c3a9ec680cf8599f99496ac2042442bf",
+      "compiler": {
+        "argv": [
+          "cargo",
+          "clippy",
+          "-p",
+          "hex-cli",
+          "--test",
+          "windows_assigned_device",
+          "--target",
+          "x86_64-pc-windows-msvc",
+          "--locked",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "elapsed_s": 46.8858380317688,
+        "exit": 0,
+        "label": "windows-test-clippy",
+        "log_bytes": 5935,
+        "log_sha256": "58597e87b5fe39b39b3ee5394d99b0150a451a1f051f10efe0c6ec6fd1e8567a",
+        "pid": 55078,
+        "reaped": true,
+        "test_results": []
+      },
+      "native_executed": false,
+      "source": "888764365adf0d54788a51a7699aed396d962e73",
+      "source_files_equal_to_signed_git": 1795,
+      "temp_entries": 0,
+      "tests_executed": 0
+    }
+  },
+  "status": "VERIFIED_OWN_COMPILER_RECEIPTS_ONLY"
+}

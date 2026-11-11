@@ -1,0 +1,9 @@
+{
+  "source": "e3c28025188347a04e3298472f1a75dd95696a19",
+  "target": "mac",
+  "pid": 13317,
+  "archive_sha256": "523f6c47abf984961e1fd4bf1ce780beb1dde53f77ffeb2b7405f283f7254f14",
+  "archive_bytes": 38414658,
+  "driver_sha256": "4f4f4fef829e154604c2b12c99fb547e7ebc6858c6e48704ee1ac476ff3ac2cd",
+  "recorded_children_reaped": true
+}

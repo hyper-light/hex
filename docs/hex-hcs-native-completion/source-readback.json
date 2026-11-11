@@ -1,0 +1,35 @@
+{
+  "base": "bd80d9c42d656c5ac2445054b4042cee1026e225",
+  "production_source": "edffbd22e0d45e2237875949aa2fb47c23dfca2a",
+  "policy_revision": "33df95b08ad8f95bddeaa1c48acf0c64386e0eac",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "implementer": "01a1c643e475709b8a829553d1100be1",
+  "coordinator": "01a1aa77778471339bea3beff90d6bbd",
+  "owned": [
+    "crates/hex-runtime/src/windows/oci/assigned_native_tests.rs",
+    "crates/hex-runtime/src/windows/oci/sys.rs ONE cfg test path registration only",
+    "docs/hex-hcs-native-completion/**"
+  ],
+  "production_functions_byte_unchanged": true,
+  "sys_without_registration_sha256": "092a4ac23ca04169e8d3f4197b51ad8069b189af6a8f6d22c18992097fb455b7",
+  "source_sha256": {
+    "crates/hex-runtime/src/windows/oci/sys.rs": "e7b7372f9397c616c947891f652eecbd8bbb4824c18fdf4e672b468934b658ab",
+    "crates/hex-runtime/src/windows/oci/assigned_native_tests.rs": "64726bf2b70990706ef9faf8b699b1b19ae223b8b3f3cf6702e5ae157634909f"
+  },
+  "native_invocations": 0,
+  "light_compile": {
+    "original_source": "479893721cad81bc89b8193540ebef5d9bd74bcb",
+    "exit": 101,
+    "cause": "test-only BoxId constructor requires borrowed string, E0308",
+    "original_log_sha256": "fe62006e132720c5376c32bd611e4777afb6078efdf99ab0a057fd17ae1da1ac",
+    "successor": {
+      "source": "eefaa97dfefab0aa2228dbafcc61d71431ae7aee",
+      "windows_test_clippy_exit": 0,
+      "log_sha256": "b9d2480d30c42230600e142bc73002f6ff9f0054e7d21d2ca51fc09d167b5c4f",
+      "executed_tests": 0,
+      "native_invocations": 0,
+      "ignored_fixture_count_in_source": 1
+    }
+  },
+  "active_jobs": []
+}

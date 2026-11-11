@@ -1,0 +1,7 @@
+{
+  "original_exit": 1,
+  "cause": "local cache parent absent before exclusive receiver input mkdir",
+  "remote_stage_exit": 0,
+  "original_preserved": true,
+  "continuation": "create local cache parent only; same staged admission/window and frozen receiver; no restage or guard change"
+}

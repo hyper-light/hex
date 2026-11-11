@@ -1,0 +1,22 @@
+{
+  "kind": "source-only causes for actual Windows original preflight unit-lib compiler failure",
+  "original_source": "c579a9453cbad2660703d15ff31b28edb6de9300",
+  "original_archive_sha256": "c276dca9b15ad4abd41714050b4d0e3a3da2f1f491dd1dfee9151e0f84cfd3cb",
+  "actual_result": "unit-lib compile101/tests0; no HCS/WMI/GPU calls",
+  "stdout_sha256": "4c477e72c4936d16ac128df4b2e2a2b5492e8411b0e967cf78d8e2e4166bd791",
+  "stderr_sha256": "02eab6dfb93c751c6b20c4084a16289a4c25b86a16f12dcd783fe65375287b67",
+  "changes": [
+    "Import Read for the existing bounded bundle File.take/read_to_string path",
+    "Annotate previous as Option<bool> in unchanged marker cleanup-path invariant",
+    "Native route mask uses SAME Holding.report Hcs-only eligibility and Class::Oci; DeviceInfo no longer duplicates a classes vector",
+    "Port existing fake-operation test to same SharedCatalog, allocationNone, OwnerRef/four-arg reserve and typed DeviceHolder::Box; original oracles and fake/native attribution unchanged"
+  ],
+  "paths": {
+    "crates/hex-runtime/src/windows/mod.rs": "fe70ece5dbfac3900b8f9da3c05988efb8422a74917eea3dd02fac87d3b7786b",
+    "crates/hex-runtime/src/windows/preflight.rs": "27aa6e530911ddc9d6c3a62975c319b0ddaef26439b477c7ceae0ecd9bc87b02",
+    "crates/hex-runtime/src/windows/oci/mod.rs": "8da831815f8a3429147cdee99ceb61a672993e84169f7286a03bcb0d39bad0c4",
+    "crates/hex-runtime/src/windows/oci/sys.rs": "2d6fa5db7016c90617f610fd3b646683646a37ddabe97de71bed11d5ea1c64b8"
+  },
+  "checks": "scoped rustfmt/diff-check only; no new builds/tests/native by L3. Tester/ROOT owns changed-cohort execution. No SDK5ba/report/CPU draft included.",
+  "role": "implementer; policy0a6d91b3/rulesdf2 unchanged; named-path signed checkpoint"
+}

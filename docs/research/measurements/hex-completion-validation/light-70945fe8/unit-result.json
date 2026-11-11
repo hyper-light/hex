@@ -1,0 +1,30 @@
+{
+  "source": "70945fe878f87e11acb5bde6e4dbf793dd726b8f",
+  "scope": "pure unit and Python syntax only; NO GPU/native/VM/mutation/profile",
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+  "archive_sha256": "5dc39bb4cf3377831b8812c78009011f0fe1ff0262554e9ac0fdd0e64abfba4e",
+  "unit": {
+    "argv": [
+      "/Users/adalundhe/.cache/hex-lead/python-3.13.18-20261026/python/bin/python3",
+      "-m",
+      "unittest",
+      "-v",
+      "test_evidence"
+    ],
+    "pid": 80514,
+    "exit": 0,
+    "reaped": true,
+    "selected": 20,
+    "count_exact": true,
+    "log_sha256": "10b625c47446f2744a0d1b0e9ddd089888ed285fc58b0129aa96676cde7477a3"
+  },
+  "syntax": {
+    "exit": 0,
+    "files": 12,
+    "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "source_unchanged": true,
+  "temp_entries": 0,
+  "exit": 0
+}

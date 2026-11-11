@@ -1,0 +1,56 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "fixed_base": "f7a08e5748e999ca6dba855143e8c7e581cfa44f",
+  "Hex_CLAUDE_blob": "29b87847405b3e9141c0c3a4475825c803e0297c (byte-equal to full read active source)",
+  "owned_source": [
+    {
+      "path": "crates/hex-sim/src/index/routes.rs",
+      "sha256": "9f10e824d5abe04c718d8c68c40fe272508b0645ce0b6ea1b8d87506b725c774"
+    },
+    {
+      "path": "crates/hex-sim/src/index/route_offer_tests.rs",
+      "sha256": "a816eeeefd6b28733bab71daa1b3c33a8bda72a9f64c36c18714d11325a50e8a"
+    }
+  ],
+  "actual_relevant_original": {
+    "source": "f7a08e5748e999ca6dba855143e8c7e581cfa44f",
+    "proof": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/keyed-composition-f7a-results-proof/cohort-f7a08e57-linux-keyed-composition-f7a",
+    "log_sha256": "c6870b2771157701f16dd6bc1de3fd787a084d8661a7dc96cc9c58a11221ff1c",
+    "selected": 1,
+    "passed": 0,
+    "failed": 1,
+    "ignored": 0,
+    "witness": "AFTER fullP Released, actual native=Admits with freshphysical observations=0 vs strict expectedNoGpu. Earlier d87 prefix failure is distinct and not claimed terminal evidence.",
+    "raw_sha256": "30469cc3 (ROOT reported prefix; full collection manifest retained)",
+    "native": 0,
+    "source_changes": [],
+    "temp_entries": 0,
+    "reaped": true
+  },
+  "original_body_sha256": "a972936548795944b95d392de9830c5927ddf7bf30bf483894b483f8746b97f2",
+  "remedy": [
+    "On the exact legal full-P Released transition, invalidate affected existing PhysicalSlot observed availability and both independent optional pressure counters (None, never0). Stable ID/model/size are retained for existing binding validation.",
+    "SAME holder transition preserves Handoff->BoxS, exact selected identity/allocation/charge and full-P native refund witness. No slot is repicked or replaced and no extra ledger/provider/cache/epoch field is added.",
+    "Actual later physical snapshot refresh can supply valid availability/counters. Release event/time passage/retry cannot restore readings. Repeated alreadyReleased observation does not invalidate a separately supplied new current snapshot."
+  ],
+  "new_control": "released_scope_keeps_selected_identity_and_charge_until_new_physical_refresh (UNRUN): exact S+charge retained through fullP release, pressure None/unavailable, nativeNoGpu, successful new fixture snapshot restoresAdmits then originalS cleanup. Pure fixture, not native observation proof.",
+  "allocation_wait_complexity": {
+    "new_allocations_in_production": 0,
+    "new_waits_caches_timers": 0,
+    "scan": "One bounded existing physical-slot pass, exact sorted full-P membership via binary_search; existing holder/refund scan unchanged.",
+    "performance": "UNMEASURED; no speed/allocation-free/leak claim, ROOT profiling owed."
+  },
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compiler": "UNRUN",
+    "tests_after": "UNRUN",
+    "local_builds": 0,
+    "dispatches": 0,
+    "native": 0
+  },
+  "R01_R16": "Typed existing missing-slot/overflow errors and checked indexing retained; exact actual red above, original unchanged; shared portable Index path, no literals or target exceptions, no extra owner/cache/wait; R08/R14 and all native/VM/GPU/fault/full gates remain ROOT/native QA. No readiness/main claim.",
+  "remaining": "ROOT only original relevant after +new positive transition control/current lint; previously passed keyed4/healthy independent baseline and old12 not repeated unchanged. Separate lazy tuple draft excluded."
+}

@@ -1,0 +1,19 @@
+{
+  "actual_normal_MCP_runner": "00aad8daff2fa3c9daa65d53c425d450",
+  "metadata_exit": 0,
+  "source": "aaca22b9c05ce0b9011d2d3096611cfab01f71c6",
+  "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-linux-matrix3-aaca-v1.scope",
+  "scope_absent": true,
+  "owned_driver_birth_absent": true,
+  "driver": {
+    "pid": 3707136,
+    "birth": 32603205
+  },
+  "stderr_bytes": 80,
+  "stderr_sha256": "1b056409e05db9ba61cb57d96f2e0aee7cb8c300370044e10480b3b1edc6f392",
+  "cause": "ROOT wrapper uses immutable run_owned without setting its working directory; Cargo inherited remote home",
+  "target_compilations": 0,
+  "later_two_targets": "UNATTEMPTED",
+  "native": 0,
+  "Windows_query_or_retry": false
+}

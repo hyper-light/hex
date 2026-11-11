@@ -1,0 +1,29 @@
+{
+  "initial_check_exit": 2,
+  "raw_diagnostics": [
+    {
+      "path": "docs/research/measurements/hex-device-driver/raw-v1/proof/test-0.log",
+      "line": 7,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "66d9d761cac44c9af1e4d1df4ca7eeac7c3dd7fc54a5a5493ae12efa6659a796"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-driver/raw-v1/proof/test-1.log",
+      "line": 7,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "3c9171db0b2fa5791b99c8dc08a727d4120446aa4a47ba2836230ce34100c45e"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-driver/raw-v1/proof/test-2.log",
+      "line": 7,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "d03fb8bed323bbd4b464f9b9abef1766dc73b64e6033fa81d554ff28d98691bf"
+    }
+  ],
+  "count": 3,
+  "stdout": "docs/research/measurements/hex-device-driver/raw-v1/proof/test-0.log:7: new blank line at EOF.\ndocs/research/measurements/hex-device-driver/raw-v1/proof/test-1.log:7: new blank line at EOF.\ndocs/research/measurements/hex-device-driver/raw-v1/proof/test-2.log:7: new blank line at EOF.\n",
+  "stderr": "",
+  "exact_raw_bytes_preserved": true,
+  "source_docs_drivers_check_exit": 0,
+  "no_global_exception": true
+}

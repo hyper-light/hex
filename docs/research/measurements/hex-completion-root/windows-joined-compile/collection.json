@@ -1,0 +1,71 @@
+{
+  "bytes": 406756,
+  "sha256": "4b69a1d30c21b8c4acaa101903414b1f8e667796061b678dfce3c943b25cd260",
+  "members": {
+    "cohort-c3bd27e8-mac-identity-v1/running.json": {
+      "bytes": 1591,
+      "sha256": "e48b1ff919189e9537d0dcf792ab84ab1751c70a65112529f72659cd2da82782"
+    },
+    "cohort-c3bd27e8-mac-identity-v1/result.json": {
+      "bytes": 1819,
+      "sha256": "a8bb8dc24946952604dfeb5159fc2487c8820d49d3df3e0f531ba33bb05128da"
+    },
+    "cohort-c3bd27e8-mac-identity-v1/source-before.json": {
+      "bytes": 293159,
+      "sha256": "ac196f5d30f872284c0250fecff434f77981990ec4b3e9ee03068b3175488e1c"
+    },
+    "cohort-c3bd27e8-mac-identity-v1/identity-control.log": {
+      "bytes": 897,
+      "sha256": "d8c16329c170755579cafedbee2801d27e44f016a8ea3f88f9cf70ca8cabde03"
+    },
+    "cohort-c3bd27e8-mac-identity-v1/source-after.json": {
+      "bytes": 293159,
+      "sha256": "ac196f5d30f872284c0250fecff434f77981990ec4b3e9ee03068b3175488e1c"
+    },
+    "cohort-c3bd27e8-mac-identity-v1/api-clippy.log": {
+      "bytes": 393,
+      "sha256": "89805756a3095446413b8ad740c47fab2685036cc0be1c1b200520491535aae4"
+    },
+    "cohort-c3bd27e8-mac-identity-v1/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-c3bd27e8-mac-identity-v1/collected-binaries.json": {
+      "bytes": 1418,
+      "sha256": "e0a252b2d7e00d3ec911d36b7dfba36178571867bde735ea3b15f0ca4aa10479"
+    },
+    "cohort-c3bd27e8-mac-windows-clippy-v1/running.json": {
+      "bytes": 1107,
+      "sha256": "d071aa114c7238cfcff289ad6e6b3c5320cf6ebc0276e0014f8353197d92136e"
+    },
+    "cohort-c3bd27e8-mac-windows-clippy-v1/result.json": {
+      "bytes": 1361,
+      "sha256": "303894c83393af157d6157353d256eb764b591cf509a8e36d32ba3af0915f6a6"
+    },
+    "cohort-c3bd27e8-mac-windows-clippy-v1/source-before.json": {
+      "bytes": 293159,
+      "sha256": "ac196f5d30f872284c0250fecff434f77981990ec4b3e9ee03068b3175488e1c"
+    },
+    "cohort-c3bd27e8-mac-windows-clippy-v1/source-after.json": {
+      "bytes": 293159,
+      "sha256": "ac196f5d30f872284c0250fecff434f77981990ec4b3e9ee03068b3175488e1c"
+    },
+    "cohort-c3bd27e8-mac-windows-clippy-v1/production-check.log": {
+      "bytes": 5532,
+      "sha256": "be68f7e99db7f1a3d61142e5637502bd78f90aba75a9d72e293e05ad11202b83"
+    },
+    "cohort-c3bd27e8-mac-windows-clippy-v1/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-c3bd27e8-mac-windows-clippy-v1/collected-binaries.json": {
+      "bytes": 754,
+      "sha256": "5e188d8e5fcfff43c21db7c080ddbe3da5380c46147de8cc3cda9c74503b2f91"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

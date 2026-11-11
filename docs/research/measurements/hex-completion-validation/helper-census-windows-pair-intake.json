@@ -1,0 +1,28 @@
+{
+  "requirement": "AC-T7.4.1",
+  "sources": [
+    "2276ce4898f2af088e86f2386032aa57d4f2ab1f",
+    "335fca8df657a2bc23294b551c318a526eee69d4",
+    "52a2aa59d49caff9b5b19635f854a3635a32ec50"
+  ],
+  "role": "ROOTcoordinator",
+  "scope": "Pureappend-only samehelpercensus +Windows fixedtwo-socket active-mask wait; narrowdeltas, currentoriginalargumentremedy/reportlaunches preserved.",
+  "review": "Read full census241lines/sharedboundedencoder andpair native function+Option successor. Same helperowner table view is not a new manager or grant. Censushostilecount/minimumencodedbytes checkedbeforefalliblereserve. Pair polls onlyactiveborrowedsockets, no newowner/worker/buffer/mode/timeoutmutations; actualHUP read bycaller notscopeabsence.",
+  "files": [
+    {
+      "path": "crates/hex-core/src/helper/managed.rs",
+      "sha256": "8c1824722ea9bc248ca54cf093f076a5be40a88f2feee245fdabf747cea4881d"
+    },
+    {
+      "path": "crates/hex-core/src/helper/managed/census.rs",
+      "sha256": "571c27e7dcd3ed4e71c23bf3d2e016e5df12056555b1d011bb49e07588745404"
+    },
+    {
+      "path": "crates/hex-runtime/src/windows/sys.rs",
+      "sha256": "5df3ddbeb18c29cc613f3057b723dfa7258a439f0323df366bc5da322b3c3ffd"
+    }
+  ],
+  "tests_executed": 0,
+  "native_invocations": 0,
+  "remaining": "Matched pure census2 +Windows socket2/body compilation/nativecontrol; no blanketreadiness/leak/resource/nativeguestproof."
+}

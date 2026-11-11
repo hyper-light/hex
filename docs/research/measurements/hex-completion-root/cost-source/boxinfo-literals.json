@@ -1,0 +1,26 @@
+{
+  "source": "34d9ce119d1d837aaae187ca4ba96cfa08854354",
+  "legacy_native_cost": null,
+  "paths": [
+    {
+      "path": "crates/hex-runtime/src/windows/mod.rs",
+      "literal_additions": 1
+    },
+    {
+      "path": "crates/hex-runtime/src/windows/oci/mod.rs",
+      "literal_additions": 1
+    },
+    {
+      "path": "crates/hex-runtime/src/macos/mod.rs",
+      "literal_additions": 2
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/dedicated.rs",
+      "literal_additions": 1
+    },
+    {
+      "path": "crates/hex-core/src/wire/tests.rs",
+      "literal_additions": 4
+    }
+  ]
+}

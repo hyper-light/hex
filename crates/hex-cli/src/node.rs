@@ -6,7 +6,7 @@
 //! On macOS (native plan step 8b) the node is the macOS runtime's `process` class with its boxes'
 //! records kept in `--state` ([`hex_node::recorded::Recorded`]), and, where a Shards guest is configured
 //! (`SHARDS_BIN`, `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`, ...,
-//! [`hex_runtime::guest::GuestConfig::from_env`]), Linux images in that guest, booted before the node
+//! [`hex_runtime::guest::GuestConfig::from_env`]), Linux images through that guest, initialized before the node
 //! accepts a box (HEX-GUEST-39); `--box-root` (cgroups) is Linux's. On Windows (native plan step 8) the
 //! node is the Windows runtime's `process` class, its boxes' records kept in `--state` as macOS's are,
 //! its socket an AF_UNIX stream on one completion port (`hex_node::serve::windows`). On Linux:
@@ -28,7 +28,7 @@
 //! it. The macOS node, too, says on stderr each box its recovery removed and why.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hex_api::Refusal;
@@ -147,7 +147,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
 }
 
 fn serve(args: &[String]) -> Result<(), (u8, String)> {
-    let args = parse(args).map_err(|why| (2, why))?;
+    let mut args = parse(args).map_err(|why| (2, why))?;
     let failed = |e: Refusal| (1, e.to_string());
     // The waits census, where the probe asks for it (bench/competitive/probes/waits_census.md); nothing otherwise.
     hex_node::census::install_from_env().map_err(failed)?;
@@ -163,6 +163,8 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
     // The state's disk is what the boxes' io bounds apply to, so it exists before the node looks.
     std::fs::create_dir_all(&args.state)
         .map_err(|e| (1, format!("making {}: {e}", args.state.display())))?;
+    args.state = std::fs::canonicalize(&args.state)
+        .map_err(|e| (1, format!("resolving node state: {e}")))?;
     let hosted = host(&args)?;
     let (ended, end) = std::sync::mpsc::channel();
     #[cfg(target_os = "linux")]
@@ -252,6 +254,20 @@ fn say_recovered(recovered: &RecoverySummary) {
 #[cfg(target_os = "linux")]
 fn host(args: &Args) -> Result<Hosted, (u8, String)> {
     let failed = |e: Refusal| (1, e.to_string());
+    let guest_config = guest_configuration().map_err(failed)?;
+    let firecracker_config = match std::env::var_os("HEX_FIRECRACKER_CONFIG") {
+        None => None,
+        Some(path) => {
+            let path = PathBuf::from(path);
+            if !path.is_absolute() {
+                return Err(failed(startup_invalid(
+                    "HEX_FIRECRACKER_CONFIG",
+                    "expected an absolute configured backend file",
+                )));
+            }
+            Some(hex_runtime::firecracker::Config::from_file(&path).map_err(failed)?)
+        }
+    };
     let node = match &args.box_root {
         Some(root) => Node::open(root, &args.state, &args.state),
         None => Node::beside_self(&args.state, &args.state),
@@ -269,6 +285,31 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
     if let Some(line) = refused_pool(&node.netns().map_err(failed)?) {
         let _ = std::io::stderr().lock().write_all(line.as_bytes());
     }
+    let node = Arc::new(node);
+    node.bind_prober(
+        hex_node::facts::shared_prober(&args.state, hex_node::facts::Declared::default())
+            .map_err(failed)?,
+    )
+    .map_err(failed)?;
+    let shards = configured_guest(
+        guest_config,
+        &args.state,
+        node.device_catalog(),
+        node.shards_native_paths().map_err(failed)?,
+    )?
+    .map(Arc::new);
+    let firecracker = firecracker_config
+        .map(|config| {
+            hex_runtime::firecracker::FirecrackerRuntime::open(
+                config,
+                node.device_catalog(),
+                node.backend_books(),
+            )
+            .map(Arc::new)
+            .map_err(failed)
+        })
+        .transpose()?;
+    node.install_backends(firecracker, shards).map_err(failed)?;
     // Recovery removes a box it can't take back; say which and why, so nothing is dropped unseen
     // (CLAUDE.md §3), before the socket opens.
     say_recovered(&node.recover().map_err(failed)?);
@@ -305,7 +346,6 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
         };
         let _ = writeln!(std::io::stderr().lock(), "hex node: parked procs: {said}");
     }
-    let node = Arc::new(node);
     let platform = node.sizes().platform();
     Ok(Hosted {
         host: Arc::clone(&node) as Arc<dyn Host>,
@@ -320,8 +360,9 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
 #[cfg(target_os = "macos")]
 fn host(args: &Args) -> Result<Hosted, (u8, String)> {
     use hex_node::recorded::Recorded;
-    use hex_runtime::guest::{GuestConfig, GuestRuntime, WithGuest};
+    use hex_runtime::guest::WithGuest;
     let failed = |e: Refusal| (1, e.to_string());
+    let guest_config = guest_configuration().map_err(failed)?;
     if args.box_root.is_some() {
         return Err((
             2,
@@ -339,29 +380,38 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
         hex_core::watch::lateness_seed(&model),
     )
     .map_err(failed)?;
-    let guest = [
-        hex_runtime::guest::ENV_SHARDS_BIN,
-        hex_runtime::guest::ENV_KERNEL,
-        hex_runtime::guest::ENV_INITRD,
-    ]
-    .iter()
-    .any(|v| std::env::var_os(v).is_some());
-    let host: Arc<dyn Host> = if guest {
-        let config = GuestConfig::from_env().map_err(failed)?;
-        let node = WithGuest::new(
-            process,
-            // `@` is in no box id, so neither the record nor its temporary is read as a box's.
-            GuestRuntime::new(Arc::new(shards_api::Shards::new()), config)
-                .recorded_at(args.state.join("@guest")),
-        )
+    let prober = hex_node::facts::shared_prober(&args.state, hex_node::facts::Declared::default())
         .map_err(failed)?;
-        let node = Recorded::open(node, &args.state).map_err(failed)?;
-        say_recovered(&node.recover().map_err(failed)?);
-        Arc::new(node)
-    } else {
-        let node = Recorded::open(process, &args.state).map_err(failed)?;
-        say_recovered(&node.recover().map_err(failed)?);
-        Arc::new(node)
+    let catalog = hex_runtime::devices::shared_catalog(
+        &backend_path(&args.state, "devices").map_err(failed)?,
+    )
+    .map_err(failed)?;
+    let host: Arc<dyn Host> = match configured_guest(
+        guest_config,
+        &args.state,
+        catalog,
+        runtime_paths(&args.state).map_err(failed)?,
+    )? {
+        Some(guest) => {
+            let routed = WithGuest::configured(process, guest, hex_runtime::guest::by_class);
+            let node =
+                Arc::new(Recorded::open_with_prober(routed, &args.state, prober).map_err(failed)?);
+            node.bind_guest_books().map_err(failed)?;
+            // AC-T7.4.1: the wrapper validates ALL retained owners before publishing
+            // Prepared. Fresh GPU observation waits for its real Index/native grant.
+            node.prepare_guest_backing()
+                .map_err(failed)?
+                .allocation()
+                .map_err(failed)?;
+            node.recover_guest_backing().map_err(failed)?;
+            say_recovered(&node.recover().map_err(failed)?);
+            node
+        }
+        None => {
+            let node = Recorded::open_with_prober(process, &args.state, prober).map_err(failed)?;
+            say_recovered(&node.recover().map_err(failed)?);
+            Arc::new(node)
+        }
     };
     let platform = hex_node::serve::macos::platform().map_err(failed)?;
     Ok(Hosted {
@@ -432,6 +482,7 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
     use hex_node::recorded::Recorded;
     use hex_runtime::windows::{WinRuntime, keeper};
     let failed = |e: Refusal| (1, e.to_string());
+    let guest_config = guest_configuration().map_err(failed)?;
     if args.box_root.is_some() {
         return Err((
             2,
@@ -444,22 +495,163 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
     let keep = vec![exe.to_string_lossy().into_owned(), "keep".to_owned()];
     let keeper_dir = args.state.join("keeper");
     let name = keeper::node_name(&keeper_dir);
-    let runtime = WinRuntime::outliving(&name, &keeper_dir, &keep).map_err(failed)?;
-    let node = Recorded::open(runtime, &args.state).map_err(failed)?;
-    say_recovered(&node.recover().map_err(failed)?);
+    let catalog = hex_runtime::devices::shared_catalog(
+        &backend_path(&args.state, "devices").map_err(failed)?,
+    )
+    .map_err(failed)?;
+    let runtime = WinRuntime::outliving_with_catalog(&name, &keeper_dir, &keep, catalog.clone())
+        .map_err(failed)?;
+    let prober = hex_node::facts::shared_prober(&args.state, hex_node::facts::Declared::default())
+        .map_err(failed)?;
+    let host: Arc<dyn Host> = match configured_guest(
+        guest_config,
+        &args.state,
+        catalog,
+        runtime_paths(&args.state).map_err(failed)?,
+    )? {
+        Some(guest) => {
+            let routed =
+                hex_runtime::guest::WithGuest::configured(runtime, guest, WinRuntime::oci_side);
+            let node =
+                Arc::new(Recorded::open_with_prober(routed, &args.state, prober).map_err(failed)?);
+            node.bind_guest_books().map_err(failed)?;
+            // AC-T7.4.1: the wrapper validates ALL retained owners before publishing
+            // Prepared. Fresh GPU observation waits for its real Index/native grant.
+            node.prepare_guest_backing()
+                .map_err(failed)?
+                .allocation()
+                .map_err(failed)?;
+            node.recover_guest_backing().map_err(failed)?;
+            say_recovered(&node.recover().map_err(failed)?);
+            node
+        }
+        None => {
+            let node = Recorded::open_with_prober(runtime, &args.state, prober).map_err(failed)?;
+            say_recovered(&node.recover().map_err(failed)?);
+            Arc::new(node)
+        }
+    };
     let platform = hex_node::serve::windows::platform().map_err(failed)?;
     Ok(Hosted {
-        host: Arc::new(node),
+        host,
         limits: hex_node::serve::limits(&platform),
         workers: platform.threads,
     })
+}
+
+/// AC-T7.4.1: configure the actual renderer and its verified cost before recovery.
+/// The existing native owner supplies both catalog and Books; this constructor boots nothing.
+fn guest_configuration() -> Result<Option<hex_runtime::guest::GuestInputs>, Refusal> {
+    let requested = [
+        hex_runtime::guest::ENV_SHARDS_BIN,
+        hex_runtime::guest::ENV_KERNEL,
+        hex_runtime::guest::ENV_INITRD,
+        hex_runtime::guest::ENV_CPUS,
+        hex_runtime::guest::ENV_MEMORY_MIB,
+        hex_runtime::guest::ENV_GPU,
+        hex_runtime::guest::ENV_COST_FILE,
+        hex_runtime::guest::ENV_COST_SHA256,
+        hex_runtime::guest::ENV_COST_EVIDENCE,
+        hex_runtime::guest::ENV_GPU_OBSERVER_FILE,
+        hex_runtime::guest::ENV_GPU_OBSERVER_SHA256,
+    ]
+    .iter()
+    .any(|name| std::env::var_os(name).is_some());
+    if !requested {
+        return Ok(None);
+    }
+    hex_runtime::guest::GuestConfig::from_env_with_native_inputs().map(Some)
+}
+
+fn configured_guest(
+    configuration: Option<hex_runtime::guest::GuestInputs>,
+    state: &Path,
+    catalog: hex_runtime::devices::SharedCatalog,
+    paths: (PathBuf, PathBuf),
+) -> Result<Option<hex_runtime::guest::GuestRuntime>, (u8, String)> {
+    use hex_runtime::guest::{GuestInputs, GuestRuntime};
+    let Some(GuestInputs {
+        config,
+        cost,
+        native_images,
+    }) = configuration
+    else {
+        return Ok(None);
+    };
+    let failed = |e: Refusal| (1, e.to_string());
+    let provider = shards_api::Shards::configured(paths.0, paths.1).map_err(|why| {
+        failed(hex_client::guest::shards::refusal(
+            "configuring node runtime paths",
+            &why,
+        ))
+    })?;
+    let paths = provider.runtime_paths().try_clone().map_err(|why| {
+        failed(hex_client::guest::shards::refusal(
+            "retaining node runtime paths",
+            &why,
+        ))
+    })?;
+    let mut guest = GuestRuntime::new(Arc::new(provider), config)
+        .recorded_at(backend_path(state, "@guest").map_err(failed)?)
+        .with_runtime_paths(paths)
+        .with_gpu_catalog(catalog)
+        .with_runtime_cost(cost)
+        .map_err(failed)?;
+    if let Some(images) = native_images {
+        guest = guest.with_native_images(images).map_err(failed)?;
+    }
+    if let Some(input) = hex_runtime::guest::GpuObserverInput::from_env().map_err(failed)? {
+        guest = guest.with_gpu_observer(input).map_err(failed)?;
+    }
+    Ok(Some(guest))
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn runtime_paths(state: &Path) -> Result<(PathBuf, PathBuf), Refusal> {
+    Ok((
+        backend_path(state, "shards-native-cache")?,
+        backend_path(state, "shards-native-home")?,
+    ))
+}
+
+fn backend_path(state: &Path, name: &str) -> Result<PathBuf, Refusal> {
+    let bound = state
+        .as_os_str()
+        .len()
+        .checked_add(name.len())
+        .and_then(|size| size.checked_add(1))
+        .ok_or(Refusal::Exhausted {
+            what: "node backend path bytes",
+            bound: usize::MAX,
+        })?;
+    let mut path = PathBuf::new();
+    path.try_reserve_exact(bound)
+        .map_err(|_| Refusal::Exhausted {
+            what: "node backend path bytes",
+            bound,
+        })?;
+    path.push(state);
+    path.push(name);
+    Ok(path)
+}
+
+#[cfg(target_os = "linux")]
+fn startup_invalid(what: &'static str, message: &'static str) -> Refusal {
+    let mut why = String::new();
+    if why.try_reserve_exact(message.len()).is_err() {
+        return Refusal::Exhausted {
+            what: "backend configuration refusal bytes",
+            bound: message.len(),
+        };
+    }
+    why.push_str(message);
+    Refusal::Invalid { what, why }
 }
 
 /// Raises the soft limit on open descriptors to the hard one: each connection and watched program
 /// holds descriptors, and a service's soft limit stays 1,024 for `select(2)`'s sake while its hard
 /// limit is 524,288 (systemd-system.conf(5), `DefaultLimitNOFILE=`), which a program that needs
 /// more raises its soft limit to.
-#[cfg(unix)]
 #[cfg(unix)]
 fn raise_descriptor_limit() -> Result<(), Refusal> {
     let limit = rustix::process::getrlimit(Resource::Nofile);

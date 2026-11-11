@@ -1,0 +1,29 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "8d1ff1199c0a8a462f25918cdf3de825232463a6",
+  "source_sha256": "092fdf16972e26d05dd489da4d75a4d1edb89104a7c3ee56490bc780bebf2b0d",
+  "scope": "TWO new original controls plus bounded fixtures appended within existing initialized normalization tests; production bytes unchanged from parent",
+  "basis": "ROOT explicitly ACKed source-only cold Pending vs canonical provisioning and exact-key vs unrelated shared CPU concern before any remedy; no claimed live defect yet",
+  "controls": [
+    "cold_pending_gpu_source_keeps_exact_charged_provisioning_and_unrelated_shared_cpu",
+    "live_uncertain_gpu_key_does_not_suppress_unrelated_shared_cpu_or_release_claims"
+  ],
+  "required_behavior": [
+    "Actual native Process host resource plane +canonical fixed-cost warm CPU source and exact GPU source use the SAME normalization/Index. No measured DeviceInfo or GPU pressure exists.",
+    "Known Prepared/key/profile/full IDs must receive an exact charged provision grant before boot despite observer Pending; fresh GPU workload remains NoGpu.",
+    "Separate same-backend shared CPU key stays eligible; Live/Uncertain GPU key retains full grant/charge and unavailable fresh workload.",
+    "No backendwide exception/new cache/new permission mask/new authority or semantic remedy included. Tests distinguish source/key/phase/measurement state."
+  ],
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compiler": "UNRUN",
+    "selected_cases_executed": 0,
+    "tests": "UNRUN/original source only",
+    "native": 0,
+    "dispatches": 0
+  },
+  "remaining": "Await ROOT actual intended controls before diagnosis/remedy. Existing passed normalization2/Driver3 are not replayed here. Private stale Node draft remains outside signed checkpoint; ROOT65b actual producer is separate."
+}

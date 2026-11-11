@@ -644,6 +644,9 @@ pub fn dangerous(seed: u64, kind: Class) -> Result<Dangerous, FaultError> {
             capacity.gpus = capacity.gpus.max(need.gpus);
         }
         specs.push(NodeSpec {
+            routes: None,
+            costs: [None; crate::model::Class::COUNT],
+            runtime_pools: Vec::new(),
             id: node_id(id)?,
             capacity,
             background_milli: 0,
@@ -690,7 +693,7 @@ pub fn dangerous(seed: u64, kind: Class) -> Result<Dangerous, FaultError> {
     };
     let onset = rng.range(S, 100 * S);
     // The oracle's cell: as it stands once the workload is stopped.
-    let mut stopped = index.clone();
+    let mut stopped = index.try_clone().map_err(FaultError::Sim)?;
     stopped
         .give(NodeId(0), tripped.id, &running)
         .map_err(FaultError::Sim)?;
@@ -799,7 +802,7 @@ fn without(
     work: &[(WorkloadId, Demand)],
     pick: &Placement,
 ) -> Result<(FitIndex, Vec<Option<NodeId>>, u64), FaultError> {
-    let mut rest = index.clone();
+    let mut rest = index.try_clone().map_err(FaultError::Sim)?;
     for (id, w) in work {
         rest.give(node, *id, w).map_err(FaultError::Sim)?;
     }
@@ -862,6 +865,9 @@ pub fn correlated(seed: u64, mutant: Mutant) -> Result<Correlated, FaultError> {
     for id in 0..nodes {
         let (classes, capacity) = g2_node(&mut rng);
         specs.push(NodeSpec {
+            routes: None,
+            costs: [None; crate::model::Class::COUNT],
+            runtime_pools: Vec::new(),
             id: node_id(id)?,
             capacity,
             background_milli: 0,

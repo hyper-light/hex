@@ -1,0 +1,123 @@
+{
+  "bytes": 660309,
+  "sha256": "54697c2d6e2fa0c82275a24752a555f771dc585b87124b90ceaf78d2b761cce7",
+  "members": {
+    "cohort-b3d0962e-mac-recorded-preflight-original-v2/running.json": {
+      "bytes": 1102,
+      "sha256": "53fa00a7fe3ff2670d81f4e3a40decfb9bfbed759430da2951d8d6ec968162cf"
+    },
+    "cohort-b3d0962e-mac-recorded-preflight-original-v2/result.json": {
+      "bytes": 1452,
+      "sha256": "5e39b3be5254d137ba4e557e59a872350d36b337c440f185e8f77bba3a85f1c1"
+    },
+    "cohort-b3d0962e-mac-recorded-preflight-original-v2/source-before.json": {
+      "bytes": 315666,
+      "sha256": "42506ef720bc07177650c085261a78adc45d91f010282245418301cb9f9cc331"
+    },
+    "cohort-b3d0962e-mac-recorded-preflight-original-v2/source-after.json": {
+      "bytes": 315666,
+      "sha256": "42506ef720bc07177650c085261a78adc45d91f010282245418301cb9f9cc331"
+    },
+    "cohort-b3d0962e-mac-recorded-preflight-original-v2/original-recorded-preflight-controls.log": {
+      "bytes": 9317,
+      "sha256": "ae498a180397ada0345e7fecc9873184937f883500774ac76fdda0bd19638d1f"
+    },
+    "cohort-b3d0962e-mac-recorded-preflight-original-v2/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-b3d0962e-mac-recorded-preflight-original-v2/collected-binaries.json": {
+      "bytes": 812,
+      "sha256": "7f3a6c4ede62f2a92f7be03c3afe09406b9dbe2ea3f990a9a491efbb0d4b4b0a"
+    },
+    "cohort-416458dd-mac-recorded-preflight-original-v3/running.json": {
+      "bytes": 1102,
+      "sha256": "311ab9f9ad85c49fd42514da1d1125affa41aa28fc13077aaaa934d5c7b4d8fc"
+    },
+    "cohort-416458dd-mac-recorded-preflight-original-v3/result.json": {
+      "bytes": 1547,
+      "sha256": "5cf87853ec99a5cd7172fba7d88f0bac9380b8e1fcaef46290609ed8ca034237"
+    },
+    "cohort-416458dd-mac-recorded-preflight-original-v3/source-before.json": {
+      "bytes": 315826,
+      "sha256": "9014c22e31881842456633ae7dbee5e64fadc1f9438410d584d525006e8f4f47"
+    },
+    "cohort-416458dd-mac-recorded-preflight-original-v3/source-after.json": {
+      "bytes": 315826,
+      "sha256": "9014c22e31881842456633ae7dbee5e64fadc1f9438410d584d525006e8f4f47"
+    },
+    "cohort-416458dd-mac-recorded-preflight-original-v3/original-recorded-preflight-controls.log": {
+      "bytes": 5549,
+      "sha256": "f8963f3d8b366157dd1bcabec9ebbc4c8501e487b8c8c2b157206f1bd70dc33d"
+    },
+    "cohort-416458dd-mac-recorded-preflight-original-v3/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-416458dd-mac-recorded-preflight-original-v3/collected-binaries.json": {
+      "bytes": 1091,
+      "sha256": "67a9d3e0f91ec98b924c175d780f7f6722ee155323e84e99fd6854e7fd0d2f29"
+    },
+    "cohort-88f72b31-mac-pool-joined-consumer-v2/joined-production-check.log": {
+      "bytes": 2979,
+      "sha256": "a6331d7dc4473bc5eaf4586b68f6a8889da291f4a41763e0e5618f1bf9895c5c"
+    },
+    "cohort-88f72b31-mac-pool-joined-consumer-v2/route-index-original-controls.log": {
+      "bytes": 8289,
+      "sha256": "a0eed1103c8d1f47b30560edc67d5e3532847bd4bd3d48f752753b773f3319e5"
+    },
+    "cohort-88f72b31-mac-pool-joined-consumer-v2/backing-receipt-codec-controls.log": {
+      "bytes": 3132,
+      "sha256": "d94a73cc3601807fcc82c272cb4b6cf422ac36a49d07351fb8ba59498428c785"
+    },
+    "cohort-88f72b31-mac-pool-joined-consumer-v2/running.json": {
+      "bytes": 6610,
+      "sha256": "098adcda3df7713b331aacd8e6631b0909df836273c8d9cbf764d678343e3433"
+    },
+    "cohort-88f72b31-mac-pool-joined-consumer-v2/result.json": {
+      "bytes": 6866,
+      "sha256": "d94eb1602565645605230d8b381117e92dd600a7e1920bc72a9c9d51aa81ca50"
+    },
+    "cohort-88f72b31-mac-pool-joined-consumer-v2/source-before.json": {
+      "bytes": 321864,
+      "sha256": "81ec4c3395a62a173a6fb11d59a396faca6bfb532646bc454ac151d55f4412dc"
+    },
+    "cohort-88f72b31-mac-pool-joined-consumer-v2/source-after.json": {
+      "bytes": 321864,
+      "sha256": "81ec4c3395a62a173a6fb11d59a396faca6bfb532646bc454ac151d55f4412dc"
+    },
+    "cohort-88f72b31-mac-pool-joined-consumer-v2/bounded-route-sequence-corrected-fixture.log": {
+      "bytes": 567,
+      "sha256": "695fdb42b1e5bcd8360b5b27bb37d4f4138be5c147320a8819811111b2f9998e"
+    },
+    "cohort-88f72b31-mac-pool-joined-consumer-v2/bounded-model-routes.log": {
+      "bytes": 1049,
+      "sha256": "9b6d25470a7a659751cf184f12e58cbd23365e099bf8a1bbf1499fc62829bab8"
+    },
+    "cohort-88f72b31-mac-pool-joined-consumer-v2/recorded-pool-transaction-controls.log": {
+      "bytes": 6047,
+      "sha256": "bf833ca05ae892438433b6eba64a65418287cd7d761004eeb6aeedb63f72dc3c"
+    },
+    "cohort-88f72b31-mac-pool-joined-consumer-v2/peer-route-receipt-control.log": {
+      "bytes": 1049,
+      "sha256": "9b6d25470a7a659751cf184f12e58cbd23365e099bf8a1bbf1499fc62829bab8"
+    },
+    "cohort-88f72b31-mac-pool-joined-consumer-v2/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-88f72b31-mac-pool-joined-consumer-v2/shared-backing-entry-controls.log": {
+      "bytes": 4718,
+      "sha256": "96e7eb2d11d3f94177e502b3f5de3b6ad8cfb8a1351958afbdf1ccf7e02dadf0"
+    },
+    "cohort-88f72b31-mac-pool-joined-consumer-v2/collected-binaries.json": {
+      "bytes": 6132,
+      "sha256": "e164f3bd625683c669e35049362a74f1b091f63ba2aa50e088c5070985555290"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

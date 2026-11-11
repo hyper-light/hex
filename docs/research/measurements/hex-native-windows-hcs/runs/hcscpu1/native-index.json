@@ -1,0 +1,48 @@
+{
+  "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcs-cpu-exec-v1",
+  "index": {
+    "hcs.stderr.log": {
+      "bytes": 928,
+      "sha256": "f8448cff2e03a3bf75a20feb2b84c5da383f50523a3cb2bdc0b76287f6814a4b"
+    },
+    "hcs.stdout.log": {
+      "bytes": 258,
+      "sha256": "a4ddc6b586448f3bdc84df244b651319f889894f68020b8690a95619ef0852fa"
+    },
+    "list.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "list.stdout.log": {
+      "bytes": 154,
+      "sha256": "1190899199e0f60df2708238817a79d7c04ea37620557f2b94eb5b4b7a05f6fc"
+    },
+    "result.json": {
+      "bytes": 8101,
+      "sha256": "98cc69c19924a77c0b3e39920b65da22eb018e54e277b5380bf11e0f8080e196"
+    },
+    "run.json": {
+      "bytes": 6058,
+      "sha256": "35e3e333bf7531e2caa9b1444dfd2c3ce0e14bf59f2852b326f415a099e63475"
+    },
+    "source-after-native.json": {
+      "bytes": 322649,
+      "sha256": "4eccc885a65b2839ec45c17fd2aaecaf9e70bdd003d386d7f70353496b21da86"
+    },
+    "source-before.json": {
+      "bytes": 322649,
+      "sha256": "4eccc885a65b2839ec45c17fd2aaecaf9e70bdd003d386d7f70353496b21da86"
+    },
+    "scratch/hex-device-uopdHC/bundle-cpu-recovery/config.json": {
+      "bytes": 676,
+      "sha256": "04fe8a6981cd04d4aff814e9a273656448d43fced2f08d57b5c9fdec33fe852a"
+    },
+    "scratch/hex-device-uopdHC/state/keeper/keeper.owner": {
+      "bytes": 23,
+      "sha256": "c5f4b8de545eb12d7f132157bd3b23ed4b4d46f7f2cdc12340f7f31d1547eac8"
+    }
+  },
+  "source_hashes": {},
+  "temp_files": [],
+  "utc": "2026-11-11T04:46:13.0937001Z"
+}

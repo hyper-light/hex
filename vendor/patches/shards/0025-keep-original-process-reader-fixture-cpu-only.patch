@@ -1,0 +1,13 @@
+diff --git a/docs/research/measurements/managed-proc-main/reader-tests.rs b/docs/research/measurements/managed-proc-main/reader-tests.rs
+index 3ef030dc..2de1a84f 100644
+--- a/docs/research/measurements/managed-proc-main/reader-tests.rs
++++ b/docs/research/measurements/managed-proc-main/reader-tests.rs
+@@ -126,6 +126,8 @@ fn process_spec() -> crate::GuestSpec {
+         cmdline: String::new(),
+         vcpus: 1,
+         memory_mib: 256,
++        gpu: false,
++        gpu_devices: Vec::new(),
+         disks: vec![],
+         shares: vec![],
+         ports: vec![1],

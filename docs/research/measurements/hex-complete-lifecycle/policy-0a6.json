@@ -1,0 +1,10 @@
+{
+  "current_policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "role": "implementer",
+  "prior_receipt": "policy-0c.json",
+  "full_reread_after_context_loss": true,
+  "all_four_binding_blobs_equal_0c598386": true,
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "ownership": "Prior ACK retained; Store/Turns/Recorded, native Windows/macOS lifecycle, authorized managed helper codec; latest narrow core/cgroup strict parser and runtime/linux/cgroup managed_usage section/tests only",
+  "checks": "No builds/tests/native; no new delegation"
+}

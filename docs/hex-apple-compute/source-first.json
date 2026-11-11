@@ -1,0 +1,13 @@
+{
+  "base": "c2da38cc363e7d53f6df8fb82ab7bbda5e2f1efe",
+  "status": "SOURCE_ONLY_UNCOMPILED_UNRUN",
+  "file": "crates/hex-gpu/tests/apple_compute.rs",
+  "bytes": 22150,
+  "sha256": "7762d5a476ec827a768d68d503217041806c6566cae65501f0a515d7f735cdbb",
+  "required_env": [
+    "HEX_METAL_REGISTRY_ID",
+    "HEX_METAL_ELEMENTS",
+    "HEX_METAL_ROUNDS"
+  ],
+  "native_execution": "ROOT_ONLY_EXTERNAL_GUARD_REQUIRED"
+}

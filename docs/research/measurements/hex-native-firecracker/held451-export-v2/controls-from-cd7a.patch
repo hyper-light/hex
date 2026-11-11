@@ -1,0 +1,23 @@
+--- cd7a/held451-export-controls.json
++++ v2/held451-export-controls.json
+@@ -47774,6 +47774,20 @@
+       "resolved": "/usr/share/perl5/core_perl/warnings/register.pm",
+       "sha256": "c7971403a276f78dc7fad5cde69846c39bcc2587310999160592fc7c6b9bd2e3",
+       "source": "/usr/share/perl5/core_perl/warnings/register.pm"
++    },
++    {
++      "source": "/etc/ld.so.cache",
++      "resolved": "/etc/ld.so.cache",
++      "bytes": 188195,
++      "sha256": "72329fd8bc8d2af6b4a155582fe979f15f2e4ea4fa01ec410d3682fae750d774",
++      "provenance": {
++        "classification": "CURRENT non-executable transport-only loader-cache control",
++        "evidence_commit": "c5ab0a20a6f1510ebffd33cbf90f02c42bb6e48d",
++        "evidence_file": "docs/research/measurements/hex-native-firecracker/held451-ld-cache-query-c2f668/current-transport-control.json",
++        "evidence_file_sha256": "4fa4593903d1761613b2deda7326987cf100398e7999dd332c208a91cf382a3e",
++        "original4a_SDK_or_source_cohort": false,
++        "tuning_default": false
++      }
+     }
+   ],
+   "meaning": "source-pinned old4a native control bytes; verify only launcher/current mapped files, not whole foreign SDK; any mismatch refuses before held source I/O"

@@ -1,0 +1,26 @@
+REFERENCE SOURCE: b4884f6b987b4a0ce16147bc70c98b456b91bdec
+Running as unit: kiln-lb-reference-455862.service
+   Compiling kiln-ci v0.2.0 (/home/adalundhe/.cache/kiln-lb/int/gwt/crates/kiln-ci)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 32.29s
+     Running unittests src/lib.rs (/home/adalundhe/.cache/kiln-lb/int/gate-target/debug/deps/kiln_ci-83940aaeaaa2c3a8)
+
+running 1 test
+
+thread 'sched::gpu::tests::w13_r01_unread_gpu_load_never_becomes_fresh_idle_capacity' (540769) panicked at crates/kiln-ci/src/sched/gpu.rs:202:13:
+unread card matched: used=None, compute=None
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test sched::gpu::tests::w13_r01_unread_gpu_load_never_becomes_fresh_idle_capacity ... FAILED
+
+failures:
+
+failures:
+    sched::gpu::tests::w13_r01_unread_gpu_load_never_becomes_fresh_idle_capacity
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1363 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p kiln-ci --lib`
+          Finished with result: exit-code
+Main processes terminated with: code=exited, status=101/n/a
+               Service runtime: 32.383s
+             CPU time consumed: 31.304s
+                   Memory peak: 3.3G (swap: 213.7M)

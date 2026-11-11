@@ -1,0 +1,48 @@
+{
+  "requirement": "AC-T7.4.1",
+  "role": "implementer L3",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "base": "baff74c55cd8f351a11aff9e116143fbfb035f06",
+  "alias_dependency": "aa298cb1ad200e408f64c85338f5a95cdc7524f1",
+  "exact_alias": "hex_runtime::devices::PoolPreparationCheck<'a> = dyn FnMut(&Records, &[PoolRecord]) -> Result<(), Refusal> + 'a",
+  "scope": "Three parameter substitutions only: common recorded::prepare_pool, Recorded Books::prepare_pool, Store::prepare_pool_validated. Explicit borrowed trait-object lifetime; SAME caller stack captures. No heap, state, owner, default or lint allowance.",
+  "preserved": "All callback, canonical snapshot/expected row equality, route projection, family/source/Box turns, metadata fence, Draining first-reference refusal, native/report/route_for and publication/removal bytes equal base.",
+  "actual_before": {
+    "root": "8621a28d85fa05cf0a080aac342fdc77ce899815",
+    "phase": "windows-x64-arm64-joined-strict",
+    "exit": 101,
+    "phase_bytes": 8318,
+    "phase_sha256": "3d79081ab430edab37d92b6a5e11a4b637362d386cc07b9c55f03cf35d49499c",
+    "cli_sha256": "3aea1e4bdad23b2cca014c97a6bc6693a2bbced0abc3b8315db8adbfaef3db01",
+    "phase_independently_matched_from_cli": [
+      {
+        "leading_bytes_removed": 0,
+        "trailing_bytes_removed": 1,
+        "bytes": 8318
+      }
+    ],
+    "cause": "devices.rs532 borrowed validator clippy::type_complexity; L1 alias names the same callback. The separate L2 Proposal layout cause is outside this delta. Mac phase unexecuted; no semantic or native failure inferred."
+  },
+  "files": {
+    "crates/hex-node/src/recorded.rs": {
+      "bytes": 109034,
+      "sha256": "5393bf1a409be1cfe5c49eebe3cd9d03d9685c837cd9a20851cd7af5ad25b207",
+      "signature_substitutions": 2,
+      "all_other_bytes_equal_base": true
+    },
+    "crates/hex-node/src/store/pool.rs": {
+      "bytes": 28159,
+      "sha256": "1d394ed3b5f0650ea08ccfee4b61af96992e19016d0a38128911e7dd8bfc1fda",
+      "signature_substitutions": 1,
+      "all_other_bytes_equal_base": true
+    }
+  },
+  "validation": {
+    "source_identity": "All bytes equal base after exactly three named signature substitutions (verified).",
+    "format": "Named rustfmt --edition 2024 --config skip_children=true --check parser/format command completed with no diagnostics; no Cargo/native execution.",
+    "Cargo_clippy_tests": "NOT DISPATCHED. ROOT joins L1 alias/L2 layout/outside ports and owns matched strict cohort. Do not replay ff765 first13 passed API/Runtime units.",
+    "native": 0
+  },
+  "remaining": "Only source/intake correction; Windows/Mac strict and pending Node units remain ROOT work. No completion, allocation profile, native or performance claim. Main unmerged."
+}

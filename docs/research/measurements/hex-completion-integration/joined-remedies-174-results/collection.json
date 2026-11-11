@@ -1,0 +1,79 @@
+{
+  "bytes": 240444,
+  "sha256": "71ea460ce3e1dfab97830333a26cc314893553ebba3728a9261072a83d6731c9",
+  "members": {
+    "cohort-174d478d-linux-joined-remedies-v1/source-before.json": {
+      "bytes": 332611,
+      "sha256": "e8c37f23fb4dca54f5750ef73cbf58be42c2d51cbc3ffff8023ff5dbbc4428b5"
+    },
+    "cohort-174d478d-linux-joined-remedies-v1/public-registry-seed.json": {
+      "bytes": 29111,
+      "sha256": "1207e374157cca04968f221e2d85327884f9c77b11a0c3f3b51b3e5f03277bef"
+    },
+    "cohort-174d478d-linux-joined-remedies-v1/owned-scope-limits.json": {
+      "bytes": 257,
+      "sha256": "7d1a77c6637b459384d89362812da982ecdd5a3fa1ef80567dedec5cf80ce4cc"
+    },
+    "cohort-174d478d-linux-joined-remedies-v1/whole-retained-preflight-controls.log": {
+      "bytes": 5335,
+      "sha256": "0cf6177e57fb2a31ccf603ac39adca5d49432828a6b75101874290dcdb7e4aa7"
+    },
+    "cohort-174d478d-linux-joined-remedies-v1/running.json": {
+      "bytes": 10072,
+      "sha256": "39200c458b6ad11687fa310d572e6513174146443083ccbdc1ee178867faa32f"
+    },
+    "cohort-174d478d-linux-joined-remedies-v1/pending-gpu-original-after.log": {
+      "bytes": 1381,
+      "sha256": "8f69a61fb0258debaf04ca5b3c6189eab07da564717938f416b2eea705c2be5f"
+    },
+    "cohort-174d478d-linux-joined-remedies-v1/granted-rollback-original-after.log": {
+      "bytes": 760,
+      "sha256": "8ed705feca789f256d86c47efbd476d0540c46fac875831831b9bcf9a2296c07"
+    },
+    "cohort-174d478d-linux-joined-remedies-v1/prepared-native-original-after.log": {
+      "bytes": 536,
+      "sha256": "1c2bd7c94d609af9d708cbeb6f176694a168827956e404ba76d892a8adf52862"
+    },
+    "cohort-174d478d-linux-joined-remedies-v1/pending-sibling-cleanup.log": {
+      "bytes": 458,
+      "sha256": "762394ed42e502eb8f569f5d4abb5bb5968eaa5a403a7c846b72c1ad13f8e9a2"
+    },
+    "cohort-174d478d-linux-joined-remedies-v1/unavailable-gpu-original-control.log": {
+      "bytes": 1534,
+      "sha256": "dbb476c184f45caf653f9b09f756a4253d4b42f54fb0518aa12e987978dfeaeb"
+    },
+    "cohort-174d478d-linux-joined-remedies-v1/active-api-route-ambiguity-control.log": {
+      "bytes": 464,
+      "sha256": "d56d33858a03758f52932a3aa5ae5f0b3e35bdce791979c73bd333728e686c38"
+    },
+    "cohort-174d478d-linux-joined-remedies-v1/retained-cost-after.log": {
+      "bytes": 675,
+      "sha256": "437530c3456486f827a1ab8f7a5a5ad05b231ec10b3ebe9ea0e15e95fb436f8f"
+    },
+    "cohort-174d478d-linux-joined-remedies-v1/shared-prepared-cost-positive.log": {
+      "bytes": 448,
+      "sha256": "73d3db39cb77e789d1fbab833ba4fc1fc65fc65f2f8f5d62c4deb9841bfc785a"
+    },
+    "cohort-174d478d-linux-joined-remedies-v1/joined-production-check.log": {
+      "bytes": 3068,
+      "sha256": "b9a5835fb36ee9b15f5283095cce16481cd5f24a9fc599f58a7a7613edac4eea"
+    },
+    "cohort-174d478d-linux-joined-remedies-v1/source-after.json": {
+      "bytes": 332611,
+      "sha256": "e8c37f23fb4dca54f5750ef73cbf58be42c2d51cbc3ffff8023ff5dbbc4428b5"
+    },
+    "cohort-174d478d-linux-joined-remedies-v1/result.json": {
+      "bytes": 10328,
+      "sha256": "401327638b1453299266d12e6a84c7f40ff9542e46c770be064a249e98fd4678"
+    },
+    "cohort-174d478d-linux-joined-remedies-v1/collected-binaries.json": {
+      "bytes": 10002,
+      "sha256": "06137d0726b3ef30cef8608b58611362b7c0598fa18be9f2c5770c1d9c86da5f"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

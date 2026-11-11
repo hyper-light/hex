@@ -1,0 +1,40 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "ec0a0ab6f2fe6266696979d8df2fdf6032178ff5",
+  "source": [
+    {
+      "path": "crates/hex-runtime/src/firecracker/native.rs",
+      "sha256": "b91c5a1f6687d301bf6474ce6a8a2997db7de368fa32ba9ce38b1b6b681840f1"
+    },
+    {
+      "path": "crates/hex-runtime/src/firecracker/pool.rs",
+      "sha256": "10bffb3a232d62444c58c79bd10b0ed06f8cba8a5ed8b115b4e7b72a909f21fd"
+    }
+  ],
+  "projection_dependency": "ec0a0ab6f2fe6266696979d8df2fdf6032178ff5",
+  "signature": "FirecrackerRuntime::project_routes(&self,pools:&[PoolRecord],introduced:Option<(Execution,&[DeviceId])>,projection:&mut devices::RouteProjection)->Result<(),Refusal>",
+  "scope": "Actual FC pure fixed/retained/introduced route producer, SAME route_key constructor reused by actual current_capacity. Subset configuration validation and existing own test-only Books signature compatibility only.",
+  "behavior": [
+    "No class prefix before the SAME actual initialized state. CPUFC prefix uses actual Configcost/platform shape; every FC retained row preflights its exact config/profile/IDset before contributing exact tuple; one new GPU lifetime validates selected identity subset and counts no fake generation.",
+    "route_key is shared by real capacity and pure projection; no Capacity/Books/provider/native/syscall/artifact probe under metadata fence. Host arch is compile-time std constant; payload OS remains actual Linux guest.",
+    "preflight_backing accepts nonempty canonical R subset of configured fullF, exact SAME observer_configuration(config,R) hash and fixed cost; foreign device/profile/hash still refuse. Original fullP hash function bytes unchanged.",
+    "No native process/holder/provider/new DTO/manager/cache. Native phase/coalescing behavior not changed in this increment."
+  ],
+  "new_control": "firecracker::native::handoff_tests::pure_firecracker_projection_uses_configured_subset_rows_and_no_native_queries (UNRUN): actual pure key constructor +full parent/subset row/new lifetime/nativeprefix union; uninitialized adapter/outsideR/profile transplant refuse. NoOwnerCalls panics if any Books/native query attempted. initialized marker is an explicit model condition, NOT native readiness evidence.",
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compile": "UNRUN; full family consumers pending, old prepare_backing caller still needs b924 integration",
+    "tests": "UNRUN",
+    "dispatches": 0,
+    "native": 0
+  },
+  "excluded": "Stale dirty private node/backends.rs excluded. Real Node source is a5f229 family method lineage; ROOT render/provider/preflight/CLI changes preserved.",
+  "remaining": [
+    "L1 Node projection owner wrapper +full FC deterministic prepare/history/recovery/phase-aware native drain/IndexACK source, using b924+8b+d6e. No adapter completion claim.",
+    "L2 GuestRuntime actual projection +L3 Recover/native initialized field bodies +Storecallback join; no matched compile before real closure.",
+    "All actual native/KVM/VFIO/GPU effects, charged resources/helper terminal/fault/mutation/profiling/full gates ROOT/native QA."
+  ]
+}

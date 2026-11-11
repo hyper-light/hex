@@ -1,0 +1,40 @@
+{
+  "source": "15203af1ca827225d7ec547600c258c494cc5a89",
+  "root_before": "b87fb51c97d81793dd9e22e16314a0e04a5ac35a",
+  "sdk": "0277c13a654290fb94429aaa3d53aa0c7643dc43",
+  "files": {
+    "crates/hex-node/src/recorded.rs": {
+      "before": "292870c5a279a00a49ad76dfc0a334bf02397203224b30c7ff8a81c128d0fd4d",
+      "after": "7f2d0b7465c10c6fc3ab76ef8127c2684cd9ba917ab5ac0d14ec30d7cd1ef641"
+    },
+    "crates/hex-runtime/src/windows/mod.rs": {
+      "before": "820c629ecd009a2d2821a742ad3174a9cc681edf93ebd09ef9c7b1b44b957ab3",
+      "after": "83ec8271fe7aa8e3af75604f70b71527fb5d38e226e30f4f506887dde4ef5735"
+    },
+    "crates/hex-runtime/src/windows/managed.rs": {
+      "before": null,
+      "after": "a9dc8be01272ebe83ca1acefecd03ed32872b820c8870b3a55e74e5ad10e00b5"
+    },
+    "crates/hex-runtime/src/windows/process.rs": {
+      "before": "c1fa79af2edc00ede7c3d76251958591d638135dcaa50536a29bfd5053e0733a",
+      "after": "a92fa0c2bbae8b766ab4ebd9f4c2d9fb3ea995aaf8b5cd9aa0fe8c1c5c6ff12a"
+    },
+    "crates/hex-runtime/src/windows/proc.rs": {
+      "before": "b6fda35103766515228a31ee55f0592c7b1ff792d744989a3f08914196ed5bb0",
+      "after": "38906cf4d938535274e5dedc8cc76fe7c0397385728b240a6834d1e3233965c2"
+    },
+    "crates/hex-runtime/src/windows/sys.rs": {
+      "before": "66335476374c0de27399e33fd0b1e502e695b7e398b550b386e30b19d8df073b",
+      "after": "eecf7bd52d695a282bb53ef212a6a271a3f7e2230fc2c0c5ae4de14b33814841"
+    },
+    "crates/hex-runtime/src/windows/oci/mod.rs": {
+      "before": "b5a287dd634a4df4aad4f08b96280fc437736364e59b66db95f5fc1f0946d3d7",
+      "after": "29ade06d83c637b41cbbb44aba70e2c1f3348a8b180c43bb60d85caa6657ff08"
+    },
+    "crates/hex-runtime/src/windows/oci/launch.rs": {
+      "before": "213f1c174dfd7f8b98c1f01b673e58d3c978dbb224eec560fad0210fc51e3efe",
+      "after": "3600c3592a81bbfc3bab4827184ad8a02baf04ce4afbcdd9a0469194ad67ed15"
+    }
+  },
+  "scope": "Source intake only; whole native/Recorded checks wait matched L1 Books/provider and L2 full guest. Mac/cold Windows adoption still incomplete; no native proof."
+}

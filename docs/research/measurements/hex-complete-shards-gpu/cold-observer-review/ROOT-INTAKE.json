@@ -1,0 +1,39 @@
+{
+  "source": "0acc562d897140b88275314adcc72c3cece9ea86",
+  "root_parent": "38293f61306f3bf13f59a50b9e2ae8d241b08549",
+  "role": "coordinator",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "closure": "all twelve changed guest source paths, not just ten latest manifest paths; managed/selected inherited source included",
+  "source_hashes": {
+    "crates/hex-runtime/src/guest/books.rs": "110da50714e8d0b94508ab1ccb4ab497b0abcf97517d355135688ed56e1e322e",
+    "crates/hex-runtime/src/guest/dedicated.rs": "f79c909f6acd8cdf0a52a56b8ab3ed2007e133a1597cc546e40fce6511c46764",
+    "crates/hex-runtime/src/guest/gpu_pool.rs": "f14490feaed341d062809117218d0772083504f40f027c06cbe719fed84a1140",
+    "crates/hex-runtime/src/guest/managed.rs": "374e9171b0359c06046b6a9d6a40062871abecad9f7dad0b4870cad18df95c09",
+    "crates/hex-runtime/src/guest/mod.rs": "f9af0be3ef4f7b0d036dc58ce0311030f517980c12377a5eed7fd39d801c7d67",
+    "crates/hex-runtime/src/guest/observer.rs": "5b168ad9644158d9a20870b266dbaf0c6cd4697b3d5debe21cdf98f003d68c49",
+    "crates/hex-runtime/src/guest/observer/config.rs": "2b0a3fd0c9f8dcf0b6bfc947a2614173e338df7e0afad9f9b4369232a23e1658",
+    "crates/hex-runtime/src/guest/observer/io.rs": "943afaa7e1fc12dfb7819f1c32a5e1870ce6c4f8e8ae2e0b91992baf41f68148",
+    "crates/hex-runtime/src/guest/physical.rs": "4dbd142b58226f0ea8676860e0f60c8671a0e3a103f1dbe3d6b854d03371588c",
+    "crates/hex-runtime/src/guest/pool.rs": "9af0846c9f4e726bd13a14c9b4fafc56d9c67fe2cdb1dd8a42dcfbd6941c55e8",
+    "crates/hex-runtime/src/guest/selected.rs": "1343a90ffaf3a797bdb7ffca3c74a2303734a08f0336836677ac09d572107ca5",
+    "crates/hex-runtime/src/guest/shared.rs": "b1f9d4f77afe4ef936d3865ae593a1150a746a706f24d1c5a262dccfd4e6c1f5"
+  },
+  "review": "full12path delta/newmodules independently read by ROOT; L4 source-only peer review separately attributed",
+  "new_compilation": "NOT RUN at intake",
+  "new_tests": "NOT RUN at intake",
+  "native_invocations": 0,
+  "remaining_source_gaps": [
+    "actual ShardsLink.dial_before must consume absolute caller deadline",
+    "unfinished Proc Drop can enter fresh/unbounded transport send; original regression source assigned to L4 before remedy",
+    "Intent receipt with published canonical init recovery lacks terminal cleanup path",
+    "failed observer must retain original exit/cause plus cleanup outcome instead of collapsing them",
+    "missing PCI Windows LDA logical/physical node mapping is not implemented; refusals are incomplete support"
+  ],
+  "remaining_integration": [
+    "actual source-pinned Vulkan guest producer and full loader/ICD/transitive executable closure",
+    "explicit CLI artifact/profile input registration",
+    "actual charged renderer/VMM helper carriage and GPU execution/recovery/resource return",
+    "all supported target checks, fault/mutation, coordinator audits/profiles and final merge gates"
+  ]
+}

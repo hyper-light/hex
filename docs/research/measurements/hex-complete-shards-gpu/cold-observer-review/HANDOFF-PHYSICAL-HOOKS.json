@@ -1,0 +1,56 @@
+{
+  "status": "SOURCE ONLY API hooks; rustfmt parser0; no compile/test/native run",
+  "parent": "f0b1359672cd1fe013f0d5422f159f8bd7e9c9d1",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": [
+    {
+      "path": "crates/hex-runtime/src/guest/dedicated.rs",
+      "sha256": "d60e015c13a16838c8ffdf4c2b9f9c306cea50fce686ea09ba54d8b19b1bfed6"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/physical.rs",
+      "sha256": "08e699e01af12dac3c25817e3ba301ddc0759e377938f4cde0775fabb6585810"
+    }
+  ],
+  "signatures": [
+    "pub GuestRuntime::handoff_unsubmitted(&BoxRecord,&PoolRecord)->Result<(),Refusal>",
+    "pub GuestRuntime::physical_observations()->Result<Vec<PhysicalDevice>,Refusal>"
+  ],
+  "dependencies": {
+    "membership_API": "a56fe683494544e9783f0d5e13e922d823ca8221",
+    "canonical_handoff_owner": "bd0a2a7a91b2db18301ae7b7e8fd5adcfec5879e",
+    "bound_source_and_removal_fence": "e4e1df2e1b6f35b91fde97b03d45e4f2ae0bfd57",
+    "physical_report_types": "c772f964f683880142eeed1c6d904c3938a09f03",
+    "qualified_snapshot_consumer": "cfb1adf5780b669542eb26648ff6085b4606a8e6",
+    "native_Node_owner": "61650e47dacd57fdae3fca3d96e09fbe128a9e5f",
+    "v5_parent_core_snapshot_producer": "01fe011d72c6801e4494e903af6353baaf0688d4"
+  },
+  "handoff_proof": [
+    "caller holds SAME canonical Box/full-P handoff or preflight guard and passes BOTH borrowed exact rows; no Books lookup/reentry",
+    "only Creating/Deleting, no init/run/exit, native_scope present, exact ShardsDedicated route/backing and initialized cost/profile, nonempty S subset P",
+    "P Live/Draining only; Released always refuses missing-Intent inference",
+    "existing has_selected_route short-lock read must find no slot; exact selected receipt read must be None; any Intent/torn/unreadable/retained entry refuses",
+    "no route slot allocation/mutation, Store/native/prober call, fake release receipt or generic absence authority; existing fallible path/catalog temporary storage remains bounded"
+  ],
+  "physical_observations": [
+    "no initialized GPU observer/catalog -> empty no native query",
+    "actual SAME canonical configured key Prepared/Granted -> typed Pending; Draining/Released ->typed Busy, after retained preflight; missing configured canonical row is Invalid",
+    "Live reuses existing scoped renderer+guest readiness/current native owner/provider join; incomplete factual metadata ->keyed Uncertain",
+    "complete actual metadata moved to PhysicalDevice, holder cleared because Store alone holds claims; busy/memory-used remain unknown None, never zero",
+    "same native owner must release provider mutex before calling; overlay within its actual PhysicalReport authority; no capacity/attachment recursion, no second provider/cache, no standalone uncharged query"
+  ],
+  "outside_integration": {
+    "L1": "Node common preflight guard ->two-borrow proof; sequential native FC/Shards physical observer merge with qualified unavailable diagnostics",
+    "L3": "Recover/Recorded same two-borrow proof; native PhysicalReport from SAME prober then guest observations after mutex release",
+    "ROOT": "registration/native CLI/wire composition; successful native Process/HCS preserved; initialize routes/canonical backing accounting even when observer unavailable; no synthetic capacity report"
+  },
+  "remaining": [
+    "new own pure no-Intent/slot/Released cases accompany next full handoff consumer checkpoint; UNRUN",
+    "Catalog subset/exclusive-owner consumer still L1; handoff launch/delete consumers separate uncommitted source",
+    "selected fresh S VM observer and lazy subset/sibling provisioning still open",
+    "no actual native/provider/driver/artifact/VM/cleanup proof, no readiness/performance claim",
+    "native watcher-error classification beyond existing keyed Backing refusals remains explicit; Invalid metadata/authority is fatal, never caught as availability"
+  ]
+}

@@ -8,7 +8,7 @@ use std::io::{IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
-use std::sync::Arc;
+use std::time::Duration;
 
 use hex_api::Refusal;
 use hex_core::patience::Patience;
@@ -24,11 +24,16 @@ use crate::calls::{Core, Handle, KINDS, Lent, Sent, Shared, Take, Transport};
 
 /// How long a call waits for the macOS node agent's answer, and its send for room in the agent's socket, one wait a
 /// kind of call (`crate::calls::kind_of`'s order), as Linux's client waits (decision 9): twice the slowest answer this
-/// process has had to a call of that kind. MEASURING: no record of a macOS node's answers yet; each kind's
-/// `client.answer.<kind>` rows of `bench/competitive/probes/waits_census.md` from a macOS host will seed it, and until
-/// then a call waits for its answer alone.
+/// process has had to a call of that kind. Hello, scheduler operations and capacity use the exact per-profile
+/// response maxima and censored run-out lower bounds of the root-verified macOS/SSH guest census (AC-T7.4.1):
+/// `bench/sched/runtime-pools/calibration-macos-cold-extension-1bb73f74.json`. These time wire replies, not workload success.
+/// Other operations remain measuring until their own actual macOS rows are recorded.
 static ANSWERS: [Patience; KINDS] = [
-    Patience::measuring("client.answer.hello"),
+    Patience::by_profile(
+        "client.answer.hello",
+        Duration::from_nanos(829_500),
+        Some(Duration::from_nanos(2_607_584)),
+    ),
     Patience::measuring("client.answer.create"),
     Patience::measuring("client.answer.start"),
     Patience::measuring("client.answer.exec"),
@@ -41,6 +46,65 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.kill"),
     Patience::measuring("client.answer.exec_streams"),
     Patience::measuring("client.answer.run"),
+    Patience::by_profile(
+        "client.answer.schedule.describe",
+        Duration::from_nanos(23_338_333),
+        Some(Duration::from_nanos(22_181_708)),
+    ),
+    Patience::by_profile(
+        "client.answer.schedule.advertise",
+        Duration::from_nanos(88_998_417),
+        Some(Duration::from_nanos(108_619_750)),
+    ),
+    Patience::by_profile(
+        "client.answer.schedule.submit",
+        Duration::from_nanos(228_296_000),
+        Some(Duration::from_nanos(401_317_333)),
+    ),
+    Patience::by_profile(
+        "client.answer.schedule.hear_create",
+        Duration::from_nanos(244_933_375),
+        Some(Duration::from_nanos(392_913_792)),
+    ),
+    Patience::by_profile(
+        "client.answer.schedule.hear_delete",
+        Duration::from_nanos(152_498_583),
+        Some(Duration::from_nanos(130_079_458)),
+    ),
+    Patience::by_profile(
+        "client.answer.schedule.hear_control",
+        Duration::from_nanos(122_932_458),
+        Some(Duration::from_nanos(119_427_250)),
+    ),
+    Patience::by_profile(
+        "client.answer.schedule.link_up",
+        Duration::from_nanos(144_625),
+        Some(Duration::from_nanos(250_209)),
+    ),
+    Patience::by_profile(
+        "client.answer.schedule.retry",
+        Duration::from_nanos(18_684_542),
+        Some(Duration::from_nanos(16_694_750)),
+    ),
+    Patience::by_profile(
+        "client.answer.schedule.delete",
+        Duration::from_nanos(166_381_084),
+        Some(Duration::from_nanos(125_323_459)),
+    ),
+    Patience::by_profile(
+        "client.answer.schedule.status",
+        Duration::from_nanos(7_577_917),
+        Some(Duration::from_nanos(7_264_708)),
+    ),
+    Patience::by_profile(
+        "client.answer.capacity",
+        Duration::from_nanos(13_172_125),
+        Some(Duration::from_nanos(14_254_417)),
+    ),
+    Patience::measuring("client.answer.physical_report"),
+    Patience::measuring("client.answer.initialize_backing"),
+    Patience::measuring("client.answer.release_backing"),
+    Patience::measuring("client.answer.backing_usage"),
 ];
 
 /// A node agent, reached through its socket.
@@ -224,7 +288,7 @@ impl Client {
             op: "connecting to the node agent's socket",
             why: format!("{}: {e}", path.display()),
         })?;
-        Core::hello(Arc::new(Shared::new(Socket { fd })))
+        Core::hello(Shared::try_new(Socket { fd })?)
     }
 }
 

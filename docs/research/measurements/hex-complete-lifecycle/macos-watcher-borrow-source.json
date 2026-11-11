@@ -1,0 +1,16 @@
+{
+  "kind": "compiler cause correction; not native bug",
+  "original_root_revision": "a39b9dd5c6cee5f5949291f0c82f25946892b64e",
+  "original_outcome": "compiler101 E0502 twice",
+  "original_log_sha256": "410fc80566af0c7de0a327039dbe8786138d4d0f0eb00e9e7f34bca0a011e02f3",
+  "original_log_bytes": 3910,
+  "original_preserved_by": "ROOT",
+  "source_parent": "c94149bd25fe19b514e696306d12915430ebeaa4",
+  "production": "crates/hex-runtime/src/macos/process.rs",
+  "sha256": "b7fe78b0a00bc1e6b18eeeef69d0f65af7411abed1f874cebc29f427583b7e85",
+  "old_cohort_patch": "macos-watcher-borrow-root-a39.patch",
+  "old_cohort_patch_sha256": "cbf69dc4df6d78736c07654b6a3ac69e90704c1afc78130d1707c84e8663dfab",
+  "invariant": "clone the existing typed TriArc<State> refcount only; same scope and validate/finish/failed ordering; no new allocation",
+  "format_diff": "0",
+  "checks": "No compiler/test/native rerun; ROOT joins changed source"
+}

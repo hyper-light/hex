@@ -323,6 +323,7 @@ dependencies = [
  "socket2",
  "tar",
  "tempfile",
+ "triomphe",
  "windows-sys",
 ]
 
@@ -339,6 +340,8 @@ dependencies = [
  "shards-api",
  "tar",
  "tempfile",
+ "triomphe",
+ "unsize",
 ]
 
 [[package]]
@@ -350,7 +353,9 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror",
+ "triomphe",
 ]
 
 [[package]]
@@ -361,6 +366,7 @@ dependencies = [
  "libc",
  "tempfile",
  "thiserror",
+ "windows",
  "windows-sys",
 ]
 
@@ -375,6 +381,7 @@ dependencies = [
 name = "hex-node"
 version = "0.1.0"
 dependencies = [
+ "getrandom",
  "hex-afunix",
  "hex-api",
  "hex-client",
@@ -385,6 +392,7 @@ dependencies = [
  "hex-sim",
  "hex-testkit",
  "rustix",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "shards-afunix",
@@ -392,6 +400,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror",
+ "triomphe",
 ]
 
 [[package]]
@@ -401,15 +410,19 @@ dependencies = [
  "hex-api",
  "hex-client",
  "hex-core",
+ "hex-gpu",
  "libc",
  "proptest",
  "rustix",
  "seccompiler",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "shards-api",
+ "socket2",
  "tempfile",
  "thiserror",
+ "triomphe",
  "windows",
  "windows-sys",
 ]
@@ -419,11 +432,15 @@ name = "hex-sim"
 version = "0.1.0"
 dependencies = [
  "cap",
+ "hex-api",
  "hex-health",
  "hyper-swim",
  "hyper-timing",
  "proptest",
+ "serde",
+ "serde_json",
  "thiserror",
+ "triomphe",
 ]
 
 [[package]]
@@ -719,6 +736,8 @@ dependencies = [
  "sha2 0.11.1",
  "shards-abi",
  "shards-afunix",
+ "triomphe",
+ "unsize",
  "windows-sys",
 ]
 
@@ -835,6 +854,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "triomphe"
+version = "0.1.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d15f4f5898bcfc5d8a8e45ed30b2f108d710c1a2e5489dbf80e078f707181bc"
+
+dependencies = [
+ "unsize",
+]
+
+[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -851,6 +880,16 @@ name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
+
+[[package]]
+name = "unsize"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fa7a7a734c1a5664a662ddcea0b6c9472a21da8888c957c7f1eaa09dba7a939"
+
+dependencies = [
+ "autocfg",
+]
 
 [[package]]
 name = "version_check"

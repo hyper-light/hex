@@ -102,6 +102,9 @@ mod macos {
         let id = BoxId::new(&format!("mac-bench-over-{members}")).unwrap();
         let _ = rt.delete(&id);
         rt.create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds {
                 memory_max: Some(BOUND),
@@ -150,6 +153,9 @@ mod macos {
         let id = BoxId::new("mac-bench-hold").unwrap();
         let _ = rt.delete(&id);
         rt.create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds {
                 memory_max: Some(BOUND),

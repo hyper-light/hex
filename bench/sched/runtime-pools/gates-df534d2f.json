@@ -1,0 +1,662 @@
+{
+  "build_jobs": 8,
+  "commands": [
+    {
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "hex-client",
+        "--lib",
+        "--locked",
+        "--target",
+        "aarch64-apple-darwin"
+      ],
+      "exit": 0
+    },
+    {
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "bash",
+        "scripts/gates.sh"
+      ],
+      "exit": 0
+    }
+  ],
+  "counts_include_separate_focused_client_run": true,
+  "kind": "root-combined-seven-target-gate",
+  "limits": [
+    "Successful test stderr is hidden by the standard test runner; passing tests can include internal hardware skips.",
+    "Not native Linux AMD64/root-lab or Windows ARM VM proof.",
+    "Does not erase the real armed Submit failure."
+  ],
+  "log": {
+    "bytes": 115827,
+    "path": "/Users/adalundhe/.cache/hex-lead/logs/cold-extension-seven-gates-df534d2f.log",
+    "sha256": "ecde785599aaa52a97149e1f21ce5217dd7004e9bee65e6918b5d2db07bbfa7f"
+  },
+  "metadata": {
+    "bytes": 842,
+    "path": "/Users/adalundhe/.cache/hex-lead/logs/cold-extension-seven-gates-df534d2f.json",
+    "sha256": "fd6a77646fccd0b38b4cf9e266c64386f1ef2b2be0e3dc6e056b1b3b9f345608"
+  },
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "rust_test_threads": 8,
+  "scope": "seven-target lint/production/fmt; native macOS workspace/vendor; not Linux AMD64 native root lab or Windows ARM VM",
+  "source_revision": "df534d2f20a32c404e62e8dd31aa70d9838f0267",
+  "test_executions": [
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 51
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 30
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 8
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 2
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 2
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 1
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 9
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 1,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 1
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 1
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 3
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 2
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 2
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 3
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 5,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 17
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 51
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 1,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 2,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 302
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 1
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 14
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 1
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 39
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 1
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 106
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 4
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 60
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 158
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 2
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 1
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 9
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 2
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 4
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 13
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 2
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 1,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 5
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 1
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 3
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 8
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 3
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 1,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 4
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 20
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 1,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 1
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 1,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 10
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    },
+    {
+      "failed": 0,
+      "filtered": 0,
+      "ignored": 0,
+      "measured": 0,
+      "outcome": "ok",
+      "passed": 0
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "byte_limit": 1048576,
+  "controller": {
+    "args": [
+      "/bin/sh",
+      "-c",
+      "printf '%s' \"$2\" > \"$1\"",
+      "hex-gate",
+      "@MARKER@",
+      "@TOKEN@"
+    ],
+    "cwd": null,
+    "env": [],
+    "user": null
+  },
+  "controller_sha256": "c157074818b094c84aaf31b8c80a1e149f234bb1c8c84a25e9a53e96afa30a29",
+  "delegated_parent": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-gate-restored-fabd-v1.scope/native-0",
+  "gate_budget_ms": 120000,
+  "gate_wait_syscall": 271,
+  "guard_ms": 60000,
+  "lab": "/home/adalundhe/.cache/hex-lead/gc5688v1/restored/l",
+  "observation_ms": 1,
+  "pidfd_budget": 2,
+  "spec": {
+    "allocation": null,
+    "bounds": {
+      "cpu_max_milli": 1000,
+      "cpu_weight": null,
+      "io_latency_us": null,
+      "io_max": null,
+      "io_weight": null,
+      "memory_high": null,
+      "memory_max": 67108864,
+      "pids_max": 256
+    },
+    "class": {
+      "firecracker": {
+        "hostname": null,
+        "hosts": [],
+        "init": {
+          "args": [
+            "/bin/sh",
+            "-c",
+            "exit 0"
+          ],
+          "cwd": null,
+          "env": [],
+          "user": null
+        },
+        "mounts": [],
+        "network": "private",
+        "rootfs": {
+          "dir": "/home/adalundhe/.cache/hex-lead/gc5688v1/restored/l/empty-rootfs"
+        }
+      }
+    },
+    "devices": [],
+    "id": "completion-gate-baseline",
+    "owner": null,
+    "route": null
+  },
+  "test_binary_sha256": "ea3b39413a6aedbfb5e66ff2eb53b62bdc60f02d87ff645b849e967d5fc990e6"
+}

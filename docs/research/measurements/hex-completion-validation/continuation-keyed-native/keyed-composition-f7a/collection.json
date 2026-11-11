@@ -1,0 +1,87 @@
+{
+  "bytes": 330033,
+  "sha256": "30469cc35cc04fd1d00ea2b86ebc1c74b04dc3844dc5385f410ecc312377a147",
+  "members": {
+    "cohort-f7a08e57-linux-keyed-composition-f7a/source-before.json": {
+      "bytes": 475055,
+      "sha256": "2e89279628b71f9422ff9c940c818619c95e2ebded5c41e0bed3d9c6f53c2b2a"
+    },
+    "cohort-f7a08e57-linux-keyed-composition-f7a/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-f7a08e57-linux-keyed-composition-f7a/owned-scope-limits.json": {
+      "bytes": 261,
+      "sha256": "72fbdf3de3f682bb92e9de92e8804d60d9ceeeda6622daa89bfff9ee59cb7160"
+    },
+    "cohort-f7a08e57-linux-keyed-composition-f7a/cold-pending-original-after.log": {
+      "bytes": 4999,
+      "sha256": "96e4c5a8071a01f39d8384989b1f8a6e02f858941f3b0fa362cd14cac0f9e44e"
+    },
+    "cohort-f7a08e57-linux-keyed-composition-f7a/running.json": {
+      "bytes": 11634,
+      "sha256": "90ddbec4f450ec213b05b7c44a6bb546d5140be1189abdb21b7639988dd04098"
+    },
+    "cohort-f7a08e57-linux-keyed-composition-f7a/live-key-original-after.log": {
+      "bytes": 1603,
+      "sha256": "fbdbb87bdb8daebc147af91f975f1c343fcebdef48a130334c67e47b9fee7bd0"
+    },
+    "cohort-f7a08e57-linux-keyed-composition-f7a/healthy-key-baseline-new.log": {
+      "bytes": 475,
+      "sha256": "f5408ee3ec64797bced1e6aa49b4a716e8d4c1855277c0eab7211548f1f865ab"
+    },
+    "cohort-f7a08e57-linux-keyed-composition-f7a/api-key-permission-new.log": {
+      "bytes": 577,
+      "sha256": "3ed949588cd8e14c063e9700d18ece49277799bee4b88eb657f786a4552ea4a5"
+    },
+    "cohort-f7a08e57-linux-keyed-composition-f7a/released-none-original-after-inputs.log": {
+      "bytes": 1623,
+      "sha256": "a2d51aff3ea9753005334a8328f2ef8afa4a8c3818cbfadec78291c5b8a6f5c2"
+    },
+    "cohort-f7a08e57-linux-keyed-composition-f7a/shards-no-intent-after-inputs.log": {
+      "bytes": 996,
+      "sha256": "5b9af5103ba26e5a0bce2918b6545536e36f2856286971557d3f9ddb6760268c"
+    },
+    "cohort-f7a08e57-linux-keyed-composition-f7a/shards-phase-matrix-new.log": {
+      "bytes": 1026,
+      "sha256": "3a8b2f965e47963abf83fa2c8ca0ee484a2704fec18e9f918ccd73769b878aa1"
+    },
+    "cohort-f7a08e57-linux-keyed-composition-f7a/native-oci-composition-original.log": {
+      "bytes": 1265,
+      "sha256": "517032efd2e47a2ae483ed28a48eaa1eab1b087c52770c8ed3fa1b20be295ee6"
+    },
+    "cohort-f7a08e57-linux-keyed-composition-f7a/checked-facts-slot-original.log": {
+      "bytes": 347,
+      "sha256": "a83a64d2a594b4b10e17d9d3f5257a14c6fafb5b7f7da49c2ad033430b425a56"
+    },
+    "cohort-f7a08e57-linux-keyed-composition-f7a/sibling-terminal-original-after-prefix.log": {
+      "bytes": 1520,
+      "sha256": "c6870b2771157701f16dd6bc1de3fd787a084d8661a7dc96cc9c58a11221ff1c"
+    },
+    "cohort-f7a08e57-linux-keyed-composition-f7a/sibling-healthy-baseline-new.log": {
+      "bytes": 465,
+      "sha256": "0c094e5b1b1032b9ac14716e25b01ccc087061fccbbc77b242e2eb4849922b4a"
+    },
+    "cohort-f7a08e57-linux-keyed-composition-f7a/joined-strict-clippy.log": {
+      "bytes": 5051,
+      "sha256": "ebdfe32afa6fb41f6b5d911ea3cd21d1ee0f4e59edc36c49ea267b4e895802fa"
+    },
+    "cohort-f7a08e57-linux-keyed-composition-f7a/source-after.json": {
+      "bytes": 475055,
+      "sha256": "2e89279628b71f9422ff9c940c818619c95e2ebded5c41e0bed3d9c6f53c2b2a"
+    },
+    "cohort-f7a08e57-linux-keyed-composition-f7a/result.json": {
+      "bytes": 11892,
+      "sha256": "dc43f8ee160ca93c2dfadb5567f6993874f7aab96654b19dcf0c6b4f6d50b45e"
+    },
+    "cohort-f7a08e57-linux-keyed-composition-f7a/collected-binaries.json": {
+      "bytes": 11713,
+      "sha256": "cb68e248c1cd03bfb3dc10fc8ba0d08519a02a87469d2b403892b7ed624eee71"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

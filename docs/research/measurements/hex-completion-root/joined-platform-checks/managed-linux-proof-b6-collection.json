@@ -1,0 +1,35 @@
+{
+  "bytes": 199049,
+  "sha256": "a4778c5ddb74fb81e9099f6400a6b7af0bad7cced38069cfc52f0b7fb7d6d57e",
+  "members": {
+    "cohort-b6ad2be7-linux-compile-v1/source-before.json": {
+      "bytes": 289055,
+      "sha256": "cbc3ddd09fd2d04431766207317597430b1480663bafac159f4a0b9ae2781804"
+    },
+    "cohort-b6ad2be7-linux-compile-v1/production-check.log": {
+      "bytes": 6214,
+      "sha256": "f4f2cedb2fe94ba370f8d6c282b1524b1247ab520a09b6c555ecc3526d91c1d7"
+    },
+    "cohort-b6ad2be7-linux-compile-v1/running.json": {
+      "bytes": 924,
+      "sha256": "c0389dca16fcb73cae5db1e3ab3dcb3284c0a62e7143313cdb05bd8feca379cc"
+    },
+    "cohort-b6ad2be7-linux-compile-v1/source-after.json": {
+      "bytes": 289055,
+      "sha256": "cbc3ddd09fd2d04431766207317597430b1480663bafac159f4a0b9ae2781804"
+    },
+    "cohort-b6ad2be7-linux-compile-v1/result.json": {
+      "bytes": 1178,
+      "sha256": "232ac02041d87d32e93e229d509c624b634d7bca8af7965fb97d4dddd74ef831"
+    },
+    "cohort-b6ad2be7-linux-compile-v1/collected-binaries.json": {
+      "bytes": 509,
+      "sha256": "09feead83958ef5164fa1cb872c76f6e30be91e9c710242c811ea465ef57b2b7"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

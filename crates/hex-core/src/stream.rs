@@ -31,6 +31,15 @@ pub const STDIO_PORT: u32 = 0x4845_5801;
 /// listening.
 pub const STAMPS_PORT: u32 = 0x4845_5803;
 
+/// AC-T7.4.1: a Firecracker guest sends this versioned readiness receipt only after
+/// its node and relay listeners are ready. The host owns the private per-VM socket;
+/// this is a boot notification, not a control connection or an attachment grant.
+pub const GUEST_READY: &[u8] = b"HEX_READY 1\n";
+/// Firecracker reserves [2^30, 2^31) for host-initiated connection ports and rejects
+/// guest-initiated requests there (pinned500efc6 docs/vsock.md). Clear that reserved
+/// bit in the assigned HEX control port for the separate guest-to-host notification.
+pub const GUEST_READY_PORT: u32 = CONTROL_PORT & !(1u32 << 30);
+
 /// A frame's prefix: the message's length, a big-endian `u32` (shards-guest.md §3a).
 const PREFIX: usize = size_of::<u32>();
 

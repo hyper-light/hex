@@ -1,0 +1,141 @@
+{
+  "source": "8d5bb0b4eb6a175532d73d889dc472b721660b41",
+  "archive_sha256": "71c4c03ee832846140f4de22b1a321141dd6fe3e3d8c2841db6dad4af1e50361",
+  "scope": "ROOT exact remote pending original AFTER, new commitment guard and affected changed2af guard only; current hex-sim all-target strict; no unrelated passed unit replay/native/VM/GPU.",
+  "target": "linux",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 2085713,
+  "phases": [
+    {
+      "name": "remote-pending-original-after",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-sim",
+        "--lib",
+        "--locked",
+        "peer::tests::remote_owner_recovers_committed_released_source_without_fresh_repick",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2089084,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "ef4b773d327f6d891eaab2dfbbd53af30679a89e32ca68e402e2897fe5bfaf87",
+      "bytes": 3047,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "new-committed-pending-guard",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-sim",
+        "--lib",
+        "--locked",
+        "index::route_offer_tests::committed_pending_recovery_keeps_receipt_charge_and_claim_bounds",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2186004,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "784e6cdaca3bcccb3c7f1e0da9be4eca26e74b31af742f29b7dac04121e9e1c1",
+      "bytes": 444,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "index::route_offer_tests::committed_pending_recovery_keeps_receipt_charge_and_claim_bounds",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "changed-recovery-phase-guard",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-sim",
+        "--lib",
+        "--locked",
+        "index::route_offer_tests::released_source_recovery_preserves_fresh_phase_and_single_consumer_guards",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2186061,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "bdcdff8ab837784d7d57ac5f8df5ec043fc292e663534446a6f662bc3ecae7d4",
+      "bytes": 453,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "index::route_offer_tests::released_source_recovery_preserves_fresh_phase_and_single_consumer_guards",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "sim-current-strict",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-sim",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 2186110
+    }
+  ]
+}

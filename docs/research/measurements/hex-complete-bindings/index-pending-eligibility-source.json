@@ -1,0 +1,17 @@
+{
+  "parent": "21363288043a8d7de1f0be0c3b6a82e8cd925dc6",
+  "role": "implementer",
+  "policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": {
+    "crates/hex-sim/src/index.rs": "cadd2a3f94ca3cfa05ab3b60fbb782cf2dcfff508c5360aca80a2724ec614381"
+  },
+  "unchanged_control_sha256": "36c1beb0b41452f7c15339c286339e5670771bedb47f01dc115358622a6fa990",
+  "red_log_sha256": "dbb476c184f45caf653f9b09f756a4253d4b42f54fb0518aa12e987978dfeaeb",
+  "checks": {
+    "scoped_rustfmt": 0,
+    "git_diff_check": 0,
+    "post_compile_test": "UNRUN; ROOT owns target follow-up"
+  },
+  "evidence": "INDEX-PENDING-ELIGIBILITY.md"
+}

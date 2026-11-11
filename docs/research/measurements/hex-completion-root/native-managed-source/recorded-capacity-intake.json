@@ -1,0 +1,21 @@
+{
+  "source": "bccdc4225afa7649525b35dae897fd11ef258173",
+  "path": "crates/hex-node/src/recorded.rs",
+  "before": "7f2d0b7465c10c6fc3ab76ef8127c2684cd9ba917ab5ac0d14ec30d7cd1ef641",
+  "after": "4be56d51c4efb42cb7b0ecb0afa0f3694e80d4154bff43c06acf0af60971ece6",
+  "actual_source": "b6ad2be77d72dfb65ef6f090be2298a7f5dd3f2b",
+  "actual_mac_libcheck_exit": 101,
+  "actual_errors": [
+    "E0425 report undefined recorded665",
+    "E0425 report undefined recorded667"
+  ],
+  "actual_log_sha256": "2a3e344f6988f10b9d933d37c9a891cfe7540c2a581e0c06cfb16660c96dfb8e",
+  "actual_cargo_pid": 42785,
+  "child_reaped": true,
+  "source_unchanged": true,
+  "temp_entries": 0,
+  "tests_executed": 0,
+  "native_invocations": 0,
+  "fix": "Move original native_metadata Capacity splice from recover into Runtime::capacity before holder overlay; flat PhysicalReport direct same Prober remains unchanged",
+  "checks": "SOURCE ONLY; matched successor compile pending"
+}

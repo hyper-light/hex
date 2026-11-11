@@ -1,0 +1,5 @@
+# Typed route contract integration
+
+L1 signed73547 supplies the exact four API files and fallible owned Capacity/backing copies. ROOT exports those types and adds only the already-locked triomphe dependency edge for the simulator's immutable route owner. The compatibility manifest records explicit absent route/empty initialized offers in existing literals. Existing native Node BoxInfo projections preserve their canonical record receipt; other adapters are being integrated by their owners. The client test transport borrows its response and compares encoded requests rather than requiring whole protocol Clone. The differential classifier retains typed Backing refusal.
+
+This is source integration, not a compiled or initialized route/backing claim. Core wire is exclusively L4-owned; real route matching, fixed shared backing/native grants, canonical recovery projections and joined checks remain pending. Original workload form is retained. Public optional serde fields preserve ordinary legacy JSON. No new native work has run for this source.

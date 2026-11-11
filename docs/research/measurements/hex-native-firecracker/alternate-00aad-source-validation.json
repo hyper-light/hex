@@ -1,0 +1,29 @@
+{
+  "schema": "hex-native-fc-alternate00aad-source-validation-v1",
+  "AST_exit": 0,
+  "JSON_manifest_consistency_exit": 0,
+  "original4a14_bytes_unchanged": [
+    "amd-root-build-cohort.json",
+    "root_build_amd_payload.py",
+    "amd-build-bundle.sha256.json",
+    "retained_root_init.c",
+    "build_retained_initramfs.py",
+    "amd-sealed-handoff.json"
+  ],
+  "contract_imported_or_executed": false,
+  "namespace_execution": false,
+  "SDK_materialization": false,
+  "kernel_or_bootstrap_build": false,
+  "VM_or_GPU_run": false,
+  "positive_scope_receipt_and_cleanup": "alternate-00aad-probes.raw.json",
+  "full_gates_and_profiling": "UNRUN, ROOT-owned",
+  "kernel_namespace_preflight": "UNRUN; cannot infer from bwrap availability/kernel settings",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "local_staged_diff_check_initial": {
+    "exit": 2,
+    "cause": "new blank line at EOF in collector source",
+    "correction": "trailing blank line trimmed; AST parsed0, no remote rerun",
+    "attribution": "executed command remains verbatim in comparison command/raw; collector successor differs only in EOF whitespace"
+  }
+}

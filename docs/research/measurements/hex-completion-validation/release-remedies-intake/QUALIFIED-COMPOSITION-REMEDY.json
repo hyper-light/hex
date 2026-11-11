@@ -1,0 +1,49 @@
+{
+  "status": "SOURCE ONLY narrow qualified capacity composition remedy after actual semantic red; afterUNRUN/no own native or test",
+  "parent": "ef9cd95ed257532ceb01cd00a25b02bd0888d5f6",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": {
+    "path": "crates/hex-runtime/src/guest/shared.rs",
+    "sha256": "bc1cd74f1bfa8bcf62fec57df43099f3fa6e6a81494fd2caeb5447576fb0e59e"
+  },
+  "actual_before": {
+    "root_source": "f7a08e5748e999ca6dba855143e8c7e581cfa44f",
+    "name": "guest::gpu_pool::tests::native_oci_routes_and_canonical_claims_survive_qualified_shards_capacity_failure",
+    "selection": "1selected/0pass/1fail/0ignored",
+    "log_sha256": "517032efd2e47a2ae483ed28a48eaa1eab1b087c52770c8ed3fa1b20be295ee6",
+    "cause": "exact-key BackingUncertain rejected composition after native prefix/canonical charge assertions passed",
+    "raw_archive_sha256": "30469cc35cc04fd1d00ea2b86ebc1c74b04dc3844dc5385f410ecc312377a147",
+    "raw_bytes": 330033,
+    "native": 0
+  },
+  "remedy": [
+    "retain initialized native routes and exact canonical backing offer when ONLY c772-qualified Shards Backing Pending/Busy/Uncertain names this exact key",
+    "failed observation contributes no actual DeviceInfo or new eligibility bit; no catalog metadata, zero telemetry, room or capacity synthesized",
+    "all invalid authority/metadata, foreign key and nonqualified causes still return the original typed refusal",
+    "same native owner physical_report ->Guest physical_observations ->c772/d3 exact-key diagnostic/admit path remains the current diagnostic channel; no second provider, observation ledger or failure cache"
+  ],
+  "snapshot_limit": "capacity and physical_report are separate current observations, not one atomic hardware sample. If state changes between them, this capacity still conservatively lacks bits from its failed observation; no prior failure or reading is cached as freshness.",
+  "required_joined_sources": {
+    "qualification_API": "c772f964f683880142eeed1c6d904c3938a09f03",
+    "keyed_admit_provisioning": "d3b9c9e5cf38f10bd3d89575f7b943e1b14676cf",
+    "own_hook": "5c33713d79f9a3cbbf69ebce1eedb8c8386dacf2",
+    "same_native_counter_merge": "a0455e5cc34e0ede2138ef90e2a6090649f1c656",
+    "Recorded_hook": "4689ef77a31c51f00858611e016feaecf315852f",
+    "ROOT_actual_before_cohort": "f7a08e5748e999ca6dba855143e8c7e581cfa44f"
+  },
+  "preserved": [
+    "original6fda oracle and fixture bytes unchanged",
+    "no changes to physical inventory/probe/native launch or holder/charge lifecycle",
+    "current cold provisioning key rules remain L1 d3; no blanket backend mask or workload widening",
+    "dbff/c78 checked-facts publication still UNRUN/no production append remedy",
+    "all costs/outer original class/allocation/route/payload and observer facts unchanged"
+  ],
+  "validation": "read full relevant log/result and verified hashes locally; scoped rustfmt/diff only. ROOT owns exact failed original AFTER and affected meaningful positive; no old passed suite replay",
+  "remaining": [
+    "checked actual metadata slot publication original still needs nonzero reproduction",
+    "lazy tuple/complement coalescing and b924+L3 helper consumer remain active source work",
+    "native/platform/helper/renderer/fault/full proof remains ROOT"
+  ]
+}

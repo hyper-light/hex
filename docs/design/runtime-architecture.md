@@ -2460,6 +2460,26 @@ decision covers the node's waits for an answer whose time it can observe (source
 RFC 6298's timer was this decision's first draft and calibration reads its second; the lead ruled out both (the
 RFC's floor and constants are TCP's clocks'; a calibration read leaves the first wait unbounded).
 
+**An available answer at the deadline (AC-T7.4.1, 2026-11-10).** A caller can resume after its deadline with a
+complete reply already queued. The common client already collected decoded mailbox answers before checking
+time, but refused an identical reply still in its native socket without reading it. Root reproduced that
+inconsistency with a real macOS Unix stream: the queued complete reply failed, while the identical decoded reply,
+a partial frame and an empty open peer gave their expected results. At expiry, collect mail and, only while
+owning the reader turn and lacking an answer, make one existing zero-time turn. Collect a complete answer or
+return without waiting. Partial data stays subject to the existing framing and ownership rules; no deadline or
+record changes. This is ready-first queue handling, also used by
+[Rust 1.85.1's channel receive](https://github.com/rust-lang/rust/blob/1.85.1/library/std/src/sync/mpmc/list.rs#L380).
+Retaining the transport-dependent behavior leaves the reproduced inconsistency; extending the deadline or
+waiting to finish a partial frame changes the wait contract and is unnecessary. Root's guard-removal mutation
+restores the single failure and the canonical fixed source passes all four controls. Exact sources, commands,
+hashes, seven-target client lint and limits are in `bench/sched/runtime-pools/queued-deadline-cd434fcb.json`.
+This isolated regression does not establish the cause of the earlier physical Submit timeout. The fixed
+tree passed all seven target lints, the native macOS workspace (910 passes, 13 ignored), and native Windows
+client checks (45 passes). Both profiles completed 1,000 local plus 1,000 forced-SSH physical lifecycles;
+root reconstructed all 513,862 ledger rows and 4,000 unique phase keys/physical IDs, matched exact Stopped
+closures and checked empty baselines. Native Linux AMD64/root-lab validation remains owed. These are
+functional checks, with no new seed, timing, leak-freedom or performance claim.
+
 | Wait | Was | Now | Seed |
 | --- | --- | --- | --- |
 | a seed's hang bound and the shell's wait for its answer (createpool `ANSWER_PATIENCE`) | 30 s, copied | 2 × max(record, seen) | `seeds::CLONE_SLOWEST`, the `seeds.hang` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 29.565 ms, debug 652.938 ms<!-- /record --> |
@@ -2565,3 +2585,73 @@ shows its target.
    `OPEN_TREE_NAMESPACE`, and the faster path is the default.
 7. **The process class through the seam** (decision 7): done when run-of-`true` p50 is at most a quarter of a systemd
    scope's, and held memory per idle box is at most a scope's.
+
+
+### 10. Scheduler control room follows capacity and retained state (AC-T7.4.1, 2026-11-10)
+
+A fixed runtime box cap is not a derivation for placement metadata. A node's physical population is
+bounded above by the smaller of its CPU divided by `MIN_CPU_MILLI` and memory divided by `MIN_MEMORY`.
+These are the existing checked API reservation minima; placement requires finite caps and reservations
+covering them. A node with no supported class contributes no physical room, and multiple classes do
+not multiply shared host capacity. The owner ceiling sums configured endpoints' populations; while
+facts are absent, one pending intent per configured endpoint preserves discovery without granting any
+receiver physical room. The receiver still checks actual host and backing-runtime pools.
+
+Each admitted owner or runner needs one durable row, with one epoch row and at most one replacement
+temporary per durable row. An epoch stores its read ceiling before admission can grow. At restart,
+that ceiling permits reading retained rows; it does not authorize new work. Boot recovers physical
+identities under the actual retained per-kind floor, then applies the current admission ceiling.
+Reducing room preserves existing rows and deletion control. Control room takes the componentwise
+maximum of current owner/runner ceilings and retained owner/runner counts: retained owners may coexist
+with newly admitted runners. A maximum of the two totals would omit that population. Overflow and
+invalid persisted metadata refuse before runtime inspection/creation. The published main8d format
+without read metadata has a bounded migration reader for its historical 65,536 rows of each kind;
+that number is never a new admission limit. Cache/order reads instead follow configured peer membership.
+
+One existing global RAII permit bounds every queued and in-flight peer word, including each peer's
+one coalesced refresh. At root run r671, the actual 432-byte `Queued` type in Rust 1.99.1 requested
+57,672,760 bytes per empty bounded channel at the old 131,073-word capacity. The same binary and message
+type requested 512 bytes per linked channel. Three interleaved process samples per mode, with one and
+three peers, reproduced the duplicated reservation; raw native process memory/fault output and
+allocation snapshots are retained in
+`bench/sched/runtime-pools/queue-constructor-allocation-09ef773b/result.json`.
+These constructor measurements are not complete Service, loaded queue, parent/kernel charge, copy,
+leak-freedom or competitive scheduler results; sample maxima provide little tail resolution.
+
+[The standard channel contract](https://doc.rust-lang.org/1.99.1/std/sync/mpsc/fn.channel.html) provides
+FIFO storage and nonblocking sends; its otherwise unbounded storage is bounded here by that existing
+global permit. [Disconnection returns the owned message](https://doc.rust-lang.org/1.99.1/std/sync/mpsc/struct.Sender.html#method.send),
+so the permit is returned on failure or drop. The
+[bounded alternative](https://doc.rust-lang.org/1.99.1/std/sync/mpsc/fn.sync_channel.html) would reserve a
+population-sized buffer per peer and retain its initial capacity after facts change. A one-word
+buffer would refuse bulk recovery independently of the authoritative global bound. No measured byte
+count becomes runtime policy, and no second queue manager or mutable count cache is introduced.
+
+Root's recovery and durability guard removals drive actual excess `SimRuntime.create` effects and
+clean them up before assertion; restoring each guard passes. Separate queue mutations exercise the
+upper bound and permit return. Native Mac/Windows source and logs, exact one-guard differences,
+restoration hashes, build identities, policy accounting and validation limits are recorded in
+`bench/sched/runtime-pools/capacity-8767f0d9/record.json`. This decision is falsified by lost retained
+rows, admission before a failed ceiling commit, a new word beyond the shared bound, a lost permit,
+or a sender identity outside configured membership. Final publication still requires its current-tree
+gates and root lab; an older source's pass is not a new source's result.
+
+### 11. Recovery agrees on immutable local payloads before effects (AC-T7.4.1, LB03)
+
+The owner and runner rows for one local key carry the same immutable `Payload`: both the complete
+box specification and the requested start intent. Recovery cannot select one contradictory copy as
+authority. `Rows::running` checks equality while collecting all recovered runners, before the driver
+can inspect or start any Runtime box. A mismatch returns typed `Damaged` with the affected key and
+cause, preserving the records and physical state. Its diagnostic contains no payload content.
+This uses the existing record owner and recovery seam, without another cache, repair protocol or
+admission rule. A matching payload still permits its originally authorized init to resume.
+
+The bounds agent first reproduced a create-only owner's box becoming `Running` through a conflicting
+runner start flag, and separately an equal-start specification mismatch reaching inspection. ROOT's
+exact guard removals reproduce both failures and exact restores pass. Actual OCI before/after runs
+also confirm the forbidden start and its refusal, sibling progress, matching repair and owned guest
+cleanup. [Coordinator evidence](../research/measurements/hex-recovery-payload-guard/COORDINATOR.md)
+records the source, native/model distinction, all hashes and remaining gates. This decision is
+falsified by any callback before a mismatch refusal, changed record bytes, payload content in the
+diagnostic, or loss of authorized matching recovery. It establishes no cause for earlier unrelated
+Submit deadline failures and makes no performance claim.

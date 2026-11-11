@@ -1,0 +1,33 @@
+{
+  "status": "SOURCE ONLY exact fixed-ROOT two-fixture path-pair setup bridge; parser0/diff0; no run",
+  "parent": "d87bcf9b6a6bb6d6e669d5179b666a2ef38041c4",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "actual_before": [
+    {
+      "name": "released_gpu_receipt_without_identity_finishes_original_published_scope",
+      "result": "0/1 setup failure before semantic oracle",
+      "log_sha256": "0c099b52261964d1d37ddd2169295aa04a1e6f95fa191be9631c73b1e2d9e78e"
+    },
+    {
+      "name": "unsubmitted_handoff_requires_held_source_no_intent_and_no_route_slot",
+      "result": "0/1 setup failure before semantic oracle",
+      "log_sha256": "6f5705c72a896827ba0c2313db0e1ca6dae018c4488f278acb73b31067e54b65"
+    }
+  ],
+  "cause": "GPU backing configuration binds configured native/probe RuntimePaths; fixture omitted required initialized pair",
+  "change": "each of the exact two test constructors supplies its own dir/cache and dir/home RuntimePaths; pure validation only, not creating/probing a native runtime",
+  "source": {
+    "path": "crates/hex-runtime/src/guest/gpu_pool.rs",
+    "sha256": "791066653a0a6c6da9b7fb6e4ae310d523dee118a4fd79fd6f01c138dee458b6"
+  },
+  "verification": "whole file equals exact parent plus only the two formatted constructor insertions; initial unformatted expected-text assertion refused after rustfmt collapsed the same new expression; no commit was created by that refused verification",
+  "preserved": [
+    "all original assertions/oracles/budgets and mocks unchanged",
+    "all production bytes unchanged",
+    "283 selected observer and ROOT joins unchanged",
+    "no Released(None) production remedy before relevant red"
+  ],
+  "after": "UNRUN; ROOT owns exact matched original reproduction"
+}

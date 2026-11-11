@@ -1,0 +1,32 @@
+{
+  "role": "implementer",
+  "task": "source-only Linux workspace dispatch review and unapplied box_run_cli delegate proposal",
+  "hex_source": "e990ff1ee953a12466551b678e7c7a9e60c552dc",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source_target": "crates/hex-cli/tests/box_run_cli.rs",
+  "base_sha256": "60861acc079188dece0ea8568aca70134ec62018668fa17369d35f079f2fa473",
+  "proposed_sha256": "6a1dd9b107fb08e02a1cdfc6a3178d9a79356bc6e4f34a95bfdbaef3d885ce76",
+  "patch_applied": false,
+  "test_source_changed": false,
+  "builds": 0,
+  "tests": 0,
+  "native_executions": 0,
+  "new_agents": 0,
+  "runner_changes": 0,
+  "files": {
+    "INVENTORY.md": {
+      "bytes": 10182,
+      "sha256": "a6ef6f7da38e3d0c806450c3b01adfce40930ef9522418228fea61afc3d5c054"
+    },
+    "PROPOSAL.md": {
+      "bytes": 4339,
+      "sha256": "f249cdcc97b2e642e027b3af6788b6248f6091b366a0be82077749e35b518274"
+    },
+    "box-run-owned-delegate.patch": {
+      "bytes": 6584,
+      "sha256": "110c1cc6b66f55e3c13d49cd43dbd3a35ad1c06838d2b9cb2bb7970c468b69bf"
+    }
+  },
+  "patch_format_note": "Blank context lines omit the optional single-space marker; source and in-memory proposed target hashes are unchanged. Initial docs whitespace scan found only those context markers; no test/source was applied."
+}

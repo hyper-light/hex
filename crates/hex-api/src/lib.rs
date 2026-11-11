@@ -21,6 +21,7 @@
 
 mod bounds;
 pub mod conformance;
+mod devices;
 pub mod differential;
 #[cfg(windows)]
 mod end;
@@ -30,9 +31,16 @@ pub mod sim;
 mod spec;
 
 pub use bounds::{Bounds, IoRates, MIN_CPU_MILLI, MIN_MEMORY};
+pub use devices::{
+    BackendUnavailable, DeviceHolder, DeviceId, DeviceInfo, DeviceKind, MAX_DEVICES,
+    PhysicalDevice, PhysicalReport,
+};
 pub use id::BoxId;
 pub use runtime::{
-    Asked, BoxInfo, BoxState, Exit, Membership, Proc, Refusal, Runtime, Signal, Usage,
+    Allocation, Asked, BackingGrant, BackingKey, BackingOffer, BackingPhase, BoxInfo, BoxState,
+    Capacity, CapacityResources, Execution, Exit, GpuEligibility, ImageArch, ImageOs,
+    ImagePlatform, LifecycleCause, MAX_RUNTIME_ROUTES, Membership, Proc, Refusal, RouteKey,
+    RouteOffer, RouteReceipt, Runtime, RuntimeCost, Signal, Usage,
 };
 pub use spec::{
     Ask, BlockCount, BoxOwner, BoxSpec, Class, ClassSpec, End, ExecLimit, Given, Mount, Network,

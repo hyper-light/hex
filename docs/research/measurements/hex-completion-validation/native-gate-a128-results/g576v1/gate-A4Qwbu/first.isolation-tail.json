@@ -1,0 +1,10 @@
+{
+  "after_producer_drop_fence": true,
+  "eof_required_for_ack": false,
+  "pid": 2252988,
+  "started": 32241214,
+  "suffix": "first",
+  "tail": {
+    "Ok": "eof"
+  }
+}

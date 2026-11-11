@@ -1,0 +1,13 @@
+{
+  "parent": "7197ed5e86307e9db615f7ee7b9699b8a7cc7f98",
+  "sources": [
+    "892ead15fa23e5ae7164eb81a43e8122684a30f4",
+    "6ac1e0d85f0a50a612a6844ccf6bec9e95142017"
+  ],
+  "actual_original_source": "25d98e88be3b8173605ed7e8e1d109d309a278b6",
+  "actual_original_logs": [
+    "84efd6015ed04327ce121abe0f8fc8d6e2244b77c8950947e87fc10a491e107b",
+    "ea417d33f1f59ef3dcf08e4c1451d0a5502cbd534f0c864a85cafbe3acc864cb"
+  ],
+  "checks": "Source reviewed, no after-remedy execution yet. Original tests unchanged. Cleanup None remains SAME canonical scope authority, never Guest/native absence. Alias guard covers configured lexical path containment; symlink/hardlink correspondence is not established by this guard. Global preflight Released(None) consistency followup still open."
+}

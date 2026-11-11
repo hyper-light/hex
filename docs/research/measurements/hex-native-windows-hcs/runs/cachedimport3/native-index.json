@@ -1,0 +1,20 @@
+{
+  "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-release-v3",
+  "index": {
+    "controller.stderr.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "controller.stdout.log": {
+      "bytes": 1471,
+      "sha256": "a6e916674fa82f286df70d37ae64dabfcbef3d241672396013aa00bf847f056e"
+    },
+    "result.json": {
+      "bytes": 36016,
+      "sha256": "858a4e8f024194dca84b3235b4bacb7a34226fca8f3a367d3668206dce3e960e"
+    }
+  },
+  "source_hashes": {},
+  "temp_files": [],
+  "utc": "2026-11-11T05:56:06.2939497Z"
+}

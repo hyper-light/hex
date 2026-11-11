@@ -1,0 +1,23 @@
+{
+  "kind": "source-only",
+  "role": "implementer",
+  "policy": "ca3ab10c151aa5539e757f1cc76029746ccbb561",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": {
+    "crates/hex-api/src/devices.rs": "7a8d0f8e63fc7521212115f4afad25c9c17ed328752e73ed2dfd0c3521d84ebb",
+    "crates/hex-api/src/runtime.rs": "32c7dcf4856d940bdb13cacb82bdf57104fe6893a46c5f17969b3a9a946bd451",
+    "crates/hex-runtime/src/devices.rs": "4f74d8b8d8727c70a2dc3a2bee714faf97fd8a9fbf29527922f4b535febacaa8",
+    "crates/hex-runtime/src/devices/tests.rs": "6d2a20defabc8698f0a7c06d6a7c2c6dc511284465ead02243779a23d03caa72",
+    "crates/hex-runtime/src/firecracker/observations.rs": "ee2b7a1110936017441284514c010d9bb6fd7ab7f2b7d4ebed5b11ad08a25807",
+    "crates/hex-node/src/placement/devices.rs": "581cfa7c9904c1aa912eb0b6fa025a214e7059661b5bf56476c9ce15326ad6ae",
+    "crates/hex-node/src/placement/device_binding_tests.rs": "5646aff7b77d408bd24de0164c3c64128c6d0bf7349f28c4c73f5f55ff67a8a0",
+    "crates/hex-node/src/scheduler/capacity/devices.rs": "721cc31361a236d8987226771fd3dc0f55b2ab5d7e8cebc4107386864304c7b9",
+    "crates/hex-node/src/scheduler/device_offer_tests.rs": "bf876dbabf1a93dc62db7af51ac1b3b5099029f67f0a43d5a63e434497b0e11c"
+  },
+  "checks": {
+    "new_pure_control": "unrun",
+    "compile": "unrun",
+    "native": "unrun"
+  },
+  "remaining": "canonical Pool Store join and actual admitted backing/provider boot path remain required"
+}

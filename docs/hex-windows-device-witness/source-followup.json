@@ -1,0 +1,8 @@
+{
+  "first_source_checkpoint": "be46fa8ac2fe0aeb4b28d5455c9c59c458ef5a2e",
+  "status": "SOURCE_ONLY_UNCOMPILED_UNRUN",
+  "change": "label unavailable actual host-positive controls explicitly UNVERIFIED before probe assertions",
+  "file": "crates/hex-cli/tests/windows_assigned_device.rs",
+  "bytes": 28927,
+  "sha256": "a2afd1a175e833268dd0bff74f11dff158b9e041bfe4071fc02441315f4a724f"
+}

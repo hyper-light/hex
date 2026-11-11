@@ -38,6 +38,11 @@ pub fn write(path: &Path, identity: &shards_api::Identity) -> Result<(), Refusal
         "{HEADER}\npid {}\nstarted {}\nvsock {vsock}\n",
         identity.pid, identity.started
     );
+    replace(path, text.as_bytes())
+}
+
+/// Replace one guest-owned record durably. The caller validates its bounded encoding first.
+pub(crate) fn replace(path: &Path, text: &[u8]) -> Result<(), Refusal> {
     let dir = path.parent().ok_or_else(|| broken(path, "has no folder"))?;
     let name = path
         .file_name()
@@ -48,25 +53,28 @@ pub fn write(path: &Path, identity: &shards_api::Identity) -> Result<(), Refusal
     let temp = dir.join(temp_name);
     let os = |op: &'static str| move |e: std::io::Error| Refusal::os(op, e);
     let mut file = std::fs::File::create(&temp).map_err(os("writing the node's guest record"))?;
-    file.write_all(text.as_bytes())
+    file.write_all(text)
         .and_then(|()| file.sync_all())
         .map_err(os("writing the node's guest record"))?;
     drop(file);
+    #[cfg(windows)]
+    crate::windows::sys::replace_durable(&temp, path)
+        .map_err(os("placing the node's guest record"))?;
+    #[cfg(not(windows))]
     std::fs::rename(&temp, path).map_err(os("placing the node's guest record"))?;
     sync_folder(dir).map_err(os("syncing the node's guest record's folder"))
 }
 
 /// Makes the rename into `dir` durable: the folder's own fsync(2).
 #[cfg(unix)]
-fn sync_folder(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_folder(dir: &Path) -> std::io::Result<()> {
     std::fs::File::open(dir).and_then(|d| d.sync_all())
 }
 
-/// Windows syncs no folder: one opens as a file only with backup semantics, and NTFS journals the rename
-/// itself, so a crash leaves the record before it or the one after, as the Windows class's own box records
-/// are left (`windows::oci`'s `write_marker`). The guest it names goes with the host in any case.
+/// Windows publication uses the existing native write-through replacement helper
+/// after the temp file's sync. This supplies no directory/hardware power-loss proof.
 #[cfg(not(unix))]
-fn sync_folder(_dir: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_folder(_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 

@@ -1,0 +1,28 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "fixed_root": "502dc405cde88fe2bf2efde4090ea1bd33296696",
+  "source_sha256": "0fd7a9f942ae76fd02bcd4184cb791ece01da35b62cbadc061025ac1eabde95b",
+  "required_sources": [
+    "a56fe683494544e9783f0d5e13e922d823ca8221 Books required handoff method",
+    "bd0a2a7a91b2db18301ae7b7e8fd5adcfec5879e shared helper/Turns/preflight",
+    "e4e1df2e1b6f35b91fde97b03d45e4f2ae0bfd57 durable source/reference serialization"
+  ],
+  "behavior": "SAME Node Books owner, canonical conflict_ids normalization, Pool configuration [] then Box full-P turns and existing attachment turns; SAME Native callbacks and recorded::handoff_transaction; preflight_handoff_turns held through each current adapter preflight. No allocation/Box transaction owner/table added.",
+  "preserved": [
+    "Root constructor/render/catalog/RPC/normalized routes",
+    "d085 Supervisor exact source",
+    "cfb CPU source lineage untouched; integrate named hunk only"
+  ],
+  "pending": "Actual adapter two-borrow no-Intent proofs and subset Catalog/FC/Index consumers are a separate subsequent source increment; this checkpoint is not handoff completion.",
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compiler": "UNRUN",
+    "tests": "UNRUN",
+    "native_effects": 0,
+    "dispatches": 0
+  },
+  "readback": "Full fixed-fb19 Hex CLAUDE was read; exact same 29b87847405b3e9141c0c3a4475825c803e0297c blob at502dc. All Shards/charter/brief current instructions read; no new hold required."
+}

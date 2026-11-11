@@ -1,0 +1,70 @@
+{
+  "bytes": 386701,
+  "sha256": "52105c361b4a774657730f50db2ca37f90e229048f1182e15ec33d6dd57cbaa7",
+  "members": {
+    "cohort-1233804b-linux-vendor-1233-linux/source-before.json": {
+      "bytes": 633931,
+      "sha256": "f512fa23511393456e13b861290837f83526796ab52df62f8433003ed3accdfd"
+    },
+    "cohort-1233804b-linux-vendor-1233-linux/owned-scope-limits.json": {
+      "bytes": 254,
+      "sha256": "5cacce6610b7d04f4be02b43f9324620d1d1b0889b126863e60a3d242fd4eba5"
+    },
+    "cohort-1233804b-linux-vendor-1233-linux/vendor.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "cohort-1233804b-linux-vendor-1233-linux/vendor.stderr": {
+      "bytes": 547,
+      "sha256": "4110824741df5a27dc543239464e95733d9d653e035cbea2e39be688779284f5"
+    },
+    "cohort-1233804b-linux-vendor-1233-linux/source-after.json": {
+      "bytes": 633931,
+      "sha256": "f512fa23511393456e13b861290837f83526796ab52df62f8433003ed3accdfd"
+    },
+    "cohort-1233804b-linux-vendor-1233-linux/result.json": {
+      "bytes": 1477,
+      "sha256": "d06698c55e9e90d11ae95d3f8f206e1ccd68d821a2da7146c9526f931eb4d1e1"
+    },
+    "cohort-1233804b-linux-vendor-1233-linux/event-evidence/journal.jsonl": {
+      "bytes": 366,
+      "sha256": "c7dfe3625ae9ebfa6b9c247c0fac64778c2ff36a5e3ed7dd95930435eed3ad34"
+    },
+    "outer-closures.json": {
+      "bytes": 690,
+      "sha256": "a9929d10c03a5c1ac243b943146f9c6991f99c5b8e67426386dbacd5967d13a2"
+    }
+  },
+  "closures": {
+    "cohort-1233804b-linux-vendor-1233-linux": {
+      "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-vendor-1233-linux.scope",
+      "scope_absent": true,
+      "owners": [
+        {
+          "kind": "driver",
+          "recorded": {
+            "pid": 2033047,
+            "ppid": 2032988,
+            "start_ticks": 32868495
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        },
+        {
+          "kind": "phase:vendor-source-consistency",
+          "recorded": {
+            "pid": 2042204,
+            "ppid": 2033047,
+            "start_ticks": 32868704
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        }
+      ]
+    }
+  },
+  "collector_exit": 0,
+  "collector_reaped": true,
+  "all_members_verified": true,
+  "source_archives_verified": true
+}

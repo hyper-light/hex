@@ -1,0 +1,60 @@
+{
+  "schema": "hex-native-fc-alternate-host-identity-v1",
+  "classification": "Strong independent-host evidence from existing contemporaneous nonprivileged queries; no DMI/firmware attestation",
+  "existing_receipts": [
+    {
+      "source_path": "/Users/adalundhe/.cache/kiln-lb/notes/katran-study/runner-physical-comparison.json",
+      "bytes": 2052,
+      "sha256": "2c18512fa80186dafe1302f2caebb333899ddcdef1062ca94c2c66799633ae2c",
+      "receipt": {
+        "451397fcc585f7f7cb9aaf00e42064bb": {
+          "cli_exit": 0,
+          "stdout": "{\"kernel\": \"7.2.9-2-cachyos\", \"arch\": \"x86_64\", \"logical_cpus\": 32, \"system_vendor\": \"ASUS\", \"product_name\": \"System Product Name\", \"board_vendor\": \"ASUSTeK COMPUTER INC.\", \"board_name\": \"ROG STRIX X870E-E GAMING WIFI7 NEO\", \"dmi_product_uuid_sha256\": null, \"machine_id_sha256\": \"098e190424c5fb1a95d09e15e2edf8013a5d3f57062773bc881b7ee0113ce449\", \"boot_id_sha256\": \"b888bfd52a5b1b9951490ebcfbc5f5689ccd0c2eca554e01624606bc2b9741a5\", \"cpu_model\": \"AMD Ryzen 9 9950X3D2 16-Core Processor\", \"hypervisor_flag\": false, \"mem_total_kib\": 128893460}\n",
+          "stderr": "\u001b[2m[kiln] on 451397fcc585f7f7cb9aaf00e42064bb \u00b7 linux/x86_64 \u00b7 22 of 32 cores idle \u00b7 95 GB free \u00b7 room for 1 CPU, 1 GiB of memory \u00b7 memory pressure 0% \u00b7 I/O pressure 19%\u001b[0m\n\u001b[2m[kiln] used memory not measured, 23 ms of CPU (counted by the system, 1.192 CPUs on average) over 20 ms; OOM kills not seen here\u001b[0m\n"
+        },
+        "00aad8daff2fa3c9daa65d53c425d450": {
+          "cli_exit": 0,
+          "stdout": "{\"kernel\": \"7.3.3-1-cachyos\", \"arch\": \"x86_64\", \"logical_cpus\": 32, \"system_vendor\": \"ASUS\", \"product_name\": \"System Product Name\", \"board_vendor\": \"ASUSTeK COMPUTER INC.\", \"board_name\": \"ROG STRIX X870E-E GAMING WIFI7 NEO\", \"dmi_product_uuid_sha256\": null, \"machine_id_sha256\": \"01685e36c9b6fe2c3c404901afcda9424fa6584dd26fa2538fc6c132ed6cbc83\", \"boot_id_sha256\": \"ae706cbc121308f52559c8c10e39cb341150db40f67122683f33899bcdd37a71\", \"cpu_model\": \"AMD Ryzen 9 9950X3D2 16-Core Processor\", \"hypervisor_flag\": false, \"mem_total_kib\": 62831872}\n",
+          "stderr": "\u001b[2m[kiln] on 00aad8daff2fa3c9daa65d53c425d450 \u00b7 linux/x86_64 \u00b7 27 of 32 cores idle \u00b7 48 GB free \u00b7 room for 1 CPU, 1 GiB of memory\u001b[0m\n\u001b[2m[kiln] used memory not measured, 15 ms of CPU (counted by the system, 1.081 CPUs on average) over 14 ms; OOM kills not seen here\u001b[0m\n"
+        }
+      }
+    },
+    {
+      "source_path": "/Users/adalundhe/.cache/kiln-lb/notes/katran-study/runner-hardware-net-comparison.json",
+      "bytes": 2159,
+      "sha256": "4ca312f4bf7480cd346fbe3dfb28b0631357b7d11123013d957e6e51d1152348",
+      "receipt": {
+        "451397fcc585f7f7cb9aaf00e42064bb": {
+          "exit": 0,
+          "stdout": "{\"hardware_network_fingerprints\": [{\"device_bus_path\": \"0000:09:00.0\", \"device_vendor\": \"0x10ec\", \"device_id\": \"0x8126\", \"address_assignment_type\": \"0\", \"address_sha256\": \"1adcabc363f4ae57b587b794371052c1346e2eea2c11700303f8e332fcb9b021\"}, {\"device_bus_path\": \"0000:08:00.0\", \"device_vendor\": \"0x14c3\", \"device_id\": \"0x6639\", \"address_assignment_type\": \"3\", \"address_sha256\": \"8052647104d92f61a47bef0a73efd6d0301d77e9c989ebb090d93727ae91688b\"}], \"limit\": \"Read-only nonprivileged evidence. DMI UUID/serial not requested with elevation; hidden virtualization cannot be excluded by this snapshot.\"}\n",
+          "stderr": "\u001b[2m[kiln] on 451397fcc585f7f7cb9aaf00e42064bb \u00b7 linux/x86_64 \u00b7 22 of 32 cores idle \u00b7 95 GB free \u00b7 room for 1 CPU, 1 GiB of memory \u00b7 memory pressure 0% \u00b7 I/O pressure 19%\u001b[0m\n\u001b[2m[kiln] used memory not measured, 20 ms of CPU (counted by the system, 1.133 CPUs on average) over 18 ms; OOM kills not seen here\u001b[0m\n"
+        },
+        "00aad8daff2fa3c9daa65d53c425d450": {
+          "exit": 0,
+          "stdout": "{\"hardware_network_fingerprints\": [{\"device_bus_path\": \"0000:09:00.0\", \"device_vendor\": \"0x10ec\", \"device_id\": \"0x8126\", \"address_assignment_type\": \"0\", \"address_sha256\": \"fe3f8dcb65841d565e54d7462f3c190048dab2cdb6d5cdbdd93048bbf2674f92\"}, {\"device_bus_path\": \"0000:08:00.0\", \"device_vendor\": \"0x14c3\", \"device_id\": \"0x7927\", \"address_assignment_type\": \"3\", \"address_sha256\": \"3b43cbd5a9889a7fcd1a3ff8091a5c29a873530bc090108a4bdf1f925d56ebdf\"}], \"limit\": \"Read-only nonprivileged evidence. DMI UUID/serial not requested with elevation; hidden virtualization cannot be excluded by this snapshot.\"}\n",
+          "stderr": "\u001b[2m[kiln] on 00aad8daff2fa3c9daa65d53c425d450 \u00b7 linux/x86_64 \u00b7 27 of 32 cores idle \u00b7 48 GB free \u00b7 room for 1 CPU, 1 GiB of memory\u001b[0m\n\u001b[2m[kiln] used memory not measured, 15 ms of CPU (counted by the system, 1.064 CPUs on average) over 15 ms; OOM kills not seen here\u001b[0m\n"
+        }
+      }
+    },
+    {
+      "source_path": "/Users/adalundhe/.cache/kiln-lb/notes/katran-study/runner-physical-comparison-manifest.json",
+      "bytes": 380,
+      "sha256": "63f74e28272399004f01cf0a1d308d99e1003db703058cbc2fc44748f0cb8452",
+      "receipt": {
+        "files": {
+          "runner-physical-comparison.json": "2c18512fa80186dafe1302f2caebb333899ddcdef1062ca94c2c66799633ae2c",
+          "runner-hardware-net-comparison.json": "4ca312f4bf7480cd346fbe3dfb28b0631357b7d11123013d957e6e51d1152348"
+        },
+        "classification": "Strong independent-host evidence from contemporaneous nonprivileged queries; not a firmware/physical-host attestation."
+      }
+    }
+  ],
+  "no_451_commands_in_this_lane": true,
+  "basis": [
+    "different machine and boot ID hashes",
+    "different permanent wired NIC fingerprint hashes",
+    "different physical memory totals and WiFi PCI device IDs",
+    "own00aad probe corroborates its hashes"
+  ],
+  "limit": "DMI UUID/serial denied and hidden virtualization cannot be cryptographically excluded; no elevated read/rebind/service/security changes attempted"
+}

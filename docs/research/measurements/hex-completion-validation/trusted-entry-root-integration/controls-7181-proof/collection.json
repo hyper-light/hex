@@ -1,0 +1,102 @@
+{
+  "bytes": 387138,
+  "sha256": "8a9e61278a4f25e1c297e87702d3d57bb673b8efe0cea88d397d89aaaf1a3cb0",
+  "members": {
+    "cohort-718105e7-mac-trusted-entry-7181-mac/entry-feature-strict.log": {
+      "bytes": 3900,
+      "sha256": "c108a0afd01465e91465bb8b3a02b1e6241534978f5005ac637178096ac00263"
+    },
+    "cohort-718105e7-mac-trusted-entry-7181-mac/running.json": {
+      "bytes": 3944,
+      "sha256": "6528424a0a36f0ae2b0b66340a7798e944c7333c9bae03d30339cf06d6dfaecf"
+    },
+    "cohort-718105e7-mac-trusted-entry-7181-mac/result.json": {
+      "bytes": 4061,
+      "sha256": "032c2056be2a54ffdcd8ed88518958cae0ac41ea61d66e97e0e7a717367dcdfa"
+    },
+    "cohort-718105e7-mac-trusted-entry-7181-mac/source-before.json": {
+      "bytes": 630507,
+      "sha256": "c2bc5c1bfbd1fadf67b8794856daddc48d7557ca458d474e52e63784ab852d67"
+    },
+    "cohort-718105e7-mac-trusted-entry-7181-mac/source-after.json": {
+      "bytes": 630507,
+      "sha256": "c2bc5c1bfbd1fadf67b8794856daddc48d7557ca458d474e52e63784ab852d67"
+    },
+    "cohort-718105e7-mac-trusted-entry-7181-mac/native-component-pure3.log": {
+      "bytes": 3303,
+      "sha256": "9d7114f19ec9c6ab16b0f17b51469ffeb109a2057d0122da2d2c73bb017c3cbf"
+    },
+    "cohort-718105e7-mac-trusted-entry-7181-mac/entry-caller-pure5.log": {
+      "bytes": 1459,
+      "sha256": "ee592e74af05fdd0ad6383f0f66c444a322ba8f87e3bbb3d37ee5e571053c38a"
+    },
+    "cohort-718105e7-mac-trusted-entry-7181-mac/public-registry-seed.json": {
+      "bytes": 31631,
+      "sha256": "c2c12e92138b859cf684cf74f9b15857b52e71a5ad84b7124060e8b56e2bb71c"
+    },
+    "outer-closures.json": {
+      "bytes": 1265,
+      "sha256": "69d049388670b14b94dc783118d7d6de1568997fd8caf14f31c33519c7c980e8"
+    }
+  },
+  "closures": {
+    "cohort-718105e7-mac-trusted-entry-7181-mac": {
+      "owners": [
+        {
+          "kind": "driver",
+          "pid": 34679,
+          "pid_absent": true,
+          "query_exit": 1,
+          "observed": "",
+          "error": ""
+        },
+        {
+          "kind": "phase:entry-feature-strict",
+          "pid": 35419,
+          "pid_absent": true,
+          "query_exit": 1,
+          "observed": "",
+          "error": ""
+        },
+        {
+          "kind": "phase:native-component-pure3",
+          "pid": 35813,
+          "pid_absent": true,
+          "query_exit": 1,
+          "observed": "",
+          "error": ""
+        },
+        {
+          "kind": "phase:entry-caller-pure5",
+          "pid": 35890,
+          "pid_absent": true,
+          "query_exit": 1,
+          "observed": "",
+          "error": ""
+        }
+      ],
+      "groups": [
+        {
+          "phase": "entry-feature-strict",
+          "pgid": 35419,
+          "group_absent": true
+        },
+        {
+          "phase": "native-component-pure3",
+          "pgid": 35813,
+          "group_absent": true
+        },
+        {
+          "phase": "entry-caller-pure5",
+          "pgid": 35890,
+          "group_absent": true
+        }
+      ],
+      "scope_note": "Mac admitted build has no Linux hard Scope; exact owned Popen groups queried, no whole nativeScope proof"
+    }
+  },
+  "collector_exit": 0,
+  "collector_reaped": true,
+  "all_members_verified": true,
+  "source_archives_verified": true
+}

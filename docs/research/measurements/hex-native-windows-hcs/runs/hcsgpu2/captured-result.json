@@ -1,0 +1,232 @@
+{
+  "kind": "independent selected-only HCS execution/recovery; corrected fixture build, CPU sibling still unverified",
+  "origin": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1",
+  "origin_result_sha256": "92b3df3ef50c7f8295c9c3f92c2154098b2ac288dc5410b44fd78b6f287d2dcc",
+  "source_revision": "985d7767232780f74ac95b2e2aa966130730b34d",
+  "source_archive_sha256": "a46ce6594ef3845316a081a136b3388858520b96702fc1603d7fa725a3081e66",
+  "source_manifest_before_sha256": "33aaeb056dd0c96594f384882ba47b65110d4e8da98cca81113b3813f128e5a7",
+  "artifact": {
+    "reason": "compiler-artifact",
+    "package_id": "path+file:///C:/Users/corph/.cache/hex-native-windows-hcs/hcsfixed1/source/crates/hex-cli#0.1.0",
+    "manifest_path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\source\\crates\\hex-cli\\Cargo.toml",
+    "target": {
+      "kind": [
+        "test"
+      ],
+      "crate_types": [
+        "bin"
+      ],
+      "name": "native_windows_hcs_compute",
+      "src_path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\source\\crates\\hex-cli\\tests\\native_windows_hcs_compute.rs",
+      "edition": "2024",
+      "doc": false,
+      "doctest": false,
+      "test": true
+    },
+    "profile": {
+      "opt_level": "3",
+      "debuginfo": 0,
+      "debug_assertions": true,
+      "overflow_checks": true,
+      "test": true
+    },
+    "features": [],
+    "filenames": [
+      "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\target\\debug\\deps\\native_windows_hcs_compute-8fdebf7e9f818e5d.exe",
+      "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\target\\debug\\deps\\native_windows_hcs_compute-8fdebf7e9f818e5d.pdb"
+    ],
+    "executable": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\target\\debug\\deps\\native_windows_hcs_compute-8fdebf7e9f818e5d.exe",
+    "fresh": false
+  },
+  "binary": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\target\\debug\\deps\\native_windows_hcs_compute-8fdebf7e9f818e5d.exe",
+  "binary_canonical": "\\\\?\\C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\target\\debug\\deps\\native_windows_hcs_compute-8fdebf7e9f818e5d.exe",
+  "binary_sha256": "aaef9dedc0cda720e635dccd6ada7e0d79bc1c7868930f76d6f965d9b999abcf",
+  "needs": "cpus=1,mem=4g,disk=12g",
+  "policy_current_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "policy_byte_equality_sha256": "6a658eef10e8802ed3d73ca09e5f5acf63b5f5c767c27196d429d73fba739388",
+  "phases": [
+    {
+      "guard": {
+        "pid": 17212,
+        "exitCode": 0,
+        "activeAfter": 0,
+        "activeBeforeCleanup": 0,
+        "processes": 3,
+        "terminated": 0,
+        "residualsTerminated": false,
+        "timedOut": false,
+        "reaped": true,
+        "peakJobMemory": 9252864,
+        "user100ns": 312500,
+        "kernel100ns": 0
+      },
+      "name": "DOS-alias-load-and-exact-test-list",
+      "stdout_sha256": "91b198f880ef198bcb77436349979866a5f00e6f41b86b2e317510708b66013b",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "interface": "\\\\?\\PCI#VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1#4&35fe04f8&0&0041#{1ca05180-a699-450a-9a0c-de4fbe3ddd89}",
+      "guard": {
+        "pid": 14384,
+        "exitCode": 101,
+        "activeAfter": 0,
+        "activeBeforeCleanup": 1,
+        "processes": 5,
+        "terminated": 0,
+        "residualsTerminated": false,
+        "timedOut": false,
+        "reaped": true,
+        "peakJobMemory": 12111872,
+        "user100ns": 468750,
+        "kernel100ns": 468750
+      },
+      "stderr_sha256": "c53cd11b31d0b45e3838a9673834997f4998fbd74673030ded0bb1eff17a4bef",
+      "name": "hcs-selected-only-compute-exclusion-recovery",
+      "command": [
+        "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\target\\debug\\deps\\native_windows_hcs_compute-8fdebf7e9f818e5d.exe",
+        "--ignored",
+        "--exact",
+        "native_windows_hcs_selected_compute_without_cpu_precondition",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "stdout_sha256": "6357f4e95f19377e99bc231870b61b60a34ebc705892480c9f71e214868566b7",
+      "luid": "0000000000014c4d",
+      "caller_wait_ms": 5000
+    }
+  ],
+  "native_tests": 1,
+  "boot": "2026-11-11T03:04:32.5000000Z",
+  "launcher_artifact": {
+    "reason": "compiler-artifact",
+    "package_id": "path+file:///C:/Users/corph/.cache/hex-native-windows-hcs/hcsfixed1/source/crates/hex-cli#0.1.0",
+    "manifest_path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\source\\crates\\hex-cli\\Cargo.toml",
+    "target": {
+      "kind": [
+        "bin"
+      ],
+      "crate_types": [
+        "bin"
+      ],
+      "name": "hex",
+      "src_path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\source\\crates\\hex-cli\\src\\main.rs",
+      "edition": "2024",
+      "doc": true,
+      "doctest": false,
+      "test": true
+    },
+    "profile": {
+      "opt_level": "3",
+      "debuginfo": 0,
+      "debug_assertions": true,
+      "overflow_checks": true,
+      "test": false
+    },
+    "features": [],
+    "filenames": [
+      "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\target\\debug\\hex.exe",
+      "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\target\\debug\\hex.pdb"
+    ],
+    "executable": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsfixed1\\target\\debug\\hex.exe",
+    "fresh": false
+  },
+  "launcher_sha256": "cb6e9f0f72bb31bb33d774b019ad3bb8eed3d0621db8787fc36f6dae97be8828",
+  "cpu_negative_and_sibling": "UNVERIFIED: separate selected-only case does not execute these controls",
+  "image_receipt_sha256": "7ea4fec0d58399004a02737b2b47e59bf32ece71fbf44c0f670d084601d2e57d",
+  "full_image_reference": "mcr.microsoft.com/windows/server@sha256:a62109569303cfe0ab49b1618383615f0477cdc285529b98d9b7085902d0e745",
+  "layer_inputs": [
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1"
+  ],
+  "full_image_dlls": [
+    {
+      "name": "ntdll.dll",
+      "files": [
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3\\Files\\Windows\\System32\\ntdll.dll",
+          "sha256": "4092c01cb70e15a956d76ca43366a6e324f1154eab7bf7636fe13236215c578a",
+          "bytes": 2541688
+        },
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\Files\\Windows\\System32\\ntdll.dll",
+          "sha256": "cfb1a39a15036ee71daa52e428523c9e7bf83d85bb1b2f0a268d05c3b5392bdd",
+          "bytes": 2521984
+        }
+      ],
+      "present": true
+    },
+    {
+      "name": "gdi32.dll",
+      "files": [
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3\\Files\\Windows\\System32\\gdi32.dll",
+          "sha256": "ec840fa35631a34affe27e684f05db59ea152eb8f251058583e1f67ea2b0e767",
+          "bytes": 187456
+        },
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\Files\\Windows\\System32\\gdi32.dll",
+          "sha256": "dcb0e1ac8e4af783b906a8964471edfd53cdd216ff0daf893aa747009fb97e5a",
+          "bytes": 187392
+        }
+      ],
+      "present": true
+    },
+    {
+      "name": "dxgi.dll",
+      "files": [
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3\\Files\\Windows\\System32\\dxgi.dll",
+          "sha256": "3af979063569dac5a1609df7c55af28ae0a1b18221a56703690bec9037060c0f",
+          "bytes": 1316248
+        },
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\Files\\Windows\\System32\\dxgi.dll",
+          "sha256": "a5910a19cb0dc99b411bab8bcc6a3083675eca770feb108cf142fd2d7e1dace5",
+          "bytes": 1294752
+        }
+      ],
+      "present": true
+    },
+    {
+      "name": "d3d12.dll",
+      "files": [
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3\\Files\\Windows\\System32\\d3d12.dll",
+          "sha256": "038c378615f358b07b43f23b9a1d8f99925331be398ba6adbc25d82759aae8dd",
+          "bytes": 157544
+        },
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\Files\\Windows\\System32\\d3d12.dll",
+          "sha256": "2f19adf6ee6ae40c41524499cec619429fa9aa5d720c4123a2c8f1ef97ac53a9",
+          "bytes": 146080
+        }
+      ],
+      "present": true
+    },
+    {
+      "name": "d3dcompiler_47.dll",
+      "files": [
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\3\\Files\\Windows\\System32\\d3dcompiler_47.dll",
+          "sha256": "1c060a8b8c3c6ef3b9a7434ac767fff4d0d880d0b33c1e7a60acdd750df44c74",
+          "bytes": 4669440
+        },
+        {
+          "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\Files\\Windows\\System32\\d3dcompiler_47.dll",
+          "sha256": "5e2d8dd8c833cdfaeee031ed04638e981198bb35ed6c4469bd53fbe24538a91b",
+          "bytes": 4669440
+        }
+      ],
+      "present": true
+    }
+  ],
+  "original_image_controller_error_preserved": "exact pinned two-layer image not established\r\nAt C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\image-cached-controller-v3\\body.ps1:114 char:26\r\n+ ... rs.Count -ne 2){throw 'exact pinned two-layer image not established'}\r\n+                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : OperationStopped: (exact pinned tw...not established:String) [], RuntimeException\r\n    + FullyQualifiedErrorId : exact pinned two-layer image not established\r\n \r\n",
+  "catalog_sha256": "2fc85b24827d10592bbd9e30446c790ebdd5729b7a41268a285ee640164c6347",
+  "compute_binary_sha256": "4fdd12df17fbf9e97b8be3ea68fb22344294cbe2f71c8f36de14c8a94034f6e9",
+  "hcs_fixture_sha256": "ba68c1de4555a2efc7bf2014d7affb6c4b5eda766916eed0b60152e8ef57fa0a",
+  "hcs_gpu_execution": "selected-only case dispatched with actual native provider; CPU negative/sibling not run and remain UNVERIFIED",
+  "source_unchanged_after_native": true,
+  "temp_entries": 0,
+  "exit_code": 1
+}

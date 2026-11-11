@@ -1,0 +1,74 @@
+{
+  "cohort-aaca22b9-linux-linux-matrix3-aaca": {
+    "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-linux-matrix3-aaca-v1.scope",
+    "scope_absent": true,
+    "owners": [
+      {
+        "kind": "driver",
+        "recorded": {
+          "pid": 3707136,
+          "ppid": 3707043,
+          "start_ticks": 32603205
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      },
+      {
+        "kind": "cargo",
+        "recorded": {
+          "pid": 3710850,
+          "ppid": 3707136,
+          "start_ticks": 32603448
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      }
+    ]
+  },
+  "cohort-aaca22b9-linux-linux-matrix3-aaca-v2": {
+    "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-linux-matrix3-aaca-v2.scope",
+    "scope_absent": true,
+    "owners": [
+      {
+        "kind": "driver",
+        "recorded": {
+          "pid": 50899,
+          "ppid": 50811,
+          "start_ticks": 32637354
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      },
+      {
+        "kind": "cargo",
+        "recorded": {
+          "pid": 54258,
+          "ppid": 50899,
+          "start_ticks": 32637574
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      },
+      {
+        "kind": "cargo",
+        "recorded": {
+          "pid": 131206,
+          "ppid": 50899,
+          "start_ticks": 32642500
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      },
+      {
+        "kind": "cargo",
+        "recorded": {
+          "pid": 194478,
+          "ppid": 50899,
+          "start_ticks": 32646603
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      }
+    ]
+  }
+}

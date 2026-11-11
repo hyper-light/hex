@@ -12,24 +12,30 @@
 
 use std::io;
 use std::mem::{size_of, zeroed};
-use std::os::windows::io::{AsRawHandle, OwnedHandle};
+use std::os::windows::io::{
+    AsHandle, AsRawHandle, AsRawSocket, BorrowedHandle, BorrowedSocket, OwnedHandle,
+};
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle,
-    ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_NOT_ENOUGH_QUOTA, FILETIME,
-    GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, CompareObjectHandles, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS,
+    DuplicateHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA,
+    ERROR_NOT_ENOUGH_QUOTA, FILETIME, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
+    INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
+use windows_sys::Win32::Networking::WinSock::{
+    INVALID_SOCKET, POLLERR, POLLHUP, POLLNVAL, POLLRDNORM, SOCKET, SOCKET_ERROR, WSAEINTR,
+    WSAGetLastError, WSAPOLLFD, WSAPoll,
 };
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
     JOB_OBJECT_CPU_RATE_CONTROL_WEIGHT_BASED, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAndIoAccountingInformation,
-    JobObjectBasicProcessIdList, JobObjectCpuRateControlInformation,
-    JobObjectExtendedLimitInformation, OpenJobObjectW, QueryInformationJobObject,
-    SetInformationJobObject, TerminateJobObject,
+    JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION, JOBOBJECT_BASIC_PROCESS_ID_LIST,
+    JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicAndIoAccountingInformation, JobObjectBasicProcessIdList,
+    JobObjectCpuRateControlInformation, JobObjectExtendedLimitInformation, OpenJobObjectW,
+    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
     ALL_PROCESSOR_GROUPS, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
@@ -37,9 +43,9 @@ use windows_sys::Win32::System::Threading::{
     GetActiveProcessorCount, GetCurrentProcess, GetExitCodeProcess, GetProcessTimes,
     InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess,
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_DUP_HANDLE,
-    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, ResumeThread,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, SetEvent, TerminateProcess,
-    WaitForSingleObject,
+    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, ResetEvent,
+    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, SetEvent, TerminateProcess,
+    WaitForMultipleObjects, WaitForSingleObject,
 };
 
 use hex_core::job::Cpu;
@@ -262,6 +268,141 @@ impl Drop for Handle {
     }
 }
 
+/// Only this private duplicate is inheritable. The caller's original writer flags never change.
+pub(crate) struct InheritedHandle(Handle);
+
+impl AsHandle for InheritedHandle {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        self.0.borrowed()
+    }
+}
+
+pub(crate) fn inheritable_copy(source: BorrowedHandle<'_>) -> io::Result<InheritedHandle> {
+    let mut copied: HANDLE = null_mut();
+    // SAFETY: source is borrowed alive for this call; the current-process pseudo handles are
+    // documented DuplicateHandle arguments. Only the new same-access copy is made inheritable.
+    if unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            source.as_raw_handle(),
+            GetCurrentProcess(),
+            &raw mut copied,
+            0,
+            1,
+            DUPLICATE_SAME_ACCESS,
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    if copied.is_null() || copied == INVALID_HANDLE_VALUE {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    // SAFETY: successful DuplicateHandle returned the unique copy owned by this process.
+    Ok(InheritedHandle(unsafe { Handle::own(copied) }))
+}
+
+fn pair_timeout(left: std::time::Duration) -> io::Result<i32> {
+    // WSAPoll accepts signed milliseconds: round a positive fractional millisecond up, then cap
+    // at the native finite width. The caller rechecks its SAME absolute deadline after each wait.
+    let fractional = !left.subsec_nanos().is_multiple_of(1_000_000);
+    let millis = left
+        .as_millis()
+        .checked_add(u128::from(fractional))
+        .ok_or(io::ErrorKind::InvalidInput)?;
+    let maximum = u128::try_from(i32::MAX).map_err(|_| io::ErrorKind::InvalidInput)?;
+    i32::try_from(millis.min(maximum)).map_err(|_| io::ErrorKind::InvalidInput.into())
+}
+
+/// Wait for the caller's active endpoints in its exact two-socket observer. None omits a completed
+/// stream entirely from the native wait. No data is consumed, physical socket
+/// mode/timeout changed, handle duplicated or asynchronous I/O left pending. HUP/ERR is read-ready
+/// so the same caller observes its actual EOF/error; neither is a whole-scope termination fact.
+pub fn readable_pair(
+    sockets: [Option<BorrowedSocket<'_>>; 2],
+    patience: std::time::Duration,
+) -> io::Result<[bool; 2]> {
+    if patience == std::time::Duration::MAX {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let deadline = std::time::Instant::now()
+        .checked_add(patience)
+        .ok_or(io::ErrorKind::InvalidInput)?;
+    let mut descriptors = [WSAPOLLFD {
+        fd: INVALID_SOCKET,
+        events: POLLRDNORM,
+        revents: 0,
+    }; 2];
+    let mut positions = [0usize; 2];
+    let mut count = 0usize;
+    for (position, socket) in sockets.into_iter().enumerate() {
+        let Some(socket) = socket else {
+            continue;
+        };
+        let raw =
+            SOCKET::try_from(socket.as_raw_socket()).map_err(|_| io::ErrorKind::InvalidInput)?;
+        if raw == INVALID_SOCKET || descriptors.iter().any(|descriptor| descriptor.fd == raw) {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        descriptors
+            .get_mut(count)
+            .ok_or(io::ErrorKind::InvalidInput)?
+            .fd = raw;
+        *positions
+            .get_mut(count)
+            .ok_or(io::ErrorKind::InvalidInput)? = position;
+        count = count.checked_add(1).ok_or(io::ErrorKind::InvalidInput)?;
+    }
+    if count == 0 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let native_count = u32::try_from(count).map_err(|_| io::ErrorKind::InvalidInput)?;
+    let mut initial = true;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if !initial && left.is_zero() {
+            return Ok([false; 2]);
+        }
+        initial = false;
+        let timeout = pair_timeout(left)?;
+        for descriptor in &mut descriptors {
+            descriptor.revents = 0;
+        }
+        // SAFETY: exactly native_count initialized WSAPOLLFD records are writable on this stack; active
+        // borrowed live sockets outlast the call. timeout is nonnegative/finite, never INFINITE.
+        let returned = unsafe { WSAPoll(descriptors.as_mut_ptr(), native_count, timeout) };
+        if returned == SOCKET_ERROR {
+            // SAFETY: capture this thread's Winsock error immediately after the failed WSAPoll.
+            let code = unsafe { WSAGetLastError() };
+            if code == WSAEINTR {
+                continue;
+            }
+            return Err(io::Error::from_raw_os_error(code));
+        }
+        if returned == 0 {
+            continue;
+        }
+        if returned < 0
+            || u32::try_from(returned).map_err(|_| io::ErrorKind::InvalidData)? > native_count
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let mask = POLLRDNORM | POLLHUP | POLLERR;
+        let mut ready = [false; 2];
+        for (descriptor, position) in descriptors.iter().zip(positions).take(count) {
+            if descriptor.revents & POLLNVAL != 0 {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            *ready.get_mut(position).ok_or(io::ErrorKind::InvalidData)? =
+                descriptor.revents & mask != 0;
+        }
+        if ready == [false; 2] {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        return Ok(ready);
+    }
+}
+
 /// A member started suspended in its box's job.
 pub struct Started {
     pub process: Handle,
@@ -301,6 +442,23 @@ const JOB_RIGHTS: u32 = 0x0001 | 0x0002 | 0x0004 | 0x0008;
 /// handle is closed on drop; with kill-on-close set, that ends every process still in the job.
 pub struct Job(Handle);
 
+fn job_name_wide(name: &str) -> io::Result<Vec<u16>> {
+    if name.is_empty() || name.contains('\0') {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    let units = name
+        .encode_utf16()
+        .count()
+        .checked_add(1)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
+    let mut wide = Vec::new();
+    wide.try_reserve_exact(units)
+        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+    wide.extend(name.encode_utf16());
+    wide.push(0);
+    Ok(wide)
+}
+
 impl Job {
     /// A new, empty job object.
     pub fn create() -> io::Result<Job> {
@@ -318,7 +476,7 @@ impl Job {
     /// creator's default: this user and SYSTEM. One of that name held already is refused
     /// (`ERROR_ALREADY_EXISTS`): it is a box a node made before, which [`Job::open`] takes back.
     pub fn create_named(name: &str) -> io::Result<Job> {
-        let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        let wide = job_name_wide(name)?;
         // SAFETY: null attributes; `wide` is a NUL-terminated name alive for the call. The handle returned
         // (to a new job, or to one of that name already, which GetLastError then says) is owned below.
         let h = unsafe { CreateJobObjectW(null(), wide.as_ptr()) };
@@ -329,10 +487,9 @@ impl Job {
         // SAFETY: h is a job handle this call returned, owned from here, closed as the value drops.
         let job = Job(unsafe { Handle::own(h) });
         if existed {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("a job named {name} is held already: a box a node made before"),
-            ));
+            let code = i32::try_from(ERROR_ALREADY_EXISTS)
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+            return Err(io::Error::from_raw_os_error(code));
         }
         Ok(job)
     }
@@ -341,7 +498,7 @@ impl Job {
     /// no job holds the name (the box's members all ended and its last handle closed, or the machine
     /// restarted).
     pub fn open(name: &str) -> io::Result<Option<Job>> {
-        let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        let wide = job_name_wide(name)?;
         // SAFETY: `wide` is a NUL-terminated name alive for the call; not inherited. The handle returned
         // is owned below.
         let h = unsafe { OpenJobObjectW(JOB_RIGHTS, 0, wide.as_ptr()) };
@@ -460,39 +617,57 @@ impl Job {
     /// (`an_ended_member_whose_handle_is_held_leaves_the_id_list`, run on jupiter), so a box whose member
     /// has exited reads as empty. The job's accounting `ActiveProcesses` is not used.
     pub fn live_processes(&self) -> io::Result<u64> {
-        let header = size_of::<u32>().saturating_mul(2);
-        self.assigned_processes(header.saturating_add(size_of::<usize>()))
-            .map(u64::from)
+        self.process_list()
+            .map(|list| u64::from(list.NumberOfAssignedProcesses))
     }
 
-    /// One read of the job's process id list into a buffer of `len` bytes, for its
-    /// `NumberOfAssignedProcesses`. `ERROR_MORE_DATA` (the ids don't all fit) still fills it in.
-    fn assigned_processes(&self, len: usize) -> io::Result<u32> {
+    /// An event to wait on for this same nested scope, or positive emptiness. A recycled snapshot
+    /// PID is checked against the held job before its observation handle can be used.
+    pub(crate) fn member(&self) -> io::Result<Member> {
+        let list = self.process_list()?;
+        if list.NumberOfAssignedProcesses == 0 {
+            return Ok(Member::Empty);
+        }
+        let pid = list
+            .ProcessIdList
+            .first()
+            .copied()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .filter(|pid| *pid != 0 && list.NumberOfProcessIdsInList != 0)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+        let process =
+            process_with_rights(pid, PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION)?;
+        if !super::oci::sys::in_job(&process, self.borrowed())? {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock));
+        }
+        Ok(Member::Process(process))
+    }
+
+    fn process_list(&self) -> io::Result<JOBOBJECT_BASIC_PROCESS_ID_LIST> {
         #[cfg(test)]
         tests::ID_LIST_READS.with(|n| n.set(n.get() + 1));
-        // usize-aligned, as the list's ids are; the count is its first 4 bytes.
-        let mut buf = vec![0usize; len.div_ceil(size_of::<usize>())];
-        let bytes = u32::try_from(buf.len().saturating_mul(size_of::<usize>()))
-            .map_err(|_| io::Error::other("a job's process id list past 4 GiB"))?;
-        // SAFETY: QueryInformationJobObject writes at most `bytes` bytes into `buf`, alive and that long
-        // for the call, for the job self owns; the class names the structure, whose header is two u32s.
+        let mut list: JOBOBJECT_BASIC_PROCESS_ID_LIST = zeroed_struct();
+        let bytes = u32::try_from(size_of::<JOBOBJECT_BASIC_PROCESS_ID_LIST>())
+            .map_err(|_| io::Error::other("a job's process list header exceeds a DWORD"))?;
+        // SAFETY: the SDK structure has room for one ULONG_PTR and is alive for this bounded
+        // query. NumberOfAssignedProcesses includes descendants in nested jobs even when the
+        // returned PID buffer is too small (Microsoft JOBOBJECT_BASIC_PROCESS_ID_LIST contract).
         let ok = unsafe {
             QueryInformationJobObject(
                 self.0.raw(),
                 JobObjectBasicProcessIdList,
-                buf.as_mut_ptr().cast(),
+                (&raw mut list).cast(),
                 bytes,
                 null_mut(),
             )
         };
         if ok == 0 {
-            let err = last_error();
-            if err.raw_os_error() != i32::try_from(ERROR_MORE_DATA).ok() {
-                return Err(err);
+            let error = last_error();
+            if error.raw_os_error() != i32::try_from(ERROR_MORE_DATA).ok() {
+                return Err(error);
             }
         }
-        let head: Vec<u8> = buf.iter().flat_map(|w| w.to_ne_bytes()).take(4).collect();
-        Ok(<[u8; 4]>::try_from(head.as_slice()).map_or(0, u32::from_ne_bytes))
+        Ok(list)
     }
 
     /// Ends every process in the job with `code`, at once. Idempotent: an already-empty job is fine.
@@ -503,6 +678,12 @@ impl Job {
         }
         Ok(())
     }
+}
+
+/// This is a short observation of an existing job, not a process receipt/reaper or holder table.
+pub(crate) enum Member {
+    Empty,
+    Process(Handle),
 }
 
 /// A job's resource accounting, read whole.
@@ -530,12 +711,21 @@ pub(crate) fn started_here() -> u64 {
 /// Only its three standard handles are inherited (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`). The caller
 /// resumes it with [`resume`].
 pub fn create(spawn: &mut Spawn, jobs: &[HANDLE]) -> io::Result<Started> {
+    create_with_report(spawn, jobs, None)
+}
+
+/// The SAME atomic job-list launcher, optionally carrying one already-owned report writer.
+/// Inherited handles retain their value in this child (CreateProcessW/Inheritance contract).
+pub(crate) fn create_with_report(
+    spawn: &mut Spawn,
+    jobs: &[HANDLE],
+    report: Option<&InheritedHandle>,
+) -> io::Result<Started> {
     // The three standard handles, made inheritable, as a contiguous array for the handle-list attribute.
-    let handles: [HANDLE; 3] = [
-        spawn.stdio[0].as_raw_handle() as HANDLE,
-        spawn.stdio[1].as_raw_handle() as HANDLE,
-        spawn.stdio[2].as_raw_handle() as HANDLE,
-    ];
+    let handles = spawn
+        .stdio
+        .each_ref()
+        .map(|handle| handle.as_raw_handle() as HANDLE);
     for h in handles {
         // SAFETY: each handle is owned by spawn.stdio for the call; marking it inheritable is sound.
         if unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
@@ -551,14 +741,33 @@ pub fn create(spawn: &mut Spawn, jobs: &[HANDLE]) -> io::Result<Started> {
     if size == 0 {
         return Err(io::Error::other("attribute list size is zero"));
     }
-    let mut buf = vec![0u8; size];
+    // Pointer-aligned storage for the native attribute list, reserved before any process exists.
+    let words = size.div_ceil(size_of::<usize>());
+    let mut buf = Vec::<usize>::new();
+    buf.try_reserve_exact(words)
+        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+    buf.resize(words, 0);
     let list = buf.as_mut_ptr().cast::<core::ffi::c_void>();
     // SAFETY: `list` points at `size` writable bytes (buf), the size the call above asked for, for 2
     // attributes.
     if unsafe { InitializeProcThreadAttributeList(list, 2, 0, &mut size) } == 0 {
         return Err(last_error());
     }
-    let started = create_in(spawn, jobs, &handles, list);
+    let [input, output, error] = handles;
+    let inherited = [
+        input,
+        output,
+        error,
+        report.map_or(null_mut(), |report| report.0.raw()),
+    ];
+    let inherited = if report.is_some() {
+        inherited.as_slice()
+    } else {
+        handles.as_slice()
+    };
+    // Attribute values, including the optional fourth handle, remain alive until the list is
+    // destroyed below (UpdateProcThreadAttribute's lpValue lifetime contract).
+    let started = create_in(spawn, jobs, &handles, inherited, list);
     // SAFETY: `list` was initialized above; deleting it frees its internal allocations once, and buf
     // (its backing bytes) is still alive and dropped after.
     unsafe { DeleteProcThreadAttributeList(list) };
@@ -569,19 +778,22 @@ pub fn create(spawn: &mut Spawn, jobs: &[HANDLE]) -> io::Result<Started> {
 fn create_in(
     spawn: &mut Spawn,
     jobs: &[HANDLE],
-    handles: &[HANDLE; 3],
+    stdio: &[HANDLE; 3],
+    handles: &[HANDLE],
     list: LPPROC_THREAD_ATTRIBUTE_LIST,
 ) -> io::Result<Started> {
-    let handles_bytes = u32::try_from(size_of::<HANDLE>().saturating_mul(3)).unwrap_or(u32::MAX);
-    // SAFETY: the handle-list attribute points at `handles` (3 HANDLEs), alive for this call; the size
-    // matches. The list has room for 2 attributes.
+    let handles_bytes = size_of::<HANDLE>()
+        .checked_mul(handles.len())
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: the handle-list points at exactly handles.len() live inheritable handles. The three
+    // stdio handles and optional private report copy outlive this call; the list has two slots.
     if unsafe {
         windows_sys::Win32::System::Threading::UpdateProcThreadAttribute(
             list,
             0,
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
             handles.as_ptr().cast(),
-            handles_bytes as usize,
+            handles_bytes,
             null_mut(),
             null(),
         )
@@ -590,7 +802,9 @@ fn create_in(
         return Err(last_error());
     }
     if !jobs.is_empty() {
-        let jobs_bytes = size_of::<HANDLE>().saturating_mul(jobs.len());
+        let jobs_bytes = size_of::<HANDLE>()
+            .checked_mul(jobs.len())
+            .ok_or_else(|| io::Error::other("job-list attribute size overflows"))?;
         // SAFETY: the job-list attribute points at `jobs` (jobs.len() HANDLEs), alive for this call; the
         // size matches.
         if unsafe {
@@ -610,17 +824,20 @@ fn create_in(
     }
 
     let mut si: STARTUPINFOEXW = zeroed_struct();
-    si.StartupInfo.cb = u32::try_from(size_of::<STARTUPINFOEXW>()).unwrap_or(0);
+    si.StartupInfo.cb = u32::try_from(size_of::<STARTUPINFOEXW>())
+        .map_err(|_| io::Error::other("STARTUPINFOEXW exceeds a DWORD"))?;
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    si.StartupInfo.hStdInput = handles[0];
-    si.StartupInfo.hStdOutput = handles[1];
-    si.StartupInfo.hStdError = handles[2];
+    let [input, output, error] = *stdio;
+    si.StartupInfo.hStdInput = input;
+    si.StartupInfo.hStdOutput = output;
+    si.StartupInfo.hStdError = error;
     si.lpAttributeList = list;
 
     let cwd = spawn.cwd.as_ref().map_or(null(), |c| c.as_ptr());
+    let environment = spawn.environment.as_ptr().cast();
     let mut pi: PROCESS_INFORMATION = zeroed_struct();
     // SAFETY: command_line is a NUL-terminated writable UTF-16 buffer (CreateProcessW may modify it);
-    // environment is a double-NUL-terminated UTF-16 block; cwd is NUL-terminated or null; si and pi are
+    // environment is a supplied double-NUL-terminated UTF-16 block; cwd is NUL-terminated or null; si and pi are
     // valid and alive for the call. bInheritHandles is TRUE because only the listed handles are
     // inherited (the handle-list attribute). The process is created suspended and in its jobs.
     let ok = unsafe {
@@ -634,7 +851,7 @@ fn create_in(
                 | CREATE_UNICODE_ENVIRONMENT
                 | CREATE_NO_WINDOW
                 | EXTENDED_STARTUPINFO_PRESENT,
-            spawn.environment.as_ptr().cast(),
+            environment,
             cwd,
             (&si as *const STARTUPINFOEXW).cast::<STARTUPINFOW>(),
             &mut pi,
@@ -710,27 +927,71 @@ pub fn close_in(into: &Handle, value: usize) -> io::Result<()> {
     Ok(())
 }
 
+/// The caller holds its existing keeper lock from comparison through close. Duplicate only an
+/// observation handle here; a stale/reused remote value never authorizes closing another object.
+pub(crate) fn close_in_if_same(
+    into: &Handle,
+    value: usize,
+    expected: BorrowedHandle<'_>,
+) -> io::Result<bool> {
+    if !same_in(into, value, expected)? {
+        return Ok(false);
+    }
+    close_in(into, value)?;
+    Ok(true)
+}
+
+pub(crate) fn same_in(
+    into: &Handle,
+    value: usize,
+    expected: BorrowedHandle<'_>,
+) -> io::Result<bool> {
+    let mut copied: HANDLE = null_mut();
+    // SAFETY: into is a verified keeper process handle with PROCESS_DUP_HANDLE. Its value is
+    // borrowed, not consumed; the duplicate is non-inheritable and owned below on success.
+    if unsafe {
+        DuplicateHandle(
+            into.raw(),
+            value as HANDLE,
+            GetCurrentProcess(),
+            &raw mut copied,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    // SAFETY: DuplicateHandle succeeded and transferred ownership of this new local handle.
+    let observed = unsafe { Handle::own(copied) };
+    // SAFETY: both handles remain alive for the comparison; this API compares kernel object
+    // identity without modifying either object or requiring object-specific access rights.
+    Ok(unsafe { CompareObjectHandles(observed.raw(), expected.as_raw_handle() as HANDLE) } != 0)
+}
+
 /// Process `pid` opened for waiting on, handing handles to and from, and reading its times; `None` where
 /// no process has the pid.
 pub fn open_process(pid: u32) -> io::Result<Option<Handle>> {
+    match process_with_rights(
+        pid,
+        PROCESS_SYNCHRONIZE | PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION,
+    ) {
+        Ok(process) => Ok(Some(process)),
+        Err(error) if error.raw_os_error() == Some(87) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn process_with_rights(pid: u32, rights: u32) -> io::Result<Handle> {
     // SAFETY: opens `pid` with the rights named; the handle returned is owned below.
-    let h = unsafe {
-        OpenProcess(
-            PROCESS_SYNCHRONIZE | PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION,
-            0,
-            pid,
-        )
-    };
+    let h = unsafe { OpenProcess(rights, 0, pid) };
     if h.is_null() {
         let e = last_error();
-        // ERROR_INVALID_PARAMETER: no process has that pid.
-        if e.raw_os_error() == Some(87) {
-            return Ok(None);
-        }
         return Err(e);
     }
     // SAFETY: a handle just opened, owned from here.
-    Ok(Some(unsafe { Handle::own(h) }))
+    Ok(unsafe { Handle::own(h) })
 }
 
 /// When `process` was created (100 ns ticks since 1601), which with its pid names it: a process given
@@ -781,6 +1042,32 @@ pub fn set(event: &Handle) -> io::Result<()> {
     Ok(())
 }
 
+pub(crate) fn reset(event: &Handle) -> io::Result<()> {
+    // SAFETY: event is an owned kernel event, alive for the call.
+    if unsafe { ResetEvent(event.raw()) } == 0 {
+        return Err(last_error());
+    }
+    Ok(())
+}
+
+/// Event-driven keeper wake/stop. Exactly these two owned handles remain alive across the wait.
+pub(crate) fn wait_either(first: &Handle, second: &Handle) -> io::Result<bool> {
+    let handles = [first.raw(), second.raw()];
+    // SAFETY: this fixed two-element array outlives the call; FALSE waits for any event, without polling.
+    match unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, u32::MAX) } {
+        WAIT_OBJECT_0 => Ok(true),
+        value
+            if value
+                == WAIT_OBJECT_0
+                    .checked_add(1)
+                    .ok_or_else(|| io::Error::other("wait index overflows"))? =>
+        {
+            Ok(false)
+        }
+        _ => Err(last_error()),
+    }
+}
+
 /// Whether `process` ended within `timeout_ms` (`u32::MAX` is forever).
 pub fn wait(process: &Handle, timeout_ms: u32) -> io::Result<bool> {
     // SAFETY: process is a valid, owned process handle; WaitForSingleObject waits on it.
@@ -789,6 +1076,49 @@ pub fn wait(process: &Handle, timeout_ms: u32) -> io::Result<bool> {
         WAIT_TIMEOUT => Ok(false),
         _ => Err(last_error()),
     }
+}
+
+/// Publish a flushed temp file beside its final name. MoveFileExW documents write-through move
+/// completion; this is not by itself a hardware power-loss proof (managed-native.md).
+pub fn replace_durable(from: &std::path::Path, to: &std::path::Path) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    fn path(path: &std::path::Path) -> io::Result<Vec<u16>> {
+        use std::os::windows::ffi::OsStrExt;
+        let count = path
+            .as_os_str()
+            .encode_wide()
+            .count()
+            .checked_add(1)
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        let mut wide = Vec::new();
+        wide.try_reserve_exact(count)
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        for unit in path.as_os_str().encode_wide() {
+            if unit == 0 {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            wide.push(unit);
+        }
+        wide.push(0);
+        Ok(wide)
+    }
+    let source = path(from)?;
+    let destination = path(to)?;
+    // SAFETY: both buffers are owned, NUL-terminated native paths alive through the call. The caller
+    // owns both names; flags request immediate same-volume replacement, never copy or reboot work.
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    Ok(())
 }
 
 /// Ends `process` alone with exit code `code` (`Proc::kill`: its job and the job's other members run on).
@@ -1030,7 +1360,7 @@ mod tests {
         // the call, and sets it on the box's job, which `bx` owns for the test.
         let ok = unsafe {
             SetInformationJobObject(
-                bx.job().as_raw_handle() as HANDLE,
+                bx.job().unwrap().as_raw_handle() as HANDLE,
                 JobObjectNotificationLimitInformation,
                 (&off as *const JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION).cast(),
                 u32::try_from(size_of::<JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION>()).unwrap(),
@@ -1110,7 +1440,7 @@ mod tests {
         // `x`, alive for the call, for the box's job, which `bx` owns for the test.
         let ok = unsafe {
             QueryInformationJobObject(
-                bx.job().as_raw_handle() as HANDLE,
+                bx.job().unwrap().as_raw_handle() as HANDLE,
                 JobObjectExtendedLimitInformation,
                 (&mut x as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
                 u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).unwrap(),
@@ -1127,5 +1457,171 @@ mod tests {
             peak <= bound + (1 << 20) + 131_072,
             "past its bound by more than one refused ask: peak {peak}, bound {bound}"
         );
+    }
+}
+
+#[cfg(test)]
+mod report_handle_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    fn flags(handle: BorrowedHandle<'_>) -> u32 {
+        let mut flags = 0;
+        // SAFETY: a read-only handle query; the borrowed live handle and initialized output remain
+        // valid throughout this synchronous call. No original inheritability is changed.
+        let result = unsafe {
+            windows_sys::Win32::Foundation::GetHandleInformation(handle.as_raw_handle(), &mut flags)
+        };
+        assert_ne!(
+            result,
+            0,
+            "reading private report handle flags: {}",
+            last_error()
+        );
+        flags
+    }
+
+    /// AC-T7.4.1: the report names the final private duplicate, leaves the source untouched, and
+    /// closes the same pipe object after its last owned writer. No VM/job/controller is launched.
+    #[test]
+    fn report_duplicate_uses_its_own_value_and_preserves_original_flags() {
+        let (mut reader, mut original) = std::io::pipe().unwrap();
+        let original_flags = flags(original.as_handle());
+        let inherited = inheritable_copy(original.as_handle()).unwrap();
+        assert_eq!(flags(original.as_handle()), original_flags);
+        assert_ne!(
+            inherited.as_handle().as_raw_handle(),
+            original.as_raw_handle()
+        );
+        assert_ne!(flags(inherited.as_handle()) & HANDLE_FLAG_INHERIT, 0);
+        let words = shards_api::physical::report_arguments([0x11; 16], &inherited).unwrap();
+        assert_eq!(words[0], "--gpu-report");
+        assert_eq!(
+            words[1],
+            std::ffi::OsString::from(inherited.as_handle().as_raw_handle().addr().to_string())
+        );
+        assert_ne!(
+            words[1],
+            std::ffi::OsString::from(original.as_raw_handle().addr().to_string())
+        );
+        assert_eq!(words[2], "--gpu-report-scope");
+        assert_eq!(words[3], std::ffi::OsString::from("11".repeat(16)));
+        original.write_all(b"same private pipe").unwrap();
+        drop(original);
+        drop(inherited);
+        let mut observed = String::new();
+        reader.read_to_string(&mut observed).unwrap();
+        assert_eq!(observed, "same private pipe");
+    }
+}
+
+#[cfg(test)]
+mod observer_socket_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::os::windows::io::AsSocket;
+    use std::time::Duration;
+
+    #[test]
+    fn observer_pair_preserves_finite_native_timeout_units() {
+        assert_eq!(pair_timeout(Duration::ZERO).unwrap(), 0);
+        assert_eq!(pair_timeout(Duration::from_nanos(1)).unwrap(), 1);
+        assert_eq!(pair_timeout(Duration::from_millis(1)).unwrap(), 1);
+        assert_eq!(
+            pair_timeout(Duration::from_millis(2) + Duration::from_nanos(1)).unwrap(),
+            3
+        );
+        assert_eq!(
+            pair_timeout(Duration::from_secs(u64::MAX)).unwrap(),
+            i32::MAX
+        );
+    }
+
+    /// AC-T7.4.1: the same caller waits for the actual stdout/stderr fact without consuming it.
+    /// This is a private loopback socket control, not AF_UNIX/GPU/VM or scope-release evidence.
+    #[test]
+    fn observer_pair_selects_data_or_eof_without_consuming_or_duplicating_sockets() {
+        fn pair() -> (TcpStream, TcpStream) {
+            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let peer = TcpStream::connect_timeout(
+                &listener.local_addr().unwrap(),
+                Duration::from_secs(10),
+            )
+            .unwrap();
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            peer.set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            (socket, peer)
+        }
+        let (mut stdout, stdout_peer) = pair();
+        let (mut stderr, mut stderr_peer) = pair();
+        assert_eq!(
+            readable_pair(
+                [Some(stdout.as_socket()), Some(stderr.as_socket())],
+                Duration::ZERO
+            )
+            .unwrap(),
+            [false, false]
+        );
+        assert!(
+            readable_pair(
+                [Some(stdout.as_socket()), Some(stdout.as_socket())],
+                Duration::ZERO
+            )
+            .is_err()
+        );
+        assert!(
+            readable_pair(
+                [Some(stdout.as_socket()), Some(stderr.as_socket())],
+                Duration::MAX
+            )
+            .is_err()
+        );
+        stderr_peer.write_all(b"R").unwrap();
+        assert_eq!(
+            readable_pair(
+                [Some(stdout.as_socket()), Some(stderr.as_socket())],
+                Duration::from_secs(10)
+            )
+            .unwrap(),
+            [false, true]
+        );
+        let mut byte = [0u8; 1];
+        stderr.read_exact(&mut byte).unwrap();
+        assert_eq!(byte, *b"R");
+        assert_eq!(
+            readable_pair(
+                [Some(stdout.as_socket()), Some(stderr.as_socket())],
+                Duration::ZERO
+            )
+            .unwrap(),
+            [false, false]
+        );
+        stdout_peer.shutdown(std::net::Shutdown::Write).unwrap();
+        let ready = readable_pair(
+            [Some(stdout.as_socket()), Some(stderr.as_socket())],
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(ready, [true, false]);
+        assert_eq!(stdout.read(&mut byte).unwrap(), 0);
+        assert_eq!(
+            readable_pair([None, Some(stderr.as_socket())], Duration::ZERO).unwrap(),
+            [false, false],
+            "completed stdout HUP must be unwatched"
+        );
+        stderr_peer.write_all(b"S").unwrap();
+        assert_eq!(
+            readable_pair([None, Some(stderr.as_socket())], Duration::from_secs(10)).unwrap(),
+            [false, true]
+        );
+        stderr.read_exact(&mut byte).unwrap();
+        assert_eq!(byte, *b"S");
+        assert!(readable_pair([None, None], Duration::ZERO).is_err());
     }
 }

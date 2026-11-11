@@ -1,0 +1,26 @@
+{
+  "parent": "cfd12a705c5f00e546160d2c14399a4bb4394098",
+  "base": "dd4f01ccf33b6e58180576e041c59ddbd6b0120f",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": {
+    "crates/hex-node/src/scheduler.rs": "af31ae80b8baf2cd808167b5a6ce51e9e0973e4167a99a9e4b580c320dcecf80",
+    "crates/hex-node/src/placement/backing_bootstrap_tests.rs": "c1f351615d01486a21474e572c4b06abd3c82294cec09dc131db21c67e023aeb"
+  },
+  "actual_original": {
+    "ROOT_source": "65482a81c4990fe024856df7d768ed3c27e43077",
+    "result": "compiler101/Driver3 executed0",
+    "cause": "unresolved tracing::warn at scheduler930; test-only unused tuple key",
+    "log_sha256": "675cf39eb693aae8998ebbb97d4c50809b44c67a69eefeac7ab22e030d240da2"
+  },
+  "correction": "Combine successful initialization bool into changed flag. Ok(false) is a no-effect outcome, not an error: SAME canonical BackingPhase::Prepared remains observable via Runtime Capacity/wire and eligible for later ordinary refresh; no global CPU admission block. Every real Result error still propagates through map_err(failed)?. No logger/dependency/new state/queue/timer. Remove ONLY unused fixture tuple binding; oracle/assertions/budgets unchanged.",
+  "checks": {
+    "rustfmt_parser": 0,
+    "compile": "UNRUN",
+    "tests": "UNRUN",
+    "dispatches": 0,
+    "native_effects": 0
+  },
+  "limits": "Compiler correction only; no claim CPU observer failure isolation or subset remedy. Original three cases unrun until ROOT matched source checks; original raw and all previous passes preserved."
+}

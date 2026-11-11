@@ -1,0 +1,21 @@
+{
+  "status": "SOURCE ONLY successor to ACTUAL e3 core Clippy101; no compiler/native behavior bug claim",
+  "base": "b1a9a6fb91ff9b1480c9f9458b2e0e9eb6e0d962",
+  "original": {
+    "source": "e3c28025188347a04e3298472f1a75dd95696a19",
+    "log_sha256": "d2c6bc8f76c9ec2097feb271dc1b59b0ed15f6c5e84404a85df4119cbedca42b",
+    "original_proof": "ROOT proof38293 (matched-producer-e3-mac-results-proof), Cargo53795 reaped, temp0; API21Clippy0 and NodeCLIcheck0, actual15 selected all passed independently.",
+    "owned_diagnostics": "managed.rs 5 arithmetic_side_effects at304/312/323/328/805; record/pool.rs match_like_matches_macro190 +unnecessary_lazy_evaluations264",
+    "nonowned_diagnostics": "wire.rs4 assigned L4, untouched here"
+  },
+  "changes": {
+    "crates/hex-core/src/helper/managed.rs": "Equivalent checked_add chain for pointer+NUL exec cost and environment path-width bound; checked minimum word width in ARG_MAX divisor. No limit increase/allow/parser role change. Actual remaining-frame prefix bound from b559 remains.",
+    "crates/hex-core/src/record/pool.rs": "Same exact legal phase pairs represented by matches!; constant Exhausted construction via ok_or. No transition/accounting/identity semantic change."
+  },
+  "sha256": {
+    "crates/hex-core/src/helper/managed.rs": "84950317813fc59ca8b6c52050e1ccead8c5790bc4f48adebc4eadce436f6848",
+    "crates/hex-core/src/record/pool.rs": "49a58c307cb602b47d268364ccf17a07e1e9532bfa1f0be0c178184d18c8958d"
+  },
+  "validation": "rustfmt parser0 only. No tests/build/native by L3; ROOT joins exact successor for lint-only, no unchanged15 rerun. New b559 two codec controls remain unrun separate.",
+  "policy": "7d7e0855 / rulesdf2 implementer; only owned helper+core record children"
+}

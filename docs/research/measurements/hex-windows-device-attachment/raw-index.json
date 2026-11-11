@@ -1,0 +1,452 @@
+{
+  "archive": "raw-evidence.tar.gz",
+  "archive_sha256": "478108935d542a95c12281ef970b0fbd72ce1dda832ad8a778264eb027d236b0",
+  "archive_bytes": 424151,
+  "members": {
+    "light-v1-cli.log": {
+      "bytes": 14673,
+      "sha256": "edfb8084492af987c90d96375df35f73e22ea248aa7b1953707709163837cb64"
+    },
+    "light-v1-collection.json": {
+      "bytes": 958,
+      "sha256": "eb017b5fdb3ce95868d75075d83af9e3212c083c351c8eb8dfc1a76b16eabdb5"
+    },
+    "light-v1-core-clippy.log": {
+      "bytes": 1258,
+      "sha256": "fc8c7dfb3905282ccb05a3591a9d8f616683de754339910423fa42b83ba5efbb"
+    },
+    "light-v1-hcs-unit.log": {
+      "bytes": 7143,
+      "sha256": "f72e30ce291ce67ad2fe2a4c810f1bae24e56b001fc298647a42f52d95e91e14"
+    },
+    "light-v1-result.json": {
+      "bytes": 8351,
+      "sha256": "7bc0aeacf5dd848a6f1860c9fc5f4dfa7970938b42cf4877ea2cd65feaf17ab5"
+    },
+    "light-v1-run.json": {
+      "bytes": 8265,
+      "sha256": "36c69a0d4894b362440fb61c6add7656857c51589ce2b5193390ee84e328e939"
+    },
+    "light-v1-source-hashes.json": {
+      "bytes": 134182,
+      "sha256": "6e952e2bc4354b5bd79fae9e6ddf7708d3d20af20cb33301d96503522410715b"
+    },
+    "light-v1-submitted-driver.py": {
+      "bytes": 6260,
+      "sha256": "c1329b87e68b41e69dfec87f0045061daacb2a32b14aae48761e87e3741237fd"
+    },
+    "light-v1-transfer.json": {
+      "bytes": 9145,
+      "sha256": "4e952c7f9b4239a89bbb0b45cd54ec94ac61f1897119c04db9f326efcc3c0348"
+    },
+    "light-v1-windows-runtime-clippy.log": {
+      "bytes": 6165,
+      "sha256": "c30f95794d0c93f61593bde130157dd571e6aca2447e158e72c685baeed7917c"
+    },
+    "light-v10-cli.log": {
+      "bytes": 2912,
+      "sha256": "bfb8bde9bdd286acc8444b2a718c1b81857d683bcc1f05a36547c4b0a8cb3854"
+    },
+    "light-v10-collection.json": {
+      "bytes": 879,
+      "sha256": "c0bdf3742bb745b7833be45d6d63df9d3bcd91f1e0832e6db7043d097adaeeec"
+    },
+    "light-v10-result.json": {
+      "bytes": 2756,
+      "sha256": "75a4e1bc147a1e27980156228463db92c0d8f2a01eb63cd10fed02b86510a7e4"
+    },
+    "light-v10-run.json": {
+      "bytes": 2670,
+      "sha256": "2e55412316b15645d3b0d356c72c975503bfd4a9ee61496ec83eb40c746587ab"
+    },
+    "light-v10-source-hashes.json": {
+      "bytes": 135382,
+      "sha256": "d902f1c1348e9defff22603acca1d8b3ff6874a9c0ce7645f31b53671f06ed8b"
+    },
+    "light-v10-submitted-driver.py": {
+      "bytes": 5680,
+      "sha256": "45904ec6e34de0a446644e92d2ef0fae64625a86acb9d3489c9fc93a5aad4864"
+    },
+    "light-v10-transfer.json": {
+      "bytes": 8298,
+      "sha256": "4093a56de947fb0b5215e2355e1dce6790a9e8933d8127cb63741be881731a75"
+    },
+    "light-v10-windows-cli-check.log": {
+      "bytes": 1786,
+      "sha256": "5d6c5b31970a9bcbd51dad9819f0f995961deb3f5dae045c30bd76608b918f10"
+    },
+    "light-v10-windows-runtime-clippy.log": {
+      "bytes": 6279,
+      "sha256": "90e896279ca4129123dbcd2b51af8b6c7cc5455216dceb430d025bd52a64a3e2"
+    },
+    "light-v2-cli.log": {
+      "bytes": 2792,
+      "sha256": "6af2971fa33268e9ceec97663711bdc066c4f106f6bc347edca474706d6d9c98"
+    },
+    "light-v2-collection.json": {
+      "bytes": 876,
+      "sha256": "cc5ae2dd71a9db25b000e644467a6fed31514f235be72ea4f0c109bb03339209"
+    },
+    "light-v2-result.json": {
+      "bytes": 2636,
+      "sha256": "1529b8338c5d0c94712508f10b7283128e35e21d9c1431342cc5e6e76b6c7994"
+    },
+    "light-v2-run.json": {
+      "bytes": 2550,
+      "sha256": "700f77009e7f810d8063908bb16c4a19e47d441817af21d8a665b161bcf70cfa"
+    },
+    "light-v2-source-hashes.json": {
+      "bytes": 134623,
+      "sha256": "625adb89b6097034c9cf9f95d96a12395f00b26baed677978a8f18ba08a6de75"
+    },
+    "light-v2-submitted-driver.py": {
+      "bytes": 5667,
+      "sha256": "20b4f86230bfac8e08361f761cf0e904ec304f413abe3a24c7fb03313098745d"
+    },
+    "light-v2-transfer.json": {
+      "bytes": 8275,
+      "sha256": "aceec9e7355a3b9f1406df7c70e45e9dc2b655eef616e6b111d9ebf03ac30d33"
+    },
+    "light-v2-windows-cli-check.log": {
+      "bytes": 1750,
+      "sha256": "87455746fd37158902885cb09ac831e9bec130daa18ffe3d74ac8279bf586f42"
+    },
+    "light-v2-windows-runtime-clippy.log": {
+      "bytes": 6255,
+      "sha256": "282e930319dca8ab1dfe18dfc51d2dd9611b9382f8484b69d148324d415e6865"
+    },
+    "light-v5-cli.log": {
+      "bytes": 26230,
+      "sha256": "b7a11e680c7900bd0ce1cccbf078ec302878ef20ed8dcc82f5d0a1a69039a034"
+    },
+    "light-v5-collection.json": {
+      "bytes": 958,
+      "sha256": "dc5c6cda9fbd44ba8b4b9e872ad47a65da98ea0b4033e26a6def694e896383f3"
+    },
+    "light-v5-core-clippy.log": {
+      "bytes": 1258,
+      "sha256": "1c6f93697b230329054de0fc0ab4b4d6e4ae54c89b65d2305d147ce9d2d12519"
+    },
+    "light-v5-hcs-unit.log": {
+      "bytes": 7394,
+      "sha256": "f6434928acb58b0843b6a681007ee4d99432848d6d129545d0057d9ea99051c7"
+    },
+    "light-v5-result.json": {
+      "bytes": 8991,
+      "sha256": "a51afbbde5b78ecbc7c7a529dc29c9a5ad760042eb02ab632de891d33b6be09f"
+    },
+    "light-v5-run.json": {
+      "bytes": 8905,
+      "sha256": "ab3db3d5954fdacda25fb419c3bdd9e3bf2516eda04bd3ec01325d08c8174aa8"
+    },
+    "light-v5-source-hashes.json": {
+      "bytes": 135079,
+      "sha256": "3ac8ccd9ca91baf414d37397b77fd8c533fd9bbce41d7c720fad59849a6f4332"
+    },
+    "light-v5-submitted-driver.py": {
+      "bytes": 6348,
+      "sha256": "d4ad3ef65b62de359ac6f307dc7a4b165f3820a69a5ca1522ea49c3d34bf087a"
+    },
+    "light-v5-transfer.json": {
+      "bytes": 9290,
+      "sha256": "423e6a63ac813f9042258f49bec3050d78dc48afb66bab87f2df1ffe80ad1de4"
+    },
+    "light-v5-windows-runtime-clippy.log": {
+      "bytes": 17082,
+      "sha256": "fc0986a714510a78758132a7c3befe26388d85036666626e871d605bdf2bffbc"
+    },
+    "light-v6-cli.log": {
+      "bytes": 9604,
+      "sha256": "84c61d69988ea84a207e3b776550438b55e48e84bd4d4bd719d751bf680bee38"
+    },
+    "light-v6-collection.json": {
+      "bytes": 752,
+      "sha256": "417799281c3d13736a1c1be6d80d90a239f7cd962927ed0ff79f573280ea2dde"
+    },
+    "light-v6-result.json": {
+      "bytes": 2150,
+      "sha256": "87b4b0dd46e59e1002b9caa18009003ddc3597ecff390ab0d23a9972f2202bef"
+    },
+    "light-v6-run.json": {
+      "bytes": 2064,
+      "sha256": "3db5267d1928a3f171119b44fb684de9cfb8cfea0bccd1f7530c5d252020c2c7"
+    },
+    "light-v6-source-hashes.json": {
+      "bytes": 135228,
+      "sha256": "dbe3112e23166d36fea9a1fe6aff406180864ddaf4d67374a476a8d90eb53a7c"
+    },
+    "light-v6-source-pin.json": {
+      "bytes": 423,
+      "sha256": "da3fac645fadd4e24533f2842ff9b639173f51d4e311c783cf063a08c7042e0b"
+    },
+    "light-v6-submitted-driver.py": {
+      "bytes": 5680,
+      "sha256": "45904ec6e34de0a446644e92d2ef0fae64625a86acb9d3489c9fc93a5aad4864"
+    },
+    "light-v6-transfer.json": {
+      "bytes": 8244,
+      "sha256": "cc1ff4cd6ec3f37fa3eae952d31f585a2e848c19a4db27df1da90f5ad3bc990e"
+    },
+    "light-v6-windows-runtime-clippy.log": {
+      "bytes": 7297,
+      "sha256": "73716b0b63f4c16d98ad09a2d217fb5054afa09bc6209d08d97c965e068d9267"
+    },
+    "light-v8-cli.log": {
+      "bytes": 9191,
+      "sha256": "bc3ccaeac68585da146413b1b62b84362a2530a52f25b22428b4acf08e327a4b"
+    },
+    "light-v8-collection.json": {
+      "bytes": 781,
+      "sha256": "bb913ecd3096061fd99db1da0f6b3016d446b185e7cd513fa22a12b2c511cb8b"
+    },
+    "light-v8-result.json": {
+      "bytes": 2179,
+      "sha256": "b0b0f2de63808805289711e5a1f1ec511eac1eb8d4192f68623f8c651918cc5e"
+    },
+    "light-v8-run.json": {
+      "bytes": 2093,
+      "sha256": "abd2c7e297dc8ce2e4a5cfc9cebb517cfc30ecd4021b7756bdaa96d475ed0dc5"
+    },
+    "light-v8-source-hashes.json": {
+      "bytes": 135382,
+      "sha256": "718ef171297bb851c90915436b622a771fd9b22ef7ca7c54f7274b1a07b91fcd"
+    },
+    "light-v8-submitted-driver.py": {
+      "bytes": 5680,
+      "sha256": "45904ec6e34de0a446644e92d2ef0fae64625a86acb9d3489c9fc93a5aad4864"
+    },
+    "light-v8-transfer.json": {
+      "bytes": 8295,
+      "sha256": "e0f3d19feca8815a0ea920db9da43b0f9c1cc34718172757434d4559e54740c8"
+    },
+    "light-v8-windows-runtime-clippy.log": {
+      "bytes": 6855,
+      "sha256": "698460bf56d588f4e1e98808d71b0498ecddc96fdd91ad734e78739667af9116"
+    },
+    "native-v1-cli.log": {
+      "bytes": 566,
+      "sha256": "c203338e868153177b0f3d16c8cdad5c0fff7969987d4c25759a3eb8d525d205"
+    },
+    "native-v1-submitted-native-light.ps1": {
+      "bytes": 6035,
+      "sha256": "c5f93c27af3e7e08dc13cd141ea9290fe2a75c1f91288b0c0a61a44ffe52babb"
+    },
+    "native-v1-transfer.json": {
+      "bytes": 17031,
+      "sha256": "8e394ec95c1fdcbcdb56a8da72d16a43dc583a88628d8f31673971e425b02617"
+    },
+    "native-v2-cli.log": {
+      "bytes": 5148,
+      "sha256": "77e8d0abb93c904f7c8c89c02982478ab44e4d0399e0cfeb828637f03c5b49a4"
+    },
+    "native-v2-collection.json": {
+      "bytes": 809,
+      "sha256": "3c22bce3fc7bba9c1b068c0edc32bf280a5786172a43fa932edb3f5bb743274b"
+    },
+    "native-v2-result.json": {
+      "bytes": 4989,
+      "sha256": "2940bf94a471baeab031e4c5fd305ac1dcc7c0aca2fe3ca311e080f2b0d236f7"
+    },
+    "native-v2-run.json": {
+      "bytes": 4932,
+      "sha256": "c7697e5cea506890e1aa041344a781490c9c0813230e312576905f49d50f1fbd"
+    },
+    "native-v2-submitted-bootstrap.ps1": {
+      "bytes": 937,
+      "sha256": "acd5c60148912d484204a2fa0bffca548e2d09064666743e492368030b6e4af5"
+    },
+    "native-v2-submitted-native-light.ps1": {
+      "bytes": 6019,
+      "sha256": "f4e3f41e9c6af59166432a1abbfab246f6213117e9b9fc15169a8baab4f8d3d4"
+    },
+    "native-v2-transfer.json": {
+      "bytes": 1158,
+      "sha256": "09b6b60aec83cee31732240ecc100848758ed4b3e5a97732c141f225d503ffdd"
+    },
+    "native-v2-windows-runtime-clippy.stderr.log": {
+      "bytes": 3110,
+      "sha256": "0f28467b71d6ceb89c1ee7d72a83b2d8f615408968a7696a1f6c3f8783328121"
+    },
+    "native-v2-windows-runtime-clippy.stdout.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "native-v2-windows-unit.stderr.log": {
+      "bytes": 6362,
+      "sha256": "91274142ce907ae467c52413041522521f33616889002c345c614b103ee0eb80"
+    },
+    "native-v2-windows-unit.stdout.log": {
+      "bytes": 713,
+      "sha256": "9a334db1dea019f611aa4e2e01a87632775c0459a8f3401567d05fc01d93a0b2"
+    },
+    "native-v7-cli.log": {
+      "bytes": 6232,
+      "sha256": "293e9e4a539fe47e6ef3d07b12a2514135652c1aadd6ef098634dba43dbfb851"
+    },
+    "native-v7-collection.json": {
+      "bytes": 587,
+      "sha256": "d219f56a4d4515ed517225c7bbc37553e7a00487e3f9511db772115f501b891e"
+    },
+    "native-v7-result.json": {
+      "bytes": 5457,
+      "sha256": "f442d2a4b8ac82d3663bc77eade754821e9d4cb04160fd753191449bb0155a01"
+    },
+    "native-v7-run.json": {
+      "bytes": 5400,
+      "sha256": "4f12d626df57834e1e0c2d1a68c50e6b9a497612af5d030e1a8b77eebe777c7a"
+    },
+    "native-v7-submitted-bootstrap.ps1": {
+      "bytes": 906,
+      "sha256": "15fb7fafcf9a1df7266d6d182835bbb809a5a72b2c0393f2a032550a15b763af"
+    },
+    "native-v7-submitted-native-light.ps1": {
+      "bytes": 5973,
+      "sha256": "42e5d11bd1506a462f70cbb52a78109b39cde65600656a2224462162b8f434c6"
+    },
+    "native-v7-transfer.json": {
+      "bytes": 1085,
+      "sha256": "5c88ce1e46aeeefda5f09cc089232c2c556fb236bb8ac71b7e21bf4b128a3eee"
+    },
+    "native-v7-windows-unit.stderr.log": {
+      "bytes": 6326,
+      "sha256": "a8272dbfe4a3b39f21e46ea1fd67816527228344201c71a8fa48483767f5dd60"
+    },
+    "native-v7-windows-unit.stdout.log": {
+      "bytes": 1821,
+      "sha256": "9d11104cf4d595f77e34b46465051fe9449fa9fde11498bf27712be0046b3dd9"
+    },
+    "native-v9-cli.log": {
+      "bytes": 8805,
+      "sha256": "4317c6793501c24dfaf99bbd7c38c3a99814270374ef858f8733ca48418557bc"
+    },
+    "native-v9-collection.json": {
+      "bytes": 1019,
+      "sha256": "d62c24088edb5d7f6117c6246a77b582b37c7cf810ed5cc3c27af96fdd94caab"
+    },
+    "native-v9-result.json": {
+      "bytes": 8030,
+      "sha256": "7fd1bf57f44d07476f915b6718162e57b83675a39f87792fb375939c41a194a3"
+    },
+    "native-v9-run.json": {
+      "bytes": 7973,
+      "sha256": "484d06a9aa60e53b0d8960c2c846959296544c671084f26faf666675c25dbd42"
+    },
+    "native-v9-submitted-bootstrap.ps1": {
+      "bytes": 912,
+      "sha256": "6bcc362985d90ca93500201635a5bf9defedf9208a2ba5c784a94d3aa4b5b8af"
+    },
+    "native-v9-submitted-native-light.ps1": {
+      "bytes": 6097,
+      "sha256": "c60bebe0d264d75bdc4e9ebdc3ba44dbc024d96fe9998f439c6791ae0d022ca3"
+    },
+    "native-v9-transfer.json": {
+      "bytes": 1103,
+      "sha256": "f47ed47968ac03dc3675a276dead2dff49eff000e1e8d914b4e5fa2caf64420b"
+    },
+    "native-v9-windows-cli-check.stderr.log": {
+      "bytes": 1763,
+      "sha256": "8abbecfbc96132ab6ea920ef8ee5b47b70fc6b88cb08247c4af84bd3dc52dde9"
+    },
+    "native-v9-windows-cli-check.stdout.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "native-v9-windows-runtime-clippy.stderr.log": {
+      "bytes": 3126,
+      "sha256": "727028f025e9b4ac7bd60dd0e5fdce5033a8fc634bf1a53b64cd0723d9053860"
+    },
+    "native-v9-windows-runtime-clippy.stdout.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "native-v9-windows-unit.stderr.log": {
+      "bytes": 6380,
+      "sha256": "ab0ba7232b35bb8d199131d02ef1457529035e67d8b8fe8279f0cd9b766e1c98"
+    },
+    "native-v9-windows-unit.stdout.log": {
+      "bytes": 2189,
+      "sha256": "2e2cdc6f3fa8ff32de4bccd04cf1f7220a9deb1cbc72d8bfc8ad1b9f4537f4e2"
+    },
+    "reclaim-green-v4-cli.log": {
+      "bytes": 6001,
+      "sha256": "b35e28fd757f81963709d2f30c73415e20a0c77f8ed80d637105c63857e7de2c"
+    },
+    "reclaim-green-v4-collection.json": {
+      "bytes": 775,
+      "sha256": "7680597c5066ee165efe2c0e059fb2930a1108709221ef0bc36379c484692890"
+    },
+    "reclaim-green-v4-result.json": {
+      "bytes": 5226,
+      "sha256": "ff4c0ab83ee3d51102c9d31f92a49e78cede7b329e1d097cb0d4f100ffe67919"
+    },
+    "reclaim-green-v4-run.json": {
+      "bytes": 5169,
+      "sha256": "40be384b3ce984b6748dbe271a0fc5509231fc2fa610905bb6f17bee7d663d7a"
+    },
+    "reclaim-green-v4-submitted-bootstrap.ps1": {
+      "bytes": 908,
+      "sha256": "8ec4514405b88a77f4cc96a5205941e36dcea8866d36f1a97fb97d740f6dcf78"
+    },
+    "reclaim-green-v4-submitted-native-light.ps1": {
+      "bytes": 5943,
+      "sha256": "44768f046c516540fa1be7e3faef7cc909ca7506906f06f263d636b0832ceae2"
+    },
+    "reclaim-green-v4-transfer.json": {
+      "bytes": 1058,
+      "sha256": "864d3822038d854fb81b791e034fa32d5e8e18af5f474d3e575486e547a1d8f2"
+    },
+    "reclaim-green-v4-windows-runtime-clippy.stderr.log": {
+      "bytes": 6255,
+      "sha256": "f1bc3d4471bc2445bdacfbd79175efb8037f79cdf7a57ef85aea02a9e1c4191d"
+    },
+    "reclaim-green-v4-windows-runtime-clippy.stdout.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "reclaim-green-v4-windows-unit.stderr.log": {
+      "bytes": 6344,
+      "sha256": "9ea43d03658166c7f038009ef70487af182074337a228c5d5b24428519ddbf14"
+    },
+    "reclaim-green-v4-windows-unit.stdout.log": {
+      "bytes": 1024,
+      "sha256": "43516abaae1e2833255375fc9a843d1b088a2aa4ef6ad9f36c4acfc29742c6ba"
+    },
+    "reclaim-red-v3-cli.log": {
+      "bytes": 3904,
+      "sha256": "35288b25e799c9b8b8c656e8eb66119f2873bc0ffde9292b341da4ba92856490"
+    },
+    "reclaim-red-v3-collection.json": {
+      "bytes": 555,
+      "sha256": "ef7d8af0812163a32e21917b6424f56fef950695d5768be552cfe97f263b1cdc"
+    },
+    "reclaim-red-v3-result.json": {
+      "bytes": 3129,
+      "sha256": "0789903dfa9c8d60ea2025c0c89b2b842ba9c5a5a93743bfcb8ff982055c52f3"
+    },
+    "reclaim-red-v3-run.json": {
+      "bytes": 3072,
+      "sha256": "a991699ab17ffee1bb697a93d4b03997921d2dc91a2737df27b07bb9ef39243a"
+    },
+    "reclaim-red-v3-submitted-bootstrap.ps1": {
+      "bytes": 906,
+      "sha256": "cdc6f6696c79af51691e1b21bbd929eeadfed342b6f477697f47ab3ac5216a6f"
+    },
+    "reclaim-red-v3-submitted-native-light.ps1": {
+      "bytes": 5976,
+      "sha256": "f9a2143fb2b45d081da5e7ac45348b7b5e3eabb7b6c19f558f73244f10fe454f"
+    },
+    "reclaim-red-v3-transfer.json": {
+      "bytes": 1088,
+      "sha256": "37102f7abdc1272fd2574c2cd3918239e74c66c8d16c02976ac2acc66f39e3e5"
+    },
+    "reclaim-red-v3-windows-unit.stderr.log": {
+      "bytes": 6758,
+      "sha256": "60b761e90e0ed8c017d672d76bb4133b68a9b67b0be24121559f6650b6553ab9"
+    },
+    "reclaim-red-v3-windows-unit.stdout.log": {
+      "bytes": 361,
+      "sha256": "d314a150743858e9f278e63ec18013b43c3e64fbf3a0f57e2452172e99e47f8d"
+    }
+  },
+  "byte_policy": "Every original raw byte retained, including CRLF, CLIXML, ANSI, trailing whitespace and libtest blank EOF; no normalization."
+}

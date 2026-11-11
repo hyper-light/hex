@@ -1,0 +1,98 @@
+{
+  "schema": "hex-native-fc-alternate00aad-plan-seal-v1",
+  "source_base": "14c7716ebfa316592b56208db3ef0eb7b2f15507",
+  "original_cohort_sha256": "cbb3faa4851200a3f3bc0f61ce8a4c3f38a678c06274ac1485cd86a9e938c701",
+  "meaning": "source-only plan/probe evidence; no SDK transfer, build, namespace, VM or GPU execution",
+  "files": [
+    {
+      "path": "ALTERNATE-00AAD-BUILDER-PLAN.md",
+      "bytes": 13937,
+      "sha256": "6829444822a4108c872c6dfe2d4207d0ee432cd71498d445458743421ef07d7f"
+    },
+    {
+      "path": "alternate-host-identity.receipt.json",
+      "bytes": 6149,
+      "sha256": "73e9fb6175b1e3c128eb4a03ae39a4eeab32b5f68dd1e5493308f9c3908bc57a"
+    },
+    {
+      "path": "alternate-00aad-host-controls.json",
+      "bytes": 1338562,
+      "sha256": "582feff78c33a664f80e117e0970514114a34f4ca2760b0d51c9ad5c639f4017"
+    },
+    {
+      "path": "alternate-00aad-probes.raw.json",
+      "bytes": 673616,
+      "sha256": "e12a28e6fc6f0d24369d559a4181b6114533b996f7df6b5ff6a38bdf4e640acd"
+    },
+    {
+      "path": "alternate-00aad-retained-archive-inputs.json",
+      "bytes": 2700,
+      "sha256": "1f79a258499bad2ff1b3b8a675fd9e86aa89d9c4b46e42f6975036f15839f52e"
+    },
+    {
+      "path": "alternate-00aad-transfer-plan.json",
+      "bytes": 6745720,
+      "sha256": "1f2256b674733e1947af15070c7cd811ce2a06772f4fb4b2ddac865e6cb8bc41"
+    },
+    {
+      "path": "alternate_00aad_adapter_contract.py",
+      "bytes": 4381,
+      "sha256": "935438e70c5be28cdc0f2caabe1be91bb416a95de742b55e3dd782291da8b0b4"
+    },
+    {
+      "path": "alternate_00aad_compare_paths.py",
+      "bytes": 1299,
+      "sha256": "c1d5572f438110356b7da56f6cfead19209429216ffb558260b80871d81ca690"
+    },
+    {
+      "path": "alternate-00aad-path-comparison.input.json.gz",
+      "bytes": 374893,
+      "sha256": "d67302f89f9a0823b2b575a897bb255b5acb54269aeed4125fe4c4bb16dce15b"
+    },
+    {
+      "path": "alternate-00aad-path-comparison.command.json",
+      "bytes": 1835,
+      "sha256": "54253dfe3915c4ec5aa7500c6f5f5371f4d6356228ace9cca29e21f7a90771c7"
+    },
+    {
+      "path": "alternate-00aad-path-comparison.raw.json",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "alternate-00aad-path-comparison.cli.log",
+      "bytes": 604,
+      "sha256": "6092bb39f5fee1acd8ba695e0b1160357744c56dc128c1e581f0fb0b2a4faa4e"
+    },
+    {
+      "path": "alternate-00aad-path-comparison.summary.json",
+      "bytes": 64,
+      "sha256": "e060c50924be60b57f4148a62e94d3a3ca1c952d01302f1cccd1bdb2c8e8b253"
+    },
+    {
+      "path": "alternate-00aad-path-comparison2.command.json",
+      "bytes": 2102,
+      "sha256": "f0fdc23ddc9ea0b2de716ec20a6c3099d68a568f3492ed10776d8fed45f68ace"
+    },
+    {
+      "path": "alternate-00aad-path-comparison2.raw.json",
+      "bytes": 2363800,
+      "sha256": "02779dec2630c46a8acfce3d1765ce92bd3997e2ca5ba17598463a12435f652f"
+    },
+    {
+      "path": "alternate-00aad-path-comparison2.cli.log",
+      "bytes": 294,
+      "sha256": "47e8ee90a6a266a2e605702101798116f3c59cf079deaa16626c9e50eb81fc3d"
+    },
+    {
+      "path": "alternate-00aad-path-comparison2.summary.json",
+      "bytes": 765,
+      "sha256": "1d89d1b29bd289eeef2364f832d36271fbde225a408f50266e10cf4330b06ea8"
+    },
+    {
+      "path": "alternate-00aad-source-validation.json",
+      "bytes": 1232,
+      "sha256": "d41374cecbaa4e9f27b77cbb77d67e228d11aafbc264f7b2d289870534f15f4e"
+    }
+  ]
+}

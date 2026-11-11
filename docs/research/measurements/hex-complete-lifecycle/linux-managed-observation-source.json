@@ -1,0 +1,18 @@
+{
+  "kind": "source-only strict cold cgroup constructor at the SAME existing pin slot",
+  "base": "2276ce4898f2af088e86f2386032aa57d4f2ab1f",
+  "path": "crates/hex-runtime/src/linux/cgroup.rs",
+  "sha256": "be4c870b636ecfb7ac8b372a5e4e7eb1733880247e2cc7f1ee987ab996371cc9",
+  "signature": "BoxCgroup::observe_managed(dir:PathBuf)->Result<Option<Self>,Refusal>",
+  "semantics": "Read-only RDONLY|DIRECTORY|NOFOLLOW|CLOEXEC. ExactNOENT only None; all other native/open/allocation errors are typed. No controller/root creation, mutation, cleanup or adoption. Path absence/pin is not scope-release authority.",
+  "ownership": "One private enum in existing fd slot: unchanged legacy stdArc owner or directly fallibly allocated nativeTriArc owner. Never both/no extra pin cache/wrapper allocation. Clone keeps same nativeTriArc, no duplicate descriptor. Avoided changing legacy child Option/OOM semantics into false absence. Existing legacy infallible Arc allocation gap remains explicit, no allocation-safe legacy claim.",
+  "constructor_dependency": "Existing runtime triomphe std edge already supplied by ROOT managed receipt cohort; no new crate/version. L1 uses this before BoxRoot initialization/global read-only recovery barrier.",
+  "legacy_bodies_sha256_unchanged": {
+    "procs": "d158399396607e8b10000fff119fdfbe38b27f1b26f40104543a24c1bc490ee9",
+    "usage": "d504f7e52697aba846fc1d872fa7d5499aa70bee6de91f953edb2b484f3e1399"
+  },
+  "new_control": 1,
+  "fixture_port": "Existing private pinned_managed_cgroup test constructor now delegates to actual strict constructor; old behavior oracles unchanged. Other legacy literal pin gets only enum wrapping.",
+  "checks": "Scoped rustfmt/named diff-check only; new control UNRUN by L3, no build/test/native dispatch.",
+  "remaining": "L1 exact Supervisor/cgroup filesystem/scope/PIDbirth/membership/limit joins; native cleanup/absence/fault/resource and full gates ROOT-owned."
+}

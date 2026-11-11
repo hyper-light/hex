@@ -1,0 +1,40 @@
+{
+  "requirement": "AC-T7.4.1",
+  "original_source": "88f72b313ef35dbc369e4b4ace98a6d35be8aa8a",
+  "actual_outcome": "all five phases compiler101; six controls executed0, native0",
+  "runtime_errors": [
+    "duplicate route fixture field from joined patch",
+    "ROOT intake accidentally duplicated ResolvedGpu metadata fixture fields",
+    "dedicated pointer test used std Arc with TriArc Booted"
+  ],
+  "node_errors": [
+    "legacy fixture schema/copies/typed holder, subsequently ported d5d68201",
+    "native gate fixture needs actual NativeRecord::Box wrapper",
+    "two native Catalog calls need SAME Store.all_pools"
+  ],
+  "current_fixes": {
+    "crates/hex-node/src/node/attachments.rs": "0d33837db845b268cc5a4e910db57af06ea6057f114652f704f6b3533df17f70",
+    "crates/hex-node/src/node.rs": "fccb490b23a3deffe03dcf1a36f07090aeb074f3f6b459a38494977ca047a618",
+    "crates/hex-node/src/supervise/completion_native_gate_tests.rs": "d699db213be81d24315609642e3f4e1693ac3dc37654c09b46ca2db16108e430",
+    "crates/hex-runtime/src/devices.rs": "8c6eb964bd1b1c5d0c4e0e0f9c78451667c19bc9e3bdc312d651f7f3db7c2502",
+    "crates/hex-runtime/src/guest/physical.rs": "12398fcf7dc87c8dc3f4588b01dedeec4dc953d6eb3bb673c441c823332fd7ab",
+    "crates/hex-runtime/src/guest/dedicated.rs": "b569fe8ba50f9f7a8ff585e7fb0824c3068c1391bde24569a38ee45d086c5555"
+  },
+  "source_after_original": "unchanged; temporary0; all five Cargo children reaped; collector43063exit0/reaped",
+  "owned_scope": {
+    "unit": "hex-root-pool-88-linux-pure-v1.scope",
+    "runtime_limits": "CPU100%, memory4GiB, swap0, pids256; exact cgroup files recorded before compiler",
+    "post_show_exit": 0,
+    "LoadState": "not-found",
+    "ActiveState": "inactive",
+    "SubState": "dead",
+    "ControlGroup": ""
+  },
+  "archive": {
+    "bytes": 230865,
+    "sha256": "075e4630a94fe9d54b9866b6cadec1096a0d17aeab814fe9e8d8aeb5a3dc2b30",
+    "members": 12
+  },
+  "new_checks_after_fixes": 0,
+  "remaining_warning": "FC list newly unused pools variable is assigned to L1; no lint waiver"
+}

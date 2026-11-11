@@ -1,0 +1,25 @@
+{
+  "source": "2a059b5c56f9561a225c8172c808679c269e8ea1",
+  "files": {
+    "crates/hex-core/src/bundle.rs": "e9f2eb4fc2cee296bb884e38c5de2e505814a6105627a4866ac609b2296cc022",
+    "crates/hex-core/src/bundle/device_edits.rs": "ed9878f9eabd3678bbfc5bb78d63879785ef8ab5dd88dc9b9481a6f31a73bd3b",
+    "crates/hex-core/src/bundle/device_edits/tests.rs": "854b0986c80e899a7772e588582e977a7a6772d011b33cfcfaee76a698185a5f",
+    "crates/hex-core/src/cdi.rs": "7ca46313f6c581c4194a9ba4a295cdda11435a285aacca8b304f41e77b6ce740",
+    "crates/hex-core/src/cdi/tests.rs": "ec66c85d14110a3c1aae9304f5ff6d095b92197552e70b6c4258cabd12ed5d30",
+    "crates/hex-core/src/lib.rs": "040e51eb13da41c9d4a7bfb4bf94e18065ba3b6c491edd2ad58e39e2763035a1"
+  },
+  "final_logs": {
+    "source.json": "96a01386e4a156281293b92f03e03ceda74c25bf106726dda820ffc94dac39c0",
+    "summary.json": "b3e29c6e8c7456d5334676bb6d3f3dcd47510f53811bafcec74c337f433c793c",
+    "private-registration.json": "e6d833e103d2ed30dba4809677c76e298d0fb8e3a66fb895a8b7d12869de87a2",
+    "legacy-comparison.json": "abc06fdedd527c24d75ce681a05fb4ef1368083915b4d5eea67c995c7f94d3cf",
+    "current-build.jsonl": "f679358e833767106f4039d57bfbb2c4de8dc1033e8e75fa850d0cbfe3660949",
+    "current-build.stderr": "3692738f2084e2d509a23e8487cbdd80413354e731bde002884959d693302764",
+    "clippy-lib.stderr": "0b96dd1c5eb5bd6ba90596712a91b5fed130258eb2517ffe6e6ed0bfd21755fd",
+    "clippy-tests.stderr": "a59b0bb77c49c02704e521f17ee59874906c2159ff0cdeb32983ceae07ba33dc",
+    "rustfmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "environment.json": "b0fba2d0dccffe9f98547b55cb155f2816a620109a336c8061306cc069c33927"
+  },
+  "binary_sha256": "79e54e7bf21be9f33e29b7cb50fce51d26eb595433068302bf5432a9f0318c0e",
+  "all_source_matches_signed_commit": true
+}

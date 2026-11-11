@@ -1,0 +1,22 @@
+{
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "needs": "cpus=1,mem=4g,disk=12g",
+  "source": "6483c6f2b0cb109cd41d009aa3974962a238c1b8",
+  "production_pin": "5e2cfbe7e09256ff6a7d979564717cfc6d8041f6",
+  "root": "~/.cache/hex-device-driver-01a1c640-6483c6f2-v1",
+  "command": "nice -n 10 python3 \"$HOME/.cache/hex-device-driver-01a1c640-6483c6f2-v1/driver.py\"",
+  "sync": false,
+  "jobs": 1,
+  "threads": 1,
+  "status_at_start": "running",
+  "run": "r20",
+  "status": "terminal",
+  "exit_code": 0,
+  "selected": 3,
+  "passed": 3,
+  "failed": 0,
+  "ignored": 0,
+  "clippy_lib": 0,
+  "clippy_tests": 0,
+  "rustfmt": 0
+}

@@ -1,0 +1,43 @@
+{
+  "bytes": 337277,
+  "sha256": "c5b2d55acf10c052c8cc209dd366b31bfb3d87b4b510891731b40684beeaa082",
+  "members": {
+    "cohort-dbd48b7a-linux-strict-dbd4/source-before.json": {
+      "bytes": 500022,
+      "sha256": "f9f0b78f5dd4b56fc947366bb6c42e28c8d099d2d1c41f24cef107b7386dad8c"
+    },
+    "cohort-dbd48b7a-linux-strict-dbd4/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-dbd48b7a-linux-strict-dbd4/owned-scope-limits.json": {
+      "bytes": 251,
+      "sha256": "9ff79906304ed9d1860bb726449aa945f0f083b726d0d29ec8630a02f52425d8"
+    },
+    "cohort-dbd48b7a-linux-strict-dbd4/runtime-joined-strict.log": {
+      "bytes": 3554,
+      "sha256": "5c1492b4513ca673dba98e03bb656f1b96fba06f1a0f47e3ae38441fc331de62"
+    },
+    "cohort-dbd48b7a-linux-strict-dbd4/running.json": {
+      "bytes": 1154,
+      "sha256": "2e60b5274462a2f6ccb002609074be8238f8224c1b68188fa6b0c5c870154d86"
+    },
+    "cohort-dbd48b7a-linux-strict-dbd4/source-after.json": {
+      "bytes": 500022,
+      "sha256": "f9f0b78f5dd4b56fc947366bb6c42e28c8d099d2d1c41f24cef107b7386dad8c"
+    },
+    "cohort-dbd48b7a-linux-strict-dbd4/result.json": {
+      "bytes": 1410,
+      "sha256": "34a4e7014d318c667abb81130a3f8a31ecc3c0b61b3e762929035d069df692ad"
+    },
+    "cohort-dbd48b7a-linux-strict-dbd4/collected-binaries.json": {
+      "bytes": 781,
+      "sha256": "2c3845a40d456aef5fef41172720bffc40dc2ff7902edfb9098fca93358d566d"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

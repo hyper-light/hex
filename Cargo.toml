@@ -29,7 +29,7 @@ hex-gpu = { path = "crates/hex-gpu", version = "0.1.0" }
 hex-afunix = { path = "crates/hex-afunix", version = "0.1.0" }
 # Shards' guests (docs/design/shards-guest.md §2, Appendix A): the oci class's Linux guest on macOS and
 # Windows. By name and version, patched below to a copy of Shards' draft until Shards lands it, then to
-# vendor/shards as every other vendored project (vendor/shards-api-draft/Cargo.toml says which).
+# vendor/shards as every other vendored project (vendor/shards/Cargo.toml says which).
 shards-api = "0.1"
 flate2 = "1.1.10"
 # hyper-swim's failure detector and the timing it runs on, for hex-sim's crash class (hyper-raft,
@@ -50,6 +50,9 @@ sha2 = "0.10.9"
 tar = "0.4.46"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
+# Same fallibly allocated native scope receipt passed to shards-api (AC-T7.4.1).
+triomphe = { version = "=0.1.17", default-features = false, features = ["std"] }
+unsize = "=1.1.0"
 ureq = "3"
 # The Windows `process` class: job objects, suspended process creation with a job and handle list, and
 # the job's accounting and guaranteed memory-limit violation (crates/hex-runtime/src/windows). Security
@@ -61,8 +64,10 @@ ureq = "3"
 # Networking_WinSock and System_IO are the node agent's socket: AF_UNIX streams on one completion port
 # (crates/hex-afunix).
 windows-sys = { version = "0.61.2", features = [
+    "Wdk_Graphics_Direct3D",
     "Wdk_System_SystemServices",
     "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Properties",
     "Win32_Foundation",
     "Win32_Networking_WinSock",
     "Win32_Security",
@@ -142,4 +147,4 @@ opt-level = 3
 seccompiler = { path = "vendor/seccompiler" }
 hyper-swim = { path = "vendor/hyper-raft/crates/hyper-swim" }
 hyper-timing = { path = "vendor/hyper-raft/crates/hyper-timing" }
-shards-api = { path = "vendor/shards-api-draft/crates/api" }
+shards-api = { path = "vendor/shards/crates/api" }

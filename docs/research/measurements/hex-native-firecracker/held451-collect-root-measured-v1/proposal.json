@@ -1,0 +1,184 @@
+{
+  "SDK_materialize_build_GPU_or_RuntimeCost_admitted": false,
+  "actual_export_receipt_pin": {
+    "bytes": 1437,
+    "sha256": "93a93fbb1a8f00f9e213a338248178a79d5cde3c746eb8f385c450af41ce6b6c",
+    "source": "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01/output/export-receipt.json"
+  },
+  "actual_launcher_pin": {
+    "bytes": 2852,
+    "sha256": "547bcc96f6dfbd25ed147f00d08407406871164be29d9cb57ef75f256511b662",
+    "source": "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01/launcher-final.json"
+  },
+  "archive_expected": {
+    "bytes": 474576896,
+    "sha256": "b5919c38358cbe1c57cd9b4968a04fe447c431356b4a7a4ca21ccb1c3bcd1507",
+    "source": "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01/output/held1596.tar"
+  },
+  "binary_stdout_transparency_executed": false,
+  "client_input": {
+    "bundle": "export-result.client-input.json",
+    "bytes": 3096,
+    "sha256": "db37450b99b2e3eba574fe90a93b4fe3142c4c55b105c81efd50032f4c2c91c7"
+  },
+  "client_input_provenance": "derived from exact actual launcher data plus its actual launcher_final_pin presentation field; not a replacement/native receipt",
+  "dispatch_authorized": false,
+  "existing_flat_staging_method": {
+    "actual_new_admission_and_opaque_ACK_not_created": true,
+    "additional_three_members": [
+      "held451-export.seal.json",
+      "reviewed.collect.json",
+      "peer-quiet-window.receipt"
+    ],
+    "fresh_exclusive_destination_required": true,
+    "inline_index": 20,
+    "inline_sha256": "77c2531a43191db5d5c939e8753d58d17a5af4a19b2a6753db161ec2ea86c706",
+    "no_new_staging_helper_or_bundle": true,
+    "reference_only_old_ACK_deadline_and_bundle": true,
+    "runtime_members": [
+      "export_held451_objects.py",
+      "held451-export-inputs.json",
+      "held451-export-controls.json",
+      "alternate_00aad_io.py"
+    ],
+    "source": "/Users/adalundhe/.cache/hex-lead/worktrees/native-firecracker-validation/docs/research/measurements/hex-native-firecracker/held451-export-c2f6681e/staging-command.json"
+  },
+  "existing_local_tool_pins": [
+    {
+      "bytes": 102352,
+      "existing_tool_only": true,
+      "resolved": "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
+      "sha256": "271143990bc83af0fb2404a255038f5faafb96df1584ed7f085e5018c0f33ffb",
+      "source": "/Applications/Xcode.app/Contents/Developer/usr/bin/python3"
+    },
+    {
+      "bytes": 308493200,
+      "existing_tool_only": true,
+      "resolved": "/Users/adalundhe/.local/bin/kiln",
+      "sha256": "a12650c7397eca6b3f1eaf078c276bb556f0a3eeb4eff15695392337e4c4ae8e",
+      "source": "/Users/adalundhe/.local/bin/kiln"
+    },
+    {
+      "bytes": 76760,
+      "existing_tool_only": true,
+      "resolved": "/opt/homebrew/Cellar/coreutils/9.11/bin/gtimeout",
+      "sha256": "96d98cb3adafdd41570802625f7511d7d340cbcd4cb7a7278d5706c282a59c33",
+      "source": "/opt/homebrew/Cellar/coreutils/9.11/bin/gtimeout"
+    },
+    {
+      "bytes": 101424,
+      "existing_tool_only": true,
+      "resolved": "/usr/bin/nice",
+      "sha256": "50906339939ef7e6235b9770d126d1cb9469265ed668d8503a2e2ebfd7b1c6db",
+      "source": "/usr/bin/nice"
+    }
+  ],
+  "external_receiver_guard_argv": [
+    "/opt/homebrew/Cellar/coreutils/9.11/bin/gtimeout",
+    "--signal=TERM",
+    "--kill-after=5s",
+    "235s",
+    "/usr/bin/nice",
+    "-n",
+    "10",
+    "/Applications/Xcode.app/Contents/Developer/usr/bin/python3",
+    "-B",
+    "/Users/adalundhe/.cache/hex-lead/worktrees/native-firecracker-validation/docs/research/measurements/hex-native-firecracker/held451-collect-root-measured-v1/acquire_held451_export.py",
+    "--reviewed-collect-admission",
+    "/Users/adalundhe/.cache/hex-native-firecracker/held451-collect-input-root-measured-v1/reviewed.collect.json",
+    "--export-result",
+    "/Users/adalundhe/.cache/hex-native-firecracker/held451-collect-input-root-measured-v1/export-result.client-input.json",
+    "--root",
+    "/Users/adalundhe/.cache/hex-native-firecracker/held451-acquired-root-measured-v1-01"
+  ],
+  "external_receiver_guard_shell_text": "/opt/homebrew/Cellar/coreutils/9.11/bin/gtimeout --signal=TERM --kill-after=5s 235s /usr/bin/nice -n 10 /Applications/Xcode.app/Contents/Developer/usr/bin/python3 -B /Users/adalundhe/.cache/hex-lead/worktrees/native-firecracker-validation/docs/research/measurements/hex-native-firecracker/held451-collect-root-measured-v1/acquire_held451_export.py --reviewed-collect-admission /Users/adalundhe/.cache/hex-native-firecracker/held451-collect-input-root-measured-v1/reviewed.collect.json --export-result /Users/adalundhe/.cache/hex-native-firecracker/held451-collect-input-root-measured-v1/export-result.client-input.json --root /Users/adalundhe/.cache/hex-native-firecracker/held451-acquired-root-measured-v1-01",
+  "frozen_receiver_sha256": "8f5f5a9a0624c9b2815f8bbaff87a51448e2541b28f264ebf668288c5ec338f5",
+  "frozen_sender_sha256": "83586fc225fbe7209eb250a6c8d21b8fb70dff97f82dd7dccb1f4f47bde00ad3",
+  "guard_composition_note": "outer gtimeout supervises receiver group; frozen8f5 starts CLI in its own session and owns its230s deadline/PID-group cleanup; remote whole scope180s. A timeout alone never proves CLI/remote absence; retain raw/partial and require exact owned receipts, no broad kill",
+  "guards": {
+    "Kiln_seconds": 210,
+    "external_receiver_KILL_after_seconds": 5,
+    "external_receiver_TERM_seconds": 235,
+    "external_receiver_total_seconds": 240,
+    "frozen_receiver_pipe_seconds": 230,
+    "receiver_cleanup_KILL_wait_seconds": 2,
+    "receiver_cleanup_TERM_wait_seconds": 2,
+    "remote_TERM_to_KILL_seconds": 3,
+    "remote_outer_seconds": 200,
+    "scope_seconds": 180,
+    "worker_seconds": 175
+  },
+  "local_caller_guard_documentation": {
+    "Python_Popen": "https://docs.python.org/3.9/library/subprocess.html#subprocess.Popen",
+    "coreutils9_11_manpage": "/opt/homebrew/Cellar/coreutils/9.11/share/man/man1/gtimeout.1",
+    "no_guard_executed": true
+  },
+  "local_receiver_cache_root": "/Users/adalundhe/.cache/hex-native-firecracker/held451-acquired-root-measured-v1-01",
+  "local_receiver_input_root": "/Users/adalundhe/.cache/hex-native-firecracker/held451-collect-input-root-measured-v1",
+  "manifest_expected": {
+    "bytes": 592303,
+    "sha256": "d61ad9b2b3e360c064ce04a0680d455e7158255e5ad7d9dc3aedcc228ce4f314",
+    "source": "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01/output/manifest.json"
+  },
+  "normal_kiln_argv": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--quiet",
+    "--on",
+    "451397fcc585f7f7cb9aaf00e42064bb",
+    "--needs",
+    "linux/amd64,cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--timeout",
+    "210",
+    "--",
+    "/usr/bin/timeout --signal=TERM --kill-after=3s 200s /usr/bin/nice -n 10 /usr/bin/python3 -B /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v1/export_held451_objects.py --stage collect --admission /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v1/reviewed.collect.json --root /home/adalundhe/.cache/hex-native-firecracker/held451-collect-root-measured-v1-01 --seal /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v1/held451-export.seal.json"
+  ],
+  "normal_kiln_shell_text": "/Users/adalundhe/.local/bin/kiln run --quiet --on 451397fcc585f7f7cb9aaf00e42064bb --needs linux/amd64,cpus=1,mem=4g,disk=12g --no-sync --timeout 210 -- '/usr/bin/timeout --signal=TERM --kill-after=3s 200s /usr/bin/nice -n 10 /usr/bin/python3 -B /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v1/export_held451_objects.py --stage collect --admission /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v1/reviewed.collect.json --root /home/adalundhe/.cache/hex-native-firecracker/held451-collect-root-measured-v1-01 --seal /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v1/held451-export.seal.json'",
+  "original_object_export_loop": false,
+  "profile_run_or_measurement_copy": false,
+  "quiet_window_requested": false,
+  "raw_binary_transport": "normal CLI stdout directly into exclusive receiver partial; no MCP/base64/archive extraction fallback",
+  "receiver_argv": [
+    "/Applications/Xcode.app/Contents/Developer/usr/bin/python3",
+    "-B",
+    "/Users/adalundhe/.cache/hex-lead/worktrees/native-firecracker-validation/docs/research/measurements/hex-native-firecracker/held451-collect-root-measured-v1/acquire_held451_export.py",
+    "--reviewed-collect-admission",
+    "/Users/adalundhe/.cache/hex-native-firecracker/held451-collect-input-root-measured-v1/reviewed.collect.json",
+    "--export-result",
+    "/Users/adalundhe/.cache/hex-native-firecracker/held451-collect-input-root-measured-v1/export-result.client-input.json",
+    "--root",
+    "/Users/adalundhe/.cache/hex-native-firecracker/held451-acquired-root-measured-v1-01"
+  ],
+  "receiver_shell_text": "/Applications/Xcode.app/Contents/Developer/usr/bin/python3 -B /Users/adalundhe/.cache/hex-lead/worktrees/native-firecracker-validation/docs/research/measurements/hex-native-firecracker/held451-collect-root-measured-v1/acquire_held451_export.py --reviewed-collect-admission /Users/adalundhe/.cache/hex-native-firecracker/held451-collect-input-root-measured-v1/reviewed.collect.json --export-result /Users/adalundhe/.cache/hex-native-firecracker/held451-collect-input-root-measured-v1/export-result.client-input.json --root /Users/adalundhe/.cache/hex-native-firecracker/held451-acquired-root-measured-v1-01",
+  "remote_argv": [
+    "/usr/bin/timeout",
+    "--signal=TERM",
+    "--kill-after=3s",
+    "200s",
+    "/usr/bin/nice",
+    "-n",
+    "10",
+    "/usr/bin/python3",
+    "-B",
+    "/home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v1/export_held451_objects.py",
+    "--stage",
+    "collect",
+    "--admission",
+    "/home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v1/reviewed.collect.json",
+    "--root",
+    "/home/adalundhe/.cache/hex-native-firecracker/held451-collect-root-measured-v1-01",
+    "--seal",
+    "/home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v1/held451-export.seal.json"
+  ],
+  "remote_bundle": "/home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v1",
+  "remote_bundle_status": "frozen8f5 hardcoded bundle, never executed by this lane; actual absence not queried, fresh-exclusive staging must refuse any collision",
+  "remote_shell_text": "/usr/bin/timeout --signal=TERM --kill-after=3s 200s /usr/bin/nice -n 10 /usr/bin/python3 -B /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v1/export_held451_objects.py --stage collect --admission /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v1/reviewed.collect.json --root /home/adalundhe/.cache/hex-native-firecracker/held451-collect-root-measured-v1-01 --seal /home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v1/held451-export.seal.json",
+  "remote_unit": "hex-native-fc-held451-collect-root-measured-v1-01",
+  "remote_work_root": "/home/adalundhe/.cache/hex-native-firecracker/held451-collect-root-measured-v1-01",
+  "retained_runtime_control_checks": "unchanged83586 launcher/mapped ELF/Python control verification still reads pinned runtime files; some names overlap object inventory; no1596-origin export loop or new source scan",
+  "runtime_seal_sha256": "02bab67d6d60b1371b205a27b9456b8fd3703a51d0b2bd7a2e0035d0676de5cb",
+  "schema": "hex-native-fc-frozen-collect-proposal-v1",
+  "source_export_root": "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01",
+  "source_only": true
+}

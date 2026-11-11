@@ -1,0 +1,5 @@
+# Original joined client-owner compiler failures
+
+Exact source4ca7afe919849846696e47e921a01c2823383a93. Four intended tests did not execute: E0308 in calls/tests.rs, the remaining std Arc::downgrade on the new TriArc Shared. Client all-target Clippy also found a missed std Arc Loopback constructor in its ignored benchmark harness. Node/CLI all-target check found a stale native scheduler fixture's Option<BoxId> holder return where the API now returns typed DeviceHolder. No production/native bug reproduction or test pass is claimed.
+
+All six recorded phase children reaped; temp0/source0diff/native0. Local dispatch CLI32358 and collector54252 reaped. Raw239789B SHA25639aa431d7363a8258c342d3d27a5bcfa40e7e24c64301d6febeeaf3e13237305; every member independently verified on collection and again before commit. Exact commands/source/log/binary metadata are retained losslessly. The separate correction only ports fixture owners/holders and preserves original assertions; it requires a fresh changed-source check.

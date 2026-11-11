@@ -42,11 +42,19 @@ pub fn rewrite(
         bounds,
         class,
         owner,
+        devices,
+        allocation,
+        route,
     } = spec;
     let mut items = Vec::new();
     let class = match class {
         ClassSpec::Process => ClassSpec::Process,
-        ClassSpec::Oci(mut oci) => {
+        class @ (ClassSpec::Oci(_) | ClassSpec::Shards(_)) => {
+            let (mut oci, shards) = match class {
+                ClassSpec::Oci(oci) => (oci, false),
+                ClassSpec::Shards(oci) => (oci, true),
+                _ => return Err(Refusal::Broken("guest class changed during rewrite".into())),
+            };
             oci.rootfs = match oci.rootfs {
                 Rootfs::Dir(dir) => {
                     Rootfs::Dir(stage(staged, &id, &mut items, "root".to_owned(), dir)?)
@@ -60,7 +68,11 @@ pub fn rewrite(
                     .ok_or_else(|| shares::unshared(shared, &mount.destination, &mount.source))?;
                 mount.source = PathBuf::from(guest);
             }
-            ClassSpec::Oci(oci)
+            if shards {
+                ClassSpec::Shards(oci)
+            } else {
+                ClassSpec::Oci(oci)
+            }
         }
         ClassSpec::Bundle(dir) => {
             let (root, config) = bundle(&dir, shared)?;
@@ -74,6 +86,12 @@ pub fn rewrite(
             });
             ClassSpec::Bundle(PathBuf::from(format!("{staged}/{id}")))
         }
+        ClassSpec::Firecracker(_) => {
+            return Err(Refusal::Invalid {
+                what: "guest backend",
+                why: "the Shards adapter cannot execute Firecracker work".into(),
+            });
+        }
     };
     Ok(Rewritten {
         spec: BoxSpec {
@@ -81,6 +99,9 @@ pub fn rewrite(
             bounds,
             class,
             owner,
+            devices,
+            allocation,
+            route,
         },
         items,
     })

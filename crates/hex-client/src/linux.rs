@@ -7,7 +7,6 @@ use std::io::{IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use hex_api::Refusal;
@@ -31,7 +30,7 @@ use crate::calls::{Core, Handle, KINDS, Lent, Sent, Shared, Take, Transport};
 /// largest max of the release arms with a row's 1,000 samples (adacachy2), a debug build from run 5's largest answer
 /// of the debug-build arms, the debug arm and the suites' (adacachy2), for the kind and the tests' waits seeded from
 /// it, never under a bound one ran out at (decision 9). A kill, an exec asking for streams and a run have no rows
-/// yet: MEASURING until a census with them in records them.
+/// yet, nor do the scheduler operations: MEASURING until a census with them in records them.
 static ANSWERS: [Patience; KINDS] = [
     Patience::by_profile(
         "client.answer.hello",
@@ -86,6 +85,21 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.kill"),
     Patience::measuring("client.answer.exec_streams"),
     Patience::measuring("client.answer.run"),
+    Patience::measuring("client.answer.schedule.describe"),
+    Patience::measuring("client.answer.schedule.advertise"),
+    Patience::measuring("client.answer.schedule.submit"),
+    Patience::measuring("client.answer.schedule.hear_create"),
+    Patience::measuring("client.answer.schedule.hear_delete"),
+    Patience::measuring("client.answer.schedule.hear_control"),
+    Patience::measuring("client.answer.schedule.link_up"),
+    Patience::measuring("client.answer.schedule.retry"),
+    Patience::measuring("client.answer.schedule.delete"),
+    Patience::measuring("client.answer.schedule.status"),
+    Patience::measuring("client.answer.capacity"),
+    Patience::measuring("client.answer.physical_report"),
+    Patience::measuring("client.answer.initialize_backing"),
+    Patience::measuring("client.answer.release_backing"),
+    Patience::measuring("client.answer.backing_usage"),
 ];
 
 /// A node agent, reached through its socket.
@@ -230,7 +244,7 @@ impl Client {
             op: "connecting to the node agent's socket",
             why: format!("{}: {e}", path.display()),
         })?;
-        Core::hello(Arc::new(Shared::new(Socket { fd })))
+        Core::hello(Shared::try_new(Socket { fd })?)
     }
 }
 

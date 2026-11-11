@@ -1,0 +1,22 @@
+{
+  "kind": "source-only same-caller observer readiness primitive",
+  "base": "c9b000e6a9ad397da72544d0c50d7642675e5689",
+  "path": "crates/hex-runtime/src/windows/sys.rs",
+  "sha256": "5f53680efa0ec5e317520101d0fa3bb5d7ef3dbf3e9860eeab20fc2c03aabe32",
+  "design": "docs/research/measurements/hex-complete-lifecycle/WINDOWS-OBSERVER-PAIR.md",
+  "primary": {
+    "revision": "b359122fcb6af0938ae83d10194186a3e586ed77",
+    "path": "sdk-api-src/content/winsock2/nf-winsock2-wsapoll.md",
+    "bytes": 10705,
+    "sha256": "8adb4c8a865aaba7158e8dff7ad27830ea79781d36ff4bfd415601c79e29ae6d",
+    "url": "https://raw.githubusercontent.com/MicrosoftDocs/sdk-api/b359122fcb6af0938ae83d10194186a3e586ed77/sdk-api-src/content/winsock2/nf-winsock2-wsapoll.md"
+  },
+  "checks": {
+    "scoped_rustfmt": 0,
+    "named_diff_check": 0,
+    "build_test_native": "UNRUN by L3; no new dispatch"
+  },
+  "new_controls": 2,
+  "integration": "New WinSock/BorrowedSocket imports + pair_timeout/readable_pair functions +observer_socket_tests only, no parent SDK5ba report code dependency. ROOT owns Windows WinSock feature/CLAUDE rationale/intake. L2 owns actual bounded stdout/stderr parser/reader.",
+  "remaining": "Matched compile/control execution and actual Given socket provider readiness/deadline/forbidden-effect evidence; no GPU or scope-release/native performance completion claim."
+}

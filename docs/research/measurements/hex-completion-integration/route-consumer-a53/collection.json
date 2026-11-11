@@ -1,0 +1,67 @@
+{
+  "bytes": 223908,
+  "sha256": "a8a1766799e822de6e0cbfb84aa8a3d84792e2616a24a8765a7f704e5b9db4ae",
+  "members": {
+    "cohort-a53f56b1-mac-route-consumer-bounds-v2/joined-production-check.log": {
+      "bytes": 3364,
+      "sha256": "d75a79975c37d5732864204a835cf4914035fb9f193e0fe02414709ff99c554a"
+    },
+    "cohort-a53f56b1-mac-route-consumer-bounds-v2/route-index-original-controls.log": {
+      "bytes": 9389,
+      "sha256": "1f75a438d410b703a72c47ddae21f35bdba8385e456203881bed65976a893e23"
+    },
+    "cohort-a53f56b1-mac-route-consumer-bounds-v2/running.json": {
+      "bytes": 7656,
+      "sha256": "8bdac53b514c54eff5a26a5d0f50a3e7560d54d28c78397308cb906298c4a4fd"
+    },
+    "cohort-a53f56b1-mac-route-consumer-bounds-v2/result.json": {
+      "bytes": 7912,
+      "sha256": "dd742d9db36e861032f6aaa94ba02cf45621c0181764eb24c7b921ee52e98394"
+    },
+    "cohort-a53f56b1-mac-route-consumer-bounds-v2/source-before.json": {
+      "bytes": 318107,
+      "sha256": "38eb5c8ae14ce1771d5a02ae57d52766e9d130c4c0a7b81143fa09653916f502"
+    },
+    "cohort-a53f56b1-mac-route-consumer-bounds-v2/source-after.json": {
+      "bytes": 318107,
+      "sha256": "38eb5c8ae14ce1771d5a02ae57d52766e9d130c4c0a7b81143fa09653916f502"
+    },
+    "cohort-a53f56b1-mac-route-consumer-bounds-v2/strict-usage-core.log": {
+      "bytes": 1028,
+      "sha256": "80c2c3e97e68e272e88ab71249bb296321a42bd2ba2feaec05b6e67ae66bdc9e"
+    },
+    "cohort-a53f56b1-mac-route-consumer-bounds-v2/bounded-model-routes.log": {
+      "bytes": 6593,
+      "sha256": "c4d8dcbf31b83c3e84561f59be4d3f05f069519e453f1315c52e94c8fcc73796"
+    },
+    "cohort-a53f56b1-mac-route-consumer-bounds-v2/bounded-route-sequence.log": {
+      "bytes": 1055,
+      "sha256": "b4235675abf0f28420eb6e56dedfb8c93d8da75e654b23d4378559250dde85eb"
+    },
+    "cohort-a53f56b1-mac-route-consumer-bounds-v2/peer-route-receipt-control.log": {
+      "bytes": 6593,
+      "sha256": "c4d8dcbf31b83c3e84561f59be4d3f05f069519e453f1315c52e94c8fcc73796"
+    },
+    "cohort-a53f56b1-mac-route-consumer-bounds-v2/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-a53f56b1-mac-route-consumer-bounds-v2/bounded-backing-claims.log": {
+      "bytes": 450,
+      "sha256": "249e0d79b7bdec540618ff0b36966ffa6d1fa56f157e395f71432097818e72d0"
+    },
+    "cohort-a53f56b1-mac-route-consumer-bounds-v2/bounded-capacity-fields.log": {
+      "bytes": 448,
+      "sha256": "54009d919c910ff28086626dbbfdb33af1df9ac284b24d854c4b0a63d6a0ad52"
+    },
+    "cohort-a53f56b1-mac-route-consumer-bounds-v2/collected-binaries.json": {
+      "bytes": 7376,
+      "sha256": "4982aaef9525cef217aae522197dac2ee33a8ff4bed5b314c36ee290f6754c4e"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

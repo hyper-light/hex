@@ -1,0 +1,31 @@
+{
+  "archive_sha256": "530274d306aa90d4d352dbf4aae5a3d522eb8be5770c70c198166782a26b1afd",
+  "archive_bytes": 10579,
+  "members": {
+    "cli.log": {
+      "bytes": 15925,
+      "sha256": "3bbce4ab4e865c8df329a7ea8a966e6f9633410be2e02dcbef63383bb2fd245b"
+    },
+    "collection.cli.log": {
+      "bytes": 32011,
+      "sha256": "d376b4c3ab0d7e2dda4738fbec2eea4eaa7b8f8231af53431f85f27a9ca190b6"
+    },
+    "raw/owner.json": {
+      "bytes": 59,
+      "sha256": "f04757a413977cd8d2eb58a29f1ae7bb345873a84bb2d39c88511bf977fb5949"
+    },
+    "raw/phase.json": {
+      "bytes": 371,
+      "sha256": "0c0a1769dcf42eb50e7c6c446f91c0f7893740c8d34752b75ee05a62f9b65e53"
+    },
+    "raw/progress.json": {
+      "bytes": 10233,
+      "sha256": "c599146b30e8344cbc20a4186d9423f41ab714ab91566f3c7bcaff2ff5cff0b5"
+    },
+    "raw/result.json": {
+      "bytes": 12846,
+      "sha256": "7ea4fec0d58399004a02737b2b47e59bf32ece71fbf44c0f670d084601d2e57d"
+    }
+  },
+  "originals_retained_in_place": true
+}

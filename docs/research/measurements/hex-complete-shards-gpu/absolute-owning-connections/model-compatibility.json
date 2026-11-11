@@ -1,0 +1,21 @@
+{
+  "models": {
+    "crates/hex-runtime/src/guest/dedicated.rs": [
+      "Controlled"
+    ],
+    "crates/hex-runtime/src/guest/tests.rs": [
+      "PlannedGuest",
+      "KeptGuest"
+    ],
+    "crates/hex-client/src/guest/tests.rs": [
+      "Patient"
+    ],
+    "crates/hex-node/tests/guest_loop.rs": [
+      "LoopGuest"
+    ]
+  },
+  "scope": "test-only required Guest method implementations; original ordinary connect bodies/oracles retained",
+  "meaning": "explicit pre/post expiry guard around each existing stand-in relay method, no unbounded-zero conversion",
+  "limits": "loopback/model adapter compatibility is not proof of real native endpoint timing or new absolute SDK behavior",
+  "new_controls": "SDK actual socket/expiry controls remain independent; compilation and matching run pending"
+}

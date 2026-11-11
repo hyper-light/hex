@@ -1,0 +1,11 @@
+
+running 1 test
+test supervise::completion_native_gate_tests::completion_controller_parent_death_cancels_gate ... FAILED
+
+failures:
+
+failures:
+    supervise::completion_native_gate_tests::completion_controller_parent_death_cancels_gate
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 378 filtered out; finished in 64.93s
+

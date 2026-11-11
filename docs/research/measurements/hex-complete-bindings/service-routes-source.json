@@ -1,0 +1,26 @@
+{
+  "parent": "c4f45aa00cc13469d1ad222d82867884d4a438c3",
+  "role": "implementer",
+  "policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": {
+    "crates/hex-node/src/placement.rs": "23e2ea313745120e9cb7010c17566e13df1c5dcf8054c50c8ac74fb89bd9b1b0",
+    "crates/hex-node/src/scheduler.rs": "d1f01cf2003c2f55d5b3ee9d752804b77036545164526f8263fced62d0ac2a4e",
+    "crates/hex-node/src/scheduler/capacity.rs": "297ae42bff24430cd6337dc3e75fb29c87ce405676280c0ed6c85e1c60e16dbb",
+    "crates/hex-node/src/scheduler/capacity/devices.rs": "68b04c8507f6e821d8414d623d9cdb97c767e0538d09a9d1bfcfa654845a47ce",
+    "crates/hex-node/src/scheduler/capacity/initialized.rs": "f6478b4eb9429e76c35b60e442bc16b2add9241262ab94324ed966903a5e4385",
+    "crates/hex-node/src/scheduler/offer.rs": "ca2c8aa8ca6f0bc375b7b46aca5b74f94aa8b6726f9997ecb7720e9d18181764",
+    "crates/hex-sim/src/model.rs": "f4051b6e125594a6a0247c619ee03031bc8af16a4d4c1f388bd0a3ac27688c74",
+    "crates/hex-sim/src/index/routes.rs": "43baa0fad9b717d0e16868691190733a9516532f0e70a48e16768393438d4b78"
+  },
+  "checks": {
+    "scoped_rustfmt": "exit0",
+    "git_diff_check": "exit0",
+    "builds_tests": "UNRUN; ROOT owns current joined checks, no duplicate dispatch"
+  },
+  "controls": [
+    "service_route_normalization_remaps_alias_bits_and_refuses_conflicting_plane",
+    "service_cold_claim_union_has_no_fabricated_device_or_classwide_vm_cap"
+  ],
+  "evidence": "SERVICE-ROUTES.md"
+}

@@ -1,0 +1,1 @@
+$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'; & C:\Windows\System32\pnputil.exe /enum-devices /instanceid 'PCI\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\4&35FE04F8&0&0041' /interfaces /properties; if($LASTEXITCODE -ne 0){throw 'PnP query failed'}

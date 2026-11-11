@@ -1,0 +1,17 @@
+{
+  "proposal_only": true,
+  "policy": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "mesa_source": {
+    "revision": "8e87a503ebd91408c88596d1b9eeb5f4c0b2088d",
+    "path": "src/virtio/vulkan/vn_physical_device.c",
+    "sha256": "607514d2b512833e8b7f66df088d253d2daf82436561ec443320c107bd7cbd14",
+    "adopted_driver": false
+  },
+  "existing_witness_source": "856d66fdb533533b902a7cc6bd6454570ee46ca9",
+  "compiled_existing_witness": "1f1f75e4dbb4bb8eec3ed669b3a3dfacf8e5780c",
+  "new_observer_source": null,
+  "new_observer_artifact": null,
+  "native_runs": 0,
+  "production_implementation_authority": "canonical grant plus same-scope renderer ACK; guest readiness separate from independent compute UUID oracle"
+}

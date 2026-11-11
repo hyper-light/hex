@@ -1,0 +1,83 @@
+{
+  "source": "bcd5d8495d592e7ebc24ce80565d8c1d29ee51ed",
+  "archive_sha256": "8f072065c5d2fcc70673240de01fdaa0b69114b25a807188aae55df908046129",
+  "scope": "ROOT new actual Recorded<WithGuest>+Store ownership originals; model guest only, no native process/VM/GPU",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver": {
+    "pid": 1583653,
+    "ppid": 1583528,
+    "start_ticks": 32733741
+  },
+  "phases": [
+    {
+      "selector": "dedicated_owner_refusal_keeps_one_canonical_box_without_outer_reentry",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--offline",
+        "dedicated_owner_refusal_keeps_one_canonical_box_without_outer_reentry",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "observation": {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--offline",
+          "dedicated_owner_refusal_keeps_one_canonical_box_without_outer_reentry",
+          "--",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "both_eof": true,
+        "reaped": true,
+        "error": null,
+        "created_pid": 1591703,
+        "identity": {
+          "pid": 1591703,
+          "ppid": 1583653,
+          "start_ticks": 32734100
+        },
+        "returncode": 0
+      },
+      "actual_counts": [
+        [
+          "ok",
+          "1",
+          "0",
+          "0"
+        ]
+      ],
+      "exact_one_completed": true,
+      "stdout": {
+        "bytes": 235,
+        "sha256": "e4e00e0b2aad1993ca9b26a29ea31e56180f168e527dde890e3677a6fdb86f63"
+      },
+      "stderr": {
+        "bytes": 3738,
+        "sha256": "de4e150449ba00ffc2cf250eb2f18bb58f086c7854c9c7f15446975127189b1f"
+      }
+    }
+  ],
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_invocations": 0,
+  "event_errors": [],
+  "exit": 0
+}

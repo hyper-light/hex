@@ -1,0 +1,343 @@
+{
+  "source": "8767f0d9c03f37c64c9c86301bceaa878f7eb495",
+  "restored_sources": {
+    "crates/hex-node/src/placement.rs": "4146cb447351386aeddcdb4bedf18418a3cef2a8af537a39dbc34d7a7df1df86",
+    "crates/hex-node/src/placement/rows.rs": "f0c584d23ac41bf0dff816d2a59d6419c9e6c09e9d7bba1ce1b2c47f1b07f58b",
+    "crates/hex-node/src/scheduler.rs": "63db21fb3050ee10212404f3a4897bbfd026b3a4f6ffad65ab2a838412290b9c"
+  },
+  "mutation_phases": [
+    {
+      "phase": "fixed-placement",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--target",
+        "aarch64-apple-darwin",
+        "placement::tests::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "expected": 0,
+      "sha256": "4a73365c32ffa74bba7597ac5d5f02eb0a3d6afe16f94550ece6aaee561b8804"
+    },
+    {
+      "phase": "fixed-queued",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--target",
+        "aarch64-apple-darwin",
+        "scheduler::tests::queued_control_limit_is_global_and_survives_shrink_and_disconnect",
+        "--",
+        "--nocapture",
+        "--test-threads=1",
+        "--exact"
+      ],
+      "exit": 0,
+      "expected": 0,
+      "sha256": "8ac5c5c730f942fac4af37562249dc611870f06ec5b0d8358204a9373de8382d"
+    },
+    {
+      "phase": "fixed-dispatch",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--target",
+        "aarch64-apple-darwin",
+        "scheduler::tests::dispatch_control_refuses_at_global_limit_and_returns_failed_send_permits",
+        "--",
+        "--nocapture",
+        "--test-threads=1",
+        "--exact"
+      ],
+      "exit": 0,
+      "expected": 0,
+      "sha256": "8f1dc07c78d5654cf285bfa7d18ec213af2e9d7e59b13e96b0ec9ad8549d719b"
+    },
+    {
+      "phase": "mutant-recovery-floor",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--target",
+        "aarch64-apple-darwin",
+        "placement::tests::recovery_floor_cannot_admit_a_replacement_above_current_budget",
+        "--",
+        "--nocapture",
+        "--test-threads=1",
+        "--exact"
+      ],
+      "exit": 101,
+      "expected": 101,
+      "sha256": "2a95b09ab905e11ddf06fe9bd7265f4065ec4239af3b05308fe5ee03a9390f4b"
+    },
+    {
+      "phase": "restored-recovery-floor",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--target",
+        "aarch64-apple-darwin",
+        "placement::tests::recovery_floor_cannot_admit_a_replacement_above_current_budget",
+        "--",
+        "--nocapture",
+        "--test-threads=1",
+        "--exact"
+      ],
+      "exit": 0,
+      "expected": 0,
+      "sha256": "22b3f2858a2d01496007352b3e684eff19c844caea4d2b90e0190bd9890faf6b"
+    },
+    {
+      "phase": "mutant-uncommitted-growth",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--target",
+        "aarch64-apple-darwin",
+        "placement::tests::failed_durable_budget_growth_does_not_admit_another_runtime_create",
+        "--",
+        "--nocapture",
+        "--test-threads=1",
+        "--exact"
+      ],
+      "exit": 101,
+      "expected": 101,
+      "sha256": "f410de5e1b76e47921014b36d383c0132984f433f60a12145c73b6a1a40c7f53"
+    },
+    {
+      "phase": "restored-uncommitted-growth",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--target",
+        "aarch64-apple-darwin",
+        "placement::tests::failed_durable_budget_growth_does_not_admit_another_runtime_create",
+        "--",
+        "--nocapture",
+        "--test-threads=1",
+        "--exact"
+      ],
+      "exit": 0,
+      "expected": 0,
+      "sha256": "64fab41a13ce063326d2f40f539f9e60df4e80e6b1aeff2b82b643e6e5a32fd1"
+    },
+    {
+      "phase": "mutant-queue-permit-return",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--target",
+        "aarch64-apple-darwin",
+        "scheduler::tests::queued_control_limit_is_global_and_survives_shrink_and_disconnect",
+        "--",
+        "--nocapture",
+        "--test-threads=1",
+        "--exact"
+      ],
+      "exit": 101,
+      "expected": 101,
+      "sha256": "ca8a104b17b90cbf6d221460c55e436a9832f87c5f5f7eb5fc690cf9824871c7"
+    },
+    {
+      "phase": "restored-queue-permit-return",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--target",
+        "aarch64-apple-darwin",
+        "scheduler::tests::queued_control_limit_is_global_and_survives_shrink_and_disconnect",
+        "--",
+        "--nocapture",
+        "--test-threads=1",
+        "--exact"
+      ],
+      "exit": 0,
+      "expected": 0,
+      "sha256": "644144b3b654c36b7039102f1d10ebf9da0332f39811cd5c0cb0ea1457ee4337"
+    },
+    {
+      "phase": "mutant-queue-upper-bound",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--target",
+        "aarch64-apple-darwin",
+        "scheduler::tests::dispatch_control_refuses_at_global_limit_and_returns_failed_send_permits",
+        "--",
+        "--nocapture",
+        "--test-threads=1",
+        "--exact"
+      ],
+      "exit": 101,
+      "expected": 101,
+      "sha256": "630672521893ca647b1c97f80c04fb56f1752ad0c5be933455daa9cc45b73df5"
+    },
+    {
+      "phase": "restored-queue-upper-bound",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--target",
+        "aarch64-apple-darwin",
+        "scheduler::tests::dispatch_control_refuses_at_global_limit_and_returns_failed_send_permits",
+        "--",
+        "--nocapture",
+        "--test-threads=1",
+        "--exact"
+      ],
+      "exit": 0,
+      "expected": 0,
+      "sha256": "30fbf5b78b83da77860d961d25421a81aee66373a898271441b8fe3636a51476"
+    }
+  ],
+  "independent_verification": "All11 original log hashes/exits checked; exact one-guard source differences and byte-exact restore hashes matched signed Git source. Recovery/growth mutants reached actual extra SimRuntime.create and cleaned up before failure.",
+  "focused": {
+    "source_revision": "8767f0d9c03f37c64c9c86301bceaa878f7eb495",
+    "source_tree": "1be5e7a8765aa48854b0727d2e6cabc9685e9768",
+    "source_archive_sha256": "e74686e3f56ece59993170ba0f3c477129cc238da1d28d721c8a7f2be3cfa917",
+    "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+    "driver_pid": 59807,
+    "resources": "cpus4 mem4g disk12g",
+    "commands": [
+      {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin"
+        ],
+        "exit": 0
+      },
+      {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "clippy",
+          "-p",
+          "hex-node",
+          "--all-targets",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit": 0
+      },
+      {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "cargo",
+          "test",
+          "-p",
+          "hex-sim",
+          "--lib",
+          "--locked",
+          "--target",
+          "aarch64-apple-darwin",
+          "peer::"
+        ],
+        "exit": 0
+      }
+    ],
+    "exit": 0,
+    "log_sha256": "eee3cd7b67df74b31d7ab035ceeb0c54b66f6932f3aa5f42542dece104d472d4"
+  },
+  "focused_summaries": [
+    "test result: ok. 127 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.09s",
+    "test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 134 filtered out; finished in 0.11s"
+  ],
+  "raw_archive_sha256": "f8fa1b19adb47e7754a7db694f82cf5a951896fe6aba3ba38bab594721b3d3bc"
+}

@@ -1,0 +1,116 @@
+{
+  "schema": 1,
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "policy": [
+    {
+      "path": "AGENTS.md",
+      "sha256": "f66d304c033ad4001d3d7347b67faa3bb3137d637860793e8e74f1eb6266db41",
+      "read": "full read retained; current origin/main verified same revision"
+    },
+    {
+      "path": "docs/development-rules.md",
+      "sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+      "read": "full read retained; current origin/main verified same revision"
+    },
+    {
+      "path": "docs/development-evidence.md",
+      "sha256": "61613a244106d95b2759b38c8b6660ff29a616983e7afd6e9faabdc38368fb63",
+      "read": "full read retained; current origin/main verified same revision"
+    },
+    {
+      "path": "CLAUDE.md",
+      "sha256": "fd1076b256516e0edab1b3655421d37cd934e93a8232f0125b96abcfb99ece5f",
+      "read": "full read retained; current origin/main verified same revision"
+    }
+  ],
+  "parent": "ac01b71abece322305b9ee7d753338a3de87e436",
+  "base_root": "7197ed5e86307e9db615f7ee7b9699b8a7cc7f98",
+  "snapshot_dependency": "01fe011d72c6801e4494e903af6353baaf0688d4",
+  "lint_dependency": "ac01b71abece322305b9ee7d753338a3de87e436",
+  "api_dependency": {
+    "commit": "c772f964f683880142eeed1c6d904c3938a09f03",
+    "manifest": "docs/research/measurements/hex-complete-bindings/cpu-unavailable-api-source.json",
+    "manifest_sha256": "72dab795cdb273a8e7af1cd8faebb0cc0bdbf62525ea2722d65527217521cf54",
+    "sources": {
+      "crates/hex-api/src/devices.rs": "1870dbebf371cd7c0ab1afd88b81dd8ada714a8a7bb8e8c5ac50094bdad6900e",
+      "crates/hex-api/src/runtime.rs": "dee6a743e4f53102b603cd02d11eef26c9f0c0de1a2eb54258c6cce82c850d34",
+      "crates/hex-sim/src/model.rs": "61f99c48985db13e9690fd6e69907fddc652db0ae7e77fd41f848cfd85eee83a"
+    },
+    "verification": "all three manifest blobs matched; API not overlaid into this private source; ROOT owns reexports/outer literal ports/join"
+  },
+  "sources": [
+    {
+      "path": "crates/hex-core/src/wire.rs",
+      "sha256": "9f0e456b8d0c030f58539f8bfa9bf9f3f584bec9ffa969d04e2928cc9706b138",
+      "bytes": 95284,
+      "parent_sha256": "134a6153f84d30be8b69e42731ada6d2ef732e4741d4a129a48ec413cc6233bd"
+    },
+    {
+      "path": "crates/hex-core/src/wire/tests.rs",
+      "sha256": "1359d3132529aacca7715acf057a143953308389144cf98df84c1be857dbb764",
+      "bytes": 121487,
+      "parent_sha256": "0a629f855bd3c95186898a497d89dc94769dc226972f10290da78f555e187b07"
+    }
+  ],
+  "protected": [
+    {
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "38ae331369187698244c8d679e944e39937b27915f4c7612191e9d65604f3fc1",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-api/src/devices.rs",
+      "sha256": "7a8d0f8e63fc7521212115f4afad25c9c17ed328752e73ed2dfd0c3521d84ebb",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-api/src/lib.rs",
+      "sha256": "b6771ead4e87a0e224bef698e3bf054b0e714a3a37b1cb19c80b92b30d01145e",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-sim/src/model.rs",
+      "sha256": "f4051b6e125594a6a0247c619ee03031bc8af16a4d4c1f388bd0a3ac27688c74",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "a8f51f83a7b8ed2c43e0824f3af7aff5e967ba77159dde320841183559ea29b8",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+      "unchanged": true
+    },
+    {
+      "path": "CLAUDE.md",
+      "sha256": "a093d49f0e51a0c9026996cb170980696dc375364b8d9f13866200c6232e0c2b",
+      "unchanged": true
+    }
+  ],
+  "wire": {
+    "tail": "omitted if empty; otherwise u32 count, existing class tag plus existing Refusal::Backing body per entry",
+    "legacy": "absent or explicit-zero tail means empty; exact old payload bytes retained when empty; partial nonempty tail refused",
+    "max_count": 2,
+    "entry_bytes": 51,
+    "bounds": "API check and checked whole-body byte preflight before body reservation; count maximum/minimum bytes before parsing/reserving entries; only VM/backing tag before variable refusal/name parsing",
+    "existing_tags_and_refusal_codec": "byte-identical source",
+    "identity": "normal source-derived IDENTITY update; no new explicit version/tag",
+    "internal_admit": "RuntimeRoutes.admit remains internal model/peer state, no Capacity/Runtime/new wire field"
+  },
+  "tests_defined": 3,
+  "test_names": [
+    "wire::tests::physical_report_unavailable_roundtrips_qualified_backing_causes",
+    "wire::tests::physical_report_unavailable_rejects_hostile_counts_and_entries",
+    "wire::tests::physical_report_unavailable_preserves_legacy_bytes_and_message_bounds"
+  ],
+  "old_tests": "unchanged prefix except one unavailable:Vec::new() in owned example_physical_report literal",
+  "builds_executed": 0,
+  "tests_executed": 0,
+  "native_executed": 0,
+  "status": "SOURCE ONLY; scoped rustfmt/source integrity only; no compiler/test/native dispatch; requires exact c772 + ROOT exports/outside literal integration",
+  "limits": "Qualified unavailability is diagnostic beside actual native facts; no empty-success capacity, zero-usage fallback, fresh authority from retained offers, physical absence or native readiness claim. General ordinary Writer inherited allocation gaps remain separately qualified."
+}

@@ -1,0 +1,114 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "b1f7a19d2524eaad61f9502ddd64239fde965ac3",
+  "owned_source": [
+    {
+      "path": "crates/hex-api/src/devices.rs",
+      "sha256": "c1318774bda085cff7ec888aeb236179aac526d7adb5e244fad7afcf1ee3bf3b"
+    },
+    {
+      "path": "crates/hex-node/src/scheduler.rs",
+      "sha256": "4f47bf22272bf94ce1fe08274fc74e91295a1f446edd3c0edd3d3304d40f61b2"
+    },
+    {
+      "path": "crates/hex-node/src/scheduler/capacity/initialized.rs",
+      "sha256": "e07b7e306f5d3802cd7227d0f579ed4900e568d828c495e791195aa684d39507"
+    },
+    {
+      "path": "crates/hex-sim/src/index/routes.rs",
+      "sha256": "c5ebba5dc5fb41e4bd9ca7438a17f875644edcbe939f67d4889e9d113ee4401c"
+    },
+    {
+      "path": "crates/hex-sim/src/model.rs",
+      "sha256": "a91c9b32af825dba069ae4cb2e7bfec7a68bc9c36b1cda198e7cd936c7227a66"
+    }
+  ],
+  "actual_original": {
+    "source": "8c0997ecf0939f9a3f58896af5b404bd4f519e19",
+    "result_path": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/cold-key-originals-8c09-results-proof/cohort-8c0997ec-linux-cold-key-originals-8c09/result.json",
+    "raw_sha256": "87ddf30175b0996cb2a1a1ad19a70465c85b100e05b33c108885f7cc05e42a83",
+    "selected": 2,
+    "passed": 0,
+    "failed": 2,
+    "ignored": 0,
+    "logs": [
+      {
+        "name": "cold_pending_gpu_source_keeps_exact_charged_provisioning_and_unrelated_shared_cpu",
+        "sha256": "93b1ccc2bc4d5859ed27ca7dadbe8fa3b1e21e3197f7b4eefd5acee482575143"
+      },
+      {
+        "name": "live_uncertain_gpu_key_does_not_suppress_unrelated_shared_cpu_or_release_claims",
+        "sha256": "6d267aadd8b5235c6f5b14cab91fff19449f1532e9755395facec8df935bb0af"
+      }
+    ],
+    "native_invocations": 0,
+    "source_changes": [],
+    "temp_entries": 0,
+    "reaped": true
+  },
+  "original_controls": [
+    {
+      "name": "cold_pending_gpu_source_keeps_exact_charged_provisioning_and_unrelated_shared_cpu",
+      "body_sha256": "1043b4a333f9fcd152243ea897cc5f0bd6c84298529c80a064702b2305b464d5",
+      "unchanged_from": "e25423fd191ce03303a1281019bc9a1f52107167",
+      "after": "UNRUN"
+    },
+    {
+      "name": "live_uncertain_gpu_key_does_not_suppress_unrelated_shared_cpu_or_release_claims",
+      "body_sha256": "42b19ff4901f9d1f1b77d8ccfe66d1ee2987ad52d97edf07cbf404b11cb6c31c",
+      "unchanged_from": "e25423fd191ce03303a1281019bc9a1f52107167",
+      "after": "UNRUN"
+    }
+  ],
+  "diagnosis": [
+    "Normalization and prepared-action filtering used backend-wide observer failure, suppressing an unrelated same-backend warm CPU key and a canonical cold GPU provision grant.",
+    "Disabled matching GPU routes were skipped before route taxonomy, yielding NoPlatform despite known matching platform; this is separate from actual absent measurement."
+  ],
+  "contract": [
+    "Existing BackendUnavailable::blocks_route(offer,current_backing) uses exact backend+BackingKey. Only qualified Pending with CURRENT canonical Prepared/Granted metadata permits provisioning before readings. Live Pending/Busy/Uncertain still blocks fresh grants; unrelated keys are independent.",
+    "Normalization assigns permission only from current offers, then retains missing prior offers/profile/full claims with permission cleared for accounting/recovery. Old snapshots never create cold permission.",
+    "Fresh workload still requires Live plus actual observed eligibility in SAME Index; no catalog or BAR/config metadata becomes DeviceInfo/model/memory/load.",
+    "BackingActions returns and propagates typed validation failures, filters prepared actions with same helper, and preserves positive canonical Released/refund receipts independently of fresh telemetry.",
+    "A current unrelated route receipt may advance; SAME Index retained-receipt verification still refuses losing an actual held old receipt. No old holder is freed by this normalization.",
+    "Matching unavailable GPU route reports NoGpu; truly missing platform/form remains NoPlatform. Recovery/refund committed() remains unchanged."
+  ],
+  "new_controls_unrun": [
+    "hex_api::devices::unavailable_tests::qualified_route_permission_is_keyed_and_cannot_invent_cold_metadata",
+    "hex_node::scheduler::capacity::initialized::tests::healthy_normalized_cold_and_live_sources_keep_no_gpu_cpu_room_and_exact_grants"
+  ],
+  "wait_cache_allocation_review": {
+    "new_waits": 0,
+    "new_caches": 0,
+    "new_registries_or_ledgers": 0,
+    "algorithm": "Bounded existing route/backing/diagnostic scans (offers <=64, diagnostics <=VM backend count); in-place prepared action retention, fallible existing prior-vector growth only. No native work under a new mutex.",
+    "numbers": "No new tuning constants; existing mask/device/report bounds retained.",
+    "performance": "UNMEASURED; coordinator profiling/allocation/fault evidence owed. No speed/allocation-free claim."
+  },
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compiler": "UNRUN",
+    "tests": "UNRUN after remedy",
+    "local_builds": 0,
+    "native": 0,
+    "dispatches": 0
+  },
+  "R01_R16": {
+    "R01": "Typed validation and fallible retained vectors; new production no unchecked allocation/arithmetic/indexing. Existing callers/lifecycle allocation audit not claimed closed.",
+    "R02_R03": "Existing canonical route/backing lifecycle, exact actual original logs and existing fixed bounds; lazy remainder broader decision separate.",
+    "R04_R07": "Cold Prepared/Granted vs Live diagnostic permission explicit, one existing helper shared by both consumers, comments explain authority.",
+    "R08_R14": "No performance claim; full allocation/fault/benchmark comparisons remain ROOT.",
+    "R09_R10": "Two exact original pure failures retained above; unchanged original after tests and mutation/native effects owed.",
+    "R11_R12": "Shared portable pure API/Index path; supported-target compile/full native validation ROOT-owned/unrun here.",
+    "R13": "Five existing production source files, no DTO/wire/cache/provider/picker/manager additions.",
+    "R15_R16": "L1 source-only checkpoint; no duplicate checks/native campaigns, no cleanup of source/evidence, >=30GiB free (160GiB readback)."
+  },
+  "excluded_dirty_draft": "crates/hex-node/src/node/backends.rs in this private worktree is stale, not signed/delivered; real Node producer is separate 502dc lineage.",
+  "remaining": [
+    "ROOT matched two affected after controls + two new healthy/keyed controls and strict current compile. No prior unchanged 9 passes rerun.",
+    "Lazy deterministic remainder/coalescing and qualified historical route topology are separate broader contract, not closed by this patch.",
+    "Source-only; actual GPU/VM/preflight/resource/profiling/fault/full gates and main remain ROOT/native QA."
+  ]
+}

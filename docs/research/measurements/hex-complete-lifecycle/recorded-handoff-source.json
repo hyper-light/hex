@@ -1,0 +1,98 @@
+{
+  "role": "implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "base": "fab82f5149977dbf2b690c062c65d644acabeddb",
+  "api_dependency": "a56fe683494544e9783f0d5e13e922d823ca8221",
+  "root_dependency": "25d98e88be3b8173605ed7e8e1d109d309a278b6",
+  "source": [
+    {
+      "path": "crates/hex-node/src/recorded.rs",
+      "bytes": 99834,
+      "sha256": "ed3fc53a46d3b4f164a18c74b77713c35300d25bdd71585f21bd7f0c1ae74ab2",
+      "base_sha256": "bb442bf856eef99b1049e0d217d044dc7091801fe51ec5a00b251d2c66f0f0e2"
+    },
+    {
+      "path": "crates/hex-node/src/store.rs",
+      "bytes": 63206,
+      "sha256": "1b0d069d31f0f959b87d3eb2d162adcfb6226ad2683259af3d7595bbfe3f193c",
+      "base_sha256": "197de26634c7bff7590b31b9ca6cb73e654823c6be8ce71cc3bebd6707791a7e"
+    },
+    {
+      "path": "crates/hex-node/src/store/pool.rs",
+      "bytes": 19173,
+      "sha256": "b58e9e169d92d222bdd9c6ff8c7578a8023b6c7f17d91993b56a03acf5dd2c54",
+      "base_sha256": "779613bb37e32855d13416dcbab4183af563e9b3b392789930fb256900b6aa0f"
+    },
+    {
+      "path": "crates/hex-node/src/turns.rs",
+      "bytes": 23025,
+      "sha256": "8c5fec83e40038f04568c9b95b85cc927797b36a0b00698c17dcc857754012da",
+      "base_sha256": "a6d59386797696315149e78679709c9a65555e95b1814e0ff62e3b9e14dbfd04"
+    },
+    {
+      "path": "docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs",
+      "bytes": 15527,
+      "sha256": "60a25a1e2005271c1d563390add17d6736d13f82eb1fcf41e19d7e9b8453dc74",
+      "base_sha256": null
+    },
+    {
+      "path": "crates/hex-runtime/src/macos/managed/remote/controls.rs",
+      "bytes": 7610,
+      "sha256": "1cd8a87b0d8d93cd05805d31cad5c3c0434f69eeb0e41d6b6de0c70dc3027833",
+      "base_sha256": "22061f7c3ebef7a223184ceda4dc93fe23888c582fd71682d3ce761245107fd3"
+    }
+  ],
+  "new_controls": [
+    {
+      "path": "crates/hex-node/src/turns.rs",
+      "name": "handoff_turn_holds_full_source_and_releases_both_on_failure_or_completion",
+      "status": "UNRUN"
+    },
+    {
+      "path": "docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs",
+      "name": "subset_handoff_reservation_and_cancel_keep_full_source_and_native_gate",
+      "status": "UNRUN"
+    },
+    {
+      "path": "docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs",
+      "name": "retained_handoff_preflight_joins_one_exact_source_before_any_effect",
+      "status": "UNRUN"
+    },
+    {
+      "path": "docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs",
+      "name": "subset_native_launch_waits_for_full_source_release_then_passes_only_selected_devices",
+      "status": "UNRUN"
+    }
+  ],
+  "original_c9b": {
+    "source": "c9b000e6a9ad397da72544d0c50d7642675e5689",
+    "path": "docs/research/measurements/hex-complete-lifecycle/store_backing_reference_tests.rs",
+    "sha256": "5ae2c99db205a592e35689b59c1d12ef3402d4e1e6523c631704ab894ac222e4",
+    "status": "unchanged; actual ROOT reproduction pending; generic remove_pool remedy HELD"
+  },
+  "validation": {
+    "scoped_rustfmt": 0,
+    "git_diff_check": 0,
+    "compile": "UNRUN",
+    "clippy": "UNRUN",
+    "tests": "UNRUN",
+    "native": "UNRUN"
+  },
+  "new_required_interfaces": [
+    "BackingOffer::check_selection_parts(P,S)",
+    "Books::with_handoff_transaction(id,source,full_conflicts,callback)"
+  ],
+  "shared_helper_signatures": [
+    "Turns::try_take_handoff(&self,id:&BoxId,source:&BackingKey,full_conflicts:&[DeviceId])->Result<(Turn,Turn),Refusal>",
+    "recorded::handoff_transaction(store:&Store,id:&BoxId,source:&BackingKey,full_conflicts:&[DeviceId],native:&Native,callback:&mut dyn FnMut(&dyn Transaction)->Result<(),Refusal>)->Result<(),Refusal>",
+    "recorded::preflight_handoff_turns(turns:&Turns,store:&Store,record:&BoxRecord,catalog:Option<&Catalog>)->Result<Option<(Turn,Turn)>,Refusal>"
+  ],
+  "remaining": [
+    "L1 Catalog subset/holder semantics +Node same helper caller",
+    "L2 guest reserve-return/drain/reenter and exact read-only no-Intent proof +tests",
+    "generic Pool reference retention remedy only after ROOT actual c9b",
+    "ROOT joined compile/new4 controls/Clippy, no repeat earlier green controls",
+    "actual native/full-P termination/witness/resource/freshness/reprobe proof remains ROOT/native lanes"
+  ]
+}

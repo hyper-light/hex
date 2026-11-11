@@ -1,0 +1,79 @@
+{
+  "status": "ORIGINAL SOURCE ONLY; production unchanged; no compile/test/native dispatch; original oracle sealed before remedy",
+  "parent": "701f3a5580f7c9b814c382a2734db4b215c53176",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "new_control": {
+    "name": "guest::gpu_pool::tests::native_oci_routes_and_canonical_claims_survive_qualified_shards_capacity_failure",
+    "sha256": "3a34861d3484ee49c4f9c61c3d449c72473c71da07af83c8eabacfda2c085d80",
+    "status": "UNRUN"
+  },
+  "preconditions": [
+    "real configured GuestRuntime with SAME Books PoolRecord Prepared->Granted->Live, exact scoped model report and complete v4 readiness (existing compatibility, not native evidence)",
+    "same retained native model observes controller Code7/Process; full scope is not Released",
+    "actual physical_observations must return exact-key Backing::Uncertain and reach native attach once before composition",
+    "real add_offers composes initialized Windows Process+OCI model native prefix with Shards routes on the same host resource plane",
+    "assert original native prefix/resource amounts, canonical full claims/cost/phase/record bytes unchanged before semantic oracle; no new launch/probe/finalize"
+  ],
+  "oracle": "qualified observation failure does not reject the composed capacity; initialized required route/backing remain accounting-visible, with no invented fresh GPU DeviceInfo",
+  "limits": [
+    "direct add_offers seam; outer WithGuest native HCS branch propagates this result but is not itself a native HCS invocation",
+    "no metadata append remedy/test in this checkpoint; separate required source gap",
+    "v4 model payload does not establish actual artifacts/driver/readiness/termination"
+  ],
+  "test_fixture_changes": [
+    "same owned RuntimePaths pair in b655 and unrun701 constructors; exact old bodies after removing constructor insertion are byte-identical",
+    "new control has the same required configured path pair from first source seal",
+    "Cold attach accepts Some(identity) ONLY for canonical Live and asserts exact existing native identity; all non-Live original Intent controls retain None assertion; no new fixture fields and no grant/finalize change"
+  ],
+  "actual_fixture_evidence": {
+    "root_fixed_bridge": "baa61939599619635ff11df5848bb3166cd22ee6",
+    "root_parent": "d87bcf9b6a6bb6d6e669d5179b666a2ef38041c4",
+    "before_setup_logs": [
+      "0c099b52261964d1d37ddd2169295aa04a1e6f95fa191be9631c73b1e2d9e78e",
+      "6f5705c72a896827ba0c2313db0e1ca6dae018c4488f278acb73b31067e54b65"
+    ]
+  },
+  "source": {
+    "path": "crates/hex-runtime/src/guest/gpu_pool.rs",
+    "sha256": "289322e6f2d24998c28030a9b27c65f2f72a0ba15ae6cb180fc03b969159ef01"
+  },
+  "protected": [
+    {
+      "path": "crates/hex-runtime/src/guest/shared.rs",
+      "sha256": "b1f9d4f77afe4ef936d3865ae593a1150a746a706f24d1c5a262dccfd4e6c1f5"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/mod.rs",
+      "sha256": "f240bd3a588d9a225739d691ee123e7e4558b50462733e6559933105a0ad0fab"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/physical.rs",
+      "sha256": "08e699e01af12dac3c25817e3ba301ddc0759e377938f4cde0775fabb6585810"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/books.rs",
+      "sha256": "306ab08727238c11817cc38474bdd151763cf22a42bec526e80a9eb60511c3ad"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/selected.rs",
+      "sha256": "36868ef01db5b7429b073af2d401c18277d06312aaa3137c22573b1667a068d1"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/observer.rs",
+      "sha256": "cfca536488e0cc8080dc7fbaece00b1aa57af4d027194668d445813571a871dd"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/observer/failure_tests.rs",
+      "sha256": "f16173de8bd30baee7826a531ccc686cfc13dece241f07204fb4886aba3e4323"
+    }
+  ],
+  "preserved": [
+    "all production bytes and all earlier actual-passed observer/Intent/Driver oracles",
+    "c2 original immutable pin/root bridge; no Released(None) production remedy",
+    "L1 keyed Pending actual reds and remedy are separate shared API/Index ownership"
+  ],
+  "root_command": "cargo test -p hex-runtime --lib --locked -- guest::gpu_pool::tests::native_oci_routes_and_canonical_claims_survive_qualified_shards_capacity_failure --exact --test-threads=1 (only within ROOT immutable admitted cohort; no local invocation)",
+  "after": "UNRUN, no own check authorized or dispatched"
+}

@@ -1,0 +1,35 @@
+{
+  "requirement": "AC-T7.4.1",
+  "source_only_intakes": [
+    {
+      "revision": "05957c024f4c2eb7aa50a3df5b2e183371ebcaa0",
+      "patch_sha256": "dfe73e98665af4d3242d48ec459f7307af93bc2745468ae7dcddf82f27f3ed1b",
+      "paths": [
+        "crates/hex-api/src/runtime.rs",
+        "crates/hex-sim/src/index.rs",
+        "crates/hex-sim/src/peer.rs"
+      ]
+    },
+    {
+      "revision": "43da345a15373f51b76ddcd72b6c626c32c51611",
+      "patch_sha256": "7360a20ce431b9902d40bdf2e0117db04b2922e543a1f574fdd651bc15d264c9",
+      "paths": [
+        "crates/hex-runtime/src/macos/process.rs"
+      ]
+    },
+    {
+      "revision": "275b9c4dde9d4b2b904af01f39a4a5aea1a7bb63",
+      "patch_sha256": "69da7c46dc52636bf70016907a3c78483b0a6e681596c43ba8ef063961b458ee",
+      "paths": [
+        "crates/hex-runtime/src/guest/shared.rs",
+        "crates/hex-runtime/src/guest/shared_tests.rs"
+      ]
+    }
+  ],
+  "controls_executed_after_intake": 0,
+  "notes": [
+    "05957 test-only compile and non-ZST fixture corrections",
+    "43da unused production function becomes test-only; actual test caller retained",
+    "275 read-only retained shared backing preflight, not whole-owner recovery remedy"
+  ]
+}

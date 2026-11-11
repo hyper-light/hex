@@ -1,0 +1,20 @@
+[
+  {
+    "name": "route-failures-mac-proof",
+    "sha256": "adf4e4cd8a0f52809bd8eab6f379602c7bce5b409de2d6907b1c481eb9e16912",
+    "bytes": 641199,
+    "all_members_verified": true
+  },
+  {
+    "name": "windows-compute-4ee-proof",
+    "sha256": "5e361422d514afb89c4734a0368588a330f307492e20e8fc2c891397b7c3290a",
+    "bytes": 208642,
+    "all_members_verified": true
+  },
+  {
+    "name": "windows-current-join-readonly-v4.cli.log",
+    "raw_sha256": "63ba9107d540caf64f6a1f4a40ae1fdc26f9ad99b0eaaeb53824e79bd88f86c6",
+    "raw_bytes": 1245,
+    "stored_lossless_gzip": true
+  }
+]

@@ -1,0 +1,29 @@
+{
+  "scope": "ROOT read-only current native platform preflight; no HCS create/start/terminate, no VM, no driver/service changes",
+  "pid": 309612,
+  "priority": "BelowNormal",
+  "os": {
+    "Caption": "Microsoft Windows 11 Pro",
+    "Version": "10.0.26200",
+    "BuildNumber": "26200",
+    "OSArchitecture": "64-bit"
+  },
+  "gpu": [
+    {
+      "Name": "AMD Radeon(TM) 8060S Graphics",
+      "PNPDeviceID": "PCI\\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\\4&35FE04F8&0&0041",
+      "DriverVersion": "32.0.22032.6002"
+    }
+  ],
+  "present": [
+    {
+      "instance": "PCI\\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\\4&35FE04F8&0&0041",
+      "status": "OK",
+      "locations": [
+        "PCIROOT(0)#PCI(0801)#PCI(0000)",
+        "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPPA)#ACPI(VGA_)"
+      ]
+    }
+  ],
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\r\nbinary: rustc\r\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\r\ncommit-date: 2026-10-13\r\nhost: x86_64-pc-windows-msvc\r\nrelease: 1.99.1\r\nLLVM version: 23.1.1\r\n"
+}

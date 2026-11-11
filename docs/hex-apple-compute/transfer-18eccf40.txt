@@ -1,0 +1,2 @@
+[2m[kiln] on d1323898b255a3ed435eb83fa0f7b0cf · macos/aarch64 · 30 of 32 cores idle · 47 GB free · room for 1 CPU, 4 GiB of memory, 12 GiB of disk[0m
+{"source_commit": "18eccf40bad6c9b85241036cf72161e372255176", "archive_sha256": "614d17c54358e0650ed32bb5e2b209b995b814821eb8e608d282b032da10393e", "archive_bytes": 8182231, "files": 1744, "private": "/Users/adalundhe/.cache/hex-lead/lanes/apple-compute-01a1c640-18eccf40-compile-v1"}

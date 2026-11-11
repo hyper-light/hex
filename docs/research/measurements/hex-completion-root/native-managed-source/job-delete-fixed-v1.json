@@ -1,0 +1,130 @@
+{
+  "sha256": "db91b5b6740c272119f6c171458a2f24843dd98a9213612315e0a12fa6e128e6",
+  "bytes": 96600,
+  "members": {
+    "result.json": {
+      "bytes": 3858,
+      "sha256": "ac2e01c55405e42dadbd7fd56dcc58cbac370d61173bd7bdf1deac1b3f0364c3"
+    },
+    "run.json": {
+      "bytes": 3583,
+      "sha256": "315d9f5311bbee92f1a5a6b989617e0ec5b7dfa4183296c6e8cb49ca75f3aac7"
+    },
+    "source-hashes.json": {
+      "bytes": 270853,
+      "sha256": "39d0c16e95c6ae241b3e3ea2cef05f4b883c727b54c81d5135df343f53262208"
+    },
+    "job-delete-lock.log": {
+      "bytes": 153,
+      "sha256": "d6c44db7cce145d382ddb0bbc19b6ea92cb3c272ef4fc396fd383b54b66ed431"
+    },
+    "job-delete-controls.log": {
+      "bytes": 2862,
+      "sha256": "2590cb4a210766ba7c2815bc1432a0aefb7017ccfa5b5f9e0d6d483bdcc2fac8"
+    },
+    "source/docs/research/measurements/hex-complete-lifecycle/job-delete-controls/src/lib.rs": {
+      "bytes": 4905,
+      "sha256": "18ad0fae379ce5883ac1929182a0404d4b4a895759bee1f88820c2e9b8d0dc54"
+    },
+    "source/docs/research/measurements/hex-complete-lifecycle/job-delete-controls/Cargo.lock": {
+      "bytes": 6124,
+      "sha256": "c2312a761ba9568c41059b9f345d99c34e61de1da475f92385dd96f251257a5a"
+    }
+  },
+  "run": {
+    "source_revision": "15203af1ca827225d7ec547600c258c494cc5a89",
+    "archive_sha256": "49f532149245ccc45bd8a7ab7925ddeb6f933412a498442cb203a90b4ff70524",
+    "source_manifest_sha256": "39d0c16e95c6ae241b3e3ea2cef05f4b883c727b54c81d5135df343f53262208",
+    "platform": "macOS-26.4-arm64-arm-64bit",
+    "arch": "arm64",
+    "root": "/Users/adalundhe/.cache/hex-complete-lifecycle/01a1c767-job-delete-green-v1",
+    "needs": "cpus=1,mem=4g,disk=12g",
+    "phases": [
+      {
+        "name": "job-delete-lock",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+          "generate-lockfile",
+          "--manifest-path",
+          "/Users/adalundhe/.cache/hex-complete-lifecycle/01a1c767-job-delete-green-v1/source/docs/research/measurements/hex-complete-lifecycle/job-delete-controls/Cargo.toml"
+        ],
+        "owned_pid": 36055,
+        "exit_code": 0,
+        "child_reaped": true,
+        "log_sha256": "d6c44db7cce145d382ddb0bbc19b6ea92cb3c272ef4fc396fd383b54b66ed431",
+        "log_bytes": 153
+      },
+      {
+        "name": "job-delete-controls",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+          "test",
+          "--manifest-path",
+          "/Users/adalundhe/.cache/hex-complete-lifecycle/01a1c767-job-delete-green-v1/source/docs/research/measurements/hex-complete-lifecycle/job-delete-controls/Cargo.toml",
+          "--locked",
+          "tests::",
+          "--",
+          "--test-threads=1",
+          "--nocapture"
+        ],
+        "owned_pid": 36058,
+        "exit_code": 0,
+        "child_reaped": true,
+        "log_sha256": "2590cb4a210766ba7c2815bc1432a0aefb7017ccfa5b5f9e0d6d483bdcc2fac8",
+        "log_bytes": 2862,
+        "selected_lines": [
+          "test tests::accepted_termination_retains_ownership_until_the_whole_scope_is_empty ... ok",
+          "test tests::failed_termination_is_not_cached_as_a_completed_delete ... ok"
+        ],
+        "summaries": [
+          "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+        ],
+        "required_tests": [
+          "tests::failed_termination_is_not_cached_as_a_completed_delete",
+          "tests::accepted_termination_retains_ownership_until_the_whole_scope_is_empty"
+        ],
+        "required_selected": true,
+        "nonzero_selection": true
+      }
+    ],
+    "scope": "actual Windows JobBox delete and Counts excerpt with fake kernel termination/population; no native calls",
+    "source_hashes": {
+      "crates/hex-runtime/src/windows/process.rs": "a92fa0c2bbae8b766ab4ebd9f4c2d9fb3ea995aaf8b5cd9aa0fe8c1c5c6ff12a"
+    },
+    "free_bytes_before": 2377565806592,
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "compatibility_overlay": {
+      "actual_subject": "crates/hex-runtime/src/windows/process.rs",
+      "source_sha256": "a92fa0c2bbae8b766ab4ebd9f4c2d9fb3ea995aaf8b5cd9aa0fe8c1c5c6ff12a",
+      "excerpt_ranges": [
+        {
+          "start": 2584,
+          "end": 3224
+        },
+        {
+          "start": 21775,
+          "end": 22757
+        }
+      ],
+      "excerpt_sha256": "9a5318524ff092f379f451c6d2c1e66f1e12f244d6f385cfffd23b09589c19c7",
+      "test_shell_sha256": "18ad0fae379ce5883ac1929182a0404d4b4a895759bee1f88820c2e9b8d0dc54",
+      "scope": "exact delete/Counts excerpt, explicit fake kernel; no Windows ABI/native proof"
+    },
+    "standalone_lock_sha256": "c2312a761ba9568c41059b9f345d99c34e61de1da475f92385dd96f251257a5a",
+    "native_backend_invocations": 0,
+    "binaries": {
+      "target/debug/deps/hex_job_delete_controls-57a916e8ca9e171f": "1950d19ff88d746a48476aaef8ca80feb457b673a3f2d69d2c3a33a453429b9a"
+    },
+    "remaining_temp_entries": 0,
+    "free_bytes_after": 2376753299456,
+    "exit_code": 0
+  },
+  "collection_exit": 0
+}

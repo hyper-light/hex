@@ -1,0 +1,8 @@
+{
+  "source": "4839af22e617889f9448db7f1bc6de47f57373e7",
+  "change": "plain if Option instead of workspace-forbidden bool::then_some; exact MAX infinite versus finite wait semantics unchanged",
+  "verification": "scoped format/diff only; ROOT joined checks, no duplicate check/native",
+  "files": {
+    "crates/hex-runtime/src/macos/proc.rs": "787c82300b601f3ea208a65d3e019421a161969d52a8e70c1e19613b4f04a182"
+  }
+}

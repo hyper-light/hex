@@ -1,0 +1,16 @@
+{
+  "VM_GPU": false,
+  "cell": "baseline",
+  "hard_scope_seconds": 1800,
+  "lab": "/home/adalundhe/.cache/hex-lead/gc5688v1/baseline/l",
+  "original_native_phase_seconds": 180,
+  "outer_owner": {
+    "pid": 2950138,
+    "ppid": 2950137,
+    "start_ticks": 32554960
+  },
+  "outer_seconds": 1780,
+  "plan_sha256": "06ba2ce2d7e577487e7e2df8ab8298aee2fe3f529e6422abc7ab24712a094fde",
+  "source": "fabd73020cdd1c6e201d8028fcca5d85f28ef18c",
+  "unit": "hex-root-gate-baseline-fabd-v1.scope"
+}

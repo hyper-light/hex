@@ -1,0 +1,103 @@
+{
+  "bytes": 325336,
+  "sha256": "e5fa5d9f3164ee6e7c58d7dce9f4480a6a6a760c142f83502a5563b173b60642",
+  "members": {
+    "cohort-d87bcf9b-linux-selected-subset-d87/source-before.json": {
+      "bytes": 467675,
+      "sha256": "c835b6fe2b4d45037c26c2f18f15215953ee7b78f4752b62a0b2f4262c700b27"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/owned-scope-limits.json": {
+      "bytes": 259,
+      "sha256": "36b1506e75f3f7582694ad6b668335ffbf64e47e7333c8d0aaf665745df5f6b2"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/released-none-original.log": {
+      "bytes": 4039,
+      "sha256": "0c099b52261964d1d37ddd2169295aa04a1e6f95fa191be9631c73b1e2d9e78e"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/running.json": {
+      "bytes": 16394,
+      "sha256": "5a4346a0736ccc3196a37de2ec1bba3243ab2faa4f9cd5375008a60b82e90433"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/catalog-subset-new.log": {
+      "bytes": 448,
+      "sha256": "0f944c8c8af6b9c0cc430336989a038bb6b3472c6a9f3edf4e858c57648a9abf"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/catalog-holder-contract-after.log": {
+      "bytes": 448,
+      "sha256": "860492f352c7f32f0d72e2bddd9ab3bbb029b64a1fd4b346925a03d82caa4e8c"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/retained-handoff-preflight-after.log": {
+      "bytes": 1465,
+      "sha256": "54ab3816698cc91fafad3d3fb28fb1b96577e40e22b87a8bd6e8eae61c62e325"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/subset-reservation-after.log": {
+      "bytes": 449,
+      "sha256": "90bbfd35cdd3a4a4264bbdb4efe191dae2d47616742ad1f92cbb08b3dfca0806"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/subset-native-gate-after.log": {
+      "bytes": 463,
+      "sha256": "1b11d52a3e082da5738f84fccba9b000c23b9b63e7e119aed68849bb4122d29b"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/exact-subset-original-after.log": {
+      "bytes": 864,
+      "sha256": "c8d483b52d89f1dcf9bb0c0afb9b4cdff138385c49f389afd82b6f53478fe623"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/subset-one-consumer-new.log": {
+      "bytes": 456,
+      "sha256": "d669b348b1838b1f46c95a65111554c3ac0886968a85696377a66e34352e3ff1"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/released-sibling-freshness-original.log": {
+      "bytes": 984,
+      "sha256": "b7ed97e6734b65177cc78f086101be439268a5ab4758bca04e6496c5e63cdc36"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/fc-unsubmitted-private-file-new.log": {
+      "bytes": 462,
+      "sha256": "e51278eb1fb161bb837b25f3252c8deccbd02a9ccc58ab041fa196553df87a63"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/shards-unsubmitted-private-file-new.log": {
+      "bytes": 1038,
+      "sha256": "6f5705c72a896827ba0c2313db0e1ca6dae018c4488f278acb73b31067e54b65"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/node-proof-dispatch-new.log": {
+      "bytes": 474,
+      "sha256": "71b4a555b445aa6739ea9825cad9e7568b693816fc658bae952972223fab22fe"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/selected-observer-authority-new.log": {
+      "bytes": 454,
+      "sha256": "5096a0469729c82e9be10baf40c812b004540993dc1bb8a2afccfe94bd765735"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/selected-observer-opaque-new.log": {
+      "bytes": 452,
+      "sha256": "1df40ea54812b7bdae6f671e636f47a29e04a257a56c4474aa6dd648e7d720af"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/observer-borrowed-dispatch-after.log": {
+      "bytes": 459,
+      "sha256": "23c2a1a04bc3129861f5329d2a93e3a68a2f7dc2a8552c9cb9c4714bb5f3ec2a"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/joined-strict-clippy.log": {
+      "bytes": 4345,
+      "sha256": "213e823e9c31af49591c61e9d4a3016d0dcde7dee85c13c7d53e040fa6b6a466"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/source-after.json": {
+      "bytes": 467675,
+      "sha256": "c835b6fe2b4d45037c26c2f18f15215953ee7b78f4752b62a0b2f4262c700b27"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/result.json": {
+      "bytes": 16652,
+      "sha256": "3e21fb419f60a85f820506dde3a588255af64cef4815c06e18f046548a4214a5"
+    },
+    "cohort-d87bcf9b-linux-selected-subset-d87/collected-binaries.json": {
+      "bytes": 16435,
+      "sha256": "c2d821a7d0150eba7bcc0d38c3be5f6a63ddef09560985a86eaec13f7fb233cf"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

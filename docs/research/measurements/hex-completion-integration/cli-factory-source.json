@@ -1,0 +1,22 @@
+{
+  "root_before": "c02b041c",
+  "before_sha256": "53651ecbf4b0f491b7b64f93d909d3f284c0c6bebb419f975e153401b8e0f8c6",
+  "source": "ROOT CLI joins current25f native scope SDKaa7 typed paths",
+  "behavior": [
+    "canonicalize existing state once before host initialization",
+    "read requested guest/FC config and exact cost artifact before native adapter startup",
+    "one catalog/Prober and shared Books, configured adapters installed before recovery",
+    "probe and PreparedBoot/native use identical explicit SHARDS_CACHE/SHARDS_HOME; no ordinary provider ambient fallback",
+    "Mac/Win WithGuest::configured replaces eager unreserved boot"
+  ],
+  "still_open": [
+    "actual initialized route offers and SAME pool grant/receipt before backing boot from L1/L2/L3",
+    "Mac actual managed producer, native startup/recovery/fault/cleanup validation",
+    "new/inherited std Arc allocations still require final R01 allocation audit; no allocation-safety/performance claim",
+    "no actual backend/GPU invocation on this source"
+  ],
+  "tests": "SOURCE ONLY; scoped fmt and joined compiler checks pending",
+  "policy_revision": "ca3ab10c151aa5539e757f1cc76029746ccbb561",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "direct_dependency": "promote existing alreadylocked shards-api from macOS-only toallhosts; no new package/version"
+}

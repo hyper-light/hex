@@ -1,0 +1,10 @@
+{
+  "run": "r17",
+  "summary_sha256": "50955835578b8210330e4b839f05630773fd5611896854480f3548aa32af9568",
+  "binary": {
+    "path": "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/baseline-target/debug/deps/hex_core-20ae9c8214162dc5",
+    "sha256": "96e2d39bbb271ecbd330cce79cf73e7e63f5bf4e6a72eb12083bda6dc44fb32c"
+  },
+  "baseline_bundle_sha256": "833a7418e7a7313295c375eaa44a2243d327c480651409b9cc66344780387f26",
+  "scope": "Read-only reuse of retained d4d capture bytes; baseline is not executed again"
+}

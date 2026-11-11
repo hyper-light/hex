@@ -1,0 +1,463 @@
+{
+  "kind": "ROOT-released cached-only continuation; whole-root operational disk accounting",
+  "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-release-v3",
+  "charged_root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs",
+  "needs": "cpus=1,mem=4g,disk=32g",
+  "review_clarification": "R16 disk request is an operational resource envelope, not a filesystem quota; no policy waiver",
+  "reviewed_body_sha256": "abf9d137ff53a1826394eb4a0d6067462888e1c831202349b76e82164d34015c",
+  "reviewed_controller_sha256": "0fe01b9b25180a13a2327dba74e7c1220b6527d26975df9eee4f532ad3c9ae3a",
+  "envelope_bytes": 34359738368,
+  "reference_measured_allocation": 23026771528,
+  "remaining_verified_tailtar_bytes": 5583841280,
+  "uncertainty": "NTFS metadata/staging overhead is unbounded by tar sizes; admission estimate is not hard allocation guarantee",
+  "continuous_growth_observer": "no bounded growth callback exists in reviewed copy/pump path; existing phase/IO-completion measurements plus whole-root pre/post retained; no periodic manager",
+  "included_paths": [
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-command-help-v1",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-import-preflight-v1",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-import-preflight-v2",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-release-v3",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\controlsv1",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\controlsv1-incoming",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\controlsv2",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\controlsv2-incoming",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v1",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcs-cpu-exec-v1",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsdiag1",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsdiag1-incoming",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsllvm1",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsllvm1-incoming",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsv1",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsv1-incoming",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsv2",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcsv2-incoming",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hostv2",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hostv2-incoming",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hostv3",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hostv3-incoming",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\image-metadata-v1",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\image-metadata-v2",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\image-prep-controller-v1",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\image-prep-controller-v2",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\image-stream-size-v1",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\image-stream-size-v2",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\launcher-imports-v1",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\native-cpu-callback-v1",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\native-cpu-callback-v2",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\native-cpu-callback-v3",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\native-launcher-loader-v1",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\path-probe-v1",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\retained-image-meter-v1",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\retained-image-meter-v2",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\vhd-capability-v1",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\whole-envelope-meter-v1",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\image-cached-controller-v3",
+    "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-image-import-v3"
+  ],
+  "pre": {
+    "entries": 236321,
+    "files": 195419,
+    "directories": 40902,
+    "reparseEntries": 46,
+    "duplicateIds": 53359,
+    "retainedLogicalBytes": 22782679231,
+    "logicalBytesWithHardlinkDuplicates": 31660097763,
+    "allocatedBytes": 23026800200,
+    "regularFileAllocation": 22908548680,
+    "directoryAllocation": 118251520,
+    "reparseAllocation": 0,
+    "maximumUtf16Path": 367,
+    "elapsedMs": 30569
+  },
+  "post": {
+    "entries": 397751,
+    "files": 329127,
+    "directories": 68624,
+    "reparseEntries": 60510,
+    "duplicateIds": 103353,
+    "retainedLogicalBytes": 31052738750,
+    "logicalBytesWithHardlinkDuplicates": 47982404179,
+    "allocatedBytes": 28686745704,
+    "regularFileAllocation": 28470460520,
+    "directoryAllocation": 216285184,
+    "reparseAllocation": 0,
+    "maximumUtf16Path": 367,
+    "elapsedMs": 41563
+  },
+  "child": {
+    "pid": 6396,
+    "birth_native": "134388480398329103",
+    "executable": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "arguments": "-NoProfile -NonInteractive -File \"C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-release-v3\\reviewed-controller.ps1\"",
+    "wait_budget_ms": 1120000,
+    "reaped": true,
+    "exit": 1
+  },
+  "caller_native_job_ms": 1100000,
+  "cached_pipeline_ms": 1000000,
+  "outer_budget_seconds": 1200,
+  "policy_current_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "native_gpu_dispatches": 0,
+  "cleanup_errors": [],
+  "exit_code": 1,
+  "host_free_before": 174953762816,
+  "estimated_working_set": 28610641480,
+  "estimated_headroom": 5749096888,
+  "allocation_delta_from_review": 28672,
+  "host_free_after": 168466604032,
+  "stdout_sha256": "a6e916674fa82f286df70d37ae64dabfcbef3d241672396013aa00bf847f056e",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "original_controller": {
+    "needs": "cpus=1,mem=4g,disk=32g",
+    "body_sha256": "abf9d137ff53a1826394eb4a0d6067462888e1c831202349b76e82164d34015c",
+    "guard_source_sha256": "25fe189bb01f69f9cb3212a3fa31633b72edce36fa367d7e4c655ab3ebe61244",
+    "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\image-cached-controller-v3",
+    "guard": {
+      "pid": 17112,
+      "exitCode": 1,
+      "activeAfter": 0,
+      "activeBeforeCleanup": 1,
+      "processes": 21,
+      "terminated": 0,
+      "residualsTerminated": false,
+      "timedOut": false,
+      "reaped": true,
+      "peakJobMemory": 623607808,
+      "user100ns": 1155468750,
+      "kernel100ns": 4091718750
+    },
+    "caller_budget_ms": 1100000,
+    "outer_budget_seconds": 1200,
+    "purpose": "cached-only local import of remaining pinned Windows layer with original base retained; no service installation/restart, driver or host configuration change",
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_sha256": "9c45f9db02b5ca38f8ec79c5b0836da6ed65e89a1debbe8c3c9db6c675c8ac00"
+  },
+  "original_body": {
+    "kind": "cached-only local import continuation; original first-layer committed state retained",
+    "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-image-import-v3",
+    "owned_image_root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2",
+    "namespace": "hex-native-hcs-full-image-v2",
+    "address": "\\\\.\\pipe\\hex-native-hcs-cached-import-v3",
+    "reference": "mcr.microsoft.com/windows/server@sha256:a62109569303cfe0ab49b1618383615f0477cdc285529b98d9b7085902d0e745",
+    "native_gpu_dispatches": 0,
+    "container_workloads": 0,
+    "registry_fetch_commands": 0,
+    "service_or_driver_changes": 0,
+    "phases": [
+      {
+        "name": "containerd",
+        "pid": 16416,
+        "birth_native": "134388480816347837",
+        "executable": "C:\\Users\\corph\\.cache\\hex-native-s4\\containerd\\bin\\containerd.exe",
+        "arguments": [
+          "--root",
+          "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root",
+          "--state",
+          "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-image-import-v3\\state",
+          "--address",
+          "\\\\.\\pipe\\hex-native-hcs-cached-import-v3"
+        ],
+        "reaped": true,
+        "exit": 4294967295
+      },
+      {
+        "name": "snapshots-before",
+        "pid": 5656,
+        "birth_native": "134388480817897115",
+        "executable": "C:\\Users\\corph\\.cache\\hex-native-s4\\containerd\\bin\\ctr.exe",
+        "arguments": [
+          "-a",
+          "\\\\.\\pipe\\hex-native-hcs-cached-import-v3",
+          "-n",
+          "hex-native-hcs-full-image-v2",
+          "snapshots",
+          "--snapshotter",
+          "windows",
+          "ls"
+        ],
+        "reaped": true,
+        "exit": 0
+      },
+      {
+        "name": "cached-import",
+        "pid": 3812,
+        "birth_native": "134388480828179854",
+        "executable": "C:\\Users\\corph\\.cache\\hex-native-s4\\containerd\\bin\\ctr.exe",
+        "arguments": [
+          "-a",
+          "\\\\.\\pipe\\hex-native-hcs-cached-import-v3",
+          "-n",
+          "hex-native-hcs-full-image-v2",
+          "images",
+          "import",
+          "--local",
+          "--digests",
+          "--base-name",
+          "mcr.microsoft.com/windows/server",
+          "--platform",
+          "windows/amd64",
+          "--snapshotter",
+          "windows",
+          "-"
+        ],
+        "reaped": true,
+        "exit": 0
+      },
+      {
+        "name": "cached-archive-producer",
+        "pid": 17328,
+        "birth_native": "134388480828294212",
+        "executable": "C:\\Windows\\System32\\tar.exe",
+        "arguments": [
+          "--format",
+          "ustar",
+          "-b",
+          "1",
+          "-cf",
+          "-",
+          "-C",
+          "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-image-import-v3\\metadata",
+          "oci-layout",
+          "index.json",
+          "-C",
+          "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.content.v1.content",
+          "blobs/sha256/a62109569303cfe0ab49b1618383615f0477cdc285529b98d9b7085902d0e745",
+          "blobs/sha256/620d54468172e4e8185670f4830dfd5bbf4f20dc2b1852b3327a3c51b8d727c6",
+          "blobs/sha256/e5dcf3bc996337655b83ea98c2e05a33a75e36a0357b01d7d433dbabcd1509a7",
+          "blobs/sha256/58b297594fae8487acb87861188616be04290bce96e6531d21161e836082b2f2"
+        ],
+        "reaped": true,
+        "exit": 0
+      },
+      {
+        "name": "snapshots-after",
+        "pid": 7680,
+        "birth_native": "134388488966399483",
+        "executable": "C:\\Users\\corph\\.cache\\hex-native-s4\\containerd\\bin\\ctr.exe",
+        "arguments": [
+          "-a",
+          "\\\\.\\pipe\\hex-native-hcs-cached-import-v3",
+          "-n",
+          "hex-native-hcs-full-image-v2",
+          "snapshots",
+          "--snapshotter",
+          "windows",
+          "ls"
+        ],
+        "reaped": true,
+        "exit": 0
+      },
+      {
+        "name": "parent-paths",
+        "pid": 4900,
+        "birth_native": "134388488966970771",
+        "executable": "C:\\Users\\corph\\.cache\\hex-native-s4\\containerd\\bin\\ctr.exe",
+        "arguments": [
+          "-a",
+          "\\\\.\\pipe\\hex-native-hcs-cached-import-v3",
+          "-n",
+          "hex-native-hcs-full-image-v2",
+          "snapshots",
+          "--snapshotter",
+          "windows",
+          "prepare",
+          "--mounts",
+          "native-cached-v3-path-read",
+          "sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d"
+        ],
+        "reaped": true,
+        "exit": 0
+      },
+      {
+        "name": "remove-own-path-read",
+        "pid": 7508,
+        "birth_native": "134388488967611903",
+        "executable": "C:\\Users\\corph\\.cache\\hex-native-s4\\containerd\\bin\\ctr.exe",
+        "arguments": [
+          "-a",
+          "\\\\.\\pipe\\hex-native-hcs-cached-import-v3",
+          "-n",
+          "hex-native-hcs-full-image-v2",
+          "snapshots",
+          "--snapshotter",
+          "windows",
+          "rm",
+          "native-cached-v3-path-read"
+        ],
+        "reaped": true,
+        "exit": 0
+      }
+    ],
+    "pipe_owner_checks": [
+      {
+        "birth_native": "134388480816347837",
+        "pid": 16416,
+        "matched": true,
+        "exit": 259
+      },
+      {
+        "birth_native": "134388480816347837",
+        "pid": 16416,
+        "matched": true,
+        "exit": 259
+      },
+      {
+        "birth_native": "134388480816347837",
+        "pid": 16416,
+        "matched": true,
+        "exit": 259
+      },
+      {
+        "birth_native": "134388480816347837",
+        "pid": 16416,
+        "matched": true,
+        "exit": 259
+      },
+      {
+        "birth_native": "134388480816347837",
+        "pid": 16416,
+        "matched": true,
+        "exit": 259
+      },
+      {
+        "birth_native": "134388480816347837",
+        "pid": 16416,
+        "matched": true,
+        "exit": 259
+      }
+    ],
+    "cleanup_errors": [],
+    "disk_admission_bytes": 34359738368,
+    "source_production_reference": "2c8855b220a36c57685e456a7b8c98d8368f7899",
+    "policy_current_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+    "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+    "policy_byte_equality_sha256": "6a658eef10e8802ed3d73ca09e5f5acf63b5f5c767c27196d429d73fba739388",
+    "oci_layout_sha256": "18f0797eab35a4597c1e9624aa4f15fd91f6254e5538c1e0d193b2a95dd4acc6",
+    "index_sha256": "dd2649453ed22c465b1a61d181d9b0b60ad786f63d17dff54ccc2c1abf28d37d",
+    "blobs": [
+      {
+        "digest": "a62109569303cfe0ab49b1618383615f0477cdc285529b98d9b7085902d0e745",
+        "bytes": 597
+      },
+      {
+        "digest": "620d54468172e4e8185670f4830dfd5bbf4f20dc2b1852b3327a3c51b8d727c6",
+        "bytes": 789
+      },
+      {
+        "digest": "e5dcf3bc996337655b83ea98c2e05a33a75e36a0357b01d7d433dbabcd1509a7",
+        "bytes": 4481593239
+      },
+      {
+        "digest": "58b297594fae8487acb87861188616be04290bce96e6531d21161e836082b2f2",
+        "bytes": 2175606732
+      }
+    ],
+    "identity_binary_sha256": "846ab5c89f048c7d0dd10c690515ce50814b947c0b5c3f3c11f46b4a539e27c6",
+    "pump_binary_sha256": "5e0a939b25b103c098894cf098a896dee3d2b637e122d78544d891ce82dff0ca",
+    "image_allocation": {
+      "entries": 342284,
+      "files": 285721,
+      "directories": 56563,
+      "reparseEntries": 60510,
+      "duplicateIds": 103048,
+      "retainedLogicalBytes": 26009877865,
+      "logicalBytesWithHardlinkDuplicates": 42637307146,
+      "allocatedBytes": 23569277080,
+      "regularFileAllocation": 23371575448,
+      "directoryAllocation": 197701632,
+      "reparseAllocation": 0,
+      "maximumUtf16Path": 367,
+      "elapsedMs": 42381
+    },
+    "controller_allocation": {
+      "entries": 29,
+      "files": 20,
+      "directories": 9,
+      "reparseEntries": 0,
+      "duplicateIds": 0,
+      "retainedLogicalBytes": 270811,
+      "logicalBytesWithHardlinkDuplicates": 270811,
+      "allocatedBytes": 283728,
+      "regularFileAllocation": 279632,
+      "directoryAllocation": 4096,
+      "reparseAllocation": 0,
+      "maximumUtf16Path": 123,
+      "elapsedMs": 1
+    },
+    "total_scoped_allocated_bytes": 23569560808,
+    "tar_binary_sha256": "a3ac62fd4cdf619a7c53f71ca3fe5fb42f72020975670ff29afe3603f6416a8e",
+    "archive_maximum_bytes": 6657207808,
+    "archive": {
+      "bytes": 6657207296,
+      "sha256": "828d0788bbf5869db1c87e26e0bb741b128740698d00e020ec7f59fe01294cca"
+    },
+    "raw_log_hashes": [
+      {
+        "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-image-import-v3\\cached-archive-producer.stderr.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      },
+      {
+        "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-image-import-v3\\cached-import.stderr.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      },
+      {
+        "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-image-import-v3\\cached-import.stdout.log",
+        "sha256": "2c8aaae5388439dc092112eef9ccc092e92e0bd9f35425fa9cedf58cc351ea71",
+        "bytes": 196
+      },
+      {
+        "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-image-import-v3\\containerd.stderr.log",
+        "sha256": "61d29de7f1cd7d4f672456ca16bd573a004b031ec0678076fab601cc9c8455aa",
+        "bytes": 16055
+      },
+      {
+        "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-image-import-v3\\containerd.stdout.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      },
+      {
+        "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-image-import-v3\\parent-paths.stderr.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      },
+      {
+        "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-image-import-v3\\parent-paths.stdout.log",
+        "sha256": "360bd58c4e944a592bc5a297ab32488386922476f30a171d451cb68085ac2e95",
+        "bytes": 599
+      },
+      {
+        "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-image-import-v3\\remove-own-path-read.stderr.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      },
+      {
+        "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-image-import-v3\\remove-own-path-read.stdout.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      },
+      {
+        "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-image-import-v3\\snapshots-after.stderr.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      },
+      {
+        "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-image-import-v3\\snapshots-after.stdout.log",
+        "sha256": "43171ee6d0fe2481bffb183f60c9cf238cba807f7e84207524d294a4b770854e",
+        "bytes": 712
+      },
+      {
+        "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-image-import-v3\\snapshots-before.stderr.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      },
+      {
+        "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\cached-image-import-v3\\snapshots-before.stdout.log",
+        "sha256": "0577b34322fa52299d963b54dde315691c0769ff2068cf9b2240062b1fa5b0d3",
+        "bytes": 534
+      }
+    ]
+  }
+}

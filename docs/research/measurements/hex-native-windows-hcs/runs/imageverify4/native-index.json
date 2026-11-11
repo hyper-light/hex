@@ -1,0 +1,24 @@
+{
+  "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\post-import-verify-v4",
+  "index": {
+    "owner.json": {
+      "bytes": 59,
+      "sha256": "f04757a413977cd8d2eb58a29f1ae7bb345873a84bb2d39c88511bf977fb5949"
+    },
+    "phase.json": {
+      "bytes": 371,
+      "sha256": "0c0a1769dcf42eb50e7c6c446f91c0f7893740c8d34752b75ee05a62f9b65e53"
+    },
+    "progress.json": {
+      "bytes": 10233,
+      "sha256": "c599146b30e8344cbc20a4186d9423f41ab714ab91566f3c7bcaff2ff5cff0b5"
+    },
+    "result.json": {
+      "bytes": 12846,
+      "sha256": "7ea4fec0d58399004a02737b2b47e59bf32ece71fbf44c0f670d084601d2e57d"
+    }
+  },
+  "source_hashes": {},
+  "temp_files": [],
+  "utc": "2026-11-11T05:56:12.8298828Z"
+}

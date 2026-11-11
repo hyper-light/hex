@@ -1,0 +1,109 @@
+[
+  {
+    "agent": "01a1c8aa921b72c89b7272fba2926a9c",
+    "name": "Hex native Windows/HCS GPU validation",
+    "status": "idle",
+    "reply": {
+      "text": "Recorded. Source attribution is unchanged; interrupted `5de` remains UNKNOWN. No additional Windows check or dispatch started.",
+      "at": 1794402351294,
+      "streaming": false
+    },
+    "last_turn": {
+      "at": 1794402351760,
+      "how": "done",
+      "why": "completed"
+    },
+    "changes_are_cumulative": true,
+    "aggregate_changes": {
+      "files": 47,
+      "added": 1359,
+      "removed": 1
+    }
+  },
+  {
+    "agent": "01a1c7676cb570a88abb4acad962a2d9",
+    "name": "Hex completion 3: recovery and cleanup",
+    "status": "idle",
+    "reply": {
+      "text": "Sealed two signed checkpoints:\n\n- `04ece3387196d3d93ef7ee769282e3981077f5cc`: trusted-entry caller, cleanup paths, five controls and [integration guide](/Users/adalundhe/.cache/hex-complete-lifecycle/worktrees/trusted-entry-786-v1/docs/research/measurements/hex-complete-lifecycle/trusted-entry-measurement-source.md).\n- `257741516c6efa6a3cd220f8bed398eb0efae21e`: separate [shared-ownership original fixture seam](/Users/adalundhe/.cache/hex-lead/worktrees/complete-lifecycle/docs/research/measurements/hex-complete-lifecycle/recorded-shared-ownership-original-seam.md), with production unchanged.\n\nControls remain unrun; no compile or native execution. Peer notifications returned 503 without accepting custody.",
+      "at": 1794407533778,
+      "streaming": false
+    },
+    "last_turn": {
+      "at": 1794407536654,
+      "how": "done",
+      "why": "completed",
+      "tools": 118
+    },
+    "changes_are_cumulative": true,
+    "aggregate_changes": {
+      "files": 86,
+      "added": 10658,
+      "removed": 119
+    }
+  },
+  {
+    "agent": "01a1c8aa92c87129a300ab8f333113bd",
+    "name": "Hex native Firecracker GPU validation",
+    "status": "idle",
+    "reply": {
+      "text": "Signed successor: `7f2cc0c44cee8356096432beaa517d67b7aa6c21`.\n\nAll five source corrections are included. `1c31`, original17 bytepins, and the terminality-only gate are preserved.\n\n[Review and limits](/Users/adalundhe/.cache/hex-lead/worktrees/native-firecracker-validation/docs/research/measurements/hex-native-firecracker/transfer-00aad-inputs-v2/REVIEW.md) \u00b7 [Focused diff](/Users/adalundhe/.cache/hex-lead/worktrees/native-firecracker-validation/docs/research/measurements/hex-native-firecracker/transfer-00aad-inputs-v2/source-from-1c31.patch) \u00b7 [Exact command](/Users/adalundhe/.cache/hex-lead/worktrees/native-firecracker-validation/docs/research/measurements/hex-native-firecracker/transfer-00aad-inputs-v2/next-command.json) \u00b7 [Seal](/Users/adalundhe/.cache/hex-lead/worktrees/native-firecracker-validation/docs/research/measurements/hex-native-firecracker/transfer-00aad-inputs-v2/review-seal.json)\n\nRemaining limits: mutable executable/loader identity, escaped descendants, same-UID mutation without snapshot guarantees, and fsync/receipt uncertainty after uncatchable termination or I/O failure. ROOT\u2019s external guard and return evidence remain required.\n\nAll admissions remain false. No fixture/import/network/native/stage/check run occurred.\n\nROOT handoff delivery returned 503; custody was not accepted.",
+      "at": 1794408646619,
+      "streaming": false
+    },
+    "last_turn": {
+      "at": 1794408649915,
+      "how": "done",
+      "why": "completed",
+      "tools": 53
+    },
+    "changes_are_cumulative": true,
+    "aggregate_changes": {
+      "files": 129,
+      "added": 92664,
+      "removed": 82
+    }
+  },
+  {
+    "agent": "01a1c7676cfc7297a41236a8e71ee188",
+    "name": "Hex completion 4: combined validation tooling",
+    "status": "idle",
+    "reply": {
+      "text": "Recorded at `aaca22b9`: parent-only baseline PASS, qualified bypass semantic FAIL, restored PASS, with verified owned cleanup and unchanged artifacts.\n\nR10 evidence applies to the whole inherited-FD guard only. No broader runtime claim or rerun.",
+      "at": 1794406321920,
+      "streaming": false
+    },
+    "last_turn": {
+      "at": 1794406322767,
+      "how": "done",
+      "why": "completed"
+    },
+    "changes_are_cumulative": true,
+    "aggregate_changes": {
+      "files": 113,
+      "added": 16603,
+      "removed": 305
+    }
+  },
+  {
+    "agent": "01a1c7676c2d7463b227be301180d1be",
+    "name": "Hex completion 1: Docker/Firecracker bindings",
+    "status": "idle",
+    "reply": {
+      "text": "Existing managed launcher contract retained. No new work; native enforcement and whole-scope proof remain unverified.",
+      "at": 1794406363092,
+      "streaming": false
+    },
+    "last_turn": {
+      "at": 1794406363436,
+      "how": "done",
+      "why": "completed"
+    },
+    "changes_are_cumulative": true,
+    "aggregate_changes": {
+      "files": 109,
+      "added": 12194,
+      "removed": 306
+    }
+  }
+]

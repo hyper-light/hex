@@ -1,0 +1,52 @@
+{
+  "source": "32e6972ce9c1c84e6cc40d0720fdb1e109975266",
+  "paths": [
+    {
+      "path": "crates/hex-core/src/hcs.rs",
+      "before_sha256": "3565076ac006986a805f5112957dbd781f3f99c015de8a58b2ae7bdc1f0d94ad",
+      "source_sha256": "e6f0918b75258e2ef75d585d07eb4022f0c1b10a094110654f25eea1537872f4"
+    },
+    {
+      "path": "crates/hex-core/src/hcs/create.rs",
+      "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source_sha256": "5c5b6517ddb15ddc96d81cea8890bc5b79ba588b69fe99b9b87ca53507ce5118"
+    },
+    {
+      "path": "crates/hex-runtime/src/windows/keeper.rs",
+      "before_sha256": "ba62286c745fa1fa532c0d28eba398df53c72b435a89a03f52af78894464f811",
+      "source_sha256": "1e58c1162c4d12bda7baa229b98204f445e2ab796d51e7aa434bf3bc5d2cf463"
+    },
+    {
+      "path": "crates/hex-runtime/src/windows/mod.rs",
+      "before_sha256": "65fd853fc18f0a1efcac9904cfb39eee932701a5dab00e06fe01b75843f10700",
+      "source_sha256": "820c629ecd009a2d2821a742ad3174a9cc681edf93ebd09ef9c7b1b44b957ab3"
+    },
+    {
+      "path": "crates/hex-runtime/src/windows/oci/mod.rs",
+      "before_sha256": "0fb5823e8946ca6d79d7d2a63a9672defbc00e235f1d6fc432c163ab9575e752",
+      "source_sha256": "b5a287dd634a4df4aad4f08b96280fc437736364e59b66db95f5fc1f0946d3d7"
+    },
+    {
+      "path": "crates/hex-runtime/src/windows/oci/service.rs",
+      "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source_sha256": "9ad010339c5c2f2535944c36931a27340f14e0e9ac6b98254e8b541469900540"
+    },
+    {
+      "path": "crates/hex-runtime/src/windows/oci/sys.rs",
+      "before_sha256": "f507954a84a2fd3c221ed1a0c6f92164086b8ef2406131d02eadf24dc5fab89b",
+      "source_sha256": "470f7208ed97ffb30cbac3c63c8f7b6fff9524f0d34f55c59088d712a31644c8"
+    },
+    {
+      "path": "crates/hex-runtime/src/windows/sys.rs",
+      "before_sha256": "d5f1c964de0764f7435886c6899d7d77a13a1394cdef27e82cc53194ca2bae68",
+      "source_sha256": "66335476374c0de27399e33fd0b1e502e695b7e398b550b386e30b19d8df073b"
+    }
+  ],
+  "source_only": true,
+  "prior_owner_proofs": "unchanged service SAME4 green, KMT5 fake; no new native claim",
+  "gaps": [
+    "creator plus keeper death before terminal publication",
+    "HCS RuntimeId incarnation guard",
+    "actual GPU HCS creation/cleanup/compute"
+  ]
+}

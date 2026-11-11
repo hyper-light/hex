@@ -1,0 +1,99 @@
+{
+  "source_revision": "d2e061d452ed82de907c465e68cf9e3495fdf148",
+  "archive": "/Users/adalundhe/.cache/hex-lead/transfers/device-recovery-final-01a1c640-d2e061d4-v5/proof-bundle.tar.gz",
+  "archive_bytes": 117344,
+  "archive_sha256": "0fdc543993ddee8909932ece40c9c49d2670ff49015f9c23d10113e76a82b216",
+  "member_count": 16,
+  "all_member_hashes_verified": true,
+  "source_unchanged": true,
+  "source_files": 1097,
+  "source_manifest_before_sha256": "35fdfdf7a8cf50c25e734ff4e0d787c10d5d9d02fdf21fc55f1e9bb051580936",
+  "source_manifest_after_sha256": "35fdfdf7a8cf50c25e734ff4e0d787c10d5d9d02fdf21fc55f1e9bb051580936",
+  "phases": [
+    {
+      "name": "lane-leaf",
+      "counts": {
+        "passed": 12,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 158
+      },
+      "exit_code": 0,
+      "log_sha256": "0b04504e8a13082a04ed70fbe62befdda24aeb0cd738e72dc17d4ff7cd8ac81a"
+    },
+    {
+      "name": "peer-units",
+      "counts": {
+        "passed": 24,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 146
+      },
+      "exit_code": 0,
+      "log_sha256": "8d3be5fae1670735838474ba994649e98c4ff35ee28d6dec20b34043df99db2f"
+    },
+    {
+      "name": "index-units",
+      "counts": {
+        "passed": 25,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 145
+      },
+      "exit_code": 0,
+      "log_sha256": "83a26bc363000f3a6617bf1b1583c3eb4ea19d69f852a13609a570d9defd28dc"
+    },
+    {
+      "name": "lib-clippy",
+      "counts": null,
+      "exit_code": 0,
+      "log_sha256": "01dca4f4248ba550ec2c29df360b5a01d69dcda3a2f9422db0d731b6fc68be9e"
+    }
+  ],
+  "chunks": [
+    {
+      "offset": 0,
+      "bytes": 16000,
+      "sha256": "1698fd4b8833118320f923a1b157ae4f047151c13ab7ed4e3008b383ee6c03cd"
+    },
+    {
+      "offset": 16000,
+      "bytes": 16000,
+      "sha256": "6b2cdf0e3f6b5dbf88e0d0024fbc6181d4ec26da6d4e5e857dbf24ef6cba06ee"
+    },
+    {
+      "offset": 32000,
+      "bytes": 16000,
+      "sha256": "5ea92c4c720c05e402c5cca3d0c85bb6122b91106b23629ce058e58bb7cfd2ef"
+    },
+    {
+      "offset": 48000,
+      "bytes": 16000,
+      "sha256": "1cca9dfbacc938b1d31a0ecd2344bf2bc2d0d81be4b6383f3ec43d928938de6a"
+    },
+    {
+      "offset": 64000,
+      "bytes": 16000,
+      "sha256": "93a4f3c0427be00f6d1a2bfb1a1ad6dc0f52261d9125d82476ee9eb80f309184"
+    },
+    {
+      "offset": 80000,
+      "bytes": 16000,
+      "sha256": "f77d0dc38034e0af2d9651dea2205312a513a1125cf7f0a5013fc04c564274c6"
+    },
+    {
+      "offset": 96000,
+      "bytes": 16000,
+      "sha256": "aeb7297eb2fb822803afb22d62486f01ed97dd7a172eeddae77ac27b9005bbe4"
+    },
+    {
+      "offset": 112000,
+      "bytes": 5344,
+      "sha256": "c966934e0ca628bc3c2a0d43093a8714b38ca492c5c8c6a78a4e5c9d3ed85bac"
+    }
+  ],
+  "native_gpu_effect": false
+}

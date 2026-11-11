@@ -1,0 +1,53 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "b924aec5b7dfb98e4ce6ce11a767c51c7b3a0d48",
+  "contract": "2c6535f49f90e9290419e53549315ecd7364a71a",
+  "scope": "First necessary lazy-route consumer increment. Existing tuple identity only; no DTO/wire/new picker/cache/authority. Does not implement lazy native producer or cold committed recovery.",
+  "source": [
+    {
+      "path": "crates/hex-api/src/runtime.rs",
+      "sha256": "cf15451b4c60b1ff71955f509bd60c3699bc1a7be9e64713e53a5dd6b8447d44"
+    },
+    {
+      "path": "crates/hex-node/src/scheduler/capacity/initialized.rs",
+      "sha256": "a33125562e93161b1b12d717ba4a847811179a17bf77aa634f9adf8bbb4c8afc"
+    },
+    {
+      "path": "crates/hex-sim/src/index/routes.rs",
+      "sha256": "4be8b8e88de101a7cfd61b9432ccfa6cf5fadef463310e96868e4d9e71d87c12"
+    }
+  ],
+  "changes": [
+    "Capacity fresh lookup uses BOTH existing key+backing and rejects absent qualified pair; duplicate exact tuple always refuses. Distinct backing with identical RouteKey may retain historical/nonLive parent and current R; existing competing LIVE workload predicate refusal remains strict.",
+    "Normalization deduplicates/remaps by exact tuple, preserves immutable cost on same-tuple aliases and current/retained backing profiles/claims; retained unavailable selection keyed to diagnostic backing instead of pulling unrelated backend history.",
+    "Index fresh choice skips Draining/Released history; committed() remains exact-pair addressable and unchanged. No noIntent/recovery/charge/removal relaxation.",
+    "Legacy API final S1/P2 clause now accepts the explicitly authorized subset and asserts Box.devices remains exactS. Earlier forged allocation/execution/missing-mask/foreign-member/profile negatives unchanged; old fixed source retained. This is contract fixture compatibility, not claimed reproduced production bug."
+  ],
+  "new_controls_unrun": [
+    "runtime::route_tests::qualified_route_history_and_current_selection_do_not_alias",
+    "hex_node::scheduler::capacity::initialized::tests::normalized_historical_and_current_tuples_keep_exact_masks_and_current_choice"
+  ],
+  "control_semantics": [
+    "Current and historical RouteKey identical but backing keys differ; fresh lookup resolves current; terminal parent/forged generation/duplicate exact tuple/competingLive/profile transplant refuse.",
+    "Two real normalized fixture reports reverse local offer order/masks; one physical known fact +one unknown historical identity, exact masks remapped, fresh selection remains current R. Pure fixture, not native readiness."
+  ],
+  "bounds_review": "Existing <=64 route/backing word bounds and physical-ID bound retained. Flat bounded catalog scans, fallible existing vectors; no waits/caches or ownership manager. Complexity/profile unmeasured and ROOT-owned.",
+  "source_controls_retained": "Original e254 keyed two bodies and sibling terminal original unchanged in this increment. Original new cold committed recovery concern is separate source-only control, no remedy before actual result.",
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "tests": "UNRUN",
+    "dispatches": 0,
+    "native": 0
+  },
+  "excluded": "Stale dirty private node/backends.rs excluded. New 335e/21086 freshness/lint source lives on fixed f7a separate lineage; ROOT must preserve/compose it, never overwrite whole index/routes file.",
+  "remaining": [
+    "Real L3 b924 preparation helper/Node+FC+guest producers, bounded canonical coalescing +existing phase-aware native release/IndexACK path.",
+    "Cold exact committed BoxS recovery from Released parent source hypothesis awaits original control, no semantic fix.",
+    "ROOT matched two new feature controls/current compile plus any changed-path controls it selects. No new dispatch or old-positive replay here.",
+    "All GPU/VM/native cleanup/resource/fault/profiling/full gates still ROOT/native QA."
+  ]
+}

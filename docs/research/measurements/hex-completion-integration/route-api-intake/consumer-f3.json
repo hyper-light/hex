@@ -1,0 +1,69 @@
+{
+  "source": "f3f99e71304a780e2a75fd143895396dbd8f2d6a",
+  "dependency_api": "42de0312055be903378213d4f6f869c1149095f9",
+  "kind": "source-only intake, outside compatibility ports still required",
+  "files": [
+    {
+      "path": "crates/hex-sim/src/model.rs",
+      "before": "6f414636bc56943552d52e78b55ea7c1f2c914ecd9e050ebda9cf3757f82e4c0",
+      "source_sha256": "f4004b4b7d43ca60ea553a65d70effab98c16506c90d358f42a3ca75e732e499"
+    },
+    {
+      "path": "crates/hex-sim/src/index.rs",
+      "before": "f632a2b3b014020be9fe0278449717985ef0c2328deeee0d1bed0dd93fdc59fe",
+      "source_sha256": "f614f3dd42b7a8505ca080d3c960e74d61ae8886b4f43afb0ad55cedd6f6db02"
+    },
+    {
+      "path": "crates/hex-sim/src/index/routes.rs",
+      "before": null,
+      "source_sha256": "520162860ad895054674f47a274a86732e6e8188dadfd9daaf53b9cec017438b"
+    },
+    {
+      "path": "crates/hex-sim/src/index/route_offer_tests.rs",
+      "before": null,
+      "source_sha256": "8ee6fcfc96d2e0c4dc3ddca2f2c18189c2c8bb90c34e71676a179fe257adaebf"
+    },
+    {
+      "path": "crates/hex-sim/src/peer.rs",
+      "before": "716ccaab54b89a40787af8feda82acf1a7b6ff9ec6018b38992ea0aedefc0399",
+      "source_sha256": "1059b83e019fdc05b46e6f23eb10f49456fd5d890acd189c6ff17913d35d0f37"
+    },
+    {
+      "path": "crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs",
+      "before": "48607d95565b096cd6ec5b46c75e9b10ddc15d72571d8e93a1569a116ac849d0",
+      "source_sha256": "a9f3b5edd755ed8359b4867b1cb95f686eef3e04246d5622c01825d232cf053b"
+    },
+    {
+      "path": "crates/hex-sim/src/facts.rs",
+      "before": "19a2382e18654dd83e0ad7aee58742ca2001625281f05c4bf50bf4d1a8c1299e",
+      "source_sha256": "ac97f1c1307a9c1e2401913b85ce72944517c94553fdd60ae510d09286a15688"
+    },
+    {
+      "path": "crates/hex-sim/src/lb/index.rs",
+      "before": "0267c9d79649019957e478e6f9dd641f3c264d0435424a54b6ad948d9a56d3ff",
+      "source_sha256": "f3fc05e9e1604c1be3c4e646b665854e5e10be907001ad6ccf79a31e0d1bec7c"
+    },
+    {
+      "path": "crates/hex-sim/src/start_cost.rs",
+      "before": "45ce285d9cab3af1e53c40786d8c96572e263028242d85d515ad2f99a4e4e030",
+      "source_sha256": "1a32f688ef7b94ba0eabe306549f437321442a183144f4819f3581c8951ccedb"
+    },
+    {
+      "path": "crates/hex-node/src/placement.rs",
+      "before": "d7ce7dc4b1aecd48ff1923dc4cc8613ff4784b94588ade26342c4f4f8a660634",
+      "source_sha256": "035d66d8efee0ed8e8c8ceb2017e2346481d5a54ded8c81486e9b8123ae92f90"
+    },
+    {
+      "path": "crates/hex-node/src/placement/tests.rs",
+      "before": "57ddc6efe21ad07b90e4598832a4b433964ab5d320cd9a600896cb57f4277a18",
+      "source_sha256": "2c2622abc37a1247abc35404b2fd514e718a12626e86896c099c13dcac9d03f5"
+    }
+  ],
+  "root_differences_reviewed": [
+    "placement/tests.rs preserved ROOT BoxSpec.route None",
+    "index.rs restores explicit cfg(test) route_offer_tests registration from owned fixture closure",
+    "recovery test allocation None ordering was cosmetic; owned route None additions retained"
+  ],
+  "test_state": "new controls UNRUN; pendingGPU intended-red UNRUN/no remedy",
+  "transport_review": "Scheduler Packet.message already uses peer encode_message/decode_message opaque bounded codec; d2/r1 carry through same packet without DTO field duplication"
+}

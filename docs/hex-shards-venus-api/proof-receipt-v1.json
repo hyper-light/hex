@@ -1,0 +1,39 @@
+{
+  "source": "3f2e9fb10e4caca0de5114e1dd5471540b17e217",
+  "production_pin": "0ba6a60f582d461e65673ad736b2ac658cee9b72",
+  "archive": {
+    "path": "/Users/adalundhe/.cache/hex-shards-venus-api-01a1c640-3f2e9fb1-v1/retained/proof.tar.gz",
+    "bytes": 91316,
+    "sha256": "ca469421169bcd2060a0b6a276797878b8e7b8a4b448e84c9a5e7a360db7a41c",
+    "members": 25
+  },
+  "safe_regular_members_verified": 25,
+  "all_member_hashes_verified": true,
+  "source_matches_signed_commit": true,
+  "no_source_registration_or_code_changes": true,
+  "only_private_generated_source_file": "vendor/shards/Cargo.lock",
+  "selected": 0,
+  "passed": 0,
+  "failed": 0,
+  "checks": {
+    "build": 101
+  },
+  "binaries": null,
+  "real_vm_tests_executed": 0,
+  "native_gpu_effects": 0,
+  "local_free_kib": 218521636,
+  "transport_command": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--on",
+    "d1323898b255a3ed435eb83fa0f7b0cf",
+    "--needs",
+    "cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--timeout",
+    "120",
+    "--",
+    "nice -n 10 python3 -c 'import base64,pathlib\nraw=pathlib.Path('\"'\"'/Users/adalundhe/.cache/hex-shards-venus-api-01a1c640-3f2e9fb1-v1/retained/proof.tar.gz'\"'\"').read_bytes();text=base64.b64encode(raw).decode()\nfor i in range(0,len(text),1000):print(text[i:i+1000])\n'"
+  ],
+  "transport_stderr": "\u001b[2m[kiln] on d1323898b255a3ed435eb83fa0f7b0cf \u00b7 macos/aarch64 \u00b7 30 of 32 cores idle \u00b7 47 GB free \u00b7 room for 1 CPU, 4 GiB of memory, 12 GiB of disk\u001b[0m\n"
+}

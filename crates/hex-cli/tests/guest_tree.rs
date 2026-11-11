@@ -212,10 +212,9 @@ trait Side {
 #[cfg(target_os = "linux")]
 mod local {
     use std::path::PathBuf;
-    use std::sync::Arc;
 
     use hex_api::{BoxId, Refusal};
-    use hex_client::guest::{Duplex, Link, stage};
+    use hex_client::guest::{Link, stage};
     use hex_core::stream::files::LIMITS;
 
     use super::{Image, Side, box_layers, items};
@@ -224,14 +223,14 @@ mod local {
     struct InProcess(PathBuf);
 
     impl Link for InProcess {
-        fn dial(&self, _port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+        fn dial(&self, _port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
             let (near, far) = std::os::unix::net::UnixStream::pair()
                 .map_err(|e| Refusal::os("pairing a staging socket", e))?;
             let staged = self.0.clone();
             std::thread::spawn(move || {
                 hex_node::relay::files::serve(Box::new(far), &staged, &LIMITS)
             });
-            Ok(Box::new(near))
+            hex_client::guest::own_duplex(near)
         }
     }
 
@@ -241,7 +240,7 @@ mod local {
 
     impl Side for Local {
         fn walk(&self, id: &BoxId, image: &Image) -> String {
-            let link: Arc<dyn Link> = Arc::new(InProcess(self.dir.path().to_owned()));
+            let link = hex_client::guest::own_link(InProcess(self.dir.path().to_owned())).unwrap();
             stage::stage(link.as_ref(), id, &items(image), &LIMITS)
                 .unwrap_or_else(|why| panic!("{}: staging: {why}", image.name));
             let staged = self.dir.path().to_str().unwrap();
@@ -264,7 +263,7 @@ mod local {
 
 /// A real guest: the layers staged over its staging port, walked by a `process` box in it.
 struct Guest {
-    link: std::sync::Arc<dyn hex_client::guest::Link>,
+    link: hex_client::guest::LinkOwner,
     client: hex_client::guest::Client,
     _guest: std::sync::Arc<dyn shards_api::Guest>,
 }
@@ -280,6 +279,9 @@ impl Side for Guest {
         let _ = self.client.delete(&walker);
         self.client
             .create(BoxSpec {
+                route: None,
+                allocation: None,
+                devices: Vec::new(),
                 id: walker.clone(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Process,
@@ -410,6 +412,7 @@ fn boot_guest(kernel: &Path, initrd: &Path, binary: &Path, memory_mib: u64) -> G
         kernel: kernel.to_path_buf(),
         initrd: initrd.to_path_buf(),
         vcpus: 1,
+        gpu: false,
         memory_mib,
         shares: Vec::new(),
         staged: hex_client::guest::stage::STAGED.to_owned(),
@@ -418,12 +421,11 @@ fn boot_guest(kernel: &Path, initrd: &Path, binary: &Path, memory_mib: u64) -> G
         .boot(&config.spec())
         .unwrap()
         .into();
-    let link: std::sync::Arc<dyn hex_client::guest::Link> =
-        std::sync::Arc::new(hex_client::guest::shards::ShardsLink::new(
-            guest.clone(),
-            2 * hex_runtime::guest::recorded_boot()
-                .expect("this host class's boot-to-ready record"),
-        ));
+    let link = hex_client::guest::own_link(hex_client::guest::shards::ShardsLink::new(
+        guest.clone(),
+        2 * hex_runtime::guest::recorded_boot().expect("this host class's boot-to-ready record"),
+    ))
+    .unwrap();
     let client = hex_client::guest::Client::connect(link.clone()).unwrap();
     Guest {
         link,
@@ -440,6 +442,9 @@ impl Guest {
         let _ = self.client.delete(&id);
         self.client
             .create(BoxSpec {
+                route: None,
+                allocation: None,
+                devices: Vec::new(),
                 id: id.clone(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Process,

@@ -42,8 +42,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use hex_api::{
-    Bounds, BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Class, ClassSpec, Exit, IoRates, Mount,
-    Network, OciSpec, Program, Refusal, Rootfs, Signal, Usage, User,
+    Allocation, BackendUnavailable, BackingGrant, BackingKey, BackingOffer, BackingPhase, Bounds,
+    BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
+    DeviceHolder, DeviceId, DeviceInfo, DeviceKind, Execution, Exit, GpuEligibility, ImageArch,
+    ImageOs, ImagePlatform, IoRates, LifecycleCause, MAX_DEVICES, MAX_RUNTIME_ROUTES, Mount,
+    Network, OciSpec, PhysicalDevice, PhysicalReport, Program, Refusal, Rootfs, RouteKey,
+    RouteOffer, RouteReceipt, RuntimeCost, Signal, Usage, User,
 };
 
 use crate::netns;
@@ -53,7 +57,18 @@ pub const MAGIC: [u8; 4] = *b"HEXW";
 /// This build's wire identity: FNV-1a (64-bit) of the wire definitions' source, this module's and
 /// [`crate::stream`]'s, made at compile time, carriage returns skipped so a checkout's line endings can't split it.
 /// Two builds talk only when theirs are the same.
-pub const IDENTITY: u64 = identity(&[include_bytes!("wire.rs"), include_bytes!("stream.rs")]);
+pub const IDENTITY: u64 = identity(&[
+    include_bytes!("wire.rs"),
+    include_bytes!("stream.rs"),
+    include_bytes!("schedule.rs"),
+    include_bytes!("../../hex-sim/src/peer.rs"),
+    include_bytes!("../../hex-sim/src/model.rs"),
+    include_bytes!("../../hex-api/src/spec.rs"),
+    include_bytes!("../../hex-api/src/id.rs"),
+    include_bytes!("../../hex-api/src/bounds.rs"),
+    include_bytes!("../../hex-api/src/devices.rs"),
+    include_bytes!("../../hex-api/src/runtime.rs"),
+]);
 /// The header's length: magic, wire identity, kind and id.
 pub const HEADER_BYTES: usize = 22;
 /// Largest message either side sends or reads. It sits under the kernel's own bound on a
@@ -127,7 +142,17 @@ mod kind {
     pub const TAKEN: u16 = 0x000e;
     pub const RUN: u16 = 0x000f;
     pub const STREAMS_READY: u16 = 0x0010;
+    pub const SCHEDULE: u16 = 0x0011;
+    pub const SCHEDULED: u16 = 0x800c;
     pub const OFFERED: u16 = 0x800b;
+    pub const CAPACITY: u16 = 0x0012;
+    pub const CAPACITY_ANSWER: u16 = 0x800d;
+    pub const PHYSICAL_REPORT: u16 = 0x0013;
+    pub const PHYSICAL_REPORT_ANSWER: u16 = 0x800e;
+    pub const INITIALIZE_BACKING: u16 = 0x0014;
+    pub const RELEASE_BACKING: u16 = 0x0015;
+    pub const BACKING_OFFER: u16 = 0x800f;
+    pub const BACKING_USAGE: u16 = 0x0016;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -138,7 +163,7 @@ pub struct Header {
 }
 
 /// What a client sends.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Request {
     /// A connection's first message, naming the client's build ([`build`]): answered with the node agent's build,
     /// what it runs and its bounds.
@@ -158,8 +183,10 @@ pub enum Request {
 }
 
 /// A call of the node agent: the `Runtime` seam's, its network namespace counts, and a program's kill.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Call {
+    /// Scheduler control, using the same bounded connection and reader as Runtime calls.
+    Schedule(Box<crate::schedule::Command>),
     Create(Box<BoxSpec>),
     Start(BoxId),
     /// `program` in box `id`, with the streams `streams` names as the message's descriptors, in order.
@@ -203,6 +230,14 @@ pub enum Call {
         streams: Streams,
         ask: Streams,
     },
+    Capacity(Class),
+    /// AC-T7.4.1: factual native observations from the existing Store/turn owner, never grants.
+    PhysicalReport,
+    /// AC-T7.4.1: one fallibly allocated payload, moved uniquely before native effects.
+    InitializeBacking(triomphe::Arc<BackingGrant>),
+    ReleaseBacking(BackingKey),
+    /// Factual host counters from the same native backing owner, answered with Usage.
+    BackingUsage(BackingKey),
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -246,8 +281,9 @@ impl Streams {
 }
 
 /// What the node agent sends.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Answer {
+    Scheduled(Box<crate::schedule::Reply>),
     Hello(Hello),
     /// create's and inspect's.
     Info(BoxInfo),
@@ -279,6 +315,9 @@ pub enum Answer {
     /// HEX-RT-17: open these guest connections in the caller before acknowledging StreamsReady.
     /// A preparation, not a started program; no descriptor or cross-process socket reservation rides with it.
     Offered(StreamOffer),
+    Capacity(Option<Capacity>),
+    PhysicalReport(PhysicalReport),
+    BackingOffer(BackingOffer),
 }
 
 /// A Shards guest's identity and the names of an exec's caller-owned streams (HEX-RT-17).
@@ -379,6 +418,8 @@ pub enum Fault {
     },
     #[error("it carries more descriptors than the {MAX_FDS} a message takes")]
     DescriptorsCut,
+    #[error("{what} storage for {bound} bytes is unavailable")]
+    Storage { what: &'static str, bound: usize },
 }
 
 impl Fault {
@@ -402,13 +443,18 @@ fn other_wire(theirs: u64, build: Option<&str>) -> String {
 
 impl From<Fault> for Refusal {
     fn from(fault: Fault) -> Self {
-        let what = match fault {
-            Fault::Wire { .. } => "wire",
-            _ => "message",
-        };
-        Refusal::Invalid {
-            what,
-            why: fault.to_string(),
+        match fault {
+            Fault::Storage { what, bound } => Refusal::Exhausted { what, bound },
+            fault => {
+                let what = match &fault {
+                    Fault::Wire { .. } => "wire",
+                    _ => "message",
+                };
+                Refusal::Invalid {
+                    what,
+                    why: fault.to_string(),
+                }
+            }
         }
     }
 }
@@ -469,6 +515,42 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
             }
             w.usize(h.budgets.in_flight)?;
             w.usize(h.budgets.programs)?;
+        }
+        Answer::Scheduled(reply) => {
+            w.header(kind::SCHEDULED, id);
+            w.string(
+                &serde_json::to_string(reply)
+                    .map_err(|e| Fault::value("scheduler reply", e.to_string()))?,
+            )?;
+        }
+        Answer::Capacity(capacity) => {
+            w.header(kind::CAPACITY_ANSWER, id);
+            w.option_with(capacity.as_ref(), |w, capacity| {
+                check_capacity(capacity)?;
+                w.string(&capacity.id)?;
+                for room in [capacity.total, capacity.free] {
+                    w.u64(room.cpu_milli);
+                    w.u64(room.mem_bytes);
+                    w.u64(room.disk_bytes);
+                }
+                w.device_count(capacity.devices.len(), 22)?;
+                for device in &capacity.devices {
+                    put_device_id(w, &device.id);
+                    w.string(&device.model)?;
+                    w.u64(device.size);
+                    put_device_holder(w, device.holder.as_ref())?;
+                }
+                put_cost_option(w, capacity.cost)?;
+                put_capacity_routes(w, capacity)
+            })?;
+        }
+        Answer::PhysicalReport(report) => {
+            w.header(kind::PHYSICAL_REPORT_ANSWER, id);
+            put_physical_report(&mut w, report)?;
+        }
+        Answer::BackingOffer(offer) => {
+            w.header(kind::BACKING_OFFER, id);
+            put_backing_offer(&mut w, offer)?;
         }
         Answer::Info(info) => {
             w.header(kind::INFO, id);
@@ -558,6 +640,35 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
     w.done()
 }
 
+/// A retained refusal's canonical Answer envelope, id zero, without cloning its body.
+/// Both sizing and writing use the ordinary refusal codec; output allocation is fallible.
+pub fn snapshot_refusal(refusal: &Refusal, bound: usize) -> Result<Vec<u8>, Fault> {
+    snapshot(kind::REFUSED, bound, |w| put_refusal(w, refusal))
+}
+
+/// A retained exit's canonical Answer envelope, id zero, using the ordinary exit codec.
+pub fn snapshot_exit(exit: Exit, bound: usize) -> Result<Vec<u8>, Fault> {
+    snapshot(kind::EXITED, bound, |w| {
+        put_exit(w, exit);
+        Ok(())
+    })
+}
+
+fn snapshot(
+    kind: u16,
+    bound: usize,
+    put: impl Fn(&mut Writer) -> Result<(), Fault>,
+) -> Result<Vec<u8>, Fault> {
+    let mut count = Writer::counting(bound);
+    count.header(kind, 0);
+    put(&mut count)?;
+    let bytes = count.counted()?;
+    let mut output = Writer::fixed(bytes)?;
+    output.header(kind, 0);
+    put(&mut output)?;
+    output.done()
+}
+
 /// A list's answer as messages of at most `bound` bytes each: as many boxes in each as fit, every
 /// message but the last marked `more`, so a node holding more boxes than one message carries still
 /// answers a list whole. An empty list is one message.
@@ -641,6 +752,29 @@ fn parse_request(
         kind::RELEASE => Request::Release,
         kind::TAKEN => Request::Taken,
         kind::STREAMS_READY => Request::StreamsReady,
+        kind::SCHEDULE => {
+            let json = r.string("scheduler command").map_err(bad)?;
+            Request::Call(Call::Schedule(Box::new(
+                serde_json::from_str(&json)
+                    .map_err(|e| bad(Fault::value("scheduler command", e.to_string())))?,
+            )))
+        }
+        kind::CAPACITY => Request::Call(Call::Capacity(class(&mut r).map_err(bad)?)),
+        kind::PHYSICAL_REPORT => Request::Call(Call::PhysicalReport),
+        kind::INITIALIZE_BACKING => {
+            let grant = backing_grant(&mut r).map_err(bad)?;
+            let grant = triomphe::Arc::try_new(grant).map_err(|_| {
+                bad(Fault::Storage {
+                    what: "native backing grant",
+                    bound: size_of::<BackingGrant>(),
+                })
+            })?;
+            Request::Call(Call::InitializeBacking(grant))
+        }
+        kind::RELEASE_BACKING => {
+            Request::Call(Call::ReleaseBacking(backing_key(&mut r).map_err(bad)?))
+        }
+        kind::BACKING_USAGE => Request::Call(Call::BackingUsage(backing_key(&mut r).map_err(bad)?)),
         kind::CREATE => Request::Call(Call::Create(Box::new(box_spec(&mut r).map_err(bad)?))),
         kind::START => Request::Call(Call::Start(box_id(&mut r).map_err(bad)?)),
         kind::EXEC => {
@@ -765,6 +899,51 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                 budgets,
             })
         }
+        kind::SCHEDULED => {
+            let json = r.string("scheduler reply")?;
+            Answer::Scheduled(Box::new(
+                serde_json::from_str(&json)
+                    .map_err(|e| Fault::value("scheduler reply", e.to_string()))?,
+            ))
+        }
+        kind::PHYSICAL_REPORT_ANSWER => Answer::PhysicalReport(physical_report(&mut r)?),
+        kind::BACKING_OFFER => Answer::BackingOffer(backing_offer(&mut r)?),
+        kind::CAPACITY_ANSWER => Answer::Capacity(r.option(|r| {
+            let id = r.string("capacity pool")?;
+            let capacity = Capacity {
+                id,
+                total: resources(r)?,
+                free: resources(r)?,
+                devices: r.device_list(22, |r| {
+                    let id = device_id(r)?;
+                    let model = r.device_string("devices.model")?;
+                    let size = r.u64()?;
+                    let holder = device_holder(r)?;
+                    Ok(DeviceInfo {
+                        id,
+                        model,
+                        size,
+                        holder,
+                    })
+                })?,
+                cost: r.option(runtime_cost)?,
+                routes: r.bounded_list(
+                    ROUTE_OFFER_MIN_BYTES,
+                    MAX_RUNTIME_ROUTES,
+                    "routes",
+                    route_offer,
+                )?,
+                device_routes: r.device_list(size_of::<u64>(), Reader::u64)?,
+                backings: r.bounded_list(
+                    BACKING_OFFER_MIN_BYTES,
+                    MAX_RUNTIME_ROUTES,
+                    "backings",
+                    backing_offer,
+                )?,
+            };
+            check_capacity(&capacity)?;
+            Ok(capacity)
+        })?),
         kind::INFO => Answer::Info(info(&mut r)?),
         kind::DONE => Answer::Done,
         kind::STARTED => Answer::Started { pid: r.u32()? },
@@ -906,12 +1085,43 @@ fn request_name(kind: u16) -> &'static str {
         kind::EXEC_STREAMS => "an exec asking for streams",
         kind::TAKEN => "a taken",
         kind::RUN => "a run",
+        kind::INITIALIZE_BACKING => "an initialize backing",
+        kind::RELEASE_BACKING => "a release backing",
+        kind::BACKING_USAGE => "a backing usage",
         _ => "a request",
     }
 }
 
 fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
     match call {
+        Call::InitializeBacking(grant) => {
+            w.header(kind::INITIALIZE_BACKING, id);
+            put_backing_grant(w, grant)
+        }
+        Call::ReleaseBacking(key) => {
+            w.header(kind::RELEASE_BACKING, id);
+            put_backing_key(w, *key)
+        }
+        Call::BackingUsage(key) => {
+            w.header(kind::BACKING_USAGE, id);
+            put_backing_key(w, *key)
+        }
+        Call::PhysicalReport => {
+            w.header(kind::PHYSICAL_REPORT, id);
+            Ok(())
+        }
+        Call::Capacity(class) => {
+            w.header(kind::CAPACITY, id);
+            w.u8(class_tag(*class));
+            Ok(())
+        }
+        Call::Schedule(command) => {
+            w.header(kind::SCHEDULE, id);
+            w.string(
+                &serde_json::to_string(command)
+                    .map_err(|e| Fault::value("scheduler command", e.to_string()))?,
+            )
+        }
         Call::Create(spec) => {
             w.header(kind::CREATE, id);
             put_box_spec(w, spec)
@@ -994,6 +1204,14 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
 }
 
 fn put_box_spec(w: &mut Writer, spec: &BoxSpec) -> Result<(), Fault> {
+    check_spec_route(spec)?;
+    if let Some(allocation) = spec.allocation {
+        allocation
+            .covers(workload_caps(spec))
+            .map_err(|e| Fault::value("allocation", e.to_string()))?;
+    }
+    spec.check_devices()
+        .map_err(|e| Fault::value("devices", e.to_string()))?;
     w.string(spec.id.as_str())?;
     put_bounds(w, &spec.bounds);
     match &spec.class {
@@ -1006,12 +1224,34 @@ fn put_box_spec(w: &mut Writer, spec: &BoxSpec) -> Result<(), Fault> {
             w.u8(2);
             w.path(path)?;
         }
+        ClassSpec::Firecracker(oci) => {
+            w.u8(3);
+            put_oci(w, oci)?;
+        }
+        ClassSpec::Shards(oci) => {
+            w.u8(4);
+            put_oci(w, oci)?;
+        }
     }
     w.option_with(spec.owner.as_ref(), |w, owner| {
         w.string(&owner.name)?;
         w.bool(owner.reuse);
         Ok(())
-    })
+    })?;
+    w.device_count(spec.devices.len(), 9)?;
+    for id in &spec.devices {
+        put_device_id(w, id);
+    }
+    w.reserve_fixed(if spec.allocation.is_some() {
+        OPTIONAL_ALLOCATION_BYTES
+    } else {
+        1
+    })?;
+    w.option_with(spec.allocation, |w, allocation| {
+        put_resources(w, allocation.resources);
+        put_cost(w, allocation.cost)
+    })?;
+    put_route_option(w, spec.route)
 }
 
 fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
@@ -1021,6 +1261,8 @@ fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
         0 => ClassSpec::Process,
         1 => ClassSpec::Oci(Box::new(oci(r)?)),
         2 => ClassSpec::Bundle(r.path()?),
+        3 => ClassSpec::Firecracker(Box::new(oci(r)?)),
+        4 => ClassSpec::Shards(Box::new(oci(r)?)),
         t => return Err(Fault::value("class spec", format!("variant {t}"))),
     };
     let owner = r.option(|r| {
@@ -1028,12 +1270,595 @@ fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
         let reuse = r.bool("owner.reuse")?;
         Ok(BoxOwner { name, reuse })
     })?;
-    Ok(BoxSpec {
+    let spec = BoxSpec {
         id,
         bounds,
         class,
         owner,
+        devices: r.device_list(9, device_id)?,
+        allocation: r.option(|r| {
+            Ok(Allocation {
+                resources: resources(r)?,
+                cost: runtime_cost(r)?,
+            })
+        })?,
+        route: r.option(route_receipt)?,
+    };
+    check_spec_route(&spec)?;
+    spec.check_devices()
+        .map_err(|e| Fault::value("devices", e.to_string()))?;
+    if let Some(allocation) = spec.allocation {
+        allocation
+            .covers(workload_caps(&spec))
+            .map_err(|e| Fault::value("allocation", e.to_string()))?;
+    }
+    Ok(spec)
+}
+
+// AC-T7.4.1: fixed native integer widths; new optional fields follow the complete old device tail.
+const RESOURCE_BYTES: usize = 3 * size_of::<u64>();
+const COST_BYTES: usize = 32 + 5 * RESOURCE_BYTES;
+const OPTIONAL_COST_BYTES: usize = 1 + COST_BYTES;
+const OPTIONAL_ALLOCATION_BYTES: usize = 1 + RESOURCE_BYTES + COST_BYTES;
+
+// Append-only route/backing widths: five enum bytes per key; opaque pool/generation bytes;
+// optional tags; and a u32 device count followed by the existing nine-byte DeviceId codec.
+const ROUTE_KEY_BYTES: usize = 5;
+const BACKING_KEY_BYTES: usize = 32 + 16;
+const ROUTE_OFFER_MIN_BYTES: usize = ROUTE_KEY_BYTES + 2;
+const BACKING_OFFER_MIN_BYTES: usize = BACKING_KEY_BYTES + COST_BYTES + 1 + size_of::<u32>();
+const BACKING_GRANT_MIN_BYTES: usize =
+    BACKING_KEY_BYTES + RESOURCE_BYTES + COST_BYTES + size_of::<u32>();
+
+fn check_capacity(capacity: &Capacity) -> Result<(), Fault> {
+    capacity
+        .check()
+        .map_err(|e| Fault::value("capacity", e.to_string()))
+}
+
+fn check_spec_route(spec: &BoxSpec) -> Result<(), Fault> {
+    // Legacy None retains the old codec's validation. A chosen route must also satisfy the
+    // original form, physical claims and finite dedicated allocation in the public API.
+    if spec.route.is_some() {
+        spec.check()
+            .map_err(|_| Fault::value("route", "invalid original workload route or allocation"))?;
+    }
+    Ok(())
+}
+
+fn check_info_route(info: &BoxInfo) -> Result<(), Fault> {
+    if let Some(route) = info.route {
+        // BoxInfo carries no device claims. Check only its declared class/route relationship;
+        // Required here validates that mode's shape, and is not evidence of a selected GPU.
+        route
+            .check(info.class, route.key.gpu == GpuEligibility::Required)
+            .map_err(|_| Fault::value("route", "invalid factual workload route"))?;
+    }
+    Ok(())
+}
+
+fn put_route_key(w: &mut Writer, key: RouteKey) -> Result<(), Fault> {
+    key.check()
+        .map_err(|_| Fault::value("route", "inconsistent route key"))?;
+    w.reserve_fixed(ROUTE_KEY_BYTES)?;
+    w.u8(class_tag(key.class));
+    w.u8(match key.image.os {
+        ImageOs::Linux => 0,
+        ImageOs::Windows => 1,
+        ImageOs::Macos => 2,
+    });
+    w.u8(match key.image.arch {
+        ImageArch::Amd64 => 0,
+        ImageArch::Arm64 => 1,
+    });
+    w.u8(match key.execution {
+        Execution::Native => 0,
+        Execution::ShardsShared => 1,
+        Execution::ShardsDedicated => 2,
+        Execution::Firecracker => 3,
+    });
+    w.u8(match key.gpu {
+        GpuEligibility::Any => 0,
+        GpuEligibility::None => 1,
+        GpuEligibility::Required => 2,
+    });
+    Ok(())
+}
+
+fn route_key(r: &mut Reader<'_>) -> Result<RouteKey, Fault> {
+    let class = class(r).map_err(|fault| match fault {
+        Fault::Value { .. } => Fault::value("route.class", "unsupported tag"),
+        other => other,
+    })?;
+    let os = match r.u8()? {
+        0 => ImageOs::Linux,
+        1 => ImageOs::Windows,
+        2 => ImageOs::Macos,
+        _ => return Err(Fault::value("route.os", "unsupported tag")),
+    };
+    let arch = match r.u8()? {
+        0 => ImageArch::Amd64,
+        1 => ImageArch::Arm64,
+        _ => return Err(Fault::value("route.arch", "unsupported tag")),
+    };
+    let execution = match r.u8()? {
+        0 => Execution::Native,
+        1 => Execution::ShardsShared,
+        2 => Execution::ShardsDedicated,
+        3 => Execution::Firecracker,
+        _ => return Err(Fault::value("route.execution", "unsupported tag")),
+    };
+    let gpu = match r.u8()? {
+        0 => GpuEligibility::Any,
+        1 => GpuEligibility::None,
+        2 => GpuEligibility::Required,
+        _ => return Err(Fault::value("route.gpu", "unsupported tag")),
+    };
+    let key = RouteKey {
+        class,
+        image: ImagePlatform { os, arch },
+        execution,
+        gpu,
+    };
+    key.check()
+        .map_err(|_| Fault::value("route", "inconsistent route key"))?;
+    Ok(key)
+}
+
+fn put_backing_key(w: &mut Writer, key: BackingKey) -> Result<(), Fault> {
+    w.reserve_fixed(BACKING_KEY_BYTES)?;
+    w.raw(&key.pool);
+    w.raw(&key.generation);
+    Ok(())
+}
+
+fn backing_key(r: &mut Reader<'_>) -> Result<BackingKey, Fault> {
+    Ok(BackingKey {
+        pool: r.array()?,
+        generation: r.array()?,
     })
+}
+
+fn put_backing_option(w: &mut Writer, key: Option<BackingKey>) -> Result<(), Fault> {
+    let bytes = key
+        .map_or(0, |_| BACKING_KEY_BYTES)
+        .checked_add(1)
+        .ok_or(Fault::Oversized {
+            bytes: usize::MAX,
+            bound: w.bound,
+        })?;
+    w.reserve_fixed(bytes)?;
+    w.option_with(key, put_backing_key)
+}
+
+fn put_route_option(w: &mut Writer, route: Option<RouteReceipt>) -> Result<(), Fault> {
+    let bytes = match route {
+        Some(route) => ROUTE_KEY_BYTES
+            .checked_add(1)
+            .and_then(|bytes| bytes.checked_add(route.backing.map_or(0, |_| BACKING_KEY_BYTES))),
+        None => Some(0),
+    }
+    .and_then(|bytes| bytes.checked_add(1))
+    .ok_or(Fault::Oversized {
+        bytes: usize::MAX,
+        bound: w.bound,
+    })?;
+    w.reserve_fixed(bytes)?;
+    w.option_with(route, |w, route| {
+        route
+            .check(route.key.class, route.key.gpu == GpuEligibility::Required)
+            .map_err(|_| Fault::value("route", "inconsistent route receipt"))?;
+        put_route_key(w, route.key)?;
+        put_backing_option(w, route.backing)
+    })
+}
+
+fn route_receipt(r: &mut Reader<'_>) -> Result<RouteReceipt, Fault> {
+    let route = RouteReceipt {
+        key: route_key(r)?,
+        backing: r.option(backing_key)?,
+    };
+    route
+        .check(route.key.class, route.key.gpu == GpuEligibility::Required)
+        .map_err(|_| Fault::value("route", "inconsistent route receipt"))?;
+    Ok(route)
+}
+
+fn put_route_offer(w: &mut Writer, route: RouteOffer) -> Result<(), Fault> {
+    route
+        .check()
+        .map_err(|_| Fault::value("route", "inconsistent initialized route"))?;
+    let bytes = ROUTE_OFFER_MIN_BYTES
+        .checked_add(route.cost.map_or(0, |_| COST_BYTES))
+        .and_then(|bytes| bytes.checked_add(route.backing.map_or(0, |_| BACKING_KEY_BYTES)))
+        .ok_or(Fault::Oversized {
+            bytes: usize::MAX,
+            bound: w.bound,
+        })?;
+    w.reserve_fixed(bytes)?;
+    put_route_key(w, route.key)?;
+    put_cost_option(w, route.cost)?;
+    put_backing_option(w, route.backing)
+}
+
+fn route_offer(r: &mut Reader<'_>) -> Result<RouteOffer, Fault> {
+    let route = RouteOffer {
+        key: route_key(r)?,
+        cost: r.option(runtime_cost)?,
+        backing: r.option(backing_key)?,
+    };
+    route
+        .check()
+        .map_err(|_| Fault::value("route", "inconsistent initialized route"))?;
+    Ok(route)
+}
+
+fn provisioning_bytes(count: usize, prefix: usize) -> Result<usize, Fault> {
+    count
+        .checked_mul(9)
+        .and_then(|bytes| prefix.checked_add(bytes))
+        .ok_or_else(|| Fault::value("backing", "encoded physical claims overflow"))
+}
+
+fn put_provisioning(w: &mut Writer, devices: &[DeviceId]) -> Result<(), Fault> {
+    w.device_count(devices.len(), 9)?;
+    for id in devices {
+        put_device_id(w, id);
+    }
+    Ok(())
+}
+
+fn put_backing_offer(w: &mut Writer, offer: &BackingOffer) -> Result<(), Fault> {
+    offer
+        .allocation()
+        .map_err(|_| Fault::value("backing", "invalid fixed profile or physical claims"))?;
+    w.reserve_fixed(provisioning_bytes(
+        offer.devices.len(),
+        BACKING_OFFER_MIN_BYTES,
+    )?)?;
+    put_backing_key(w, offer.key)?;
+    put_cost(w, offer.cost)?;
+    w.u8(match offer.phase {
+        BackingPhase::Prepared => 0,
+        BackingPhase::Granted => 1,
+        BackingPhase::Live => 2,
+        BackingPhase::Draining => 3,
+        BackingPhase::Released => 4,
+    });
+    put_provisioning(w, &offer.devices)
+}
+
+fn backing_offer(r: &mut Reader<'_>) -> Result<BackingOffer, Fault> {
+    let key = backing_key(r)?;
+    let cost = runtime_cost(r)?;
+    let phase = match r.u8()? {
+        0 => BackingPhase::Prepared,
+        1 => BackingPhase::Granted,
+        2 => BackingPhase::Live,
+        3 => BackingPhase::Draining,
+        4 => BackingPhase::Released,
+        _ => return Err(Fault::value("backing.phase", "unsupported tag")),
+    };
+    let offer = BackingOffer {
+        key,
+        cost,
+        phase,
+        devices: r.device_list(9, device_id)?,
+    };
+    offer
+        .allocation()
+        .map_err(|_| Fault::value("backing", "invalid fixed profile or physical claims"))?;
+    Ok(offer)
+}
+
+fn put_backing_grant(w: &mut Writer, grant: &BackingGrant) -> Result<(), Fault> {
+    grant
+        .check()
+        .map_err(|_| Fault::value("backing", "invalid fixed grant or physical claims"))?;
+    w.reserve_fixed(provisioning_bytes(
+        grant.devices.len(),
+        BACKING_GRANT_MIN_BYTES,
+    )?)?;
+    put_backing_key(w, grant.key)?;
+    put_resources(w, grant.allocation.resources);
+    put_cost(w, grant.allocation.cost)?;
+    put_provisioning(w, &grant.devices)
+}
+
+fn backing_grant(r: &mut Reader<'_>) -> Result<BackingGrant, Fault> {
+    let grant = BackingGrant {
+        key: backing_key(r)?,
+        allocation: Allocation {
+            resources: resources(r)?,
+            cost: runtime_cost(r)?,
+        },
+        devices: r.device_list(9, device_id)?,
+    };
+    grant
+        .check()
+        .map_err(|_| Fault::value("backing", "invalid fixed grant or physical claims"))?;
+    Ok(grant)
+}
+
+fn put_capacity_routes(w: &mut Writer, capacity: &Capacity) -> Result<(), Fault> {
+    // Capacity::check bounded both lists by the single u64 eligibility word before this point.
+    w.reserve_fixed(size_of::<u32>())?;
+    w.device_count(capacity.routes.len(), ROUTE_OFFER_MIN_BYTES)?;
+    for route in &capacity.routes {
+        put_route_offer(w, *route)?;
+    }
+    w.reserve_fixed(size_of::<u32>())?;
+    w.device_count(capacity.device_routes.len(), size_of::<u64>())?;
+    for mask in &capacity.device_routes {
+        w.reserve_fixed(size_of::<u64>())?;
+        w.u64(*mask);
+    }
+    w.reserve_fixed(size_of::<u32>())?;
+    w.device_count(capacity.backings.len(), BACKING_OFFER_MIN_BYTES)?;
+    for backing in &capacity.backings {
+        put_backing_offer(w, backing)?;
+    }
+    Ok(())
+}
+
+// Device kind/key, model length, byte size and two optional-counter tags. Holder is absent by
+// definition: this factual RPC cannot authorize a reservation through telemetry (AC-T7.4.1).
+const PHYSICAL_MIN_BYTES: usize =
+    size_of::<u8>() + size_of::<u64>() + size_of::<u32>() + size_of::<u64>() + 2 * size_of::<u8>();
+const PHYSICAL_PREFIX_BYTES: usize = 2 * size_of::<u32>();
+// Existing class, Refusal::Backing, fixed key and lifecycle-cause tags; no variable refusal data.
+const PHYSICAL_UNAVAILABLE_BYTES: usize = 3 * size_of::<u8>() + BACKING_KEY_BYTES;
+
+fn put_physical_report(w: &mut Writer, report: &PhysicalReport) -> Result<(), Fault> {
+    report
+        .check()
+        .map_err(|e| Fault::value("physical report", e.to_string()))?;
+    let overflow = || Fault::value("physical report", "encoded snapshot size overflows");
+    let mut bytes = PHYSICAL_PREFIX_BYTES
+        .checked_add(report.authority.len())
+        .ok_or_else(overflow)?;
+    for device in &report.devices {
+        bytes = bytes
+            .checked_add(PHYSICAL_MIN_BYTES)
+            .and_then(|n| n.checked_add(device.info.model.len()))
+            .and_then(|n| {
+                n.checked_add(if device.busy_per_mille.is_some() {
+                    size_of::<u16>()
+                } else {
+                    0
+                })
+            })
+            .and_then(|n| {
+                n.checked_add(if device.memory_used_bytes.is_some() {
+                    size_of::<u64>()
+                } else {
+                    0
+                })
+            })
+            .ok_or_else(overflow)?;
+    }
+    if !report.unavailable.is_empty() {
+        bytes = report
+            .unavailable
+            .len()
+            .checked_mul(PHYSICAL_UNAVAILABLE_BYTES)
+            .and_then(|tail| tail.checked_add(size_of::<u32>()))
+            .and_then(|tail| bytes.checked_add(tail))
+            .ok_or_else(overflow)?;
+    }
+    w.reserve_fixed(bytes)?;
+    w.string(&report.authority)?;
+    w.device_count(report.devices.len(), PHYSICAL_MIN_BYTES)?;
+    for device in &report.devices {
+        put_device_id(w, &device.info.id);
+        w.string(&device.info.model)?;
+        w.u64(device.info.size);
+        w.option(device.busy_per_mille, |w, value| w.u16(value));
+        w.option(device.memory_used_bytes, |w, value| w.u64(value));
+    }
+    // Omit the empty tail so a report without diagnostics retains its previous body bytes.
+    if !report.unavailable.is_empty() {
+        w.device_count(report.unavailable.len(), PHYSICAL_UNAVAILABLE_BYTES)?;
+        for observation in &report.unavailable {
+            w.u8(class_tag(observation.backend));
+            put_refusal(w, &observation.cause)?;
+        }
+    }
+    Ok(())
+}
+
+fn physical_report(r: &mut Reader<'_>) -> Result<PhysicalReport, Fault> {
+    let authority = r.device_string("physical authority")?;
+    let devices = r.device_list(PHYSICAL_MIN_BYTES, |r| {
+        Ok(PhysicalDevice {
+            info: DeviceInfo {
+                id: device_id(r)?,
+                model: r.device_string("physical device model")?,
+                size: r.u64()?,
+                holder: None,
+            },
+            busy_per_mille: r.option(|r| r.u16())?,
+            memory_used_bytes: r.option(|r| r.u64())?,
+        })
+    })?;
+    let unavailable = if r.rest.is_empty() {
+        Vec::new()
+    } else {
+        r.bounded_list(
+            PHYSICAL_UNAVAILABLE_BYTES,
+            BackendUnavailable::MAX_COUNT,
+            "physical report.unavailable",
+            |r| {
+                let backend = class(r)?;
+                if !matches!(backend, Class::Firecracker | Class::Shards) {
+                    return Err(Fault::value(
+                        "physical report.unavailable",
+                        "only VM backend classes may be unavailable",
+                    ));
+                }
+                // Refuse every other refusal tag before its strings or static-name interner.
+                // The accepted body is decoded by the same canonical refusal codec as answers.
+                if r.rest.first() != Some(&10) {
+                    return Err(Fault::value(
+                        "physical report.unavailable",
+                        "only qualified backing refusals may be unavailable",
+                    ));
+                }
+                let observation = BackendUnavailable {
+                    backend,
+                    cause: refusal(r)?,
+                };
+                observation.check().map_err(|_| {
+                    Fault::value(
+                        "physical report.unavailable",
+                        "invalid qualified backing observation",
+                    )
+                })?;
+                Ok(observation)
+            },
+        )?
+    };
+    let report = PhysicalReport {
+        authority,
+        devices,
+        unavailable,
+    };
+    report
+        .check()
+        .map_err(|e| Fault::value("physical report", e.to_string()))?;
+    Ok(report)
+}
+
+fn workload_caps(spec: &BoxSpec) -> CapacityResources {
+    CapacityResources {
+        cpu_milli: spec.bounds.cpu_max_milli.map_or(0, u64::from),
+        mem_bytes: spec.bounds.memory_max.unwrap_or(0),
+        disk_bytes: 0,
+    }
+}
+
+fn put_resources(w: &mut Writer, resources: CapacityResources) {
+    w.u64(resources.cpu_milli);
+    w.u64(resources.mem_bytes);
+    w.u64(resources.disk_bytes);
+}
+
+fn resources(r: &mut Reader<'_>) -> Result<CapacityResources, Fault> {
+    Ok(CapacityResources {
+        cpu_milli: r.u64()?,
+        mem_bytes: r.u64()?,
+        disk_bytes: r.u64()?,
+    })
+}
+
+fn put_cost_option(w: &mut Writer, cost: Option<RuntimeCost>) -> Result<(), Fault> {
+    w.reserve_fixed(if cost.is_some() {
+        OPTIONAL_COST_BYTES
+    } else {
+        1
+    })?;
+    w.option_with(cost, put_cost)
+}
+
+fn put_cost(w: &mut Writer, cost: RuntimeCost) -> Result<(), Fault> {
+    cost.check()
+        .map_err(|e| Fault::value("runtime cost", e.to_string()))?;
+    w.reserve_fixed(COST_BYTES)?;
+    w.raw(&cost.id);
+    for resources in [
+        cost.floor,
+        cost.ceiling,
+        cost.quantum,
+        cost.guest_overhead,
+        cost.overhead,
+    ] {
+        put_resources(w, resources);
+    }
+    Ok(())
+}
+
+fn runtime_cost(r: &mut Reader<'_>) -> Result<RuntimeCost, Fault> {
+    let cost = RuntimeCost {
+        id: r.array::<32>()?,
+        floor: resources(r)?,
+        ceiling: resources(r)?,
+        quantum: resources(r)?,
+        guest_overhead: resources(r)?,
+        overhead: resources(r)?,
+    };
+    cost.check()
+        .map_err(|e| Fault::value("runtime cost", e.to_string()))?;
+    Ok(cost)
+}
+
+// Fixed tags independent of Rust discriminants; the catalog order is retained because scheduler
+// indices refer to it. DeviceId is one tag plus eight key bytes, DeviceInfo at least 22 bytes
+// (identity, model length, size and holder-option tag), before any model or holder bytes.
+fn put_device_id(w: &mut Writer, id: &DeviceId) {
+    w.u8(match id.kind {
+        DeviceKind::Gpu => 0,
+        DeviceKind::Vfio => 1,
+        DeviceKind::Block => 2,
+        DeviceKind::Net => 3,
+    });
+    w.u64(id.key);
+}
+
+fn device_id(r: &mut Reader<'_>) -> Result<DeviceId, Fault> {
+    let kind = match r.u8()? {
+        0 => DeviceKind::Gpu,
+        1 => DeviceKind::Vfio,
+        2 => DeviceKind::Block,
+        3 => DeviceKind::Net,
+        _ => return Err(Fault::value("devices.kind", "unsupported tag")),
+    };
+    let id = DeviceId {
+        kind,
+        key: r.u64()?,
+    };
+    id.check()
+        .map_err(|e| Fault::value("devices.id", e.to_string()))?;
+    Ok(id)
+}
+
+fn put_device_holder(w: &mut Writer, holder: Option<&DeviceHolder>) -> Result<(), Fault> {
+    match holder {
+        None => {
+            w.reserve_fixed(1)?;
+            w.u8(0);
+            Ok(())
+        }
+        Some(DeviceHolder::Box(id)) => {
+            let bytes = 1usize
+                .checked_add(size_of::<u32>())
+                .and_then(|n| n.checked_add(id.as_str().len()))
+                .ok_or_else(|| Fault::value("devices.holder", "encoded box holder overflows"))?;
+            w.reserve_fixed(bytes)?;
+            w.u8(1);
+            w.string(id.as_str())
+        }
+        Some(DeviceHolder::Backing(key)) => {
+            w.reserve_fixed(1 + BACKING_KEY_BYTES)?;
+            w.u8(2);
+            put_backing_key(w, *key)
+        }
+    }
+}
+
+fn device_holder(r: &mut Reader<'_>) -> Result<Option<DeviceHolder>, Fault> {
+    match r.u8()? {
+        0 => Ok(None),
+        1 => {
+            let bytes = r.bytes()?;
+            let text = std::str::from_utf8(bytes)
+                .map_err(|_| Fault::value("devices.holder", "is not UTF-8"))?;
+            let id = BoxId::new(text)
+                .map_err(|_| Fault::value("devices.holder", "is not a valid box id"))?;
+            Ok(Some(DeviceHolder::Box(id)))
+        }
+        2 => backing_key(r).map(|key| Some(DeviceHolder::Backing(key))),
+        _ => Err(Fault::value("devices.holder", "unsupported holder tag")),
+    }
 }
 
 fn put_bounds(w: &mut Writer, b: &Bounds) {
@@ -1177,6 +2002,8 @@ fn class_tag(c: Class) -> u8 {
     match c {
         Class::Process => 0,
         Class::Oci => 1,
+        Class::Firecracker => 2,
+        Class::Shards => 3,
     }
 }
 
@@ -1184,11 +2011,14 @@ fn class(r: &mut Reader<'_>) -> Result<Class, Fault> {
     match r.u8()? {
         0 => Ok(Class::Process),
         1 => Ok(Class::Oci),
+        2 => Ok(Class::Firecracker),
+        3 => Ok(Class::Shards),
         t => Err(Fault::value("class", format!("variant {t}"))),
     }
 }
 
 fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
+    check_info_route(info)?;
     w.string(info.id.as_str())?;
     w.u8(class_tag(info.class));
     w.u8(match info.state {
@@ -1200,11 +2030,25 @@ fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
     w.bool(info.adopted);
     w.option(info.exit, put_exit);
     w.u64(info.abandoned);
-    Ok(())
+    // AC-T7.4.1: the retained native receipt follows every old info field. The wire identity
+    // changes with this schema; list entries carry their own option tag, including None.
+    w.reserve_fixed(if info.allocation.is_some() {
+        OPTIONAL_ALLOCATION_BYTES
+    } else {
+        1
+    })?;
+    w.option_with(info.allocation, |w, allocation| {
+        allocation
+            .guest()
+            .map_err(|e| Fault::value("allocation", e.to_string()))?;
+        put_resources(w, allocation.resources);
+        put_cost(w, allocation.cost)
+    })?;
+    put_route_option(w, info.route)
 }
 
 fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
-    Ok(BoxInfo {
+    let info = BoxInfo {
         membership: None,
         id: box_id(r)?,
         class: class(r)?,
@@ -1218,7 +2062,20 @@ fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
         adopted: r.bool("adopted")?,
         exit: r.option(exit)?,
         abandoned: r.u64()?,
-    })
+        allocation: r.option(|r| {
+            let allocation = Allocation {
+                resources: resources(r)?,
+                cost: runtime_cost(r)?,
+            };
+            allocation
+                .guest()
+                .map_err(|e| Fault::value("allocation", e.to_string()))?;
+            Ok(allocation)
+        })?,
+        route: r.option(route_receipt)?,
+    };
+    check_info_route(&info)?;
+    Ok(info)
 }
 
 fn put_exit(w: &mut Writer, exit: Exit) {
@@ -1292,6 +2149,27 @@ fn put_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             w.u8(8);
             w.string(why)
         }
+        Refusal::Lifecycle { id, cause } => {
+            w.u8(9);
+            w.string(id.as_str())?;
+            w.u8(match cause {
+                LifecycleCause::Pending => 0,
+                LifecycleCause::Uncertain => 1,
+                LifecycleCause::Busy => 2,
+            });
+            Ok(())
+        }
+        Refusal::Backing { key, cause } => {
+            w.reserve_fixed(1 + BACKING_KEY_BYTES + 1)?;
+            w.u8(10);
+            put_backing_key(w, *key)?;
+            w.u8(match cause {
+                LifecycleCause::Pending => 0,
+                LifecycleCause::Uncertain => 1,
+                LifecycleCause::Busy => 2,
+            });
+            Ok(())
+        }
     }
 }
 
@@ -1319,6 +2197,24 @@ fn refusal(r: &mut Reader<'_>) -> Result<Refusal, Fault> {
             why: r.string("refusal reason")?,
         },
         8 => Refusal::Broken(r.string("refusal reason")?),
+        9 => Refusal::Lifecycle {
+            id: box_id(r)?,
+            cause: match r.u8()? {
+                0 => LifecycleCause::Pending,
+                1 => LifecycleCause::Uncertain,
+                2 => LifecycleCause::Busy,
+                t => return Err(Fault::value("lifecycle cause", format!("variant {t}"))),
+            },
+        },
+        10 => Refusal::Backing {
+            key: backing_key(r)?,
+            cause: match r.u8()? {
+                0 => LifecycleCause::Pending,
+                1 => LifecycleCause::Uncertain,
+                2 => LifecycleCause::Busy,
+                _ => return Err(Fault::value("backing.cause", "unsupported tag")),
+            },
+        },
         t => return Err(Fault::value("refusal", format!("variant {t}"))),
     })
 }
@@ -1361,6 +2257,15 @@ fn name(s: &str) -> Result<&'static str, Fault> {
 pub(crate) struct Writer {
     out: Vec<u8>,
     bound: usize,
+    mode: WriteMode,
+    failure: Option<Fault>,
+}
+
+#[derive(Clone, Copy)]
+enum WriteMode {
+    Ordinary,
+    Counting(usize),
+    Fixed,
 }
 
 impl Writer {
@@ -1368,22 +2273,122 @@ impl Writer {
         Self {
             out: Vec::with_capacity(HEADER_BYTES.min(bound)),
             bound,
+            mode: WriteMode::Ordinary,
+            failure: None,
         }
     }
 
+    fn counting(bound: usize) -> Self {
+        Self {
+            out: Vec::new(),
+            bound,
+            mode: WriteMode::Counting(0),
+            failure: None,
+        }
+    }
+
+    fn fixed(bytes: usize) -> Result<Self, Fault> {
+        let mut out = Vec::new();
+        out.try_reserve_exact(bytes).map_err(|_| Fault::Storage {
+            what: "wire snapshot bytes",
+            bound: bytes,
+        })?;
+        Ok(Self {
+            out,
+            bound: bytes,
+            mode: WriteMode::Fixed,
+            failure: None,
+        })
+    }
+
+    fn position(&self) -> usize {
+        match self.mode {
+            WriteMode::Counting(bytes) => bytes,
+            WriteMode::Ordinary | WriteMode::Fixed => self.out.len(),
+        }
+    }
+
+    fn status(&mut self) -> Result<(), Fault> {
+        match self.failure.take() {
+            Some(fault) => Err(fault),
+            None => Ok(()),
+        }
+    }
+
+    fn checked_growth(&self, bytes: usize) -> Result<usize, Fault> {
+        let after = self.position().checked_add(bytes);
+        if after.is_none_or(|after| after > self.bound) {
+            return Err(Fault::Oversized {
+                bytes: after.unwrap_or(usize::MAX),
+                bound: self.bound,
+            });
+        }
+        let after = after.ok_or(Fault::Oversized {
+            bytes: usize::MAX,
+            bound: self.bound,
+        })?;
+        if matches!(self.mode, WriteMode::Fixed) && after > self.out.capacity() {
+            return Err(Fault::Storage {
+                what: "wire snapshot fixed capacity",
+                bound: self.bound,
+            });
+        }
+        Ok(after)
+    }
+
+    fn counted(mut self) -> Result<usize, Fault> {
+        self.status()?;
+        Ok(self.position())
+    }
+
     pub(crate) fn header(&mut self, kind: u16, id: u64) {
-        self.out.extend_from_slice(&MAGIC);
+        self.raw(&MAGIC);
         self.u64(IDENTITY);
         self.u16(kind);
         self.u64(id);
     }
 
-    /// Bytes as they are, with no length before them: another message's header.
-    pub(crate) fn raw(&mut self, b: &[u8]) {
-        self.out.extend_from_slice(b);
+    /// The new fixed-width cost/charge tail is checked and reserved before writing any of it.
+    fn reserve_fixed(&mut self, bytes: usize) -> Result<(), Fault> {
+        self.status()?;
+        self.checked_growth(bytes)?;
+        if !matches!(self.mode, WriteMode::Ordinary) {
+            return Ok(());
+        }
+        self.out
+            .try_reserve_exact(bytes)
+            .map_err(|_| Fault::Storage {
+                what: "wire allocation receipt",
+                bound: bytes,
+            })
     }
 
-    pub(crate) fn done(self) -> Result<Vec<u8>, Fault> {
+    /// Bytes as they are, with no length before them: another message's header.
+    pub(crate) fn raw(&mut self, b: &[u8]) {
+        if matches!(self.mode, WriteMode::Ordinary) {
+            self.out.extend_from_slice(b);
+            return;
+        }
+        if self.failure.is_some() {
+            return;
+        }
+        match self.checked_growth(b.len()) {
+            Ok(after) => match self.mode {
+                WriteMode::Counting(_) => self.mode = WriteMode::Counting(after),
+                WriteMode::Ordinary | WriteMode::Fixed => self.out.extend_from_slice(b),
+            },
+            Err(fault) => self.failure = Some(fault),
+        }
+    }
+
+    pub(crate) fn done(mut self) -> Result<Vec<u8>, Fault> {
+        self.status()?;
+        if matches!(self.mode, WriteMode::Fixed) && self.out.len() != self.bound {
+            return Err(Fault::Storage {
+                what: "wire snapshot exact size",
+                bound: self.bound,
+            });
+        }
         if self.out.len() > self.bound {
             return Err(Fault::Oversized {
                 bytes: self.out.len(),
@@ -1394,23 +2399,23 @@ impl Writer {
     }
 
     pub(crate) fn u8(&mut self, v: u8) {
-        self.out.push(v);
+        self.raw(&[v]);
     }
 
     pub(crate) fn u16(&mut self, v: u16) {
-        self.out.extend_from_slice(&v.to_le_bytes());
+        self.raw(&v.to_le_bytes());
     }
 
     pub(crate) fn u32(&mut self, v: u32) {
-        self.out.extend_from_slice(&v.to_le_bytes());
+        self.raw(&v.to_le_bytes());
     }
 
     pub(crate) fn u64(&mut self, v: u64) {
-        self.out.extend_from_slice(&v.to_le_bytes());
+        self.raw(&v.to_le_bytes());
     }
 
     pub(crate) fn i32(&mut self, v: i32) {
-        self.out.extend_from_slice(&v.to_le_bytes());
+        self.raw(&v.to_le_bytes());
     }
 
     pub(crate) fn usize(&mut self, v: usize) -> Result<(), Fault> {
@@ -1427,7 +2432,11 @@ impl Writer {
     /// A length, refused when what follows it would pass the bound: a caller's huge argument list is
     /// refused before it is copied.
     pub(crate) fn len(&mut self, n: usize) -> Result<(), Fault> {
-        let after = self.out.len().checked_add(4).and_then(|l| l.checked_add(n));
+        self.status()?;
+        let after = self
+            .position()
+            .checked_add(4)
+            .and_then(|l| l.checked_add(n));
         if after.is_none_or(|after| after > self.bound) {
             return Err(Fault::Oversized {
                 bytes: after.unwrap_or(usize::MAX),
@@ -1444,7 +2453,7 @@ impl Writer {
 
     pub(crate) fn bytes(&mut self, b: &[u8]) -> Result<(), Fault> {
         self.len(b.len())?;
-        self.out.extend_from_slice(b);
+        self.raw(b);
         Ok(())
     }
 
@@ -1496,6 +2505,27 @@ impl Writer {
         for item in items {
             put(self, item)?;
         }
+        Ok(())
+    }
+
+    fn device_count(&mut self, count: usize, minimum_bytes: usize) -> Result<(), Fault> {
+        self.status()?;
+        if count > MAX_DEVICES {
+            return Err(Fault::value(
+                "devices",
+                "count exceeds the u16 device index address space",
+            ));
+        }
+        let after = count
+            .checked_mul(minimum_bytes)
+            .and_then(|bytes| self.position().checked_add(4)?.checked_add(bytes));
+        if after.is_none_or(|after| after > self.bound) {
+            return Err(Fault::Oversized {
+                bytes: after.unwrap_or(usize::MAX),
+                bound: self.bound,
+            });
+        }
+        self.u32(u32::try_from(count).map_err(|_| Fault::value("devices", "count exceeds u32"))?);
         Ok(())
     }
 }
@@ -1655,6 +2685,66 @@ impl<'a> Reader<'a> {
         let mut out = Vec::with_capacity(n.min(16));
         for _ in 0..n {
             out.push(get(self)?);
+        }
+        Ok(out)
+    }
+
+    fn device_string(&mut self, what: &'static str) -> Result<String, Fault> {
+        let bytes = self.bytes()?;
+        let text = std::str::from_utf8(bytes).map_err(|_| Fault::value(what, "is not UTF-8"))?;
+        let mut out = String::new();
+        out.try_reserve_exact(text.len())
+            .map_err(|_| Fault::value(what, "cannot reserve string"))?;
+        out.push_str(text);
+        Ok(out)
+    }
+
+    fn device_list<T>(
+        &mut self,
+        minimum_bytes: usize,
+        get: impl FnMut(&mut Self) -> Result<T, Fault>,
+    ) -> Result<Vec<T>, Fault> {
+        self.bounded_list(minimum_bytes, MAX_DEVICES, "devices", get)
+    }
+
+    fn bounded_list<T>(
+        &mut self,
+        minimum_bytes: usize,
+        maximum: usize,
+        what: &'static str,
+        mut get: impl FnMut(&mut Self) -> Result<T, Fault>,
+    ) -> Result<Vec<T>, Fault> {
+        let count = usize::try_from(self.u32()?)
+            .map_err(|_| Fault::value(what, "count exceeds this platform"))?;
+        if count > maximum {
+            return Err(Fault::value(
+                what,
+                if what == "devices" {
+                    "count exceeds the u16 device index address space"
+                } else if what == "physical report.unavailable" {
+                    "count exceeds the supported VM backend classes"
+                } else {
+                    "count exceeds the route eligibility word"
+                },
+            ));
+        }
+        let bytes = count
+            .checked_mul(minimum_bytes)
+            .ok_or_else(|| Fault::value(what, "encoded list size overflows"))?;
+        if bytes > self.rest.len() {
+            return Err(Fault::Truncated {
+                need: self.at().saturating_add(bytes),
+                have: self.len,
+            });
+        }
+        let mut out = Vec::new();
+        for _ in 0..count {
+            // Invalid tags/identities are refused before making room for that item. The count
+            // preflight bounds work, but does not allocate a full caller-selected list up front.
+            let item = get(self)?;
+            out.try_reserve(1)
+                .map_err(|_| Fault::value(what, "cannot reserve list"))?;
+            out.push(item);
         }
         Ok(out)
     }

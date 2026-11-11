@@ -1,0 +1,15 @@
+{
+  "parent": "7ec18c9a1f668f66a60afd469b5d42a4fd49d38e",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "cause": "ROOT source review found denied clippy::exit on test worker process::exit(0); not a runtime defect or executed compiler result",
+  "change": "After exact parent X permission only, move THIS test OwnedChild escrow into ManuallyDrop immediately before natural single-test worker return/process exit. All earlier failure paths retain escrow Drop cleanup. No new waiter, waiver, unsafe, production or process query/signal.",
+  "originals": "cc2/c8f/7ec and a102 raw retained; prior native actors UNKNOWN; primitive NPROC body unchanged, PASS not rerun",
+  "status": "Source only; no own compile/Clippy/test/native dispatch",
+  "leaf": {
+    "path": "docs/research/measurements/hex-complete-lifecycle/macos_scope_completion_root005_tests.rs",
+    "bytes": 24892,
+    "sha256": "c0498e2f0d2d913fec8f625b1bc4f42bbb53f4e1c81df8d8c64fd2253e7f9874"
+  }
+}

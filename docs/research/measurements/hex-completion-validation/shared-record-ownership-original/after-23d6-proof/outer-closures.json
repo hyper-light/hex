@@ -1,0 +1,28 @@
+{
+  "cohort-23d64553-linux-shared-owner-after-23d6": {
+    "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-shared-owner-after-23d6.scope",
+    "scope_absent": true,
+    "owners": [
+      {
+        "kind": "driver",
+        "recorded": {
+          "pid": 2082353,
+          "ppid": 2082280,
+          "start_ticks": 32751756
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      },
+      {
+        "kind": "cargo",
+        "recorded": {
+          "pid": 2091598,
+          "ppid": 2082353,
+          "start_ticks": 32752151
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "pid": 88465,
+  "argv": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--on",
+    "f766f09294f2e17e3b8a631ffd4e6a4b",
+    "--needs",
+    "cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--quiet",
+    "--stdin",
+    "--timeout",
+    "120",
+    "--",
+    "powershell.exe -NoProfile -NonInteractive -Command \"Invoke-Expression ([Console]::In.ReadToEnd())\""
+  ],
+  "script_sha256": "34a6c82fca01ded06f97075e714d3d72ac0c2dd48c95796c536a2daa16926fe4",
+  "exit": 0,
+  "reaped": true,
+  "raw_sha256": "8b91dc914a14a88f6223ca75c1ac09c0a9f145eece06d2ad41ca2365f6b8bbf8",
+  "files": 9,
+  "source_files": 2314
+}

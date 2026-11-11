@@ -1,0 +1,47 @@
+--- a/vendor/shards/crates/api/src/client.rs
++++ b/vendor/shards/crates/api/src/client.rs
+@@ -1616,8 +1616,7 @@
+ }
+ 
+ /// Failed completion leaves this SAME watcher owning Shared and all IO storage.
+-/// After an error it subscribes to the actual native completion event; explicit
+-/// stop/drop requests only retry an unavailable native wait, never periodic probes.
++/// It waits for an explicit existing stop/last-drop request, never periodic probes.
+ fn finish_managed_report(shared: &Shared) {
+     loop {
+         let completed = match lock(&shared.report).as_mut() {
+@@ -1638,33 +1637,7 @@
+                 state.exited = true;
+                 state.report_cleanup = ReportCleanup::Uncertain;
+                 shared.changed.notify_all();
+-                // The OS completion event, not another API owner, must wake
+-                // this watcher if cancellation/observation failed before it.
+-                drop(state);
+-                let terminal = match lock(&shared.report).as_mut() {
+-                    Some(report) => report.wait_for_completion(),
+-                    None => Ok(()),
+-                };
+-                state = lock(&shared.state);
+-                match terminal {
+-                    Ok(()) => {
+-                        state.report_cleanup = ReportCleanup::Complete;
+-                        return;
+-                    }
+-                    Err(why) => {
+-                        // A failed native wait proves nothing. Keep the same
+-                        // watcher/resources; preserve the first reported cause.
+-                        if state.managed.is_none() {
+-                            state.managed = Some(Err(why));
+-                        }
+-                        if state.report_cleanup != ReportCleanup::Requested {
+-                            state.report_cleanup = ReportCleanup::Uncertain;
+-                        }
+-                        shared.changed.notify_all();
+-                    }
+-                }
+-                if requested || state.report_cleanup == ReportCleanup::Requested {
+-                    state.report_cleanup = ReportCleanup::Observing;
++                if requested {
+                     drop(state);
+                     continue;
+                 }

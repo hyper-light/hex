@@ -204,6 +204,9 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, (classes, capacity))| NodeSpec {
+                routes: None,
+                costs: [None; crate::model::Class::COUNT],
+                runtime_pools: Vec::new(),
                 id: NodeId(u32::try_from(i).unwrap()),
                 capacity: *capacity,
                 background_milli: 0,

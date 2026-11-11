@@ -1,0 +1,35 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "e25423fd191ce03303a1281019bc9a1f52107167",
+  "source_sha256": "cdff6a6c48100f4be318a1b47edb0406eeddba3f83b2de6a04c098338a89460e",
+  "original_archive": {
+    "source": "5a0a020b4f49073bc020818205739a893b059ac0",
+    "path": "crates/hex-node/src/scheduler/observer_cpu_tests.rs",
+    "sha256": "4ee9e2c847c55e47cbb65fb77f38b9fb0beaea126d97f8dd63f0c20c9c9b7f54",
+    "same_as_initial25d9": true,
+    "actual_log_sha256": "e36f2e60aafe314712e64e8f77eccfe26f9f97ef3fa78010844caf3ceb8718eb",
+    "result": "actual0/1; refresh/facts nowOk but returned create Step discarded; create progress assertion failed; no actual CPU-after green"
+  },
+  "separate_initial_red": {
+    "source": "25d98e88be3b8173605ed7e8e1d109d309a278b6",
+    "log_sha256": "58a60692d499dfbd42b9d960accc6f4954714d15661cd74e9a833fbd167451e7",
+    "symptom": "both real refresh/facts ErrBackingUncertain blocked independent native CPU before lifecycle branch"
+  },
+  "source_trace": [
+    "peer::place returns local Msg::Start; Driver::collect wraps outgoing Step without self delivery.",
+    "Service::dispatch is the existing bounded local delivery loop; the original fixture discarded submit and delete Steps.",
+    "Driver routed create queries only selected runtime.capacity(Process), no strict whole Runtimes.capacities call at that seam."
+  ],
+  "authorized_repair": "Explicit ROOT ACK fixture-only: deliver BOTH returned Steps through Service::dispatch. All original payload/limits/authority/oracles retained; add successful SimRuntime create/delete counters=1 each and FCobserver counters=0. No production auto-dispatch/recursion/admission/capacity bypass/data change.",
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "tests": "UNRUN",
+    "native_hardware": 0,
+    "dispatches": 0
+  },
+  "remaining": "ROOT actual CPU fixture pass must include real successful simulated backend create/delete counts; pure evidence is not native hardware proof. No other passed API/index/merge/wire checks rerun here."
+}

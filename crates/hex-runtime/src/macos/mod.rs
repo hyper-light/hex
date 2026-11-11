@@ -10,9 +10,13 @@ pub mod directory;
 pub mod helper_client;
 pub mod helper_daemon;
 pub mod helper_sys;
+mod managed;
 pub mod proc;
 pub mod process;
 pub mod sys;
+
+#[cfg(feature = "native-trusted-entry-measurement")]
+pub use process::trusted_entry;
 
 #[cfg(test)]
 mod tests;
@@ -22,6 +26,7 @@ use std::ffi::CString;
 use std::num::NonZeroU64;
 use std::os::fd::{AsFd, OwnedFd};
 use std::sync::{Arc, Mutex};
+use triomphe::Arc as NativeArc;
 
 use hex_api::{
     Bounds, BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, ExecLimit, Membership, Proc,
@@ -29,6 +34,7 @@ use hex_api::{
 };
 use rustix::fs::{Mode, OFlags};
 
+use hex_core::record::{NativeRecord, OwnerKey, OwnerRef};
 use process::{ProcessBox, Shared};
 
 /// The bound macOS's execve puts on a program's arguments and environment, read from the kernel now
@@ -89,15 +95,66 @@ pub fn machine_model() -> Result<String, Refusal> {
 }
 
 pub struct MacRuntime {
-    shared: Arc<Shared>,
+    shared: NativeArc<Shared>,
     /// Shared with a run's thread, which removes its box through [`remove_process_box`] as `delete` does.
-    boxes: Arc<Mutex<BTreeMap<BoxId, Arc<ProcessBox>>>>,
+    boxes: NativeArc<NativeBoxes>,
     helper: Option<BoxUser>,
     /// The kernel's bound on a program's arguments and environment, read at start (`kern.argmax`).
     exec_limit: ExecLimit,
 }
 
+type NativeBoxEntries = Vec<(OwnerKey, NativeArc<ProcessBox>)>;
+type NativeBoxes = Mutex<NativeBoxEntries>;
+
+fn native_owner_index(
+    boxes: &[(OwnerKey, NativeArc<ProcessBox>)],
+    id: OwnerRef<'_>,
+) -> Result<usize, usize> {
+    boxes.binary_search_by(|(key, _)| key.as_ref().cmp(&id))
+}
+fn native_index(boxes: &[(OwnerKey, NativeArc<ProcessBox>)], id: &BoxId) -> Result<usize, usize> {
+    native_owner_index(boxes, OwnerRef::Box(id))
+}
+
+fn native_allocation(bound: usize) -> Refusal {
+    Refusal::Exhausted {
+        what: "native box receipt storage",
+        bound,
+    }
+}
+
 impl MacRuntime {
+    /// The original canonical VM row's native owner. It neither chooses devices nor creates a
+    /// synthetic Process workload; its receipt is retained in the same native box table.
+    pub fn launch_managed(
+        &self,
+        record: NativeRecord<'_>,
+        plan: &crate::devices::ManagedLaunch<'_>,
+        io: shards_api::LaunchIo,
+        patience: std::time::Duration,
+        publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
+    ) -> Result<shards_api::ManagedReceipt, Refusal> {
+        managed::launch(self, record, plan, io, patience, publish)
+    }
+    pub fn attach_managed(
+        &self,
+        record: NativeRecord<'_>,
+        identity: Option<&shards_api::Identity>,
+    ) -> Result<shards_api::ManagedReceipt, Refusal> {
+        managed::attach(self, record, identity)
+    }
+    /// The internal Books transaction calls this only after the exact durable Released boot receipt.
+    pub fn finalize_managed(
+        &self,
+        record: NativeRecord<'_>,
+        identity: Option<&shards_api::Identity>,
+    ) -> Result<(), Refusal> {
+        managed::finalize(self, record, identity)
+    }
+    pub fn managed_usage(&self, record: NativeRecord<'_>) -> Result<Usage, Refusal> {
+        managed::usage(self, record)
+    }
+
     /// The growth rates the node's boxes are paced at, as its watchers have learned them (observability:
     /// what the watchers pace by).
     pub fn pacing(&self) -> Result<hex_core::watch::Rates, Refusal> {
@@ -122,8 +179,10 @@ impl MacRuntime {
         let shared = Shared::new(rate_bytes, rate_processes, lateness)
             .map_err(|e| Refusal::os("reading the machine's timebase", e))?;
         Ok(Self {
-            shared: Arc::new(shared),
-            boxes: Arc::new(Mutex::new(BTreeMap::new())),
+            shared: NativeArc::try_new(shared)
+                .map_err(|_| native_allocation(std::mem::size_of::<Shared>()))?,
+            boxes: NativeArc::try_new(Mutex::new(Vec::new()))
+                .map_err(|_| native_allocation(std::mem::size_of::<NativeBoxes>()))?,
             helper: None,
             exec_limit: exec_limit()?,
         })
@@ -142,8 +201,10 @@ impl MacRuntime {
                 let shared = Shared::new(rate_bytes, rate_processes, lateness)
                     .map_err(|e| Refusal::os("reading the machine's timebase", e))?;
                 Ok(Self {
-                    shared: Arc::new(shared),
-                    boxes: Arc::new(Mutex::new(BTreeMap::new())),
+                    shared: NativeArc::try_new(shared)
+                        .map_err(|_| native_allocation(std::mem::size_of::<Shared>()))?,
+                    boxes: NativeArc::try_new(Mutex::new(Vec::new()))
+                        .map_err(|_| native_allocation(std::mem::size_of::<NativeBoxes>()))?,
                     helper: Some(BoxUser {
                         helper: Arc::new(helper),
                         boxes: Arc::new(Mutex::new(BTreeMap::new())),
@@ -165,11 +226,18 @@ impl MacRuntime {
     /// ([`ProcessBox::adopt`]).
     pub fn adopt(&self, spec: &BoxSpec, group: Option<(i32, u64)>) -> Result<(), Refusal> {
         let mut boxes = self.boxes()?;
-        if boxes.contains_key(&spec.id) {
-            return Err(Refusal::Exists(spec.id.clone()));
+        let at = native_index(&boxes, &spec.id)
+            .map_or_else(Ok, |_| Err(Refusal::Exists(spec.id.clone())))?;
+        if boxes.len() >= crate::MAX_BOXES {
+            return Err(Refusal::Full(crate::MAX_BOXES));
         }
+        boxes
+            .try_reserve(1)
+            .map_err(|_| native_allocation(crate::MAX_BOXES))?;
         let b = ProcessBox::adopt(spec.id.clone(), &spec.bounds, self.shared.as_ref(), group)?;
-        boxes.insert(spec.id.clone(), Arc::new(b));
+        let b = NativeArc::try_new(b)
+            .map_err(|_| native_allocation(std::mem::size_of::<ProcessBox>()))?;
+        boxes.insert(at, (OwnerKey::Box(spec.id.try_clone()?), b));
         Ok(())
     }
 
@@ -196,7 +264,7 @@ impl MacRuntime {
             );
         }
         let b = self.get(id)?;
-        let (boxes, gone) = (Arc::clone(&self.boxes), id.clone());
+        let (boxes, gone) = (NativeArc::clone(&self.boxes), id.clone());
         crate::run::Run::start(
             proc,
             id,
@@ -205,9 +273,7 @@ impl MacRuntime {
         )
     }
 
-    fn boxes(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, BTreeMap<BoxId, Arc<ProcessBox>>>, Refusal> {
+    fn boxes(&self) -> Result<std::sync::MutexGuard<'_, NativeBoxEntries>, Refusal> {
         self.boxes
             .lock()
             .map_err(|_| Refusal::Broken("the node's box map lock is poisoned".to_owned()))
@@ -219,16 +285,20 @@ impl MacRuntime {
         self.get(id)?.status()
     }
 
-    fn get(&self, id: &BoxId) -> Result<Arc<ProcessBox>, Refusal> {
-        self.boxes()?
-            .get(id)
-            .cloned()
-            .ok_or_else(|| Refusal::NoSuchBox(id.clone()))
+    fn get(&self, id: &BoxId) -> Result<NativeArc<ProcessBox>, Refusal> {
+        let boxes = self.boxes()?;
+        let at = native_index(&boxes, id).map_err(|_| Refusal::NoSuchBox(id.clone()))?;
+        let (_, boxed) = boxes.get(at).ok_or_else(|| managed::uncertain(id))?;
+        if boxed.is_managed() {
+            return Err(Refusal::NoSuchBox(id.try_clone()?));
+        }
+        Ok(NativeArc::clone(boxed))
     }
 
     fn info(&self, b: &ProcessBox) -> Result<BoxInfo, Refusal> {
         Ok(BoxInfo {
-            id: b.id().clone(),
+            route: None,
+            id: b.id()?.try_clone()?,
             class: Class::Process,
             state: if b.running_now()? {
                 BoxState::Running
@@ -242,6 +312,7 @@ impl MacRuntime {
             // A process box has no init, so no container exit to report (HEX-RT-11).
             exit: None,
             abandoned: 0,
+            allocation: None,
         })
     }
 }
@@ -344,15 +415,15 @@ fn remove_user_box(
 /// Removes rootless box `id` and ends it (kill, drain, stop its watcher): the runtime's delete and a run's thread
 /// take this one path. Dropping the last Arc does the same, so removing a box a caller still holds through
 /// `list` is safe.
-fn remove_process_box(
-    boxes: &Mutex<BTreeMap<BoxId, Arc<ProcessBox>>>,
-    id: &BoxId,
-) -> Result<(), Refusal> {
-    let b = boxes
-        .lock()
-        .map_err(|_| Refusal::Broken("the node's box map lock is poisoned".to_owned()))?
-        .remove(id)
-        .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+fn remove_process_box(boxes: &NativeBoxes, id: &BoxId) -> Result<(), Refusal> {
+    let b = {
+        let mut boxes = boxes.lock().map_err(|_| managed::uncertain(id))?;
+        let at = native_index(&boxes, id).map_err(|_| Refusal::NoSuchBox(id.clone()))?;
+        if boxes.get(at).is_some_and(|(_, boxed)| boxed.is_managed()) {
+            return Err(managed::uncertain(id));
+        }
+        boxes.remove(at).1
+    };
     b.delete()
 }
 
@@ -360,6 +431,7 @@ fn remove_process_box(
 /// exit, and no abandoned programs (the node's disconnect rule is the helper's here).
 fn info(id: BoxId, bounds: Bounds, state: BoxState) -> BoxInfo {
     BoxInfo {
+        route: None,
         id,
         class: Class::Process,
         state,
@@ -368,6 +440,7 @@ fn info(id: BoxId, bounds: Bounds, state: BoxState) -> BoxInfo {
         membership: Some(Membership::BoxUser),
         exit: None,
         abandoned: 0,
+        allocation: None,
     }
 }
 
@@ -377,7 +450,21 @@ impl Runtime for MacRuntime {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        spec.check()?;
+        spec.check_no_devices("macos")?;
+        if spec.allocation.is_some() {
+            let text = "this ordinary native route advertises identity cost";
+            let mut why = String::new();
+            why.try_reserve_exact(text.len())
+                .map_err(|_| Refusal::Exhausted {
+                    what: "native allocation refusal bytes",
+                    bound: text.len(),
+                })?;
+            why.push_str(text);
+            return Err(Refusal::Invalid {
+                what: "native runtime allocation",
+                why,
+            });
+        }
         let ClassSpec::Process = spec.class else {
             return Err(Refusal::Platform {
                 what: "the oci class",
@@ -391,16 +478,22 @@ impl Runtime for MacRuntime {
             return bu.create(&spec);
         }
         let mut boxes = self.boxes()?;
-        if boxes.contains_key(&spec.id) {
-            return Err(Refusal::Exists(spec.id));
+        let at = native_index(&boxes, &spec.id)
+            .map_or_else(Ok, |_| Err(Refusal::Exists(spec.id.clone())))?;
+        if boxes.len() >= crate::MAX_BOXES {
+            return Err(Refusal::Full(crate::MAX_BOXES));
         }
-        let b = Arc::new(ProcessBox::create(
+        boxes
+            .try_reserve(1)
+            .map_err(|_| native_allocation(crate::MAX_BOXES))?;
+        let b = NativeArc::try_new(ProcessBox::create(
             spec.id.clone(),
             &spec.bounds,
             self.shared.as_ref(),
-        )?);
+        )?)
+        .map_err(|_| native_allocation(std::mem::size_of::<ProcessBox>()))?;
         let info = self.info(&b)?;
-        boxes.insert(spec.id, b);
+        boxes.insert(at, (OwnerKey::Box(spec.id), b));
         Ok(info)
     }
 
@@ -457,6 +550,7 @@ impl Runtime for MacRuntime {
     /// the run, and only then gives the caller the end. Its kill is the box's KILL, the box holding that program
     /// alone. In both modes: a process group's and a box user's.
     fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check_no_devices("macos")?;
         spec.check_run()?;
         let id = spec.id.clone();
         self.create(spec)?;
@@ -496,7 +590,17 @@ impl Runtime for MacRuntime {
             let ids: Vec<BoxId> = bu.boxes()?.keys().cloned().collect();
             return ids.iter().map(|id| bu.info(id)).collect();
         }
-        let boxes: Vec<Arc<ProcessBox>> = self.boxes()?.values().cloned().collect();
+        let boxes = {
+            let held = self.boxes()?;
+            let mut boxes = Vec::new();
+            boxes
+                .try_reserve_exact(held.len())
+                .map_err(|_| native_allocation(held.len()))?;
+            for (_, boxed) in held.iter().filter(|(_, boxed)| !boxed.is_managed()) {
+                boxes.push(NativeArc::clone(boxed));
+            }
+            boxes
+        };
         boxes.iter().map(|b| self.info(b)).collect()
     }
 

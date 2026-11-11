@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "source_parent": "9b44967ee57b0fc22ea18b6844e6780c4639b632",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "artifacts": [
+    {
+      "path": "original-9b44-settle.log",
+      "sha256": "c7e268fcce9d18a7a2bd6e8f15343c17f80b5466da81eb24860e4c19ae7176ef",
+      "bytes": 2456,
+      "copied_unchanged": true
+    },
+    {
+      "path": "original-9b44-owned-test-cleanup.json",
+      "sha256": "f57e028234495e85f84b337cda314c2a8d9750380f2d5fe140dfad9eda68e108",
+      "bytes": 1077,
+      "copied_unchanged": true
+    }
+  ],
+  "protected_source": [
+    {
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "38ae331369187698244c8d679e944e39937b27915f4c7612191e9d65604f3fc1",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/calls/budget_tests.rs",
+      "sha256": "b1cdd41e299e101736138d499a3ce171ae27a28ef2b1600a3d1b2af28c5e053e",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/guest/tests.rs",
+      "sha256": "68ba6db123682e110827cd02315097edb61576fa51acb650bdefe2b9dab21626",
+      "unchanged": true
+    }
+  ],
+  "actual_result": {
+    "classification": "INCOMPLETE, no production red",
+    "guard_seconds": 900,
+    "cargo_pid": 2011513,
+    "cargo_exit": -15,
+    "cargo_reaped": true,
+    "completed_test_count": null,
+    "clippy_ran": false,
+    "owned_test_pid": 2059947,
+    "birth": 30607552,
+    "root_cleanup_terminal_event": true,
+    "unit_after": "not-found/inactive/dead/empty cgroup",
+    "source_changes": 0,
+    "temp_entries": 0
+  },
+  "source_findings": [
+    {
+      "kind": "concrete fixture contract hole, observed phase not proven",
+      "code": "SettleOriginal::recv delegates Offers::recv; Offers drains UDP wake and returns Ok(false) when empty, ignoring Stalled.closed. Shared::end sends shutdown wake before mailbox close. An unbounded reader can consume the only wake/re-poll before the closing mail is observed; unlike a real stream EOF this readiness is not persistent."
+    },
+    {
+      "kind": "protocol hypothesis not established",
+      "code": "Defined memory peer queues Started only; no Given (Taken trigger) or Offered (StreamsReady trigger). Rejected unexpected words should be journaled, not accepted without an observed cause."
+    }
+  ],
+  "proposal_only": "fixture-local closed-error check after draining queued data +bounded phase diagnostics before cleanup/join; no production behavior change, source not edited here",
+  "new_builds": 0,
+  "new_tests": 0,
+  "new_native_effects": 0,
+  "rerun_requested": false
+}

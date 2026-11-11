@@ -1,0 +1,39 @@
+{
+  "bytes": 186220,
+  "sha256": "862a8bf9805bebb6354ed362a08b72ccfdc773c212784cb2e51adfa6068338b2",
+  "members": {
+    "cohort-9ba81af8-light-v2/wire.log": {
+      "bytes": 3844,
+      "sha256": "625cf0a4c5ab9523db787202cedba6a2d199e8614c4c3517108a7f9b8e59f337"
+    },
+    "cohort-9ba81af8-light-v2/running.json": {
+      "bytes": 1828,
+      "sha256": "2a4c0e9f21e95383973c610ad7fec32ee4ac61764d3b97a7f1a5a7698fcc5df2"
+    },
+    "cohort-9ba81af8-light-v2/result.json": {
+      "bytes": 2078,
+      "sha256": "cd215a785f40994f5e43e526ab274e302b7e4d5545386280f69605cc5924e774"
+    },
+    "cohort-9ba81af8-light-v2/source-before.json": {
+      "bytes": 275560,
+      "sha256": "3c8a5cd87d507866cf6be07a6b5b7786b1fc1517589fd1ca9c27b19dd46954ee"
+    },
+    "cohort-9ba81af8-light-v2/source-after.json": {
+      "bytes": 275560,
+      "sha256": "3c8a5cd87d507866cf6be07a6b5b7786b1fc1517589fd1ca9c27b19dd46954ee"
+    },
+    "cohort-9ba81af8-light-v2/fit-cost.log": {
+      "bytes": 943,
+      "sha256": "4a485b334b8b0587d9a35031b151c10cbab86de8481f73fd4c1947ecfc24c155"
+    },
+    "cohort-9ba81af8-light-v2/collected-binaries.json": {
+      "bytes": 1738,
+      "sha256": "ef5dd3681e4fa75de7bbf92835bf1bafd493a6a49bb5824b3904ad34df87c9ce"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

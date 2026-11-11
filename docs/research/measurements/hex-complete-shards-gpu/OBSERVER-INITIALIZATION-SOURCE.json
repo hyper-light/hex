@@ -1,0 +1,65 @@
+{
+  "status": "SIGNED SOURCE FEATURE / UNCOMPILED / three new controls UNRUN / no native or build dispatch",
+  "parent": "b861161ab0319d6b825bcfa6d514c5dfd1953918",
+  "role": "implementer shards-gpu",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "scope": "owned guest observer config/load +owned registrations +lane docs only; ROOT owns CLI/manifests/shared registration",
+  "public_api": [
+    "GpuObserverInput::from_env()->Result<Option<Self>,Refusal>",
+    "GpuObserverInput::from_vars(Fn(&str)->Option<OsString>)->Result<Option<Self>,Refusal>",
+    "GpuObserverInput::load(&Path,[u8;32])->Result<Self,Refusal>"
+  ],
+  "optional_environment": [
+    "HEX_GUEST_GPU_OBSERVER_FILE",
+    "HEX_GUEST_GPU_OBSERVER_SHA256"
+  ],
+  "schema": "same existing typed evidence/artifacts/launch/max_queue_families/max_allocation_bytes/stderr_bytes/bounds; seven required root fields, six required artifact fields, eight required Bounds fields, four explicit IoRates fields when Some; no UUID/native identity input or new wire DTO",
+  "bounds": {
+    "file_bytes": "existing hex_core::bundle::MAX_CONFIG_BYTES =1<<20",
+    "read_buffer": "verified metadata size+1 checked/fallibly reserved",
+    "schema_max_depth": 3,
+    "array_logical_elements": "<=verified input byte count N with checked sizeof multiplication and fallible Vec growth",
+    "string_owned_bytes": "<=raw quoted bytes, fallibly reserved before RFC8259 escape/Unicode decoding",
+    "subsequent_constructor": "all existing count/encoding/output/paidroom/artifact identity checks unchanged"
+  },
+  "preservation": "Entire existing observer/config.rs byte-identical after removing new module/export registration; no constructor, physical selection, native record, deadline, pool, original test, Cargo or outside CLI body changed.",
+  "new_units": [
+    "guest::observer::config::load::tests::optional_observer_manifest_reaches_real_constructor_with_escaped_unicode_paths",
+    "guest::observer::config::load::tests::observer_manifest_rejects_hostile_schema_lengths_escapes_and_partial_inputs",
+    "guest::observer::config::load::tests::loaded_observer_manifest_keeps_actual_artifact_and_paid_room_checks"
+  ],
+  "checks": {
+    "scoped_rustfmt_parser": "exit0",
+    "git_diff_check": "exit0",
+    "compiler": "NOT RUN",
+    "new_units": "NOT RUN",
+    "native": "NOT RUN",
+    "old_passes": "NOT REPLAYED"
+  },
+  "primary": "RFC8259 https://www.rfc-editor.org/rfc/rfc8259.html sections2,4,6\u20139; existing own config.rs typed constructor and observer hex/refusal helpers",
+  "files": {
+    "crates/hex-runtime/src/guest/mod.rs": {
+      "bytes": 54225,
+      "sha256": "3a0beeb7d64a4f259ed2316be1e3a004114d86e42aca44a82d09964b504e631f"
+    },
+    "crates/hex-runtime/src/guest/observer/config.rs": {
+      "bytes": 24432,
+      "sha256": "6c13bc3a8ba51c4bb71657ccc133f40b99b532ba1760b15341277a56134f513e"
+    },
+    "crates/hex-runtime/src/guest/observer/config/load.rs": {
+      "bytes": 19830,
+      "sha256": "e25a7983eefaf75c3d1f0ae78bc70cfe8ee3a653f95cc240c45e5ae81521c699"
+    },
+    "crates/hex-runtime/src/guest/observer/config/load/tests.rs": {
+      "bytes": 9072,
+      "sha256": "db18ddb653f60213adf01b60a9b44c35da43dd009abc11b222f868c63ad5b2a4"
+    },
+    "docs/research/measurements/hex-complete-shards-gpu/OBSERVER-INITIALIZATION-SOURCE.md": {
+      "bytes": 8644,
+      "sha256": "c4a9919e881070c897131ec021e2528750abf6f4a1198dabf92c9d685c216872"
+    }
+  },
+  "remaining": "ROOT exact CLI snippet/variable registration and joined compile/new controls; actual reviewed observer artifacts/evidence/complete closure, native pre-main/worker/renderer/guest execution, resources, mutation and performance proof. Hashing/model byte files are not native readiness.",
+  "existing_seams": "from_env uses existing std::env::var_os OsString acquisition pattern required by the accepted API. Its standard-library allocation boundary, and existing Refusal::os/Bounds/constructor error allocation seams, are explicitly not a new R01 audit/completion claim. New decoder-owned strings/Vec/Path storage is fallibly reserved."
+}

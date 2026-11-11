@@ -1,0 +1,562 @@
+{
+  "source": "bba3d814cfa8373d589482dfbaa38b9bfa792d03",
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "run": "r462",
+  "exit": 0,
+  "log": "/Users/adalundhe/.cache/hex-lead/logs/refusal-census-seven-gates-bba3d814.log",
+  "log_sha256": "c9cc5dee82696be95a98662a74cfe3740b29d5bee2811b2cef444fb2b32f9e00",
+  "commands": [
+    "::: cargo fmt --all --check",
+    "::: cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl -- -D warnings",
+    "::: cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin -- -D warnings",
+    "::: cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-msvc --target aarch64-pc-windows-msvc -- -D warnings",
+    "::: bash scripts/check-production.sh",
+    "::: cargo test --workspace --locked",
+    "::: no test skipped",
+    "::: python3 scripts/vendor.py check"
+  ],
+  "test_summary_rows": [
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 30,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "35.36"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.15"
+    },
+    {
+      "result": "ok",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.14"
+    },
+    {
+      "result": "ok",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.19"
+    },
+    {
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.46"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 1,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "5.28"
+    },
+    {
+      "result": "ok",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "1.23"
+    },
+    {
+      "result": "ok",
+      "passed": 17,
+      "failed": 0,
+      "ignored": 5,
+      "seconds": "17.47"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 51,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.18"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 1,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 302,
+      "failed": 0,
+      "ignored": 2,
+      "seconds": "4.75"
+    },
+    {
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 14,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.09"
+    },
+    {
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 39,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.06"
+    },
+    {
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 106,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "14.37"
+    },
+    {
+      "result": "ok",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.05"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 60,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.11"
+    },
+    {
+      "result": "ok",
+      "passed": 160,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "3.54"
+    },
+    {
+      "result": "ok",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "11.23"
+    },
+    {
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "5.44"
+    },
+    {
+      "result": "ok",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "4.33"
+    },
+    {
+      "result": "ok",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.08"
+    },
+    {
+      "result": "ok",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "706.32"
+    },
+    {
+      "result": "ok",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "13.57"
+    },
+    {
+      "result": "ok",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "7.56"
+    },
+    {
+      "result": "ok",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 1,
+      "seconds": "5.67"
+    },
+    {
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "366.12"
+    },
+    {
+      "result": "ok",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.04"
+    },
+    {
+      "result": "ok",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.11"
+    },
+    {
+      "result": "ok",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.63"
+    },
+    {
+      "result": "ok",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 1,
+      "seconds": "69.95"
+    },
+    {
+      "result": "ok",
+      "passed": 20,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "137.55"
+    },
+    {
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 1,
+      "seconds": "25.57"
+    },
+    {
+      "result": "ok",
+      "passed": 10,
+      "failed": 0,
+      "ignored": 1,
+      "seconds": "0.16"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.01"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    },
+    {
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": "0.00"
+    }
+  ],
+  "reported_rust_pass_executions": 908,
+  "ignored_test_lines": [
+    "test boot_to_ready_and_stop ... ignored, a measurement: run with --ignored --nocapture, release, where a guest boots",
+    "test a_box_user_box_holds_the_bar_oversubscribed ... ignored, needs the installed root helper; the installer lab runs it via HEX_BOX_HELPER_SOCK",
+    "test box_user_boxes_hold_the_contract ... ignored, needs a root helper daemon; run by bench/native/macos/boxlab.sh via HEX_BOX_HELPER_SOCK",
+    "test hex_mac_1_a_held_box_stop_compared_one_by_one_at_once_and_one_running ... ignored, the hold's stops compared on demand on the Studio (the lead, 2026-11-09)",
+    "test measure_a_cpu_bound_members_work_rate ... ignored, a measurement; run by hand and recorded in bench/native/macos/records",
+    "test measure_exec_to_exit ... ignored, a measurement; run by hand and recorded in bench/native/macos/records",
+    "test guest_client_exec_start_and_throughput ... ignored, a measurement: run with --ignored --nocapture, release",
+    "test boxuser::tests::records_the_rarest_case_shares ... ignored, a recorder: its output sizes the model tests' case counts",
+    "test pool::tests::records_the_rarest_case_shares ... ignored, a measurement; run by hand and recorded in bench/native/macos/records",
+    "test health_gated_confirmations_end_false_positives_over_1000_seeds ... ignored, 1,000 seeds: the record run, in release",
+    "test rebuild_cost ... ignored, a wall-clock measurement, run by hand in release",
+    "test a_crashed_member_is_condemned_within_its_stated_bound_over_1000_seeds ... ignored, 1,000 seeds at each pace: the record run, in release",
+    "test waits::tests::census_child ... ignored, the census test's child, run in a process of its own"
+  ],
+  "scope": "seven-target crossclippy, native macOS workspace/vendor, two parser suites; not native Linux/rootlab or a seed claim"
+}

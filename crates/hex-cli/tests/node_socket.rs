@@ -222,6 +222,9 @@ fn nofile_seen(client: &Client, class: ClassSpec) -> String {
     let id = BoxId::new("nofile").unwrap();
     client
         .create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class,
@@ -573,6 +576,9 @@ impl Fixture for OciBoxes<'_> {
     }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id,
             bounds,
             class: ClassSpec::Bundle(self.0.bundle_with(&Lab::act(&Act::Wait), self.1)),
@@ -582,6 +588,9 @@ impl Fixture for OciBoxes<'_> {
 
     fn init(&self, id: BoxId, act: &Act) -> BoxSpec {
         BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id,
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(self.0.bundle_with(&Lab::act(act), self.1)),
@@ -603,6 +612,9 @@ impl Fixture for ProcessBoxes<'_> {
     }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id,
             bounds,
             class: ClassSpec::Process,
@@ -681,16 +693,16 @@ fn the_agent_parks_procs_as_root_and_none_rootless(lab: &Lab, own: &Path, cache:
 struct GuestPorts(PathBuf);
 
 impl hex_client::guest::Link for GuestPorts {
-    fn dial(&self, port: u32) -> Result<Box<dyn hex_client::guest::Duplex>, Refusal> {
+    fn dial(&self, port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
         let name = match port {
             stream::CONTROL_PORT => "control.sock",
             stream::STDIO_PORT => "stdio.sock",
             stream::files::FILES_PORT => "files.sock",
             other => panic!("dialed port {other:#x}"),
         };
-        Ok(Box::new(
+        hex_client::guest::own_duplex(
             std::os::unix::net::UnixStream::connect(self.0.join(name)).unwrap(),
-        ))
+        )
     }
 }
 
@@ -719,9 +731,10 @@ fn through_the_guest_relay(lab: &Lab, agent: &Agent, exe: &str) {
         .read_line(&mut line)
         .unwrap();
     assert_eq!(line.trim(), "ready", "hex guest relay said {line:?}");
-    let guest =
-        hex_client::guest::Client::connect(std::sync::Arc::new(GuestPorts(dir.path().to_owned())))
-            .expect("connect through the guest relay");
+    let guest = hex_client::guest::Client::connect(
+        hex_client::guest::own_link(GuestPorts(dir.path().to_owned())).unwrap(),
+    )
+    .expect("connect through the guest relay");
     assert_eq!(guest.classes(), [Class::Process, Class::Oci]);
     let failures = conformance::run(&guest, &OciBoxes(lab, false));
     assert!(
@@ -841,6 +854,7 @@ fn simulated_guest(agent: &Agent, exe: &str) -> SimulatedGuest {
         initrd: PathBuf::from("/nonexistent/initrd"),
         // Shards' least guest: one vCPU and its architecture's least memory (`shards_api::check`).
         vcpus: 1,
+        gpu: false,
         memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
         shares: vec![Share {
             dir: PathBuf::from("/"),
@@ -1029,6 +1043,9 @@ fn through_a_host_nodes_socket(lab: &Lab, agent: &Agent, exe: &str) {
 fn example(lab: &Lab, client: &Client) -> Result<(), String> {
     let id = BoxId::new("example").unwrap();
     let made = client.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait))),
@@ -1098,6 +1115,9 @@ fn namespaces_counted(lab: &Lab, client: &Client) {
     let id = BoxId::new("own-network").unwrap();
     client
         .create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(lab.bundle_with(&Lab::act(&Act::Wait), true)),
@@ -1149,6 +1169,9 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
     let process = BoxId::new("left-process").unwrap();
     client
         .create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: oci.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait))),
@@ -1158,6 +1181,9 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
     client.start(&oci).unwrap();
     client
         .create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: process.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Process,
@@ -1519,6 +1545,9 @@ fn crash_case(
         }
     };
     let spec = BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class,
@@ -1911,6 +1940,9 @@ fn a_box_cannot_arm_the_agents_crash_point(lab: &Lab, own: &Path, exe: &str) {
     }
     let made = client
         .create(BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Oci(Box::new(spec)),
@@ -1978,6 +2010,9 @@ fn a_sigterm_says_the_parked_procs_and_leaves_the_boxes_as_a_sigkill_does(
     for name in ["term-a", "term-b"] {
         client
             .create(BoxSpec {
+                route: None,
+                allocation: None,
+                devices: Vec::new(),
                 id: id(name),
                 bounds: Bounds::default(),
                 class: ClassSpec::Bundle(lab.bundle(&wait)),
@@ -2080,6 +2115,9 @@ fn a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(lab: &Lab, own: &Path
     ] {
         client
             .create(BoxSpec {
+                route: None,
+                allocation: None,
+                devices: Vec::new(),
                 id: id(name),
                 bounds: Bounds::default(),
                 class: ClassSpec::Bundle(lab.bundle(&wait)),

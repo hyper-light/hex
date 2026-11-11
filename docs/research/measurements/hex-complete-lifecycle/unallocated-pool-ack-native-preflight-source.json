@@ -1,0 +1,42 @@
+{
+  "base": "9094958ecb34925b6a99e8572ebbddbd8631fb37",
+  "feature": "same native no-submission callback recheck before explicit Index ACK removes exact unallocated Released cancellation",
+  "required_prepared_producer": "0597523f90fdc665e4f1d3393665544d47443bdf",
+  "required_scoped_node_ack_producer": "431ca4173ade1c26eef7b2860e9f14af48912455",
+  "public_check_unsubmitted_pool": "unchanged Prepared-only",
+  "allocated_Released_semantics": "unchanged; native durable/finalize proof remains adapter responsibility",
+  "old_four_unit_bodies_sha256": "2842dc374eb2fd0849f97560efbfa049a552313b7ce1a8fcaf9ce908d18c4e64",
+  "old_four_unit_bodies": "byte-identical prefix; one ordered control appended",
+  "files": {
+    "crates/hex-node/src/recorded.rs": {
+      "sha256": "efa39d98fedaa18e4f8137ffc12512b970ab7b3b81e191e931ef3502c965b7a8",
+      "bytes": 104685
+    },
+    "docs/research/measurements/hex-complete-lifecycle/recorded_unsubmitted_pool_tests.rs": {
+      "sha256": "c54159d09cccc740fcce3859b320f16cee34f71fc339072bc1e695d83c410fcb",
+      "bytes": 14785
+    },
+    "docs/research/measurements/hex-complete-lifecycle/prepared-pool-native-preflight.md": {
+      "sha256": "ae7aaf929920a2915918a7ea29a0d9eea7971797c5d971ed7e59abb7a241509c",
+      "bytes": 8071
+    }
+  },
+  "source_checks": [
+    "scoped rustfmt parser/format only",
+    "git diff --check"
+  ],
+  "compile_tests_native": "UNRUN; no L3 dispatch",
+  "new_units": 1,
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "separate_sources": [
+    "9a587/909 measurement-only C",
+    "2ef full Mac helper remains unimported"
+  ],
+  "remaining": [
+    "match L2 cancel/ACK consumer",
+    "ROOT focused common+native-owner metadata controls",
+    "actual native absence/resource proof",
+    "supported target compiler/strict lint/full gates"
+  ]
+}

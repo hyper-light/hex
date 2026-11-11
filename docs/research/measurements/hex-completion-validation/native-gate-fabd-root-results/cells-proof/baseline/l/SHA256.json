@@ -1,0 +1,94 @@
+{
+  "case.stderr": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "case.stdout": {
+    "bytes": 215,
+    "sha256": "e48b0de8813e84c68c95060298c2b76b86597e2e4b53070b9dec9fa8d648ffc9"
+  },
+  "comparison-result.json": {
+    "bytes": 3205,
+    "sha256": "c2e89cd4a882dedabced9e4ccc75d7408589aff0e4f4527f979b40e1ce117db8"
+  },
+  "config.json": {
+    "bytes": 1573,
+    "sha256": "f69691a1879162ce0d28786c1ab17c7b2157c8d7fe33059110b169fdb2e2fe87"
+  },
+  "gate-7dNJiQ/first.creating.record.json": {
+    "bytes": 639,
+    "sha256": "9ab452b8f4fe67d450460c57f708bc7e372af2e7070b03c436cae0535b1ea502"
+  },
+  "gate-7dNJiQ/first.isolation-ack.json": {
+    "bytes": 741,
+    "sha256": "98016967c794f20ac38dbf27121d874ab5991280b0e829654c93e2819c22b582"
+  },
+  "gate-7dNJiQ/first.isolation-tail.json": {
+    "bytes": 167,
+    "sha256": "f4af0cc3ed6b355df4dacfdc28d441c5095bc52074c244f453d7d002791357f6"
+  },
+  "gate-7dNJiQ/gate-result.json": {
+    "bytes": 210,
+    "sha256": "2c8fa2c13c11db01245acaa212d0489657022e7b249102c3d3517d44eee9018d"
+  },
+  "gate-7dNJiQ/native-vm-owner.lock": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "gate-7dNJiQ/parent-death.evidence.json": {
+    "bytes": 22199,
+    "sha256": "4e4e86db9eeec0184e9a2da7061c98b0c424c0ca9e9a163d0ed0de9ee5b9ccca"
+  },
+  "gate-7dNJiQ/parent.stderr": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "gate-7dNJiQ/parent.stdout": {
+    "bytes": 4071,
+    "sha256": "f6d102a8e004ec1bd8edf19a936d06b00b0b616ed6d3ffed73e2a58a89a26799"
+  },
+  "gate-7dNJiQ/parent.stop.json": {
+    "bytes": 508,
+    "sha256": "1fe562c8fafcc067a8e461deffe80bea177d5aaacc3e855aa18498e759a5a25c"
+  },
+  "gate-7dNJiQ/sibling.creating.record.json": {
+    "bytes": 645,
+    "sha256": "0043bd50d46b69c636ac1dda27af9283c38c68b70fbe242d3376a69d65977f19"
+  },
+  "gate-7dNJiQ/sibling.isolation-ack.json": {
+    "bytes": 751,
+    "sha256": "610ac05afdc53a10a08d1a5b13e1b51a021da80d91bf5081f802b70a5bf40cfe"
+  },
+  "gate-7dNJiQ/sibling.isolation-tail.json": {
+    "bytes": 169,
+    "sha256": "c1b5d12a65e5595bec0f0c0487a7b346f727a3556234eec5d7e8332bf45e53a3"
+  },
+  "inputs.json": {
+    "bytes": 399,
+    "sha256": "f4e67c2e24a29331e4de8a1945f993bfe0bf804b9473a919686b7c120f44bc97"
+  },
+  "journal.jsonl": {
+    "bytes": 3280,
+    "sha256": "c675d016163fd05936657dbf7c5933d5feb3cd0698cecc110a79e92b5c8ba742"
+  },
+  "resources-after.json": {
+    "bytes": 3096,
+    "sha256": "f7146434eaace09cf3b89ec54f226ef06dc6af031e3af61a34bd6e0c4842afb8"
+  },
+  "resources-before.json": {
+    "bytes": 2916,
+    "sha256": "fb43a071e3ec59acc766ae38a2326e92ec88e449ed8809ee0041e92cbf536f15"
+  },
+  "scope-restoration.json": {
+    "bytes": 440,
+    "sha256": "e05de2f3d6d04e2531669e88168d327ecb644429b057839178b60b06f6e30c08"
+  },
+  "unit.stderr": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "unit.stdout": {
+    "bytes": 138,
+    "sha256": "4b23d60e35d7ba5e2bc9e77ad6535c8740e6011998bcfc1979b674463704f371"
+  }
+}

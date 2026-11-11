@@ -1,0 +1,28 @@
+{
+  "base": "ff765c021b842e02ea872abdec0809d802703d0b",
+  "branch": "cp/t7-lifecycle-ff-no-keeper-original-v1",
+  "source_role": "implementer L3 test-only original control",
+  "production_unchanged": true,
+  "all_old_units_unchanged": true,
+  "new_units": 1,
+  "original_status": "UNCOMPILED/UNRUN; source hypothesis only; no remedy before ROOT relevant result",
+  "selection": "windows::preflight::tests::original_unallocated_released_without_keeper_checks_same_submission_metadata",
+  "native_calls_or_jobs": 0,
+  "files": {
+    "crates/hex-runtime/src/windows/preflight.rs": {
+      "bytes": 28270,
+      "sha256": "a23e60a3a8f9e19e861edc1dcd1f5bdb4220aa98f58002746ec41dec4664f748"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/windows-no-keeper-unallocated-original.md": {
+      "bytes": 2371,
+      "sha256": "a9a04cd71bd7a69e1d7c28162bcdc155663e36e96be97c7207cb95f782b66b47"
+    }
+  },
+  "parent_full_file_sha256": "8b96593ad890bb4db6a002d8378e3c9490b6207fe1047349326883bb729f7bbd",
+  "source_checks": [
+    "scoped rustfmt0",
+    "git diff --check0"
+  ],
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3"
+}

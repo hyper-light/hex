@@ -78,3 +78,12 @@ take = [
     "src/device/readers/amd_adl/sensors.rs",
 ]
 own = ["UPSTREAM.md"]
+
+# The public Shards API and ABI now landed on main; replace the provisional copy.
+[projects.shards]
+kind = "git"
+repository = "https://github.com/hyper-light/shards"
+commit = "33df95b08ad8f95bddeaa1c48acf0c64386e0eac"
+path = "vendor/shards"
+take = ["LICENSE", "AGENTS.md", "CLAUDE.md", "clippy.toml", "rustfmt.toml", "docs/development-rules.md", "docs/development-evidence.md", "crates/api", "crates/abi", "crates/afunix", "crates/testdir", "docs/research/measurements/managed-borrowed-nowait/focused.rs", "docs/research/measurements/managed-borrowed-nowait/contract.rs", "docs/research/measurements/managed-proc-main/allocation.rs", "docs/research/measurements/managed-proc-main/repro.rs", "docs/research/measurements/managed-proc-main/reader-tests.rs"]
+own = ["Cargo.toml", "UPSTREAM.md"]

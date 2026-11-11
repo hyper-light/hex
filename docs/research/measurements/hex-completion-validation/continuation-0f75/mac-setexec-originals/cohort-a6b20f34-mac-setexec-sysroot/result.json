@@ -1,0 +1,94 @@
+{
+  "source": "a6b20f34d815d41d5ae36233352e576f5c56b2c3",
+  "archive_sha256": "ea49677ac086248c2fe48b150d7db45f6be5f2ae461613785da3c5722352c452",
+  "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+  "driver_pid": 98016,
+  "clang": "/Library/Developer/CommandLineTools/usr/bin/clang",
+  "clang_sha256": "f30550eab15fdf5ab8c0dc54c52679711241e5d4b636b027e18c09fef531775d",
+  "sdk": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+  "compiler_version": "Apple clang version 21.0.0 (clang-2100.1.1.101)\nTarget: arm64-apple-darwin25.4.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin\n",
+  "sdk_version": "26.5",
+  "memory_mib": 64,
+  "memory_input_basis": "explicit disposable input: existing ARM guest minimum64MiB, within admitted4GiB; no production allowance",
+  "phases": [
+    {
+      "name": "compile",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Library/Developer/CommandLineTools/usr/bin/clang",
+        "-isysroot",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "-std=c17",
+        "-O0",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "/Users/adalundhe/.cache/hex-lead/cohort-a6b20f34-mac-setexec-sysroot/source/macos_setexec_preseal_control.c",
+        "-o",
+        "/Users/adalundhe/.cache/hex-lead/cohort-a6b20f34-mac-setexec-sysroot/setexec-control"
+      ],
+      "external_guard_seconds": 90,
+      "pid": 98023,
+      "exit": 0,
+      "reaped": true,
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "native-four-cuts",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/cohort-a6b20f34-mac-setexec-sysroot/setexec-control",
+        "--memory-mib",
+        "64"
+      ],
+      "external_guard_seconds": 60,
+      "pid": 98026,
+      "exit": 1,
+      "reaped": true,
+      "bytes": 437,
+      "sha256": "3c1fd9d0de1f872d5fc05c499753d6e6606a4630ec432e3f9e980fa745a40a49",
+      "actual_case_results": [
+        {
+          "case": 0,
+          "error": 100,
+          "relevant": 0,
+          "main_cleanup": "REAPED"
+        }
+      ],
+      "expected_fixed_cases": 4,
+      "selection_verified": false
+    }
+  ],
+  "VM_GPU_invocations": 0,
+  "installed_sdk_headers": {
+    "usr/include/errno.h": {
+      "resolved": "/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk/usr/include/errno.h",
+      "sha256": "ff95a158e0799dcf0622e83882e64d88f1783b98a91d9b206bcba2a12f8425e6",
+      "bytes": 1003
+    },
+    "usr/include/spawn.h": {
+      "resolved": "/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk/usr/include/spawn.h",
+      "sha256": "2d90f16beec60b2080553613234f004b58f384003feaa5eb809fe5e91b42b884",
+      "bytes": 8793
+    },
+    "usr/include/pthread/spawn.h": {
+      "resolved": "/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk/usr/include/pthread/spawn.h",
+      "sha256": "0eddd1d85276ea57f9985e2eb3b3ef0b76d30c6d05de4ad3c6f5c972d99458e4",
+      "bytes": 2761
+    },
+    "usr/include/sys/event.h": {
+      "resolved": "/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk/usr/include/sys/event.h",
+      "sha256": "b09a4fdd9e88a5c1c9a29bded36a6f8b96b39a3054f0075a07c19da587f0e062",
+      "bytes": 17873
+    }
+  },
+  "binary_sha256": "e540ab28276695bef3132d76c6b3626c547d8dc89c25f6f18b4dbb52f1c3777d",
+  "source_changes": [],
+  "temp_entries": 0,
+  "exit": 1
+}

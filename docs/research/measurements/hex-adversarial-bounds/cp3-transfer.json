@@ -1,0 +1,11 @@
+{
+  "base": "807ab21eaeb250a94c2ee38aad7edba29663b8a3",
+  "fixture_sha256": "ace384486b9d1fc16cf14a9444096d85f1ea8ee9132518837d6e610ab703ea55",
+  "archive_sha256": "6a7dbb784fe06cf6a80b7cce5dcd74215df3116b9f3f6444eaca255d46b97533",
+  "archive_bytes": 5896041,
+  "runner_script_sha256": "dac02fe1062c01ec48b43fb9eec151f6bee4149dd5de78a0ca2df072c7624600",
+  "remote_root": "/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp3-v1",
+  "needs": "cpus=1,mem=4g,disk=12g",
+  "transfer": "--no-sync --stdin",
+  "selector": "placement::tests::adversarial_bounds_tests::representable_hostile_read_ceiling_compacts_without_new_physical_authority"
+}

@@ -9,12 +9,16 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+hex-api.workspace = true
+serde.workspace = true
 hex-health.workspace = true
 hyper-swim.workspace = true
 hyper-timing.workspace = true
 thiserror.workspace = true
+triomphe.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 # AC-T7.11.4's counting allocator (tests/memory.rs): a safe count of live heap bytes over System.
 cap = "0.1.2"
 proptest = "1.12.0"

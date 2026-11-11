@@ -1,0 +1,10 @@
+{
+  "source": "73547edda8a5188b0a40b3c2aa5d7a5da99be163",
+  "paths": {
+    "crates/hex-api/src/devices.rs": "a70d11ace7d6a74295bb399b3cd8930c217ad482c0fff1555b2839890f28f8a3",
+    "crates/hex-api/src/runtime.rs": "669ff9cc9bdc4598487fd34e88864679da7bfea7315562f31ae2a84dd530c8c5",
+    "crates/hex-api/src/spec.rs": "0b964bbc6ddcac95b06446840ea4f6ccc5e592d296cc27e43f18a67949f87af2",
+    "crates/hex-api/src/sim.rs": "9e2cd2a944e083917e0fb649b4592f866e0eb23de2abe665c02ecc3e9ad1b191"
+  },
+  "scope": "exact four API files, ROOT reexports and existing locked triomphe sim edge; no tests or native claims"
+}

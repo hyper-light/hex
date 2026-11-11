@@ -25,14 +25,15 @@
 //! leader pid names the group, so a program that outlives the leader and whose leader pid is recycled to a
 //! new group leader could be mislisted; this step documents that gap, which the box-user also closes.
 
-use std::collections::BTreeSet;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use triomphe::Arc;
 
 use hex_api::{Bounds, BoxId, Refusal, Signal, Usage};
+use hex_core::record::{NativeRecord, OwnerKey, OwnerRef};
 use hex_core::watch::{self, Life, Limit, Member, Rates, Verdict, Watch};
 
 use super::sys::{self, Clamp, Event, Kqueue, Timebase};
@@ -134,12 +135,15 @@ impl Shared {
     ) -> io::Result<Self> {
         Ok(Self {
             tb: Timebase::get()?,
-            rates: Arc::new(Mutex::new(watch::LearnedRates::new(Rates {
+            rates: Arc::try_new(Mutex::new(watch::LearnedRates::new(Rates {
                 bytes: rate_bytes,
                 processes: rate_processes,
-            }))),
-            drain: Arc::new(Mutex::new(hex_core::drain::Learned::default())),
-            lateness: Arc::new(Mutex::new(watch::Lateness::new(lateness))),
+            })))
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?,
+            drain: Arc::try_new(Mutex::new(hex_core::drain::Learned::default()))
+                .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?,
+            lateness: Arc::try_new(Mutex::new(watch::Lateness::new(lateness)))
+                .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?,
         })
     }
 
@@ -165,7 +169,7 @@ impl Shared {
 /// The state one box shares between the node's threads and its one watcher thread.
 #[derive(Debug)]
 struct State {
-    id: BoxId,
+    id: OwnerKey,
     clamp: Clamp,
     /// The bounds the box was made with, to report on inspect; the watcher holds the [`Limit`] of them it
     /// enforces. Neither changes after create (a new bound is a new box).
@@ -186,7 +190,7 @@ struct State {
     /// The watcher reads it to leave a fully-armed one-member box to its events and to attribute a
     /// member's death at its cap to memory; a pid is dropped once gone or accounted, so the set stays
     /// bounded by the box's live member count (CLAUDE.md §2).
-    armed: Mutex<BTreeSet<i32>>,
+    armed: Mutex<Pids>,
     /// Whether the watcher is ending the box by its own rule (it issued a killpg for a bound). A member's
     /// waiter reads it so a SIGKILL the watcher sent isn't double-counted as a kernel cap kill — the
     /// watcher's End verdict already counted that bound. The watcher mirrors its own `ending` here.
@@ -200,9 +204,37 @@ struct State {
     /// The watcher waits on it; the node triggers it to make a read happen at once (a member started, or
     /// the box is stopped).
     kq: Kqueue,
+    vm: Option<super::managed::Scope>,
 }
 
 impl State {
+    fn uncertain(&self) -> Refusal {
+        if let Some(scope) = &self.vm {
+            return scope.refusal(self.id.as_ref());
+        }
+        match &self.id {
+            OwnerKey::Box(id) => super::managed::uncertain(id),
+            OwnerKey::Pool(_) => super::native_allocation(std::mem::size_of::<State>()),
+        }
+    }
+    fn validate_vm_scope(&self) -> Result<(), Refusal> {
+        if let Some(scope) = &self.vm {
+            scope.validate(
+                self.pgid
+                    .lock()
+                    .map_err(|_| poisoned("a box's group"))?
+                    .as_ref()
+                    .copied(),
+                self.leader_started
+                    .lock()
+                    .map_err(|_| poisoned("a box's leader"))?
+                    .as_ref()
+                    .copied(),
+                self.id.as_ref(),
+            )?;
+        }
+        Ok(())
+    }
     fn status(&self) -> Result<std::sync::MutexGuard<'_, Status>, Refusal> {
         self.status.lock().map_err(|_| poisoned("a box's status"))
     }
@@ -224,8 +256,10 @@ impl State {
     /// unread).
     fn hold_new(&self, pid: i32) -> Result<(), Refusal> {
         let mut held = self.held()?;
+        let additional = usize::from(!held.stopped.contains(&pid));
+        held.stopped.reserve(additional)?;
         if signal_one(pid, rustix::process::Signal::STOP)? {
-            held.stopped.insert(pid);
+            held.stopped.insert(pid)?;
         }
         Ok(())
     }
@@ -248,7 +282,7 @@ impl State {
         held.stopped.retain(|pid| pids.contains(pid));
         let Some(&pid) = turn
             .checked_rem(held.stopped.len())
-            .and_then(|at| held.stopped.iter().nth(at))
+            .and_then(|at| held.stopped.values.get(at))
         else {
             return Ok(None);
         };
@@ -286,23 +320,47 @@ impl State {
     /// continued. Returns how many members it holds.
     fn apply(&self, order: &[u32], run: &[u32]) -> Result<usize, Refusal> {
         let mut held = self.held()?;
-        for &member in order {
-            let Ok(pid) = i32::try_from(member) else {
-                continue;
-            };
-            if run.contains(&member) {
-                if held.stopped.remove(&pid) {
-                    signal_one(pid, rustix::process::Signal::CONT)?;
+        let additional = order
+            .iter()
+            .filter_map(|member| i32::try_from(*member).ok())
+            .filter(|pid| !held.stopped.contains(pid))
+            .count();
+        held.stopped.reserve(additional)?;
+        held.added.clear();
+        held.continued.clear();
+        let result = (|| {
+            for &member in order {
+                let Ok(pid) = i32::try_from(member) else {
+                    continue;
+                };
+                if run.contains(&member) {
+                    if held.stopped.contains(&pid) {
+                        signal_one(pid, rustix::process::Signal::CONT)?;
+                        held.continued.push(pid);
+                    }
+                } else if !held.stopped.contains(&pid)
+                    && sys::run_state(pid)
+                        .map_err(|error| Refusal::os("reading a member's run state", error))?
+                        == Some(sys::Run::Live)
+                    && signal_one(pid, rustix::process::Signal::STOP)?
+                {
+                    held.added.push(pid);
                 }
-            } else if !held.stopped.contains(&pid)
-                && sys::run_state(pid)
-                    .map_err(|e| Refusal::os("reading a member's run state", e))?
-                    == Some(sys::Run::Live)
-                && signal_one(pid, rustix::process::Signal::STOP)?
-            {
-                held.stopped.insert(pid);
             }
-        }
+            Ok::<(), Refusal>(())
+        })();
+        held.continued.sort_unstable();
+        // Both work buffers and the final set were reserved before any CONT/STOP above.
+        let Hold {
+            stopped,
+            added,
+            continued,
+        } = &mut *held;
+        stopped.retain(|pid| continued.binary_search(pid).is_err());
+        stopped.values.extend_from_slice(added);
+        stopped.values.sort_unstable();
+        stopped.values.dedup();
+        result?;
         Ok(held.stopped.len())
     }
 
@@ -311,11 +369,12 @@ impl State {
     fn release_all(&self, pgid: i32, pids: &mut Vec<i32>) -> Result<(), Refusal> {
         let mut held = self.held()?;
         sys::group(pgid, pids).map_err(|e| Refusal::os("listing a box's group", e))?;
-        for pid in std::mem::take(&mut held.stopped) {
+        for &pid in &held.stopped.values {
             if pids.contains(&pid) {
                 signal_one(pid, rustix::process::Signal::CONT)?;
             }
         }
+        held.stopped.values.clear();
         Ok(())
     }
 
@@ -369,7 +428,80 @@ impl State {
 struct Hold {
     /// The members the watcher stopped, each its to continue; one the box's own programs stopped is never
     /// among them.
-    stopped: BTreeSet<i32>,
+    stopped: Pids,
+    added: Vec<i32>,
+    continued: Vec<i32>,
+}
+
+/// Sorted native members, bounded by this kernel's maximum process count. Whole snapshots use
+/// sort once; an individual native start reserves before its effect and inserts only once.
+#[derive(Debug, Default)]
+struct Pids {
+    values: Vec<i32>,
+    bound: usize,
+}
+impl Pids {
+    fn new(bound: usize) -> Result<Self, Refusal> {
+        Ok(Self {
+            values: storage(bound)?,
+            bound,
+        })
+    }
+    fn contains(&self, pid: &i32) -> bool {
+        self.values.binary_search(pid).is_ok()
+    }
+    fn remove(&mut self, pid: &i32) -> bool {
+        match self.values.binary_search(pid) {
+            Ok(at) => {
+                self.values.remove(at);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+    fn insert(&mut self, pid: i32) -> Result<(), Refusal> {
+        if let Err(at) = self.values.binary_search(&pid) {
+            self.reserve(1)?;
+            self.values.insert(at, pid);
+        }
+        Ok(())
+    }
+    fn reserve(&mut self, additional: usize) -> Result<(), Refusal> {
+        let count = self
+            .values
+            .len()
+            .checked_add(additional)
+            .filter(|count| *count <= self.bound)
+            .ok_or_else(|| super::native_allocation(self.bound))?;
+        self.values
+            .try_reserve(count.saturating_sub(self.values.len()))
+            .map_err(|_| super::native_allocation(self.bound))
+    }
+    fn retain(&mut self, keep: impl FnMut(&i32) -> bool) {
+        self.values.retain(keep);
+    }
+    fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+}
+impl Hold {
+    fn new(bound: usize) -> Result<Self, Refusal> {
+        Ok(Self {
+            stopped: Pids::new(bound)?,
+            added: storage(bound)?,
+            continued: storage(bound)?,
+        })
+    }
+}
+fn storage<T>(count: usize) -> Result<Vec<T>, Refusal> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| super::native_allocation(count))?;
+    Ok(values)
 }
 
 /// A held member continued for its watcher's read, and its use before it ran.
@@ -386,6 +518,9 @@ struct ReadRun {
 pub struct Members(Arc<State>);
 
 impl Members {
+    pub(super) fn uncertain(&self) -> Refusal {
+        self.0.uncertain()
+    }
     /// Tells the box a member ended: when `sigkill` and its `peak` (read from its zombie before the reap)
     /// reached the cap, counts a memory end once ([`State::killed_by_cap`]). A clean exit, another signal,
     /// or a SIGKILL under the cap is not a memory end.
@@ -417,6 +552,9 @@ pub struct ProcessBox {
     drain: Arc<Mutex<hex_core::drain::Learned>>,
     /// The machine's timebase, for a live read's CPU.
     tb: Timebase,
+    pub(super) controller: Mutex<super::managed::Controller>,
+    pub(super) identity: OnceLock<shards_api::Identity>,
+    pub(super) scope_pids: Mutex<Vec<i32>>,
 }
 
 impl ProcessBox {
@@ -449,7 +587,26 @@ impl ProcessBox {
         shared: &Shared,
         group: Option<(i32, u64)>,
     ) -> Result<Self, Refusal> {
-        let state = Arc::new(State {
+        let boxed = Self::prepared(OwnerKey::Box(id), bounds, shared, group, None)?;
+        boxed.start_watcher(shared)?;
+        Ok(boxed)
+    }
+
+    fn prepared(
+        id: OwnerKey,
+        bounds: &Bounds,
+        shared: &Shared,
+        group: Option<(i32, u64)>,
+        vm: Option<super::managed::Scope>,
+    ) -> Result<Self, Refusal> {
+        let maximum = sys::max_processes()
+            .map_err(|error| Refusal::os("sizing native member storage", error))?;
+        let scope_pids = if vm.is_some() {
+            storage(maximum)?
+        } else {
+            Vec::new()
+        };
+        let state = Arc::try_new(State {
             id,
             clamp: clamp(bounds),
             bounds: bounds.clone(),
@@ -458,26 +615,209 @@ impl ProcessBox {
             pgid: Mutex::new(group.map(|(pgid, _)| pgid)),
             leader_started: Mutex::new(group.map(|(_, started)| started)),
             status: Mutex::new(Status::default()),
-            armed: Mutex::new(BTreeSet::new()),
+            armed: Mutex::new(Pids::new(maximum)?),
             ending: AtomicBool::new(false),
             stop: AtomicBool::new(false),
-            held: Mutex::new(Hold::default()),
-            kq: Kqueue::new().map_err(|e| Refusal::os("making a box's kqueue", e))?,
-        });
-        let watcher = Watcher::new(Arc::clone(&state), shared.clone())
-            .map_err(|e| Refusal::os("sizing a box's watcher", e))?
-            .start()
-            .map_err(|e| Refusal::os("starting a box's watcher", e))?;
+            held: Mutex::new(Hold::new(maximum)?),
+            kq: Kqueue::new().map_err(|error| Refusal::os("making a box's kqueue", error))?,
+            vm,
+        })
+        .map_err(|_| super::native_allocation(std::mem::size_of::<State>()))?;
         Ok(Self {
             state,
-            watcher: Mutex::new(Some(watcher)),
+            watcher: Mutex::new(None),
             drain: Arc::clone(&shared.drain),
             tb: shared.tb,
+            controller: Mutex::new(super::managed::Controller::Unsubmitted),
+            identity: OnceLock::new(),
+            scope_pids: Mutex::new(scope_pids),
         })
     }
 
-    pub fn id(&self) -> &BoxId {
-        &self.state.id
+    fn start_watcher(&self, shared: &Shared) -> Result<(), Refusal> {
+        let watcher = Watcher::new(Arc::clone(&self.state), shared.clone())
+            .map_err(|error| Refusal::os("sizing a box's watcher", error))?
+            .start()
+            .map_err(|error| Refusal::os("starting a box's watcher", error))?;
+        let mut held = self
+            .watcher
+            .lock()
+            .map_err(|_| poisoned("a box's watcher"))?;
+        if held.is_some() {
+            return Err(self.state.uncertain());
+        }
+        *held = Some(watcher);
+        Ok(())
+    }
+
+    pub(super) fn prepare_managed(
+        record: NativeRecord<'_>,
+        bounds: &Bounds,
+        shared: &Shared,
+        ownership: super::managed::Ownership,
+    ) -> Result<Arc<Self>, Refusal> {
+        let vm = super::managed::Scope::new(record, ownership)?;
+        let observer = super::proc::Prepared::new()?;
+        let boxed = Arc::try_new(Self::prepared(
+            record.owner().try_owned()?,
+            bounds,
+            shared,
+            None,
+            Some(vm),
+        )?)
+        .map_err(|_| super::native_allocation(std::mem::size_of::<Self>()))?;
+        *boxed
+            .controller
+            .lock()
+            .map_err(|_| poisoned("native controller preparation"))? =
+            super::managed::Controller::Prepared(observer);
+        boxed.start_watcher(shared)?;
+        Ok(boxed)
+    }
+
+    pub(super) fn scope(&self) -> Option<&super::managed::Scope> {
+        self.state.vm.as_ref()
+    }
+    pub(super) fn is_managed(&self) -> bool {
+        self.scope().is_some()
+    }
+
+    pub(super) fn held_exec(&self, spawn: &sys::Spawn) -> Result<i32, Refusal> {
+        let mut pgid = self
+            .state
+            .pgid
+            .lock()
+            .map_err(|_| poisoned("a box's group"))?;
+        if pgid.is_some() {
+            return Err(self.state.uncertain());
+        }
+        let mut armed = self
+            .state
+            .armed
+            .lock()
+            .map_err(|_| poisoned("a box's armed set"))?;
+        if spawn.jetsam_mib.is_some() {
+            armed.reserve(1)?;
+        }
+        self.scope()
+            .ok_or_else(|| self.state.uncertain())?
+            .held(self.owner())?;
+        let pid = sys::spawn_suspended(spawn, 0, self.state.clamp)
+            .map_err(|error| Refusal::os("creating the held native VM controller", error))?;
+        // Keep the actual submitted PID before any further fallible observation/publication.
+        *pgid = Some(pid);
+        if spawn.jetsam_mib.is_some() {
+            armed.insert(pid)?;
+        }
+        if pid <= 0 {
+            return Err(self.state.uncertain());
+        }
+        Ok(pid)
+    }
+
+    pub(super) fn not_submitted(&self) -> Result<(), Refusal> {
+        if self
+            .state
+            .pgid
+            .lock()
+            .map_err(|_| poisoned("a box's group"))?
+            .is_some()
+        {
+            return Err(self.state.uncertain());
+        }
+        self.scope()
+            .ok_or_else(|| self.state.uncertain())?
+            .not_submitted(self.owner())
+    }
+
+    pub(super) fn introduce_group(&self, pid: i32, started: u64) -> Result<(), Refusal> {
+        if pid <= 0 || started == 0 {
+            return Err(self.state.uncertain());
+        }
+        *self
+            .state
+            .pgid
+            .lock()
+            .map_err(|_| poisoned("a box's group"))? = Some(pid);
+        *self
+            .state
+            .leader_started
+            .lock()
+            .map_err(|_| poisoned("a box's leader"))? = Some(started);
+        Ok(())
+    }
+
+    pub(super) fn resume_managed(&self) -> Result<(), Refusal> {
+        let (pid, _) = self.group()?.ok_or_else(|| self.state.uncertain())?;
+        self.scope()
+            .ok_or_else(|| self.state.uncertain())?
+            .running(self.owner())?;
+        if !signal_one(pid, rustix::process::Signal::CONT)? {
+            return Err(self.state.uncertain());
+        }
+        self.state.wake()
+    }
+
+    pub(super) fn stop_managed(&self) -> Result<(), Refusal> {
+        let valid = self.state.validate_vm_scope();
+        self.state.stop.store(true, Ordering::SeqCst);
+        let woken = self.state.wake();
+        valid?;
+        woken
+    }
+
+    pub(super) fn stop_managed_raw(&self) -> Result<(), shards_api::ProcessFailure> {
+        use shards_api::{ProcessFailure, ProcessOperation};
+        let pgid = *self
+            .state
+            .pgid
+            .lock()
+            .map_err(|_| ProcessFailure::Poisoned {
+                what: "native scope group",
+            })?;
+        let started = *self
+            .state
+            .leader_started
+            .lock()
+            .map_err(|_| ProcessFailure::Poisoned {
+                what: "native scope leader",
+            })?;
+        self.scope()
+            .ok_or(ProcessFailure::InvalidStartRecord)?
+            .validate_native(pgid, started)?;
+        self.state.stop.store(true, Ordering::SeqCst);
+        self.state
+            .kq
+            .trigger()
+            .map_err(|error| super::proc::process_failure(ProcessOperation::StopScope, error))
+    }
+
+    pub(super) fn finalize_watcher(&self, end: shards_api::ManagedEnd) -> Result<(), Refusal> {
+        self.scope()
+            .ok_or_else(|| self.state.uncertain())?
+            .finalizing(end, self.owner())?;
+        self.state.stop.store(true, Ordering::SeqCst);
+        self.state.wake()?;
+        if let Some(watcher) = self
+            .watcher
+            .lock()
+            .map_err(|_| poisoned("a box's watcher"))?
+            .take()
+        {
+            watcher.join().map_err(|_| self.state.uncertain())?;
+        }
+        Ok(())
+    }
+
+    pub fn id(&self) -> Result<&BoxId, Refusal> {
+        match &self.state.id {
+            OwnerKey::Box(id) => Ok(id),
+            OwnerKey::Pool(_) => Err(self.state.uncertain()),
+        }
+    }
+
+    pub(super) fn owner(&self) -> OwnerRef<'_> {
+        self.state.id.as_ref()
     }
 
     /// A handle for a member's waiter to tell the box the member ended, so a kill at the fatal cap is
@@ -497,7 +837,7 @@ impl ProcessBox {
     /// box on any other OS takes a program after its last ended (HEX-DIFF-1). Returns its pid.
     pub fn exec(&self, spawn: sys::Spawn) -> Result<i32, Refusal> {
         if self.state.stop.load(Ordering::SeqCst) {
-            return Err(Refusal::NoSuchBox(self.state.id.clone()));
+            return Err(Refusal::NoSuchBox(self.id()?.try_clone()?));
         }
         let mut pgid = self
             .state
@@ -509,6 +849,13 @@ impl ProcessBox {
             _ => 0,
         };
         let carries_cap = spawn.jetsam_mib.is_some();
+        if carries_cap {
+            self.state
+                .armed
+                .lock()
+                .map_err(|_| poisoned("a box's armed set"))?
+                .reserve(1)?;
+        }
         let pid = sys::spawn(&spawn, group, self.state.clamp)
             .map_err(|e| Refusal::os("spawning a program in a box", e))?;
         if group == 0 {
@@ -531,7 +878,7 @@ impl ProcessBox {
                 .armed
                 .lock()
                 .map_err(|_| poisoned("a box's armed set"))?
-                .insert(pid);
+                .insert(pid)?;
         }
         // A member started beside another, whose sum no kernel cap bounds, waits stopped for the watcher's
         // next read, which continues it: that read can come late (the lead, 2026-11-08), and a member left
@@ -622,7 +969,9 @@ impl ProcessBox {
             what: "signal",
             why: format!("signal {} has no macOS number", signal.number()),
         })?;
-        let not_running = || Refusal::NotRunning(self.state.id.clone(), "signal");
+        let not_running = || -> Result<Refusal, Refusal> {
+            Ok(Refusal::NotRunning(self.id()?.try_clone()?, "signal"))
+        };
         match *self
             .state
             .pgid
@@ -641,21 +990,24 @@ impl ProcessBox {
                 ]
                 .contains(&macos)
                 {
-                    *self.state.held()? = Hold::default();
+                    self.state.held()?.stopped.values.clear();
                 }
                 if killpg(pgid, macos)? {
                     Ok(())
                 } else {
-                    Err(not_running())
+                    Err(not_running()?)
                 }
             }
-            _ => Err(not_running()),
+            _ => Err(not_running()?),
         }
     }
 
     /// Ends the box: stops its watcher, kills every member (killpg KILL) and waits for them to die, leaving
     /// each member's own waiter to reap it. Idempotent.
     pub fn delete(&self) -> Result<(), Refusal> {
+        if self.is_managed() {
+            return Err(self.state.uncertain());
+        }
         self.state.stop.store(true, Ordering::SeqCst);
         self.state.wake()?;
         if let Some(handle) = self
@@ -699,10 +1051,7 @@ impl ProcessBox {
                 if deadline.is_none_or(|d| Instant::now() >= d) {
                     return Err(Refusal::os(
                         "emptying a box",
-                        io::Error::other(format!(
-                            "box {} still holds a live member",
-                            self.state.id
-                        )),
+                        io::Error::other(format!("box {} still holds a live member", self.id()?)),
                     ));
                 }
                 std::thread::yield_now();
@@ -714,7 +1063,16 @@ impl ProcessBox {
 
 impl Drop for ProcessBox {
     fn drop(&mut self) {
-        let _ = self.delete();
+        if self.is_managed() {
+            let _ = self.stop_managed();
+            if let Ok(watcher) = self.watcher.get_mut()
+                && let Some(watcher) = watcher.take()
+            {
+                let _ = watcher.join();
+            }
+        } else {
+            let _ = self.delete();
+        }
     }
 }
 
@@ -761,6 +1119,7 @@ fn read_live(pgid: i32) -> Result<Live, Refusal> {
 /// only what happens after it attaches (`filt_procattach`, `bsd/kern/kern_event.c`), and refuses a gone
 /// process (`ESRCH`) but not a zombie: a member that ended between the listing and its watch posts no exit
 /// event (c-route's finding on the node's socket, 2026-11-07).
+#[cfg(test)]
 pub(crate) fn watch_members(kq: &Kqueue, pids: &[i32]) -> Result<Vec<i32>, Refusal> {
     let mut ended = kq
         .watch(pids, 0)
@@ -853,7 +1212,12 @@ struct Watcher {
     last_sig: u64,
     /// The running members watched on the box's kqueue for their forks and ends, so a fork (an unarmed
     /// child) or a member's death wakes the watcher at once rather than at its next timer.
-    watched: BTreeSet<i32>,
+    watched: Vec<i32>,
+    next_watched: Vec<i32>,
+    present: Vec<i32>,
+    previous_pids: Vec<i32>,
+    current_keys: Vec<(u32, u64)>,
+    maximum: usize,
     pids: Vec<i32>,
     /// The last read's listing, to tell whether this one changed.
     last_listing: Vec<i32>,
@@ -889,33 +1253,67 @@ impl Watcher {
         let rates = shared
             .rates()
             .map_err(|e| io::Error::other(e.to_string()))?;
-        let watch = Watch::new(state.limit, rates);
+        let maximum = sys::max_processes()?;
+        let mut watch = Watch::new(state.limit, rates);
+        watch.reserve_members(maximum).map_err(io::Error::from)?;
+        let reserved = |error: Refusal| io::Error::other(error.to_string());
         Ok(Self {
             state,
             shared,
             watch,
-            last: Vec::new(),
+            last: storage(maximum).map_err(reserved)?,
             last_sig: 0,
-            watched: BTreeSet::new(),
-            pids: sys::listing()?,
-            events: Vec::with_capacity(sys::EVENTS),
-            last_listing: Vec::new(),
+            watched: storage(maximum).map_err(reserved)?,
+            next_watched: storage(maximum).map_err(reserved)?,
+            present: storage(maximum).map_err(reserved)?,
+            previous_pids: storage(maximum).map_err(reserved)?,
+            current_keys: storage(maximum).map_err(reserved)?,
+            maximum,
+            pids: sys::listing_from(Ok(maximum))?,
+            events: storage(sys::EVENTS).map_err(reserved)?,
+            last_listing: storage(maximum).map_err(reserved)?,
             last_read: None,
             before: None,
             ending_since: None,
             armed_at: None,
-            last_user: Vec::new(),
+            last_user: storage(maximum).map_err(reserved)?,
             ran_from: None,
             turn: 0,
-            order: Vec::new(),
-            ran: Vec::new(),
-            run: Vec::new(),
+            order: storage(maximum).map_err(reserved)?,
+            ran: storage(maximum.checked_add(1).ok_or(io::ErrorKind::OutOfMemory)?)
+                .map_err(reserved)?,
+            run: storage(maximum).map_err(reserved)?,
         })
     }
 
     fn start(mut self) -> io::Result<JoinHandle<()>> {
+        let (prefix, suffix) = match self.state.id.as_ref() {
+            OwnerRef::Box(id) => ("hex-box-", id.as_str().len()),
+            OwnerRef::Pool(pool) => (
+                "hex-pool-",
+                pool.len()
+                    .checked_mul(2)
+                    .ok_or(io::ErrorKind::OutOfMemory)?,
+            ),
+        };
+        let count = prefix
+            .len()
+            .checked_add(suffix)
+            .ok_or(io::ErrorKind::OutOfMemory)?;
+        let mut name = String::new();
+        name.try_reserve_exact(count).map_err(io::Error::from)?;
+        name.push_str(prefix);
+        match self.state.id.as_ref() {
+            OwnerRef::Box(id) => name.push_str(id.as_str()),
+            OwnerRef::Pool(pool) => {
+                use std::fmt::Write;
+                for byte in pool {
+                    write!(name, "{byte:02x}").map_err(|_| io::ErrorKind::OutOfMemory)?;
+                }
+            }
+        }
         std::thread::Builder::new()
-            .name(format!("hex-box-{}", self.state.id))
+            .name(name)
             .spawn(move || self.run())
     }
 
@@ -924,7 +1322,15 @@ impl Watcher {
         // over other programs (Ada's rule, 2026-11-03; the lead, 2026-11-06).
         loop {
             if self.state.stop.load(Ordering::SeqCst) {
-                self.finish();
+                if self
+                    .state
+                    .vm
+                    .as_ref()
+                    .is_none_or(|scope| !scope.is_finalized())
+                    && self.state.validate_vm_scope().is_ok()
+                {
+                    self.finish();
+                }
                 return;
             }
             // Account any member the kernel killed at its fatal cap, from the exit events the last wait
@@ -938,7 +1344,15 @@ impl Watcher {
                 // is left as it is for delete to clean up, its held members continued, since no read of this
                 // watcher will continue them.
                 Err(_) => {
-                    if let Ok(Some(pgid)) = self.state.pgid.lock().map(|g| *g) {
+                    let state = Arc::clone(&self.state);
+                    if let Some(scope) = &state.vm {
+                        if state.validate_vm_scope().is_ok() {
+                            self.finish();
+                        }
+                        scope.failed(shards_api::ProcessFailure::Poisoned {
+                            what: "native scope watcher",
+                        });
+                    } else if let Ok(Some(pgid)) = self.state.pgid.lock().map(|group| *group) {
                         let _ = self.state.release_all(pgid, &mut self.pids);
                     }
                     return;
@@ -947,13 +1361,31 @@ impl Watcher {
             // A timer only where a bound needs one; otherwise the box's next change wakes it: a member's
             // fork or end, a start (exec) or a delete, each a kqueue event.
             self.armed_at = next.map(|wait| (Instant::now(), wait));
-            let _ = self.state.kq.wait(next, None, &mut self.events);
+            if let Err(error) = self.state.kq.wait(next, None, &mut self.events) {
+                let state = Arc::clone(&self.state);
+                if let Some(scope) = &state.vm {
+                    if state.validate_vm_scope().is_ok() {
+                        self.finish();
+                    }
+                    scope.failed(super::proc::process_failure(
+                        shards_api::ProcessOperation::KeventExit,
+                        error,
+                    ));
+                    return;
+                }
+            }
         }
     }
 
     /// One read and its decision; returns the wait before the next read, or `None` to wait until the box
     /// changes (it is idle).
     fn step(&mut self) -> Result<Option<Duration>, Refusal> {
+        if let Some(scope) = &self.state.vm
+            && !scope.watchable(self.state.id.as_ref())?
+        {
+            return Ok(None);
+        }
+        self.state.validate_vm_scope()?;
         let Some(pgid) = *self
             .state
             .pgid
@@ -961,6 +1393,12 @@ impl Watcher {
             .map_err(|_| poisoned("a box's group"))?
         else {
             return Ok(None);
+        };
+        let mut reading = Reading {
+            members: storage(self.maximum)?,
+            users: storage(self.maximum)?,
+            totals: Totals::default(),
+            sig: 0,
         };
         let armed = self.armed_at.take();
         self.turn = self.turn.wrapping_add(1);
@@ -972,7 +1410,7 @@ impl Watcher {
         let rates = self.shared.rates()?;
         self.watch.rated(rates);
         let started = Instant::now();
-        let mut reading = self.read_members(pgid)?;
+        self.read_members(pgid, &mut reading)?;
         self.ran.clear();
         if let Some(before) = read_run {
             // Whether a thread of it ran or waited for a core while it was continued: with none it was asleep,
@@ -1039,7 +1477,13 @@ impl Watcher {
                 });
             }
         }
-        let read = self.watch.read(&reading.members);
+        let read = self
+            .watch
+            .read(&reading.members)
+            .map_err(|_| Refusal::Exhausted {
+                what: "watcher growth snapshot",
+                bound: reading.members.len(),
+            })?;
         self.watch.ran(&self.ran);
         // The growth since the last read: a box faster than the node's rates raises them.
         let now = Instant::now();
@@ -1111,7 +1555,11 @@ impl Watcher {
         self.order.rotate_left(first);
         let floor = self
             .watch
-            .runs(&read, &self.order, self.shared.lateness()?, &mut self.run);
+            .runs(&read, &self.order, self.shared.lateness()?, &mut self.run)
+            .map_err(|_| Refusal::Exhausted {
+                what: "watcher run selection",
+                bound: self.order.len(),
+            })?;
         let held = self.state.apply(&self.order, &self.run)?;
         self.ran_from = Some(Instant::now());
         let next = floor.or(next);
@@ -1142,26 +1590,29 @@ impl Watcher {
     /// life and whether the box armed it, read through its rusage, once per member. A pid the listing
     /// holds but rusage no longer has (ESRCH) was reaped since: left out. Prunes the armed set of pids
     /// gone, so it stays bounded by the live members (CLAUDE.md §2).
-    fn read_members(&mut self, pgid: i32) -> Result<Reading, Refusal> {
-        sys::group(pgid, &mut self.pids).map_err(|e| Refusal::os("listing a box's group", e))?;
+    fn read_members(&mut self, pgid: i32, reading: &mut Reading) -> Result<(), Refusal> {
+        if sys::group(pgid, &mut self.pids).map_err(|e| Refusal::os("listing a box's group", e))? {
+            return Err(super::native_allocation(self.maximum));
+        }
         // The armed set's pruning needs the listing's pids as sets: built only when the listing changed.
         let listing_changed = self.pids != self.last_listing;
-        let last_pids: BTreeSet<i32> = if listing_changed {
-            self.last
-                .iter()
-                .filter_map(|m| i32::try_from(m.pid).ok())
-                .collect()
-        } else {
-            BTreeSet::new()
-        };
+        self.previous_pids.clear();
+        if listing_changed {
+            self.previous_pids.extend(
+                self.last
+                    .iter()
+                    .filter_map(|member| i32::try_from(member.pid).ok()),
+            );
+            self.previous_pids.sort_unstable();
+        }
         let mut armed = self
             .state
             .armed
             .lock()
             .map_err(|_| poisoned("a box's armed set"))?;
-        let mut members = Vec::with_capacity(self.pids.len());
-        let mut users = Vec::with_capacity(self.pids.len());
-        let mut present = BTreeSet::new();
+        let members = &mut reading.members;
+        let users = &mut reading.users;
+        self.present.clear();
         let mut totals = Totals::default();
         let mut sig = 0u64;
         for &pid in &self.pids {
@@ -1171,7 +1622,7 @@ impl Watcher {
                 continue;
             };
             if listing_changed {
-                present.insert(pid);
+                self.present.push(pid);
             }
             // The leader's zombie, while other members run, is the node holding the pid so the group id
             // can't be recycled: not the box's own process. Any other ended member is counted until reaped,
@@ -1206,28 +1657,48 @@ impl Watcher {
         // Prune armed pids that were listed before and are gone now (reaped): keeps the set bounded by the
         // live members, without dropping a just-spawned pid the listing hasn't caught up with yet.
         if listing_changed {
-            armed.retain(|p| present.contains(p) || !last_pids.contains(p));
-            self.last_listing.clone_from(&self.pids);
+            self.present.sort_unstable();
+            armed.retain(|pid| {
+                self.present.binary_search(pid).is_ok()
+                    || self.previous_pids.binary_search(pid).is_err()
+            });
+            self.last_listing.clear();
+            self.last_listing.extend_from_slice(&self.pids);
         }
         drop(armed);
-        Ok(Reading {
-            members,
-            users,
-            totals,
-            sig,
-        })
+        reading.totals = totals;
+        reading.sig = sig;
+        Ok(())
     }
 
     /// Counts the members that left the group alive since the last read: each daemonized (setsid), which
     /// the box no longer holds (the next step's box-user does). A member whose rusage is gone or ended just
     /// exited, and isn't an escape.
     fn count_escapes(&mut self, now: &[Member]) -> Result<(), Refusal> {
-        let gone = watch::changes(&self.last, now).gone;
+        self.current_keys.clear();
+        self.current_keys
+            .extend(now.iter().map(|member| (member.pid, member.started)));
+        self.current_keys.sort_unstable();
         let mut escaped = 0u64;
-        for m in gone {
-            let pid = i32::try_from(m.pid).unwrap_or(-1);
-            match sys::rusage(pid).map_err(|e| Refusal::os("reading a gone member's rusage", e))? {
-                Some(r) if !r.ended => escaped = escaped.saturating_add(1),
+        for member in self
+            .last
+            .iter()
+            .filter(|member| member.life == Life::Running)
+        {
+            if self
+                .current_keys
+                .binary_search(&(member.pid, member.started))
+                .is_ok()
+            {
+                continue;
+            }
+            let pid = i32::try_from(member.pid).map_err(|_| self.state.uncertain())?;
+            match sys::rusage(pid)
+                .map_err(|error| Refusal::os("reading a gone member's rusage", error))?
+            {
+                Some(actual) if actual.started == member.started && !actual.ended => {
+                    escaped = escaped.saturating_add(1)
+                }
                 _ => {}
             }
         }
@@ -1305,28 +1776,47 @@ impl Watcher {
             let mut status = self.state.status()?;
             status.membership_passes = status.membership_passes.saturating_add(1);
         }
-        let running: BTreeSet<i32> = members
-            .iter()
-            .filter(|m| m.life == Life::Running)
-            .filter_map(|m| i32::try_from(m.pid).ok())
-            .collect();
-        let to_watch: Vec<i32> = running.difference(&self.watched).copied().collect();
-        if !to_watch.is_empty() {
-            let ended = watch_members(&self.state.kq, &to_watch)?;
-            // A member that ended before its watch attached posts no exit event: wake the watcher for a
-            // read that finds it ended, rather than wait for a change that already happened.
-            if !ended.is_empty() {
+        self.next_watched.clear();
+        self.next_watched.extend(
+            members
+                .iter()
+                .filter(|member| member.life == Life::Running)
+                .filter_map(|member| i32::try_from(member.pid).ok()),
+        );
+        self.next_watched.sort_unstable();
+        self.next_watched.dedup();
+        for &pid in &self.next_watched {
+            if self.watched.binary_search(&pid).is_ok() {
+                continue;
+            }
+            let child = self
+                .state
+                .armed
+                .lock()
+                .map_err(|_| poisoned("a box's armed set"))?
+                .contains(&pid);
+            let gone = self
+                .state
+                .kq
+                .watch_one(pid, 0, child)
+                .map_err(|error| Refusal::os("watching a box's member", error))?;
+            if gone
+                || sys::rusage(pid)
+                    .map_err(|error| Refusal::os("reading a watched member's rusage", error))?
+                    .is_none_or(|usage| usage.ended)
+            {
                 self.state.wake()?;
             }
         }
-        let to_unwatch: Vec<i32> = self.watched.difference(&running).copied().collect();
-        for pid in to_unwatch {
-            self.state
-                .kq
-                .unwatch(pid)
-                .map_err(|e| Refusal::os("unwatching a box's member", e))?;
+        for &pid in &self.watched {
+            if self.next_watched.binary_search(&pid).is_err() {
+                self.state
+                    .kq
+                    .unwatch(pid)
+                    .map_err(|error| Refusal::os("unwatching a box's member", error))?;
+            }
         }
-        self.watched = running;
+        std::mem::swap(&mut self.watched, &mut self.next_watched);
         Ok(())
     }
 
@@ -1424,3 +1914,31 @@ fn killpg(pgid: i32, signal: i32) -> Result<bool, Refusal> {
         Err(e) => Err(Refusal::os("killpg", e)),
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../docs/research/measurements/hex-complete-lifecycle/macos_scope_completion_root005_tests.rs"]
+mod scope_completion_tests;
+
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+
+    /// AC-T7.4.1/R01: a native member-storage refusal precedes mutation of existing membership.
+    #[test]
+    fn bounded_member_storage_preserves_the_existing_snapshot() {
+        let mut pids = Pids::new(2).unwrap();
+        pids.insert(9).unwrap();
+        pids.insert(3).unwrap();
+        pids.insert(3).unwrap();
+        assert_eq!(pids.values, [3, 9]);
+        assert!(pids.reserve(1).is_err());
+        assert_eq!(pids.values, [3, 9]);
+        assert!(pids.remove(&3));
+        pids.insert(4).unwrap();
+        assert_eq!(pids.values, [4, 9]);
+        assert!(Pids::new(usize::MAX).is_err());
+    }
+}
+
+#[cfg(feature = "native-trusted-entry-measurement")]
+pub mod trusted_entry;

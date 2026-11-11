@@ -1,0 +1,24 @@
+{
+  "base": "7b3fca63dddeba933776e338b424d523a778fd2a",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": {
+    "crates/hex-runtime/src/firecracker/native.rs": "888cb1cb7fa117137a2f2a2d16cef63443ed5e0eb3823cf749c875664d8716ad",
+    "crates/hex-runtime/src/firecracker/pool.rs": "efb11182cf6a55b9c3c34d8ce56eda0b97710a3a0b662f271ae5ef8342bcdeca"
+  },
+  "original_vm_io_factory_preserved": true,
+  "original_vm_io_factory_sha256": "696662503ba10796f69139eb72bca41ad7067f7657ebb22318170ca7b4585363",
+  "original_io_tests_preserved": true,
+  "original_io_tests_sha256": "5f219026b108d3ec9993ddbd8b9aa2fe9a40be04f2367366c99ed5e3b177e5f2",
+  "actual_red": "ROOT exact7b Linuxv2 compiler101, runtime selected0; client absolute5PASS",
+  "checks": {
+    "rustfmt": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "tests": "UNRUN",
+    "sink_red": "UNRUN",
+    "native_effects": 0,
+    "jobs_started": 0
+  }
+}

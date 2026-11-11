@@ -28,6 +28,7 @@
 
 pub mod boxuser;
 pub mod bundle;
+pub mod cdi;
 pub mod cgroup;
 pub mod darwin;
 pub mod demand;
@@ -47,6 +48,7 @@ pub mod pool;
 pub mod record;
 pub mod recovery;
 pub mod reuse;
+pub mod schedule;
 pub mod seed;
 pub mod seeds;
 pub mod setup;

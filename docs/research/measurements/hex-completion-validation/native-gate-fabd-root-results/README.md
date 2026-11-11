@@ -1,0 +1,19 @@
+# Actual inherited-FD guard comparison
+
+ROOT coordinator; policy7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506, rules SHA256df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3. Fixed signed sourcefabd73020cdd1c6e201d8028fcca5d85f28ef18c. Linux x86-64 glibc2.44/kernel7.3.3, Rust1.99.1. Normal1CPU/4GiB/12GiB admission; actual100%CPU/4GiB/swap0/pids256 delegated scopes, nice10. No VM, GPU, installed helper or host-driver operation.
+
+The unchanged parent-death unit completed once per cell. Baseline1PASS; bypass0PASS/1intentional semantic FAIL; restored1PASS. This is not three passing production tests. The bypass disables ONLY the unique held_child inherited-FD isolation guard call; it retains the guard body as a typed function reference, all native join/ACK/gate paths and test oracles. Baseline/restored full source manifests match. Each Node libtest was built from a new EMPTY target/cargo using only verified public registry archives/index; all Cargo artifacts are fresh:false and source/ELF hashes are retained.
+
+| Cell | Parent native reap after t0 | First terminal observation after t0 | Result |
+|---|---:|---:|---|
+| Baseline |2421390663ns |2421443532ns |both native children exited127 before G |
+| Bypass |2425818386ns |62525009188ns |exact pidfd exit guard expired before G; both actual native cleanup reaps SIGKILL |
+| Restored |2469115005ns |2469143278ns |both native children exited127 before G |
+
+D=60000000000ns and G=120000000000ns are original inputs. Every cell retains actual byte2 ACKs bound to the same PID/birth, publication-held facts, the sibling's kernel SIGSTOP status, parent SIGKILL before D and absent canaries. Positive controls additionally retain kernel-T sibling state through the first child's cancellation and actual early127. The bypass records no first waitid/early127; its relevant failure occurs before G, followed by exact native cleanup. Trace times are observer return/check times, not kernel timestamps. Gate-tail EOF is evidence, never an ACK or mutation prerequisite: positive tails observed EOF, bypass tails observed Open.
+
+All three native fixtures completed both output streams, reaped their actors, removed empty private phase trees without outer fallback kill, restored original scope limits and recorded cleanup_uncertainty[]. External receipts prove each exact driver birth absent and whole scope absent. The build driver's PID2255259/birth32506827 and whole build scope were also absent before native dispatch. A final data-only collector independently rehashed all three ELFs and every source file against the sealed manifests; source unchanged, no symlinks. No timeout/signal fallback branch in the build wrapper was entered; its conditional source cleanup risks remain explicitly recorded in build-review-limits.json and are not generalized as tested fault safety.
+
+Build raw archive2581780B SHA256a4e49285966fd73e6e201696cb59066a403f2eee349e7b30d1b3c7371210301f. Native raw archive29518B SHA256ec36bb4641de51514c4ae5a659ce8109e8db129cff3587dcf55f936533727443. All raw members independently verified; complete libtest stdout/stderr read, and all causal native event/cleanup fields reviewed. The native source5b033/driverc74 and immutable a128 helper are already tracked beside this result. Complete build manifests/plan/logs reside in build-proof/raw.tar.gz; native raw traces, receipts and external closures are also extracted in cells-proof. Absolute commands, wrappers, original deadlines and source/binary pins are included.
+
+This is one meaningful whole-isolation-guard falsifier and restoration. It does not isolate foreign-only FD inheritance; own and foreign writers may remain when the whole guard is bypassed. The two other old native baseline passes were not replayed. It establishes no whole Shards helper, VM/GPU selection/execution, aggregate-resource or performance claim. Full platform, fault, R01/R05/R14 and final main validation remain owed.

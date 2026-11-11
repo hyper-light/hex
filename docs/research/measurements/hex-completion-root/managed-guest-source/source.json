@@ -1,0 +1,86 @@
+{
+  "hex_base": "b06b1760bb690c9e29a31f99efdb998cf8279c36",
+  "guest_source_pin": "efce10fabb9d7dd3c6a58c29b63c504c73c79ade",
+  "root_reference": "0277c13a654290fb94429aaa3d53aa0c7643dc43",
+  "root_sdk_cohort": "2af7dd6adabe4b949def667802d679f9a3ebbe05",
+  "root_sdk_rust_same_as": "0277c13a654290fb94429aaa3d53aa0c7643dc43",
+  "root_private_seed_sha256": "1e9ae2e5e95e103c27bce8e0f7294900984825d22c9926f770c63c872d547386",
+  "upstream_api": "eee80c129e44d35e957377c60629af088f4b2da3",
+  "books": "48bacdffb63afd84a37487b8775b5709e0097205",
+  "native_recorded": "15203af1ca827225d7ec547600c258c494cc5a89",
+  "policy": "ca3ab10c151aa5539e757f1cc76029746ccbb561",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "matching_original_charge_route_blocks": [
+    {
+      "name": "GuestConfig::spec",
+      "path": "crates/hex-runtime/src/guest/mod.rs",
+      "sha256": "b278f9914a3503fd5e33e69685d68db7b101e1702e408508492dd44ca822da05",
+      "byte_identical_to_root": true
+    },
+    {
+      "name": "GuestRuntime::rewrite_spec",
+      "path": "crates/hex-runtime/src/guest/mod.rs",
+      "sha256": "ac29c00733976d2604d6101e07b68bfe83928ef4f1d783c2529c64adf3703089",
+      "byte_identical_to_root": true
+    },
+    {
+      "name": "GuestRuntime::with_runtime_cost",
+      "path": "crates/hex-runtime/src/guest/books.rs",
+      "sha256": "299fae1c2e65707a3131051193d0ab1384751cc0bbdbcfe5d6ab3e4b6bdf159b",
+      "byte_identical_to_root": true
+    },
+    {
+      "name": "GuestRuntime::check_allocation",
+      "path": "crates/hex-runtime/src/guest/books.rs",
+      "sha256": "3fea4ad97458ff386a8d2514eff8bcfea64b8fc6c21645d0fef41131e8645d99",
+      "byte_identical_to_root": true
+    },
+    {
+      "name": "GuestRuntime::owns_record",
+      "path": "crates/hex-runtime/src/guest/books.rs",
+      "sha256": "2240abc3e783c05f0daf16cf5d3c6158f0c13cf989931ebc5c8ee9dbfa3b191a",
+      "byte_identical_to_root": true
+    },
+    {
+      "name": "WithGuest::route",
+      "path": "crates/hex-runtime/src/guest/mod.rs",
+      "sha256": "150b652ad73730c3781bd76749869fa2fd7c4bbc62e723e0388eb2af147e7de8",
+      "byte_identical_to_root": true
+    },
+    {
+      "name": "WithGuest::holder",
+      "path": "crates/hex-runtime/src/guest/mod.rs",
+      "sha256": "02d5be7e051889a22091b4af5271a9c3e7377bdc561a7d5f0f6a06433eb5f4c9",
+      "byte_identical_to_root": true
+    },
+    {
+      "name": "WithGuest::capacity",
+      "path": "crates/hex-runtime/src/guest/mod.rs",
+      "sha256": "62136a52ee1945a9dd32a2afb793a7b52c269d81f0748d4643462939c869b1b8",
+      "byte_identical_to_root": true
+    },
+    {
+      "name": "entire guest/rewrite.rs original allocation and workload rewrite",
+      "path": "crates/hex-runtime/src/guest/rewrite.rs",
+      "sha256": "283613c39fb445c2762a33e566c009b1b3c8fdbce48a95c65868d9e56412fe3c",
+      "byte_identical_to_root": true
+    }
+  ],
+  "files": {
+    "crates/hex-runtime/src/guest/books.rs": "09d7fd9f2ec84a6d15646389cfb7d60bfcdb6d9b5f9081c932032d6d9f694dc8",
+    "crates/hex-runtime/src/guest/dedicated.rs": "eac143c2d1ede8f166eb812056ba41200a47ae82a891b74eba423cc24634aad5",
+    "crates/hex-runtime/src/guest/device_routing_tests.rs": "dcfce9cd6ba842e34efec104e6870b2affd635ef865d63a9194a7d2d1c08e503",
+    "crates/hex-runtime/src/guest/gpu.rs": "1ac07be47a716ac6f8f07e0a40469486fc4104f78146baea2dcafc5fc9c898b0",
+    "crates/hex-runtime/src/guest/held.rs": "4584be7695fe31969889c4e41e224dc0e29ae544a481a5c9d45683a9f31d5468",
+    "crates/hex-runtime/src/guest/managed.rs": "4a49cb3ca0ee0f2c63ee6a0eaeffe2f18c8308fa414fb76ba02cbb1f37ba7237",
+    "crates/hex-runtime/src/guest/mod.rs": "168465d08e98292a75a5d9faf69a0fe6c287e9656532acb49648b85ff3cfde30",
+    "crates/hex-runtime/src/guest/physical.rs": "ae9dca3c38e838d0a05736a0718fab3e151da08d7fbf22c1ab47ac8e3017d1cf",
+    "crates/hex-runtime/src/guest/rewrite.rs": "283613c39fb445c2762a33e566c009b1b3c8fdbce48a95c65868d9e56412fe3c",
+    "crates/hex-runtime/src/guest/selected.rs": "6fad936363de24a35434628cea9d377c025c05fbfb520ba0d4d4cbd9c815cbc9",
+    "crates/hex-runtime/src/guest/shares.rs": "52c3d83bde8fbcfb3010d0562dd69439d4755591e8416edc4bdb562705271136",
+    "crates/hex-runtime/src/guest/tests.rs": "f6b7161bcc536350f7a8802cf4d49796c914ee01192c7ee3d2c49905e94179fb"
+  },
+  "validation": "source only, scoped rustfmt/diff checks; no joined Hex compile or native result",
+  "sdk_scope": "only distinct two managed model controls plus API strict Clippy after own unknown219 job fenced; not launched yet"
+}

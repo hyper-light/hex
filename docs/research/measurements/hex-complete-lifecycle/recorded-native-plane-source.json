@@ -1,0 +1,15 @@
+{
+  "kind": "required native resource-plane/route producer boundary",
+  "parent": "60caf4e858dde9fcb509455f552e126a3cd9ddb0",
+  "path": "crates/hex-node/src/recorded.rs",
+  "sha256": "0e1cfbc1021bc7d0fa69a894f8aab57bd6a7d861fc0a1bc0a981b377df939516",
+  "dependency": "L2 416da4aed2b11c1f9648eb6c947f51f1b56196ed Guest.add_offers owns real route eligibility join",
+  "behavior": "Books.capacity reads devices directly from SAME flat Prober, then SAME Catalog Box/Pool holder query. No attachment_offers/capacity reentry/native provider reopen. Public Recorded.capacity still validates initialized offers and overlays native metadata.",
+  "attribution": "new pool resource-plane contract completion; source observation only, no performance reproduction/claim",
+  "checks": {
+    "scoped_format_diff": 0,
+    "compiler_unit_native": "UNRUN",
+    "dispatch": false
+  },
+  "remaining": "ROOT matched producer/guest cohort checks and native effect proof"
+}

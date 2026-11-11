@@ -1,0 +1,191 @@
+{
+  "role": "implementer bindings-firecracker; execution and integration ROOT-owned",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "implementation": "d67a15ac02e9a024206ed8be87fb60d4f8a5f6c8",
+  "tested_integration": "8d5bb0b4eb6a175532d73d889dc472b721660b41",
+  "result_path": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/remote-pending-after-results-proof/cohort-8d5bb0b4-linux-remote-pending-after/result.json",
+  "result_sha256": "0137e7eb136ad2d7c9110352e5a9ff2bb77a956ac1da0f16cf9209878d836438",
+  "raw": {
+    "path": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/remote-pending-after-results-proof/raw.tar.gz",
+    "bytes": 354690,
+    "sha256": "c03b7879f0af87188137c0ab531805d6d16482f06a17e9b876150572e0e512b5",
+    "lane_readback": "Read FULL result and all four phase logs; independently hashed raw archive and all11 named members against collection.json, without extraction/execution. Exact three owned source blobs equal d67.",
+    "binary_metadata": [
+      {
+        "path": "target/debug/deps/hex_sim-1a26fbe8e182b00f",
+        "bytes": 93763432,
+        "sha256": "79200981438237179e4e808d6b52bdbe0742489b22526e0db6e49b7532d5f0fe"
+      }
+    ],
+    "binary_limit": "Binary digest is ROOT-recorded metadata from the verified collection; the lane did not load/execute the binary or independently reread its remote bytes."
+  },
+  "actual": {
+    "driver_pid": 2085713,
+    "phases": [
+      {
+        "name": "remote-pending-original-after",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "test",
+          "-p",
+          "hex-sim",
+          "--lib",
+          "--locked",
+          "peer::tests::remote_owner_recovers_committed_released_source_without_fresh_repick",
+          "--",
+          "--exact",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "pid": 2089084,
+        "exit": 0,
+        "reaped": true,
+        "sha256": "ef4b773d327f6d891eaab2dfbbd53af30679a89e32ca68e402e2897fe5bfaf87",
+        "bytes": 3047,
+        "expected_selected": 1,
+        "actual_counts": [
+          {
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0
+          }
+        ],
+        "selection_verified": true,
+        "test_outcomes": []
+      },
+      {
+        "name": "new-committed-pending-guard",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "test",
+          "-p",
+          "hex-sim",
+          "--lib",
+          "--locked",
+          "index::route_offer_tests::committed_pending_recovery_keeps_receipt_charge_and_claim_bounds",
+          "--",
+          "--exact",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "pid": 2186004,
+        "exit": 0,
+        "reaped": true,
+        "sha256": "784e6cdaca3bcccb3c7f1e0da9be4eca26e74b31af742f29b7dac04121e9e1c1",
+        "bytes": 444,
+        "expected_selected": 1,
+        "actual_counts": [
+          {
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0
+          }
+        ],
+        "selection_verified": true,
+        "test_outcomes": [
+          {
+            "name": "index::route_offer_tests::committed_pending_recovery_keeps_receipt_charge_and_claim_bounds",
+            "outcome": "ok"
+          }
+        ]
+      },
+      {
+        "name": "changed-recovery-phase-guard",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "test",
+          "-p",
+          "hex-sim",
+          "--lib",
+          "--locked",
+          "index::route_offer_tests::released_source_recovery_preserves_fresh_phase_and_single_consumer_guards",
+          "--",
+          "--exact",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "pid": 2186061,
+        "exit": 0,
+        "reaped": true,
+        "sha256": "bdcdff8ab837784d7d57ac5f8df5ec043fc292e663534446a6f662bc3ecae7d4",
+        "bytes": 453,
+        "expected_selected": 1,
+        "actual_counts": [
+          {
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0
+          }
+        ],
+        "selection_verified": true,
+        "test_outcomes": [
+          {
+            "name": "index::route_offer_tests::released_source_recovery_preserves_fresh_phase_and_single_consumer_guards",
+            "outcome": "ok"
+          }
+        ]
+      },
+      {
+        "name": "sim-current-strict",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "clippy",
+          "-p",
+          "hex-sim",
+          "--all-targets",
+          "--locked",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "pid": 2186110,
+        "exit": 0,
+        "reaped": true,
+        "sha256": "0a2e847ecdef4edc0d34aa16eb56e58128248c9216bd98db6583a164726eb1d7",
+        "bytes": 1776,
+        "test_outcomes": []
+      }
+    ],
+    "exit": 0,
+    "source_changes": [],
+    "temp_entries": 0,
+    "native_invocations": 0,
+    "scope_limits": {
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-remote-pending-after-v1.scope",
+      "limits": {
+        "cpu.max": "100000 100000",
+        "memory.max": "4294967296",
+        "memory.swap.max": "0",
+        "pids.max": "256"
+      }
+    }
+  },
+  "counts": "3selected/3PASS/0FAIL/0IGNORED, each exact unit1PASS; hex-sim all-target strict Clippy exit0. Previous4AFTER/23/loader3 not replayed. No VM/GPU/native effect proof.",
+  "before": "ROOT4f0 actual remote original 0PASS/1semanticFAIL, 3630B SHA60474064306d52b1a41f3e0a01ed6018aa3c4cfc854793322439ec3fd54bbd15. Original source d2a/4f0 and all old evidence remain preserved; source cause and explicit2af pending-contract correction are in remote-committed-pending-after-source.json.",
+  "read_only_review": {
+    "callers": "runtime_holds_committed is reached only by the two durable recovery entries. Sole production take_pending_routed caller remains peer::recover for selected At/Created/Deleting ownership; it does not publish a new Start or choose physical devices.",
+    "authority": "Exact qualified tuple lookup and API source-profile compatibility remain separate from current fresh eligibility. Pending recovery debits original resources and same used entry, never creates a physical Workload holder. The selected peer remains the physical binding/native owner.",
+    "refund": "give_routed still derives the refund from immutable original allocation/receipt, uses checked underflow/overflow and existing route usage, and requires ordinary caller lifecycle proof. No end/refund/ACK changes in d67.",
+    "fresh": "take_routed, chosen, Live predicate and masks remain unchanged; new explicit positive restore cannot certify currentR fresh readiness.",
+    "finding_status": "No additional reproduced issue or production correction from this source readback. Review is not a broad audit, complete Host/native proof or R14 claim."
+  },
+  "r10": {
+    "status": "OWED / ROOT-owned / NOT DISPATCHED by lane",
+    "meaningful_falsifier": "A ROOT-only isolated mutant can keep the source-profile validation call but remove its boolean enforcement in the Released dedicated return, preserving compilation/caller ownership. The unchanged new commitment guard must then fail specifically at foreign profile because otherwise-valid allocation with another profile identity is accepted. Keep original tests/fixtures/source and mutant raw distinct. This is a suggested guard falsifier, not an executed mutation/result.",
+    "limits": "The pure guard can establish model acceptance/resource-authority behavior only; it cannot prove native execution, physical GPU identity, full-scope terminal absence or native forbidden-effect behavior."
+  },
+  "remaining": "ROOT actual meaningful mutation, native recovery/forbidden effects/faults/measurements, supported-target and full combined gates, allocation/profile audit and main merge remain owed. No lane builds/tests/native/runner actions; source unchanged in this evidence-only checkpoint."
+}

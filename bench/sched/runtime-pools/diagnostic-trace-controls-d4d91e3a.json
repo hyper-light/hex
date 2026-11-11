@@ -1,0 +1,463 @@
+{
+  "calibration_eligibility": false,
+  "candidate_ready": false,
+  "cases": [
+    {
+      "backend_reaped": true,
+      "baseline": true,
+      "failure_lines": [
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)",
+        "hex schedule: the node holds its most scheduler command publication (1)"
+      ],
+      "identity": {
+        "pid": 79677,
+        "started": 12516418932243,
+        "vsock": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/guest-tmp/shards-api-6464575bfab0710d-0/v"
+      },
+      "ledger": {
+        "bytes": 238515,
+        "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/pids.jsonl",
+        "sha256": "0b98cbc6c63f76807e21e04a60c9fe0ed96e80bf472afa01d3c56469f9eea2d1"
+      },
+      "logs": [
+        {
+          "bytes": 14904,
+          "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/call.log",
+          "sha256": "1933548de2a22eb5b7b7e2a6383e34f0bb72c09570b2f6080fba4febab2d8754"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/cold-node.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/hex-version.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/keygen-client-0.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/keygen-client-1.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/keygen-host-key.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/l.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 77,
+          "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/o.log",
+          "sha256": "4126cccf4234c059e7c0bbac4de6957e3a7c886bcef90c7d199937ba017f6fa9"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/pid-check.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/r.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/runtime-probe.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 83,
+          "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/sshd-14.log",
+          "sha256": "51d2670636d644c2df52a5795243e0c2028210f3ebcee80eaac2300deb65cce9"
+        },
+        {
+          "bytes": 83,
+          "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/sshd-4.log",
+          "sha256": "51d2670636d644c2df52a5795243e0c2028210f3ebcee80eaac2300deb65cce9"
+        },
+        {
+          "bytes": 83,
+          "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/sshd-6.log",
+          "sha256": "51d2670636d644c2df52a5795243e0c2028210f3ebcee80eaac2300deb65cce9"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/sshd-effective.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "marker_count": 0,
+      "physical_created": 2,
+      "physical_deleted": 2,
+      "receipt": {
+        "bytes": 617,
+        "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/owned-guest.json",
+        "sha256": "cf62ad4c3902d48ff3aca086573ec3f69f4edc87ca7d40a1d72356e2c874900c"
+      },
+      "record": {
+        "bytes": 131,
+        "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/cold-node.node-state/@guest",
+        "sha256": "12d7e3cbd765b523519aa5c1f10ccb6b90dcc2d3dc2d472f45c45f935b547598"
+      },
+      "result": {
+        "bytes": 7248,
+        "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/result.json",
+        "sha256": "5305e94698178c1bad26e50d986f374360d15ab96974f1896e0bc3189a545715"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 79677,
+        "started": 12516418932243
+      },
+      "runtime": {
+        "bytes": 961,
+        "path": "/Users/adalundhe/.cache/hx/e-4r_cjjmc/runtime.json",
+        "sha256": "e33ff8b2b04a032c6657b6f786869fb68bd7e62f5f7cbdbb0dc8774a244bafe6"
+      },
+      "status": "passed",
+      "trace": "off"
+    },
+    {
+      "backend_reaped": true,
+      "baseline": null,
+      "failure_lines": [
+        "[DEBUG-submit-df534d2f] pid=80265 wall_ns=Some(1794317303460310000) elapsed_ns=4083 phase=caller_expired_readiness request_id=1 mine=true read_ready=Some(true) probe_error=false",
+        "[DEBUG-submit-df534d2f] pid=80265 wall_ns=Some(1794317303460357000) elapsed_ns=3774500 phase=call_expired request_id=1 offered=false",
+        "hex schedule: waiting for the node agent's answer failed: none came in 1.659ms, twice the slowest answer to a call of its kind"
+      ],
+      "identity": {
+        "pid": 80175,
+        "started": 12516492330140,
+        "vsock": "/Users/adalundhe/.cache/hx/e-j17_jtuf/guest-tmp/shards-api-7f3842f59bc447a0-0/v"
+      },
+      "ledger": {
+        "bytes": 45199,
+        "path": "/Users/adalundhe/.cache/hx/e-j17_jtuf/pids.jsonl",
+        "sha256": "805ca006015a158c1b18f6d9760384a1ebe0da89fca258cf86dc5e9d5d48c9ac"
+      },
+      "logs": [
+        {
+          "bytes": 58394,
+          "path": "/Users/adalundhe/.cache/hx/e-j17_jtuf/call.log",
+          "sha256": "e944c623ef7dc4d378b2c9cdde4c61ca0ca27cf90a84d85ceb4f297d7af39ff9"
+        },
+        {
+          "bytes": 10553,
+          "path": "/Users/adalundhe/.cache/hx/e-j17_jtuf/cold-node.log",
+          "sha256": "de5112c6fdce775ab0cb8a848c61188ede9414787018f84184103e6672a282fb"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-j17_jtuf/hex-version.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-j17_jtuf/keygen-client-0.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-j17_jtuf/keygen-client-1.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-j17_jtuf/keygen-host-key.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 26049,
+          "path": "/Users/adalundhe/.cache/hx/e-j17_jtuf/l.log",
+          "sha256": "30360f9d23b2fd29d97160f67b10ba7697a05fe8ae7b3877cea8fff9132905ce"
+        },
+        {
+          "bytes": 61538,
+          "path": "/Users/adalundhe/.cache/hx/e-j17_jtuf/o.log",
+          "sha256": "6ce6675844d57d04ac76904fbdaa1c5d055d893e471e6fffdda1f865ea9d432e"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-j17_jtuf/pid-check.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 7311,
+          "path": "/Users/adalundhe/.cache/hx/e-j17_jtuf/r.log",
+          "sha256": "fb57bcd8f527aaafb0ef3041a717c89648fedd788df58e5ec7aea109ebb40c13"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-j17_jtuf/runtime-probe.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 206,
+          "path": "/Users/adalundhe/.cache/hx/e-j17_jtuf/sshd-4.log",
+          "sha256": "159da44247a8d132c6252f79a603407f06ad44772c7d07eca8bd2d1d5a6fafbc"
+        },
+        {
+          "bytes": 0,
+          "path": "/Users/adalundhe/.cache/hx/e-j17_jtuf/sshd-effective.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "marker_count": 1053,
+      "physical_created": null,
+      "physical_deleted": null,
+      "receipt": {
+        "bytes": 617,
+        "path": "/Users/adalundhe/.cache/hx/e-j17_jtuf/owned-guest.json",
+        "sha256": "8b768ec4b2116964c244e751064813b9d354acdd742a78121dd146646516afda"
+      },
+      "record": {
+        "bytes": 131,
+        "path": "/Users/adalundhe/.cache/hx/e-j17_jtuf/cold-node.node-state/@guest",
+        "sha256": "5bf5cf9e68d24baef7b66ebb5ab91f5d498d3805950559a6bb187368d61e358c"
+      },
+      "result": {
+        "bytes": 7066,
+        "path": "/Users/adalundhe/.cache/hx/e-j17_jtuf/result.json",
+        "sha256": "729d6c614da1dfaa27dfc987224af3f549b8c948fe16876de52783ce109e7b95"
+      },
+      "retirement": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 80175,
+        "started": 12516492330140
+      },
+      "runtime": {
+        "bytes": 961,
+        "path": "/Users/adalundhe/.cache/hx/e-j17_jtuf/runtime.json",
+        "sha256": "1a883433a6735ecd908f8bd67d4e9856039836ec37153a9ff925f8284589aa5b"
+      },
+      "status": "failed",
+      "trace": "on"
+    }
+  ],
+  "driver_exit": 1,
+  "driver_log": {
+    "bytes": 3995,
+    "path": "/Users/adalundhe/.cache/hex-lead/logs/submit-trace-n1-off-on-d4d91e3a.log",
+    "sha256": "7b886450d35f8491d869f3d7e7067a7078cdb668547e9c026e9baf51e7af035d"
+  },
+  "finding": "OFF passed; ON failed on CLI Hello before a complete physical campaign. This is distinct from the original armed Submit timeout. read_ready includes IN/ERR/HUP and does not prove a full queued answer.",
+  "kind": "root-diagnostic-trace-controls",
+  "source_revision": "d4d91e3a478d88bdb701d101e9b8db63562031e0"
+}

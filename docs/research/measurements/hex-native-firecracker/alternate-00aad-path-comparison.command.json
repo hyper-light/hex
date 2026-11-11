@@ -1,0 +1,27 @@
+{
+  "argv": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--on",
+    "00aad8daff2fa3c9daa65d53c425d450",
+    "--needs",
+    "linux/amd64,cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--timeout",
+    "55",
+    "--stdin",
+    "--",
+    "timeout",
+    "--signal=TERM",
+    "--kill-after=2s",
+    "47s",
+    "nice",
+    "-n",
+    "10",
+    "python3",
+    "-c",
+    "import gzip,hashlib,json,os,sys,time\nfrom pathlib import Path\npacked=sys.stdin.buffer.read(1048577);assert len(packed)<=1048576\ndata=gzip.decompress(packed);assert len(data)<=16777216\nmanifest=json.loads(data);rows=manifest['rows'];assert len(rows)<=8192\ndeadline=time.monotonic()+40\nout={'mode':'read-only exact4a SDK/payload path comparison; no materialization/compile/VM/GPU','cohort_sha256':manifest['cohort_sha256'],'results':[]}\nfor row in rows:\n assert time.monotonic()<deadline\n item={**row}\n p=Path(row['source'])\n try:\n  before=p.stat()\n  if not p.is_file():raise ValueError('not_regular')\n  if before.st_size!=row['bytes']:\n   item.update(state='different_extent',actual_bytes=before.st_size)\n  else:\n   h=hashlib.sha256();n=0\n   with p.open('rb') as f:\n    while True:\n     b=f.read(1048576)\n     if not b:break\n     n+=len(b);assert n<=row['bytes']+1048576;h.update(b)\n   item.update(state='exact_hash_match' if n==row['bytes'] and h.hexdigest()==row['sha256'] else 'different_digest',actual_bytes=n,actual_sha256=h.hexdigest())\n except FileNotFoundError:item['state']='absent'\n except (OSError,ValueError) as e:item.update(state='unreadable',error=str(e))\n out['results'].append(item)\nout['metadata_input_sha256']=hashlib.sha256(data).hexdigest()\nprint(json.dumps(out,sort_keys=True))\n\n"
+  ],
+  "input": "alternate-00aad-path-comparison.input.json.gz",
+  "meaning": "metadata-only stdin; no SDK files transferred"
+}

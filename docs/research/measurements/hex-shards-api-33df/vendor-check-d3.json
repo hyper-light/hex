@@ -1,0 +1,12 @@
+{
+  "source": "d3e936d12f89397715f8a3b34a4ca69160252f78",
+  "run": "r723",
+  "command": "python3 scripts/vendor.py check shards",
+  "exit": 0,
+  "pid": 49358,
+  "reaped": true,
+  "source_unchanged": true,
+  "sha256": "b632db11cd365ff7f4816d0c113e0ccb7ce958392e0d227b8d66e1c1ba2814d5",
+  "bytes": 107,
+  "scope": "shards entry only, 39 source files,3 recorded changes,0differences; not a whole workspace or native effects gate"
+}

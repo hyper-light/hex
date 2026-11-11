@@ -1,0 +1,3 @@
+ActiveState=active
+ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-gate-bypass-fabd-v1.scope
+Delegate=yes

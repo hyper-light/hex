@@ -1,0 +1,33 @@
+{
+  "status": "SOURCE ONLY lint correction; rustfmt parser0; no rerun",
+  "parent": "13c021b2f7412f47146890ab91866850658d90a0",
+  "original_actual_result": {
+    "source": "ROOT e852 immutable cohort",
+    "reported_by": "ROOT coordinator",
+    "runtime_clippy_exit": 101,
+    "log_sha256": "4bcdd81ba9d38577986985a4f1b783def33454eef7c7e0832a5358c6fbb7b206",
+    "causes": [
+      "pool.rs112 collapsible_if",
+      "selected.rs561 manual chunks_exact -> as_chunks"
+    ]
+  },
+  "changes": [
+    "same optional-attempt refusal Boolean expressed as a let chain",
+    "same strict hex parity now rejects nonempty as_chunks tail before allocation; same bound/hex/scope/full selector checks"
+  ],
+  "files": [
+    {
+      "path": "crates/hex-runtime/src/guest/pool.rs",
+      "sha256": "8336e297a1c0ce4576eea26cd8784fa4af4ddf0fed30336dad9df0a9a438b9f3"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/selected.rs",
+      "sha256": "6af357dc1172b82cf5139082fdc7ef928a49ba4969800e090f5fa2cff86898ac"
+    }
+  ],
+  "limits": [
+    "ROOT reported thirteen guest controls and five wire/wait controls passing on original e852, not this successor",
+    "original finite retry control failed fixture SUN_LEN before behavior, not a reproduced SDK defect",
+    "no original Intent/typed failure recovery remedy here; no native/backend claim"
+  ]
+}

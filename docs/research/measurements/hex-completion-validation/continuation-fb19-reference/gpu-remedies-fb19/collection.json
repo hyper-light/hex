@@ -1,0 +1,51 @@
+{
+  "bytes": 311826,
+  "sha256": "1d15fad303a63f993ab687ed04224cc1046e376c9259f75090a1a7f4331c9fb6",
+  "members": {
+    "cohort-fb191e49-linux-gpu-remedies-fb19/source-before.json": {
+      "bytes": 453359,
+      "sha256": "02f7f77267795a3c2a4a33c0928590b14fa453115689f6a3b54b7aaf5520ecd5"
+    },
+    "cohort-fb191e49-linux-gpu-remedies-fb19/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-fb191e49-linux-gpu-remedies-fb19/owned-scope-limits.json": {
+      "bytes": 257,
+      "sha256": "bab48526c495981e338cd25102caf86fcea5e0810cd00b22b9f5c09e9ad85ec6"
+    },
+    "cohort-fb191e49-linux-gpu-remedies-fb19/intent-original-after.log": {
+      "bytes": 3428,
+      "sha256": "e88ce0eeaa11c86723efe14336ef13f93e72daa1d3781b960af8f07af0dd0ee0"
+    },
+    "cohort-fb191e49-linux-gpu-remedies-fb19/running.json": {
+      "bytes": 3301,
+      "sha256": "d5279b4d0d6d196f262097e3a0a927efd6fd9334f049ad32b1117636c27caaf1"
+    },
+    "cohort-fb191e49-linux-gpu-remedies-fb19/share-alias-original-after.log": {
+      "bytes": 442,
+      "sha256": "315d9ed8c703568cf69312ef5444a7420e9f8293f6afe7954cdbd7a30013ca2c"
+    },
+    "cohort-fb191e49-linux-gpu-remedies-fb19/joined-strict-clippy.log": {
+      "bytes": 5117,
+      "sha256": "661d7d1c520c07ad340822205cf5e70087646bc50154af898640c346cfd7c2b1"
+    },
+    "cohort-fb191e49-linux-gpu-remedies-fb19/source-after.json": {
+      "bytes": 453359,
+      "sha256": "02f7f77267795a3c2a4a33c0928590b14fa453115689f6a3b54b7aaf5520ecd5"
+    },
+    "cohort-fb191e49-linux-gpu-remedies-fb19/result.json": {
+      "bytes": 3559,
+      "sha256": "7f0721e6611eca77666aca66b847621c943a8a77da88302f901dfb10fa8aacc9"
+    },
+    "cohort-fb191e49-linux-gpu-remedies-fb19/collected-binaries.json": {
+      "bytes": 3045,
+      "sha256": "80d809c6a9d414e3e7cc179d32b1e65496921f4363befe7963d4c7540e490b18"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

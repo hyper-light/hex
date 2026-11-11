@@ -1,0 +1,43 @@
+{
+  "bytes": 351046,
+  "sha256": "9c2dfdcd0c7e3b624b6e6581086f25a3ad919a5447e901bdb2ddc0e26e9edbd2",
+  "members": {
+    "cohort-4f0a80e5-linux-remote-pending-original/source-before.json": {
+      "bytes": 522320,
+      "sha256": "f426dcc571f89914245560d5eb3c99411cf1570d1822226e7f565d1ff937b5e8"
+    },
+    "cohort-4f0a80e5-linux-remote-pending-original/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-4f0a80e5-linux-remote-pending-original/owned-scope-limits.json": {
+      "bytes": 263,
+      "sha256": "98be385b32b6b56acf3382c0c95a6e55f5f0db3d480139bd90339aa0af0efbce"
+    },
+    "cohort-4f0a80e5-linux-remote-pending-original/remote-committed-pending-original.log": {
+      "bytes": 3630,
+      "sha256": "60474064306d52b1a41f3e0a01ed6018aa3c4cfc854793322439ec3fd54bbd15"
+    },
+    "cohort-4f0a80e5-linux-remote-pending-original/running.json": {
+      "bytes": 1122,
+      "sha256": "dfa991d4fb73b60ab522e67f1ee449cc055da4d72e27e73f11da40893fc60374"
+    },
+    "cohort-4f0a80e5-linux-remote-pending-original/source-after.json": {
+      "bytes": 522320,
+      "sha256": "f426dcc571f89914245560d5eb3c99411cf1570d1822226e7f565d1ff937b5e8"
+    },
+    "cohort-4f0a80e5-linux-remote-pending-original/result.json": {
+      "bytes": 1567,
+      "sha256": "bc8d2af9372dec6902f771b35f9eb56fe4d3395306efd3b26e3a35fbc0084d94"
+    },
+    "cohort-4f0a80e5-linux-remote-pending-original/collected-binaries.json": {
+      "bytes": 1091,
+      "sha256": "b2a5dc3c7e21bbcda68ae5d9d0056a469b7cc56da02c2ed0ad6731c310a4bd84"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

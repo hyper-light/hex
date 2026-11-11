@@ -1,0 +1,17 @@
+{
+  "source_before": "40feda1f7d4b908eda41ae8adb1bc797f2109e3f",
+  "owners": {
+    "placement": "139fc142fdf6a12a49ac3fca0193db05836111d0",
+    "turns": "2d82c192a6a4fcf856455dbbbb0901933d116ca8"
+  },
+  "actual_before": {
+    "source": "dacdc8a6cec7c59069eff454423ff1cac1ff388e",
+    "log_sha256": "ad1d00e6ec4dac73c6abb9f78555529e2998eac9f69b4e436d2ad36dd51737d1",
+    "native": 0
+  },
+  "change": "exact owner cause deltas: fallible shared status plus reserved notice; target-gated actual helper and remove unused wrapper",
+  "after_tests": "not run yet; canonical fixture compile corrections pending",
+  "coordinator": "01a1aa77778471339bea3beff90d6bbd",
+  "policy_revision": "ca3ab10c151aa5539e757f1cc76029746ccbb561",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3"
+}

@@ -1,0 +1,197 @@
+{
+  "actual_host_artifacts": {
+    "hex": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-mac-seeds-host-8dffdca8/aarch64-apple-darwin/release/hex",
+      "sha256": "3c48d103fc75e6cee3fa012452e9305a8edc05d9e1327ff3923a0a5a2220c710"
+    },
+    "initrd": {
+      "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-cc7c2190-release-aarch64.cpio",
+      "sha256": "5521b2304a5a6c2d9357fe4e1ac43f68ec817b685f8600115fa94f139eda778e"
+    },
+    "kernel": {
+      "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+      "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+    },
+    "linux_hex": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-cc7c2190/aarch64-unknown-linux-musl/release/hex",
+      "sha256": "e2670cf5cf0b4ac32fa30f55b7027b3f95a942205c51aafe26169f5a7b9a276d"
+    },
+    "runtime_probe": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-mac-seeds-probe-8dffdca8/aarch64-apple-darwin/release/hex-scheduler-runtime-probe",
+      "sha256": "aa415b4f8ccb596c496156b9de3b70d403c1b45693482d1cfadc8a0374d080b4"
+    },
+    "shards": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+      "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+    }
+  },
+  "actual_retirement": {
+    "end": "Stopped",
+    "guest_stopped": true,
+    "pid": 25719,
+    "started": 12412173209405
+  },
+  "aggregate": {
+    "bytes": 3021,
+    "path": "/Users/adalundhe/.cache/hex-lead/cold-census-8f51140e/receipts/native-arm-quota-fixed-mutant-fixed-v2.json",
+    "sha256": "838f5e01bc695a8fc76ed8c5accb284f08c5ef3f1c8911e20d665eb3117e403f"
+  },
+  "build_log": {
+    "bytes": 6887,
+    "path": "/Users/adalundhe/.cache/hex-lead/logs/native-arm-linux-quota-unit-build-v2-8f51140e.log",
+    "sha256": "71213cc6b9f160a420669c2eea9807e8f456af52fb5c26dbaeb56268f1a98d8a"
+  },
+  "build_metadata": {
+    "bytes": 1070,
+    "path": "/Users/adalundhe/.cache/hex-lead/logs/native-arm-linux-quota-unit-build-v2-8f51140e.json",
+    "sha256": "636683865621afa703dac80e6a01946d85415c599d97b59b623ff436f9b070a3"
+  },
+  "cases": [
+    {
+      "actual_exit": {
+        "Code": 0
+      },
+      "artifact": {
+        "facts_sha256": "f550939867a78a12372e82a72e1b9d2cd8e14dac08c9297f2729683bb17f7a76",
+        "label": "fixed",
+        "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/hex-node-quota-unit-fixed-v2-8f51140e-aarch64-musl",
+        "sha256": "b896ba4d87c7ee7229673bebf0104f9e5f90dc579541e93372a5d3aa37b07b2f",
+        "source": "/Users/adalundhe/.cache/hex-lead/snapshots/cold-census-8f51140e"
+      },
+      "baseline_restored": true,
+      "box_retained_after_init_exit": true,
+      "expected_exit": 0,
+      "key": {
+        "epoch": 1,
+        "owner": 0,
+        "seq": 0
+      },
+      "label": "fixed",
+      "physical": "hex-place-62f5e7e8b92adb5fd21a6fd906b1d588f68a502aa7cf6794bd92ff446828617c-0-1-0",
+      "physical_deleted": true,
+      "test": "facts::capacity_tests::runtime_capacity_cpu_quota_preserves_fractional_milli_and_refuses_bad_authority"
+    },
+    {
+      "actual_exit": {
+        "Code": 101
+      },
+      "artifact": {
+        "facts_sha256": "32771e12b61d8238ef0695142794085f026ad682567ec4e3fffe306f8e0ea029",
+        "label": "whole-cpu-truncation-mutant",
+        "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/hex-node-quota-unit-whole-cpu-truncation-mutant-v2-8f51140e-aarch64-musl",
+        "sha256": "19ff899774490c2dc13a467e15b16dc27f32d23b581f8699235a543401555f39",
+        "source": "/Users/adalundhe/.cache/hex-lead/snapshots/quota-milli-mutant-8f51140e"
+      },
+      "baseline_restored": true,
+      "box_retained_after_init_exit": true,
+      "expected_exit": 101,
+      "key": {
+        "epoch": 1,
+        "owner": 0,
+        "seq": 1
+      },
+      "label": "truncation-mutant",
+      "physical": "hex-place-62f5e7e8b92adb5fd21a6fd906b1d588f68a502aa7cf6794bd92ff446828617c-0-1-1",
+      "physical_deleted": true,
+      "test": "facts::capacity_tests::runtime_capacity_cpu_quota_preserves_fractional_milli_and_refuses_bad_authority"
+    },
+    {
+      "actual_exit": {
+        "Code": 0
+      },
+      "artifact": {
+        "facts_sha256": "f550939867a78a12372e82a72e1b9d2cd8e14dac08c9297f2729683bb17f7a76",
+        "label": "fixed",
+        "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/hex-node-quota-unit-fixed-v2-8f51140e-aarch64-musl",
+        "sha256": "b896ba4d87c7ee7229673bebf0104f9e5f90dc579541e93372a5d3aa37b07b2f",
+        "source": "/Users/adalundhe/.cache/hex-lead/snapshots/cold-census-8f51140e"
+      },
+      "baseline_restored": true,
+      "box_retained_after_init_exit": true,
+      "expected_exit": 0,
+      "key": {
+        "epoch": 1,
+        "owner": 0,
+        "seq": 2
+      },
+      "label": "fixed-restored",
+      "physical": "hex-place-62f5e7e8b92adb5fd21a6fd906b1d588f68a502aa7cf6794bd92ff446828617c-0-1-2",
+      "physical_deleted": true,
+      "test": "facts::capacity_tests::runtime_capacity_cpu_quota_preserves_fractional_milli_and_refuses_bad_authority"
+    }
+  ],
+  "environment": {
+    "box_cpu_milli": 1000,
+    "box_memory_mib": 64,
+    "cpu_count": 32,
+    "free_disk_bytes_before": 2839443951616,
+    "guest_cpus": 4,
+    "guest_memory_mib": 632,
+    "guest_shares_sha256": "8960f906e7012ab05b3f1f06f03eb771cf4b85411d219363273bbd27ae23f309",
+    "machine": "arm64",
+    "os": "macOS-26.4-arm64-arm-64bit",
+    "path_sha256": "fc1eebdda3ae92cef120aebbddd33817c1f3239b1adb5984d94910cfb38b3bd7"
+  },
+  "execution_log": {
+    "bytes": 2051,
+    "path": "/Users/adalundhe/.cache/hex-lead/logs/native-arm-linux-quota-unit-run-v2-8f51140e.log",
+    "sha256": "bc713b17e3ff2f7f5e7f36eef715e099008d1f92b651840eb4dbabb879b8180d"
+  },
+  "first_invalid_control": {
+    "error": "native Linux unit returned unexpected exit {'Code': 0}",
+    "fixed_and_mutant_same_hash": true,
+    "interpretation": "first fixed zero alone did not establish filtered-test execution; original mutant was not a valid mutation",
+    "remedy": "distinct target directory and explicit manifest for each source; require distinct artifact hashes before VM dispatch",
+    "result": {
+      "bytes": 8192,
+      "path": "/Users/adalundhe/.cache/hx/e-uz2zxvmd/result.json",
+      "sha256": "8ed1ecc397fd408b40d859842e89032d9dc15715145938f93834cb60b103365a"
+    },
+    "retirement": {
+      "end": "Stopped",
+      "guest_stopped": true,
+      "pid": 24077,
+      "started": 12401050378857
+    },
+    "status": "failed; invalid mutation artifact, preserved"
+  },
+  "guest_arch": "aarch64-unknown-linux-musl",
+  "host_runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "kind": "root-native-aarch64-linux-musl-quota-unit-mutation",
+  "ledger": {
+    "bytes": 21606,
+    "path": "/Users/adalundhe/.cache/hx/e-xb9g7wzu/pids.jsonl",
+    "sha256": "b0d9f64078b73eb0696d7421da7ce34225828568922939f76391f1035801ea26"
+  },
+  "mutation_source_diff": "--- fixed/facts.rs\n+++ mutant/facts.rs\n@@ -268,8 +268,8 @@\n         }\n         let quota: u64 = quota.parse().map_err(|_| ())?;\n         let milli = u128::from(quota)\n-            .checked_mul(1000)\n-            .and_then(|n| n.checked_div(u128::from(period)))\n+            .checked_div(u128::from(period))\n+            .and_then(|n| n.checked_mul(1000))\n             .ok_or(())?;\n         u64::try_from(milli).map(Some).map_err(|_| ())\n     }\n",
+  "owned_identity_reconstruction": {
+    "live_API_check": "not performed by verifier",
+    "pid": 25719,
+    "receipt_sha256": "4d0c43458367a7f9930a73cb692e297d2e9facb8bfccc33661c1680ab5bd91bd",
+    "record_sha256": "4738da4509a5f233caf944fd7f9534625f81ec4010faa411d68063c4680d6072",
+    "recorded_terminal": "Stopped",
+    "started": 12412173209405,
+    "vsock": "/Users/adalundhe/.cache/hx/e-xb9g7wzu/guest-tmp/shards-api-35b198bc2430fb93-0/v"
+  },
+  "production_revision": "bbb3ef2114641d82742e153c98665ea6639b9a60",
+  "raw_result": {
+    "bytes": 9780,
+    "path": "/Users/adalundhe/.cache/hx/e-xb9g7wzu/result.json",
+    "sha256": "23c66cb9680a24aabb19479c36547fe71bec6bb9f69f37a152b2e3bc51e880c0"
+  },
+  "requirement": "AC-T7.4.1; native Linux CPU quota authority",
+  "runtime": {
+    "bytes": 957,
+    "path": "/Users/adalundhe/.cache/hx/e-xb9g7wzu/runtime.json",
+    "sha256": "d7aea55980de5ffbfaaee5520f0c497848892cb31212cbd099708da1d88e81a6"
+  },
+  "scope": "One exact libtest runs as an OCI init inside a real HVF Shards Linux ARM64 guest through production laptop scheduler. Long-lived tracking/deletion and empty physical baseline checked. Not native AMD64, cgroup controller integration, root lab, performance, seed or full-goal evidence.",
+  "source_revision": "8f51140ef653d0b348597b02b241cc185a4aa54e",
+  "status": "passed bounded fixed/mutant/fixed execution",
+  "test": "facts::capacity_tests::runtime_capacity_cpu_quota_preserves_fractional_milli_and_refuses_bad_authority",
+  "wrapper": {
+    "bytes": 4266,
+    "path": "/Users/adalundhe/.cache/hex-lead/fixtures/scheduler-backend/native_quota_actual_v2_8f51140e.py",
+    "sha256": "070a8543b5fef451dc81014301d8ef1854965a544bb3b191681113c6c786e794"
+  }
+}

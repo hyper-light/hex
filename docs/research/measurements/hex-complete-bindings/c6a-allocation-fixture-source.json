@@ -1,0 +1,27 @@
+{
+  "base": "c6a64f4b29606fe65ffc0cf11968178d8350c9f7",
+  "role": "implementer bindings-firecracker",
+  "policy": {
+    "revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+    "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3"
+  },
+  "cause": "Actual dual-Windows strict compilation rejects literal Some(allocation).unwrap in the new recovery control. Keep the concrete copied Allocation and wrap Some only at the two API call sites. Assertions, receipt, resources, counters and budgets unchanged.",
+  "source": {
+    "path": "crates/hex-sim/src/index/route_offer_tests.rs",
+    "before_sha256": "0368d248f7e68fbd6bc5b045843ce7f6c21b514dbd3629b9f57b6af6e8b3b84a",
+    "after_sha256": "94c23ea131c8d07cc6e9328d06d709016c7e6fef00ec5fe05b3138316cf295bc"
+  },
+  "original_result": {
+    "path": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/portability-and-memory-c6a-8cd-results-proof/cohort-c6a64f4b-mac-portability-c6a/windows-x64-arm64-joined-strict.log",
+    "bytes": 8276,
+    "sha256": "10ebb7a9e398e58069146d53322f80edfb1c65fb20c4594e6cb122c8cddcfb60",
+    "result": "compiler101 unnecessary_literal_unwrap; Mac phase unexecuted"
+  },
+  "validation": {
+    "rustfmt": "named installed formatter exit0",
+    "cargo": "not run by lane",
+    "native": "not run",
+    "after": "ROOT-owned pending"
+  },
+  "limits": "Fixture-only; no production change, allocation policy change, oracle weakening or behavior pass claimed. Existing c6a semantic red retained separately."
+}

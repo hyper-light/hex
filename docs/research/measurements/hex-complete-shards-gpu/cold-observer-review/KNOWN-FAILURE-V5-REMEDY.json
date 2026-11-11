@@ -1,0 +1,86 @@
+{
+  "status": "SOURCE REMEDY only after actual relevant original red; scoped rustfmt parser0; no compile/test/native dispatched by L2",
+  "parent": "6ac1e0d85f0a50a612a6844ccf6bec9e95142017",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "sources": [
+    {
+      "path": "crates/hex-runtime/src/guest/observer.rs",
+      "sha256": "df034474b711dce3b37fcc74a36be78d9204cb19cb7aab41f5f7b40a5dd13aed",
+      "bytes": 32865
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/observer/facts.rs",
+      "sha256": "6574d79d0a8c8a2fec26a582c9c6532d3142e0fb8094a09e717e8ed0ed1158de",
+      "bytes": 12785
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/pool.rs",
+      "sha256": "234ee2950d816a8aee1ab62876ffe8b2fae943ac34c32227c66a2c128ffd15b5",
+      "bytes": 22739
+    }
+  ],
+  "dependency": {
+    "snapshot_producer": "01fe011d72c6801e4494e903af6353baaf0688d4",
+    "owned_by": "L4 / ROOT shared core wire intake",
+    "signatures": [
+      "wire::snapshot_refusal(&Refusal,usize)->Result<Vec<u8>,Fault>",
+      "wire::snapshot_exit(Exit,usize)->Result<Vec<u8>,Fault>"
+    ],
+    "guarantee": "same refusal/exit codecs; id0/current IDENTITY; counting then exact fallible fixed writer; no clone/tag duplication/interner",
+    "integration": "ROOT composes exact producer and guest paths; private L2 base has older shared core/API and is not an independently compiled cohort"
+  },
+  "actual_original": {
+    "cohort": "25d98e88 Linux producer recovery",
+    "checkpoint": "ec3683877511cc75b5fc5cd6f24a800fee705fd4",
+    "selected": 1,
+    "passed": 0,
+    "failed": 1,
+    "ignored": 0,
+    "log": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/producer-recovery-25d9-results-proof/cohort-25d98e88-linux-producer-recovery-25d9/known-failure-facts-original.log",
+    "log_sha256": "97803359dd6e709d8cfefaab3fba606d12113328c5b0bb78e2c5010780877841",
+    "raw_sha256": "d3ad1f961ef744953bf44d5278f5198c25b1d8cf5f409029c1d15da3cd054cf4",
+    "symptom": "all actual Client setup, Exited7, EOF, exact typed failed Delete and retained grant preconditions passed; durable exit tag absent"
+  },
+  "encoding": {
+    "new_header": "hex-guest-backing 5",
+    "legacy": "headers1/2/3/4 stay readable; no-facts attempts/CPU write exact original v4; legacy diagnostics are never fabricated",
+    "ordered_rows": [
+      "observer-exit\\t<snapshot|none>",
+      "observer-failure\\t<original-phase>\\t<snapshot>, or none",
+      "observer-cleanup\\t<pending|attempting|deleted|missing|failed\\t<snapshot>>"
+    ],
+    "snapshot": "version u32 positive, wire identity exact16 lowerhex, positive declared byte length, exact lowercase hex frame; envelope1 producer canonical Answer id0",
+    "frame_bound": "existing wire::MAX_MESSAGE (128<<10); checked BEFORE allocating parsed raw bytes",
+    "record_bound": "existing MAX_RECORD_BYTES (1<<20); streams+readiness+worst3 complete hex snapshots/tags/widths counted before guest Program run; overflow/exhaustion returns typed refusal",
+    "opaque": "unknown snapshot version/wire retained bounded and never decoded; cannot authorize usable readiness, guest/native absence or release; existing v4 provenance checks remain separate so opaque facts cannot block native cleanup"
+  },
+  "transitions": [
+    "known Exit captured and persisted before nonzero interpretation",
+    "original AttemptPhase+exact typed refusal persisted before cleanup",
+    "cleanup intent persisted; actual delete called once with same Budget.deadline; matching NoSuchBox stored as missing ordinary guest row only",
+    "cleanup failure exact typed refusal stored separately; caller returns existing Backing Uncertain while same full native scope/grant remains",
+    "codec/storage/deadline failures remain typed; no truncation/default/guessed exit/release or renewed deadline; durable write failure does not become cleanup proof"
+  ],
+  "preserved": {
+    "original_actual_client_leaf_sha256": "f16173de8bd30baee7826a531ccc686cfc13dece241f07204fb4886aba3e4323",
+    "original_leaf_byte_identical": true,
+    "existing_observer_unit_module_byte_identical_to_6ac": true,
+    "intent_and_alias_source_remedies_unchanged": true,
+    "v4_cleanup_compatibility": true,
+    "no_native_or_holder_authority_added": true
+  },
+  "new_source_controls": [
+    "guest::observer::facts::tests::observer_failure_facts_keep_exit_original_stage_and_cleanup_separately",
+    "guest::observer::facts::tests::observer_fact_bounds_and_unknown_wire_cannot_become_ready",
+    "guest::pool::tests::observer_v5_diagnostics_preserve_legacy_v4_and_same_grant_cleanup"
+  ],
+  "remaining": [
+    "ROOT exact joined compile and original failed ec368 plus affected meaningful positive/codec controls; no L2 repeat of Driver3/old13",
+    "R01 new snapshot path guarded via exact L4 dependency; pre-existing PoolRecord codecs/OS refusal presentation remain prior seams, no blanket allocation audit claim",
+    "actual disk failure/entropy/cancel/native VMM/helper/renderer/guest artifact closure and lifecycle proof remain ROOT",
+    "R08/R14 comparative performance/allocation/fault profiles unrun; supported-target checks unrun for this delta",
+    "selected Box VM observer receipt extension and handoff/lazy subsets are separate source increments, not completed here"
+  ]
+}

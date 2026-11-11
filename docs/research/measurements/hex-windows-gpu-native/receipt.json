@@ -1,0 +1,14 @@
+{
+  "source": "9190738c332a442c91719aaa7857f9c3673a2769",
+  "source_files": 1848,
+  "all_post_sources_equal_signed_git": true,
+  "sha256": {
+    "result.json": "f4294c052781b32749412d05fb71ea1fa477b46294693bd6e125554e8dcb7731",
+    "run.json": "18a6a861a9b1d9c46baea7aa6a824ffa8a4e59e291d5635473fd22e59dd2adfa",
+    "source-hashes.json": "836282a8a659da4a530bfbb78cf1578c494a0646dae2461c148372a3690dfb07",
+    "windows-gpu.stdout.log": "8bfa2a4a07fb86d99ca67f7bd934238dba00dd02d9fab781495d0345bfb67e46",
+    "windows-gpu.stderr.log": "02a1f3ff5dc541ac5eff6a3b1768d0a2ff1fe1c2c9ac606d4d27d2713d1e59a4"
+  },
+  "collector_exit": 0,
+  "collector_reaped": true
+}

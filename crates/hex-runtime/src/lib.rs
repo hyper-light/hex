@@ -20,6 +20,8 @@
 /// platform, so a bound that is one a box (the node's record turns) names it wherever it compiles.
 pub const MAX_BOXES: usize = 65_536;
 
+pub mod devices;
+pub mod firecracker;
 pub mod guest;
 
 #[cfg(target_os = "linux")]

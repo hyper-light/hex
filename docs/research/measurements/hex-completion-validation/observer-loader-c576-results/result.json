@@ -1,0 +1,110 @@
+{
+  "source": "c576d4c2a0a37d7722a81174b9ab1d7ff1434ad5",
+  "archive_sha256": "e1ae3b08bcc1aab278fdce4df96f17c233a3f4cef1b834cbb52a57ced3effeba",
+  "scope": "ROOTc576 new explicit observer loader3; matched actual-ACK nativegate compile only; current runtime/node/CLI strict, no prior23 or ff13 replay; no native/VM/GPU invocation.",
+  "target": "linux",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 3687615,
+  "phases": [
+    {
+      "name": "observer-loader-new3",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::observer::config::load::tests::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 3693506,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "8c3cbf634b073b8724042ab67f505fd50904ecb0ff01bcc41ddf349bb0f80e4e",
+      "bytes": 3979,
+      "expected_selected": 3,
+      "actual_counts": [
+        {
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "guest::observer::config::load::tests::loaded_observer_manifest_keeps_actual_artifact_and_paid_room_checks",
+          "outcome": "ok"
+        },
+        {
+          "name": "guest::observer::config::load::tests::observer_manifest_rejects_hostile_schema_lengths_escapes_and_partial_inputs",
+          "outcome": "ok"
+        },
+        {
+          "name": "guest::observer::config::load::tests::optional_observer_manifest_reaches_real_constructor_with_escaped_unicode_paths",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "native-gate-matched-compile",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--no-run"
+      ],
+      "pid": 3810957,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "1a03d2fb7d3946d7ae8ab7420494657d2166f689ee1898179853e1442c04c4d1",
+      "bytes": 1222,
+      "test_outcomes": []
+    },
+    {
+      "name": "observer-and-gate-strict",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-runtime",
+        "-p",
+        "hex-node",
+        "-p",
+        "hex-cli",
+        "--all-targets",
+        "--locked",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 3981458,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "d2d7458c72f5a1463587d6fca3a972153158e98b0a6c8cbf663a1075d6ae81a0",
+      "bytes": 4387,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_invocations": 0,
+  "exit": 1
+}

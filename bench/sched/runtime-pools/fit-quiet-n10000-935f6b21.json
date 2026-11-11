@@ -1,0 +1,1850 @@
+{
+  "purpose": "paired quiet equivalent healthy global-fit comparison, one real-sized pool per node; no competitor/whole-scheduler/VM-performance claim",
+  "date_utc": "2026-11-10T08:22:12.999614+00:00",
+  "os": "macOS-26.2-arm64-arm-64bit",
+  "hardware": [
+    "Mac16,9",
+    "Apple M4 Max",
+    "14",
+    "38654705664"
+  ],
+  "runner": "2768d0d5d2974f1e21d348edadff9d1b",
+  "args": [
+    "--nodes",
+    "10000",
+    "--cpu-milli",
+    "48000",
+    "--mem-bytes",
+    "412316860416",
+    "--rounds",
+    "1",
+    "--workload",
+    "runtime-pool-cycles",
+    "--pool-classes",
+    "shards",
+    "--pool-cpu-milli",
+    "4000",
+    "--pool-mem-bytes",
+    "662700032",
+    "--demand-class",
+    "shards",
+    "--demand-cpu-milli",
+    "1000",
+    "--demand-mem-bytes",
+    "67108864",
+    "--decision",
+    "fit",
+    "--scorer",
+    "hex",
+    "--repeats",
+    "10000",
+    "--warmup-repeats",
+    "0"
+  ],
+  "toolchain": "binaries built Rust1.99.1 on MacStudio26.4; run unchanged on Mac26.2; no compilation here",
+  "source": {
+    "inline": "63ec2758d8f2ef89cde84d48bb566485eeb60e36",
+    "side": "935f6b21f98ebb11a58a605dc2447c0f6770910b"
+  },
+  "binary_sha256": {
+    "inline": "4a5428d04de52c7f371d51b9fc93af3b0170f1d90d87b8806192902b4f252b0c",
+    "side": "2147f54a4d15f6ab7eed3b204f566ab2f0f52553e6cbd2018be8f0240e0912b5"
+  },
+  "input_derivation": "N10000 AC-T7.4.2; host48core384GiB committedHuawei; pool4vCPU632MiB and1CPU64MiB actualVMcensus;5pairedrounds existing method;1000samples existing minimum;zero explicit warmup",
+  "limitations": [
+    "5pairedrounds is not a confidence interval",
+    "tiny take/give spans near clock resolution;no overhead subtraction",
+    "empty restored nodes, one finite pool;not90percentloadedtrace or contention",
+    "allocator instrumentation identical in both, raw timing includes its boundary overhead",
+    "copies and kernel memory unmeasured",
+    "no4-5x external competitor or throughput claim"
+  ],
+  "observations": [
+    {
+      "pair": 0,
+      "version": "inline",
+      "before": {
+        "load": [
+          1.296875,
+          1.578125,
+          1.6376953125
+        ],
+        "visible_build_processes": []
+      },
+      "after": {
+        "load": [
+          1.296875,
+          1.578125,
+          1.6376953125
+        ],
+        "visible_build_processes": []
+      },
+      "quiet": true,
+      "raw": "/Users/adalundhe/.cache/hex-lead/quiet-pool-profile-935f6b21/fit-results-n10000/0-inline.jsonl",
+      "raw_sha256": "90e7509a9cadb20da0727cf461a584aba4ecaf5ffe84422adda8cbff495b3dd0",
+      "external_time": "        1.58 real         1.52 user         0.05 sys\n           218169344  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               13622  page reclaims\n                   1  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  40  voluntary context switches\n                  20  involuntary context switches\n         51183922843  instructions retired\n          7090469811  cycles elapsed\n           217661968  peak memory footprint\n",
+      "round": {
+        "accounting_valid": true,
+        "after_drop_live_bytes_delta": "0",
+        "completed_cycles": 10000,
+        "constructor": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10051,
+            "deallocations": 33,
+            "live_bytes": 11506440,
+            "reallocations": 0,
+            "requested_bytes": 11507568
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10041,
+            "deallocations": 33,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 5602844
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 10,
+            "deallocations": 0,
+            "duration_ns": "441250",
+            "live_bytes_delta": "5904724",
+            "reallocations": 0,
+            "requested_bytes": 5904724
+          }
+        },
+        "constructor_retained_live_bytes": 5904724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "decision": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "1391931818",
+          "latency_ns": {
+            "max": "239250",
+            "method": "nearest-rank",
+            "min": "127625",
+            "p50": "139833",
+            "p95": "147625",
+            "p99": "155333"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "decision_scope": "global-fit",
+        "drop": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10051,
+            "deallocations": 43,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 11507568
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10051,
+            "deallocations": 33,
+            "live_bytes": 11506440,
+            "reallocations": 0,
+            "requested_bytes": 11507568
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 0,
+            "deallocations": 10,
+            "duration_ns": "17666",
+            "live_bytes_delta": "-5904724",
+            "reallocations": 0,
+            "requested_bytes": 0
+          }
+        },
+        "event": "runtime_pool_cycles_round",
+        "failure": null,
+        "give": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "217231",
+          "latency_ns": {
+            "max": "250",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "41",
+            "p95": "42",
+            "p99": "42"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "inputs": {
+          "cpu_milli": 48000,
+          "decision": "fit",
+          "demand_class": "shards",
+          "demand_cpu_milli": 1000,
+          "demand_mem_bytes": 67108864,
+          "disk_bytes": 0,
+          "gpu_count": 0,
+          "kind": "plain",
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "pool_classes": [
+            "shards"
+          ],
+          "pool_cpu_milli": 4000,
+          "pool_mem_bytes": 662700032,
+          "repeats": 10000,
+          "rounds": 1,
+          "scorer": "hex",
+          "scorer_applies": true,
+          "warmup_repeats": 0
+        },
+        "round": 0,
+        "status": "ok",
+        "take": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "328733",
+          "latency_ns": {
+            "max": "458",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "42",
+            "p95": "42",
+            "p99": "42"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        }
+      }
+    },
+    {
+      "pair": 0,
+      "version": "side",
+      "before": {
+        "load": [
+          1.296875,
+          1.578125,
+          1.6376953125
+        ],
+        "visible_build_processes": []
+      },
+      "after": {
+        "load": [
+          1.27294921875,
+          1.568359375,
+          1.6337890625
+        ],
+        "visible_build_processes": []
+      },
+      "quiet": true,
+      "raw": "/Users/adalundhe/.cache/hex-lead/quiet-pool-profile-935f6b21/fit-results-n10000/0-side.jsonl",
+      "raw_sha256": "5568878250b9a58359c334aad9cedddc8e0712e4ec2412b3e0e3f0c74362a150",
+      "external_time": "        1.60 real         1.52 user         0.05 sys\n           216956928  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               13541  page reclaims\n                   1  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  89  voluntary context switches\n                 506  involuntary context switches\n         51788618206  instructions retired\n          7085761496  cycles elapsed\n           216285688  peak memory footprint\n",
+      "round": {
+        "accounting_valid": true,
+        "after_drop_live_bytes_delta": "0",
+        "completed_cycles": 10000,
+        "constructor": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 20052,
+            "deallocations": 33,
+            "live_bytes": 10706440,
+            "reallocations": 0,
+            "requested_bytes": 10707566
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10041,
+            "deallocations": 33,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 5602842
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 10011,
+            "deallocations": 0,
+            "duration_ns": "381250",
+            "live_bytes_delta": "5104724",
+            "reallocations": 0,
+            "requested_bytes": 5104724
+          }
+        },
+        "constructor_retained_live_bytes": 5104724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "decision": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "1402270806",
+          "latency_ns": {
+            "max": "953375",
+            "method": "nearest-rank",
+            "min": "126083",
+            "p50": "135375",
+            "p95": "157709",
+            "p99": "197958"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "decision_scope": "global-fit",
+        "drop": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 20052,
+            "deallocations": 10044,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 10707566
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 20052,
+            "deallocations": 33,
+            "live_bytes": 10706440,
+            "reallocations": 0,
+            "requested_bytes": 10707566
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 0,
+            "deallocations": 10011,
+            "duration_ns": "109834",
+            "live_bytes_delta": "-5104724",
+            "reallocations": 0,
+            "requested_bytes": 0
+          }
+        },
+        "event": "runtime_pool_cycles_round",
+        "failure": null,
+        "give": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "223885",
+          "latency_ns": {
+            "max": "542",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "41",
+            "p95": "42",
+            "p99": "42"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "inputs": {
+          "cpu_milli": 48000,
+          "decision": "fit",
+          "demand_class": "shards",
+          "demand_cpu_milli": 1000,
+          "demand_mem_bytes": 67108864,
+          "disk_bytes": 0,
+          "gpu_count": 0,
+          "kind": "plain",
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "pool_classes": [
+            "shards"
+          ],
+          "pool_cpu_milli": 4000,
+          "pool_mem_bytes": 662700032,
+          "repeats": 10000,
+          "rounds": 1,
+          "scorer": "hex",
+          "scorer_applies": true,
+          "warmup_repeats": 0
+        },
+        "round": 0,
+        "status": "ok",
+        "take": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "305743",
+          "latency_ns": {
+            "max": "3708",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "41",
+            "p95": "42",
+            "p99": "84"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        }
+      }
+    },
+    {
+      "pair": 1,
+      "version": "side",
+      "before": {
+        "load": [
+          1.27294921875,
+          1.568359375,
+          1.6337890625
+        ],
+        "visible_build_processes": []
+      },
+      "after": {
+        "load": [
+          1.27294921875,
+          1.568359375,
+          1.6337890625
+        ],
+        "visible_build_processes": []
+      },
+      "quiet": true,
+      "raw": "/Users/adalundhe/.cache/hex-lead/quiet-pool-profile-935f6b21/fit-results-n10000/1-side.jsonl",
+      "raw_sha256": "956df87d25736866a7e1ba93057bb68f667d4303f4d76bbe65e75e5f3c8b09c7",
+      "external_time": "        1.57 real         1.51 user         0.05 sys\n           216891392  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               13537  page reclaims\n                   1  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 105  voluntary context switches\n                  20  involuntary context switches\n         51769641631  instructions retired\n          7049949000  cycles elapsed\n           216220152  peak memory footprint\n",
+      "round": {
+        "accounting_valid": true,
+        "after_drop_live_bytes_delta": "0",
+        "completed_cycles": 10000,
+        "constructor": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 20052,
+            "deallocations": 33,
+            "live_bytes": 10706440,
+            "reallocations": 0,
+            "requested_bytes": 10707566
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10041,
+            "deallocations": 33,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 5602842
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 10011,
+            "deallocations": 0,
+            "duration_ns": "389166",
+            "live_bytes_delta": "5104724",
+            "reallocations": 0,
+            "requested_bytes": 5104724
+          }
+        },
+        "constructor_retained_live_bytes": 5104724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "decision": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "1379534163",
+          "latency_ns": {
+            "max": "205083",
+            "method": "nearest-rank",
+            "min": "129000",
+            "p50": "136458",
+            "p95": "148417",
+            "p99": "160541"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "decision_scope": "global-fit",
+        "drop": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 20052,
+            "deallocations": 10044,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 10707566
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 20052,
+            "deallocations": 33,
+            "live_bytes": 10706440,
+            "reallocations": 0,
+            "requested_bytes": 10707566
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 0,
+            "deallocations": 10011,
+            "duration_ns": "99083",
+            "live_bytes_delta": "-5104724",
+            "reallocations": 0,
+            "requested_bytes": 0
+          }
+        },
+        "event": "runtime_pool_cycles_round",
+        "failure": null,
+        "give": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "216133",
+          "latency_ns": {
+            "max": "333",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "41",
+            "p95": "42",
+            "p99": "42"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "inputs": {
+          "cpu_milli": 48000,
+          "decision": "fit",
+          "demand_class": "shards",
+          "demand_cpu_milli": 1000,
+          "demand_mem_bytes": 67108864,
+          "disk_bytes": 0,
+          "gpu_count": 0,
+          "kind": "plain",
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "pool_classes": [
+            "shards"
+          ],
+          "pool_cpu_milli": 4000,
+          "pool_mem_bytes": 662700032,
+          "repeats": 10000,
+          "rounds": 1,
+          "scorer": "hex",
+          "scorer_applies": true,
+          "warmup_repeats": 0
+        },
+        "round": 0,
+        "status": "ok",
+        "take": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "282061",
+          "latency_ns": {
+            "max": "875",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "41",
+            "p95": "42",
+            "p99": "42"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        }
+      }
+    },
+    {
+      "pair": 1,
+      "version": "inline",
+      "before": {
+        "load": [
+          1.27294921875,
+          1.568359375,
+          1.6337890625
+        ],
+        "visible_build_processes": []
+      },
+      "after": {
+        "load": [
+          1.27294921875,
+          1.568359375,
+          1.6337890625
+        ],
+        "visible_build_processes": []
+      },
+      "quiet": true,
+      "raw": "/Users/adalundhe/.cache/hex-lead/quiet-pool-profile-935f6b21/fit-results-n10000/1-inline.jsonl",
+      "raw_sha256": "616f1c21e3f64985a7b4df0ecffda64d58405f48a84859b86569bef433930d0f",
+      "external_time": "        1.60 real         1.54 user         0.05 sys\n           218136576  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               13620  page reclaims\n                   1  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  41  voluntary context switches\n                  63  involuntary context switches\n         51180418454  instructions retired\n          7169714544  cycles elapsed\n           217629200  peak memory footprint\n",
+      "round": {
+        "accounting_valid": true,
+        "after_drop_live_bytes_delta": "0",
+        "completed_cycles": 10000,
+        "constructor": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10051,
+            "deallocations": 33,
+            "live_bytes": 11506440,
+            "reallocations": 0,
+            "requested_bytes": 11507568
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10041,
+            "deallocations": 33,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 5602844
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 10,
+            "deallocations": 0,
+            "duration_ns": "423875",
+            "live_bytes_delta": "5904724",
+            "reallocations": 0,
+            "requested_bytes": 5904724
+          }
+        },
+        "constructor_retained_live_bytes": 5904724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "decision": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "1410630145",
+          "latency_ns": {
+            "max": "237416",
+            "method": "nearest-rank",
+            "min": "129792",
+            "p50": "141375",
+            "p95": "150375",
+            "p99": "165875"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "decision_scope": "global-fit",
+        "drop": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10051,
+            "deallocations": 43,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 11507568
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10051,
+            "deallocations": 33,
+            "live_bytes": 11506440,
+            "reallocations": 0,
+            "requested_bytes": 11507568
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 0,
+            "deallocations": 10,
+            "duration_ns": "23042",
+            "live_bytes_delta": "-5904724",
+            "reallocations": 0,
+            "requested_bytes": 0
+          }
+        },
+        "event": "runtime_pool_cycles_round",
+        "failure": null,
+        "give": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "217865",
+          "latency_ns": {
+            "max": "208",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "41",
+            "p95": "42",
+            "p99": "42"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "inputs": {
+          "cpu_milli": 48000,
+          "decision": "fit",
+          "demand_class": "shards",
+          "demand_cpu_milli": 1000,
+          "demand_mem_bytes": 67108864,
+          "disk_bytes": 0,
+          "gpu_count": 0,
+          "kind": "plain",
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "pool_classes": [
+            "shards"
+          ],
+          "pool_cpu_milli": 4000,
+          "pool_mem_bytes": 662700032,
+          "repeats": 10000,
+          "rounds": 1,
+          "scorer": "hex",
+          "scorer_applies": true,
+          "warmup_repeats": 0
+        },
+        "round": 0,
+        "status": "ok",
+        "take": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "340763",
+          "latency_ns": {
+            "max": "625",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "42",
+            "p95": "42",
+            "p99": "42"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        }
+      }
+    },
+    {
+      "pair": 2,
+      "version": "inline",
+      "before": {
+        "load": [
+          1.27294921875,
+          1.568359375,
+          1.6337890625
+        ],
+        "visible_build_processes": []
+      },
+      "after": {
+        "load": [
+          1.2509765625,
+          1.55859375,
+          1.6298828125
+        ],
+        "visible_build_processes": []
+      },
+      "quiet": true,
+      "raw": "/Users/adalundhe/.cache/hex-lead/quiet-pool-profile-935f6b21/fit-results-n10000/2-inline.jsonl",
+      "raw_sha256": "1eff0c291d88c5b88b5a1773a0cf250874eba1cb72b1dca1be3561662cc50c38",
+      "external_time": "        1.59 real         1.52 user         0.06 sys\n           217432064  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               13578  page reclaims\n                   1  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  93  voluntary context switches\n                  49  involuntary context switches\n         51202692510  instructions retired\n          7066077302  cycles elapsed\n           216908280  peak memory footprint\n",
+      "round": {
+        "accounting_valid": true,
+        "after_drop_live_bytes_delta": "0",
+        "completed_cycles": 10000,
+        "constructor": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10051,
+            "deallocations": 33,
+            "live_bytes": 11506440,
+            "reallocations": 0,
+            "requested_bytes": 11507568
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10041,
+            "deallocations": 33,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 5602844
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 10,
+            "deallocations": 0,
+            "duration_ns": "422459",
+            "live_bytes_delta": "5904724",
+            "reallocations": 0,
+            "requested_bytes": 5904724
+          }
+        },
+        "constructor_retained_live_bytes": 5904724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "decision": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "1393379360",
+          "latency_ns": {
+            "max": "234292",
+            "method": "nearest-rank",
+            "min": "128209",
+            "p50": "138042",
+            "p95": "155667",
+            "p99": "167459"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "decision_scope": "global-fit",
+        "drop": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10051,
+            "deallocations": 43,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 11507568
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10051,
+            "deallocations": 33,
+            "live_bytes": 11506440,
+            "reallocations": 0,
+            "requested_bytes": 11507568
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 0,
+            "deallocations": 10,
+            "duration_ns": "16875",
+            "live_bytes_delta": "-5904724",
+            "reallocations": 0,
+            "requested_bytes": 0
+          }
+        },
+        "event": "runtime_pool_cycles_round",
+        "failure": null,
+        "give": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "222718",
+          "latency_ns": {
+            "max": "333",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "41",
+            "p95": "42",
+            "p99": "42"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "inputs": {
+          "cpu_milli": 48000,
+          "decision": "fit",
+          "demand_class": "shards",
+          "demand_cpu_milli": 1000,
+          "demand_mem_bytes": 67108864,
+          "disk_bytes": 0,
+          "gpu_count": 0,
+          "kind": "plain",
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "pool_classes": [
+            "shards"
+          ],
+          "pool_cpu_milli": 4000,
+          "pool_mem_bytes": 662700032,
+          "repeats": 10000,
+          "rounds": 1,
+          "scorer": "hex",
+          "scorer_applies": true,
+          "warmup_repeats": 0
+        },
+        "round": 0,
+        "status": "ok",
+        "take": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "333871",
+          "latency_ns": {
+            "max": "583",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "42",
+            "p95": "42",
+            "p99": "42"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        }
+      }
+    },
+    {
+      "pair": 2,
+      "version": "side",
+      "before": {
+        "load": [
+          1.2509765625,
+          1.55859375,
+          1.6298828125
+        ],
+        "visible_build_processes": []
+      },
+      "after": {
+        "load": [
+          1.2509765625,
+          1.55859375,
+          1.6298828125
+        ],
+        "visible_build_processes": []
+      },
+      "quiet": true,
+      "raw": "/Users/adalundhe/.cache/hex-lead/quiet-pool-profile-935f6b21/fit-results-n10000/2-side.jsonl",
+      "raw_sha256": "8d0424cb9c7052455b0cf83a3ef264d31b528d1f519735604210a03cb0f05e37",
+      "external_time": "        1.59 real         1.54 user         0.05 sys\n           216956928  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               13541  page reclaims\n                   1  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  34  voluntary context switches\n                  57  involuntary context switches\n         51790400044  instructions retired\n          7127190874  cycles elapsed\n           216285688  peak memory footprint\n",
+      "round": {
+        "accounting_valid": true,
+        "after_drop_live_bytes_delta": "0",
+        "completed_cycles": 10000,
+        "constructor": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 20052,
+            "deallocations": 33,
+            "live_bytes": 10706440,
+            "reallocations": 0,
+            "requested_bytes": 10707566
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10041,
+            "deallocations": 33,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 5602842
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 10011,
+            "deallocations": 0,
+            "duration_ns": "406583",
+            "live_bytes_delta": "5104724",
+            "reallocations": 0,
+            "requested_bytes": 5104724
+          }
+        },
+        "constructor_retained_live_bytes": 5104724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "decision": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "1406175433",
+          "latency_ns": {
+            "max": "425167",
+            "method": "nearest-rank",
+            "min": "125166",
+            "p50": "141666",
+            "p95": "155500",
+            "p99": "172833"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "decision_scope": "global-fit",
+        "drop": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 20052,
+            "deallocations": 10044,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 10707566
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 20052,
+            "deallocations": 33,
+            "live_bytes": 10706440,
+            "reallocations": 0,
+            "requested_bytes": 10707566
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 0,
+            "deallocations": 10011,
+            "duration_ns": "101166",
+            "live_bytes_delta": "-5104724",
+            "reallocations": 0,
+            "requested_bytes": 0
+          }
+        },
+        "event": "runtime_pool_cycles_round",
+        "failure": null,
+        "give": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "225471",
+          "latency_ns": {
+            "max": "500",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "41",
+            "p95": "42",
+            "p99": "42"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "inputs": {
+          "cpu_milli": 48000,
+          "decision": "fit",
+          "demand_class": "shards",
+          "demand_cpu_milli": 1000,
+          "demand_mem_bytes": 67108864,
+          "disk_bytes": 0,
+          "gpu_count": 0,
+          "kind": "plain",
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "pool_classes": [
+            "shards"
+          ],
+          "pool_cpu_milli": 4000,
+          "pool_mem_bytes": 662700032,
+          "repeats": 10000,
+          "rounds": 1,
+          "scorer": "hex",
+          "scorer_applies": true,
+          "warmup_repeats": 0
+        },
+        "round": 0,
+        "status": "ok",
+        "take": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "291223",
+          "latency_ns": {
+            "max": "666",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "41",
+            "p95": "42",
+            "p99": "83"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        }
+      }
+    },
+    {
+      "pair": 3,
+      "version": "side",
+      "before": {
+        "load": [
+          1.2509765625,
+          1.55859375,
+          1.6298828125
+        ],
+        "visible_build_processes": []
+      },
+      "after": {
+        "load": [
+          1.2509765625,
+          1.55859375,
+          1.6298828125
+        ],
+        "visible_build_processes": []
+      },
+      "quiet": true,
+      "raw": "/Users/adalundhe/.cache/hex-lead/quiet-pool-profile-935f6b21/fit-results-n10000/3-side.jsonl",
+      "raw_sha256": "df70150077a325412bfb013919d774e509f6bf8abcedf0577796f2e7abc2571e",
+      "external_time": "        1.68 real         1.61 user         0.06 sys\n           217628672  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               13582  page reclaims\n                   1  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  59  voluntary context switches\n                  63  involuntary context switches\n         51791113800  instructions retired\n          7313842550  cycles elapsed\n           216990224  peak memory footprint\n",
+      "round": {
+        "accounting_valid": true,
+        "after_drop_live_bytes_delta": "0",
+        "completed_cycles": 10000,
+        "constructor": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 20052,
+            "deallocations": 33,
+            "live_bytes": 10706440,
+            "reallocations": 0,
+            "requested_bytes": 10707566
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10041,
+            "deallocations": 33,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 5602842
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 10011,
+            "deallocations": 0,
+            "duration_ns": "389791",
+            "live_bytes_delta": "5104724",
+            "reallocations": 0,
+            "requested_bytes": 5104724
+          }
+        },
+        "constructor_retained_live_bytes": 5104724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "decision": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "1473774385",
+          "latency_ns": {
+            "max": "437542",
+            "method": "nearest-rank",
+            "min": "124291",
+            "p50": "145292",
+            "p95": "173958",
+            "p99": "201542"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "decision_scope": "global-fit",
+        "drop": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 20052,
+            "deallocations": 10044,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 10707566
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 20052,
+            "deallocations": 33,
+            "live_bytes": 10706440,
+            "reallocations": 0,
+            "requested_bytes": 10707566
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 0,
+            "deallocations": 10011,
+            "duration_ns": "99500",
+            "live_bytes_delta": "-5104724",
+            "reallocations": 0,
+            "requested_bytes": 0
+          }
+        },
+        "event": "runtime_pool_cycles_round",
+        "failure": null,
+        "give": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "245805",
+          "latency_ns": {
+            "max": "333",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "41",
+            "p95": "42",
+            "p99": "42"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "inputs": {
+          "cpu_milli": 48000,
+          "decision": "fit",
+          "demand_class": "shards",
+          "demand_cpu_milli": 1000,
+          "demand_mem_bytes": 67108864,
+          "disk_bytes": 0,
+          "gpu_count": 0,
+          "kind": "plain",
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "pool_classes": [
+            "shards"
+          ],
+          "pool_cpu_milli": 4000,
+          "pool_mem_bytes": 662700032,
+          "repeats": 10000,
+          "rounds": 1,
+          "scorer": "hex",
+          "scorer_applies": true,
+          "warmup_repeats": 0
+        },
+        "round": 0,
+        "status": "ok",
+        "take": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "297141",
+          "latency_ns": {
+            "max": "2583",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "41",
+            "p95": "42",
+            "p99": "83"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        }
+      }
+    },
+    {
+      "pair": 3,
+      "version": "inline",
+      "before": {
+        "load": [
+          1.2509765625,
+          1.55859375,
+          1.6298828125
+        ],
+        "visible_build_processes": []
+      },
+      "after": {
+        "load": [
+          1.23046875,
+          1.54931640625,
+          1.6259765625
+        ],
+        "visible_build_processes": []
+      },
+      "quiet": true,
+      "raw": "/Users/adalundhe/.cache/hex-lead/quiet-pool-profile-935f6b21/fit-results-n10000/3-inline.jsonl",
+      "raw_sha256": "18cadaa44bbbf37508466762fb7a8f2a286a872ef1eb82350638e908f91cb8de",
+      "external_time": "        1.58 real         1.52 user         0.05 sys\n           217432064  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               13578  page reclaims\n                   1  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  38  voluntary context switches\n                 111  involuntary context switches\n         51200309593  instructions retired\n          6997636635  cycles elapsed\n           216891872  peak memory footprint\n",
+      "round": {
+        "accounting_valid": true,
+        "after_drop_live_bytes_delta": "0",
+        "completed_cycles": 10000,
+        "constructor": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10051,
+            "deallocations": 33,
+            "live_bytes": 11506440,
+            "reallocations": 0,
+            "requested_bytes": 11507568
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10041,
+            "deallocations": 33,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 5602844
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 10,
+            "deallocations": 0,
+            "duration_ns": "412042",
+            "live_bytes_delta": "5904724",
+            "reallocations": 0,
+            "requested_bytes": 5904724
+          }
+        },
+        "constructor_retained_live_bytes": 5904724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "decision": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "1385132780",
+          "latency_ns": {
+            "max": "644125",
+            "method": "nearest-rank",
+            "min": "126542",
+            "p50": "136292",
+            "p95": "150334",
+            "p99": "163375"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "decision_scope": "global-fit",
+        "drop": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10051,
+            "deallocations": 43,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 11507568
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10051,
+            "deallocations": 33,
+            "live_bytes": 11506440,
+            "reallocations": 0,
+            "requested_bytes": 11507568
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 0,
+            "deallocations": 10,
+            "duration_ns": "16458",
+            "live_bytes_delta": "-5904724",
+            "reallocations": 0,
+            "requested_bytes": 0
+          }
+        },
+        "event": "runtime_pool_cycles_round",
+        "failure": null,
+        "give": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "223827",
+          "latency_ns": {
+            "max": "333",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "41",
+            "p95": "42",
+            "p99": "42"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "inputs": {
+          "cpu_milli": 48000,
+          "decision": "fit",
+          "demand_class": "shards",
+          "demand_cpu_milli": 1000,
+          "demand_mem_bytes": 67108864,
+          "disk_bytes": 0,
+          "gpu_count": 0,
+          "kind": "plain",
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "pool_classes": [
+            "shards"
+          ],
+          "pool_cpu_milli": 4000,
+          "pool_mem_bytes": 662700032,
+          "repeats": 10000,
+          "rounds": 1,
+          "scorer": "hex",
+          "scorer_applies": true,
+          "warmup_repeats": 0
+        },
+        "round": 0,
+        "status": "ok",
+        "take": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "337782",
+          "latency_ns": {
+            "max": "3000",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "42",
+            "p95": "42",
+            "p99": "83"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        }
+      }
+    },
+    {
+      "pair": 4,
+      "version": "inline",
+      "before": {
+        "load": [
+          1.23046875,
+          1.54931640625,
+          1.6259765625
+        ],
+        "visible_build_processes": []
+      },
+      "after": {
+        "load": [
+          1.23046875,
+          1.54931640625,
+          1.6259765625
+        ],
+        "visible_build_processes": []
+      },
+      "quiet": true,
+      "raw": "/Users/adalundhe/.cache/hex-lead/quiet-pool-profile-935f6b21/fit-results-n10000/4-inline.jsonl",
+      "raw_sha256": "fb998b0a65196b85a80a9eb5f88f6e1f573c54612ad4156cec372ff11022e569",
+      "external_time": "        1.56 real         1.50 user         0.05 sys\n           217432064  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               13578  page reclaims\n                   1  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  36  voluntary context switches\n                  38  involuntary context switches\n         51189054749  instructions retired\n          6984398451  cycles elapsed\n           216908280  peak memory footprint\n",
+      "round": {
+        "accounting_valid": true,
+        "after_drop_live_bytes_delta": "0",
+        "completed_cycles": 10000,
+        "constructor": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10051,
+            "deallocations": 33,
+            "live_bytes": 11506440,
+            "reallocations": 0,
+            "requested_bytes": 11507568
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10041,
+            "deallocations": 33,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 5602844
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 10,
+            "deallocations": 0,
+            "duration_ns": "402917",
+            "live_bytes_delta": "5904724",
+            "reallocations": 0,
+            "requested_bytes": 5904724
+          }
+        },
+        "constructor_retained_live_bytes": 5904724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "decision": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "1368352721",
+          "latency_ns": {
+            "max": "233166",
+            "method": "nearest-rank",
+            "min": "129750",
+            "p50": "134833",
+            "p95": "147875",
+            "p99": "157667"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "decision_scope": "global-fit",
+        "drop": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10051,
+            "deallocations": 43,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 11507568
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10051,
+            "deallocations": 33,
+            "live_bytes": 11506440,
+            "reallocations": 0,
+            "requested_bytes": 11507568
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 0,
+            "deallocations": 10,
+            "duration_ns": "14666",
+            "live_bytes_delta": "-5904724",
+            "reallocations": 0,
+            "requested_bytes": 0
+          }
+        },
+        "event": "runtime_pool_cycles_round",
+        "failure": null,
+        "give": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "213425",
+          "latency_ns": {
+            "max": "209",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "41",
+            "p95": "42",
+            "p99": "42"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "inputs": {
+          "cpu_milli": 48000,
+          "decision": "fit",
+          "demand_class": "shards",
+          "demand_cpu_milli": 1000,
+          "demand_mem_bytes": 67108864,
+          "disk_bytes": 0,
+          "gpu_count": 0,
+          "kind": "plain",
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "pool_classes": [
+            "shards"
+          ],
+          "pool_cpu_milli": 4000,
+          "pool_mem_bytes": 662700032,
+          "repeats": 10000,
+          "rounds": 1,
+          "scorer": "hex",
+          "scorer_applies": true,
+          "warmup_repeats": 0
+        },
+        "round": 0,
+        "status": "ok",
+        "take": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "332369",
+          "latency_ns": {
+            "max": "583",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "42",
+            "p95": "42",
+            "p99": "42"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        }
+      }
+    },
+    {
+      "pair": 4,
+      "version": "side",
+      "before": {
+        "load": [
+          1.23046875,
+          1.54931640625,
+          1.6259765625
+        ],
+        "visible_build_processes": []
+      },
+      "after": {
+        "load": [
+          1.23046875,
+          1.54931640625,
+          1.6259765625
+        ],
+        "visible_build_processes": []
+      },
+      "quiet": true,
+      "raw": "/Users/adalundhe/.cache/hex-lead/quiet-pool-profile-935f6b21/fit-results-n10000/4-side.jsonl",
+      "raw_sha256": "6a88bdd87c50f5dd0bcbe0b7e4e1a8bce249ea25059116a8c7882dd9b087f7ca",
+      "external_time": "        1.59 real         1.53 user         0.05 sys\n           216924160  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               13539  page reclaims\n                   1  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  19  voluntary context switches\n                  72  involuntary context switches\n         51791825550  instructions retired\n          7125493073  cycles elapsed\n           216269328  peak memory footprint\n",
+      "round": {
+        "accounting_valid": true,
+        "after_drop_live_bytes_delta": "0",
+        "completed_cycles": 10000,
+        "constructor": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 20052,
+            "deallocations": 33,
+            "live_bytes": 10706440,
+            "reallocations": 0,
+            "requested_bytes": 10707566
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 10041,
+            "deallocations": 33,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 5602842
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 10011,
+            "deallocations": 0,
+            "duration_ns": "386375",
+            "live_bytes_delta": "5104724",
+            "reallocations": 0,
+            "requested_bytes": 5104724
+          }
+        },
+        "constructor_retained_live_bytes": 5104724,
+        "copied_bytes": null,
+        "copy_measurement": "unmeasured",
+        "decision": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "1402478918",
+          "latency_ns": {
+            "max": "607209",
+            "method": "nearest-rank",
+            "min": "126875",
+            "p50": "136667",
+            "p95": "155417",
+            "p99": "167416"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "decision_scope": "global-fit",
+        "drop": {
+          "after": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 20052,
+            "deallocations": 10044,
+            "live_bytes": 5601716,
+            "reallocations": 0,
+            "requested_bytes": 10707566
+          },
+          "before": {
+            "accounting_invalid": false,
+            "allocation_failures": 0,
+            "allocations": 20052,
+            "deallocations": 33,
+            "live_bytes": 10706440,
+            "reallocations": 0,
+            "requested_bytes": 10707566
+          },
+          "phase": {
+            "accounting_valid": true,
+            "allocation_failures": 0,
+            "allocations": 0,
+            "deallocations": 10011,
+            "duration_ns": "106333",
+            "live_bytes_delta": "-5104724",
+            "reallocations": 0,
+            "requested_bytes": 0
+          }
+        },
+        "event": "runtime_pool_cycles_round",
+        "failure": null,
+        "give": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "218243",
+          "latency_ns": {
+            "max": "417",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "41",
+            "p95": "42",
+            "p99": "42"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        },
+        "inputs": {
+          "cpu_milli": 48000,
+          "decision": "fit",
+          "demand_class": "shards",
+          "demand_cpu_milli": 1000,
+          "demand_mem_bytes": 67108864,
+          "disk_bytes": 0,
+          "gpu_count": 0,
+          "kind": "plain",
+          "mem_bytes": 412316860416,
+          "nodes": 10000,
+          "pool_classes": [
+            "shards"
+          ],
+          "pool_cpu_milli": 4000,
+          "pool_mem_bytes": 662700032,
+          "repeats": 10000,
+          "rounds": 1,
+          "scorer": "hex",
+          "scorer_applies": true,
+          "warmup_repeats": 0
+        },
+        "round": 0,
+        "status": "ok",
+        "take": {
+          "allocation_failures": 0,
+          "allocations": 0,
+          "count": 10000,
+          "deallocations": 0,
+          "duration_ns_sum": "297753",
+          "latency_ns": {
+            "max": "4583",
+            "method": "nearest-rank",
+            "min": "0",
+            "p50": "41",
+            "p95": "42",
+            "p99": "83"
+          },
+          "live_bytes_delta": "0",
+          "reallocations": 0,
+          "requested_bytes": 0
+        }
+      }
+    }
+  ],
+  "reason": "extend first retained5pairedN1000 capture because p99 differed while paired directions varied;10000 fromAC-T7.4.2 placements/s count, not a runtime tuning constant; all earlier evidence retained",
+  "aggregate": {
+    "inline": {
+      "decision": {
+        "n": 50000,
+        "p50_ns": 138000,
+        "p90_ns": 146208,
+        "p99_ns": 162875,
+        "max_ns": 644125,
+        "sum_ns": 6949426824
+      },
+      "take": {
+        "n": 50000,
+        "p50_ns": 42,
+        "p90_ns": 42,
+        "p99_ns": 42,
+        "max_ns": 3000,
+        "sum_ns": 1673518
+      },
+      "give": {
+        "n": 50000,
+        "p50_ns": 41,
+        "p90_ns": 42,
+        "p99_ns": 42,
+        "max_ns": 333,
+        "sum_ns": 1095066
+      }
+    },
+    "side": {
+      "decision": {
+        "n": 50000,
+        "p50_ns": 138208,
+        "p90_ns": 155209,
+        "p99_ns": 189292,
+        "max_ns": 953375,
+        "sum_ns": 7064233705
+      },
+      "take": {
+        "n": 50000,
+        "p50_ns": 41,
+        "p90_ns": 42,
+        "p99_ns": 83,
+        "max_ns": 4583,
+        "sum_ns": 1473921
+      },
+      "give": {
+        "n": 50000,
+        "p50_ns": 41,
+        "p90_ns": 42,
+        "p99_ns": 42,
+        "max_ns": 542,
+        "sum_ns": 1129537
+      }
+    }
+  },
+  "all_observations_quiet": true
+}

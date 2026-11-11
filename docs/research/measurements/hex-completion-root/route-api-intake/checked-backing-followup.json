@@ -1,0 +1,15 @@
+{
+  "sources": {
+    "crates/hex-api/src/runtime.rs": "db78588512268916282192e8786dc807fa13d564",
+    "crates/hex-api/src/spec.rs": "db78588512268916282192e8786dc807fa13d564",
+    "crates/hex-node/src/node.rs": "8cc1640059e6e0ddd9099b53ce2c1b1b022680d0",
+    "crates/hex-runtime/src/firecracker/native.rs": "8cc1640059e6e0ddd9099b53ce2c1b1b022680d0"
+  },
+  "sha256": {
+    "crates/hex-api/src/runtime.rs": "6bf43c039c91490f8fdcef7d6bf65f0e32a25211bb23391c1427cb42989ea4e3",
+    "crates/hex-api/src/spec.rs": "6c209d5880bf1003f33c2aee26da0929e3b48dbc7b2ce299c1578c69e65f67ad",
+    "crates/hex-node/src/node.rs": "b28e5fcb7824892860fe1840cc82175307d9767bb6397eaf43e21855237725f3",
+    "crates/hex-runtime/src/firecracker/native.rs": "45eff1e2b37690d8b5bdbc048d97643c726bab9df2cb64fb2bacee3b7f5613e4"
+  },
+  "status": "source-only; exact topology/profile/full-grant checks and original class/route projection; no checks or native effects claimed"
+}

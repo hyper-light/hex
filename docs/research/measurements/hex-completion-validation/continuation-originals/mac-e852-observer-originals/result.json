@@ -1,0 +1,597 @@
+{
+  "source": "e852c1b5ba9e1e2c8eb122dfb5817cd4dc339748",
+  "archive_sha256": "b8f8ac42517fccf4887c99fe48f15397333a8bfa8513b8966fe50df1e931e1c0",
+  "scope": "ROOT original finite-owned and unfinishedDrop regressions plus new chargedguest observer controls/changed wire payload, strictClippy/check; no nativebackend/VM/GPU, no old15/PCI16/report3 repeat",
+  "target": "mac",
+  "platform": "macOS-26.2-arm64-arm-64bit",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 59246,
+  "phases": [
+    {
+      "name": "api-finite-owned-original",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "--manifest-path",
+        "vendor/shards/crates/api/Cargo.toml",
+        "--lib",
+        "client::tests::finite_owned_retry_expiry_cannot_start_an_unbounded_handshake",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 59304,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "82f1850359d901758e2a4cff51ee9c153539e4c61ec5e294fa74ecc0f14a346d",
+      "bytes": 1757,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "client-drop-original",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-client",
+        "--lib",
+        "--locked",
+        "calls::budget_tests::absolute_run_error_return_does_not_renew_drop_sender_budget",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 59360,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "e3d2818db4d03b8d4296495ef2c0bb86bcf815f5dbee1d6f3632d823e9dfe7c0",
+      "bytes": 3244,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "guest-observer-new-eight",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::observer::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 59506,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "75072c024faf49d9ae8b8d9f1a0106910d8575beeffeeefcf9d67360701e6f4a",
+      "bytes": 2561,
+      "expected_selected": 8,
+      "actual_counts": [
+        {
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "guest::observer::config::tests::observer_artifact_bytes_paths_and_clean_program_are_exact",
+          "outcome": "ok"
+        },
+        {
+          "name": "guest::observer::config::tests::observer_configuration_refuses_alias_unknown_and_uncharged_inputs",
+          "outcome": "ok"
+        },
+        {
+          "name": "guest::observer::io::tests::bounded_observer_capture_keeps_overrun_and_requires_actual_eof",
+          "outcome": "ok"
+        },
+        {
+          "name": "guest::observer::io::tests::two_actual_guest_style_sockets_require_both_stream_ends",
+          "outcome": "ok"
+        },
+        {
+          "name": "guest::observer::tests::complete_venus_readiness_keeps_duplicate_diagnostic_uuids_and_all_heaps",
+          "outcome": "ok"
+        },
+        {
+          "name": "guest::observer::tests::hostile_guest_inventory_never_becomes_partial_ready",
+          "outcome": "ok"
+        },
+        {
+          "name": "guest::observer::tests::retained_observer_attempt_preserves_partial_eof_and_overrun_witness",
+          "outcome": "ok"
+        },
+        {
+          "name": "guest::observer::tests::retained_readiness_is_scoped_and_never_repairs_hostile_properties",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "cold-gpu-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::gpu_pool::tests::cold_gpu_backing_reserves_only_configured_claims_before_any_observation",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 59561,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "9a66011837e52c7f0ad606b7bb09466aab26c185cdd0606917578391a48529e5",
+      "bytes": 904,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "guest::gpu_pool::tests::cold_gpu_backing_reserves_only_configured_claims_before_any_observation",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "selected-report-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::selected::tests::private_renderer_report_round_trip_retains_original_scope_and_native_set",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 59563,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "45b48e0b7e2e512d876856ff1f7933f2db65bda0439e77092cb9c5f9f6cee08a",
+      "bytes": 905,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "guest::selected::tests::private_renderer_report_round_trip_retains_original_scope_and_native_set",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "selected-legacy-report-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::selected::tests::legacy_gpu_receipt_keeps_claims_without_manufacturing_private_report",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 59565,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "17a6db2b2e9d8088851fb982852490c2cb1c6d8dbcfb221ebd226c1cf5311bdb",
+      "bytes": 901,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "guest::selected::tests::legacy_gpu_receipt_keeps_claims_without_manufacturing_private_report",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "pool-report-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::pool::tests::pool_private_report_keeps_original_scope_and_exact_native_claim",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 59567,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "7835105926b08502b2a2eed39e5dc9cb10f3378c71d04fc5148481e63734863b",
+      "bytes": 892,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "guest::pool::tests::pool_private_report_keeps_original_scope_and_exact_native_claim",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "pool-reservation-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::dedicated::tests::pool_process_reservation_excludes_only_its_own_canonical_owner",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 59569,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "9aa0b917b5a62c36c0bf3088abb3dd444b9248c6cf8c8445326c0d36ccd51496",
+      "bytes": 896,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "guest::dedicated::tests::pool_process_reservation_excludes_only_its_own_canonical_owner",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "route_wire_backing_calls_and_all_phases_roundtrip",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-core",
+        "--lib",
+        "--locked",
+        "wire::tests::route_wire_backing_calls_and_all_phases_roundtrip",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 59571,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "a37fa212afe4de9331977cd495f6b65d59da4c9e2b066412da2e3af39c5f4f57",
+      "bytes": 889,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "wire::tests::route_wire_backing_calls_and_all_phases_roundtrip",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "route_wire_backing_claims_reject_duplicates_order_bad_ids_and_counts",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-core",
+        "--lib",
+        "--locked",
+        "wire::tests::route_wire_backing_claims_reject_duplicates_order_bad_ids_and_counts",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 59614,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "73586ef4ae89752f66bc99a89300a96034623b8a09bf9e330d6fbd9723f140c3",
+      "bytes": 440,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "wire::tests::route_wire_backing_claims_reject_duplicates_order_bad_ids_and_counts",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "route_wire_new_messages_enforce_exact_bounds_truncation_and_trailing_bytes",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-core",
+        "--lib",
+        "--locked",
+        "wire::tests::route_wire_new_messages_enforce_exact_bounds_truncation_and_trailing_bytes",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 59616,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "b136623fec77f9dfa000937f53bbbdd789d4aa1fb535f16b03bdaab8c015bfa8",
+      "bytes": 446,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "wire::tests::route_wire_new_messages_enforce_exact_bounds_truncation_and_trailing_bytes",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "route_wire_fixed_backing_profiles_and_grants_are_revalidated",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-core",
+        "--lib",
+        "--locked",
+        "wire::tests::route_wire_fixed_backing_profiles_and_grants_are_revalidated",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 59618,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "f559b9f426dc1309da69c3536220af6fea7930348e4eed55209d2baaba9fb489",
+      "bytes": 432,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "wire::tests::route_wire_fixed_backing_profiles_and_grants_are_revalidated",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "backing-wait-consumer",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-client",
+        "--lib",
+        "--locked",
+        "calls::tests::backing_lifecycle_waits_append_without_reordering_old_operations",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 59620,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "48810f55422874a40eb1f41c14bb1b64dd8cb093797b400f6e52d4f100f7eb1d",
+      "bytes": 438,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "calls::tests::backing_lifecycle_waits_append_without_reordering_old_operations",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "client-core-runtime-strict-clippy",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-client",
+        "-p",
+        "hex-core",
+        "-p",
+        "hex-runtime",
+        "--all-targets",
+        "--locked",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 59622,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "4bcdd81ba9d38577986985a4f1b783def33454eef7c7e0832a5358c6fbb7b206",
+      "bytes": 4261,
+      "test_outcomes": []
+    },
+    {
+      "name": "node-cli-matched-check",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "check",
+        "-p",
+        "hex-node",
+        "-p",
+        "hex-cli",
+        "--all-targets",
+        "--locked"
+      ],
+      "pid": 59711,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "35d568c0cd97505a7f0aba7c764c5d3d43505983f5fb1ce439cc7787a919ea7f",
+      "bytes": 2181,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [
+    "vendor/shards/Cargo.lock"
+  ],
+  "temp_entries": 1,
+  "native_backend_invocations": 0,
+  "api_registry_cohort": {
+    "seed_sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+    "pruned_sha256": "dcbe9479bcbd6b91c7f1cbe46a59a482e78d8d097bd49a0af91c352880ee9c84",
+    "registry_packages": 15,
+    "all_registry_tuples_subset_of_exact_root_lock": true,
+    "private_lock_overlay_only": true
+  },
+  "exit": 1
+}

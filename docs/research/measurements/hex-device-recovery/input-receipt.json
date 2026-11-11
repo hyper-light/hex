@@ -1,0 +1,13 @@
+{
+  "source_revision": "44a2df3bb8aeac1ed8ae405c3e933b88ee3f6abe",
+  "fixed_base": "37021c35e64b2a8bab1d35f20f92a0042d874a44",
+  "archive_sha256": "ee251bb9bb01edc8914b597ad7e7fbdb2c851da9c4b549b6ca8a3f0f7adf6105",
+  "archive_bytes": 6470388,
+  "leaf_sha256": "c98b6f1e9017e7d1152c4248c8006011389467d4139d455ea198201e95ff89d7",
+  "parent_original_sha256": "3bdec78b35be0c93c491ad65b5b268b312702c56a98202cae01bfe510903c120",
+  "selected_test": "peer::adversarial_device_recovery_tests::reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_twice",
+  "parent_registered_sha256": "9de0915a302a0582d6683ee95528054c83d79300d829e172d52f17a265009d5c",
+  "temporary_registration": "\n#[cfg(test)]\n#[path = \"peer/adversarial_device_recovery_tests.rs\"]\nmod adversarial_device_recovery_tests;\n",
+  "source_members": 1315,
+  "remote_base": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-01a1c640-44a2df3b-v1"
+}

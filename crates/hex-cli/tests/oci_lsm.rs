@@ -272,6 +272,9 @@ fn run_probe(
     .with_lsm(policy);
     let id = BoxId::new(name).map_err(|e| e.to_string())?;
     let spec = BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle.path().to_path_buf()),

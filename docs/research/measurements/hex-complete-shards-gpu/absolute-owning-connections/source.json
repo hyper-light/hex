@@ -1,0 +1,34 @@
+{
+  "source_chain": [
+    "89936ab99a313f5aa05724d23d1a6d059f46acb2",
+    "2ee4410fc5dbf89d168f7387dd1076b4eae55192",
+    "b93d1d3d101a547872c432bbb634240081d794e6",
+    "b287310aabfc6a05f1104dad7ec1449c070bdf70",
+    "1b93ea703d02e76b5d5c4c7461547429529a9f56"
+  ],
+  "scope": "new Guest::connect_before/typed Connect refusal through SAME owning adapter and Sim, plus actual old-positive-finite retry remedy",
+  "original_red": {
+    "source": "e852c1b5ba9e1e2c8eb122dfb5817cd4dc339748",
+    "binary_sha256": "63eeaa5e86d5ff70de2c97036a8514a6badb784e78de68f490a9bcc08a62787d",
+    "log_sha256": "db481f0e866b132e454e9276d4e997ba977dd2b5b02d150d2b68df915ccc13d3",
+    "counts": [
+      0,
+      1,
+      0
+    ],
+    "failure": "expired finite retry performed a new native dial",
+    "cleanup": "owned socket closed and thread joined before assertion"
+  },
+  "preserved": [
+    "borrowed connector byte body",
+    "ordinary SDK arguments",
+    "owning standalone zero/MAX compatibility",
+    "original2ee regression assertions"
+  ],
+  "new_controls": 2,
+  "results": "SOURCE ONLY; original-after/new2/compatibility and strictClippy pending",
+  "native_gpu_vm_hcs": 0,
+  "policy": "7d7e0855/df2 coordinator",
+  "root_comment": "clarified positive finite versus standalone zero/no-clock behavior; no executable-code deviation",
+  "vendor_first_check": "46 files/23patches/0differences; row initially used untruncated generated title, corrected to actual recorded filename"
+}

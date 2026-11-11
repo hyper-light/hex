@@ -1,0 +1,36 @@
+{
+  "CPU_percent": 100,
+  "disk_bytes": 12884901888,
+  "export_launcher_pin": {
+    "bytes": 2852,
+    "sha256": "547bcc96f6dfbd25ed147f00d08407406871164be29d9cb57ef75f256511b662",
+    "source": "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01/launcher-final.json"
+  },
+  "export_receipt_pin": {
+    "bytes": 1437,
+    "sha256": "93a93fbb1a8f00f9e213a338248178a79d5cde3c746eb8f385c450af41ce6b6c",
+    "source": "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01/output/export-receipt.json"
+  },
+  "jobs": 1,
+  "memory_bytes": 4294967296,
+  "needs": "linux/amd64,cpus=1,mem=4g,disk=12g",
+  "nice": 10,
+  "note": "FALSE source-only collect proposal. Actual completed measured export pins are historical inputs only. NEW ROOT review and actual bounded LB ACK/fresh deadline required. Frozen83586 sender/8f5 raw CLI receiver, no original-object export or profiler; no materialize/build/GPU admission.",
+  "operator_not_after_unix_ns": null,
+  "pids": 256,
+  "quiet_window_receipt": null,
+  "quiet_window_reviewed": false,
+  "remote_admission_path": "/home/adalundhe/.cache/hex-native-firecracker/held451-collect-bundle-2359-v1/reviewed.collect.json",
+  "reviewed": false,
+  "reviewed_by": "01a1aa77778471339bea3beff90d6bbd",
+  "root": "/home/adalundhe/.cache/hex-native-firecracker/held451-collect-root-measured-v1-01",
+  "runner": "451397fcc585f7f7cb9aaf00e42064bb",
+  "schema": "hex-native-fc-held451-readonly-admission-v1",
+  "scope_seconds": 180,
+  "source_export_root": "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01",
+  "source_seal_sha256": "02bab67d6d60b1371b205a27b9456b8fd3703a51d0b2bd7a2e0035d0676de5cb",
+  "stage": "collect",
+  "swap_bytes": 0,
+  "test_threads": 1,
+  "unit": "hex-native-fc-held451-collect-root-measured-v1-01"
+}

@@ -1,0 +1,65 @@
+{
+  "actual_census_directory_entries": 0,
+  "authority_inputs_hashed": 5001,
+  "binary_and_artifact_hashes": {
+    "hex": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-cold-extension-host-265c1501/aarch64-apple-darwin/release/hex",
+      "sha256": "cd9c1650550532f6f518b560a9ce1169e4c7637902f3b3397ff169d7ef7007d1"
+    },
+    "initrd": {
+      "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-cc7c2190-release-aarch64.cpio",
+      "sha256": "5521b2304a5a6c2d9357fe4e1ac43f68ec817b685f8600115fa94f139eda778e"
+    },
+    "kernel": {
+      "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+      "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+    },
+    "linux_hex": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-cc7c2190/aarch64-unknown-linux-musl/release/hex",
+      "sha256": "e2670cf5cf0b4ac32fa30f55b7027b3f95a942205c51aafe26169f5a7b9a276d"
+    },
+    "runtime_probe": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-cold-extension-probe-265c1501/aarch64-apple-darwin/release/hex-scheduler-runtime-probe",
+      "sha256": "9ad51a2fe7edb3dd3e9a25a42997378f25ee90249c1cde2c0b26b17b4be7835e"
+    },
+    "shards": {
+      "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+      "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+    }
+  },
+  "byte_identical_copy": "/Users/adalundhe/.cache/hx/root-armed-cold-release-n1000-265c1501.json",
+  "external_inputs_hashed": 9,
+  "fresh_roots": 1000,
+  "kind": "root-armed-cold-raw-reconstruction",
+  "ledger_rows": 16000,
+  "n": 1000,
+  "original_aggregate": {
+    "bytes": 1497095,
+    "path": "/Users/adalundhe/.cache/hex-lead/cold-extension-265c1501/receipts/armed-cold-release-n1000.json",
+    "sha256": "2f28591aefc6a40c66f1a16442feffd7b4d8b6b0f2e733fb5f252cec74dd0d64"
+  },
+  "profile": "release",
+  "receipts": {
+    "build": {
+      "path": "/Users/adalundhe/.cache/hex-lead/cold-extension-265c1501/receipts/build-release.json",
+      "sha256": "2c35808a29a04e3b0249039999d4c63ce66751d4470389811dd7fdbbd26d82d1"
+    },
+    "deadline": {
+      "path": "/Users/adalundhe/.cache/hex-lead/cold-extension-265c1501/receipts/method-armed-release-n1000.json",
+      "sha256": "e1311c7b87765f1f4f5e5009bb1956a65383ee0892af5547af61f3506096d810"
+    },
+    "policy": {
+      "path": "/Users/adalundhe/.cache/hex-lead/cold-extension-265c1501/receipts/policy-root-f5.json",
+      "sha256": "2561f5c98ec6340a0007606f4c20d7fac8c802716bab4514a03d7bf7da94dcb0"
+    }
+  },
+  "root_verification": {
+    "bytes": 1060789,
+    "path": "/Users/adalundhe/.cache/hex-lead/cold-extension-265c1501/receipts/root-armed-cold-release-n1000-verified.json",
+    "sha256": "a68b3d2c595e00a42a3bfaa35dda94d902ea9f859ffbe7cce69a06791d9bd4a4"
+  },
+  "scope": "all raw result/runtime/ledger/identity/config/receipt/record/Stopped data checked; ordered recorded original-Popen reap; no live verifier API query or independent no-transient-create counter; no timing,CDF,seed,fullboot,workload,resource-return or performance claim",
+  "source_revision": "265c15016d1a47c07f28e55a2f352c166b94a4b2",
+  "status": "consistent",
+  "unique_pid_start_pairs": 1000
+}

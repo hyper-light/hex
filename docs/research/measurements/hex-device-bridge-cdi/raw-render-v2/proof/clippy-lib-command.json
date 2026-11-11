@@ -1,0 +1,1 @@
+["/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo", "clippy", "-p", "hex-core", "--lib", "--locked", "--offline", "--no-deps", "--", "-D", "warnings"]

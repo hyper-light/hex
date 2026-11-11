@@ -1,0 +1,39 @@
+{
+  "version": "v1",
+  "archive": {
+    "path": "/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/retained/proof-v1.tar.gz",
+    "bytes": 93995,
+    "sha256": "a47664cbbc6247d57c8035cb9bb3a4ab512e5ea73e795d5a6b77d9ae803dc05c",
+    "members": 136
+  },
+  "source": "661cbd8140bdcc5510b20e6535790690997ca33e",
+  "local_free_kib": 156023136,
+  "safe_members_verified": 136,
+  "all_member_hashes_verified": true,
+  "all_test_logs_pass_and_reap_verified": true,
+  "source_matches_signed_commit": true,
+  "checks": {
+    "baseline-build": 0,
+    "current-build": 0,
+    "legacy-byte-comparison": 0,
+    "clippy-lib": 101,
+    "clippy-tests": 101,
+    "rustfmt": 0
+  },
+  "passes": 27,
+  "failures": 0,
+  "transport_command": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--on",
+    "d1323898b255a3ed435eb83fa0f7b0cf",
+    "--needs",
+    "cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--timeout",
+    "120",
+    "--",
+    "python3 -c 'import base64,pathlib\nraw=pathlib.Path('\"'\"'/Users/adalundhe/.cache/hex-cdi-render-01a1c640-661cbd81-v1/retained/proof-v1.tar.gz'\"'\"').read_bytes()\ntext=base64.b64encode(raw).decode()\nfor i in range(0,len(text),1000):print(text[i:i+1000])\n'"
+  ],
+  "transport_stderr": "\u001b[2m[kiln] on d1323898b255a3ed435eb83fa0f7b0cf \u00b7 macos/aarch64 \u00b7 30 of 32 cores idle \u00b7 47 GB free \u00b7 room for 1 CPU, 4 GiB of memory, 12 GiB of disk\u001b[0m\n"
+}

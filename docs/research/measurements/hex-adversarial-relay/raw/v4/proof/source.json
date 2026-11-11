@@ -1,0 +1,9 @@
+{
+  "base": "dc29e7dadb5d820bfa83e115280dc79574f9f68a",
+  "prior_private_source": "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v3/source",
+  "checked_in_leaf_sha256": "b6524b2f9dabd3a3cd36c8aee71f3162421c3ebf6e607e6fcf72b554811e8e15",
+  "registration": "same private-only parent registration as v1/v2/v3; main leaf exact bytes with 3 contract tests, no candidate appendix",
+  "root": "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v4",
+  "jobs": 1,
+  "test_threads": 1
+}

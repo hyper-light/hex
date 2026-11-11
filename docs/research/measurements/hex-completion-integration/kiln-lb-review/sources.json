@@ -1,0 +1,48 @@
+{
+  "hex_source": "378192b78b09cec7b8ad088d5a9eb8ae32389888",
+  "kiln_review_pin": "b4884f6b987b4a0ce16147bc70c98b456b91bdec",
+  "kiln_owner": "01a198e7a285772298e00399c5c7d5de",
+  "method": "Read-only pinned production/test diff review, no Kiln edit/build/test/benchmark. Peer results below are attributed, not reproduced by ROOT.",
+  "commits": [
+    {
+      "commit": "a6a223733d59db3f48c50da842ad90928df51450",
+      "show_sha256": "019cd602eb8b4da1501b96c64a116c00748e700b3a6a3f4563e213e8f3babdd3",
+      "subject": "W05-R03 W13-R09: preserve GPU demand across pool admission and reserve finite devices at boot"
+    },
+    {
+      "commit": "84652309cc291dc2a8a28676d9d9d658b1c7d84e",
+      "show_sha256": "22783d17f9600e9834ea4612d7eebb0f0ca72a684315ec0c7cc5c37791422efd",
+      "subject": "W05-R03 W05-R40: enforce projected GPU capacity for gangs and pools"
+    },
+    {
+      "commit": "48ad228adf50f1065c63eda78f20c85327bde4f7",
+      "show_sha256": "693facd7cfdf33a797da1bb732d77a74bbdf029e2dde9777e446848e170c10d6",
+      "subject": "W05-R16 W05-R34: exclude GPU-incompatible alternatives from lost-grant retries"
+    },
+    {
+      "commit": "df601a26456f84be131e79f8f1bafe234ae66817",
+      "show_sha256": "3df92cf2d4e73b629c87d9e45e97b5c50c0ca4b0d6896482656a83e9f94aea09",
+      "subject": "W05-R10 W05-R39: order released-reservation waiters with runner-loss retries"
+    },
+    {
+      "commit": "8245ca3cc16433da412a4f1663756fa62bd1efa5",
+      "show_sha256": "0fdbab6143070129847f9e30a81f044ab1eeaac53045436321c9fb9cb12b7521",
+      "subject": "W05-R23: preserve measured per-core CPU fitting on equal GPU ranks"
+    },
+    {
+      "commit": "db8d4577e5a5e851235095a87b9e0ea84af8c2ea",
+      "show_sha256": "c7db2c47e79ffe98009d91c9423d95e244dc232c78acac5f71dc9d24bbdfb2e0",
+      "subject": "W13-R01: serialize facts-publisher handoff and preserve full-look intent"
+    },
+    {
+      "commit": "bb3c0dc0175d18c7ebd85e8e65aaf0120651ab13",
+      "show_sha256": "6ae2c76176fe26c55a19a536a5c901d63c9544df81ddbafa00302efe1d5c331c",
+      "subject": "W05-AC08 W05-AC09: index armed class waits instead of scanning every queued leg"
+    },
+    {
+      "commit": "b4884f6b987b4a0ce16147bc70c98b456b91bdec",
+      "show_sha256": "aa5e496d10a1961934fac3b4dff55ed90337066e3de90f0c07cf166025d580fc",
+      "subject": "W13-R01 W05-R03: pin missing GPU telemetry at fresh admission"
+    }
+  ]
+}

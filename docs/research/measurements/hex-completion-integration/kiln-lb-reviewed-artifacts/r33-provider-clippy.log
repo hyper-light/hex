@@ -1,0 +1,10 @@
+    Updating crates.io index
+    Checking libc v0.2.190
+    Checking errno v0.3.14
+    Checking getrandom v0.4.3
+    Checking rustix v1.1.5
+    Checking thiserror v2.0.21
+    Checking once_cell v1.21.4
+    Checking tempfile v3.27.0
+    Checking kiln-gpu v0.2.0 (/Users/adalundhe/.cache/kiln-lb/int/tree-int/crates/kiln-gpu)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.45s

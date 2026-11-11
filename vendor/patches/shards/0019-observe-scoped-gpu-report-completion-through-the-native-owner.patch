@@ -1,0 +1,1396 @@
+diff --git a/crates/api/Cargo.toml b/crates/api/Cargo.toml
+index 8910f37c..9cfbc0e3 100644
+--- a/crates/api/Cargo.toml
++++ b/crates/api/Cargo.toml
+@@ -19,7 +19,7 @@ libc = { workspace = true }
+ 
+ [target.'cfg(windows)'.dependencies]
+ shards-afunix = { path = "../afunix" }
+-windows-sys = { workspace = true }
++windows-sys = { workspace = true, features = ["Win32_System_Pipes"] }
+ 
+ [dev-dependencies]
+ shards-testdir = { path = "../testdir" }
+diff --git a/crates/api/src/client.rs b/crates/api/src/client.rs
+index 95609901..1f796fce 100644
+--- a/crates/api/src/client.rs
++++ b/crates/api/src/client.rs
+@@ -234,6 +234,7 @@ fn take_back(identity: &Identity, spec: &GuestSpec) -> Result<ShardsGuest, Refus
+             status: None,
+             managed: None,
+             managed_ports: Vec::new(),
++            report_cleanup: ReportCleanup::Complete,
+         }),
+         changed: Condvar::new(),
+         tail: Mutex::new(Tail {
+@@ -248,6 +249,7 @@ fn take_back(identity: &Identity, spec: &GuestSpec) -> Result<ShardsGuest, Refus
+         end_mark: end_mark(),
+         probe: false,
+         managed_owners: std::sync::atomic::AtomicUsize::new(0),
++        report: Mutex::new(None),
+     });
+     let (watched, watcher) = (process.clone(), shared.clone());
+     std::thread::Builder::new()
+@@ -387,6 +389,7 @@ fn launch(
+             status: None,
+             managed: None,
+             managed_ports: Vec::new(),
++            report_cleanup: ReportCleanup::Complete,
+         }),
+         changed: Condvar::new(),
+         tail: Mutex::new(Tail {
+@@ -401,6 +404,7 @@ fn launch(
+         end_mark: marker,
+         probe: probe.is_some(),
+         managed_owners: std::sync::atomic::AtomicUsize::new(0),
++        report: Mutex::new(None),
+     });
+     #[cfg(unix)]
+     let pid = child.id();
+@@ -572,6 +576,11 @@ pub fn prepare_boot(
+     // Only prepared native launches keep the existing helpers in their original
+     // scope. This marker grants no physical identity/device authority.
+     argument_push(&mut arguments, "--host-managed")?;
++    let mut gpu_devices = Vec::new();
++    gpu_devices
++        .try_reserve_exact(spec.gpu_devices.len())
++        .map_err(|_| Refusal::Launch(crate::LaunchError::Allocation))?;
++    gpu_devices.extend_from_slice(&spec.gpu_devices);
+     Ok(crate::PreparedBoot {
+         binary: PathBuf::from(argument_copy(binary.as_os_str())?),
+         arguments,
+@@ -579,6 +588,8 @@ pub fn prepare_boot(
+         ports,
+         output_bytes,
+         runtime_paths: None,
++        gpu_devices,
++        gpu_report: None,
+     })
+ }
+ 
+@@ -722,6 +733,15 @@ struct Shared {
+     probe: bool,
+     /// API lifetime handles only, distinct from worker Arc refs and native holders.
+     managed_owners: std::sync::atomic::AtomicUsize,
++    report: Mutex<Option<crate::physical::report::Receiver>>,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum ReportCleanup {
++    Observing,
++    Requested,
++    Uncertain,
++    Complete,
+ }
+ 
+ #[derive(Debug)]
+@@ -744,6 +764,7 @@ struct State {
+     /// Pending None -> native completion or failed observer; never a release ledger.
+     managed: Option<Result<crate::ManagedEnd, Refusal>>,
+     managed_ports: Vec<u32>,
++    report_cleanup: ReportCleanup,
+ }
+ 
+ #[derive(Debug)]
+@@ -1499,7 +1520,16 @@ impl std::fmt::Debug for ManagedGuest {
+     }
+ }
+ 
+-fn managed_shared(keep: usize, recovered: bool) -> Result<triomphe::Arc<Shared>, Refusal> {
++fn managed_shared(
++    keep: usize,
++    recovered: bool,
++    report: Option<crate::physical::report::Receiver>,
++) -> Result<triomphe::Arc<Shared>, Refusal> {
++    let report_cleanup = if report.is_some() {
++        ReportCleanup::Observing
++    } else {
++        ReportCleanup::Complete
++    };
+     let mut bytes = VecDeque::new();
+     bytes
+         .try_reserve_exact(
+@@ -1524,6 +1554,7 @@ fn managed_shared(keep: usize, recovered: bool) -> Result<triomphe::Arc<Shared>,
+             status: None,
+             managed: None,
+             managed_ports: Vec::new(),
++            report_cleanup,
+         }),
+         changed: Condvar::new(),
+         tail: Mutex::new(Tail {
+@@ -1538,6 +1569,7 @@ fn managed_shared(keep: usize, recovered: bool) -> Result<triomphe::Arc<Shared>,
+         end_mark: managed_marker()?,
+         probe: false,
+         managed_owners: std::sync::atomic::AtomicUsize::new(1),
++        report: Mutex::new(report),
+     })
+     .map_err(|_| Refusal::Launch(crate::LaunchError::Allocation))
+ }
+@@ -1583,6 +1615,74 @@ fn lossy_output(bytes: &[u8]) -> Result<String, Refusal> {
+     Ok(text)
+ }
+ 
++/// Failed completion leaves this SAME watcher owning Shared and all IO storage.
++/// After an error it subscribes to the actual native completion event; explicit
++/// stop/drop requests only retry an unavailable native wait, never periodic probes.
++fn finish_managed_report(shared: &Shared) {
++    loop {
++        let completed = match lock(&shared.report).as_mut() {
++            Some(report) => report.finish(),
++            None => Ok(()),
++        };
++        let mut state = lock(&shared.state);
++        match completed {
++            Ok(()) => {
++                state.report_cleanup = ReportCleanup::Complete;
++                return;
++            }
++            Err(why) => {
++                let requested = state.report_cleanup == ReportCleanup::Requested;
++                if state.managed.is_none() {
++                    state.managed = Some(Err(why));
++                }
++                state.exited = true;
++                state.report_cleanup = ReportCleanup::Uncertain;
++                shared.changed.notify_all();
++                // The OS completion event, not another API owner, must wake
++                // this watcher if cancellation/observation failed before it.
++                drop(state);
++                let terminal = match lock(&shared.report).as_mut() {
++                    Some(report) => report.wait_for_completion(),
++                    None => Ok(()),
++                };
++                state = lock(&shared.state);
++                match terminal {
++                    Ok(()) => {
++                        state.report_cleanup = ReportCleanup::Complete;
++                        return;
++                    }
++                    Err(why) => {
++                        // A failed native wait proves nothing. Keep the same
++                        // watcher/resources; preserve the first reported cause.
++                        if state.managed.is_none() {
++                            state.managed = Some(Err(why));
++                        }
++                        if state.report_cleanup != ReportCleanup::Requested {
++                            state.report_cleanup = ReportCleanup::Uncertain;
++                        }
++                        shared.changed.notify_all();
++                    }
++                }
++                if requested || state.report_cleanup == ReportCleanup::Requested {
++                    state.report_cleanup = ReportCleanup::Observing;
++                    drop(state);
++                    continue;
++                }
++                while state.report_cleanup == ReportCleanup::Uncertain {
++                    state = shared.changed.wait(state).unwrap_or_else(PoisonError::into_inner);
++                }
++                state.report_cleanup = ReportCleanup::Observing;
++            }
++        }
++    }
++}
++
++fn request_report_cleanup(state: &mut State) {
++    if state.report_cleanup != ReportCleanup::Complete {
++        state.report_cleanup = ReportCleanup::Requested;
++    }
++}
++
+ fn watch_managed(
+     shared: triomphe::Arc<Shared>,
+     process: crate::ManagedReceipt,
+@@ -1594,19 +1694,22 @@ fn watch_managed(
+         Ok(_) => Err(Refusal::Launch(crate::LaunchError::Observer)),
+         Err(why) => Err(why),
+     };
++    finish_managed_report(&shared);
+     let said = match writer {
+         Some(writer) => lossy_output(finish_drain(&shared, writer).bytes.make_contiguous()),
+         None => Ok(String::new()),
+     };
+     let mut state = lock(&shared.state);
+     state.observed_exited = observed.is_ok();
+-    state.managed = Some(match said {
+-        Ok(said) => {
+-            state.said = said;
+-            observed
+-        }
+-        Err(why) => Err(why),
+-    });
++    if state.managed.is_none() {
++        state.managed = Some(match said {
++            Ok(said) => {
++                state.said = said;
++                observed
++            }
++            Err(why) => Err(why),
++        });
++    }
+     state.exited = true;
+     shared.changed.notify_all();
+ }
+@@ -1630,7 +1733,15 @@ pub fn boot_managed(
+     plan: crate::PreparedBoot,
+     launcher: &mut dyn crate::ManagedLauncher,
+ ) -> Result<ManagedGuest, Refusal> {
+-    let shared = managed_shared(plan.output_bytes, false)?;
++    let (report, gpu_report) = match plan.gpu_report_request() {
++        Some(request) => {
++            let request = crate::physical::report::Request::copy_from(request)?;
++            let (receiver, writer) = crate::physical::report::Receiver::new(request)?;
++            (Some(receiver), Some(writer))
++        }
++        None => (None, None),
++    };
++    let shared = managed_shared(plan.output_bytes, false, report)?;
+     let drain_name = owned_text("shards-api-managed-drain")?;
+     let wait_name = owned_text("shards-api-managed-wait")?;
+     let (output, writer) = io::pipe().map_err(|e| managed_io("output pipe", e))?;
+@@ -1640,7 +1751,14 @@ pub fn boot_managed(
+     let stderr = writer
+         .try_clone()
+         .map_err(|e| managed_io("output writer clone", e))?;
+-    let process = launcher.launch(&plan, crate::LaunchIo { stdout, stderr })?;
++    let process = launcher.launch(
++        &plan,
++        crate::LaunchIo {
++            stdout,
++            stderr,
++            gpu_report,
++        },
++    )?;
+     let identity = match process.identity() {
+         Ok(identity) => identity,
+         Err(why) => {
+@@ -1676,7 +1794,7 @@ pub fn attach_managed(
+     if identity.vsock != plan.vsock {
+         return Err(Refusal::Launch(crate::LaunchError::Socket));
+     }
+-    let shared = managed_shared(0, true)?;
++    let shared = managed_shared(0, true, None)?;
+     let wait_name = owned_text("shards-api-managed-wait")?;
+     let process = launcher.attach(identity)?;
+     if process.identity()? != identity {
+@@ -1688,6 +1806,20 @@ pub fn attach_managed(
+ }
+ 
+ impl ManagedGuest {
++    /// Transfer the one private report within the original create deadline.
++    /// A timeout/EOF/error never proves VM or helper termination. Recovery must
++    /// use its already persisted canonical report; it cannot recreate this pipe.
++    pub fn take_gpu_report(&self, patience: Duration) -> Result<crate::physical::GpuReport, Refusal> {
++        let mut report = self.shared.report.try_lock().map_err(|error| match error {
++            std::sync::TryLockError::WouldBlock => Refusal::GpuProbe(crate::GpuProbeError::Pending),
++            std::sync::TryLockError::Poisoned(_) => Refusal::Launch(crate::LaunchError::Observer),
++        })?;
++        report
++            .as_mut()
++            .ok_or(Refusal::GpuProbe(crate::GpuProbeError::Unavailable))?
++            .take(patience)
++    }
++
+     /// Shares the existing protocol/native receipt with checked handle counting.
+     /// Worker references are not lifetime owners and cannot suppress last-drop stop.
+     pub fn try_clone(&self) -> Result<Self, Refusal> {
+@@ -1759,7 +1891,12 @@ impl Guest for ManagedGuest {
+     fn stop(&self) -> Result<(), Refusal> {
+         // Native stop may complete inline and wake a concurrent waiter. Publish
+         // the request first; an uncertain native result cannot undo its effects.
+-        lock(&self.shared.state).stopping = true;
++        {
++            let mut state = lock(&self.shared.state);
++            state.stopping = true;
++            request_report_cleanup(&mut state);
++            self.shared.changed.notify_all();
++        }
+         self.process.stop()
+     }
+     fn wait_for(&self, timeout: Duration) -> Result<Option<End>, Refusal> {
+@@ -1802,6 +1939,11 @@ impl Drop for ManagedGuest {
+                 return;
+             }
+         }
++        {
++            let mut state = lock(&self.shared.state);
++            request_report_cleanup(&mut state);
++            self.shared.changed.notify_all();
++        }
+         if !matches!(
+             self.process.terminal(),
+             Ok(Some(crate::ManagedEnd {
+@@ -2117,6 +2259,136 @@ mod tests {
+         assert_eq!(waiter.join().unwrap().unwrap(), Some(End::Stopped));
+     }
+ 
++    /// An explicit cleanup request is neither completion nor permission to
++    /// destroy Shared. A worker reference keeps the SAME allocation alive after
++    /// the API's reference is dropped; Complete cannot be reopened by drop.
++    #[test]
++    fn managed_report_cleanup_request_preserves_same_worker_owner_order() {
++        let shared = managed_shared(0, true, None).unwrap();
++        let worker = shared.clone();
++        {
++            let mut state = lock(&shared.state);
++            state.report_cleanup = ReportCleanup::Uncertain;
++            request_report_cleanup(&mut state);
++            assert_eq!(state.report_cleanup, ReportCleanup::Requested);
++            assert!(
++                state.managed.is_none(),
++                "a request creates no terminal observation"
++            );
++        }
++        drop(shared);
++        assert_eq!(triomphe::Arc::strong_count(&worker), 1);
++        {
++            let mut state = lock(&worker.state);
++            state.report_cleanup = ReportCleanup::Complete;
++            request_report_cleanup(&mut state);
++            assert_eq!(state.report_cleanup, ReportCleanup::Complete);
++        }
++    }
++
++    /// A later actual completion must wake the SAME watcher after cancellation
++    /// errors and last API drop, without any later API notification or polling.
++    #[cfg(windows)]
++    #[test]
++    fn managed_report_last_api_drop_before_later_native_completion_reclaims_owner() {
++        let patience = crate::conformance::PATIENCE.get();
++        let request = crate::physical::report::Request {
++            scope: [0x93; 16],
++            selected: vec![crate::PhysicalGpu::MetalRegistry(7)],
++            deadline: Instant::now().checked_add(patience).unwrap(),
++        };
++        let (receiver, mut writer) = crate::physical::report::Receiver::new(request).unwrap();
++        // Model two exact failed native cancellation calls: the deadline-bound
++        // caller's, then the observer's. A real overlapped read remains pending.
++        receiver.fail_cancel_calls_for_test(2);
++        let shared = managed_shared(0, true, Some(receiver)).unwrap();
++        let native = triomphe::Arc::try_new(ModelNative {
++            identity: Identity {
++                pid: 42,
++                started: 7,
++                vsock: "/model/native/v".into(),
++            },
++            state: Mutex::new(NativeState::default()),
++            changed: Condvar::new(),
++            coordinate_stop: false,
++            stops: std::sync::atomic::AtomicUsize::new(0),
++        })
++        .unwrap();
++        let watching = shared.clone();
++        let process = crate::managed_receipt(native.clone());
++        let (done, completed) = std::sync::mpsc::sync_channel(1);
++        let watcher = std::thread::Builder::new()
++            .name("report-order-control".into())
++            .spawn(move || {
++                watch_managed(watching, process, None);
++                let _ = done.send(());
++            })
++            .unwrap();
++        let guest = ManagedGuest {
++            process: crate::managed_receipt(native.clone()),
++            shared: shared.clone(),
++        };
++        // Collect every oracle before asserting: even an old stuck-watcher
++        // regression must close this fixture's writer and join its own worker.
++        let report = guest.take_gpu_report(patience);
++        drop(guest);
++        let owners = shared.managed_owners.load(Ordering::Acquire);
++        let (cleanup_before, uncertainty_timed_out) = {
++            let state = lock(&shared.state);
++            let (state, timed) = shared
++                .changed
++                .wait_timeout_while(state, patience, |state| {
++                    state.report_cleanup != ReportCleanup::Uncertain
++                })
++                .unwrap_or_else(PoisonError::into_inner);
++            (state.report_cleanup, timed.timed_out())
++        };
++        // No API owner exists and no Shared notification is sent here. The OS
++        // alone completes its pending read as this owned writer writes/closes.
++        let wrote = writer.write_all(b"later kernel completion");
++        drop(writer);
++        let completed_without_api_wake = completed.recv_timeout(patience);
++        if completed_without_api_wake.is_err() {
++            // Failure cleanup only: the frozen5ba path needs an explicit wake
++            // after its already-positive pipe completion. This cannot turn the
++            // previously captured failed oracle into a passing observation.
++            native.publish(crate::TerminalScope::Released);
++            let mut state = lock(&shared.state);
++            request_report_cleanup(&mut state);
++            shared.changed.notify_all();
++        }
++        let joined = watcher.join();
++        drop(native);
++        assert!(matches!(
++            report,
++            Err(Refusal::ManagedIo {
++                operation: "injected private report cancellation",
++                ..
++            })
++        ));
++        assert_eq!(owners, 0);
++        assert!(
++            !uncertainty_timed_out,
++            "observer must publish the exact cleanup error"
++        );
++        assert_eq!(cleanup_before, ReportCleanup::Uncertain);
++        assert!(
++            wrote.is_ok(),
++            "later owned writer must complete its actual pending read"
++        );
++        assert!(
++            completed_without_api_wake.is_ok(),
++            "native completion must wake the observer without another API notification"
++        );
++        assert!(joined.is_ok());
++        assert_eq!(lock(&shared.state).report_cleanup, ReportCleanup::Complete);
++        assert_eq!(triomphe::Arc::strong_count(&shared), 1);
++        assert!(
++            matches!(lock(&shared.state).managed.as_ref(), Some(Err(_))),
++            "cleanup completion cannot erase the original uncertainty"
++        );
++    }
++
+     /// D215/AC-T7.4.1: pure preparation launches nothing and preserves the exact
+     /// native command/ports; wrong endpoint/port fail before borrowed observation.
+     #[test]
+diff --git a/crates/api/src/lib.rs b/crates/api/src/lib.rs
+index 04ba7db6..fa16e536 100644
+--- a/crates/api/src/lib.rs
++++ b/crates/api/src/lib.rs
+@@ -91,7 +91,31 @@ pub struct PreparedBoot {
+     ports: Vec<u32>,
+     output_bytes: usize,
+     runtime_paths: Option<RuntimePaths>,
++    gpu_devices: Vec<PhysicalGpu>,
++    gpu_report: Option<([u8; 16], std::time::Instant)>,
+ }
++
++/// Pure immutable request. The final native launcher separately owns and renders
++/// the actual transferred writer; no descriptor value is embedded in this plan.
++#[derive(Debug, Clone, Copy)]
++pub struct GpuReportRequest<'a> {
++    scope: [u8; 16],
++    selected: &'a [PhysicalGpu],
++    deadline: std::time::Instant,
++}
++
++impl GpuReportRequest<'_> {
++    pub fn scope(&self) -> [u8; 16] {
++        self.scope
++    }
++    pub fn selected(&self) -> &[PhysicalGpu] {
++        self.selected
++    }
++    pub fn deadline(&self) -> std::time::Instant {
++        self.deadline
++    }
++}
++
+ impl PreparedBoot {
+     pub fn binary(&self) -> &std::path::Path {
+         &self.binary
+@@ -116,6 +140,34 @@ impl PreparedBoot {
+         self.runtime_paths = Some(paths.try_clone()?);
+         Ok(self)
+     }
++
++    /// Bind a private renderer report to the original native scope and finite
++    /// absolute create budget. No channel or foreign process is created here.
++    pub fn with_gpu_report(mut self, scope: [u8; 16], deadline: std::time::Instant) -> Result<Self, Refusal> {
++        if self.gpu_report.is_some() {
++            return Err(Refusal::GpuProbe(GpuProbeError::ReportTaken));
++        }
++        if scope == [0; 16] {
++            return Err(Refusal::GpuProbe(GpuProbeError::Scope));
++        }
++        physical::check_selection(&self.gpu_devices).map_err(Refusal::Gpu)?;
++        if self.gpu_devices.is_empty() {
++            return Err(Refusal::GpuProbe(GpuProbeError::Empty));
++        }
++        if std::time::Instant::now() >= deadline {
++            return Err(Refusal::GpuProbe(GpuProbeError::Pending));
++        }
++        self.gpu_report = Some((scope, deadline));
++        Ok(self)
++    }
++
++    pub fn gpu_report_request(&self) -> Option<GpuReportRequest<'_>> {
++        self.gpu_report.map(|(scope, deadline)| GpuReportRequest {
++            scope,
++            deadline,
++            selected: &self.gpu_devices,
++        })
++    }
+ }
+ 
+ /// The configured node's two runtime directories, shared as values by its probe
+@@ -153,13 +205,18 @@ impl std::fmt::Display for LaunchError {
+ }
+ impl std::error::Error for LaunchError {}
+ 
+-/// Stdio created by the API's existing bounded drain path. The native owner
+-/// consumes only these output handles; stdin is its native null device. No extra
+-/// inherited handles, output socket export or post-spawn placement is permitted.
++/// Stdio created by the API's existing bounded drain path and optional private
++/// GPU-report writer. The native owner allowlists these exact owned handles;
++/// stdin is its native null device. No ambient inheritance or post-spawn
++/// placement is permitted.
+ #[derive(Debug)]
+ pub struct LaunchIo {
+     pub stdout: std::io::PipeWriter,
+     pub stderr: std::io::PipeWriter,
++    /// Sole VMM-private report writer, optional for ordinary CPU compatibility.
++    /// Forward only to the confined VMM, after final transfer/allowlisting. The
++    /// VMM closes it before guest execution; no guest/helper may inherit a copy.
++    pub gpu_report: Option<std::io::PipeWriter>,
+ }
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+diff --git a/crates/api/src/physical.rs b/crates/api/src/physical.rs
+index b41ac076..845bbf6a 100644
+--- a/crates/api/src/physical.rs
++++ b/crates/api/src/physical.rs
+@@ -2,6 +2,8 @@
+ 
+ use std::fmt;
+ 
++pub(crate) mod report;
++
+ pub use shards_abi::gpu::{
+     GPU_NAME_BYTES, GpuName, GpuProbe, GpuProbeError, GpuReport, MAX_PHYSICAL_GPUS, PhysicalGpu,
+     PhysicalGpuError, ResolvedGpu, check_selection, probe_bytes, report_bytes,
+diff --git a/crates/api/src/physical/report.rs b/crates/api/src/physical/report.rs
+new file mode 100644
+index 00000000..96e5eef9
+--- /dev/null
++++ b/crates/api/src/physical/report.rs
+@@ -0,0 +1,231 @@
++//! One private report, consumed under the original operation deadline. The same
++//! Shared owner retains its channel through native observation and cancellation.
++
++use std::io;
++use std::time::{Duration, Instant};
++
++use super::{GpuReport, PhysicalGpu};
++use crate::{GpuProbeError, Refusal};
++
++#[cfg(unix)]
++mod unix;
++#[cfg(unix)]
++use unix::Reader;
++#[cfg(windows)]
++mod windows;
++#[cfg(windows)]
++use windows::Reader;
++
++#[derive(Debug)]
++pub(crate) struct Request {
++    pub scope: [u8; 16],
++    pub selected: Vec<PhysicalGpu>,
++    pub deadline: Instant,
++}
++
++impl Request {
++    pub fn copy_from(request: crate::GpuReportRequest<'_>) -> Result<Self, Refusal> {
++        let mut selected = Vec::new();
++        selected
++            .try_reserve_exact(request.selected().len())
++            .map_err(|_| Refusal::GpuProbe(GpuProbeError::Allocation))?;
++        selected.extend_from_slice(request.selected());
++        Ok(Self {
++            scope: request.scope(),
++            selected,
++            deadline: request.deadline(),
++        })
++    }
++}
++
++#[derive(Debug, Clone, Copy)]
++enum Transfer {
++    Available,
++    Taken,
++}
++
++#[derive(Debug)]
++pub(crate) struct Receiver {
++    request: Request,
++    transfer: Transfer,
++    reader: Reader,
++}
++
++pub(super) fn io_error(operation: &'static str, error: io::Error) -> Refusal {
++    Refusal::ManagedIo {
++        operation,
++        kind: error.kind(),
++        code: error.raw_os_error(),
++    }
++}
++
++pub(super) fn pending() -> Refusal {
++    Refusal::GpuProbe(GpuProbeError::Pending)
++}
++
++#[cfg(unix)]
++pub(super) fn buffer(bytes: usize) -> Result<Vec<u8>, Refusal> {
++    let mut buffer = Vec::new();
++    buffer
++        .try_reserve_exact(bytes)
++        .map_err(|_| Refusal::GpuProbe(GpuProbeError::Allocation))?;
++    buffer.resize(bytes, 0);
++    Ok(buffer)
++}
++
++impl Receiver {
++    pub fn new(request: Request) -> Result<(Self, io::PipeWriter), Refusal> {
++        if request.scope == [0; 16] {
++            return Err(Refusal::GpuProbe(GpuProbeError::Scope));
++        }
++        super::check_selection(&request.selected).map_err(Refusal::Gpu)?;
++        if request.selected.is_empty() {
++            return Err(Refusal::GpuProbe(GpuProbeError::Empty));
++        }
++        if Instant::now() >= request.deadline {
++            return Err(pending());
++        }
++        // The extra byte distinguishes an overlong frame before parsing or
++        // allocating any reported device/name storage.
++        let bytes = super::report_bytes(request.selected.len())
++            .map_err(Refusal::GpuProbe)?
++            .checked_add(1)
++            .ok_or(Refusal::GpuProbe(GpuProbeError::Count))?;
++        let (reader, writer) = Reader::new(bytes, request.scope)?;
++        Ok((
++            Self {
++                request,
++                transfer: Transfer::Available,
++                reader,
++            },
++            writer,
++        ))
++    }
++
++    pub fn take(&mut self, patience: Duration) -> Result<GpuReport, Refusal> {
++        if matches!(self.transfer, Transfer::Taken) {
++            return Err(Refusal::GpuProbe(GpuProbeError::ReportTaken));
++        }
++        self.transfer = Transfer::Taken;
++        let now = Instant::now();
++        let deadline = now
++            .checked_add(patience)
++            .map_or(self.request.deadline, |caller| caller.min(self.request.deadline));
++        if now >= deadline {
++            return Err(pending());
++        }
++        let bytes = self.reader.frame(deadline)?;
++        if Instant::now() >= deadline {
++            return Err(pending());
++        }
++        if bytes.len() > super::report_bytes(self.request.selected.len()).map_err(Refusal::GpuProbe)? {
++            return Err(Refusal::GpuProbe(GpuProbeError::Count));
++        }
++        let text = std::str::from_utf8(bytes).map_err(|_| Refusal::GpuProbe(GpuProbeError::Syntax))?;
++        let report = GpuReport::parse(text, self.request.scope, &self.request.selected);
++        if Instant::now() >= deadline {
++            return Err(pending());
++        }
++        report.map_err(Refusal::GpuProbe)
++    }
++
++    /// Called by the existing native observer on success OR observation error.
++    /// Completion of this private I/O is never native scope release evidence.
++    pub fn finish(&mut self) -> Result<(), Refusal> {
++        self.reader.finish()
++    }
++
++    pub fn wait_for_completion(&mut self) -> Result<(), Refusal> {
++        self.reader.wait_for_completion()
++    }
++
++    #[cfg(all(test, windows))]
++    pub fn fail_cancel_calls_for_test(&self, calls: usize) {
++        self.reader.fail_cancel_calls_for_test(calls);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::physical::{GpuProbe, ResolvedGpu};
++    use std::io::Write as _;
++
++    fn fixture() -> (Request, GpuReport) {
++        let selected = PhysicalGpu::MetalRegistry(7);
++        let scope = [3; 16];
++        let request = Request {
++            scope,
++            selected: vec![selected],
++            deadline: Instant::now().checked_add(Duration::from_secs(1)).unwrap(),
++        };
++        let report = GpuReport {
++            scope,
++            probe: GpuProbe {
++                devices: vec![ResolvedGpu {
++                    physical: selected,
++                    uuid: [4; 16],
++                    pci: None,
++                    luid: Some(7u64.to_be_bytes()),
++                    name: None,
++                    device_local_bytes: None,
++                }],
++                host_visible_bytes: 1,
++            },
++        };
++        (request, report)
++    }
++
++    /// AC-T7.4.1: only the private writer's complete scoped frame transfers;
++    /// console framing is unrelated and a second consumer gets no second report.
++    #[test]
++    fn private_report_transfers_exactly_once_after_writer_eof() {
++        let (request, expected) = fixture();
++        let text = expected.encode().unwrap();
++        let (mut receiver, mut writer) = Receiver::new(request).unwrap();
++        writer.write_all(text.as_bytes()).unwrap();
++        drop(writer);
++        assert_eq!(receiver.take(Duration::from_secs(1)).unwrap(), expected);
++        assert!(matches!(
++            receiver.take(Duration::ZERO),
++            Err(Refusal::GpuProbe(GpuProbeError::ReportTaken))
++        ));
++        receiver.finish().unwrap();
++    }
++
++    /// AC-T7.4.1: an empty/malformed/oversized private stream is uncertainty,
++    /// and never a successful renderer observation or release receipt.
++    #[test]
++    fn private_report_refuses_missing_torn_and_over_bound_bytes() {
++        for bytes in [
++            Vec::new(),
++            b"shards-vmm-gpu 1 torn\n".to_vec(),
++            vec![b'x'; super::super::report_bytes(1).unwrap() + 1],
++        ] {
++            let (request, _) = fixture();
++            let (mut receiver, mut writer) = Receiver::new(request).unwrap();
++            writer.write_all(&bytes).unwrap();
++            drop(writer);
++            assert!(receiver.take(Duration::from_secs(1)).is_err());
++            receiver.finish().unwrap();
++        }
++    }
++
++    /// A zero remaining caller budget cannot replace the original create budget
++    /// or wait for a writer that still exists. Cleanup owns cancellation separately.
++    #[test]
++    fn private_report_expired_caller_budget_does_not_wait_or_retry() {
++        let (request, _) = fixture();
++        let (mut receiver, writer) = Receiver::new(request).unwrap();
++        assert!(matches!(
++            receiver.take(Duration::ZERO),
++            Err(Refusal::GpuProbe(GpuProbeError::Pending))
++        ));
++        receiver.finish().unwrap();
++        assert!(matches!(
++            receiver.take(Duration::from_secs(1)),
++            Err(Refusal::GpuProbe(GpuProbeError::ReportTaken))
++        ));
++        drop(writer);
++    }
++}
+diff --git a/crates/api/src/physical/report/unix.rs b/crates/api/src/physical/report/unix.rs
+new file mode 100644
+index 00000000..b311712b
+--- /dev/null
++++ b/crates/api/src/physical/report/unix.rs
+@@ -0,0 +1,115 @@
++//! A private nonblocking pipe; poll spends the original finite deadline.
++#![allow(unsafe_code)]
++
++use std::io::{self, Read as _};
++use std::os::fd::AsRawFd as _;
++use std::time::Instant;
++
++use super::{buffer, io_error, pending};
++use crate::{GpuProbeError, Refusal};
++
++#[derive(Debug)]
++pub(super) struct Reader {
++    pipe: Option<io::PipeReader>,
++    bytes: Vec<u8>,
++    used: usize,
++}
++
++impl Reader {
++    pub fn new(byte_count: usize, _scope: [u8; 16]) -> Result<(Self, io::PipeWriter), Refusal> {
++        let bytes = buffer(byte_count)?;
++        let (reader, writer) = io::pipe().map_err(|e| io_error("GPU report pipe", e))?;
++        let fd = reader.as_raw_fd();
++        // SAFETY: fd is a live private pipe, owned here; no concurrent reader or
++        // foreign launch exists yet. Existing descriptor flags are preserved.
++        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
++        if flags < 0 {
++            return Err(io_error("GPU report flags", io::Error::last_os_error()));
++        }
++        // SAFETY: the same owned descriptor/flags are valid and O_NONBLOCK only
++        // affects this read end. The separately owned writer remains blocking.
++        if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
++            return Err(io_error("GPU report nonblocking", io::Error::last_os_error()));
++        }
++        Ok((
++            Self {
++                pipe: Some(reader),
++                bytes,
++                used: 0,
++            },
++            writer,
++        ))
++    }
++
++    pub fn frame(&mut self, deadline: Instant) -> Result<&[u8], Refusal> {
++        let reader = self
++            .pipe
++            .as_mut()
++            .ok_or(Refusal::GpuProbe(GpuProbeError::Unavailable))?;
++        loop {
++            let left = deadline.saturating_duration_since(Instant::now());
++            if left.is_zero() {
++                return Err(pending());
++            }
++            let available = self
++                .bytes
++                .get_mut(self.used..)
++                .filter(|tail| !tail.is_empty())
++                .ok_or(Refusal::GpuProbe(GpuProbeError::Count))?;
++            match reader.read(available) {
++                Ok(0) => {
++                    return self
++                        .bytes
++                        .get(..self.used)
++                        .ok_or(Refusal::GpuProbe(GpuProbeError::Count));
++                }
++                Ok(read) => {
++                    self.used = self
++                        .used
++                        .checked_add(read)
++                        .ok_or(Refusal::GpuProbe(GpuProbeError::Count))?;
++                    continue;
++                }
++                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
++                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
++                Err(error) => return Err(io_error("GPU report read", error)),
++            }
++            // poll uses milliseconds; round UP once, then recheck the absolute
++            // deadline. The i32 ceiling is its ABI, not a retry/tuning interval.
++            let left = deadline.saturating_duration_since(Instant::now());
++            if left.is_zero() {
++                return Err(pending());
++            }
++            let millis = left
++                .as_millis()
++                .checked_add(u128::from(left.subsec_nanos() % 1_000_000 != 0))
++                .ok_or(Refusal::GpuProbe(GpuProbeError::Count))?;
++            let timeout = i32::try_from(millis).unwrap_or(i32::MAX);
++            let mut event = libc::pollfd {
++                fd: reader.as_raw_fd(),
++                events: libc::POLLIN,
++                revents: 0,
++            };
++            // SAFETY: one initialized stack pollfd, live private descriptor, and
++            // finite native timeout; poll retains no memory after returning.
++            let ready = unsafe { libc::poll(&mut event, 1, timeout) };
++            if ready < 0 {
++                let error = io::Error::last_os_error();
++                if error.kind() != io::ErrorKind::Interrupted {
++                    return Err(io_error("GPU report readiness", error));
++                }
++            } else if event.revents & libc::POLLNVAL != 0 {
++                return Err(Refusal::Launch(crate::LaunchError::Observer));
++            }
++        }
++    }
++
++    pub fn finish(&mut self) -> Result<(), Refusal> {
++        self.pipe.take();
++        Ok(())
++    }
++
++    pub fn wait_for_completion(&mut self) -> Result<(), Refusal> {
++        self.finish()
++    }
++}
+diff --git a/crates/api/src/physical/report/windows.rs b/crates/api/src/physical/report/windows.rs
+new file mode 100644
+index 00000000..d4f4112e
+--- /dev/null
++++ b/crates/api/src/physical/report/windows.rs
+@@ -0,0 +1,467 @@
++//! Windows anonymous pipes are synchronous. This private local pipe has an
++//! overlapped read end; only its synchronous owned writer leaves the API.
++#![allow(unsafe_code)]
++
++use std::cell::UnsafeCell;
++use std::io;
++use std::mem::ManuallyDrop;
++use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
++use std::time::Instant;
++
++use windows_sys::Win32::{
++    Foundation::{
++        ERROR_BROKEN_PIPE, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED,
++        GENERIC_WRITE, GetLastError, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
++    },
++    Storage::FileSystem::{
++        CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, OPEN_EXISTING, PIPE_ACCESS_INBOUND,
++        ReadFile,
++    },
++    System::{
++        IO::{CancelIoEx, GetOverlappedResult, GetOverlappedResultEx, OVERLAPPED},
++        Pipes::{
++            CreateNamedPipeW, GetNamedPipeClientProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
++            PIPE_TYPE_BYTE, PIPE_WAIT,
++        },
++        Threading::{CreateEventW, INFINITE, ResetEvent, WaitForSingleObject},
++    },
++};
++
++use super::{io_error, pending};
++use crate::{GpuProbeError, Refusal};
++
++#[derive(Debug, Clone, Copy)]
++enum Operation {
++    Idle,
++    Pending,
++    Closed,
++}
++
++pub(super) struct Reader {
++    pipe: ManuallyDrop<OwnedHandle>,
++    event: ManuallyDrop<OwnedHandle>,
++    // Both backing allocations are fallible and never resize while IO is pending.
++    // A one-element Vec pins OVERLAPPED without an infallible Box allocation.
++    operation: ManuallyDrop<Vec<UnsafeCell<OVERLAPPED>>>,
++    bytes: ManuallyDrop<Vec<UnsafeCell<u8>>>,
++    used: usize,
++    state: Operation,
++    #[cfg(test)]
++    cancel_errors: std::sync::atomic::AtomicUsize,
++}
++
++impl std::fmt::Debug for Reader {
++    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        out.debug_struct("GpuReportReader")
++            .field("state", &self.state)
++            .finish_non_exhaustive()
++    }
++}
++
++// SAFETY: owned kernel handles are Send. The only embedded raw value is the
++// event HANDLE in heap-stable OVERLAPPED; no pointer targets this movable struct.
++// Exclusive &mut access/Shared's mutex serializes calls. The existing watcher
++// retains Shared until positive completion. Drop never waits; an unexpected
++// Pending drop retains all kernel-referenced resources rather than freeing them.
++unsafe impl Send for Reader {}
++
++fn owned(raw: *mut core::ffi::c_void, operation: &'static str) -> Result<OwnedHandle, Refusal> {
++    if raw.is_null() || raw == INVALID_HANDLE_VALUE {
++        return Err(io_error(operation, io::Error::last_os_error()));
++    }
++    // SAFETY: callers pass a newly created, uniquely owned non-null/invalid handle.
++    Ok(unsafe { OwnedHandle::from_raw_handle(raw) })
++}
++
++impl Reader {
++    pub fn new(byte_count: usize, scope: [u8; 16]) -> Result<(Self, io::PipeWriter), Refusal> {
++        use core::fmt::Write as _;
++        let allocation = || Refusal::GpuProbe(GpuProbeError::Allocation);
++        let mut text = String::new();
++        let scope_chars = scope
++            .len()
++            .checked_mul(2)
++            .ok_or(Refusal::GpuProbe(GpuProbeError::Count))?;
++        let prefix = r"\\.\pipe\shards-api-gpu-";
++        text.try_reserve_exact(prefix.len().checked_add(scope_chars).ok_or_else(allocation)?)
++            .map_err(|_| allocation())?;
++        text.push_str(prefix);
++        for byte in scope {
++            write!(&mut text, "{byte:02x}").map_err(|_| allocation())?;
++        }
++        let mut name = Vec::new();
++        name.try_reserve_exact(text.len().checked_add(1).ok_or_else(allocation)?)
++            .map_err(|_| allocation())?;
++        name.extend(text.encode_utf16());
++        name.push(0);
++        let capacity = u32::try_from(byte_count).map_err(|_| Refusal::GpuProbe(GpuProbeError::Count))?;
++        let mut bytes = Vec::new();
++        bytes.try_reserve_exact(byte_count).map_err(|_| allocation())?;
++        bytes.resize_with(byte_count, || UnsafeCell::new(0u8));
++        let mut operation = Vec::new();
++        operation.try_reserve_exact(1).map_err(|_| allocation())?;
++        // SAFETY: null security attributes/name create a private non-inheritable
++        // manual-reset event. It is retained through every overlapped operation.
++        let event = owned(
++            unsafe { CreateEventW(core::ptr::null(), 1, 0, core::ptr::null()) },
++            "GPU report event",
++        )?;
++        operation.push(UnsafeCell::new(OVERLAPPED {
++            hEvent: event.as_raw_handle(),
++            ..OVERLAPPED::default()
++        }));
++        // SAFETY: terminated name, derived bounded buffers, one instance, and
++        // non-inheritable server handle. FIRST_PIPE_INSTANCE refuses name reuse;
++        // REJECT_REMOTE_CLIENTS prevents a network client from supplying reports.
++        let pipe = owned(
++            unsafe {
++                CreateNamedPipeW(
++                    name.as_ptr(),
++                    PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
++                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
++                    1,
++                    0,
++                    capacity,
++                    0,
++                    core::ptr::null(),
++                )
++            },
++            "GPU report pipe",
++        )?;
++        // SAFETY: this opens the same newly created local pipe synchronously for
++        // writing, without inherited handles, retries, external services or waits.
++        let writer = owned(
++            unsafe {
++                CreateFileW(
++                    name.as_ptr(),
++                    GENERIC_WRITE,
++                    0,
++                    core::ptr::null(),
++                    OPEN_EXISTING,
++                    0,
++                    core::ptr::null_mut(),
++                )
++            },
++            "GPU report writer",
++        )?;
++        let mut client = 0u32;
++        // SAFETY: the owned server is connected by the successful CreateFileW;
++        // the native API writes only this initialized process-id scalar.
++        if unsafe { GetNamedPipeClientProcessId(pipe.as_raw_handle(), &mut client) } == 0 {
++            return Err(io_error(
++                "GPU report private connection",
++                io::Error::last_os_error(),
++            ));
++        }
++        if client != std::process::id() {
++            return Err(Refusal::Launch(crate::LaunchError::Observer));
++        }
++        Ok((
++            Self {
++                pipe: ManuallyDrop::new(pipe),
++                event: ManuallyDrop::new(event),
++                operation: ManuallyDrop::new(operation),
++                bytes: ManuallyDrop::new(bytes),
++                used: 0,
++                state: Operation::Idle,
++                #[cfg(test)]
++                cancel_errors: std::sync::atomic::AtomicUsize::new(0),
++            },
++            io::PipeWriter::from(writer),
++        ))
++    }
++
++    fn completed(&mut self, count: u32) -> Result<bool, Refusal> {
++        self.state = Operation::Idle;
++        if count == 0 {
++            return Ok(true);
++        }
++        let count = usize::try_from(count).map_err(|_| Refusal::GpuProbe(GpuProbeError::Count))?;
++        self.used = self
++            .used
++            .checked_add(count)
++            .filter(|used| *used <= self.bytes.len())
++            .ok_or(Refusal::GpuProbe(GpuProbeError::Count))?;
++        Ok(false)
++    }
++
++    fn await_read(&mut self, deadline: Instant) -> Result<bool, Refusal> {
++        loop {
++            let left = deadline.saturating_duration_since(Instant::now());
++            if left.is_zero() {
++                self.cancel()?;
++                return Err(pending());
++            }
++            // DWORD milliseconds; MAX is INFINITE, so the largest finite value
++            // is MAX-1. Longer finite budgets are split only at that ABI limit.
++            let millis = left
++                .as_millis()
++                .checked_add(u128::from(left.subsec_nanos() % 1_000_000 != 0))
++                .ok_or(Refusal::GpuProbe(GpuProbeError::Count))?;
++            let timeout = u32::try_from(millis).unwrap_or(u32::MAX - 1).min(u32::MAX - 1);
++            let operation = self
++                .operation
++                .first()
++                .ok_or(Refusal::Launch(crate::LaunchError::Observer))?
++                .get();
++            let mut count = 0;
++            // SAFETY: the same live server and heap-stable OVERLAPPED submitted
++            // for this pending read. Its event/buffer remain owned and untouched.
++            if unsafe { GetOverlappedResultEx(self.pipe.as_raw_handle(), operation, &mut count, timeout, 0) }
++                != 0
++            {
++                return self.completed(count);
++            }
++            // SAFETY: immediately reads this thread's failed native call status.
++            let error = unsafe { GetLastError() };
++            match error {
++                WAIT_TIMEOUT | ERROR_IO_INCOMPLETE if Instant::now() < deadline => continue,
++                WAIT_TIMEOUT | ERROR_IO_INCOMPLETE => {
++                    self.cancel()?;
++                    return Err(pending());
++                }
++                ERROR_BROKEN_PIPE => {
++                    self.state = Operation::Idle;
++                    return Ok(true);
++                }
++                ERROR_OPERATION_ABORTED => {
++                    self.state = Operation::Idle;
++                    return Err(io_error(
++                        "GPU report cancelled completion",
++                        io::Error::from_raw_os_error(i32::from_ne_bytes(error.to_ne_bytes())),
++                    ));
++                }
++                _ => {
++                    // Unknown completion-call errors do not establish terminal
++                    // storage ownership. Keep Pending for the existing watcher.
++                    return Err(io_error(
++                        "GPU report completion",
++                        io::Error::from_raw_os_error(i32::from_ne_bytes(error.to_ne_bytes())),
++                    ));
++                }
++            }
++        }
++    }
++
++    pub fn frame(&mut self, deadline: Instant) -> Result<&[u8], Refusal> {
++        loop {
++            if Instant::now() >= deadline {
++                self.cancel()?;
++                return Err(pending());
++            }
++            match self.state {
++                Operation::Closed => return Err(Refusal::GpuProbe(GpuProbeError::Unavailable)),
++                Operation::Pending => {
++                    if self.await_read(deadline)? {
++                        break;
++                    }
++                    continue;
++                }
++                Operation::Idle => {}
++            }
++            let count = self
++                .bytes
++                .len()
++                .checked_sub(self.used)
++                .filter(|count| *count > 0)
++                .ok_or(Refusal::GpuProbe(GpuProbeError::Count))?;
++            let count = u32::try_from(count).map_err(|_| Refusal::GpuProbe(GpuProbeError::Count))?;
++            let output = self
++                .bytes
++                .as_ptr()
++                .wrapping_add(self.used)
++                .cast::<u8>()
++                .cast_mut();
++            let operation = self
++                .operation
++                .first()
++                .ok_or(Refusal::Launch(crate::LaunchError::Observer))?
++                .get();
++            // SAFETY: no previous operation is pending. Reset this retained
++            // manual event before the next read's immutable heap addresses escape.
++            if unsafe { ResetEvent(self.event.as_raw_handle()) } == 0 {
++                return Err(io_error("GPU report reset", io::Error::last_os_error()));
++            }
++            // SAFETY: Idle proves no pending operation aliases this cell.
++            unsafe {
++                operation.write(OVERLAPPED {
++                    hEvent: self.event.as_raw_handle(),
++                    ..OVERLAPPED::default()
++                });
++            }
++            // SAFETY: writable reserved buffer and OVERLAPPED have stable heap
++            // addresses until positive completion. No Rust access occurs pending.
++            let read = unsafe {
++                ReadFile(
++                    self.pipe.as_raw_handle(),
++                    output,
++                    count,
++                    core::ptr::null_mut(),
++                    operation,
++                )
++            };
++            if read != 0 {
++                self.state = Operation::Pending;
++                continue;
++            }
++            // SAFETY: immediately reads this thread's failed native call status.
++            match unsafe { GetLastError() } {
++                ERROR_IO_PENDING => self.state = Operation::Pending,
++                ERROR_BROKEN_PIPE => break,
++                _ => return Err(io_error("GPU report read", io::Error::last_os_error())),
++            }
++        }
++        if self.used > self.bytes.len() || matches!(self.state, Operation::Pending) {
++            return Err(Refusal::Launch(crate::LaunchError::Observer));
++        }
++        // SAFETY: no operation is pending; UnsafeCell<u8> has u8's layout, and
++        // the initialized, stable allocation contains at least used bytes. This
++        // slice borrow prevents another mutable operation until parsing ends.
++        Ok(unsafe { std::slice::from_raw_parts(self.bytes.as_ptr().cast::<u8>(), self.used) })
++    }
++
++    fn cancel(&self) -> Result<(), Refusal> {
++        if matches!(self.state, Operation::Pending) {
++            #[cfg(test)]
++            if self
++                .cancel_errors
++                .try_update(
++                    std::sync::atomic::Ordering::AcqRel,
++                    std::sync::atomic::Ordering::Acquire,
++                    |left| left.checked_sub(1),
++                )
++                .is_ok()
++            {
++                return Err(io_error(
++                    "injected private report cancellation",
++                    io::ErrorKind::Other.into(),
++                ));
++            }
++            let operation = self
++                .operation
++                .first()
++                .ok_or(Refusal::Launch(crate::LaunchError::Observer))?
++                .get();
++            // SAFETY: the same submitted raw cell pointer and owned live handle.
++            // No &OVERLAPPED exists while the kernel may mutate its storage.
++            if unsafe { CancelIoEx(self.pipe.as_raw_handle(), operation) } == 0 {
++                // SAFETY: reads this thread's immediately preceding failure.
++                let error = unsafe { GetLastError() };
++                // Not found can race completed IO, but is NOT completion proof.
++                if error != ERROR_NOT_FOUND {
++                    return Err(io_error(
++                        "GPU report cancellation request",
++                        io::Error::from_raw_os_error(i32::from_ne_bytes(error.to_ne_bytes())),
++                    ));
++                }
++            }
++        }
++        Ok(())
++    }
++
++    pub fn finish(&mut self) -> Result<(), Refusal> {
++        if matches!(self.state, Operation::Pending) {
++            self.cancel()?;
++            let operation = self
++                .operation
++                .first()
++                .ok_or(Refusal::Launch(crate::LaunchError::Observer))?
++                .get();
++            let mut count = 0;
++            // SAFETY: SAME stable cells/buffer/handles. Only the existing native
++            // watcher performs this completion wait. A cancellation request is
++            // insufficient; only success or a documented completed error closes.
++            if unsafe { GetOverlappedResult(self.pipe.as_raw_handle(), operation, &mut count, 1) } == 0 {
++                // SAFETY: reads this thread's immediately preceding failure.
++                let error = unsafe { GetLastError() };
++                if !matches!(error, ERROR_OPERATION_ABORTED | ERROR_BROKEN_PIPE) {
++                    return Err(io_error(
++                        "GPU report cleanup completion",
++                        io::Error::from_raw_os_error(i32::from_ne_bytes(error.to_ne_bytes())),
++                    ));
++                }
++            }
++        }
++        self.state = Operation::Closed;
++        Ok(())
++    }
++
++    /// After an observation/cancellation error, subscribe to the operation's
++    /// ACTUAL private completion event. A later kernel completion must wake this
++    /// same watcher even when the last API owner has already gone.
++    pub fn wait_for_completion(&mut self) -> Result<(), Refusal> {
++        if matches!(self.state, Operation::Pending) {
++            // SAFETY: this event is uniquely owned, not inherited or signalled by
++            // callers; it was reset immediately before this one pending read.
++            // Windows signals it only after that operation completes. Shared
++            // retains the same cells/handles throughout this lifecycle wait.
++            let returned = unsafe { WaitForSingleObject(self.event.as_raw_handle(), INFINITE) };
++            if returned != WAIT_OBJECT_0 {
++                return Err(if returned == windows_sys::Win32::Foundation::WAIT_FAILED {
++                    io_error("GPU report native completion event", io::Error::last_os_error())
++                } else {
++                    Refusal::Launch(crate::LaunchError::Observer)
++                });
++            }
++        }
++        // No data is published after an earlier take/cleanup error. The unique
++        // operation's positive native event returns storage ownership even if
++        // its result status was unavailable; it is not native scope release.
++        self.state = Operation::Closed;
++        Ok(())
++    }
++
++    #[cfg(test)]
++    pub fn fail_cancel_calls_for_test(&self, calls: usize) {
++        self.cancel_errors
++            .store(calls, std::sync::atomic::Ordering::Release);
++    }
++}
++
++impl Drop for Reader {
++    fn drop(&mut self) {
++        // Production cannot reach last-drop Pending: take is exposed only after
++        // the watcher owns Shared, and that watcher retains it on cleanup error.
++        // Keep a memory-safety backstop for an unexpected internal early drop:
++        // retain its kernel-referenced resources rather than block a caller or
++        // free live IO storage. Such retention is uncertainty, never a pass.
++        if matches!(self.state, Operation::Pending) {
++            return;
++        }
++        // SAFETY: Idle/Closed proves no pending kernel reference to either
++        // allocation/handle. These are the four unique manually owned resources.
++        unsafe {
++            ManuallyDrop::drop(&mut self.operation);
++            ManuallyDrop::drop(&mut self.bytes);
++            ManuallyDrop::drop(&mut self.event);
++            ManuallyDrop::drop(&mut self.pipe);
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// The owned writer remains open: only positive cancellation completion,
++    /// never writer EOF or request success, can close this pending read storage.
++    #[test]
++    fn pending_private_read_keeps_cells_until_positive_cancel_completion() {
++        let (mut reader, writer) = Reader::new(64, [0x91; 16]).unwrap();
++        let operation = reader.operation.first().unwrap().get();
++        let buffer = reader.bytes.as_ptr();
++        let deadline = Instant::now()
++            .checked_add(crate::conformance::PATIENCE.get())
++            .unwrap();
++        assert!(matches!(
++            reader.frame(deadline),
++            Err(Refusal::GpuProbe(GpuProbeError::Pending))
++        ));
++        assert!(matches!(reader.state, Operation::Pending));
++        assert_eq!(reader.operation.first().unwrap().get(), operation);
++        assert_eq!(reader.bytes.as_ptr(), buffer);
++        reader.finish().unwrap();
++        assert!(matches!(reader.state, Operation::Closed));
++        drop(writer);
++    }
++}

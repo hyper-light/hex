@@ -1,0 +1,11 @@
+{
+  "driver_pid": 2255259,
+  "driver_birth": 32506827,
+  "owned_driver_absent": true,
+  "native_observation": {
+    "absent": true
+  },
+  "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-gate-comparison-build-fabd-v1.scope",
+  "scope_absent": true,
+  "members": []
+}

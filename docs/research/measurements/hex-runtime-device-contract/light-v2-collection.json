@@ -1,0 +1,17 @@
+{
+  "archive_sha256": "61952d0f439e8fb8830f6a2183d9dd9e550880fddec8d57c4dbf5dc67dbabd7c",
+  "files": {
+    "result.json": "37668f4c0fd7782a6ca46d5db03826457082efe0f367cc68e71bea4c2efb066c",
+    "run.json": "c4254a8d83bf6294e8c207f143f3622ed498e5798facc12bf2d1eb678178ecf1",
+    "source-hashes.json": "2921aa55aaae1b70e577bec37dc9a63ff7d5f8a6c704d4ea8b718e76b7366fa4",
+    "api-device-unit.log": "4dd4cdaf9f62919221f1d247bc25d5bb8b3f3e6da99285501025ba41ef10e259",
+    "api-id-unit.log": "12ad6bf09d7db67d40656960c7a9bcbe652a7dbc373f347e462e9c02441a5580",
+    "wire-unit.log": "ac34b0f95fda80de22b4203f587931ba124222bd03f89a55fa4a628d31c1aff7",
+    "api-clippy.log": "37f42dbf8a4e5fa29ffcd8f7a644951bc59ef8b3c121d899abb8091c8d7fe33b",
+    "core-clippy.log": "8edf4ea560d8dd81df2fed653bc6dc4bcd7a29b892a560dc8e5f7c4331a288ad"
+  },
+  "source_revision": "0429d0849e6661a6f2c78d9d1ef68526edc3e115",
+  "remote_root": "/Users/adalundhe/.cache/hex-runtime-device-contract/01a1c643-0429d084-light-v2",
+  "source_archive_sha256": "4428f6be7022606ec06cdec4a2473eaaf14a87c988cbef28d031d2da231b6864",
+  "free_kib_before_collection": 176902304
+}

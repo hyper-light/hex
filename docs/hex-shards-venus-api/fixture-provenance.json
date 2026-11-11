@@ -1,0 +1,12 @@
+{
+  "root_source": "03f19b891417f2f87de331baf359c1fdb612c5e4",
+  "upstream": "33df95b08ad8f95bddeaa1c48acf0c64386e0eac",
+  "all_5_root_copies_match_upstream": true,
+  "private_compiled_mac_include_set": [
+    "docs/research/measurements/managed-borrowed-nowait/focused.rs",
+    "docs/research/measurements/managed-borrowed-nowait/contract.rs"
+  ],
+  "api_source": "3f2e9fb10e4caca0de5114e1dd5471540b17e217",
+  "no_live_snapshot_mutation": true,
+  "actual_worktree_fixtures_changed": false
+}

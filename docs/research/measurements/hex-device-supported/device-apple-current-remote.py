@@ -1,0 +1,46 @@
+import hashlib,io,json,os,platform,re,subprocess,sys,tarfile
+from pathlib import Path,PurePosixPath
+root=Path(sys.argv[1]);expected,revision=sys.argv[2:4]
+root.mkdir(parents=True,exist_ok=False)
+data=sys.stdin.buffer.read()
+if hashlib.sha256(data).hexdigest()!=expected:raise ValueError('source archive mismatch')
+(root/'source.tar.gz').write_bytes(data)
+source=root/'source';source.mkdir()
+with tarfile.open(fileobj=io.BytesIO(data),mode='r:gz') as bundle:
+ for member in bundle.getmembers():
+  p=PurePosixPath(member.name)
+  if p.is_absolute() or '..' in p.parts or not(member.isfile() or member.isdir()):raise ValueError('nonregular archive member')
+ bundle.extractall(source)
+sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+manifest={str(p.relative_to(source)):sha(p) for p in sorted(source.rglob('*')) if p.is_file()}
+(root/'source-hashes.json').write_text(json.dumps(manifest,indent=2)+'\n')
+for name in ['target','cache/cargo','temp']:(root/name).mkdir(parents=True)
+rustup=Path.home()/'.cache/hex-lead/rustup-scheduler-copy';toolchain=rustup/'toolchains/1.99.1-aarch64-apple-darwin/bin'
+env={k:v for k,v in os.environ.items() if not k.startswith(('DYLD_','HEX_DEBUG_','HEX_WAITS_CENSUS','SHARDS_DEBUG_'))}
+env.update(PATH=str(toolchain)+os.pathsep+env['PATH'],RUSTUP_HOME=str(rustup),RUSTC=str(toolchain/'rustc'),RUSTDOC=str(toolchain/'rustdoc'),CARGO_HOME=str(root/'cache/cargo'),CARGO_TARGET_DIR=str(root/'target'),CARGO_BUILD_JOBS='1',RUST_TEST_THREADS='1',RAYON_NUM_THREADS='1',TMPDIR=str(root/'temp'))
+result={'source':revision,'archive_sha256':expected,'platform':platform.platform(),'arch':platform.machine(),'scope':'ROOT Apple native GPU inventory and telemetry plus facts/model and supported-target compilation; no runtime/guest attachment claim','phases':[]}
+
+for name,args in [('metal-facts',['test','-p','hex-node','--lib','--locked','facts::tests::metal_facts_keep_the_full_native_registry_identity_and_budget','--','--exact','--nocapture','--test-threads=1']),('device-offer',['test','-p','hex-node','--lib','--locked','scheduler::tests::device_offer_tests::','--','--nocapture','--test-threads=1']),('apple-hardware',['test','-p','hex-gpu','--test','hardware','--locked','--','--nocapture','--test-threads=1']),('node-native-clippy',['clippy','-p','hex-node','--all-targets','--locked','--','-D','warnings']),('node-winarm-clippy',['clippy','-p','hex-node','--all-targets','--locked','--target','aarch64-pc-windows-msvc','--','-D','warnings']),('node-linux-clippy',['clippy','-p','hex-node','--all-targets','--locked','--target','aarch64-unknown-linux-musl','--','-D','warnings'])]:
+ command=['nice','-n','10',str(toolchain/'cargo')]+args;phase={'name':name,'command':command};result['phases'].append(phase)
+ with (root/(name+'.log')).open('xb') as log:
+  child=subprocess.Popen(command,cwd=source,env=env,stdout=log,stderr=subprocess.STDOUT);phase['pid']=child.pid
+  (root/'run.json').write_text(json.dumps(result,indent=2)+'\n')
+  try:phase['exit']=child.wait(timeout=900)
+  except subprocess.TimeoutExpired:
+   child.terminate()
+   try:child.wait(timeout=10)
+   except subprocess.TimeoutExpired:child.kill();child.wait()
+   phase['exit']=child.returncode;phase['timed_out']=True
+ phase['reaped']=child.returncode is not None
+ raw=(root/(name+'.log')).read_bytes();phase['sha256']=hashlib.sha256(raw).hexdigest();phase['bytes']=len(raw)
+ if name=='metal-facts':phase['required_selected']=b'1 passed; 0 failed; 0 ignored;' in raw and b'panicked at' not in raw
+ if name=='apple-hardware':phase['required_selected']=b'1 passed; 0 failed; 0 ignored;' in raw and b'found Gpu { vendor: Apple' in raw and b'sample 1:' in raw and b'skipped:' not in raw
+ if name=='device-offer':phase['required_selected']=b'6 passed; 0 failed; 0 ignored;' in raw and b'panicked at' not in raw
+ (root/'run.json').write_text(json.dumps(result,indent=2)+'\n')
+ if phase['exit']!=0 or phase.get('timed_out'):break
+result['exit']=0 if len(result['phases'])==6 and all(p['exit']==0 and p.get('required_selected',True) and not p.get('timed_out') for p in result['phases']) else 1
+result['temp_entries']=len(list((root/'temp').iterdir()))
+(root/'result.json').write_text(json.dumps(result,indent=2)+'\n')
+print(json.dumps(result,indent=2),flush=True)
+if result['exit']:print((root/(result['phases'][-1]['name']+'.log')).read_text(errors='replace')[-14000:],flush=True)
+sys.exit(result['exit'])

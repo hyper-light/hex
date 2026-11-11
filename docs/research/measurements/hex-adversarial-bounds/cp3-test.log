@@ -1,0 +1,115 @@
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded const-oid v0.10.2
+  Downloaded block-buffer v0.10.4
+  Downloaded cpufeatures v0.2.17
+  Downloaded version_check v0.9.5
+  Downloaded cfg-if v1.0.5
+  Downloaded cpufeatures v0.3.1
+  Downloaded crypto-common v0.1.7
+  Downloaded xattr v1.6.1
+  Downloaded generic-array v0.14.7
+  Downloaded crypto-common v0.2.2
+  Downloaded adler2 v2.0.1
+  Downloaded block-buffer v0.12.1
+  Downloaded itoa v1.0.18
+  Downloaded errno v0.3.14
+  Downloaded fastrand v2.5.0
+  Downloaded filetime v0.2.29
+  Downloaded thiserror-impl v2.0.21
+  Downloaded digest v0.10.7
+  Downloaded zmij v1.0.23
+  Downloaded sha2 v0.11.1
+  Downloaded digest v0.11.3
+  Downloaded thiserror v2.0.21
+  Downloaded sha2 v0.10.9
+  Downloaded quote v1.0.47
+  Downloaded once_cell v1.21.4
+  Downloaded bitflags v2.13.2
+  Downloaded tempfile v3.27.0
+  Downloaded hybrid-array v0.4.15
+  Downloaded crc32fast v1.5.4
+  Downloaded getrandom v0.4.3
+  Downloaded serde_core v1.0.229
+  Downloaded simd-adler32 v0.3.10
+  Downloaded unicode-ident v1.0.27
+  Downloaded proc-macro2 v1.0.107
+  Downloaded miniz_oxide v0.9.1
+  Downloaded serde_derive v1.0.229
+  Downloaded tar v0.4.46
+  Downloaded typenum v1.20.1
+  Downloaded serde v1.0.229
+  Downloaded flate2 v1.1.11
+  Downloaded memchr v2.8.3
+  Downloaded serde_json v1.0.154
+  Downloaded zlib-rs v0.6.8
+  Downloaded syn v3.0.9
+  Downloaded rustix v1.1.5
+  Downloaded libc v0.2.191
+   Compiling proc-macro2 v1.0.107
+   Compiling libc v0.2.191
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.27
+   Compiling typenum v1.20.1
+   Compiling syn v3.0.9
+   Compiling cfg-if v1.0.5
+   Compiling serde_core v1.0.229
+   Compiling thiserror v2.0.21
+   Compiling thiserror-impl v2.0.21
+   Compiling version_check v0.9.5
+   Compiling generic-array v0.14.7
+   Compiling serde v1.0.229
+   Compiling serde_derive v1.0.229
+   Compiling hybrid-array v0.4.15
+   Compiling zmij v1.0.23
+   Compiling rustix v1.1.5
+   Compiling errno v0.3.14
+   Compiling bitflags v2.13.2
+   Compiling serde_json v1.0.154
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling shards-abi v0.1.0 (/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp3-v1/source/vendor/shards-api-draft/crates/abi)
+   Compiling const-oid v0.10.2
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling crc32fast v1.5.4
+   Compiling digest v0.11.3
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling hex-api v0.1.0 (/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp3-v1/source/crates/hex-api)
+   Compiling cpufeatures v0.3.1
+   Compiling simd-adler32 v0.3.10
+   Compiling adler2 v2.0.1
+   Compiling miniz_oxide v0.9.1
+   Compiling sha2 v0.11.1
+   Compiling hex-core v0.1.0 (/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp3-v1/source/crates/hex-core)
+   Compiling digest v0.10.7
+   Compiling xattr v1.6.1
+   Compiling filetime v0.2.29
+   Compiling cpufeatures v0.2.17
+   Compiling getrandom v0.4.3
+   Compiling sha2 v0.10.9
+   Compiling tar v0.4.46
+   Compiling flate2 v1.1.11
+   Compiling shards-api v0.1.0 (/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp3-v1/source/vendor/shards-api-draft/crates/api)
+   Compiling hyper-timing v0.1.0 (/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp3-v1/source/vendor/hyper-raft/crates/hyper-timing)
+   Compiling hyper-swim v0.1.0 (/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp3-v1/source/vendor/hyper-raft/crates/hyper-swim)
+   Compiling hex-client v0.1.0 (/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp3-v1/source/crates/hex-client)
+   Compiling hex-health v0.1.0 (/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp3-v1/source/crates/hex-health)
+   Compiling once_cell v1.21.4
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling hex-sim v0.1.0 (/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp3-v1/source/crates/hex-sim)
+   Compiling hex-runtime v0.1.0 (/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp3-v1/source/crates/hex-runtime)
+   Compiling hex-testkit v0.1.0 (/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp3-v1/source/crates/hex-testkit)
+   Compiling hex-gpu v0.1.0 (/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp3-v1/source/crates/hex-gpu)
+   Compiling hex-node v0.1.0 (/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp3-v1/source/crates/hex-node)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 00s
+     Running unittests src/lib.rs (/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp3-v1/target/debug/deps/hex_node-1028f62b4e94535b)
+
+running 1 test
+test placement::tests::adversarial_bounds_tests::representable_hostile_read_ceiling_compacts_without_new_physical_authority ... hostile-read expected=Full0/creates1/starts0/retained1 observed=Some(Core(Full { what: "owned records", bound: 0 }))/creates1/starts0/retained1 cleanup_boxes=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 129 filtered out; finished in 0.16s
+

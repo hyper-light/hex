@@ -1,0 +1,374 @@
+{
+  "file": "docs/research/measurements/hex-native-windows-hcs/runs/committedmeta1/raw/after-snapshots.db",
+  "bytes": 65536,
+  "sha256": "9a909f9be9efc4724d88a0503c59313a298435c4c64b66b3222910f8f466b3e5",
+  "page_size": 4096,
+  "valid_metas": [
+    {
+      "page": 0,
+      "root": 7,
+      "high": 12,
+      "transaction": 6,
+      "checksum": "b9159f1bed4cfd6e"
+    },
+    {
+      "page": 1,
+      "root": 10,
+      "high": 12,
+      "transaction": 7,
+      "checksum": "accc3fbc8157f781"
+    }
+  ],
+  "chosen": {
+    "page": 1,
+    "root": 10,
+    "high": 12,
+    "transaction": 7,
+    "checksum": "accc3fbc8157f781"
+  },
+  "rows": [
+    {
+      "path": [
+        "v1",
+        "parents",
+        "\u0001\u0000\u0002"
+      ],
+      "value": "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+      "hex": null,
+      "bytes": 125
+    },
+    {
+      "path": [
+        "v1",
+        "parents",
+        "\u0001\u0000\u0003"
+      ],
+      "value": "hex-native-hcs-full-image-v2/5/sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+      "hex": null,
+      "bytes": 102
+    },
+    {
+      "path": [
+        "v1",
+        "parents",
+        "\u0003\u0000\u0004"
+      ],
+      "value": "hex-native-hcs-full-image-v2/6/native-cached-v3-path-read",
+      "hex": null,
+      "bytes": 57
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "createdat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e6a52e83209cffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "id"
+      ],
+      "value": null,
+      "hex": "01",
+      "bytes": 1
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "inodes"
+      ],
+      "value": null,
+      "hex": "00",
+      "bytes": 1
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "kind"
+      ],
+      "value": null,
+      "hex": "03",
+      "bytes": 1
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "size"
+      ],
+      "value": null,
+      "hex": "beaeff9a8d01",
+      "bytes": 6
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "updatedat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e6a52e83209cffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "createdat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e6a52ec5fe94ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "id"
+      ],
+      "value": null,
+      "hex": "02",
+      "bytes": 1
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "kind"
+      ],
+      "value": null,
+      "hex": "02",
+      "bytes": 1
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "parent"
+      ],
+      "value": "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+      "hex": null,
+      "bytes": 102
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "updatedat"
+      ],
+      "value": null,
+      "hex": "010000000ee285e6a52ec5fe94ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/5/sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "createdat"
+      ],
+      "value": null,
+      "hex": "010000000ee285f557140dd234ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/5/sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "id"
+      ],
+      "value": null,
+      "hex": "03",
+      "bytes": 1
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/5/sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "inodes"
+      ],
+      "value": null,
+      "hex": "00",
+      "bytes": 1
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/5/sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "kind"
+      ],
+      "value": null,
+      "hex": "03",
+      "bytes": 1
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/5/sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "parent"
+      ],
+      "value": "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+      "hex": null,
+      "bytes": 102
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/5/sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "size"
+      ],
+      "value": null,
+      "hex": "82c8dac979",
+      "bytes": 5
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/5/sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "updatedat"
+      ],
+      "value": null,
+      "hex": "010000000ee285f557140dd234ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/6/native-cached-v3-path-read",
+        "createdat"
+      ],
+      "value": null,
+      "hex": "010000000ee285f5802bade988ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/6/native-cached-v3-path-read",
+        "id"
+      ],
+      "value": null,
+      "hex": "04",
+      "bytes": 1
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/6/native-cached-v3-path-read",
+        "kind"
+      ],
+      "value": null,
+      "hex": "02",
+      "bytes": 1
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/6/native-cached-v3-path-read",
+        "parent"
+      ],
+      "value": "hex-native-hcs-full-image-v2/5/sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+      "hex": null,
+      "bytes": 102
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/6/native-cached-v3-path-read",
+        "updatedat"
+      ],
+      "value": null,
+      "hex": "010000000ee285f5802bade988ffff",
+      "bytes": 15
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "labels",
+        "containerd.io/snapshot.ref"
+      ],
+      "value": "sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+      "hex": null,
+      "bytes": 71
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/2/sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+        "labels",
+        "containerd.io/snapshot/diff-id"
+      ],
+      "value": "sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+      "hex": null,
+      "bytes": 71
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "labels",
+        "containerd.io/snapshot.ref"
+      ],
+      "value": "sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+      "hex": null,
+      "bytes": 71
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "labels",
+        "containerd.io/snapshot/diff-id"
+      ],
+      "value": "sha256:4c77a873187ab2974036b801a24a6fd6fc18d93a00d96f813b8a82ee56fe1bc3",
+      "hex": null,
+      "bytes": 71
+    },
+    {
+      "path": [
+        "v1",
+        "snapshots",
+        "hex-native-hcs-full-image-v2/3/extract-784196300-9zjU sha256:49639eb7e32ce1d8a18cc2504b183a024475038fcba89f069a50751e8eef5a8d",
+        "labels",
+        "containerd.io/snapshot/parent-chain-id"
+      ],
+      "value": "sha256:7dd5847c8729728bf9037115c47152e0dbb67e2349b82aabde1f0d7d0387f1bc",
+      "hex": null,
+      "bytes": 71
+    }
+  ]
+}

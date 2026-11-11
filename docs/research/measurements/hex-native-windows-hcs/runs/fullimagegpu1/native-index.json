@@ -1,0 +1,16 @@
+{
+  "root": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\native-full-image-gpu-v1",
+  "index": {
+    "journal.json": {
+      "bytes": 9452,
+      "sha256": "ddceedb65c6b7b3256d9bd4137daa1beac35e75cd8a524fdf3278d554fc19155"
+    },
+    "submitted-hcs.json": {
+      "bytes": 1026,
+      "sha256": "b8a2b171be13f5dc7298075764bf1537736018e32955c1a8d3e29ae28e5a87af"
+    }
+  },
+  "source_hashes": {},
+  "temp_files": [],
+  "utc": "2026-11-11T06:19:48.0188392Z"
+}

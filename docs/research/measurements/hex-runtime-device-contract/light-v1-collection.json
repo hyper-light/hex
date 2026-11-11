@@ -1,0 +1,13 @@
+{
+  "archive_sha256": "f6ae2de08c9f679f4e83fe8307902bd60eb38251e6a5afc5d76a8f45ba2ec2b4",
+  "files": {
+    "result.json": "76601a6a7fb5476510611ee2c4ecd67b56d7745c9d1a246ed8acdc0d79875697",
+    "run.json": "90fe14f71f6d3c39ff3f58edb3e914af58c78d81711756d6f2a2430152513606",
+    "source-hashes.json": "7161e4657bc669dad22d177ef10b87f63e41d43ac9612dac04c948e9fea2f138",
+    "api-unit.log": "3fb7bb7788b086719ee3eb28e4422ece38e4d23f8397f255f9ea77a9a5799440"
+  },
+  "source_revision": "441ceb27872d0a64b847d5569017cc30b70f3d3a",
+  "remote_root": "/Users/adalundhe/.cache/hex-runtime-device-contract/01a1c643-441ceb27-light-v1",
+  "source_archive_sha256": "c3a9b7ef504229c7ff34858a92e88663dbd6f0cfd85a2f57250ca50d8f3df7b4",
+  "free_kib_before_collection": 59353728
+}

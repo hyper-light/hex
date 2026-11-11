@@ -1,0 +1,54 @@
+{
+  "source": "786775e3b119c5163d49aa12662c0207cb25cc29",
+  "archive_sha256": "b6631496067c2cd5ad5a0e62286225663da1c64ff48c2838c1f827240d5f968d",
+  "scope": "ROOT786 native image input coherent API/runtime/node/CLI Windows x64+ARM64 and Mac arm64 strict, new Mac API file/preparation3; no old controls replay or native VM/GPU; no WindowsARM VM",
+  "target": "mac",
+  "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 20375,
+  "phases": [
+    {
+      "name": "windows-x64-arm64-sdk-strict",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "--manifest-path",
+        "vendor/shards/crates/api/Cargo.toml",
+        "--all-targets",
+        "--offline",
+        "--no-deps",
+        "--target",
+        "x86_64-pc-windows-msvc",
+        "--target",
+        "aarch64-pc-windows-msvc",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 20778,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "6e95c1b313c4fe779e764559a298d02377a2a46b5fe48391af0c1a3e478afd18",
+      "bytes": 1749,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [
+    "vendor/shards/Cargo.lock"
+  ],
+  "temp_root": "/Users/adalundhe/.cache/hx-native-786v2",
+  "temp_entries": 0,
+  "native_test_invocations": 0,
+  "VM_GPU_invocations": 0,
+  "api_registry_cohort": {
+    "seed_sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+    "pruned_sha256": "dcbe9479bcbd6b91c7f1cbe46a59a482e78d8d097bd49a0af91c352880ee9c84",
+    "registry_packages": 15,
+    "all_registry_tuples_subset_of_exact_root_lock": true,
+    "private_lock_overlay_only": true
+  },
+  "exit": 1
+}

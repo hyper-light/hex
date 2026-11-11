@@ -81,7 +81,7 @@ pub struct FedConfig {
 
 /// One cell's run: its own cluster, node and workload ids dense within it, and the cluster's id of
 /// each of its workloads.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CellRun {
     pub region: u32,
     pub cell: u32,
@@ -101,7 +101,7 @@ pub enum Moved {
     NoCapacity,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct FedRun {
     /// Every cell, region by region, cell by cell.
     pub cells: Vec<CellRun>,
@@ -111,7 +111,7 @@ pub struct FedRun {
 
 /// The regions over the cluster's nodes, and each region's cells over its nodes, as [`Layout`]
 /// splits a cell's nodes into slices: contiguous ranges of ids.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Topo {
     regions: Layout,
     cells: Vec<Layout>,
@@ -119,6 +119,25 @@ struct Topo {
 }
 
 impl Topo {
+    fn try_clone(&self) -> Result<Self, SimError> {
+        let regions = self.regions.try_clone()?;
+        let mut cells = Vec::new();
+        cells
+            .try_reserve_exact(self.cells.len())
+            .map_err(|_| SimError::Full {
+                what: "topology snapshot regions",
+                bound: self.cells.len(),
+            })?;
+        for cell in &self.cells {
+            cells.push(cell.try_clone()?);
+        }
+        Ok(Self {
+            regions,
+            cells,
+            topology: self.topology,
+        })
+    }
+
     fn new(nodes: &[NodeSpec], topology: Topology) -> Result<Self, SimError> {
         if topology.cells == 0 {
             return Err(SimError::Config("a region has at least one cell"));
@@ -276,7 +295,7 @@ pub fn run(cluster: &Cluster, config: &FedConfig) -> Result<FedRun, SimError> {
     }
     moving.sort_by_key(|w| w.id);
     let mut capacity = Capacity {
-        topo: topo.clone(),
+        topo: topo.try_clone()?,
         free,
         pick: config.cell.pick,
     };
@@ -433,7 +452,7 @@ pub struct Admitted {
 
 /// Each cell's free nodes as the federation sees them, a cell it can't place on held as none, and
 /// the admission over them: H66's re-placement of a lost region's work and H68's selection.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Capacity {
     topo: Topo,
     free: Vec<Option<FitIndex>>,

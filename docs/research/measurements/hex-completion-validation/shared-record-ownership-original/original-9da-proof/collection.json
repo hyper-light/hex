@@ -1,0 +1,96 @@
+{
+  "bytes": 388595,
+  "sha256": "62c794c3c934f6102b4299142bba3adfe1d3acb2fbf029e6d787e0174bf6bc3b",
+  "members": {
+    "cohort-9da455c2-linux-shared-outer-original-9da/source-before.json": {
+      "bytes": 606795,
+      "sha256": "5b8bf442312dcc3f39c63a0203e0f30c582218a3207dc0cd63e4c64d2a9bb41c"
+    },
+    "cohort-9da455c2-linux-shared-outer-original-9da/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-9da455c2-linux-shared-outer-original-9da/owned-scope-limits.json": {
+      "bytes": 262,
+      "sha256": "58eafaa9f057587cee81296c4cec7d6f4c217f55c6f6826c35f2f520f8b6b439"
+    },
+    "cohort-9da455c2-linux-shared-outer-original-9da/dedicated_owner_refusal_keeps_one_canonical_box_without_outer_reentry.stdout": {
+      "bytes": 378,
+      "sha256": "99cf7d4598c8f76e089a5a362d5834c568188c18f4a847e144775c5e919e98e3"
+    },
+    "cohort-9da455c2-linux-shared-outer-original-9da/dedicated_owner_refusal_keeps_one_canonical_box_without_outer_reentry.stderr": {
+      "bytes": 4293,
+      "sha256": "5849cecf534d0a477f0edb94608a123c92a75f5be703563cc4fcf9bf055f260c"
+    },
+    "cohort-9da455c2-linux-shared-outer-original-9da/running.json": {
+      "bytes": 3986,
+      "sha256": "264889de8390122ecae171c10b075ef7df18c17db9c30b80ab56a6a6cbf9392e"
+    },
+    "cohort-9da455c2-linux-shared-outer-original-9da/original_shared_create_uncertainty_keeps_outer_box_and_same_pool_reference.stdout": {
+      "bytes": 388,
+      "sha256": "e52d0566d8d5dc468f054a99c95e5ac968fcce7caafcafe59dc44361581ac36b"
+    },
+    "cohort-9da455c2-linux-shared-outer-original-9da/original_shared_create_uncertainty_keeps_outer_box_and_same_pool_reference.stderr": {
+      "bytes": 734,
+      "sha256": "65b99d6ac69f4d7106a95174de4cc85d8f63bc659f8b016cb15b92419ace502f"
+    },
+    "cohort-9da455c2-linux-shared-outer-original-9da/source-after.json": {
+      "bytes": 606795,
+      "sha256": "5b8bf442312dcc3f39c63a0203e0f30c582218a3207dc0cd63e4c64d2a9bb41c"
+    },
+    "cohort-9da455c2-linux-shared-outer-original-9da/result.json": {
+      "bytes": 4093,
+      "sha256": "48a1f4db1e0c6756987fff5d0a6a3bedbe61df75dc010cb0f030e0807d077e32"
+    },
+    "cohort-9da455c2-linux-shared-outer-original-9da/event-evidence/journal.jsonl": {
+      "bytes": 1530,
+      "sha256": "730cc67934e9b596e718d2527d7bd6c47044bcdf7b2edd0e719465de1227c8b1"
+    },
+    "outer-closures.json": {
+      "bytes": 896,
+      "sha256": "a2c2fd3afcabf034c11d9ac658d5cffa92a479efeae0fbf6a904902f32872565"
+    }
+  },
+  "closures": {
+    "cohort-9da455c2-linux-shared-outer-original-9da": {
+      "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-shared-outer-original-9da.scope",
+      "scope_absent": true,
+      "owners": [
+        {
+          "kind": "driver",
+          "recorded": {
+            "pid": 950112,
+            "ppid": 950039,
+            "start_ticks": 32695625
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        },
+        {
+          "kind": "cargo",
+          "recorded": {
+            "pid": 952390,
+            "ppid": 950112,
+            "start_ticks": 32695781
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        },
+        {
+          "kind": "cargo",
+          "recorded": {
+            "pid": 1066624,
+            "ppid": 950112,
+            "start_ticks": 32703006
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        }
+      ]
+    }
+  },
+  "collector_exit": 0,
+  "collector_reaped": true,
+  "all_members_verified": true,
+  "source_archives_verified": true
+}

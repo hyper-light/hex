@@ -1,0 +1,63 @@
+{
+  "status": "SEPARATE SIGNED SOURCE CHECKPOINT / UNCOMPILED / new single control UNRUN / no native effects or dispatch",
+  "parent": "a237c9671ce3458c2abd65e824459073a0bb34b8",
+  "role": "implementer shards-gpu",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "production_delta": "two lines only: existing exact config/receipt preflight then real Prepared-only check_unsubmitted_pool before shared cancellation publication",
+  "private_ack": "existing d852 ->real70b364/431ca native recheck, no new API or broad Released(None) permission",
+  "dependencies": {
+    "required_transaction_method": "8641a1d08b2baa5e2a7938df747466a9d38bb393",
+    "recorded_native_callback": "0597523f90fdc665e4f1d3393665544d47443bdf",
+    "node_native_absence": "1aee0be8d8d9bbcb4fbb2fef43f30aa5fb4203ee",
+    "node_cancelled_ack_shape": "431ca4173ade1c26eef7b2860e9f14af48912455",
+    "recorded_private_cancelled_ack": "70b364aeb198b425a794878916f83321e41f0966"
+  },
+  "new_unit": "guest::shared::tests::shared_prepared_cancel_and_ack_recheck_native_absence_without_a_scope_end",
+  "preserved": {
+    "original7e6_and_d852_unit_bodies": "all11 byte-identical",
+    "current_root_source": "ff765c021b842e02ea872abdec0809d802703d0b immutable32 unaffected",
+    "old_d852_narrow_source": "unchanged",
+    "ROOT_6fb_fixtures": "not replaced"
+  },
+  "checks": {
+    "scoped_rustfmt_parser": "exit0",
+    "git_diff_check": "exit0",
+    "compiler": "NOT RUN",
+    "control": "NOT RUN",
+    "native": "NOT RUN"
+  },
+  "R01_R16": {
+    "R01": "no new production allocation/arithmetic/index/wait/owner; existing two fallible calls return before mutation; compiler/strict not run here",
+    "R02": "accepted shared reuse of existing real no-submission/native owner; source contract and alternatives in prior family/d852 records, no new architecture claim",
+    "R03": "no new production literal/resource allowance/deadline; test count derives from exact six model actions",
+    "R04": "Prepared-only noSubmission ->unallocated Released ->private ACK recheck ->remove/keyclear; presence/error retain row; no native end synthesized",
+    "R05": "same Tx/Store/turn/provider; no extra abstraction/worker/reaper/cache; key lock released before IO/callback",
+    "R06": "two production calls in existing Prepared branch; private ACK reused",
+    "R07": "guide records non-obvious absence-versus-terminal distinction; no production narration added",
+    "R08": "no performance claim; comparative measured target owed ROOT",
+    "R09": "new required feature closure, not unproven semantic bug remedy; d852 actual original0f75 red preserved separately",
+    "R10": "source/fixture hashes +exact unit +dependencies retained, execution/mutation results pending",
+    "R11": "shared portable consumer only; actual supported-target/native coverage unverified here",
+    "R12": "same existing native callback for GPU/CPU Pool, no platform duplication",
+    "R13": "no new public method/DTO/flag/owner; two-line production reuse",
+    "R14": "ROOT profiling/allocation/fault measurement owed; none dispatched",
+    "R15": "implementer scoped source only, no own replay/native/main merge; ROOT immutable32 preserved",
+    "R16": "small owned source/docs/draft preserved under cache; no foreign process/data/cache mutation"
+  },
+  "files": {
+    "crates/hex-runtime/src/guest/shared.rs": {
+      "bytes": 64351,
+      "sha256": "868f3b67d1fc5828b851aeff9ca8d6689b10edcb37d88e5b65df35594eaef7ed"
+    },
+    "crates/hex-runtime/src/guest/shared_tests.rs": {
+      "bytes": 37264,
+      "sha256": "ab9c08ae39364a83bf0273a1404592ed116ee264403f579156753963aa6aeaa5"
+    },
+    "docs/research/measurements/hex-complete-shards-gpu/SHARED-PREPARED-CANCEL-SOURCE.md": {
+      "bytes": 4265,
+      "sha256": "acc84afeb762685ff6cc85b4a16902d26c63aca9418f5aaf2dca1860e8dadc1c"
+    }
+  },
+  "open": "ROOT source review/matched compiler+new control; L3 Win no-keeper cancelled ACK source concern remains original-only, no remedy or production absence inference; Mac closed-worker/nativeGPU/LDA proof still owed."
+}

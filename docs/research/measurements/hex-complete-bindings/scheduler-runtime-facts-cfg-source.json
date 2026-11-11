@@ -1,0 +1,16 @@
+{
+  "scope": "AC-T7.4.1 helper-only portability correction",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "base": "6c71c072957993cff77b8005b64d59e8d01b6784",
+  "source": "crates/hex-node/src/scheduler.rs",
+  "before_sha256": "4f47bf22272bf94ce1fe08274fc74e91295a1f446edd3c0edd3d3304d40f61b2",
+  "after_sha256": "8ba8f79dda2372307e9ef68bc54bf7be4153e87c6fdb2650d317e4c245758244",
+  "change": "Only runtime_facts cfg(test) -> cfg(all(test,target_os=\"linux\")), matching its sole observer_cpu_tests module/caller gate. Body/production untouched.",
+  "original_log": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/portability-6c71-results-proof/cohort-6c71c072-mac-portability-6c71/windows-x64-arm64-joined-strict.log",
+  "original_log_sha256": "ed6e520f02a29a2af7a8f7d5a617015d333215cfaaa3efb64567a3e0d22b100d",
+  "original_result": "Windows x64+ARM64 joined all-target Clippy 101, sole runtime_facts dead-code cause; no native phase",
+  "validation": "source/diff only; no check dispatched; ROOT owns matched rerun",
+  "owed": "cross-target check and native/full gates remain ROOT-owned"
+}

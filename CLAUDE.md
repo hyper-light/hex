@@ -81,8 +81,10 @@ depth-first on the call stack. Work is flat: loops with counted budgets and boun
 ## 12. Portable
 
 Linux (glibc and musl), macOS and Windows, on x86_64 and aarch64, but for macOS on x86_64 (Ada, 2026-11-09:
-"windows, macos, and linux (of most any major flavor) compatible. AMD 64 and ARM64 excepting MacOS x86_64"). Platform code sits behind `cfg` with a portable path
-beside it, or a typed refusal naming the platform. `unsafe` is denied; where an OS interface needs it,
+"windows, macos, and linux (of most any major flavor) compatible. AMD 64 and ARM64 excepting MacOS x86_64"). Platform code sits behind `cfg` with equivalent working adapters on every supported target.
+Ada, 2026-11-10: valid device requests must work across these targets; a platform-based
+`unsupported` refusal is an implementation gap, never completion. Intel Mac remains excluded.
+`unsafe` is denied; where an OS interface needs it,
 its file is named here with the reason, and every block carries a `// SAFETY:` comment stating its
 invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at its top):
 
@@ -91,7 +93,11 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   decision 7) and executes it in the child, which shares the agent's memory until its execve and leaves its
   errno there when it can't, or, where
   the kernel refuses that clone, joins it to the cgroup in the forked child before `execve` (`pre_exec`);
-  Rust can express neither safely. And the `close_range` call, with the walk of `/proc/self/fd` by borrowed raw
+  Rust can express neither safely. Its managed-VM launch also uses a COW clone with atomic pidfd
+  ownership and a finite private pipe gate: the trusted child joins the cgroup and isolates inherited
+  descriptors, then waits until the canonical identity is durable before foreign exec; EOF cancels.
+  This held child uses prepared memory and signal-safe syscalls alone, with no vfork sharing.
+  And the `close_range` call, with the walk of `/proc/self/fd` by borrowed raw
   descriptors where the kernel refuses it, by which every descriptor from 3 up is marked close-on-exec before
   foreign code runs (those two children, a hook's, a container's init, an exec'd program's child, a seed:
   CVE-2024-21626's class), which rustix doesn't wrap.
@@ -148,7 +154,36 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   Hex declares itself (the macOS 26 SDK ships neither prototype, nor the jetsam flag values, which are
   xnu's `bsd/sys/spawn_internal.h`, though libSystem exports the symbols). Rust can express none of these
   foreign calls, nor the raw `posix_spawnattr_t` the spawn-attribute setters write, safely, and macOS
-  offers no safe wrapper.
+  offers no safe wrapper. Managed VM controllers use the SAME native owner and process group:
+  `POSIX_SPAWN_START_SUSPENDED` holds foreign code until its exact canonical PID/birth is durable;
+  read-only `sigaction` rejects auto-reaping/custom child ownership before launch, and `getpgid`
+  positively checks native membership. Passive `EVFILT_SIGNAL` for SIGCHLD on that controller's
+  existing kqueue observes waitable zombie publication without changing handlers or masks. The sole
+  waiter retains WNOWAIT ownership until durable Released/finalization. These calls need the same
+  foreign ABI isolation; they do not establish cold cleanup authority or an aggregate CPU cap.
+  Its managed helper also reads `clock_gettime(CLOCK_UPTIME_RAW)` into one initialized,
+  checked timespec to transfer an original same-host absolute operation deadline. This is
+  Rust1.99.1 Instant's Apple clock; locked rustix1.1.5 exposes no safe Apple uptime-raw
+  clock variant. The sender samples the native clock before the remaining Instant budget
+  so conversion cannot extend authority; the receiver checks the same clock and exact
+  helper identity. Read failure, negative/invalid timespec or arithmetic overflow refuses.
+  This read-only foreign call needs the existing file's isolation and SAFETY invariant;
+  it changes no clock and grants no lifecycle, release or resource authority.
+  The opt-in `native-trusted-entry-measurement` path also reads the loader-owned
+  `_NSGetArgc`/`_NSGetArgv` before the first standard argv collection, with native
+  count/NUL/ARG_MAX bounds and fallible owned copies. Its measurement-only fresh
+  Hex entry uses prepared attributes/actions for SETEXEC plus START_SUSPENDED,
+  exact returned-PID storage, initialized RLIMIT_NPROC0 readback and descriptor
+  copies/flags. Finite kevent output and the original CLOCK_UPTIME_RAW expiry
+  observe one exact known controller. Genuine task-name/audit-token queries own
+  and release their Mach rights; token-fenced CONT/KILL never fall back to PID
+  signals and tokens are recaptured after exec. These public native interfaces
+  have no equivalent safe workspace wrapper; all reached unsafe blocks remain
+  in this existing sys file with explicit SAFETY obligations. The focused safe
+  process child grants no whole-scope Released or refund and never continues the
+  foreign image. Source pins and unresolved pre-main, image/TOCTOU, resource and
+  closed-worker obligations are in trusted-entry-native-component.md and
+  trusted-entry-measurement-source.md. No native result is asserted by registration.
 - `crates/hex-runtime/src/macos/helper_sys.rs`: the macOS box helper daemon's privileged syscalls (the
   `process` class's box-user mode, decision "each OS runs its own boxes natively"; step 2). The daemon,
   as root, starts a box's programs as the box's pool user: a `fork` whose child drops to the user
@@ -191,10 +226,20 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   the keeper as it starts a member but in no job (`CreateProcessW` with the `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`
   alone, its three standard handles the NUL device), so the keeper, which outlives the node, holds none of
   the node's handles, names a process by its creation time (`GetProcessTimes`) so a reused pid is told
-  apart, and makes and signals the keeper's stop (`CreateEventW` named, `SetEvent`). `windows-sys` binds these as `unsafe` foreign
+  apart, compares an observation duplicate of a keeper-held handle with the original native job
+  (`CompareObjectHandles`) before closing that remote value, so a recycled value cannot authorize
+  disposal of a different object, and makes and signals the keeper's stop (`CreateEventW` named, `SetEvent`). Its HCS request
+  wake event is reset before scanning durable requests (`ResetEvent`), and the keeper waits on its
+  stop and request events together (`WaitForMultipleObjects`), retaining native creation ownership
+  after the node ends without periodically probing the request folder. `windows-sys` binds these as `unsafe` foreign
   functions, and std's own
   job-object support and its `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process creation are
   unstable; Rust can express none of them safely.
+  The guest observer also uses synchronous `WSAPoll`/`WSAGetLastError` on its two
+  borrowed output sockets. Only active endpoints enter the fixed stack array; the finite
+  deadline and native array remain owned for the call. No data, socket mode, timeout option,
+  asynchronous operation or handle ownership changes. These Winsock calls have no safe SDK wrapper.
+
 - `crates/hex-runtime/src/windows/wmi.rs`: the Windows node reads the optional features Hex's installer
   turns on (Containers, HypervisorPlatform) from WMI in process rather than starting PowerShell for them.
   On a thread of its own it initializes COM (`CoInitializeEx`, multithreaded, paired with
@@ -222,8 +267,16 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   the node gave it, and reads the host's build and kind (`RtlGetVersion`), an image's build from its base
   layer's `ntdll.dll` (`GetFileVersionInfoW`, `VerQueryValueW`), and a device interface class's members
   (`CM_Get_Device_Interface_List_SizeW`, `CM_Get_Device_Interface_ListW`) and whether each opens from where
-  it runs (`CreateFileW`, a query open). Rust can express none of these
+  it runs (`CreateFileW`, a query open). The exact present adapter interface for a PNP instance is
+  opened by `D3DKMTOpenAdapterFromDeviceName` to obtain its native full LUID and closed by
+  `D3DKMTCloseAdapter`; the existing Windows SDK types define that ABI. Rust can express none of these
   foreign calls, the function pointers resolved at run time, nor a handle value crossing processes, safely.
+- `crates/hex-gpu/src/apple/sys.rs`: Apple Silicon GPU identity and telemetry for the same
+  `hex-gpu` inventory/sample seam. Metal's device registry identifiers and the native Objective-C,
+  CoreFoundation, IOKit/IOReport interfaces require foreign calls and explicit retain/release ownership;
+  Rust cannot express those calls safely through this workspace's existing dependencies. Keep them
+  isolated here with checked type/count/lifetime boundaries and a SAFETY explanation per block.
+  This adapter is required by Ada's 2026-11-10 full macOS device-support instruction.
 - `crates/hex-gpu/src/nvml/sys.rs`: hex-gpu's NVIDIA telemetry (`docs/design/gpu-telemetry.md` G1). It loads
   NVML at run time, so a node without NVIDIA's driver starts and says why it reads no NVIDIA GPU: `dlopen`,
   `dlsym` and `dlerror` on Linux, `LoadLibraryExW` from System32 alone and `GetProcAddress` on Windows, each
@@ -235,6 +288,11 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   (`unsafe impl`): NVML is thread-safe, and a handle stays valid until `nvmlShutdown`, which Hex never calls.
   Rust can express none of these foreign calls, the function pointers resolved at run time, nor an opaque
   handle's thread-safety, safely. (Approved by Ada, 2026-11-09: "I approve that unsafe block.")
+- `crates/hex-gpu/src/windows_identity/sys.rs`: Windows AMD's actual present PCI devnode join.
+  Configuration Manager's locate, device-ID and property calls read only the exact ADL-reported
+  PNP instance into fixed initialized buffers. Checked native type/size, termination, complete PCI
+  location grammar and BusNumber/Address corroboration establish the full segment/BDF before
+  grouping. These SDK calls are unsafe; no pointer or handle escapes and no driver state changes.
 - `crates/hex-gpu/src/adl/sys.rs`: hex-gpu's AMD telemetry on Windows (`docs/design/gpu-telemetry.md` G3).
   It loads AMD's ADL (`atiadlxx.dll`, from System32 alone) at run time through `nvml/sys.rs`'s loader, so a
   node without AMD's driver (ARM64 Windows among them) starts and says why it reads no AMD GPU; makes one ADL
@@ -275,11 +333,22 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   which Hex declares itself; std has no AF_UNIX socket or completion port on Windows, and a buffer the kernel
   writes after the call returns is beyond Rust's borrow rules. Rust can express none of them safely.
 
-- `vendor/shards-api-draft/crates/api/src/borrowed.rs` (Windows module): the borrowed guest connector
+- `vendor/shards/crates/api/src/client.rs` (Windows module): the borrowed guest connector
   opens only a non-inheritable query/synchronize process handle (`OpenProcess`), verifies its creation time
   (`GetProcessTimes`) and current exit state (`WaitForSingleObject` with zero timeout), then closes only
   that observation handle (`CloseHandle`). These Windows calls are unsafe foreign functions; the handle
   owns no VM lifecycle and has no termination or duplication rights (HEX-RT-17).
+
+- `vendor/shards/crates/api/src/physical/report/unix.rs`: the managed GPU report's private
+  pipe uses `fcntl` to retain its flags while making only its read end nonblocking, and `poll`
+  spends the caller's original absolute deadline. libc exposes these native descriptor calls as
+  unsafe; the fixed stack poll entry and the private descriptor remain owned for the whole call.
+- `vendor/shards/crates/api/src/physical/report/windows.rs`: the managed GPU report owns one
+  private named pipe/event and heap-stable `OVERLAPPED`/buffer cells through native completion.
+  `CreateNamedPipeW`, `CreateFileW`, `ReadFile`, `GetOverlappedResult`, `CancelIoEx`, event waits
+  and peer-PID queries are unsafe SDK calls. The existing managed watcher retains pending storage
+  after errors and observes its actual private completion event before release; that event grants
+  storage ownership only, never native-scope release. A failed completion wait retains uncertainty.
 
 ## 13. Lean code
 

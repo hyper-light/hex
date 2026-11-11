@@ -1,0 +1,68 @@
+{
+  "build_exit": 0,
+  "binary": "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v3/target/debug/deps/hex_node-1028f62b4e94535b",
+  "binary_sha256": "edc62f34956a41980a10a39a906f13ffeb4d9bb9b50294887e949102d3b3cf3e",
+  "tests": [
+    {
+      "name": "scheduler::tests::adversarial_relay_tests::cancellation_reconciles_lost_start_reply_without_losing_either_queued_lane",
+      "command": [
+        "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v3/target/debug/deps/hex_node-1028f62b4e94535b",
+        "--exact",
+        "scheduler::tests::adversarial_relay_tests::cancellation_reconciles_lost_start_reply_without_losing_either_queued_lane",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "log": "test-0.log",
+      "log_sha256": "024d2e9ba710ed5d3a5b7afd661c6bf7a50e006e949f48fdbec53ff0ecdaa98a",
+      "log_bytes": 1575
+    },
+    {
+      "name": "scheduler::tests::adversarial_relay_tests::candidate_dc29::wrong_owner_start_does_not_consume_the_legitimate_peers_next_stamp",
+      "command": [
+        "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v3/target/debug/deps/hex_node-1028f62b4e94535b",
+        "--exact",
+        "scheduler::tests::adversarial_relay_tests::candidate_dc29::wrong_owner_start_does_not_consume_the_legitimate_peers_next_stamp",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "log": "test-1.log",
+      "log_sha256": "44f33105bc3223dfca1ad7030ef35496bba02bca6dbab07c855cabf871b959ab",
+      "log_bytes": 1704
+    },
+    {
+      "name": "scheduler::tests::adversarial_relay_tests::delayed_start_stays_fenced_through_forget_restart_and_new_sender_epoch",
+      "command": [
+        "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v3/target/debug/deps/hex_node-1028f62b4e94535b",
+        "--exact",
+        "scheduler::tests::adversarial_relay_tests::delayed_start_stays_fenced_through_forget_restart_and_new_sender_epoch",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "log": "test-2.log",
+      "log_sha256": "1258f6e2e554a254888d13c4c8f55aa6a8432e88c0bf45982e5135fbb7ee9459",
+      "log_bytes": 619
+    },
+    {
+      "name": "scheduler::tests::adversarial_relay_tests::wrong_owner_start_has_no_effect_and_other_peer_and_later_stamp_progress",
+      "command": [
+        "/Users/adalundhe/.cache/hex-adversarial-relay-01a1c640-v3/target/debug/deps/hex_node-1028f62b4e94535b",
+        "--exact",
+        "scheduler::tests::adversarial_relay_tests::wrong_owner_start_has_no_effect_and_other_peer_and_later_stamp_progress",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "log": "test-3.log",
+      "log_sha256": "8f4fa177a080ad2ff7982c07c63d60a4c574cb911aa59307aabe755acf9ad5ea",
+      "log_bytes": 716
+    }
+  ],
+  "selected": 4,
+  "passes": 2,
+  "nonzero": 2,
+  "scope": "actual native macOS test binary; Service/Order/Driver with SimRuntime effects; no native runtime box, SSH or VM",
+  "candidate_note": "wrong-owner unchanged-order/same-stamp correction expectation is a spec candidate, not a production defect; ROOT noted commit-before-effects transport fencing contract"
+}

@@ -1,0 +1,695 @@
+{
+  "requirement": "AC-T7.4.1 / decision9",
+  "kind": "root-reviewed-macos-client-wait-seeds",
+  "status": "candidate installed in source; broader validation FAILED; not ready to land",
+  "host": "macOS arm64 d1323898b255a3ed435eb83fa0f7b0cf",
+  "source": "bba3d814cfa8373d589482dfbaa38b9bfa792d03",
+  "helper_source": "fa5c7e4eb1fe47b1f4c2b3d31cd00cd473badf72",
+  "units": "nanoseconds",
+  "method": "existing per-operation, per-build-profile slowest-response seed and unchanged online running maximum; deadline remains TIMES_SLOWEST times larger of recorded and observed",
+  "selection": "Each row has at least1000 completed non-refusal wire replies in a root-verified ordinary local/SSH real-runtime capture. SDK guest Hello instead uses1000 class-validated borrower calls joined by exact unique census filename to successful helper exit. Seed is exact observed max, with no rounding/floor/multiplier added. All classified typed-refusal maxima in these same rows are below their selected answer maximum.",
+  "semantics": "These waits bound completed wire responses, including pending/refusal-notice Scheduled payloads; they do not assert workload success. Actual physical controls separately verify2000 local/SSH create/delete cycles per large profile. HearCreate has1000 non-refused replies and1000 remote physical creates per profile. HearControl/HearDelete may include repeated protocol messages and cannot be called unique successful workloads.",
+  "profile_scope": "Host client build profile is explicit in each retained binary receipt; guest binary/profile remains exactly as recorded, not inferred from host profile. SDK Hello timing begins after borrowed dial/token setup.",
+  "excluded": "Historical935f mixed unmarked data, diagnostic pressure/trace rows, synthetic rows, timeouts/cancelled runs, short N1 controls, cross-OS extrapolation and refusal-only rows are not used.",
+  "portability": "Apply only to macOS native transport and macOS-host guest transport. Linux/Windows remain unmeasured for these rows. Other runtime classes, hardware and supported-OS resource/cancellation checks remain unverified. Existing unrelated measuring waits are unchanged and remain explicitly owed.",
+  "seeded_validation": "No claim until root runs ordinary production binaries with both census env vars absent, including forced SSH child boundaries; existing census installation calls measure_all and cannot validate armed waits.",
+  "rows": {
+    "client.answer.hello": {
+      "release": {
+        "seed_ns": 829500,
+        "answer_n": 84605,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 829500,
+          "n": 84605,
+          "p50": 41417,
+          "p90": 60834,
+          "p99": 92042,
+          "p999": 160833
+        },
+        "wire_refused": {
+          "n": 0,
+          "max": null
+        },
+        "evidence": "census-release-bba3d814.json",
+        "raw_report_sha256": "f36db5fb920753c445988217e9c06eb2dcc3cd45921f095bdfb3baf6f46d9fc8",
+        "verification_report_sha256": "bd8dbe6efcb438f0c0a20ee73819146f8cee6e2dfdab43c1de83691b7a8a4248"
+      },
+      "debug": {
+        "seed_ns": 2607584,
+        "answer_n": 110297,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 2607584,
+          "n": 110297,
+          "p50": 92000,
+          "p90": 124333,
+          "p99": 171500,
+          "p999": 276000
+        },
+        "wire_refused": {
+          "n": 0,
+          "max": null
+        },
+        "evidence": "census-debug-bba3d814.json",
+        "raw_report_sha256": "3a64368c891ab0c346b57696475fd176e881e2d67e1e70f8f11c26714079ca74",
+        "verification_report_sha256": "ca7611dc3bb50301d3af070fb5346d7a31881052d0f85a597536edec7eb74142"
+      }
+    },
+    "client.answer.schedule.describe": {
+      "release": {
+        "seed_ns": 22866875,
+        "answer_n": 6448,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 22866875,
+          "n": 6448,
+          "p50": 879209,
+          "p90": 9527750,
+          "p99": 14233708,
+          "p999": 17705083
+        },
+        "wire_refused": {
+          "max": 189583,
+          "n": 1674,
+          "p50": 47750,
+          "p90": 70416,
+          "p99": 103833,
+          "p999": 188958
+        },
+        "evidence": "census-release-bba3d814.json",
+        "raw_report_sha256": "f36db5fb920753c445988217e9c06eb2dcc3cd45921f095bdfb3baf6f46d9fc8",
+        "verification_report_sha256": "bd8dbe6efcb438f0c0a20ee73819146f8cee6e2dfdab43c1de83691b7a8a4248"
+      },
+      "debug": {
+        "seed_ns": 22181708,
+        "answer_n": 6243,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 22181708,
+          "n": 6243,
+          "p50": 1573000,
+          "p90": 9802458,
+          "p99": 14869167,
+          "p999": 18638875
+        },
+        "wire_refused": {
+          "max": 472792,
+          "n": 1383,
+          "p50": 92792,
+          "p90": 134417,
+          "p99": 243666,
+          "p999": 385417
+        },
+        "evidence": "census-debug-bba3d814.json",
+        "raw_report_sha256": "3a64368c891ab0c346b57696475fd176e881e2d67e1e70f8f11c26714079ca74",
+        "verification_report_sha256": "ca7611dc3bb50301d3af070fb5346d7a31881052d0f85a597536edec7eb74142"
+      }
+    },
+    "client.answer.schedule.advertise": {
+      "release": {
+        "seed_ns": 78447792,
+        "answer_n": 2000,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 78447792,
+          "n": 2000,
+          "p50": 36420542,
+          "p90": 52480666,
+          "p99": 66065917,
+          "p999": 75094959
+        },
+        "wire_refused": {
+          "max": 239625,
+          "n": 1183,
+          "p50": 55000,
+          "p90": 79375,
+          "p99": 127166,
+          "p999": 237584
+        },
+        "evidence": "census-release-bba3d814.json",
+        "raw_report_sha256": "f36db5fb920753c445988217e9c06eb2dcc3cd45921f095bdfb3baf6f46d9fc8",
+        "verification_report_sha256": "bd8dbe6efcb438f0c0a20ee73819146f8cee6e2dfdab43c1de83691b7a8a4248"
+      },
+      "debug": {
+        "seed_ns": 108619750,
+        "answer_n": 2000,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 108619750,
+          "n": 2000,
+          "p50": 35400083,
+          "p90": 52055917,
+          "p99": 66225542,
+          "p999": 77074583
+        },
+        "wire_refused": {
+          "max": 527125,
+          "n": 1180,
+          "p50": 124958,
+          "p90": 164959,
+          "p99": 222833,
+          "p999": 520375
+        },
+        "evidence": "census-debug-bba3d814.json",
+        "raw_report_sha256": "3a64368c891ab0c346b57696475fd176e881e2d67e1e70f8f11c26714079ca74",
+        "verification_report_sha256": "ca7611dc3bb50301d3af070fb5346d7a31881052d0f85a597536edec7eb74142"
+      }
+    },
+    "client.answer.schedule.submit": {
+      "release": {
+        "seed_ns": 162546792,
+        "answer_n": 2000,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 162546792,
+          "n": 2000,
+          "p50": 83403166,
+          "p90": 137340792,
+          "p99": 150621917,
+          "p999": 160869958
+        },
+        "wire_refused": {
+          "max": 270000,
+          "n": 202,
+          "p50": 62417,
+          "p90": 88375,
+          "p99": 146792,
+          "p999": 270000
+        },
+        "evidence": "census-release-bba3d814.json",
+        "raw_report_sha256": "f36db5fb920753c445988217e9c06eb2dcc3cd45921f095bdfb3baf6f46d9fc8",
+        "verification_report_sha256": "bd8dbe6efcb438f0c0a20ee73819146f8cee6e2dfdab43c1de83691b7a8a4248"
+      },
+      "debug": {
+        "seed_ns": 401317333,
+        "answer_n": 2000,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 401317333,
+          "n": 2000,
+          "p50": 72101875,
+          "p90": 312797417,
+          "p99": 356956791,
+          "p999": 388124875
+        },
+        "wire_refused": {
+          "max": 936375,
+          "n": 279,
+          "p50": 143792,
+          "p90": 195583,
+          "p99": 256417,
+          "p999": 936375
+        },
+        "evidence": "census-debug-bba3d814.json",
+        "raw_report_sha256": "3a64368c891ab0c346b57696475fd176e881e2d67e1e70f8f11c26714079ca74",
+        "verification_report_sha256": "ca7611dc3bb50301d3af070fb5346d7a31881052d0f85a597536edec7eb74142"
+      }
+    },
+    "client.answer.schedule.hear_create": {
+      "release": {
+        "seed_ns": 213308750,
+        "answer_n": 1000,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 213308750,
+          "n": 1000,
+          "p50": 131807750,
+          "p90": 168843458,
+          "p99": 194432834,
+          "p999": 209867792
+        },
+        "wire_refused": {
+          "n": 0,
+          "max": null
+        },
+        "evidence": "census-release-bba3d814.json",
+        "raw_report_sha256": "f36db5fb920753c445988217e9c06eb2dcc3cd45921f095bdfb3baf6f46d9fc8",
+        "verification_report_sha256": "bd8dbe6efcb438f0c0a20ee73819146f8cee6e2dfdab43c1de83691b7a8a4248"
+      },
+      "debug": {
+        "seed_ns": 392913792,
+        "answer_n": 1000,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 392913792,
+          "n": 1000,
+          "p50": 283312291,
+          "p90": 333608584,
+          "p99": 370222583,
+          "p999": 383382375
+        },
+        "wire_refused": {
+          "n": 0,
+          "max": null
+        },
+        "evidence": "census-debug-bba3d814.json",
+        "raw_report_sha256": "3a64368c891ab0c346b57696475fd176e881e2d67e1e70f8f11c26714079ca74",
+        "verification_report_sha256": "ca7611dc3bb50301d3af070fb5346d7a31881052d0f85a597536edec7eb74142"
+      }
+    },
+    "client.answer.schedule.hear_delete": {
+      "release": {
+        "seed_ns": 132392000,
+        "answer_n": 2705,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 132392000,
+          "n": 2705,
+          "p50": 42990417,
+          "p90": 75678833,
+          "p99": 105263291,
+          "p999": 123527167
+        },
+        "wire_refused": {
+          "max": 89333,
+          "n": 133,
+          "p50": 41500,
+          "p90": 59708,
+          "p99": 88250,
+          "p999": 89333
+        },
+        "evidence": "census-release-bba3d814.json",
+        "raw_report_sha256": "f36db5fb920753c445988217e9c06eb2dcc3cd45921f095bdfb3baf6f46d9fc8",
+        "verification_report_sha256": "bd8dbe6efcb438f0c0a20ee73819146f8cee6e2dfdab43c1de83691b7a8a4248"
+      },
+      "debug": {
+        "seed_ns": 130079458,
+        "answer_n": 2813,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 130079458,
+          "n": 2813,
+          "p50": 42660625,
+          "p90": 78129750,
+          "p99": 108854250,
+          "p999": 125271333
+        },
+        "wire_refused": {
+          "max": 277625,
+          "n": 138,
+          "p50": 92750,
+          "p90": 131417,
+          "p99": 194458,
+          "p999": 277625
+        },
+        "evidence": "census-debug-bba3d814.json",
+        "raw_report_sha256": "3a64368c891ab0c346b57696475fd176e881e2d67e1e70f8f11c26714079ca74",
+        "verification_report_sha256": "ca7611dc3bb50301d3af070fb5346d7a31881052d0f85a597536edec7eb74142"
+      }
+    },
+    "client.answer.schedule.hear_control": {
+      "release": {
+        "seed_ns": 116103292,
+        "answer_n": 12317,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 116103292,
+          "n": 12317,
+          "p50": 40788416,
+          "p90": 63880500,
+          "p99": 90416792,
+          "p999": 107270875
+        },
+        "wire_refused": {
+          "max": 212625,
+          "n": 2515,
+          "p50": 34375,
+          "p90": 50959,
+          "p99": 77375,
+          "p999": 185666
+        },
+        "evidence": "census-release-bba3d814.json",
+        "raw_report_sha256": "f36db5fb920753c445988217e9c06eb2dcc3cd45921f095bdfb3baf6f46d9fc8",
+        "verification_report_sha256": "bd8dbe6efcb438f0c0a20ee73819146f8cee6e2dfdab43c1de83691b7a8a4248"
+      },
+      "debug": {
+        "seed_ns": 119427250,
+        "answer_n": 12213,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 119427250,
+          "n": 12213,
+          "p50": 40000833,
+          "p90": 64334833,
+          "p99": 91917083,
+          "p999": 106629666
+        },
+        "wire_refused": {
+          "max": 1750500,
+          "n": 2359,
+          "p50": 79625,
+          "p90": 104833,
+          "p99": 144709,
+          "p999": 461709
+        },
+        "evidence": "census-debug-bba3d814.json",
+        "raw_report_sha256": "3a64368c891ab0c346b57696475fd176e881e2d67e1e70f8f11c26714079ca74",
+        "verification_report_sha256": "ca7611dc3bb50301d3af070fb5346d7a31881052d0f85a597536edec7eb74142"
+      }
+    },
+    "client.answer.schedule.link_up": {
+      "release": {
+        "seed_ns": 139333,
+        "answer_n": 1000,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 139333,
+          "n": 1000,
+          "p50": 57750,
+          "p90": 78542,
+          "p99": 102250,
+          "p999": 125084
+        },
+        "wire_refused": {
+          "max": 105375,
+          "n": 795,
+          "p50": 48792,
+          "p90": 70291,
+          "p99": 96333,
+          "p999": 105375
+        },
+        "evidence": "census-release-bba3d814.json",
+        "raw_report_sha256": "f36db5fb920753c445988217e9c06eb2dcc3cd45921f095bdfb3baf6f46d9fc8",
+        "verification_report_sha256": "bd8dbe6efcb438f0c0a20ee73819146f8cee6e2dfdab43c1de83691b7a8a4248"
+      },
+      "debug": {
+        "seed_ns": 250209,
+        "answer_n": 1000,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 250209,
+          "n": 1000,
+          "p50": 112083,
+          "p90": 162250,
+          "p99": 199416,
+          "p999": 221542
+        },
+        "wire_refused": {
+          "max": 164000,
+          "n": 677,
+          "p50": 74709,
+          "p90": 107125,
+          "p99": 142208,
+          "p999": 164000
+        },
+        "evidence": "census-debug-bba3d814.json",
+        "raw_report_sha256": "3a64368c891ab0c346b57696475fd176e881e2d67e1e70f8f11c26714079ca74",
+        "verification_report_sha256": "ca7611dc3bb50301d3af070fb5346d7a31881052d0f85a597536edec7eb74142"
+      }
+    },
+    "client.answer.schedule.retry": {
+      "release": {
+        "seed_ns": 9766084,
+        "answer_n": 2000,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 9766084,
+          "n": 2000,
+          "p50": 348000,
+          "p90": 570209,
+          "p99": 1102959,
+          "p999": 5525375
+        },
+        "wire_refused": {
+          "max": 161584,
+          "n": 714,
+          "p50": 48625,
+          "p90": 69542,
+          "p99": 105041,
+          "p999": 161584
+        },
+        "evidence": "census-release-bba3d814.json",
+        "raw_report_sha256": "f36db5fb920753c445988217e9c06eb2dcc3cd45921f095bdfb3baf6f46d9fc8",
+        "verification_report_sha256": "bd8dbe6efcb438f0c0a20ee73819146f8cee6e2dfdab43c1de83691b7a8a4248"
+      },
+      "debug": {
+        "seed_ns": 16694750,
+        "answer_n": 2000,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 16694750,
+          "n": 2000,
+          "p50": 630875,
+          "p90": 1253167,
+          "p99": 9786083,
+          "p999": 14888083
+        },
+        "wire_refused": {
+          "max": 235500,
+          "n": 717,
+          "p50": 79750,
+          "p90": 110708,
+          "p99": 142292,
+          "p999": 235500
+        },
+        "evidence": "census-debug-bba3d814.json",
+        "raw_report_sha256": "3a64368c891ab0c346b57696475fd176e881e2d67e1e70f8f11c26714079ca74",
+        "verification_report_sha256": "ca7611dc3bb50301d3af070fb5346d7a31881052d0f85a597536edec7eb74142"
+      }
+    },
+    "client.answer.schedule.delete": {
+      "release": {
+        "seed_ns": 83190542,
+        "answer_n": 2000,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 83190542,
+          "n": 2000,
+          "p50": 39303250,
+          "p90": 64999417,
+          "p99": 76758083,
+          "p999": 82096791
+        },
+        "wire_refused": {
+          "max": 221500,
+          "n": 1394,
+          "p50": 49834,
+          "p90": 74125,
+          "p99": 101625,
+          "p999": 197875
+        },
+        "evidence": "census-release-bba3d814.json",
+        "raw_report_sha256": "f36db5fb920753c445988217e9c06eb2dcc3cd45921f095bdfb3baf6f46d9fc8",
+        "verification_report_sha256": "bd8dbe6efcb438f0c0a20ee73819146f8cee6e2dfdab43c1de83691b7a8a4248"
+      },
+      "debug": {
+        "seed_ns": 125323459,
+        "answer_n": 2000,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 125323459,
+          "n": 2000,
+          "p50": 44991500,
+          "p90": 81042125,
+          "p99": 108969958,
+          "p999": 123923500
+        },
+        "wire_refused": {
+          "max": 367000,
+          "n": 1172,
+          "p50": 84250,
+          "p90": 115417,
+          "p99": 161000,
+          "p999": 331750
+        },
+        "evidence": "census-debug-bba3d814.json",
+        "raw_report_sha256": "3a64368c891ab0c346b57696475fd176e881e2d67e1e70f8f11c26714079ca74",
+        "verification_report_sha256": "ca7611dc3bb50301d3af070fb5346d7a31881052d0f85a597536edec7eb74142"
+      }
+    },
+    "client.answer.schedule.status": {
+      "release": {
+        "seed_ns": 4420667,
+        "answer_n": 47850,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 4420667,
+          "n": 47850,
+          "p50": 57958,
+          "p90": 91333,
+          "p99": 385834,
+          "p999": 778708
+        },
+        "wire_refused": {
+          "max": 159084,
+          "n": 14832,
+          "p50": 50250,
+          "p90": 71333,
+          "p99": 96708,
+          "p999": 123709
+        },
+        "evidence": "census-release-bba3d814.json",
+        "raw_report_sha256": "f36db5fb920753c445988217e9c06eb2dcc3cd45921f095bdfb3baf6f46d9fc8",
+        "verification_report_sha256": "bd8dbe6efcb438f0c0a20ee73819146f8cee6e2dfdab43c1de83691b7a8a4248"
+      },
+      "debug": {
+        "seed_ns": 7264708,
+        "answer_n": 74234,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 7264708,
+          "n": 74234,
+          "p50": 126250,
+          "p90": 179834,
+          "p99": 738125,
+          "p999": 4896667
+        },
+        "wire_refused": {
+          "max": 1437292,
+          "n": 14687,
+          "p50": 79583,
+          "p90": 110959,
+          "p99": 144500,
+          "p999": 182833
+        },
+        "evidence": "census-debug-bba3d814.json",
+        "raw_report_sha256": "3a64368c891ab0c346b57696475fd176e881e2d67e1e70f8f11c26714079ca74",
+        "verification_report_sha256": "ca7611dc3bb50301d3af070fb5346d7a31881052d0f85a597536edec7eb74142"
+      }
+    },
+    "client.answer.capacity": {
+      "release": {
+        "seed_ns": 13172125,
+        "answer_n": 12453,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 13172125,
+          "n": 12453,
+          "p50": 285083,
+          "p90": 5043958,
+          "p99": 6828083,
+          "p999": 8618792
+        },
+        "wire_refused": {
+          "n": 0,
+          "max": null
+        },
+        "evidence": "census-release-bba3d814.json",
+        "raw_report_sha256": "f36db5fb920753c445988217e9c06eb2dcc3cd45921f095bdfb3baf6f46d9fc8",
+        "verification_report_sha256": "bd8dbe6efcb438f0c0a20ee73819146f8cee6e2dfdab43c1de83691b7a8a4248"
+      },
+      "debug": {
+        "seed_ns": 14254417,
+        "answer_n": 12248,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 14254417,
+          "n": 12248,
+          "p50": 450792,
+          "p90": 5134458,
+          "p99": 7056500,
+          "p999": 9853500
+        },
+        "wire_refused": {
+          "n": 0,
+          "max": null
+        },
+        "evidence": "census-debug-bba3d814.json",
+        "raw_report_sha256": "3a64368c891ab0c346b57696475fd176e881e2d67e1e70f8f11c26714079ca74",
+        "verification_report_sha256": "ca7611dc3bb50301d3af070fb5346d7a31881052d0f85a597536edec7eb74142"
+      }
+    },
+    "client.guest.answer.capacity": {
+      "release": {
+        "seed_ns": 5094833,
+        "answer_n": 12453,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 5094833,
+          "n": 12453,
+          "p50": 188375,
+          "p90": 290125,
+          "p99": 523250,
+          "p999": 1013125
+        },
+        "wire_refused": {
+          "n": 0,
+          "max": null
+        },
+        "evidence": "census-release-bba3d814.json",
+        "raw_report_sha256": "f36db5fb920753c445988217e9c06eb2dcc3cd45921f095bdfb3baf6f46d9fc8",
+        "verification_report_sha256": "bd8dbe6efcb438f0c0a20ee73819146f8cee6e2dfdab43c1de83691b7a8a4248"
+      },
+      "debug": {
+        "seed_ns": 6826667,
+        "answer_n": 12248,
+        "distribution": "non_refusal_wire_answers",
+        "answer_statistics_ns": {
+          "max": 6826667,
+          "n": 12248,
+          "p50": 254250,
+          "p90": 426250,
+          "p99": 876125,
+          "p999": 1498042
+        },
+        "wire_refused": {
+          "n": 0,
+          "max": null
+        },
+        "evidence": "census-debug-bba3d814.json",
+        "raw_report_sha256": "3a64368c891ab0c346b57696475fd176e881e2d67e1e70f8f11c26714079ca74",
+        "verification_report_sha256": "ca7611dc3bb50301d3af070fb5346d7a31881052d0f85a597536edec7eb74142"
+      }
+    },
+    "client.guest.answer.hello": {
+      "release": {
+        "seed_ns": 202583,
+        "answer_n": 1000,
+        "distribution": "filename_process_exit_success",
+        "answer_statistics_ns": {
+          "max": 202583,
+          "n": 1000,
+          "p50": 83709,
+          "p90": 102083,
+          "p99": 134458,
+          "p999": 149791
+        },
+        "wire_refused": {
+          "n": 0,
+          "max": null
+        },
+        "evidence": "guest-hello-release-fa5c7e4e.json",
+        "raw_report_sha256": "bef82ca27d3fb2fe7450145981c65a7a363abd55941e1d35bca1d33dc21d0492",
+        "verification_report_sha256": "c14409aaad5ee4ce05efe2438660e8984b07847ed3980d3d777c1ce3848573b1"
+      },
+      "debug": {
+        "seed_ns": 197042,
+        "answer_n": 1000,
+        "distribution": "filename_process_exit_success",
+        "answer_statistics_ns": {
+          "max": 197042,
+          "n": 1000,
+          "p50": 105167,
+          "p90": 115833,
+          "p99": 131750,
+          "p999": 148708
+        },
+        "wire_refused": {
+          "n": 0,
+          "max": null
+        },
+        "evidence": "guest-hello-debug-fa5c7e4e.json",
+        "raw_report_sha256": "75f1be8f0bbc595764a86c0ac2f90ea3c366f963c8ce5fe2397b6a58b541f91b",
+        "verification_report_sha256": "87a83525318e5aa716462934dd3458f778db35bb0212e876a5820bcbf8f1cc0a"
+      }
+    }
+  },
+  "source_patch_sha256": "8dffdca89bee66b54cca558c666a199130ef5b5500c6594fd3139448c73c0940",
+  "focused_checks": {
+    "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+    "run": "r500",
+    "source": "bba3d814 plus exact root patch8dffdca8",
+    "client_library": {
+      "passed": 51,
+      "failed": 0,
+      "ignored": 0
+    },
+    "seven_target_client_all_target_clippy_exit": 0,
+    "log": "/Users/adalundhe/.cache/hex-lead/logs/mac-seeds-focused-8dffdca8.log",
+    "log_sha256": "82113e20118b25b8b03b31e640c88b8aa895b9680ed4d4fc21d4747379afe465",
+    "earlier_attempt": "r498 patch96915ac8 failed compile because new macOS Duration use lacked its import; corrected before this check; earlier log retained; no tests ran in that failed compile",
+    "unverified": "actual armed seed behavior and final combined workspace/root lab"
+  },
+  "validation_record": "mac-seeds-validation-e2fb4f17.json"
+}

@@ -1,0 +1,600 @@
+[
+  {
+    "path": "crates/hex-api/src/conformance.rs",
+    "boxspec": 2,
+    "capacity": 0,
+    "lines": [
+      908,
+      1091
+    ]
+  },
+  {
+    "path": "crates/hex-bench/benches/macos_box.rs",
+    "boxspec": 2,
+    "capacity": 0,
+    "lines": [
+      104,
+      153
+    ]
+  },
+  {
+    "path": "crates/hex-bench/benches/native_box.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      248
+    ]
+  },
+  {
+    "path": "crates/hex-bench/benches/node_memory.rs",
+    "boxspec": 2,
+    "capacity": 0,
+    "lines": [
+      109,
+      121
+    ]
+  },
+  {
+    "path": "crates/hex-bench/benches/seam_box.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      59
+    ]
+  },
+  {
+    "path": "crates/hex-bench/benches/seam_oci.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      167
+    ]
+  },
+  {
+    "path": "crates/hex-bench/benches/windows_oci.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      77
+    ]
+  },
+  {
+    "path": "crates/hex-cli/benches/noisy_neighbor.rs",
+    "boxspec": 2,
+    "capacity": 0,
+    "lines": [
+      85,
+      96
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/guest_create_bench.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      130
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/guest_first_create.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      90
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/guest_real.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      57
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/guest_tree.rs",
+    "boxspec": 2,
+    "capacity": 0,
+    "lines": [
+      282,
+      444
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/guest_validation.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      282
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_node_recovery.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      85
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_process_box.rs",
+    "boxspec": 16,
+    "capacity": 0,
+    "lines": [
+      63,
+      232,
+      267,
+      332,
+      401,
+      430,
+      467,
+      512,
+      550,
+      677,
+      789,
+      848,
+      921,
+      973,
+      1048,
+      1397
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/node_socket.rs",
+    "boxspec": 12,
+    "capacity": 0,
+    "lines": [
+      224,
+      576,
+      586,
+      608,
+      1036,
+      1106,
+      1158,
+      1168,
+      1530,
+      1923,
+      1991,
+      2094
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "boxspec": 33,
+    "capacity": 0,
+    "lines": [
+      446,
+      457,
+      492,
+      502,
+      725,
+      1025,
+      1421,
+      1569,
+      1747,
+      2049,
+      2229,
+      2352,
+      2479,
+      2686,
+      2802,
+      3035,
+      3064,
+      3222,
+      3343,
+      3457,
+      3661,
+      3718,
+      4279,
+      4397,
+      4574,
+      4616,
+      4739,
+      4789,
+      4906,
+      4921,
+      5013,
+      5153,
+      5252
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_cgroupfs_box.rs",
+    "boxspec": 4,
+    "capacity": 0,
+    "lines": [
+      132,
+      155,
+      252,
+      279
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_devices/native_scheduler.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      192
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_devices.rs",
+    "boxspec": 2,
+    "capacity": 0,
+    "lines": [
+      157,
+      494
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_ipcuts.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      338
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_lsm.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      274
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_reuse.rs",
+    "boxspec": 9,
+    "capacity": 0,
+    "lines": [
+      248,
+      507,
+      542,
+      608,
+      1068,
+      1624,
+      1929,
+      2217,
+      2336
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_seccomp.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      136
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_spec_box.rs",
+    "boxspec": 8,
+    "capacity": 0,
+    "lines": [
+      167,
+      177,
+      336,
+      476,
+      556,
+      577,
+      636,
+      687
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/process_box.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      47
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_assigned_device.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      403
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_node.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      99
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_node_recovery.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      80
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_oci_box.rs",
+    "boxspec": 2,
+    "capacity": 0,
+    "lines": [
+      113,
+      546
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_process_box.rs",
+    "boxspec": 6,
+    "capacity": 0,
+    "lines": [
+      54,
+      102,
+      199,
+      333,
+      366,
+      462
+    ]
+  },
+  {
+    "path": "crates/hex-client/src/calls/tests.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      746
+    ]
+  },
+  {
+    "path": "crates/hex-core/src/record.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      218
+    ]
+  },
+  {
+    "path": "crates/hex-core/src/recovery.rs",
+    "boxspec": 2,
+    "capacity": 0,
+    "lines": [
+      139,
+      251
+    ]
+  },
+  {
+    "path": "crates/hex-core/src/schedule/waits.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      81
+    ]
+  },
+  {
+    "path": "crates/hex-core/src/wire/tests.rs",
+    "boxspec": 6,
+    "capacity": 2,
+    "lines": [
+      33,
+      43,
+      380,
+      505,
+      545,
+      557,
+      622,
+      1546
+    ]
+  },
+  {
+    "path": "crates/hex-core/src/wire.rs",
+    "boxspec": 1,
+    "capacity": 1,
+    "lines": [
+      842,
+      1162
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/abandoned.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      96
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/facts.rs",
+    "boxspec": 0,
+    "capacity": 1,
+    "lines": [
+      144
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/node.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      2438
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/placement/device_binding_tests.rs",
+    "boxspec": 0,
+    "capacity": 1,
+    "lines": [
+      142
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/placement/tests.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      121
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/adversarial_relay_tests.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      70
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/capacity.rs",
+    "boxspec": 0,
+    "capacity": 1,
+    "lines": [
+      111
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/device_offer_tests.rs",
+    "boxspec": 0,
+    "capacity": 1,
+    "lines": [
+      79
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/tests.rs",
+    "boxspec": 6,
+    "capacity": 0,
+    "lines": [
+      42,
+      179,
+      252,
+      364,
+      575,
+      843
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/tunnel.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      359
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/serve/linux_tests.rs",
+    "boxspec": 2,
+    "capacity": 0,
+    "lines": [
+      209,
+      876
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/serve/macos_tests.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      136
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/serve/sim_tests.rs",
+    "boxspec": 2,
+    "capacity": 0,
+    "lines": [
+      614,
+      815
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/serve/unix_tests.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      129
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/store.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      573
+    ]
+  },
+  {
+    "path": "crates/hex-node/tests/guest_loop.rs",
+    "boxspec": 3,
+    "capacity": 0,
+    "lines": [
+      943,
+      994,
+      1018
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/devices/tests.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      10
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/guest/device_routing_tests.rs",
+    "boxspec": 1,
+    "capacity": 1,
+    "lines": [
+      26,
+      99
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/guest/rewrite.rs",
+    "boxspec": 1,
+    "capacity": 0,
+    "lines": [
+      95
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/guest/tests.rs",
+    "boxspec": 3,
+    "capacity": 2,
+    "lines": [
+      109,
+      336,
+      438,
+      1347,
+      1408
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/macos/tests.rs",
+    "boxspec": 5,
+    "capacity": 0,
+    "lines": [
+      159,
+      377,
+      437,
+      569,
+      708
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/windows/mod.rs",
+    "boxspec": 2,
+    "capacity": 1,
+    "lines": [
+      1340,
+      1634,
+      2086
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/windows/oci/sys.rs",
+    "boxspec": 2,
+    "capacity": 0,
+    "lines": [
+      1449,
+      1517
+    ]
+  }
+]

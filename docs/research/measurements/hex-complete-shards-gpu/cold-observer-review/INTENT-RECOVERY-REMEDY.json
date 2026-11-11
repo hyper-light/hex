@@ -1,0 +1,44 @@
+{
+  "status": "SIGNED SOURCE REMEDY after actual original relevant red; no new compile/test/native run by L2",
+  "parent": "ec3683877511cc75b5fc5cd6f24a800fee705fd4",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": {
+    "path": "crates/hex-runtime/src/guest/gpu_pool.rs",
+    "sha256": "1dcb871ff0c67eb3b8e6c06101ab03a95a48bc9dc5eb0e6eb977be43f24e1bb4"
+  },
+  "actual_original": {
+    "coordinator": "ROOT",
+    "cohort": "25d98e88 Linux producer recovery",
+    "original_control": "13c021b2f7412f47146890ab91866850658d90a0",
+    "unit": "guest::gpu_pool::tests::published_gpu_scope_with_retained_intent_recovers_without_a_second_launch",
+    "selected": 1,
+    "passed": 0,
+    "failed": 1,
+    "ignored": 0,
+    "symptom": "attaches0; Intent must not prevent cleanup of the original published scope",
+    "log": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/producer-recovery-25d9-results-proof/cohort-25d98e88-linux-producer-recovery-25d9/intent-recovery-original.log",
+    "log_sha256": "84efd6015ed04327ce121abe0f8fc8d6e2244b77c8950947e87fc10a491e107b",
+    "raw_archive": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/producer-recovery-25d9-results-proof/raw.tar.gz",
+    "raw_sha256": "d3ad1f961ef744953bf44d5278f5198c25b1d8cf5f409029c1d15da3cd054cf4"
+  },
+  "change": "Intent and Released-without-local-identity use cleanup-only Tx.attach_managed(None) even when SAME canonical PoolRecord.init is published. Scope and native commitment validation remain mandatory.",
+  "invariants": [
+    "None is not a native identity and never constructs usable Guest, guessed PID/birth/vsock or legacy missing scope",
+    "same original row/key/claims/allocation/configuration and full conflict turns precede cleanup",
+    "controller-only terminal retains Draining and full claims; only positive whole Released permits native finalization/canonical Released",
+    "after native termination is durable, failed native finalize can retry same cleanup authority without local identity",
+    "usable boot/reattach still requires local Running identity, exact renderer report and guest readiness; interrupted Intent is never relaunched"
+  ],
+  "preserved": {
+    "all_cfg_test_bytes_identical_to_parent": true,
+    "v4_receipt_codec_unchanged": true,
+    "original_checkpoints_retained": true
+  },
+  "remaining": [
+    "ROOT reruns only original failed unit plus affected meaningful positive after joined source",
+    "native whole-scope proof remains ROOT/L3; pure model release is not native resource proof",
+    "alias and known-failure remedies separate; subset interfaces/design separate"
+  ]
+}

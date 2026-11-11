@@ -1,0 +1,67 @@
+{
+  "bytes": 360582,
+  "sha256": "2cc9ff0ea17f0785e92d14cd21abe6268dfd39925e5810a60aefab924a59f9bc",
+  "members": {
+    "cohort-d83ce734-light-v1/running.json": {
+      "bytes": 870,
+      "sha256": "2da89964002cfd06c1a6cfb5eec869f5df1df7907f3a157c220760e0f6590305"
+    },
+    "cohort-d83ce734-light-v1/result.json": {
+      "bytes": 1121,
+      "sha256": "e4c099cb1dd7d6d97e4d8ece16cd150492d6ad23532ec7fb3d22d0348dbf3272"
+    },
+    "cohort-d83ce734-light-v1/source-before.json": {
+      "bytes": 264360,
+      "sha256": "cf818d15bc8fb108b8aafc534cc26c1d73ad8e3a721da79bbf45ec6852a2455b"
+    },
+    "cohort-d83ce734-light-v1/source-after.json": {
+      "bytes": 264360,
+      "sha256": "cf818d15bc8fb108b8aafc534cc26c1d73ad8e3a721da79bbf45ec6852a2455b"
+    },
+    "cohort-d83ce734-light-v1/guest.log": {
+      "bytes": 6615,
+      "sha256": "2f1dc6160e335cd9e6df8672ee15570471fff22ec064ccfd7bc42f854f052ef7"
+    },
+    "cohort-d83ce734-light-v1/collected-binaries.json": {
+      "bytes": 680,
+      "sha256": "46fce636d959a916285367172d4c1b409fb1203baed64747b55f5368b2bc4274"
+    },
+    "cohort-e72b6683-light-v1/wire.log": {
+      "bytes": 5361,
+      "sha256": "3a0029a0e92f91da6c2a6f7f75dc5318e2db36bf57b91817476ad3bc9adb35f9"
+    },
+    "cohort-e72b6683-light-v1/api.log": {
+      "bytes": 4469,
+      "sha256": "83acbd70f73f9e4aaa612e062d14fff65fad3ab6383a0fb4cf64f42b083470ab"
+    },
+    "cohort-e72b6683-light-v1/running.json": {
+      "bytes": 2329,
+      "sha256": "eb977dd7e6631151f3791bd75164ba533c62bb971bd92250c0524e5aead222c9"
+    },
+    "cohort-e72b6683-light-v1/result.json": {
+      "bytes": 2533,
+      "sha256": "ebe85eb6faf6ce4e9496f274fdd177c9c3bcb2b980986baa018e7e62c385deaa"
+    },
+    "cohort-e72b6683-light-v1/source-before.json": {
+      "bytes": 266116,
+      "sha256": "69e37a3638885f35b9871bf773a1ad1574124ced284cf77d6068132fe2377c85"
+    },
+    "cohort-e72b6683-light-v1/source-after.json": {
+      "bytes": 266116,
+      "sha256": "69e37a3638885f35b9871bf773a1ad1574124ced284cf77d6068132fe2377c85"
+    },
+    "cohort-e72b6683-light-v1/clippy.log": {
+      "bytes": 2958,
+      "sha256": "a33d332caebaf75ec2d20893a92734cf8bd9d08f63fa88db5817b932c8042488"
+    },
+    "cohort-e72b6683-light-v1/collected-binaries.json": {
+      "bytes": 2472,
+      "sha256": "69dc4ba13426faa4dc98953bbe3783cf7d2a6cda3108e6fddc504150a702adfd"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

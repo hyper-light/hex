@@ -1,0 +1,168 @@
+{
+  "source_revision": "93abeaae82d97aaf64271e8fc29908538788bbb8",
+  "source_archive_sha256": "194b9647a3812c7ff44bb6362c8a6888fa28636cb289ec6ba25ac594f956bf73",
+  "policy_revision": "0c598386ca1f7c65c6e0634dba77983e4abffff2",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "assigned adversarial native Windows/HCS",
+  "owned_paths": [
+    "NEW docs/research/measurements/hex-native-windows-hcs/**",
+    "NEW crates/hex-cli/tests/native_windows_*",
+    "NEW crates/hex-gpu/tests/native_windows_*"
+  ],
+  "runner": "f766f09294f2e17e3b8a631ffd4e6a4b",
+  "needs": "cpus=1,mem=4g,disk=12g",
+  "root": "C:/Users/corph/.cache/hex-native-windows-hcs/winpreflight2",
+  "priority": "BelowNormal",
+  "driver_pid": 9952,
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\r\nbinary: rustc\r\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\r\ncommit-date: 2026-10-13\r\nhost: x86_64-pc-windows-msvc\r\nrelease: 1.99.1\r\nLLVM version: 23.1.1\r\n",
+  "phases": [
+    {
+      "guard": {
+        "pid": 12860,
+        "exitCode": 0,
+        "activeAfter": 0,
+        "activeBeforeCleanup": 1,
+        "processes": 156,
+        "terminated": 0,
+        "residualsTerminated": true,
+        "timedOut": false,
+        "reaped": true,
+        "peakJobMemory": 1067507712,
+        "user100ns": 434062500,
+        "kernel100ns": 243906250
+      },
+      "command": [
+        "C:\\Users\\corph\\.rustup\\toolchains\\1.99.1-x86_64-pc-windows-msvc\\bin\\cargo.exe",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "name": "build",
+      "stdout_sha256": "c8b377a70461c126d6dcce283fa99a0162f700423306eb0a135f145b4eb80183",
+      "stderr_sha256": "e58be4d97f2a894c6c8f1ee14ffaf4c89046c581f4ca05d71b0cfe8506214723"
+    },
+    {
+      "guard": {
+        "pid": 18224,
+        "exitCode": 0,
+        "activeAfter": 0,
+        "activeBeforeCleanup": 1,
+        "processes": 3,
+        "terminated": 0,
+        "residualsTerminated": false,
+        "timedOut": false,
+        "reaped": true,
+        "peakJobMemory": 9400320,
+        "user100ns": 156250,
+        "kernel100ns": 312500
+      },
+      "name": "list-preflight-four",
+      "stdout_sha256": "d973cd3dde50331e0ddb7be374418de26cbb8dd840b5707598c8451c6e6f7832",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "guard": {
+        "pid": 17920,
+        "exitCode": 101,
+        "activeAfter": 0,
+        "activeBeforeCleanup": 1,
+        "processes": 3,
+        "terminated": 0,
+        "residualsTerminated": false,
+        "timedOut": false,
+        "reaped": true,
+        "peakJobMemory": 10264576,
+        "user100ns": 468750,
+        "kernel100ns": 312500
+      },
+      "command": [
+        "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\winpreflight2\\target\\debug\\deps\\hex_runtime-1a8c3fd91d9a5f68.exe",
+        "windows::preflight::tests::",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "name": "preflight-four-only",
+      "stdout_sha256": "dd5f2588bc3d6bf7efe1b88e333b227bb25fa0d15df9e8ee0a084797f2268859",
+      "stderr_sha256": "b51a7a087796bd7113781b4e8b3218d7a1dfd44e9441dc0cd38304ae2131cadb"
+    }
+  ],
+  "native_tests": 0,
+  "boot": "2026-11-11T03:04:32.5000000Z",
+  "leaf_sha256": "27aa6e530911ddc9d6c3a62975c319b0ddaef26439b477c7ceae0ecd9bc87b02",
+  "build_cohort": "ROOT-requested c579 or its exact L3 nine-cause successor93 Windows preflight four-only light tests; runtime Clippy deliberately not run on known lint-red source",
+  "linker": "C:\\Users\\corph\\.rustup\\toolchains\\1.99.1-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\bin\\rust-lld.exe",
+  "linker_sha256": "53d7ea9474ddbb0f0eda351f2dace3259e77f1175537f64d321c232bc8d29b68",
+  "rustflags": "-C linker-flavor=lld-link -C target-feature=+crt-static",
+  "cargo_profile_dev_debug": "0",
+  "cargo_profile_test_debug": "0",
+  "policy_current_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "policy_fully_read_revision": "0c598386ca1f7c65c6e0634dba77983e4abffff2",
+  "policy_byte_equality_sha256": "6a658eef10e8802ed3d73ca09e5f5acf63b5f5c767c27196d429d73fba739388",
+  "target_initially_empty": true,
+  "target_canonical_before": "\\\\?\\C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\winpreflight2\\target",
+  "source_manifest_before_sha256": "29d0d11df8cf1225a828d801b2ae063c36d4c6b2d92b0fe383bd1f3842d076e5",
+  "source_manifest_after_build_sha256": "29d0d11df8cf1225a828d801b2ae063c36d4c6b2d92b0fe383bd1f3842d076e5",
+  "source_unchanged_before_native": true,
+  "artifact": {
+    "reason": "compiler-artifact",
+    "package_id": "path+file:///C:/Users/corph/.cache/hex-native-windows-hcs/winpreflight2/source/crates/hex-runtime#0.1.0",
+    "manifest_path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\winpreflight2\\source\\crates\\hex-runtime\\Cargo.toml",
+    "target": {
+      "kind": [
+        "lib"
+      ],
+      "crate_types": [
+        "lib"
+      ],
+      "name": "hex_runtime",
+      "src_path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\winpreflight2\\source\\crates\\hex-runtime\\src\\lib.rs",
+      "edition": "2024",
+      "doc": true,
+      "doctest": true,
+      "test": true
+    },
+    "profile": {
+      "opt_level": "0",
+      "debuginfo": 0,
+      "debug_assertions": true,
+      "overflow_checks": true,
+      "test": true
+    },
+    "features": [],
+    "filenames": [
+      "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\winpreflight2\\target\\debug\\deps\\hex_runtime-1a8c3fd91d9a5f68.exe",
+      "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\winpreflight2\\target\\debug\\deps\\hex_runtime-1a8c3fd91d9a5f68.pdb"
+    ],
+    "executable": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\winpreflight2\\target\\debug\\deps\\hex_runtime-1a8c3fd91d9a5f68.exe",
+    "fresh": false
+  },
+  "artifact_machine": "IMAGE_FILE_MACHINE_AMD64 0x8664",
+  "binary": "\\\\?\\C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\winpreflight2\\target\\debug\\deps\\hex_runtime-1a8c3fd91d9a5f68.exe",
+  "binary_sha256": "7f4c88f212ecc2861b50887699040e9d620c460ee70acfd6e2620cc673825d23",
+  "artifact_verified_before_dispatch": true,
+  "production_base": "93abeaae82d97aaf64271e8fc29908538788bbb8",
+  "allowed_light_cohorts": [
+    "c579a9453cbad2660703d15ff31b28edb6de9300",
+    "93abeaae82d97aaf64271e8fc29908538788bbb8"
+  ],
+  "preflight_source_sha256": "27aa6e530911ddc9d6c3a62975c319b0ddaef26439b477c7ceae0ecd9bc87b02",
+  "runtime_clippy": "NOT RUN: ROOT explicitly excluded known unchanged lint failures on this frozen source",
+  "native_gpu_dispatches": 0,
+  "hcs_calls_from_tests": 0,
+  "wmi_calls_from_tests": 0,
+  "native_job_creation_from_tests": 0,
+  "selected_test_names": [
+    "retained_cpu_marker_preflight_preserves_foreign_system_and_storage_bytes",
+    "pending_hcs_marker_absence_or_missing_service_receipt_never_initializes_native_state",
+    "orphan_native_marker_refuses_without_reclaiming_or_starting_a_keeper",
+    "keeper_configuration_is_read_only_and_legacy_cpu_preflight_stays_positive"
+  ],
+  "actual_selected_test_count": 4,
+  "source_unchanged_after_tests": true,
+  "temp_entries": 0,
+  "exit_code": 1
+}

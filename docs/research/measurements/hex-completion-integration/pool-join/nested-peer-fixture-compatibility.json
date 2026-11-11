@@ -1,0 +1,10 @@
+{
+  "requirement": "AC-T7.4.1",
+  "actual_compiler_source": "88f72 Mac v2 route/peer/model lib-test compilation;zero cases executed",
+  "path": "crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs",
+  "before": "a9f3b5edd755ed8359b4867b1cb95f686eef3e04246d5622c01825d232cf053b",
+  "change": "Only two missing commas before the already required routeNone fields in existing test macro constructors; no production/recovery behavior changed.",
+  "original_signed_refs_retained": true,
+  "checks_after_change": "unrun",
+  "after": "32f01772818edc249de77141e8b9256523ad5e075b969309e50336f6659c0e51"
+}

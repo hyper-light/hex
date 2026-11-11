@@ -1,0 +1,95 @@
+{
+  "bytes": 618135,
+  "sha256": "f701852bd758d0ac88fb319066332b9d0a83dfbd0677ff9847fcd2ab96ff98e8",
+  "members": {
+    "cohort-dacdc8a6-mac-provider-controls-v1/running.json": {
+      "bytes": 1102,
+      "sha256": "c80a7e7408086e7d26749aed685058494dac42ba8ca845462e3ded30fbb7ef7e"
+    },
+    "cohort-dacdc8a6-mac-provider-controls-v1/rpc-control.log": {
+      "bytes": 3679,
+      "sha256": "4808252f6fe26f142b1f2b638ae465cb59e9c7cc8824f7da15f200758da59fa8"
+    },
+    "cohort-dacdc8a6-mac-provider-controls-v1/result.json": {
+      "bytes": 1369,
+      "sha256": "572c55ef4cdaf8b083047dd524f340781f295b71ba9ac8dddba9300ed3d37243"
+    },
+    "cohort-dacdc8a6-mac-provider-controls-v1/source-before.json": {
+      "bytes": 296117,
+      "sha256": "cd5eae4096e1d293df7e68dad6ea11f042b121725715a3784cf04b562a6180f3"
+    },
+    "cohort-dacdc8a6-mac-provider-controls-v1/source-after.json": {
+      "bytes": 296117,
+      "sha256": "cd5eae4096e1d293df7e68dad6ea11f042b121725715a3784cf04b562a6180f3"
+    },
+    "cohort-dacdc8a6-mac-provider-controls-v1/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-dacdc8a6-mac-provider-controls-v1/collected-binaries.json": {
+      "bytes": 772,
+      "sha256": "2f7966f422b74ebf8290953fd3f1b2c43f014ec01b38f48462dad398ca4e2c82"
+    },
+    "cohort-dacdc8a6-mac-windows-clippy-v1/running.json": {
+      "bytes": 1107,
+      "sha256": "c3c47e498aa3101591ff33aef0cc519cd191d83f8f3c5bff9458db270daa98f9"
+    },
+    "cohort-dacdc8a6-mac-windows-clippy-v1/result.json": {
+      "bytes": 1361,
+      "sha256": "5696f9e3377325a4ce1c5b5e363a925e4a5a9fbc0ef2e5f19b82ad342be51f79"
+    },
+    "cohort-dacdc8a6-mac-windows-clippy-v1/source-before.json": {
+      "bytes": 296117,
+      "sha256": "cd5eae4096e1d293df7e68dad6ea11f042b121725715a3784cf04b562a6180f3"
+    },
+    "cohort-dacdc8a6-mac-windows-clippy-v1/source-after.json": {
+      "bytes": 296117,
+      "sha256": "cd5eae4096e1d293df7e68dad6ea11f042b121725715a3784cf04b562a6180f3"
+    },
+    "cohort-dacdc8a6-mac-windows-clippy-v1/production-check.log": {
+      "bytes": 5343,
+      "sha256": "ad1d00e6ec4dac73c6abb9f78555529e2998eac9f69b4e436d2ad36dd51737d1"
+    },
+    "cohort-dacdc8a6-mac-windows-clippy-v1/public-registry-seed.json": {
+      "bytes": 25211,
+      "sha256": "a2d55ceeaf67a0da2c0a16d485439089ad7b2b0e4922b4d7a4fdaa0423ec12ae"
+    },
+    "cohort-dacdc8a6-mac-windows-clippy-v1/collected-binaries.json": {
+      "bytes": 754,
+      "sha256": "b1af2cad069888d37e5694bd610de9afb414ca6e301204d8b65d2031ed6a1172"
+    },
+    "cohort-40feda1f-mac-provider-controls-v1/running.json": {
+      "bytes": 1144,
+      "sha256": "ab4f23a5bdf1ea25d69a95d9f9d9f780735183d2b00492b46480a805a8427d4c"
+    },
+    "cohort-40feda1f-mac-provider-controls-v1/rpc-control.log": {
+      "bytes": 7959,
+      "sha256": "19ae11d2ab3b0847f8f2155c3ae6c9a4be21077e8a60856cab0e050f3c2c5862"
+    },
+    "cohort-40feda1f-mac-provider-controls-v1/result.json": {
+      "bytes": 1411,
+      "sha256": "a04a50192179144665b256aeca42535d08c2a597c3f77adeb899328a1dd01c15"
+    },
+    "cohort-40feda1f-mac-provider-controls-v1/source-before.json": {
+      "bytes": 297593,
+      "sha256": "4b447b304318d83cdfc8a130c787016ecf636667b32d35297f0d2dfb74b35927"
+    },
+    "cohort-40feda1f-mac-provider-controls-v1/source-after.json": {
+      "bytes": 297593,
+      "sha256": "4b447b304318d83cdfc8a130c787016ecf636667b32d35297f0d2dfb74b35927"
+    },
+    "cohort-40feda1f-mac-provider-controls-v1/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-40feda1f-mac-provider-controls-v1/collected-binaries.json": {
+      "bytes": 772,
+      "sha256": "a147530728719085d84ae549291e68f4d09436744202aac2ff2f379ce297e731"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

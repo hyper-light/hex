@@ -1,0 +1,63 @@
+{
+  "bytes": 221269,
+  "sha256": "0a34e0ec667820795cda9cf5ee3dc4168c084d9ee14c4e137156e0b702913495",
+  "members": {
+    "cohort-be8bbe56-mac-pool-joined-controls-b24-v4/joined-production-check.log": {
+      "bytes": 3031,
+      "sha256": "0a8b89e06771e27f54e697d7fedea7427f34ac5c6f2d21ef93df5b285a07dc67"
+    },
+    "cohort-be8bbe56-mac-pool-joined-controls-b24-v4/route-index-original-controls.log": {
+      "bytes": 6379,
+      "sha256": "1296bc314c6259869d9cfcf8543250e93b5427351750c137254f891b0c782f1e"
+    },
+    "cohort-be8bbe56-mac-pool-joined-controls-b24-v4/backing-receipt-codec-controls.log": {
+      "bytes": 542,
+      "sha256": "e88cd14786fe57c39001c0978a0ef0bcc06c6b109d0827fdd04579ca5c0020a9"
+    },
+    "cohort-be8bbe56-mac-pool-joined-controls-b24-v4/running.json": {
+      "bytes": 8488,
+      "sha256": "7f761a035a9f88d87ad067435e5e17691828f100e064a0651d6624b836517fe9"
+    },
+    "cohort-be8bbe56-mac-pool-joined-controls-b24-v4/result.json": {
+      "bytes": 8744,
+      "sha256": "6404dbe8854039bb7bb6ea6a42baf60a3a1d428becb329f6e64167695b3cb84e"
+    },
+    "cohort-be8bbe56-mac-pool-joined-controls-b24-v4/source-before.json": {
+      "bytes": 325278,
+      "sha256": "7467ffef67b24555468f0ce7f5a483ed8ab5e17fd22a753fa1c8cce07e3cf60c"
+    },
+    "cohort-be8bbe56-mac-pool-joined-controls-b24-v4/source-after.json": {
+      "bytes": 325278,
+      "sha256": "7467ffef67b24555468f0ce7f5a483ed8ab5e17fd22a753fa1c8cce07e3cf60c"
+    },
+    "cohort-be8bbe56-mac-pool-joined-controls-b24-v4/bounded-model-routes.log": {
+      "bytes": 450,
+      "sha256": "cae65441cb9f421ead55bc57f7bc0e6b4cec5f7daf5c21b9d39dc6a3ca252422"
+    },
+    "cohort-be8bbe56-mac-pool-joined-controls-b24-v4/recorded-pool-transaction-controls.log": {
+      "bytes": 1151,
+      "sha256": "c2712345f8e09e0cab3a0166d1099b4c5b7a06355483b97389cf6cd9aa5e674c"
+    },
+    "cohort-be8bbe56-mac-pool-joined-controls-b24-v4/peer-route-receipt-control.log": {
+      "bytes": 450,
+      "sha256": "775c20f4403305b27603e820ede38fcbd97ef6b1304fa5536974548ba6efde85"
+    },
+    "cohort-be8bbe56-mac-pool-joined-controls-b24-v4/public-registry-seed.json": {
+      "bytes": 189,
+      "sha256": "c56da3f4b73aa6ede9395bd31764e1e4ffba5a01197efb6b596a81a5165d70dd"
+    },
+    "cohort-be8bbe56-mac-pool-joined-controls-b24-v4/shared-backing-entry-controls.log": {
+      "bytes": 4563,
+      "sha256": "7529f1e6ee6607c857aa45515e3952ad660344943d3b00009f8ef87718ee266c"
+    },
+    "cohort-be8bbe56-mac-pool-joined-controls-b24-v4/collected-binaries.json": {
+      "bytes": 8405,
+      "sha256": "9442fd5ca781ff116ea2eb59b0cc827e6ff2a4e839b2dc795fd481c4fe2baf4a"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

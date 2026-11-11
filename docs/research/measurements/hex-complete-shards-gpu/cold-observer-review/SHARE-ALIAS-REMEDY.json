@@ -1,0 +1,41 @@
+{
+  "status": "SOURCE REMEDY after actual relevant original red; no compile/test/native run by L2",
+  "parent": "892ead15fa23e5ae7164eb81a43e8122684a30f4",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": {
+    "path": "crates/hex-runtime/src/guest/observer/config.rs",
+    "sha256": "2433c313463f9d0f09711b7f7c31e65a78e95d5836c83d1461cb9111061e705d"
+  },
+  "actual_original": {
+    "coordinator": "ROOT",
+    "cohort": "25d98e88 Linux producer recovery",
+    "original_control": "3497b8e27a22440af48ea715ca0928e32444832c",
+    "unit": "guest::observer::config::tests::observer_artifact_refuses_a_writable_parent_share_alias",
+    "selected": 1,
+    "passed": 0,
+    "failed": 1,
+    "ignored": 0,
+    "symptom": "GpuObserver::new accepted model artifact closure also reachable through writable parent share",
+    "log": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/producer-recovery-25d9-results-proof/cohort-25d98e88-linux-producer-recovery-25d9/share-alias-original.log",
+    "log_sha256": "ea417d33f1f59ef3dcf08e4c1451d0a5502cbd534f0c864a85cafbe3acc864cb"
+  },
+  "change": "mapped rejects any writable configured share whose component path covers artifact.host, even when another exact read-only mapping exists. Called both at initialized input and before use.",
+  "invariants": [
+    "no new file opening/normalization cache/allocation/manager/native call",
+    "original exact read-only guest path, digest, bytes, file identity and initialized allocation checks preserved",
+    "existing fallible invalid refusal helper; no new arbitrary cap",
+    "same guest/source configuration and v4 receipts; no original test oracle changes"
+  ],
+  "preserved": {
+    "all_cfg_test_bytes_identical_to_parent": true,
+    "v4_codec_unchanged": true,
+    "original_checkpoints_retained": true
+  },
+  "limits": [
+    "this narrow remedy covers explicit component paths in configured shares",
+    "symlink/hardlink/case aliases, outside host writers and full transitive artifact/native transport closure remain separate unproven boundaries; no complete immutability claim",
+    "ROOT owns rerun of original failed1 plus meaningful affected positive, no prior Driver replay by L2"
+  ]
+}

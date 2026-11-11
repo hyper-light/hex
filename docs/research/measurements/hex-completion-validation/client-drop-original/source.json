@@ -1,0 +1,82 @@
+{
+  "kind": "source-only-original-drop-regression",
+  "parent": "6ed9f7820d134f44778cc66da9af2ab789b1b27c",
+  "branch": "cp/t7-client-drop-original",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "policy_four_files_equal_fully_read_0a6": true,
+  "hex_claude_sha256": "8f7fd5931336872d726e655b6167d0cb73751ea6d2385bfb6280b1495971b286",
+  "files": [
+    {
+      "path": "crates/hex-client/src/calls/budget_tests.rs",
+      "bytes": 62114,
+      "sha256": "9e49002f5ae2866ac9f523a231cf2abc4ffc365c5309a5cefeccb0854a848461"
+    },
+    {
+      "path": "docs/research/measurements/hex-completion-validation/client-drop-original/README.md",
+      "bytes": 5626,
+      "sha256": "58311dfb9a7500b69af803444bb468d53ea3c8609c2c089d8799e15f3f1f15c9"
+    },
+    {
+      "path": "docs/research/measurements/hex-completion-validation/client-drop-original/PEER-REVIEW-0ACC.md",
+      "bytes": 4834,
+      "sha256": "75ae633f8ed0029f43c9d9d91d29f93f8efe6f1579aeba4f19b2e2c3e07bcaa8"
+    }
+  ],
+  "protected_production": [
+    {
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "b50682e0f363ba63a717d7b3d547a7a0d3c7f7ccdb36768e44187f48a0dd6c94",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/guest.rs",
+      "sha256": "6a9410629157e85ec4ddc507a09e34ac82e275c6ca9f28323e5145cb50a16c7c",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/guest/shards.rs",
+      "sha256": "3fb501d9144f76ceccb6928472b0eba5f1201f51d22807e65b9fdfbefe58f040",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/linux.rs",
+      "sha256": "173f09b21390698ba1d50641e289a017af14226bd6962b5e2e05ffd8cb9a124d",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/macos.rs",
+      "sha256": "54283c653f14360c0c2397c8862ad1d820da03053f79d0effde1b49f35a93c23",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/windows.rs",
+      "sha256": "1d5a98755b0439d38844c8a36a730dfc98c4fb01e626d87202e0900be421ee23",
+      "unchanged": true
+    }
+  ],
+  "old_test_prefix": {
+    "bytes": 55668,
+    "sha256": "feedf355b8e3329ba69882d9881838e493f6d26a2f3f8822804c2e9df20466a8",
+    "unchanged": true
+  },
+  "new_exact_test": "calls::budget_tests::absolute_run_error_return_does_not_renew_drop_sender_budget",
+  "intended_original": "actual Run/Started/no Exit; reply_budgetNone; original absolute expired before gate; SAME sender guard held; typed final return blocks in Drop until cleanup; assertion only AFTER releasing guard/ending owned connection/joining actor",
+  "results": {
+    "compiler_invocations": 0,
+    "tests_executed": 0,
+    "native_executions": 0,
+    "gpu_dispatches": 0,
+    "remote_dispatches": 0,
+    "test_actors_started": 0,
+    "scoped_rustfmt": "applied",
+    "whitespace_check": "0"
+  },
+  "remaining": [
+    "ROOT matched compile and exactly one original regression execution, preserve red/raw/cleanup",
+    "No production remedy until original result",
+    "Partial-frame Drop branch not covered by this one original",
+    "L2 other source findings/actual backend/native gates remain separate"
+  ]
+}

@@ -1,0 +1,5 @@
+# Empty scheduler channel storage (AC-T7.4.1)
+
+ROOT run r671 uses the actual private `Queued` type from source 09ef773b and Rust 1.99.1 on the arm64 Mac Studio. `result.json` records the method, all twelve samples, native context and limits. `raw.tar.gz` preserves original stdout/time/exits; its hash is in the result. The source-only `probe.patch` applies to fixed ebf8d90a in a separate diagnostic checkout, not production. Compile it with the existing supported toolchain, then use `run.py` after adjusting only explicit private paths. The driver requires its exact standalone test binary and refuses to overwrite its proof directory.
+
+The bounded constructor requests 57,672,760 bytes per peer before any word is sent; the linked constructor requests 512. This reproduces the duplicated reservation being removed. Production retains its existing global RAII permit, covering all queued and in-flight words, with current/retained capacity-derived admission. The measured byte counts never become runtime policy. Loaded queues, full Service startup, copies and induced parent/kernel charges were not measured here.

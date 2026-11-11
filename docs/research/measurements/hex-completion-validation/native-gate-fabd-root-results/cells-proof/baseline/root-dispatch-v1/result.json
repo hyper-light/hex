@@ -1,0 +1,185 @@
+{
+  "VM_GPU": false,
+  "cell": "baseline",
+  "comparison": {
+    "VM_GPU_claim": false,
+    "cause": {
+      "D_ns": "60000000000",
+      "EOF_phase_prerequisite": false,
+      "G_ns": "120000000000",
+      "classification": "positive causal control",
+      "foreign_only_claim": false,
+      "preserved_raw": {
+        "first.creating.record.json": {
+          "bytes": 639,
+          "sha256": "9ab452b8f4fe67d450460c57f708bc7e372af2e7070b03c436cae0535b1ea502"
+        },
+        "first.isolation-ack.json": {
+          "bytes": 741,
+          "sha256": "98016967c794f20ac38dbf27121d874ab5991280b0e829654c93e2819c22b582"
+        },
+        "first.isolation-tail.json": {
+          "bytes": 167,
+          "sha256": "f4af0cc3ed6b355df4dacfdc28d441c5095bc52074c244f453d7d002791357f6"
+        },
+        "gate-result.json": {
+          "bytes": 210,
+          "sha256": "2c8fa2c13c11db01245acaa212d0489657022e7b249102c3d3517d44eee9018d"
+        },
+        "parent.stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "parent.stdout": {
+          "bytes": 4071,
+          "sha256": "f6d102a8e004ec1bd8edf19a936d06b00b0b616ed6d3ffed73e2a58a89a26799"
+        },
+        "parent.stop.json": {
+          "bytes": 508,
+          "sha256": "1fe562c8fafcc067a8e461deffe80bea177d5aaacc3e855aa18498e759a5a25c"
+        },
+        "sibling.creating.record.json": {
+          "bytes": 645,
+          "sha256": "0043bd50d46b69c636ac1dda27af9283c38c68b70fbe242d3376a69d65977f19"
+        },
+        "sibling.isolation-ack.json": {
+          "bytes": 751,
+          "sha256": "610ac05afdc53a10a08d1a5b13e1b51a021da80d91bf5081f802b70a5bf40cfe"
+        },
+        "sibling.isolation-tail.json": {
+          "bytes": 169,
+          "sha256": "c1b5d12a65e5595bec0f0c0487a7b346f727a3556234eec5d7e8332bf45e53a3"
+        }
+      },
+      "sha256": "4e4e86db9eeec0184e9a2da7061c98b0c424c0ca9e9a163d0ed0de9ee5b9ccca",
+      "trace": "/home/adalundhe/.cache/hex-lead/gc5688v1/baseline/l/gate-7dNJiQ/parent-death.evidence.json"
+    },
+    "cell": "baseline",
+    "cleanup": {
+      "empty": true,
+      "error": null,
+      "kill_needed": false,
+      "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-gate-baseline-fabd-v1.scope/native-0",
+      "reaped": true
+    },
+    "errors": [],
+    "expected_outcome_witnessed": true,
+    "foreign_only_claim": false,
+    "observation": {
+      "argv": [
+        "/usr/bin/python3",
+        "/home/adalundhe/.cache/hex-lead/gc5688-build-v1/source/docs/research/measurements/hex-completion-validation/native-gate-r05/root_native_gate_comparison.py",
+        "--exec-phase",
+        "/home/adalundhe/.cache/hex-lead/gc5688v1/sealed.json",
+        "06ba2ce2d7e577487e7e2df8ab8298aee2fe3f529e6422abc7ab24712a094fde",
+        "baseline",
+        "hex-root-gate-baseline-fabd-v1.scope",
+        "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-gate-baseline-fabd-v1.scope/native-0/actor",
+        "completion_controller_parent_death_cancels_gate",
+        "2950153",
+        "32554962",
+        "214333.913670272"
+      ],
+      "both_eof": true,
+      "created_pid": 2951303,
+      "error": null,
+      "identity": {
+        "pid": 2951303,
+        "ppid": 2950153,
+        "start_ticks": 32555035
+      },
+      "reaped": true,
+      "returncode": 0
+    },
+    "restored": true
+  },
+  "errors": [],
+  "exit": 0,
+  "external_closure": {
+    "driver": {
+      "pid": 2950153,
+      "ppid": 2950138,
+      "start_ticks": 32554962
+    },
+    "native_observation": {
+      "absent": true
+    },
+    "owned_driver_birth_absent": true,
+    "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-gate-baseline-fabd-v1.scope",
+    "scope_absent": true
+  },
+  "hard_scope_seconds": 1800,
+  "lab": "/home/adalundhe/.cache/hex-lead/gc5688v1/baseline/l",
+  "original_native_phase_seconds": 180,
+  "outer_owner": {
+    "pid": 2950138,
+    "ppid": 2950137,
+    "start_ticks": 32554960
+  },
+  "outer_seconds": 1780,
+  "plan_sha256": "06ba2ce2d7e577487e7e2df8ab8298aee2fe3f529e6422abc7ab24712a094fde",
+  "scope_launcher": {
+    "argv": [
+      "/usr/bin/systemd-run",
+      "--user",
+      "--scope",
+      "--collect",
+      "--quiet",
+      "--unit=hex-root-gate-baseline-fabd-v1.scope",
+      "--property=Delegate=yes",
+      "--property=CPUQuota=100%",
+      "--property=MemoryMax=4G",
+      "--property=MemorySwapMax=0",
+      "--property=TasksMax=256",
+      "--property=RuntimeMaxSec=1800",
+      "/usr/bin/nice",
+      "-n",
+      "10",
+      "/usr/bin/python3",
+      "-B",
+      "/home/adalundhe/.cache/hex-lead/gc5688-build-v1/source/docs/research/measurements/hex-completion-validation/native-gate-r05/root_native_gate_comparison.py",
+      "cell",
+      "--plan",
+      "/home/adalundhe/.cache/hex-lead/gc5688v1/sealed.json",
+      "--plan-sha256",
+      "06ba2ce2d7e577487e7e2df8ab8298aee2fe3f529e6422abc7ab24712a094fde",
+      "--cell",
+      "baseline",
+      "--unit",
+      "hex-root-gate-baseline-fabd-v1.scope",
+      "--lab",
+      "/home/adalundhe/.cache/hex-lead/gc5688v1/baseline/l"
+    ],
+    "both_eof": true,
+    "created_pid": 2950153,
+    "error": null,
+    "identity": {
+      "pid": 2950153,
+      "ppid": 2950138,
+      "start_ticks": 32554962
+    },
+    "reaped": true,
+    "returncode": 0
+  },
+  "source": "fabd73020cdd1c6e201d8028fcca5d85f28ef18c",
+  "terminal_unit_query": {
+    "argv": [
+      "/usr/bin/systemctl",
+      "--user",
+      "show",
+      "hex-root-gate-baseline-fabd-v1.scope",
+      "--property=ActiveState,SubState,ControlGroup"
+    ],
+    "both_eof": true,
+    "created_pid": 2960231,
+    "error": null,
+    "identity": {
+      "pid": 2960231,
+      "ppid": 2950138,
+      "start_ticks": 32555599
+    },
+    "reaped": true,
+    "returncode": 0
+  },
+  "unit": "hex-root-gate-baseline-fabd-v1.scope"
+}

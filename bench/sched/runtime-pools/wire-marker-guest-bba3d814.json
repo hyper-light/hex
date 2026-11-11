@@ -1,0 +1,288 @@
+{
+  "kind": "root-actual-wire-refusal-census-controls",
+  "source_revision": "bba3d814cfa8373d589482dfbaa38b9bfa792d03",
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "run": "r465",
+  "scope": "debug/release N1 actual guest capacity boundaries and emitted typed wire refusal categories; not seed data",
+  "raw_count_verification": "completed: root fixed verifier a1b650da independently reconstructed every raw SHA/count/typed marker and filename attribution in both boundary captures",
+  "runs": [
+    {
+      "profile": "debug",
+      "status": "passed",
+      "source_revision": "bba3d814cfa8373d589482dfbaa38b9bfa792d03",
+      "verified_physical_created": 2,
+      "verified_physical_deleted": 2,
+      "verified_oversized_refusals": 2,
+      "backend_baseline_restored": true,
+      "owned_guest_retired": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 16783,
+        "started": 12216828351394
+      },
+      "binary_and_artifact_hashes": {
+        "hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-refusal-bba3d814/aarch64-apple-darwin/debug/hex",
+          "sha256": "8690611eb9cdbb6f45f0330bfd86c31eefbef85730e1af12e5fe47ac53505d9c"
+        },
+        "initrd": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-cc7c2190-debug-aarch64.cpio",
+          "sha256": "fcab9b12bb999fb0e7cf7f91ecd96011df0ede2f24cd46be5f30ddda0afbe68d"
+        },
+        "kernel": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+          "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+        },
+        "linux_hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-cc7c2190/aarch64-unknown-linux-musl/debug/hex",
+          "sha256": "4706ad1c166de3d95342d8751145c2a975da3d79b7e24015f7f0504df2c560ab"
+        },
+        "runtime_probe": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-probe-refusal-bba3d814/aarch64-apple-darwin/debug/hex-scheduler-runtime-probe",
+          "sha256": "6fdd8da34f6f5b009dca92ee62bceeba5f72c792557ce671c03f92c8bf4be30d"
+        },
+        "shards": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+          "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+        }
+      },
+      "environment": {
+        "box_cpu_milli": 1000,
+        "box_memory_mib": 633,
+        "cpu_count": 32,
+        "free_disk_bytes_before": 3018253570048,
+        "guest_cpus": 4,
+        "guest_memory_mib": 632,
+        "guest_shares_sha256": "994441860542018716705e4349fc3b30faf5d58b9c0eca207b902e12b21e4204",
+        "machine": "arm64",
+        "os": "macOS-26.4-arm64-arm-64bit",
+        "path_sha256": "fc1eebdda3ae92cef120aebbddd33817c1f3239b1adb5984d94910cfb38b3bd7"
+      },
+      "receipts": {
+        "build": {
+          "path": "/Users/adalundhe/.cache/hex-lead/refusal-census-bba3d814/receipts/build-debug.json",
+          "sha256": "dc94f7763c8e95edc931ca3f177d848478a960929c41467be76bd143f13934ba"
+        },
+        "deadline": {
+          "path": "/Users/adalundhe/.cache/hex-lead/refusal-census-bba3d814/receipts/method-debug.json",
+          "sha256": "a251902ec104797c6827c9ce745160a4f06c2cbd249dcf0a10fde35abbae011e"
+        },
+        "policy": {
+          "path": "/Users/adalundhe/.cache/hex-lead/refusal-census-bba3d814/receipts/policy-f5.json",
+          "sha256": "00fca9fa1a05d72fe197d633a7426d6e3ec9b4ea4bc44899e0556cd9b761f960"
+        }
+      },
+      "success_controls": {
+        "advertise": 2,
+        "delete": 4,
+        "describe": 2,
+        "link_up": 1,
+        "retry": 4,
+        "status": 202,
+        "submit": 4
+      },
+      "raw_report": "/Users/adalundhe/.cache/hx/e-u91_2jpk/result.json",
+      "raw_report_sha256": "4bf32f65e640aaea09b731a28ec4da155803f6c07afcbf109c7f1a4f676fe97b",
+      "census": {
+        "answer_rows_by_name": {
+          "client.answer.capacity": 34,
+          "client.answer.create": 2,
+          "client.answer.delete": 2,
+          "client.answer.hello": 297,
+          "client.answer.inspect": 4,
+          "client.answer.list": 10,
+          "client.answer.schedule.advertise": 2,
+          "client.answer.schedule.delete": 4,
+          "client.answer.schedule.describe": 19,
+          "client.answer.schedule.hear_control": 31,
+          "client.answer.schedule.hear_create": 1,
+          "client.answer.schedule.hear_delete": 2,
+          "client.answer.schedule.link_up": 1,
+          "client.answer.schedule.retry": 4,
+          "client.answer.schedule.status": 202,
+          "client.answer.schedule.submit": 4,
+          "client.answer.start": 2,
+          "client.answer.usage": 15,
+          "client.guest.answer.capacity": 34,
+          "client.guest.answer.create": 2,
+          "client.guest.answer.delete": 2,
+          "client.guest.answer.hello": 2,
+          "client.guest.answer.inspect": 2,
+          "client.guest.answer.list": 10,
+          "guest.stage": 6,
+          "store.turns": 8
+        },
+        "refused_rows_by_name": {
+          "client.answer.inspect": 2,
+          "client.answer.schedule.hear_control": 3,
+          "client.answer.schedule.link_up": 22,
+          "client.answer.schedule.status": 41,
+          "client.guest.answer.inspect": 2
+        },
+        "successful_single_call_rows": {
+          "client.answer.hello": 219,
+          "client.answer.schedule.advertise": 2,
+          "client.answer.schedule.delete": 4,
+          "client.answer.schedule.describe": 2,
+          "client.answer.schedule.link_up": 1,
+          "client.answer.schedule.retry": 4,
+          "client.answer.schedule.status": 202,
+          "client.answer.schedule.submit": 4
+        },
+        "successful_process_rows": {
+          "client.answer.capacity": 10,
+          "client.answer.hello": 10,
+          "client.answer.inspect": 2,
+          "client.answer.list": 10
+        },
+        "malformed_files": [],
+        "truncated_files": [],
+        "missing_row_targets": {},
+        "missing_successful_single_call_rows": {}
+      },
+      "verification_report": "/Users/adalundhe/.cache/hx/e-u91_2jpk/root-verified-refusal-census.json",
+      "verification_report_sha256": "d66f35d14a08d76392e01e542be928f0cba1e3bc10a2cace99adfcd154cd5c51",
+      "verification_status": "consistent"
+    },
+    {
+      "profile": "release",
+      "status": "passed",
+      "source_revision": "bba3d814cfa8373d589482dfbaa38b9bfa792d03",
+      "verified_physical_created": 2,
+      "verified_physical_deleted": 2,
+      "verified_oversized_refusals": 2,
+      "backend_baseline_restored": true,
+      "owned_guest_retired": {
+        "end": "Stopped",
+        "guest_stopped": true,
+        "pid": 17124,
+        "started": 12216919165564
+      },
+      "binary_and_artifact_hashes": {
+        "hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-refusal-bba3d814/aarch64-apple-darwin/release/hex",
+          "sha256": "73ed6e291c3141f29be481c39f0ade540842ef67e2a02efe29ef514e3617621f"
+        },
+        "initrd": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/initramfs-cc7c2190-release-aarch64.cpio",
+          "sha256": "5521b2304a5a6c2d9357fe4e1ac43f68ec817b685f8600115fa94f139eda778e"
+        },
+        "kernel": {
+          "path": "/Users/adalundhe/.cache/hex-lead/vm-assets/Image-6.18.48-aarch64",
+          "sha256": "1b178851998d27b4c6c346ae391c26d675f81461fbaa19cbe514500291fe472d"
+        },
+        "linux_hex": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-scheduler-vm-cc7c2190/aarch64-unknown-linux-musl/release/hex",
+          "sha256": "e2670cf5cf0b4ac32fa30f55b7027b3f95a942205c51aafe26169f5a7b9a276d"
+        },
+        "runtime_probe": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-probe-refusal-bba3d814/aarch64-apple-darwin/release/hex-scheduler-runtime-probe",
+          "sha256": "a6e47c156b3aa8d6ec17a8c7d5c0ce3ac4fead706cf41251c315b7313ef350fe"
+        },
+        "shards": {
+          "path": "/Users/adalundhe/.cache/hex-lead/target-shards-vm-tool/release/shards",
+          "sha256": "b9d74f0910a54593b66f604ffe36e39d588c89afea60d4643e37813200daa61e"
+        }
+      },
+      "environment": {
+        "box_cpu_milli": 1000,
+        "box_memory_mib": 633,
+        "cpu_count": 32,
+        "free_disk_bytes_before": 3018221625344,
+        "guest_cpus": 4,
+        "guest_memory_mib": 632,
+        "guest_shares_sha256": "038ab314d84e87d2f4b1d26c594baeeaa8cbadcf658cf1647f13a5b5cda446b6",
+        "machine": "arm64",
+        "os": "macOS-26.4-arm64-arm-64bit",
+        "path_sha256": "fc1eebdda3ae92cef120aebbddd33817c1f3239b1adb5984d94910cfb38b3bd7"
+      },
+      "receipts": {
+        "build": {
+          "path": "/Users/adalundhe/.cache/hex-lead/refusal-census-bba3d814/receipts/build-release.json",
+          "sha256": "98f5c10be892bc87554df2499020fd4d191176610454835881e8b32fd8607cd1"
+        },
+        "deadline": {
+          "path": "/Users/adalundhe/.cache/hex-lead/refusal-census-bba3d814/receipts/method-release.json",
+          "sha256": "a57ee4c6aa28c24503b6741f99a7655867a63f4645698244f576459f13aabf3d"
+        },
+        "policy": {
+          "path": "/Users/adalundhe/.cache/hex-lead/refusal-census-bba3d814/receipts/policy-f5.json",
+          "sha256": "00fca9fa1a05d72fe197d633a7426d6e3ec9b4ea4bc44899e0556cd9b761f960"
+        }
+      },
+      "success_controls": {
+        "advertise": 2,
+        "delete": 4,
+        "describe": 2,
+        "link_up": 1,
+        "retry": 4,
+        "status": 206,
+        "submit": 4
+      },
+      "raw_report": "/Users/adalundhe/.cache/hx/e-soi_5zd0/result.json",
+      "raw_report_sha256": "d343809bb999965f900e27c304b77c36a0d0adaa19bd34059901dfa8b33fdb15",
+      "census": {
+        "answer_rows_by_name": {
+          "client.answer.capacity": 58,
+          "client.answer.create": 2,
+          "client.answer.delete": 2,
+          "client.answer.hello": 399,
+          "client.answer.inspect": 4,
+          "client.answer.list": 10,
+          "client.answer.schedule.advertise": 2,
+          "client.answer.schedule.delete": 4,
+          "client.answer.schedule.describe": 43,
+          "client.answer.schedule.hear_control": 79,
+          "client.answer.schedule.hear_create": 1,
+          "client.answer.schedule.hear_delete": 3,
+          "client.answer.schedule.link_up": 1,
+          "client.answer.schedule.retry": 4,
+          "client.answer.schedule.status": 206,
+          "client.answer.schedule.submit": 4,
+          "client.answer.start": 2,
+          "client.answer.usage": 39,
+          "client.guest.answer.capacity": 58,
+          "client.guest.answer.create": 2,
+          "client.guest.answer.delete": 2,
+          "client.guest.answer.hello": 2,
+          "client.guest.answer.inspect": 2,
+          "client.guest.answer.list": 10,
+          "guest.stage": 6,
+          "store.turns": 8
+        },
+        "refused_rows_by_name": {
+          "client.answer.inspect": 2,
+          "client.answer.schedule.delete": 2,
+          "client.answer.schedule.hear_control": 8,
+          "client.answer.schedule.link_up": 7,
+          "client.answer.schedule.retry": 1,
+          "client.answer.schedule.status": 151,
+          "client.guest.answer.inspect": 2
+        },
+        "successful_single_call_rows": {
+          "client.answer.hello": 223,
+          "client.answer.schedule.advertise": 2,
+          "client.answer.schedule.delete": 4,
+          "client.answer.schedule.describe": 2,
+          "client.answer.schedule.link_up": 1,
+          "client.answer.schedule.retry": 4,
+          "client.answer.schedule.status": 206,
+          "client.answer.schedule.submit": 4
+        },
+        "successful_process_rows": {
+          "client.answer.capacity": 10,
+          "client.answer.hello": 10,
+          "client.answer.inspect": 2,
+          "client.answer.list": 10
+        },
+        "malformed_files": [],
+        "truncated_files": [],
+        "missing_row_targets": {},
+        "missing_successful_single_call_rows": {}
+      },
+      "verification_report": "/Users/adalundhe/.cache/hx/e-soi_5zd0/root-verified-refusal-census.json",
+      "verification_report_sha256": "2e65763b92c96e1c866b15165ba59ec88f302c4cc53073fff233027d2bf1388a",
+      "verification_status": "consistent"
+    }
+  ]
+}

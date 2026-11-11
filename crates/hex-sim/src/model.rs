@@ -1,10 +1,12 @@
 //! What a simulated cluster is made of: nodes with a capacity, a platform and devices, workloads with
 //! a need and an ask of their node.
 
+use serde::{Deserialize, Serialize};
+
 /// Virtual nanoseconds since the run began.
 pub type Time = u64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -13,7 +15,7 @@ pub struct WorkloadId(pub u64);
 /// What a node reserves for a workload until it is deleted: CPU, memory, disk and GPUs (kiln's needs,
 /// `crates/kiln-ci/src/sched/needs.rs`: `cpus=`, `mem=`, `disk=`, `gpus=`). Ordered field by field, so
 /// a need can key an equivalence class.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub struct Resources {
     pub cpu_milli: u64,
     pub mem_bytes: u64,
@@ -50,7 +52,9 @@ impl Resources {
 }
 
 /// An operating system, as Rust names it (kiln `crates/kiln-ci/src/sched/needs.rs` `os_name`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub enum Os {
     #[default]
     Linux,
@@ -87,7 +91,9 @@ impl Os {
 }
 
 /// A processor architecture, as Rust names it (kiln's `arch_name`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub enum Arch {
     #[default]
     X86_64,
@@ -113,7 +119,9 @@ impl Arch {
 
 /// A node's OS and architecture. The default is EC2 m5d.metal's, G2's main node model: Linux on
 /// x86_64.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub struct Platform {
     pub os: Os,
     pub arch: Arch,
@@ -121,7 +129,7 @@ pub struct Platform {
 
 /// The virtualization a node offers (kiln's facts' `virt`): `/dev/kvm` usable, nested virtualization
 /// on (its guests may use KVM themselves), and macOS's Hypervisor.framework supported.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Virt {
     pub kvm: bool,
     pub nested: bool,
@@ -129,7 +137,7 @@ pub struct Virt {
 }
 
 /// A device a box holds alone, from its start until it is deleted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum DeviceKind {
     Gpu,
     /// A PCI function bound to `vfio-pci`, given whole.
@@ -142,15 +150,18 @@ pub enum DeviceKind {
 
 /// A GPU's load from what isn't Hex's (hex-gpu's `sample()`): its utilisation in per mille, and its
 /// memory in use. Injected in the simulator; a node's agent reads it from hex-gpu.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub struct GpuLoad {
-    pub busy_per_mille: u16,
-    pub memory_used: u64,
+    /// None is unread, never an idle sample. Independent counters retain independent quality.
+    pub busy_per_mille: Option<u16>,
+    pub memory_used: Option<u64>,
 }
 
 /// A device model's name, interned in its cluster ([`Cluster::model`]): GPU models are compared by
 /// it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ModelId(pub u32);
 
 impl ModelId {
@@ -160,28 +171,68 @@ impl ModelId {
 
 /// One of a node's devices: its kind, its model, its size (a GPU's memory, a block device's bytes) and,
 /// for a GPU, its load.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Device {
     pub kind: DeviceKind,
+    /// Stable physical identity within `kind`; `None` denotes a synthetic indexed device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<u64>,
+    /// Live backend room for a fresh holder; exact existing reservations remain authoritative.
+    #[serde(default = "device_available")]
+    pub available: bool,
+    /// Initialized attachment adapters for this exact identity. One physical slot and holder are
+    /// shared by all listed classes; an adapter never creates another slot for the same hardware.
+    #[serde(default = "legacy_device_classes")]
+    pub classes: Classes,
     pub model: ModelId,
     pub size: u64,
     pub load: GpuLoad,
 }
 
+fn device_available() -> bool {
+    true
+}
+
+fn legacy_device_classes() -> Classes {
+    Classes::NONE.with(Class::Oci)
+}
+
 impl Device {
+    pub fn native_id(&self) -> Option<hex_api::DeviceId> {
+        Some(hex_api::DeviceId {
+            kind: match self.kind {
+                DeviceKind::Gpu => hex_api::DeviceKind::Gpu,
+                DeviceKind::Vfio => hex_api::DeviceKind::Vfio,
+                DeviceKind::Block => hex_api::DeviceKind::Block,
+                DeviceKind::Net => hex_api::DeviceKind::Net,
+            },
+            key: self.key?,
+        })
+    }
+
     /// A GPU of `model` with `memory` bytes, idle.
     pub fn gpu(model: ModelId, memory: u64) -> Self {
         Self {
             kind: DeviceKind::Gpu,
+            key: None,
+            available: true,
+            classes: legacy_device_classes(),
             model,
             size: memory,
-            load: GpuLoad::default(),
+            // This constructor declares a synthetic idle device. Native observations supply
+            // explicit independent counters instead; their Default is unknown.
+            load: GpuLoad {
+                busy_per_mille: Some(0),
+                memory_used: Some(0),
+            },
         }
     }
 
     /// A GPU's memory free of what isn't Hex's.
-    pub fn memory_free(&self) -> u64 {
-        self.size.saturating_sub(self.load.memory_used)
+    pub fn memory_free(&self) -> Option<u64> {
+        self.load
+            .memory_used
+            .map(|used| self.size.saturating_sub(used))
     }
 }
 
@@ -194,6 +245,13 @@ pub const DEVICES: usize = 1 << 16;
 /// ([`Resources::gpus`]); `gpu_model` and `gpu_memory` constrain each of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Ask {
+    /// Original payload form. Process keeps host-platform semantics; OCI names its image platform.
+    /// None preserves legacy traces, but cannot disambiguate multiple initialized payload routes.
+    pub runtime_class: Option<hex_api::Class>,
+    /// Opaque native OCI bundles cannot be rewritten as guest OciSpec payloads. The driver derives
+    /// this constraint from that actual payload before candidate admission.
+    pub native_only: bool,
+    /// Image OS for routed OCI/VMs; host OS for Process. Never inferred from a rootfs path.
     pub os: Option<Os>,
     pub arch: Option<Arch>,
     pub gpu_model: Option<ModelId>,
@@ -218,45 +276,109 @@ impl Ask {
 /// The devices a workload holds on its node, by their places in the node's devices.
 pub type Held = Vec<u16>;
 
-/// The devices `ask` and `gpus` take of `devices`, where `free(i)` says whether device `i` is free:
-/// for each kind, that many free devices of the kind that match the ask. GPUs go least loaded first
-/// (utilisation, then memory in use), so the box gets the idlest; block devices smallest that hold
-/// the size first, so a larger one is kept for a larger ask; the rest by place. `None` where too few
-/// are free. Each device is read once a kind, so a node's devices bound it.
+fn device_needs(gpus: u32, ask: &Ask) -> impl Iterator<Item = (DeviceKind, u64)> {
+    [
+        (DeviceKind::Gpu, u64::from(gpus)),
+        (DeviceKind::Vfio, u64::from(ask.vfio)),
+        (DeviceKind::Block, u64::from(ask.block)),
+        (DeviceKind::Net, u64::from(ask.net)),
+    ]
+    .into_iter()
+}
+
+/// The admission half of bind, without selecting/sorting identities or allocating a Held vector.
+/// Device kinds are disjoint, so enough matching free devices of every kind is sufficient.
+pub fn fits_devices(
+    devices: &[Device],
+    free: impl Fn(usize) -> bool,
+    gpus: u32,
+    ask: &Ask,
+) -> bool {
+    fits_observed(devices.len(), |at| devices.get(at), free, gpus, ask)
+}
+
+/// The same predicate over the canonical physical slots, whose provisioning-only observations
+/// are None. Such slots can be reserved by a backing but can never match fresh workload demand.
+pub(crate) fn fits_observed<'a>(
+    count: usize,
+    observed: impl Fn(usize) -> Option<&'a Device>,
+    free: impl Fn(usize) -> bool,
+    gpus: u32,
+    ask: &Ask,
+) -> bool {
+    device_needs(gpus, ask).all(|(kind, n)| {
+        let Ok(n) = usize::try_from(n) else {
+            return false;
+        };
+        (0..count)
+            .filter(|&at| {
+                free(at) && observed(at).is_some_and(|d| d.kind == kind && matches(d, ask))
+            })
+            .take(n)
+            .count()
+            == n
+    })
+}
+
+/// The sole picker for both ordinary observed catalogs and nullable provisioning slots. Device
+/// order breaks equal native loads; an unavailable observation never receives an idle rank.
 pub fn bind(
     devices: &[Device],
     free: impl Fn(usize) -> bool,
     gpus: u32,
     ask: &Ask,
 ) -> Option<Held> {
+    bind_observed(devices.len(), |at| devices.get(at), free, gpus, ask)
+}
+
+pub(crate) fn bind_observed<'a>(
+    count: usize,
+    observed: impl Fn(usize) -> Option<&'a Device>,
+    free: impl Fn(usize) -> bool,
+    gpus: u32,
+    ask: &Ask,
+) -> Option<Held> {
+    let total = device_needs(gpus, ask).try_fold(0usize, |total, (_, n)| {
+        total.checked_add(usize::try_from(n).ok()?)
+    })?;
+    if total > count || count > DEVICES {
+        return None;
+    }
     let mut held = Held::new();
-    let wants = [
-        (DeviceKind::Gpu, u64::from(gpus)),
-        (DeviceKind::Vfio, u64::from(ask.vfio)),
-        (DeviceKind::Block, u64::from(ask.block)),
-        (DeviceKind::Net, u64::from(ask.net)),
-    ];
-    for (kind, n) in wants {
+    held.try_reserve_exact(total).ok()?;
+    if total == 0 {
+        return Some(held);
+    }
+    let mut fit = Vec::new();
+    fit.try_reserve_exact(count).ok()?;
+    for (kind, n) in device_needs(gpus, ask) {
         if n == 0 {
             continue;
         }
-        let mut fit: Vec<(u64, u64, usize)> = devices
-            .iter()
-            .enumerate()
-            .filter(|&(i, d)| d.kind == kind && free(i) && matches(d, ask))
-            .map(|(i, d)| match kind {
-                DeviceKind::Gpu => (u64::from(d.load.busy_per_mille), d.load.memory_used, i),
-                DeviceKind::Block => (d.size, 0, i),
-                DeviceKind::Vfio | DeviceKind::Net => (0, 0, i),
-            })
-            .collect();
+        fit.clear();
+        for at in 0..count {
+            let Some(device) =
+                observed(at).filter(|d| d.kind == kind && free(at) && matches(d, ask))
+            else {
+                continue;
+            };
+            let rank = match kind {
+                DeviceKind::Gpu => (
+                    u64::from(device.load.busy_per_mille?),
+                    device.load.memory_used?,
+                ),
+                DeviceKind::Block => (device.size, 0),
+                DeviceKind::Vfio | DeviceKind::Net => (0, 0),
+            };
+            fit.push((rank.0, rank.1, at));
+        }
         fit.sort_unstable();
         let n = usize::try_from(n).ok()?;
         if fit.len() < n {
             return None;
         }
-        for &(_, _, i) in fit.iter().take(n) {
-            held.push(u16::try_from(i).ok()?);
+        for &(_, _, at) in fit.iter().take(n) {
+            held.push(u16::try_from(at).ok()?);
         }
     }
     Some(held)
@@ -266,14 +388,206 @@ pub fn bind(
 pub fn matches(d: &Device, ask: &Ask) -> bool {
     match d.kind {
         DeviceKind::Gpu => {
-            ask.gpu_model.is_none_or(|m| m == d.model) && d.memory_free() >= ask.gpu_memory
+            ask.gpu_model.is_none_or(|m| m == d.model)
+                && d.load.busy_per_mille.is_some_and(|busy| busy <= 1000)
+                && d.memory_free().is_some_and(|free| free >= ask.gpu_memory)
         }
         DeviceKind::Block => d.size >= ask.block_size,
         DeviceKind::Vfio | DeviceKind::Net => true,
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePool {
+    pub classes: Classes,
+    pub capacity: Resources,
+}
+
+/// One immutable initialized offer view; masks pair with NodeSpec's existing device list.
+/// Backing claims may name unobserved physical IDs and never supply measured Device metadata.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeRoutes {
+    /// Current route permission: a cold permit may provision its canonical backing, while
+    /// workload admission still requires Live and observed matching. Retained committed receipts
+    /// survive missing observations; None preserves all-offers behavior without inventing readings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admit: Option<u64>,
+    #[serde(deserialize_with = "hex_api::Capacity::deserialize_routes")]
+    pub offers: Vec<hex_api::RouteOffer>,
+    #[serde(deserialize_with = "hex_api::Capacity::deserialize_device_routes")]
+    pub device_routes: Vec<u64>,
+    #[serde(deserialize_with = "hex_api::Capacity::deserialize_backings")]
+    pub backings: Vec<hex_api::BackingOffer>,
+}
+
+pub type SharedRoutes = triomphe::Arc<RuntimeRoutes>;
+
+impl RuntimeRoutes {
+    fn check_admit(&self) -> Result<(), crate::SimError> {
+        let bits = if self.offers.len() == hex_api::MAX_RUNTIME_ROUTES {
+            u64::MAX
+        } else {
+            u32::try_from(self.offers.len())
+                .ok()
+                .and_then(|count| 1u64.checked_shl(count))
+                .and_then(|value| value.checked_sub(1))
+                .ok_or(crate::SimError::Config(
+                    "runtime offer admission mask exceeds its word",
+                ))?
+        };
+        if self.admit.is_some_and(|mask| mask & !bits != 0) {
+            return Err(crate::SimError::Config(
+                "runtime admission mask references an absent offer",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn admits(&self, at: usize) -> bool {
+        at < self.offers.len()
+            && self.admit.is_none_or(|mask| {
+                u32::try_from(at)
+                    .ok()
+                    .and_then(|at| 1u64.checked_shl(at))
+                    .is_some_and(|bit| mask & bit != 0)
+            })
+    }
+
+    /// Provisioning authority contributes identities only, after the observed catalog's slots.
+    /// This is the SAME union consumed by Index; it supplies no model, size, load or fresh offer.
+    pub fn unobserved_claims(
+        &self,
+        devices: &[Device],
+        node: NodeId,
+    ) -> Result<Vec<hex_api::DeviceId>, crate::SimError> {
+        if devices.len() > DEVICES
+            || self.backings.len() > hex_api::MAX_RUNTIME_ROUTES
+            || self
+                .backings
+                .iter()
+                .any(|backing| backing.devices.len() > DEVICES)
+        {
+            return Err(crate::SimError::Resources(node));
+        }
+        let mut known = Vec::new();
+        known
+            .try_reserve_exact(devices.len())
+            .map_err(|_| crate::SimError::Resources(node))?;
+        for device in devices {
+            known.push(device.native_id().ok_or(crate::SimError::Config(
+                "initialized routes require stable physical IDs",
+            ))?);
+        }
+        known.sort_unstable();
+        let count = self
+            .backings
+            .iter()
+            .try_fold(0usize, |n, backing| n.checked_add(backing.devices.len()))
+            .ok_or(crate::SimError::Resources(node))?;
+        let mut provisioned = Vec::new();
+        provisioned
+            .try_reserve_exact(count)
+            .map_err(|_| crate::SimError::Resources(node))?;
+        for backing in &self.backings {
+            provisioned.extend_from_slice(&backing.devices);
+        }
+        provisioned.sort_unstable();
+        provisioned.dedup();
+        provisioned.retain(|id| known.binary_search(id).is_err());
+        if devices
+            .len()
+            .checked_add(provisioned.len())
+            .is_none_or(|total| total > DEVICES)
+        {
+            return Err(crate::SimError::Full {
+                what: "canonical physical slots",
+                bound: DEVICES,
+            });
+        }
+        Ok(provisioned)
+    }
+
+    pub fn share(self) -> Result<SharedRoutes, crate::SimError> {
+        if self.offers.len() > hex_api::MAX_RUNTIME_ROUTES
+            || self.backings.len() > hex_api::MAX_RUNTIME_ROUTES
+            || self.device_routes.len() > DEVICES
+        {
+            return Err(crate::SimError::Config(
+                "initialized routes exceed their address space",
+            ));
+        }
+        self.check_admit()?;
+        triomphe::Arc::try_new(self).map_err(|_| crate::SimError::Full {
+            what: "immutable initialized runtime routes",
+            bound: 1,
+        })
+    }
+
+    pub fn check(&self, node: &NodeSpec) -> Result<(), crate::SimError> {
+        self.check_admit()?;
+        for (at, offer) in self.offers.iter().enumerate() {
+            let arch = match offer.key.image.arch {
+                hex_api::ImageArch::Amd64 => Arch::X86_64,
+                hex_api::ImageArch::Arm64 => Arch::Aarch64,
+            };
+            let native_os = match offer.key.image.os {
+                hex_api::ImageOs::Linux => Os::Linux,
+                hex_api::ImageOs::Windows => Os::Windows,
+                hex_api::ImageOs::Macos => Os::Macos,
+            };
+            let supported = match offer.key.backend_class() {
+                hex_api::Class::Firecracker => {
+                    node.platform.os == Os::Linux && (!self.admits(at) || node.virt.kvm)
+                }
+                hex_api::Class::Shards => match node.platform.os {
+                    Os::Linux => !self.admits(at) || node.virt.kvm,
+                    Os::Macos => {
+                        (!self.admits(at) || node.virt.hvf) && node.platform.arch == Arch::Aarch64
+                    }
+                    Os::Windows => true, // The initialized native endpoint supplies WHP authority.
+                    Os::Freebsd => false,
+                },
+                hex_api::Class::Process | hex_api::Class::Oci => native_os == node.platform.os,
+            };
+            if arch != node.platform.arch || !supported {
+                return Err(crate::SimError::Config(
+                    "initialized execution disagrees with its native host/platform",
+                ));
+            }
+        }
+        hex_api::Capacity::check_route_parts(
+            capacity_resources(node.capacity),
+            node.devices.len(),
+            &self.offers,
+            &self.device_routes,
+            &self.backings,
+        )
+        .map_err(|_| crate::SimError::Config("invalid initialized route/backing offer"))
+    }
+}
+
+mod shared_routes {
+    use super::*;
+
+    pub fn serialize<S: serde::Serializer>(
+        value: &Option<SharedRoutes>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.as_deref().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<SharedRoutes>, D::Error> {
+        Option::<RuntimeRoutes>::deserialize(deserializer)?
+            .map(RuntimeRoutes::share)
+            .transpose()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeSpec {
     pub id: NodeId,
     pub capacity: Resources,
@@ -286,9 +600,142 @@ pub struct NodeSpec {
     pub virt: Virt,
     /// What boxes may be given whole; its GPUs are [`Resources::gpus`] of its capacity.
     pub devices: Vec<Device>,
+    /// Additional capacity of a shared runtime (e.g. one fixed guest). Host capacity still applies.
+    /// Missing pools retain the host-backed model used by earlier records/configuration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_pools: Vec<RuntimePool>,
+    /// Initialized, evidence-pinned per-box charges. Real peer/Service offers require a known
+    /// profile for each VM class; absent entries retain native identity-cost semantics only.
+    #[serde(default, skip_serializing_if = "no_runtime_costs")]
+    pub costs: [Option<hex_api::RuntimeCost>; Class::COUNT],
+    /// Absent retains unambiguous legacy admission. The owner is allocated fallibly once, then
+    /// borrowed/shared across views; cloning a node never clones a backing's physical claim Vec.
+    #[serde(
+        default,
+        with = "shared_routes",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub routes: Option<SharedRoutes>,
+}
+
+fn no_runtime_costs(costs: &[Option<hex_api::RuntimeCost>; Class::COUNT]) -> bool {
+    costs.iter().all(Option::is_none)
+}
+
+/// Physical resource units shared with the native allocation API; GPU counts stay in the sole
+/// existing device/holder authority and are never inferred from a runtime's resource profile.
+pub fn capacity_resources(need: Resources) -> hex_api::CapacityResources {
+    hex_api::CapacityResources {
+        cpu_milli: need.cpu_milli,
+        mem_bytes: need.mem_bytes,
+        disk_bytes: need.disk_bytes,
+    }
+}
+
+/// Validate the immutable receipt against the original demand, including on recovery. This calls
+/// the API's single cost formula; it does not re-derive the charge using today's runtime profile.
+pub fn allocated_resources(
+    need: Resources,
+    allocation: Option<hex_api::Allocation>,
+) -> Result<Resources, hex_api::Refusal> {
+    let Some(allocation) = allocation else {
+        return Ok(need);
+    };
+    allocation.check(capacity_resources(need))?;
+    Ok(Resources {
+        cpu_milli: allocation.resources.cpu_milli,
+        mem_bytes: allocation.resources.mem_bytes,
+        disk_bytes: allocation.resources.disk_bytes,
+        gpus: need.gpus,
+    })
+}
+
+pub fn reserved_resources(
+    need: Resources,
+    allocation: Option<hex_api::Allocation>,
+    route: Option<hex_api::RouteReceipt>,
+) -> Result<Resources, hex_api::Refusal> {
+    let Some(route) = route else {
+        return allocated_resources(need, allocation);
+    };
+    route.check(route.key.class, need.gpus != 0)?;
+    let charged = route.charged(capacity_resources(need), allocation)?;
+    Ok(Resources {
+        cpu_milli: charged.cpu_milli,
+        mem_bytes: charged.mem_bytes,
+        disk_bytes: charged.disk_bytes,
+        // A linked observer already owns this physical grant; the same holder transitions.
+        gpus: if route.backing.is_some() {
+            0
+        } else {
+            need.gpus
+        },
+    })
 }
 
 impl NodeSpec {
+    /// Copy bounded node facts fallibly; the initialized route/claim catalog keeps the SAME owner.
+    /// Structural and capability validation remains the caller's explicit operation.
+    pub fn try_clone(&self) -> Result<Self, crate::SimError> {
+        if self.devices.len() > DEVICES || self.runtime_pools.len() > Class::COUNT {
+            return Err(crate::SimError::Resources(self.id));
+        }
+        let mut devices = Vec::new();
+        devices
+            .try_reserve_exact(self.devices.len())
+            .map_err(|_| crate::SimError::Resources(self.id))?;
+        devices.extend_from_slice(&self.devices);
+        let mut runtime_pools = Vec::new();
+        runtime_pools
+            .try_reserve_exact(self.runtime_pools.len())
+            .map_err(|_| crate::SimError::Resources(self.id))?;
+        runtime_pools.extend_from_slice(&self.runtime_pools);
+        Ok(Self {
+            id: self.id,
+            capacity: self.capacity,
+            background_milli: self.background_milli,
+            classes: self.classes,
+            platform: self.platform,
+            virt: self.virt,
+            devices,
+            runtime_pools,
+            costs: self.costs,
+            routes: self.routes.clone(),
+        })
+    }
+
+    /// Runtime pools are bounded by the runtime class set: each class belongs to at most one pool.
+    pub fn check_runtime_pools(&self) -> Result<(), crate::SimError> {
+        if let Some(routes) = &self.routes {
+            routes.check(self)?;
+        }
+        for cost in self.costs.iter().flatten() {
+            cost.check().map_err(|_| {
+                crate::SimError::Config("node runtime cost has an invalid identity, bound or unit")
+            })?;
+        }
+        if self.runtime_pools.len() > Class::COUNT {
+            return Err(crate::SimError::Full {
+                what: "a node's runtime pools",
+                bound: Class::COUNT,
+            });
+        }
+        let mut covered = 0;
+        for pool in &self.runtime_pools {
+            let mask = pool.classes.0;
+            if mask == 0
+                || mask & !Classes::ALL.0 != 0
+                || mask & !self.classes.0 != 0
+                || covered & mask != 0
+            {
+                return Err(crate::SimError::Config(
+                    "runtime pool masks must be nonempty, disjoint and within the node's classes",
+                ));
+            }
+            covered |= mask;
+        }
+        Ok(())
+    }
     /// A Linux x86_64 node with KVM and `capacity`, running every class, its GPUs unnamed and idle,
     /// with nothing outside Hex.
     pub fn new(id: NodeId, capacity: Resources) -> Self {
@@ -303,6 +750,9 @@ impl NodeSpec {
                 ..Virt::default()
             },
             devices: unnamed_gpus(capacity.gpus),
+            runtime_pools: Vec::new(),
+            costs: [None; Class::COUNT],
+            routes: None,
         }
     }
 
@@ -314,7 +764,14 @@ impl NodeSpec {
             .iter()
             .filter(|d| d.kind == DeviceKind::Gpu)
             .count();
-        self.devices.len() <= DEVICES && u32::try_from(gpus) == Ok(self.capacity.gpus)
+        self.devices.len() <= DEVICES
+            // A routed index includes canonical unobserved provisioning IDs in its physical
+            // claim budget. Its constructor checks that union, without inventing Device facts.
+            && (self.routes.is_some() || u32::try_from(gpus) == Ok(self.capacity.gpus))
+            && self
+                .devices
+                .iter()
+                .all(|device| device.classes.0 != 0 && device.classes.0 & !Classes::ALL.0 == 0)
     }
 }
 
@@ -326,6 +783,7 @@ pub fn unnamed_gpus(n: u32) -> Vec<Device> {
 /// What runs a workload. Hex places three: OCI containers, Firecracker microVMs and Shards
 /// microVMs (Ada, 2026-11-06), each only on a node that can run it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(usize)]
 pub enum Class {
     #[default]
     Oci,
@@ -334,20 +792,25 @@ pub enum Class {
 }
 
 impl Class {
+    pub const COUNT: usize = Self::Shards as usize + 1;
+    pub const ALL: [Self; Self::COUNT] = [Self::Oci, Self::Firecracker, Self::Shards];
     /// Whether it can be given a device of `kind` on a node of `os`
     /// (docs/research/scheduler/agentic-workloads.md §6 and finding 8: device access is a property of
     /// the node and the class). An OCI container on Linux can be given each kind: its runtime passes
     /// the device in by CDI, as Kubernetes' device plugins do ([21][55] there), a VFIO group, a block
     /// device or a network device moved into its namespace. On Windows, a process-isolated container
     /// is given a GPU by its device interface class (the class Hex's Windows `oci` grants), and no
-    /// device whole. A Firecracker microVM can be given none: its mainline emulates six devices and
-    /// passes none through ([25]-[28] there). Nor, yet, can a Shards microVM placed by Hex: Shards'
-    /// VMM gives a guest a shared Venus GPU, or on Linux a PCI function by VFIO, but shards-api,
-    /// Hex's one seam to it, names no device ([58]-[60] there).
+    /// device whole. Firecracker's pinned VFIO adapter runs on Linux KVM; Shards' exact renderer
+    /// adapter also works on macOS and Windows. These are physical ceilings only: each Device's
+    /// classes mask must additionally name the initialized adapter for that identity.
     pub fn exposes(self, os: Os, kind: DeviceKind) -> bool {
         match (self, os) {
             (Class::Oci, Os::Linux) => true,
             (Class::Oci, Os::Windows) => kind == DeviceKind::Gpu,
+            (Class::Oci, Os::Macos) => kind == DeviceKind::Gpu,
+            (Class::Firecracker, Os::Linux) => matches!(kind, DeviceKind::Gpu | DeviceKind::Vfio),
+            (Class::Shards, Os::Linux) => matches!(kind, DeviceKind::Gpu | DeviceKind::Vfio),
+            (Class::Shards, Os::Macos | Os::Windows) => kind == DeviceKind::Gpu,
             _ => false,
         }
     }
@@ -371,7 +834,7 @@ impl Class {
 }
 
 /// The classes a node can run, a bit each.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Classes(u8);
 
 impl Classes {
@@ -636,4 +1099,41 @@ pub fn model_name(name: &str) -> String {
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>()
         .join("-")
+}
+
+#[cfg(test)]
+mod route_decode_tests {
+    use super::*;
+
+    /// AC-T7.4.1/R01: the SAME bounded API visitors run before immutable-owner allocation.
+    #[test]
+    fn initialized_route_json_bounds_precede_shared_owner_construction() {
+        #[derive(Deserialize)]
+        struct View {
+            #[serde(with = "shared_routes")]
+            routes: Option<SharedRoutes>,
+        }
+        assert!(
+            serde_json::from_str::<View>(r#"{"routes":null}"#)
+                .unwrap()
+                .routes
+                .is_none()
+        );
+        let route = serde_json::json!({
+            "key": {"class":"oci","image":{"os":"linux","arch":"amd64"},"execution":"native","gpu":"any"},
+            "cost":null,"backing":null
+        });
+        let mut input =
+            serde_json::json!({"routes":{"offers":[],"device_routes":[],"backings":[]}});
+        let empty: View = serde_json::from_value(input.clone()).unwrap();
+        assert!(empty.routes.unwrap().offers.is_empty());
+        input["routes"]["offers"] =
+            serde_json::Value::Array(vec![route; hex_api::MAX_RUNTIME_ROUTES + 1]);
+        let error = serde_json::from_value::<View>(input).err().unwrap();
+        assert!(error.to_string().contains("route count"));
+        let input =
+            serde_json::json!({"offers":[],"device_routes":vec![0u64; DEVICES+1],"backings":[]});
+        let error = serde_json::from_value::<RuntimeRoutes>(input).unwrap_err();
+        assert!(error.to_string().contains("eligibility count"));
+    }
 }

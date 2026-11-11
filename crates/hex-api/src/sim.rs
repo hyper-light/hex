@@ -44,6 +44,8 @@ pub struct SimRuntime {
     /// Whether TERM ends an `oci` box's init, as [`Fixture::term_ends_init`] says of the class it
     /// stands for.
     term_ends_init: bool,
+    /// A specific initialized endpoint, when exercising routing between distinct backends.
+    backend: Option<Class>,
 }
 
 struct SimBox {
@@ -104,6 +106,14 @@ impl SimRuntime {
         Self::default()
     }
 
+    /// The same simulated implementation restricted to the initialized backend the caller names.
+    pub fn for_backend(class: Class) -> Self {
+        Self {
+            backend: Some(class),
+            ..Self::default()
+        }
+    }
+
     /// A simulator whose `oci` inits end on TERM when `ends`, as the class whose oracle it is does.
     pub fn with_term_ending_init(ends: bool) -> Self {
         Self {
@@ -162,6 +172,8 @@ impl SimRuntime {
                 BoxState::Empty
             },
             bounds: b.spec.bounds.clone(),
+            allocation: b.spec.allocation,
+            route: b.spec.route,
             adopted: false,
             exit,
             // A simulated program has no caller to lose: only the node agent's socket abandons one.
@@ -173,8 +185,9 @@ impl SimRuntime {
 /// How a simulated init ends once started: `fail N` with N, `say` with 0, anything else (and a
 /// bundle, whose program the simulator can't read) not until it is signalled.
 fn init_ends(class: &ClassSpec) -> Result<Option<Exit>, Refusal> {
-    let ClassSpec::Oci(spec) = class else {
-        return Ok(None);
+    let spec = match class {
+        ClassSpec::Oci(spec) | ClassSpec::Firecracker(spec) | ClassSpec::Shards(spec) => spec,
+        ClassSpec::Process | ClassSpec::Bundle(_) => return Ok(None),
     };
     match spec.init.args.first().map(String::as_str) {
         Some("fail") => Ok(Some(Exit::Code(arg(&spec.init, 1)?))),
@@ -201,14 +214,52 @@ fn write(to: Option<&mut std::io::PipeWriter>, bytes: &[u8]) {
 }
 
 impl Runtime for SimRuntime {
+    fn physical_report(&self) -> Result<crate::PhysicalReport, Refusal> {
+        // This CPU-only simulated owner has no native inventory or attachment grant.
+        let name = "simulator:cpu";
+        let mut authority = String::new();
+        authority
+            .try_reserve_exact(name.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "simulated native authority bytes",
+                bound: name.len(),
+            })?;
+        authority.push_str(name);
+        Ok(crate::PhysicalReport {
+            unavailable: Vec::new(),
+            authority,
+            devices: Vec::new(),
+        })
+    }
+
     fn classes(&self) -> Vec<Class> {
-        vec![Class::Process, Class::Oci]
+        match self.backend {
+            Some(class) => vec![class],
+            None => vec![
+                Class::Process,
+                Class::Oci,
+                Class::Firecracker,
+                Class::Shards,
+            ],
+        }
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        spec.check()?;
-        if let ClassSpec::Oci(oci) = &spec.class {
-            oci.init.fits(&SIM_EXEC_LIMIT)?;
+        spec.check_no_devices("sim")?;
+        if self
+            .backend
+            .is_some_and(|class| class != spec.class.class())
+        {
+            return Err(Refusal::Invalid {
+                what: "simulated backend",
+                why: "payload belongs to another initialized backend".into(),
+            });
+        }
+        match &spec.class {
+            ClassSpec::Oci(oci) | ClassSpec::Firecracker(oci) | ClassSpec::Shards(oci) => {
+                oci.init.fits(&SIM_EXEC_LIMIT)?
+            }
+            ClassSpec::Process | ClassSpec::Bundle(_) => {}
         }
         let mut boxes = self.boxes()?;
         if boxes.contains_key(&spec.id) {
@@ -217,7 +268,7 @@ impl Runtime for SimRuntime {
         if boxes.len() >= SIM_BOXES {
             return Err(Refusal::Full(SIM_BOXES));
         }
-        let init = (spec.class.class() == Class::Oci).then(|| Arc::new(SimProc::default()));
+        let init = (spec.class.class() != Class::Process).then(|| Arc::new(SimProc::default()));
         let init_ends = init_ends(&spec.class)?;
         let b = SimBox {
             spec,
@@ -359,6 +410,7 @@ impl Runtime for SimRuntime {
     }
 
     fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check_no_devices("sim")?;
         spec.check_run()?;
         let id = spec.id.clone();
         self.create(spec)?;
@@ -494,18 +546,25 @@ pub enum SimFixture {
     Process,
     Bundle,
     Spec,
+    Firecracker,
+    Shards,
 }
 
 impl SimFixture {
     fn oci(&self, act: &Act) -> ClassSpec {
-        ClassSpec::Oci(Box::new(OciSpec {
+        let workload = Box::new(OciSpec {
             rootfs: Rootfs::Dir("/rootfs".into()),
             init: self.program(act),
             mounts: Vec::new(),
             hostname: None,
             network: Network::Private,
             hosts: Vec::new(),
-        }))
+        });
+        match self {
+            Self::Firecracker => ClassSpec::Firecracker(workload),
+            Self::Shards => ClassSpec::Shards(workload),
+            Self::Process | Self::Bundle | Self::Spec => ClassSpec::Oci(workload),
+        }
     }
 }
 
@@ -515,23 +574,29 @@ impl Fixture for SimFixture {
     }
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
+            devices: Vec::new(),
+            allocation: None,
+            route: None,
             id,
             bounds,
             class: match self {
                 Self::Process => ClassSpec::Process,
                 Self::Bundle => ClassSpec::Bundle("/bundle".into()),
-                Self::Spec => self.oci(&Act::Wait),
+                Self::Spec | Self::Firecracker | Self::Shards => self.oci(&Act::Wait),
             },
             owner: None,
         }
     }
     fn init(&self, id: BoxId, act: &Act) -> BoxSpec {
         BoxSpec {
+            devices: Vec::new(),
+            allocation: None,
+            route: None,
             id,
             bounds: Bounds::default(),
             class: match self {
                 Self::Process => ClassSpec::Process,
-                Self::Bundle | Self::Spec => self.oci(act),
+                Self::Bundle | Self::Spec | Self::Firecracker | Self::Shards => self.oci(act),
             },
             owner: None,
         }
@@ -555,7 +620,13 @@ mod tests {
 
     #[test]
     fn the_simulator_passes_the_conformance_suite() {
-        for fixture in [SimFixture::Process, SimFixture::Bundle, SimFixture::Spec] {
+        for fixture in [
+            SimFixture::Process,
+            SimFixture::Bundle,
+            SimFixture::Spec,
+            SimFixture::Firecracker,
+            SimFixture::Shards,
+        ] {
             let failures = conformance::run(&SimRuntime::new(), &fixture);
             assert!(failures.is_empty(), "{fixture:?}: {failures:#?}");
         }

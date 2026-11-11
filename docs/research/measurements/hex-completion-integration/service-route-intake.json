@@ -1,0 +1,18 @@
+{
+  "kind": "ROOT reviewed minimal source intake; source-only until new joined checks",
+  "pins": [
+    "c4f45aa00cc13469d1ad222d82867884d4a438c3",
+    "51870d7a811d21abdbe8bbdc56bf0f310e0f4e7e"
+  ],
+  "root_parent": "be8bbe5646fb1c69bb4c4e0194f554643190bb1e",
+  "retained_ports": [
+    "normal capacity/devices module resolution",
+    "current capacity literal ordering",
+    "ROOT native pool holder argument and NativeRecord ports"
+  ],
+  "new_controls": [
+    "service_route_normalization_remaps_alias_bits_and_refuses_conflicting_plane",
+    "service_cold_claim_union_has_no_fabricated_device_or_classwide_vm_cap"
+  ],
+  "tests": "new controls unrun; prior be8 Linux6 and production check0 remain prior-source attribution"
+}

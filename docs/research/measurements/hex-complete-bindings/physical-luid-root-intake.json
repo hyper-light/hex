@@ -1,0 +1,20 @@
+{
+  "source": "9b8f6043686e9d3b2541a42b5f0643562af5d03d",
+  "root_parent": "e3c28025188347a04e3298472f1a75dd95696a19",
+  "scope": "three named source deltas plus original implementer evidence",
+  "production_check": "NOT RUN in this intake",
+  "new_unit": "NOT RUN",
+  "native_calls": 0,
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source_hashes": {
+    "crates/hex-runtime/src/devices.rs": "d02e66d1aa2920d85d2d69f35092112dab5d304b22884f0b699735deb5627aca",
+    "crates/hex-node/src/facts.rs": "b9ddd8e68525bc973823e167e4f725aa2ad6d867381be00df56c172d1ce97294",
+    "crates/hex-node/src/node/backends.rs": "24259f76c171969a0b7d675908c14cc1e1f2b9d86f6b727ca0eac97d6ca517ce"
+  },
+  "limits": [
+    "LUID alone is no physical-node correspondence; actual LDA nodeMask proof still missing",
+    "Recorded/native owner delegation remains pending",
+    "Windows source-specific compile/native mapping and mutation unverified"
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "commit": "9cb5953cd84ace541a4cead1269a71ef9d079c30",
+  "archive_sha256": "932c4f358ccc7d0a436b242f89760356487d3e593cddf6a22e1e2b994a801c1d",
+  "archive_bytes": 6479055,
+  "root": "/Users/adalundhe/.cache/hex-cdi-01a1c640-9cb5953c-v1",
+  "parent_registration": "private copy ONLY: pub mod cdi; appended to hex-core/src/lib.rs",
+  "parent_before_sha256": "040e51eb13da41c9d4a7bfb4bf94e18065ba3b6c491edd2ad58e39e2763035a1",
+  "parent_after_sha256": "bd43106b1bc3be61e84ff5ee37fa909cc2d8c2e8a3068d211768ca9a1214d4f9",
+  "cdi_sha256": "7ca46313f6c581c4194a9ba4a295cdda11435a285aacca8b304f41e77b6ce740",
+  "tests_sha256": "ec66c85d14110a3c1aae9304f5ff6d095b92197552e70b6c4258cabd12ed5d30",
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "needs": "cpus=1,mem=4g,disk=12g",
+  "jobs": 1,
+  "threads": 1,
+  "nice_command": 10
+}

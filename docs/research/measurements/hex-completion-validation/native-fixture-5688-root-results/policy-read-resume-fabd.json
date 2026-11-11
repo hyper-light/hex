@@ -1,0 +1,13 @@
+{
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "policy_hashes": {
+    "AGENTS.md": "f66d304c033ad4001d3d7347b67faa3bb3137d637860793e8e74f1eb6266db41",
+    "docs/development-rules.md": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+    "docs/development-evidence.md": "61613a244106d95b2759b38c8b6660ff29a616983e7afd6e9faabdc38368fb63",
+    "CLAUDE.md": "fd1076b256516e0edab1b3655421d37cd934e93a8232f0125b96abcfb99ece5f"
+  },
+  "role": "coordinator",
+  "task": "Hex scheduler/runtime completion and exact inherited-FD guard comparison",
+  "source": "fabd73020cdd1c6e201d8028fcca5d85f28ef18c",
+  "readback": "Full current policy4, Hex CLAUDE, charter and latest active handoff read; source-only local operations; all remote validation through normal admitted owned scopes; no new agents or goals."
+}

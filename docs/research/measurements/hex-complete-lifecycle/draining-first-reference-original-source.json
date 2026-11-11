@@ -1,0 +1,21 @@
+{
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "original_production": "c93ac262295d0301e16a46da1aea99bb03bd9262",
+  "source_status": "TEST-ONLY appended original hypothesis, UNRUN; semantic remedy held until ROOT actual result",
+  "selector": "recorded::handoff_tests::draining_observer_refuses_first_reference_but_retains_existing_consumer",
+  "behavior": "Canonical consumer first introduced while Live can reenter/delete under Draining. After actual reference removal, stale new ordinary Store put_lifecycle against same no-ref Draining source must refuse before fresh scope/publication. Strict preflight and unchanged Pool bytes are preconditions/oracles. No native callbacks or HCS/VM actors.",
+  "separate_original": "c9b removal original and all previous handoff test bodies byte-identical",
+  "dependencies": [
+    "aeceffcc3994966249ac0840ff2d0d6b0466afa0 factual backing helper",
+    "afbf135a39b0f2d19ac280faa887940b50f54578 valid Granted identity fixture",
+    "ROOT coherent Catalog full-P holder/subset support"
+  ],
+  "source_leaf": {
+    "path": "docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs",
+    "bytes": 23832,
+    "sha256": "2bd74bc8a07dcc69033cad1b0696271bceacea7ef3536ac366458a03d41e3afe"
+  },
+  "own_checks": "No compile/test/native; parser metadata only. ROOT owns exact original execution before remedy."
+}

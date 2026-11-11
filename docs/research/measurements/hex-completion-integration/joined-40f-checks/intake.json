@@ -1,0 +1,114 @@
+{
+  "actual": [
+    {
+      "name": "cohort-40feda1f-mac-provider-controls-v1",
+      "source": "40feda1f7d4b908eda41ae8adb1bc797f2109e3f",
+      "phases": [
+        {
+          "name": "rpc-control",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "-p",
+            "hex-node",
+            "--lib",
+            "--locked",
+            "scheduler::tests::device_offer_tests::physical_rpc_facts_keep_unknowns_and_empty_native_inventory_cannot_grant",
+            "--",
+            "--exact",
+            "--test-threads=1"
+          ],
+          "pid": 52811,
+          "exit": 101,
+          "reaped": true,
+          "sha256": "19ae11d2ab3b0847f8f2155c3ae6c9a4be21077e8a60856cab0e050f3c2c5862",
+          "bytes": 7959,
+          "selected_one_passed": false
+        }
+      ],
+      "source_changes": [],
+      "temp_entries": 0,
+      "native_invocations": 0
+    },
+    {
+      "name": "cohort-dacdc8a6-mac-provider-controls-v1",
+      "source": "dacdc8a6cec7c59069eff454423ff1cac1ff388e",
+      "phases": [
+        {
+          "name": "rpc-control",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "-p",
+            "hex-node",
+            "--lib",
+            "--locked",
+            "scheduler::tests::device_offer_tests::physical_rpc_facts_keep_unknowns_and_empty_native_inventory_cannot_grant",
+            "--",
+            "--exact",
+            "--test-threads=1"
+          ],
+          "pid": 50763,
+          "exit": 101,
+          "reaped": true,
+          "sha256": "4808252f6fe26f142b1f2b638ae465cb59e9c7cc8824f7da15f200758da59fa8",
+          "bytes": 3679,
+          "selected_one_passed": false
+        }
+      ],
+      "source_changes": [],
+      "temp_entries": 0,
+      "native_invocations": 0
+    },
+    {
+      "name": "cohort-dacdc8a6-mac-windows-clippy-v1",
+      "source": "dacdc8a6cec7c59069eff454423ff1cac1ff388e",
+      "phases": [
+        {
+          "name": "production-check",
+          "command": [
+            "nice",
+            "-n",
+            "10",
+            "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+            "clippy",
+            "-p",
+            "hex-runtime",
+            "-p",
+            "hex-node",
+            "--lib",
+            "--locked",
+            "--target",
+            "x86_64-pc-windows-msvc",
+            "--target",
+            "aarch64-pc-windows-msvc",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "pid": 51285,
+          "exit": 101,
+          "reaped": true,
+          "sha256": "ad1d00e6ec4dac73c6abb9f78555529e2998eac9f69b4e436d2ad36dd51737d1",
+          "bytes": 5343
+        }
+      ],
+      "source_changes": [],
+      "temp_entries": 0,
+      "native_invocations": 0
+    }
+  ],
+  "readiness": "all three source checks stopped at compiler/lint diagnostics; zero selected tests executed",
+  "fixes": {
+    "placement_fixture": "13aa5e29172132ea7253f0e1362bb9c89f8d1ea1",
+    "recorded_fixture": "5f23eeb2c6ed41e602328f83aeaf050af77604a7",
+    "node_lints_root": "2d0e6cc2"
+  },
+  "source_only_after": true
+}

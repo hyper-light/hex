@@ -1,0 +1,101 @@
+{
+  "final-light/index-units.log.gz": {
+    "format": "gzip, mtime=0",
+    "raw_original_name": "final-light/index-units.log",
+    "raw_bytes": 2328,
+    "raw_sha256": "83a26bc363000f3a6617bf1b1583c3eb4ea19d69f852a13609a570d9defd28dc",
+    "stored_bytes": 930,
+    "stored_sha256": "1f1ffe525f1f0ef5c20f08fffe05be3cf9f9c5042a3d5e3fca1f014c60c30d55",
+    "reason": "Preserve exact native log bytes while avoiding Git whitespace changes; original uncompressed proof/transfer files remain retained."
+  },
+  "final-light/lane-leaf.log.gz": {
+    "format": "gzip, mtime=0",
+    "raw_original_name": "final-light/lane-leaf.log",
+    "raw_bytes": 13085,
+    "raw_sha256": "0b04504e8a13082a04ed70fbe62befdda24aeb0cd738e72dc17d4ff7cd8ac81a",
+    "stored_bytes": 2882,
+    "stored_sha256": "6ea89fe6762db8a48d36672bd98d54076637c0e6aafe778e2002b577a559a876",
+    "reason": "Preserve exact native log bytes while avoiding Git whitespace changes; original uncompressed proof/transfer files remain retained."
+  },
+  "final-light/peer-units.log.gz": {
+    "format": "gzip, mtime=0",
+    "raw_original_name": "final-light/peer-units.log",
+    "raw_bytes": 2319,
+    "raw_sha256": "8d3be5fae1670735838474ba994649e98c4ff35ee28d6dec20b34043df99db2f",
+    "stored_bytes": 887,
+    "stored_sha256": "27c8dd00644b447724cbd9cc5ea7c2ac7c17aa599f2a31e4e09684951ae6173d",
+    "reason": "Preserve exact native log bytes while avoiding Git whitespace changes; original uncompressed proof/transfer files remain retained."
+  },
+  "first-fixed-lint-failure/index-units.log.gz": {
+    "format": "gzip, mtime=0",
+    "raw_original_name": "first-fixed-lint-failure/index-units.log",
+    "raw_bytes": 2331,
+    "raw_sha256": "918054fca355045f7ca82a2736457da16a8a6130ca39fa412a355e0b3c0ec28e",
+    "stored_bytes": 930,
+    "stored_sha256": "f77a9753f34aadc34b6bc0af04e21221b705c861905e2d4350d5f094fcfecd70",
+    "reason": "Preserve exact native log bytes while avoiding Git whitespace changes; original uncompressed proof/transfer files remain retained."
+  },
+  "first-fixed-lint-failure/lane-leaf.log.gz": {
+    "format": "gzip, mtime=0",
+    "raw_original_name": "first-fixed-lint-failure/lane-leaf.log",
+    "raw_bytes": 12129,
+    "raw_sha256": "e0b1d1b3be42a8ef2fc356a6d2b1f922e8e7cc7a97ffc81ea437728a97a16fce",
+    "stored_bytes": 2590,
+    "stored_sha256": "cedcb2d42e07395642e255b0ead59219e9c5b9ab8eefd6830275eb56eca3ce41",
+    "reason": "Preserve exact native log bytes while avoiding Git whitespace changes; original uncompressed proof/transfer files remain retained."
+  },
+  "first-fixed-lint-failure/peer-units.log.gz": {
+    "format": "gzip, mtime=0",
+    "raw_original_name": "first-fixed-lint-failure/peer-units.log",
+    "raw_bytes": 2322,
+    "raw_sha256": "7e29253cea7aecd9d57f5a3a9f412d3ffc9d2eec55c8551330d5b1ac1edba875",
+    "stored_bytes": 888,
+    "stored_sha256": "e6ea096954ea084f9d6f62ba802b801669646b8ad0c48f1aeb475bea1094c1a8",
+    "reason": "Preserve exact native log bytes while avoiding Git whitespace changes; original uncompressed proof/transfer files remain retained."
+  },
+  "tested-58/index-units.log.gz": {
+    "format": "gzip, mtime=0",
+    "raw_original_name": "tested-58/index-units.log",
+    "raw_bytes": 2331,
+    "raw_sha256": "358afb8398018d88e85d310eb2addf277e5bb1f68a9070ffb17e7cdbd95f6e08",
+    "stored_bytes": 931,
+    "stored_sha256": "37c5eba2468e11149528c83ff5ee7d8ec8f92503279b3dbc105ceff773677034",
+    "reason": "Preserve exact native log bytes while avoiding Git whitespace changes; original uncompressed proof/transfer files remain retained."
+  },
+  "tested-58/lane-leaf.log.gz": {
+    "format": "gzip, mtime=0",
+    "raw_original_name": "tested-58/lane-leaf.log",
+    "raw_bytes": 12129,
+    "raw_sha256": "17cc88d385823f49cbdacd25e5da5fbc78bb02903a389cbf303b8d9cba8a8c9f",
+    "stored_bytes": 2590,
+    "stored_sha256": "d808fa843a54ca0e5d99e6a536bd53d6e22bbfa0c55a8a22b2e702441ce912a6",
+    "reason": "Preserve exact native log bytes while avoiding Git whitespace changes; original uncompressed proof/transfer files remain retained."
+  },
+  "tested-58/peer-units.log.gz": {
+    "format": "gzip, mtime=0",
+    "raw_original_name": "tested-58/peer-units.log",
+    "raw_bytes": 2322,
+    "raw_sha256": "da2595461cfba6b70d924b4bcf40d0fccf611d18cce0fbab9193e169faad0d58",
+    "stored_bytes": 889,
+    "stored_sha256": "2c0cdfe75662839d32a1b6b6036d80e7efdd8d50e8a0ce683e28c212009973b6",
+    "reason": "Preserve exact native log bytes while avoiding Git whitespace changes; original uncompressed proof/transfer files remain retained."
+  },
+  "legal-index-green/max-index.log.gz": {
+    "format": "gzip, mtime=0",
+    "raw_original_name": "legal-index-green/max-index.log",
+    "raw_bytes": 3787,
+    "raw_sha256": "2200dc24dbfd7d5737e9f2358df0fdf3537876bd57d1690aa04f42f548f024dc",
+    "stored_bytes": 1151,
+    "stored_sha256": "c3d855455ecae8fcbb3b183a82f76b91562373a333e692c9a1a9763f566ef5ad",
+    "reason": "Preserve exact native log bytes while avoiding Git whitespace changes; original uncompressed proof/transfer files remain retained."
+  },
+  "legal-index-red/max-index.log.gz": {
+    "format": "gzip, mtime=0",
+    "raw_original_name": "legal-index-red/max-index.log",
+    "raw_bytes": 4611,
+    "raw_sha256": "19a406b559ed805c95366c25cc9878d96e25e792eb25994c8092db672b70073e",
+    "stored_bytes": 1426,
+    "stored_sha256": "ffdb6b3c4bdcb8e46cd2c7abb104b5d0d96930553b4b0940a5e1cc9d3cbde753",
+    "reason": "Preserve exact native log bytes while avoiding Git whitespace changes; original uncompressed proof/transfer files remain retained."
+  }
+}

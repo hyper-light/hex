@@ -1,0 +1,19 @@
+{
+  "parent": "f714a707208d1af6596634c30800a9d7b8941cff",
+  "role": "implementer",
+  "policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": {
+    "crates/hex-sim/src/index.rs": "cc851a80b84eaba3ef4e950ead2da0415d13ddf2a7103876b0e94d2a5b71080f",
+    "crates/hex-sim/src/index/routes.rs": "1a031cd3516a497c80fcbf6da01e17a817f2fd17d20d3c16bca4a5021b170f2a",
+    "crates/hex-sim/src/index/pending_gpu_cleanup_tests.rs": "9d79792bf2737b825587e771dd14ec210311c1690fc6d05a45946005d9ba4d55"
+  },
+  "original_tests_sha256": "6e1c41eb5798595216f320a3e4d2188dcb33057caba0cab381d33a3a068d4e81",
+  "red_log_sha256": "1296bc314c6259869d9cfcf8543250e93b5427351750c137254f891b0c782f1e",
+  "checks": {
+    "scoped_rustfmt": 0,
+    "git_diff_check": 0,
+    "post_compile_tests": "UNRUN, ROOT owns exact affected controls; no duplicate dispatch"
+  },
+  "evidence": "INDEX-RETAINED-GPU.md"
+}

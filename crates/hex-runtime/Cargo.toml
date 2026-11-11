@@ -12,10 +12,14 @@ publish.workspace = true
 hex-api.workspace = true
 hex-client.workspace = true
 hex-core.workspace = true
+hex-gpu.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 shards-api.workspace = true
+socket2.workspace = true
 thiserror.workspace = true
+triomphe.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
@@ -34,6 +38,12 @@ rustix.workspace = true
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys.workspace = true
 windows.workspace = true
+
+[features]
+# Read-only held-child phase witness for Node native tests; no execution authority.
+native-gate-test = []
+# Measurement-only shared typed startup builder; native entry remains separately reviewed.
+native-trusted-entry-measurement = []
 
 [dev-dependencies]
 proptest = "1.12.0"

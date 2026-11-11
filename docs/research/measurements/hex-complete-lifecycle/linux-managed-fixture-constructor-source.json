@@ -1,0 +1,8 @@
+{
+  "status": "SOURCE ONLY cause fix to ACTUAL fixture compile101 / zero units",
+  "base": "ce01a7338d34d6bb04cc90d70f1c826fa2887f50",
+  "original": "ROOT2ab Linux first phase, current integrated ebd12; original log SHA56acd7f2de16c334cebeacf092f089e5ea8ca17807acda1d54439aa6cc9805d6; Cargo896837 reaped/temp0/source unchanged, next phases unrun/native0",
+  "change": "Only two new cgroup test constructors TempDir::new(name)->existing tempfile::tempdir(); no import/alias/stub/ignore, production byte-identical, bounds fixture unchanged until actual test.",
+  "tests": "Neither selected new unit has run yet; no own check/native dispatch; ROOT matched successor required.",
+  "policy": "7d7e0855/rulesdf2 implementer; explicit narrow2 fixture correction ACK"
+}

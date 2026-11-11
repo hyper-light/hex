@@ -1,0 +1,18 @@
+{
+  "base": "128d084cae79abb20f435a0bbc4b54bbbcd4fa9a",
+  "actual_root_source": "ff765c021b842e02ea872abdec0809d802703d0b",
+  "actual_root_result": "first13 API/Runtime units PASS; Node test compile101 before tests on two obsolete Os tuple patterns",
+  "actual_root_log_sha256": "531e4065baf34bcfb72d64e98e6284a92ef37d5d3d412e98bb07f60c17a7643e",
+  "actual_root_log_bytes": 2752,
+  "raw_attribution": "ROOT-reported exact receipt, collector pending; no independent local raw-read claim",
+  "scope": "only2 test patterns to actual Refusal::Os {op,why}; exact op equality and denied detail required; no production/oracle weakening",
+  "file": "docs/research/measurements/hex-complete-lifecycle/recorded_unsubmitted_pool_tests.rs",
+  "sha256": "3adf7dac87f79885cda172f14bcf997ada314bc8f097296af58f4c87ae8c875d",
+  "new_checks": "UNRUN; no ownjob/native; unchanged13 passes mustnotreplay",
+  "source_checks": [
+    "scoped rustfmt0",
+    "git diff --check0"
+  ],
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3"
+}

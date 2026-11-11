@@ -1,0 +1,135 @@
+{"phase": "vulkan-c-syntax", "exit": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "log_tail": ""}
+{"phase": "gpu-telemetry-clippy", "exit": 0, "sha256": "97ee1010cdd3584a562c683e767c9c32e0743ff1dcf96b54aa308bc2cda7b4ad", "log_tail": ""}
+{"phase": "windows-compute-clippy", "exit": 101, "sha256": "309f786c4d82423755a3811c474c9a9d07ff701fbd7ebd87037abe48b15d3902", "log_tail": " Downloading crates ...\n  Downloaded windows-threading v0.2.1\n  Downloaded windows-link v0.2.1\n  Downloaded windows-interface v0.59.3\n  Downloaded windows-implement v0.60.2\n  Downloaded windows-collections v0.3.2\n  Downloaded windows-core v0.62.2\n  Downloaded windows-numerics v0.3.1\n  Downloaded windows-result v0.4.1\n  Downloaded windows-strings v0.5.1\n  Downloaded windows-future v0.3.2\n  Downloaded syn v2.0.119\n  Downloaded windows-sys v0.61.2\n  Downloaded windows v0.62.2\n   Compiling proc-macro2 v1.0.107\n   Compiling quote v1.0.47\n   Compiling unicode-ident v1.0.27\n    Checking windows-link v0.2.1\n   Compiling syn v2.0.119\n   Compiling windows-interface v0.59.3\n   Compiling windows-implement v0.60.2\n    Checking windows-strings v0.5.1\n    Checking windows-result v0.4.1\n    Checking windows-core v0.62.2\n   Compiling syn v3.0.9\n   Compiling thiserror v2.0.21\n   Compiling getrandom v0.4.3\n   Compiling thiserror-impl v2.0.21\n    Checking windows-threading v0.2.1\n    Checking windows-sys v0.61.2\n    Checking cfg-if v1.0.5\n    Checking windows-future v0.3.2\n    Checking windows-numerics v0.3.1\n    Checking windows-collections v0.3.2\n    Checking once_cell v1.21.4\n    Checking fastrand v2.5.0\n    Checking tempfile v3.27.0\n    Checking windows v0.62.2\n    Checking hex-gpu v0.1.0 (/Users/adalundhe/.cache/hex-completion-validation/compile-70945fe8-8c399c0b-a6863c4c/source/crates/hex-gpu)\n    Checking cap v0.1.2\nerror: not automatically applying `DerefMut` on `ManuallyDrop` union field\n   --> crates/hex-gpu/tests/completion_windows_compute.rs:510:38\n    |\n510 |     unsafe { ManuallyDrop::drop(&mut barrier.Anonymous.Transition.pResource) };\n    |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    |\n    = help: writing to this reference calls the destructor for the old value\n    = help: add an explicit `*` if that is desired, or call `ptr::write` to not run the destructor\n\nerror: could not compile `hex-gpu` (test \"completion_windows_compute\") due to 1 previous error\n"}
+{"phase": "backend-fixture-clippy", "exit": 101, "sha256": "5390ad6c9608b1a27f4bcda424bce7fda633c82af02f70b640a7a0183cc97fb8", "log_tail": " Downloading crates ...\n  Downloaded adler2 v2.0.1\n  Downloaded flate2 v1.1.11\n  Downloaded cpufeatures v0.2.17\n  Downloaded generic-array v0.14.7\n  Downloaded block-buffer v0.12.1\n  Downloaded cpufeatures v0.3.1\n  Downloaded itoa v1.0.18\n  Downloaded xattr v1.6.1\n  Downloaded version_check v0.9.5\n  Downloaded crypto-common v0.2.2\n  Downloaded crypto-common v0.1.7\n  Downloaded sha2 v0.11.1\n  Downloaded digest v0.11.3\n  Downloaded sha2 v0.10.9\n  Downloaded zmij v1.0.23\n  Downloaded filetime v0.2.29\n  Downloaded simd-adler32 v0.3.10\n  Downloaded digest v0.10.7\n  Downloaded block-buffer v0.10.4\n  Downloaded triomphe v0.1.17\n  Downloaded const-oid v0.10.2\n  Downloaded hybrid-array v0.4.15\n  Downloaded serde_derive v1.0.229\n  Downloaded crc32fast v1.5.4\n  Downloaded tar v0.4.46\n  Downloaded serde_core v1.0.229\n  Downloaded miniz_oxide v0.9.1\n  Downloaded serde v1.0.229\n  Downloaded memchr v2.8.3\n  Downloaded typenum v1.20.1\n  Downloaded serde_json v1.0.154\n  Downloaded zlib-rs v0.6.8\n    Checking typenum v1.20.1\n   Compiling version_check v0.9.5\n   Compiling serde_core v1.0.229\n   Compiling generic-array v0.14.7\n    Checking hybrid-array v0.4.15\n   Compiling rustix v1.1.5\n   Compiling serde v1.0.229\n   Compiling serde_derive v1.0.229\n   Compiling zmij v1.0.23\n    Checking crypto-common v0.2.2\n    Checking block-buffer v0.12.1\n    Checking const-oid v0.10.2\n   Compiling serde_json v1.0.154\n   Compiling crc32fast v1.5.4\n   Compiling shards-abi v0.1.0 (/Users/adalundhe/.cache/hex-completion-validation/compile-70945fe8-8c399c0b-a6863c4c/source/vendor/shards/crates/abi)\n    Checking digest v0.11.3\n    Checking crypto-common v0.1.7\n    Checking block-buffer v0.10.4\n    Checking cpufeatures v0.3.1\n    Checking memchr v2.8.3\n    Checking itoa v1.0.18\n    Checking simd-adler32 v0.3.10\n    Checking adler2 v2.0.1\n    Checking miniz_oxide v0.9.1\n    Checking sha2 v0.11.1\n    Checking digest v0.10.7\n    Checking hex-api v0.1.0 (/Users/adalundhe/.cache/hex-completion-validation/compile-70945fe8-8c399c0b-a6863c4c/source/crates/hex-api)\n    Checking xattr v1.6.1\n    Checking filetime v0.2.29\n    Checking cpufeatures v0.2.17\n    Checking triomphe v0.1.17\n    Checking shards-api v0.1.0 (/Users/adalundhe/.cache/hex-completion-validation/compile-70945fe8-8c399c0b-a6863c4c/source/vendor/shards/crates/api)\n    Checking sha2 v0.10.9\n    Checking tar v0.4.46\n    Checking hex-core v0.1.0 (/Users/adalundhe/.cache/hex-completion-validation/compile-70945fe8-8c399c0b-a6863c4c/source/crates/hex-core)\nerror[E0004]: non-exhaustive patterns: `&hex_api::ClassSpec::Firecracker(_)` and `&hex_api::ClassSpec::Shards(_)` not covered\n   --> crates/hex-core/src/record.rs:165:11\n    |\n165 |     match class {\n    |           ^^^^^ patterns `&hex_api::ClassSpec::Firecracker(_)` and `&hex_api::ClassSpec::Shards(_)` not covered\n    |\nnote: `hex_api::ClassSpec` defined here\n   --> crates/hex-api/src/spec.rs:170:1\n    |\n170 | pub enum ClassSpec {\n    | ^^^^^^^^^^^^^^^^^^\n...\n182 |     Firecracker(Box<OciSpec>),\n    |     ----------- not covered\n183 |     /// A guest workload run by Shards, with host configuration owned by its initialized backend.\n184 |     Shards(Box<OciSpec>),\n    |     ------ not covered\n    = note: the matched value is of type `&hex_api::ClassSpec`\nhelp: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern, a match arm with multiple or-patterns as shown, or multiple match arms\n    |\n179 ~         ],\n180 ~         &hex_api::ClassSpec::Firecracker(_) | &hex_api::ClassSpec::Shards(_) => todo!(),\n    |\n\nFor more information about this error, try `rustc --explain E0004`.\nerror: could not compile `hex-core` (lib) due to 1 previous error\n"}
+{"phase": "backend-pure-parser", "exit": 101, "sha256": "395b18d09500ae1970288ce9e6e5dabab20318324d9146be49844bb50affd540", "log_tail": "   Compiling libc v0.2.191\n   Compiling typenum v1.20.1\n   Compiling cfg-if v1.0.5\n   Compiling thiserror v2.0.21\n   Compiling serde_core v1.0.229\n   Compiling hybrid-array v0.4.15\n   Compiling generic-array v0.14.7\n   Compiling errno v0.3.14\n   Compiling bitflags v2.13.2\n   Compiling rustix v1.1.5\n   Compiling serde v1.0.229\n   Compiling crypto-common v0.2.2\n   Compiling block-buffer v0.12.1\n   Compiling const-oid v0.10.2\n   Compiling digest v0.11.3\n   Compiling zmij v1.0.23\n   Compiling crypto-common v0.1.7\n   Compiling block-buffer v0.10.4\n   Compiling cpufeatures v0.3.1\n   Compiling memchr v2.8.3\n   Compiling itoa v1.0.18\n   Compiling simd-adler32 v0.3.10\n   Compiling adler2 v2.0.1\n   Compiling miniz_oxide v0.9.1\n   Compiling serde_json v1.0.154\n   Compiling sha2 v0.11.1\n   Compiling digest v0.10.7\n   Compiling shards-abi v0.1.0 (/Users/adalundhe/.cache/hex-completion-validation/compile-70945fe8-8c399c0b-a6863c4c/source/vendor/shards/crates/abi)\n   Compiling crc32fast v1.5.4\n   Compiling hex-api v0.1.0 (/Users/adalundhe/.cache/hex-completion-validation/compile-70945fe8-8c399c0b-a6863c4c/source/crates/hex-api)\n   Compiling xattr v1.6.1\n   Compiling filetime v0.2.29\n   Compiling cpufeatures v0.2.17\n   Compiling triomphe v0.1.17\n   Compiling shards-api v0.1.0 (/Users/adalundhe/.cache/hex-completion-validation/compile-70945fe8-8c399c0b-a6863c4c/source/vendor/shards/crates/api)\n   Compiling sha2 v0.10.9\n   Compiling tar v0.4.46\n   Compiling hex-core v0.1.0 (/Users/adalundhe/.cache/hex-completion-validation/compile-70945fe8-8c399c0b-a6863c4c/source/crates/hex-core)\nerror[E0004]: non-exhaustive patterns: `&ClassSpec::Firecracker(_)` and `&ClassSpec::Shards(_)` not covered\n   --> crates/hex-core/src/record.rs:165:11\n    |\n165 |     match class {\n    |           ^^^^^ patterns `&ClassSpec::Firecracker(_)` and `&ClassSpec::Shards(_)` not covered\n    |\nnote: `ClassSpec` defined here\n   --> crates/hex-api/src/spec.rs:170:1\n    |\n170 | pub enum ClassSpec {\n    | ^^^^^^^^^^^^^^^^^^\n...\n182 |     Firecracker(Box<OciSpec>),\n    |     ----------- not covered\n183 |     /// A guest workload run by Shards, with host configuration owned by its initialized backend.\n184 |     Shards(Box<OciSpec>),\n    |     ------ not covered\n    = note: the matched value is of type `&ClassSpec`\nhelp: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern, a match arm with multiple or-patterns as shown, or multiple match arms\n    |\n179 ~         ],\n180 ~         &ClassSpec::Firecracker(_) | &ClassSpec::Shards(_) => todo!(),\n    |\n\nFor more information about this error, try `rustc --explain E0004`.\nerror: could not compile `hex-core` (lib) due to 1 previous error\n"}
+{
+  "root": "/Users/adalundhe/.cache/hex-completion-validation/compile-70945fe8-8c399c0b-a6863c4c",
+  "result": {
+    "cohort": "8c399c0b0c55914c6cf765348e5b8622860b4014",
+    "owned": "70945fe878f87e11acb5bde6e4dbf793dd726b8f",
+    "archive_sha256": "276a53533bce9dda940abaacb7b2564efe5451284cd3b43f7eaa36a68ef36d42",
+    "scope": "light static C/Rust native fixtures plus one pure Rust parser test ONLY; NO native dispatch/VM/HCS/profile",
+    "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+    "phases": [
+      {
+        "name": "vulkan-c-syntax",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/usr/bin/cc",
+          "-std=c11",
+          "-fsyntax-only",
+          "-Wall",
+          "-Wextra",
+          "-Werror",
+          "-I",
+          "/Users/adalundhe/.cache/hex-completion-validation/compile-70945fe8-8c399c0b-a6863c4c/headers/Vulkan-Headers-vulkan-sdk-1.4.321.0/include",
+          "/Users/adalundhe/.cache/hex-completion-validation/compile-70945fe8-8c399c0b-a6863c4c/source/scripts/scheduler-completion/vulkan-witness.c"
+        ],
+        "pid": 80975,
+        "exit": 0,
+        "reaped": true,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "gpu-telemetry-clippy",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+          "clippy",
+          "-p",
+          "hex-gpu",
+          "--test",
+          "completion_telemetry",
+          "--locked",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "pid": 80977,
+        "exit": 0,
+        "reaped": true,
+        "sha256": "97ee1010cdd3584a562c683e767c9c32e0743ff1dcf96b54aa308bc2cda7b4ad"
+      },
+      {
+        "name": "windows-compute-clippy",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+          "clippy",
+          "-p",
+          "hex-gpu",
+          "--test",
+          "completion_windows_compute",
+          "--locked",
+          "--target",
+          "x86_64-pc-windows-msvc",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "pid": 81078,
+        "exit": 101,
+        "reaped": true,
+        "sha256": "309f786c4d82423755a3811c474c9a9d07ff701fbd7ebd87037abe48b15d3902"
+      },
+      {
+        "name": "backend-fixture-clippy",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+          "clippy",
+          "-p",
+          "hex-cli",
+          "--test",
+          "completion_backends",
+          "--locked",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "pid": 81381,
+        "exit": 101,
+        "reaped": true,
+        "sha256": "5390ad6c9608b1a27f4bcda424bce7fda633c82af02f70b640a7a0183cc97fb8"
+      },
+      {
+        "name": "backend-pure-parser",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+          "test",
+          "-p",
+          "hex-cli",
+          "--test",
+          "completion_backends",
+          "--locked",
+          "completion_receipt_parser_uses_the_actual_last_json_result",
+          "--",
+          "--exact",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "pid": 81514,
+        "exit": 101,
+        "reaped": true,
+        "sha256": "395b18d09500ae1970288ce9e6e5dabab20318324d9146be49844bb50affd540",
+        "selected_exact": false
+      }
+    ],
+    "source_unchanged": true,
+    "temp_entries": 0,
+    "exit": 1,
+    "binaries": {}
+  }
+}

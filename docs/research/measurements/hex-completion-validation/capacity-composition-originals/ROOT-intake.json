@@ -1,0 +1,13 @@
+{
+  "role": "coordinator",
+  "pins": [
+    "6fda9054bc0cbab3a57c79703df4109839e136d9",
+    "dbff43145b2416f0753e61778702dbb0424de51c"
+  ],
+  "status": "UNRUN originals; no production remedies",
+  "ports": "Append two named controls; matrix701 required own RuntimePaths pair; Cold attach allows exact same identity ONLY for Live, prior Intent no-identity oracle remains strict. Prior baa path pairs protected.",
+  "sources": {
+    "crates/hex-runtime/src/guest/gpu_pool.rs": "1f036fc69189a5677447d1431b8382a81e967415ae72561453e2a4f2d32f9371",
+    "crates/hex-runtime/src/guest/shared_tests.rs": "84a2701352b10db2e079c2742690cd2662bab797fb712747b5e8f5c32c0b6c06"
+  }
+}

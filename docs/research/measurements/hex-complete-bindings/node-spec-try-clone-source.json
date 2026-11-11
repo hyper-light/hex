@@ -1,0 +1,24 @@
+{
+  "bounds": [
+    "devices<=DEVICES",
+    "runtime_pools<=Class::COUNT"
+  ],
+  "checks": {
+    "compile": "unrun",
+    "diff": "pass",
+    "native": "unrun",
+    "scoped_format": "pass",
+    "tests": "unrun"
+  },
+  "integration": "L4 sim.rs/federation.rs exact4f wrapper callers; ROOT joins",
+  "kind": "source-only/minimal-fallible-copy-helper",
+  "method": "NodeSpec::try_clone(&self)->Result<Self,SimError>",
+  "new_dependencies": false,
+  "new_tests": false,
+  "ownership": "same immutable SharedRoutes Arc; no deep backing claims clone",
+  "policy": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "role": "implementer",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sha256": "2376dd1db95895f2578a9e6e006af4436897c8e2bf8578fb9ccb0df7c31190f2",
+  "source": "crates/hex-sim/src/model.rs"
+}

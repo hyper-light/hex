@@ -1,0 +1,17 @@
+{
+  "requirement": "AC-T7.4.1",
+  "base": "d535057f1e0201729849f192d3b619053a91674d",
+  "original_actual_compiler_failure": "b3d preflight original v2:10 schema/Clone/holder errors, zero controls executed",
+  "production_changed": false,
+  "new_fields": "legacy empty route/backing/mask fields; routeNone in two native model fixture specs",
+  "copy": "DeviceInfo.try_clone().unwrap in existing test-only fixture copies; complete DeviceHolder::Box expected variant",
+  "files_before": {
+    "crates/hex-node/src/placement/device_binding_tests.rs": "36c7e570b322874eb0acca5d595e446e5f3800d31b6a376d8e65385b3eba0831",
+    "docs/research/measurements/hex-complete-lifecycle/recorded_authority_tests.rs": "6f6d3854ce282ac88b91421e4ed4fbddcab0473e14d23f90db2279abcc97f59d"
+  },
+  "files_after": {
+    "crates/hex-node/src/placement/device_binding_tests.rs": "b0cf8beb3294259095d260b5055f7d2c0668d27248dbc3232c31b83dcf59237d",
+    "docs/research/measurements/hex-complete-lifecycle/recorded_authority_tests.rs": "d603325cbcf881f23d9c5b6a8c0dd5899f89fa82ea95189a25bbada4556735d7"
+  },
+  "tests_executed": 0
+}

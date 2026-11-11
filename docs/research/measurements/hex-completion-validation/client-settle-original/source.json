@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "parent": "25d98e88be3b8173605ed7e8e1d109d309a278b6",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": {
+    "path": "crates/hex-client/src/calls/budget_tests.rs",
+    "sha256": "b1cdd41e299e101736138d499a3ce171ae27a28ef2b1600a3d1b2af28c5e053e",
+    "bytes": 78193,
+    "parent_prefix_bytes": 69140,
+    "parent_prefix_sha256": "a892505c8ff87433c992725743b09c5be085e40e5bd900db15c5f65084dfd9f8",
+    "append_only": true
+  },
+  "test_name": "calls::budget_tests::absolute_run_settle_error_does_not_renew_kill_answer_budget",
+  "tests_defined": 1,
+  "tests_executed": 0,
+  "builds_executed": 0,
+  "native_executed": 0,
+  "protected": [
+    {
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "38ae331369187698244c8d679e944e39937b27915f4c7612191e9d65604f3fc1",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/guest.rs",
+      "sha256": "893c281be8a3d4907d81bcffc36c0991a1d614108e3e68ecf7500e130887c6b3",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/guest/tests.rs",
+      "sha256": "68ba6db123682e110827cd02315097edb61576fa51acb650bdefe2b9dab21626",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "a8f51f83a7b8ed2c43e0824f3af7aff5e967ba77159dde320841183559ea29b8",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+      "unchanged": true
+    }
+  ],
+  "fixture_waits": {
+    "existing_CAP_ms": 25,
+    "existing_OBSERVE_ms": 100,
+    "clock": "existing until(original), no new timer/sleep/default"
+  },
+  "ownership": {
+    "worker_threads_defined": 1,
+    "native_processes_defined": 0,
+    "transport": "same configured Core/Offers/Stalled memory transport; no relative reply budget; private Measuring table",
+    "fault": "bounded asks_before returns actual owned stdout pipe end while only stdin requested; real Started then real settle refuses",
+    "withheld": "only actual Kill answer; sender lock not artificially held",
+    "cleanup": "end only fixture Shared, drop retained pipe, join before assertions; preserve poison as failed witness"
+  },
+  "wait_none": "source is zero-duration poll; a real Kill send is the independent positive witness that it returned before the subsequent unarmed call wait",
+  "expected_original": "error result missing before owned cleanup after original authority expires; causal Kill witness required before regression assertion; NOT an observed result",
+  "status": "source-only original, ROOT exact one selector execution pending; no production remedy"
+}

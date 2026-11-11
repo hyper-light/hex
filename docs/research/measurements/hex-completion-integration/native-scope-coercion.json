@@ -1,0 +1,8 @@
+{
+  "source_before": "25fd0744c2625deabcbd642ab87cee2a461c04f9",
+  "actual_before": "MacARM64 and Linuxx64 runtime/node lib checks reached Node and failed E0308 atStore392; runtime/core/SDK compiled; no tests/native",
+  "cause": "scoped branch inferred &PathBuf while existing place returns &Path",
+  "change": "borrow the same disk path as Path, preserving directory/durability selection and lifetime",
+  "after": "pending exact joined compiler checks",
+  "recorded_owners_notified": true
+}

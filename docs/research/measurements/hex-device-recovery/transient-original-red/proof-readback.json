@@ -1,0 +1,66 @@
+{
+  "archive": "/Users/adalundhe/.cache/hex-lead/transfers/device-recovery-impl-01a1c640-90230466-before-v1/proof-bundle.tar.gz",
+  "archive_sha256": "d916ad6e4479e09cafd71d4c6dbbdece60e909542c0b78efdd428169248cac8c",
+  "archive_bytes": 110586,
+  "member_count": 10,
+  "all_member_hashes_verified": true,
+  "source_unchanged": true,
+  "source_manifest_before_sha256": "40c9197783f329a69997688871b2dc1512e185096405dbae4f0d6b7382110c67",
+  "source_manifest_after_sha256": "40c9197783f329a69997688871b2dc1512e185096405dbae4f0d6b7382110c67",
+  "source_revision": "90230466c3e157855ee7639adb196637dc708530",
+  "source_files": 1093,
+  "logs": [
+    [
+      "selected-device-recovery.log",
+      5307,
+      "32d31800b3761033e9b8fadd0eabbaa444c6f46345f3de62dc245f0eb609fe5d"
+    ]
+  ],
+  "exit_code": 101,
+  "counts": {
+    "passed": 0,
+    "failed": 1,
+    "ignored": 0,
+    "measured": 0,
+    "filtered_out": 159
+  },
+  "phases": [],
+  "chunks": [
+    {
+      "offset": 0,
+      "bytes": 16000,
+      "sha256": "a67b0f7c059ab08135d29b7271b7a3d9c62af92f7f9679274bcb470faf2636d9"
+    },
+    {
+      "offset": 16000,
+      "bytes": 16000,
+      "sha256": "9ee5f060b91fe78e59bcb9fdeb2b3121375c548338aab54f120e08d6b0630054"
+    },
+    {
+      "offset": 32000,
+      "bytes": 16000,
+      "sha256": "aea292e824759f1f26bbc10c1ab8586b931a13f5168fe104129f80766d16170f"
+    },
+    {
+      "offset": 48000,
+      "bytes": 16000,
+      "sha256": "f2766c3a94f9b0216aa3462f29acafdbd1c518b45e2cbbd7a2ac6574da9db527"
+    },
+    {
+      "offset": 64000,
+      "bytes": 16000,
+      "sha256": "8204e2e63d83e4f00be009ed96261fe640484c4a43b1b2f5875f340157724dd9"
+    },
+    {
+      "offset": 80000,
+      "bytes": 16000,
+      "sha256": "b131cc01aa9b28de60261bfaece28f3f4c7a660a5493024b5f234ca8275b1c87"
+    },
+    {
+      "offset": 96000,
+      "bytes": 14586,
+      "sha256": "d59ec33d6c2f4313d750d465264fd701b1fd505f61ed6e8976db1ae6945283d9"
+    }
+  ],
+  "native_gpu_effect": false
+}

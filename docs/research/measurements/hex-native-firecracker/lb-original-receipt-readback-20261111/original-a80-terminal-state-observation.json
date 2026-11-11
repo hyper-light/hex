@@ -1,0 +1,10 @@
+{
+  "exit": 0,
+  "values": {
+    "ActiveState": "inactive",
+    "SubState": "dead",
+    "MainPID": "0",
+    "ControlGroup": ""
+  },
+  "stderr": ""
+}

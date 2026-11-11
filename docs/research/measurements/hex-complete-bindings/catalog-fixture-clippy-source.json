@@ -1,0 +1,17 @@
+{
+  "parent": "70e71c7341c7e51a8d24bb6b4511c979bd8f913a",
+  "role": "implementer",
+  "policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": "crates/hex-runtime/src/devices/tests.rs",
+  "sha256": "bb964509eec8a12f08ede343bca8dfc7dab060b8b3d81cfe667bcc720a094b1e",
+  "actual_before": "ROOT8a421601 MacARM64 light owner1+barrier6 passed; client/runtime all-target Clippy101, original log854b685e59922f0ed86b6be0d0a683aba1d577c11f529561863e7752a04d63c8. Three bool::then_some fixture sites assigned L1.",
+  "delta": "ONLY equivalent plain if/else at init/exit/expected holder; phases, oracle, counts and production unchanged.",
+  "checks": {
+    "scoped_rustfmt": 0,
+    "diff_check": 0,
+    "tests": "No repeated seven passes; changed Clippy/compile ROOT-owned",
+    "production_changes": 0,
+    "jobs_started": 0
+  }
+}

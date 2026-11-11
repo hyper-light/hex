@@ -1,0 +1,34 @@
+{
+  "parent": "fb93ef5b960474d32ffc5b7ecf1d68f76c90bfa6",
+  "policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "sources": {
+    "crates/hex-node/src/placement.rs": "bdfc0728658815fcd84e96e101c756be886a81e6d93b8bdb980a9fef1d9dcb96",
+    "crates/hex-node/src/placement/backing_tests.rs": "23c5111dfe76f06af43a8e94f31aef76af1c8d41e39305f36a4bd16cf04eda0e",
+    "crates/hex-node/src/scheduler.rs": "6b422d19ce045415c94abf4bc953000c4b69e10ef05a3c36395c7f7e91bb2fbd",
+    "crates/hex-runtime/src/firecracker/native.rs": "c22d2091e0037e44763a13a1bb9a40e1d1c39bc994a9c17482747ee60aca49bc",
+    "crates/hex-runtime/src/firecracker/observations.rs": "e6821cc812b74646236929e3316f6ae67c7df43535406e9677b3404d9c991bbb",
+    "crates/hex-runtime/src/firecracker/pool.rs": "eee29254d2ee1aa1efe6eb399047e659ca2bc58ef9f1b7de5bf6f469d2305d37",
+    "crates/hex-sim/src/index/routes.rs": "51da36e1348299665d2a059a400fa388c85e15c832bcdd2da30a2674725cc8b2",
+    "crates/hex-sim/src/peer.rs": "95be79fff4a802f4756b4206755ce0bf8b0094a57c0540eea551db0487f3cc2d"
+  },
+  "contract": "Same canonical Pool/Box native observation +actual guest native OCI binding +Service factual Released observation before Driver Runtime.release_backing acknowledgement/rearm. No API/wire/CLI/Cargo changes.",
+  "integration": "Apply named owned deltas preserving ROOT current literal/render/catalog/registration ports. Backend methods remain exact initialized Firecracker; no native/Shards fallback. Existing Node Record/Pool authority is unchanged.",
+  "original_vm_io_helper_sha256": "696662503ba10796f69139eb72bca41ad7067f7657ebb22318170ca7b4585363",
+  "original_vm_io_body_preserved_from": "70e71c7341c7e51a8d24bb6b4511c979bd8f913a",
+  "new_controls_unrun": [
+    "firecracker::observations::tests::observer_needs_exact_driver_set_and_real_native_container_binding",
+    "placement::backing_tests::native_rearm_waits_for_the_original_released_snapshot"
+  ],
+  "checks": {
+    "scoped_rustfmt": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "tests": "UNRUN",
+    "native_effects": 0,
+    "jobs_started": 0
+  },
+  "remaining": "ROOT joined compile/light and actual native/descriptor/whole-scope/driver/cost/fault proof; pinned guest driver/native CDI artifact closure; arbitrary proper-subset provisioning acceptance; whole-owner cold native metadata hook with L3. No completion claim.",
+  "evidence": "FIRECRACKER-OBSERVATION-HANDOFF.md"
+}

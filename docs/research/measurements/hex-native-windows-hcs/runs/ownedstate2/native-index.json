@@ -1,0 +1,192 @@
+{
+  "utc": "2026-11-11T04:49:05.5674618Z",
+  "id": "wd-hexdeviceuopdHC-cpu-recovery",
+  "lab": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcs-cpu-exec-v1\\scratch\\hex-device-uopdHC",
+  "processes": [
+    {
+      "present": false,
+      "pid": 7828
+    },
+    {
+      "present": false,
+      "pid": 14668
+    },
+    {
+      "present": false,
+      "pid": 13244
+    },
+    {
+      "present": false,
+      "pid": 5060
+    },
+    {
+      "present": false,
+      "pid": 9244
+    },
+    {
+      "present": false,
+      "pid": 6212
+    }
+  ],
+  "state_files": [
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcs-cpu-exec-v1\\scratch\\hex-device-uopdHC\\state\\devices",
+      "sha256": "2fc85b24827d10592bbd9e30446c790ebdd5729b7a41268a285ee640164c6347",
+      "bytes": 101
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcs-cpu-exec-v1\\scratch\\hex-device-uopdHC\\state\\keeper\\keeper-ready-14588",
+      "sha256": "c5f4b8de545eb12d7f132157bd3b23ed4b4d46f7f2cdc12340f7f31d1547eac8",
+      "bytes": 23
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\hcs-cpu-exec-v1\\scratch\\hex-device-uopdHC\\state\\keeper\\keeper.owner",
+      "sha256": "c5f4b8de545eb12d7f132157bd3b23ed4b4d46f7f2cdc12340f7f31d1547eac8",
+      "bytes": 23
+    }
+  ],
+  "physical": {
+    "marker_exists": false,
+    "scratch_exists": false,
+    "absent": true,
+    "open_hr": "0x8037010e"
+  },
+  "image_metadata": [
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots",
+      "directory": true,
+      "last_write_utc": "2026-11-11T04:31:33.7852655Z",
+      "bytes": null
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\metadata.db",
+      "directory": false,
+      "last_write_utc": "2026-11-11T04:31:33.7852655Z",
+      "bytes": 65536
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1",
+      "directory": true,
+      "last_write_utc": "2026-11-11T04:30:54.0603600Z",
+      "bytes": null
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\2",
+      "directory": true,
+      "last_write_utc": "2026-11-11T04:31:33.7852655Z",
+      "bytes": null
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.metadata.v1.bolt\\meta.db",
+      "directory": false,
+      "last_write_utc": "2026-11-11T04:31:33.7866169Z",
+      "bytes": 131072
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\Files",
+      "directory": true,
+      "last_write_utc": "2026-01-11T10:06:49.0543544Z",
+      "bytes": null
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\Hives",
+      "directory": true,
+      "last_write_utc": "2026-11-11T04:30:54.0603600Z",
+      "bytes": null
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\UtilityVM",
+      "directory": true,
+      "last_write_utc": "2026-11-11T04:30:56.0739627Z",
+      "bytes": null
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\bcd.bak",
+      "directory": false,
+      "last_write_utc": "2026-11-11T04:29:56.3394011Z",
+      "bytes": 16384
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\bcd.log.bak",
+      "directory": false,
+      "last_write_utc": "2026-11-11T04:29:56.3401415Z",
+      "bytes": 16384
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\bcd.log1.bak",
+      "directory": false,
+      "last_write_utc": "2026-11-11T04:29:56.3401415Z",
+      "bytes": 0
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\bcd.log2.bak",
+      "directory": false,
+      "last_write_utc": "2026-11-11T04:29:56.3430442Z",
+      "bytes": 0
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\blank-base.vhdx",
+      "directory": false,
+      "last_write_utc": "2026-11-11T04:30:18.6746646Z",
+      "bytes": 39845888
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\blank.vhdx",
+      "directory": false,
+      "last_write_utc": "2026-11-11T04:30:54.0791808Z",
+      "bytes": 4194304
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\layout",
+      "directory": false,
+      "last_write_utc": "2026-11-11T04:30:54.0603600Z",
+      "bytes": 15
+    }
+  ],
+  "collection_refusals": [
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\bcd.bak",
+      "bytes": 16384,
+      "reason": "raw budget or non-metadata extension; exact file retained remotely, not silently skipped"
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\bcd.log.bak",
+      "bytes": 16384,
+      "reason": "raw budget or non-metadata extension; exact file retained remotely, not silently skipped"
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\bcd.log1.bak",
+      "bytes": 0,
+      "reason": "raw budget or non-metadata extension; exact file retained remotely, not silently skipped"
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\bcd.log2.bak",
+      "bytes": 0,
+      "reason": "raw budget or non-metadata extension; exact file retained remotely, not silently skipped"
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\blank-base.vhdx",
+      "bytes": 39845888,
+      "reason": "raw budget or non-metadata extension; exact file retained remotely, not silently skipped"
+    },
+    {
+      "path": "C:\\Users\\corph\\.cache\\hex-native-windows-hcs\\full-image-prep-v2\\root\\io.containerd.snapshotter.v1.windows\\snapshots\\1\\layout",
+      "bytes": 15,
+      "reason": "raw budget or non-metadata extension; exact file retained remotely, not silently skipped"
+    }
+  ],
+  "pre_cleanup_store_marker_bytes_retained": false,
+  "pre_cleanup_bytes_gap": "fixture deleted private marker/store during normal failure cleanup before external collection; no prior bytes reconstructed",
+  "native_workloads": 0,
+  "mutations": 0,
+  "raw_index": {
+    "io.containerd.snapshotter.v1.windows/metadata.db": {
+      "sha256": "391ce09fe56632a48f9af17c0a1b51311f1971396773c2363a328aba18ae5d8b",
+      "bytes": 65536
+    },
+    "io.containerd.metadata.v1.bolt/meta.db": {
+      "sha256": "1874a57aa5915be302f83318873c9c4c57d3bea9a76c3e0ef466963339fc6eef",
+      "bytes": 131072
+    }
+  }
+}

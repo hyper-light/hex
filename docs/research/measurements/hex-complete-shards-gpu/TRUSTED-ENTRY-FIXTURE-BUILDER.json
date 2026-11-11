@@ -1,0 +1,67 @@
+{
+  "status": "SOURCE ONLY; new fixture2 controls UNRUN; ROOT registration and native effects separate",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "hex_parent": "a89737cf6b19daee65a092006cb821f499445a6d",
+  "root_producer": "786775e3b119c5163d49aa12662c0207cb25cc29",
+  "api_source": "68941d44c7c39d27f0e9ade5d1d0e7169af53002",
+  "api_lint_successor": "511f92720ef372047370166095933ac6de0e676e",
+  "feature": "native-trusted-entry-measurement",
+  "registration_owner": "ROOT",
+  "entry_owner": "L3 existing Mac sys/native owner",
+  "signature": "pub(crate) prepare(Input<'_>)->Result<(PreparedBoot,Allocation),Refusal>",
+  "input": [
+    "&GuestConfig",
+    "cost file/digest/evidence",
+    "&RuntimePaths",
+    "syntactic socket",
+    "explicit console_kept"
+  ],
+  "no_effects": [
+    "no Runtime/Prober initialization",
+    "no env or second manifest",
+    "no argv reparse",
+    "no pointers across exec",
+    "no native or process/VM/GPU",
+    "no codec/FFI/tag/worker change",
+    "no own check dispatch"
+  ],
+  "new_controls": [
+    "guest::native_fixture::tests::fixed_native_fixture_uses_real_evidence_and_refuses_legacy_or_wrong_cost",
+    "guest::native_fixture::tests::fallible_fixture_spec_preserves_existing_kernel_and_ordered_share_grammar"
+  ],
+  "retained_limits": [
+    "existing cost read/serde allocation seams",
+    "actual image exec consumption and pre-main proof",
+    "native direct-child abort/reap/custody",
+    "future fixed workers and whole scope/helper charge proof"
+  ],
+  "files": [
+    {
+      "path": "crates/hex-runtime/src/guest/books.rs",
+      "bytes": 34010,
+      "sha256": "45903f14d813d745a988df9f405fba4872ebe3d53760570828fd7c4b34e887d2"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/mod.rs",
+      "bytes": 58246,
+      "sha256": "167c832f869024420915db3fef85e9ffe1acabc319b9365169163901da4276f5"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/native_fixture.rs",
+      "bytes": 2003,
+      "sha256": "9f92717bc333fcfe606b1d0f1f3409accc4e98582d571eb11b3c2087c2275f38"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/native_fixture/tests.rs",
+      "bytes": 5934,
+      "sha256": "0c8aa5d7569180caf3e373414c17f4bcf811b1709e90b7a52580e7e88c4cd8b6"
+    },
+    {
+      "path": "docs/research/measurements/hex-complete-shards-gpu/TRUSTED-ENTRY-FIXTURE-BUILDER.md",
+      "bytes": 4567,
+      "sha256": "7773c0f6cf80a8b47526b7e806c2367d972357c2d0f14fff4d120f4f2bd6ce79"
+    }
+  ]
+}

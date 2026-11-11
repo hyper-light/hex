@@ -105,8 +105,11 @@ fn a_source_maps_under_the_deepest_share_that_holds_it() {
     assert_eq!(shares::in_guest(&shared, Path::new("/etc")), None);
 }
 
-fn oci(rootfs: Rootfs, mounts: Vec<Mount>) -> BoxSpec {
+pub(super) fn oci(rootfs: Rootfs, mounts: Vec<Mount>) -> BoxSpec {
     BoxSpec {
+        devices: Vec::new(),
+        allocation: None,
+        route: None,
         id: BoxId::new("box-1").unwrap(),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(OciSpec {
@@ -333,6 +336,9 @@ fn a_bundles_config_is_rewritten_to_the_guests_paths() {
     std::fs::write(bundle.join("config.json"), config.to_string()).unwrap();
     let shared = [share(0, "/etc", false), share(1, &base, false)];
     let spec = BoxSpec {
+        devices: Vec::new(),
+        allocation: None,
+        route: None,
         id: BoxId::new("box-1").unwrap(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle.clone()),
@@ -370,6 +376,16 @@ struct NoGuest {
 }
 
 impl shards_api::Guests for NoGuest {
+    fn probe_gpu(
+        &self,
+        _: &shards_api::GuestSpec,
+        _: Duration,
+    ) -> Result<shards_api::GpuProbe, shards_api::Refusal> {
+        Err(shards_api::Refusal::GpuProbe(
+            shards_api::GpuProbeError::Unavailable,
+        ))
+    }
+
     fn backend(&self) -> Result<shards_api::Backend, shards_api::Refusal> {
         self.backend.clone()
     }
@@ -396,7 +412,7 @@ impl shards_api::Guests for NoGuest {
     }
 }
 
-fn config() -> GuestConfig {
+pub(super) fn config() -> GuestConfig {
     GuestConfig {
         binary: PathBuf::from("/shards"),
         kernel: PathBuf::from("/k"),
@@ -404,6 +420,7 @@ fn config() -> GuestConfig {
         // Shards' least guest: one vCPU and its architecture's least memory (`shards_api::check`).
         vcpus: 1,
         memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
+        gpu: false,
         shares: vec![share(0, "/", false)],
         staged: STAGED.to_owned(),
     }
@@ -433,6 +450,9 @@ fn where_shards_has_no_backend_the_class_is_refused_before_anything_boots() {
     assert!(why.contains("x86_64") && why.contains("Shards"), "{why}");
     assert_eq!(guests.boots.load(Ordering::SeqCst), 0);
     let process = BoxSpec {
+        devices: Vec::new(),
+        allocation: None,
+        route: None,
         id: BoxId::new("p").unwrap(),
         bounds: Bounds::default(),
         class: ClassSpec::Process,
@@ -465,6 +485,16 @@ fn the_guests_spec_names_its_init_ports_and_shares() {
     );
     assert_eq!(spec.shares.len(), 1);
     assert!(spec.disks.is_empty());
+    assert!(!spec.gpu);
+    let gpu = GuestConfig {
+        gpu: true,
+        ..config()
+    }
+    .spec();
+    assert!(gpu.gpu);
+    assert_eq!(gpu.cmdline, spec.cmdline);
+    assert_eq!(gpu.ports, spec.ports);
+    assert_eq!(gpu.shares, spec.shares);
 }
 
 /// HEX-GUEST-17: read the guest from variables with Shards' binary, the kernel and the initramfs
@@ -512,6 +542,22 @@ fn every_missing_guest_input_is_named_in_one_refusal() {
     assert_eq!((config.vcpus, config.memory_mib), (2, 1024));
     assert_eq!(config.spec().binary, Some(PathBuf::from("/opt/shards")));
     assert_eq!(config.shares.len(), 1);
+    assert!(!config.gpu);
+    for (value, enabled) in [("false", false), ("true", true)] {
+        let mut vars = all.clone();
+        vars.push((ENV_GPU, value));
+        let selected = read(&vars).unwrap();
+        assert_eq!(selected.spec().gpu, enabled);
+        assert_eq!(selected.spec().ports, config.spec().ports);
+    }
+    for value in ["", "TRUE", "1", "yes"] {
+        let mut vars = all.clone();
+        vars.push((ENV_GPU, value));
+        assert!(matches!(
+            read(&vars),
+            Err(Refusal::Invalid { what: ENV_GPU, .. })
+        ));
+    }
 }
 
 /// One value of a spec broken, as HEX-RT-13 breaks them.
@@ -690,6 +736,10 @@ impl shards_api::Stream for Looped {
 
 /// A relay and node agent in one: the connection's token, then the answer to its hello.
 fn ready_relay() -> std::net::TcpStream {
+    ready_relay_with_answer(None)
+}
+
+fn ready_relay_with_answer(answer: Option<hex_core::wire::Answer>) -> std::net::TcpStream {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -723,6 +773,24 @@ fn ready_relay() -> std::net::TcpStream {
         let bytes = hex_core::wire::answer(h.id, &hello, hex_core::wire::MAX_MESSAGE).unwrap();
         conn.write_all(&stream::frame(&bytes, hex_core::wire::MAX_MESSAGE).unwrap())
             .unwrap();
+        if let Some(answer) = answer {
+            let message = loop {
+                conn.read_exact(&mut byte).unwrap();
+                if let (_, Some(m)) = d.take(&byte).unwrap() {
+                    break m;
+                }
+            };
+            let (header, request) =
+                hex_core::wire::read_request_apart(&message, hex_core::wire::MAX_MESSAGE).unwrap();
+            assert_eq!(
+                request,
+                hex_core::wire::Request::Call(hex_core::wire::Call::Capacity(Class::Oci))
+            );
+            let bytes =
+                hex_core::wire::answer(header.id, &answer, hex_core::wire::MAX_MESSAGE).unwrap();
+            conn.write_all(&stream::frame(&bytes, hex_core::wire::MAX_MESSAGE).unwrap())
+                .unwrap();
+        }
         // Held until the client goes, as a relay's connection is.
         let _ = conn.read(&mut byte);
     });
@@ -730,6 +798,10 @@ fn ready_relay() -> std::net::TcpStream {
 }
 
 impl shards_api::Guest for PlannedGuest {
+    fn process_exited(&self) -> Result<bool, shards_api::Refusal> {
+        Ok(false)
+    }
+
     fn connect(
         &self,
         _port: u32,
@@ -744,6 +816,32 @@ impl shards_api::Guest for PlannedGuest {
                 why: format!("unanswered in {patience:?}"),
             }),
         }
+    }
+
+    fn connect_before(
+        &self,
+        port: u32,
+        at: std::time::Instant,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        let left = at
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or(shards_api::Refusal::Connect {
+                port,
+                failure: shards_api::HandshakeError::Expired {
+                    phase: shards_api::HandshakePhase::Dial,
+                },
+            })?;
+        let stream = self.connect(port, left)?;
+        if std::time::Instant::now() >= at {
+            return Err(shards_api::Refusal::Connect {
+                port,
+                failure: shards_api::HandshakeError::Expired {
+                    phase: shards_api::HandshakePhase::ClearTimeouts,
+                },
+            });
+        }
+        Ok(stream)
     }
 
     fn stop(&self) -> Result<(), shards_api::Refusal> {
@@ -764,6 +862,16 @@ impl shards_api::Guest for PlannedGuest {
 }
 
 impl shards_api::Guests for Planned {
+    fn probe_gpu(
+        &self,
+        _: &shards_api::GuestSpec,
+        _: Duration,
+    ) -> Result<shards_api::GpuProbe, shards_api::Refusal> {
+        Err(shards_api::Refusal::GpuProbe(
+            shards_api::GpuProbeError::Unavailable,
+        ))
+    }
+
     fn backend(&self) -> Result<shards_api::Backend, shards_api::Refusal> {
         shards_api::backend()
     }
@@ -1088,6 +1196,10 @@ struct KeptGuest {
 }
 
 impl shards_api::Guest for KeptGuest {
+    fn process_exited(&self) -> Result<bool, shards_api::Refusal> {
+        Ok(!self.kept.running.lock().unwrap().contains(&self.pid))
+    }
+
     fn connect(
         &self,
         port: u32,
@@ -1101,6 +1213,32 @@ impl shards_api::Guest for KeptGuest {
                 why: "a stand-in that won't answer".to_owned(),
             })
         }
+    }
+
+    fn connect_before(
+        &self,
+        port: u32,
+        at: std::time::Instant,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        let left = at
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or(shards_api::Refusal::Connect {
+                port,
+                failure: shards_api::HandshakeError::Expired {
+                    phase: shards_api::HandshakePhase::Dial,
+                },
+            })?;
+        let stream = self.connect(port, left)?;
+        if std::time::Instant::now() >= at {
+            return Err(shards_api::Refusal::Connect {
+                port,
+                failure: shards_api::HandshakeError::Expired {
+                    phase: shards_api::HandshakePhase::ClearTimeouts,
+                },
+            });
+        }
+        Ok(stream)
     }
 
     fn stop(&self) -> Result<(), shards_api::Refusal> {
@@ -1127,6 +1265,16 @@ impl shards_api::Guest for KeptGuest {
 struct KeptGuests(Arc<Kept>);
 
 impl shards_api::Guests for KeptGuests {
+    fn probe_gpu(
+        &self,
+        _: &shards_api::GuestSpec,
+        _: Duration,
+    ) -> Result<shards_api::GpuProbe, shards_api::Refusal> {
+        Err(shards_api::Refusal::GpuProbe(
+            shards_api::GpuProbeError::Unavailable,
+        ))
+    }
+
     fn backend(&self) -> Result<shards_api::Backend, shards_api::Refusal> {
         shards_api::backend()
     }
@@ -1250,4 +1398,146 @@ fn a_node_that_stops_its_guest_leaves_no_record() {
     drop(node);
     assert_eq!(held::read(&record).unwrap(), None);
     assert!(kept.running.lock().unwrap().is_empty());
+}
+
+struct CapacityLink(Option<hex_api::Capacity>);
+impl Link for CapacityLink {
+    fn dial(&self, port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
+        assert_eq!(port, stream::CONTROL_PORT);
+        hex_client::guest::own_duplex(ready_relay_with_answer(Some(
+            hex_core::wire::Answer::Capacity(
+                self.0
+                    .as_ref()
+                    .map(hex_api::Capacity::try_clone)
+                    .transpose()?,
+            ),
+        )))
+    }
+}
+
+fn capacity_runtime(capacity: Option<hex_api::Capacity>, config: GuestConfig) -> GuestRuntime {
+    let kept = Kept::new(true);
+    kept.running.lock().unwrap().insert(123);
+    let guest: Arc<dyn shards_api::Guest> = kept.guest(123).into();
+    let link: LinkOwner = own_link(CapacityLink(capacity)).unwrap();
+    let client = Client::connect(triomphe::Arc::clone(&link)).unwrap();
+    let runtime = GuestRuntime::new(Arc::new(KeptGuests(kept)), config);
+    *runtime.booted.lock().unwrap() = Some(
+        booted_owner(Booted {
+            guest: GuestHandle::Shared(guest),
+            link,
+            client,
+            evented: Mutex::new(None),
+            owner: None,
+            backing: None,
+        })
+        .unwrap(),
+    );
+    runtime
+}
+
+pub(super) fn model_connection() -> (LinkOwner, Client) {
+    let link: LinkOwner = own_link(CapacityLink(None)).unwrap();
+    let client = Client::connect(triomphe::Arc::clone(&link)).unwrap();
+    (link, client)
+}
+
+/// AC-T7.4.1/r329: the actual guest-node reply, not host RAM, supplies the pool; a 633MiB
+/// request cannot gain authority from a guest configured with only632MiB.
+#[test]
+fn runtime_capacity_forwards_guest_room_clamps_config_and_preserves_guest_disk() {
+    let mut config = config();
+    config.vcpus = 2;
+    config.memory_mib = 632;
+    let reported = hex_api::Capacity {
+        devices: Vec::new(),
+        cost: None,
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        id: "inner-node".into(),
+        total: hex_api::CapacityResources {
+            cpu_milli: 4_000,
+            mem_bytes: 1024 << 20,
+            disk_bytes: 8 << 30,
+        },
+        free: hex_api::CapacityResources {
+            cpu_milli: 3_000,
+            mem_bytes: 900 << 20,
+            disk_bytes: 7 << 30,
+        },
+    };
+    let runtime = capacity_runtime(Some(reported.try_clone().unwrap()), config);
+    let actual = runtime.capacity(Class::Oci).unwrap().unwrap();
+    assert_eq!(actual.id, "guest:123:1230");
+    assert_eq!(
+        (actual.total.cpu_milli, actual.free.cpu_milli),
+        (2_000, 2_000)
+    );
+    assert_eq!(
+        (actual.total.mem_bytes, actual.free.mem_bytes),
+        (632 << 20, 632 << 20)
+    );
+    assert_eq!(
+        (actual.total.disk_bytes, actual.free.disk_bytes),
+        (reported.total.disk_bytes, reported.free.disk_bytes)
+    );
+    assert!(runtime.capacity(Class::Process).is_err());
+}
+
+/// AC-T7.4.1: no guest capacity is a refusal; native Process still explicitly uses host facts.
+#[test]
+fn runtime_capacity_guest_missing_is_refused_native_default_is_host_fallback() {
+    let guest = capacity_runtime(None, config());
+    let combined = WithGuest::new(hex_api::sim::SimRuntime::new(), guest).unwrap();
+    assert_eq!(combined.capacity(Class::Process).unwrap(), None);
+    assert!(matches!(
+        combined.capacity(Class::Oci),
+        Err(Refusal::Broken(_))
+    ));
+}
+
+/// AC-T7.4.1: a configured ceiling never inflates a smaller actual guest or its free room.
+#[test]
+fn runtime_capacity_keeps_smaller_actual_guest_room() {
+    let mut configured = config();
+    configured.vcpus = 4;
+    configured.memory_mib = 632;
+    let room = hex_api::CapacityResources {
+        cpu_milli: 500,
+        mem_bytes: 500 << 20,
+        disk_bytes: 1 << 30,
+    };
+    let free = hex_api::CapacityResources {
+        cpu_milli: 250,
+        mem_bytes: 400 << 20,
+        disk_bytes: 512 << 20,
+    };
+    let actual = guest_capacity(
+        hex_api::Capacity {
+            devices: Vec::new(),
+            cost: None,
+            routes: Vec::new(),
+            device_routes: Vec::new(),
+            backings: Vec::new(),
+            id: "inner".into(),
+            total: room,
+            free,
+        },
+        &configured,
+        &kept_identity(123),
+    )
+    .unwrap();
+    assert_eq!((actual.total, actual.free), (room, free));
+}
+
+#[path = "device_routing_tests.rs"]
+mod device_routing_tests;
+
+/// Reuse the actual native-prefix adapter in the same-owner composition controls.
+pub(super) fn native_reporting(report: hex_api::Capacity) -> impl Runtime {
+    device_routing_tests::NativeReporting {
+        inner: hex_api::sim::SimRuntime::new(),
+        report,
+    }
 }

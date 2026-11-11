@@ -1,0 +1,12 @@
+{
+  "original_source": "d83a1eb097088b2b14033f6159f11cf40c0da22d",
+  "change": [
+    "check rejects terminal exit before Draining/Released, including decoded Granted rows",
+    "ShardsShared canonical CPU-only pool rejects all physical claims at record validation"
+  ],
+  "controls": "new hostile serialized Granted+exit and shared physical device controls plus valid dedicated roundtrip; UNRUN, not native bug/pass",
+  "verification": "scoped rustfmt/diff only; ROOT joined checks, no duplicate dispatch",
+  "files": {
+    "crates/hex-core/src/record/pool.rs": "bf69d384c25894bc1631c946235d15ee3d342c84e39f9e9e27703c6682aeb851"
+  }
+}

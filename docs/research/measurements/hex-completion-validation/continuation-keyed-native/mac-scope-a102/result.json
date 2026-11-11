@@ -1,0 +1,137 @@
+{
+  "source": "a102d46a6a5d870335a5f4edcf20d8331d0562e2",
+  "archive_sha256": "2e82091811bd944bc90b0892a944f894635c57c9a15049a5cd8df96961d8caec",
+  "scope": "ROOT Mac current production original/controller+escaped descendant native processes and independent child-only Nproc0 control; no2ef import, VM/GPU0, exact2ignored selectors only after compile0",
+  "target": "mac",
+  "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 82127,
+  "phases": [
+    {
+      "name": "mac-scope-compile-only",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "--no-run"
+      ],
+      "pid": 82137,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "1055ffbeeb083d39f3823ccc86d80d701a0209adbe07449ca074f11906bce766",
+      "bytes": 5443,
+      "test_outcomes": []
+    },
+    {
+      "name": "mac-nproc-native-control",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "macos::process::scope_completion_tests::native_nproc_zero_refuses_spawn_and_hard_raise_but_preserves_threads",
+        "--",
+        "--ignored",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 82563,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "66e740d6153eaa365d6412fc0808db06b74ad5e3d0f04113f37e158494fc6a9a",
+      "bytes": 459,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "macos::process::scope_completion_tests::native_nproc_zero_refuses_spawn_and_hard_raise_but_preserves_threads",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "mac-escape-native-original",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "macos::process::scope_completion_tests::unobserved_escaped_descendant_prevents_scope_release",
+        "--",
+        "--ignored",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 82566,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "458f81cc463276135a8ccb91b82d5298255ca1e5801ac913c01ee02ffa56e4f0",
+      "bytes": 1930,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "mac-joined-strict-clippy",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-runtime",
+        "--all-targets",
+        "--locked",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 82570,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "ef714bb0e7b567b0dea6e4ff3e3b1d8fe8c94836e4da2b144beca2819b7c5701",
+      "bytes": 4867,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [],
+  "temp_root": "/Users/adalundhe/.cache/hx-mscope-a102",
+  "temp_entries": 0,
+  "native_test_invocations": 2,
+  "VM_GPU_invocations": 0,
+  "exit": 1
+}

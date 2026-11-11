@@ -1,0 +1,486 @@
+{
+  "initial_staged_check_exit": 2,
+  "exact_diagnostics": [
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/baseline-capture.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "cb945f7615ca8cd2ee45a96d963982caca98ae34edea025e3cca9dba324bde77"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-0.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "04232b6fefced192d15d2d2b474f4f5aa4723bc975ab6106f9f3c3175155a229"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-1.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "daa57f83853e2eb53c4102bb33f781c48d4d951c540ec88bd96e3b3be6ff4f6f"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-10.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "7322df0fffe84fe16f50262cdc5d565be7e17d17a9d981bd229b73b3c41eba38"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-11.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "9649ada0be8b8f9ece6d146303e21a7b9e315444f1c1039196b93a88cf01eeef"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-12.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "ab83034f42d689d40d55fdfc663df9ebc2b2bc77f4e23cc2076ef5e5bceaa209"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-13.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "8d902a9ea2e203caae13b4f3322518cbb3d34aedf5d6b618444522bf7b00b222"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-14.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "f1036b1c8ffbf5971269c3b06b58c07e139ca73ca68cfd0de7a51c18a1ce6190"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-15.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "4e5e25475f25f78d52c439facca4f8dc491f9b0ef3eb8d7d29bcc21c5ca75a44"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-16.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "c368cef2d176c0ed2beb32995a06d464cd06eadd4c3887c8dea38063b7131e77"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-17.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "4f37e9e5e60839d0a277221badf6a7fffa2d4fb19832cf163307aca11f565852"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-18.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "f2e25a3013341bd8ddc657a4ab26553ce6090760e90b0143f3688ff82bc836af"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-19.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "ef864b60c19045b82b6f4d2b815526c94efe6fda221c2781f700f962b63d2097"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-2.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "a38f5a0e39cbe585d72e8bf0612c169f8e9eb9c2cb66d1b6207b4d14f5cd1148"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-20.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "2f8239b454efcea8be12d44f98febf4f6352c6fc0086c75b14112b772f8315e3"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-21.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "4c8383e5ce53d853aa8816bc873439aaea31f42f48eeae085dca063a0f21610a"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-22.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "1e1640cd63b479fc291363830b786dca376214660d3e5e6c27c097678e8c761d"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-23.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "97dbeb56345bf612c9155100a5e48e1850736e5e7988240360b05312d5bf1718"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-24.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "25b54ff2325e2ac538c6550aa7c8e99576460e5743403df952b730a85934feb2"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-25.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "b61d8db6e2896b3ab687a388303b607963dd9620d45d5c4111e304b45640206f"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-3.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "216cb545167071296913a64e35db64508b7d5870fb28fdef0e243db0c15ad794"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-4.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "3b9561728129c591fa9aaf5ef7ce712a22b714b9a2d6cbe35fbba1261a99b790"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-5.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "b0475d5d99f168037afd200d131de8ba13599119fe06c8698fb85e04451da625"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-6.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "a906b8edb2917ee52f7d7fc3a41fdabaed892b059888b8aec3467457cad38e19"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-7.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "d84087cc919817d57d8c1982027a9aba5d70c190749d2b3cb531d629b7adef25"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-8.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "2f4115ca3b01e7e43037abdc3a7d12f5e609a7bc5561257d894c01201dac42b5"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-9.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "51ddb254a63710f66c502e8af2b294f7cfe137c291e7fb46f3616454be961d0f"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-0.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "5400d9de1d0f375d8a44514279538a29a6f9367cad043aa0aee397bcbbd83db5"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-1.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "daa57f83853e2eb53c4102bb33f781c48d4d951c540ec88bd96e3b3be6ff4f6f"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-10.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "7322df0fffe84fe16f50262cdc5d565be7e17d17a9d981bd229b73b3c41eba38"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-11.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "9649ada0be8b8f9ece6d146303e21a7b9e315444f1c1039196b93a88cf01eeef"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-12.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "9ac2f6bc5f38d2c66a0b9d6c0955f6bef71b301f5521af97eeb699878afd3012"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-13.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "8d902a9ea2e203caae13b4f3322518cbb3d34aedf5d6b618444522bf7b00b222"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-14.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "f1036b1c8ffbf5971269c3b06b58c07e139ca73ca68cfd0de7a51c18a1ce6190"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-15.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "4e5e25475f25f78d52c439facca4f8dc491f9b0ef3eb8d7d29bcc21c5ca75a44"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-16.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "c368cef2d176c0ed2beb32995a06d464cd06eadd4c3887c8dea38063b7131e77"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-17.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "4f37e9e5e60839d0a277221badf6a7fffa2d4fb19832cf163307aca11f565852"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-18.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "f2e25a3013341bd8ddc657a4ab26553ce6090760e90b0143f3688ff82bc836af"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-19.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "ef864b60c19045b82b6f4d2b815526c94efe6fda221c2781f700f962b63d2097"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-2.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "a38f5a0e39cbe585d72e8bf0612c169f8e9eb9c2cb66d1b6207b4d14f5cd1148"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-20.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "2f8239b454efcea8be12d44f98febf4f6352c6fc0086c75b14112b772f8315e3"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-21.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "4c8383e5ce53d853aa8816bc873439aaea31f42f48eeae085dca063a0f21610a"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-22.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "1e1640cd63b479fc291363830b786dca376214660d3e5e6c27c097678e8c761d"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-23.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "97dbeb56345bf612c9155100a5e48e1850736e5e7988240360b05312d5bf1718"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-24.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "25b54ff2325e2ac538c6550aa7c8e99576460e5743403df952b730a85934feb2"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-25.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "b61d8db6e2896b3ab687a388303b607963dd9620d45d5c4111e304b45640206f"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-3.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "216cb545167071296913a64e35db64508b7d5870fb28fdef0e243db0c15ad794"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-4.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "3b9561728129c591fa9aaf5ef7ce712a22b714b9a2d6cbe35fbba1261a99b790"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-5.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "b0475d5d99f168037afd200d131de8ba13599119fe06c8698fb85e04451da625"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-6.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "a906b8edb2917ee52f7d7fc3a41fdabaed892b059888b8aec3467457cad38e19"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-7.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "d84087cc919817d57d8c1982027a9aba5d70c190749d2b3cb531d629b7adef25"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-8.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "2f4115ca3b01e7e43037abdc3a7d12f5e609a7bc5561257d894c01201dac42b5"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-9.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "51ddb254a63710f66c502e8af2b294f7cfe137c291e7fb46f3616454be961d0f"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-0.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "5400d9de1d0f375d8a44514279538a29a6f9367cad043aa0aee397bcbbd83db5"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-1.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "daa57f83853e2eb53c4102bb33f781c48d4d951c540ec88bd96e3b3be6ff4f6f"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-10.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "7322df0fffe84fe16f50262cdc5d565be7e17d17a9d981bd229b73b3c41eba38"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-11.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "9649ada0be8b8f9ece6d146303e21a7b9e315444f1c1039196b93a88cf01eeef"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-12.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "9ac2f6bc5f38d2c66a0b9d6c0955f6bef71b301f5521af97eeb699878afd3012"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-13.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "28645d4e3a6c20885f5d0dbc8d8983e82f6d78cacb06e2c1605ed9f8c2ce8fd6"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-14.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "f1036b1c8ffbf5971269c3b06b58c07e139ca73ca68cfd0de7a51c18a1ce6190"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-15.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "4e5e25475f25f78d52c439facca4f8dc491f9b0ef3eb8d7d29bcc21c5ca75a44"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-16.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "c368cef2d176c0ed2beb32995a06d464cd06eadd4c3887c8dea38063b7131e77"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-17.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "4f37e9e5e60839d0a277221badf6a7fffa2d4fb19832cf163307aca11f565852"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-18.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "f2e25a3013341bd8ddc657a4ab26553ce6090760e90b0143f3688ff82bc836af"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-19.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "ef864b60c19045b82b6f4d2b815526c94efe6fda221c2781f700f962b63d2097"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-2.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "a38f5a0e39cbe585d72e8bf0612c169f8e9eb9c2cb66d1b6207b4d14f5cd1148"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-20.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "2f8239b454efcea8be12d44f98febf4f6352c6fc0086c75b14112b772f8315e3"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-21.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "4c8383e5ce53d853aa8816bc873439aaea31f42f48eeae085dca063a0f21610a"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-22.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "1e1640cd63b479fc291363830b786dca376214660d3e5e6c27c097678e8c761d"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-23.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "97dbeb56345bf612c9155100a5e48e1850736e5e7988240360b05312d5bf1718"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-24.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "25b54ff2325e2ac538c6550aa7c8e99576460e5743403df952b730a85934feb2"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-25.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "b61d8db6e2896b3ab687a388303b607963dd9620d45d5c4111e304b45640206f"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-3.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "216cb545167071296913a64e35db64508b7d5870fb28fdef0e243db0c15ad794"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-4.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "3b9561728129c591fa9aaf5ef7ce712a22b714b9a2d6cbe35fbba1261a99b790"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-5.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "b0475d5d99f168037afd200d131de8ba13599119fe06c8698fb85e04451da625"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-6.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "a906b8edb2917ee52f7d7fc3a41fdabaed892b059888b8aec3467457cad38e19"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-7.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "d84087cc919817d57d8c1982027a9aba5d70c190749d2b3cb531d629b7adef25"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-8.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "2f4115ca3b01e7e43037abdc3a7d12f5e609a7bc5561257d894c01201dac42b5"
+    },
+    {
+      "path": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-9.log",
+      "line": 6,
+      "diagnostic": "new blank line at EOF.",
+      "sha256": "51ddb254a63710f66c502e8af2b294f7cfe137c291e7fb46f3616454be961d0f"
+    }
+  ],
+  "diagnostic_count": 79,
+  "stdout": "docs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/baseline-capture.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-0.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-1.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-10.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-11.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-12.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-13.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-14.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-15.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-16.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-17.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-18.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-19.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-2.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-20.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-21.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-22.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-23.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-24.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-25.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-3.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-4.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-5.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-6.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-7.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-8.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v1/proof/current-test-9.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-0.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-1.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-10.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-11.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-12.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-13.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-14.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-15.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-16.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-17.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-18.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-19.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-2.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-20.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-21.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-22.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-23.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-24.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-25.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-3.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-4.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-5.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-6.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-7.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-8.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v2/proof/current-test-9.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-0.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-1.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-10.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-11.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-12.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-13.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-14.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-15.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-16.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-17.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-18.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-19.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-2.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-20.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-21.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-22.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-23.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-24.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-25.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-3.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-4.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-5.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-6.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-7.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-8.log:6: new blank line at EOF.\ndocs/research/measurements/hex-device-bridge-cdi/raw-render-v3/proof/current-test-9.log:6: new blank line at EOF.\n",
+  "stderr": "",
+  "only_hash_identified_raw_files": true,
+  "source_docs_drivers_check_exit": 0,
+  "raw_bytes_preserved": true,
+  "no_global_exception": true
+}

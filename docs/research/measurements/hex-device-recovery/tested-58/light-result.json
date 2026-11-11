@@ -1,0 +1,216 @@
+{
+  "source_revision": "9bbb62b2ef0a8e516b471d506888e1a08c49920f",
+  "fixed_base": "37021c35e64b2a8bab1d35f20f92a0042d874a44",
+  "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+  "platform": "macOS-26.4-arm64-arm-64bit",
+  "architecture": "arm64",
+  "driver_pid": 22294,
+  "nice": "20",
+  "environment": {
+    "CARGO_HOME": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-identity-01a1c640-9bbb62b2-v2/cargo-home",
+    "CARGO_TARGET_DIR": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-identity-01a1c640-9bbb62b2-v2/target",
+    "CARGO_BUILD_JOBS": "1",
+    "RUST_TEST_THREADS": "1",
+    "RUSTUP_HOME": "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy",
+    "TMPDIR": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-identity-01a1c640-9bbb62b2-v2/tmp"
+  },
+  "native_gpu_effect": false,
+  "phases": [
+    {
+      "name": "lane-leaf",
+      "exit_code": 0,
+      "counts": {
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 158
+      },
+      "expected_selected_count": 9,
+      "log": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-identity-01a1c640-9bbb62b2-v2/proof/lane-leaf.log",
+      "log_bytes": 12129,
+      "log_sha256": "17cc88d385823f49cbdacd25e5da5fbc78bb02903a389cbf303b8d9cba8a8c9f",
+      "child_reaped": true,
+      "owned": {
+        "pid": 22300,
+        "start": "Tue Nov 10 09:58:00 2026",
+        "argv": [
+          "/Users/adalundhe/.cargo/bin/cargo",
+          "test",
+          "-p",
+          "hex-sim",
+          "--lib",
+          "--locked",
+          "peer::adversarial_device_recovery_tests::",
+          "--",
+          "--test-threads=1",
+          "--nocapture"
+        ],
+        "driver_pid": 22294
+      },
+      "witnesses": [
+        "test peer::adversarial_device_recovery_tests::chosen_binding_is_atomic_with_demand_before_create_even_at_the_record_write ... binding-put when=None puts=1 row_present=true released_create=true actual_boxes=0 cleanup_rows=epoch_only cleanup_charge=0",
+        "binding-put when=Some(Before) puts=1 row_present=false released_create=false actual_boxes=0 cleanup_rows=epoch_only cleanup_charge=0",
+        "binding-put when=Some(After) puts=1 row_present=true released_create=false actual_boxes=0 cleanup_rows=epoch_only cleanup_charge=0",
+        "test peer::adversarial_device_recovery_tests::exact_recovery_reserve_validates_stable_authority_and_is_atomic_on_refusal ... reserve-refusal case=missing typed=true charge_unchanged=true holders=0",
+        "reserve-refusal case=range typed=true charge_unchanged=true holders=0",
+        "reserve-refusal case=duplicate typed=true charge_unchanged=true holders=0",
+        "reserve-refusal case=kind typed=true charge_unchanged=true holders=0",
+        "reserve-refusal case=model typed=true charge_unchanged=true holders=0",
+        "reserve-refusal case=total-size typed=true charge_unchanged=true holders=0",
+        "reserve-refusal case=class-exposure typed=true charge_unchanged=true holders=0",
+        "reserve-refusal case=os typed=true charge_unchanged=true holders=0",
+        "reserve-refusal case=arch typed=true charge_unchanged=true holders=0",
+        "reserve-refusal case=resource-room typed=true charge_unchanged=true holders=0",
+        "reserve-refusal case=block-size typed=true charge_unchanged=true holders=0",
+        "reserve-overlap typed=true charge_unchanged=true sibling_hold=[0] independent_hold=[1] cleanup_holders=0 cleanup_charge=0",
+        "test peer::adversarial_device_recovery_tests::legacy_cpu_only_row_recovers_with_empty_assignments_and_replay_does_not_create ... legacy-cpu restored=true held=[] replay_creates=0 cleanup_rows=epoch_only cleanup_charge=0",
+        "test peer::adversarial_device_recovery_tests::missing_duplicate_out_of_range_and_overflow_claims_refuse_before_runtime_observation ... binding-refusal case=legacy-device typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged(\"runner Key { owner: 0, epoch: 1, seq: 0 } has no durable chosen-device binding\")",
+        "binding-refusal case=missing typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged(\"runner Key { owner: 0, epoch: 1, seq: 0 }: the configuration is refused: recovered binding count differs from demand\")",
+        "binding-refusal case=duplicate typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged(\"runner Key { owner: 0, epoch: 1, seq: 0 }: the configuration is refused: recovered binding count differs from demand\")",
+        "binding-refusal case=range typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged(\"runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\\\"synthetic binding has no matching synthetic slot\\\")\")",
+        "binding-refusal case=u16-overflow typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged(\"runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\\\"a demand's number\\\")\")",
+        "binding-refusal case=count-overflow typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged(\"runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\\\"a demand's number\\\")\")",
+        "binding-refusal case=excess-count typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged(\"runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\\\"runner binding count exceeds node devices\\\")\")",
+        "binding-refusal case=trailing typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged(\"runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\\\"trailing runner bindings\\\")\")",
+        "binding-refusal case=version typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged(\"runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\\\"invalid runner owner or binding version\\\")\")",
+        "binding-refusal case=representation typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged(\"runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\\\"a runner binding's representation\\\")\")",
+        "binding-refusal case=physical-missing typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged(\"runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\\\"a physical binding's device is missing\\\")\")",
+        "binding-refusal case=physical-overflow typed_damaged=true bytes_unchanged=true runtime_observations=0 result=Damaged(\"runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\\\"a demand's number\\\")\")",
+        "test peer::adversarial_device_recovery_tests::overlapping_recovery_claims_preserve_all_rows_until_the_whole_restore_is_valid ... binding-overlap typed_damaged=true bytes_unchanged=true observed=2 repaired_holds=[0]/[1] replay_creates=0 cleanup_rows=epoch_only cleanup_charge=0",
+        "test peer::adversarial_device_recovery_tests::physical_binding_survives_unheld_device_removal_and_reindex_without_reselection ... physical-reindex old=Key { owner: 0, epoch: 1, seq: 0 } fresh=Key { owner: 0, epoch: 2, seq: 0 } old_before=[1] old_restored=[0] fresh_held=[1] physical_old=(Gpu,101) physical_fresh=(Gpu,102) collision=false cleanup_physical=0 cleanup_rows=epoch_only cleanup_charge=0 native_gpu_effect=false",
+        "test peer::adversarial_device_recovery_tests::physical_replacement_wrong_shape_and_synthetic_downgrade_preserve_exact_state ... physical-refusal case=same-shape-replacement typed_damaged=true bytes_unchanged=true observations=0 result=Damaged(\"runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\\\"a physical binding's device is missing\\\")\")",
+        "physical-refusal case=model typed_damaged=true bytes_unchanged=true observations=0 result=Damaged(\"runner Key { owner: 0, epoch: 1, seq: 0 }: the configuration is refused: recovered GPU model or total size differs\")",
+        "physical-refusal case=total-size typed_damaged=true bytes_unchanged=true observations=0 result=Damaged(\"runner Key { owner: 0, epoch: 1, seq: 0 }: the configuration is refused: recovered GPU model or total size differs\")",
+        "physical-refusal case=kind typed_damaged=true bytes_unchanged=true observations=0 result=Damaged(\"runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\\\"a physical binding's device is missing\\\")\")",
+        "physical-refusal case=duplicate-catalog typed_damaged=true bytes_unchanged=true observations=0 result=Damaged(\"the configuration is refused: duplicate physical device identity\")",
+        "physical-refusal case=lost-physical-key typed_damaged=true bytes_unchanged=true observations=0 result=Damaged(\"runner Key { owner: 0, epoch: 1, seq: 0 }: Damaged(\\\"a physical binding's device is missing\\\")\")",
+        "test peer::adversarial_device_recovery_tests::reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_twice ... device-recovery PURE expected_old=[0] expected_fresh=[1] old=Key { owner: 0, epoch: 1, seq: 0 } fresh=Key { owner: 0, epoch: 2, seq: 0 } sibling=Key { owner: 0, epoch: 1, seq: 1 } progress=Key { owner: 0, epoch: 2, seq: 1 } before_held=[0] recovered_held=[0] old_after_fresh=[0] fresh_held=[1] collisions=[] before_assignments={Key { owner: 0, epoch: 1, seq: 0 }: [0], Key { owner: 0, epoch: 1, seq: 1 }: []} after_assignments={Key { owner: 0, epoch: 1, seq: 0 }: [0], Key { owner: 0, epoch: 1, seq: 1 }: [], Key { owner: 0, epoch: 2, seq: 0 }: [1], Key { owner: 0, epoch: 2, seq: 1 }: []} runtime_observations=[(Key { owner: 0, epoch: 1, seq: 0 }, [0]), (Key { owner: 0, epoch: 1, seq: 1 }, [])] sibling_survived=true progress_confirmed=true admitted_before_cleanup=[400, 2048, 0, 2] creates=4 deletes=4 cleanup_assignments=0 cleanup_own=0 cleanup_ran=0 cleanup_charge=0 cleanup_records=epoch_only old_runner_record=\"bindings1:0:1:s:0 running d1 session oci 100 512 1 0 linux x86_64 fixture-gpu 1024 0 0 0 0 0\" native_gpu_effect=false",
+        "test peer::adversarial_device_recovery_tests::retained_gpu_recovery_ignores_transient_memory_and_session_hotness ... retained-transient runner_only=false memory_pressure=true expected=bootOk/held0 observed_refusal=None recovered_held=[0] fresh_verdict=Some(NoGpu) cleanup_assignments=0 cleanup_rows=epoch_only cleanup_charge=0",
+        "retained-transient runner_only=false memory_pressure=false expected=bootOk/held0 observed_refusal=None recovered_held=[0] fresh_verdict=Some(Hot) cleanup_assignments=0 cleanup_rows=epoch_only cleanup_charge=0",
+        "retained-transient runner_only=true memory_pressure=true expected=bootOk/held0 observed_refusal=None recovered_held=[0] fresh_verdict=Some(NoGpu) cleanup_assignments=0 cleanup_rows=epoch_only cleanup_charge=0",
+        "retained-transient runner_only=true memory_pressure=false expected=bootOk/held0 observed_refusal=None recovered_held=[0] fresh_verdict=Some(Hot) cleanup_assignments=0 cleanup_rows=epoch_only cleanup_charge=0"
+      ]
+    },
+    {
+      "name": "peer-units",
+      "exit_code": 0,
+      "counts": {
+        "passed": 24,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 143
+      },
+      "expected_selected_count": null,
+      "log": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-identity-01a1c640-9bbb62b2-v2/proof/peer-units.log",
+      "log_bytes": 2322,
+      "log_sha256": "da2595461cfba6b70d924b4bcf40d0fccf611d18cce0fbab9193e169faad0d58",
+      "child_reaped": true,
+      "owned": {
+        "pid": 22523,
+        "start": "Tue Nov 10 09:59:03 2026",
+        "argv": [
+          "/Users/adalundhe/.cargo/bin/cargo",
+          "test",
+          "-p",
+          "hex-sim",
+          "--lib",
+          "--locked",
+          "peer::tests::",
+          "--",
+          "--test-threads=1",
+          "--nocapture"
+        ],
+        "driver_pid": 22294
+      },
+      "witnesses": []
+    },
+    {
+      "name": "index-units",
+      "exit_code": 0,
+      "counts": {
+        "passed": 25,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 142
+      },
+      "expected_selected_count": null,
+      "log": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-identity-01a1c640-9bbb62b2-v2/proof/index-units.log",
+      "log_bytes": 2331,
+      "log_sha256": "358afb8398018d88e85d310eb2addf277e5bb1f68a9070ffb17e7cdbd95f6e08",
+      "child_reaped": true,
+      "owned": {
+        "pid": 22526,
+        "start": "Tue Nov 10 09:59:03 2026",
+        "argv": [
+          "/Users/adalundhe/.cargo/bin/cargo",
+          "test",
+          "-p",
+          "hex-sim",
+          "--lib",
+          "--locked",
+          "index::tests::",
+          "--",
+          "--test-threads=1",
+          "--nocapture"
+        ],
+        "driver_pid": 22294
+      },
+      "witnesses": []
+    },
+    {
+      "name": "lib-clippy",
+      "exit_code": 0,
+      "counts": null,
+      "expected_selected_count": null,
+      "log": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-identity-01a1c640-9bbb62b2-v2/proof/lib-clippy.log",
+      "log_bytes": 770,
+      "log_sha256": "b4e870bdb9ba2b14be3a32861f395fe3e0542c571b2b17fea888d91b4e7c2627",
+      "child_reaped": true,
+      "owned": {
+        "pid": 22529,
+        "start": "Tue Nov 10 09:59:03 2026",
+        "argv": [
+          "/Users/adalundhe/.cargo/bin/cargo",
+          "clippy",
+          "-p",
+          "hex-sim",
+          "--lib",
+          "--locked",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "driver_pid": 22294
+      },
+      "witnesses": []
+    }
+  ],
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "exit_code": 0,
+  "source_unchanged": true,
+  "child_reaped": true,
+  "source_sha256": {
+    "crates/hex-sim/src/model.rs": "c791e11dc7b6b5db064000e74798e2f6d6a60c58615b7118eabe73b65d493ad2",
+    "crates/hex-sim/src/index.rs": "6ed831fef6f0da14decb3a1aa5674d81d618abd6c81b8ae0e82c49010328d6e9",
+    "crates/hex-sim/src/peer.rs": "5bde294893f4b24242335b80e6ed0121a2ee5d543c7250e2a0c07fe660938f2b",
+    "crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs": "baf9273bdb76b97bd56bd469e1922e68e54ef4b90df12b69828a74dc3084cb4a"
+  },
+  "parent_registered_sha256": "bd04680f7e3b187e7bc574e16894773cdb35395be05392435eff772fd2c4b9da",
+  "private_compatibility": {
+    "file": "crates/hex-sim/src/facts.rs",
+    "change": "only add key: None to existing explicit Device literal; ROOT owns actual identity bridge",
+    "original_sha256": "173953bcf2e4f0cf60e5ea49b3b1c88236c907f9ef669b8d569e91ddcf42e704",
+    "private_sha256": "466a9069cd6d2a2ca04f738aa0a8807faa65ac70f104a5e63f62ce1de6f04ae5"
+  },
+  "binaries": [
+    {
+      "path": "/Users/adalundhe/.cache/hex-lead/lanes/device-recovery-identity-01a1c640-9bbb62b2-v2/target/debug/deps/hex_sim-9ebd5bc0b4cd9747",
+      "sha256": "73436c62acb3db9dbc23834501ead9c3de4e93bc64a591234bcece076cc9e122",
+      "bytes": 14982424
+    }
+  ]
+}

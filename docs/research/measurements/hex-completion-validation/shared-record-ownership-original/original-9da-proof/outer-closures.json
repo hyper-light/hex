@@ -1,0 +1,38 @@
+{
+  "cohort-9da455c2-linux-shared-outer-original-9da": {
+    "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-shared-outer-original-9da.scope",
+    "scope_absent": true,
+    "owners": [
+      {
+        "kind": "driver",
+        "recorded": {
+          "pid": 950112,
+          "ppid": 950039,
+          "start_ticks": 32695625
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      },
+      {
+        "kind": "cargo",
+        "recorded": {
+          "pid": 952390,
+          "ppid": 950112,
+          "start_ticks": 32695781
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      },
+      {
+        "kind": "cargo",
+        "recorded": {
+          "pid": 1066624,
+          "ppid": 950112,
+          "start_ticks": 32703006
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      }
+    ]
+  }
+}

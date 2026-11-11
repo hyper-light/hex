@@ -1,0 +1,29 @@
+{
+  "role": "coordinator",
+  "base": "231d59eb3244d1cbf7c4c9322ca47ebbcae5dd67",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "pins": [
+    "283ff2eb8429357b78b584b3deb5cee6d9e86cc4",
+    "f3fe91875b0987202f1357a04845623f6f02e118"
+  ],
+  "sources": {
+    "crates/hex-runtime/src/guest/dedicated.rs": "d2c7d4101ea28727623cf01a5592df6b0a391c6c86e2c38bd437495b74fde743",
+    "crates/hex-runtime/src/guest/observer.rs": "cfca536488e0cc8080dc7fbaece00b1aa57af4d027194668d445813571a871dd",
+    "crates/hex-runtime/src/guest/observer/receipt.rs": "fe73742bccf18ce5b4eaaf64a3746144b04eb97280be75417b8909c4e64cd433",
+    "crates/hex-runtime/src/guest/pool.rs": "b40b72aa8443ba603a21ab2cb3d1487f567cd85627706c890ead4f559e58a732",
+    "crates/hex-runtime/src/guest/selected.rs": "36868ef01db5b7429b073af2d401c18277d06312aaa3137c22573b1667a068d1"
+  },
+  "protected": {
+    "crates/hex-runtime/src/guest/observer/failure_tests.rs": "f16173de8bd30baee7826a531ccc686cfc13dece241f07204fb4886aba3e4323",
+    "crates/hex-runtime/src/guest/gpu_pool.rs": "b91ce7ac63fffc277b0a2a5810927a01b9ddf54e31d71702990116787ec99218",
+    "crates/hex-runtime/src/guest/books.rs": "9a850c33cabde6a9549f203b328bf49bdce6ee410c43ffe7a4401b021f559501"
+  },
+  "review": "Read complete named diffs, borrowed receipt dispatch, observer sequence, selected codec and native recovery/create callsites. Same actual Pool/Selected observer; selected readiness before payload, bounded diagnostics remain cleanup-readable. No new lifecycle authority from inventory or readiness.",
+  "checks": "Scoped rustfmt/diff0 only. New selected2 + remainder of interrupted231d runtime checks pending; 231d reserve compiler101 preserved. No native invocation or whole-path completion claim.",
+  "remaining": [
+    "Actual selected VM/artifact/renderer native execution",
+    "Lazy sibling/keyed provisioning",
+    "Complete cross-platform recovery/resource and seven-target gates"
+  ]
+}

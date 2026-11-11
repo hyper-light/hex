@@ -675,6 +675,9 @@ mod tests {
 
     fn store() -> Store {
         let nodes = [NodeSpec {
+            routes: None,
+            costs: [None; crate::model::Class::COUNT],
+            runtime_pools: Vec::new(),
             id: NodeId(0),
             capacity: Resources {
                 cpu_milli: 1000,

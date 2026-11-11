@@ -708,6 +708,10 @@ mod windows_stdio {
 }
 
 impl shards_api::Guest for LoopGuest {
+    fn process_exited(&self) -> Result<bool, shards_api::Refusal> {
+        Ok(self.ended.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
     fn connect(
         &self,
         port: u32,
@@ -719,6 +723,32 @@ impl shards_api::Guest for LoopGuest {
             self.control
         };
         Ok(Box::new(Looped(TcpStream::connect(to).unwrap())))
+    }
+
+    fn connect_before(
+        &self,
+        port: u32,
+        at: std::time::Instant,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        let left = at
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or(shards_api::Refusal::Connect {
+                port,
+                failure: shards_api::HandshakeError::Expired {
+                    phase: shards_api::HandshakePhase::Dial,
+                },
+            })?;
+        let stream = self.connect(port, left)?;
+        if std::time::Instant::now() >= at {
+            return Err(shards_api::Refusal::Connect {
+                port,
+                failure: shards_api::HandshakeError::Expired {
+                    phase: shards_api::HandshakePhase::ClearTimeouts,
+                },
+            });
+        }
+        Ok(stream)
     }
 
     fn stop(&self) -> Result<(), shards_api::Refusal> {
@@ -793,6 +823,16 @@ impl Drop for LoopGuests {
 struct Shared(Arc<LoopGuests>);
 
 impl shards_api::Guests for Shared {
+    fn probe_gpu(
+        &self,
+        _: &shards_api::GuestSpec,
+        _: Duration,
+    ) -> Result<shards_api::GpuProbe, shards_api::Refusal> {
+        Err(shards_api::Refusal::GpuProbe(
+            shards_api::GpuProbeError::Unavailable,
+        ))
+    }
+
     fn backend(&self) -> Result<shards_api::Backend, shards_api::Refusal> {
         shards_api::backend()
     }
@@ -920,6 +960,7 @@ fn config() -> GuestConfig {
         initrd: PathBuf::from("/i"),
         vcpus: 1,
         memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
+        gpu: false,
         shares: Vec::new(),
         staged: "/staged".to_owned(),
     }
@@ -940,6 +981,9 @@ fn a_call_its_guest_holds_holds_no_other_clients_call_through_the_guest_client()
     let host = Host(hex_api::sim::SimRuntime::new());
     let here = BoxId::new("here").unwrap();
     host.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: here.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Process,
@@ -990,6 +1034,9 @@ fn a_guest_booted_again_answers_on_the_loop_too() {
     let host = Host(hex_api::sim::SimRuntime::new());
     let here = BoxId::new("here").unwrap();
     host.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: here.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Process,
@@ -1013,6 +1060,9 @@ fn a_guest_booted_again_answers_on_the_loop_too() {
     let rootfs = dir.path().join("root.tar");
     std::fs::File::create(&rootfs).unwrap();
     let _ = client.create(BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
         id: BoxId::new("anew").unwrap(),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(hex_api::OciSpec {

@@ -1,0 +1,18 @@
+{
+  "command": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--on",
+    "d1323898b255a3ed435eb83fa0f7b0cf",
+    "--needs",
+    "cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--timeout",
+    "120",
+    "--",
+    "nice -n 10 python3 -c 'import os,pathlib,json,hashlib\nroot=pathlib.Path.home()/'\"'\"'.cache/hex-device-offer-01a1c640-a69d3426-v2'\"'\"'\nproof=root/'\"'\"'proof'\"'\"';pid=int((proof/'\"'\"'build.pid'\"'\"').read_text())\ntry:os.kill(pid,0);exists=True\nexcept ProcessLookupError:exists=False\nrow={'\"'\"'recorded_owned_build_pid'\"'\"':pid,'\"'\"'pid_exists_after_r22_stop'\"'\"':exists,'\"'\"'test_logs'\"'\"':sorted(p.name for p in proof.glob('\"'\"'test-*.log'\"'\"')),'\"'\"'tests_list_exists'\"'\"':(proof/'\"'\"'tests.list'\"'\"').exists(),'\"'\"'summary_exists'\"'\"':(proof/'\"'\"'summary.json'\"'\"').exists(),'\"'\"'build_exit_file_exists'\"'\"':(proof/'\"'\"'build.exit'\"'\"').exists(),'\"'\"'build_stdout_sha256'\"'\"':hashlib.sha256((proof/'\"'\"'build.jsonl'\"'\"').read_bytes()).hexdigest(),'\"'\"'build_stderr_sha256'\"'\"':hashlib.sha256((proof/'\"'\"'build.stderr'\"'\"').read_bytes()).hexdigest()}\n(proof/'\"'\"'steering-stop.json'\"'\"').write_text(json.dumps(row,indent=2)+'\"'\"'\\n'\"'\"')\nprint(json.dumps(row))\n'"
+  ],
+  "exit": 0,
+  "stdout": "{\"recorded_owned_build_pid\": 39653, \"pid_exists_after_r22_stop\": false, \"test_logs\": [], \"tests_list_exists\": false, \"summary_exists\": false, \"build_exit_file_exists\": false, \"build_stdout_sha256\": \"474ecaa8a37e196999907d407ebb1839d455e1e1e2361b1366889f01fe139aa7\", \"build_stderr_sha256\": \"e9fa0fdf299256ddb458d69b32cc80273e3e60ec65c7e51751b0c73eded8250a\"}\n",
+  "stderr": "\u001b[2m[kiln] on d1323898b255a3ed435eb83fa0f7b0cf \u00b7 macos/aarch64 \u00b7 30 of 32 cores idle \u00b7 47 GB free \u00b7 room for 1 CPU, 4 GiB of memory, 12 GiB of disk\u001b[0m\n"
+}

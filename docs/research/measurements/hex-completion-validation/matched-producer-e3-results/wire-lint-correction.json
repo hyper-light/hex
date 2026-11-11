@@ -1,0 +1,24 @@
+{
+  "original_source": "e3c28025188347a04e3298472f1a75dd95696a19",
+  "actual_lint_log_sha256": "d2c6bc8f76c9ec2097feb271dc1b59b0ed15f6c5e84404a85df4119cbedca42b",
+  "coordinator_changes": [
+    "three checked encoded-size expressions retain widths/refusal behavior",
+    "largest backing-grant Call payload moves through existing fallible triomphe0.1.17 Arc allocation; receiver demands unique ownership before calling native host",
+    "existing core dependency edge added; all registry name/version/checksum tuples unchanged",
+    "existing wire behavioral fixtures adapted only for new owned payload type"
+  ],
+  "codec": "scalar body/tags unchanged; source-derived wire identity changes and requires matched rebuild",
+  "allocation": "one explicit new heap object per backing initialization; allocation refusal remains typed before send/native; no allocation-free/latency claim",
+  "alternative": "Box::new would be new infallible allocation; no stable Box::try_new/custom unsafe/lint exemption introduced",
+  "reference": "locked triomphe0.1.17 source arc.rs try_new and try_unwrap independently read",
+  "validation": "source-only; scoped fmt/diff0, registry tuples verified; strictClippy/affected wire/consumer checks pending",
+  "source_hashes": {
+    "Cargo.lock": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+    "crates/hex-core/Cargo.toml": "7912a984c160589fae4af2c84fd6aa6ea0051b976509d6e7dba5ccf1dfa9117d",
+    "crates/hex-core/src/wire.rs": "5320facae6e7c07f45441291f45ee9ed45d9ca441ea9d92e105a8408c49f847c",
+    "crates/hex-core/src/wire/tests.rs": "3cba2c21c0ec5f575df1ba0f2098e997be8ea63f0d718534fe145f807d867d0d",
+    "crates/hex-client/src/calls.rs": "a4b1f9fcfe8fc0dff0a2bb6036f7ef589a9ef7365306674e2dc159a485a10ed6",
+    "crates/hex-client/src/calls/tests.rs": "19be01f6ba33aa7321d7aaf8e35f730d455b96b60cd7c0af9d5a6c2ebcd6dbb0",
+    "crates/hex-node/src/serve.rs": "9351f1e7597f34f2b40ddc0f821c167020b93ec091e4ead0cf603503ac449579"
+  }
+}

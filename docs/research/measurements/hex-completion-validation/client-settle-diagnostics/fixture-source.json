@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "parent": "bf13a17d7cb3f31a178060c3262d8c577c5e1051",
+  "original_code": "2212c9747c9cf21871ced1886918a424fcbd6db5 / ROOT9b44967ee57b0fc22ea18b6844e6780c4639b632",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": {
+    "path": "crates/hex-client/src/calls/budget_tests.rs",
+    "sha256": "b1ae5ed897ad4cd61b3e84a277b13c64ea2371edf7297406c8cde628fc4e4a1a",
+    "bytes": 79559,
+    "parent_sha256": "b1cdd41e299e101736138d499a3ce171ae27a28ef2b1600a3d1b2af28c5e053e"
+  },
+  "assertion_tail": {
+    "sha256": "18ac590d46219b122800cd945ea4653ff410eccfd469f3f09a8a92ab020f148c",
+    "unchanged": true
+  },
+  "selector": "calls::budget_tests::absolute_run_settle_error_does_not_renew_kill_answer_budget",
+  "changes": "fixture-local persistent closed error AFTER queued data drain +bounded setup/send/Started/cleanup/join phase logs",
+  "same_contract": "Run/Started/one owned malformed end/noExit/withheld Kill answer; wait(None) zero-poll source unchanged; unexpected protocol words still explicit refusal",
+  "guards": "existing CAP25ms OBSERVE100ms; ROOT900s guard untouched, no new timer/retry",
+  "protected": [
+    {
+      "path": "crates/hex-client/src/calls.rs",
+      "sha256": "38ae331369187698244c8d679e944e39937b27915f4c7612191e9d65604f3fc1",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/guest/tests.rs",
+      "sha256": "68ba6db123682e110827cd02315097edb61576fa51acb650bdefe2b9dab21626",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "a8f51f83a7b8ed2c43e0824f3af7aff5e967ba77159dde320841183559ea29b8",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+      "unchanged": true
+    }
+  ],
+  "builds_executed": 0,
+  "tests_executed": 0,
+  "native_executed": 0,
+  "status": "source-only fixture closure correction; originalINCOMPLETE not productionred, ROOT next matched review only"
+}

@@ -1,0 +1,40 @@
+{
+  "source": "c5e806edb0b91395af14a0575b6f74a69979a5dc",
+  "production_pin": "07c68e378b741e3ce6008e1cd612b5e9d9bc3ed2",
+  "archive": {
+    "path": "/Users/adalundhe/.cache/hex-device-offer-01a1c640-c5e806ed-v1/retained/proof-v1.tar.gz",
+    "bytes": 232738,
+    "sha256": "e6b568438963ad895ebd4c3e1e71a56e5dddeacdd90fd89f3db4bb0f6eae6f79",
+    "members": 54
+  },
+  "safe_regular_members_verified": 54,
+  "all_member_hashes_verified": true,
+  "source_matches_signed_commits": true,
+  "private_registration_only": true,
+  "counted_passes": 5,
+  "failed": 1,
+  "ignored": 0,
+  "all_logs_nonzero_selected_and_candidate_red_preserved": true,
+  "all_selected_child_reaps_verified": true,
+  "binary_sha256": "a0bfaaa926334cc07e2e2415f1bdee543b4c2147f0fba435ee3431391a636f27",
+  "checks": {
+    "clippy-lib": 0,
+    "clippy-tests": 101,
+    "rustfmt": 0
+  },
+  "local_free_kib": 218636724,
+  "transport_command": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--on",
+    "d1323898b255a3ed435eb83fa0f7b0cf",
+    "--needs",
+    "cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--timeout",
+    "120",
+    "--",
+    "nice -n 10 python3 -c 'import base64,pathlib\nraw=pathlib.Path('\"'\"'/Users/adalundhe/.cache/hex-device-offer-01a1c640-c5e806ed-v1/retained/proof-v1.tar.gz'\"'\"').read_bytes();text=base64.b64encode(raw).decode()\nfor i in range(0,len(text),1000):print(text[i:i+1000])\n'"
+  ],
+  "transport_stderr": "\u001b[2m[kiln] on d1323898b255a3ed435eb83fa0f7b0cf \u00b7 macos/aarch64 \u00b7 30 of 32 cores idle \u00b7 47 GB free \u00b7 room for 1 CPU, 4 GiB of memory, 12 GiB of disk\u001b[0m\n"
+}

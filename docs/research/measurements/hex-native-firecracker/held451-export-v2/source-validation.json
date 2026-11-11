@@ -1,0 +1,53 @@
+{
+  "appended_control_rows": 1,
+  "appended_row": {
+    "bytes": 188195,
+    "provenance": {
+      "classification": "CURRENT non-executable transport-only loader-cache control",
+      "evidence_commit": "c5ab0a20a6f1510ebffd33cbf90f02c42bb6e48d",
+      "evidence_file": "docs/research/measurements/hex-native-firecracker/held451-ld-cache-query-c2f668/current-transport-control.json",
+      "evidence_file_sha256": "4fa4593903d1761613b2deda7326987cf100398e7999dd332c208a91cf382a3e",
+      "original4a_SDK_or_source_cohort": false,
+      "tuning_default": false
+    },
+    "resolved": "/etc/ld.so.cache",
+    "sha256": "72329fd8bc8d2af6b4a155582fe979f15f2e4ea4fa01ec410d3682fae750d774",
+    "source": "/etc/ld.so.cache"
+  },
+  "exit_code": 0,
+  "export_collect_materialize_preflight_build_admitted": false,
+  "fixed_bodies_input": {
+    "acquire_held451_export.py": "8f5f5a9a0624c9b2815f8bbaff87a51448e2541b28f264ebf668288c5ec338f5",
+    "alternate_00aad_io.py": "e9a19c06d94bcac09930e89ed6e0823264e4a3697c883a4a70289be7931937c2",
+    "export_held451_objects.py": "83586fc225fbe7209eb250a6c8d21b8fb70dff97f82dd7dccb1f4f47bde00ad3",
+    "held451-export-inputs.json": "14e35dbed0d79273b963f8f27c1973d53ff997e6a02bd8b99fbe6c00deb91412"
+  },
+  "guard_or_envelope_change": false,
+  "host_query_or_execution": false,
+  "independent_hash_rows": [
+    "3ca1f4427b5d4792afa60b1cc7142d97866335d790440b9951318d1be20fe3dd  docs/research/measurements/hex-native-firecracker/held451-export-v2/REVIEW.md",
+    "8f5f5a9a0624c9b2815f8bbaff87a51448e2541b28f264ebf668288c5ec338f5  docs/research/measurements/hex-native-firecracker/held451-export-v2/acquire_held451_export.py",
+    "e9a19c06d94bcac09930e89ed6e0823264e4a3697c883a4a70289be7931937c2  docs/research/measurements/hex-native-firecracker/held451-export-v2/alternate_00aad_io.py",
+    "b7e3dc983b766ca895980e1cd69680fda6c7121aca0ac9bdd491edce869870b7  docs/research/measurements/hex-native-firecracker/held451-export-v2/controls-from-cd7a.patch",
+    "4fa4593903d1761613b2deda7326987cf100398e7999dd332c208a91cf382a3e  docs/research/measurements/hex-native-firecracker/held451-export-v2/current-transport-loader-cache.provenance.json",
+    "83586fc225fbe7209eb250a6c8d21b8fb70dff97f82dd7dccb1f4f47bde00ad3  docs/research/measurements/hex-native-firecracker/held451-export-v2/export_held451_objects.py",
+    "837f3a7df069425b7f80281a1f0a03da8786b0a728210c5cc5ab07bfe58d2962  docs/research/measurements/hex-native-firecracker/held451-export-v2/held451-admission.collect.template.json",
+    "d53c0df03656686920c8f166ac4f3a7591bf0de8521f64a37d5ea0bb8c779839  docs/research/measurements/hex-native-firecracker/held451-export-v2/held451-admission.export.template.json",
+    "4fde5da40f2325881e281fe279c45adaba60d70237eba340173f0140be60cbb2  docs/research/measurements/hex-native-firecracker/held451-export-v2/held451-export-collect.invocations.json",
+    "d5e8cc65e999c435c17efb5afe584233217b1a9fd164f5d6809aaefe9aa932de  docs/research/measurements/hex-native-firecracker/held451-export-v2/held451-export-controls.json",
+    "14e35dbed0d79273b963f8f27c1973d53ff997e6a02bd8b99fbe6c00deb91412  docs/research/measurements/hex-native-firecracker/held451-export-v2/held451-export-inputs.json",
+    "02bab67d6d60b1371b205a27b9456b8fd3703a51d0b2bd7a2e0035d0676de5cb  docs/research/measurements/hex-native-firecracker/held451-export-v2/held451-export.seal.json"
+  ],
+  "independent_shasum_exit": 0,
+  "inherited2359_runtime_members_byte_identical": 17,
+  "inherited_control_rows_unchanged": 7869,
+  "new_live_green_or_mutation": null,
+  "original_failure_preserved": "1dc5132dbb0c727f6e35d2c1ffb2f2049982dc12",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "previous_seals_raw_and_rounded_drafts_unchanged": true,
+  "role": "assigned-adversarial Firecracker evidence lane, source-only current step",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "runtime_seal_sha256": "02bab67d6d60b1371b205a27b9456b8fd3703a51d0b2bd7a2e0035d0676de5cb",
+  "schema": "hex-native-fc-held451-v2-source-validation-v1",
+  "validation_kind": "local AST/JSON/byte/hash/diff/argv metadata; no module import/runtime/host I/O"
+}

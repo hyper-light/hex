@@ -1,0 +1,53 @@
+<string>:14: DeprecationWarning: Python 3.14 will, by default, filter extracted tar archives and reject files or modify their metadata. Use the filter argument to control this behavior.
+{
+  "root": "/Users/adalundhe/.cache/hex-completion-validation/light-85ee0ce8-f370b2ff97",
+  "result": {
+    "source": "85ee0ce83fad8d7becdcfc2d97b7625a94ee68c9",
+    "scope": "pure unit and Python syntax only; NO GPU/native/VM/mutation/profile",
+    "runner": "d1323898b255a3ed435eb83fa0f7b0cf",
+    "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+    "archive_sha256": "593bcc782777763575ad916b4bee65598839f055304980a056a2c9add4dcf868",
+    "unit": {
+      "argv": [
+        "/Users/adalundhe/.cache/hex-lead/python-3.13.18-20261026/python/bin/python3",
+        "-m",
+        "unittest",
+        "-v",
+        "test_evidence"
+      ],
+      "pid": 93295,
+      "exit": 0,
+      "reaped": true,
+      "selected": 27,
+      "count_exact": true,
+      "log_sha256": "1f2fc35f42da1d893d4cefc8d6560625e509d6dde11e217bda731158a0ed526b"
+    },
+    "syntax": {
+      "exit": 0,
+      "files": 14,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "c_syntax": {
+      "exit": 0,
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/usr/bin/cc",
+        "-std=c11",
+        "-fsyntax-only",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-I",
+        "/Users/adalundhe/.cache/hex-completion-validation/compile-70945fe8-8c399c0b-a6863c4c/headers/Vulkan-Headers-vulkan-sdk-1.4.321.0/include",
+        "/Users/adalundhe/.cache/hex-completion-validation/light-85ee0ce8-f370b2ff97/source/scripts/scheduler-completion/vulkan-witness.c"
+      ],
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "source_unchanged": true,
+    "temp_entries": 0,
+    "exit": 0
+  },
+  "unit_log": "test_accepts_exact_real_case_shape (test_evidence.EvidenceBehavior.test_accepts_exact_real_case_shape) ... ok\ntest_checks_artifact_bytes_and_hash (test_evidence.EvidenceBehavior.test_checks_artifact_bytes_and_hash) ... ok\ntest_guard_replacement_is_exact_and_restorable (test_evidence.EvidenceBehavior.test_guard_replacement_is_exact_and_restorable) ... ok\ntest_hex_uuid_without_matching_native_identity_is_not_proof (test_evidence.EvidenceBehavior.test_hex_uuid_without_matching_native_identity_is_not_proof) ... ok\ntest_light_scope_cannot_be_promoted_to_native_run (test_evidence.EvidenceBehavior.test_light_scope_cannot_be_promoted_to_native_run) ... ok\ntest_matrix_never_promotes_missing_hardware (test_evidence.EvidenceBehavior.test_matrix_never_promotes_missing_hardware) ... ok\ntest_median_confidence_uses_binomial_bounds (test_evidence.EvidenceBehavior.test_median_confidence_uses_binomial_bounds) ... ok\ntest_missing_copy_measurements_cannot_claim_a_profile_target (test_evidence.EvidenceBehavior.test_missing_copy_measurements_cannot_claim_a_profile_target) ... ok\ntest_multibit_luid_node_mask_is_not_exact (test_evidence.EvidenceBehavior.test_multibit_luid_node_mask_is_not_exact) ... ok\ntest_nonlinux_firecracker_requires_peer_route (test_evidence.EvidenceBehavior.test_nonlinux_firecracker_requires_peer_route) ... ok\ntest_preserves_selected_only_gaps (test_evidence.EvidenceBehavior.test_preserves_selected_only_gaps) ... ok\ntest_profile_refuses_different_hardware (test_evidence.EvidenceBehavior.test_profile_refuses_different_hardware) ... ok\ntest_profile_target_misses_are_retained (test_evidence.EvidenceBehavior.test_profile_target_misses_are_retained) ... ok\ntest_profiles_reject_nan_and_negative_values (test_evidence.EvidenceBehavior.test_profiles_reject_nan_and_negative_values) ... ok\ntest_rejects_duplicate_or_nonfinite_json (test_evidence.EvidenceBehavior.test_rejects_duplicate_or_nonfinite_json) ... ok\ntest_rejects_foreign_access (test_evidence.EvidenceBehavior.test_rejects_foreign_access) ... ok\ntest_rejects_ignored_only (test_evidence.EvidenceBehavior.test_rejects_ignored_only) ... ok\ntest_rejects_missing_capability (test_evidence.EvidenceBehavior.test_rejects_missing_capability) ... ok\ntest_rejects_missing_native_join (test_evidence.EvidenceBehavior.test_rejects_missing_native_join) ... ok\ntest_rejects_native_cleanup_gap (test_evidence.EvidenceBehavior.test_rejects_native_cleanup_gap) ... ok\ntest_rejects_recovery_repick (test_evidence.EvidenceBehavior.test_rejects_recovery_repick) ... ok\ntest_rejects_symlink_or_path_escape (test_evidence.EvidenceBehavior.test_rejects_symlink_or_path_escape) ... ok\ntest_rejects_unpoisoned_outputs (test_evidence.EvidenceBehavior.test_rejects_unpoisoned_outputs) ... ok\ntest_rejects_vacuous_wrong_id (test_evidence.EvidenceBehavior.test_rejects_vacuous_wrong_id) ... ok\ntest_rejects_zero_selected (test_evidence.EvidenceBehavior.test_rejects_zero_selected) ... ok\ntest_shared_luid_cannot_select_a_physical_linked_node (test_evidence.EvidenceBehavior.test_shared_luid_cannot_select_a_physical_linked_node) ... ok\ntest_tail_distribution_preserves_observed_samples (test_evidence.EvidenceBehavior.test_tail_distribution_preserves_observed_samples) ... ok\n\n----------------------------------------------------------------------\nRan 27 tests in 0.003s\n\nOK\n"
+}

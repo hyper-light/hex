@@ -1,0 +1,39 @@
+{
+  "bytes": 201210,
+  "sha256": "c78cf0da856eb51599de5c27da4a38fe8d2989ae2e908891a9f5f0c9e5209453",
+  "members": {
+    "cohort-31fe8ab8-mac-compile-v1/running.json": {
+      "bytes": 993,
+      "sha256": "4ff670e71e1313241036c9d0abd6a97ea82851400c71ec10a953afc0f2dfd42a"
+    },
+    "cohort-31fe8ab8-mac-compile-v1/result.json": {
+      "bytes": 1245,
+      "sha256": "7d4c4167c5061156e25db0886970f366424388229b8d1db65ffb73157826a87f"
+    },
+    "cohort-31fe8ab8-mac-compile-v1/source-before.json": {
+      "bytes": 289722,
+      "sha256": "8781e3596f1f137833b72a00db21a9c3539066c65505b0b46ecd245ba0534013"
+    },
+    "cohort-31fe8ab8-mac-compile-v1/source-after.json": {
+      "bytes": 289722,
+      "sha256": "8781e3596f1f137833b72a00db21a9c3539066c65505b0b46ecd245ba0534013"
+    },
+    "cohort-31fe8ab8-mac-compile-v1/production-check.log": {
+      "bytes": 3455,
+      "sha256": "133386adfd9e4ba9c3b71688f18b7382b8f1d49b9e9a2ab910f73bfdde5d9f3e"
+    },
+    "cohort-31fe8ab8-mac-compile-v1/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-31fe8ab8-mac-compile-v1/collected-binaries.json": {
+      "bytes": 594,
+      "sha256": "407152d81f0752132321d443dd4c22d4256ed9ae085d8aad6e6e9dba5ef19346"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

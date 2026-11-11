@@ -1,0 +1,225 @@
+{
+  "source": "fabd73020cdd1c6e201d8028fcca5d85f28ef18c",
+  "archive_sha256": "c8223d02bcf25a42633b8b0fba7beaf530c380fe77d4deff0718e4177ffa50e0",
+  "target": "linux",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 2255259,
+  "driver_birth": 32506827,
+  "scope": "ROOT only prepare/build/seal three fresh exact sources/targets; no tests/native/VM/GPU invocation",
+  "output": "/home/adalundhe/.cache/hex-lead/gc5688v1",
+  "phases": [
+    {
+      "name": "comparison-prepare",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/usr/bin/python3",
+        "-B",
+        "/home/adalundhe/.cache/hex-lead/gc5688-build-v1/source/docs/research/measurements/hex-completion-validation/native-gate-r05/root_native_gate_comparison.py",
+        "prepare",
+        "--source",
+        "/home/adalundhe/.cache/hex-lead/gc5688-build-v1/source",
+        "--source-pin",
+        "fabd73020cdd1c6e201d8028fcca5d85f28ef18c",
+        "--manifest",
+        "/home/adalundhe/.cache/hex-lead/gc5688-build-v1/source-before.json",
+        "--manifest-sha256",
+        "cc8c417de4cf4eb0e847439116bb21f1dad85563123374be14cf88c92ac42a24",
+        "--output",
+        "/home/adalundhe/.cache/hex-lead/gc5688v1"
+      ],
+      "deadline_seconds": 180,
+      "start_ns": 213675140078490,
+      "pid": 2260452,
+      "process_group": 2260452,
+      "birth": 32507157,
+      "exit": 0,
+      "reaped": true,
+      "end_ns": 213676055818583,
+      "stdout": {
+        "path": "/home/adalundhe/.cache/hex-lead/gc5688-build-v1/prepare.stdout",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stderr": {
+        "path": "/home/adalundhe/.cache/hex-lead/gc5688-build-v1/prepare.stderr",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "name": "baseline-compile",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--no-run",
+        "--message-format=json",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-j1"
+      ],
+      "deadline_seconds": 900,
+      "start_ns": 213676064076106,
+      "pid": 2261866,
+      "process_group": 2261866,
+      "birth": 32507249,
+      "exit": 0,
+      "reaped": true,
+      "end_ns": 213752741847919,
+      "stdout": {
+        "path": "/home/adalundhe/.cache/hex-lead/gc5688v1/baseline/cargo.jsonl",
+        "bytes": 75803,
+        "sha256": "1c3edfce9ba60b58a2353e96e2b904d9a5d3e5cc25b12a52c5b696fef9234b0d"
+      },
+      "stderr": {
+        "path": "/home/adalundhe/.cache/hex-lead/gc5688v1/baseline/cargo.stderr",
+        "bytes": 3098,
+        "sha256": "661fbba41c0f831e2f4e49f9fc415a6f46115884de5fa7e29b6ae003edab7ab4"
+      },
+      "target_created_empty": true,
+      "target_reused": false,
+      "temp_entries": 0
+    },
+    {
+      "name": "bypass-compile",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--no-run",
+        "--message-format=json",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-j1"
+      ],
+      "deadline_seconds": 900,
+      "start_ns": 213752748714843,
+      "pid": 2385711,
+      "process_group": 2385711,
+      "birth": 32514918,
+      "exit": 0,
+      "reaped": true,
+      "end_ns": 213883993376905,
+      "stdout": {
+        "path": "/home/adalundhe/.cache/hex-lead/gc5688v1/bypass/cargo.jsonl",
+        "bytes": 75159,
+        "sha256": "11125987f254d1e60edffb77540e7e49fa61845bca032ab4dfb02173bbab8f07"
+      },
+      "stderr": {
+        "path": "/home/adalundhe/.cache/hex-lead/gc5688v1/bypass/cargo.stderr",
+        "bytes": 3070,
+        "sha256": "3f2854590e9ab84ad486143b5017c2e330fe1727f87965dd0d0eee8ff596115c"
+      },
+      "target_created_empty": true,
+      "target_reused": false,
+      "temp_entries": 0
+    },
+    {
+      "name": "restored-compile",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "--no-run",
+        "--message-format=json",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-j1"
+      ],
+      "deadline_seconds": 900,
+      "start_ns": 213884003696751,
+      "pid": 2525983,
+      "process_group": 2525983,
+      "birth": 32528043,
+      "exit": 0,
+      "reaped": true,
+      "end_ns": 213962043271231,
+      "stdout": {
+        "path": "/home/adalundhe/.cache/hex-lead/gc5688v1/restored/cargo.jsonl",
+        "bytes": 75803,
+        "sha256": "fddf09bc89c934553ee0b82129a7b17300740a55487c5ebd61b8a8ec38c08d3d"
+      },
+      "stderr": {
+        "path": "/home/adalundhe/.cache/hex-lead/gc5688v1/restored/cargo.stderr",
+        "bytes": 3098,
+        "sha256": "a975f90990482827bac516796ed9770d738266e237782cae996edecd5dc27850"
+      },
+      "target_created_empty": true,
+      "target_reused": false,
+      "temp_entries": 0
+    },
+    {
+      "name": "comparison-seal",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/usr/bin/python3",
+        "-B",
+        "/home/adalundhe/.cache/hex-lead/gc5688-build-v1/source/docs/research/measurements/hex-completion-validation/native-gate-r05/root_native_gate_comparison.py",
+        "seal",
+        "--plan",
+        "/home/adalundhe/.cache/hex-lead/gc5688v1/prepared.json",
+        "--plan-sha256",
+        "b106d5fc2ccc6c54c9444196aacdadbde8a0ad2a5c70636bc1543145edfbdf09",
+        "--output",
+        "/home/adalundhe/.cache/hex-lead/gc5688v1/sealed.json"
+      ],
+      "deadline_seconds": 180,
+      "start_ns": 213962052677629,
+      "pid": 2650086,
+      "process_group": 2650086,
+      "birth": 32535848,
+      "exit": 0,
+      "reaped": true,
+      "end_ns": 213963720027313,
+      "stdout": {
+        "path": "/home/adalundhe/.cache/hex-lead/gc5688-build-v1/seal.stdout",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stderr": {
+        "path": "/home/adalundhe/.cache/hex-lead/gc5688-build-v1/seal.stderr",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  ],
+  "prepared_sha256": "b106d5fc2ccc6c54c9444196aacdadbde8a0ad2a5c70636bc1543145edfbdf09",
+  "sealed_sha256": "06ba2ce2d7e577487e7e2df8ab8298aee2fe3f529e6422abc7ab24712a094fde",
+  "exit": 0,
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_invocations": 0,
+  "build_root_du": {
+    "exit": 0,
+    "stdout": "205324\t/home/adalundhe/.cache/hex-lead/gc5688-build-v1\n",
+    "stderr": ""
+  },
+  "comparison_root_du": {
+    "exit": 0,
+    "stdout": "5339160\t/home/adalundhe/.cache/hex-lead/gc5688v1\n",
+    "stderr": ""
+  }
+}

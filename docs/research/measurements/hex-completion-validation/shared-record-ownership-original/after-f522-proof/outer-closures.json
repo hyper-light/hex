@@ -1,0 +1,68 @@
+{
+  "cohort-f522a9a4-linux-shared-owner-after-f522": {
+    "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-shared-owner-after-f522.scope",
+    "scope_absent": true,
+    "owners": [
+      {
+        "kind": "driver",
+        "recorded": {
+          "pid": 2531587,
+          "ppid": 2531572,
+          "start_ticks": 32769736
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      },
+      {
+        "kind": "cargo",
+        "recorded": {
+          "pid": 2539238,
+          "ppid": 2531587,
+          "start_ticks": 32770011
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      },
+      {
+        "kind": "cargo",
+        "recorded": {
+          "pid": 2857609,
+          "ppid": 2531587,
+          "start_ticks": 32777911
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      },
+      {
+        "kind": "cargo",
+        "recorded": {
+          "pid": 2950976,
+          "ppid": 2531587,
+          "start_ticks": 32780062
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      },
+      {
+        "kind": "cargo",
+        "recorded": {
+          "pid": 3029584,
+          "ppid": 2531587,
+          "start_ticks": 32781457
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      },
+      {
+        "kind": "cargo",
+        "recorded": {
+          "pid": 3271680,
+          "ppid": 2531587,
+          "start_ticks": 32789560
+        },
+        "owned_birth_absent": true,
+        "absent": true
+      }
+    ]
+  }
+}

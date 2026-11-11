@@ -1,0 +1,56 @@
+[2m[kiln] on d1323898b255a3ed435eb83fa0f7b0cf · macos/aarch64 · 27 of 32 cores idle · 47 GB free · room for 1 CPU, 4 GiB of memory, 12 GiB of disk[0m
+{
+  "platform": "macOS-26.4-arm64-arm-64bit",
+  "arch": "arm64",
+  "archive_sha256": "6316d5e56652661aa799583dfa546174a59c37797e6ae85e0efe1aeb42930f4d",
+  "fixture_sha256": "b02e662366dcbb44360db1c87a39f0c7410d3d7512e25ed2b3b32f68f3a7a54e",
+  "source_hashes_sha256": "07d058491c2de25036aa6758d36c0669a43a5e4e90831c5427fbe4276f3b92cd",
+  "temporary_registration": {
+    "path": "crates/hex-node/src/placement/tests.rs",
+    "before_sha256": "00fb45393f5543e27ee1286e10a8a21657da45dea31f91055bf8443c154b2ea4",
+    "after_sha256": "c1b7e1d5e209a85d95dc4058cb35319965c0cb1979b9e644ed1f67c76aff19d1",
+    "appended": "\n#[path = \"adversarial_bounds_tests.rs\"]\nmod adversarial_bounds_tests;\n"
+  },
+  "command": [
+    "nice",
+    "-n",
+    "10",
+    "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+    "test",
+    "-p",
+    "hex-node",
+    "--lib",
+    "--locked",
+    "placement::tests::adversarial_bounds_tests::equal_start_spec_disagreement_refuses_before_callbacks_without_rendering_payload",
+    "--",
+    "--exact",
+    "--nocapture",
+    "--test-threads=1"
+  ],
+  "expected_selected_count": 1,
+  "root": "/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp4-spec-before-457f-v1",
+  "owned_paths": [
+    "/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp4-spec-before-457f-v1/source",
+    "/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp4-spec-before-457f-v1/target",
+    "/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp4-spec-before-457f-v1/cache",
+    "/Users/adalundhe/.cache/hex-adversarial-bounds/01a1c643-cp4-spec-before-457f-v1/temp"
+  ],
+  "scope": "native macOS libtest execution, private filesystem and SimRuntime only; no native runtime or VM effects",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "owned_cargo_pid": 3764,
+  "exit_code": 101,
+  "log_sha256": "388fed33d503f2611acb893c0ff71891ef142f1c8b2201c855be4096a3ca9658",
+  "log_bytes": 5946,
+  "selected_lines": [
+    "test placement::tests::adversarial_bounds_tests::equal_start_spec_disagreement_refuses_before_callbacks_without_rendering_payload ... immutable-spec expected=Damaged/callback_delta0/key_cause_only observed_damaged=false key=false cause=false content_hidden=true before=(2, 0, 2, 0) after=(3, 0, 2, 0) target_unchanged=true sibling_unchanged=true matching_recovery=true cleanup_boxes=0"
+  ],
+  "summaries": [
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 130 filtered out; finished in 0.35s"
+  ],
+  "selected_count_matches": true,
+  "remaining_temp_entries": 0,
+  "cleanup_witnesses": [
+    "test placement::tests::adversarial_bounds_tests::equal_start_spec_disagreement_refuses_before_callbacks_without_rendering_payload ... immutable-spec expected=Damaged/callback_delta0/key_cause_only observed_damaged=false key=false cause=false content_hidden=true before=(2, 0, 2, 0) after=(3, 0, 2, 0) target_unchanged=true sibling_unchanged=true matching_recovery=true cleanup_boxes=0"
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "output": "/Users/adalundhe/.cache/hx/e-kges2rvg/root-verified-armed-validation.json",
+  "sha256": "671a560660b5815aca23956c3b821df11a2c2a35502cb5e136bd704dd0cdf377",
+  "kind": "root-armed-validation-reconstruction",
+  "status": "consistent",
+  "run": "/Users/adalundhe/.cache/hx/e-kges2rvg",
+  "source": "e2fb4f174cdc20097ebccdf693668a0c62e8e991",
+  "profile": "debug",
+  "result_sha256": "62942a39ff88812a561b8346f17008a3c80e9b93571e0c8fd9f101e1950aaebc",
+  "n": 1000,
+  "physical_created": 2000,
+  "physical_deleted": 2000,
+  "baseline_restored": true,
+  "ledger": {
+    "sha256": "cbd7b8eeac211457f15b483dbbf88d2dfa2e92508b49b7882684c396b7eec1fe",
+    "rows": 272257,
+    "bytes": 68472057,
+    "physical_control_events": {
+      "local": 1000,
+      "remote": 1000
+    }
+  },
+  "owned_guest_retirement": {
+    "pid": 49759,
+    "started": 12323971571942,
+    "vsock": "/Users/adalundhe/.cache/hx/e-kges2rvg/guest-tmp/shards-api-f3a40a64bd789d4c-0/v",
+    "receipt_sha256": "ab731d51019bf11c90278426d8f413f2c959b5d4657c87c1875694bdd9e82c30",
+    "record_sha256": "a0655ee4e6604f9e66b8793f6a87ee9c9581066aca09f65df3b6a658208350d5",
+    "recorded_terminal": "Stopped",
+    "live_API_check": "not performed by verifier"
+  },
+  "census_enabled": false,
+  "census_files": 0,
+  "reader_sha256": "a1b650dafee625f17d619fffe47afd3bc97fb920d5e17717c48b98a93fb8987a",
+  "operator_read_budgets": {
+    "max_result_bytes": 134217728,
+    "max_ledger_rows": 1000000
+  },
+  "scope": "root bounded reconstruction of report and every ledger row/unique phase-key control, absent census and recorded retirement; source/API physical assertions remain separately attributed; no live API check by verifier, no distribution or seed eligibility"
+}

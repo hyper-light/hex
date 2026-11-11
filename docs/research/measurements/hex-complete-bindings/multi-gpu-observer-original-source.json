@@ -1,0 +1,19 @@
+{
+  "parent": "9b8f6043686e9d3b2541a42b5f0643562af5d03d",
+  "role": "implementer",
+  "policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": {
+    "crates/hex-sim/src/index/route_offer_tests.rs": "eec592dba55f5ef79570d88cc1c30fbf2d4796c5f9ae8ea91adb14ccb424d800"
+  },
+  "new_control": "index::route_offer_tests::one_gpu_demand_can_select_an_exact_subset_of_a_two_gpu_observer",
+  "production_unchanged": true,
+  "checks": {
+    "scoped_rustfmt": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "intended_control": "UNRUN, no red established",
+    "native_effects": 0,
+    "jobs_started": 0
+  }
+}

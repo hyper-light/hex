@@ -1,0 +1,70 @@
+{
+  "source": "6483c6f2b0cb109cd41d009aa3974962a238c1b8",
+  "production_pin": "5e2cfbe7e09256ff6a7d979564717cfc6d8041f6",
+  "build_exit": 0,
+  "binary": "/Users/adalundhe/.cache/hex-device-driver-01a1c640-6483c6f2-v1/target/debug/deps/hex_node-1028f62b4e94535b",
+  "binary_sha256": "78cbee6f077357f2b2ca4ee927a60c9646de4562bc11342c03b3738721a20e88",
+  "selected": 3,
+  "passes": 3,
+  "failed": 0,
+  "ignored": 0,
+  "tests": [
+    {
+      "name": "placement::tests::device_binding_tests::model_driver_keeps_exact_gpu_binding_across_reboot_inventory_reorder_and_load_swap",
+      "command": [
+        "/Users/adalundhe/.cache/hex-device-driver-01a1c640-6483c6f2-v1/target/debug/deps/hex_node-1028f62b4e94535b",
+        "--exact",
+        "placement::tests::device_binding_tests::model_driver_keeps_exact_gpu_binding_across_reboot_inventory_reorder_and_load_swap",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 30432,
+      "reaped": true,
+      "ran_one": true,
+      "passed": true,
+      "log": "test-0.log",
+      "log_sha256": "66d9d761cac44c9af1e4d1df4ca7eeac7c3dd7fc54a5a5493ae12efa6659a796"
+    },
+    {
+      "name": "placement::tests::device_binding_tests::model_driver_refuses_recovered_metadata_disagreement_before_rows_or_init_then_repairs",
+      "command": [
+        "/Users/adalundhe/.cache/hex-device-driver-01a1c640-6483c6f2-v1/target/debug/deps/hex_node-1028f62b4e94535b",
+        "--exact",
+        "placement::tests::device_binding_tests::model_driver_refuses_recovered_metadata_disagreement_before_rows_or_init_then_repairs",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 30433,
+      "reaped": true,
+      "ran_one": true,
+      "passed": true,
+      "log": "test-1.log",
+      "log_sha256": "3c9171db0b2fa5791b99c8dc08a727d4120446aa4a47ba2836230ce34100c45e"
+    },
+    {
+      "name": "placement::tests::device_binding_tests::model_driver_rejects_forged_caller_claims_before_records_and_runtime_then_progresses",
+      "command": [
+        "/Users/adalundhe/.cache/hex-device-driver-01a1c640-6483c6f2-v1/target/debug/deps/hex_node-1028f62b4e94535b",
+        "--exact",
+        "placement::tests::device_binding_tests::model_driver_rejects_forged_caller_claims_before_records_and_runtime_then_progresses",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "pid": 30434,
+      "reaped": true,
+      "ran_one": true,
+      "passed": true,
+      "log": "test-2.log",
+      "log_sha256": "d03fb8bed323bbd4b464f9b9abef1766dc73b64e6033fa81d554ff28d98691bf"
+    }
+  ],
+  "checks": {
+    "clippy-lib": 0,
+    "clippy-tests": 0,
+    "rustfmt": 0
+  },
+  "scope": "Real file-backed Driver + test BoxRecords/shared Catalog + unchanged SimRuntime after explicit claim extraction. ALL effects model only; no hardware/native attachment/VM/SSH/hook effects."
+}
