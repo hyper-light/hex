@@ -1085,7 +1085,7 @@ fn offered_expiry_releases_only_its_ownership_while_a_sibling_progresses() {
     // Even a missing/late opening event must not strand the call actor.
     opened.unwrap();
     let shared = &client.conn.shared;
-    let outbound = shared.transport.outbound.lock().unwrap().clone();
+    let outbound = shared.transport.outbound.lock().unwrap();
     let state = shared.state().unwrap();
     let clean = state.calls.is_empty()
         && state.programs.is_empty()
