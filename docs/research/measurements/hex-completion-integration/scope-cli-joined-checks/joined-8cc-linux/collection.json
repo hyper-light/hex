@@ -1,0 +1,39 @@
+{
+  "bytes": 214225,
+  "sha256": "221aeb99b9f3b08fa90384ede696e71b5497c882fb57f208806b22f3b792b1df",
+  "members": {
+    "cohort-8ccb2f81-linux-native-gate-compile-v1/source-before.json": {
+      "bytes": 301946,
+      "sha256": "58bd56102f871b09be4713caa9c31624e9c219b55a2ec2d6a6ae690cb441d814"
+    },
+    "cohort-8ccb2f81-linux-native-gate-compile-v1/public-registry-seed.json": {
+      "bytes": 22686,
+      "sha256": "674ed58256dad16b9ce3a6dc0ad51b2021263e6285d552d3a0c589744de90bac"
+    },
+    "cohort-8ccb2f81-linux-native-gate-compile-v1/production-check.log": {
+      "bytes": 3777,
+      "sha256": "59b2138992a5e8517653c67398ddadd1c5affe0e14fc54d7d27eebfaf749415e"
+    },
+    "cohort-8ccb2f81-linux-native-gate-compile-v1/running.json": {
+      "bytes": 919,
+      "sha256": "516e8fb9f0d50850e597cb89c0f33f0b4e577d780acc6206cf2532ef788a9ee4"
+    },
+    "cohort-8ccb2f81-linux-native-gate-compile-v1/source-after.json": {
+      "bytes": 301946,
+      "sha256": "58bd56102f871b09be4713caa9c31624e9c219b55a2ec2d6a6ae690cb441d814"
+    },
+    "cohort-8ccb2f81-linux-native-gate-compile-v1/result.json": {
+      "bytes": 1171,
+      "sha256": "a746d6c5d8bbf09ecfcca77b9804d47916ca3d4205d14fbb2f4b38cfa0048ecb"
+    },
+    "cohort-8ccb2f81-linux-native-gate-compile-v1/collected-binaries.json": {
+      "bytes": 674,
+      "sha256": "23d8b1e2d9bda28513eb9e4a84c54b77f74c62d05222614056687a57bac7e380"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

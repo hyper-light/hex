@@ -1,0 +1,156 @@
+[
+  {
+    "source": "1fdfb9ce5d4d2d17a69a9243b25c873b48ad0dfc",
+    "archive_sha256": "8861bc576d15c64e1473d61c49e4fd2468b757e945ba65ca195bbd5dfb116898",
+    "scope": "ROOT matched managed receipt/Books/provider/native source compilation ONLY; zero tests/native GPU/KVM/HCS/VM or backend execution",
+    "target": "mac",
+    "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+    "driver_pid": 56821,
+    "phases": [
+      {
+        "name": "production-check",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+          "check",
+          "-p",
+          "hex-runtime",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked"
+        ],
+        "pid": 56827,
+        "exit": 0,
+        "reaped": true,
+        "sha256": "90479df4fe725ad7d152c865cc94a94fe3dca184e2bebcf433058f322510e1ed",
+        "bytes": 3032
+      }
+    ],
+    "source_changes": [],
+    "temp_entries": 0,
+    "tests_executed": 0,
+    "native_invocations": 0,
+    "exit": 0
+  },
+  {
+    "source": "1fdfb9ce5d4d2d17a69a9243b25c873b48ad0dfc",
+    "archive_sha256": "8861bc576d15c64e1473d61c49e4fd2468b757e945ba65ca195bbd5dfb116898",
+    "scope": "ROOT Windows x64+arm64 runtime/node production Clippy only; no tests/native execution",
+    "target": "mac",
+    "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+    "driver_pid": 56823,
+    "phases": [
+      {
+        "name": "production-check",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+          "clippy",
+          "-p",
+          "hex-runtime",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked",
+          "--target",
+          "x86_64-pc-windows-msvc",
+          "--target",
+          "aarch64-pc-windows-msvc",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "pid": 57276,
+        "exit": 101,
+        "reaped": true,
+        "sha256": "ce8a0f7eb7c37cc001c83cd25ad0d4d315b7af502afd37fc698127f17986a085",
+        "bytes": 5182
+      }
+    ],
+    "source_changes": [],
+    "temp_entries": 0,
+    "tests_executed": 0,
+    "native_invocations": 0,
+    "exit": 1
+  },
+  {
+    "source": "25fd0744c2625deabcbd642ab87cee2a461c04f9",
+    "archive_sha256": "d929241fa8a72e1cd4ef77749a180f3c34a070e5bf4a6758a0e6b313593a77a5",
+    "scope": "ROOT matched managed receipt/Books/provider/native source compilation ONLY; zero tests/native GPU/KVM/HCS/VM or backend execution",
+    "target": "mac",
+    "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+    "driver_pid": 56034,
+    "phases": [
+      {
+        "name": "production-check",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+          "check",
+          "-p",
+          "hex-runtime",
+          "-p",
+          "hex-node",
+          "--lib",
+          "--locked"
+        ],
+        "pid": 56464,
+        "exit": 101,
+        "reaped": true,
+        "sha256": "f16cc21334c1ae00ae3406dea8de185044b56aa6fb0de9feb413eef5b53df200",
+        "bytes": 3719
+      }
+    ],
+    "source_changes": [],
+    "temp_entries": 0,
+    "tests_executed": 0,
+    "native_invocations": 0,
+    "exit": 1
+  },
+  {
+    "source": "73229016b14adddcbabf5f523193677dfde70faa",
+    "archive_sha256": "ca35226fb4e8a3a16ccf05ef4fb54947882a79035a506f2762b6226176ee21a6",
+    "scope": "ROOT CLI initialized-backend factory compilation ONLY; zero tests/native GPU/KVM/HCS/VM or backend execution",
+    "target": "mac",
+    "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+    "driver_pid": 57729,
+    "phases": [
+      {
+        "name": "production-check",
+        "command": [
+          "nice",
+          "-n",
+          "10",
+          "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+          "check",
+          "-p",
+          "hex-cli",
+          "--bin",
+          "hex",
+          "--locked"
+        ],
+        "pid": 57805,
+        "exit": 0,
+        "reaped": true,
+        "sha256": "e0b80f14a7bfe3f0ba7436ad9e232225fa19af8b380156a0d817fa43c92abe98",
+        "bytes": 3169
+      }
+    ],
+    "source_changes": [],
+    "temp_entries": 0,
+    "tests_executed": 0,
+    "native_invocations": 0,
+    "exit": 0
+  }
+]
