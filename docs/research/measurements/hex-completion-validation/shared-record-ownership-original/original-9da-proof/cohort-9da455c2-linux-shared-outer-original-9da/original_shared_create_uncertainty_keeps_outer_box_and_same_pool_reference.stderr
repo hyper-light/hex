@@ -1,0 +1,7 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (/home/adalundhe/.cache/hex-lead/cohort-9da455c2-linux-shared-outer-original-9da/target/debug/deps/hex_node-d6283f30893b31f3)
+
+thread 'recorded::shared_outer_original_tests::original_shared_create_uncertainty_keeps_outer_box_and_same_pool_reference' (1066716) panicked at crates/hex-node/src/../../../docs/research/measurements/hex-completion-validation/shared-record-ownership-original/recorded_shared_outer_tests.rs:219:5:
+shared create uncertainty lost the outer canonical Box/Pool reference
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: test failed, to rerun pass `-p hex-node --lib`

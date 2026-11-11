@@ -1,0 +1,7 @@
+# Actual fixed9da original result
+
+The shared original completed1 selected/0 passed/1 failed/0 ignored at the intended missing canonical Box/Pool-reference assertion. Before that oracle, actual configuration/route/source profile/Store transitions, same-key Uncertain refusal, unchanged Pool bytes and zero simulated guest boots all passed. Full stdout/stderr were read. This reproduces the actual Recorded/WithGuest ownership behavior in-process, not a native VM failure.
+
+The separate dedicated control completed0/1 at spec.check: its fixture omitted finite original CPU/memory caps. Its ownership oracle was not reached, so this is a fixture precondition failure. The next fixture-only correction derives both caps from the SAME existing fixed cost floor minus guest overhead. No limits/formula/oracle or production behavior changes; the complete shared semantic original body stays byte-identical. Only the corrected dedicated control needs an original rerun before the semantic remedy.
+
+Exact9da source, commands, both logs, manifests and native process receipts are in original-9da-proof. Raw388595B SHA25662c794c3c934f6102b4299142bba3adfe1d3acb2fbf029e6d787e0174bf6bc3b; all members independently verified. Driver950112/birth32695625 and Cargo952390/32695781,1066624/32703006 completed/reaped; both output EOFs, source0diff/temp0/native0 and exact whole scope/owned births absent. The two model tests start no native process or VM. No production remedy or AFTER green is part of this receipt.

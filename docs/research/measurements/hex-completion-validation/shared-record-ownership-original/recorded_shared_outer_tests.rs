@@ -247,6 +247,23 @@ fn dedicated_owner_refusal_keeps_one_canonical_box_without_outer_reentry() {
         panic!("fixture payload class changed")
     };
     spec.class = ClassSpec::Shards(oci);
+    spec.bounds.cpu_max_milli = Some(
+        u32::try_from(
+            pool.cost
+                .floor
+                .cpu_milli
+                .checked_sub(pool.cost.guest_overhead.cpu_milli)
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+    spec.bounds.memory_max = Some(
+        pool.cost
+            .floor
+            .mem_bytes
+            .checked_sub(pool.cost.guest_overhead.mem_bytes)
+            .unwrap(),
+    );
     spec.allocation = Some(pool.offer().unwrap().allocation().unwrap());
     spec.route = Some(RouteReceipt {
         key: RouteKey {
