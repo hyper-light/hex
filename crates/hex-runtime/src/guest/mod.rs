@@ -13,6 +13,8 @@ pub mod gpu;
 mod gpu_pool;
 pub mod held;
 mod managed;
+#[cfg(any(test, feature = "native-trusted-entry-measurement"))]
+pub(crate) mod native_fixture;
 mod observer;
 mod physical;
 mod pool;
@@ -173,20 +175,118 @@ impl GuestConfig {
 }
 
 impl GuestConfig {
-    fn cmdline(&self) -> String {
-        let modes: Vec<&str> = self
-            .shares
-            .iter()
-            .map(|s| if s.read_only { "ro" } else { "rw" })
-            .collect();
+    fn cmdline_parts(&self, mut emit: impl FnMut(&str)) {
         // `panic=-1`: a negative timeout reboots at once on a panic (kernel-parameters.txt, `panic=`;
         // kernel/panic.c `panic_timeout`), so the VM ends and the host sees it rather than a guest that
         // hangs.
-        let mut cmdline = "console=ttyS0 panic=-1".to_owned();
-        if !modes.is_empty() {
-            cmdline.push_str(&format!(" {}={}", shares::CMDLINE, modes.join(",")));
+        emit("console=ttyS0 panic=-1");
+        if !self.shares.is_empty() {
+            emit(" ");
+            emit(shares::CMDLINE);
+            emit("=");
+            let mut separated = false;
+            for share in &self.shares {
+                if separated {
+                    emit(",");
+                }
+                emit(if share.read_only { "ro" } else { "rw" });
+                separated = true;
+            }
         }
+    }
+
+    fn cmdline(&self) -> String {
+        let mut cmdline = String::new();
+        self.cmdline_parts(|part| cmdline.push_str(part));
         cmdline
+    }
+
+    #[cfg(any(test, feature = "native-trusted-entry-measurement"))]
+    pub(crate) fn try_spec(&self) -> Result<shards_api::GuestSpec, Refusal> {
+        let exhausted = |bound| Refusal::Exhausted {
+            what: "native fixture guest specification storage",
+            bound,
+        };
+        if self.shares.len() > shares::MAX_SHARES {
+            return Err(route::invalid(
+                "native fixture exceeds the configured share bound",
+            ));
+        }
+        let path = |path: &std::path::Path| -> Result<PathBuf, Refusal> {
+            let mut copy = OsString::new();
+            copy.try_reserve_exact(path.as_os_str().len())
+                .map_err(|_| exhausted(path.as_os_str().len()))?;
+            copy.push(path.as_os_str());
+            Ok(PathBuf::from(copy))
+        };
+        let mut count = Some(0usize);
+        self.cmdline_parts(|part| count = count.and_then(|count| count.checked_add(part.len())));
+        let mut cmdline = String::new();
+        let count = count.ok_or_else(|| exhausted(usize::MAX))?;
+        cmdline
+            .try_reserve_exact(count)
+            .map_err(|_| exhausted(count))?;
+        // The same immutable segment traversal was counted above. Every push
+        // fits this reservation; no formatting/allocation fallback is used.
+        self.cmdline_parts(|part| cmdline.push_str(part));
+        let mut shares = Vec::new();
+        shares
+            .try_reserve_exact(self.shares.len())
+            .map_err(|_| exhausted(shares::MAX_SHARES))?;
+        for share in &self.shares {
+            shares.push(shards_api::Share {
+                dir: path(&share.dir)?,
+                read_only: share.read_only,
+            });
+        }
+        let allowed = [stream::CONTROL_PORT, stream::STDIO_PORT, files::FILES_PORT];
+        let mut ports = Vec::new();
+        ports
+            .try_reserve_exact(allowed.len())
+            .map_err(|_| exhausted(allowed.len()))?;
+        ports.extend_from_slice(&allowed);
+        Ok(shards_api::GuestSpec {
+            kernel: path(&self.kernel)?,
+            init: shards_api::Init::Initrd(path(&self.initrd)?),
+            cmdline,
+            vcpus: self.vcpus,
+            memory_mib: self.memory_mib,
+            gpu: self.gpu,
+            gpu_devices: Vec::new(),
+            disks: Vec::new(),
+            binary: Some(path(&self.binary)?),
+            ports,
+            shares,
+        })
+    }
+
+    /// One existing fixed-VM cost/configuration check, shared by runtime
+    /// registration and the measurement's typed preparation, without an owner.
+    pub(crate) fn checked_runtime_allocation(
+        &self,
+        cost: hex_api::RuntimeCost,
+    ) -> Result<hex_api::Allocation, Refusal> {
+        cost.check()?;
+        let configured = selected::resources(self)?;
+        if cost.floor.cpu_milli != configured.cpu_milli
+            || cost.ceiling.cpu_milli != configured.cpu_milli
+            || cost.floor.mem_bytes != configured.mem_bytes
+            || cost.ceiling.mem_bytes != configured.mem_bytes
+        {
+            let why = "CPU/memory floor and ceiling must equal the configured VM";
+            let mut text = String::new();
+            text.try_reserve_exact(why.len())
+                .map_err(|_| Refusal::Exhausted {
+                    what: "Shards runtime cost refusal bytes",
+                    bound: why.len(),
+                })?;
+            text.push_str(why);
+            return Err(Refusal::Invalid {
+                what: "Shards runtime cost",
+                why: text,
+            });
+        }
+        cost.allocate(hex_api::CapacityResources::default())
     }
 }
 

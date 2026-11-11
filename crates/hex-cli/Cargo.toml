@@ -94,3 +94,7 @@ windows-sys.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# ROOT-only macOS trusted-entry measurement, off for normal builds.
+native-trusted-entry-measurement = ["hex-runtime/native-trusted-entry-measurement"]

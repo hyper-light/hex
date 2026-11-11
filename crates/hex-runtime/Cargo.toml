@@ -42,6 +42,8 @@ windows.workspace = true
 [features]
 # Read-only held-child phase witness for Node native tests; no execution authority.
 native-gate-test = []
+# Measurement-only shared typed startup builder; native entry remains separately reviewed.
+native-trusted-entry-measurement = []
 
 [dev-dependencies]
 proptest = "1.12.0"

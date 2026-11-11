@@ -77,20 +77,9 @@ impl GuestRuntime {
                 "native image evidence cannot change with the runtime cost",
             ));
         }
-        let configured = self.dedicated_resources()?;
-        if cost.floor.cpu_milli != configured.cpu_milli
-            || cost.ceiling.cpu_milli != configured.cpu_milli
-            || cost.floor.mem_bytes != configured.mem_bytes
-            || cost.ceiling.mem_bytes != configured.mem_bytes
-        {
-            return Err(Refusal::Invalid {
-                what: "Shards runtime cost",
-                why: "CPU/memory floor and ceiling must equal the configured VM".into(),
-            });
-        }
         // The explicit units and measured kernel/relay allowance must fit that
         // same configured envelope. No overhead estimate is invented here.
-        cost.allocate(hex_api::CapacityResources::default())?;
+        self.config.checked_runtime_allocation(cost)?;
         self.runtime_cost = Some(cost);
         Ok(self)
     }
