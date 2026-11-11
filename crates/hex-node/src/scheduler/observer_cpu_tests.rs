@@ -15,6 +15,8 @@ struct Endpoint {
     observer: bool,
     failed: Arc<AtomicBool>,
     calls: AtomicUsize,
+    creates: AtomicUsize,
+    deletes: AtomicUsize,
     key: BackingKey,
     capacity: Capacity,
 }
@@ -49,7 +51,9 @@ impl Runtime for Endpoint {
         self.sim.physical_report()
     }
     fn create(&self, spec: BoxSpec) -> Result<hex_api::BoxInfo, Refusal> {
-        self.sim.create(spec)
+        let info = self.sim.create(spec)?;
+        self.creates.fetch_add(1, Ordering::SeqCst);
+        Ok(info)
     }
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
         self.sim.start(id)
@@ -73,7 +77,9 @@ impl Runtime for Endpoint {
         self.sim.list()
     }
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
-        self.sim.delete(id)
+        self.sim.delete(id)?;
+        self.deletes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -168,6 +174,8 @@ fn failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_fa
         observer: false,
         failed: failed.clone(),
         calls: AtomicUsize::new(0),
+        creates: AtomicUsize::new(0),
+        deletes: AtomicUsize::new(0),
         key,
         capacity: native,
     });
@@ -176,11 +184,16 @@ fn failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_fa
         observer: true,
         failed: failed.clone(),
         calls: AtomicUsize::new(0),
+        creates: AtomicUsize::new(0),
+        deletes: AtomicUsize::new(0),
         key,
         capacity: observer_report,
     });
     let runtimes = Runtimes::new([
-        (hex_sim::model::Class::Oci, native as Arc<dyn Runtime>),
+        (
+            hex_sim::model::Class::Oci,
+            native.clone() as Arc<dyn Runtime>,
+        ),
         (
             hex_sim::model::Class::Firecracker,
             observer.clone() as Arc<dyn Runtime>,
@@ -259,7 +272,7 @@ fn failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_fa
             ..Ask::default()
         },
     };
-    let (workload, _) = service
+    let (workload, create) = service
         .driver
         .submit(
             demand,
@@ -281,6 +294,7 @@ fn failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_fa
             },
         )
         .unwrap();
+    service.dispatch(create).unwrap();
     let status = service.driver.status(workload).unwrap().unwrap();
     assert!(
         status.created,
@@ -290,6 +304,14 @@ fn failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_fa
         sim.inspect(&status.physical).unwrap().class,
         hex_api::Class::Process
     );
-    service.driver.delete(workload).unwrap();
+    assert_eq!(native.creates.load(Ordering::SeqCst), 1);
+    let delete = service.driver.delete(workload).unwrap();
+    service.dispatch(delete).unwrap();
     assert!(sim.list().unwrap().is_empty());
+    assert_eq!(native.deletes.load(Ordering::SeqCst), 1);
+    assert_eq!(observer.creates.load(Ordering::SeqCst), 0);
+    assert_eq!(observer.deletes.load(Ordering::SeqCst), 0);
+    eprintln!(
+        "CPU actual Service lifecycle: native_create=1; native_delete=1; observer_create=0; observer_delete=0; simulated_backend=true; native_hardware_effect=false"
+    );
 }

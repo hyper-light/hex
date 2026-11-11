@@ -611,6 +611,8 @@ mod tests {
         queries: AtomicUsize,
         native: Option<triomphe::Arc<RecoveringNative>>,
         finalized: AtomicUsize,
+        luid: Option<[u8; 8]>,
+        launches: AtomicUsize,
     }
     impl Books for Cold {
         fn with_handoff_transaction(
@@ -684,7 +686,7 @@ mod tests {
         }
         fn physical_luid(&self, _: hex_api::DeviceId) -> Result<[u8; 8], Refusal> {
             self.queries.fetch_add(1, Ordering::SeqCst);
-            Err(refused_model())
+            self.luid.ok_or_else(refused_model)
         }
         fn with_transaction(
             &self,
@@ -793,6 +795,7 @@ mod tests {
             _: shards_api::LaunchIo,
             _: std::time::Duration,
         ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            self.launches.fetch_add(1, Ordering::SeqCst);
             Err(refused_model())
         }
         fn attach_managed(
@@ -904,6 +907,8 @@ mod tests {
                 queries: AtomicUsize::new(0),
                 native: Some(native.clone()),
                 finalized: AtomicUsize::new(0),
+                luid: None,
+                launches: AtomicUsize::new(0),
             });
             let books: Arc<dyn Books> = owner.clone();
             runtime.bind_books(Arc::downgrade(&books)).unwrap();
@@ -991,6 +996,8 @@ mod tests {
             queries: AtomicUsize::new(0),
             native: None,
             finalized: AtomicUsize::new(0),
+            luid: None,
+            launches: AtomicUsize::new(0),
         });
         let books: Arc<dyn Books> = owner.clone();
         runtime.bind_books(Arc::downgrade(&books)).unwrap();

@@ -438,7 +438,9 @@ impl Slot {
                 .routes
                 .as_ref()
                 .and_then(|routes| routes.backing(key))
-                .is_none_or(|(backing, _)| selected != Some(backing.devices.len()))
+                .is_none_or(|(backing, _)| {
+                    selected.is_none_or(|count| count == 0 || count > backing.devices.len())
+                })
             {
                 return Verdict::NoGpu;
             }

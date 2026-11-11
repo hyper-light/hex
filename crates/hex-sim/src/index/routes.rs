@@ -462,22 +462,20 @@ impl Routes {
             return false;
         };
         if choice.offer.key.execution != Execution::ShardsShared {
-            let used = self
+            let consumed = self
                 .catalog
                 .offers
                 .iter()
                 .zip(&self.used)
                 .filter(|(offer, _)| offer.backing == Some(key))
-                .try_fold(0u32, |sum, (_, used)| sum.checked_add(used.gpus))
-                .and_then(|used| used.checked_add(demand.need.gpus));
+                .any(|(_, used)| *used != Resources::default());
             let physical = backing
                 .devices
                 .iter()
                 .filter(|id| id.kind == hex_api::DeviceKind::Gpu)
                 .count();
-            return used
-                .zip(u32::try_from(physical).ok())
-                .is_some_and(|(used, physical)| used <= physical);
+            return !consumed
+                && u32::try_from(physical).is_ok_and(|physical| demand.need.gpus <= physical);
         }
         let used = self
             .catalog

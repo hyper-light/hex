@@ -23,7 +23,10 @@ fn observer_cost(config: &Config) -> Result<RuntimeCost, Refusal> {
     Ok(cost)
 }
 
-fn observer_configuration(config: &Config, claims: &[DeviceId]) -> Result<[u8; 32], Refusal> {
+pub(super) fn observer_configuration(
+    config: &Config,
+    claims: &[DeviceId],
+) -> Result<[u8; 32], Refusal> {
     config.check()?;
     if claims.len() > hex_api::MAX_DEVICES
         || claims
@@ -82,11 +85,11 @@ fn observer_configuration(config: &Config, claims: &[DeviceId]) -> Result<[u8; 3
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::time::Duration;
 
-    fn config() -> Config {
+    pub(in super::super) fn config() -> Config {
         let guest = CapacityResources {
             cpu_milli: 1_000,
             mem_bytes: 64 << 20,

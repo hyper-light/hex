@@ -11,7 +11,7 @@ use hex_api::{
     Refusal, Runtime, Signal, Stdio, Usage,
 };
 use hex_client::guest::{Client, LinkOwner, own_link, stage};
-use hex_core::record::{BoxRecord, Phase};
+use hex_core::record::{BoxRecord, Phase, PoolRecord};
 
 use super::{Books, Config, Transaction, exhausted, invalid, observations, transport, vfio};
 use crate::devices::{Binding, ManagedLaunch, Route, SharedCatalog, managed_scope_id};
@@ -605,6 +605,149 @@ impl FirecrackerRuntime {
         Ok(())
     }
 
+    /// Read-only no-submission proof under the SAME canonical source/Box/full-P guard. This is
+    /// not native absence proof: after source Released, ordinary scope cleanup remains mandatory.
+    pub fn handoff_unsubmitted(
+        &self,
+        record: &BoxRecord,
+        source: &PoolRecord,
+    ) -> Result<(), Refusal> {
+        self.preflight_record(record)?;
+        self.preflight_backing(source)?;
+        let id = &record.spec.id;
+        let route = record.spec.route.ok_or_else(|| uncertain(id))?;
+        if !matches!(record.phase, Phase::Creating | Phase::Deleting)
+            || record.init.is_some()
+            || record.run.is_some()
+            || record.exit.is_some()
+            || !record.dirs.is_empty()
+            || route.key.execution != hex_api::Execution::Firecracker
+            || route.backing != Some(source.key)
+            || !matches!(
+                source.phase,
+                hex_api::BackingPhase::Live | hex_api::BackingPhase::Draining
+            )
+        {
+            return Err(uncertain(id));
+        }
+        route.check_backing_parts(
+            record.spec.allocation.map(|allocation| allocation.cost),
+            source.key,
+            source.cost,
+            &source.devices,
+            &record.spec.devices,
+        )?;
+        record.native_commitment()?;
+        source.native_commitment()?;
+        // The canonical dirs write precedes private directory creation and native launch.
+        // A collision or an unread path cannot prove that this incarnation was never submitted.
+        match fs::symlink_metadata(self.paths(record)?.dir) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(Refusal::os(
+                "checking unsubmitted Firecracker incarnation",
+                error,
+            )),
+            Ok(_) => Err(uncertain(id)),
+        }
+    }
+
+    fn create_handoff(
+        &self,
+        spec: BoxSpec,
+        key: hex_api::BackingKey,
+        until: Instant,
+    ) -> Result<BoxInfo, Refusal> {
+        let source = self
+            .authority()?
+            .pool_records()?
+            .into_iter()
+            .find(|pool| pool.key == key)
+            .ok_or(Refusal::Backing {
+                key,
+                cause: LifecycleCause::Uncertain,
+            })?;
+        self.preflight_backing(&source)?;
+        // This is an exact isolation/identity check, not another picker. Refuse an inseparable
+        // unselected GPU before draining the observer; companion metadata cannot enlarge S.
+        drop(vfio::plan(&self.catalog, &spec.devices)?);
+        let keys = self.catalog.conflict_ids(&source.devices)?;
+        let id = spec.id.try_clone()?;
+        let (pending, commitment, init) = crate::devices::with_handoff_transaction(
+            &self.books,
+            &id,
+            &key,
+            &keys,
+            |transaction| {
+                let source = transaction.read_pool(&key)?.ok_or_else(|| uncertain(&id))?;
+                self.preflight_backing(&source)?;
+                if source.phase != hex_api::BackingPhase::Live {
+                    return Err(Refusal::Backing {
+                        key,
+                        cause: LifecycleCause::Pending,
+                    });
+                }
+                if transaction.read(&id)?.is_some() {
+                    return Err(Refusal::Exists(id.try_clone()?));
+                }
+                let records = transaction.records()?;
+                if records.len() >= crate::MAX_BOXES {
+                    return Err(Refusal::Full(crate::MAX_BOXES));
+                }
+                let pools = transaction.pool_records()?;
+                self.catalog.prepare(&spec, &records, &pools)?;
+                let commitment = source.native_commitment()?;
+                transaction.put(&BoxRecord::new(spec, Phase::Creating, Vec::new()))?;
+                let pending = transaction.read(&id)?.ok_or_else(|| uncertain(&id))?;
+                self.handoff_unsubmitted(&pending, &source)?;
+                Ok((pending, commitment, source.init))
+            },
+        )?;
+        // No Box or device turn is held while the SAME owner drains the original full-P scope.
+        // Controller exit alone never produces this positive whole-scope Released receipt.
+        let released = self.release_observer_before(&key, Some(until))?;
+        remaining(until)?;
+        crate::devices::with_handoff_transaction(&self.books, &id, &key, &keys, |transaction| {
+            let source = transaction.read_pool(&key)?.ok_or_else(|| uncertain(&id))?;
+            self.preflight_backing(&source)?;
+            if source.phase != hex_api::BackingPhase::Released
+                || source.exit.is_none()
+                || source.native_commitment()? != commitment
+                || source.init != init
+                || released.key != key
+                || released.phase != hex_api::BackingPhase::Released
+                || released.cost != source.cost
+                || released.devices != source.devices
+            {
+                return Err(uncertain(&id));
+            }
+            if transaction.read(&id)?.as_ref() != Some(&pending) {
+                return Err(uncertain(&id));
+            }
+            let scope = pending.native_scope.ok_or_else(|| uncertain(&id))?;
+            self.create_or_cleanup(&id, pending.spec, Some(scope), transaction, until)
+        })
+    }
+
+    fn create_or_cleanup(
+        &self,
+        id: &BoxId,
+        spec: BoxSpec,
+        scope: Option<hex_core::record::NativeScope>,
+        transaction: &dyn Transaction,
+        until: Instant,
+    ) -> Result<BoxInfo, Refusal> {
+        match self.create_inner(spec, scope, transaction, until) {
+            Ok(info) => Ok(info),
+            Err(error) => match transaction.read(id)? {
+                Some(_) => match self.remove(id, transaction) {
+                    Ok(()) => Err(error),
+                    Err(_) => Err(uncertain(id)),
+                },
+                None => Err(error),
+            },
+        }
+    }
+
     fn current_capacity(
         &self,
         class: Class,
@@ -835,52 +978,16 @@ impl Runtime for FirecrackerRuntime {
                 .validate_route(&spec)?;
         }
         remaining(until)?;
+        if let Some(key) = spec.route.and_then(|route| route.backing) {
+            return self.create_handoff(spec, key, until);
+        }
         let keys = self.catalog.conflict_ids(&spec.devices)?;
         let id = spec.id.try_clone()?;
-        let (spec, scope) = if let Some(key) = spec.route.and_then(|route| route.backing) {
-            let pending =
-                crate::devices::with_transaction(&self.books, &id, &keys, |transaction| {
-                    if transaction.read(&id)?.is_some() {
-                        return Err(Refusal::Exists(id.try_clone()?));
-                    }
-                    let records = transaction.records()?;
-                    if records.len() >= crate::MAX_BOXES {
-                        return Err(Refusal::Full(crate::MAX_BOXES));
-                    }
-                    let pools = transaction.pool_records()?;
-                    self.catalog.prepare(&spec, &records, &pools)?;
-                    transaction.put(&BoxRecord::new(spec, Phase::Creating, Vec::new()))?;
-                    transaction.read(&id)?.ok_or_else(|| uncertain(&id))
-                })?;
-            // No Box/device turn is held while entering this SAME owner's Pool transaction.
-            // A failed or controller-only stop retains both canonical handoff claims.
-            let released = self.release_observer_before(&key, Some(until))?;
-            if released.key != key
-                || released.phase != hex_api::BackingPhase::Released
-                || released.devices != pending.spec.devices
-            {
-                return Err(uncertain(&id));
-            }
-            let scope = pending.native_scope.ok_or_else(|| uncertain(&id))?;
-            (pending.spec, Some(scope))
-        } else {
-            (spec, None)
-        };
-        remaining(until)?;
         crate::devices::with_transaction(&self.books, &id, &keys, |transaction| {
-            if scope.is_none() && transaction.read(&id)?.is_some() {
+            if transaction.read(&id)?.is_some() {
                 return Err(Refusal::Exists(id.try_clone()?));
             }
-            match self.create_inner(spec, scope, transaction, until) {
-                Ok(info) => Ok(info),
-                Err(error) => match transaction.read(&id)? {
-                    Some(_) => match self.remove(&id, transaction) {
-                        Ok(()) => Err(error),
-                        Err(_) => Err(uncertain(&id)),
-                    },
-                    None => Err(error),
-                },
-            }
+            self.create_or_cleanup(&id, spec, None, transaction, until)
         })
     }
 
@@ -964,6 +1071,36 @@ impl Runtime for FirecrackerRuntime {
     }
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
         let record = self.record(id)?;
+        if let Some(key) = record.spec.route.and_then(|route| route.backing) {
+            let source = self
+                .authority()?
+                .pool_records()?
+                .into_iter()
+                .find(|pool| pool.key == key)
+                .ok_or_else(|| uncertain(id))?;
+            if matches!(
+                source.phase,
+                hex_api::BackingPhase::Live | hex_api::BackingPhase::Draining
+            ) {
+                let keys = self.catalog.conflict_ids(&source.devices)?;
+                return crate::devices::with_handoff_transaction(
+                    &self.books,
+                    id,
+                    &key,
+                    &keys,
+                    |transaction| {
+                        let source = transaction.read_pool(&key)?.ok_or_else(|| uncertain(id))?;
+                        let mut current = transaction.read(id)?.ok_or_else(|| missing(id))?;
+                        self.handoff_unsubmitted(&current, &source)?;
+                        current.phase = Phase::Deleting;
+                        transaction.put(&current)?;
+                        // No Box native scope was submitted. Original full-P scope/claims remain
+                        // owned by its PoolRecord; cancellation removes only this consuming reference.
+                        transaction.remove(id)
+                    },
+                );
+            }
+        }
         let keys = self.catalog.conflict_ids(&record.spec.devices)?;
         crate::devices::with_transaction(&self.books, id, &keys, |transaction| {
             self.remove(id, transaction)
@@ -1085,5 +1222,173 @@ mod io_tests {
             output.is_ok() && error.is_ok(),
             "stdout={output:?}; stderr={error:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::*;
+    use crate::devices::{Catalog, PoolRecords, Records};
+    use hex_api::{
+        BackingKey, BackingOffer, BackingPhase, Capacity, Execution, GpuEligibility, ImageArch,
+        ImageOs, ImagePlatform, RouteKey, RouteReceipt, RuntimeCost,
+    };
+
+    struct NoOwnerCalls;
+    impl Books for NoOwnerCalls {
+        fn records(&self) -> Result<Records, Refusal> {
+            panic!("read-only proof must not call Books")
+        }
+        fn pool_records(&self) -> Result<PoolRecords, Refusal> {
+            panic!("read-only proof must not call Books")
+        }
+        fn prepare_pool(
+            &self,
+            _: [u8; 32],
+            _: Execution,
+            _: RuntimeCost,
+            _: &[DeviceId],
+        ) -> Result<BackingOffer, Refusal> {
+            panic!("read-only proof must not call Books")
+        }
+        fn capacity(&self) -> Result<Capacity, Refusal> {
+            panic!("read-only proof must not query capacity")
+        }
+        fn physical_devices(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
+            panic!("read-only proof must not probe")
+        }
+        fn with_transaction(
+            &self,
+            _: &BoxId,
+            _: &[DeviceId],
+            _: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+        ) -> Result<(), Refusal> {
+            panic!("read-only proof must not acquire another transaction")
+        }
+        fn with_pool_transaction(
+            &self,
+            _: &BackingKey,
+            _: &[DeviceId],
+            _: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+        ) -> Result<(), Refusal> {
+            panic!("read-only proof must not acquire another transaction")
+        }
+        fn with_handoff_transaction(
+            &self,
+            _: &BoxId,
+            _: &BackingKey,
+            _: &[DeviceId],
+            _: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+        ) -> Result<(), Refusal> {
+            panic!("read-only proof must not acquire another transaction")
+        }
+    }
+
+    /// AC-T7.4.1: cancelling an unsubmitted S never infers native absence after P Released.
+    /// Only private regular-file metadata and synthetic canonical records; no native/Books calls.
+    #[test]
+    fn unsubmitted_subset_proof_refuses_intent_collision_and_released_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = pool::tests::config();
+        config.state_dir = dir.path().to_owned();
+        let catalog = Catalog::parse(b"hex-devices-1\ngpu\t256\ta\t1\tvfio\t0000:01:00.0\t7\ngpu\t512\tb\t1\tvfio\t0000:02:00.0\t8\n").unwrap();
+        let owner: Arc<dyn Books> = Arc::new(NoOwnerCalls);
+        let runtime = FirecrackerRuntime {
+            config,
+            catalog: triomphe::Arc::try_new(catalog).unwrap(),
+            books: Arc::downgrade(&owner),
+            initialized: std::sync::OnceLock::new(),
+        };
+        let devices = [256, 512]
+            .map(|key| DeviceId {
+                kind: DeviceKind::Gpu,
+                key,
+            })
+            .to_vec();
+        let cost = RuntimeCost {
+            ceiling: runtime.config.cost.floor,
+            ..runtime.config.cost
+        };
+        let mut source = PoolRecord {
+            version: hex_core::record::RECORD_VERSION,
+            key: BackingKey {
+                pool: pool::observer_configuration(&runtime.config, &devices).unwrap(),
+                generation: [3; 16],
+            },
+            execution: Execution::Firecracker,
+            cost,
+            allocation: Some(
+                cost.allocate(hex_api::CapacityResources::default())
+                    .unwrap(),
+            ),
+            devices,
+            phase: BackingPhase::Live,
+            init: Some(hex_core::record::ProcId {
+                pid: 1,
+                start_ticks: 1,
+            }),
+            exit: None,
+        };
+        let spec = BoxSpec {
+            id: BoxId::new("unsubmitted-subset").unwrap(),
+            bounds: hex_api::Bounds {
+                cpu_max_milli: Some(1000),
+                memory_max: Some(hex_api::MIN_MEMORY),
+                ..hex_api::Bounds::default()
+            },
+            class: ClassSpec::Firecracker(Box::new(hex_api::OciSpec {
+                rootfs: hex_api::Rootfs::Dir("/fixture/root".into()),
+                init: Program::of(&["true"]),
+                mounts: Vec::new(),
+                hostname: None,
+                network: hex_api::Network::Private,
+                hosts: Vec::new(),
+            })),
+            owner: None,
+            devices: vec![source.devices[0]],
+            allocation: Some(
+                runtime
+                    .config
+                    .cost
+                    .allocate(hex_api::CapacityResources {
+                        cpu_milli: 1000,
+                        mem_bytes: hex_api::MIN_MEMORY,
+                        disk_bytes: 0,
+                    })
+                    .unwrap(),
+            ),
+            route: Some(RouteReceipt {
+                key: RouteKey {
+                    class: Class::Firecracker,
+                    image: ImagePlatform {
+                        os: ImageOs::Linux,
+                        arch: ImageArch::Amd64,
+                    },
+                    execution: Execution::Firecracker,
+                    gpu: GpuEligibility::Required,
+                },
+                backing: Some(source.key),
+            }),
+        };
+        let mut record = BoxRecord::new(spec, Phase::Creating, Vec::new());
+        record.native_scope = Some(hex_core::record::NativeScope::from_bytes([6; 16]));
+        runtime.handoff_unsubmitted(&record, &source).unwrap();
+        record.phase = Phase::Deleting;
+        source.phase = BackingPhase::Draining;
+        runtime.handoff_unsubmitted(&record, &source).unwrap();
+        let paths = runtime.paths(&record).unwrap();
+        fs::create_dir(&paths.dir).unwrap();
+        assert!(runtime.handoff_unsubmitted(&record, &source).is_err());
+        fs::remove_dir(&paths.dir).unwrap();
+        record.init = source.init;
+        assert!(runtime.handoff_unsubmitted(&record, &source).is_err());
+        record.init = None;
+        record.dirs.push(paths.dir);
+        assert!(runtime.handoff_unsubmitted(&record, &source).is_err());
+        record.dirs.clear();
+        source.phase = BackingPhase::Released;
+        source.exit = Some(hex_api::Exit::Code(0));
+        assert!(runtime.handoff_unsubmitted(&record, &source).is_err());
+        assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
     }
 }

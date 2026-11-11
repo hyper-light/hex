@@ -853,3 +853,147 @@ fn unavailable_route_keeps_committed_recovery_refund_and_backing_charge() {
     let mut unavailable = FitIndex::new(&[offered]).unwrap();
     assert!(unavailable.grant_backing(NodeId(0), key).is_err());
 }
+
+fn subset_observer_fixture(native: bool) -> (NodeSpec, Demand, BackingOffer) {
+    let ids = [7, 8].map(|key| hex_api::DeviceId {
+        kind: hex_api::DeviceKind::Gpu,
+        key,
+    });
+    let source = BackingOffer {
+        key: BackingKey {
+            pool: [91; 32],
+            generation: [92; 16],
+        },
+        cost: profile(),
+        phase: BackingPhase::Live,
+        devices: ids.to_vec(),
+    };
+    let mut offered = NodeSpec::new(
+        NodeId(0),
+        Resources {
+            cpu_milli: 8000,
+            mem_bytes: 8 << 30,
+            disk_bytes: 0,
+            gpus: 2,
+        },
+    );
+    offered.virt.kvm = true;
+    offered.classes = Classes::ALL;
+    for (gpu, id) in offered.devices.iter_mut().zip(ids) {
+        gpu.key = Some(id.key);
+        gpu.classes = Classes::ALL;
+    }
+    let mut offers = vec![RouteOffer {
+        key: RouteKey {
+            class: hex_api::Class::Firecracker,
+            image: image(ImageOs::Linux, false),
+            execution: Execution::Firecracker,
+            gpu: GpuEligibility::Required,
+        },
+        cost: Some(profile()),
+        backing: Some(source.key),
+    }];
+    if native {
+        offers.push(RouteOffer {
+            key: RouteKey {
+                class: hex_api::Class::Oci,
+                image: image(ImageOs::Linux, false),
+                execution: Execution::Native,
+                gpu: GpuEligibility::Any,
+            },
+            cost: None,
+            backing: None,
+        });
+    }
+    offered.routes = Some(
+        RuntimeRoutes {
+            admit: None,
+            offers,
+            device_routes: vec![if native { 3 } else { 1 }; 2],
+            backings: vec![source.try_clone().unwrap()],
+        }
+        .share()
+        .unwrap(),
+    );
+    let request = Demand {
+        class: Class::Firecracker,
+        ask: Ask {
+            runtime_class: Some(hex_api::Class::Firecracker),
+            os: Some(Os::Linux),
+            arch: Some(crate::model::Arch::X86_64),
+            ..Ask::default()
+        },
+        ..demand(Some(Os::Linux), 1)
+    };
+    (offered, request, source)
+}
+
+/// AC-T7.4.1: one subset cannot consume a second lifetime or refund the original full-P scope.
+#[test]
+fn exact_subset_has_one_consumer_and_cancellation_keeps_full_backing_reservation() {
+    let (offered, request, _) = subset_observer_fixture(false);
+    let mut index = FitIndex::new(&[offered]).unwrap();
+    let before = index.key(NodeId(0)).unwrap();
+    let route = index.route(NodeId(0), &request).unwrap();
+    let allocation = index.allocation(NodeId(0), &request).unwrap();
+    index
+        .take_routed(NodeId(0), WorkloadId(91), &request, allocation, route)
+        .unwrap();
+    assert_eq!(
+        index.held_devices(NodeId(0), WorkloadId(91)).unwrap().len(),
+        1
+    );
+    assert_ne!(index.verdict(NodeId(0), &request).unwrap(), Verdict::Admits);
+    assert!(
+        index
+            .take_routed(NodeId(0), WorkloadId(92), &request, allocation, route)
+            .is_err()
+    );
+    index
+        .give_routed(NodeId(0), WorkloadId(91), &request, allocation, route)
+        .unwrap();
+    assert_eq!(index.key(NodeId(0)).unwrap(), before);
+    assert_eq!(index.verdict(NodeId(0), &request).unwrap(), Verdict::Admits);
+}
+
+/// AC-T7.4.1 source-first control: terminal P does not make its stale sibling sample current.
+/// This new lifecycle-freshness concern is UNRUN, not an accepted red or an included remedy.
+#[test]
+fn released_observer_siblings_require_new_observation_before_native_route_admission() {
+    let (offered, request, mut source) = subset_observer_fixture(true);
+    let mut index = FitIndex::new(&[offered]).unwrap();
+    let route = index.route(NodeId(0), &request).unwrap();
+    let allocation = index.allocation(NodeId(0), &request).unwrap();
+    index
+        .take_routed(NodeId(0), WorkloadId(91), &request, allocation, route)
+        .unwrap();
+    let native = Demand {
+        class: Class::Oci,
+        ask: Ask {
+            runtime_class: Some(hex_api::Class::Oci),
+            os: Some(Os::Linux),
+            arch: Some(crate::model::Arch::X86_64),
+            ..Ask::default()
+        },
+        ..request
+    };
+    assert_eq!(index.verdict(NodeId(0), &native).unwrap(), Verdict::NoGpu);
+    source.phase = BackingPhase::Draining;
+    index.observe_backing(NodeId(0), &source).unwrap();
+    assert_eq!(index.verdict(NodeId(0), &native).unwrap(), Verdict::NoGpu);
+    source.phase = BackingPhase::Released;
+    index.observe_backing(NodeId(0), &source).unwrap();
+    assert_eq!(
+        index.held_devices(NodeId(0), WorkloadId(91)).unwrap().len(),
+        1
+    );
+    let actual = index.verdict(NodeId(0), &native).unwrap();
+    eprintln!(
+        "released sibling original: native={actual:?}; fresh physical observations=0; native_effect=false"
+    );
+    assert_eq!(
+        actual,
+        Verdict::NoGpu,
+        "the existing catalog sample predates release; a new successful observation is required for the sibling"
+    );
+}
