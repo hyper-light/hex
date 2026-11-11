@@ -16,6 +16,10 @@ pub(super) enum Phase {
     Intent,
     Running(shards_api::Identity),
     Stopping(shards_api::Identity),
+    Released {
+        identity: Option<shards_api::Identity>,
+        status: shards_api::ManagedStatus,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,8 +64,40 @@ pub fn resources(config: &GuestConfig) -> Result<CapacityResources, Refusal> {
 
 impl Record {
     pub fn intent(spec: &BoxSpec, config: &GuestConfig) -> Result<Self, Refusal> {
+        let receipt = Self::retained(spec)?;
+        let configured = resources(config)?;
+        if u64::from(receipt.vcpus).checked_mul(1000) != Some(configured.cpu_milli)
+            || receipt.memory_mib.checked_mul(1 << 20) != Some(configured.mem_bytes)
+        {
+            return Err(invalid("admitted VM disagrees with new configured VM"));
+        }
+        Ok(receipt)
+    }
+
+    pub fn retained(spec: &BoxSpec) -> Result<Self, Refusal> {
         spec.check()?;
-        let reserved = resources(config)?;
+        let reserved = spec
+            .allocation
+            .ok_or_else(|| invalid("dedicated VM has no original allocation"))?
+            .guest()?;
+        if reserved.cpu_milli.checked_rem(1000) != Some(0)
+            || reserved.mem_bytes.checked_rem(1 << 20) != Some(0)
+        {
+            return Err(invalid(
+                "admitted VM resources are not exact native CPU/MiB units",
+            ));
+        }
+        let vcpus = u32::try_from(
+            reserved
+                .cpu_milli
+                .checked_div(1000)
+                .ok_or_else(|| invalid("CPU unit conversion failed"))?,
+        )
+        .map_err(|_| invalid("admitted vCPUs exceed their native representation"))?;
+        let memory_mib = reserved
+            .mem_bytes
+            .checked_div(1 << 20)
+            .ok_or_else(|| invalid("memory unit conversion failed"))?;
         if (!matches!(spec.class.class(), Class::Oci | Class::Shards))
             || (spec.devices.is_empty() && spec.class.class() != Class::Shards)
             || spec.devices.iter().any(|id| id.kind != DeviceKind::Gpu)
@@ -90,22 +126,37 @@ impl Record {
             devices,
             class: spec.class.class(),
             physical: Vec::new(),
-            vcpus: config.vcpus,
-            memory_mib: config.memory_mib,
+            vcpus,
+            memory_mib,
             phase: Phase::Intent,
         })
     }
 
-    pub fn matches(&self, spec: &BoxSpec, config: &GuestConfig) -> Result<(), Refusal> {
-        let expected = Self::intent(spec, config)?;
-        if self.id != expected.id
-            || self.devices != expected.devices
-            || self.class != expected.class
-            || self.vcpus != expected.vcpus
-            || self.memory_mib != expected.memory_mib
+    pub fn matches(&self, spec: &BoxSpec) -> Result<(), Refusal> {
+        spec.check()?;
+        let allocation = spec
+            .allocation
+            .ok_or_else(|| invalid("dedicated record lost its admission receipt"))?;
+        let guest = allocation.guest()?;
+        let cpu = u64::from(self.vcpus)
+            .checked_mul(1000)
+            .ok_or_else(|| invalid("receipt CPU overflows"))?;
+        let memory = self
+            .memory_mib
+            .checked_mul(1 << 20)
+            .ok_or_else(|| invalid("receipt memory overflows"))?;
+        if self.id != spec.id
+            || self.class != spec.class.class()
+            || self.devices.len() != spec.devices.len()
+            || !self
+                .devices
+                .iter()
+                .all(|device| spec.devices.contains(device))
+            || guest.cpu_milli != cpu
+            || guest.mem_bytes != memory
         {
             return Err(invalid(
-                "recovery disagrees with the immutable launch receipt",
+                "recovery disagrees with its original admission and launch receipt",
             ));
         }
         Ok(())
@@ -113,8 +164,13 @@ impl Record {
 
     pub fn identity(&self) -> Result<&shards_api::Identity, Refusal> {
         match &self.phase {
-            Phase::Running(identity) | Phase::Stopping(identity) => Ok(identity),
-            Phase::Intent => Err(invalid(
+            Phase::Running(identity)
+            | Phase::Stopping(identity)
+            | Phase::Released {
+                identity: Some(identity),
+                ..
+            } => Ok(identity),
+            Phase::Intent | Phase::Released { identity: None, .. } => Err(invalid(
                 "a launch intent has no recorded process identity; physical absence is unproved",
             )),
         }
@@ -150,18 +206,62 @@ impl Record {
         }
         match &self.phase {
             Phase::Intent => writeln!(text, "intent"),
-            Phase::Running(id) | Phase::Stopping(id) => {
-                let phase = if matches!(self.phase, Phase::Running(_)) {
-                    "running"
-                } else {
-                    "stopping"
+            Phase::Released {
+                identity: None,
+                status,
+            } => {
+                writeln!(text, "released-unpublished")?;
+                render_status(text, *status)
+            }
+            Phase::Running(id)
+            | Phase::Stopping(id)
+            | Phase::Released {
+                identity: Some(id), ..
+            } => {
+                let phase = match self.phase {
+                    Phase::Running(_) => "running",
+                    Phase::Released { .. } => "released",
+                    _ => "stopping",
                 };
                 writeln!(text, "{phase}")?;
                 writeln!(text, "pid {}", id.pid)?;
                 writeln!(text, "started {}", id.started)?;
-                writeln!(text, "vsock {}", id.vsock.display())
+                writeln!(text, "vsock {}", id.vsock.display())?;
+                if let Phase::Released { status, .. } = self.phase {
+                    render_status(text, status)?;
+                }
+                Ok(())
             }
         }
+    }
+}
+
+fn render_status(
+    out: &mut impl std::fmt::Write,
+    status: shards_api::ManagedStatus,
+) -> std::fmt::Result {
+    match status {
+        shards_api::ManagedStatus::Code(code) => writeln!(out, "status code {code}"),
+        shards_api::ManagedStatus::Signal(signal) => writeln!(out, "status signal {signal}"),
+        shards_api::ManagedStatus::Unknown => writeln!(out, "status unknown"),
+    }
+}
+
+fn parse_status(line: Option<&str>) -> Result<shards_api::ManagedStatus, Refusal> {
+    let value = field(line, "status ")?;
+    if value == "unknown" {
+        return Ok(shards_api::ManagedStatus::Unknown);
+    }
+    let (kind, value) = value
+        .split_once(' ')
+        .ok_or_else(|| invalid("missing terminal status"))?;
+    let number = value
+        .parse::<i32>()
+        .map_err(|_| invalid("invalid native terminal status"))?;
+    match kind {
+        "code" => Ok(shards_api::ManagedStatus::Code(number)),
+        "signal" => Ok(shards_api::ManagedStatus::Signal(number)),
+        _ => Err(invalid("unknown native terminal status kind")),
     }
 }
 
@@ -224,7 +324,11 @@ pub(super) fn remove(path: &Path) -> Result<(), Refusal> {
     let parent = path
         .parent()
         .ok_or_else(|| invalid("receipt has no parent"))?;
-    held::sync_folder(parent).map_err(|e| Refusal::os("syncing selected guest receipt removal", e))
+    match held::sync_folder(parent) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(Refusal::os("syncing selected guest receipt removal", e)),
+    }
 }
 
 fn parse(text: &str) -> Result<Record, Refusal> {
@@ -286,7 +390,11 @@ fn parse(text: &str) -> Result<Record, Refusal> {
         .map_err(|_| invalid("native selectors repeat or exceed their representation"))?;
     let phase = match lines.next() {
         Some("intent") => Phase::Intent,
-        Some(phase @ ("running" | "stopping")) => {
+        Some("released-unpublished") => Phase::Released {
+            identity: None,
+            status: parse_status(lines.next())?,
+        },
+        Some(phase @ ("running" | "stopping" | "released")) => {
             let pid = field(lines.next(), "pid ")?
                 .parse::<u32>()
                 .map_err(|_| invalid("invalid process identity"))?;
@@ -305,12 +413,21 @@ fn parse(text: &str) -> Result<Record, Refusal> {
             let identity = shards_api::Identity {
                 pid,
                 started,
-                vsock: PathBuf::from(vsock),
+                vsock: {
+                    let mut path = PathBuf::new();
+                    path.try_reserve_exact(vsock.len())
+                        .map_err(|_| allocation(vsock.len()))?;
+                    path.push(vsock);
+                    path
+                },
             };
-            if phase == "running" {
-                Phase::Running(identity)
-            } else {
-                Phase::Stopping(identity)
+            match phase {
+                "running" => Phase::Running(identity),
+                "released" => Phase::Released {
+                    identity: Some(identity),
+                    status: parse_status(lines.next())?,
+                },
+                _ => Phase::Stopping(identity),
             }
         }
         _ => return Err(invalid("unknown launch phase")),
@@ -371,7 +488,15 @@ mod tests {
         for phase in [
             Phase::Intent,
             Phase::Running(identity.clone()),
-            Phase::Stopping(identity),
+            Phase::Stopping(identity.clone()),
+            Phase::Released {
+                identity: Some(identity),
+                status: shards_api::ManagedStatus::Signal(9),
+            },
+            Phase::Released {
+                identity: None,
+                status: shards_api::ManagedStatus::Unknown,
+            },
         ] {
             let record = Record { phase, ..record() };
             write(&path, &record).unwrap();

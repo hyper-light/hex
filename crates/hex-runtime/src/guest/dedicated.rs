@@ -4,6 +4,8 @@
 
 use super::selected::{self, Phase, Record};
 use super::*;
+use crate::devices::Transaction;
+use hex_core::record::BoxRecord;
 
 pub(super) struct Guest {
     receipt: Record,
@@ -18,6 +20,7 @@ mod tests {
 
     struct Controlled {
         ended: AtomicBool,
+        released: AtomicBool,
         stops: AtomicUsize,
         wait: Box<dyn Fn() + Send + Sync>,
     }
@@ -26,7 +29,15 @@ mod tests {
         fn process_exited(&self) -> Result<bool, shards_api::Refusal> {
             Ok(self.ended.load(Ordering::SeqCst))
         }
-
+        fn terminal_scope(&self) -> Result<Option<shards_api::TerminalScope>, shards_api::Refusal> {
+            Ok(self.ended.load(Ordering::SeqCst).then(|| {
+                if self.released.load(Ordering::SeqCst) {
+                    shards_api::TerminalScope::Released
+                } else {
+                    shards_api::TerminalScope::Process
+                }
+            }))
+        }
         fn connect(
             &self,
             port: u32,
@@ -55,6 +66,124 @@ mod tests {
                 .load(Ordering::SeqCst)
                 .then_some(shards_api::End::Stopped))
         }
+    }
+
+    impl shards_api::ManagedProcess for Controlled {
+        fn identity(&self) -> Result<&shards_api::Identity, shards_api::Refusal> {
+            static ID: std::sync::LazyLock<shards_api::Identity> =
+                std::sync::LazyLock::new(|| shards_api::Identity {
+                    pid: 42,
+                    started: 7,
+                    vsock: "/model/private.sock".into(),
+                });
+            Ok(&ID)
+        }
+        fn stop(&self) -> Result<(), shards_api::Refusal> {
+            shards_api::Guest::stop(self)
+        }
+        fn terminal(&self) -> Result<Option<shards_api::ManagedEnd>, shards_api::Refusal> {
+            Ok(
+                shards_api::Guest::terminal_scope(self)?.map(|scope| shards_api::ManagedEnd {
+                    status: shards_api::ManagedStatus::Code(0),
+                    scope,
+                }),
+            )
+        }
+        fn wait_for(
+            &self,
+            _: Duration,
+        ) -> Result<Option<shards_api::ManagedEnd>, shards_api::Refusal> {
+            (self.wait)();
+            Ok(shards_api::ManagedProcess::terminal(self)?
+                .filter(|end| end.scope == shards_api::TerminalScope::Released))
+        }
+    }
+
+    struct Cleanup {
+        record: BoxRecord,
+        process: triomphe::Arc<Controlled>,
+        fail_finalize: AtomicBool,
+    }
+    impl Transaction for Cleanup {
+        fn records(&self) -> Result<crate::devices::Records, Refusal> {
+            panic!("cleanup has no inventory effect")
+        }
+        fn read(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
+            Ok((self.record.spec.id == *id).then(|| self.record.clone()))
+        }
+        fn put(&self, _: &BoxRecord) -> Result<(), Refusal> {
+            panic!("outer owner persists")
+        }
+        fn remove(&self, _: &BoxId) -> Result<(), Refusal> {
+            panic!("outer owner removes")
+        }
+        fn finalize_managed(&self, _: Option<&shards_api::Identity>) -> Result<(), Refusal> {
+            if self.fail_finalize.load(Ordering::SeqCst) {
+                return Err(super::super::books::uncertain(&self.record.spec.id)?);
+            }
+            Ok(())
+        }
+        fn launch_managed(
+            &self,
+            _: &shards_api::PreparedBoot,
+            _: shards_api::LaunchIo,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            panic!("cleanup cannot launch")
+        }
+        fn attach_managed(
+            &self,
+            identity: Option<&shards_api::Identity>,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            if let Some(identity) = identity {
+                assert_eq!(
+                    identity,
+                    shards_api::ManagedProcess::identity(self.process.as_ref()).unwrap()
+                );
+            }
+            Ok(shards_api::managed_receipt(self.process.clone()))
+        }
+    }
+
+    fn model_record(runtime: &GuestRuntime, id: &BoxId) -> BoxRecord {
+        let mut spec = super::super::tests::oci(hex_api::Rootfs::Dir("/rootfs".into()), Vec::new());
+        let ClassSpec::Oci(payload) = spec.class else {
+            panic!("model OCI")
+        };
+        spec.id = id.clone();
+        spec.class = ClassSpec::Shards(payload);
+        spec.bounds.cpu_max_milli = Some(1);
+        spec.bounds.memory_max = Some(1);
+        let floor = runtime.dedicated_resources().unwrap();
+        let cost = hex_api::RuntimeCost {
+            id: [1; 32],
+            floor,
+            ceiling: floor,
+            quantum: hex_api::CapacityResources {
+                cpu_milli: 1000,
+                mem_bytes: 1 << 20,
+                disk_bytes: 1,
+            },
+            guest_overhead: hex_api::CapacityResources::default(),
+            overhead: hex_api::CapacityResources {
+                cpu_milli: 1,
+                mem_bytes: 1,
+                disk_bytes: 0,
+            },
+        };
+        spec.allocation = Some(
+            cost.allocate(hex_api::CapacityResources {
+                cpu_milli: 1,
+                mem_bytes: 1,
+                disk_bytes: 0,
+            })
+            .unwrap(),
+        );
+        let mut record = BoxRecord::new(spec, hex_core::record::Phase::Deleting, Vec::new());
+        record.init = Some(hex_core::record::ProcId {
+            pid: 42,
+            start_ticks: 7,
+        });
+        record
     }
 
     fn runtime(path: &std::path::Path) -> Arc<GuestRuntime> {
@@ -96,9 +225,9 @@ mod tests {
 
     fn info(id: &BoxId) -> BoxInfo {
         BoxInfo {
-            allocation: None,
             id: id.clone(),
             class: Class::Oci,
+            allocation: None,
             state: BoxState::Empty,
             bounds: Bounds::default(),
             adopted: false,
@@ -115,11 +244,15 @@ mod tests {
     ) -> Arc<Booted> {
         let (link, client) = super::super::tests::model_connection();
         let booted = Arc::new(Booted {
-            guest,
+            guest: GuestHandle::Shared(guest),
             link,
             client,
             evented: Mutex::new(None),
-            owner: Some((id.clone(), Class::Shards)),
+            owner: Some(Owner {
+                id: id.clone(),
+                class: Class::Shards,
+                allocation: None,
+            }),
         });
         let receipt = record(id);
         std::fs::create_dir_all(runtime.selected_dir().unwrap()).unwrap();
@@ -147,6 +280,7 @@ mod tests {
         let asked = id.clone();
         let guest = Arc::new(Controlled {
             ended: AtomicBool::new(false),
+            released: AtomicBool::new(false),
             stops: AtomicUsize::new(0),
             wait: Box::new(move || {
                 let runtime = weak.upgrade().unwrap();
@@ -177,6 +311,7 @@ mod tests {
             &id,
             Arc::new(Controlled {
                 ended: AtomicBool::new(false),
+                released: AtomicBool::new(false),
                 stops: AtomicUsize::new(0),
                 wait: Box::new(|| {}),
             }),
@@ -200,13 +335,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let runtime = runtime(dir.path());
         let id = BoxId::new("selected-stop").unwrap();
-        let guest = Arc::new(Controlled {
+        let guest = triomphe::Arc::try_new(Controlled {
             ended: AtomicBool::new(false),
+            released: AtomicBool::new(false),
             stops: AtomicUsize::new(0),
             wait: Box::new(|| {}),
-        });
-        install(&runtime, &id, guest.clone());
-        assert!(runtime.delete_selected(&id).is_err());
+        })
+        .unwrap();
+        std::fs::create_dir_all(runtime.selected_dir().unwrap()).unwrap();
+        selected::write(&runtime.selected_path(&id).unwrap(), &record(&id)).unwrap();
+        let transaction = Cleanup {
+            record: model_record(&runtime, &id),
+            process: guest.clone(),
+            fail_finalize: AtomicBool::new(true),
+        };
+        assert!(runtime.delete_selected(&id, &transaction).is_err());
         assert_eq!(guest.stops.load(Ordering::SeqCst), 1);
         assert!(matches!(
             selected::read(&runtime.selected_path(&id).unwrap())
@@ -215,9 +358,44 @@ mod tests {
                 .phase,
             Phase::Stopping(_)
         ));
-        assert!(runtime.selected_running(&id).is_err());
+        assert!(
+            shards_api::ManagedProcess::terminal(guest.as_ref())
+                .unwrap()
+                .is_none()
+        );
         guest.ended.store(true, Ordering::SeqCst);
-        assert_eq!(runtime.delete_selected(&id), Ok(true));
+        assert!(
+            runtime.delete_selected(&id, &transaction).is_err(),
+            "controller exit leaves helpers uncertain"
+        );
+        guest.released.store(true, Ordering::SeqCst);
+        assert_eq!(runtime.delete_selected(&id, &transaction), Ok(()));
+        let stops = guest.stops.load(Ordering::SeqCst);
+        assert_eq!(runtime.delete_selected(&id, &transaction), Ok(()));
+        assert_eq!(
+            guest.stops.load(Ordering::SeqCst),
+            stops,
+            "durable Released never stops a name-reused native scope"
+        );
+        assert!(runtime.finalize_selected(&id, &transaction).is_err());
+        assert!(matches!(
+            selected::read(&runtime.selected_path(&id).unwrap())
+                .unwrap()
+                .unwrap()
+                .phase,
+            Phase::Released {
+                identity: Some(_),
+                status: shards_api::ManagedStatus::Code(0),
+            }
+        ));
+        transaction.fail_finalize.store(false, Ordering::SeqCst);
+        runtime.finalize_selected(&id, &transaction).unwrap();
+        assert!(
+            selected::read(&runtime.selected_path(&id).unwrap())
+                .unwrap()
+                .is_some()
+        );
+        runtime.forget_selected(&id).unwrap();
         assert!(
             selected::read(&runtime.selected_path(&id).unwrap())
                 .unwrap()
@@ -236,16 +414,63 @@ mod tests {
             &id,
             Arc::new(Controlled {
                 ended: AtomicBool::new(false),
+                released: AtomicBool::new(false),
                 stops: AtomicUsize::new(0),
                 wait: Box::new(|| {}),
             }),
         );
         assert_eq!(booted.host_info(info(&id)).unwrap().class, Class::Shards);
+        let allocation = model_record(&runtime, &id).spec.allocation;
+        let (link, client) = super::super::tests::model_connection();
+        let projected = Booted {
+            guest: GuestHandle::Shared(Arc::new(Controlled {
+                ended: AtomicBool::new(false),
+                released: AtomicBool::new(false),
+                stops: AtomicUsize::new(0),
+                wait: Box::new(|| {}),
+            })),
+            link,
+            client,
+            evented: Mutex::new(None),
+            owner: Some(Owner {
+                id: id.clone(),
+                class: Class::Shards,
+                allocation,
+            }),
+        };
+        let mut exited = info(&id);
+        exited.state = BoxState::Empty;
+        exited.exit = Some(hex_api::Exit::Code(0));
+        assert_eq!(projected.host_info(exited).unwrap().allocation, allocation);
+        let mut forged = info(&id);
+        forged.allocation = allocation;
+        assert!(
+            projected.host_info(forged).is_err(),
+            "inner OCI cannot mint a host VM allocation"
+        );
         assert!(
             booted
                 .host_info(info(&BoxId::new("foreign-box").unwrap()))
                 .is_err()
         );
+    }
+    /// AC-T7.4.1: old allocation and actual VM units survive a new initialized
+    /// admission profile; recovery cannot resize the old VM to today's config.
+    #[test]
+    fn retained_allocation_survives_current_config_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = runtime(dir.path());
+        let id = BoxId::new("retained-cost").unwrap();
+        let record = model_record(&runtime, &id);
+        let receipt = Record::retained(&record.spec).unwrap();
+        receipt.matches(&record.spec).unwrap();
+        let mut changed = runtime.config.clone();
+        changed.vcpus = 2;
+        assert!(Record::intent(&record.spec, &changed).is_err());
+        receipt.matches(&record.spec).unwrap();
+        let mut forged = record.spec.clone();
+        forged.allocation.as_mut().unwrap().resources.mem_bytes = 1;
+        assert!(receipt.matches(&forged).is_err());
     }
 }
 
@@ -338,6 +563,14 @@ impl Drop for Reservation<'_> {
     }
 }
 
+fn copy_path(path: &std::path::Path) -> Result<PathBuf, Refusal> {
+    let mut text = OsString::new();
+    text.try_reserve_exact(path.as_os_str().len())
+        .map_err(|_| invalid("native path storage unavailable"))?;
+    text.push(path.as_os_str());
+    Ok(PathBuf::from(text))
+}
+
 fn invalid(why: impl Into<String>) -> Refusal {
     Refusal::Invalid {
         what: "dedicated GPU guest",
@@ -345,28 +578,16 @@ fn invalid(why: impl Into<String>) -> Refusal {
     }
 }
 
-fn absent(why: &shards_api::Refusal) -> bool {
-    matches!(
-        why,
-        shards_api::Refusal::Gone { .. }
-            | shards_api::Refusal::Ended(_)
-            | shards_api::Refusal::Process {
-                failure: shards_api::ProcessFailure::DifferentStart { .. }
-                    | shards_api::ProcessFailure::Exited,
-                ..
-            }
-    )
-}
-
 impl Booted {
     pub(super) fn host_info(&self, mut info: BoxInfo) -> Result<BoxInfo, Refusal> {
-        if let Some((id, class)) = &self.owner {
-            if info.id != *id || info.class != Class::Oci {
+        if let Some(owner) = &self.owner {
+            if info.id != owner.id || info.class != Class::Oci || info.allocation.is_some() {
                 return Err(invalid(
-                    "dedicated guest returned a foreign box or workload class",
+                    "dedicated guest returned a foreign box, workload class or native charge",
                 ));
             }
-            info.class = *class;
+            info.class = owner.class;
+            info.allocation = owner.allocation;
         }
         Ok(info)
     }
@@ -375,16 +596,17 @@ impl Booted {
 impl GuestRuntime {
     pub(super) fn booted_for(&self, id: &BoxId) -> Result<Option<Arc<Booted>>, Refusal> {
         let dedicated = if self.uses_books() {
-            self.recorded_box(id)?.is_some_and(|record| {
-                !record.spec.devices.is_empty() || matches!(record.spec.class, ClassSpec::Shards(_))
-            })
+            self.recorded_box(id)?
+                .is_some_and(|record| self.owns_record(&record.spec))
         } else if self.record.is_some() {
             selected::read(&self.selected_path(id)?)?.is_some()
         } else {
             false
         };
         if dedicated {
-            self.selected_running(id)
+            // Forward already owns its canonical method turn. No recursive enter;
+            // recovery/create installs the native route before accepting forwards.
+            self.cached_selected(id)
         } else {
             self.running()
         }
@@ -446,13 +668,67 @@ impl GuestRuntime {
             .record
             .as_ref()
             .ok_or_else(|| invalid("dedicated guests require durable receipts"))?;
-        let mut dir = record.as_os_str().to_os_string();
-        dir.push(".gpu");
-        Ok(PathBuf::from(dir))
+        let mut text = OsString::new();
+        text.try_reserve_exact(
+            record
+                .as_os_str()
+                .len()
+                .checked_add(".gpu".len())
+                .ok_or_else(|| invalid("receipt directory length overflows"))?,
+        )
+        .map_err(|_| invalid("receipt directory storage unavailable"))?;
+        text.push(record.as_os_str());
+        text.push(".gpu");
+        Ok(PathBuf::from(text))
     }
 
     fn selected_path(&self, id: &BoxId) -> Result<PathBuf, Refusal> {
-        Ok(self.selected_dir()?.join(id.as_str()))
+        let mut path = self.selected_dir()?;
+        path.try_reserve(
+            id.as_str()
+                .len()
+                .checked_add(1)
+                .ok_or_else(|| invalid("receipt path length overflows"))?,
+        )
+        .map_err(|_| invalid("receipt path storage unavailable"))?;
+        path.push(id.as_str());
+        Ok(path)
+    }
+
+    fn selected_socket(&self, id: &BoxId) -> Result<PathBuf, Refusal> {
+        let mut dir = self.selected_dir()?;
+        let suffix = "-sockets";
+        let mut text = OsString::new();
+        text.try_reserve_exact(
+            dir.as_os_str()
+                .len()
+                .checked_add(suffix.len())
+                .ok_or_else(|| invalid("socket directory length overflows"))?,
+        )
+        .map_err(|_| invalid("socket directory storage unavailable"))?;
+        text.push(dir.as_os_str());
+        text.push(suffix);
+        dir = PathBuf::from(text);
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder
+            .create(&dir)
+            .map_err(|e| Refusal::os("creating private selected socket directory", e))?;
+        held::sync_folder(&dir).map_err(|e| Refusal::os("syncing selected socket directory", e))?;
+        dir.try_reserve(
+            id.as_str()
+                .len()
+                .checked_add(1)
+                .ok_or_else(|| invalid("socket path length overflows"))?,
+        )
+        .map_err(|_| invalid("socket path storage unavailable"))?;
+        dir.push(id.as_str());
+        Ok(dir)
     }
 
     pub(super) fn selected_ids(&self) -> Result<Vec<BoxId>, Refusal> {
@@ -504,7 +780,7 @@ impl GuestRuntime {
         if receipt.devices.is_empty() {
             return Ok(());
         }
-        if self.physical_for(&receipt.devices)? != receipt.physical {
+        if self.catalog_physical(&receipt.devices)? != receipt.physical {
             return Err(invalid(
                 "configured physical binding changed since guest launch",
             ));
@@ -541,32 +817,8 @@ impl GuestRuntime {
         if devices.is_empty() {
             return Ok(Vec::new());
         }
-        let catalog = self
-            .gpu_catalog
-            .as_ref()
-            .ok_or_else(|| invalid("no initialized exact Shards GPU catalog"))?;
-        let mut physical = Vec::new();
-        physical
-            .try_reserve_exact(devices.len())
-            .map_err(|_| Refusal::Exhausted {
-                what: "native guest bindings",
-                bound: devices.len(),
-            })?;
-        for id in devices {
-            let entry = catalog
-                .entries()
-                .iter()
-                .find(|entry| entry.info.id == *id)
-                .ok_or_else(|| invalid("selected GPU is not in the initialized catalog"))?;
-            let Some(crate::devices::Binding::ShardsGpu { physical: native }) =
-                entry.binding(crate::devices::Route::ShardsGpu)
-            else {
-                return Err(invalid("selected GPU has another backend binding"));
-            };
-            physical.push(*native);
-        }
-        shards_api::physical::check_selection(&physical)
-            .map_err(|_| invalid("native GPU binding aliases or exceeds its representation"))?;
+        let physical = self.catalog_physical(devices)?;
+        self.checked_physical(devices, &physical)?;
         Ok(physical)
     }
 
@@ -579,86 +831,152 @@ impl GuestRuntime {
                 id: spec.id.try_clone()?,
                 cause: hex_api::LifecycleCause::Uncertain,
             })?;
-        receipt.matches(spec, &self.config)?;
+        receipt.matches(spec)?;
         self.selected_spec(&receipt)?;
         Ok(())
     }
 
     fn booted(
         &self,
-        guest: Arc<dyn shards_api::Guest>,
+        guest: shards_api::ManagedGuest,
         receipt: &Record,
+        record: &BoxRecord,
     ) -> Result<Arc<Booted>, Refusal> {
-        let link: Arc<dyn Link> = Arc::new(ShardsLink::new(
-            Arc::clone(&guest),
+        let link: Arc<dyn Link> = Arc::new(ShardsLink::managed(
+            guest
+                .try_clone()
+                .map_err(|why| refusal("retaining managed guest connection", &why))?,
             self.first_dial_bound()?,
         ));
         let client = Client::connect(Arc::clone(&link))?;
         let booted = Arc::new(Booted {
-            guest,
+            guest: GuestHandle::Managed(guest),
             link,
             client,
             evented: Mutex::new(None),
-            owner: Some((receipt.id.try_clone()?, receipt.class)),
+            owner: Some(Owner {
+                id: receipt.id.try_clone()?,
+                class: receipt.class,
+                allocation: record.spec.allocation,
+            }),
         });
         self.join(&booted)?;
         Ok(booted)
     }
 
-    pub(super) fn selected_running(&self, id: &BoxId) -> Result<Option<Arc<Booted>>, Refusal> {
-        if self.record.is_none() {
-            return Ok(None);
-        }
+    fn cached_selected(&self, id: &BoxId) -> Result<Option<Arc<Booted>>, Refusal> {
         let mut reservation = self.reserve(id, Operation::Loading)?;
-        if let Some(known) = reservation.previous.take() {
-            let booted = Arc::clone(&known.booted);
-            reservation.previous = Some(known);
-            match booted.guest.wait_for(Duration::ZERO) {
-                Ok(Some(_)) => {
-                    selected::remove(&self.selected_path(id)?)?;
-                    reservation.publish(None)?;
-                    return Ok(None);
-                }
-                Ok(None) => {}
-                Err(why) => return Err(refusal("observing selected guest lifetime", &why)),
-            }
-            if reservation
-                .previous
-                .as_ref()
-                .is_some_and(|known| !matches!(known.receipt.phase, Phase::Running(_)))
-            {
-                return Err(invalid("selected guest is stopping"));
-            }
-            let known = reservation.previous.take();
-            reservation.publish(known)?;
-            return Ok(Some(booted));
-        }
-        let path = self.selected_path(id)?;
-        let Some(receipt) = selected::read(&path)? else {
+        let Some(known) = reservation.previous.take() else {
             reservation.publish(None)?;
-            return Ok(None);
+            return if self.uses_books() {
+                Err(super::books::uncertain(id)?)
+            } else {
+                Ok(None)
+            };
         };
-        if receipt.id != *id
-            || receipt.vcpus != self.config.vcpus
-            || receipt.memory_mib != self.config.memory_mib
-        {
-            return Err(invalid("receipt disagrees with its box or VM envelope"));
-        }
-        let identity = receipt.identity()?;
-        if !matches!(receipt.phase, Phase::Running(_)) {
-            return Err(invalid("selected guest is stopping"));
-        }
-        let spec = self.selected_spec(&receipt)?;
-        let guest: Arc<dyn shards_api::Guest> = match self.guests.attach(identity, &spec) {
-            Ok(guest) => guest.into(),
-            Err(why) if absent(&why) => {
-                selected::remove(&path)?;
-                reservation.publish(None)?;
+        let booted = Arc::clone(&known.booted);
+        reservation.previous = Some(known);
+        let terminal = booted
+            .guest
+            .wait_for(Duration::ZERO)
+            .map_err(|why| refusal("observing selected guest lifetime", &why))?;
+        let scope = booted
+            .guest
+            .terminal_scope()
+            .map_err(|why| refusal("observing selected native scope", &why))?;
+        if terminal.is_some() || scope.is_some() {
+            if scope == Some(shards_api::TerminalScope::Released) {
+                let known = reservation.previous.take();
+                reservation.publish(known)?;
                 return Ok(None);
             }
-            Err(why) => return Err(refusal("taking back selected guest", &why)),
-        };
-        let booted = self.booted(guest, &receipt)?;
+            return Err(super::books::uncertain(id)?);
+        }
+        if reservation
+            .previous
+            .as_ref()
+            .is_some_and(|known| !matches!(known.receipt.phase, Phase::Running(_)))
+        {
+            return Err(super::books::uncertain(id)?);
+        }
+        if self.uses_books() {
+            let record = self.recorded_box(id)?.ok_or(super::books::uncertain(id)?)?;
+            self.validate_binding(&record.spec)?;
+            let identity = booted
+                .guest
+                .identity()
+                .map_err(|why| refusal("validating selected route identity", &why))?;
+            managed::same_init(&record, &identity)?;
+            if booted.owner.as_ref().is_none_or(|owner| {
+                owner.allocation != record.spec.allocation
+                    || owner.class != record.spec.class.class()
+            }) {
+                return Err(super::books::uncertain(id)?);
+            }
+        }
+        let known = reservation.previous.take();
+        reservation.publish(known)?;
+        Ok(Some(booted))
+    }
+
+    fn has_selected_route(&self, id: &BoxId) -> Result<bool, Refusal> {
+        Ok(self
+            .dedicated
+            .lock()
+            .map_err(poisoned)?
+            .iter()
+            .any(|slot| slot.id == *id))
+    }
+
+    pub(super) fn selected_running(&self, id: &BoxId) -> Result<Option<Arc<Booted>>, Refusal> {
+        if !self.uses_books() {
+            return self.cached_selected(id);
+        }
+        let record = self.recorded_box(id)?.ok_or(super::books::uncertain(id)?)?;
+        let keys = self.turn_keys(&record.spec.devices)?;
+        let books = self.books.get().ok_or(super::books::uncertain(id)?)?;
+        crate::devices::with_transaction(books, id, &keys, |transaction| {
+            let current = transaction.read(id)?.ok_or(super::books::uncertain(id)?)?;
+            if current.spec != record.spec || current.init != record.init {
+                return Err(super::books::uncertain(id)?);
+            }
+            self.selected_running_in(id, transaction, &current)
+        })
+    }
+
+    pub fn recover_managed(&self, spec: &BoxSpec) -> Result<(), Refusal> {
+        if !self.owns_record(spec) {
+            return Ok(());
+        }
+        self.validate_binding(spec)?;
+        self.selected_running(&spec.id)?
+            .ok_or(super::books::uncertain(&spec.id)?)?;
+        Ok(())
+    }
+
+    pub(super) fn selected_running_in(
+        &self,
+        id: &BoxId,
+        transaction: &dyn Transaction,
+        record: &BoxRecord,
+    ) -> Result<Option<Arc<Booted>>, Refusal> {
+        if self.has_selected_route(id)? {
+            return self.cached_selected(id);
+        }
+        let reservation = self.reserve(id, Operation::Loading)?;
+        let receipt =
+            selected::read(&self.selected_path(id)?)?.ok_or(super::books::uncertain(id)?)?;
+        receipt.matches(&record.spec)?;
+        let identity = receipt.identity()?;
+        managed::same_init(record, identity)?;
+        if !matches!(receipt.phase, Phase::Running(_)) {
+            return Err(super::books::uncertain(id)?);
+        }
+        let spec = self.selected_spec(&receipt)?;
+        self.checked_physical(&receipt.devices, &receipt.physical)?;
+        let plan = self.managed_plan(&spec, &identity.vsock)?;
+        let guest = managed::attach(transaction, plan, identity)?;
+        let booted = self.booted(guest, &receipt, record)?;
         reservation.publish(Some(Guest {
             receipt,
             booted: Arc::clone(&booted),
@@ -666,7 +984,42 @@ impl GuestRuntime {
         Ok(Some(booted))
     }
 
-    pub(super) fn create_selected(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+    fn managed_plan(
+        &self,
+        spec: &shards_api::GuestSpec,
+        socket: &std::path::Path,
+    ) -> Result<shards_api::PreparedBoot, Refusal> {
+        shards_api::prepare_boot(
+            spec,
+            &self.config.binary,
+            socket,
+            shards_api::recorded_console_bytes(&spec.kernel),
+        )
+        .map_err(|why| refusal("preparing admitted Shards scope", &why))
+    }
+
+    pub(super) fn prepare_selected_create(&self, id: &BoxId) -> Result<(), Refusal> {
+        if self.has_selected_route(id)? {
+            return Err(super::books::uncertain(id)?);
+        }
+        let path = self.selected_path(id)?;
+        if let Some(receipt) = selected::read(&path)? {
+            if receipt.id != *id || !matches!(receipt.phase, Phase::Released { .. }) {
+                return Err(super::books::uncertain(id)?);
+            }
+            // The caller proved the sole canonical record absent under its turn.
+            // This is a completed removal whose final receipt unlink was interrupted.
+            selected::remove(&path)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn create_selected(
+        &self,
+        spec: BoxSpec,
+        transaction: &dyn Transaction,
+    ) -> Result<BoxInfo, Refusal> {
+        self.check_allocation(&spec)?;
         let reservation = self.reserve(&spec.id, Operation::Creating)?;
         let path = self.selected_path(&spec.id)?;
         if reservation.previous.is_some() || selected::read(&path)?.is_some() {
@@ -683,75 +1036,127 @@ impl GuestRuntime {
             held::sync_folder(parent)
                 .map_err(|e| Refusal::os("syncing selected guest receipt directory", e))?;
         }
+        let socket = self.selected_socket(&receipt.id)?;
+        let plan = self.managed_plan(&guest_spec, &socket)?;
         selected::write(&path, &receipt)?;
-        let guest: Arc<dyn shards_api::Guest> = self
-            .guests
-            .boot(&guest_spec)
-            .map_err(|why| refusal("booting exactly selected guest", &why))?
-            .into();
-        receipt.phase = Phase::Running(
-            guest
-                .identity()
-                .map_err(|why| refusal("recording selected guest identity", &why))?,
-        );
+        let guest = managed::boot(transaction, plan)?;
+        let identity = shards_api::Guest::identity(&guest)
+            .map_err(|why| refusal("recording selected guest identity", &why))?;
+        let record = transaction
+            .read(&receipt.id)?
+            .ok_or(super::books::uncertain(&receipt.id)?)?;
+        managed::same_init(&record, &identity)?;
+        receipt.matches(&record.spec)?;
+        receipt.phase = Phase::Running(identity);
         selected::write(&path, &receipt)?;
-        let booted = self.booted(guest, &receipt)?;
-        // The same-ID reservation also covers staging/create; callbacks cannot
-        // delete/recreate this slot while its first box is still being made.
+        let booted = self.booted(guest, &receipt, &record)?;
         let created = self.create_in(&booted, rewritten);
         reservation.publish(Some(Guest { receipt, booted }))?;
         created
     }
 
-    pub(super) fn delete_selected(&self, id: &BoxId) -> Result<bool, Refusal> {
-        if self.record.is_none() {
-            return Ok(false);
-        }
+    pub(super) fn delete_selected(
+        &self,
+        id: &BoxId,
+        transaction: &dyn Transaction,
+    ) -> Result<(), Refusal> {
         let mut reservation = self.reserve(id, Operation::Stopping)?;
         let path = self.selected_path(id)?;
-        let Some(mut receipt) = selected::read(&path)? else {
-            if reservation.previous.is_some() {
-                return Err(invalid("live selected route lost its receipt"));
-            }
-            reservation.publish(None)?;
-            return Ok(false);
-        };
-        if receipt.id != *id {
-            return Err(invalid("receipt names another box"));
-        }
-        let guest = match reservation.previous.as_ref() {
-            Some(known) => Arc::clone(&known.booted.guest),
-            None => match self
-                .guests
-                .attach(receipt.identity()?, &self.receipt_spec(&receipt)?)
-            {
-                Ok(guest) => Arc::<dyn shards_api::Guest>::from(guest),
-                Err(why) if absent(&why) => {
-                    selected::remove(&path)?;
-                    reservation.publish(None)?;
-                    return Ok(true);
+        let receipt = selected::read(&path)?;
+        let record = transaction.read(id)?.ok_or(super::books::uncertain(id)?)?;
+        let identity = match receipt.as_ref() {
+            Some(receipt) => {
+                receipt.matches(&record.spec)?;
+                match &receipt.phase {
+                    Phase::Running(identity) | Phase::Stopping(identity) => {
+                        managed::same_init(&record, identity)?;
+                        Some(identity)
+                    }
+                    Phase::Released {
+                        identity: Some(identity),
+                        ..
+                    } => {
+                        managed::same_init(&record, identity)?;
+                        reservation.publish(None)?;
+                        return Ok(());
+                    }
+                    Phase::Released { identity: None, .. } if record.init.is_none() => {
+                        reservation.publish(None)?;
+                        return Ok(());
+                    }
+                    Phase::Released { identity: None, .. } => {
+                        return Err(super::books::uncertain(id)?);
+                    }
+                    Phase::Intent => None,
                 }
-                Err(why) => return Err(refusal("taking back selected guest to stop", &why)),
-            },
-        };
-        receipt.phase = Phase::Stopping(receipt.identity()?.clone());
-        selected::write(&path, &receipt)?;
-        if let Some(known) = reservation.previous.as_mut() {
-            known.receipt.phase = receipt.phase.clone();
-        }
-        let stopped = guest.stop();
-        let terminal = guest
-            .wait_for(self.first_dial_bound()?)
-            .map_err(|why| refusal("proving selected guest termination", &why))?;
-        if terminal.is_none() {
-            if let Err(why) = stopped {
-                return Err(refusal("stopping selected guest", &why));
             }
-            return Err(invalid("selected guest termination remains unproved"));
+            None if reservation.previous.is_some() => return Err(super::books::uncertain(id)?),
+            None => None,
+        };
+        if let Some(identity) = identity {
+            let mut stopping = selected::read(&path)?.ok_or(super::books::uncertain(id)?)?;
+            stopping.phase = Phase::Stopping(shards_api::Identity {
+                pid: identity.pid,
+                started: identity.started,
+                vsock: copy_path(&identity.vsock)?,
+            });
+            selected::write(&path, &stopping)?;
+            if let Some(known) = reservation.previous.as_mut() {
+                known.receipt = stopping;
+            }
         }
-        selected::remove(&path)?;
-        reservation.publish(None)?;
-        Ok(true)
+        // The native transaction names the original scope even before publication.
+        // PID exit/Gone/observer error never substitutes for complete scope release.
+        let terminal = managed::stop(transaction, id, identity, self.first_dial_bound()?)?;
+        let released_identity = identity
+            .map(|identity| -> Result<_, Refusal> {
+                Ok(shards_api::Identity {
+                    pid: identity.pid,
+                    started: identity.started,
+                    vsock: copy_path(&identity.vsock)?,
+                })
+            })
+            .transpose()?;
+        let mut released = match receipt {
+            Some(receipt) => receipt,
+            None => {
+                // No effect can precede Intent. Recover a pre-intent failure only
+                // after the native owner positively proved the original scope empty.
+                let mut receipt = Record::retained(&record.spec)?;
+                receipt.physical = self.catalog_physical(&receipt.devices)?;
+                receipt
+            }
+        };
+        released.phase = Phase::Released {
+            identity: released_identity,
+            status: terminal.status,
+        };
+        selected::write(&path, &released)?;
+        reservation.publish(None)
+    }
+
+    pub(super) fn finalize_selected(
+        &self,
+        id: &BoxId,
+        transaction: &dyn Transaction,
+    ) -> Result<(), Refusal> {
+        let receipt =
+            selected::read(&self.selected_path(id)?)?.ok_or(super::books::uncertain(id)?)?;
+        let record = transaction.read(id)?.ok_or(super::books::uncertain(id)?)?;
+        receipt.matches(&record.spec)?;
+        let Phase::Released { identity, .. } = &receipt.phase else {
+            return Err(super::books::uncertain(id)?);
+        };
+        match identity {
+            Some(identity) => managed::same_init(&record, identity)?,
+            None if record.init.is_none() => {}
+            None => return Err(super::books::uncertain(id)?),
+        }
+        transaction.finalize_managed(identity.as_ref())
+    }
+
+    pub(super) fn forget_selected(&self, id: &BoxId) -> Result<(), Refusal> {
+        selected::remove(&self.selected_path(id)?)
     }
 
     pub fn evented_for(&self, id: &BoxId) -> Result<Option<Arc<Client>>, Refusal> {

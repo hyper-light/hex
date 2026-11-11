@@ -192,14 +192,41 @@ pub fn boot_authority() -> Result<Option<Authority>, Refusal> {
     Authority::parse(text)
 }
 
+#[cfg(target_os = "linux")]
+fn path_join(base: &Path, tail: &str) -> Result<PathBuf, Refusal> {
+    let bytes = base
+        .as_os_str()
+        .len()
+        .checked_add(tail.len())
+        .and_then(|n| n.checked_add(1))
+        .ok_or_else(|| invalid("native GPU path length overflows"))?;
+    let mut path = PathBuf::new();
+    path.try_reserve_exact(bytes)
+        .map_err(|_| invalid("native GPU path storage unavailable"))?;
+    path.push(base);
+    path.push(tail);
+    Ok(path)
+}
+
 /// Revalidate a resolved CDI node through the kernel's device identity, not its
 /// path name or a copied ordinal. Used only with a matching dedicated authority.
 #[cfg(target_os = "linux")]
 pub fn check_render_node(major: u32, minor: u32) -> Result<(), Refusal> {
-    let base = PathBuf::from(format!("/sys/dev/char/{major}:{minor}"));
-    let subsystem = std::fs::canonicalize(base.join("subsystem"))
+    use std::fmt::Write as _;
+    let mut text = String::new();
+    // Two u32 decimal components and one separator, not a tuned path allowance.
+    let bytes = "/sys/dev/char/"
+        .len()
+        .checked_add("4294967295:4294967295".len())
+        .ok_or_else(|| invalid("native char device path length overflows"))?;
+    text.try_reserve_exact(bytes)
+        .map_err(|_| invalid("native char device path storage unavailable"))?;
+    write!(text, "/sys/dev/char/{major}:{minor}")
+        .map_err(|_| invalid("native char device path cannot be encoded"))?;
+    let base = PathBuf::from(text);
+    let subsystem = std::fs::canonicalize(path_join(&base, "subsystem")?)
         .map_err(|e| Refusal::os("resolving guest render node subsystem", e))?;
-    let driver = std::fs::canonicalize(base.join("device/driver"))
+    let driver = std::fs::canonicalize(path_join(&base, "device/driver")?)
         .map_err(|e| Refusal::os("resolving guest render node driver", e))?;
     if subsystem.file_name().is_none_or(|name| name != "drm")
         || driver.file_name().is_none_or(|name| name != "virtio_gpu")
@@ -278,7 +305,16 @@ fn render_nodes() -> Result<Vec<Node>, Refusal> {
         if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_digit()) {
             return Err(invalid("malformed DRM render node name"));
         }
-        let path = format!("/dev/dri/renderD{suffix}");
+        let mut path = String::new();
+        path.try_reserve_exact(
+            "/dev/dri/renderD"
+                .len()
+                .checked_add(suffix.len())
+                .ok_or_else(|| invalid("render path length overflows"))?,
+        )
+        .map_err(|_| invalid("render path storage unavailable"))?;
+        path.push_str("/dev/dri/renderD");
+        path.push_str(suffix);
         let metadata =
             std::fs::metadata(&path).map_err(|e| Refusal::os("reading guest render node", e))?;
         if !metadata.file_type().is_char_device() {
@@ -312,7 +348,7 @@ pub fn initialize(state: &Path) -> Result<Option<Authority>, Refusal> {
         return Ok(None);
     };
     let nodes = render_nodes()?;
-    let cdi = state.join("shards-gpu.cdi");
+    let cdi = path_join(state, "shards-gpu.cdi")?;
     let file = cdi
         .to_str()
         .filter(|path| path.starts_with('/') && !path.contains(['\t', '\n', '\r', '\0']))
@@ -358,7 +394,7 @@ pub fn initialize(state: &Path) -> Result<Option<Authority>, Refusal> {
         .map_err(|_| invalid("guest GPU CDI exceeds native config bytes"))?;
     std::fs::create_dir_all(state).map_err(|e| Refusal::os("creating guest node state", e))?;
     super::held::replace(&cdi, json.0.as_bytes())?;
-    super::held::replace(&state.join("devices"), catalog.0.as_bytes())?;
+    super::held::replace(&path_join(state, "devices")?, catalog.0.as_bytes())?;
     Ok(Some(authority))
 }
 

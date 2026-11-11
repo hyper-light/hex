@@ -1363,7 +1363,7 @@ fn capacity_runtime(capacity: Option<hex_api::Capacity>, config: GuestConfig) ->
     let client = Client::connect(Arc::clone(&link)).unwrap();
     let runtime = GuestRuntime::new(Arc::new(KeptGuests(kept)), config);
     *runtime.booted.lock().unwrap() = Some(Arc::new(Booted {
-        guest,
+        guest: GuestHandle::Shared(guest),
         link,
         client,
         evented: Mutex::new(None),

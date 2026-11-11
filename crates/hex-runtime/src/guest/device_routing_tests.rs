@@ -203,3 +203,28 @@ fn exact_shards_bypasses_native_ordinary_route_without_relabeling_oci() {
         "uninitialized Books/cost is no capability"
     );
 }
+
+/// AC-T7.4.1: post-Arc native owner registration cannot require an earlier,
+/// unreserved VM boot. Backend-explicit Shards still routes to the guest while
+/// Windows/native OCI retains the caller's configured host route.
+#[test]
+fn configured_owner_route_is_pure_until_native_admission_and_registration() {
+    let guests = Arc::new(NoGuest {
+        backend: Ok(shards_api::Backend::Kvm),
+        boots: AtomicUsize::new(0),
+    });
+    let runtime = WithGuest::configured(
+        hex_api::sim::SimRuntime::new(),
+        GuestRuntime::new(guests.clone(), config()),
+        |_host, _class| Ok(Side::Host),
+    );
+    let mut spec = oci(hex_api::Rootfs::Dir("/rootfs".into()), Vec::new());
+    assert_eq!(runtime.route(&spec.class).unwrap(), Side::Host);
+    let ClassSpec::Oci(payload) = spec.class else {
+        panic!("OCI model")
+    };
+    spec.class = ClassSpec::Shards(payload);
+    assert_eq!(runtime.route(&spec.class).unwrap(), Side::Guest);
+    assert_eq!(guests.boots.load(Ordering::SeqCst), 0);
+    assert!(!runtime.guest().uses_books());
+}

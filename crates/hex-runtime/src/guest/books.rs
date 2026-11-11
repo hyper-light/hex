@@ -6,9 +6,9 @@ use std::sync::Weak;
 use hex_core::record::{BoxRecord, Phase};
 
 use super::*;
-use crate::devices::{self, Books, Route};
+use crate::devices::{self, Books};
 
-fn uncertain(id: &BoxId) -> Result<Refusal, Refusal> {
+pub(super) fn uncertain(id: &BoxId) -> Result<Refusal, Refusal> {
     Ok(Refusal::Lifecycle {
         id: id.try_clone()?,
         cause: hex_api::LifecycleCause::Uncertain,
@@ -50,8 +50,27 @@ mod tests {
             self.records.lock().unwrap().remove(id);
             Ok(())
         }
+        fn finalize_managed(&self, _: Option<&shards_api::Identity>) -> Result<(), Refusal> {
+            panic!("pure record control cannot finalize native scope")
+        }
+        fn launch_managed(
+            &self,
+            _: &shards_api::PreparedBoot,
+            _: shards_api::LaunchIo,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            panic!("pure record control cannot launch")
+        }
+        fn attach_managed(
+            &self,
+            _: Option<&shards_api::Identity>,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            panic!("pure record control cannot attach")
+        }
     }
     impl Books for Owner {
+        fn physical_devices(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
+            Ok(Vec::new())
+        }
         fn records(&self) -> Result<Records, Refusal> {
             Transaction::records(self)
         }
@@ -297,7 +316,7 @@ impl GuestRuntime {
         spec.check()
     }
 
-    fn authority(&self) -> Result<Arc<dyn Books>, Refusal> {
+    pub(super) fn authority(&self) -> Result<Arc<dyn Books>, Refusal> {
         self.books
             .get()
             .and_then(Weak::upgrade)
@@ -319,7 +338,10 @@ impl GuestRuntime {
             .transpose()
     }
 
-    fn turn_keys(&self, devices: &[hex_api::DeviceId]) -> Result<Vec<hex_api::DeviceId>, Refusal> {
+    pub(super) fn turn_keys(
+        &self,
+        devices: &[hex_api::DeviceId],
+    ) -> Result<Vec<hex_api::DeviceId>, Refusal> {
         if devices.is_empty() {
             return Ok(Vec::new());
         }
@@ -340,6 +362,7 @@ impl GuestRuntime {
             if transaction.read(&id)?.is_some() {
                 return Err(Refusal::Exists(id.try_clone()?));
             }
+            self.prepare_selected_create(&id)?;
             let records = transaction.records()?;
             if records.len() >= crate::MAX_BOXES {
                 return Err(Refusal::Full(crate::MAX_BOXES));
@@ -349,17 +372,18 @@ impl GuestRuntime {
                     Refusal::Broken("guest has no initialized device catalog".into())
                 })?;
                 let _selection = catalog.prepare(&spec, &records)?;
-                self.physical_for(&spec.devices)?;
             }
             // Store the original workload and immutable admission receipt, never
             // the rewritten inner OCI payload. Any failed effect retains Creating.
             let record = BoxRecord::new(spec, Phase::Creating, Vec::new());
             transaction.put(&record)?;
-            let info = self.create_payload(record.spec)?;
+            let info = self.create_selected(record.spec, transaction)?;
             let mut record = transaction.read(&id)?.ok_or(uncertain(&id)?)?;
             if record.phase != Phase::Creating
                 || info.id != id
                 || info.class != record.spec.class.class()
+                || info.allocation != record.spec.allocation
+                || record.init.is_none()
             {
                 return Err(uncertain(&id)?);
             }
@@ -389,13 +413,15 @@ impl GuestRuntime {
             let record = transaction
                 .read(id)?
                 .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
-            if record.spec != snapshot.spec {
+            if record.spec != snapshot.spec || record.init != snapshot.init {
                 return Err(uncertain(id)?);
             }
             if ready && record.phase != Phase::Ready {
                 return Err(uncertain(id)?);
             }
             self.validate_binding(&record.spec)?;
+            self.selected_running_in(id, transaction, &record)?
+                .ok_or(uncertain(id)?)?;
             call()
         })
     }
@@ -413,41 +439,30 @@ impl GuestRuntime {
             let mut record = transaction
                 .read(id)?
                 .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
-            if record.spec != snapshot.spec {
+            if record.spec != snapshot.spec || record.init != snapshot.init {
                 return Err(uncertain(id)?);
             }
             record.phase = Phase::Deleting;
             transaction.put(&record)?;
             // Stop uses the immutable VM receipt, even if current bindings changed.
             // Failed/uncertain native observation leaves the sole holder in Deleting.
-            self.delete_payload(id)?;
-            transaction.remove(id)
+            self.delete_selected(id, transaction)?;
+            self.finalize_selected(id, transaction)?;
+            transaction.remove(id)?;
+            // The positive Released receipt survives any failed native finalization
+            // or Store removal; remove it only after the canonical transaction did.
+            self.forget_selected(id)
         })
     }
 
     pub(super) fn native_capacity(&self) -> Result<hex_api::Capacity, Refusal> {
         let authority = self.authority()?;
-        let records = authority.records()?;
         let mut capacity = authority.capacity()?;
         capacity.cost = Some(self.runtime_cost.ok_or_else(|| Refusal::Invalid {
             what: "Shards runtime cost",
             why: "measured backend cost has not been initialized".into(),
         })?);
-        if let Some(catalog) = &self.gpu_catalog {
-            capacity.devices.retain(|device| {
-                catalog.entries().iter().any(|entry| {
-                    entry.info.id == device.id && entry.binding(Route::ShardsGpu).is_some()
-                })
-            });
-            for device in &mut capacity.devices {
-                device.holder = catalog
-                    .holder(device.id, &records)?
-                    .map(BoxId::try_clone)
-                    .transpose()?;
-            }
-        } else {
-            capacity.devices.clear();
-        }
+        capacity.devices = self.attachment_offers()?;
         capacity.check()?;
         Ok(capacity)
     }

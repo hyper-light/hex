@@ -9,6 +9,8 @@ mod books;
 mod dedicated;
 pub mod gpu;
 pub mod held;
+mod managed;
+mod physical;
 pub mod rewrite;
 pub mod selected;
 pub mod shares;
@@ -175,12 +177,33 @@ where
 }
 
 /// The booted guest and the client of its node.
+enum GuestHandle {
+    Shared(Arc<dyn shards_api::Guest>),
+    Managed(shards_api::ManagedGuest),
+}
+
+impl std::ops::Deref for GuestHandle {
+    type Target = dyn shards_api::Guest;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Shared(guest) => guest.as_ref(),
+            Self::Managed(guest) => guest,
+        }
+    }
+}
+
+struct Owner {
+    id: BoxId,
+    class: Class,
+    allocation: Option<hex_api::Allocation>,
+}
+
 struct Booted {
-    guest: Arc<dyn shards_api::Guest>,
+    guest: GuestHandle,
     link: Arc<dyn Link>,
     client: Client,
     evented: Mutex<Option<Arc<Client>>>,
-    owner: Option<(BoxId, Class)>,
+    owner: Option<Owner>,
 }
 
 /// The slowest recorded value of each wait that seeds a bound, by host class
@@ -449,7 +472,7 @@ impl GuestRuntime {
             Ok(client) => {
                 // The binary that booted it isn't known here: no warm-up is asked for it.
                 let b = Arc::new(Booted {
-                    guest,
+                    guest: GuestHandle::Shared(guest),
                     link,
                     client,
                     evented: Mutex::new(None),
@@ -650,7 +673,7 @@ impl GuestRuntime {
                     }
                     *self.booted_binary.lock().map_err(poisoned)? = binary;
                     let b = Arc::new(Booted {
-                        guest,
+                        guest: GuestHandle::Shared(guest),
                         link,
                         client,
                         evented: Mutex::new(None),
@@ -889,7 +912,9 @@ impl Runtime for GuestRuntime {
 impl GuestRuntime {
     fn create_payload(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         if !spec.devices.is_empty() || matches!(spec.class, ClassSpec::Shards(_)) {
-            return self.create_selected(spec);
+            return Err(Refusal::Broken(
+                "dedicated launch requires its canonical transaction".into(),
+            ));
         }
         let rewritten = self.rewrite_spec(spec)?;
         let b = self.guest()?;
@@ -898,9 +923,6 @@ impl GuestRuntime {
     }
 
     fn delete_payload(&self, id: &BoxId) -> Result<(), Refusal> {
-        if self.delete_selected(id)? {
-            return Ok(());
-        }
         let b = self
             .running()?
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
@@ -1008,6 +1030,21 @@ impl<P: Runtime> WithGuest<P> {
         &self.oci
     }
 
+    /// Construct the route before the existing Arc<Recorded<WithGuest<P>>> is
+    /// available. This performs no boot: register that SAME owner's Weak Books
+    /// and initialized cost/provider before dedicated admission or recovery.
+    pub fn configured(
+        process: P,
+        oci: GuestRuntime,
+        route: fn(&P, &ClassSpec) -> Result<Side, Refusal>,
+    ) -> Self {
+        Self {
+            process,
+            oci,
+            route,
+        }
+    }
+
     /// The node's runtime, routed by class ([`by_class`]), its guest booted before it returns, so it accepts
     /// no box before that boot ([`GuestRuntime::boot`]); a guest that can't boot refuses the node by type.
     pub fn new(process: P, oci: GuestRuntime) -> Result<Self, Refusal> {
@@ -1022,11 +1059,7 @@ impl<P: Runtime> WithGuest<P> {
         route: fn(&P, &ClassSpec) -> Result<Side, Refusal>,
     ) -> Result<Self, Refusal> {
         oci.boot()?;
-        Ok(Self {
-            process,
-            oci,
-            route,
-        })
+        Ok(Self::configured(process, oci, route))
     }
 
     /// The runtime that makes a box of `spec`, as its `route` says. An id is one box's across both classes: the other
