@@ -166,6 +166,17 @@ impl Boot {
     }
 }
 
+impl Boot {
+    /// The guest's grant for `spec` at render, before any device effect: a Shards renderer's exact
+    /// owner and set ([`Authority::check`]).
+    pub fn check(&self, spec: &BoxSpec) -> Result<(), Refusal> {
+        match self {
+            Self::Renderer(authority) => authority.check(spec),
+            Self::Pci { .. } => Ok(()),
+        }
+    }
+}
+
 fn keys(list: &str) -> Result<Vec<DeviceId>, Refusal> {
     let mut devices = Vec::new();
     for key in list.split(',') {
@@ -1125,5 +1136,45 @@ mod tests {
         std::fs::write(gpu.join("drm/renderD128/dev"), "226:128\n").unwrap();
         std::fs::write(gpu.join("class"), "0x0300000\n").unwrap();
         assert!(pci_functions(sys.path()).is_err());
+    }
+
+    /// AC-T7.4.1: original. A Firecracker guest's words name owner `fc-box` and one attached GPU,
+    /// which its catalog keys 24. Do: grant GPUs at render to `fc-box`, to another box, to
+    /// `fc-box` asking for another number, and to a process box; expect only the owner with the
+    /// whole attached set to pass, as a Shards renderer's grant does.
+    #[test]
+    fn original_a_firecracker_guests_gpus_go_to_its_vm_owner_alone() {
+        use hex_api::{Bounds, ClassSpec, Network, OciSpec, Program, Rootfs};
+        let boot = Boot::parse("console=ttyS0 hex.gpu.box=fc-box hex.gpu.pci=1")
+            .unwrap()
+            .unwrap();
+        let spec = |id: &str, keys: &[u64]| BoxSpec {
+            id: BoxId::new(id).unwrap(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Oci(Box::new(OciSpec {
+                rootfs: Rootfs::Dir("/rootfs".into()),
+                init: Program::of(&["/bin/true"]),
+                mounts: Vec::new(),
+                hostname: None,
+                network: Network::Private,
+                hosts: Vec::new(),
+            })),
+            owner: None,
+            devices: keys
+                .iter()
+                .map(|key| DeviceId {
+                    kind: DeviceKind::Gpu,
+                    key: *key,
+                })
+                .collect(),
+            allocation: None,
+            route: None,
+        };
+        boot.check(&spec("fc-box", &[24])).unwrap();
+        assert!(boot.check(&spec("foreign", &[24])).is_err());
+        assert!(boot.check(&spec("fc-box", &[24, 32])).is_err());
+        let mut process = spec("fc-box", &[24]);
+        process.class = ClassSpec::Process;
+        assert!(boot.check(&process).is_err());
     }
 }
