@@ -668,6 +668,486 @@ fn a_failed_offer_open_releases_the_remote_preparation_and_local_reservation() {
     assert!(state.given.is_empty());
 }
 
+/// AC-T7.4.1: a Release cut short on a stream (`Conn::send_now_before`). The rest of its frame follows with nothing
+/// between its bytes, neither an owed word nor another message, or the connection ends.
+mod release_frame {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+
+    /// How much of one write the agent's socket takes, in the order writes come; once the script is spent, all.
+    enum Room {
+        /// This many bytes, then no room.
+        Part(usize),
+        /// None: the agent, not reading while its answers wait for room, writes this answer to this request.
+        Stall(u64, Box<Answer>),
+        /// This many bytes, then the write fails.
+        Fail(usize),
+    }
+
+    /// What another reader does while a write cut short is under way.
+    type During = Box<dyn FnOnce() + Send>;
+    /// An answer as the agent writes it: its bytes, and the ends riding with it.
+    type Written = (Vec<u8>, Vec<hex_api::End>);
+    /// Each event-form exec's answer, by its id.
+    type Answers = mpsc::Receiver<(u64, Result<Answer, Refusal>)>;
+
+    /// A node agent's stream, read as its agent reads it: frame by frame, an exec started and a start done.
+    struct Narrow {
+        handle: std::net::UdpSocket,
+        room: Mutex<VecDeque<Room>>,
+        during: Mutex<Option<During>>,
+        inbound: Mutex<VecDeque<Written>>,
+        agent: Mutex<Agent>,
+        /// The connection's end: the client's shutdown, or the agent's on bytes it can't read.
+        ended: AtomicBool,
+    }
+
+    /// The agent's reading of what was written.
+    struct Agent {
+        frames: hex_core::stream::Deframer,
+        /// Each whole request, in order.
+        heard: Vec<(u64, Request)>,
+        /// The rest of a frame cut short: the next bytes written must be these.
+        rest: Vec<u8>,
+        /// Why it read no further.
+        fault: Option<String>,
+    }
+
+    impl Narrow {
+        /// Writes the agent's `answer` to request `id`, with an end for each stream a given answer names.
+        fn answer(&self, id: u64, answer: &Answer) {
+            let ends = match answer {
+                Answer::Given { given, .. } => (0..given.count())
+                    .map(|_| std::io::pipe().unwrap().0.into())
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let bytes = wire::answer(id, answer, wire::MAX_MESSAGE).unwrap();
+            self.inbound.lock().unwrap().push_back((bytes, ends));
+            self.handle.send(&[1]).unwrap();
+        }
+
+        fn end(&self) {
+            self.ended.store(true, Ordering::Release);
+            let _ = self.handle.send(&[1]);
+        }
+
+        /// The agent reads one write's `bytes`: each request heard, and answered, once its frame is whole.
+        fn hear(&self, agent: &mut Agent, mut bytes: &[u8]) {
+            while !bytes.is_empty() && agent.fault.is_none() {
+                let (used, message) = match agent.frames.take(bytes) {
+                    Ok(taken) => taken,
+                    Err(fault) => {
+                        agent.fault = Some(format!("an unreadable frame: {fault}"));
+                        return;
+                    }
+                };
+                bytes = &bytes[used..];
+                let Some(message) = message else { continue };
+                match wire::read_request_apart(&message, wire::MAX_MESSAGE) {
+                    Ok((header, request)) => {
+                        match &request {
+                            Request::Call(Call::Exec { .. }) => {
+                                self.answer(header.id, &Answer::Started { pid: 7 });
+                            }
+                            Request::Call(Call::Start(_)) => self.answer(header.id, &Answer::Done),
+                            _ => {}
+                        }
+                        agent.heard.push((header.id, request));
+                    }
+                    Err(bad) => agent.fault = Some(format!("an unreadable request: {bad:?}")),
+                }
+            }
+        }
+    }
+
+    impl Transport for Narrow {
+        type Reading = ();
+
+        fn answers() -> &'static [Patience; KINDS] {
+            static ANSWERS: [Patience; KINDS] =
+                [const { Patience::measuring("test.release_frame.answer") }; KINDS];
+            &ANSWERS
+        }
+
+        fn reading(&self) {}
+
+        fn handle(&self) -> Handle<'_> {
+            #[cfg(unix)]
+            return std::os::fd::AsFd::as_fd(&self.handle);
+            #[cfg(windows)]
+            std::os::windows::io::AsSocket::as_socket(&self.handle)
+        }
+
+        fn frame(message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
+            hex_core::stream::frame(&message, wire::MAX_MESSAGE).map_err(Refusal::from)
+        }
+
+        fn recv(&self, _: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
+            while self.handle.recv(&mut [0u8; 1]).is_ok() {}
+            let mut came = false;
+            loop {
+                let written = self.inbound.lock().unwrap().pop_front();
+                let Some((bytes, ends)) = written else { break };
+                let message = Received {
+                    size: bytes.len(),
+                    bytes: &bytes,
+                    descriptors: ends.len(),
+                    descriptors_cut: false,
+                };
+                take(&message, ends)?;
+                came = true;
+            }
+            if self.ended.load(Ordering::Acquire) {
+                return Err(Refusal::Broken(
+                    "the node agent's connection ended".to_owned(),
+                ));
+            }
+            Ok(came)
+        }
+
+        fn try_send(&self, bytes: &[u8], at: &mut usize, lent: &[Lent<'_>]) -> Result<bool, Sent> {
+            assert!(lent.is_empty(), "these messages lend nothing");
+            if self.ended.load(Ordering::Acquire) {
+                return Err(Sent::Gone);
+            }
+            let rest = &bytes[*at..];
+            let room = self.room.lock().unwrap().pop_front();
+            let (took, fails) = match room {
+                None => (rest.len(), false),
+                Some(Room::Part(n)) => (n.min(rest.len()), false),
+                Some(Room::Fail(n)) => (n.min(rest.len()), true),
+                Some(Room::Stall(id, answer)) => {
+                    self.answer(id, &answer);
+                    (0, false)
+                }
+            };
+            {
+                let mut agent = self.agent.lock().unwrap();
+                // The transport's contract: no other message's bytes come between one message's own.
+                if !agent.rest.is_empty() && rest != agent.rest.as_slice() {
+                    agent.fault = Some(format!(
+                        "{} bytes of another message came inside a frame {} bytes short",
+                        rest.len(),
+                        agent.rest.len()
+                    ));
+                }
+                if took > 0 {
+                    agent.rest = rest[took..].to_vec();
+                }
+                self.hear(&mut agent, &rest[..took]);
+                if agent.fault.is_some() {
+                    self.end();
+                }
+            }
+            *at += took;
+            if took < rest.len() {
+                let during = self.during.lock().unwrap().take();
+                if let Some(during) = during {
+                    during();
+                }
+            }
+            if fails {
+                return Err(Sent::Refused(Refusal::Broken(
+                    "the agent's socket failed under a write".to_owned(),
+                )));
+            }
+            Ok(*at == bytes.len())
+        }
+
+        fn shutdown(&self) {
+            self.end();
+        }
+    }
+
+    /// A client of a `Narrow` stream whose agent's budget of programs is `programs`, as its hello would say.
+    fn narrow(programs: usize) -> Core<Narrow> {
+        let handle = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        handle.connect(handle.local_addr().unwrap()).unwrap();
+        handle.set_nonblocking(true).unwrap();
+        let transport = Narrow {
+            handle,
+            room: Mutex::new(VecDeque::new()),
+            during: Mutex::new(None),
+            inbound: Mutex::new(VecDeque::new()),
+            agent: Mutex::new(Agent {
+                frames: hex_core::stream::Deframer::new(wire::MAX_MESSAGE),
+                heard: Vec::new(),
+                rest: Vec::new(),
+                fault: None,
+            }),
+            ended: AtomicBool::new(false),
+        };
+        let client = Core {
+            conn: triomphe::Arc::try_new(Conn {
+                shared: Shared::try_new(transport).unwrap(),
+            })
+            .unwrap(),
+            classes: Vec::new(),
+            limits: Limits {
+                connections: 1,
+                message_bytes: wire::MAX_MESSAGE,
+                in_flight: 4,
+                programs,
+            },
+            budgets: wire::Budgets {
+                in_flight: 4,
+                programs,
+            },
+        };
+        client.conn.shared.owed.lock().unwrap().bound = programs;
+        client
+    }
+
+    const STDOUT: Streams = Streams {
+        stdin: false,
+        stdout: true,
+        stderr: false,
+    };
+
+    fn running() -> BoxId {
+        BoxId::new("cut-release").unwrap()
+    }
+
+    fn exec_a() -> Request {
+        Request::Call(Call::Exec {
+            id: running(),
+            program: Program::of(&["cat"]),
+            streams: Streams::default(),
+        })
+    }
+
+    /// An event-form exec asking for its program's stdout, whose answer gives that end.
+    fn asking() -> Call {
+        Call::ExecStreams {
+            id: running(),
+            program: Program::of(&["cat"]),
+            streams: Streams::default(),
+            ask: STDOUT,
+        }
+    }
+
+    fn gave() -> Answer {
+        Answer::Given {
+            pid: 8,
+            given: STDOUT,
+        }
+    }
+
+    /// Exec A started, its `Proc` returned, then `others` event-form execs asking for stdout sent: their ids, and
+    /// where their answers come.
+    fn started(client: &Core<Narrow>, others: usize) -> (Box<dyn Proc>, Vec<u64>, Answers) {
+        let process = client
+            .exec(&running(), Program::of(&["cat"]), Stdio::null())
+            .unwrap();
+        let (answer, answers) = mpsc::channel();
+        let ids = (0..others)
+            .map(|_| {
+                let answer = answer.clone();
+                let other = client
+                    .defer(
+                        asking(),
+                        Box::new(move |id, got| answer.send((id, got)).unwrap()),
+                        Box::new(|_| {}),
+                    )
+                    .unwrap();
+                let id = other.id();
+                other.send().unwrap();
+                id
+            })
+            .collect();
+        (process, ids, answers)
+    }
+
+    /// A Release's frame's length: its cut points are 1 up to it.
+    fn release_frame() -> usize {
+        Narrow::frame(wire::request(0, &Request::Release, wire::MAX_MESSAGE).unwrap())
+            .unwrap()
+            .len()
+    }
+
+    /// AC-T7.4.1: do drop a started program's `Proc` while the agent's socket takes only part of its Release (cut at
+    /// each byte of the frame), the agent then writing, not reading, an answer that gives an end, for which the client
+    /// owes a Taken word, and make a call after; expect the agent to read the Release, the Taken word and the call,
+    /// each whole and in that order, and the call answered on a connection still up.
+    #[test]
+    fn a_release_cut_short_goes_whole_before_owed_words_and_later_calls() {
+        for cut in 1..release_frame() {
+            let client = narrow(2);
+            let shared = &client.conn.shared;
+            let (process, others, answers) = started(&client, 1);
+            let other = others[0];
+            shared
+                .transport
+                .room
+                .lock()
+                .unwrap()
+                .extend([Room::Part(cut), Room::Stall(other, Box::new(gave()))]);
+            drop(process);
+            let start = client.start(&running());
+            let agent = shared.transport.agent.lock().unwrap();
+            assert_eq!(agent.fault, None, "cut at {cut} of the Release's frame");
+            let exec = agent.heard[0].0;
+            let ids: Vec<u64> = agent.heard.iter().map(|(id, _)| *id).collect();
+            let requests: Vec<&Request> = agent.heard.iter().map(|(_, request)| request).collect();
+            assert_eq!(
+                requests,
+                [
+                    &exec_a(),
+                    &Request::Call(asking()),
+                    &Request::Release,
+                    &Request::Taken,
+                    &Request::Call(Call::Start(running())),
+                ],
+                "cut at {cut}"
+            );
+            assert_eq!(ids[1..4], [other, exec, other], "cut at {cut}");
+            assert!(agent.frames.at_boundary(), "cut at {cut}");
+            drop(agent);
+            assert_eq!(start, Ok(()), "cut at {cut}");
+            assert!(!client.closed());
+            assert!(!shared.owing());
+            assert_eq!(answers.try_recv().unwrap(), (other, Ok(gave())));
+        }
+    }
+
+    /// Has another reader, while the next write is cut short, read what the agent wrote meanwhile: exec A's end, its
+    /// program ending as it is let go, and a given answer to each of `others`, for which the client owes a Taken
+    /// word. `observer` holds the connection for that read.
+    fn read_while_cut(observer: &Arc<triomphe::Arc<Shared<Narrow>>>, others: &[u64]) {
+        let weak = Arc::downgrade(observer);
+        let exec = observer.transport.agent.lock().unwrap().heard[0].0;
+        let given = others.to_vec();
+        *observer.transport.during.lock().unwrap() = Some(Box::new(move || {
+            let shared = weak.upgrade().unwrap();
+            shared
+                .transport
+                .answer(exec, &Answer::Exited(Exit::Code(0)));
+            for id in given {
+                shared.transport.answer(id, &gave());
+            }
+            shared.recv().unwrap();
+        }));
+    }
+
+    /// AC-T7.4.1: do drop a started program's `Proc` while the agent's socket takes only part of its Release, other
+    /// readers meanwhile owing Taken words within their bound, then make a call; expect the agent to read the Release,
+    /// then those words, then the call, each whole.
+    #[test]
+    fn a_release_cut_short_goes_before_words_owed_while_it_was_written() {
+        for cut in 1..release_frame() {
+            let client = narrow(3);
+            let shared = &client.conn.shared;
+            let (process, others, answers) = started(&client, 2);
+            let observer = Arc::new(triomphe::Arc::clone(shared));
+            read_while_cut(&observer, &others);
+            shared
+                .transport
+                .room
+                .lock()
+                .unwrap()
+                .push_back(Room::Part(cut));
+            drop(process);
+            let start = client.start(&running());
+            let agent = shared.transport.agent.lock().unwrap();
+            assert_eq!(agent.fault, None, "cut at {cut} of the Release's frame");
+            let exec = agent.heard[0].0;
+            let ids: Vec<u64> = agent.heard.iter().map(|(id, _)| *id).collect();
+            let requests: Vec<&Request> = agent.heard.iter().map(|(_, request)| request).collect();
+            assert_eq!(
+                requests,
+                [
+                    &exec_a(),
+                    &Request::Call(asking()),
+                    &Request::Call(asking()),
+                    &Request::Release,
+                    &Request::Taken,
+                    &Request::Taken,
+                    &Request::Call(Call::Start(running())),
+                ],
+                "cut at {cut}"
+            );
+            assert_eq!(ids[3..6], [exec, others[0], others[1]], "cut at {cut}");
+            assert!(agent.frames.at_boundary(), "cut at {cut}");
+            drop(agent);
+            assert_eq!(start, Ok(()), "cut at {cut}");
+            assert!(!client.closed());
+            assert!(!shared.owing());
+            assert_eq!(
+                answers.try_iter().collect::<Vec<_>>(),
+                [(others[0], Ok(gave())), (others[1], Ok(gave()))]
+            );
+        }
+    }
+
+    /// Cuts a Release short, at each byte of its frame, where its rest can't follow: with `overfull`, other readers
+    /// owe the agent its whole budget of words as it goes out; else the socket fails under it. The connection must
+    /// end with the cut Release its last bytes, nothing after it for the agent to misread, and the next call refused
+    /// by that end.
+    fn rest_cannot_follow(overfull: bool) {
+        for cut in 1..release_frame() {
+            let client = narrow(2);
+            let shared = &client.conn.shared;
+            let (process, others, _answers) = started(&client, if overfull { 2 } else { 0 });
+            let observer = Arc::new(triomphe::Arc::clone(shared));
+            let room = if overfull {
+                read_while_cut(&observer, &others);
+                Room::Part(cut)
+            } else {
+                Room::Fail(cut)
+            };
+            shared.transport.room.lock().unwrap().push_back(room);
+            drop(process);
+            let owed = shared.owed.lock().unwrap().words.len();
+            let start = client.start(&running());
+            let agent = shared.transport.agent.lock().unwrap();
+            assert_eq!(agent.fault, None, "cut at {cut} of the Release's frame");
+            let requests: Vec<&Request> = agent.heard.iter().map(|(_, request)| request).collect();
+            let mut expected = vec![exec_a()];
+            expected.extend(others.iter().map(|_| Request::Call(asking())));
+            assert_eq!(
+                requests,
+                expected.iter().collect::<Vec<_>>(),
+                "cut at {cut}"
+            );
+            assert!(
+                !agent.frames.at_boundary(),
+                "cut at {cut}: the cut Release is the stream's last bytes"
+            );
+            drop(agent);
+            assert_eq!(
+                owed,
+                others.len(),
+                "cut at {cut}: the words owed fill the bound"
+            );
+            assert!(
+                shared.transport.ended.load(Ordering::Acquire),
+                "cut at {cut}"
+            );
+            assert!(
+                matches!(start, Err(Refusal::Broken(_))),
+                "cut at {cut}: {start:?}"
+            );
+            assert!(client.closed(), "cut at {cut}");
+        }
+    }
+
+    /// AC-T7.4.1: do cut a Release short while other readers owe the agent its whole budget of words; expect the
+    /// connection to end with nothing after the cut Release, never those words inside it.
+    #[test]
+    fn a_release_cut_short_with_the_owed_words_at_their_bound_ends_the_connection() {
+        rest_cannot_follow(true);
+    }
+
+    /// AC-T7.4.1: do fail the socket part way through a Release; expect the connection to end with nothing after the
+    /// cut Release, never the next call's bytes inside it.
+    #[test]
+    fn a_release_whose_write_fails_part_way_ends_the_connection() {
+        rest_cannot_follow(false);
+    }
+}
+
 /// AC-T7.4.1: a new capacity wait appends after every historical runtime/scheduler wait.
 #[test]
 fn runtime_capacity_wait_appends_without_moving_existing_indexes() {
