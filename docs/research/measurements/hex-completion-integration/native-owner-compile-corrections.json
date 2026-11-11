@@ -1,0 +1,26 @@
+{
+  "root_before": "26055540a98646beb62a49df3f04d856d8e1a07c",
+  "owner_sources": [
+    "b44c24f2599a21e728996a15bcaf4cb128084079",
+    "2a1a728de6216697af5578d2847025479f06cd72"
+  ],
+  "actual_originals": [
+    {
+      "source": "1fdfb9ce",
+      "scope": "WindowsRuntimeNodeProductionClippy",
+      "exit": 101,
+      "log_sha256": "ce8a0f7eb7c37cc001c83cd25ad0d4d315b7af502afd37fc698127f17986a085",
+      "cause": "unused inheritance helper/enum and constant chunks"
+    },
+    {
+      "source": "26055540",
+      "scope": "LinuxNodeHarnesCompileNoRun",
+      "exit": 101,
+      "log_sha256": "063d925ebb33b17f13f5647d1ecc4b24fc700b36cbea383f0730f3af517871b2",
+      "cause": "new fixture PollFd borrowing"
+    }
+  ],
+  "change": "exact owner deltas remove unused ambient create path; fixedchunk parser and borrow same owned stdout, no behavior stub/lintwaiver",
+  "tests_native_executed": 0,
+  "after": "pending matchedsource checks"
+}

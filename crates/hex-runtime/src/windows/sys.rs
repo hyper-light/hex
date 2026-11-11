@@ -570,26 +570,6 @@ pub(crate) fn started_here() -> u64 {
 /// Only its three standard handles are inherited (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`). The caller
 /// resumes it with [`resume`].
 pub fn create(spawn: &mut Spawn, jobs: &[HANDLE]) -> io::Result<Started> {
-    create_using(spawn, jobs, Environment::Supplied)
-}
-
-/// The managed Shards controller preserves its existing inherited environment. It still inherits
-/// only the three explicitly supplied stream handles and is atomically created in `jobs`.
-pub(crate) fn create_inheriting(spawn: &mut Spawn, jobs: &[HANDLE]) -> io::Result<Started> {
-    create_using(spawn, jobs, Environment::Inherited)
-}
-
-#[derive(Clone, Copy)]
-enum Environment {
-    Supplied,
-    Inherited,
-}
-
-fn create_using(
-    spawn: &mut Spawn,
-    jobs: &[HANDLE],
-    environment: Environment,
-) -> io::Result<Started> {
     // The three standard handles, made inheritable, as a contiguous array for the handle-list attribute.
     let handles = spawn
         .stdio
@@ -622,7 +602,7 @@ fn create_using(
     if unsafe { InitializeProcThreadAttributeList(list, 2, 0, &mut size) } == 0 {
         return Err(last_error());
     }
-    let started = create_in(spawn, jobs, &handles, list, environment);
+    let started = create_in(spawn, jobs, &handles, list);
     // SAFETY: `list` was initialized above; deleting it frees its internal allocations once, and buf
     // (its backing bytes) is still alive and dropped after.
     unsafe { DeleteProcThreadAttributeList(list) };
@@ -635,7 +615,6 @@ fn create_in(
     jobs: &[HANDLE],
     handles: &[HANDLE; 3],
     list: LPPROC_THREAD_ATTRIBUTE_LIST,
-    environment: Environment,
 ) -> io::Result<Started> {
     let handles_bytes = size_of::<[HANDLE; 3]>();
     // SAFETY: the handle-list attribute points at `handles` (3 HANDLEs), alive for this call; the size
@@ -686,13 +665,10 @@ fn create_in(
     si.lpAttributeList = list;
 
     let cwd = spawn.cwd.as_ref().map_or(null(), |c| c.as_ptr());
-    let environment = match environment {
-        Environment::Supplied => spawn.environment.as_ptr().cast(),
-        Environment::Inherited => null(),
-    };
+    let environment = spawn.environment.as_ptr().cast();
     let mut pi: PROCESS_INFORMATION = zeroed_struct();
     // SAFETY: command_line is a NUL-terminated writable UTF-16 buffer (CreateProcessW may modify it);
-    // environment is a double-NUL-terminated UTF-16 block or null to inherit; cwd is NUL-terminated or null; si and pi are
+    // environment is a supplied double-NUL-terminated UTF-16 block; cwd is NUL-terminated or null; si and pi are
     // valid and alive for the call. bInheritHandles is TRUE because only the listed handles are
     // inherited (the handle-list attribute). The process is created suspended and in its jobs.
     let ok = unsafe {

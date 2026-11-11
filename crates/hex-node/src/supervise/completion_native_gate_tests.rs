@@ -753,7 +753,7 @@ fn read_ready(
                     tv_sec: text(i64::try_from(left.as_secs()))?,
                     tv_nsec: i64::from(left.subsec_nanos()),
                 };
-                let mut fds = [PollFd::new(output.as_fd(), PollFlags::IN | PollFlags::HUP)];
+                let mut fds = [PollFd::new(&*output, PollFlags::IN | PollFlags::HUP)];
                 text(rustix::event::poll(&mut fds, Some(&timeout)))?;
             }
             Err(error) => return Err(error.to_string()),

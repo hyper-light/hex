@@ -103,7 +103,11 @@ fn unhex<const N: usize>(value: &str) -> Result<[u8; N], Refusal> {
         return Err(invalid("a commitment has the wrong width"));
     }
     let mut bytes = [0; N];
-    for (byte, pair) in bytes.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(invalid("a commitment has incomplete hex"));
+    }
+    for (byte, pair) in bytes.iter_mut().zip(pairs) {
         let text =
             std::str::from_utf8(pair).map_err(|_| invalid("a commitment is not ASCII hex"))?;
         *byte =
