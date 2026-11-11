@@ -452,12 +452,14 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
             0,
             "HEXW",
         ),
+        // Request kinds are numbered up from 0x0001 as the wire grows (0x0013 became
+        // PHYSICAL_REPORT), so the probe is the request range's last kind.
         Hostile(
             "unknown kind",
-            with(12, [0x13, 0]),
+            with(12, [0xff, 0x7f]),
             vec![],
             9,
-            "kind 0x0013 isn't a request this wire defines",
+            "kind 0x7fff isn't a request this wire defines",
         ),
         Hostile(
             "an answer kind",

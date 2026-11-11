@@ -741,6 +741,83 @@ fn every_dial_carries_a_finite_deadline_after_the_first_listen() {
     }
 }
 
+/// HEX-GUEST-33, AC-T7.4.1 (CLAUDE.md §2): connect with no caller deadline, plainly and in the event form, through a
+/// Shards link whose guest takes the control connection and holds its relay's token until the link's bound has
+/// surely passed, then sends it and answers the hello: expect each connect refused by type at the link's own setup
+/// bound, the token's read with the dial, never connected late, as a relay that stays silent would hold it forever.
+#[test]
+fn a_relay_token_held_past_the_links_bound_refuses_the_connect() {
+    let mut seen = Vec::new();
+    for evented in [false, true] {
+        let guest = Arc::new(Patient {
+            listener: TcpListener::bind("127.0.0.1:0").unwrap(),
+            given: std::sync::Mutex::new(Vec::new()),
+            absolute: std::sync::Mutex::new(Vec::new()),
+        });
+        let listener = guest.listener.try_clone().unwrap();
+        let bound = CONNECT_CAP;
+        let relay = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            // The connect's setup began before its dial, so its deadline is at most the bound past this accept:
+            // hold the token until then, unless the connect gives up first and closes.
+            let past = Instant::now().checked_add(bound).unwrap();
+            loop {
+                let left = past.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                conn.set_read_timeout(Some(left)).unwrap();
+                match conn.peek(&mut [0u8; 1]) {
+                    Ok(0) => return false,
+                    Ok(_) => panic!("the client wrote before the relay's token"),
+                    Err(e) => assert!(
+                        matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock
+                                | std::io::ErrorKind::TimedOut
+                                | std::io::ErrorKind::Interrupted
+                        ),
+                        "{e}"
+                    ),
+                }
+            }
+            conn.set_read_timeout(None).unwrap();
+            if conn.write_all(&TOKEN.to_le_bytes()).is_err() {
+                return false;
+            }
+            // A connect that read the late token says hello: answer it, then hold until it goes.
+            if !matches!(conn.peek(&mut [0u8; 1]), Ok(n) if n > 0) {
+                return false;
+            }
+            let (h, _) = next_request(&mut conn);
+            send_answer(&mut conn, h.id, &Answer::Hello(agents_hello()));
+            let _ = conn.read(&mut [0u8; 1]);
+            true
+        });
+        let link = own_link(shards::ShardsLink::new(guest.clone(), bound)).unwrap();
+        let connected = if evented {
+            Client::connect_evented(link, Arc::new(|| {})).map(drop)
+        } else {
+            Client::connect(link).map(drop)
+        };
+        let late = relay.join().unwrap();
+        eprintln!(
+            "hex_guest_33_token evented={evented} bound={bound:?} connected={connected:?} late={late}"
+        );
+        seen.push((evented, connected, late));
+    }
+    for (evented, connected, late) in seen {
+        assert!(
+            matches!(&connected, Err(Refusal::Os { op, why }) if op.contains("token") && why.contains("setup bound")),
+            "evented={evented}: {connected:?}"
+        );
+        assert!(
+            !late,
+            "evented={evented}: connected on a token past its bound"
+        );
+    }
+}
+
 /// HEX-GUEST-33, AC-T7.4.1 (CLAUDE.md §2, §3): give a link a bound that names no finite deadline, zero (a boot
 /// that spent its bound) or `Duration::MAX`, and dial: expect each refused by type before Shards is asked, as
 /// Shards' client awaits either's CONNECT answer without a bound.

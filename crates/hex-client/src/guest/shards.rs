@@ -117,6 +117,12 @@ impl Link for ShardsLink {
             .map_err(|why| refusal("naming the guest's stream endpoint", &why))
     }
 
+    /// The learned bound on a boot to ready, whose ready includes the CONNECT/OK exchange and the
+    /// relay's token after it: a connect with no caller deadline spends it once on both.
+    fn setup_bound(&self) -> Option<Duration> {
+        Some(self.bound)
+    }
+
     fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
         self.dial_before(port, None)
     }
