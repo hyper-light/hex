@@ -779,6 +779,14 @@ fn temp_file(dir: &Path, id: &BoxId) -> PathBuf {
     dir.join(format!(".{id}.tmp"))
 }
 
+/// Canonical writers use `.json`. Other ASCII casing must refuse at startup even on Windows,
+/// where a case-insensitive filesystem can resolve it to the same durable object.
+fn retained_json_name(name: &std::ffi::OsStr) -> bool {
+    Path::new(name)
+        .extension()
+        .is_some_and(|extension| extension.as_encoded_bytes().eq_ignore_ascii_case(b"json"))
+}
+
 /// The records in `dir`, each box's id with its file: every `<id>.json`, nothing else.
 fn records_in(dir: &Path, retained: bool) -> Result<Vec<(BoxId, PathBuf)>, Refusal> {
     let mut out = Vec::new();
@@ -801,7 +809,7 @@ fn records_in(dir: &Path, retained: bool) -> Result<Vec<(BoxId, PathBuf)>, Refus
             .and_then(|n| n.strip_suffix(".json"))
             .and_then(|n| BoxId::new(n).ok())
         else {
-            if retained && Path::new(&name).extension() == Some(std::ffi::OsStr::new("json")) {
+            if retained && retained_json_name(&name) {
                 return Err(retained_identity_error(
                     "a retained Box record has no valid canonical BoxId name",
                 ));

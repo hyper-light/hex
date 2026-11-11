@@ -1,0 +1,38 @@
+{
+  "role": "implementer",
+  "policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "production_original": "e52d9e7685c338c32845914eb2039853a0b0153d",
+  "original_control": "84bfcf8ab3dfc4cda872fdcaef695e380806c722",
+  "actual_red": {
+    "root": "174d (resolve full pin at ROOT)",
+    "selected": 9,
+    "passed": 8,
+    "failed": 1,
+    "ignored": 0,
+    "log_sha256": "0cf6177e57fb2a31ccf603ac39adca5d49432828a6b75101874290dcdb7e4aa7",
+    "failure": "uppercase retained Pool unreadable BODY was ignored; recover returned Ok adopted aa-retained-ready",
+    "attribution": "Real Store/Recorded private files and counted SimRuntime callbacks, not HCS/native. Original416 two controls and other6 controls passed separately from the new1red."
+  },
+  "cause": "pool_from_name accepted uppercase hex then all_pools read_pool reconstructed lowercase name; a retained enumerated file could disappear semantically on case-sensitive Linux.",
+  "remedy": [
+    "Require exact canonical lowercase64hex.json name; noncanonical retained JSON names refuse.",
+    "Enumerated canonical row opens its actual spelling through existing fallible path join; missing/read failure is a refusal, never None.",
+    "Direct and scan reads share one read_pool_file decoder/identity check, preserving interactive read_pool optional absence.",
+    "ASCII .JSON/.JsOn aliases refuse in strict Box/Pool scanners on every supported target; ordinary Box scanner remains unchanged."
+  ],
+  "production": {
+    "crates/hex-node/src/store.rs": "197de26634c7bff7590b31b9ca6cb73e654823c6be8ce71cc3bebd6707791a7e",
+    "crates/hex-node/src/store/pool.rs": "7317f21bb31f697c9dd66c348763eb98798c307aef52727c705253130faf66a0"
+  },
+  "original_control_unchanged_sha256": "96fb91a1d54601a40207a13c96e0c170220b5d5996955ba94a0c76207997d0d8",
+  "new_control": "retained_noncanonical_json_spellings_refuse_and_keep_exact_files: canonical positive plus uppercase hex/.JSON/mixed extension/private bytes, legacy scanner unchanged",
+  "checks": {
+    "named_fmt": 0,
+    "focused_remedy": "UNRUN; ROOT only changed-cohort rerun",
+    "new_portability_control": "UNRUN; no Windows .JSON live claim",
+    "native": 0
+  },
+  "allocation": "New filename predicate/hex check allocation-free scalar checks; actual path uses existing try_reserve join. Existing Store directory/BTreeMap/serde allocations remain separately documented gaps. No allocation/performance completion claim.",
+  "out_of_scope": "Unsealed Recorded/platform native metadata and Mac helper drafts excluded."
+}

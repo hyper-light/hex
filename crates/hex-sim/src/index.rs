@@ -347,6 +347,7 @@ impl Slot {
         &self,
         demand: &Demand,
         devices: &[PhysicalSlot],
+        pending_gpus: u32,
         free: impl Fn(usize) -> bool,
     ) -> Verdict {
         let (ask, class, os) = (&demand.ask, demand.class, self.platform.os);
@@ -460,6 +461,22 @@ impl Slot {
         }
         if !self.free.holds(&need) || !self.runtime_holds(demand, &need) {
             return Verdict::NoRoom;
+        }
+        if demand.need.gpus > 0 && pending_gpus > 0 {
+            let Some(required) = demand.need.gpus.checked_add(pending_gpus) else {
+                return Verdict::NoRoom;
+            };
+            // Pending owner rows have no proven receiver binding yet. They still consume eligible
+            // room; foreign/unread cards cannot sponsor an additional fresh GPU reservation.
+            if !fits_observed(
+                devices.len(),
+                observed,
+                |i| exposed_device(i) && free(i),
+                required,
+                &gpus_only,
+            ) {
+                return Verdict::NoRoom;
+            }
         }
         if (demand.need.gpus > 0 || ask.devices())
             && !fits_observed(
@@ -882,7 +899,18 @@ impl FitIndex {
             .ok()
             .flatten()
             .and_then(|choice| choice.offer.backing);
-        slot.verdict(demand, devices, |i| {
+        let pending = if backing.is_some() {
+            0
+        } else {
+            let Ok(node) = u32::try_from(at) else {
+                return Verdict::NoRoom;
+            };
+            let Ok(pending) = pending_gpus(slot, devices, held, NodeId(node)) else {
+                return Verdict::NoRoom;
+            };
+            pending
+        };
+        slot.verdict(demand, devices, pending, |i| {
             held.get(i)
                 .is_some_and(|holder| Self::physical_free(*holder, backing))
                 && devices

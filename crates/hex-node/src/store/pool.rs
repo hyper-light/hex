@@ -91,7 +91,11 @@ fn name(pool: &[u8; 32]) -> Result<String, Refusal> {
 
 fn pool_from_name(name: &std::ffi::OsStr) -> Option<[u8; 32]> {
     let text = name.to_str()?.strip_suffix(".json")?;
-    if text.len() != 64 {
+    if text.len() != 64
+        || !text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
         return None;
     }
     let (pairs, tail) = text.as_bytes().as_chunks::<2>();
@@ -104,6 +108,15 @@ fn pool_from_name(name: &std::ffi::OsStr) -> Option<[u8; 32]> {
         *byte = u8::from_str_radix(pair, 16).ok()?;
     }
     Some(pool)
+}
+
+fn read_pool_file(file: File, pool: &[u8; 32]) -> Result<PoolRecord, Refusal> {
+    let bytes = super::read_record_bytes(file)?;
+    let record = PoolRecord::decode(&bytes)?;
+    if record.key.pool != *pool {
+        return Err(refused(record.key));
+    }
+    Ok(record)
 }
 
 impl Store {
@@ -200,12 +213,7 @@ impl Store {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(Refusal::os("opening a native backing record", error)),
         };
-        let bytes = super::read_record_bytes(file)?;
-        let record = PoolRecord::decode(&bytes)?;
-        if record.key.pool != *pool {
-            return Err(refused(record.key));
-        }
-        Ok(Some(record))
+        read_pool_file(file, pool).map(Some)
     }
 
     pub(crate) fn grant_pool(&self, grant: &BackingGrant) -> Result<PoolRecord, Refusal> {
@@ -252,7 +260,7 @@ impl Store {
 
     pub(crate) fn all_pools(&self) -> Result<Vec<PoolRecord>, Refusal> {
         let directory = self.pool_directory()?;
-        let entries = match fs::read_dir(directory) {
+        let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(Refusal::os("listing native backing records", error)),
@@ -272,17 +280,27 @@ impl Store {
                 entry.map_err(|error| Refusal::os("listing a native backing record", error))?;
             let filename = entry.file_name();
             let Some(pool) = pool_from_name(&filename) else {
-                if Path::new(&filename).extension() == Some(std::ffi::OsStr::new("json")) {
+                if super::retained_json_name(&filename) {
                     return Err(invalid(
                         "retained Pool record has no valid canonical configuration name",
                     ));
                 }
                 continue;
             };
-            if let Some(record) = self.read_pool(&pool)? {
-                records.try_reserve(1).map_err(|_| allocation(bound))?;
-                records.push(record);
-            }
+            // Open the actual enumerated spelling, never a reconstructed name that might resolve
+            // to a different row (or no row) on a case-sensitive filesystem. Vanishing entries are
+            // a refusal during startup, not an absent owner. Interactive read_pool keeps its API.
+            let path = join(
+                &directory,
+                filename
+                    .to_str()
+                    .ok_or_else(|| invalid("a canonical backing filename is not ASCII"))?,
+            )?;
+            let file = File::open(path)
+                .map_err(|error| Refusal::os("opening a retained native backing record", error))?;
+            let record = read_pool_file(file, &pool)?;
+            records.try_reserve(1).map_err(|_| allocation(bound))?;
+            records.push(record);
         }
         records.sort_unstable_by_key(|record| record.key);
         if records
@@ -417,5 +435,37 @@ mod tests {
         assert!(store.grant_pool(&grant).is_err());
         assert!(store.remove_pool(&first.key).is_err());
         assert_eq!(store.read_pool(&[1; 32]).unwrap(), Some(replacement));
+    }
+
+    /// T-T7.1.2: native filename aliases are never treated as an absent retained owner.
+    /// The `.JSON` case is a portability requirement, not a reproduced Windows filesystem bug.
+    #[test]
+    fn retained_noncanonical_json_spellings_refuse_and_keep_exact_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("disk");
+        let store = Store::open(&disk, &dir.path().join("run")).unwrap();
+        let canonical = prepared(&store, [2; 16]);
+        assert_eq!(store.all_pools().unwrap(), vec![canonical]);
+        for filename in [
+            format!("{}.json", "A1".repeat(32)),
+            format!("{}.JSON", "a2".repeat(32)),
+            "@unknown.JsOn".to_owned(),
+        ] {
+            let path = disk.join(".pools").join(filename);
+            let bytes = b"{retained unreadable alias\n";
+            std::fs::write(&path, bytes).unwrap();
+            assert!(store.all_pools().is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            std::fs::remove_file(&path).unwrap();
+        }
+        let path = disk.join("retained-box.JSON");
+        let bytes = b"{retained box with noncanonical extension\n";
+        std::fs::write(&path, bytes).unwrap();
+        assert!(store.retained_records().is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(
+            store.all().unwrap().is_empty(),
+            "legacy ordinary scanner is unchanged"
+        );
     }
 }
