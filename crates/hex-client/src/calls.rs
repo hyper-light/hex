@@ -2596,9 +2596,9 @@ struct RemoteProc<T: Transport> {
 }
 
 impl<T: Transport> RemoteProc<T> {
-    /// Its end if it has come, waiting for it at most `timeout` (none: not at all, but what has come read now): read by
-    /// this wait itself while it holds the reader's turn, taken when free or handed to it, else handed to it by the
-    /// thread that reads; the turn handed on as it goes.
+    /// Its end if it has come, waiting for it at most `timeout` (none or zero: not at all, but what has come read
+    /// once): read by this wait itself while it holds the reader's turn, taken when free or handed to it, else
+    /// handed to it by the thread that reads; the turn handed on as it goes.
     fn wait(&mut self, timeout: Option<Duration>) -> Result<Option<Exit>, Refusal> {
         self.wait_before(timeout, None)
     }
@@ -2613,6 +2613,9 @@ impl<T: Transport> RemoteProc<T> {
         }
         let shared = triomphe::Arc::clone(&self.conn.shared);
         let deadline = timeout.map(|t| Instant::now().checked_add(t));
+        // AC-T7.4.1: a poll (no time asked, no cap) is bounded by its work, one turn's read, so messages
+        // for others that keep coming can't hold it.
+        let poll = cap.is_none() && timeout.is_none_or(|t| t.is_zero());
         shared.state()?.waiting.insert(self.exec);
         let mut mine = false;
         // Every way out of the loop goes through its end, so the wait is never left registered.
@@ -2659,10 +2662,10 @@ impl<T: Transport> RemoteProc<T> {
             };
             if mine {
                 match shared.turn(Some(left)) {
-                    Ok(true) => continue,
+                    Ok(true) if !poll => continue,
                     Ok(false) if !left.is_zero() => continue,
-                    // Waited out: what came is its end, or none.
-                    Ok(false) => {
+                    // Waited out, or polled: what came is its end, or none.
+                    Ok(_) => {
                         let ended = match self.ending.state.lock() {
                             Ok(ended) => ended,
                             Err(e) => break Err(poisoned(e)),
