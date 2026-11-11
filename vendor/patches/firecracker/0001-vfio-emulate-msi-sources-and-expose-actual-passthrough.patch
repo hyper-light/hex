@@ -1,0 +1,1391 @@
+Subject: vfio emulate MSI sources and expose actual passthrough attachments
+Why: AC-T7.4.1: Hex's firecracker class joins guest-native GPU facts to the exact selected host PCI function only through the VMM's own assignment record, never an ordinal guess: GET /device-passthrough/{id} answers the host and guest SBDF the VMM assigned (crates/hex-runtime/src/firecracker/transport.rs attachment). A passthrough device keeps one exclusive counted MSI/MSI-X source whose guest-programmed address routes through the existing KVM irqfds, and the witness refuses when interrupt programming failed. Hex commit 2c62f12a0a4c90ea4d2a806c44797e12a582f594 on this pin.
+
+diff --git a/src/firecracker/src/api_server/parsed_request.rs b/src/firecracker/src/api_server/parsed_request.rs
+index 6917027087db00fcd55ddbf094907a782a78f716..f054b0cd7bd1cfe337a6d31496b1d526c9b8691a 100644
+--- a/src/firecracker/src/api_server/parsed_request.rs
++++ b/src/firecracker/src/api_server/parsed_request.rs
+@@ -15,7 +15,9 @@ use super::request::actions::parse_put_actions;
+ use super::request::balloon::{parse_get_balloon, parse_patch_balloon, parse_put_balloon};
+ use super::request::boot_source::parse_put_boot_source;
+ use super::request::cpu_configuration::parse_put_cpu_config;
+-use super::request::device_passthrough::parse_put_device_passthrough;
++use super::request::device_passthrough::{
++    parse_get_device_passthrough, parse_put_device_passthrough,
++};
+ use super::request::drive::{parse_patch_drive, parse_put_drive};
+ use super::request::entropy::parse_put_entropy;
+ use super::request::instance_info::parse_get_instance_info;
+@@ -89,6 +91,9 @@ impl TryFrom<&Request> for ParsedRequest {
+             (Method::Get, "vm", None) if path_tokens.next() == Some("config") => {
+                 Ok(ParsedRequest::new_sync(VmmAction::GetFullVmConfig))
+             }
++            (Method::Get, "device-passthrough", None) => {
++                parse_get_device_passthrough(path_tokens.next(), path_tokens.next())
++            }
+             (Method::Get, "machine-config", None) => parse_get_machine_config(),
+             (Method::Get, "mmds", None) => parse_get_mmds(),
+             (Method::Get, "hotplug", None) if path_tokens.next() == Some("memory") => {
+@@ -191,6 +196,9 @@ impl ParsedRequest {
+     ) -> Response {
+         match request_outcome {
+             Ok(vmm_data) => match vmm_data {
++                VmmData::PassthroughAttachment(attachment) => {
++                    Self::success_response_with_data(attachment)
++                }
+                 VmmData::Empty => {
+                     info_unrestricted!(
+                         "The request was executed successfully. Status code: 204 No Content."
+@@ -603,6 +611,9 @@ pub mod tests {
+             let data = Ok(vmm_data);
+             let mut buf = Cursor::new(vec![0]);
+             let expected_response = match data.as_ref().unwrap() {
++                VmmData::PassthroughAttachment(attachment) => {
++                    http_response(&serde_json::to_string(attachment).unwrap(), 200)
++                }
+                 VmmData::BalloonConfig(cfg) => {
+                     http_response(&serde_json::to_string(cfg).unwrap(), 200)
+                 }
+diff --git a/src/firecracker/src/api_server/request/device_passthrough.rs b/src/firecracker/src/api_server/request/device_passthrough.rs
+index 39bada4f8660a7c1c626ee3b439a9857e67cf041..04a7a69306fbdd39ab43a55def14be3ab3b880a5 100644
+--- a/src/firecracker/src/api_server/request/device_passthrough.rs
++++ b/src/firecracker/src/api_server/request/device_passthrough.rs
+@@ -38,6 +38,28 @@ pub(crate) fn parse_put_device_passthrough(
+     }
+ }
+ 
++/// A readonly lookup is valid only for one explicitly named device, without an extra path suffix.
++pub(crate) fn parse_get_device_passthrough(
++    id: Option<&str>,
++    trailing: Option<&str>,
++) -> Result<ParsedRequest, RequestError> {
++    if trailing.is_some() {
++        return Err(RequestError::InvalidID);
++    }
++    let id = checked_id(id.ok_or(RequestError::EmptyID)?)?;
++    let mut owned = String::new();
++    owned.try_reserve_exact(id.len()).map_err(|_| {
++        RequestError::Generic(
++            StatusCode::InternalServerError,
++            "attachment request allocation refused".to_owned(),
++        )
++    })?;
++    owned.push_str(id);
++    Ok(ParsedRequest::new_sync(VmmAction::GetPassthroughDevice(
++        owned,
++    )))
++}
++
+ #[cfg(test)]
+ mod tests {
+     use vmm::pci::PciSBDF;
+@@ -45,6 +67,22 @@ mod tests {
+     use super::*;
+     use crate::api_server::parsed_request::tests::vmm_action_from_request;
+ 
++    #[test]
++    fn readonly_witness_requires_one_exact_checked_device_id() {
++        let action =
++            vmm_action_from_request(parse_get_device_passthrough(Some("pci_100"), None).unwrap());
++        assert_eq!(action, VmmAction::GetPassthroughDevice("pci_100".into()));
++        for (id, trailing) in [
++            (None, None),
++            (Some(""), None),
++            (Some("pci-100"), None),
++            (Some("pci_100"), Some("extra")),
++            (Some("pci_100"), Some("")),
++        ] {
++            assert!(parse_get_device_passthrough(id, trailing).is_err());
++        }
++    }
++
+     #[test]
+     fn test_parse_put_device_passthrough_request() {
+         // No body, no id
+diff --git a/src/vmm/src/device_manager/pci_mngr.rs b/src/vmm/src/device_manager/pci_mngr.rs
+index 84bccdc3c8e2545ae597a97359358e4f9e5c667f..0a150218c069e9adcf8eda59ad0e36141c5671da 100644
+--- a/src/vmm/src/device_manager/pci_mngr.rs
++++ b/src/vmm/src/device_manager/pci_mngr.rs
+@@ -115,6 +115,33 @@ pub enum PciManagerError {
+ }
+ 
+ impl PciDevices {
++    /// Observe an attached function directly; configuration order is not a guest-address oracle.
++    pub fn passthrough_attachment(
++        &self,
++        id: &str,
++    ) -> Result<crate::rpc_interface::PassthroughAttachment, crate::rpc_interface::VmmActionError>
++    {
++        use crate::rpc_interface::{PassthroughAttachment, VmmActionError};
++        for device in &self.vfio_devices {
++            let device = device.lock().map_err(|_| VmmActionError::AttachmentLock)?;
++            if device.config.id == id {
++                if device.interrupt_ready().is_err() {
++                    return Err(VmmActionError::AttachmentUnavailable);
++                }
++                let mut name = String::new();
++                name.try_reserve_exact(id.len())
++                    .map_err(|_| VmmActionError::AttachmentAllocation)?;
++                name.push_str(id);
++                return Ok(PassthroughAttachment {
++                    id: name,
++                    sbdf: device.config.sbdf,
++                    guest_sbdf: device.sbdf,
++                });
++            }
++        }
++        Err(VmmActionError::AttachmentUnavailable)
++    }
++
+     pub fn new(vm: &Arc<KvmVm>, hotplug_ports: u8) -> Result<Self, PciManagerError> {
+         // Currently we don't assign any IRQs to PCI devices. We will be using MSI-X interrupts
+         // only.
+diff --git a/src/vmm/src/pci/mod.rs b/src/vmm/src/pci/mod.rs
+index 52aba42f8a596439975fc5346a4e8aa62d200dbf..475fee4094e90315d74b8ea318be324cf4b332a8 100644
+--- a/src/vmm/src/pci/mod.rs
++++ b/src/vmm/src/pci/mod.rs
+@@ -9,6 +9,8 @@
+ pub mod bus;
+ /// PCI configuration space handling
+ pub mod configuration;
++/// PCI MSI capability logic
++pub mod msi;
+ /// MSI-X logic
+ pub mod msix;
+ /// PCI Express Capability structure
+diff --git a/src/vmm/src/pci/msi.rs b/src/vmm/src/pci/msi.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..2d79416f008e0e099c79df95364020a029672a95
+--- /dev/null
++++ b/src/vmm/src/pci/msi.rs
+@@ -0,0 +1,273 @@
++// Copyright 2026 Hex contributors.
++// SPDX-License-Identifier: Apache-2.0
++
++//! PCI MSI capabilities routed through the existing KVM MSI vector implementation.
++//! PCI Local Bus 3.0 section 6.8 and Linux pci_regs.h define the offsets/flags below.
++//! Per-vector masking is optional: do not advertise it when emulating MSI through irqfds.
++
++use crate::pci::msix::MsixTableEntry;
++
++#[derive(Debug, thiserror::Error, displaydoc::Display)]
++pub enum MsiError {
++    /// Malformed PCI MSI capability or access.
++    Invalid,
++    /// MSI route storage allocation failed.
++    Allocation,
++}
++
++#[derive(Debug)]
++pub struct MsiConfig {
++    offset: usize,
++    // Largest PCI MSI capability: 64-bit address, data, mask and pending registers (24 bytes).
++    bytes: [u8; 24],
++    len: usize,
++    vectors: u16,
++}
++
++impl MsiConfig {
++    /// Parse the bounded legacy capability chain and its actual VFIO MSI vector ceiling.
++    pub fn parse(space: &[u32], available: u32) -> Result<Option<Self>, MsiError> {
++        if available == 0 {
++            return Ok(None);
++        }
++        let mut pointer =
++            usize::try_from(space.get(0x34 / 4).copied().ok_or(MsiError::Invalid)? & 0xff)
++                .map_err(|_| MsiError::Invalid)?;
++        // PCI's legacy capability region has at most 256 / 4 aligned entries.
++        for _ in 0..(256 / 4) {
++            if pointer == 0 {
++                return Ok(None);
++            }
++            if pointer < 0x40 || pointer > 0xfc || pointer & 3 != 0 {
++                return Err(MsiError::Invalid);
++            }
++            let header = *space.get(pointer / 4).ok_or(MsiError::Invalid)?;
++            if header & 0xff == 0x05 {
++                let control = u16::try_from(header >> 16).map_err(|_| MsiError::Invalid)?;
++                let shift = u32::from((control >> 1) & 7);
++                if shift > 5 {
++                    return Err(MsiError::Invalid);
++                }
++                let hardware = 1u32.checked_shl(shift).ok_or(MsiError::Invalid)?;
++                let room = hardware.min(available);
++                let power = room.checked_ilog2().ok_or(MsiError::Invalid)?;
++                let vectors = 1u16.checked_shl(power).ok_or(MsiError::Invalid)?;
++                let wide = control & 0x80 != 0;
++                let len = if wide { 14 } else { 10 };
++                let mut bytes = [0u8; 24];
++                for i in 0usize..len {
++                    let at = pointer.checked_add(i).ok_or(MsiError::Invalid)?;
++                    let word = space.get(at / 4).ok_or(MsiError::Invalid)?;
++                    let shift = u32::try_from((at % 4).checked_mul(8).ok_or(MsiError::Invalid)?)
++                        .map_err(|_| MsiError::Invalid)?;
++                    *bytes.get_mut(i).ok_or(MsiError::Invalid)? =
++                        u8::try_from((word >> shift) & 0xff).map_err(|_| MsiError::Invalid)?;
++                }
++                let mut config = Self {
++                    offset: pointer,
++                    bytes,
++                    len,
++                    vectors,
++                };
++                // Expose only IRQ vectors actually allocated and hide optional per-vector mask.
++                config.set_control(
++                    (control & 0x80) | (u16::try_from(power).map_err(|_| MsiError::Invalid)? << 1),
++                )?;
++                return Ok(Some(config));
++            }
++            pointer = usize::try_from((header >> 8) & 0xff).map_err(|_| MsiError::Invalid)?;
++        }
++        Err(MsiError::Invalid)
++    }
++
++    /// Maximum power-of-two vector count advertised to this guest.
++    pub fn vectors(&self) -> u16 {
++        self.vectors
++    }
++
++    /// Current guest-enabled vector count (zero when disabled), used for the VFIO hardware source.
++    pub fn enabled_vectors(&self) -> Result<u16, MsiError> {
++        let control = self.control()?;
++        if control & 1 == 0 {
++            return Ok(0);
++        }
++        let enabled = 1u16
++            .checked_shl(u32::from((control >> 4) & 7))
++            .ok_or(MsiError::Invalid)?;
++        if enabled > self.vectors {
++            return Err(MsiError::Invalid);
++        }
++        Ok(enabled)
++    }
++
++    fn control(&self) -> Result<u16, MsiError> {
++        let bytes: [u8; 2] = self
++            .bytes
++            .get(2..4)
++            .ok_or(MsiError::Invalid)?
++            .try_into()
++            .map_err(|_| MsiError::Invalid)?;
++        Ok(u16::from_le_bytes(bytes))
++    }
++
++    fn set_control(&mut self, control: u16) -> Result<(), MsiError> {
++        self.bytes
++            .get_mut(2..4)
++            .ok_or(MsiError::Invalid)?
++            .copy_from_slice(&control.to_le_bytes());
++        Ok(())
++    }
++
++    /// Emulate a capability dword read, leaving unrelated registers to the caller.
++    pub fn read(&self, register: u16) -> Option<u32> {
++        let at = usize::from(register)
++            .checked_mul(4)?
++            .checked_sub(self.offset)?;
++        if at >= self.len {
++            return None;
++        }
++        let end = at.checked_add(4)?;
++        let bytes: [u8; 4] = self.bytes.get(at..end)?.try_into().ok()?;
++        Some(u32::from_le_bytes(bytes))
++    }
++
++    /// Update guest-writable address/data/enable bits without writing host PCI configuration.
++    pub fn write(&mut self, register: u16, offset: u8, data: &[u8]) -> Result<bool, MsiError> {
++        let absolute = usize::from(register)
++            .checked_mul(4)
++            .ok_or(MsiError::Invalid)?;
++        let Some(base) = absolute
++            .checked_sub(self.offset)
++            .filter(|at| *at < self.len)
++        else {
++            return Ok(false);
++        };
++        if usize::from(offset)
++            .checked_add(data.len())
++            .is_none_or(|end| end > 4)
++        {
++            return Err(MsiError::Invalid);
++        }
++        let at = base
++            .checked_add(usize::from(offset))
++            .ok_or(MsiError::Invalid)?;
++        let old = self.control()?;
++        for (index, byte) in data.iter().enumerate() {
++            let target = at.checked_add(index).ok_or(MsiError::Invalid)?;
++            if target >= 2 && target < self.len {
++                *self.bytes.get_mut(target).ok_or(MsiError::Invalid)? = *byte;
++            }
++        }
++        // Enable and multiple-message-enable are the only guest-writable control bits.
++        let control = (old & !0x71) | (self.control()? & 0x71);
++        let enabled = 1u16
++            .checked_shl(u32::from((control >> 4) & 7))
++            .ok_or(MsiError::Invalid)?;
++        if enabled > self.vectors {
++            self.set_control(old & !1)?;
++            return Err(MsiError::Invalid);
++        }
++        self.set_control(control)?;
++        Ok(true)
++    }
++
++    /// Build exactly the allocated KVM route set, masking vectors beyond the enabled count.
++    pub fn routes(&self) -> Result<Vec<MsixTableEntry>, MsiError> {
++        let control = self.control()?;
++        let enabled = 1u16
++            .checked_shl(u32::from((control >> 4) & 7))
++            .ok_or(MsiError::Invalid)?;
++        if enabled > self.vectors {
++            return Err(MsiError::Invalid);
++        }
++        let word = |at: usize| -> Result<u32, MsiError> {
++            let end = at.checked_add(4).ok_or(MsiError::Invalid)?;
++            let bytes: [u8; 4] = self
++                .bytes
++                .get(at..end)
++                .ok_or(MsiError::Invalid)?
++                .try_into()
++                .map_err(|_| MsiError::Invalid)?;
++            Ok(u32::from_le_bytes(bytes))
++        };
++        let wide = control & 0x80 != 0;
++        let data_offset: usize = if wide { 12 } else { 8 };
++        let data: [u8; 2] = self
++            .bytes
++            .get(data_offset..data_offset.checked_add(2).ok_or(MsiError::Invalid)?)
++            .ok_or(MsiError::Invalid)?
++            .try_into()
++            .map_err(|_| MsiError::Invalid)?;
++        let data = u32::from(u16::from_le_bytes(data));
++        let mask = u32::from(enabled.checked_sub(1).ok_or(MsiError::Invalid)?);
++        let mut routes = Vec::new();
++        routes
++            .try_reserve_exact(usize::from(self.vectors))
++            .map_err(|_| MsiError::Allocation)?;
++        for vector in 0..self.vectors {
++            routes.push(MsixTableEntry {
++                msg_addr_lo: word(4)?,
++                msg_addr_hi: if wide { word(8)? } else { 0 },
++                msg_data: (data & !mask) | (u32::from(vector) & mask),
++                vector_ctl: u32::from(control & 1 == 0 || vector >= enabled),
++            });
++        }
++        Ok(routes)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn space(wide: bool) -> [u32; 64] {
++        let mut words = [0u32; 64];
++        words[0x34 / 4] = 0x40;
++        words[0x40 / 4] = 5 | (u32::from(if wide { 0x0184u16 } else { 0x0104u16 }) << 16);
++        words
++    }
++
++    #[test]
++    fn writes_program_exact_guest_msi_routes_and_enable_only_allocated_vectors() {
++        for wide in [false, true] {
++            let mut msi = MsiConfig::parse(&space(wide), 4).unwrap().unwrap();
++            assert_eq!(msi.vectors(), 4);
++            assert_eq!(msi.enabled_vectors().unwrap(), 0);
++            assert!(msi.routes().unwrap().iter().all(|route| route.masked()));
++            msi.write(0x44 / 4, 0, &0xfee0_0000u32.to_le_bytes())
++                .unwrap();
++            if wide {
++                msi.write(0x48 / 4, 0, &1u32.to_le_bytes()).unwrap();
++            }
++            msi.write(
++                if wide { 0x4c / 4 } else { 0x48 / 4 },
++                0,
++                &0x44u16.to_le_bytes(),
++            )
++            .unwrap();
++            let control = if wide { 0xa5u16 } else { 0x25u16 };
++            msi.write(0x40 / 4, 2, &control.to_le_bytes()).unwrap();
++            assert_eq!(msi.enabled_vectors().unwrap(), 4);
++            let routes = msi.routes().unwrap();
++            assert_eq!(routes.len(), 4);
++            for (index, route) in routes.iter().enumerate() {
++                assert_eq!(route.msg_addr_lo, 0xfee0_0000);
++                assert_eq!(route.msg_addr_hi, u32::from(wide));
++                assert_eq!(route.msg_data, 0x44 | u32::try_from(index).unwrap());
++                assert!(!route.masked());
++            }
++            assert_eq!(msi.read(0x40 / 4).unwrap() >> 16 & 0x100, 0);
++        }
++    }
++
++    #[test]
++    fn malformed_chain_or_excessive_message_enable_refuses() {
++        let mut words = space(false);
++        words[0x34 / 4] = 0xff;
++        assert!(MsiConfig::parse(&words, 4).is_err());
++        let mut msi = MsiConfig::parse(&space(false), 2).unwrap().unwrap();
++        assert!(msi.write(0x40 / 4, 2, &0x31u16.to_le_bytes()).is_err());
++        assert!(msi.routes().unwrap().iter().all(|route| route.masked()));
++        assert!(MsiConfig::parse(&space(false), 0).unwrap().is_none());
++    }
++}
+diff --git a/src/vmm/src/rpc_interface.rs b/src/vmm/src/rpc_interface.rs
+index e9655927f02037a6c26a10c0d4c2616acf518f23..2f0bc350649f79373407e535ed91166f9da7facd 100644
+--- a/src/vmm/src/rpc_interface.rs
++++ b/src/vmm/src/rpc_interface.rs
+@@ -4,6 +4,7 @@
+ use std::fmt::{self, Debug};
+ use std::sync::{Arc, Mutex, MutexGuard};
+ 
++use serde::{Serialize, Serializer};
+ use serde_json::Value;
+ use utils::time::{ClockType, get_time_us};
+ 
+@@ -73,6 +74,8 @@ pub enum VmmAction {
+     GetBalloonStats,
+     /// Get complete microVM configuration in JSON format.
+     GetFullVmConfig,
++    /// Read the actual host/guest PCI binding of an attached VFIO device.
++    GetPassthroughDevice(String),
+     /// Get MMDS contents.
+     GetMMDS,
+     /// Get the machine configuration of the microVM.
+@@ -167,6 +170,12 @@ pub enum VmmAction {
+ /// Wrapper for all errors associated with VMM actions.
+ #[derive(Debug, thiserror::Error, displaydoc::Display)]
+ pub enum VmmActionError {
++    /// The requested VFIO device is not attached to this running VM.
++    AttachmentUnavailable,
++    /// Native attachment state is inaccessible because a lock was poisoned.
++    AttachmentLock,
++    /// Attachment response storage could not be reserved.
++    AttachmentAllocation,
+     /// Balloon config error: {0}
+     BalloonConfig(#[from] BalloonConfigError),
+     /// Balloon update error: {0}
+@@ -235,11 +244,30 @@ pub enum VmmActionError {
+     IncompatibleDeviceConfiguration(#[from] ResourcesError),
+ }
+ 
++/// The attached device's host source and actual PCI address assigned by the VMM.
++#[derive(Debug, PartialEq, Eq, Serialize)]
++pub struct PassthroughAttachment {
++    pub id: String,
++    #[serde(serialize_with = "serialize_attachment_sbdf")]
++    pub sbdf: crate::pci::PciSBDF,
++    #[serde(serialize_with = "serialize_attachment_sbdf")]
++    pub guest_sbdf: crate::pci::PciSBDF,
++}
++
++fn serialize_attachment_sbdf<S: Serializer>(
++    value: &crate::pci::PciSBDF,
++    serializer: S,
++) -> Result<S::Ok, S::Error> {
++    serializer.collect_str(value)
++}
++
+ /// The enum represents the response sent by the VMM in case of success. The response is either
+ /// empty, when no data needs to be sent, or an internal VMM structure.
+ #[allow(clippy::large_enum_variant)]
+ #[derive(Debug, PartialEq, Eq)]
+ pub enum VmmData {
++    /// Readonly native attachment witness.
++    PassthroughAttachment(PassthroughAttachment),
+     /// The balloon device configuration.
+     BalloonConfig(BalloonDeviceConfig),
+     /// The latest balloon device statistics.
+@@ -517,6 +545,7 @@ impl<'a> PrebootApiController<'a> {
+             SetMemoryHotplugDevice(config) => self.set_memory_hotplug_device(config),
+             // Operations not allowed pre-boot.
+             CreateSnapshot(_)
++            | GetPassthroughDevice(_)
+             | FlushMetrics
+             | Pause
+             | Resume
+@@ -737,6 +766,19 @@ impl RuntimeApiController {
+         use self::VmmAction::*;
+         match request {
+             // Supported operations allowed post-boot.
++            GetPassthroughDevice(id) => {
++                let vmm = self
++                    .vmm
++                    .lock()
++                    .map_err(|_| VmmActionError::AttachmentLock)?;
++                let devices = vmm
++                    .device_manager
++                    .pci_devices()
++                    .ok_or(VmmActionError::AttachmentUnavailable)?;
++                devices
++                    .passthrough_attachment(&id)
++                    .map(VmmData::PassthroughAttachment)
++            }
+             CreateSnapshot(snapshot_create_cfg) => self.create_snapshot(&snapshot_create_cfg),
+             FlushMetrics => self.flush_metrics(),
+             GetBalloonConfig => self
+@@ -1075,6 +1117,19 @@ impl RuntimeApiController {
+ 
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn passthrough_witness_retains_actual_host_and_guest_addresses() {
++        let witness = super::PassthroughAttachment {
++            id: "pci_100".into(),
++            sbdf: crate::pci::PciSBDF::new(0, 1, 0, 0),
++            guest_sbdf: crate::pci::PciSBDF::new(0, 0, 5, 0),
++        };
++        let value = serde_json::to_value(witness).unwrap();
++        assert_eq!(value["id"], "pci_100");
++        assert_eq!(value["sbdf"], "0000:01:00.0");
++        assert_eq!(value["guest_sbdf"], "0000:00:05.0");
++    }
++
+     use std::path::PathBuf;
+ 
+     use super::*;
+diff --git a/src/vmm/src/vfio.rs b/src/vmm/src/vfio.rs
+index 8eaa462178efe596b176e95cad533c2a1909a78b..2931f8b270401ef18b52855942fb5e223b0709b6 100644
+--- a/src/vmm/src/vfio.rs
++++ b/src/vmm/src/vfio.rs
+@@ -27,6 +27,7 @@ use crate::pci::configuration::{
+     BAR0_REG_IDX, Bars, COMMAND_BUS_MASTER_ENABLE, COMMAND_INTX_DISABLE, COMMAND_IO_SPACE_ENABLE,
+     COMMAND_MEMORY_SPACE_ENABLE, COMMAND_REG, NUM_BAR_REGS, ROM_BAR_REG,
+ };
++use crate::pci::msi::{MsiConfig, MsiError};
+ use crate::pci::msix::{MsixCap, MsixConfig};
+ use crate::pci::{PciCapabilityId, PciDevice, PciExpressCapabilityId, PciSBDF};
+ use crate::utils::{
+@@ -36,6 +37,7 @@ use crate::utils::{
+ use crate::vmm_config::device_passthrough::DevicePassthroughConfig;
+ use crate::vstate::bus::{BusDevice, BusError};
+ use crate::vstate::interrupts::InterruptError;
++use crate::vstate::interrupts::MsixVectorGroup;
+ use crate::vstate::memory::{GuestMemoryMmap, GuestRegionType};
+ use crate::vstate::resources::ResourceAllocator;
+ use crate::vstate::vm::{KvmVm, VmError};
+@@ -58,6 +60,12 @@ const PCI_CONFIG_BAR_PREFETCHABLE: u32 = 1 << 3;
+ /// VfioError
+ #[derive(Debug, thiserror::Error, displaydoc::Display)]
+ pub enum VfioError {
++    /// MSI capability or route storage error: {0}
++    Msi(#[from] MsiError),
++    /// Device provides no supported MSI or MSI-X interrupt source.
++    NoMsiIrq,
++    /// Interrupt route storage allocation failed.
++    InterruptAllocation,
+     /// Failed to allocate guest address for BAR
+     BarAllocation,
+     /// Mmap failed: {0:?}
+@@ -155,6 +163,144 @@ struct VfioMsixState {
+     config: MsixConfig,
+ }
+ 
++#[derive(Debug)]
++struct VfioMsiState {
++    config: MsiConfig,
++    vectors: Arc<MsixVectorGroup>,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum InterruptSource {
++    None,
++    Msi(u16),
++    Msix,
++}
++
++#[derive(Debug)]
++struct VfioSources {
++    msix: Option<VfioMsixState>,
++    msi: Option<VfioMsiState>,
++    active: InterruptSource,
++}
++
++#[derive(Debug)]
++enum VfioInterrupts {
++    Ready(VfioSources),
++    Failed(VfioError),
++}
++
++impl VfioInterrupts {
++    fn msix(&self) -> Option<&VfioMsixState> {
++        match self {
++            Self::Ready(sources) => sources.msix.as_ref(),
++            Self::Failed(_) => None,
++        }
++    }
++    fn msix_mut(&mut self) -> Option<&mut VfioMsixState> {
++        match self {
++            Self::Ready(sources) => sources.msix.as_mut(),
++            Self::Failed(_) => None,
++        }
++    }
++    fn msi(&self) -> Option<&VfioMsiState> {
++        match self {
++            Self::Ready(sources) => sources.msi.as_ref(),
++            Self::Failed(_) => None,
++        }
++    }
++    fn msi_mut(&mut self) -> Option<&mut VfioMsiState> {
++        match self {
++            Self::Ready(sources) => sources.msi.as_mut(),
++            Self::Failed(_) => None,
++        }
++    }
++}
++
++impl VfioSources {
++    // VFIO permits one active hardware IRQ type. Disable the previous physical source before
++    // enabling another, and never program a guest MSI address into host PCI configuration.
++    fn synchronize(&mut self, device: &InternalVfioDevice, sbdf: PciSBDF) -> Result<(), VfioError> {
++        let msi = self
++            .msi
++            .as_ref()
++            .map(|state| state.config.enabled_vectors())
++            .transpose()?
++            .unwrap_or(0);
++        let msix = self.msix.as_ref().is_some_and(|state| state.config.enabled);
++        let requested = source(msi, msix)?;
++        if self.active != requested {
++            match self.active {
++                InterruptSource::None => {}
++                InterruptSource::Msi(_) => {
++                    let state = self.msi.as_ref().ok_or(VfioError::NoMsiIrq)?;
++                    state.vectors.disable().map_err(VfioError::MsixConfig)?;
++                    device.disable_msi()?;
++                }
++                InterruptSource::Msix => {
++                    let state = self.msix.as_ref().ok_or(VfioError::NoMsixIrq)?;
++                    state
++                        .config
++                        .vectors
++                        .disable()
++                        .map_err(VfioError::MsixConfig)?;
++                    device.disable_msix()?;
++                }
++            }
++            self.active = InterruptSource::None;
++            match requested {
++                InterruptSource::None => {}
++                InterruptSource::Msi(count) => {
++                    let state = self.msi.as_ref().ok_or(VfioError::NoMsiIrq)?;
++                    device.enable_msi(vfio_interrupt_fds(&state.vectors, usize::from(count))?)?;
++                }
++                InterruptSource::Msix => {
++                    let state = self.msix.as_ref().ok_or(VfioError::NoMsixIrq)?;
++                    device.enable_msix(vfio_interrupt_fds(
++                        &state.config.vectors,
++                        state.config.table_entries.len(),
++                    )?)?;
++                }
++            }
++            self.active = requested;
++        }
++        match requested {
++            InterruptSource::None => Ok(()),
++            InterruptSource::Msi(_) => {
++                let state = self.msi.as_ref().ok_or(VfioError::NoMsiIrq)?;
++                state
++                    .vectors
++                    .update_batched(&state.config.routes()?, sbdf)
++                    .map_err(VfioError::MsixConfig)
++            }
++            InterruptSource::Msix => {
++                let state = self.msix.as_ref().ok_or(VfioError::NoMsixIrq)?;
++                if state.config.masked {
++                    state
++                        .config
++                        .vectors
++                        .disable()
++                        .map_err(VfioError::MsixConfig)
++                } else {
++                    state
++                        .config
++                        .vectors
++                        .update_batched(&state.config.table_entries, sbdf)
++                        .map_err(VfioError::MsixConfig)
++                }
++            }
++        }
++    }
++}
++
++fn source(msi: u16, msix: bool) -> Result<InterruptSource, VfioError> {
++    match (msi, msix) {
++        (0, false) => Ok(InterruptSource::None),
++        (0, true) => Ok(InterruptSource::Msix),
++        (count, false) if count.is_power_of_two() && count <= 32 => Ok(InterruptSource::Msi(count)),
++        _ => Err(VfioError::Msi(MsiError::Invalid)),
++    }
++}
++
+ /// Mask for specific register in the configuration space
+ #[derive(Debug)]
+ struct VfioRegisterMask {
+@@ -178,7 +324,7 @@ pub struct VfioDevice {
+     bar_mappings: Vec<VfioBarMapping>,
+     /// Areas of the BARs which are emulated instead of being mapped into the guest.
+     pub emulated_areas: VfioBarEmulatedAreas,
+-    msix_state: VfioMsixState,
++    interrupts: VfioInterrupts,
+     masks: Vec<VfioRegisterMask>,
+     vm: Arc<KvmVm>,
+ }
+@@ -203,6 +349,49 @@ impl VfioDevice {
+         vfio_init_device(container, vm, config, sbdf)
+     }
+ 
++    /// A failed MSI programming transition cannot produce a successful attachment witness.
++    pub fn interrupt_ready(&self) -> Result<(), &VfioError> {
++        match &self.interrupts {
++            VfioInterrupts::Failed(error) => Err(error),
++            VfioInterrupts::Ready(_) => Ok(()),
++        }
++    }
++
++    fn synchronize_interrupts(&mut self) {
++        if let VfioInterrupts::Ready(sources) = &mut self.interrupts {
++            if let Err(error) = sources.synchronize(&self.device, self.sbdf) {
++                self.fail_interrupts(error);
++            }
++        }
++    }
++
++    fn fail_interrupts(&mut self, error: VfioError) {
++        if let VfioInterrupts::Ready(sources) = &self.interrupts {
++            for vectors in sources
++                .msi
++                .iter()
++                .map(|state| &state.vectors)
++                .chain(sources.msix.iter().map(|state| &state.config.vectors))
++            {
++                if let Err(disable) = vectors.disable() {
++                    error!("Failed disabling guest interrupt routes: {disable}");
++                }
++            }
++            let disabled = match sources.active {
++                InterruptSource::None => Ok(()),
++                InterruptSource::Msi(_) => self.device.disable_msi(),
++                InterruptSource::Msix => self.device.disable_msix(),
++            };
++            if let Err(disable) = disabled {
++                error!("Failed disabling physical IRQ source: {disable}");
++            }
++        }
++        // PCI BusDevice methods cannot return an error: retain it authoritatively and refuse
++        // the readonly attachment witness instead of claiming the device is usable.
++        error!("Passthrough interrupt configuration failed: {error}");
++        self.interrupts = VfioInterrupts::Failed(error);
++    }
++
+     fn maybe_relocate_all_bars(&mut self) {
+         vfio_maybe_relocate_all_bars(self);
+     }
+@@ -267,15 +456,15 @@ fn vfio_distribute_msix_access(
+ // Distribute BAR access aiming at the emulated areas
+ fn vfio_distribute_emulated_access(
+     emulated_areas: &[VfioBarEmulatedArea],
+-    msix_cap: &MsixCap,
++    msix_cap: Option<&MsixCap>,
+     base: u64,
+     offset: u64,
+     data_len: u64,
+ ) -> HandleBarAccessResult {
+     for area in emulated_areas.iter() {
+         if area.gpa == base {
+-            let result = if area.bar_idx == msix_cap.table_bir() {
+-                vfio_distribute_msix_access(area, msix_cap, base, offset, data_len)
++            let result = if let Some(cap) = msix_cap.filter(|cap| area.bar_idx == cap.table_bir()) {
++                vfio_distribute_msix_access(area, cap, base, offset, data_len)
+             } else {
+                 HandleBarAccessResult::Device {
+                     bar_idx: area.bar_idx,
+@@ -291,9 +480,13 @@ fn vfio_distribute_emulated_access(
+ 
+ impl BusDevice for VfioDevice {
+     fn read(&mut self, base: u64, offset: u64, data: &mut [u8]) {
++        if matches!(self.interrupts, VfioInterrupts::Failed(_)) {
++            data.fill(0xff);
++            return;
++        }
+         match vfio_distribute_emulated_access(
+             &self.emulated_areas,
+-            &self.msix_state.cap,
++            self.interrupts.msix().map(|state| &state.cap),
+             base,
+             offset,
+             usize_to_u64(data.len()),
+@@ -307,7 +500,11 @@ impl BusDevice for VfioDevice {
+                 data.fill(0);
+             }
+             HandleBarAccessResult::MsixTable(offset) => {
+-                self.msix_state.config.read_table(offset, data);
++                if let Some(state) = self.interrupts.msix() {
++                    state.config.read_table(offset, data);
++                } else {
++                    data.fill(0);
++                }
+             }
+             HandleBarAccessResult::Device { bar_idx, offset } => {
+                 let region_size = self.device.get_region_size(bar_idx as u32);
+@@ -320,9 +517,12 @@ impl BusDevice for VfioDevice {
+     }
+ 
+     fn write(&mut self, base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
++        if matches!(self.interrupts, VfioInterrupts::Failed(_)) {
++            return None;
++        }
+         match vfio_distribute_emulated_access(
+             &self.emulated_areas,
+-            &self.msix_state.cap,
++            self.interrupts.msix().map(|state| &state.cap),
+             base,
+             offset,
+             usize_to_u64(data.len()),
+@@ -335,7 +535,10 @@ impl BusDevice for VfioDevice {
+                 );
+             }
+             HandleBarAccessResult::MsixTable(offset) => {
+-                self.msix_state.config.write_table(offset, data);
++                if let Some(state) = self.interrupts.msix_mut() {
++                    state.config.write_table(offset, data);
++                }
++                self.synchronize_interrupts();
+             }
+             HandleBarAccessResult::Device { bar_idx, offset } => {
+                 let region_size = self.device.get_region_size(bar_idx as u32);
+@@ -390,6 +593,25 @@ impl PciDevice for VfioDevice {
+         offset: u8,
+         data: &[u8],
+     ) -> Option<Arc<Barrier>> {
++        if matches!(self.interrupts, VfioInterrupts::Failed(_)) {
++            return None;
++        }
++        let msi_write = self
++            .interrupts
++            .msi_mut()
++            .map(|state| state.config.write(reg_idx, offset, data))
++            .transpose();
++        match msi_write {
++            Ok(Some(true)) => {
++                self.synchronize_interrupts();
++                return None;
++            }
++            Ok(Some(false) | None) => {}
++            Err(error) => {
++                self.fail_interrupts(VfioError::Msi(error));
++                return None;
++            }
++        }
+         let mut handled: bool = false;
+         if BAR0_REG_IDX <= reg_idx && reg_idx < BAR0_REG_IDX + u16::from(NUM_BAR_REGS) {
+             // reg_idx is in [BAR0_REG, BAR0_REG+NUM_BAR_REGS), so the difference is 0..5.
+@@ -425,12 +647,41 @@ impl PciDevice for VfioDevice {
+                  {offset:#x}",
+                 self.config.id
+             );
+-        } else if reg_idx == u16::from(self.msix_state.register) {
+-            // offset is within a 4-byte PCI config register (0..3).
+-            self.msix_state.config.write_msg_ctl_register(offset, data);
+-            // Don't set `handled` since we need to passthrough write
+-            // to the msg_ctl register to the device, so it will enable Msix
+-            // interrupts
++        } else if self
++            .interrupts
++            .msix()
++            .is_some_and(|state| reg_idx == u16::from(state.register))
++        {
++            let updated = self
++                .interrupts
++                .msix_mut()
++                .ok_or(VfioError::NoMsixIrq)
++                .and_then(|state| {
++                    let mut control = state.config.as_msg_ctl().to_le_bytes();
++                    let end = usize::from(offset)
++                        .checked_add(data.len())
++                        .filter(|end| *end <= 4)
++                        .ok_or(VfioError::Msi(MsiError::Invalid))?;
++                    for (index, byte) in (usize::from(offset)..end).zip(data) {
++                        if let Some(target) = index
++                            .checked_sub(2)
++                            .and_then(|index| control.get_mut(index))
++                        {
++                            *target = *byte;
++                        }
++                    }
++                    let control = u16::from_le_bytes(control);
++                    state.config.enabled = control & (1 << 15) != 0;
++                    state.config.masked = control & (1 << 14) != 0;
++                    Ok(())
++                });
++            if let Err(error) = updated {
++                self.fail_interrupts(error);
++            } else {
++                self.synchronize_interrupts();
++            }
++            // VFIO ioctls own the physical interrupt capability; guest values stay emulated.
++            return None;
+         } else if reg_idx == COMMAND_REG {
+             // This is special write that can force us to relocate BARs
+             handled = true;
+@@ -456,6 +707,14 @@ impl PciDevice for VfioDevice {
+         None
+     }
+     fn read_config_register(&mut self, reg_idx: u16) -> u32 {
++        if matches!(self.interrupts, VfioInterrupts::Failed(_)) {
++            return u32::MAX;
++        }
++        if let Some(state) = self.interrupts.msi() {
++            if let Some(value) = state.config.read(reg_idx) {
++                return value;
++            }
++        }
+         let mut result: u32 = 0;
+         if BAR0_REG_IDX <= reg_idx && reg_idx < BAR0_REG_IDX + u16::from(NUM_BAR_REGS) {
+             // reg_idx is in [BAR0_REG, BAR0_REG+NUM_BAR_REGS), so the difference is 0..5.
+@@ -475,10 +734,14 @@ impl PciDevice for VfioDevice {
+                 result.as_mut_bytes(),
+                 config_offset,
+             );
+-            if reg_idx == u16::from(self.msix_state.register) {
++            if let Some(state) = self
++                .interrupts
++                .msix()
++                .filter(|state| reg_idx == u16::from(state.register))
++            {
+                 // Since we emulate the MsixCap, we need to set the Mask and Msix enable bits to
+                 // values we have, and not what device has.
+-                let msg_ctl = self.msix_state.config.as_msg_ctl();
++                let msg_ctl = state.config.as_msg_ctl();
+                 result &= 0x0000ffff;
+                 result |= u32::from(msg_ctl) << 16;
+             }
+@@ -851,7 +1114,7 @@ fn vfio_ranges_overlap(start_a: u64, size_a: u64, start_b: u64, size_b: u64) ->
+ fn vfio_calculate_bar_areas(
+     bars: &Bars,
+     bar_infos: &[VfioBarInfo; NUM_BAR_REGS as usize],
+-    msix_cap: &MsixCap,
++    msix_cap: Option<&MsixCap>,
+ ) -> Result<(Vec<VfioBarMappableArea>, VfioBarEmulatedAreas), VfioError> {
+     // There are 6 BARs with maximum of 1 MSIx table gap, so the maximum number of mappable areas
+     // is 7. The only reason to use `Vec` instead of `ArrayVec` here is that this vector can be
+@@ -883,10 +1146,12 @@ fn vfio_calculate_bar_areas(
+             let mut msix_table_offset = 0;
+             let mut msix_table_size = 0;
+             let mut msix_table_gpa = 0;
+-            let contains_msix_table = bar_idx == msix_cap.table_bir();
++            let contains_msix_table = msix_cap.is_some_and(|cap| bar_idx == cap.table_bir());
+ 
+             if contains_msix_table {
+-                let (offset, size) = msix_cap.table_bar_offset_and_size();
++                let (offset, size) = msix_cap
++                    .ok_or(VfioError::NoMsixIrq)?
++                    .table_bar_offset_and_size();
+                 // Since original `offset` and `size` are `u32` and `u16`, their addition
+                 // cannot overflow when widened to `u64`;
+                 let (offset, size) = (offset as u64, size as u64);
+@@ -1257,6 +1522,23 @@ fn vfio_unmap_bar_mapping(vm: &KvmVm, mapping: &VfioBarMapping) {
+     }
+ }
+ 
++fn vfio_interrupt_fds(vectors: &MsixVectorGroup, count: usize) -> Result<Vec<&EventFd>, VfioError> {
++    if count == 0 || count > vectors.vectors.len() {
++        return Err(VfioError::NoMsiIrq);
++    }
++    let mut fds = Vec::new();
++    fds.try_reserve_exact(count)
++        .map_err(|_| VfioError::InterruptAllocation)?;
++    fds.extend(
++        vectors
++            .vectors
++            .iter()
++            .take(count)
++            .map(|vector| &vector.event_fd),
++    );
++    Ok(fds)
++}
++
+ /// This will open a VFIO device, attach its group both to the KVM VFIO device and to the VFIO
+ /// container. It will setup MSIx irqs and BAR DMAs.
+ fn vfio_init_device(
+@@ -1281,41 +1563,81 @@ fn vfio_init_device(
+     vfio_device_reset_command_reg(&device);
+     device.reset();
+ 
+-    let Some(msix_irq_info) = device.get_irq_info(VFIO_PCI_MSIX_IRQ_INDEX) else {
+-        return Err(VfioError::NoMsixIrq);
+-    };
+-    if msix_irq_info.count == 0 {
+-        return Err(VfioError::NoMsixIrq);
+-    }
+-
+     let mut config_space = [0_u32; PCI_CONFIG_SPACE_REGS as usize];
+     device.region_read(VFIO_PCI_CONFIG_REGION_INDEX, config_space.as_mut_bytes(), 0);
+     let (msix_cap_and_register, masks) = vfio_get_pci_capabilities(&config_space);
+-
+-    // Only devices with MSI-X cap and irqs are supported
+-    let Some((msix_cap, msix_register)) = msix_cap_and_register else {
+-        return Err(VfioError::NoMsixIrq);
++    let msix_info = device
++        .get_irq_info(VFIO_PCI_MSIX_IRQ_INDEX)
++        .filter(|info| info.count > 0);
++    let msix = if let Some(((cap, register), info)) = msix_cap_and_register.zip(msix_info) {
++        let count = u16::try_from(info.count)
++            .ok()
++            .filter(|count| *count > 0 && *count <= 2048)
++            .ok_or(VfioError::NoMsixIrq)?;
++        // MSI-X encodes table size minus one in eleven bits. VFIO's actual allocated source
++        // must agree with the capability before guest writes can index that route table.
++        let advertised = (cap.msg_ctl & 0x7ff)
++            .checked_add(1)
++            .ok_or(VfioError::NoMsixIrq)?;
++        if count != advertised {
++            return Err(VfioError::NoMsixIrq);
++        }
++        let vectors =
++            Arc::new(KvmVm::create_msix_group(vm.clone(), count).map_err(VfioError::MsixConfig)?);
++        let mut table_entries = Vec::new();
++        table_entries
++            .try_reserve_exact(usize::from(count))
++            .map_err(|_| VfioError::InterruptAllocation)?;
++        table_entries.resize_with(usize::from(count), Default::default);
++        // PCI MSI-X PBA has one bit per vector in 64-bit words (PCI Local Bus 3.0 section 6.8).
++        let pba_count = usize::from(count.div_ceil(64));
++        let mut pba_entries = Vec::new();
++        pba_entries
++            .try_reserve_exact(pba_count)
++            .map_err(|_| VfioError::InterruptAllocation)?;
++        pba_entries.resize(pba_count, 0);
++        Some(VfioMsixState {
++            register,
++            cap,
++            config: MsixConfig {
++                table_entries,
++                pba_entries,
++                sbdf,
++                vectors,
++                masked: true,
++                enabled: false,
++            },
++        })
++    } else {
++        None
+     };
+-
+-    // SAFETY: maximum msix table size is 1 << 11 = 2048 (it has 10 bits in the control register
+-    // and encoded as N - 1). This fits into u16 without issues.
+-    #[allow(clippy::cast_possible_truncation)]
+-    let msix_num = msix_irq_info.count as u16;
+-    let msix_vectors =
+-        KvmVm::create_msix_group(vm.clone(), msix_num).map_err(VfioError::MsixConfig)?;
+-    let msix_config = MsixConfig::new(Arc::new(msix_vectors), sbdf);
+-
+-    // We set VFIO irqs here on device setup. There is no reason to add additional tracking
+-    // for driver MSIx configuration since those are handled by the MsixState.
+-    // If anything after this call fails, we don't need to do anything since the kernel will
+-    // clean up these irqs when `device` file will be closed.
+-    let fds: Vec<&EventFd> = msix_config
+-        .vectors
+-        .vectors
+-        .iter()
+-        .map(|v| &v.event_fd)
+-        .collect();
+-    device.enable_msix(fds)?;
++    let msi_info = device
++        .get_irq_info(VFIO_PCI_MSI_IRQ_INDEX)
++        .filter(|info| info.count > 0);
++    let msi = if let Some(info) = msi_info {
++        if let Some(state) = MsiConfig::parse(&config_space, info.count)? {
++            let vectors = Arc::new(
++                KvmVm::create_msix_group(vm.clone(), state.vectors())
++                    .map_err(VfioError::MsixConfig)?,
++            );
++            Some(VfioMsiState {
++                config: state,
++                vectors,
++            })
++        } else {
++            None
++        }
++    } else {
++        None
++    };
++    if msi.is_none() && msix.is_none() {
++        return Err(VfioError::NoMsiIrq);
++    }
++    let interrupts = VfioInterrupts::Ready(VfioSources {
++        msi,
++        msix,
++        active: InterruptSource::None,
++    });
+ 
+     // There is no direct access to `regions` in `VfioDevice`, so need to work around this
+     let bar_infos: [VfioBarInfo; NUM_BAR_REGS as usize] = std::array::from_fn(|i| {
+@@ -1333,11 +1655,13 @@ fn vfio_init_device(
+ 
+     let bars = VfioBars::new(vm.clone(), &bar_infos)?;
+ 
+-    let (areas, emulated_areas) = vfio_calculate_bar_areas(&bars.vmm_bars, &bar_infos, &msix_cap)?;
+-    if !emulated_areas
+-        .iter()
+-        .any(|area| area.bar_idx == msix_cap.table_bir())
+-    {
++    let msix_cap = interrupts.msix().map(|state| &state.cap);
++    let (areas, emulated_areas) = vfio_calculate_bar_areas(&bars.vmm_bars, &bar_infos, msix_cap)?;
++    if msix_cap.is_some_and(|cap| {
++        !emulated_areas
++            .iter()
++            .any(|area| area.bar_idx == cap.table_bir())
++    }) {
+         return Err(VfioError::NoMsixIrq);
+     }
+ 
+@@ -1354,12 +1678,6 @@ fn vfio_init_device(
+     let bar_mappings =
+         vfio_create_bar_mappings_from_areas(vm.as_ref(), &areas, &device, first_area_slot)?;
+ 
+-    let msix_state = VfioMsixState {
+-        register: msix_register,
+-        cap: msix_cap,
+-        config: msix_config,
+-    };
+-
+     let vfio_device = VfioDevice {
+         config,
+         sbdf,
+@@ -1367,7 +1685,7 @@ fn vfio_init_device(
+         bars,
+         bar_mappings,
+         emulated_areas,
+-        msix_state,
++        interrupts,
+         masks,
+         vm: vm.clone(),
+     };
+@@ -1431,6 +1749,30 @@ pub fn vfio_create_kvm_vfio_device_and_vfio_container(
+ 
+ #[cfg(test)]
+ mod tests {
++    /// MSI and MSI-X are exclusive VFIO sources; a guest cannot activate both or an invalid count.
++    #[test]
++    fn guest_interrupt_source_is_exclusive_and_counted() {
++        assert_eq!(
++            super::source(0, false).unwrap(),
++            super::InterruptSource::None
++        );
++        assert_eq!(
++            super::source(1, false).unwrap(),
++            super::InterruptSource::Msi(1)
++        );
++        assert_eq!(
++            super::source(32, false).unwrap(),
++            super::InterruptSource::Msi(32)
++        );
++        assert_eq!(
++            super::source(0, true).unwrap(),
++            super::InterruptSource::Msix
++        );
++        assert!(super::source(1, true).is_err());
++        assert!(super::source(3, false).is_err());
++        assert!(super::source(64, false).is_err());
++    }
++
+     use std::fs::OpenOptions;
+     use std::sync::Mutex;
+ 
+@@ -1530,11 +1872,11 @@ mod tests {
+         let cap = MsixCap::new(0, 4, 0, 0, 0x800);
+ 
+         // The BAR holding the table goes through the table/device split
+-        let result = vfio_distribute_emulated_access(&areas, &cap, 0x1000, 0x10, 4);
++        let result = vfio_distribute_emulated_access(&areas, Some(&cap), 0x1000, 0x10, 4);
+         assert!(matches!(result, HandleBarAccessResult::MsixTable(0x10)));
+ 
+         // Any other emulated BAR is forwarded to the device as is
+-        let result = vfio_distribute_emulated_access(&areas, &cap, 0x5000, 0x40, 4);
++        let result = vfio_distribute_emulated_access(&areas, Some(&cap), 0x5000, 0x40, 4);
+         assert!(matches!(
+             result,
+             HandleBarAccessResult::Device {
+@@ -1955,7 +2297,7 @@ mod tests {
+         let msix_cap = MsixCap::new(0, 0, 0, 0, 0);
+ 
+         let (areas, emulated_areas) =
+-            vfio_calculate_bar_areas(&bars, &bar_infos, &msix_cap).unwrap();
++            vfio_calculate_bar_areas(&bars, &bar_infos, Some(&msix_cap)).unwrap();
+         assert!(areas.is_empty());
+         assert!(emulated_areas.is_empty());
+     }
+@@ -1977,7 +2319,7 @@ mod tests {
+         let msix_cap = MsixCap::new(3, 0, 0, 3, 0);
+ 
+         let (areas, emulated_areas) =
+-            vfio_calculate_bar_areas(&bars, &bar_infos, &msix_cap).unwrap();
++            vfio_calculate_bar_areas(&bars, &bar_infos, Some(&msix_cap)).unwrap();
+ 
+         assert_eq!(areas.len(), 2);
+         assert_eq!(areas[0].gpa, page);
+@@ -2007,7 +2349,7 @@ mod tests {
+         let msix_cap = MsixCap::new(3, 0, 0, 3, 0);
+ 
+         let (areas, emulated_areas) =
+-            vfio_calculate_bar_areas(&vmm_bars, &bar_infos, &msix_cap).unwrap();
++            vfio_calculate_bar_areas(&vmm_bars, &bar_infos, Some(&msix_cap)).unwrap();
+ 
+         // The kernel can mmap the BAR, but it is smaller than the host page, so it is not mapped
+         assert!(areas.is_empty());
+@@ -2026,7 +2368,7 @@ mod tests {
+         let msix_cap = MsixCap::new(0, 4, 0, 0, 0x400);
+ 
+         let (areas, emulated_areas) =
+-            vfio_calculate_bar_areas(&vmm_bars, &bar_infos, &msix_cap).unwrap();
++            vfio_calculate_bar_areas(&vmm_bars, &bar_infos, Some(&msix_cap)).unwrap();
+ 
+         // The page aligned table area is bigger than the BAR, so only the BAR itself is emulated
+         assert!(areas.is_empty());
+@@ -2044,7 +2386,7 @@ mod tests {
+         let msix_cap = MsixCap::new(3, 0, 0, 3, 0);
+ 
+         let (areas, emulated_areas) =
+-            vfio_calculate_bar_areas(&vmm_bars, &bar_infos, &msix_cap).unwrap();
++            vfio_calculate_bar_areas(&vmm_bars, &bar_infos, Some(&msix_cap)).unwrap();
+ 
+         // Nothing is mapped, the whole BAR is emulated
+         assert!(areas.is_empty());
+@@ -2063,7 +2405,7 @@ mod tests {
+         let msix_cap = MsixCap::new(0, 4, 0x100, 0, 0x800);
+ 
+         let (areas, emulated_areas) =
+-            vfio_calculate_bar_areas(&vmm_bars, &bar_infos, &msix_cap).unwrap();
++            vfio_calculate_bar_areas(&vmm_bars, &bar_infos, Some(&msix_cap)).unwrap();
+ 
+         // Exactly one area covering the whole BAR. Two overlapping areas (the page aligned table
+         // plus the whole BAR) would be rejected by the mmio bus.
+@@ -2082,7 +2424,7 @@ mod tests {
+         let msix_cap = MsixCap::new(0, 4, 0x1000, 0, 0x2000);
+ 
+         let (areas, emulated_areas) =
+-            vfio_calculate_bar_areas(&vmm_bars, &bar_infos, &msix_cap).unwrap();
++            vfio_calculate_bar_areas(&vmm_bars, &bar_infos, Some(&msix_cap)).unwrap();
+ 
+         // Table page cannot be mmapped, so nothing is mapped and the whole BAR is emulated
+         assert!(areas.is_empty());
+@@ -2111,7 +2453,7 @@ mod tests {
+             let msix_cap = MsixCap::new(0, 32, 0, 2, 0);
+ 
+             let (areas, emulated_areas) =
+-                vfio_calculate_bar_areas(&vmm_bars, &bar_infos, &msix_cap).unwrap();
++                vfio_calculate_bar_areas(&vmm_bars, &bar_infos, Some(&msix_cap)).unwrap();
+ 
+             assert_eq!(areas.len(), 1);
+             assert_eq!(areas[0].gpa, 2 * page);
+@@ -2144,7 +2486,7 @@ mod tests {
+             let msix_cap = MsixCap::new(0, 32, 0, 2, 0);
+ 
+             let (areas, emulated_areas) =
+-                vfio_calculate_bar_areas(&vmm_bars, &bar_infos, &msix_cap).unwrap();
++                vfio_calculate_bar_areas(&vmm_bars, &bar_infos, Some(&msix_cap)).unwrap();
+ 
+             assert_eq!(areas.len(), 2);
+             assert_eq!(areas[0].gpa, 2 * page);
+@@ -2192,7 +2534,7 @@ mod tests {
+             let msix_cap = MsixCap::new(3, 0, 0, 3, 0);
+ 
+             let (areas, emulated_areas) =
+-                vfio_calculate_bar_areas(&vmm_bars, &bar_infos, &msix_cap).unwrap();
++                vfio_calculate_bar_areas(&vmm_bars, &bar_infos, Some(&msix_cap)).unwrap();
+ 
+             assert_eq!(areas.len(), 2);
+             assert_eq!(areas[0].gpa, page);
+@@ -2234,7 +2576,7 @@ mod tests {
+             // Set BIR to an unused BAR
+             let msix_cap = MsixCap::new(3, 0, 0, 3, 0);
+ 
+-            vfio_calculate_bar_areas(&vmm_bars, &bar_infos, &msix_cap).unwrap_err();
++            vfio_calculate_bar_areas(&vmm_bars, &bar_infos, Some(&msix_cap)).unwrap_err();
+         }
+ 
+         // Unaligned
+@@ -2262,7 +2604,7 @@ mod tests {
+             // Set BIR to an unused BAR
+             let msix_cap = MsixCap::new(3, 0, 0, 3, 0);
+ 
+-            vfio_calculate_bar_areas(&vmm_bars, &bar_infos, &msix_cap).unwrap_err();
++            vfio_calculate_bar_areas(&vmm_bars, &bar_infos, Some(&msix_cap)).unwrap_err();
+         }
+     }
+ 
+@@ -2309,7 +2651,7 @@ mod tests {
+                 })],
+             )]);
+ 
+-            let err = vfio_calculate_bar_areas(&vmm_bars, &bar_infos, &msix_cap).unwrap_err();
++            let err = vfio_calculate_bar_areas(&vmm_bars, &bar_infos, Some(&msix_cap)).unwrap_err();
+             assert!(
+                 matches!(
+                     err,
+@@ -2352,7 +2694,7 @@ mod tests {
+             )]);
+ 
+             let (areas, emulated_areas) =
+-                vfio_calculate_bar_areas(&vmm_bars, &bar_infos, &msix_cap).unwrap();
++                vfio_calculate_bar_areas(&vmm_bars, &bar_infos, Some(&msix_cap)).unwrap();
+ 
+             assert_eq!(areas.len(), 2);
+             assert_eq!(areas[0].gpa, page);
+@@ -2389,13 +2731,15 @@ mod tests {
+         )]);
+ 
+         let (_, emulated_areas) =
+-            vfio_calculate_bar_areas(&vmm_bars, &bar_infos, &msix_cap).unwrap();
++            vfio_calculate_bar_areas(&vmm_bars, &bar_infos, Some(&msix_cap)).unwrap();
+ 
+         // Table access goes to the emulated MSI-X table
+-        let result = vfio_distribute_emulated_access(&emulated_areas, &msix_cap, page, 0x110, 4);
++        let result =
++            vfio_distribute_emulated_access(&emulated_areas, Some(&msix_cap), page, 0x110, 4);
+         assert!(matches!(result, HandleBarAccessResult::MsixTable(0x10)));
+         // Access to the table page outside of the table goes to the device
+-        let result = vfio_distribute_emulated_access(&emulated_areas, &msix_cap, page, 0x800, 4);
++        let result =
++            vfio_distribute_emulated_access(&emulated_areas, Some(&msix_cap), page, 0x800, 4);
+         assert!(matches!(
+             result,
+             HandleBarAccessResult::Device {
+@@ -2405,7 +2749,7 @@ mod tests {
+         ));
+         // Access to the gap between table page and sparse area goes to the device
+         let result =
+-            vfio_distribute_emulated_access(&emulated_areas, &msix_cap, page, page + 0x40, 4);
++            vfio_distribute_emulated_access(&emulated_areas, Some(&msix_cap), page, page + 0x40, 4);
+         assert!(matches!(
+             result,
+             HandleBarAccessResult::Device {
+@@ -2428,7 +2772,7 @@ mod tests {
+         // end of the table at offset 0xff8 with size of 16 will land outside 0x1000 region
+         let msix_cap = MsixCap::new(0, 1, 0xff8, 0, 0);
+ 
+-        let err = vfio_calculate_bar_areas(&vmm_bars, &bar_infos, &msix_cap).unwrap_err();
++        let err = vfio_calculate_bar_areas(&vmm_bars, &bar_infos, Some(&msix_cap)).unwrap_err();
+         assert!(matches!(
+             err,
+             VfioError::MsixTableOutOfRange(0, 0xff8, 16, 0x1000)
+@@ -2436,7 +2780,7 @@ mod tests {
+ 
+         // Same for the fully emulated BAR
+         let bar_infos = dummy_bar_infos([dummy_non_mmappable_bar_info(0x1000)]);
+-        let err = vfio_calculate_bar_areas(&vmm_bars, &bar_infos, &msix_cap).unwrap_err();
++        let err = vfio_calculate_bar_areas(&vmm_bars, &bar_infos, Some(&msix_cap)).unwrap_err();
+         assert!(matches!(
+             err,
+             VfioError::MsixTableOutOfRange(0, 0xff8, 16, 0x1000)
+@@ -2530,7 +2874,7 @@ mod tests {
+         let msix_cap = MsixCap::new(0, 1, u32::try_from(page).unwrap(), 0, 0);
+         let bars = VfioBars::new(vm.clone(), &bar_infos).unwrap();
+         let (areas, emulated_areas) =
+-            vfio_calculate_bar_areas(&bars.vmm_bars, &bar_infos, &msix_cap).unwrap();
++            vfio_calculate_bar_areas(&bars.vmm_bars, &bar_infos, Some(&msix_cap)).unwrap();
+         let zero = OpenOptions::new()
+             .read(true)
+             .write(true)
