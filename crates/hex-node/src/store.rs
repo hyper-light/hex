@@ -616,6 +616,37 @@ impl Store {
         self.scan_records(true)
     }
 
+    /// Takes the torn records out of `records`, a [`Store::retained_records`]: each unreadable one the
+    /// runtime directory holds, its first write cut short (above). Every other write is whole, and only an
+    /// unscoped record is kept there; whose box that makes it, the caller says. Each comes with why it
+    /// couldn't be read. The Linux node's recovery is its caller.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_torn(
+        &self,
+        records: &mut BTreeMap<BoxId, Result<BoxRecord, String>>,
+    ) -> Result<Vec<(BoxId, String)>, Refusal> {
+        let mut torn = Vec::new();
+        torn.try_reserve_exact(records.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "torn record identities",
+                bound: records.len(),
+            })?;
+        for (id, record) in records.iter() {
+            let Err(why) = record else {
+                continue;
+            };
+            match fs::symlink_metadata(runtime_record(&self.run, id)) {
+                Ok(_) => torn.push((id.clone(), why.clone())),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Refusal::os("finding a torn record's place", e)),
+            }
+        }
+        for (id, _) in &torn {
+            records.remove(id);
+        }
+        Ok(torn)
+    }
+
     fn scan_records(
         &self,
         retained: bool,
@@ -1479,5 +1510,36 @@ mod tests {
         let reach = shards * (1.0 - ((shards - 1.0) / shards).powi(256));
         assert!((reach - 62.86).abs() < 0.01, "{reach}");
         assert_eq!(shards_256_ids_reach(), 50);
+    }
+
+    /// T-T7.1.2/AC-T7.4.1: do keep a record torn at its first write in the runtime directory, one
+    /// unreadable in the state directory, which no write tears, and a whole one; expect only the torn one
+    /// taken, with why it couldn't be read, and the other two left for the whole-owner barrier.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_a_record_torn_in_the_runtime_directory_is_taken_as_torn() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let whole = record("whole");
+        store.put(&whole).unwrap();
+        let torn = BoxId::new("torn").unwrap();
+        let path = runtime_record(&dir.path().join("run"), &torn);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"{\"version\":").unwrap();
+        let unread = BoxId::new("unread").unwrap();
+        fs::write(
+            record_file(&dir.path().join("state"), &unread),
+            b"{\"version\":",
+        )
+        .unwrap();
+        let mut records = store.retained_records().unwrap();
+        assert_eq!(records.len(), 3);
+        let taken = store.take_torn(&mut records).unwrap();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].0, torn);
+        assert!(!taken[0].1.is_empty());
+        assert!(!records.contains_key(&torn));
+        assert!(records.get(&unread).is_some_and(Result::is_err));
+        assert!(records.get(&whole.spec.id).is_some_and(Result::is_ok));
     }
 }

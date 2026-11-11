@@ -11,6 +11,9 @@ use hex_runtime::firecracker::FirecrackerRuntime;
 use hex_runtime::guest::GuestRuntime;
 use std::sync::Weak;
 
+/// Torn records, each with why it couldn't be read ([`Node::preflight_configured`]).
+pub(super) type Torn = Vec<(BoxId, String)>;
+
 pub(super) struct Backends {
     firecracker: Option<Arc<FirecrackerRuntime>>,
     shards: Option<Arc<GuestRuntime>>,
@@ -338,7 +341,7 @@ impl Node {
         if let Some(guest) = &shards {
             guest.bind_books(self.backend_books())?;
         }
-        let (_, retained_pools) =
+        let (_, retained_pools, _) =
             self.preflight_configured(firecracker.as_deref(), shards.as_deref())?;
         let (vm_root, lease) = if firecracker.is_some() || shards.is_some() {
             let (root, lease) = self.initialize_vm_root()?;
@@ -426,12 +429,22 @@ impl Node {
         project_initialized_routes(self.backends.get(), pools, introduced).map(|_| ())
     }
 
+    /// The retained records and pools, each past the whole-owner barrier, and apart from them the torn
+    /// records ([`crate::store::Store::take_torn`]). A torn record lies in the runtime directory, where
+    /// only an unscoped record is kept: Firecracker's are scoped, and a shared Shards box's needs that
+    /// backend, so with none configured it is a native box's. No scope or backend owns one; recovery
+    /// proves its box's end by the box's own cgroup and removes it as unreadable (T-T7.1.2). With
+    /// Shards configured it may be a guest's, so it stays and the barrier refuses it.
     fn preflight_configured(
         &self,
         firecracker: Option<&FirecrackerRuntime>,
         shards: Option<&GuestRuntime>,
-    ) -> Result<(Records, PoolRecords), Refusal> {
-        let records = self.store.retained_records()?;
+    ) -> Result<(Records, PoolRecords, Torn), Refusal> {
+        let mut records = self.store.retained_records()?;
+        let torn = match shards {
+            None => self.store.take_torn(&mut records)?,
+            Some(_) => Vec::new(),
+        };
         let pools = self.store.all_pools()?;
         crate::recorded::preflight_records(&records, &pools, Some(self.attachments.as_ref()))?;
         for (id, record) in &records {
@@ -528,10 +541,10 @@ impl Node {
         let parent = native_path(self.root.dir(), ".vm")?;
         self.supervisor
             .preflight_managed(&native_path(&parent, &self.key)?, &managed)?;
-        Ok((records, pools))
+        Ok((records, pools, torn))
     }
 
-    pub(super) fn retained_preflight(&self) -> Result<(Records, PoolRecords), Refusal> {
+    pub(super) fn retained_preflight(&self) -> Result<(Records, PoolRecords, Torn), Refusal> {
         let backends = self.backends.get();
         self.preflight_configured(
             backends.and_then(|backends| backends.firecracker.as_deref()),
