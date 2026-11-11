@@ -15,6 +15,15 @@ pub(super) fn authority(spec: &BoxSpec) -> Result<Authority, Refusal> {
     Ok(authority)
 }
 
+/// A Firecracker guest's attached PCI GPUs are granted as its boot words say (`gpu::Boot::check`).
+/// A host's own kernel line carries no such words, so a host node's CDI GPUs are unaffected.
+pub(super) fn pci(spec: &BoxSpec) -> Result<(), Refusal> {
+    match gpu::boot()? {
+        Some(boot @ gpu::Boot::Pci { .. }) => boot.check(spec),
+        Some(gpu::Boot::Renderer(_)) | None => Ok(()),
+    }
+}
+
 /// All injected objects must be initialized virtio render nodes. Ordinary host CDI continues to
 /// use its native PCI/NVIDIA checks and cannot opt into this validation through a selector label.
 pub(super) fn check(
