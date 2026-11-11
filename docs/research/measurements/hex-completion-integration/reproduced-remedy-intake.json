@@ -1,0 +1,25 @@
+{
+  "source_pins": [
+    "fa7a3aa1f34e1c086d8ec64ac4e2ad31ba9a6800",
+    "a45b36ba1a3914a9d96e0556fd7713b0fbc2dc08",
+    "e81d714d026f9bd435f3a22296ef0305b0ca56ce",
+    "e52d9e7685c338c32845914eb2039853a0b0153d",
+    "bede1aeb"
+  ],
+  "tests": "original behavioral reds preserved; post-change controls UNRUN",
+  "originals": [
+    "Index be8 3 failures/1296bc31",
+    "Recorded416 2 failures/f8963f3d",
+    "initialized backing cost38 1failure/21a1568a"
+  ],
+  "preserved": [
+    "all original test bodies",
+    "canonical5f authority fixture and ROOT schema ports",
+    "normal module resolution and existing Node pool ports"
+  ],
+  "new_source_review_concerns": [
+    "unavailable GPU may be counted as pending (L1 adds source control before remedy)",
+    "uppercase pool name reconstructs lowercase path (L3 adds source control before remedy)",
+    "Windows/Mac retained native marker/receipt preflight extension still open"
+  ]
+}

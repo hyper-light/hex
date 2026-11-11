@@ -105,7 +105,7 @@ impl Choice {
 #[derive(Debug)]
 pub(super) struct Routes {
     pub catalog: SharedRoutes,
-    pub used: Vec<CapacityResources>,
+    pub used: Vec<Resources>,
     pub phases: Vec<BackingPhase>,
 }
 
@@ -241,7 +241,7 @@ impl Routes {
     pub fn refreshed(&self, catalog: &SharedRoutes, node: NodeId) -> Result<Self, SimError> {
         let mut next = Self::new(catalog, node)?;
         for (offer, used) in self.catalog.offers.iter().zip(&self.used) {
-            if *used == CapacityResources::default() {
+            if *used == Resources::default() {
                 continue;
             }
             let at = next
@@ -266,8 +266,11 @@ impl Routes {
                 || matches!(
                     (phase, new_phase),
                     (
+                        BackingPhase::Granted | BackingPhase::Live | BackingPhase::Draining,
+                        BackingPhase::Prepared
+                    ) | (
                         BackingPhase::Live | BackingPhase::Draining,
-                        BackingPhase::Prepared | BackingPhase::Granted
+                        BackingPhase::Granted
                     ) | (BackingPhase::Draining, BackingPhase::Live)
                 )
             {
@@ -284,7 +287,7 @@ impl Routes {
                     .any(|(offer, used)| {
                         offer.backing == Some(backing.key)
                             && offer.key.execution == Execution::ShardsShared
-                            && *used != CapacityResources::default()
+                            && *used != Resources::default()
                     })
             {
                 return Err(SimError::Config(
@@ -309,7 +312,7 @@ impl Routes {
                         && offer.key.execution == Execution::ShardsShared
                 })
                 .try_fold(CapacityResources::default(), |sum, (_, used)| {
-                    sum.checked_add(*used)
+                    sum.checked_add(capacity_resources(*used))
                 })
                 .ok_or(SimError::Resources(node))?;
             backing
@@ -323,7 +326,7 @@ impl Routes {
         let mut used = Vec::new();
         used.try_reserve_exact(catalog.offers.len())
             .map_err(|_| SimError::Resources(node))?;
-        used.resize(catalog.offers.len(), CapacityResources::default());
+        used.resize(catalog.offers.len(), Resources::default());
         let mut phases = Vec::new();
         phases
             .try_reserve_exact(catalog.backings.len())
@@ -360,6 +363,7 @@ impl Routes {
             return Err(Verdict::NoPlatform);
         }
         let mut found = None;
+        let mut inactive = None;
         for (at, offer) in self.catalog.offers.iter().enumerate() {
             let form_matches = demand.ask.runtime_class.map_or_else(
                 || match demand.class {
@@ -394,12 +398,27 @@ impl Routes {
             {
                 continue;
             }
+            if offer
+                .backing
+                .is_some_and(|key| !matches!(self.backing(key), Some((_, BackingPhase::Live))))
+            {
+                inactive = Some(match inactive {
+                    None => Ok(Choice { at, offer: *offer }),
+                    Some(_) => Err(Verdict::NoPlatform),
+                });
+                continue;
+            }
             if found.is_some() {
                 return Err(Verdict::NoPlatform);
             }
             found = Some(Choice { at, offer: *offer });
         }
-        found.ok_or(Verdict::NoPlatform)
+        // A sole inactive route still reaches the existing pending/NoGpu admission check. An
+        // inactive provisioning alternative cannot hide a fully initialized native execution.
+        found
+            .map(Ok)
+            .or(inactive)
+            .unwrap_or(Err(Verdict::NoPlatform))
     }
     pub fn committed(&self, receipt: RouteReceipt) -> Result<Choice, SimError> {
         self.catalog
@@ -440,7 +459,22 @@ impl Routes {
             return false;
         };
         if choice.offer.key.execution != Execution::ShardsShared {
-            return true;
+            let used = self
+                .catalog
+                .offers
+                .iter()
+                .zip(&self.used)
+                .filter(|(offer, _)| offer.backing == Some(key))
+                .try_fold(0u32, |sum, (_, used)| sum.checked_add(used.gpus))
+                .and_then(|used| used.checked_add(demand.need.gpus));
+            let physical = backing
+                .devices
+                .iter()
+                .filter(|id| id.kind == hex_api::DeviceKind::Gpu)
+                .count();
+            return used
+                .zip(u32::try_from(physical).ok())
+                .is_some_and(|(used, physical)| used <= physical);
         }
         let used = self
             .catalog
@@ -451,7 +485,7 @@ impl Routes {
                 offer.backing == Some(key) && offer.key.execution == Execution::ShardsShared
             })
             .try_fold(CapacityResources::default(), |sum, (_, used)| {
-                sum.checked_add(*used)
+                sum.checked_add(capacity_resources(*used))
             })
             .and_then(|used| used.checked_add(capacity_resources(demand.need)));
         used.is_some_and(|used| backing.check_inner(used).is_ok())
@@ -461,17 +495,17 @@ impl Routes {
         receipt: RouteReceipt,
         demand: &Demand,
         adding: bool,
-    ) -> Result<(usize, CapacityResources), SimError> {
+    ) -> Result<(usize, Resources), SimError> {
         let choice = self.committed(receipt)?;
         let used = self
             .used
             .get(choice.at)
             .ok_or(SimError::Config("missing route usage"))?;
-        let amount = capacity_resources(demand.need);
+        let amount = demand.need;
         let next = if adding {
-            used.checked_add(amount)
+            used.checked_add(&amount)
         } else {
-            used.checked_sub(amount)
+            used.checked_sub(&amount)
         }
         .ok_or(SimError::Config(
             "route payload usage overflows or underflows",
@@ -521,6 +555,18 @@ impl FitIndex {
                 "backing physical grant conflicts with another owner",
             ));
         }
+        let gpu_claims = u32::try_from(
+            grant
+                .devices
+                .iter()
+                .filter(|id| id.kind == hex_api::DeviceKind::Gpu)
+                .count(),
+        )
+        .map_err(|_| SimError::Resources(node))?;
+        if gpu_claims > slot.free.gpus {
+            return Err(SimError::Resources(node));
+        }
+        let pending = self.pending_gpus(node)?;
         let charge = backing_charge(backing, node)?;
         let free = slot
             .free
@@ -546,7 +592,7 @@ impl FitIndex {
             *holders.get_mut(index).ok_or(SimError::Resources(node))? = Some(Holder::Backing(key));
         }
         self.ix.relink(node.0, from, to);
-        self.recount_gpus(node)?;
+        self.recount_gpus(node, pending)?;
         Ok(grant)
     }
 
@@ -597,13 +643,14 @@ impl FitIndex {
                 .any(|(offer, used)| {
                     offer.backing == Some(observed.key)
                         && offer.key.execution == Execution::ShardsShared
-                        && *used != CapacityResources::default()
+                        && *used != Resources::default()
                 })
         {
             return Err(SimError::Config(
                 "backing release still has retained inner reservations",
             ));
         }
+        let pending = self.pending_gpus(node)?;
         let next_free = if releasing {
             slot.free
                 .checked_add(&backing_charge(backing, node)?)
@@ -639,6 +686,6 @@ impl FitIndex {
             }
         }
         self.ix.relink(node.0, from, to);
-        self.recount_gpus(node)
+        self.recount_gpus(node, pending)
     }
 }

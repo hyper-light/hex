@@ -75,6 +75,7 @@ impl GuestRuntime {
         let key = record.key;
         if record.execution != Execution::ShardsShared
             || !record.devices.is_empty()
+            || self.runtime_cost != Some(record.cost)
             || self.shared_pool.get().is_some_and(|bound| *bound != key)
             || key.pool != self.pool_configuration(record.cost)?
         {

@@ -544,10 +544,35 @@ impl Store {
     /// Every record the store holds, by box id; an id whose file can't be read is included with its
     /// reason. A stray temp file (a crash mid-write) is ignored: its rename never completed.
     pub fn all(&self) -> Result<BTreeMap<BoxId, Result<BoxRecord, String>>, Refusal> {
+        self.scan_records(false)
+    }
+
+    /// Recovery must see every retained canonical name, including a conflicting duplicate in
+    /// another Store directory. No overwritten/unknown `.json` row may disappear before cleanup.
+    pub(crate) fn retained_records(
+        &self,
+    ) -> Result<BTreeMap<BoxId, Result<BoxRecord, String>>, Refusal> {
+        self.scan_records(true)
+    }
+
+    fn scan_records(
+        &self,
+        retained: bool,
+    ) -> Result<BTreeMap<BoxId, Result<BoxRecord, String>>, Refusal> {
         let mut out = BTreeMap::new();
         for dir in self.listed() {
-            for (id, path) in records_in(&dir)? {
-                let record = match fs::read(path) {
+            for (id, path) in records_in(&dir, retained)? {
+                if retained && (out.len() >= TURNS || out.contains_key(&id)) {
+                    return Err(uncertain(&id));
+                }
+                let bytes = if retained {
+                    let file = File::open(&path)
+                        .map_err(|error| Refusal::os("opening a retained record", error))?;
+                    Ok(read_record_bytes(file)?)
+                } else {
+                    fs::read(path)
+                };
+                let record = match bytes {
                     Ok(bytes) => BoxRecord::decode(&bytes),
                     Err(e) => Err(format!("reading the record: {e}")),
                 };
@@ -602,6 +627,59 @@ impl Store {
             .map_err(|e| Refusal::os("flushing the record directory", e))?;
         self.synced.dirs.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+}
+
+/// The same bounded file reader for scoped Pool rows and whole-owner retained Box preflight.
+/// Reserve before reading; a torn/oversized row remains a decoder refusal, never an absent owner.
+fn read_record_bytes(mut file: File) -> Result<Vec<u8>, Refusal> {
+    use std::io::Read;
+    let bound = hex_core::record::MAX_RECORD_BYTES;
+    let room = bound.checked_add(1).ok_or(Refusal::Exhausted {
+        what: "retained record bytes",
+        bound,
+    })?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(room)
+        .map_err(|_| Refusal::Exhausted {
+            what: "retained record bytes",
+            bound: room,
+        })?;
+    bytes.resize(room, 0);
+    let mut used = 0usize;
+    while used < room {
+        let tail = bytes.get_mut(used..).ok_or(Refusal::Exhausted {
+            what: "retained record bytes",
+            bound: room,
+        })?;
+        let read = file
+            .read(tail)
+            .map_err(|error| Refusal::os("reading a retained record", error))?;
+        if read == 0 {
+            break;
+        }
+        used = used.checked_add(read).ok_or(Refusal::Exhausted {
+            what: "retained record bytes",
+            bound: room,
+        })?;
+    }
+    bytes.truncate(used);
+    Ok(bytes)
+}
+
+fn retained_identity_error(message: &'static str) -> Refusal {
+    let mut why = String::new();
+    if why.try_reserve_exact(message.len()).is_err() {
+        return Refusal::Exhausted {
+            what: "retained identity refusal bytes",
+            bound: message.len(),
+        };
+    }
+    why.push_str(message);
+    Refusal::Invalid {
+        what: "retained record identity",
+        why,
     }
 }
 
@@ -702,10 +780,20 @@ fn temp_file(dir: &Path, id: &BoxId) -> PathBuf {
 }
 
 /// The records in `dir`, each box's id with its file: every `<id>.json`, nothing else.
-fn records_in(dir: &Path) -> Result<Vec<(BoxId, PathBuf)>, Refusal> {
+fn records_in(dir: &Path, retained: bool) -> Result<Vec<(BoxId, PathBuf)>, Refusal> {
     let mut out = Vec::new();
     let entries = fs::read_dir(dir).map_err(|e| Refusal::os("listing records", e))?;
+    // Same bounded canonical/temporary/owner-metadata scan budget as the Pool directory. This
+    // limits startup work; it grants no extra boxes or native ownership.
+    let scan_bound = TURNS.checked_mul(3).ok_or(Refusal::Full(TURNS))?;
+    let mut scanned = 0usize;
     for entry in entries {
+        if retained {
+            if scanned >= scan_bound {
+                return Err(Refusal::Full(TURNS));
+            }
+            scanned = scanned.checked_add(1).ok_or(Refusal::Full(TURNS))?;
+        }
         let entry = entry.map_err(|e| Refusal::os("listing records", e))?;
         let name = entry.file_name();
         let Some(id) = name
@@ -713,8 +801,19 @@ fn records_in(dir: &Path) -> Result<Vec<(BoxId, PathBuf)>, Refusal> {
             .and_then(|n| n.strip_suffix(".json"))
             .and_then(|n| BoxId::new(n).ok())
         else {
+            if retained && Path::new(&name).extension() == Some(std::ffi::OsStr::new("json")) {
+                return Err(retained_identity_error(
+                    "a retained Box record has no valid canonical BoxId name",
+                ));
+            }
             continue;
         };
+        if retained {
+            if out.len() >= TURNS {
+                return Err(Refusal::Full(TURNS));
+            }
+            out.try_reserve(1).map_err(|_| Refusal::Full(TURNS))?;
+        }
         out.push((id, entry.path()));
     }
     Ok(out)

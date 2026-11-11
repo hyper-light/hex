@@ -1,7 +1,7 @@
 //! Pool rows use the SAME Store/Turns and durable publication as a scoped box row.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
@@ -9,7 +9,7 @@ use hex_api::{
     BackingGrant, BackingKey, BackingPhase, DeviceId, Execution, LifecycleCause, Refusal,
     RuntimeCost,
 };
-use hex_core::record::{MAX_RECORD_BYTES, PoolRecord, RECORD_VERSION};
+use hex_core::record::{PoolRecord, RECORD_VERSION};
 
 use super::{Store, TURNS, fresh_scope, owner_only};
 
@@ -195,31 +195,12 @@ impl Store {
 
     pub(crate) fn read_pool(&self, pool: &[u8; 32]) -> Result<Option<PoolRecord>, Refusal> {
         let (_, path) = scoped_paths(&self.pool_directory()?, &name(pool)?)?;
-        let mut file = match File::open(path) {
+        let file = match File::open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(Refusal::os("opening a native backing record", error)),
         };
-        let room = MAX_RECORD_BYTES
-            .checked_add(1)
-            .ok_or_else(|| allocation(MAX_RECORD_BYTES))?;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(room)
-            .map_err(|_| allocation(room))?;
-        bytes.resize(room, 0);
-        let mut used = 0usize;
-        while used < room {
-            let tail = bytes.get_mut(used..).ok_or_else(|| allocation(room))?;
-            let read = file
-                .read(tail)
-                .map_err(|error| Refusal::os("reading a native backing record", error))?;
-            if read == 0 {
-                break;
-            }
-            used = used.checked_add(read).ok_or_else(|| allocation(room))?;
-        }
-        bytes.truncate(used);
+        let bytes = super::read_record_bytes(file)?;
         let record = PoolRecord::decode(&bytes)?;
         if record.key.pool != *pool {
             return Err(refused(record.key));
@@ -289,7 +270,13 @@ impl Store {
             seen = seen.checked_add(1).ok_or_else(|| allocation(bound))?;
             let entry =
                 entry.map_err(|error| Refusal::os("listing a native backing record", error))?;
-            let Some(pool) = pool_from_name(&entry.file_name()) else {
+            let filename = entry.file_name();
+            let Some(pool) = pool_from_name(&filename) else {
+                if Path::new(&filename).extension() == Some(std::ffi::OsStr::new("json")) {
+                    return Err(invalid(
+                        "retained Pool record has no valid canonical configuration name",
+                    ));
+                }
                 continue;
             };
             if let Some(record) = self.read_pool(&pool)? {

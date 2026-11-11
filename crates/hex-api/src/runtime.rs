@@ -994,12 +994,23 @@ impl Capacity {
                 "device eligibility references an absent initialized route",
             ));
         }
+        let active = |route: &RouteOffer| {
+            route.backing.is_none_or(|key| {
+                backings
+                    .iter()
+                    .find(|backing| backing.key == key)
+                    .is_some_and(|backing| backing.phase == BackingPhase::Live)
+            })
+        };
         for (at, route) in routes.iter().enumerate() {
             route.check()?;
             if routes.iter().take(at).any(|previous| {
-                previous.key.class == route.key.class
-                    && previous.key.image == route.key.image
-                    && previous.key.gpu.overlaps(route.key.gpu)
+                previous.key == route.key
+                    || active(previous)
+                        && active(route)
+                        && previous.key.class == route.key.class
+                        && previous.key.image == route.key.image
+                        && previous.key.gpu.overlaps(route.key.gpu)
             }) {
                 return Err(invalid_route(
                     "initialized execution routes have ambiguous workload predicates",

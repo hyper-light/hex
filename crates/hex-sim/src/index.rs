@@ -221,6 +221,35 @@ struct Slot {
     routes: Option<Routes>,
 }
 
+fn pending_gpus(
+    slot: &Slot,
+    physical: &[PhysicalSlot],
+    holders: &[Option<Holder>],
+    node: NodeId,
+) -> Result<u32, SimError> {
+    let bound = physical
+        .iter()
+        .zip(holders)
+        .filter(|(physical, holder)| {
+            holder.is_some()
+                && physical
+                    .observed
+                    .as_ref()
+                    .map(|device| device.kind == DeviceKind::Gpu)
+                    .unwrap_or_else(|| {
+                        physical
+                            .id
+                            .is_some_and(|id| id.kind == hex_api::DeviceKind::Gpu)
+                    })
+        })
+        .count();
+    slot.capacity
+        .gpus
+        .checked_sub(slot.free.gpus)
+        .and_then(|reserved| reserved.checked_sub(u32::try_from(bound).ok()?))
+        .ok_or(SimError::Resources(node))
+}
+
 /// A GPU's load as one share, in millionths: the larger of its utilisation and its memory in use, as
 /// DRF takes a dominant share (Ghodsi et al., NSDI 2011).
 fn gpu_busy(d: &Device) -> Option<u64> {
@@ -975,10 +1004,7 @@ impl FitIndex {
                 Some(Routes::new(new, node.id)?)
             }
             (Some(old), None)
-                if old
-                    .used
-                    .iter()
-                    .all(|used| *used == hex_api::CapacityResources::default())
+                if old.used.iter().all(|used| *used == Resources::default())
                     && old.phases.iter().all(|phase| {
                         matches!(
                             phase,
@@ -1022,6 +1048,9 @@ impl FitIndex {
                 return Err(SimError::Resources(node.id));
             }
         }
+        let old_physical = self.devices.get(at).ok_or(SimError::UnknownNode(node.id))?;
+        let old_holders = self.held.get(at).ok_or(SimError::UnknownNode(node.id))?;
+        let pending_gpus = pending_gpus(old, old_physical, old_holders, node.id)?;
         let mut devices = routes::physical(node)?;
         let mut holders = Vec::new();
         holders
@@ -1143,7 +1172,9 @@ impl FitIndex {
                 })
                 .count(),
         )
-        .map_err(|_| SimError::Resources(node.id))?;
+        .map_err(|_| SimError::Resources(node.id))?
+        .checked_sub(pending_gpus)
+        .ok_or(SimError::Resources(node.id))?;
         Ok(PreparedRefresh {
             node: node.id,
             slot: Slot {
@@ -1511,6 +1542,7 @@ impl FitIndex {
             return Err(SimError::Resources(node));
         }
         let held = self.bound(at, demand).ok_or(SimError::Resources(node))?;
+        let pending = self.pending_gpus(node)?;
         self.change(
             node,
             demand,
@@ -1520,7 +1552,13 @@ impl FitIndex {
             |n| n.checked_add(1),
             |used| used.checked_add(&charged),
         )?;
-        self.claim_workload(node, workload, &held, route.and_then(|route| route.backing))?;
+        self.claim_workload(
+            node,
+            workload,
+            &held,
+            route.and_then(|route| route.backing),
+            pending,
+        )?;
         self.key(node)
     }
 
@@ -1530,6 +1568,7 @@ impl FitIndex {
         workload: WorkloadId,
         held: &[u16],
         backing: Option<hex_api::BackingKey>,
+        pending: u32,
     ) -> Result<(), SimError> {
         let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
         let holders = self.held.get_mut(at).ok_or(SimError::UnknownNode(node))?;
@@ -1550,10 +1589,20 @@ impl FitIndex {
                 }
             });
         }
-        self.recount_gpus(node)
+        self.recount_gpus(node, pending)
     }
 
-    fn recount_gpus(&mut self, node: NodeId) -> Result<(), SimError> {
+    fn pending_gpus(&self, node: NodeId) -> Result<u32, SimError> {
+        let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
+        pending_gpus(
+            self.slot(node)?,
+            self.devices.get(at).ok_or(SimError::UnknownNode(node))?,
+            self.held.get(at).ok_or(SimError::UnknownNode(node))?,
+            node,
+        )
+    }
+
+    fn recount_gpus(&mut self, node: NodeId, pending_gpus: u32) -> Result<(), SimError> {
         let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
         let physical = self.devices.get(at).ok_or(SimError::UnknownNode(node))?;
         let holders = self.held.get(at).ok_or(SimError::UnknownNode(node))?;
@@ -1572,7 +1621,10 @@ impl FitIndex {
                         })
             })
             .count();
-        let count = u32::try_from(count).map_err(|_| SimError::Resources(node))?;
+        let count = u32::try_from(count)
+            .ok()
+            .and_then(|count| count.checked_sub(pending_gpus))
+            .ok_or(SimError::Resources(node))?;
         self.slots
             .get_mut(at)
             .ok_or(SimError::UnknownNode(node))?
@@ -1776,6 +1828,7 @@ impl FitIndex {
                 "recovered device overlaps an existing reservation",
             ));
         }
+        let pending = self.pending_gpus(node)?;
         self.change(
             node,
             demand,
@@ -1785,7 +1838,7 @@ impl FitIndex {
             |n| n.checked_add(1),
             |used| used.checked_add(&charged),
         )?;
-        self.claim_workload(node, workload, held, backing)?;
+        self.claim_workload(node, workload, held, backing, pending)?;
         self.key(node)
     }
 
@@ -1829,6 +1882,18 @@ impl FitIndex {
     ) -> Result<Key, SimError> {
         let charged = crate::model::reserved_resources(demand.need, allocation, route)
             .map_err(|_| SimError::Resources(node))?;
+        let mut pending = self.pending_gpus(node)?;
+        let physical_owner = self
+            .held
+            .get(usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?)
+            .ok_or(SimError::UnknownNode(node))?
+            .iter()
+            .any(|holder| holder.and_then(Holder::workload) == Some(workload));
+        if !physical_owner {
+            pending = pending
+                .checked_sub(charged.gpus)
+                .ok_or(SimError::Resources(node))?;
+        }
         self.change(
             node,
             demand,
@@ -1847,7 +1912,7 @@ impl FitIndex {
                 };
             }
         }
-        self.recount_gpus(node)?;
+        self.recount_gpus(node, pending)?;
         self.key(node)
     }
 
@@ -3137,3 +3202,7 @@ mod tests {
 #[cfg(test)]
 #[path = "index/route_offer_tests.rs"]
 mod route_offer_tests;
+
+#[cfg(test)]
+#[path = "index/pending_gpu_cleanup_tests.rs"]
+mod pending_gpu_cleanup_tests;

@@ -287,3 +287,6 @@ fn lifecycle_recovery_reaches_cleanup_for_incomplete_create_without_ready_probe(
     assert!(recovery.is_ok(), "{recovery:?}");
     assert!(physically_gone && record_gone);
 }
+
+#[path = "recorded_preflight_tests.rs"]
+mod preflight;

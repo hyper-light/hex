@@ -1,0 +1,69 @@
+{
+  "base": "43da345a15373f51b76ddcd72b6c626c32c51611",
+  "source_only": true,
+  "production": {
+    "crates/hex-node/src/recorded.rs": "0c65d187eee3647c381fed4a241f9cb2e30bbb4f2535d7dd08db6bcfba5e6118",
+    "crates/hex-node/src/store.rs": "b36cf288a40f29191eb67e3879e6cc8c142c0622ddc699ae87565e61b6598bb4",
+    "crates/hex-node/src/store/pool.rs": "5d706ccfb11b79ccc453709a221346b5eb911d7e45f24e07b0507b9ff042d09d"
+  },
+  "fixture": {
+    "path": "docs/research/measurements/hex-complete-lifecycle/recorded_preflight_tests.rs",
+    "sha256": "96b57ede1487aa9576e3e0bab9f162f80158fda2bdf9b6a73ac42e3cad3db8c0",
+    "original4687_leaf_sha256": "c8429c92cd6cc61977ab094b363fbaaa552d1bfcb19931431c0c7284ed52f332",
+    "original_is_byte_identical_prefix": true,
+    "old_controls": 2,
+    "new_controls": 6,
+    "remedy_outcome": "UNRUN; no new compiler/unit/native job by L3"
+  },
+  "actual_original": {
+    "revision": "416458dd9917f35fa4d1040eb74cc7768e3bd0c1",
+    "production": "a39 original +ONLY d849 Mac compiler cause; legacy test schema ports",
+    "selected": 2,
+    "passed": 0,
+    "failed": 2,
+    "ignored": 0,
+    "log_sha256": "f8963f3d8b366157dd1bcabec9ebbc4c8501e487b8c8c2b157206f1bd70dc33d",
+    "behavior": [
+      "later malformed Box allowed one earlier backend callback",
+      "malformed retained Pool ignored; recovery returned Ok/adopted aa-retained-ready"
+    ],
+    "collector": "ROOT actual receipt: Cargo83334 reaped/tmp0/source unchanged; source/raw preserved by ROOT30f99a5b",
+    "attribution": "Real Recorded/Store/private files +counted SimRuntime callbacks; NOT native HCS/VM proof. Earlier restart UNKNOWN and fixture-compiler101 remain distinct, not behavioral reds."
+  },
+  "common_api": "pub(crate) recorded::preflight_records(&devices::Records,&[PoolRecord],Option<&Catalog>)->Result<(),Refusal>",
+  "store_api": "pub(crate) Store::retained_records()->Result<Records,Refusal>; SAME parser/scanner, strict startup mode rejects duplicate/unknown .json identity, bounded file bytes reuse existing Pool reader; ordinary all() remains non-strict. all_pools rejects unknown canonical .json names. No mutation in any preflight path.",
+  "public_cli_api": [
+    "Recorded<R>::preflight_recovery()->Result<(),Refusal>",
+    "Recorded<WithGuest<P>>::bind_guest_books(self:&Arc<Self>)->Result<(),Refusal> unchanged",
+    "Recorded<WithGuest<P>>::prepare_guest_backing()->Result<BackingOffer,Refusal>",
+    "Recorded<WithGuest<P>>::recover_guest_backing()->Result<(),Refusal>"
+  ],
+  "configuration": "Recover::preflight_record/preflight_pool are pure. WithGuest route_for ->host pure preflight or GuestRuntime.preflight_box; every retained Pool ->preflight_backing. Win uses committed native route and borrowed Hcs binding metadata; Mac native Process validates its actual route; no Runtime.capacity, physical report, GPU query or native probe. All structural +all configuration passes finish before remove_strays/alive/adopt/end/discard/put/remove.",
+  "dependencies": {
+    "joined_root": "39a5a694 (resolve full pin at ROOT), includes L1 f714 and L2 299d35c5b15bca085650a21ca7c7467276e7968d; existing signed c941/7f1/a357 +API/wire/provider cohort",
+    "L1_Node": "use Store.retained_records()+all_pools()->SAME preflight_records()->ALL pure initialized backend config preflight->recover_backends()/remove_strays/native work. No duplicate validator/holder.",
+    "L2_source_concern": "preflight_backing275 currently hashes record.cost; requested exact initialized runtime_cost equality +pure changed-profile control from L2. This source observation is not a native bug/pass. Consume successor when sealed.",
+    "fixtures": "ROOT canonical5f lifecycle+authority and original2 registration are preserved. Copy this exact appended leaf; do not overwrite ROOT schema ports or original test bodies. If module absent, append only the documented nested registration once."
+  },
+  "bounds": "Box and Pool rows each existing TURNS/MAX_BOXES; scopes reserve their checked summed count, sort once and reject duplicate incarnations. Raw active claims reserve2*MAX_DEVICES (sole Box/Pool exact handoff maximum), sort/dedup then call ONLY existing Catalog.holder per identity. Pool configs sorted/unique, reference joins binary-search. Strict file read reuses MAX_RECORD_BYTES+1 fallible storage; directory scan uses existing Pool 3*TURNS budget. These are safety/work bounds, not extra grants.",
+  "lifecycle": "Original workload/spec/allocation/route unchanged. Shared payload always needs exact canonical parent generation; a dedicated Box may outlive old Released pool row only after its own held native init+scope is canonical. Deleting and exited claims remain owned until native proof and actual removal. No legacy VM scope/charge synthesis. Ordinary kernel birth tick0 is not blanket-rejected; managed controller birth requirements remain explicit.",
+  "checks": {
+    "named_rustfmt": 0,
+    "git_diff_check": 0,
+    "original_fixture_prefix_equality": true,
+    "compiler": "UNRUN for this source",
+    "focused_units": "UNRUN remedy8",
+    "native": "UNRUN; no campaign by L3",
+    "Mac_draft": "unfinished CPU/token/helper files excluded from this checkpoint"
+  },
+  "rules": {
+    "R01": "New scratch buffers/check arithmetic fallible; no new deep record clone. Inherited Store BTreeMap insertion, BoxRecord serde decoding/error formatting and legacy recover clones still known allocation review gaps, not allocation-safe completion.",
+    "R02_R03": "Existing Store/Pool parser, NativeRecord, RouteOffer contract, initialized catalog and SAME Catalog.holder reused. Bounds derived above; no invented polling period/cost measurement/default.",
+    "R04_R05_R06_R07_R12_R13": "Read all retained state ->structural/claim barrier ->all configured-route barrier ->effects. No second parser/selection/inventory/ledger/manager; no map lock across native IO. Startup before serving is the public precondition, not a new concurrent online snapshot guarantee.",
+    "R08_R14": "No performance/resource/allocator/leak claim; ROOT audit/profiling/competition/full gates owed.",
+    "R09": "Exact original2 live light reds preceded this production remedy; no different-symptom test used as red.",
+    "R10_R15": "Signed source +original hashes/raw receipt +appended focused controls; all final green/mutation/native evidence owed ROOT.",
+    "R11": "Common owner adapter covers Linux Node plus Mac/Windows Recorded; supported-target compiler/native proofs for changed tree unrun.",
+    "R16": "No new jobs/agents/goals, no runner/native/foreign process/data changes, originals/drafts preserved."
+  }
+}

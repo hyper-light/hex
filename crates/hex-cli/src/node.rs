@@ -397,7 +397,13 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
             let node =
                 Arc::new(Recorded::open_with_prober(routed, &args.state, prober).map_err(failed)?);
             node.bind_guest_books().map_err(failed)?;
-            initialized_guest(node.as_ref()).map_err(failed)?;
+            // AC-T7.4.1: the wrapper validates ALL retained owners before publishing
+            // Prepared. Fresh GPU observation waits for its real Index/native grant.
+            node.prepare_guest_backing()
+                .map_err(failed)?
+                .check()
+                .map_err(failed)?;
+            node.recover_guest_backing().map_err(failed)?;
             say_recovered(&node.recover().map_err(failed)?);
             node
         }
@@ -509,7 +515,13 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
             let node =
                 Arc::new(Recorded::open_with_prober(routed, &args.state, prober).map_err(failed)?);
             node.bind_guest_books().map_err(failed)?;
-            initialized_guest(node.as_ref()).map_err(failed)?;
+            // AC-T7.4.1: the wrapper validates ALL retained owners before publishing
+            // Prepared. Fresh GPU observation waits for its real Index/native grant.
+            node.prepare_guest_backing()
+                .map_err(failed)?
+                .check()
+                .map_err(failed)?;
+            node.recover_guest_backing().map_err(failed)?;
             say_recovered(&node.recover().map_err(failed)?);
             node
         }
@@ -580,31 +592,6 @@ fn configured_guest(
         .with_runtime_cost(cost)
         .map_err(failed)?;
     Ok(Some(guest))
-}
-
-#[cfg(any(target_os = "macos", windows))]
-fn initialized_guest(runtime: &dyn hex_api::Runtime) -> Result<(), Refusal> {
-    let capacity = runtime.capacity(hex_api::Class::Shards)?.ok_or_else(|| {
-        startup_invalid("Shards backend", "initialized capacity and cost are absent")
-    })?;
-    capacity.check()?;
-    // AC-T7.4.1: initialized routes carry their own checked costs. A native route
-    // from another backend cannot satisfy the configured Shards capability.
-    let initialized = if capacity.routes.is_empty() {
-        capacity.cost.is_some()
-    } else {
-        capacity
-            .routes
-            .iter()
-            .any(|offer| offer.key.backend_class() == hex_api::Class::Shards)
-    };
-    if !initialized {
-        return Err(startup_invalid(
-            "Shards backend",
-            "initialized measured route or legacy cost is absent",
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(any(target_os = "macos", windows))]

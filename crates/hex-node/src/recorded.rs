@@ -74,6 +74,21 @@ pub trait Recover: Runtime {
         Ok(None)
     }
 
+    /// Pure initialized-route/configuration validation, before ANY retained owner is recovered.
+    /// No capacity sample, GPU probe, native observation, publication or cleanup belongs here.
+    fn preflight_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        record.spec.check()?;
+        if !self.classes().contains(&record.spec.backend_class()?) {
+            return Err(uncertain(&record.spec.id));
+        }
+        Ok(())
+    }
+
+    /// An unknown backing configuration retains its grant; absence of an adapter is not cleanup.
+    fn preflight_pool(&self, record: &PoolRecord) -> Result<(), Refusal> {
+        Err(NativeRecord::Pool(record).refusal(hex_api::LifecycleCause::Uncertain))
+    }
+
     /// Launches within this same native owner's envelope. The process remains suspended until
     /// `publish` durably introduces its immutable identity in the canonical Creating record.
     fn launch_managed(
@@ -256,6 +271,165 @@ fn broken(message: &'static str) -> Refusal {
     }
     why.push_str(message);
     Refusal::Broken(why)
+}
+
+/// Whole retained-owner structural preflight shared by Node and Recorded. These are borrowed
+/// snapshots from their SAME Store, not a second ledger. Only Catalog::holder decides conflicting
+/// physical ownership, including its existing exact Box/Pool handoff rule.
+pub(crate) fn preflight_records(
+    records: &hex_runtime::devices::Records,
+    pools: &[PoolRecord],
+    catalog: Option<&hex_runtime::devices::Catalog>,
+) -> Result<(), Refusal> {
+    let bound = crate::store::TURNS;
+    if records.len() > bound || pools.len() > bound {
+        return Err(Refusal::Full(bound));
+    }
+    let count = records
+        .len()
+        .checked_add(pools.len())
+        .ok_or(Refusal::Full(bound))?;
+    let mut scopes = Vec::new();
+    scopes
+        .try_reserve_exact(count)
+        .map_err(|_| Refusal::Exhausted {
+            what: "retained native scope preflight",
+            bound: count,
+        })?;
+    // A legal physical handoff has at most two retained claims per device (Box plus Pool).
+    // Prepared/Released pool rows are not active grants. More is already conflicting authority.
+    let claim_bound = hex_api::MAX_DEVICES
+        .checked_mul(2)
+        .ok_or(Refusal::Full(bound))?;
+    let mut claims = Vec::new();
+    claims
+        .try_reserve_exact(claim_bound)
+        .map_err(|_| Refusal::Exhausted {
+            what: "retained physical claim preflight",
+            bound: claim_bound,
+        })?;
+    let mut add_claims = |devices: &[DeviceId]| -> Result<(), Refusal> {
+        if claims
+            .len()
+            .checked_add(devices.len())
+            .is_none_or(|count| count > claim_bound)
+        {
+            return Err(broken(
+                "retained physical claims exceed unique ownership and one handoff",
+            ));
+        }
+        claims.extend_from_slice(devices);
+        Ok(())
+    };
+    if pools
+        .windows(2)
+        .any(|pair| matches!(pair, [left, right] if left.key.pool >= right.key.pool))
+    {
+        return Err(broken(
+            "retained backing configurations are not unique and ordered",
+        ));
+    }
+    for pool in pools {
+        pool.check()?;
+        if !pool.devices.is_empty() {
+            let catalog = catalog
+                .ok_or_else(|| broken("retained pool selections have no initialized catalog"))?;
+            if pool
+                .devices
+                .iter()
+                .any(|id| !catalog.entries().iter().any(|entry| entry.info.id == *id))
+            {
+                return Err(NativeRecord::Pool(pool).refusal(hex_api::LifecycleCause::Uncertain));
+            }
+        }
+        scopes.push(*pool.scope().bytes());
+        if !matches!(
+            pool.phase,
+            hex_api::BackingPhase::Prepared | hex_api::BackingPhase::Released
+        ) {
+            add_claims(&pool.devices)?;
+        }
+    }
+    for (id, result) in records {
+        let record = result.as_ref().map_err(|_| uncertain(id))?;
+        if record.version != hex_core::record::RECORD_VERSION || record.spec.id != *id {
+            return Err(uncertain(id));
+        }
+        record.spec.check()?;
+        if [record.init, record.run]
+            .into_iter()
+            .flatten()
+            .any(|process| process.pid == 0)
+        {
+            return Err(uncertain(id));
+        }
+        let backend = record.spec.backend_class()?;
+        let shared = record.spec.route_execution() == Some(hex_api::Execution::ShardsShared);
+        if matches!(backend, Class::Firecracker | Class::Shards)
+            && !shared
+            && (record.native_scope.is_none()
+                || record.spec.allocation.is_none()
+                || record.init.is_some_and(|init| init.start_ticks == 0)
+                || (record.phase == Phase::Ready && record.init.is_none()))
+        {
+            return Err(uncertain(id));
+        }
+        if let Some(scope) = record.native_scope {
+            scopes.push(*scope.bytes());
+        }
+        if let Some(route) = record.spec.route
+            && let Some(key) = route.backing
+        {
+            if let Some(pool) = pools
+                .binary_search_by_key(&key, |pool| pool.key)
+                .ok()
+                .and_then(|at| pools.get(at))
+            {
+                if route.key.backend_class() != NativeRecord::Pool(pool).class()?
+                    || pool.phase == hex_api::BackingPhase::Prepared
+                {
+                    return Err(uncertain(id));
+                }
+                hex_api::RouteOffer {
+                    key: route.key,
+                    cost: record.spec.allocation.map(|allocation| allocation.cost),
+                    backing: Some(key),
+                }
+                .check_backing_parts(pool.key, pool.cost, &pool.devices)?;
+                if !shared && record.spec.devices != pool.devices {
+                    return Err(uncertain(id));
+                }
+            } else if shared || record.init.is_none() || record.native_scope.is_none() {
+                // A dedicated observer may outlive its old Released pool row only AFTER the new
+                // Box's own held native identity is canonical. A shared payload never owns that VM.
+                return Err(uncertain(id));
+            }
+        }
+        add_claims(&record.spec.devices)?;
+    }
+    scopes.sort_unstable();
+    if scopes
+        .windows(2)
+        .any(|pair| matches!(pair, [left, right] if left == right))
+    {
+        return Err(broken("retained owners reuse a native scope incarnation"));
+    }
+    claims.sort_unstable();
+    claims.dedup();
+    if claims.is_empty() {
+        return Ok(());
+    }
+    let catalog =
+        catalog.ok_or_else(|| broken("retained physical claims have no initialized catalog"))?;
+    for id in claims {
+        if !catalog.entries().iter().any(|entry| entry.info.id == id) {
+            return Err(broken(
+                "retained physical identity is absent from the initialized catalog",
+            ));
+        }
+        catalog.holder(id, records, pools)?;
+    }
+    Ok(())
 }
 
 impl Transaction<'_> {
@@ -728,6 +902,29 @@ fn native_metadata(
 }
 
 impl<R: Recover> Recorded<R> {
+    fn preflight_snapshot(&self) -> Result<hex_runtime::devices::Records, Refusal> {
+        let records = self.books.store.retained_records()?;
+        let pools = self.books.store.all_pools()?;
+        let catalog = self.runtime.device_catalog()?;
+        preflight_records(&records, &pools, catalog.as_deref())?;
+        // Configuration validation is a complete second read-only pass. Native observations and
+        // cleanup are deliberately deferred until every sibling and backing passes both passes.
+        for (id, record) in &records {
+            self.runtime
+                .preflight_record(record.as_ref().map_err(|_| uncertain(id))?)?;
+        }
+        for record in &pools {
+            self.runtime.preflight_pool(record)?;
+        }
+        Ok(records)
+    }
+
+    /// Startup preflight over ALL retained owners, before backend preparation/recovery or serving
+    /// new calls. A refusal preserves their bytes and charge; this never probes a GPU or VM.
+    pub fn preflight_recovery(&self) -> Result<(), Refusal> {
+        self.preflight_snapshot().map(|_| ())
+    }
+
     fn native_transaction(
         &self,
         owner: TransactionOwner<'_>,
@@ -1033,10 +1230,10 @@ impl<R: Recover> Recorded<R> {
     /// removed when the node stopped is removed, with what its record names ended. Safe to call again after
     /// a crash during it: ending a box tolerates its processes being gone already.
     pub fn recover(&self) -> Result<RecoverySummary, Refusal> {
+        let records = self.preflight_snapshot()?;
         // What a crash at a record write left: a temp file never renamed into place.
         self.books.store.remove_strays()?;
         let mut summary = RecoverySummary::default();
-        let records = self.books.store.all()?;
         let mut seen: BTreeMap<BoxId, Seen> = BTreeMap::new();
         for (id, record) in &records {
             // Without a readable class/identity this owner cannot choose a cleanup backend.
@@ -1138,6 +1335,20 @@ impl<P: Recover + 'static> Recorded<hex_runtime::guest::WithGuest<P>> {
     pub fn bind_guest_books(self: &Arc<Self>) -> Result<(), Refusal> {
         let authority: Arc<dyn hex_runtime::devices::Books> = self.clone();
         self.runtime.guest().bind_books(Arc::downgrade(&authority))
+    }
+
+    /// Publish only the configured shared backing after the complete retained-owner preflight.
+    /// This does not boot a VM or sample GPU capacity; Index still owns its later actual grant.
+    pub fn prepare_guest_backing(&self) -> Result<hex_api::BackingOffer, Refusal> {
+        self.preflight_recovery()?;
+        self.runtime.guest().prepare_backing()
+    }
+
+    /// Recover the already-admitted backing only after every retained sibling/configuration is
+    /// known. Payload recovery follows this call and uses the same Store/turn/native owner.
+    pub fn recover_guest_backing(&self) -> Result<(), Refusal> {
+        self.preflight_recovery()?;
+        self.runtime.guest().recover_backing()
     }
 }
 
@@ -1485,6 +1696,21 @@ impl<R: Recover> Host for Recorded<R> {
 /// time (`proc_pid_rusage`'s Mach absolute time, in [`ProcId::start_ticks`]).
 #[cfg(target_os = "macos")]
 impl Recover for hex_runtime::macos::MacRuntime {
+    fn preflight_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        record.spec.check()?;
+        if record.spec.class.class() != Class::Process || !record.spec.devices.is_empty() {
+            return Err(uncertain(&record.spec.id));
+        }
+        if let Some(route) = record.spec.route
+            && (route.key.execution != hex_api::Execution::Native
+                || route.key.image.os != hex_api::ImageOs::Macos
+                || route.key.image.arch != hex_api::ImageArch::Arm64)
+        {
+            return Err(uncertain(&record.spec.id));
+        }
+        Ok(())
+    }
+
     fn managed_usage(&self, record: NativeRecord<'_>) -> Result<Usage, Refusal> {
         hex_runtime::macos::MacRuntime::managed_usage(self, record)
     }
@@ -1545,6 +1771,28 @@ fn group(trace: Option<ProcId>) -> Option<(i32, u64)> {
 /// records name that is still there, and removes the rest with what is left of them.
 #[cfg(windows)]
 impl Recover for hex_runtime::windows::WinRuntime {
+    fn preflight_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        hex_runtime::windows::WinRuntime::check_native_spec(self, &record.spec)?;
+        if !record.spec.devices.is_empty() {
+            let catalog = hex_runtime::windows::WinRuntime::device_catalog(self)
+                .ok_or_else(|| uncertain(&record.spec.id))?;
+            for id in &record.spec.devices {
+                let entry = catalog
+                    .entries()
+                    .iter()
+                    .find(|entry| entry.info.id == *id)
+                    .ok_or_else(|| uncertain(&record.spec.id))?;
+                if !matches!(
+                    entry.binding(hex_runtime::devices::Route::Hcs),
+                    Some(hex_runtime::devices::Binding::Hcs { .. })
+                ) {
+                    return Err(uncertain(&record.spec.id));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn device_catalog(&self) -> Result<Option<hex_runtime::devices::SharedCatalog>, Refusal> {
         Ok(hex_runtime::windows::WinRuntime::device_catalog(self))
     }
@@ -1620,6 +1868,16 @@ impl Recover for hex_runtime::windows::WinRuntime {
 /// ended). Neither has host processes to end; a box recovery removes that the guest still holds is deleted
 /// there.
 impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
+    fn preflight_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        match self.route_for(&record.spec)? {
+            hex_runtime::guest::Side::Host => self.host().preflight_record(record),
+            hex_runtime::guest::Side::Guest => self.guest().preflight_box(record),
+        }
+    }
+    fn preflight_pool(&self, record: &PoolRecord) -> Result<(), Refusal> {
+        self.guest().preflight_backing(record)
+    }
+
     fn device_catalog(&self) -> Result<Option<hex_runtime::devices::SharedCatalog>, Refusal> {
         let guest = self.guest().device_catalog();
         let host = self.host().device_catalog()?;

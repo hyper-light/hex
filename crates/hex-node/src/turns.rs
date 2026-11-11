@@ -138,7 +138,7 @@ impl Turns {
     /// Takes method-lifetime ownership without waiting. A native operation can complete on a
     /// callback that needs this box again, so its callers must refuse overlap rather than wait on
     /// themselves or retain a map lock across the native call.
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(test)]
     pub(crate) fn try_take(&self, id: &BoxId) -> Result<Turn<'_>, Refusal> {
         self.try_take_devices(id, &[])
     }
