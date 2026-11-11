@@ -178,12 +178,7 @@ impl Receipt {
             .attempt
             .as_ref()
             .ok_or_else(|| refused(self.original.key, LifecycleCause::Uncertain))?;
-        if attempt.phase != super::observer::AttemptPhase::Complete
-            || attempt.configuration != readiness.configuration
-            || attempt.max_queues != readiness.max_queues
-            || !attempt.finished_streams()
-            || !attempt.matches_report(&readiness.report)?
-        {
+        if !attempt.matches_readiness(readiness)? {
             return Err(refused(self.original.key, LifecycleCause::Uncertain));
         }
         Ok(readiness)

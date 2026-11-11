@@ -13,7 +13,8 @@ use hex_core::record::{BoxRecord, NativeScope};
 
 use super::{GuestConfig, held};
 
-const HEADER: &str = "hex-selected-guest 4";
+const HEADER: &str = "hex-selected-guest 5";
+const REPORT_HEADER: &str = "hex-selected-guest 4";
 const ROUTE_HEADER: &str = "hex-selected-guest 3";
 const SCOPE_HEADER: &str = "hex-selected-guest 2";
 const LEGACY_HEADER: &str = "hex-selected-guest 1";
@@ -38,6 +39,8 @@ pub(super) struct Record {
     pub route: Option<RouteReceipt>,
     pub physical: Vec<shards_api::PhysicalGpu>,
     pub report: Option<shards_api::physical::GpuReport>,
+    pub readiness: Option<super::observer::Evidence>,
+    pub attempt: Option<super::observer::Attempt>,
     pub vcpus: u32,
     pub memory_mib: u64,
     pub phase: Phase,
@@ -156,6 +159,8 @@ impl Record {
             route: spec.route,
             physical: Vec::new(),
             report: None,
+            readiness: None,
+            attempt: None,
             vcpus,
             memory_mib,
             phase: Phase::Intent,
@@ -234,7 +239,25 @@ impl Record {
         Ok(Some(report))
     }
 
-    fn encode(&self) -> Result<String, Refusal> {
+    pub fn checked_readiness(&self) -> Result<&super::observer::Evidence, Refusal> {
+        let bad = || super::books::uncertain(&self.id).unwrap_or_else(std::convert::identity);
+        if self.physical.is_empty() || !matches!(self.phase, Phase::Running(_)) {
+            return Err(bad());
+        }
+        self.checked_report()?.ok_or_else(bad)?;
+        let readiness = self.readiness.as_ref().ok_or_else(bad)?;
+        readiness.check(self.scope.ok_or_else(bad)?, self.physical.len())?;
+        let attempt = self.attempt.as_ref().ok_or_else(bad)?;
+        if !attempt.has_facts()
+            || !attempt.matches_readiness(readiness)?
+            || !attempt.ready_facts()?
+        {
+            return Err(bad());
+        }
+        Ok(readiness)
+    }
+
+    pub(super) fn encode(&self) -> Result<String, Refusal> {
         let bound = hex_core::bundle::MAX_CONFIG_BYTES;
         let report = self
             .report
@@ -261,7 +284,8 @@ impl Record {
     }
 
     fn render(&self, text: &mut impl std::fmt::Write, report: Option<&str>) -> std::fmt::Result {
-        writeln!(text, "{HEADER}")?;
+        let observing = self.attempt.is_some() || self.readiness.is_some();
+        writeln!(text, "{}", if observing { HEADER } else { REPORT_HEADER })?;
         writeln!(text, "box {}", self.id)?;
         writeln!(text, "class {}", self.class.name())?;
         write!(text, "scope ")?;
@@ -286,6 +310,19 @@ impl Record {
             writeln!(text, "native {physical}")?;
         }
         render_report(text, report)?;
+        if observing {
+            write!(text, "readiness ")?;
+            match &self.readiness {
+                Some(readiness) => readiness.render(text)?,
+                None => write!(text, "none")?,
+            }
+            writeln!(text)?;
+            let attempt = self.attempt.as_ref().ok_or(std::fmt::Error)?;
+            write!(text, "observer ")?;
+            attempt.render(text)?;
+            writeln!(text)?;
+            attempt.render_facts(text)?;
+        }
         render_phase(text, &self.phase)
     }
 }
@@ -423,7 +460,8 @@ fn parse(text: &str) -> Result<Record, Refusal> {
     }
     let mut lines = text.lines();
     let version = match lines.next() {
-        Some(HEADER) => 4,
+        Some(HEADER) => 5,
+        Some(REPORT_HEADER) => 4,
         Some(ROUTE_HEADER) => 3,
         Some(SCOPE_HEADER) => 2,
         Some(LEGACY_HEADER) => 1,
@@ -501,6 +539,25 @@ fn parse(text: &str) -> Result<Record, Refusal> {
     } else {
         None
     };
+    let (readiness, attempt) = if version >= 5 {
+        if physical.is_empty() || report.is_none() {
+            return Err(invalid(
+                "CPU-only or reportless receipt cannot contain a GPU observer",
+            ));
+        }
+        let scope = scope.ok_or_else(|| invalid("GPU observer receipt lost its original scope"))?;
+        let readiness = super::observer::Evidence::parse(
+            field(lines.next(), "readiness ")?,
+            scope,
+            physical.len(),
+        )?;
+        let mut attempt = super::observer::Attempt::parse(field(lines.next(), "observer ")?)?
+            .ok_or_else(|| invalid("GPU observer receipt has no actual attempt"))?;
+        attempt.parse_facts(&mut lines)?;
+        (readiness, Some(attempt))
+    } else {
+        (None, None)
+    };
     let phase = parse_phase(&mut lines)?;
     if lines.next().is_some() {
         return Err(invalid("receipt has trailing data"));
@@ -513,6 +570,8 @@ fn parse(text: &str) -> Result<Record, Refusal> {
         route,
         physical,
         report,
+        readiness,
+        attempt,
         vcpus,
         memory_mib,
         phase,
@@ -772,10 +831,147 @@ mod tests {
                 function: 0,
             }],
             report: None,
+            readiness: None,
+            attempt: None,
             vcpus: 1,
             memory_mib: 256,
             phase: Phase::Intent,
         }
+    }
+
+    fn observed_record() -> Record {
+        use std::fmt::Write as _;
+        let mut receipt = record();
+        let scope = receipt.scope.unwrap();
+        let physical = receipt.physical[0];
+        receipt.report = Some(shards_api::physical::GpuReport {
+            scope: *scope.bytes(),
+            probe: shards_api::GpuProbe {
+                devices: vec![shards_api::ResolvedGpu {
+                    physical,
+                    pci: Some(physical),
+                    luid: None,
+                    uuid: [3; 16],
+                    name: None,
+                    device_local_bytes: None,
+                }],
+                host_visible_bytes: 1,
+            },
+        });
+        // Model data only: this unit checks receipt authority and gating, not
+        // driver execution, immutable artifacts or native GPU/termination facts.
+        let inventory = format!(
+            "hex-vulkan-guest-inventory 1 1\ndevice 0 4202496 22 1 1 2 2 {} 677075 76656e7573 4d657361 2 1 1 2 1\nheap 0 0 1 4096\n",
+            "03".repeat(16)
+        );
+        receipt.readiness = Some(super::super::observer::Evidence {
+            scope,
+            configuration: [9; 32],
+            max_queues: 2,
+            report: super::super::observer::Report::parse(inventory.as_bytes(), 1, 2).unwrap(),
+        });
+        let mut stdout = String::new();
+        for byte in inventory.as_bytes() {
+            write!(&mut stdout, "{byte:02x}").unwrap();
+        }
+        let mut attempt = super::super::observer::Attempt::parse(&format!(
+            "{} 2 complete eof {} {} eof 1 -",
+            "09".repeat(32),
+            super::super::observer::output_bound(1).unwrap(),
+            stdout,
+        ))
+        .unwrap()
+        .unwrap();
+        let frame =
+            hex_core::wire::snapshot_exit(hex_api::Exit::Code(0), hex_core::wire::MAX_MESSAGE)
+                .unwrap();
+        let mut encoded = String::new();
+        for byte in &frame {
+            write!(&mut encoded, "{byte:02x}").unwrap();
+        }
+        attempt.parse_facts(&mut format!("observer-exit\t1\t{:016x}\t{}\t{encoded}\nobserver-failure\tnone\nobserver-cleanup\tdeleted\n", hex_core::wire::IDENTITY, frame.len()).lines()).unwrap();
+        receipt.attempt = Some(attempt);
+        receipt.phase = Phase::Running(shards_api::Identity {
+            pid: 42,
+            started: 7,
+            vsock: "/model/v".into(),
+        });
+        receipt
+    }
+
+    /// AC-T7.4.1: a parent/legacy native report cannot certify the new selected
+    /// guest. Only this exact scope, visible set, artifact identity and completed
+    /// actual-observer protocol may gate payload execution.
+    #[test]
+    fn selected_observer_receipt_requires_its_own_scope_set_and_complete_outcome() {
+        let mut receipt = observed_record();
+        receipt.checked_readiness().unwrap();
+        let text = receipt.encode().unwrap();
+        assert!(text.starts_with("hex-selected-guest 5\n"));
+        assert_eq!(parse(&text).unwrap(), receipt);
+        receipt.readiness.as_mut().unwrap().scope = NativeScope::from_bytes([8; 16]);
+        assert!(receipt.checked_readiness().is_err());
+        assert!(receipt.encode().is_err());
+        let mut receipt = parse(&text).unwrap();
+        receipt.attempt.as_mut().unwrap().phase = super::super::observer::AttemptPhase::Waiting;
+        assert!(receipt.checked_readiness().is_err());
+        receipt.attempt.as_mut().unwrap().phase = super::super::observer::AttemptPhase::Complete;
+        receipt.readiness.as_mut().unwrap().configuration = [10; 32];
+        assert!(receipt.checked_readiness().is_err());
+        let mut receipt = parse(&text).unwrap();
+        receipt.devices.push(DeviceId {
+            kind: DeviceKind::Gpu,
+            key: 512,
+        });
+        receipt.physical.push(shards_api::PhysicalGpu::Pci {
+            domain: 0,
+            bus: 2,
+            device: 0,
+            function: 0,
+        });
+        assert!(receipt.checked_readiness().is_err());
+        let mut legacy = parse(&text).unwrap();
+        legacy.readiness = None;
+        legacy.attempt = None;
+        let v4 = legacy.encode().unwrap();
+        assert!(v4.starts_with("hex-selected-guest 4\n"));
+        assert_eq!(parse(&v4).unwrap().encode().unwrap(), v4);
+        assert!(legacy.checked_readiness().is_err());
+        legacy.phase = Phase::Released {
+            identity: None,
+            status: shards_api::ManagedStatus::Unknown,
+        };
+        assert_eq!(parse(&legacy.encode().unwrap()).unwrap(), legacy);
+    }
+
+    /// AC-T7.4.1: malformed/reordered/foreign diagnostics never become usable
+    /// readiness, yet an opaque wire fact remains readable for SAME scope cleanup.
+    #[test]
+    fn selected_observer_opaque_facts_remain_cleanup_only_and_cpu_v4_unchanged() {
+        let receipt = observed_record();
+        let text = receipt.encode().unwrap();
+        for bad in [
+            text.replacen("readiness ", "readiness 00", 1),
+            text.replacen("observer-exit\t", "observer-cleanup\t", 1),
+            text.replacen("observer-cleanup\tdeleted", "observer-cleanup\tunknown", 1),
+        ] {
+            assert!(parse(&bad).is_err());
+        }
+        let foreign = text.replacen("observer-exit\t1\t", "observer-exit\t2\t", 1);
+        let mut retained = parse(&foreign).unwrap();
+        assert!(retained.checked_readiness().is_err());
+        retained.phase = Phase::Released {
+            identity: None,
+            status: shards_api::ManagedStatus::Unknown,
+        };
+        assert_eq!(parse(&retained.encode().unwrap()).unwrap(), retained);
+        let mut cpu = record();
+        cpu.devices.clear();
+        cpu.physical.clear();
+        let v4 = cpu.encode().unwrap();
+        assert!(v4.starts_with("hex-selected-guest 4\n"));
+        assert_eq!(parse(&v4).unwrap().encode().unwrap(), v4);
+        assert!(cpu.attempt.is_none() && cpu.readiness.is_none());
     }
 
     /// AC-T7.4.1: every lifecycle phase retains the same exact claims and VM identity.

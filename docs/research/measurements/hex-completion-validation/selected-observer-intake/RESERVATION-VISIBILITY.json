@@ -1,0 +1,25 @@
+{
+  "status": "SOURCE ONLY visibility correction; scoped rustfmt parser only, no compile/test/native run",
+  "parent": "283ff2eb8429357b78b584b3deb5cee6d9e86cc4",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "actual_before": {
+    "root_source": "231d (ROOT exact full pin retained there)",
+    "exit": 101,
+    "cause": "E0624 gpu_pool.rs710 calls private dedicated::GuestRuntime::reserve",
+    "raw_bytes": 1293,
+    "raw_sha256": "f0439d9b0b462abfe1baed53fdef19816d9522d146393902325e549fb5d08ff2"
+  },
+  "change": "reserve becomes pub(super); its returned Reservation already pub(super). No function body or ownership change.",
+  "source": {
+    "path": "crates/hex-runtime/src/guest/dedicated.rs",
+    "sha256": "7d4422e7c558139df10092dde758ea0ef7b238f3a3f8c393a5c9833bb89e9b0b"
+  },
+  "preserved": [
+    "283 selected observer source",
+    "c2 original Released(None) unit/oracle in separate immutable source",
+    "all gpu_pool.rs bytes unchanged"
+  ],
+  "after": "UNRUN; ROOT owns matched cohort"
+}

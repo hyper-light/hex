@@ -270,6 +270,8 @@ mod tests {
             route: None,
             physical: Vec::new(),
             report: None,
+            readiness: None,
+            attempt: None,
             vcpus: 1,
             memory_mib: 256,
             phase: Phase::Running(shards_api::Identity {
@@ -941,7 +943,11 @@ impl GuestRuntime {
         selected::resources(&self.config)
     }
 
-    fn reserve(&self, id: &BoxId, operation: Operation) -> Result<Reservation<'_>, Refusal> {
+    pub(super) fn reserve(
+        &self,
+        id: &BoxId,
+        operation: Operation,
+    ) -> Result<Reservation<'_>, Refusal> {
         self.reserve_owner(OwnerRef::Box(id), operation)
     }
 
@@ -1093,6 +1099,27 @@ impl GuestRuntime {
         self.receipt_spec(receipt)
     }
 
+    fn check_selected_observer(&self, receipt: &Record) -> Result<(), Refusal> {
+        if receipt.physical.is_empty() {
+            return Ok(());
+        }
+        let observer = self
+            .gpu_observer
+            .as_ref()
+            .ok_or(super::books::uncertain(&receipt.id)?)?;
+        let readiness = receipt.checked_readiness()?;
+        if readiness.configuration != observer.identity()
+            || readiness.max_queues != observer.queues()
+        {
+            return Err(super::books::uncertain(&receipt.id)?);
+        }
+        receipt
+            .attempt
+            .as_ref()
+            .ok_or(super::books::uncertain(&receipt.id)?)?
+            .check_config(observer, receipt.physical.len())
+    }
+
     fn check_native_binding(&self, receipt: &Record) -> Result<(), Refusal> {
         if receipt.devices.is_empty() {
             return Ok(());
@@ -1237,6 +1264,7 @@ impl GuestRuntime {
                 report,
             )?;
         }
+        self.check_selected_observer(&receipt)?;
         if self.uses_books() {
             let record = self.recorded_box(id)?.ok_or(super::books::uncertain(id)?)?;
             receipt.matches_record(&record)?;
@@ -1329,6 +1357,7 @@ impl GuestRuntime {
             )?;
         }
         let plan = self.managed_plan(&spec, &identity.vsock)?;
+        self.check_selected_observer(&receipt)?;
         let guest = managed::attach(transaction, plan, identity, budget)?;
         let booted = self.booted(guest, &receipt, record, budget)?;
         reservation.publish(Some(Guest {
@@ -1452,6 +1481,15 @@ impl GuestRuntime {
         }
         let mut receipt = Record::intent(&canonical, &self.config)?;
         receipt.physical = self.physical_for(&receipt.devices)?;
+        if !receipt.physical.is_empty() {
+            let observer = self
+                .gpu_observer
+                .as_ref()
+                .ok_or(super::books::uncertain(&receipt.id)?)?;
+            observer.verify(&self.config)?;
+            observer.check_allocation(self.configured_allocation()?)?;
+            observer.output_bytes(receipt.physical.len())?;
+        }
         let guest_spec = self.selected_spec(&receipt)?;
         let rewritten = self.rewrite_spec(spec)?;
         let dir = self.selected_dir()?;
@@ -1500,6 +1538,14 @@ impl GuestRuntime {
         receipt.phase = Phase::Running(identity);
         selected::write(&path, &receipt)?;
         let booted = self.booted(guest, &receipt, &record, budget)?;
+        if !receipt.physical.is_empty() {
+            let observer = self
+                .gpu_observer
+                .as_ref()
+                .ok_or(super::books::uncertain(&receipt.id)?)?;
+            super::observer::observe_selected(observer, &booted, &mut receipt, &path, budget)?;
+            self.check_selected_observer(&receipt)?;
+        }
         budget.remaining()?;
         let created = self.create_in(&booted, rewritten);
         reservation.publish(Some(Guest { booted }))?;
