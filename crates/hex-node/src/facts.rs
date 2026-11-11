@@ -1110,8 +1110,9 @@ mod tests {
     }
 
     /// CP-T7.4, GPU load from hex-gpu: do probe this machine's GPUs through the kept `Gpus`; expect
-    /// either each GPU hex-gpu lists, with its load, or none and hex-gpu's reason (macOS, a host
-    /// without a driver), never both and never neither.
+    /// either each GPU hex-gpu lists, with its load, or none and hex-gpu's reason (a host without
+    /// a driver), never both and never neither. On macOS a listed GPU is Apple Silicon's, by its
+    /// native Metal identity with no PCI address, and NVIDIA and AMD are never read.
     #[test]
     fn gpus_come_from_hex_gpu_or_say_why_not() {
         let dir = tempfile::tempdir().unwrap();
@@ -1120,14 +1121,25 @@ mod tests {
         match prober.gpus.as_ref().unwrap().inventory() {
             Ok(listed) => {
                 assert_eq!((f.gpus.len(), &f.no_gpus), (listed.len(), &None), "{f:?}");
+                if cfg!(target_os = "macos") {
+                    assert!(
+                        f.gpus
+                            .iter()
+                            .all(|g| g.vendor == "apple" && g.key.is_some() && g.pci.is_none()),
+                        "{f:?}"
+                    );
+                }
             }
             Err(none) => {
                 assert!(f.gpus.is_empty(), "{f:?}");
                 assert_eq!(f.no_gpus, Some(none.to_string()));
+                if cfg!(target_os = "macos") {
+                    assert_eq!(
+                        (&none.nvidia, &none.amd),
+                        (&hex_gpu::Absent::Unsupported, &hex_gpu::Absent::Unsupported)
+                    );
+                }
             }
-        }
-        if cfg!(target_os = "macos") {
-            assert!(f.no_gpus.is_some(), "{f:?}");
         }
     }
 

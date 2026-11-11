@@ -122,11 +122,19 @@ fn replayed_cancel_after_reboot_and_sequence_reuse_cannot_touch_sibling_namespac
 
     let deleting = first.delete(old).unwrap();
     let (_, stale_cancel) = deleting.send.first().unwrap().clone();
+    // Driver::submit records the payload's runtime form in the durable demand it sends.
+    let durable = Demand {
+        ask: Ask {
+            runtime_class: Some(hex_api::Class::Process),
+            ..d.ask
+        },
+        ..d
+    };
     assert_eq!(
         stale_cancel.msg,
         Msg::Delete {
             key: old,
-            demand: d
+            demand: durable
         }
     );
     local(&first, deleting);
@@ -295,7 +303,8 @@ fn failed_cleanup_and_delete_intent_survive_smaller_budget_restart_until_exact_d
     );
     let rows = durable_placement_files(dir.path());
     assert_eq!(rows.len(), 5);
-    for (kind, prefix) in [("own", "deleting 0 "), ("ran", "0 running ")] {
+    // A ran row names its owner and its explicit device binding: none, for this CPU-only box.
+    for (kind, prefix) in [("own", "deleting 0 "), ("ran", "bindings1:0:0 running ")] {
         let value: serde_json::Value =
             serde_json::from_slice(rows.get(&format!("{}.rec", name(kind, uncertain))).unwrap())
                 .unwrap();

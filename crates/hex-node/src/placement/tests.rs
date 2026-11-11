@@ -1291,12 +1291,21 @@ fn restart_with_less_room(pool_limited: bool) {
     .unwrap();
     assert_eq!(recovered.status(key).unwrap().unwrap().physical, physical);
     assert_eq!(rt.creates.load(Ordering::SeqCst), 1);
+    // A repeated Start carries the durable demand, where Driver::submit recorded the payload's
+    // runtime form; any other demand is refused as a changed one.
+    let durable = Demand {
+        ask: Ask {
+            runtime_class: Some(hex_api::Class::Process),
+            ..d.ask
+        },
+        ..d
+    };
     let duplicate = Envelope {
         msg: Msg::Start {
             route: None,
             allocation: None,
             key,
-            demand: d,
+            demand: durable,
         },
         payload: Some(p.clone()),
         refusal: None,
