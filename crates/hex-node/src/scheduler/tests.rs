@@ -1093,6 +1093,75 @@ fn dispatch_control_refuses_at_global_limit_and_returns_failed_send_permits() {
     assert_eq!(service.queued.load(Ordering::Acquire), 0);
 }
 
+/// AC-T7.4.1/LB03, a cache is not authority: do start the scheduler over a peer cache holding
+/// peer 1's offer as a build before 516a370b cached it (every class, no runtime cost) beside peer
+/// 2's valid offer. Expect it to start with peer 1 uncached, its record set aside and reported
+/// against it with why, and peer 2's cached facts restored.
+#[test]
+fn a_cached_offer_todays_rules_refuse_is_set_aside_and_the_scheduler_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let peers = state.join("peers");
+    std::fs::create_dir_all(&peers).unwrap();
+    let room = Resources {
+        cpu_milli: 1_000,
+        mem_bytes: 1 << 30,
+        ..Resources::default()
+    };
+    let stale = dto::Offer {
+        spec: serde_json::to_string(&NodeSpec::new(NodeId(1), room)).unwrap(),
+        models: Vec::new(),
+    };
+    std::fs::write(
+        peers.join("peer-1.rec"),
+        serde_json::to_string(&stale).unwrap(),
+    )
+    .unwrap();
+    let mut valid = NodeSpec::new(NodeId(2), room);
+    valid.classes = Classes::NONE.with(hex_sim::model::Class::Oci);
+    let valid_record = serde_json::to_string(&offer::from_local(&valid, &[]).unwrap()).unwrap();
+    std::fs::write(peers.join("peer-2.rec"), &valid_record).unwrap();
+    let config = Config {
+        cluster: "cache-start".into(),
+        node: 0,
+        state,
+        socket: dir.path().join("scheduler.sock"),
+        nodes: Vec::new(),
+        models: Vec::new(),
+        backends: Vec::new(),
+        // An empty host is refused before any SSH process starts.
+        peers: [1, 2]
+            .map(|node| Peer {
+                node,
+                host: String::new(),
+                command: String::new(),
+            })
+            .into(),
+    };
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&reports);
+    let report: Report =
+        Arc::new(move |node, why| sink.lock().unwrap().push((node, why.to_owned())));
+    let service = Service::open(&config, report).unwrap();
+    service.shutdown().unwrap();
+    let nodes = service.cluster.lock().unwrap().nodes.clone();
+    let mut placeholder = NodeSpec::new(NodeId(1), Resources::default());
+    placeholder.classes = Classes::NONE;
+    assert_eq!(nodes[1], placeholder);
+    assert_eq!(nodes[2], valid);
+    let reports = reports.lock().unwrap();
+    assert!(
+        reports.iter().any(|(node, why)| *node == NodeId(1)
+            && why.contains("initialized VM peer offer has no immutable runtime cost")),
+        "{reports:?}"
+    );
+    assert!(!peers.join("peer-1.rec").exists());
+    assert_eq!(
+        std::fs::read_to_string(peers.join("peer-2.rec")).unwrap(),
+        valid_record
+    );
+}
+
 #[path = "adversarial_relay_tests.rs"]
 mod adversarial_relay_tests;
 
