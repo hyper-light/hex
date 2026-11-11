@@ -518,6 +518,91 @@ fn content_length(header: &[u8]) -> Result<usize, Refusal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hex_api::{ConnectFailure, ConnectPhase, ConnectReply, IoKind};
+
+    /// Firecracker's host-side vsock socket (vsock.md): one connection, its `CONNECT <port>\n`
+    /// read whole, then `answer` written and the connection closed. Bound before any dial.
+    fn vsock(path: &Path, answer: &'static [u8]) -> std::thread::JoinHandle<Vec<u8>> {
+        let listener = UnixListener::bind(path).unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while request.last() != Some(&b'\n') {
+                assert_eq!(stream.read(&mut byte).unwrap(), 1, "request ends at its newline");
+                request.push(byte[0]);
+            }
+            stream.write_all(answer).unwrap();
+            request
+        })
+    }
+
+    fn dial(path: &Path, create_deadline: Option<Instant>) -> Result<(), Refusal> {
+        Endpoint {
+            path: path.to_owned(),
+            timeout: Duration::from_secs(30),
+            create_deadline,
+        }
+        .dial_before(1024, None)
+        .map(drop)
+    }
+
+    /// AC-T7.4.1: a Firecracker CONNECT that fails reaches the caller as Hex's typed Connect
+    /// refusal, its port, phase and cause kept (as the Shards adapter carries Shards' own),
+    /// never as Os or Invalid text.
+    #[test]
+    fn a_failed_connect_keeps_its_port_phase_and_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let connect = |failure| Refusal::Connect { port: 1024, failure };
+
+        let absent = dir.path().join("absent.sock");
+        assert_eq!(
+            dial(&absent, None),
+            Err(connect(ConnectFailure::Io {
+                phase: ConnectPhase::Dial,
+                kind: IoKind::new(std::io::ErrorKind::NotFound),
+                code: Some(libc::ENOENT),
+            }))
+        );
+
+        let spent = Some(Instant::now());
+        assert_eq!(
+            dial(&absent, spent),
+            Err(connect(ConnectFailure::Expired {
+                phase: ConnectPhase::Dial
+            }))
+        );
+
+        for (name, answer, failure) in [
+            ("closed.sock", b"".as_slice(), ConnectFailure::Closed),
+            (
+                "refused.sock",
+                b"NO 1\n".as_slice(),
+                ConnectFailure::Reply(ConnectReply::NotOk),
+            ),
+            (
+                "zero.sock",
+                b"OK 0\n".as_slice(),
+                ConnectFailure::Reply(ConnectReply::NotOk),
+            ),
+            (
+                "long.sock",
+                b"OK 12345678901\n".as_slice(),
+                ConnectFailure::Reply(ConnectReply::TooLong),
+            ),
+        ] {
+            let path = dir.path().join(name);
+            let peer = vsock(&path, answer);
+            assert_eq!(dial(&path, None), Err(connect(failure)), "{name}");
+            assert_eq!(peer.join().unwrap(), b"CONNECT 1024\n");
+        }
+
+        let path = dir.path().join("ok.sock");
+        let peer = vsock(&path, b"OK 1073741824\n");
+        assert_eq!(dial(&path, None), Ok(()));
+        assert_eq!(peer.join().unwrap(), b"CONNECT 1024\n");
+    }
+
     /// AC-T7.4.1: framing is finite on persistent HTTP connections and rejects ambiguous lengths.
     #[test]
     fn witness_response_requires_one_bounded_content_length() {
