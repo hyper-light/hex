@@ -22,7 +22,10 @@ pub mod selected;
 mod shared;
 pub mod shares;
 
-pub use observer::config::{GpuArtifact, GpuArtifactRole, GpuObserver, GpuObserverInput};
+pub use observer::config::{
+    ENV_GPU_OBSERVER_FILE, ENV_GPU_OBSERVER_SHA256, GpuArtifact, GpuArtifactRole, GpuObserver,
+    GpuObserverInput,
+};
 
 use std::ffi::OsString;
 use std::path::PathBuf;

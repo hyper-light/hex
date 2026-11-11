@@ -553,6 +553,8 @@ fn guest_configuration()
         hex_runtime::guest::ENV_COST_FILE,
         hex_runtime::guest::ENV_COST_SHA256,
         hex_runtime::guest::ENV_COST_EVIDENCE,
+        hex_runtime::guest::ENV_GPU_OBSERVER_FILE,
+        hex_runtime::guest::ENV_GPU_OBSERVER_SHA256,
     ]
     .iter()
     .any(|name| std::env::var_os(name).is_some());
@@ -585,12 +587,15 @@ fn configured_guest(
             &why,
         ))
     })?;
-    let guest = GuestRuntime::new(Arc::new(provider), config)
+    let mut guest = GuestRuntime::new(Arc::new(provider), config)
         .recorded_at(backend_path(state, "@guest").map_err(failed)?)
         .with_runtime_paths(paths)
         .with_gpu_catalog(catalog)
         .with_runtime_cost(cost)
         .map_err(failed)?;
+    if let Some(input) = hex_runtime::guest::GpuObserverInput::from_env().map_err(failed)? {
+        guest = guest.with_gpu_observer(input).map_err(failed)?;
+    }
     Ok(Some(guest))
 }
 

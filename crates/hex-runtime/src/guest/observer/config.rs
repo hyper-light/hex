@@ -11,6 +11,9 @@ use sha2::{Digest, Sha256};
 use super::{exhausted, invalid, output_bound};
 use crate::guest::{GuestConfig, shares};
 
+mod load;
+pub use load::{ENV_GPU_OBSERVER_FILE, ENV_GPU_OBSERVER_SHA256};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuArtifactRole {
     Program,
