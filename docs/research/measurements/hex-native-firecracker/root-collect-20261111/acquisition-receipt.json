@@ -1,0 +1,18 @@
+{
+  "SDK_materialization_or_compile_or_VM_GPU": false,
+  "archive": {
+    "bytes": 474576896,
+    "sha256": "b5919c38358cbe1c57cd9b4968a04fe447c431356b4a7a4ca21ccb1c3bcd1507",
+    "source": "/Users/adalundhe/.cache/hex-native-firecracker/held451-acquired-root-measured-v1-01/held1596.tar"
+  },
+  "child_reaped": true,
+  "import_manifest": {
+    "bytes": 592303,
+    "sha256": "d61ad9b2b3e360c064ce04a0680d455e7158255e5ad7d9dc3aedcc228ce4f314",
+    "source": "/Users/adalundhe/.cache/hex-native-firecracker/held451-acquired-root-measured-v1-01/manifest.json"
+  },
+  "normal_kiln_exit": 0,
+  "object_bytes": 472712455,
+  "objects": 1596,
+  "remote_cleanup": "see remote collect launcher-final; local success alone is not native cleanup proof"
+}

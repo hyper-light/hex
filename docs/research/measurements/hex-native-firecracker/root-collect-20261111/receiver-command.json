@@ -1,0 +1,24 @@
+{
+  "argv": [
+    "/opt/homebrew/Cellar/coreutils/9.11/bin/gtimeout",
+    "--signal=TERM",
+    "--kill-after=5s",
+    "235s",
+    "/usr/bin/nice",
+    "-n",
+    "10",
+    "/Applications/Xcode.app/Contents/Developer/usr/bin/python3",
+    "-B",
+    "/Users/adalundhe/.cache/hex-lead/worktrees/scheduler-live/docs/research/measurements/hex-native-firecracker/held451-collect-root-measured-v1/acquire_held451_export.py",
+    "--reviewed-collect-admission",
+    "/Users/adalundhe/.cache/hex-native-firecracker/held451-collect-input-root-measured-v1/reviewed.collect.json",
+    "--export-result",
+    "/Users/adalundhe/.cache/hex-native-firecracker/held451-collect-input-root-measured-v1/export-result.client-input.json",
+    "--root",
+    "/Users/adalundhe/.cache/hex-native-firecracker/held451-acquired-root-measured-v1-01"
+  ],
+  "script_body_identical_to_proposal": true,
+  "only_path_substitution": "ROOT reviewed source copy",
+  "until": 1794403047470007000,
+  "whole_process_guard_seconds": 240
+}
