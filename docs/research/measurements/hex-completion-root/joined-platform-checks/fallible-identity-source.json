@@ -1,0 +1,9 @@
+{
+  "requirement": "AC-T7.4.1",
+  "source": "crates/hex-api/src/id.rs",
+  "sha256": "8b18be8233dd5b98edede84c61f33387560fef53970b5fd42db6ad759b818dd3",
+  "behavior": "BoxId::try_new validates existing grammar and reserves both refusal and identity bytes fallibly; existing new, serde and TryFrom semantics unchanged",
+  "bound": "existing BoxId::MAX_LEN and ASCII grammar",
+  "checks": "scoped rustfmt and diffcheck only; compile/behavior checks pending",
+  "native_calls": 0
+}

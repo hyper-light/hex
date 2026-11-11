@@ -1,0 +1,39 @@
+{
+  "bytes": 206447,
+  "sha256": "d739977a871b6b028cf27d67f99e50c2c1f3932839938eaad4ba6c70688a4835",
+  "members": {
+    "cohort-31fe8ab8-linux-compile-v1/source-before.json": {
+      "bytes": 289722,
+      "sha256": "8781e3596f1f137833b72a00db21a9c3539066c65505b0b46ecd245ba0534013"
+    },
+    "cohort-31fe8ab8-linux-compile-v1/public-registry-seed.json": {
+      "bytes": 22686,
+      "sha256": "674ed58256dad16b9ce3a6dc0ad51b2021263e6285d552d3a0c589744de90bac"
+    },
+    "cohort-31fe8ab8-linux-compile-v1/production-check.log": {
+      "bytes": 3462,
+      "sha256": "f1c1f9a2c3019ac5c5dc355dd5a39267e8d5c213ce22e94ab43a7f6fd4c239db"
+    },
+    "cohort-31fe8ab8-linux-compile-v1/running.json": {
+      "bytes": 924,
+      "sha256": "9ad71e25d47bd0647ee8547f5cdefa8c696c7b25de4c42e3ff820c5796694ccf"
+    },
+    "cohort-31fe8ab8-linux-compile-v1/source-after.json": {
+      "bytes": 289722,
+      "sha256": "8781e3596f1f137833b72a00db21a9c3539066c65505b0b46ecd245ba0534013"
+    },
+    "cohort-31fe8ab8-linux-compile-v1/result.json": {
+      "bytes": 1176,
+      "sha256": "94a1aed5aae0a091619c472693acd2c7c53ef6055c6988b8607da4420b5ab715"
+    },
+    "cohort-31fe8ab8-linux-compile-v1/collected-binaries.json": {
+      "bytes": 507,
+      "sha256": "afc8b8305dae02b08638b35228ec4b841e88f72a7e9237bd842e0ec3997cf9ca"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

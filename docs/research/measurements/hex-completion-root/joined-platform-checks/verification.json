@@ -1,0 +1,38 @@
+{
+  "foundation-clippy-proof": {
+    "bytes": 384933,
+    "sha256": "85bb9512562e14d580e8d83e823bb72b8337178da9f62e670c0c90186d55db2d",
+    "members": 12,
+    "all_members_independently_verified": true
+  },
+  "clippy-path-proof-2af": {
+    "bytes": 190888,
+    "sha256": "99da8b530ec7a040a9490fd9d56c63b863757e36cdd3584acfedd81b284515e0",
+    "members": 6,
+    "all_members_independently_verified": true
+  },
+  "managed-mac-proof-b6": {
+    "bytes": 193869,
+    "sha256": "add28535868c99927b5d8b2ea62d5369d7f2f8438560d61d55cf8a1a639ee8cd",
+    "members": 6,
+    "all_members_independently_verified": true
+  },
+  "managed-linux-proof-b6": {
+    "bytes": 199049,
+    "sha256": "a4778c5ddb74fb81e9099f6400a6b7af0bad7cced38069cfc52f0b7fb7d6d57e",
+    "members": 6,
+    "all_members_independently_verified": true
+  },
+  "managed-mac-proof-31f": {
+    "bytes": 201210,
+    "sha256": "c78cf0da856eb51599de5c27da4a38fe8d2989ae2e908891a9f5f0c9e5209453",
+    "members": 7,
+    "all_members_independently_verified": true
+  },
+  "managed-linux-proof-31f": {
+    "bytes": 206447,
+    "sha256": "d739977a871b6b028cf27d67f99e50c2c1f3932839938eaad4ba6c70688a4835",
+    "members": 7,
+    "all_members_independently_verified": true
+  }
+}
