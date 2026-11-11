@@ -2,7 +2,8 @@
 # Builds the Shards guest Hex's oci class runs in on macOS and Windows (docs/design/shards-guest.md §4):
 #   scripts/guest/build.sh x86_64|aarch64 SHARDS OUT [VARIANT]
 # SHARDS is a Shards checkout at the revision the guest is built from; VARIANT is a Shards kernel
-# variant (`hyperv` for a Windows host's guest: resources/kernel/README.md). Writes to OUT:
+# variant (`hyperv` for a Windows host's guest, `gpu` for a guest given a GPU, whose kernel is also checked
+# against kernel-needs-gpu.config: resources/kernel/README.md). Writes to OUT:
 # - the kernel, Shards' pinned Linux built by Shards' own scripts/build-kernel.sh in Shards' pinned
 #   builder (resources/kernel/builder.env), and its config, checked against kernel-needs.config;
 # - `hex`, static glibc (the runtime's decision: no loader or libraries in the guest), built in the
@@ -57,8 +58,8 @@ docker run --rm "${limits[@]}" -v "$shards:/src:ro" -v "$out/kernel:/out" \
         # shellcheck disable=SC2086
         apt-get install -y -q --no-install-recommends $PACKAGES
         {
-            gcc --version | head -1
-            ld --version | head -1
+            gcc --version | sed -n 1p
+            ld --version | sed -n 1p
             dpkg-query -W -f="\${Package} \${Version}\n" $PACKAGES gcc-12 binutils libc6-dev
         } > "/out/toolchain-kernel.txt"
         /src/scripts/build-kernel.sh "$ARCH_" /out "$VARIANT_"
@@ -67,12 +68,18 @@ docker run --rm "${limits[@]}" -v "$shards:/src:ro" -v "$out/kernel:/out" \
 suffix=${variant:+-${variant//+/-}}
 kernel=$(ls "$out/kernel/$kernel_name"-*-"$arch$suffix")
 config=$(ls "$out/kernel/config"-*-"$arch$suffix")
+needs=("$here/kernel-needs.config")
+case +$variant+ in
+*+gpu+*) needs+=("$here/kernel-needs-gpu.config") ;;
+esac
 missing=0
-while IFS= read -r line; do
-    case $line in
-    CONFIG_*=*) grep -qxF -- "$line" "$config" || { echo "the guest kernel lacks $line" >&2; missing=1; } ;;
-    esac
-done <"$here/kernel-needs.config"
+for file in "${needs[@]}"; do
+    while IFS= read -r line; do
+        case $line in
+        CONFIG_*=*) grep -qxF -- "$line" "$config" || { echo "the guest kernel lacks $line" >&2; missing=1; } ;;
+        esac
+    done <"$file"
+done
 [ $missing -eq 0 ]
 
 # 2. A static `hex` for the guest.
@@ -90,7 +97,7 @@ docker run --rm "${limits[@]}" --user "$user" -v "$hex:/hex:ro" -v "$out/target:
         cp /target/$target/release/hex /out/hex
         ldd /out/hex >/out/ldd.txt 2>&1 || true
         grep -Eq 'not a dynamic executable|statically linked' /out/ldd.txt
-        { rustc -vV; ldd --version | head -1; } > /out/toolchain-hex.txt
+        { rustc -vV; ldd --version | sed -n 1p; } > /out/toolchain-hex.txt
     "
 docker image inspect --format '{{index .RepoDigests 0}}' "$image" >>"$out/toolchain-hex.txt"
 (cd "$hex" && git rev-parse HEAD && git status --porcelain) >"$out/hex-commit.txt"

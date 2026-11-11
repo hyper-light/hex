@@ -219,6 +219,53 @@ pub fn refusal(op: &'static str, code: u32, host: Host, message: Option<&str>) -
     }
 }
 
+/// What a failed HCS call's result document states (`SchemaReference.md`, ResultError): its
+/// `ErrorMessage`, each `ErrorEvents` entry's `Message` and each `Attribution` record (schema 2.4: the
+/// operation or exit HCS attributes the failure to), so an empty `ErrorMessage` still says where HCS
+/// failed. A document that isn't a ResultError, or states none of these, is stated whole. The parts are
+/// the document's own, so its length bounds them.
+pub fn result_message(document: &str) -> String {
+    let Ok(error) = serde_json::from_str::<ResultError>(document) else {
+        return document.to_owned();
+    };
+    let mut parts = Vec::new();
+    if !error.message.trim().is_empty() {
+        parts.push(error.message.trim().to_owned());
+    }
+    for event in &error.events {
+        if !event.message.trim().is_empty() {
+            parts.push(format!("event: {}", event.message.trim()));
+        }
+    }
+    for (kind, detail) in error.attribution.iter().flatten() {
+        parts.push(format!("attributed to {kind} {detail}"));
+    }
+    if parts.is_empty() {
+        document.to_owned()
+    } else {
+        parts.join("; ")
+    }
+}
+
+/// The fields of HCS's ResultError a refusal states; the rest (`Error`, an event's provider and data)
+/// and any a later schema adds are ignored.
+#[derive(Deserialize)]
+struct ResultError {
+    #[serde(rename = "ErrorMessage", default)]
+    message: String,
+    #[serde(rename = "ErrorEvents", default)]
+    events: Vec<ErrorEvent>,
+    /// Each record names its kind (`OperationFailure`, `WorkerExit`, `GuestCrash`, ...) and its detail.
+    #[serde(rename = "Attribution", default)]
+    attribution: Vec<Map<String, Value>>,
+}
+
+#[derive(Deserialize)]
+struct ErrorEvent {
+    #[serde(rename = "Message", default)]
+    message: String,
+}
+
 /// The class refused because the Containers feature is off, saying how it comes on (Ada's call,
 /// 2026-10-31: the installer turns it on).
 pub fn containers_off(what_is_missing: &str) -> Refusal {
@@ -1905,6 +1952,37 @@ mod tests {
                 why: "HCS 0x80370105: bad state".to_owned()
             }
         );
+    }
+
+    /// AC-T7.4.1: do: state HCS's actual ResultError for a full-image Start failure (jupiter,
+    /// 2026-11-11, fullimagecpu1: an empty ErrorMessage, attributed to an OperationFailure at Start),
+    /// one that words its message too, and one whose event says why. Expect each refusal to keep what
+    /// HCS attributed and reported, never `HCS 0x80070287: ` with nothing after it.
+    #[test]
+    fn a_result_error_keeps_what_it_attributes_the_failure_to() {
+        let start = r#"{"Error":-2147024249,"ErrorMessage":"","Attribution":[{"OperationFailure":{"Detail":"Start"}}]}"#;
+        assert_eq!(
+            refusal(
+                "starting a container",
+                0x8007_0287,
+                client(26_200),
+                Some(&result_message(start))
+            ),
+            Refusal::Os {
+                op: "starting a container",
+                why: r#"HCS 0x80070287: attributed to OperationFailure {"Detail":"Start"}"#
+                    .to_owned()
+            }
+        );
+        let worded = r#"{"ErrorMessage":"The parameter is incorrect.","Attribution":[{"OperationFailure":{"Detail":"Construct"}}]}"#;
+        assert_eq!(
+            result_message(worded),
+            r#"The parameter is incorrect.; attributed to OperationFailure {"Detail":"Construct"}"#
+        );
+        let evented = r#"{"ErrorMessage":"","ErrorEvents":[{"Message":"A driver failed to load.","EventId":7}]}"#;
+        assert_eq!(result_message(evented), "event: A driver failed to load.");
+        assert_eq!(result_message("{}"), "{}");
+        assert_eq!(result_message("not a document"), "not a document");
     }
 
     fn bundle() -> Value {

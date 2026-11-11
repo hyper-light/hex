@@ -2154,3 +2154,222 @@ fn a_programs_stdout_close_is_held_by_no_copier() {
     (&host).read_to_end(&mut came).unwrap();
     assert_eq!(came.len(), wrote.len(), "the stream lost bytes");
 }
+
+/// AC-T7.4.1: a staging connection as a host that never half-closes it is: its bytes, then nothing. A transport need
+/// not carry a half-close (Firecracker's vsock muxer makes a host's a full shutdown, after which nothing the guest
+/// sends reaches the host: `vsock/csm/connection.rs:228-239` and `:307` at 500efc6), so a read past what the host sent
+/// is the relay waiting for an end no host owes it: it fails by name instead of waiting. What the relay writes is kept.
+struct Unclosed {
+    sent: io::Cursor<Vec<u8>>,
+    answers: Arc<Mutex<Vec<u8>>>,
+    handle: OwnedFd,
+}
+
+impl Read for Unclosed {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.sent.position() == self.sent.get_ref().len() as u64 {
+            return Err(io::Error::other("the relay read past what its host sent"));
+        }
+        self.sent.read(buf)
+    }
+}
+
+impl Write for Unclosed {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.answers.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Duplex for Unclosed {
+    fn try_clone(&self) -> io::Result<hex_client::guest::DuplexOwner> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    fn shutdown(&self, _: Shutdown) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn set_write_timeout(&self, _: Option<Duration>) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn set_read_timeout(&self, _: Option<Duration>) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn handle(&self) -> hex_client::guest::Handle<'_> {
+        self.handle.as_fd()
+    }
+
+    fn set_nonblocking(&self, _: bool) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serves `sent` on one staging connection its host never half-closes: the relay's messages, in order.
+fn serve_unclosed(staged: &Path, sent: Vec<u8>) -> Vec<Vec<u8>> {
+    let answers = Arc::new(Mutex::new(Vec::new()));
+    files::serve(
+        Box::new(Unclosed {
+            sent: io::Cursor::new(sent),
+            answers: Arc::clone(&answers),
+            handle: File::open("/dev/null").unwrap().into(),
+        }),
+        staged,
+        &hf::LIMITS,
+    );
+    let bytes = answers.lock().unwrap().clone();
+    let (mut deframer, mut rest, mut messages) =
+        (Deframer::new(wire::MAX_MESSAGE), &bytes[..], Vec::new());
+    while !rest.is_empty() {
+        let (took, whole) = deframer.take(rest).unwrap();
+        rest = &rest[took..];
+        messages.extend(whole);
+    }
+    messages
+}
+
+/// The answer a relay's message frames.
+fn answer_in(message: &[u8]) -> Answer {
+    let received = Received {
+        bytes: message,
+        size: message.len(),
+        descriptors: 0,
+        descriptors_cut: false,
+    };
+    wire::read_answer(&received, wire::MAX_MESSAGE).unwrap().1
+}
+
+/// AC-T7.4.1 (original): a stage's stream ends at its end head and a removal's at its opening
+/// (`hex_core::stream::files`), and the relay answers there. Serve each on a connection its host never half-closes:
+/// expect the stage's budget and `Done`, its copy whole, then the removal's `Done`, its copy gone. Over Firecracker the
+/// relay answered only at a half-close, which the muxer had made a full shutdown, so no answer came
+/// (native_firecracker_smoke: "the guest's relay closed a staging connection without an answer").
+#[test]
+fn original_the_relay_answers_a_stage_and_a_removal_at_their_in_band_end() {
+    let (_lab, staged) = staged_lab();
+    let stage = serve_unclosed(&staged, raw_stage(&[("d", hf::What::Dir)]));
+    assert_eq!(stage.len(), 2, "the stage's budget and its answer");
+    assert!(hf::read_budget(&stage[0]).is_some());
+    assert_eq!(answer_in(&stage[1]), Answer::Done);
+    assert!(staged.join("b/d").is_dir());
+    let removal = serve_unclosed(&staged, hf::open(hf::Op::Remove, "b").unwrap());
+    assert_eq!(
+        removal.iter().map(|m| answer_in(m)).collect::<Vec<_>>(),
+        [Answer::Done]
+    );
+    assert!(!staged.join("b").exists());
+}
+
+/// AC-T7.4.1: the in-band end is the stream's last byte. Serve a stage, then a removal, each with three bytes after its
+/// end on a connection never half-closed: expect each refused by type (`3 bytes follow the stream's end`) and acted on
+/// by neither: no copy staged, and the copy the removal named kept.
+#[test]
+fn the_relay_refuses_bytes_after_a_streams_in_band_end_before_acting_on_it() {
+    let (lab, staged) = staged_lab();
+    let trailing = |mut sent: Vec<u8>| {
+        sent.extend([7u8; 3]);
+        sent
+    };
+    let after_end = |answer: Answer| matches!(answer, Answer::Refused(Refusal::Invalid { why, .. }) if why == "3 bytes follow the stream's end");
+    let stage = serve_unclosed(&staged, trailing(raw_stage(&[("d", hf::What::Dir)])));
+    assert!(after_end(answer_in(stage.last().unwrap())));
+    assert!(!staged.join("b").exists());
+    assert_eq!(
+        stage_raw(&lab, &raw_stage(&[("d", hf::What::Dir)])),
+        Answer::Done
+    );
+    let removal = serve_unclosed(&staged, trailing(hf::open(hf::Op::Remove, "b").unwrap()));
+    assert!(after_end(answer_in(removal.last().unwrap())));
+    assert!(staged.join("b/d").is_dir());
+}
+
+/// A staging connection as Firecracker's vsock muxer carries it: a host's half-close is the connection's full
+/// shutdown, after which nothing the guest sends reaches the host (`vsock/csm/connection.rs:228-239` and `:307` at
+/// 500efc6). Its `shutdown(Write)` shuts both ways, so what the relay writes after it fails, as the muxer drops it.
+struct Muxed(UnixStream);
+
+impl Read for Muxed {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl Write for Muxed {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl Duplex for Muxed {
+    fn try_clone(&self) -> io::Result<hex_client::guest::DuplexOwner> {
+        hex_client::guest::own_duplex(Muxed(self.0.try_clone()?))
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
+    }
+
+    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        self.0.shutdown(match how {
+            Shutdown::Write => Shutdown::Both,
+            how => how,
+        })
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.0.set_write_timeout(timeout)
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.0.set_read_timeout(timeout)
+    }
+
+    fn handle(&self) -> hex_client::guest::Handle<'_> {
+        self.0.as_fd()
+    }
+
+    fn set_nonblocking(&self, on: bool) -> io::Result<()> {
+        self.0.set_nonblocking(on)
+    }
+}
+
+/// The relay's staging port, each connection [`Muxed`].
+struct MuxedPorts(PathBuf);
+
+impl Link for MuxedPorts {
+    fn dial(&self, port: u32) -> Result<hex_client::guest::DuplexOwner, Refusal> {
+        assert_eq!(port, hf::FILES_PORT);
+        hex_client::guest::own_duplex(Muxed(UnixStream::connect(&self.0).unwrap()))
+    }
+}
+
+/// AC-T7.4.1 (original): stage a box and remove its copy through a port whose half-close is a full shutdown, as
+/// Firecracker's is: expect both answered, the copy staged and then gone. The host half-closed before reading each
+/// answer, so over Firecracker it read the connection's end instead (native_firecracker_smoke: "the guest's relay
+/// closed a staging connection without an answer").
+#[test]
+fn original_staging_through_a_port_whose_half_close_is_a_full_shutdown_is_answered() {
+    use hex_client::guest::stage::{Item, Source, stage, unstage};
+    let (lab, staged) = staged_lab();
+    let link = hex_client::guest::own_link(MuxedPorts(lab.dir.path().join("files.sock"))).unwrap();
+    let id = BoxId::new("box-1").unwrap();
+    let items = [Item {
+        name: "config.json".to_owned(),
+        source: Source::Bytes(b"{}".to_vec()),
+    }];
+    let staged_it = stage(link.as_ref(), &id, &items, &hf::LIMITS).map(|s| s.learned.len());
+    let copied = std::fs::read(staged.join("box-1/config.json")).ok();
+    let removed = unstage(link.as_ref(), &id);
+    assert_eq!(
+        (staged_it, copied, removed),
+        (Ok(0), Some(b"{}".to_vec()), Ok(()))
+    );
+    assert!(!staged.join("box-1").exists());
+}

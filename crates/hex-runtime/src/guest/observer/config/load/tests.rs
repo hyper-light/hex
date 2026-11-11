@@ -26,7 +26,6 @@ fn schema(input: &GpuObserverInput) -> Value {
         "launch": input.launch,
         "max_queue_families": input.max_queue_families,
         "max_allocation_bytes": input.max_allocation_bytes,
-        "stderr_bytes": input.stderr_bytes,
         "bounds": input.bounds,
     })
 }
@@ -97,6 +96,23 @@ fn optional_observer_manifest_reaches_real_constructor_with_escaped_unicode_path
     assert!(json.rest.is_empty());
 }
 
+/// AC-T7.4.1: write a manifest that names a stderr bound beside its others and expect it refused as an
+/// unknown field: the Program's stderr bound is the node's own (observer::stderr_room), never a second,
+/// configured one. The same manifest without it is read.
+#[test]
+fn observer_manifest_naming_a_stderr_bound_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, input, _) = super::super::tests::fixture(dir.path());
+    let valid = schema(&input);
+    assert!(parse(&serde_json::to_string(&valid).unwrap()).is_ok());
+    let mut named = valid;
+    named
+        .as_object_mut()
+        .unwrap()
+        .insert("stderr_bytes".into(), json!(4096));
+    assert!(parse(&serde_json::to_string(&named).unwrap()).is_err());
+}
+
 /// AC-T7.4.1: schema/byte/field/count/UTF8 failures never create a default
 /// observer; metadata-only file validation starts no worker, provider or VM.
 #[test]
@@ -117,7 +133,6 @@ fn observer_manifest_rejects_hostile_schema_lengths_escapes_and_partial_inputs()
         "launch",
         "max_queue_families",
         "max_allocation_bytes",
-        "stderr_bytes",
         "bounds",
     ] {
         let mut missing = valid.clone();

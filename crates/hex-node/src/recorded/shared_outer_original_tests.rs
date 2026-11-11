@@ -76,9 +76,8 @@ struct Fixture {
     boots: Arc<AtomicUsize>,
 }
 
-fn fixture() -> Fixture {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
+/// The guest-backed node alone, under `root`, with nothing retained yet, and its boot count.
+fn guest_node(root: &Path) -> (Arc<Recorded<WithGuest<SimRuntime>>>, Arc<AtomicUsize>) {
     let config = GuestConfig {
         binary: root.join("model-shards"),
         kernel: root.join("model-kernel"),
@@ -137,6 +136,12 @@ fn fixture() -> Fixture {
         .unwrap(),
     );
     node.bind_guest_books().unwrap();
+    (node, boots)
+}
+
+fn fixture() -> Fixture {
+    let dir = tempfile::tempdir().unwrap();
+    let (node, boots) = guest_node(dir.path());
     let prepared = node.prepare_guest_backing().unwrap();
     assert_eq!(prepared.phase, BackingPhase::Prepared);
     let mut pool = node
@@ -325,5 +330,33 @@ fn dedicated_owner_refusal_keeps_one_canonical_box_without_outer_reentry() {
             .encode()
             .unwrap(),
         before
+    );
+}
+
+/// AC-T7.4.1: the guest keeps a selected receipt per dedicated box, named by its id. One that no
+/// retained record names is an orphan: its native scope is nobody else's to find. The startup barrier
+/// refuses it, typed, before any recovery effect, instead of leaving it to fail later as Uncertain.
+#[test]
+fn an_orphaned_guest_receipt_is_refused_at_the_startup_barrier() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node, boots) = guest_node(dir.path());
+    node.preflight_recovery().unwrap();
+    let receipts = dir.path().join("guest.gpu");
+    std::fs::create_dir_all(&receipts).unwrap();
+    std::fs::write(receipts.join("orphaned-box"), b"retained receipt bytes").unwrap();
+    let before = node.books.store.all().unwrap();
+    let refused = node.preflight_recovery();
+    assert!(
+        matches!(
+            &refused,
+            Err(Refusal::Lifecycle { id, cause: LifecycleCause::Uncertain }) if id.as_str() == "orphaned-box"
+        ),
+        "an orphaned guest receipt passed the startup barrier: {refused:?}"
+    );
+    assert_eq!(node.books.store.all().unwrap(), before);
+    assert_eq!(boots.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        std::fs::read(receipts.join("orphaned-box")).unwrap(),
+        b"retained receipt bytes"
     );
 }

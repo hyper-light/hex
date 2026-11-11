@@ -25,9 +25,13 @@ use shards_api::{
     prepare_boot,
 };
 
-// Existing API caller guard. Each wait returns at an observed event.
+// One managed attempt's bound, as the node gives `managed::Budget` (`first_dial_bound`): twice the
+// guest's recorded boot to ready. Each wait is for a fact the attempt makes within itself, its observer's
+// entry or its end once published, and returns at that event.
 fn guard() -> Duration {
-    shards_api::conformance::PATIENCE.get()
+    hex_runtime::guest::recorded_boot()
+        .unwrap()
+        .saturating_mul(hex_core::patience::TIMES_SLOWEST)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

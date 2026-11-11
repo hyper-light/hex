@@ -10,7 +10,10 @@ use sha2::{Digest, Sha256};
 
 use super::GuestConfig;
 
+mod cpu;
 mod images;
+
+pub use cpu::{CpuResponse, section as cpu_response_section, split as cpu_response_split};
 
 /// The same initialization, with optional native declarations from its existing
 /// SHA-verified evidence. Missing declarations grant no native worker authority.
@@ -19,6 +22,8 @@ pub struct GuestInputs {
     pub config: GuestConfig,
     pub cost: RuntimeCost,
     pub native_images: Option<shards_api::NativeImages>,
+    /// Measured managed CPU responses, by host class, from the same evidence (none: no row).
+    pub cpu_responses: Vec<CpuResponse>,
 }
 
 pub const ENV_COST_FILE: &str = "HEX_GUEST_COST_FILE";
@@ -135,6 +140,22 @@ pub fn load_runtime_inputs(
     expected_sha256: [u8; 32],
     evidence: &Path,
 ) -> Result<(RuntimeCost, Option<shards_api::NativeImages>), Refusal> {
+    load_runtime_evidence(file, expected_sha256, evidence).map(|(cost, images, _)| (cost, images))
+}
+
+/// The same inputs with the evidence's measured CPU-response rows (AC-T7.4.1).
+pub fn load_runtime_evidence(
+    file: &Path,
+    expected_sha256: [u8; 32],
+    evidence: &Path,
+) -> Result<
+    (
+        RuntimeCost,
+        Option<shards_api::NativeImages>,
+        Vec<CpuResponse>,
+    ),
+    Refusal,
+> {
     if !file.is_absolute() || !evidence.is_absolute() {
         return Err(invalid(
             "cost and evidence paths must be explicit absolute paths",
@@ -155,8 +176,9 @@ pub fn load_runtime_inputs(
             "cost identity does not match its measurement evidence",
         ));
     }
-    let native = images::parse(&evidence, cost.id)?;
-    Ok((cost, native))
+    let (responses, rest) = cpu::split(&evidence)?;
+    let native = images::parse(rest, cost.id)?;
+    Ok((cost, native, responses))
 }
 
 impl GuestConfig {
@@ -194,11 +216,13 @@ impl GuestConfig {
                 .to_str()
                 .ok_or_else(|| invalid("cost hash is not ASCII"))?,
         )?;
-        let (cost, native_images) = load_runtime_inputs(&file, expected, &evidence)?;
+        let (cost, native_images, cpu_responses) =
+            load_runtime_evidence(&file, expected, &evidence)?;
         Ok(GuestInputs {
             config,
             cost,
             native_images,
+            cpu_responses,
         })
     }
 }

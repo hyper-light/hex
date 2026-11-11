@@ -1,0 +1,86 @@
+# A GPU for a Firecracker microVM: the host's part (AC-T7.4.1)
+
+Hex's `firecracker` class passes a selected PCI GPU into a VM through VFIO and never configures the
+host to do it: no driver bind, module load or permission change (`firecracker/vfio.rs`). This note
+states what the host's administrator provides, the two candidate GPUs on Hex's lab hosts, and what
+a run on each would and would not prove. Decided by the native Firecracker lane with Hex's lead,
+2026-11-11.
+
+## The contract
+
+The administrator, as root, before the node starts:
+
+1. Turns the IOMMU on (both lab hosts have: AMD-Vi `ivhd0`, 31 groups).
+2. Binds every function of the GPU's IOMMU group to `vfio-pci`, and catalogs the GPU with its
+   companions (`gpu<TAB>key<TAB>model<TAB>size<TAB>vfio<TAB>sbdf[,companion]<TAB>group`). The
+   adapter refuses a function bound to any other driver, and a group holding an uncatalogued one
+   (`vfio::validate_function`, `vfio::plan`).
+3. Gives `/dev/vfio/vfio` and `/dev/vfio/<group>` read-write to the user running `hex node`
+   (`vfio::validate` opens both).
+4. Lets that process lock each VM's whole guest memory: `RLIMIT_MEMLOCK` of at least the guest's
+   memory, or `CAP_IPC_LOCK`. VFIO type1 pins and charges every DMA-mapped page against that limit
+   ([vfio_iommu_type1.c at v7.3](https://github.com/torvalds/linux/blob/v7.3/drivers/vfio/vfio_iommu_type1.c#L770),
+   `lock_cap` at L1777), and the VMM maps all guest memory for its devices
+   (`vendor/firecracker/src/vmm/src/vfio.rs` `vfio_dma_map_guest_memory`). Both lab hosts give their
+   runners' processes 8 MiB.
+
+The guest serves what its VMM attached: the boot line carries the VM's owner and how many GPU
+functions were passed (`hex.gpu.box=<owner> hex.gpu.pci=<count>`), the guest's PID 1 catalogs each
+display or accelerator function its kernel lists by the guest's own PCI address, and the host joins
+that address to its own selection only through the VMM's `GET /device-passthrough/{id}` witness
+(`guest/gpu.rs`, `firecracker/observations.rs`).
+
+## The lab's GPUs (read-only probe, 2026-11-11)
+
+| Host | GPU | Function, IOMMU group | Reset | Display |
+| --- | --- | --- | --- | --- |
+| adacachy2, adacachy | NVIDIA 10de:2d04 | 0000:01:00.0 with audio 01:00.1, group 13 | FLR, bus | boot VGA, DP-3 attached on both |
+| adacachy2 | AMD iGPU 1002:13c0 (GC 10.3.6) | 0000:79:00.0 alone, group 25 | bus only | none attached |
+| adacachy | AMD iGPU 1002:13c0 | 0000:79:00.0 alone, group 25 | bus only | HDMI-A-2 attached |
+
+No function is bound to `vfio-pci` on either host, and `vfio_pci` is not loaded.
+
+## Option A: the AMD iGPU on adacachy2
+
+```sh
+modprobe vfio-pci
+echo vfio-pci > /sys/bus/pci/devices/0000:79:00.0/driver_override
+echo 0000:79:00.0 > /sys/bus/pci/devices/0000:79:00.0/driver/unbind
+echo 0000:79:00.0 > /sys/bus/pci/drivers_probe
+chown <node user> /dev/vfio/25
+# and RLIMIT_MEMLOCK >= guest memory for the process that runs `hex node`:
+# LimitMEMLOCK= in its unit, or prlimit --pid <pid> --memlock=<bytes>:<bytes>
+```
+
+Undo: unbind it again, `echo > .../driver_override`, then `echo 0000:79:00.0 >
+/sys/bus/pci/drivers_probe` gives it back to amdgpu.
+
+It would prove the attach, the witness, guest amdgpu with its embedded firmware, a RADV compute
+dispatch through Hex's adapter, and the selected identity through restart and deletion. It cannot
+prove a clean GPU between owners: 79:00.0's only reset is a secondary bus reset, and bus 0x79 also
+holds 79:00.1 (audio), 79:00.2 (`ccp`) and 79:00.3-4 (xHCI), so the kernel refuses it
+([pci.c at v7.3, `pci_parent_bus_reset`](https://github.com/torvalds/linux/blob/v7.3/drivers/pci/pci.c#L4934))
+and vfio-pci proceeds without one
+([vfio_pci_core.c](https://github.com/torvalds/linux/blob/v7.3/drivers/vfio/pci/vfio_pci_core.c#L612)).
+The guest driver resets no APU at init
+([nv.c at v6.18](https://github.com/torvalds/linux/blob/v6.18/drivers/gpu/drm/amd/amdgpu/nv.c#L542)).
+Its VBIOS is also unverified: the VMM ignores ROM BAR access (`vendor/firecracker/src/vmm/src/vfio.rs`)
+and builds no VFCT table (upstream `src/vmm/src/acpi/mod.rs` at the pinned commit), so amdgpu can
+use only a copy at the start of BAR0, which firmware leaves "if a discrete card is present"
+([amdgpu_bios.c at v6.18](https://github.com/torvalds/linux/blob/v6.18/drivers/gpu/drm/amd/amdgpu/amdgpu_bios.c#L94)).
+
+## Option B: the NVIDIA GPU (either host)
+
+The same commands for `0000:01:00.0` and `0000:01:00.1` (both in group 13; catalog the audio
+function as the GPU's companion), with `/dev/vfio/13`. The host's display on DP-3 goes dark while
+bound, and nothing may hold `/dev/nvidia*` when the driver lets go.
+
+It would prove the same path with a function-level reset between owners. It needs a guest payload
+not yet built: NVIDIA's open kernel modules for the guest kernel, its GSP firmware, the matching
+userspace driver, and NVML in the guest for Hex's facts.
+
+## What would change this
+
+A guest amdgpu "Unable to locate a BIOS ROM" makes option A need a VMM change (a ROM BAR served from
+a file, or a VFCT table). A run that finds the GPU unusable after its first VM ends, with no reset,
+makes option A one VM per host boot.

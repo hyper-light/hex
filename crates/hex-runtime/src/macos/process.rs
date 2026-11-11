@@ -258,8 +258,9 @@ impl State {
         let mut held = self.held()?;
         let additional = usize::from(!held.stopped.contains(&pid));
         held.stopped.reserve(additional)?;
-        if signal_one(pid, rustix::process::Signal::STOP)? {
-            held.stopped.insert(pid)?;
+        let member = self.stopped_member(pid, &[])?;
+        if self.signal_stopped(member, sys::MemberSignal::Stop)? {
+            held.stopped.insert(member)?;
         }
         Ok(())
     }
@@ -280,20 +281,42 @@ impl State {
         }
         sys::group(pgid, pids).map_err(|e| Refusal::os("listing a box's group", e))?;
         held.stopped.retain(|pid| pids.contains(pid));
-        let Some(&pid) = turn
+        let Some(member) = turn
             .checked_rem(held.stopped.len())
-            .and_then(|at| held.stopped.values.get(at))
+            .and_then(|at| held.stopped.at(at))
         else {
             return Ok(None);
         };
+        let pid = member.pid;
         // Gone since the listing (a pid no longer a process): not held, and nothing to run.
         let Some(before) =
             sys::rusage(pid).map_err(|e| Refusal::os("reading a member's rusage", e))?
         else {
+            if let Some(scope) = &self.vm {
+                return Err(scope.control_failed(
+                    sys::TokenFailure::Changed { observed: None },
+                    self.id.as_ref(),
+                ));
+            }
             held.stopped.remove(&pid);
             return Ok(None);
         };
-        if !signal_one(pid, rustix::process::Signal::CONT)? {
+        if member
+            .native
+            .is_some_and(|token| token.birth() != before.started)
+        {
+            return Err(self
+                .vm
+                .as_ref()
+                .ok_or_else(|| self.uncertain())?
+                .control_failed(
+                    sys::TokenFailure::Changed {
+                        observed: Some(before.started),
+                    },
+                    self.id.as_ref(),
+                ));
+        }
+        if !self.signal_stopped(member, sys::MemberSignal::Continue)? {
             held.stopped.remove(&pid);
             return Ok(None);
         }
@@ -308,7 +331,9 @@ impl State {
     /// let go of since ([`ProcessBox::signal`]) is the box's own, left as it is.
     fn stop_again(&self, pid: i32) -> Result<(), Refusal> {
         let mut held = self.held()?;
-        if held.stopped.contains(&pid) && !signal_one(pid, rustix::process::Signal::STOP)? {
+        if let Some(member) = held.stopped.get(&pid)
+            && !self.signal_stopped(member, sys::MemberSignal::Stop)?
+        {
             held.stopped.remove(&pid);
         }
         Ok(())
@@ -318,7 +343,7 @@ impl State {
     /// running members, each in `run` runs across the wait, continued if the watcher held it, and the rest are
     /// held, each stopped in turn. A member the box's own programs stopped is theirs, never held, so never
     /// continued. Returns how many members it holds.
-    fn apply(&self, order: &[u32], run: &[u32]) -> Result<usize, Refusal> {
+    fn apply(&self, order: &[u32], run: &[u32], members: &[Member]) -> Result<usize, Refusal> {
         let mut held = self.held()?;
         let additional = order
             .iter()
@@ -334,17 +359,19 @@ impl State {
                     continue;
                 };
                 if run.contains(&member) {
-                    if held.stopped.contains(&pid) {
-                        signal_one(pid, rustix::process::Signal::CONT)?;
+                    if let Some(member) = held.stopped.get(&pid) {
+                        self.signal_stopped(member, sys::MemberSignal::Continue)?;
                         held.continued.push(pid);
                     }
                 } else if !held.stopped.contains(&pid)
                     && sys::run_state(pid)
                         .map_err(|error| Refusal::os("reading a member's run state", error))?
                         == Some(sys::Run::Live)
-                    && signal_one(pid, rustix::process::Signal::STOP)?
                 {
-                    held.added.push(pid);
+                    let member = self.stopped_member(pid, members)?;
+                    if self.signal_stopped(member, sys::MemberSignal::Stop)? {
+                        held.added.push_reserved(member)?;
+                    }
                 }
             }
             Ok::<(), Refusal>(())
@@ -357,9 +384,7 @@ impl State {
             continued,
         } = &mut *held;
         stopped.retain(|pid| continued.binary_search(pid).is_err());
-        stopped.values.extend_from_slice(added);
-        stopped.values.sort_unstable();
-        stopped.values.dedup();
+        stopped.append_reserved(added)?;
         result?;
         Ok(held.stopped.len())
     }
@@ -369,13 +394,80 @@ impl State {
     fn release_all(&self, pgid: i32, pids: &mut Vec<i32>) -> Result<(), Refusal> {
         let mut held = self.held()?;
         sys::group(pgid, pids).map_err(|e| Refusal::os("listing a box's group", e))?;
-        for &pid in &held.stopped.values {
-            if pids.contains(&pid) {
-                signal_one(pid, rustix::process::Signal::CONT)?;
+        for at in 0..held.stopped.len() {
+            let member = held.stopped.at(at).ok_or_else(|| self.uncertain())?;
+            if pids.contains(&member.pid) {
+                self.signal_stopped(member, sys::MemberSignal::Continue)?;
             }
         }
-        held.stopped.values.clear();
+        held.stopped.clear();
         Ok(())
+    }
+
+    fn stopped_member(&self, pid: i32, members: &[Member]) -> Result<Stopped, Refusal> {
+        let Some(scope) = &self.vm else {
+            return Ok(Stopped { pid, native: None });
+        };
+        self.validate_vm_scope()?;
+        let birth = members
+            .iter()
+            .find(|member| i32::try_from(member.pid) == Ok(pid))
+            .map(|member| member.started)
+            .ok_or_else(|| self.uncertain())?;
+        let group = self
+            .pgid
+            .lock()
+            .map_err(|_| self.uncertain())?
+            .ok_or_else(|| self.uncertain())?;
+        if sys::group_of(pid)
+            .map_err(|error| Refusal::os("checking native stop membership", error))?
+            != Some(group)
+        {
+            scope.failed(shards_api::ProcessFailure::DifferentScope);
+            return Err(self.uncertain());
+        }
+        let token = sys::capture_member(pid, birth)
+            .map_err(|failure| scope.control_failed(failure, self.id.as_ref()))?;
+        if sys::group_of(pid)
+            .map_err(|error| Refusal::os("rechecking native stop membership", error))?
+            != Some(group)
+        {
+            scope.failed(shards_api::ProcessFailure::DifferentScope);
+            return Err(self.uncertain());
+        }
+        Ok(Stopped {
+            pid,
+            native: Some(token),
+        })
+    }
+
+    fn signal_stopped(&self, member: Stopped, signal: sys::MemberSignal) -> Result<bool, Refusal> {
+        if let Some(scope) = &self.vm {
+            self.validate_vm_scope()?;
+            let token = member.native.ok_or_else(|| self.uncertain())?;
+            let group = self
+                .pgid
+                .lock()
+                .map_err(|_| self.uncertain())?
+                .ok_or_else(|| self.uncertain())?;
+            if token.pid() != member.pid
+                || sys::group_of(member.pid)
+                    .map_err(|error| Refusal::os("checking owned member signal scope", error))?
+                    != Some(group)
+            {
+                scope.failed(shards_api::ProcessFailure::DifferentScope);
+                return Err(self.uncertain());
+            }
+            sys::signal_member(&token, signal)
+                .map_err(|failure| scope.control_failed(failure, self.id.as_ref()))?;
+            return Ok(true);
+        }
+        let signal = match signal {
+            sys::MemberSignal::Stop => rustix::process::Signal::STOP,
+            sys::MemberSignal::Continue => rustix::process::Signal::CONT,
+            sys::MemberSignal::Kill => rustix::process::Signal::KILL,
+        };
+        signal_one(member.pid, signal)
     }
 
     /// Counts member `pid`'s death as a memory end — once — if the box armed it with the fatal cap, isn't
@@ -424,13 +516,174 @@ impl State {
 
 /// What the watcher holds of a box. Bounded by its members (CLAUDE.md §2): one gone from the box is dropped
 /// at the next read that runs a held member.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Hold {
     /// The members the watcher stopped, each its to continue; one the box's own programs stopped is never
     /// among them.
-    stopped: Pids,
-    added: Vec<i32>,
+    stopped: Stops,
+    added: Stops,
     continued: Vec<i32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Stopped {
+    pid: i32,
+    native: Option<sys::MemberToken>,
+}
+#[derive(Debug)]
+enum StopStorage {
+    Plain(Vec<i32>),
+    Native(Vec<Stopped>),
+}
+#[derive(Debug)]
+struct Stops {
+    values: StopStorage,
+    bound: usize,
+}
+impl Stops {
+    fn new(bound: usize, native: bool) -> Result<Self, Refusal> {
+        Ok(Self {
+            values: if native {
+                StopStorage::Native(storage(bound)?)
+            } else {
+                StopStorage::Plain(storage(bound)?)
+            },
+            bound,
+        })
+    }
+    fn search(&self, pid: &i32) -> Result<usize, usize> {
+        match &self.values {
+            StopStorage::Plain(values) => values.binary_search(pid),
+            StopStorage::Native(values) => values.binary_search_by_key(pid, |member| member.pid),
+        }
+    }
+    fn at(&self, at: usize) -> Option<Stopped> {
+        match &self.values {
+            StopStorage::Plain(values) => values.get(at).map(|pid| Stopped {
+                pid: *pid,
+                native: None,
+            }),
+            StopStorage::Native(values) => values.get(at).copied(),
+        }
+    }
+    fn get(&self, pid: &i32) -> Option<Stopped> {
+        self.search(pid).ok().and_then(|at| self.at(at))
+    }
+    fn contains(&self, pid: &i32) -> bool {
+        self.get(pid).is_some()
+    }
+    fn remove(&mut self, pid: &i32) -> bool {
+        let Ok(at) = self.search(pid) else {
+            return false;
+        };
+        match &mut self.values {
+            StopStorage::Plain(values) => {
+                values.remove(at);
+            }
+            StopStorage::Native(values) => {
+                values.remove(at);
+            }
+        }
+        true
+    }
+    fn reserve(&mut self, additional: usize) -> Result<(), Refusal> {
+        self.len()
+            .checked_add(additional)
+            .filter(|count| *count <= self.bound)
+            .ok_or_else(|| super::native_allocation(self.bound))?;
+        match &mut self.values {
+            StopStorage::Plain(values) => values.try_reserve(additional),
+            StopStorage::Native(values) => values.try_reserve(additional),
+        }
+        .map_err(|_| super::native_allocation(self.bound))
+    }
+    fn insert(&mut self, member: Stopped) -> Result<(), Refusal> {
+        match self.search(&member.pid) {
+            Ok(at) if self.at(at).is_some_and(|old| old.native != member.native) => {
+                return Err(super::managed::configuration(
+                    "held native incarnation cannot be replaced",
+                ));
+            }
+            Err(at) => {
+                self.reserve(1)?;
+                match &mut self.values {
+                    StopStorage::Plain(values) if member.native.is_none() => {
+                        values.insert(at, member.pid)
+                    }
+                    StopStorage::Native(values) if member.native.is_some() => {
+                        values.insert(at, member)
+                    }
+                    _ => {
+                        return Err(super::managed::configuration(
+                            "hold storage does not match native owner",
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    fn push_reserved(&mut self, member: Stopped) -> Result<(), Refusal> {
+        if self.len() >= self.bound {
+            return Err(super::native_allocation(self.bound));
+        }
+        match &mut self.values {
+            StopStorage::Plain(values)
+                if member.native.is_none() && values.len() < values.capacity() =>
+            {
+                values.push(member.pid)
+            }
+            StopStorage::Native(values)
+                if member.native.is_some() && values.len() < values.capacity() =>
+            {
+                values.push(member)
+            }
+            _ => return Err(super::native_allocation(self.bound)),
+        }
+        Ok(())
+    }
+    fn append_reserved(&mut self, added: &Self) -> Result<(), Refusal> {
+        for at in 0..added.len() {
+            self.push_reserved(
+                added
+                    .at(at)
+                    .ok_or_else(|| super::native_allocation(self.bound))?,
+            )?;
+        }
+        match &mut self.values {
+            StopStorage::Plain(values) => {
+                values.sort_unstable();
+                values.dedup();
+            }
+            StopStorage::Native(values) => {
+                values.sort_unstable_by_key(|member| member.pid);
+                values.dedup_by_key(|member| member.pid);
+            }
+        }
+        Ok(())
+    }
+    fn retain(&mut self, mut keep: impl FnMut(&i32) -> bool) {
+        match &mut self.values {
+            StopStorage::Plain(values) => values.retain(keep),
+            StopStorage::Native(values) => values.retain(|member| keep(&member.pid)),
+        }
+    }
+    fn clear(&mut self) {
+        match &mut self.values {
+            StopStorage::Plain(values) => values.clear(),
+            StopStorage::Native(values) => values.clear(),
+        }
+    }
+    fn len(&self) -> usize {
+        match &self.values {
+            StopStorage::Plain(values) => values.len(),
+            StopStorage::Native(values) => values.len(),
+        }
+    }
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Sorted native members, bounded by this kernel's maximum process count. Whole snapshots use
@@ -480,18 +733,12 @@ impl Pids {
     fn retain(&mut self, keep: impl FnMut(&i32) -> bool) {
         self.values.retain(keep);
     }
-    fn is_empty(&self) -> bool {
-        self.values.is_empty()
-    }
-    fn len(&self) -> usize {
-        self.values.len()
-    }
 }
 impl Hold {
-    fn new(bound: usize) -> Result<Self, Refusal> {
+    fn new(bound: usize, native: bool) -> Result<Self, Refusal> {
         Ok(Self {
-            stopped: Pids::new(bound)?,
-            added: storage(bound)?,
+            stopped: Stops::new(bound, native)?,
+            added: Stops::new(bound, native)?,
             continued: storage(bound)?,
         })
     }
@@ -618,7 +865,7 @@ impl ProcessBox {
             armed: Mutex::new(Pids::new(maximum)?),
             ending: AtomicBool::new(false),
             stop: AtomicBool::new(false),
-            held: Mutex::new(Hold::new(maximum)?),
+            held: Mutex::new(Hold::new(maximum, vm.is_some())?),
             kq: Kqueue::new().map_err(|error| Refusal::os("making a box's kqueue", error))?,
             vm,
         })
@@ -654,9 +901,10 @@ impl ProcessBox {
         record: NativeRecord<'_>,
         bounds: &Bounds,
         shared: &Shared,
-        ownership: super::managed::Ownership,
+        control: Option<(super::CpuControl, u64)>,
+        baseline: Duration,
     ) -> Result<Arc<Self>, Refusal> {
-        let vm = super::managed::Scope::new(record, ownership)?;
+        let vm = super::managed::Scope::new(record, control, baseline)?;
         let observer = super::proc::Prepared::new()?;
         let boxed = Arc::try_new(Self::prepared(
             record.owner().try_owned()?,
@@ -671,6 +919,13 @@ impl ProcessBox {
             .lock()
             .map_err(|_| poisoned("native controller preparation"))? =
             super::managed::Controller::Prepared(observer);
+        // Passive SIGCHLD readiness closes NOTE_EXIT-before-SZOMB without another VMM waiter or
+        // time probe. It only wakes the same watcher; terminal facts still check this owned child.
+        boxed
+            .state
+            .kq
+            .child_completions()
+            .map_err(|error| Refusal::os("observing managed waitable child readiness", error))?;
         boxed.start_watcher(shared)?;
         Ok(boxed)
     }
@@ -734,27 +989,72 @@ impl ProcessBox {
         if pid <= 0 || started == 0 {
             return Err(self.state.uncertain());
         }
-        *self
-            .state
-            .pgid
-            .lock()
-            .map_err(|_| poisoned("a box's group"))? = Some(pid);
-        *self
-            .state
-            .leader_started
-            .lock()
-            .map_err(|_| poisoned("a box's leader"))? = Some(started);
+        {
+            let mut group = self
+                .state
+                .pgid
+                .lock()
+                .map_err(|_| poisoned("a box's group"))?;
+            if group.is_some_and(|old| old != pid) {
+                return Err(self.state.uncertain());
+            }
+            *group = Some(pid);
+        }
+        {
+            let mut birth = self
+                .state
+                .leader_started
+                .lock()
+                .map_err(|_| poisoned("a box's leader"))?;
+            if birth.is_some_and(|old| old != started) {
+                return Err(self.state.uncertain());
+            }
+            *birth = Some(started);
+        }
+        if let Some(scope) = self.scope() {
+            let token = sys::capture_member(pid, started)
+                .map_err(|failure| scope.control_failed(failure, self.owner()))?;
+            self.state.held()?.stopped.insert(Stopped {
+                pid,
+                native: Some(token),
+            })?;
+        }
         Ok(())
     }
 
     pub(super) fn resume_managed(&self) -> Result<(), Refusal> {
         let (pid, _) = self.group()?.ok_or_else(|| self.state.uncertain())?;
+        let decision = self
+            .scope()
+            .ok_or_else(|| self.state.uncertain())?
+            .start_cpu(self.owner())?;
         self.scope()
             .ok_or_else(|| self.state.uncertain())?
             .running(self.owner())?;
-        if !signal_one(pid, rustix::process::Signal::CONT)? {
+        if matches!(decision, super::cpu::Decision::Hold(_)) {
+            // The controller is already natively suspended. Earn the same startup debt before
+            // any CONT; the existing watcher resumes it from its retained audit-token Hold entry.
+            self.scope()
+                .ok_or_else(|| self.state.uncertain())?
+                .cpu_held(self.owner())?;
+            return self.state.wake();
+        }
+        if decision == super::cpu::Decision::Prepared {
             return Err(self.state.uncertain());
         }
+        let mut held = self.state.held()?;
+        let member = held
+            .stopped
+            .get(&pid)
+            .ok_or_else(|| self.state.uncertain())?;
+        if !self
+            .state
+            .signal_stopped(member, sys::MemberSignal::Continue)?
+        {
+            return Err(self.state.uncertain());
+        }
+        held.stopped.remove(&pid);
+        drop(held);
         self.state.wake()
     }
 
@@ -935,9 +1235,13 @@ impl ProcessBox {
             .pgid
             .lock()
             .map_err(|_| poisoned("a box's group"))?;
-        let live = match pgid {
-            Some(pgid) => Some(read_live(pgid)?),
-            None => None,
+        let live = if self.is_managed() {
+            Some(self.managed_live(pgid)?)
+        } else {
+            match pgid {
+                Some(pgid) => Some(read_live(pgid)?),
+                None => None,
+            }
         };
         let mut s = self.state.status()?;
         if let Some(live) = live {
@@ -960,6 +1264,40 @@ impl ProcessBox {
             io_read_bytes: s.read_bytes,
             io_write_bytes: s.written_bytes,
         })
+    }
+
+    fn managed_live(&self, pgid: Option<i32>) -> Result<Live, Refusal> {
+        self.state.validate_vm_scope()?;
+        let mut live = Live {
+            footprint: 0,
+            processes: 0,
+            cpu: 0,
+            read: 0,
+            written: 0,
+        };
+        let helper = managed_helper_usage()?;
+        if let Some(pgid) = pgid {
+            let mut pids = self.scope_pids.lock().map_err(|_| self.state.uncertain())?;
+            if sys::group(pgid, &mut pids)
+                .map_err(|error| Refusal::os("listing strict managed usage", error))?
+            {
+                return Err(self.state.uncertain());
+            }
+            let own = rustix::process::getpid().as_raw_nonzero().get();
+            for &pid in pids.iter() {
+                if pid == own {
+                    return Err(self.state.uncertain());
+                }
+                let usage = sys::rusage(pid)
+                    .map_err(|error| Refusal::os("reading strict managed usage", error))?
+                    .ok_or_else(|| self.state.uncertain())?;
+                live.add(usage, !(usage.ended && pid == pgid));
+            }
+        }
+        // Whole-helper memory/CPU is conservatively charged to every active canonical allocation.
+        // It is an actual native process observation, never a fake Member to stop or a new row.
+        live.add(helper, true);
+        Ok(live)
     }
 
     /// Sends `signal` to every member (killpg). KILL is the rule's own end; any other is passed on. Refused
@@ -990,7 +1328,7 @@ impl ProcessBox {
                 ]
                 .contains(&macos)
                 {
-                    self.state.held()?.stopped.values.clear();
+                    self.state.held()?.stopped.clear();
                 }
                 if killpg(pgid, macos)? {
                     Ok(())
@@ -1064,9 +1402,26 @@ impl ProcessBox {
 impl Drop for ProcessBox {
     fn drop(&mut self) {
         if self.is_managed() {
+            // A failed pre-effect construction can join its own watcher immediately. Submitted
+            // native scopes retain their watcher/receipt until exact durable Released/finalize;
+            // dropping a proxy or a runtime value is not a scope-empty witness.
+            if let Some(scope) = self.scope()
+                && self.group().is_ok_and(|group| group.is_none())
+                && scope.no_submission(self.owner()).unwrap_or(false)
+            {
+                let _ = scope.finalizing(
+                    shards_api::ManagedEnd {
+                        status: shards_api::ManagedStatus::Unknown,
+                        scope: shards_api::TerminalScope::Released,
+                    },
+                    self.owner(),
+                );
+            }
             let _ = self.stop_managed();
+            let finalized = self.scope().is_some_and(|scope| scope.is_finalized());
             if let Ok(watcher) = self.watcher.get_mut()
                 && let Some(watcher) = watcher.take()
+                && finalized
             {
                 let _ = watcher.join();
             }
@@ -1084,6 +1439,65 @@ struct Live {
     cpu: u64,
     read: u64,
     written: u64,
+}
+
+impl Live {
+    fn add(&mut self, usage: sys::Rusage, count: bool) {
+        // Values beyond u64 exceed every representable native resource bound.
+        self.footprint = self.footprint.saturating_add(usage.footprint);
+        self.processes = self.processes.saturating_add(u64::from(count));
+        self.cpu = self.cpu.saturating_add(usage.cpu);
+        self.read = self.read.saturating_add(usage.read_bytes);
+        self.written = self.written.saturating_add(usage.written_bytes);
+    }
+}
+
+fn managed_helper_usage() -> Result<sys::Rusage, Refusal> {
+    let pid = rustix::process::getpid().as_raw_nonzero().get();
+    sys::rusage(pid)
+        .map_err(|error| Refusal::os("reading same native helper usage", error))?
+        .filter(|usage| !usage.ended && usage.started != 0)
+        .ok_or_else(|| super::managed::configuration("native helper usage has no live incarnation"))
+}
+
+/// Include the actual helper in the SAME allocation without making it a process-group member.
+/// Ordinary Watch rules remain untouched. The helper cannot be bounded by a VMM member's individual
+/// jetsam cap, so its combined headroom always uses the existing aggregate wait/hold formula.
+fn managed_watch_read(
+    read: &mut watch::Read,
+    limit: &Limit,
+    rates: &Rates,
+    helper: u64,
+    ending: bool,
+) {
+    read.footprint = read.footprint.saturating_add(helper);
+    read.processes = read.processes.saturating_add(1);
+    if read.running == 0 {
+        return;
+    }
+    if matches!(read.verdict, Verdict::End(_) | Verdict::Kill) {
+        return;
+    }
+    if ending {
+        read.verdict = Verdict::Kill;
+        return;
+    }
+    if let Some(bound) = limit.memory
+        && read.footprint > bound
+    {
+        read.verdict = Verdict::End(watch::Over::Memory {
+            footprint: read.footprint,
+            bound,
+        });
+        return;
+    }
+    let next = watch::next(limit, rates, read.footprint, read.processes);
+    read.verdict = match (read.verdict, next) {
+        (Verdict::Wait(before), Some(after)) => Verdict::Wait(before.min(after)),
+        (Verdict::Wait(before), None) => Verdict::Wait(before),
+        (_, Some(after)) => Verdict::Wait(after),
+        (before, None) => before,
+    };
 }
 
 /// Reads process group `pgid` now: each listed member's rusage, a pid gone since the listing (ESRCH) left
@@ -1322,6 +1736,31 @@ impl Watcher {
         // over other programs (Ada's rule, 2026-11-03; the lead, 2026-11-06).
         loop {
             if self.state.stop.load(Ordering::SeqCst) {
+                if let Some(scope) = &self.state.vm {
+                    if scope.is_finalized() {
+                        return;
+                    }
+                    let state = Arc::clone(&self.state);
+                    if state.validate_vm_scope().is_ok() {
+                        self.finish();
+                    }
+                    if let Some(scope) = &state.vm {
+                        let _ = scope.notify();
+                    }
+                    // Keep the SAME watcher alive for remaining helpers' exit/readiness and an
+                    // explicit later Stop after a transient cleanup failure. No timer/poll is used.
+                    if let Err(error) = state.kq.wait(None, None, &mut self.events) {
+                        if let Some(scope) = &state.vm {
+                            scope.failed(super::proc::process_failure(
+                                shards_api::ProcessOperation::KeventExit,
+                                error,
+                            ));
+                            let _ = scope.notify();
+                        }
+                        return;
+                    }
+                    continue;
+                }
                 if self
                     .state
                     .vm
@@ -1336,6 +1775,11 @@ impl Watcher {
             // Account any member the kernel killed at its fatal cap, from the exit events the last wait
             // delivered, before this read prunes the armed set of pids now gone.
             if self.account_exit_events().is_err() {
+                let native = Arc::clone(&self.state);
+                if let Some(scope) = &native.vm {
+                    self.finish();
+                    scope.failed(shards_api::ProcessFailure::InvalidStartRecord);
+                }
                 return;
             }
             let next = match self.step() {
@@ -1394,6 +1838,26 @@ impl Watcher {
         else {
             return Ok(None);
         };
+        let native = Arc::clone(&self.state);
+        let cpu = native
+            .vm
+            .as_ref()
+            .map(|scope| scope.cpu_decision(native.id.as_ref()))
+            .transpose()?
+            .flatten();
+        let cpu_run = match cpu {
+            None => true,
+            Some(super::cpu::Decision::Run(_)) => {
+                native
+                    .vm
+                    .as_ref()
+                    .ok_or_else(|| native.uncertain())?
+                    .cpu_permit(native.id.as_ref())?;
+                true
+            }
+            Some(super::cpu::Decision::Hold(_)) => false,
+            Some(super::cpu::Decision::Prepared) => return Err(native.uncertain()),
+        };
         let mut reading = Reading {
             members: storage(self.maximum)?,
             users: storage(self.maximum)?,
@@ -1405,7 +1869,11 @@ impl Watcher {
         // One held member runs for this read, each in turn, so its own rate shows: the read's only run, it is
         // stopped again first, so nothing runs behind its stop (XNU's stop waits on each running member's core
         // before the next: the hold's stops compared, the lead 2026-11-09).
-        let read_run = self.state.run_one(pgid, &mut self.pids, self.turn)?;
+        let read_run = if cpu_run {
+            self.state.run_one(pgid, &mut self.pids, self.turn)?
+        } else {
+            None
+        };
         let ran_since = Instant::now();
         let rates = self.shared.rates()?;
         self.watch.rated(rates);
@@ -1477,13 +1945,26 @@ impl Watcher {
                 });
             }
         }
-        let read = self
+        let mut read = self
             .watch
             .read(&reading.members)
             .map_err(|_| Refusal::Exhausted {
                 what: "watcher growth snapshot",
                 bound: reading.members.len(),
             })?;
+        if self.state.vm.is_some() {
+            let helper = managed_helper_usage()?;
+            managed_watch_read(
+                &mut read,
+                &self.state.limit,
+                &rates,
+                helper.footprint,
+                self.state.ending.load(Ordering::SeqCst),
+            );
+            reading.totals.cpu = reading.totals.cpu.saturating_add(helper.cpu);
+            reading.totals.read = reading.totals.read.saturating_add(helper.read_bytes);
+            reading.totals.written = reading.totals.written.saturating_add(helper.written_bytes);
+        }
         self.watch.ran(&self.ran);
         // The growth since the last read: a box faster than the node's rates raises them.
         let now = Instant::now();
@@ -1500,9 +1981,11 @@ impl Watcher {
         self.record(&read, &reading.totals)?;
         // Mirror the watcher's own ending for a member's waiter: a SIGKILL the watcher sent isn't a
         // separate kernel cap kill to count.
-        self.state
-            .ending
-            .store(self.watch.ending().is_some(), Ordering::SeqCst);
+        self.state.ending.store(
+            self.watch.ending().is_some()
+                || matches!(read.verdict, Verdict::End(_) | Verdict::Kill),
+            Ordering::SeqCst,
+        );
         // Watch the current members for their forks and ends, so the next membership change wakes at once.
         if membership_changed {
             self.rewatch(&reading.members)?;
@@ -1536,7 +2019,11 @@ impl Watcher {
         let next = match read.verdict {
             Verdict::Wait(d) => Some(d),
             Verdict::End(_) | Verdict::Kill => {
-                let _ = killpg(pgid, kill_signal());
+                if self.state.vm.is_some() {
+                    self.end_managed_scope()?;
+                } else {
+                    let _ = killpg(pgid, kill_signal());
+                }
                 Some(watch::FLOOR)
             }
             Verdict::Idle | Verdict::Events => None,
@@ -1560,9 +2047,13 @@ impl Watcher {
                 what: "watcher run selection",
                 bound: self.order.len(),
             })?;
-        let held = self.state.apply(&self.order, &self.run)?;
+        if !cpu_run {
+            self.run.clear();
+        }
+        let mut held = self.state.apply(&self.order, &self.run, &self.last)?;
         self.ran_from = Some(Instant::now());
         let next = floor.or(next);
+        let next = self.cpu_pace(native.vm.as_ref(), next, &mut held)?;
         // How late the watcher acted past its wait: its wake, its read and its stops, through all of which a
         // member running across the wait runs on (the lead, 2026-11-09: from the reads' own observed delays).
         if let Some((at, wait)) = armed {
@@ -1584,6 +2075,41 @@ impl Watcher {
             held > 0,
         ));
         Ok(next)
+    }
+
+    fn cpu_pace(
+        &mut self,
+        scope: Option<&super::managed::Scope>,
+        next: Option<Duration>,
+        held: &mut usize,
+    ) -> Result<Option<Duration>, Refusal> {
+        let Some(scope) = scope else { return Ok(next) };
+        let owner = self.state.id.as_ref();
+        let decision = scope.cpu_decision(owner)?;
+        let wait = match decision {
+            None => return Ok(next),
+            Some(super::cpu::Decision::Prepared) => return Err(self.state.uncertain()),
+            Some(super::cpu::Decision::Run(wait)) => wait,
+            Some(super::cpu::Decision::Hold(_)) => {
+                *held = self.state.apply(&self.order, &[], &self.last)?;
+                scope.cpu_held(owner)?;
+                match scope.cpu_decision(owner)? {
+                    Some(super::cpu::Decision::Hold(wait)) => Some(wait),
+                    Some(super::cpu::Decision::Run(_)) => {
+                        // Credit earned during this read/stop permits the next observed turn. A
+                        // notification, not a periodic probe or an invented minimum CPU interval.
+                        self.state.wake()?;
+                        None
+                    }
+                    _ => return Err(self.state.uncertain()),
+                }
+            }
+        };
+        Ok(match (next, wait) {
+            (Some(memory), Some(cpu)) => Some(memory.min(cpu)),
+            (memory, None) => memory,
+            (None, cpu) => cpu,
+        })
     }
 
     /// The box's members now and their summed CPU and I/O: each listed pid with its footprint, start time,
@@ -1718,7 +2244,7 @@ impl Watcher {
         // Max, not assignment: a member the kernel killed at its cap recorded its peak in account_jetsam
         // before this read, and the watcher's own peak (summed live footprints) can be lower — a box read
         // only on its events may never have seen the member near its cap while it was alive.
-        status.peak = status.peak.max(self.watch.peak());
+        status.peak = status.peak.max(self.watch.peak()).max(read.footprint);
         status.reads = self.watch.reads();
         // In microseconds, from the machine's timebase (`cpu` is Mach ticks).
         status.cpu_ticks = self.shared.tb.nanos(totals.cpu) / 1000;
@@ -1762,6 +2288,15 @@ impl Watcher {
                     .map(|r| r.peak);
                 self.state.killed_by_cap(pid, peak)?;
             }
+        }
+        if self.events.iter().any(|event| {
+            matches!(
+                event,
+                Event::Exit { .. } | Event::Signal { .. } | Event::Fork { exited: true, .. }
+            )
+        }) && let Some(scope) = &self.state.vm
+        {
+            scope.notify().map_err(|_| self.state.uncertain())?;
         }
         Ok(())
     }
@@ -1822,6 +2357,13 @@ impl Watcher {
 
     /// On stop: end the box. Kill the group and mark it deleted if the rule hadn't already ended it.
     fn finish(&mut self) {
+        let native = Arc::clone(&self.state);
+        if let Some(scope) = &native.vm {
+            if self.end_managed_scope().is_err() {
+                scope.failed(shards_api::ProcessFailure::InvalidStartRecord);
+            }
+            return;
+        }
         if let Ok(Some(pgid)) = self.state.pgid.lock().map(|g| *g) {
             let _ = killpg(pgid, kill_signal());
         }
@@ -1830,6 +2372,55 @@ impl Watcher {
         {
             status.ended = Some(Ended::Deleted);
         }
+    }
+
+    fn end_managed_scope(&mut self) -> Result<(), Refusal> {
+        self.state.validate_vm_scope()?;
+        let scope = self
+            .state
+            .vm
+            .as_ref()
+            .ok_or_else(|| self.state.uncertain())?;
+        let group = *self.state.pgid.lock().map_err(|_| self.state.uncertain())?;
+        let Some(pgid) = group else {
+            return if scope.no_submission(self.state.id.as_ref())? {
+                Ok(())
+            } else {
+                Err(self.state.uncertain())
+            };
+        };
+        if sys::group(pgid, &mut self.pids)
+            .map_err(|error| Refusal::os("listing owned scope to stop", error))?
+        {
+            return Err(self.state.uncertain());
+        }
+        for &pid in &self.pids {
+            let Some(actual) = sys::rusage(pid)
+                .map_err(|error| Refusal::os("reading owned scope to stop", error))?
+            else {
+                return Err(scope.control_failed(
+                    sys::TokenFailure::Changed { observed: None },
+                    self.state.id.as_ref(),
+                ));
+            };
+            if actual.ended {
+                continue;
+            }
+            let token = sys::capture_member(pid, actual.started)
+                .map_err(|failure| scope.control_failed(failure, self.state.id.as_ref()))?;
+            self.state.signal_stopped(
+                Stopped {
+                    pid,
+                    native: Some(token),
+                },
+                sys::MemberSignal::Kill,
+            )?;
+        }
+        let mut status = self.state.status()?;
+        if status.ended.is_none() {
+            status.ended = Some(Ended::Deleted);
+        }
+        Ok(())
     }
 }
 
@@ -1920,6 +2511,58 @@ mod scope_completion_tests;
 
 #[cfg(test)]
 mod storage_tests {
+    #[test]
+    fn actual_helper_cost_uses_aggregate_headroom_without_becoming_a_member() {
+        let rates = Rates {
+            bytes: std::num::NonZeroU64::new(4096).unwrap(),
+            processes: std::num::NonZeroU64::new(4).unwrap(),
+        };
+        let limit = Limit {
+            memory: Some(8192),
+            processes: None,
+        };
+        let mut armed = watch::Read {
+            verdict: Verdict::Events,
+            footprint: 4096,
+            processes: 1,
+            running: 1,
+        };
+        managed_watch_read(&mut armed, &limit, &rates, 4096, false);
+        assert_eq!(
+            (armed.footprint, armed.processes, armed.running),
+            (8192, 2, 1)
+        );
+        assert_eq!(
+            armed.verdict,
+            watch::next(&limit, &rates, 8192, 2).map_or(Verdict::Events, Verdict::Wait)
+        );
+        let mut aggregate = watch::Read {
+            footprint: 4097,
+            ..armed
+        };
+        managed_watch_read(&mut aggregate, &limit, &rates, 4096, false);
+        assert_eq!(
+            aggregate.verdict,
+            Verdict::End(watch::Over::Memory {
+                footprint: 8193,
+                bound: 8192
+            })
+        );
+        let mut idle = watch::Read {
+            verdict: Verdict::Idle,
+            footprint: 0,
+            processes: 0,
+            running: 0,
+        };
+        managed_watch_read(&mut idle, &limit, &rates, 4096, false);
+        assert_eq!(
+            (idle.verdict, idle.footprint, idle.running),
+            (Verdict::Idle, 4096, 0)
+        );
+        // Idle native VM members do not credit the still-running helper's actual charge.
+        assert_eq!(idle.processes, 1);
+    }
+
     use super::*;
 
     /// AC-T7.4.1/R01: a native member-storage refusal precedes mutation of existing membership.
@@ -1936,6 +2579,61 @@ mod storage_tests {
         pids.insert(4).unwrap();
         assert_eq!(pids.values, [4, 9]);
         assert!(Pids::new(usize::MAX).is_err());
+    }
+
+    /// AC-T7.4.1: a same-PID replacement or later exec-token cannot acquire another incarnation's
+    /// continue authority. The original token/birth and the bounded Hold entries remain unchanged.
+    #[test]
+    fn native_hold_retains_exact_incarnation_across_replacement_and_exhaustion() {
+        let mut held = Stops::new(1, true).unwrap();
+        let original = sys::simulated_member(89, 97, 101);
+        held.insert(Stopped {
+            pid: 89,
+            native: Some(original),
+        })
+        .unwrap();
+        for replacement in [
+            sys::simulated_member(89, 103, 107),
+            sys::simulated_member(89, 97, 109),
+        ] {
+            assert!(
+                held.insert(Stopped {
+                    pid: 89,
+                    native: Some(replacement)
+                })
+                .is_err()
+            );
+            assert_eq!(held.get(&89).unwrap().native, Some(original));
+        }
+        assert!(held.reserve(1).is_err());
+        assert_eq!(held.get(&89).unwrap().native, Some(original));
+        assert_eq!(held.len(), 1);
+    }
+
+    /// AC-T7.4.1: ordinary Hold keeps its original PID-sized buffers and sorted stop ownership;
+    /// the managed token payload is allocated only for an actual managed native scope.
+    #[test]
+    fn ordinary_hold_keeps_plain_bounded_member_storage() {
+        let mut hold = Hold::new(2, false).unwrap();
+        assert!(matches!(hold.stopped.values, StopStorage::Plain(_)));
+        assert!(matches!(hold.added.values, StopStorage::Plain(_)));
+        hold.stopped
+            .insert(Stopped {
+                pid: 17,
+                native: None,
+            })
+            .unwrap();
+        hold.added
+            .push_reserved(Stopped {
+                pid: 11,
+                native: None,
+            })
+            .unwrap();
+        hold.stopped.append_reserved(&hold.added).unwrap();
+        assert_eq!(hold.stopped.at(0).unwrap().pid, 11);
+        assert_eq!(hold.stopped.at(1).unwrap().pid, 17);
+        assert!(hold.stopped.reserve(1).is_err());
+        assert!(hold.stopped.contains(&11) && hold.stopped.contains(&17));
     }
 }
 

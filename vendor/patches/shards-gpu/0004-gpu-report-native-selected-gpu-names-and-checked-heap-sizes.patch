@@ -1,0 +1,514 @@
+Subject: gpu report native selected GPU names and checked heap sizes
+Why: AC-T7.4.1: the native report the node checks names each selected GPU and its checked device-local heap sizes. Shards commit 070964ea.
+
+diff --git a/crates/abi/src/gpu.rs b/crates/abi/src/gpu.rs
+index 6e590f9018d4caa6a1affb562d12affed8e522ad..1411caf71bf85aa091c024c5d78ece6f79122bbc 100644
+--- a/crates/abi/src/gpu.rs
++++ b/crates/abi/src/gpu.rs
+@@ -3,7 +3,7 @@
+ //! public client and the VMM have one checked grammar and one representation.
+ 
+ mod probe;
+-pub use probe::{GpuProbe, GpuProbeError, ResolvedGpu, probe_bytes, uuid_from_hex};
++pub use probe::{GPU_NAME_BYTES, GpuName, GpuProbe, GpuProbeError, ResolvedGpu, probe_bytes, uuid_from_hex};
+ 
+ use alloc::vec::Vec;
+ use core::fmt;
+diff --git a/crates/abi/src/gpu/probe.rs b/crates/abi/src/gpu/probe.rs
+index ff25ef61a93ddd12974b648e39ea814893fbbceb..787fa64d6356c14df61da3dc6cda5f4e572ad41d 100644
+--- a/crates/abi/src/gpu/probe.rs
++++ b/crates/abi/src/gpu/probe.rs
+@@ -4,12 +4,67 @@ use super::{MAX_PHYSICAL_GPUS, PhysicalGpu, PhysicalGpuError, check_selection};
+ use alloc::{string::String, vec::Vec};
+ use core::fmt::{self, Write};
+ 
+-const HEADER: &str = "shards-gpu-selection 2";
+-const LINE_BYTES: usize =
++const HEADER: &str = "shards-gpu-selection 3";
++const IDENTITY_HEADER: &str = "shards-gpu-selection 2";
++const IDENTITY_LINE_BYTES: usize =
+     "metal:ffffffffffffffff\tffffffffffffffffffffffffffffffff\tpci:ffffffff:ff:1f.7\tffffffffffffffff\n"
+         .len();
+ const FIXED_BYTES: usize =
+-    "shards-gpu-selection 2\nhost-visible 18446744073709551615\ndevices 65536\nend\n".len();
++    "shards-gpu-selection 3\nhost-visible 18446744073709551615\ndevices 65536\nend\n".len();
++
++/// Vulkan's VK_MAX_PHYSICAL_DEVICE_NAME_SIZE includes the UTF-8 string's NUL.
++pub const GPU_NAME_BYTES: usize = 256;
++
++/// The renderer driver's reported name, never a selector or a catalog/model guess.
++/// Fixed storage keeps ownership transfer fallible only where text is requested.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct GpuName {
++    bytes: [u8; GPU_NAME_BYTES],
++}
++
++impl GpuName {
++    pub fn new(text: &str) -> Result<Self, GpuProbeError> {
++        if text.len() >= GPU_NAME_BYTES || text.contains('\0') {
++            return Err(GpuProbeError::Properties);
++        }
++        let mut bytes = [0; GPU_NAME_BYTES];
++        bytes
++            .get_mut(..text.len())
++            .ok_or(GpuProbeError::Properties)?
++            .copy_from_slice(text.as_bytes());
++        Ok(Self { bytes })
++    }
++
++    pub fn from_buffer(bytes: &[u8; GPU_NAME_BYTES]) -> Result<Self, GpuProbeError> {
++        let end = bytes
++            .iter()
++            .position(|byte| *byte == 0)
++            .ok_or(GpuProbeError::Properties)?;
++        Self::new(
++            core::str::from_utf8(bytes.get(..end).ok_or(GpuProbeError::Properties)?)
++                .map_err(|_| GpuProbeError::Properties)?,
++        )
++    }
++
++    pub fn as_str(&self) -> Result<&str, GpuProbeError> {
++        let end = self
++            .bytes
++            .iter()
++            .position(|byte| *byte == 0)
++            .ok_or(GpuProbeError::Properties)?;
++        core::str::from_utf8(self.bytes.get(..end).ok_or(GpuProbeError::Properties)?)
++            .map_err(|_| GpuProbeError::Properties)
++    }
++
++    pub fn try_text(&self) -> Result<String, GpuProbeError> {
++        let name = self.as_str()?;
++        let mut text = String::new();
++        text.try_reserve_exact(name.len())
++            .map_err(|_| GpuProbeError::Allocation)?;
++        text.push_str(name);
++        Ok(text)
++    }
++}
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub struct ResolvedGpu {
+@@ -19,6 +74,11 @@ pub struct ResolvedGpu {
+     pub pci: Option<PhysicalGpu>,
+     /// Exact native byte order from VkPhysicalDeviceIDProperties when valid.
+     pub luid: Option<[u8; 8]>,
++    /// Actual VkPhysicalDeviceProperties::deviceName when reported. None stays unknown.
++    pub name: Option<GpuName>,
++    /// Checked sum of this selected device's DEVICE_LOCAL heaps, in bytes. This is
++    /// neither host RAM, free VRAM, a working-set budget nor a utilization reading.
++    pub device_local_bytes: Option<u64>,
+ }
+ 
+ #[derive(Debug, PartialEq, Eq)]
+@@ -38,14 +98,20 @@ pub enum GpuProbeError {
+     Allocation,
+     Unavailable,
+     Pending,
++    Properties,
+ }
+ 
+ pub fn probe_bytes(count: usize) -> Result<usize, GpuProbeError> {
+     if count == 0 || count > MAX_PHYSICAL_GPUS {
+         return Err(GpuProbeError::Count);
+     }
++    let line_bytes = GPU_NAME_BYTES
++        .checked_mul(2)
++        .and_then(|name| name.checked_add("\t\t18446744073709551615".len()))
++        .and_then(|facts| facts.checked_add(IDENTITY_LINE_BYTES))
++        .ok_or(GpuProbeError::Count)?;
+     count
+-        .checked_mul(LINE_BYTES)
++        .checked_mul(line_bytes)
+         .and_then(|n| n.checked_add(FIXED_BYTES))
+         .ok_or(GpuProbeError::Count)
+ }
+@@ -115,6 +181,9 @@ impl GpuProbe {
+             if !matches {
+                 return Err(GpuProbeError::Identity);
+             }
++            if let Some(name) = &resolved.name {
++                name.as_str()?;
++            }
+             uuids.push(resolved.uuid);
+         }
+         uuids.sort_unstable();
+@@ -171,6 +240,20 @@ impl GpuProbe {
+                 }
+                 None => out.write_char('-')?,
+             };
++            out.write_char('\t')?;
++            match device.name {
++                Some(name) => {
++                    for byte in name.bytes {
++                        write!(out, "{byte:02x}")?;
++                    }
++                }
++                None => out.write_char('-')?,
++            }
++            out.write_char('\t')?;
++            match device.device_local_bytes {
++                Some(bytes) => write!(out, "{bytes}")?,
++                None => out.write_char('-')?,
++            }
+             out.write_char('\n')?;
+         }
+         writeln!(out, "end")
+@@ -209,9 +292,11 @@ impl GpuProbe {
+             return Err(GpuProbeError::Syntax);
+         }
+         let mut lines = text.lines();
+-        if lines.next() != Some(HEADER) {
+-            return Err(GpuProbeError::Syntax);
+-        }
++        let facts = match lines.next() {
++            Some(HEADER) => true,
++            Some(IDENTITY_HEADER) => false,
++            _ => return Err(GpuProbeError::Syntax),
++        };
+         fn field<'a>(line: Option<&'a str>, prefix: &str) -> Result<&'a str, GpuProbeError> {
+             line.and_then(|line| line.strip_prefix(prefix))
+                 .ok_or(GpuProbeError::Syntax)
+@@ -236,6 +321,24 @@ impl GpuProbe {
+             let uuid = fields.next().ok_or(GpuProbeError::Syntax)?;
+             let pci = fields.next().ok_or(GpuProbeError::Syntax)?;
+             let luid = fields.next().ok_or(GpuProbeError::Syntax)?;
++            let (name, device_local_bytes) = if facts {
++                let name = fields.next().ok_or(GpuProbeError::Syntax)?;
++                let size = fields.next().ok_or(GpuProbeError::Syntax)?;
++                let name = if name == "-" {
++                    None
++                } else {
++                    let bytes = fixed_hex(name)?;
++                    let name = GpuName::from_buffer(&bytes)?;
++                    if name.bytes != bytes {
++                        return Err(GpuProbeError::Properties);
++                    }
++                    Some(name)
++                };
++                let size = if size == "-" { None } else { Some(number(size)?) };
++                (name, size)
++            } else {
++                (None, None)
++            };
+             if fields.next().is_some() {
+                 return Err(GpuProbeError::Syntax);
+             }
+@@ -248,6 +351,8 @@ impl GpuProbe {
+                     Some(pci.parse().map_err(GpuProbeError::Selection)?)
+                 },
+                 luid: if luid == "-" { None } else { Some(fixed_hex(luid)?) },
++                name,
++                device_local_bytes,
+             });
+         }
+         if lines.next() != Some("end") || lines.next().is_some() {
+@@ -280,6 +385,7 @@ impl fmt::Display for GpuProbeError {
+             Self::Pending => {
+                 out.write_str("GPU probe has no completed native result within the caller deadline")
+             }
++            Self::Properties => out.write_str("renderer GPU properties are malformed or unavailable"),
+         }
+     }
+ }
+@@ -310,6 +416,8 @@ mod tests {
+                 uuid: [7; 16],
+                 pci: Some(native),
+                 luid: Some(9u64.to_le_bytes()),
++                name: None,
++                device_local_bytes: None,
+             }],
+             host_visible_bytes: 4096,
+         };
+@@ -334,4 +442,72 @@ mod tests {
+             assert!(GpuProbe::parse(&bad).is_err());
+         }
+     }
++
++    #[test]
++    fn renderer_properties_keep_known_zero_and_unknown_distinct_and_legacy_unknown() {
++        let physical = PhysicalGpu::Pci {
++            domain: 7,
++            bus: 2,
++            device: 1,
++            function: 0,
++        };
++        let mut probe = GpuProbe {
++            devices: vec![ResolvedGpu {
++                physical,
++                uuid: [1; 16],
++                pci: Some(physical),
++                luid: None,
++                name: Some(GpuName::new("actual renderer\tGPU\nα").unwrap()),
++                device_local_bytes: Some(0),
++            }],
++            host_visible_bytes: 4096,
++        };
++        let encoded = probe.encode().unwrap();
++        let parsed = GpuProbe::parse(&encoded).unwrap();
++        assert_eq!(parsed, probe);
++        assert_eq!(
++            parsed.devices[0].name.unwrap().try_text().unwrap(),
++            "actual renderer\tGPU\nα"
++        );
++        assert_eq!(parsed.devices[0].device_local_bytes, Some(0));
++        probe.devices[0].name = None;
++        probe.devices[0].device_local_bytes = None;
++        let unknown = probe.encode().unwrap();
++        assert_eq!(GpuProbe::parse(&unknown).unwrap(), probe);
++        let old = unknown.replace(HEADER, IDENTITY_HEADER).replace("\t-\t-\n", "\n");
++        assert_eq!(GpuProbe::parse(&old).unwrap(), probe);
++        assert!(encoded.len() <= probe_bytes(1).unwrap());
++    }
++
++    #[test]
++    fn renderer_name_and_heap_receipt_reject_overflow_noncanonical_and_hostile_text() {
++        assert!(GpuName::new(&"x".repeat(GPU_NAME_BYTES)).is_err());
++        assert!(GpuName::new("a\0b").is_err());
++        assert!(GpuName::from_buffer(&[b'x'; GPU_NAME_BYTES]).is_err());
++        let mut bytes = [0; GPU_NAME_BYTES];
++        bytes[0] = 0xff;
++        assert!(GpuName::from_buffer(&bytes).is_err());
++        let physical = PhysicalGpu::MetalRegistry(7);
++        let probe = GpuProbe {
++            devices: vec![ResolvedGpu {
++                physical,
++                uuid: [1; 16],
++                pci: None,
++                luid: Some(7u64.to_be_bytes()),
++                name: Some(GpuName::new("actual").unwrap()),
++                device_local_bytes: Some(u64::MAX),
++            }],
++            host_visible_bytes: 4096,
++        };
++        let encoded = probe.encode().unwrap();
++        for bad in [
++            encoded.replace("\t18446744073709551615\n", "\t18446744073709551616\n"),
++            encoded.replace("\t18446744073709551615\n", "\t+1\n"),
++            encoded.replace(&"00".repeat(GPU_NAME_BYTES - 6), &"01".repeat(GPU_NAME_BYTES - 6)),
++            encoded.replace("61637475616c", "ff637475616c"),
++        ] {
++            assert!(GpuProbe::parse(&bad).is_err());
++        }
++        assert!(GpuName::new(&"x".repeat(GPU_NAME_BYTES - 1)).is_ok());
++    }
+ }
+diff --git a/crates/vmm/src/devices/virtio/gpu/selection.rs b/crates/vmm/src/devices/virtio/gpu/selection.rs
+index a6a99bdebc553d048fa3098c572e456faee5f07d..0fd717aef61d2b646802f50fecd53782922a237b 100644
+--- a/crates/vmm/src/devices/virtio/gpu/selection.rs
++++ b/crates/vmm/src/devices/virtio/gpu/selection.rs
+@@ -4,7 +4,7 @@
+ pub use shards_abi::gpu::{MAX_PHYSICAL_GPUS, PhysicalGpu, PhysicalGpuError, check_selection};
+ 
+ #[repr(C)]
+-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub struct Properties {
+     pub uuid: [u8; 16],
+     pub luid: [u8; 8],
+@@ -15,6 +15,24 @@ pub struct Properties {
+     pub luid_valid: u32,
+     pub pci_valid: u32,
+     pub host_memory_valid: u32,
++    pub name: [u8; shards_abi::gpu::GPU_NAME_BYTES],
++}
++
++impl Default for Properties {
++    fn default() -> Self {
++        Self {
++            uuid: [0; 16],
++            luid: [0; 8],
++            domain: 0,
++            bus: 0,
++            device: 0,
++            function: 0,
++            luid_valid: 0,
++            pci_valid: 0,
++            host_memory_valid: 0,
++            name: [0; shards_abi::gpu::GPU_NAME_BYTES],
++        }
++    }
+ }
+ 
+ /// The same immutable native properties used to resolve the selector, retained
+@@ -54,6 +72,9 @@ pub fn resolved(
+         uuid: props.uuid,
+         pci,
+         luid,
++        name: Some(shards_abi::gpu::GpuName::from_buffer(&props.name).map_err(|_| JoinError::InvalidNative)?),
++        // The actual memory query fills this independently after exact identity resolution.
++        device_local_bytes: None,
+     })
+ }
+ 
+@@ -67,6 +88,19 @@ pub enum JoinError {
+     Aliased,
+     InvalidUuid,
+     InvalidNative,
++    Memory,
++}
++
++/// Vulkan DEVICE_LOCAL heaps are distinct entries, not memory types (which may
++/// alias a heap). The caller passes each queried heap once; overflow refuses.
++pub fn local_heap_bytes(mut heaps: impl Iterator<Item = (u64, bool)>) -> Result<u64, JoinError> {
++    heaps.try_fold(0u64, |total, (size, local)| {
++        if local {
++            total.checked_add(size).ok_or(JoinError::Memory)
++        } else {
++            Ok(total)
++        }
++    })
+ }
+ 
+ fn native(
+@@ -180,6 +214,7 @@ impl std::fmt::Display for JoinError {
+             Self::InvalidNative => {
+                 f.write_str("native Vulkan GPU properties exceed their identity representation")
+             }
++            Self::Memory => f.write_str("selected device-local Vulkan heap sizes overflow"),
+         }
+     }
+ }
+@@ -189,6 +224,39 @@ impl std::error::Error for JoinError {}
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn local_heaps_are_counted_once_without_inventing_budget_or_usage() {
++        assert_eq!(
++            local_heap_bytes([(4, true), (7, false), (8, true)].into_iter()),
++            Ok(12)
++        );
++        assert_eq!(local_heap_bytes([(0, true)].into_iter()), Ok(0));
++        assert_eq!(
++            local_heap_bytes([(u64::MAX, false), (8, true)].into_iter()),
++            Ok(8)
++        );
++        assert_eq!(
++            local_heap_bytes([(u64::MAX, true), (1, true)].into_iter()),
++            Err(JoinError::Memory)
++        );
++    }
++
++    #[test]
++    fn native_report_keeps_renderer_name_with_the_same_complete_uuid_join() {
++        assert_eq!(std::mem::size_of::<Properties>(), 308);
++        let mut props = properties(7);
++        let name = b"actual renderer GPU\0";
++        props.name[..name.len()].copy_from_slice(name);
++        let report = resolved(pci(7), &props, false).unwrap();
++        assert_eq!(report.name.unwrap().as_str().unwrap(), "actual renderer GPU");
++        assert_eq!(
++            report.device_local_bytes, None,
++            "memory is not inferred from an identity query"
++        );
++        props.name.fill(0xff);
++        assert_eq!(resolved(pci(7), &props, false), Err(JoinError::InvalidNative));
++    }
++
+     fn pci(bus: u8) -> PhysicalGpu {
+         PhysicalGpu::Pci {
+             domain: u32::MAX,
+diff --git a/crates/vmm/src/devices/virtio/gpu/virgl.rs b/crates/vmm/src/devices/virtio/gpu/virgl.rs
+index 2b957d13088a75f8d6fb53103403305c749c911c..23815bd4ac2ca3e40600872a3fa3d9cec41a036c 100644
+--- a/crates/vmm/src/devices/virtio/gpu/virgl.rs
++++ b/crates/vmm/src/devices/virtio/gpu/virgl.rs
+@@ -263,6 +263,8 @@ struct MemoryProperties {
+ const STRUCTURE_TYPE_INSTANCE_CREATE_INFO: i32 = 1;
+ const MEMORY_PROPERTY_HOST_VISIBLE: u32 = 1 << 1;
+ const MEMORY_PROPERTY_DEVICE_LOCAL: u32 = 1 << 0;
++/// VkMemoryHeapFlagBits::VK_MEMORY_HEAP_DEVICE_LOCAL_BIT, not a memory-type flag.
++const MEMORY_HEAP_DEVICE_LOCAL: u32 = 1 << 0;
+ 
+ /// `VkExtensionProperties` (vulkan_core.h).
+ #[repr(C)]
+@@ -658,25 +660,29 @@ fn host_visible(selected: &[PhysicalGpu]) -> Result<(u64, Vec<SelectedGpu>), Str
+         let mut total = 0u64;
+         for (position, index) in indices.into_iter().enumerate() {
+             let device = *devices.get(index).ok_or("Vulkan selection index is invalid")?;
+-            if !selected.is_empty() {
++            let mut native = if !selected.is_empty() {
+                 let props = properties
+                     .get(index)
+                     .ok_or("Vulkan selection identity is missing")?;
+                 let physical = selected.get(position).ok_or("Vulkan selection order changed")?;
+-                uuids.push(SelectedGpu {
+-                    text: uuid_text(&props.uuid)?,
+-                    native: selection::resolved(*physical, props, cfg!(target_os = "macos"))
++                Some(
++                    selection::resolved(*physical, props, cfg!(target_os = "macos"))
+                         .map_err(|error| error.to_string())?,
+-                });
+-            }
++                )
++            } else {
++                None
++            };
+             #[cfg(windows)]
+-            if if selected.is_empty() {
+-                !vk.imports_host_memory(device)
++            let imports_host = if selected.is_empty() {
++                vk.imports_host_memory(device)
+             } else {
+                 properties
+                     .get(index)
+-                    .is_none_or(|props| props.host_memory_valid == 0)
+-            } {
++                    .is_some_and(|props| props.host_memory_valid != 0)
++            };
++            #[cfg(not(windows))]
++            let imports_host = true;
++            if native.is_none() && !imports_host {
+                 continue;
+             }
+             let mut props = MemoryProperties {
+@@ -695,6 +701,23 @@ fn host_visible(selected: &[PhysicalGpu]) -> Result<(u64, Vec<SelectedGpu>), Str
+                 .heaps
+                 .get(..usize::try_from(props.heap_count).map_err(|_| "Vulkan heap count overflows")?)
+                 .ok_or("Vulkan heap count is invalid")?;
++            if let Some(native) = &mut native {
++                native.device_local_bytes = Some(
++                    selection::local_heap_bytes(
++                        heaps
++                            .iter()
++                            .map(|heap| (heap.size, heap.flags & MEMORY_HEAP_DEVICE_LOCAL != 0)),
++                    )
++                    .map_err(|error| error.to_string())?,
++                );
++                uuids.push(SelectedGpu {
++                    text: uuid_text(&native.uuid)?,
++                    native: *native,
++                });
++            }
++            if !imports_host {
++                continue;
++            }
+             let mut counted = [false; 16]; // VK_MAX_MEMORY_HEAPS.
+             for kind in types
+                 .iter()
+diff --git a/resources/gpu/native-identity.c b/resources/gpu/native-identity.c
+index b4ae528034fd80bbbdae137d101c064b714645de..fd55dff30e9114493b871675431775176e66b673 100644
+--- a/resources/gpu/native-identity.c
++++ b/resources/gpu/native-identity.c
+@@ -10,9 +10,10 @@ struct shards_gpu_properties {
+     uint8_t luid[VK_LUID_SIZE];
+     uint32_t domain, bus, device, function;
+     uint32_t luid_valid, pci_valid, host_memory_valid;
++    uint8_t name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
+ };
+ 
+-_Static_assert(sizeof(struct shards_gpu_properties) == 52,
++_Static_assert(sizeof(struct shards_gpu_properties) == 308,
+                "Rust/C native GPU properties must have the same ABI");
+ 
+ int32_t
+@@ -63,6 +64,9 @@ shards_gpu_get_properties(PFN_vkGetPhysicalDeviceProperties2 properties,
+         .pNext = &ids,
+     };
+     properties(device, &props);
++    if (!memchr(props.properties.deviceName, '\0', VK_MAX_PHYSICAL_DEVICE_NAME_SIZE))
++        return VK_ERROR_INITIALIZATION_FAILED;
++    memcpy(out->name, props.properties.deviceName, sizeof(out->name));
+     memcpy(out->uuid, ids.deviceUUID, sizeof(out->uuid));
+     memcpy(out->luid, ids.deviceLUID, sizeof(out->luid));
+     out->luid_valid = ids.deviceLUIDValid;

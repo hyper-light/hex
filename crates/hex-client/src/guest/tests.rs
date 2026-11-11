@@ -604,6 +604,108 @@ impl shards_api::Guest for Patient {
     }
 }
 
+/// A guest whose relay answers the first dial and is then gone. Its `connect_before` stands for the
+/// retrying form, which would ask again until its deadline: so it answers only once, and is then expired.
+/// Its single attempt is closed unanswered, as the VMM's muxer closes a CONNECT nobody listens for.
+struct GoneRelay {
+    listener: TcpListener,
+    before: std::sync::Mutex<Vec<u32>>,
+    once: std::sync::Mutex<Vec<u32>>,
+}
+
+impl shards_api::Guest for GoneRelay {
+    fn process_exited(&self) -> Result<bool, shards_api::Refusal> {
+        Ok(false)
+    }
+
+    fn connect(
+        &self,
+        port: u32,
+        _: Duration,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        panic!("a link dials port {port} only within a deadline")
+    }
+
+    fn connect_before(
+        &self,
+        port: u32,
+        _: std::time::Instant,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        let mut before = self.before.lock().unwrap();
+        before.push(port);
+        if before.len() > 1 {
+            return Err(shards_api::Refusal::Connect {
+                port,
+                failure: shards_api::HandshakeError::Expired {
+                    phase: shards_api::HandshakePhase::Dial,
+                },
+            });
+        }
+        let conn = TcpStream::connect(self.listener.local_addr().unwrap()).unwrap();
+        Ok(Box::new(Looped(conn)))
+    }
+
+    fn connect_once_before(
+        &self,
+        port: u32,
+        _: std::time::Instant,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        self.once.lock().unwrap().push(port);
+        Err(shards_api::Refusal::Connect {
+            port,
+            failure: shards_api::HandshakeError::Closed,
+        })
+    }
+
+    fn stop(&self) -> Result<(), shards_api::Refusal> {
+        Ok(())
+    }
+
+    fn wait_for(&self, _: Duration) -> Result<Option<shards_api::End>, shards_api::Refusal> {
+        Ok(None)
+    }
+
+    fn identity(&self) -> Result<shards_api::Identity, shards_api::Refusal> {
+        Err(shards_api::Refusal::Unsupported {
+            what: "identity",
+            why: "a loopback stand-in names no VM".into(),
+        })
+    }
+}
+
+/// AC-T7.4.1: dial a guest whose relay answered the first dial and is then gone; expect the first dial
+/// through `connect_before`, which waits for the relay to listen, and each later dial one
+/// `connect_once_before` attempt, refused at once as closed unanswered, by type. The relay binds every
+/// port before it serves any, so a later port that refuses has no relay behind it.
+#[test]
+fn a_later_dial_to_a_gone_relay_is_one_attempt_refused_at_once() {
+    let guest = Arc::new(GoneRelay {
+        listener: TcpListener::bind("127.0.0.1:0").unwrap(),
+        before: std::sync::Mutex::new(Vec::new()),
+        once: std::sync::Mutex::new(Vec::new()),
+    });
+    let link = shards::ShardsLink::new(guest.clone(), Duration::from_secs(60));
+    link.dial(stream::CONTROL_PORT).unwrap();
+    for port in [stream::STDIO_PORT, stream::CONTROL_PORT] {
+        let refused = link.dial(port).err().unwrap();
+        assert!(
+            matches!(
+                refused,
+                hex_api::Refusal::Connect {
+                    port: p,
+                    failure: hex_api::ConnectFailure::Closed,
+                } if p == port
+            ),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(*guest.before.lock().unwrap(), [stream::CONTROL_PORT]);
+    assert_eq!(
+        *guest.once.lock().unwrap(),
+        [stream::STDIO_PORT, stream::CONTROL_PORT]
+    );
+}
+
 /// HEX-GUEST-33, AC-T7.4.1 (§2, CLAUDE.md §2): dial a booted guest three times with no caller deadline, the
 /// later two after its relay listens: expect each dial to reach Shards as `connect_before` with one finite
 /// absolute deadline, the link's bound from that dial's start; never a relative patience, as Shards' client
@@ -1049,9 +1151,11 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {
             binary: None,
         })
         .unwrap();
-    // A link's bound names a finite deadline (HEX-GUEST-33): Shards' learned bound on a real guest's boot
-    // and listen (`conformance::PATIENCE`) holds the simulator's.
-    let bound = shards_api::conformance::PATIENCE.get();
+    // A link's bound names a finite deadline (HEX-GUEST-33): the first dial's, as the node gives it
+    // (`first_dial_bound`), twice the guest's recorded boot to ready, the boot and listen it waits on.
+    let bound = shards::recorded_boot()
+        .unwrap()
+        .saturating_mul(hex_core::patience::TIMES_SLOWEST);
     let transport =
         Stream::dial(own_link(shards::ShardsLink::new(Arc::from(guest), bound)).unwrap()).unwrap();
     let given = transport

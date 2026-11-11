@@ -3,6 +3,9 @@
 use std::time::Duration;
 
 pub mod census;
+pub mod completed;
+pub mod rejected;
+pub mod timed;
 
 use crate::record::{NativeRecord, NativeScope, OwnerKey, OwnerRef, ProcId};
 use crate::wire::{Fault, Reader};
@@ -96,6 +99,8 @@ pub enum Action {
     Terminal,
     Usage,
     Finalize,
+    /// Read only the same receipt's immutable metadata; no notification/attach/native query.
+    Inspect,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -191,6 +196,11 @@ pub enum Answer {
         key: Key,
         failure: Failure,
     },
+    Metadata {
+        key: Key,
+        controller: Option<ProcId>,
+        vsock: Vec<u8>,
+    },
 }
 impl Answer {
     pub fn key(&self) -> &Key {
@@ -200,6 +210,7 @@ impl Answer {
             | Self::Usage { key, .. }
             | Self::Done { key }
             | Self::Refused { key, .. } => key,
+            Self::Metadata { key, .. } => key,
         }
     }
     pub fn descriptors(&self) -> usize {
@@ -247,6 +258,8 @@ const A_TERMINAL: u16 = 0x800b;
 const A_USAGE: u16 = 0x800c;
 const A_DONE: u16 = 0x800d;
 const A_REFUSED: u16 = 0x800e;
+const INSPECT: u16 = 0x0013;
+const A_METADATA: u16 = 0x8010;
 
 fn invalid(what: &'static str) -> Fault {
     Fault::Value {
@@ -310,10 +323,8 @@ impl Launch {
             }
             exec = exec
                 .checked_add(word.len())
-                .and_then(|n| {
-                    n.checked_add(1)
-                        .and_then(|n| n.checked_add(size_of::<usize>()))
-                })
+                .and_then(|n| n.checked_add(1))
+                .and_then(|n| n.checked_add(size_of::<usize>()))
                 .ok_or_else(|| bounded(usize::MAX))?;
         }
         check_prepared_arguments(self.arguments.iter().map(Vec::as_slice))?;
@@ -333,10 +344,8 @@ impl Launch {
             }
             exec = exec
                 .checked_add(value.len())
-                .and_then(|n| {
-                    n.checked_add(1)
-                        .and_then(|n| n.checked_add(size_of::<usize>()))
-                })
+                .and_then(|n| n.checked_add(1))
+                .and_then(|n| n.checked_add(size_of::<usize>()))
                 .ok_or_else(|| bounded(usize::MAX))?;
         }
         if exec > ARG_MAX {
@@ -542,10 +551,15 @@ fn action_kind(action: Action) -> u16 {
         Action::Terminal => TERMINAL,
         Action::Usage => USAGE,
         Action::Finalize => FINALIZE,
+        Action::Inspect => INSPECT,
     }
 }
 /// Same HEXM header and framing. Count and fallibly reserve the complete new message before copy.
 pub fn encode_request(version: u16, id: u64, request: &Request) -> Result<Vec<u8>, Fault> {
+    check_request(request)?;
+    encode(|out| put_request(out, version, id, request))
+}
+fn check_request(request: &Request) -> Result<(), Fault> {
     match request {
         Request::Prepare { key, launch } => {
             launch.check()?;
@@ -565,40 +579,46 @@ pub fn encode_request(version: u16, id: u64, request: &Request) -> Result<Vec<u8
             }
         }
     }
-    encode(|out| {
-        header(
-            out,
-            version,
-            match request {
-                Request::Prepare { .. } => PREPARE,
-                Request::Control { action, .. } => action_kind(*action),
-            },
-            id,
-        )?;
-        put_key(out, request.key())?;
+    Ok(())
+}
+fn put_request(
+    out: &mut dyn Output,
+    version: u16,
+    id: u64,
+    request: &Request,
+) -> Result<(), Fault> {
+    header(
+        out,
+        version,
         match request {
-            Request::Prepare { launch, .. } => {
-                u8(
-                    out,
-                    match launch.record_kind {
-                        RecordKind::Box => 0,
-                        RecordKind::Pool => 1,
-                    },
-                )?;
-                blob(out, &launch.record)?;
-                blob(out, &launch.binary)?;
-                put_words(out, &launch.arguments)?;
-                put_words(out, &launch.environment)?;
-                blob(out, &launch.vsock)?;
-                out.raw(&launch.cpu.cost_id)?;
-                u64(out, launch.cpu.response.as_secs())?;
-                u32(out, launch.cpu.response.subsec_nanos())?;
-                out.raw(&launch.report_scope.unwrap_or([0; 16]))?;
-                u8(out, u8::from(launch.report_scope.is_some()))
-            }
-            Request::Control { controller, .. } => put_optional_proc(out, *controller),
+            Request::Prepare { .. } => PREPARE,
+            Request::Control { action, .. } => action_kind(*action),
+        },
+        id,
+    )?;
+    put_key(out, request.key())?;
+    match request {
+        Request::Prepare { launch, .. } => {
+            u8(
+                out,
+                match launch.record_kind {
+                    RecordKind::Box => 0,
+                    RecordKind::Pool => 1,
+                },
+            )?;
+            blob(out, &launch.record)?;
+            blob(out, &launch.binary)?;
+            put_words(out, &launch.arguments)?;
+            put_words(out, &launch.environment)?;
+            blob(out, &launch.vsock)?;
+            out.raw(&launch.cpu.cost_id)?;
+            u64(out, launch.cpu.response.as_secs())?;
+            u32(out, launch.cpu.response.subsec_nanos())?;
+            out.raw(&launch.report_scope.unwrap_or([0; 16]))?;
+            u8(out, u8::from(launch.report_scope.is_some()))
         }
-    })
+        Request::Control { controller, .. } => put_optional_proc(out, *controller),
+    }
 }
 fn put_exit(out: &mut dyn Output, exit: Exit) -> Result<(), Fault> {
     match exit {
@@ -709,12 +729,16 @@ pub fn encode_answer(version: u16, id: u64, answer: &Answer) -> Result<Vec<u8>, 
                 Answer::Usage { .. } => A_USAGE,
                 Answer::Done { .. } => A_DONE,
                 Answer::Refused { .. } => A_REFUSED,
+                Answer::Metadata { .. } => A_METADATA,
             },
             id,
         )?;
         put_key(out, answer.key())?;
         match answer {
             Answer::Attached {
+                controller, vsock, ..
+            }
+            | Answer::Metadata {
                 controller, vsock, ..
             } => {
                 if vsock.is_empty() || vsock.len() >= PATH_MAX || vsock.contains(&0) {
@@ -784,17 +808,24 @@ fn read_key(input: &mut Reader<'_>) -> Result<Key, Fault> {
         helper,
     })
 }
-fn words(input: &mut Reader<'_>) -> Result<Vec<Vec<u8>>, Fault> {
+fn words(input: &mut Reader<'_>, frame_bytes: usize) -> Result<Vec<Vec<u8>>, Fault> {
     let count = usize::try_from(input.u32()?).map_err(|_| invalid("native word count"))?;
     // Even an empty argument consumes its length prefix in this frame and a pointer+NUL at exec.
+    let remaining = frame_bytes
+        .checked_sub(input.at())
+        .ok_or_else(|| invalid("native word frame position"))?;
     if count
-        > ARG_MAX
-            .checked_div(
-                size_of::<usize>()
-                    .checked_add(1)
-                    .ok_or_else(|| bounded(ARG_MAX))?,
-            )
-            .ok_or_else(|| bounded(ARG_MAX))?
+        > remaining
+            .checked_div(size_of::<u32>())
+            .ok_or_else(|| bounded(frame_bytes))?
+        || count
+            > ARG_MAX
+                .checked_div(
+                    size_of::<usize>()
+                        .checked_add(1)
+                        .ok_or_else(|| bounded(ARG_MAX))?,
+                )
+                .ok_or_else(|| bounded(ARG_MAX))?
     {
         return Err(invalid("native word count"));
     }
@@ -843,8 +874,8 @@ pub fn read_request(bytes: &[u8], fds: usize) -> Result<(u16, u64, Request), Fau
         };
         let record = owned_blob(&mut input, crate::record::MAX_RECORD_BYTES)?;
         let binary = owned_blob(&mut input, PATH_MAX)?;
-        let arguments = words(&mut input)?;
-        let environment = words(&mut input)?;
+        let arguments = words(&mut input, bytes.len())?;
+        let environment = words(&mut input, bytes.len())?;
         let vsock = owned_blob(&mut input, PATH_MAX)?;
         let cost_id = input.array::<32>()?;
         let seconds = input.u64()?;
@@ -889,6 +920,7 @@ pub fn read_request(bytes: &[u8], fds: usize) -> Result<(u16, u64, Request), Fau
             TERMINAL => Action::Terminal,
             USAGE => Action::Usage,
             FINALIZE => Action::Finalize,
+            INSPECT => Action::Inspect,
             _ => {
                 return Err(Fault::Kind {
                     kind,
@@ -984,6 +1016,18 @@ pub fn read_answer(bytes: &[u8], fds: usize) -> Result<(u16, u64, Answer), Fault
                 return Err(invalid("native vsock path"));
             }
             Answer::Attached {
+                key,
+                controller,
+                vsock,
+            }
+        }
+        A_METADATA => {
+            let controller = input.option(read_proc)?;
+            let vsock = owned_blob(&mut input, PATH_MAX)?;
+            if vsock.is_empty() || vsock.contains(&0) {
+                return Err(invalid("native vsock path"));
+            }
+            Answer::Metadata {
                 key,
                 controller,
                 vsock,
@@ -1173,6 +1217,49 @@ mod tests {
         let scope = encoded.len() - 17;
         encoded[scope] ^= 1;
         assert!(read_request(&encoded, 3).is_err());
+    }
+
+    /// AC-T7.4.1: read-only preflight observes immutable native metadata without obtaining a
+    /// notification pipe, resuming a controller or interpreting metadata as a release witness.
+    #[test]
+    fn metadata_only_frames_keep_legacy_attach_and_descriptor_contract() {
+        let request = Request::Control {
+            key: key(),
+            action: Action::Inspect,
+            controller: None,
+        };
+        let bytes = encode_request(VERSION, 79, &request).unwrap();
+        assert_eq!(&bytes[..8], b"HEXM\x01\x00\x13\x00");
+        assert_eq!(read_request(&bytes, 0).unwrap(), (VERSION, 79, request));
+        assert!(read_request(&bytes, 1).is_err());
+        for controller in [
+            None,
+            Some(ProcId {
+                pid: 83,
+                start_ticks: 89,
+            }),
+        ] {
+            let metadata = Answer::Metadata {
+                key: key(),
+                controller,
+                vsock: b"/private/reusable-path".to_vec(),
+            };
+            let bytes = encode_answer(VERSION, 97, &metadata).unwrap();
+            assert_eq!(&bytes[..8], b"HEXM\x01\x00\x10\x80");
+            assert_eq!(metadata.descriptors(), 0);
+            assert_eq!(read_answer(&bytes, 0).unwrap(), (VERSION, 97, metadata));
+            assert!(read_answer(&bytes, 1).is_err());
+            let mut forged = bytes;
+            forged[6..8].copy_from_slice(&A_ATTACHED.to_le_bytes());
+            assert!(read_answer(&forged, 0).is_err());
+            assert!(matches!(
+                read_answer(&forged, 1).unwrap().2,
+                Answer::Attached { .. }
+            ));
+        }
+        // A hostile tiny frame cannot ask for pointer storage larger than its length prefixes.
+        let mut tiny = Reader::new(&[0xff, 0xff, 0xff, 0x00]);
+        assert!(matches!(words(&mut tiny, 4), Err(Fault::Value { .. })));
     }
 
     /// AC-T7.4.1: control requests retain helper/owner/scope/commitment/controller identity, and
