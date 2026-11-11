@@ -168,11 +168,26 @@ impl Boot {
 
 impl Boot {
     /// The guest's grant for `spec` at render, before any device effect: a Shards renderer's exact
-    /// owner and set ([`Authority::check`]).
+    /// owner and set ([`Authority::check`]); a Firecracker VM's owner, with every PCI GPU its VMM
+    /// attached.
     pub fn check(&self, spec: &BoxSpec) -> Result<(), Refusal> {
         match self {
             Self::Renderer(authority) => authority.check(spec),
-            Self::Pci { .. } => Ok(()),
+            Self::Pci { owner, count } => {
+                spec.check()?;
+                let gpus = spec
+                    .devices
+                    .iter()
+                    .filter(|device| device.kind == DeviceKind::Gpu)
+                    .count();
+                if spec.class.class() != hex_api::Class::Oci || spec.id != *owner || gpus != *count
+                {
+                    return Err(invalid(
+                        "request disagrees with the Firecracker VM's owner or its attached GPUs",
+                    ));
+                }
+                Ok(())
+            }
         }
     }
 }
