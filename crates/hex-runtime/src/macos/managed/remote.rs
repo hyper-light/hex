@@ -808,7 +808,7 @@ impl Helper {
         let (bytes, descriptors) =
             frame::receive(fd.as_fd(), protocol::MAX_MESSAGE, Some(until))
                 .map_err(|error| CallFailure::framed(protocol::Operation::Connect, error))?;
-        peer(fd, request.key().helper)?;
+        peer_after_reply(fd, request.key().helper)?;
         if let Ok((version, answer_id, rejected)) =
             protocol::rejected::read(&bytes, descriptors.len())
         {
@@ -851,7 +851,7 @@ impl Helper {
             .map_err(|_| native_allocation(crate::MAX_BOXES))?;
         let (bytes, descriptors) =
             frame::receive(fd.as_fd(), bound, Some(until)).map_err(frame::Failure::refusal)?;
-        peer(&fd, process)?;
+        peer_after_reply(&fd, process)?;
         let (version, got, census) =
             protocol::census::read_answer(&bytes, descriptors.len(), crate::MAX_BOXES)
                 .map_err(|_| super::configuration("invalid native census reply"))?;
@@ -1031,6 +1031,19 @@ fn check_process(expected: ProcId) -> Result<(), Refusal> {
     }
     Ok(())
 }
+/// The same peer check once a whole reply is read. The helper closes a connection when it has
+/// answered (each request's, and its startup socket after the first Prepare), so a peer already
+/// gone then is the one checked before the request, not another: its process must still be the
+/// same live incarnation. Every other failure still refuses.
+fn peer_after_reply(fd: impl AsFd, expected: ProcId) -> Result<(), Refusal> {
+    match sys::peer_pid(fd.as_fd()) {
+        Err(sys::PeerPidFailure::Native(error)) if error.raw_os_error() == Some(libc::ENOTCONN) => {
+            check_process(expected)
+        }
+        _ => peer(fd, expected),
+    }
+}
+
 fn peer(fd: impl AsFd, expected: ProcId) -> Result<(), Refusal> {
     check_process(expected)?;
     if sys::peer_euid(fd.as_fd())
