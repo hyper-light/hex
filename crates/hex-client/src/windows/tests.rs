@@ -132,7 +132,7 @@ fn the_common_core_takes_windows_stream_handles_and_acknowledges_them() {
         answer(&peer, header.id, Answer::Exited(Exit::Code(0)), &[]);
     });
     raw.set_nonblocking(true).unwrap();
-    let client = Core::hello(Arc::new(Shared::new(Socket { raw }))).unwrap();
+    let client = Core::hello(Shared::try_new(Socket { raw }).unwrap()).unwrap();
     assert_eq!(client.classes(), vec![Class::Process]);
     let mut proc = client
         .exec(

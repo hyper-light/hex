@@ -75,12 +75,13 @@ impl Lab {
         Self { dir, node }
     }
 
-    fn link(&self) -> Arc<dyn Link> {
-        Arc::new(Ports {
+    fn link(&self) -> hex_client::guest::LinkOwner {
+        hex_client::guest::own_link(Ports {
             control: self.dir.path().join("control.sock"),
             stdio: self.dir.path().join("stdio.sock"),
             files: self.dir.path().join("files.sock"),
         })
+        .unwrap()
     }
 }
 
@@ -307,7 +308,7 @@ struct Held {
     control: PathBuf,
     stdio: PathBuf,
     wrote: Mutex<std::sync::mpsc::Sender<()>>,
-    held: Mutex<Option<UnixStream>>,
+    held: Arc<Mutex<Option<UnixStream>>>,
 }
 
 impl Link for Held {
@@ -352,12 +353,14 @@ fn an_exec_whose_stream_never_comes_waits_for_its_host_and_goes_with_it() {
     let nowhere = lab.dir.path().join("nowhere.sock");
     let nowhere_listener = UnixListener::bind(&nowhere).unwrap();
     let (wrote, writes) = std::sync::mpsc::channel();
-    let link = Arc::new(Held {
+    let held = Arc::new(Mutex::new(None));
+    let link = hex_client::guest::own_link(Held {
         control: lab.dir.path().join("control.sock"),
         stdio: nowhere,
         wrote: Mutex::new(wrote),
-        held: Mutex::new(None),
-    });
+        held: Arc::clone(&held),
+    })
+    .unwrap();
     let node = lab.node.try_clone().unwrap();
     let agent = std::thread::spawn(move || {
         let first = hello(&node);
@@ -372,7 +375,7 @@ fn an_exec_whose_stream_never_comes_waits_for_its_host_and_goes_with_it() {
         answer(&second, h, &Answer::Exited(Exit::Code(0)));
         second
     });
-    let first = Client::connect(Arc::clone(&link) as Arc<dyn Link>).unwrap();
+    let first = Client::connect(link.clone()).unwrap();
     while writes.try_recv().is_ok() {}
     std::thread::scope(|scope| {
         let waiting = scope.spawn(|| exec_stdin(&first).map(|_| ()));
@@ -380,7 +383,7 @@ fn an_exec_whose_stream_never_comes_waits_for_its_host_and_goes_with_it() {
         // the end that follows on the same connection.
         let _stream = nowhere_listener.accept().unwrap();
         writes.recv().unwrap();
-        let host = link.held.lock().unwrap().take().unwrap();
+        let host = held.lock().unwrap().take().unwrap();
         host.shutdown(Shutdown::Write).unwrap();
         assert!(matches!(waiting.join().unwrap(), Err(Refusal::Broken(_))));
     });
@@ -684,10 +687,13 @@ fn a_parked_exec_goes_to_the_node_when_its_set_is_whole() {
         answer(&conn, h, &Answer::Exited(Exit::Code(0)));
         conn
     });
-    let client = Client::connect(Arc::new(LatePorts {
-        dir: lab.dir.path().to_owned(),
-        relay: Arc::clone(&relay),
-    }))
+    let client = Client::connect(
+        hex_client::guest::own_link(LatePorts {
+            dir: lab.dir.path().to_owned(),
+            relay: Arc::clone(&relay),
+        })
+        .unwrap(),
+    )
     .unwrap();
     let mut proc = exec_stdin(&client).unwrap();
     assert_eq!(proc.wait_for(Duration::MAX).unwrap(), Some(Exit::Code(0)));

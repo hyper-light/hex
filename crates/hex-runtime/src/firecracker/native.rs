@@ -10,7 +10,7 @@ use hex_api::{
     BoxId, BoxInfo, BoxSpec, Class, ClassSpec, DeviceId, DeviceKind, LifecycleCause, Proc, Program,
     Refusal, Runtime, Signal, Stdio, Usage,
 };
-use hex_client::guest::{Client, Link, stage};
+use hex_client::guest::{Client, LinkOwner, own_link, stage};
 use hex_core::record::{BoxRecord, Phase};
 
 use super::{Books, Config, Transaction, exhausted, invalid, observations, transport, vfio};
@@ -153,12 +153,12 @@ impl FirecrackerRuntime {
         })
     }
 
-    fn link(&self, record: &BoxRecord) -> Result<Arc<dyn Link>, Refusal> {
-        Ok(Arc::new(transport::Endpoint {
+    fn link(&self, record: &BoxRecord) -> Result<LinkOwner, Refusal> {
+        own_link(transport::Endpoint {
             path: self.paths(record)?.vsock,
             timeout: self.config.operation_timeout,
             create_deadline: None,
-        }))
+        })
     }
 
     fn native_identity(&self, record: &BoxRecord) -> Result<Option<shards_api::Identity>, Refusal> {
@@ -373,11 +373,11 @@ impl FirecrackerRuntime {
         guest_spec.class = ClassSpec::Oci(workload);
         guest_spec.allocation = None;
         guest_spec.route = None;
-        let link: Arc<dyn Link> = Arc::new(transport::Endpoint {
+        let link = own_link(transport::Endpoint {
             path: copy_path(&paths.vsock)?,
             timeout: self.config.operation_timeout,
             create_deadline: Some(until),
-        });
+        })?;
         fs::create_dir(&paths.dir)
             .and_then(|()| fs::set_permissions(&paths.dir, fs::Permissions::from_mode(0o700)))
             .map_err(|e| Refusal::os("creating private VM directory", e))?;
@@ -431,7 +431,7 @@ impl FirecrackerRuntime {
         }
         record = current;
         transport::ready(&listener, native.as_ref(), remaining(until)?)?;
-        let client = Client::connect(Arc::clone(&link))?;
+        let client = Client::connect(triomphe::Arc::clone(&link))?;
         guest_spec.devices = self.translate(&record, &client, Some(until))?;
         let memory = self
             .config

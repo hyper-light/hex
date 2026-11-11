@@ -30,14 +30,58 @@ impl Link for Loopback {
     }
 }
 
-fn listeners() -> (TcpListener, TcpListener, Arc<dyn Link>) {
+fn listeners() -> (TcpListener, TcpListener, LinkOwner) {
     let control = TcpListener::bind("127.0.0.1:0").unwrap();
     let stdio = TcpListener::bind("127.0.0.1:0").unwrap();
-    let link = Arc::new(Loopback {
+    let link = own_link(Loopback {
         control: control.local_addr().unwrap(),
         stdio: stdio.local_addr().unwrap(),
-    });
+    })
+    .unwrap();
     (control, stdio, link)
+}
+
+/// AC-T7.4.1: owning a link makes no dial; clones retain the same link until the last drop.
+#[test]
+fn link_owner_retains_one_instance_without_dial_effects() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Counted {
+        dials: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+    impl Link for Counted {
+        fn dial(&self, _: u32) -> Result<Box<dyn Duplex>, Refusal> {
+            self.dials.fetch_add(1, Ordering::SeqCst);
+            Err(Refusal::Broken("owned test dial".into()))
+        }
+    }
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let dials = Arc::new(AtomicUsize::new(0));
+    let drops = Arc::new(AtomicUsize::new(0));
+    let owner = own_link(Counted {
+        dials: Arc::clone(&dials),
+        drops: Arc::clone(&drops),
+    })
+    .unwrap();
+    let retained = owner.clone();
+    assert!(triomphe::Arc::ptr_eq(&owner, &retained));
+    assert_eq!(dials.load(Ordering::SeqCst), 0);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        retained.dial(stream::CONTROL_PORT),
+        Err(Refusal::Broken(_))
+    ));
+    assert_eq!(dials.load(Ordering::SeqCst), 1);
+    drop(owner);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    drop(retained);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
 /// The next framed request on `conn`, waiting on the fact: its bytes, or its end, which fails the test.
@@ -156,7 +200,7 @@ fn an_agent_of_another_wire_is_refused_at_the_hello() {
         send_answer(&mut conn, h.id, &Answer::Refused(Refusal::NoSuchBox(id)));
         (rest, conn)
     });
-    let refused = Client::connect(Arc::clone(&link)).err();
+    let refused = Client::connect(link.clone()).err();
     let Some(Refusal::Invalid { what: "wire", why }) = &refused else {
         panic!("refused for its wire, not {refused:?}")
     };
@@ -393,11 +437,12 @@ fn a_stdio_connection_waits_on_its_program_as_a_local_pipe_does() {
         TcpListener::bind("127.0.0.1:0").unwrap(),
     );
     let bounds = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let link = Arc::new(Recording {
+    let link = own_link(Recording {
         control: control.local_addr().unwrap(),
         stdio: stdio.local_addr().unwrap(),
         bounds: Arc::clone(&bounds),
-    });
+    })
+    .unwrap();
     let agent = std::thread::spawn(move || {
         let (mut conn, _) = control.accept().unwrap();
         hello(&mut conn);
@@ -593,11 +638,9 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {
             binary: None,
         })
         .unwrap();
-    let transport = Stream::dial(Arc::new(shards::ShardsLink::new(
-        Arc::from(guest),
-        Duration::MAX,
-    )))
-    .unwrap();
+    let transport =
+        Stream::dial(own_link(shards::ShardsLink::new(Arc::from(guest), Duration::MAX)).unwrap())
+            .unwrap();
     let given = transport
         .asks(
             1,

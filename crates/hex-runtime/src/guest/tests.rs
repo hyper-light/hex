@@ -1367,8 +1367,8 @@ fn capacity_runtime(capacity: Option<hex_api::Capacity>, config: GuestConfig) ->
     let kept = Kept::new(true);
     kept.running.lock().unwrap().insert(123);
     let guest: Arc<dyn shards_api::Guest> = kept.guest(123).into();
-    let link: Arc<dyn Link> = Arc::new(CapacityLink(capacity));
-    let client = Client::connect(Arc::clone(&link)).unwrap();
+    let link: LinkOwner = own_link(CapacityLink(capacity)).unwrap();
+    let client = Client::connect(triomphe::Arc::clone(&link)).unwrap();
     let runtime = GuestRuntime::new(Arc::new(KeptGuests(kept)), config);
     *runtime.booted.lock().unwrap() = Some(
         booted_owner(Booted {
@@ -1384,9 +1384,9 @@ fn capacity_runtime(capacity: Option<hex_api::Capacity>, config: GuestConfig) ->
     runtime
 }
 
-pub(super) fn model_connection() -> (Arc<dyn Link>, Client) {
-    let link: Arc<dyn Link> = Arc::new(CapacityLink(None));
-    let client = Client::connect(Arc::clone(&link)).unwrap();
+pub(super) fn model_connection() -> (LinkOwner, Client) {
+    let link: LinkOwner = own_link(CapacityLink(None)).unwrap();
+    let client = Client::connect(triomphe::Arc::clone(&link)).unwrap();
     (link, client)
 }
 

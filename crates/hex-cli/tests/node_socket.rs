@@ -731,9 +731,10 @@ fn through_the_guest_relay(lab: &Lab, agent: &Agent, exe: &str) {
         .read_line(&mut line)
         .unwrap();
     assert_eq!(line.trim(), "ready", "hex guest relay said {line:?}");
-    let guest =
-        hex_client::guest::Client::connect(std::sync::Arc::new(GuestPorts(dir.path().to_owned())))
-            .expect("connect through the guest relay");
+    let guest = hex_client::guest::Client::connect(
+        hex_client::guest::own_link(GuestPorts(dir.path().to_owned())).unwrap(),
+    )
+    .expect("connect through the guest relay");
     assert_eq!(guest.classes(), [Class::Process, Class::Oci]);
     let failures = conformance::run(&guest, &OciBoxes(lab, false));
     assert!(

@@ -1024,13 +1024,13 @@ impl GuestRuntime {
         backing: Option<shared::Binding>,
         budget: managed::Budget,
     ) -> Result<triomphe::Arc<Booted>, Refusal> {
-        let link: Arc<dyn Link> = Arc::new(ShardsLink::managed(
+        let link: LinkOwner = own_link(ShardsLink::managed(
             guest
                 .try_clone()
                 .map_err(|why| refusal("retaining managed guest connection", &why))?,
             budget.remaining()?,
-        ));
-        let client = Client::connect(Arc::clone(&link))?;
+        ))?;
+        let client = Client::connect(triomphe::Arc::clone(&link))?;
         let booted = booted_owner(Booted {
             guest: GuestHandle::Managed(guest),
             link,
@@ -1402,7 +1402,7 @@ impl GuestRuntime {
             .clone()
             .ok_or_else(|| invalid("guest program has no node event loop"))?;
         let (token, room) = joins.reserve()?;
-        let (client, pump) = Client::connect_evented(Arc::clone(&booted.link), room)?;
+        let (client, pump) = Client::connect_evented(triomphe::Arc::clone(&booted.link), room)?;
         joins.join(token, pump)?;
         Ok(Some(Arc::new(client)))
     }

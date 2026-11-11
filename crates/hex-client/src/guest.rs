@@ -21,7 +21,8 @@ use hex_core::stream::{self, Deframer, Exec, Named};
 use hex_core::wire::{self, Received};
 
 use crate::calls::{
-    Core, KINDS, Lent, ReplyDeadline, Sent, Shared, Take, Transport, poisoned, protocol_ready,
+    Core, KINDS, Lent, ReplyDeadline, Sent, Shared, SharedOwner, Take, Transport, poisoned,
+    protocol_ready,
 };
 use crate::copy::{copy, copy_in};
 
@@ -130,6 +131,20 @@ pub trait Link: Send + Sync + 'static {
     }
 }
 
+/// The same fallibly allocated link retained by every stream on a connection.
+pub type LinkOwner = triomphe::Arc<dyn Link>;
+
+/// Owns `link` before dialing or any other link effect. Unsizing keeps the same allocation.
+pub fn own_link<L: Link>(link: L) -> Result<LinkOwner, Refusal> {
+    use unsize::CoerceUnsize;
+
+    let owner = triomphe::Arc::try_new(link).map_err(|_| Refusal::Exhausted {
+        what: "guest link owner",
+        bound: std::mem::size_of::<L>(),
+    })?;
+    Ok(owner.unsize(unsize::Coercion!(to dyn Link)))
+}
+
 /// How long a call waits for the guest's node agent's answer, one wait a kind of call (`crate::calls::kind_of`'s
 /// order), as the socket's client waits (decision 9): twice the slowest answer this process has had to a call of
 /// that kind, through the guest. On macOS, Hello and capacity use exact per-profile maxima from
@@ -187,7 +202,7 @@ pub type Client = Core<Stream>;
 
 /// The control connection, as a client's transport: read and written without waiting, waited on by the core.
 pub struct Stream {
-    link: Arc<dyn Link>,
+    link: LinkOwner,
     /// Configuration, not a connection-lifetime deadline: each operation starts its own cap.
     reply_budget: Option<Duration>,
     /// The token the relay sent first on the control connection, which its stdio connections name.
@@ -668,7 +683,7 @@ const READS_PER_READY: usize = 64;
 /// [`Pump::handle`] calls [`Pump::ready`] when it is ready, which reads what has come and hands each
 /// message to its call's completion, and writes what waits. It holds the connection's reader's turn for good.
 pub struct Pump {
-    shared: Arc<Shared<Stream>>,
+    shared: SharedOwner<Stream>,
     ended: bool,
 }
 
@@ -734,11 +749,11 @@ impl Pump {
 
 impl Client {
     /// Dials the guest's node agent through `link` and learns what it runs and its bounds.
-    pub fn connect(link: Arc<dyn Link>) -> Result<Self, Refusal> {
+    pub fn connect(link: LinkOwner) -> Result<Self, Refusal> {
         let budget = link.reply_budget();
         let deadline = ReplyDeadline::caller(budget)?;
         Core::hello_before(
-            Arc::new(Shared::new(Stream::dial_before(link, budget, deadline)?)),
+            Shared::try_new(Stream::dial_before(link, budget, deadline)?)?,
             deadline,
         )
     }
@@ -749,13 +764,13 @@ impl Client {
     /// `wants_room` is told when bytes wait to be written, so the loop watches for room too. Every connection's
     /// waits are the loop's from here: its reads and writes never wait.
     pub fn connect_evented(
-        link: Arc<dyn Link>,
+        link: LinkOwner,
         wants_room: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<(Self, Pump), Refusal> {
         let budget = link.reply_budget();
         let deadline = ReplyDeadline::caller(budget)?;
-        let shared = Arc::new(Shared::new(Stream::dial_before(link, budget, deadline)?));
-        let client = Core::hello_before(Arc::clone(&shared), deadline)?;
+        let shared = Shared::try_new(Stream::dial_before(link, budget, deadline)?)?;
+        let client = Core::hello_before(triomphe::Arc::clone(&shared), deadline)?;
         let limits = client.limits();
         *shared.transport.backlog.lock().map_err(poisoned)? = Some(Backlog {
             bytes: VecDeque::new(),
@@ -777,14 +792,14 @@ impl Stream {
     /// The guest's control port dialed through `link`, its relay's token read, and the connection made to read and
     /// write without waiting, as the core waits on it.
     #[cfg(test)]
-    pub(crate) fn dial(link: Arc<dyn Link>) -> Result<Self, Refusal> {
+    pub(crate) fn dial(link: LinkOwner) -> Result<Self, Refusal> {
         let budget = link.reply_budget();
         let deadline = ReplyDeadline::caller(budget)?;
         Self::dial_before(link, budget, deadline)
     }
 
     fn dial_before(
-        link: Arc<dyn Link>,
+        link: LinkOwner,
         budget: Option<Duration>,
         deadline: Option<ReplyDeadline>,
     ) -> Result<Self, Refusal> {

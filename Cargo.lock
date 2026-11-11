@@ -340,6 +340,8 @@ dependencies = [
  "shards-api",
  "tar",
  "tempfile",
+ "triomphe",
+ "unsize",
 ]
 
 [[package]]

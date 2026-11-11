@@ -496,6 +496,9 @@ pub struct Shared<T: Transport> {
     owed: Mutex<Owed>,
 }
 
+/// One connection state allocation, shared by its Core, Pump and remote programs.
+pub(crate) type SharedOwner<T> = triomphe::Arc<Shared<T>>;
+
 /// The existing whole-message send authority. Only its acquisition changes: a queued caller can
 /// wait on the current sender's release with its own deadline instead of blocking inside Mutex::lock.
 #[derive(Default)]
@@ -668,15 +671,19 @@ struct EndState {
 }
 
 impl<T: Transport> Shared<T> {
-    pub(crate) fn new(transport: T) -> Self {
+    pub(crate) fn try_new(transport: T) -> Result<SharedOwner<T>, Refusal> {
         let reading = transport.reading();
-        Self {
+        triomphe::Arc::try_new(Self {
             transport,
             state: Mutex::new(State::default()),
             reading: Mutex::new(reading),
             sending: SendLock::default(),
             owed: Mutex::new(Owed::default()),
-        }
+        })
+        .map_err(|_| Refusal::Exhausted {
+            what: "client shared state owner",
+            bound: std::mem::size_of::<Self>(),
+        })
     }
 
     fn state(&self) -> Result<MutexGuard<'_, State>, Refusal> {
@@ -1299,7 +1306,7 @@ impl<T: Transport> Drop for Caller<'_, T> {
 
 /// The connection, held by the client and by each `Proc` it returned: it closes when the last goes.
 pub(crate) struct Conn<T: Transport> {
-    shared: Arc<Shared<T>>,
+    shared: SharedOwner<T>,
 }
 
 impl<T: Transport> Drop for Conn<T> {
@@ -1507,7 +1514,7 @@ impl<T: Transport> Conn<T> {
 
 /// A node agent, reached through a transport.
 pub struct Core<T: Transport> {
-    conn: Arc<Conn<T>>,
+    conn: triomphe::Arc<Conn<T>>,
     classes: Vec<Class>,
     limits: Limits,
     budgets: wire::Budgets,
@@ -1518,7 +1525,7 @@ pub struct Core<T: Transport> {
 /// before a successful send cancels only its reservation; it sends no request or release and makes no stream.
 #[must_use = "a deferred call sends nothing until send is called"]
 pub struct Deferred<T: Transport> {
-    conn: Arc<Conn<T>>,
+    conn: triomphe::Arc<Conn<T>>,
     id: u64,
     bytes: Vec<u8>,
     reserved: bool,
@@ -1614,17 +1621,20 @@ impl<T: Transport> Core<T> {
     /// Says hello over `shared`, naming this build, and learns what the agent runs and its bounds. An agent of
     /// another wire is refused here, by type, naming both wires and both builds (`hex_core::wire::Fault::Wire`):
     /// two sides talk only when built from the same wire.
-    pub(crate) fn hello(shared: Arc<Shared<T>>) -> Result<Self, Refusal> {
+    pub(crate) fn hello(shared: SharedOwner<T>) -> Result<Self, Refusal> {
         let deadline = ReplyDeadline::caller(shared.transport.reply_budget())?;
         Self::hello_before(shared, deadline)
     }
 
     pub(crate) fn hello_before(
-        shared: Arc<Shared<T>>,
+        shared: SharedOwner<T>,
         deadline: Option<ReplyDeadline>,
     ) -> Result<Self, Refusal> {
         let client = Self {
-            conn: Arc::new(Conn { shared }),
+            conn: triomphe::Arc::try_new(Conn { shared }).map_err(|_| Refusal::Exhausted {
+                what: "client connection owner",
+                bound: std::mem::size_of::<Conn<T>>(),
+            })?,
             classes: Vec::new(),
             limits: Limits {
                 connections: 1,
@@ -1791,7 +1801,7 @@ impl<T: Transport> Core<T> {
             id
         };
         let mut deferred = Deferred {
-            conn: Arc::clone(&self.conn),
+            conn: triomphe::Arc::clone(&self.conn),
             id,
             bytes: Vec::new(),
             reserved: true,
@@ -1973,7 +1983,7 @@ impl<T: Transport> Core<T> {
             Answer::Started { pid } | Answer::Given { pid, .. } => {
                 let ends = shared.state()?.given.remove(&exec).unwrap_or_default();
                 let mut proc = RemoteProc {
-                    conn: Arc::clone(&self.conn),
+                    conn: triomphe::Arc::clone(&self.conn),
                     bound: self.limits.message_bytes,
                     exec,
                     pid,
@@ -2331,7 +2341,7 @@ impl<T: Transport> Runtime for Core<T> {
 
 /// A program a node agent started for this client: its end comes as a message.
 struct RemoteProc<T: Transport> {
-    conn: Arc<Conn<T>>,
+    conn: triomphe::Arc<Conn<T>>,
     /// The agent's message bound, which its kill goes in.
     bound: usize,
     exec: u64,
@@ -2350,7 +2360,7 @@ impl<T: Transport> RemoteProc<T> {
         if let Some(exit) = self.exit {
             return Ok(Some(exit));
         }
-        let shared = Arc::clone(&self.conn.shared);
+        let shared = triomphe::Arc::clone(&self.conn.shared);
         let deadline = timeout.map(|t| Instant::now().checked_add(t));
         shared.state()?.waiting.insert(self.exec);
         let mut mine = false;

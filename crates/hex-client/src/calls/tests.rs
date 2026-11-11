@@ -134,8 +134,8 @@ fn client() -> Core<Memory> {
     handle.connect(handle.local_addr().unwrap()).unwrap();
     handle.set_nonblocking(true).unwrap();
     let client = Core {
-        conn: Arc::new(Conn {
-            shared: Arc::new(Shared::new(Memory {
+        conn: triomphe::Arc::try_new(Conn {
+            shared: Shared::try_new(Memory {
                 handle,
                 outbound: Mutex::new(Vec::new()),
                 inbound: Mutex::new(VecDeque::new()),
@@ -144,8 +144,10 @@ fn client() -> Core<Memory> {
                 opened: Mutex::new(Vec::new()),
                 program_stdio: Mutex::new(None),
                 opening: Mutex::new(None),
-            })),
-        }),
+            })
+            .unwrap(),
+        })
+        .unwrap(),
         classes: Vec::new(),
         limits: Limits {
             connections: 1,

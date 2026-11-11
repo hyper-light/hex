@@ -7,7 +7,6 @@ use std::io::{IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use hex_api::Refusal;
@@ -245,7 +244,7 @@ impl Client {
             op: "connecting to the node agent's socket",
             why: format!("{}: {e}", path.display()),
         })?;
-        Core::hello(Arc::new(Shared::new(Socket { fd })))
+        Core::hello(Shared::try_new(Socket { fd })?)
     }
 }
 

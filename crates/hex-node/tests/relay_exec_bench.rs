@@ -28,7 +28,6 @@ use std::mem::MaybeUninit;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, Class, Exit, Program, Refusal, Runtime, Stdio};
@@ -162,7 +161,9 @@ fn relay_exec_start_and_throughput() {
     let relay = Relay::new(&node_path, &staged, Limits::of(&node_limits(), &budgets()));
     std::thread::spawn(move || relay.serve(Box::new(control), Box::new(stdio), Box::new(files)));
     std::thread::spawn(move || node(listener));
-    let client = Client::connect(Arc::new(Ports(dir.path().to_owned()))).unwrap();
+    let client =
+        Client::connect(hex_client::guest::own_link(Ports(dir.path().to_owned())).unwrap())
+            .unwrap();
     let b = BoxId::new("b").unwrap();
     let exec = |input: std::io::PipeReader, output: std::io::PipeWriter| {
         client

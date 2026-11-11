@@ -5,7 +5,6 @@
 use std::io::Write as _;
 use std::os::windows::io::AsSocket;
 use std::path::Path;
-use std::sync::Arc;
 
 use hex_afunix::{self as socket, Socket as Raw};
 use hex_api::Refusal;
@@ -225,7 +224,7 @@ impl Client {
         })?;
         raw.set_nonblocking(true)
             .map_err(|e| Refusal::os("making the node agent's socket non-blocking", e))?;
-        Core::hello(Arc::new(Shared::new(Socket { raw })))
+        Core::hello(Shared::try_new(Socket { raw })?)
     }
 }
 

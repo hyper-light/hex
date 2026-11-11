@@ -80,13 +80,14 @@ fn explicit_budget_caps_an_unarmed_core_hello() {
     socket.connect(socket.local_addr().unwrap()).unwrap();
     socket.set_nonblocking(true).unwrap();
     let (sent, request) = mpsc::sync_channel(1);
-    let shared = Arc::new(Shared::new(Stalled {
+    let shared = Shared::try_new(Stalled {
         socket,
         sent: Mutex::new(Some(sent)),
         closed: AtomicBool::new(false),
         budget: Some(CAP),
-    }));
-    let control = Arc::clone(&shared);
+    })
+    .unwrap();
+    let control = triomphe::Arc::clone(&shared);
     let (finished, answer) = mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
         let result = Core::hello(control).map(drop);
@@ -154,7 +155,11 @@ fn explicit_budget_caps_token_after_a_bounded_dial() {
     let (finished, answer) = mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
         finished
-            .send(guest::Client::connect(Arc::new(TokenLink { address })).map(drop))
+            .send(
+                guest::own_link(TokenLink { address })
+                    .and_then(guest::Client::connect)
+                    .map(drop),
+            )
             .unwrap();
     });
     let peer = accept_before(
@@ -188,9 +193,10 @@ fn explicit_budget_caps_token_after_a_bounded_dial() {
 
 fn configured<T: Transport>(transport: T) -> Core<T> {
     let client = Core {
-        conn: Arc::new(Conn {
-            shared: Arc::new(Shared::new(transport)),
-        }),
+        conn: triomphe::Arc::try_new(Conn {
+            shared: Shared::try_new(transport).unwrap(),
+        })
+        .unwrap(),
         classes: vec![Class::Oci],
         limits: Limits {
             connections: 1,
@@ -209,7 +215,7 @@ fn configured<T: Transport>(transport: T) -> Core<T> {
 
 struct NoDial {
     budget: Duration,
-    dials: AtomicUsize,
+    dials: Arc<AtomicUsize>,
 }
 impl Link for NoDial {
     fn reply_budget(&self) -> Option<Duration> {
@@ -244,10 +250,12 @@ fn invalid_budgets_refuse_before_call_or_dial_effects() {
         assert!(state.programs.is_empty());
         drop(state);
         assert!(matches!(request.try_recv(), Err(mpsc::TryRecvError::Empty)));
-        let link = Arc::new(NoDial {
+        let dials = Arc::new(AtomicUsize::new(0));
+        let link = guest::own_link(NoDial {
             budget,
-            dials: AtomicUsize::new(0),
-        });
+            dials: Arc::clone(&dials),
+        })
+        .unwrap();
         assert!(matches!(
             guest::Client::connect(link.clone()),
             Err(Refusal::Invalid {
@@ -255,7 +263,7 @@ fn invalid_budgets_refuse_before_call_or_dial_effects() {
                 ..
             })
         ));
-        assert_eq!(link.dials.load(Ordering::SeqCst), 0);
+        assert_eq!(dials.load(Ordering::SeqCst), 0);
     }
 }
 
@@ -488,7 +496,7 @@ struct RecordedLink {
     control: SocketAddr,
     stdio: SocketAddr,
     budget: Duration,
-    deadlines: Mutex<Vec<(u32, Instant)>>,
+    deadlines: Arc<Mutex<Vec<(u32, Instant)>>>,
     read: Option<mpsc::SyncSender<TokenRead>>,
 }
 impl Link for RecordedLink {
@@ -591,14 +599,16 @@ fn partial_token_progress_does_not_reset_the_absolute_deadline() {
     let wake = Wake::new().unwrap();
     // The fixed token has eight bytes; this two-byte case records positive and WouldBlock reads.
     let (read, reads) = mpsc::sync_channel(hex_core::stream::TOKEN_BYTES * 2);
-    let link = Arc::new(RecordedLink {
+    let recorded_deadlines = Arc::new(Mutex::new(Vec::new()));
+    let link = guest::own_link(RecordedLink {
         control: address,
         stdio: address,
         budget: OBSERVE,
-        deadlines: Mutex::new(Vec::new()),
+        deadlines: Arc::clone(&recorded_deadlines),
         read: Some(read),
-    });
-    let control = Arc::clone(&link);
+    })
+    .unwrap();
+    let control = link.clone();
     let (finished, answer) = mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
         finished
@@ -627,8 +637,7 @@ fn partial_token_progress_does_not_reset_the_absolute_deadline() {
             &mut events,
             Instant::now().checked_add(OBSERVE).unwrap(),
         )?;
-        let deadline = link
-            .deadlines
+        let deadline = recorded_deadlines
             .lock()
             .unwrap()
             .first()
@@ -679,7 +688,7 @@ fn partial_token_progress_does_not_reset_the_absolute_deadline() {
             .any(|event| matches!(event.result, Err(io::ErrorKind::WouldBlock)))
     );
     assert!(matches!(completed.unwrap(), Err(Refusal::Os { why, .. }) if why.contains("caller")));
-    assert_eq!(link.deadlines.lock().unwrap().len(), 1);
+    assert_eq!(recorded_deadlines.lock().unwrap().len(), 1);
 }
 
 fn next_request(peer: &mut TcpStream) -> io::Result<(Header, Request)> {
@@ -743,13 +752,15 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
     let stop = Arc::new(AtomicBool::new(false));
     let wake = Arc::new(Wake::new().unwrap());
     let owned = Arc::new(Mutex::new(Vec::<TcpStream>::new()));
-    let link = Arc::new(RecordedLink {
+    let recorded_deadlines = Arc::new(Mutex::new(Vec::new()));
+    let link = guest::own_link(RecordedLink {
         control: control.local_addr().unwrap(),
         stdio: stdio.local_addr().unwrap(),
         budget: CAP,
-        deadlines: Mutex::new(Vec::new()),
+        deadlines: Arc::clone(&recorded_deadlines),
         read: None,
-    });
+    })
+    .unwrap();
     let (agent_stop, agent_wake, agent_owned) =
         (Arc::clone(&stop), Arc::clone(&wake), Arc::clone(&owned));
     let (agent_finished, agent_done) = mpsc::sync_channel(1);
@@ -847,7 +858,7 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
             },
         )?;
         eprintln!("client_budget_named phase=client_started");
-        let deadlines = link.deadlines.lock().unwrap().clone();
+        let deadlines = recorded_deadlines.lock().unwrap().clone();
         let deadline = deadlines.last().unwrap().1;
         until(deadline)?;
         let pending = proc.try_wait()?;

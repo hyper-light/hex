@@ -29,9 +29,11 @@ use hex_api::{
     BoxId, BoxInfo, BoxSpec, Class, ClassSpec, Proc, Program, Refusal, Rootfs, Runtime, Signal,
     Stdio, Usage,
 };
+#[cfg(test)]
+use hex_client::guest::Link;
 use hex_client::guest::shards::{ShardsLink, refusal};
 use hex_client::guest::stage::{self, Item};
-use hex_client::guest::{Client, Link};
+use hex_client::guest::{Client, LinkOwner, own_link};
 use hex_core::stream::{self, files};
 
 use shares::Share;
@@ -207,7 +209,7 @@ struct Owner {
 
 struct Booted {
     guest: GuestHandle,
-    link: Arc<dyn Link>,
+    link: LinkOwner,
     client: Client,
     evented: Mutex<Option<Arc<Client>>>,
     owner: Option<Owner>,
@@ -487,11 +489,11 @@ impl GuestRuntime {
                 }
                 Err(why) => return Err(refusal("taking back the node's guest", &why)),
             };
-        let link: Arc<dyn Link> = Arc::new(ShardsLink::new(
+        let link: LinkOwner = own_link(ShardsLink::new(
             Arc::clone(&guest),
             self.first_dial_bound()?,
-        ));
-        match Client::connect(Arc::clone(&link)) {
+        ))?;
+        match Client::connect(triomphe::Arc::clone(&link)) {
             Ok(client) => {
                 // The binary that booted it isn't known here: no warm-up is asked for it.
                 let b = booted_owner(Booted {
@@ -539,7 +541,7 @@ impl GuestRuntime {
             return Ok(());
         };
         let (token, room) = joins.reserve()?;
-        let (client, pump) = Client::connect_evented(Arc::clone(&b.link), room)?;
+        let (client, pump) = Client::connect_evented(triomphe::Arc::clone(&b.link), room)?;
         *b.evented.lock().map_err(poisoned)? = Some(Arc::new(client));
         joins.join(token, pump)
     }
@@ -574,7 +576,7 @@ impl GuestRuntime {
                 Refusal::Broken("the guest program has no node event loop".to_owned())
             })?;
         let (token, room) = joins.reserve()?;
-        let (client, pump) = Client::connect_evented(Arc::clone(&b.link), room)?;
+        let (client, pump) = Client::connect_evented(triomphe::Arc::clone(&b.link), room)?;
         joins.join(token, pump)?;
         Ok(Some(Arc::new(client)))
     }
@@ -694,8 +696,8 @@ impl GuestRuntime {
                 .map_err(|why| refusal("booting the node's guest", &why))?
                 .into();
             let patience = bound.saturating_sub(began.elapsed());
-            let link: Arc<dyn Link> = Arc::new(ShardsLink::new(Arc::clone(&guest), patience));
-            match Client::connect(Arc::clone(&link)) {
+            let link: LinkOwner = own_link(ShardsLink::new(Arc::clone(&guest), patience))?;
+            match Client::connect(triomphe::Arc::clone(&link)) {
                 Ok(client) => {
                     self.learn(began.elapsed());
                     if let Err(why) = self.record(guest.as_ref()) {
