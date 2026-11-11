@@ -1,0 +1,68 @@
+{
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "67861440bf98bfc2d7d03e7507828a00cf2f01af",
+  "scope": "Standalone TEST/measurement only; no production/sys/helper/SDK/ABI/Cargo change",
+  "research_pin": "2ba039ccc73d0378eb9567a8743df7ef381f5e61",
+  "actual_escape_original_log_sha256": "14c6f6051e4cdf39358d6ef6914ee1532376e94fef040bccefbb649036df1ecc",
+  "old_a102_actors": "UNKNOWN unchanged; no query/signal",
+  "own_compile_syntax_test_native_dispatch": false,
+  "cases": [
+    "samePID/birth held replacement +NPROC0/QoS/FD/thread checks",
+    "nativeENOENT owned child error/reap",
+    "postactivation invalid-session terminal ownership",
+    "held replacement fatal-memory combination"
+  ],
+  "inputs": "Only explicit positive native-memory MiB cap; ROOT admits actual budget",
+  "parent_guard_ns": 39507000000,
+  "safety": "Prepared storage/actions beforeCOWfork; no child allocator/format/locks/destructors; only public preparedposix_spawn+existing native primitives; no root/credential/service/filter changes or private syscall",
+  "production_release_remedy": false,
+  "remaining": [
+    "ROOT exact compiler/native mechanism receipt",
+    "Native closed set of EACH presealed Shards worker",
+    "Actual helper/GPU/native-scope absence/final-charge/resource/full gates"
+  ],
+  "sdk_headers": [
+    {
+      "path": "/Library/Developer/CommandLineTools/SDKs/MacOSX26.4.sdk/usr/include/spawn.h",
+      "bytes": 8685,
+      "sha256": "e71350191a9597fc90d474b1d7baa3d81ef62282981c89e78f8055fcd10d2f48"
+    },
+    {
+      "path": "/Library/Developer/CommandLineTools/SDKs/MacOSX26.4.sdk/usr/include/sys/spawn.h",
+      "bytes": 3492,
+      "sha256": "8e73a88c3f63dae77ebf831737942e82ee7c78a7af1446fdbb1ee7ac6804a7e4"
+    },
+    {
+      "path": "/Library/Developer/CommandLineTools/SDKs/MacOSX26.4.sdk/usr/include/pthread/spawn.h",
+      "bytes": 2761,
+      "sha256": "0eddd1d85276ea57f9985e2eb3b3ef0b76d30c6d05de4ad3c6f5c972d99458e4"
+    },
+    {
+      "path": "/Library/Developer/CommandLineTools/SDKs/MacOSX26.4.sdk/usr/include/pthread/qos.h",
+      "bytes": 10256,
+      "sha256": "bfcfcf23501c328f5aa7f3bb39c0c8167730ab111393063c5b5fb4bd72d074f2"
+    },
+    {
+      "path": "/Library/Developer/CommandLineTools/SDKs/MacOSX26.4.sdk/usr/include/sys/proc.h",
+      "bytes": 11852,
+      "sha256": "593af71b2740ba6248995691280bcb15f8900d46b1d9868f7345084aa0692949"
+    },
+    {
+      "path": "/Library/Developer/CommandLineTools/SDKs/MacOSX26.4.sdk/usr/include/sys/event.h",
+      "bytes": 17873,
+      "sha256": "b09a4fdd9e88a5c1c9a29bded36a6f8b96b39a3054f0075a07c19da587f0e062"
+    }
+  ],
+  "source_hashes": {
+    "docs/research/measurements/hex-complete-lifecycle/macos_setexec_preseal_control.c": {
+      "bytes": 28566,
+      "sha256": "243c975934baa363003cc0dec9b96724cad946a71a6f9bb7d58544a3acdb324b"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/macos-setexec-preseal-control.md": {
+      "bytes": 10690,
+      "sha256": "edaea2224cea0785ba4247a34b39f68f8f1d863b978a5c83274791650a82290e"
+    }
+  }
+}
