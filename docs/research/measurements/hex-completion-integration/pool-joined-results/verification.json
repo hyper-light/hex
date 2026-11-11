@@ -1,0 +1,25 @@
+{
+  "independently_reverified_all_archives_and_members": true,
+  "archives": [
+    {
+      "file": "original-preflight-and-mac-compiler-ports.tar.gz",
+      "sha256": "54697c2d6e2fa0c82275a24752a555f771dc585b87124b90ceaf78d2b761cce7",
+      "bytes": 660309,
+      "verified_members": 28
+    },
+    {
+      "file": "linux-be8-six-green.tar.gz",
+      "sha256": "ffaf928857d2dfad4ddf25881b7c962a1a16a3477cfbb01d2ec4f3c7e440c001",
+      "bytes": 231816,
+      "verified_members": 12
+    },
+    {
+      "file": "mac-be8-original-five-red.tar.gz",
+      "sha256": "0a34e0ec667820795cda9cf5ee3dc4168c084d9ee14c4e137156e0b702913495",
+      "bytes": 221269,
+      "verified_members": 13
+    }
+  ],
+  "source_claim": "per-archive exact source manifests and before/after; every recorded Cargo child reaped, temporary entries zero",
+  "native_invocations": 0
+}
