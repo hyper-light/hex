@@ -1,12 +1,14 @@
 {
   "origin": "33df95b08ad8f95bddeaa1c48acf0c64386e0eac:Cargo.lock",
   "origin_sha256": "1ecb41e738c4c4133a1968873e424efce5b2a65899dd8f40f37ac6aaffec8133",
-  "seed_sha256": "5bc1b78708a541fda67263a3af6ed4690b93ab05882532cffa6fbfb0a996b66b",
+  "seed_sha256": "1e9ae2e5e95e103c27bce8e0f7294900984825d22c9926f770c63c872d547386",
   "changes": [
     "shards-api direct unsize edge",
     "triomphe optional unsize dependency edge",
-    "exact unsize1.1.0 crate/checksum entry"
+    "exact unsize1.1.0 crate/checksum entry",
+    "unsize build-dependency edge to already pinned autocfg1.5.1"
   ],
   "other_registry_versions_or_checksums_changed": false,
-  "purpose": "Private API workspace seed; Cargo may prune unreachable packages, every retained registry version/checksum must remain a subset. Not a native or compilation result."
+  "purpose": "Private API workspace seed; Cargo may prune unreachable packages, every retained registry version/checksum must remain a subset. Not a native or compilation result.",
+  "superseded_seed_sha256": "5bc1b78708a541fda67263a3af6ed4690b93ab05882532cffa6fbfb0a996b66b"
 }
