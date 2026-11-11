@@ -589,4 +589,73 @@ fn uncertain_canonical_drain_keeps_cpu_progress_and_retains_original_charge() {
     eprintln!(
         "uncertain-drain actual Service lifecycle: native_create=1; native_delete=1; drain_callback=1; ack_callback=0; observer_create=0; simulated_backend=true; native_hardware_effect=false"
     );
+    // Stronger AFTER-only observation: the original lifecycle/charge oracles above are intact.
+    // A later actual control reply must also expose the exact cleanup uncertainty, without ACK.
+    let expected = Refusal::Backing {
+        key,
+        cause: LifecycleCause::Uncertain,
+    };
+    assert_eq!(refreshed.unwrap(), vec![expected.clone()]);
+    let reply = service.command(dto::Command::Retry).unwrap();
+    assert_eq!(reply.refusals, vec![encoded_refusal(&expected).unwrap()]);
+    assert_eq!(observer.releases.load(Ordering::SeqCst), 2);
+    assert!(
+        service
+            .driver
+            .release_backing(hex_sim::model::Class::Firecracker, &unproved)
+            .is_err(),
+        "a diagnostic reply must not release the original grant"
+    );
+    assert_eq!(observer.releases.load(Ordering::SeqCst), 2);
+    eprintln!(
+        "uncertain-drain typed Reply: same_key=1; uncertain=1; drain_callbacks=2; ack_callbacks=0; native_hardware_effect=false"
+    );
+}
+
+/// AC-T7.4.1: qualification cannot hide foreign identity or malformed native authority.
+#[test]
+fn cleanup_diagnostics_preserve_exact_identity_and_refuse_unqualified_failures() {
+    let key = BackingKey {
+        pool: [0xff; 32],
+        generation: [0; 16],
+    };
+    for cause in [
+        LifecycleCause::Pending,
+        LifecycleCause::Busy,
+        LifecycleCause::Uncertain,
+    ] {
+        let why = Refusal::Backing { key, cause };
+        assert_eq!(drain_failure(key, why.clone()).unwrap(), why);
+        let text = cleanup_report(&why).unwrap();
+        assert!(text.contains(&"ff".repeat(key.pool.len())));
+        assert!(text.contains(&"00".repeat(key.generation.len())));
+        let name = match cause {
+            LifecycleCause::Pending => "pending",
+            LifecycleCause::Busy => "busy",
+            LifecycleCause::Uncertain => "uncertain",
+        };
+        assert!(text.ends_with(&format!("cause={name}")));
+    }
+    let foreign = BackingKey {
+        generation: [1; 16],
+        ..key
+    };
+    let errors = [
+        Refusal::Backing {
+            key: foreign,
+            cause: LifecycleCause::Uncertain,
+        },
+        Refusal::Invalid {
+            what: "native authority",
+            why: "foreign owner".into(),
+        },
+        Refusal::Broken("malformed canonical receipt".into()),
+        Refusal::Lifecycle {
+            id: BoxId::new("not-a-pool").unwrap(),
+            cause: LifecycleCause::Busy,
+        },
+    ];
+    for why in errors {
+        assert_eq!(drain_failure(key, why.clone()).unwrap_err(), why);
+    }
 }

@@ -167,6 +167,87 @@ fn encoded_refusal(why: &Refusal) -> Result<Vec<u8>, Refusal> {
     wire::answer(0, &wire::Answer::Refused(why.clone()), wire::MAX_MESSAGE).map_err(Into::into)
 }
 
+fn drain_failure(key: hex_api::BackingKey, why: Refusal) -> Result<Refusal, Refusal> {
+    match why {
+        Refusal::Backing {
+            key: actual,
+            cause:
+                cause @ (hex_api::LifecycleCause::Pending
+                | hex_api::LifecycleCause::Busy
+                | hex_api::LifecycleCause::Uncertain),
+        } if actual == key => Ok(Refusal::Backing { key, cause }),
+        other => Err(other),
+    }
+}
+
+fn encoded_cleanup_failures(failures: Vec<Refusal>) -> Result<Vec<Vec<u8>>, Refusal> {
+    if failures.len() > hex_api::MAX_RUNTIME_ROUTES {
+        return Err(capacity::invalid(
+            "cleanup diagnostics exceed the route catalog bound",
+        ));
+    }
+    let mut encoded = Vec::new();
+    encoded
+        .try_reserve_exact(failures.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "backing cleanup diagnostics",
+            bound: hex_api::MAX_RUNTIME_ROUTES,
+        })?;
+    for failure in failures {
+        encoded.push(encoded_refusal(&failure)?);
+    }
+    Ok(encoded)
+}
+
+/// Bootstrap has no control reply yet; the existing CLI reporter receives the same exact identity
+/// and qualified cause. Fixed hexadecimal widths make its allocation bound independent of input.
+fn cleanup_report(why: &Refusal) -> Result<String, Refusal> {
+    let Refusal::Backing { key, cause } = why else {
+        return Err(capacity::invalid(
+            "cleanup diagnostic is not a backing refusal",
+        ));
+    };
+    let cause = match cause {
+        hex_api::LifecycleCause::Pending => "pending",
+        hex_api::LifecycleCause::Busy => "busy",
+        hex_api::LifecycleCause::Uncertain => "uncertain",
+    };
+    let prefix = "retained native backing cleanup pool=";
+    let generation = " generation=";
+    let reason = " cause=";
+    // Two hexadecimal characters per byte of the existing fixed-width backing identity.
+    let bound = key
+        .pool
+        .len()
+        .checked_add(key.generation.len())
+        .and_then(|n| n.checked_mul(2))
+        .and_then(|n| n.checked_add(prefix.len()))
+        .and_then(|n| n.checked_add(generation.len()))
+        .and_then(|n| n.checked_add(reason.len()))
+        .and_then(|n| n.checked_add(cause.len()))
+        .ok_or_else(|| capacity::invalid("cleanup diagnostic byte count overflows"))?;
+    let mut text = String::new();
+    text.try_reserve_exact(bound)
+        .map_err(|_| Refusal::Exhausted {
+            what: "backing cleanup diagnostic bytes",
+            bound,
+        })?;
+    use std::fmt::Write as _;
+    text.push_str(prefix);
+    for byte in key.pool {
+        write!(text, "{byte:02x}")
+            .map_err(|_| capacity::invalid("cleanup identity rendering failed"))?;
+    }
+    text.push_str(generation);
+    for byte in key.generation {
+        write!(text, "{byte:02x}")
+            .map_err(|_| capacity::invalid("cleanup identity rendering failed"))?;
+    }
+    text.push_str(reason);
+    text.push_str(cause);
+    Ok(text)
+}
+
 fn packet(
     envelope: &Envelope,
     models: &[String],
@@ -748,7 +829,9 @@ impl Service {
                 .command
                 .lock()
                 .map_err(|_| Refusal::Broken("scheduler command lock poisoned".into()))?;
-            service.initialize_backings(backing_actions)?;
+            for failure in service.initialize_backings(backing_actions)? {
+                report(id, &cleanup_report(&failure)?);
+            }
             service.refresh_peers()?;
             let recovered = service.driver.take_recovered().map_err(failed)?;
             service.dispatch(recovered)?;
@@ -956,14 +1039,26 @@ impl Service {
         Ok(result)
     }
 
-    fn refresh(&self) -> Result<(), Refusal> {
+    fn refresh(&self) -> Result<Vec<Refusal>, Refusal> {
         let prepared = self.refresh_snapshot()?;
         self.initialize_backings(prepared)
     }
 
     /// One bounded pass over actual canonical lifecycle offers. Native cleanup finishes before
     /// Index refund and its separate ACK; new boot still consumes the same Index grant.
-    fn initialize_backings(&self, actions: BackingActions) -> Result<(), Refusal> {
+    fn initialize_backings(&self, actions: BackingActions) -> Result<Vec<Refusal>, Refusal> {
+        if actions.draining.len() > hex_api::MAX_RUNTIME_ROUTES {
+            return Err(capacity::invalid(
+                "draining actions exceed the route catalog bound",
+            ));
+        }
+        let mut failures = Vec::new();
+        failures
+            .try_reserve_exact(actions.draining.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "backing cleanup diagnostics",
+                bound: hex_api::MAX_RUNTIME_ROUTES,
+            })?;
         let mut initialized = false;
         for (endpoint, released) in actions.released {
             self.driver
@@ -972,10 +1067,15 @@ impl Service {
             initialized = true;
         }
         for (endpoint, draining) in actions.draining {
-            let released = self
-                .driver
-                .drain_backing(endpoint, &draining)
-                .map_err(failed)?;
+            let released = match self.driver.drain_backing(endpoint, &draining) {
+                Ok(released) => released,
+                Err(why) => {
+                    // A qualified failure leaves the SAME Index's full charge and claims intact.
+                    // It is observable in this operation's reply; no Released ACK is attempted.
+                    failures.push(drain_failure(draining.key, failed(why))?);
+                    continue;
+                }
+            };
             self.driver
                 .release_backing(endpoint, &released)
                 .map_err(failed)?;
@@ -995,7 +1095,7 @@ impl Service {
             // next ordinary refresh takes a new bounded pass after the current operation ends.
             self.refresh_snapshot()?;
         }
-        Ok(())
+        Ok(failures)
     }
 
     fn refresh_snapshot(&self) -> Result<BackingActions, Refusal> {
@@ -1111,10 +1211,12 @@ impl Service {
 
         // Current facts gate new admission. Refresh errors stop admission; an old, larger offer is
         // never used merely because the host can no longer establish its current capacity.
-        if matches!(&command, dto::Command::Submit { .. } | dto::Command::Retry)
-            && let Err(why) = self.refresh()
-        {
-            self.driver.block_admission(why).map_err(failed)?;
+        let mut cleanup_failures = Vec::new();
+        if matches!(&command, dto::Command::Submit { .. } | dto::Command::Retry) {
+            match self.refresh() {
+                Ok(failures) => cleanup_failures = encoded_cleanup_failures(failures)?,
+                Err(why) => self.driver.block_admission(why).map_err(failed)?,
+            }
         }
 
         let mut requested = None;
@@ -1130,7 +1232,7 @@ impl Service {
                         why: "sender is not configured".into(),
                     });
                 }
-                self.refresh()?;
+                let failures = encoded_cleanup_failures(self.refresh()?)?;
                 let cluster = self
                     .cluster
                     .lock()
@@ -1143,6 +1245,7 @@ impl Service {
                 return Ok(dto::Reply {
                     offer: Some(offer::from_local(spec, &cluster.models)?),
                     observations: self.observations()?,
+                    refusals: failures,
                     ..dto::Reply::default()
                 });
             }
@@ -1273,10 +1376,11 @@ impl Service {
                     .map_err(|_| Refusal::Broken("scheduler model lock poisoned".into()))?;
                 let message = envelope(packet, &cluster.models)?;
                 drop(cluster);
-                if matches!(message.msg, peer::Msg::Start { .. })
-                    && let Err(why) = self.refresh()
-                {
-                    self.driver.block_admission(why).map_err(failed)?;
+                if matches!(message.msg, peer::Msg::Start { .. }) {
+                    match self.refresh() {
+                        Ok(failures) => cleanup_failures = encoded_cleanup_failures(failures)?,
+                        Err(why) => self.driver.block_admission(why).map_err(failed)?,
+                    }
                 }
                 let step = self.driver.hear(NodeId(from), message).map_err(failed)?;
                 drop(order);
@@ -1308,6 +1412,22 @@ impl Service {
             }
         };
         let dispatch = self.dispatch(step)?;
+        let refusals = if cleanup_failures.is_empty() {
+            dispatch.refusals
+        } else {
+            let bound = cleanup_failures
+                .len()
+                .checked_add(dispatch.refusals.len())
+                .ok_or_else(|| capacity::invalid("scheduler refusal count overflows"))?;
+            cleanup_failures
+                .try_reserve_exact(dispatch.refusals.len())
+                .map_err(|_| Refusal::Exhausted {
+                    what: "scheduler control refusals",
+                    bound,
+                })?;
+            cleanup_failures.extend(dispatch.refusals);
+            cleanup_failures
+        };
         let status = requested
             .map(|key| self.driver.status(key).map_err(failed))
             .transpose()?
@@ -1327,7 +1447,7 @@ impl Service {
                     .notices
                     .iter()
                     .any(|n| matches!(n, Notice::Ended { key } if Some(*key) == requested)),
-            refusals: dispatch.refusals,
+            refusals,
             ..dto::Reply::default()
         })
     }

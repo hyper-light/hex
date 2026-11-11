@@ -1,0 +1,58 @@
+{
+  "base": "3cd9f72826f098ce05889103b6aed6873dc6566f",
+  "cohort": "c6a64f4b29606fe65ffc0cf11968178d8350c9f7",
+  "role": "implementer bindings-firecracker",
+  "policy": {
+    "revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+    "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3"
+  },
+  "original": {
+    "test": "scheduler::observer_cpu_tests::uncertain_canonical_drain_keeps_cpu_progress_and_retains_original_charge",
+    "path": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/remaining-c6a-results-proof/cohort-c6a64f4b-linux-remaining-c6a/uncertain-drain-cpu-original.log",
+    "bytes": 1406,
+    "sha256": "530fa19f0d82933c7fee9b1652660c4810be8890f1047cfc811a5e4afcbf307e",
+    "outcome": "ROOT actual0/1: real drain callback exact-key Backing Uncertain aborts refresh, while authoritative native facts succeed and no GPU facts are supplied"
+  },
+  "cause": "Service.initialize_backings propagated actual drain_backing cleanup uncertainty into the whole Service refresh result after the native CPU plane and canonical full Draining allocation were already validated. The Driver already retains charge/claims on this error and refuses premature Released ACK.",
+  "mechanism": {
+    "private_result": "refresh and initialize_backings now return Result<Vec<Refusal>,Refusal>. At most one same-key Pending/Busy/Uncertain diagnostic per bounded canonical Draining action; allocation is fallibly reserved before any action. Other errors including foreign key, invalid authority/metadata/core failure propagate unchanged.",
+    "lifecycle": "Qualified actual drain failure skips release_backing entirely. It grants no measured usage credit, change of phase, termination/absence witness, native ACK, refund, new GPU observation or fresh route. Driver/Index/Store and original charge/claims remain the sole owners. Successful drain/ACK and Prepared initialization semantics unchanged.",
+    "observation": "Existing Reply.refusals encodes diagnostics for Submit, Retry, Describe and Hear(Start) through the same refusal codec. At bootstrap, existing CLI Report emits full pool/generation/cause with exact fallibly reserved hexadecimal text; no logger/dependency/DTO/field/cache added. No diagnostic is recorded as a global admission fault.",
+    "ordinary_path": "When cleanup diagnostic list is empty the original dispatch refusal vector is moved directly, preserving its owner rather than copying it.",
+    "bounds": "MAX_RUNTIME_ROUTES bounds Draining diagnostics. Vectors reserve fallibly before push. Report bytes derive from actual fixed identity lengths, two hex characters per byte and fixed strings. Final reply merge count uses checked_add and fallible reserve."
+  },
+  "sources": [
+    {
+      "path": "crates/hex-node/src/scheduler.rs",
+      "before_sha256": "3d0c400565e4339962d8758032e6955dd345f3900e102b0f8119512f4f840a4c",
+      "after_sha256": "80cce9ad3dc028535d50446f0a59d8c99bd2e5100ef6ca78c13541f5eb2c8d34"
+    },
+    {
+      "path": "crates/hex-node/src/scheduler/observer_cpu_tests.rs",
+      "before_sha256": "7eae4ac27d974a2b4e7c8b2cea61e42408f2fbbc14bac2cf30f41234fc823549",
+      "after_sha256": "52dc539da50c177d4b80e3aedde84f7d0881fba04c95348cb28f1631f5bebde5"
+    }
+  ],
+  "controls": {
+    "original": "All c6a original source bytes through its final original lifecycle print are preserved. Original CPU create/delete, absent GPU facts, exact native authority, full retained claim and no premature ACK assertions unchanged.",
+    "stronger_suffix": "AFTER-only ordered suffix asserts exact typed refresh diagnostic, a later actual Retry Reply.refusals frame, second real drain callback and continued no-ACK/full-claim guard. Original source/raw remain in fixed c6a and manifest before hashes.",
+    "new": "cleanup_diagnostics_preserve_exact_identity_and_refuse_unqualified_failures checks all qualified causes preserve identity, full reporter identity/cause, and exact foreign-generation/Invalid/Broken/Box-Lifecycle failures remain errors. Source-only/unrun."
+  },
+  "rules": {
+    "R01": "All added allocation reservations/arithmetic checked; fixed-width rendering before use; no production unwrap/panic/unchecked indexing. Existing Report/callback and refusal codec allocation behavior outside new fixed Backing variant remains inherited audit scope.",
+    "R02_R03_R05_R12": "Narrow actual-red cause correction at existing Service/Driver/refusal seams; no architectural/provider/ledger/cost/interface mechanism introduced. Existing canonical lifecycle/qualified diagnostic contract reused; no measurement or tuning constant added.",
+    "R04_R06_R07_R13": "Draining failure is nonterminal, full reservation retained. Exact key/cause is returned, fatal authority paths remain fatal. Helpers isolate qualification/encoding/bootstrap rendering.",
+    "R08_R14": "No speed, allocation-free or performance claim; ROOT allocation/profile/benchmark review owed, including bounded temporary diagnostics.",
+    "R09_R10": "ROOT actual log/hash retained and read fully before production remedy. Original semantic test remains the relevant after control with stricter typed-observation suffix; ROOT after/mutation pending.",
+    "R11": "Shared pure Service change; supported-target compile/native proof remains ROOT-owned. No VM/native operations by lane.",
+    "R15_R16": "Named source-only signed checkpoint; no lane build/check/native/new agent/runner change/deletion. Previous23 passes not replayed; all retained evidence preserved."
+  },
+  "validation": {
+    "rustfmt": "two exact owned files installed formatter exit0",
+    "diff_check": "exit0",
+    "cargo": "not run by lane",
+    "native": "not run",
+    "after": "ROOT-owned unrun; no green claim"
+  },
+  "remaining": "ROOT exact original AFTER plus new qualification control, affected strict compilation, actual native cleanup/forbidden-effect/mutation/profiling/full gates remain owed. Native GPU hardware prerequisites and actual RuntimeCost measurements remain unverified."
+}
