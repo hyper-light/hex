@@ -1825,7 +1825,7 @@ mod create_tests {
         };
         let bindings = rt.bindings(&spec).unwrap();
         let container = rt.container(&spec).unwrap();
-        let marker = rt.marker(&spec.id);
+        let marker = rt.marker(&spec.id).unwrap();
         let mut mounted = super::super::scratch(
             &container,
             "unused-borrowed-base",

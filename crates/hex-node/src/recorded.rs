@@ -74,8 +74,8 @@ pub trait Recover: Runtime {
         Ok(None)
     }
 
-    /// Pure initialized-route/configuration validation, before ANY retained owner is recovered.
-    /// No capacity sample, GPU probe, native observation, publication or cleanup belongs here.
+    /// Read-only initialized configuration and retained metadata validation, before ANY owner is
+    /// recovered. No capacity sample, GPU probe, native mutation, publication or cleanup belongs here.
     fn preflight_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
         record.spec.check()?;
         if !self.classes().contains(&record.spec.backend_class()?) {
@@ -87,6 +87,26 @@ pub trait Recover: Runtime {
     /// An unknown backing configuration retains its grant; absence of an adapter is not cleanup.
     fn preflight_pool(&self, record: &PoolRecord) -> Result<(), Refusal> {
         Err(NativeRecord::Pool(record).refusal(hex_api::LifecycleCause::Uncertain))
+    }
+
+    /// The SAME native owner's scope/receipt metadata, without attaching or adopting that scope.
+    fn preflight_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
+        Err(record.refusal(hex_api::LifecycleCause::Uncertain))
+    }
+
+    /// Read-only cross-check of native metadata names against the complete retained cohort.
+    fn preflight_retained(
+        &self,
+        records: &hex_runtime::devices::Records,
+        pools: &[PoolRecord],
+    ) -> Result<(), Refusal> {
+        let _ = (records, pools);
+        Ok(())
+    }
+
+    /// Deferred native initialization is entered only after the complete read-only barrier.
+    fn initialize_native(&self) -> Result<(), Refusal> {
+        Ok(())
     }
 
     /// Launches within this same native owner's envelope. The process remains suspended until
@@ -916,6 +936,7 @@ impl<R: Recover> Recorded<R> {
         for record in &pools {
             self.runtime.preflight_pool(record)?;
         }
+        self.runtime.preflight_retained(&records, &pools)?;
         Ok(records)
     }
 
@@ -923,6 +944,12 @@ impl<R: Recover> Recorded<R> {
     /// new calls. A refusal preserves their bytes and charge; this never probes a GPU or VM.
     pub fn preflight_recovery(&self) -> Result<(), Refusal> {
         self.preflight_snapshot().map(|_| ())
+    }
+
+    /// Initializes native owners after ALL retained owners pass the read-only barrier.
+    pub fn initialize_native(&self) -> Result<(), Refusal> {
+        self.preflight_recovery()?;
+        self.runtime.initialize_native()
     }
 
     fn native_transaction(
@@ -1231,6 +1258,7 @@ impl<R: Recover> Recorded<R> {
     /// a crash during it: ending a box tolerates its processes being gone already.
     pub fn recover(&self) -> Result<RecoverySummary, Refusal> {
         let records = self.preflight_snapshot()?;
+        self.runtime.initialize_native()?;
         // What a crash at a record write left: a temp file never renamed into place.
         self.books.store.remove_strays()?;
         let mut summary = RecoverySummary::default();
@@ -1347,7 +1375,7 @@ impl<P: Recover + 'static> Recorded<hex_runtime::guest::WithGuest<P>> {
     /// Recover the already-admitted backing only after every retained sibling/configuration is
     /// known. Payload recovery follows this call and uses the same Store/turn/native owner.
     pub fn recover_guest_backing(&self) -> Result<(), Refusal> {
-        self.preflight_recovery()?;
+        self.initialize_native()?;
         self.runtime.guest().recover_backing()
     }
 }
@@ -1697,18 +1725,19 @@ impl<R: Recover> Host for Recorded<R> {
 #[cfg(target_os = "macos")]
 impl Recover for hex_runtime::macos::MacRuntime {
     fn preflight_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
-        record.spec.check()?;
-        if record.spec.class.class() != Class::Process || !record.spec.devices.is_empty() {
-            return Err(uncertain(&record.spec.id));
-        }
-        if let Some(route) = record.spec.route
-            && (route.key.execution != hex_api::Execution::Native
-                || route.key.image.os != hex_api::ImageOs::Macos
-                || route.key.image.arch != hex_api::ImageArch::Arm64)
-        {
-            return Err(uncertain(&record.spec.id));
-        }
-        Ok(())
+        hex_runtime::macos::MacRuntime::preflight_record(self, record)
+    }
+
+    fn preflight_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
+        hex_runtime::macos::MacRuntime::preflight_managed(self, record)
+    }
+
+    fn preflight_retained(
+        &self,
+        records: &hex_runtime::devices::Records,
+        pools: &[PoolRecord],
+    ) -> Result<(), Refusal> {
+        hex_runtime::macos::MacRuntime::preflight_retained(self, records, pools)
     }
 
     fn managed_usage(&self, record: NativeRecord<'_>) -> Result<Usage, Refusal> {
@@ -1772,25 +1801,23 @@ fn group(trace: Option<ProcId>) -> Option<(i32, u64)> {
 #[cfg(windows)]
 impl Recover for hex_runtime::windows::WinRuntime {
     fn preflight_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
-        hex_runtime::windows::WinRuntime::check_native_spec(self, &record.spec)?;
-        if !record.spec.devices.is_empty() {
-            let catalog = hex_runtime::windows::WinRuntime::device_catalog(self)
-                .ok_or_else(|| uncertain(&record.spec.id))?;
-            for id in &record.spec.devices {
-                let entry = catalog
-                    .entries()
-                    .iter()
-                    .find(|entry| entry.info.id == *id)
-                    .ok_or_else(|| uncertain(&record.spec.id))?;
-                if !matches!(
-                    entry.binding(hex_runtime::devices::Route::Hcs),
-                    Some(hex_runtime::devices::Binding::Hcs { .. })
-                ) {
-                    return Err(uncertain(&record.spec.id));
-                }
-            }
-        }
-        Ok(())
+        hex_runtime::windows::WinRuntime::preflight_record(self, record)
+    }
+
+    fn preflight_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
+        hex_runtime::windows::WinRuntime::preflight_managed(self, record)
+    }
+
+    fn preflight_retained(
+        &self,
+        records: &hex_runtime::devices::Records,
+        pools: &[PoolRecord],
+    ) -> Result<(), Refusal> {
+        hex_runtime::windows::WinRuntime::preflight_retained(self, records, pools)
+    }
+
+    fn initialize_native(&self) -> Result<(), Refusal> {
+        hex_runtime::windows::WinRuntime::initialize_native(self)
     }
 
     fn device_catalog(&self) -> Result<Option<hex_runtime::devices::SharedCatalog>, Refusal> {
@@ -1871,11 +1898,30 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
     fn preflight_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
         match self.route_for(&record.spec)? {
             hex_runtime::guest::Side::Host => self.host().preflight_record(record),
-            hex_runtime::guest::Side::Guest => self.guest().preflight_box(record),
+            hex_runtime::guest::Side::Guest => {
+                self.guest().preflight_box(record)?;
+                if record.spec.route_execution() != Some(hex_api::Execution::ShardsShared) {
+                    self.host().preflight_managed(NativeRecord::Box(record))?;
+                }
+                Ok(())
+            }
         }
     }
     fn preflight_pool(&self, record: &PoolRecord) -> Result<(), Refusal> {
-        self.guest().preflight_backing(record)
+        self.guest().preflight_backing(record)?;
+        self.host().preflight_managed(NativeRecord::Pool(record))
+    }
+
+    fn preflight_retained(
+        &self,
+        records: &hex_runtime::devices::Records,
+        pools: &[PoolRecord],
+    ) -> Result<(), Refusal> {
+        self.host().preflight_retained(records, pools)
+    }
+
+    fn initialize_native(&self) -> Result<(), Refusal> {
+        self.host().initialize_native()
     }
 
     fn device_catalog(&self) -> Result<Option<hex_runtime::devices::SharedCatalog>, Refusal> {

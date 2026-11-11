@@ -11,6 +11,7 @@ pub mod features;
 pub mod keeper;
 mod managed;
 pub mod oci;
+mod preflight;
 pub mod proc;
 pub mod process;
 pub mod sys;
@@ -191,24 +192,57 @@ fn copy_text(value: &str) -> Result<String, Refusal> {
 }
 
 /// A node's keeper and the state folder its boxes' jobs are recorded in. The keeper is started by
-/// [`Keeping::start`] (or an existing one adopted from the state folder) and holds a second handle to each
+/// the post-preflight transition (or an existing one adopted from the state folder) and holds a second handle to each
 /// box's job, so a box outlives the node (`keeper`).
 struct Keeping {
     state: PathBuf,
     command: Vec<String>,
-    keeper: Mutex<keeper::NodeKeeper>,
+    keeper: Mutex<KeeperState>,
+}
+
+enum KeeperState {
+    Configured,
+    Running(keeper::NodeKeeper),
+}
+
+impl KeeperState {
+    fn running(&self) -> Result<&keeper::NodeKeeper, Refusal> {
+        match self {
+            Self::Running(keeper) => Ok(keeper),
+            Self::Configured => Err(preflight::invalid(
+                "the keeper is not initialized after preflight",
+            )),
+        }
+    }
 }
 
 impl Keeping {
-    /// The keeper for a node on `state`: the one the state folder records if it is still alive, else a new
-    /// one started from `command` (`hex keep ...`), recorded for the next node.
-    fn start(state: &Path, command: &[String]) -> Result<Self, Refusal> {
-        let keeping = Self {
-            state: state.to_path_buf(),
-            command: command.to_vec(),
-            keeper: Mutex::new(Self::adopt_or_spawn(state, command)?),
-        };
-        Ok(keeping)
+    /// Retain the initialized launch configuration without starting a keeper or dispatching requests.
+    /// Recorded's whole-owner preflight precedes the Configured -> Running transition.
+    fn configured(state: &Path, command: &[String]) -> Result<Self, Refusal> {
+        let bound = hex_core::hcs::COMMAND_LINE_UNITS;
+        let units = command.iter().try_fold(0usize, |units, word| {
+            units
+                .checked_add(word.encode_utf16().count())?
+                .checked_add(1)
+        });
+        if command.is_empty() || units.is_none_or(|units| units > bound) {
+            return Err(preflight::invalid(
+                "the keeper command is empty or exceeds the native command bound",
+            ));
+        }
+        let mut copied = Vec::new();
+        copied
+            .try_reserve_exact(command.len())
+            .map_err(|_| allocation(bound))?;
+        for word in command {
+            copied.push(copy_text(word)?);
+        }
+        Ok(Self {
+            state: copy_path(state)?,
+            command: copied,
+            keeper: Mutex::new(KeeperState::Configured),
+        })
     }
 
     fn adopt_or_spawn(state: &Path, command: &[String]) -> Result<keeper::NodeKeeper, Refusal> {
@@ -603,10 +637,15 @@ impl Holding {
             .keeper
             .lock()
             .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?;
-        if keeper.alive() {
+        if matches!(&*keeper, KeeperState::Running(keeper) if keeper.alive()) {
             return Ok(());
         }
-        *keeper = keeping.spawn()?;
+        let next = match &*keeper {
+            KeeperState::Configured => Keeping::adopt_or_spawn(&keeping.state, &keeping.command)?,
+            KeeperState::Running(_) => keeping.spawn()?,
+        };
+        *keeper = KeeperState::Running(next);
+        let keeper = keeper.running()?;
         self.rehold_ready_using(
             keeper.pid(),
             keeper.created(),
@@ -717,6 +756,7 @@ impl Holding {
             .keeper
             .lock()
             .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?;
+        let keeper = keeper.running()?;
         let receipt = match keeper::read_held(&keeping.state, id.as_str()) {
             Some(old) if old.held_by(keeper.pid(), keeper.created()) => {
                 if let Held::Process(boxed) = held
@@ -766,6 +806,7 @@ impl Holding {
             .keeper
             .lock()
             .map_err(|_| pending("the native keeper lock is poisoned"))?;
+        let keeper = keeper.running()?;
         let receipt = match keeper::vm::read(&path)? {
             Some(old) => {
                 if old.scope != scope
@@ -840,6 +881,7 @@ impl Holding {
                 .keeper
                 .lock()
                 .map_err(|_| Refusal::Broken("the node's keeper lock is poisoned".to_owned()))?;
+            let keeper = keeper.running()?;
             if receipt.pid == keeper.pid()
                 && receipt.created == keeper.created()
                 && let Err(error) = keeper.drop_held(receipt.value)
@@ -888,9 +930,10 @@ impl Holding {
             .keeper
             .lock()
             .map_err(|_| pending("native keeper lock is poisoned"))?;
+        let native = current.running()?;
         let previous;
-        let process = if current.pid() == receipt.pid && current.created() == receipt.created {
-            Some(current.process())
+        let process = if native.pid() == receipt.pid && native.created() == receipt.created {
+            Some(native.process())
         } else {
             previous = sys::open_process(receipt.pid)
                 .map_err(|error| Refusal::os("observing the original VM keeper", error))?;
@@ -1118,6 +1161,14 @@ impl WinRuntime {
     /// again, and is refused by name if that fails too.
     pub fn with(processors: u32, scratch_root: PathBuf) -> Self {
         let reclaim_failures = oci::reclaim(&scratch_root);
+        Self::configured_runtime(processors, scratch_root, reclaim_failures)
+    }
+
+    fn configured_runtime(
+        processors: u32,
+        scratch_root: PathBuf,
+        reclaim_failures: Vec<Refusal>,
+    ) -> Self {
         let runtime = Self {
             processors: NonZeroU32::new(processors).unwrap_or(NonZeroU32::MIN),
             catalog: NativeCatalog::Empty(Catalog::default()),
@@ -1150,8 +1201,9 @@ impl WinRuntime {
     pub fn outliving(node: &str, dir: &Path, keeper: &[String]) -> Result<Self, Refusal> {
         std::fs::create_dir_all(dir)
             .map_err(|e| Refusal::os("making the node's state folder", e))?;
-        let keeping = Keeping::start(dir, keeper)?;
-        let mut runtime = Self::with(sys::active_processors(), dir.join("boxes"));
+        let keeping = Keeping::configured(dir, keeper)?;
+        let mut runtime =
+            Self::configured_runtime(sys::active_processors(), dir.join("boxes"), Vec::new());
         runtime.node = Some(node.to_owned());
         // Nothing shares the runtime's holding yet, so its keeper is set in place.
         Arc::get_mut(&mut runtime.holding)
@@ -1178,14 +1230,6 @@ impl WinRuntime {
         keeper: &[String],
         catalog: SharedCatalog,
     ) -> Result<Self, Refusal> {
-        if catalog
-            .entries()
-            .iter()
-            .any(|entry| entry.binding(Route::Hcs).is_some())
-        {
-            std::fs::create_dir_all(dir.join("boxes"))
-                .map_err(|e| Refusal::os("making the native scratch root", e))?;
-        }
         let mut runtime = Self::outliving(node, dir, keeper)?;
         runtime.catalog = NativeCatalog::Shared(catalog);
         Ok(runtime)
@@ -1272,7 +1316,7 @@ impl WinRuntime {
         self.holding.reserve(
             OwnerRef::Box(&spec.id),
             &ids,
-            Some(self.marker(&spec.id)),
+            Some(self.marker(&spec.id)?),
             spec.route,
         )?;
         self.holding.uncertain(OwnerRef::Box(&spec.id))
@@ -1284,7 +1328,7 @@ impl WinRuntime {
     pub fn keeper_pid(&self) -> Option<u32> {
         let keeping = self.holding.keeper.as_ref()?;
         self.holding.ensure_keeper(keeping).ok()?;
-        Some(keeping.keeper.lock().ok()?.pid())
+        Some(keeping.keeper.lock().ok()?.running().ok()?.pid())
     }
 
     /// The job name a node's box `id` has (`Local\hex-<node>-<box>`), where its boxes outlive it.
@@ -1370,7 +1414,7 @@ impl WinRuntime {
                 Ok(None)
             }
             ClassSpec::Oci(_) | ClassSpec::Bundle(_) => {
-                let marker = self.marker(&spec.id);
+                let marker = self.marker(&spec.id)?;
                 if marker.exists() {
                     let record = oci::read_marker(&marker)?;
                     if let Err(error) = self.validate_bindings(spec, &record) {
@@ -1402,7 +1446,11 @@ impl WinRuntime {
         let name = self
             .job_name(&spec.id)
             .ok_or_else(|| pending("this runtime has no outliving boxes to adopt"))?;
-        let marker = (!matches!(spec.class, ClassSpec::Process)).then(|| self.marker(&spec.id));
+        let marker = if matches!(spec.class, ClassSpec::Process) {
+            None
+        } else {
+            Some(self.marker(&spec.id)?)
+        };
         if let Some(marker) = marker.as_ref() {
             let record = oci::read_marker(marker)?;
             if let Err(error) = self.validate_bindings(spec, &record) {
@@ -1433,7 +1481,7 @@ impl WinRuntime {
         }
         match self.job_name(id) {
             Some(name) => {
-                let marker = self.marker(id);
+                let marker = self.marker(id)?;
                 if marker.exists() {
                     let record = oci::read_marker(&marker)?;
                     if !record.devices.is_empty() {
@@ -1454,7 +1502,7 @@ impl WinRuntime {
                     }
                 }
                 JobBox::end_named(&name)?;
-                oci::end(&self.marker(id))?;
+                oci::end(&self.marker(id)?)?;
                 self.drop_from_keeper(id)
             }
             None => Ok(()),
@@ -1647,8 +1695,21 @@ impl WinRuntime {
     }
 
     /// Where `oci` box `id`'s record is kept: its scratch marker under the runtime's scratch root.
-    fn marker(&self, id: &BoxId) -> PathBuf {
-        self.scratch_root.join(format!("{id}.scratch.json"))
+    fn marker(&self, id: &BoxId) -> Result<PathBuf, Refusal> {
+        let suffix = ".scratch.json";
+        let mut name = copy_text(id.as_str())?;
+        name.try_reserve_exact(suffix.len())
+            .map_err(|_| allocation(suffix.len()))?;
+        name.push_str(suffix);
+        let extra = name
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| allocation(usize::MAX))?;
+        let mut path = copy_path(&self.scratch_root)?;
+        path.try_reserve_exact(extra)
+            .map_err(|_| allocation(extra))?;
+        path.push(name);
+        Ok(path)
     }
 
     /// The `oci` box `spec` asks for, made. Where this node's boxes outlive it, its job is the one named for
@@ -1679,7 +1740,7 @@ impl WinRuntime {
             job,
             container,
             &launcher,
-            Some(self.marker(&spec.id)),
+            Some(self.marker(&spec.id)?),
             lifetime,
             bindings,
             self.holding
@@ -1735,7 +1796,7 @@ impl WinRuntime {
     /// marker, its job by name, then its container, scratch and init ([`OciBox::take_back`]).
     fn take_back_oci(&self, spec: &BoxSpec, name: &str) -> Result<OciBox, Refusal> {
         let container = self.container(spec)?;
-        let marker = self.marker(&spec.id);
+        let marker = self.marker(&spec.id)?;
         let record = oci::read_marker(&marker)?;
         self.validate_bindings(spec, &record)?;
         let job = JobBox::take_back(spec.id.clone(), &spec.bounds, self.processors, name)?;
@@ -1876,7 +1937,11 @@ impl Runtime for WinRuntime {
         } else {
             Some(self.container(&spec)?)
         };
-        let marker = (!matches!(spec.class, ClassSpec::Process)).then(|| self.marker(&spec.id));
+        let marker = if matches!(spec.class, ClassSpec::Process) {
+            None
+        } else {
+            Some(self.marker(&spec.id)?)
+        };
         if marker.as_ref().is_some_and(|path| path.exists()) {
             return Err(Refusal::Exists(spec.id));
         }
@@ -2295,7 +2360,7 @@ mod tests {
                 "PCIROOT(0)#PCI(0200)".to_owned()
             )]
         );
-        let marker = rt.marker(&spec.id);
+        let marker = rt.marker(&spec.id).unwrap();
         assert_eq!(marker, scratch.path().join("borrowed-bundle.scratch.json"));
         let record = hex_core::hcs::BoxRecord {
             folder: volume.to_owned(),
@@ -2436,7 +2501,7 @@ mod tests {
         assert_eq!(rt.validate_bindings(&spec, &record), Ok(())); // Matching positive data control.
         record.devices[0].location = "synthetic-private-old-location".to_owned();
         let bytes = hex_core::hcs::write_record(&record).unwrap();
-        let marker = rt.marker(&spec.id);
+        let marker = rt.marker(&spec.id).unwrap();
         std::fs::write(&marker, &bytes).unwrap();
         let error = rt.adopt(&spec).unwrap_err();
         assert!(matches!(
@@ -2463,7 +2528,7 @@ mod tests {
         let mut old_record = record;
         old_record.devices.clear();
         let old_bytes = hex_core::hcs::write_record(&old_record).unwrap();
-        let old_marker = missing_metadata.marker(&spec.id);
+        let old_marker = missing_metadata.marker(&spec.id).unwrap();
         std::fs::write(&old_marker, &old_bytes).unwrap();
         assert!(missing_metadata.adopt(&spec).is_err());
         assert_eq!(
@@ -2513,7 +2578,7 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let rt = device_runtime(scratch.path());
         let spec = device_spec("retained-declared", 256);
-        let marker = rt.marker(&spec.id);
+        let marker = rt.marker(&spec.id).unwrap();
         let sibling = scratch.path().join("sibling-sentinel");
         std::fs::write(&sibling, b"unaffected").unwrap();
         let record = hex_core::hcs::BoxRecord {

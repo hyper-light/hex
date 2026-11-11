@@ -240,3 +240,6 @@ fn uppercase_retained_pool_body_cannot_be_ignored_before_cpu_adoption() {
     assert_eq!(node.books.store.get(&id).unwrap(), owner_before);
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
+
+#[path = "recorded_adapter_preflight_tests.rs"]
+mod initialized_adapter_preflight;

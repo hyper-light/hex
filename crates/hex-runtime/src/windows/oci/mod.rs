@@ -10,7 +10,6 @@ pub mod launch;
 pub(crate) mod service;
 pub mod sys;
 
-use std::io::Read;
 use std::os::windows::io::OwnedHandle;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -79,26 +78,16 @@ fn write_marker(marker: &Path, record: &hcs::BoxRecord) -> Result<(), Refusal> {
 /// Reads the box's record at `marker`, at most [`hcs::MAX_RECORD`] bytes: what a node taking the box back
 /// reopens ([`OciBox::take_back`]).
 pub fn read_marker(marker: &Path) -> Result<hcs::BoxRecord, Refusal> {
-    let bound = hcs::record_bound()?;
-    let mut bytes = Vec::new();
-    let room = bound
-        .checked_add(1)
-        .ok_or_else(|| super::allocation(bound))?;
-    bytes
-        .try_reserve_exact(room)
-        .map_err(|_| super::allocation(room))?;
-    std::fs::File::open(marker)
-        .and_then(|f| {
-            f.take(
-                u64::try_from(bound)
-                    .map_err(std::io::Error::other)?
-                    .checked_add(1)
-                    .ok_or_else(|| std::io::Error::other("native marker read bound overflows"))?,
-            )
-            .read_to_end(&mut bytes)
-        })
-        .map_err(|e| Refusal::os("reading a scratch marker", e))?;
-    hcs::read_record(&bytes).map_err(|r| match r {
+    read_marker_if_present(marker)?
+        .ok_or_else(|| Refusal::os("reading a scratch marker", std::io::ErrorKind::NotFound))
+}
+
+/// The same bounded reader, with absence kept separate from a read or parse failure.
+pub(crate) fn read_marker_if_present(marker: &Path) -> Result<Option<hcs::BoxRecord>, Refusal> {
+    let Some(bytes) = super::keeper::read_native_bytes(marker, hcs::record_bound()?)? else {
+        return Ok(None);
+    };
+    hcs::read_record(&bytes).map(Some).map_err(|r| match r {
         Refusal::Invalid { what, why } => Refusal::Invalid {
             what,
             why: format!("{}: {why}", marker.display()),
@@ -1283,10 +1272,19 @@ pub fn devices(class: &str) -> Result<sys::DeviceView, Refusal> {
 
 /// The scratch folder for a box made from an `OciSpec` under `root`.
 pub fn scratch_folder(root: &Path, id: &BoxId) -> Result<String, Refusal> {
-    root.join(id.as_str())
-        .to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| Refusal::os("naming a box's scratch folder", "not UTF-8"))
+    let mut path = super::copy_path(root)?;
+    let room = id
+        .as_str()
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| super::allocation(usize::MAX))?;
+    path.try_reserve_exact(room)
+        .map_err(|_| super::allocation(room))?;
+    path.push(id.as_str());
+    super::copy_text(
+        path.to_str()
+            .ok_or_else(|| Refusal::os("naming a box's scratch folder", "not UTF-8"))?,
+    )
 }
 
 #[cfg(test)]

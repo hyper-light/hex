@@ -1,0 +1,7 @@
+# Read-only native preflight integration
+
+Reviewed the entire signed c89d0143 delta: all retained Box/Pool structural and initialized metadata checks precede native initialization and recovery mutation. Windows outliving construction retains Configured in its existing keeper mutex; post-barrier initialization enters Running. Exact bounded marker/request/keeper reads and cross-owner filename checks use the same native records. No native observation, GPU probe, cleanup or new owner manager is introduced by preflight.
+
+All listed source hashes match the lane manifest except sys.rs, where ROOT's existing two empty route fields in fixture BoxSpec literals are retained. The original intake assertion incorrectly expected a registration delta; its source comparison stopped before any intake commit and is corrected here. Canonical lifecycle authority/schema and original recovery controls are preserved. Six new counted SimRuntime/private-Store controls and four Windows private-file controls are source-only here. ROOT will validate the joined targets; old recovery greens do not prove this new platform extension.
+
+Cold active Mac VM recovery remains conservatively uncertain until the same persistent helper is implemented. No phase-only release exception or fabricated native absence witness is added. Native kernel ownership/cleanup/fault proof, full gates, allocation review and performance remain unclosed.

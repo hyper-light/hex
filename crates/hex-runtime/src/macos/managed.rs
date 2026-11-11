@@ -1,6 +1,8 @@
 //! Managed Shards controllers reuse the original native ProcessBox, its watcher and its one waiter.
 //! The controller remains an unreaped child until the durable selected-boot Released publication.
 
+mod preflight;
+
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Mutex;

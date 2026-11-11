@@ -1,5 +1,5 @@
 //! The existing keeper handle receipt, committed to one canonical VM incarnation/workload.
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use hex_api::Refusal;
@@ -158,36 +158,19 @@ pub(crate) fn parse(text: &str) -> Result<Held, Refusal> {
 }
 
 pub(crate) fn read(path: &Path) -> Result<Option<Held>, Refusal> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(Refusal::os("opening the VM keeper receipt", error)),
+    let Some(bytes) = super::read_native_bytes(path, bound()?)? else {
+        return Ok(None);
     };
-    let bound = bound()?;
-    let room = bound.checked_add(1).ok_or_else(|| allocation(bound))?;
-    let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(room)
-        .map_err(|_| allocation(room))?;
-    bytes.resize(room, 0);
-    let mut file = file.take(u64::try_from(room).map_err(|_| allocation(room))?);
-    let mut used = 0usize;
-    while used < room {
-        let tail = bytes.get_mut(used..).ok_or_else(|| allocation(room))?;
-        let count = file
-            .read(tail)
-            .map_err(|error| Refusal::os("reading the VM keeper receipt", error))?;
-        if count == 0 {
-            break;
-        }
-        used = used.checked_add(count).ok_or_else(|| allocation(room))?;
-    }
-    if used > bound {
-        return Err(invalid("VM keeper receipt exceeds its exact field bound"));
-    }
-    let text = std::str::from_utf8(bytes.get(..used).ok_or_else(|| allocation(room))?)
-        .map_err(|_| invalid("VM keeper receipt is not UTF-8"))?;
+    let text =
+        std::str::from_utf8(&bytes).map_err(|_| invalid("VM keeper receipt is not UTF-8"))?;
     parse(text).map(Some)
+}
+
+pub(crate) fn pool_from_name(name: &str) -> Result<[u8; 32], Refusal> {
+    unhex(
+        name.strip_prefix("pool-held-")
+            .ok_or_else(|| invalid("a backing keeper receipt has a different name"))?,
+    )
 }
 
 pub(crate) fn path(state: &Path, owner: OwnerRef<'_>) -> Result<PathBuf, Refusal> {

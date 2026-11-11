@@ -404,6 +404,42 @@ pub(crate) fn resolve(marker: &Path, record: &mut hcs::BoxRecord) -> Result<(), 
     super::write_marker(marker, record)
 }
 
+/// Inspect only the existing committed request/receipt. No lock, event, resolve, notification,
+/// native operation or write is allowed before the whole retained-owner barrier.
+pub(crate) fn preflight(marker: &Path, record: &hcs::BoxRecord) -> Result<(), Refusal> {
+    let dir = directory(marker);
+    match fs::metadata(&dir) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Err(refused()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return if record.creation == hcs::NativeCreate::Pending {
+                Err(refused())
+            } else {
+                Ok(())
+            };
+        }
+        Err(error) => {
+            return Err(Refusal::os(
+                "reading retained native request metadata",
+                error,
+            ));
+        }
+    }
+    let request = Request::decode(&read(&dir.join(INPUT))?)?;
+    let receipt = Receipt::decode(&read(&dir.join(RECEIPT))?)?;
+    receipt.outcome_for(record)?;
+    receipt.check_request(&request)?;
+    if marker
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(super::MARKER_SUFFIX))
+        != record.system.as_ref().map(hex_api::BoxId::as_str)
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
 pub(crate) fn reconcile(marker: &Path, cancel: bool) -> Result<(), Refusal> {
     notify(marker)?;
     let mut record = super::read_marker(marker)?;
