@@ -1653,7 +1653,8 @@ fn hostile_values_are_refused_by_name() {
         Fault::Truncated { .. }
     ));
     let mut info = answer(2, &Answer::Info(info()), MAX_MESSAGE).unwrap();
-    let adopted = info.len() - 1 - 8 - 6; // abandoned's 8, the exit's 5 and option byte, then adopted
+    // The None allocation tag follows abandoned's eight bytes and the exit's five plus tag.
+    let adopted = info.len() - 1 - 8 - 6 - 1;
     info[adopted] = 2;
     assert!(matches!(
         read_answer(&received(&info, 0), MAX_MESSAGE),
