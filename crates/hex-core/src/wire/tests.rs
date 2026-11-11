@@ -3457,7 +3457,10 @@ fn physical_report_unavailable_roundtrips_qualified_backing_causes() {
             put_physical_report(&mut short, report),
             Err(Fault::Oversized { .. })
         ));
-        assert_eq!((short.out.len(), short.out.capacity()), (0, initial_capacity));
+        assert_eq!(
+            (short.out.len(), short.out.capacity()),
+            (0, initial_capacity)
+        );
         assert!(matches!(
             read_answer(&received(&bytes, 1), MAX_MESSAGE),
             Err(Fault::Descriptors { .. })
