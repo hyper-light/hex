@@ -1,0 +1,71 @@
+{
+  "base": "4f0a80e592c0d5cec66adf7f711a653591f3bb76",
+  "role": "implementer bindings-firecracker",
+  "policy": {
+    "revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+    "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3"
+  },
+  "original": {
+    "test": "peer::tests::remote_owner_recovers_committed_released_source_without_fresh_repick",
+    "path": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/remote-pending-original-results-proof/cohort-4f0a80e5-linux-remote-pending-original/remote-committed-pending-original.log",
+    "bytes": 3630,
+    "sha256": "60474064306d52b1a41f3e0a01ed6018aa3c4cfc854793322439ec3fd54bbd15",
+    "source": "4f0a80e592c0d5cec66adf7f711a653591f3bb76",
+    "driver_pid": 3556847,
+    "cargo_pid": 3563089,
+    "unit_thread_not_cargo": 3727407,
+    "exit": 1,
+    "counts": [
+      {
+        "passed": 0,
+        "failed": 1,
+        "ignored": 0
+      }
+    ],
+    "cleanup": "result.json reaped=true/temp_entries0/source_changes empty/native_invocations0; ROOT whole collection351046B sha9c2dfdcd0c7e3b624b6e6581086f25a3ad919a5447e901bdb2ddc0e26e9edbd2 reported independently verified"
+  },
+  "cause": "The sole production pending caller is peer::recover for a durable remote At/Created/Deleting row. take_pending_routed checked the exact committed tuple with fresh runtime_holds_routed/holds_inner, which requires Live and rejects retained Released-P even though host room, allocation and canonical old row are valid. ROOT actual original passes healthy remote-At baseline, exact Created row/profile/receipt and currentR fresh-NoGpu preconditions before this error.",
+  "mechanism": "SAME Slot.runtime_holds_committed serves local bound recovery and remote committed pending recovery. Exact tuple lookup, original allocation.check/reserved_resources formula, host free.holds, same used-vector single-consumer and full-P GPU count remain. Only existing dedicated Released recovery case is used; Prepared/Granted/Draining/shared Released receive no new permission. Released allocations additionally reuse existing API RouteOffer.check_backing topology/profile compatibility against their SAME canonical retained source; this temporary validation value is never advertised. No cost recalculation from currentR, native effect, physical binding choice, claim refund or ACK.",
+  "fresh_preservation": "Full take_routed body, Routes.chosen/committed/allocation/charged and holds_inner source segments checked byte-equal to fixed4f0. Fresh route/admit/device masks/Live predicates unchanged.",
+  "sources": [
+    {
+      "path": "crates/hex-sim/src/index.rs",
+      "before_sha256": "92f75399b4cd2119ed7e74a824b62b8717f73943194ed566295367b40515ba9a",
+      "after_sha256": "36b7dd33fac17c0af8092003fc939c412131bf52aa746dc1504947436e64e323"
+    },
+    {
+      "path": "crates/hex-sim/src/index/routes.rs",
+      "before_sha256": "000fabe426f1622d84e51430e50822fc80b9671edf19fcc5ea7128958c379e68",
+      "after_sha256": "cda46b5fee827aaab61a9e2fcf7f1e9b7085c596017cbd7de3d3d2ebabb399fc"
+    },
+    {
+      "path": "crates/hex-sim/src/index/route_offer_tests.rs",
+      "before_sha256": "b15c4a83f5394fa38bf0002eafd60db76bac058ebfe5478e4fa56c6d4143cc28",
+      "after_sha256": "795f0d8ee79eaa8226905c5dc22bdc142942be1f8f1ab03cbfb3a48142a9a614"
+    }
+  ],
+  "original_preservation": {
+    "path": "crates/hex-sim/src/peer.rs",
+    "sha256": "d28df722bd2bfc72d597c18e7d95f6ea59e6f35ed1c54ce893623d06128a2057",
+    "status": "Whole peer.rs including remote original byte-equal fixed4f0; no original weakening or fixture adjustment."
+  },
+  "explicit_new_contract_oracle_change": "Only the pending-refusal block in the new2af control is replaced after ROOT actual4f0 remote red: a separate copied view must restore the exact paid remote commitment while remaining fresh-NoGpu and binding no Workload devices. Source comparison verifies every preexisting byte before/after that block, including fresh take_routed, local phase/second-consumer/holder/refund oracles, remains exact. Old2af/d2a/4f0 source/raw preserved.",
+  "new_control": "committed_pending_recovery_keeps_receipt_charge_and_claim_bounds: missing/foreign-generation receipt, missing/malformed allocation, valid but foreign source profile and oversized GPU count refuse without charge mutation; masked/unknown fresh eligibility permits exact paid committed recovery once with no physical selection; a second canonical R grant leaves one CPU unit too little and must prevent host overcommit. UNRUN/source only.",
+  "review": {
+    "R01": "No added production owner/container allocation, unchecked arithmetic/indexing or panic. Existing API cost/topology errors remain typed and fallible. Test-only copies use existing explicit fallible backing copies.",
+    "R02_R03_R05_R12": "Narrow actual-red cause at same Index/peer recovery seams; existing immutable allocation/profile/topology API reused, no new formula/DTO/provider/cache/holder/picker/manager/constant or native mechanism.",
+    "R04_R06_R07_R13": "Restore durable commitments while querying selected peer Holds, never repick. Shared phase/one-consumer checks kept at one helper; pending creates no physical holder. Exact canonical full-P identity/phase/profile remains prerequisite.",
+    "R08_R14": "No measured speed/allocation-free/performance claim. New profile check is bounded O(routes+full-P claims), no cache; ROOT allocation/profile/audit owed.",
+    "R09_R10": "FULL authoritative log+result read/verified before edits; actual semantic red separate from prior green6856 four and all strict results. ROOT after and meaningful mutation pending.",
+    "R11": "Pure portable shared source; supported target/actual VM validation ROOT-owned/unverified for this successor.",
+    "R15_R16": "Named signed source-only checkpoint. No lane test/build/native/new agent/runner change/deletion. All frozen source/raw/PID identities preserved; only installed scoped rustfmt and read/hash/diff locally."
+  },
+  "validation": {
+    "installed_named_rustfmt": "three owned files exit0",
+    "git_diff_check": "exit0",
+    "cargo": "not run by lane",
+    "native": "not run",
+    "after": "ROOT-owned original+changed/new controls unrun; no pass claim"
+  },
+  "remaining": "ROOT exact remote original AFTER, changed contract/guard control and affected strict checks; native recovery/forbidden effect/fault/mutation/measurement/profiling/full gates and main ROOT-owned. No native proof from pure row/model receipts."
+}

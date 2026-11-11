@@ -356,6 +356,22 @@ impl Slot {
                     .is_some_and(|free| free.holds(need))
             })
     }
+
+    /// A durable local or remote owner restores its original tuple, not a fresh candidate.
+    fn runtime_holds_committed(
+        &self,
+        demand: &Demand,
+        need: &Resources,
+        allocation: Option<hex_api::Allocation>,
+        receipt: Option<hex_api::RouteReceipt>,
+    ) -> bool {
+        if let (Some(routes), Some(receipt)) = (&self.routes, receipt) {
+            return routes
+                .committed(receipt)
+                .is_ok_and(|choice| routes.holds_recovered_inner(choice, demand, allocation));
+        }
+        self.runtime_holds_routed(demand, need, receipt)
+    }
     /// The verdict on `demand` here, `devices` the node's and `free(i)` whether device `i` is free.
     fn verdict(
         &self,
@@ -1667,7 +1683,8 @@ impl FitIndex {
         Ok(())
     }
 
-    /// The owner's remote row reserves its exact chosen route, never a replacement physical binding.
+    /// Restore a durable remote-owned row while asking the selected peer Holds. This reserves
+    /// the original charge/tuple without a fresh candidate or replacement physical binding.
     pub(crate) fn take_pending_routed(
         &mut self,
         node: NodeId,
@@ -1678,7 +1695,9 @@ impl FitIndex {
         let charged = crate::model::reserved_resources(demand.need, allocation, route)
             .map_err(|_| SimError::Resources(node))?;
         let slot = self.slot(node)?;
-        if !slot.free.holds(&charged) || !slot.runtime_holds_routed(demand, &charged, route) {
+        if !slot.free.holds(&charged)
+            || !slot.runtime_holds_committed(demand, &charged, allocation, route)
+        {
             return Err(SimError::Resources(node));
         }
         self.change(node, demand, route, true, &charged)
@@ -1831,15 +1850,8 @@ impl FitIndex {
         let charged = crate::model::reserved_resources(demand.need, allocation, route)
             .map_err(|_| SimError::Resources(node))?;
         let slot = self.slot(node)?;
-        let runtime_holds = if let (Some(routes), Some(receipt)) = (&slot.routes, route) {
-            routes
-                .committed(receipt)
-                .is_ok_and(|choice| routes.holds_recovered_inner(choice, demand))
-        } else {
-            slot.runtime_holds_routed(demand, &charged, route)
-        };
         if !slot.free.holds(&charged)
-            || !runtime_holds
+            || !slot.runtime_holds_committed(demand, &charged, allocation, route)
             || matches!(demand.kind, Kind::Build) && slot.benchmarks > 0
             || matches!(demand.kind, Kind::Benchmark) && slot.builds > 0
         {

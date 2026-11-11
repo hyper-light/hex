@@ -495,16 +495,28 @@ impl Routes {
         used.is_some_and(|used| backing.check_inner(used).is_ok())
     }
 
-    /// Released observer history still identifies its one surviving dedicated Box. The caller
-    /// restores that Box's immutable charge and exact devices; it cannot select a fresh route.
-    pub fn holds_recovered_inner(&self, choice: Choice, demand: &Demand) -> bool {
+    /// Released observer history still identifies its one surviving dedicated lifetime. Its
+    /// receiver retains the exact binding; a remote owner reserves only the original commitment.
+    pub fn holds_recovered_inner(
+        &self,
+        choice: Choice,
+        demand: &Demand,
+        allocation: Option<Allocation>,
+    ) -> bool {
         if matches!(
             choice.offer.key.execution,
             Execution::ShardsDedicated | Execution::Firecracker
         ) && let Some(key) = choice.offer.backing
             && let Some((backing, BackingPhase::Released)) = self.backing(key)
         {
-            return self.holds_dedicated_inner(key, backing, demand);
+            // Validate the immutable profile against its SAME retained source with the API's
+            // existing topology check; this temporary value is never advertised as a fresh offer.
+            let original = RouteOffer {
+                cost: allocation.map(|allocation| allocation.cost),
+                ..choice.offer
+            };
+            return original.check_backing(backing).is_ok()
+                && self.holds_dedicated_inner(key, backing, demand);
         }
         self.holds_inner(choice, demand)
     }

@@ -1247,11 +1247,21 @@ fn released_source_recovery_preserves_fresh_phase_and_single_consumer_guards() {
     let mut index = FitIndex::new(&[node]).unwrap();
     let before = index.key(NodeId(0)).unwrap();
     assert_eq!(index.verdict(NodeId(0), &request).unwrap(), Verdict::NoGpu);
-    assert!(
-        index
-            .take_pending_routed(NodeId(0), &request, Some(allocation), Some(route))
-            .is_err()
+    // ROOT4f0's actual remote-owner original establishes that this is also committed recovery.
+    // Keep it in a separate view so every fresh/local one-consumer oracle below stays intact.
+    let mut remote_owner = index.try_clone().unwrap();
+    remote_owner
+        .take_pending_routed(NodeId(0), &request, Some(allocation), Some(route))
+        .unwrap();
+    assert_eq!(
+        remote_owner.key(NodeId(0)).unwrap().cpu_milli,
+        before.cpu_milli - allocation.resources.cpu_milli
     );
+    assert_eq!(
+        remote_owner.verdict(NodeId(0), &request).unwrap(),
+        Verdict::NoGpu
+    );
+    assert!(remote_owner.holds(NodeId(0), WorkloadId(91)).is_empty());
     assert!(
         index
             .take_routed(
@@ -1301,4 +1311,147 @@ fn released_source_recovery_preserves_fresh_phase_and_single_consumer_guards() {
         .unwrap();
     assert_eq!(index.key(NodeId(0)).unwrap(), before);
     assert_eq!(index.verdict(NodeId(0), &request).unwrap(), Verdict::NoGpu);
+}
+
+/// AC-T7.4.1: committed pending recovery retains one exact paid source without fresh facts,
+/// a new binding, foreign receipt/profile, oversized physical demand or host overcommit.
+#[test]
+fn committed_pending_recovery_keeps_receipt_charge_and_claim_bounds() {
+    let (mut node, request, parent) = subset_observer_fixture(false);
+    let allocation = profile()
+        .allocate(crate::model::capacity_resources(request.need))
+        .unwrap();
+    let current = BackingOffer {
+        key: BackingKey {
+            pool: [0x75; 32],
+            generation: [0x76; 16],
+        },
+        cost: profile(),
+        phase: BackingPhase::Prepared,
+        devices: vec![parent.devices[1]],
+    };
+    let catalog = triomphe::Arc::get_mut(node.routes.as_mut().unwrap()).unwrap();
+    catalog.backings[0].phase = BackingPhase::Released;
+    let route = hex_api::RouteReceipt {
+        key: catalog.offers[0].key,
+        backing: Some(parent.key),
+    };
+    catalog.offers.push(RouteOffer {
+        backing: Some(current.key),
+        ..catalog.offers[0]
+    });
+    catalog.backings.push(current.try_clone().unwrap());
+    catalog.device_routes = vec![1, 0];
+    for device in &mut node.devices {
+        device.available = false;
+        device.load = crate::model::GpuLoad::default();
+    }
+    let mut malformed = allocation;
+    malformed.resources.cpu_milli -= 1;
+    let mut foreign_profile = profile();
+    foreign_profile.id[0] ^= 1;
+    let foreign_allocation = foreign_profile
+        .allocate(crate::model::capacity_resources(request.need))
+        .unwrap();
+    let foreign_route = hex_api::RouteReceipt {
+        backing: Some(BackingKey {
+            generation: [0x77; 16],
+            ..parent.key
+        }),
+        ..route
+    };
+    let mut oversized = request;
+    oversized.need.gpus = 3;
+    for (name, demand, allocation, receipt) in [
+        ("missing receipt", request, Some(allocation), None),
+        (
+            "foreign generation",
+            request,
+            Some(allocation),
+            Some(foreign_route),
+        ),
+        ("missing allocation", request, None, Some(route)),
+        ("malformed charge", request, Some(malformed), Some(route)),
+        (
+            "foreign profile",
+            request,
+            Some(foreign_allocation),
+            Some(route),
+        ),
+        (
+            "too many physical GPUs",
+            oversized,
+            Some(allocation),
+            Some(route),
+        ),
+    ] {
+        let mut index = FitIndex::new(std::slice::from_ref(&node)).unwrap();
+        let before = index.key(NodeId(0)).unwrap();
+        assert!(
+            index
+                .take_pending_routed(NodeId(0), &demand, allocation, receipt)
+                .is_err(),
+            "{name}"
+        );
+        assert_eq!(index.key(NodeId(0)).unwrap(), before, "{name}");
+    }
+    let mut masked = node.try_clone().unwrap();
+    let source = node.routes.as_ref().unwrap();
+    masked.routes = Some(
+        RuntimeRoutes {
+            admit: Some(0),
+            offers: source.offers.clone(),
+            device_routes: source.device_routes.clone(),
+            backings: source
+                .backings
+                .iter()
+                .map(|backing| backing.try_clone().unwrap())
+                .collect(),
+        }
+        .share()
+        .unwrap(),
+    );
+    let mut retained = FitIndex::new(&[masked]).unwrap();
+    let before = retained.key(NodeId(0)).unwrap();
+    assert_eq!(
+        retained.verdict(NodeId(0), &request).unwrap(),
+        Verdict::NoGpu
+    );
+    retained
+        .take_pending_routed(NodeId(0), &request, Some(allocation), Some(route))
+        .unwrap();
+    let paid = retained.key(NodeId(0)).unwrap();
+    assert_eq!(
+        paid.cpu_milli,
+        before.cpu_milli - allocation.resources.cpu_milli
+    );
+    assert_eq!(
+        paid.mem_bytes,
+        before.mem_bytes - allocation.resources.mem_bytes
+    );
+    assert_eq!(
+        retained.verdict(NodeId(0), &request).unwrap(),
+        Verdict::NoGpu
+    );
+    assert!(retained.holds(NodeId(0), WorkloadId(91)).is_empty());
+    assert!(
+        retained
+            .take_pending_routed(NodeId(0), &request, Some(allocation), Some(route))
+            .is_err()
+    );
+    assert_eq!(retained.key(NodeId(0)).unwrap(), paid);
+
+    // The other exact canonical source can consume room before this old Box is restored.
+    // Both individual envelopes fit the host; their combined charge is one CPU unit too large.
+    node.capacity.cpu_milli =
+        allocation.resources.cpu_milli + current.allocation().unwrap().resources.cpu_milli - 1;
+    let mut short = FitIndex::new(&[node]).unwrap();
+    short.grant_backing(NodeId(0), current.key).unwrap();
+    let before = short.key(NodeId(0)).unwrap();
+    assert!(
+        short
+            .take_pending_routed(NodeId(0), &request, Some(allocation), Some(route))
+            .is_err()
+    );
+    assert_eq!(short.key(NodeId(0)).unwrap(), before);
 }
