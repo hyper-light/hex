@@ -96,7 +96,13 @@ fn digest(text: &str) -> Result<[u8; 32], Refusal> {
             "SHA256 pin must contain exactly 64 hexadecimal digits",
         ));
     }
-    for (out, pair) in digest.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+    let (pairs, remainder) = text.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(invalid(
+            "SHA256 pin contains an incomplete hexadecimal pair",
+        ));
+    }
+    for (out, pair) in digest.iter_mut().zip(pairs) {
         let byte = std::str::from_utf8(pair)
             .ok()
             .and_then(|pair| u8::from_str_radix(pair, 16).ok())

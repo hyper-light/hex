@@ -448,7 +448,7 @@ struct CreateData {
     system: Option<System>,
     state: CreateOperationState,
     cancellation: CreateCancellation,
-    durable: Option<super::service::TerminalOwner>,
+    durable: Option<super::service::TerminalReceipt>,
 }
 
 enum CreateOperationState {
@@ -695,10 +695,7 @@ impl PendingCreate {
             data.close(context.calls);
         }
         Ok(matches!(data.state, CreateOperationState::Terminal(_))
-            && data
-                .durable
-                .as_ref()
-                .is_some_and(super::service::TerminalOwner::published))
+            && data.durable.as_ref().is_some_and(|owner| owner.published()))
     }
 
     pub(crate) fn cancel(&mut self) -> CreateCancellation {
@@ -761,7 +758,7 @@ pub(crate) fn create_system_owned(
 pub(crate) fn create_system_durable(
     id: &str,
     document: &str,
-    durable: &mut Option<super::service::TerminalOwner>,
+    durable: &mut Option<super::service::TerminalReceipt>,
 ) -> Result<PendingCreate, HcsFailure> {
     create_system_inner(id, document, Duration::ZERO, durable)
 }
@@ -770,7 +767,7 @@ fn create_system_inner(
     id: &str,
     document: &str,
     patience: Duration,
-    durable: &mut Option<super::service::TerminalOwner>,
+    durable: &mut Option<super::service::TerminalReceipt>,
 ) -> Result<PendingCreate, HcsFailure> {
     let api = api().map_err(|m| HcsFailure {
         code: 0x8037_0114,
@@ -1371,9 +1368,9 @@ impl AdapterCalls {
             )
         };
         if library.is_null() {
-            // SAFETY: captures this thread's last error immediately after the failed load.
             return Err(AdapterLoadFailure {
                 op: "loading native GPU adapter queries",
+                // SAFETY: captures this thread's last error immediately after the failed load.
                 code: unsafe { GetLastError() },
             });
         }
@@ -1386,18 +1383,18 @@ impl AdapterCalls {
             )
         };
         let Some(open) = open else {
-            // SAFETY: immediate capture of this thread's export lookup failure.
             return Err(AdapterLoadFailure {
                 op: "resolving D3DKMTOpenAdapterFromDeviceName",
+                // SAFETY: immediate capture of this thread's export lookup failure.
                 code: unsafe { GetLastError() },
             });
         };
         // SAFETY: same static name and module lifetime as above.
         let close = unsafe { GetProcAddress(library, windows_sys::core::s!("D3DKMTCloseAdapter")) };
         let Some(close) = close else {
-            // SAFETY: immediate capture of this thread's export lookup failure.
             return Err(AdapterLoadFailure {
                 op: "resolving D3DKMTCloseAdapter",
+                // SAFETY: immediate capture of this thread's export lookup failure.
                 code: unsafe { GetLastError() },
             });
         };

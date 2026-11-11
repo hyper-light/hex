@@ -1,0 +1,72 @@
+{
+  "requirement": "AC-T7.4.1",
+  "files": {
+    "crates/hex-api/src/sim.rs": {
+      "source": "965725174252cb9a79790cd4e7cf5f8199afeac1",
+      "before": "bcc906eae67335640e50b950b6726733285a73a1e3f821d65640a4576a3a77e2",
+      "after": "56d7ea93a930b80aeaab748162d8655b5e06fcfe0462705675c04932a2fa76ac"
+    },
+    "crates/hex-node/src/scheduler/tests.rs": {
+      "source": "965725174252cb9a79790cd4e7cf5f8199afeac1",
+      "before": "c03c675ad907f2e0b489ef856f9aaf3bb0ff80a735e39c766ff9fa5a2c7bdcda",
+      "after": "132bb91c9038f7ffeedb88a3d92208c66238ac47b9de86557c28e963438e211c"
+    },
+    "crates/hex-node/src/scheduler/adversarial_relay_tests.rs": {
+      "source": "965725174252cb9a79790cd4e7cf5f8199afeac1",
+      "before": "037660b2e4cf8892e7c46d1d1302033edff9deb6356ccfa7461a3e133e27e6b8",
+      "after": "0b9e611e1ccabc9a303c0cb3539296facfe856a0edfdc4c291ddaa1561dcd7be"
+    },
+    "crates/hex-sim/src/peer.rs": {
+      "source": "965725174252cb9a79790cd4e7cf5f8199afeac1",
+      "before": "b80deef57cdef69d56d1f6cb3ac8c2344d3b427a91491eb6a6e44550724f1c1c",
+      "after": "716ccaab54b89a40787af8feda82acf1a7b6ff9ec6018b38992ea0aedefc0399"
+    },
+    "crates/hex-runtime/src/firecracker/config.rs": {
+      "source": "3fe5ff38792d0291bedef56d8f64626c454d6be2",
+      "before": "63faa33c2e1e17c8bda5016ab2a6169f55a7d637df1548160cfabd361ddcb68d",
+      "after": "642206566c4832152ae1353f9457a8a8b9337feafde22b36c1459871ef5391fd"
+    },
+    "crates/hex-runtime/src/guest/gpu.rs": {
+      "source": "e264b23a0ba1194650590d313d5d0d96e52c9bfd",
+      "before": "1ac07be47a716ac6f8f07e0a40469486fc4104f78146baea2dcafc5fc9c898b0",
+      "after": "cd3b7f35bc0a907c68d18deaa35f932d4f445757df497488c88cc74428cda11c"
+    },
+    "crates/hex-runtime/src/windows/oci/service.rs": {
+      "source": "4b7b6bb918e7951add3fd3f7ef3678e1fbd3ce5c",
+      "before": "9ad010339c5c2f2535944c36931a27340f14e0e9ac6b98254e8b541469900540",
+      "after": "36b8d675390a70f0ce2e1d7f3c0d64fa8aa2ced000b00fb90ff047ad51476bee"
+    },
+    "crates/hex-runtime/src/windows/oci/sys.rs": {
+      "source": "4b7b6bb918e7951add3fd3f7ef3678e1fbd3ce5c",
+      "before": "c9fc3223c5dbc8161070ebe5fcf03517fce93b10e1ff1715e0f8d877cd31165a",
+      "after": "83c928e08fdb86f898934c6f7e155a66d3272b9a39c81d51e93dc14c93a71fa9"
+    },
+    "crates/hex-runtime/src/windows/managed.rs": {
+      "source": "9d64->4b7b checked_rem hunk ONLY; scope changes held",
+      "before": "31d477226ab215a0f8500060618236ce2470a16f029bdba9747c349ab3e64f44",
+      "after": "9d2760a763589c5d9b779386436a78e27e40e0a2e7a0bed7bce58126ede7f38d"
+    }
+  },
+  "review": "One-byte known-zero fixture readings remain Some, CPU-only simulator does not open Gpus; one device_offer_tests registration preserved. Native TerminalOwner UniqueArc allocated fallibly BEFORE Dispatched receipt write/HCS effect and moved into existing context/attempt once; no parallel manager or infallible Box. Checked remainder and syntax/safety comment changes retain behavior.",
+  "original_windows": {
+    "source": "9c41481694ad5b2747ea47fa335fc14a5aaeb5d5",
+    "cargo": 48111,
+    "exit": 101,
+    "log": "f308055554b97677bbcf82affcb14867ee2ac9b0071757eae2e10c193cce5288",
+    "reaped": true,
+    "temp_entries": 0
+  },
+  "original_cost": {
+    "source": "e1cdcd683fd641650fe0117c4ef8dc646f6f0b9e",
+    "selected": [
+      2,
+      0,
+      0
+    ],
+    "cargo": 49022,
+    "log": "622588e197e0b98ec1e9a77a69f4968fb5df1aad26c709d3e414c332185ce41a",
+    "runtime_clippy_exit": 101,
+    "runtime_clippy_log": "dce49725aae7160afb9d43b73c6562c88ecbfe1cd5ac5ed82bbf047730910f13"
+  },
+  "held": "L2 test-only lint corrections await source; all whole joined source/Windows checks pending, native0"
+}

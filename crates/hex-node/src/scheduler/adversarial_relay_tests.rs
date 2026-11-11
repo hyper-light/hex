@@ -17,6 +17,9 @@ struct RelayRuntime {
 }
 
 impl Runtime for RelayRuntime {
+    fn physical_report(&self) -> Result<hex_api::PhysicalReport, Refusal> {
+        self.sim.physical_report()
+    }
     fn classes(&self) -> Vec<hex_api::Class> {
         self.sim.classes()
     }
@@ -122,10 +125,7 @@ fn relay_receiver(dir: &Path, runtime: Arc<RelayRuntime>) -> (Arc<Service>, [Rec
     );
     let (other_send, other_receive) = channel();
     let owned = Arc::get_mut(&mut service).unwrap();
-    owned.prober = Mutex::new(
-        crate::facts::Prober::open(dir, crate::facts::Declared::default())
-            .with_classes(Classes::NONE.with(relay_class())),
-    );
+    owned.initialized = Classes::NONE.with(relay_class());
     owned.senders.insert(NodeId(2), other_send);
     owned
         .refreshing
@@ -603,10 +603,7 @@ fn cancellation_reconciles_lost_start_reply_without_losing_either_queued_lane() 
         .unwrap(),
         other_send,
     );
-    Arc::get_mut(&mut other).unwrap().prober = Mutex::new(
-        crate::facts::Prober::open(&dir.path().join("other"), crate::facts::Declared::default())
-            .with_classes(Classes::NONE.with(relay_class())),
-    );
+    Arc::get_mut(&mut other).unwrap().initialized = Classes::NONE.with(relay_class());
     relay_hear(&other, &second_start, new_epoch, 1).unwrap();
     relay_feedback(&owner, 2, &relay_take(&other_feedback), 1);
     let second_created = owner.driver.status(second).unwrap().unwrap().created;

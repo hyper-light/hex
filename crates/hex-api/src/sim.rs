@@ -213,6 +213,23 @@ fn write(to: Option<&mut std::io::PipeWriter>, bytes: &[u8]) {
 }
 
 impl Runtime for SimRuntime {
+    fn physical_report(&self) -> Result<crate::PhysicalReport, Refusal> {
+        // This CPU-only simulated owner has no native inventory or attachment grant.
+        let name = "simulator:cpu";
+        let mut authority = String::new();
+        authority
+            .try_reserve_exact(name.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "simulated native authority bytes",
+                bound: name.len(),
+            })?;
+        authority.push_str(name);
+        Ok(crate::PhysicalReport {
+            authority,
+            devices: Vec::new(),
+        })
+    }
+
     fn classes(&self) -> Vec<Class> {
         match self.backend {
             Some(class) => vec![class],

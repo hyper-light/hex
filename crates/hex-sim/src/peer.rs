@@ -3410,14 +3410,21 @@ mod tests {
         assert_eq!(out[0].0, NodeId(1));
         node.hear(NodeId(1), Msg::Ended { key }, &mut records)
             .unwrap();
-        node.set_gpu_load(NodeId(0), 0, crate::model::GpuLoad::default())
-            .unwrap();
+        node.set_gpu_load(
+            NodeId(0),
+            0,
+            crate::model::GpuLoad {
+                busy_per_mille: Some(0),
+                memory_used: Some(0),
+            },
+        )
+        .unwrap();
         node.set_gpu_load(
             NodeId(1),
             0,
             crate::model::GpuLoad {
                 busy_per_mille: Some(1000),
-                ..crate::model::GpuLoad::default()
+                memory_used: Some(0),
             },
         )
         .unwrap();

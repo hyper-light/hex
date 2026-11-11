@@ -83,10 +83,9 @@ fn replayed_deletion_does_not_interrupt_the_reconnected_peer() {
         driver,
         runtimes: Runtimes::default(),
         cluster: Mutex::new(cluster),
-        prober: Mutex::new(crate::facts::Prober::open(
-            dir.path(),
-            crate::facts::Declared::default(),
-        )),
+        facts_dir: dir.path().to_path_buf(),
+        initialized: Classes::NONE,
+        physical_authority: None,
         stopping,
         queued: Arc::new(AtomicUsize::new(0)),
         control_limit: AtomicUsize::new(crate::records::MOST),
@@ -160,10 +159,9 @@ fn laptop_dispatch_and_common_wire_keep_the_box_until_explicit_delete() {
         driver,
         runtimes: Runtimes::default(),
         cluster: Mutex::new(cluster),
-        prober: Mutex::new(crate::facts::Prober::open(
-            dir.path(),
-            crate::facts::Declared::default(),
-        )),
+        facts_dir: dir.path().to_path_buf(),
+        initialized: Classes::NONE,
+        physical_authority: None,
         stopping: Arc::new(Stopping::default()),
         queued: Arc::new(AtomicUsize::new(0)),
         control_limit: AtomicUsize::new(crate::records::MOST),
@@ -344,10 +342,9 @@ fn cold_remote_creation_feedback_survives_owner_publication_busy() {
         driver: owner_driver,
         runtimes: Runtimes::default(),
         cluster: Mutex::new(cluster),
-        prober: Mutex::new(crate::facts::Prober::open(
-            dir.path(),
-            crate::facts::Declared::default(),
-        )),
+        facts_dir: dir.path().to_path_buf(),
+        initialized: Classes::NONE,
+        physical_authority: None,
         stopping: Arc::new(Stopping::new([1])),
         queued: Arc::new(AtomicUsize::new(0)),
         control_limit: AtomicUsize::new(crate::records::MOST),
@@ -525,6 +522,16 @@ fn advertise_service_with_budget(
         runtimes.clone(),
     )
     .unwrap();
+    let initialized = cluster
+        .nodes
+        .iter()
+        .find(|node| node.id == id)
+        .unwrap()
+        .classes;
+    let physical_authority = runtimes
+        .physical_report()
+        .unwrap()
+        .map(|report| report.authority);
     Arc::new(Service {
         id,
         realm: "advertise-time".into(),
@@ -549,10 +556,9 @@ fn advertise_service_with_budget(
         driver,
         runtimes,
         cluster: Mutex::new(cluster),
-        prober: Mutex::new(crate::facts::Prober::open(
-            dir,
-            crate::facts::Declared::default(),
-        )),
+        facts_dir: dir.to_path_buf(),
+        initialized,
+        physical_authority,
         stopping: Arc::new(Stopping::new([other.0])),
         queued: Arc::new(AtomicUsize::new(0)),
         control_limit: AtomicUsize::new(crate::records::MOST),

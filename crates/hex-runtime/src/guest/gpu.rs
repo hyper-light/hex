@@ -93,10 +93,10 @@ impl Authority {
                 if owner.replace(value).is_some() {
                     return Err(invalid("repeated GPU box parameter"));
                 }
-            } else if let Some(value) = word.strip_prefix("hex.gpu=") {
-                if list.replace(value).is_some() {
-                    return Err(invalid("repeated GPU selection parameter"));
-                }
+            } else if let Some(value) = word.strip_prefix("hex.gpu=")
+                && list.replace(value).is_some()
+            {
+                return Err(invalid("repeated GPU selection parameter"));
             }
         }
         let (owner, list) = match (owner, list) {

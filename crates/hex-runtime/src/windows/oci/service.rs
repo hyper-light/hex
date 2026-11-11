@@ -190,6 +190,7 @@ pub(crate) struct TerminalOwner {
     _owner: File,
     completion: win::Handle,
 }
+pub(crate) type TerminalReceipt = triomphe::UniqueArc<TerminalOwner>;
 impl TerminalOwner {
     pub(crate) fn submitted(&mut self) {
         self.receipt.system_owner = SystemOwner::Unknown;
@@ -234,7 +235,7 @@ pub(crate) struct Service {
 enum Attempt {
     Operation(sys::PendingCreate),
     Preparation {
-        owner: TerminalOwner,
+        owner: TerminalReceipt,
         result: Result<(), HcsFailure>,
     },
 }
@@ -340,15 +341,20 @@ impl Service {
                 bound: crate::MAX_BOXES,
             })?;
         receipt.dispatch(owner)?;
-        write(&dir.join(RECEIPT), &receipt.encode()?)?;
         let completion = win::named_event(&completion_name(marker))
             .map_err(|e| Refusal::os("opening native completion event", e))?;
-        let mut durable = Some(TerminalOwner {
+        let terminal = triomphe::UniqueArc::try_new(TerminalOwner {
             dir,
             receipt,
             _owner: lock,
             completion,
-        });
+        })
+        .map_err(|_| Refusal::Exhausted {
+            what: "native terminal owner",
+            bound: std::mem::size_of::<TerminalOwner>(),
+        })?;
+        write(&terminal.dir.join(RECEIPT), &terminal.receipt.encode()?)?;
+        let mut durable = Some(terminal);
         let mut attempt =
             match sys::create_system_durable(expected.as_str(), &request.document, &mut durable) {
                 Ok(create) => Attempt::Operation(create),
