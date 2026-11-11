@@ -396,7 +396,6 @@ fn play(setup: Setup, events: &[Event], paths: &Cell<Paths>) -> Result<(), TestC
                                 oracle.counts.refused_waited += 1;
                                 seen.refused_on_failed_start += 1;
                                 let wait = now - since;
-                                oracle.wait.ran_out(wait);
                                 oracle
                                     .answered
                                     .push((ticket, Err(Refused::Waited { wait })));
