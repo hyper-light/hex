@@ -587,7 +587,7 @@ impl FirecrackerRuntime {
                 &owner,
             )?;
             let program = self.vm_program(&paths)?;
-            let io = Self::vm_io()?;
+            let (io, mut output) = Self::vm_io()?;
             fs::create_dir(&paths.dir)
                 .and_then(|()| fs::set_permissions(&paths.dir, fs::Permissions::from_mode(0o700)))
                 .map_err(|error| Refusal::os("creating observer incarnation directory", error))?;
@@ -614,7 +614,8 @@ impl FirecrackerRuntime {
             {
                 return Err(refused(grant.key, LifecycleCause::Uncertain));
             }
-            transport::ready(&ready, native.as_ref(), until)?;
+            transport::ready(&ready, native.as_ref(), &mut output, until)?;
+            drop(output);
             let client = self.pool_client(&current, transaction, Some(until))?;
             self.pool_observations(&current, &client, Some(until))?;
             current.phase = BackingPhase::Live;
