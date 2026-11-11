@@ -1,0 +1,92 @@
+{
+  "binary": [
+    {
+      "path": "target/debug/deps/hex_runtime-14fd602464dfe5b3",
+      "bytes": 24267888,
+      "sha256": "ddb1470cec262927c851ebe61b80f266cd121d9297c841643f0eade8ac48c350"
+    }
+  ],
+  "phases": [
+    {
+      "name": "mac-scope-compile-only",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "--no-run"
+      ],
+      "pid": 90816,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "f949e1c93896479501e9d9a090a6ed87041c881acd4798dd5122d61b0f849deb",
+      "bytes": 5435,
+      "test_outcomes": []
+    },
+    {
+      "name": "mac-escape-native-original",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "macos::process::scope_completion_tests::unobserved_escaped_descendant_prevents_scope_release",
+        "--",
+        "--ignored",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 91331,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "14c6f6051e4cdf39358d6ef6914ee1532376e94fef040bccefbb649036df1ecc",
+      "bytes": 3332,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "mac-joined-strict-clippy",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-runtime",
+        "--all-targets",
+        "--locked",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 91335,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "a98317c44a365c306c84edf321c5ae70cfac3d6cca7a7e0272d4ac7a189e02ea",
+      "bytes": 2620,
+      "test_outcomes": []
+    }
+  ],
+  "recorded_children_reaped": true
+}
