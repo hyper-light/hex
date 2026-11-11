@@ -543,3 +543,155 @@ fn pending_gpu_reservations_keep_original_shape_across_refresh_and_backing_hando
         (Verdict::NoRoom, Verdict::NoRoom, Verdict::NoRoom)
     );
 }
+
+/// AC-T7.4.1: an ungranted alternative cannot hide an initialized native route with a free GPU.
+/// ROOT's f3 source hypothesis; this control is source-first and has not established an actual red.
+#[test]
+fn a_prepared_gpu_backing_does_not_hide_an_eligible_native_oci_route() {
+    let id = hex_api::DeviceId {
+        kind: hex_api::DeviceKind::Gpu,
+        key: 7,
+    };
+    let mut node = NodeSpec::new(
+        NodeId(0),
+        Resources {
+            cpu_milli: 8000,
+            mem_bytes: 8 << 30,
+            disk_bytes: 0,
+            gpus: 1,
+        },
+    );
+    node.virt.kvm = true;
+    node.devices[0].key = Some(id.key);
+    node.devices[0].classes = Classes::ALL;
+    let observer = BackingOffer {
+        key: BackingKey {
+            pool: [31; 32],
+            generation: [32; 16],
+        },
+        cost: profile(),
+        phase: BackingPhase::Prepared,
+        devices: vec![id],
+    };
+    node.routes = Some(
+        RuntimeRoutes {
+            offers: vec![
+                RouteOffer {
+                    key: RouteKey {
+                        class: hex_api::Class::Oci,
+                        image: image(ImageOs::Linux, false),
+                        execution: Execution::Native,
+                        gpu: GpuEligibility::Any,
+                    },
+                    cost: None,
+                    backing: None,
+                },
+                RouteOffer {
+                    key: RouteKey {
+                        class: hex_api::Class::Oci,
+                        image: image(ImageOs::Linux, false),
+                        execution: Execution::ShardsDedicated,
+                        gpu: GpuEligibility::Required,
+                    },
+                    cost: Some(profile()),
+                    backing: Some(observer.key),
+                },
+            ],
+            device_routes: vec![3],
+            backings: vec![observer],
+        }
+        .share()
+        .unwrap(),
+    );
+    node.check_runtime_pools().unwrap();
+    let mut request = demand(Some(Os::Linux), 1);
+    request.ask.arch = Some(crate::model::Arch::X86_64);
+    let mut cpu = request;
+    cpu.need.gpus = 0;
+    let mut index = FitIndex::new(&[node]).unwrap();
+    let cpu_verdict = index.verdict(NodeId(0), &cpu).unwrap();
+    let gpu_verdict = index.verdict(NodeId(0), &request).unwrap();
+    eprintln!(
+        "mixed initialized/prepared route source control: cpu={cpu_verdict:?}, gpu={gpu_verdict:?}; native_effect=false"
+    );
+    assert_eq!(
+        (cpu_verdict, gpu_verdict),
+        (Verdict::Admits, Verdict::Admits)
+    );
+    let route = index.route(NodeId(0), &request).unwrap();
+    assert_eq!(route.unwrap().key.execution, Execution::Native);
+    let before = index.key(NodeId(0)).unwrap();
+    let allocation = index.allocation(NodeId(0), &request).unwrap();
+    index
+        .take_routed(NodeId(0), WorkloadId(1), &request, allocation, route)
+        .unwrap();
+    index
+        .give_routed(NodeId(0), WorkloadId(1), &request, allocation, route)
+        .unwrap();
+    assert_eq!(index.key(NodeId(0)).unwrap(), before);
+}
+
+/// AC-T7.4.1: a delayed Prepared report cannot revoke a locally granted physical/native envelope.
+/// ROOT's f3 source hypothesis; no production remedy is included before an actual control result.
+#[test]
+fn a_prepared_snapshot_cannot_roll_back_a_granted_backing_or_its_claims() {
+    let mut node = NodeSpec::new(
+        NodeId(0),
+        Resources {
+            cpu_milli: 8000,
+            mem_bytes: 8 << 30,
+            disk_bytes: 0,
+            gpus: 1,
+        },
+    );
+    node.virt.kvm = true;
+    node.devices[0].key = Some(7);
+    node.devices[0].classes = Classes::ALL;
+    let observer = BackingOffer {
+        key: BackingKey {
+            pool: [41; 32],
+            generation: [42; 16],
+        },
+        cost: profile(),
+        phase: BackingPhase::Prepared,
+        devices: vec![hex_api::DeviceId {
+            kind: hex_api::DeviceKind::Gpu,
+            key: 7,
+        }],
+    };
+    let key = observer.key;
+    node.routes = Some(
+        RuntimeRoutes {
+            offers: vec![RouteOffer {
+                key: RouteKey {
+                    class: hex_api::Class::Shards,
+                    image: image(ImageOs::Linux, false),
+                    execution: Execution::ShardsDedicated,
+                    gpu: GpuEligibility::Required,
+                },
+                cost: Some(profile()),
+                backing: Some(key),
+            }],
+            device_routes: vec![1],
+            backings: vec![observer],
+        }
+        .share()
+        .unwrap(),
+    );
+    node.check_runtime_pools().unwrap();
+    let mut index = FitIndex::new(std::slice::from_ref(&node)).unwrap();
+    let grant = index.grant_backing(NodeId(0), key).unwrap();
+    let before = index.key(NodeId(0)).unwrap();
+    assert_eq!(before.gpus, 0);
+    let refreshed = index.refresh_node(&node);
+    let after = index.key(NodeId(0)).unwrap();
+    eprintln!(
+        "granted/prepared rollback source control: refresh={refreshed:?}, before={before:?}, after={after:?}; native_effect=false"
+    );
+    assert!(
+        refreshed.is_err(),
+        "a stale Prepared snapshot is not release proof"
+    );
+    assert_eq!(after, before);
+    assert_eq!(index.grant_backing(NodeId(0), key).unwrap(), grant);
+}

@@ -1,0 +1,22 @@
+{
+  "checks": {
+    "compile": "unrun",
+    "diff": "pass",
+    "native": "unrun",
+    "scoped_format": "pass",
+    "tests": "unrun"
+  },
+  "controls": {
+    "a_prepared_gpu_backing_does_not_hide_an_eligible_native_oci_route": "intended-red/unrun",
+    "a_prepared_snapshot_cannot_roll_back_a_granted_backing_or_its_claims": "intended-red/unrun"
+  },
+  "kind": "test-only/source-first",
+  "policy": "0c598386ca1f7c65c6e0634dba77983e4abffff2",
+  "production": "f3f99e71304a780e2a75fd143895396dbd8f2d6a",
+  "production_remedy": false,
+  "role": "implementer",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": "crates/hex-sim/src/index/route_offer_tests.rs",
+  "source_sha256": "6e1c41eb5798595216f320a3e4d2188dcb33057caba0cab381d33a3a068d4e81",
+  "unchanged_pending_control": "pending_gpu_reservations_keep_original_shape_across_refresh_and_backing_handoff"
+}
