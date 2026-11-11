@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "owner": "ROOT only; source hook, NOT executed by L4",
+  "source": "crates/hex-client/src/calls.rs",
+  "source_sha256": "2274b7d480ab9291716b0ea257f750e0e9c53fb8e86ab20bf600cbcc51b1dd59",
+  "selector": "calls::budget_tests::absolute_run_settle_error_does_not_renew_kill_answer_budget",
+  "expected_matches": 1,
+  "find": ".call_before(self.bound, &kill, |_, _| Ok(NONE), None, Some(cap))?",
+  "replace": ".call_before(self.bound, &kill, |_, _| Ok(NONE), None, None)?",
+  "purpose": "Remove only the retained original cap from cleanup Kill send/answer. Keep the same bounded zero-duration exit poll, Started/setup/withheld-answer fixture and all guards.",
+  "expected_observation": "The unchanged original selector must reject return delayed until owned cleanup, with actual Run/Started/Kill before deadline and no Exit. Missing phase or compile failure is not mutation rejection proof.",
+  "restoration": "Restore exact pre-mutation calls.rs SHA and compare private compiled/source/binary provenance; ROOT owns fresh private build/result/reaps.",
+  "status": "SOURCE HOOK ONLY; no mutation/build/test executed"
+}

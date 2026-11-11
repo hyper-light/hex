@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "hex_claude_full_read_sha256": "a093d49f0e51a0c9026996cb170980696dc375364b8d9f13866200c6232e0c2b",
+  "parent": "5a0a020b4f49073bc020818205739a893b059ac0",
+  "source": {
+    "path": "crates/hex-client/src/calls.rs",
+    "parent_sha256": "38ae331369187698244c8d679e944e39937b27915f4c7612191e9d65604f3fc1",
+    "sha256": "2274b7d480ab9291716b0ea257f750e0e9c53fb8e86ab20bf600cbcc51b1dd59",
+    "bytes": 111824
+  },
+  "protected": [
+    {
+      "path": "crates/hex-client/src/calls/budget_tests.rs",
+      "sha256": "9a376262305f7add3585b385b67802b8bd5909336ee451a08e779f0dccd97585",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/guest.rs",
+      "sha256": "893c281be8a3d4907d81bcffc36c0991a1d614108e3e68ecf7500e130887c6b3",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/guest/tests.rs",
+      "sha256": "68ba6db123682e110827cd02315097edb61576fa51acb650bdefe2b9dab21626",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-core/src/patience.rs",
+      "sha256": "3b0b0902568a369dd8ae345f91f043c7cac5bf4b3c886accfb8d4aa3b6ea5709",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-core/src/wire.rs",
+      "sha256": "9f0e456b8d0c030f58539f8bfa9bf9f3f584bec9ffa969d04e2928cc9706b138",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-api/src/devices.rs",
+      "sha256": "6fc8bc6a95f0ba496e3deac6dcb35e482e39a1f1821b313eabb264648164b923",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "a8f51f83a7b8ed2c43e0824f3af7aff5e967ba77159dde320841183559ea29b8",
+      "unchanged": true
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "e8453e60847d551d658cebff88a757ce6bee2043058b9cd9e5a3b94ea791a304",
+      "unchanged": true
+    },
+    {
+      "path": "CLAUDE.md",
+      "sha256": "a093d49f0e51a0c9026996cb170980696dc375364b8d9f13866200c6232e0c2b",
+      "unchanged": true
+    }
+  ],
+  "original_actual": {
+    "source": "5a0a020b4f49073bc020818205739a893b059ac0",
+    "selector": "calls::budget_tests::absolute_run_settle_error_does_not_renew_kill_answer_budget",
+    "passed": 0,
+    "failed": 1,
+    "ignored": 0,
+    "raw_copy": "original-5a0-settle.log",
+    "raw_sha256": "3c63fedc016f369580cd29a56066d96bf1c362811051bc3f91c87f79fd4fd4c7",
+    "verified_root_archive": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/cpu-handoff-5a0a-results-proof/raw.tar.gz",
+    "verified_root_archive_sha256": "cea01958da856db5269392a8f9c76c84bc659f3e6fd19e16c22f37de74421e39",
+    "phase": "CallerAbsolute25ms; actual Run/Started and Kill before original deadline, no Exit/releases, before_cleanup ErrTimeout after100ms; original stream-settlement Broken returned only after owned cleanup; clean/join true.",
+    "prior_2212": "Original9b44 run INCOMPLETE remains separately retained; persistent-closed fixture5de88 made5a0 actual red observable."
+  },
+  "remedy": "Only failed setup with Some original effective caller/configured cap calls private RemoteProc::kill_before. Existing zero-duration wait loop receives same cap and checks it each iteration after known completion; cleanup Kill uses Conn.call_before(Some samecap). No new caller/configured cap or retry is created. None/ordinary Proc kill/wait unchanged.",
+  "authority": "Known completion still wins; cap expiry stops polling and Conn.call_before checks before Kill send. Existing bounded sender handles queued/partial-frame cases. Drop retains original release cap/ownership; the exact original setup error survives cleanup refusal. No physical absence/termination inferred.",
+  "mutation": "mutation-hook.json, exact one-instance retained Kill cap removal; ROOT only, unexecuted",
+  "original_test_unchanged": true,
+  "test_selectors_added": 0,
+  "builds_executed": 0,
+  "tests_executed": 0,
+  "native_executed": 0,
+  "status": "SOURCE ONLY; scoped rustfmt/source integrity only; ROOT owns unchanged original after-check and meaningful mutation evidence. No old9 passing cases replayed."
+}
