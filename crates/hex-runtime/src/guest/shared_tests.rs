@@ -44,6 +44,8 @@ struct Owner {
     pool: Mutex<Option<PoolRecord>>,
     boxes: Mutex<Records>,
     launches: AtomicUsize,
+    preparations: AtomicUsize,
+    removals: AtomicUsize,
     capacity_calls: AtomicUsize,
     finalized: AtomicUsize,
     fail_finalize: AtomicBool,
@@ -56,6 +58,8 @@ impl Owner {
             pool: Mutex::new(None),
             boxes: Mutex::new(Records::new()),
             launches: AtomicUsize::new(0),
+            preparations: AtomicUsize::new(0),
+            removals: AtomicUsize::new(0),
             capacity_calls: AtomicUsize::new(0),
             finalized: AtomicUsize::new(0),
             fail_finalize: AtomicBool::new(false),
@@ -101,8 +105,27 @@ impl Transaction for Owner {
         self.put_pool(&row)?;
         Ok(row)
     }
-    fn remove_pool(&self, _: &BackingKey) -> Result<(), Refusal> {
-        panic!("these controls retain the canonical terminal row")
+    fn remove_pool(&self, key: &BackingKey) -> Result<(), Refusal> {
+        let boxes = self.boxes.lock().unwrap();
+        if boxes.values().any(|boxed| matches!(boxed, Ok(boxed) if boxed.spec.route.and_then(|route| route.backing) == Some(*key))) {
+            return Err(refused(*key, LifecycleCause::Busy));
+        }
+        let mut held = self.pool.lock().unwrap();
+        let row = held
+            .as_ref()
+            .ok_or_else(|| refused(*key, LifecycleCause::Uncertain))?;
+        if row.key != *key
+            || row.phase != BackingPhase::Released
+            || row.allocation.is_none()
+            || row.exit != Some(hex_api::Exit::Code(7))
+            || !self.native.released.load(Ordering::SeqCst)
+            || self.finalized.load(Ordering::SeqCst) == 0
+        {
+            return Err(refused(*key, LifecycleCause::Uncertain));
+        }
+        *held = None;
+        self.removals.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
     fn read(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
         Ok(self
@@ -187,12 +210,15 @@ impl Books for Owner {
             assert_eq!(row.key.pool, pool);
             return row.offer();
         }
+        let generation = 7u8
+            .checked_add(u8::try_from(self.preparations.fetch_add(1, Ordering::SeqCst)).unwrap())
+            .unwrap();
         let row = PoolRecord {
             version: RECORD_VERSION,
             key: BackingKey {
                 pool,
-                generation: [7; 16],
-            }, // Deterministic model input, not an entropy implementation.
+                generation: [generation; 16],
+            }, // Deterministic bounded model stream, not native entropy.
             execution,
             cost,
             allocation: None,
@@ -680,4 +706,67 @@ fn empty_native_oci_prefix_adds_guest_route_without_native_facts_query() {
     assert_eq!(actual.backings, [shared]);
     actual.check().unwrap();
     assert_eq!(owner.launches.load(Ordering::SeqCst), 0);
+}
+
+/// ORIGINAL AC-T7.4.1: observing the original positive scope end and an explicit
+/// Index ACK must allow the SAME shared family to prepare a fresh incarnation.
+/// This uses real runtime entrypoints; native outcomes are controlled model facts.
+#[test]
+fn shared_backing_rearms_only_after_original_scope_release_and_index_ack() {
+    let dir = socket_fixture();
+    let (runtime, owner) = configured(dir.path());
+    let original = runtime.prepare_backing().unwrap();
+    let allocation = original.allocation().unwrap();
+    assert_eq!(original.phase, BackingPhase::Prepared);
+    assert_eq!(owner.preparations.load(Ordering::SeqCst), 1);
+    assert!(runtime.initialize_backing(grant(&original)).is_err());
+    assert_eq!(owner.launches.load(Ordering::SeqCst), 1);
+    assert_eq!(owner.row().key, original.key);
+    assert_eq!(owner.row().allocation, Some(allocation));
+    assert!(runtime.release_backing(original.key).is_err());
+    assert_eq!(owner.row().phase, BackingPhase::Draining);
+    assert_eq!(owner.row().allocation, Some(allocation));
+    assert_eq!(owner.removals.load(Ordering::SeqCst), 0);
+    assert_eq!(owner.finalized.load(Ordering::SeqCst), 0);
+    // Positive SAME whole-scope outcome, not controller-only exit or socket EOF.
+    owner.native.released.store(true, Ordering::SeqCst);
+    let released = runtime.release_backing(original.key).unwrap();
+    assert_eq!(released.key, original.key);
+    assert_eq!(released.phase, BackingPhase::Released);
+    assert_eq!(owner.row().exit, Some(hex_api::Exit::Code(7)));
+    assert_eq!(owner.finalized.load(Ordering::SeqCst), 1);
+    assert_eq!(owner.removals.load(Ordering::SeqCst), 0);
+    assert!(pool::read(&dir.path().join("@guest")).unwrap().is_none());
+    // Existing Driver observes this exact Released row before its ACK. No
+    // scheduler/Index mutation or replacement is fabricated in this fixture.
+    let observed = runtime.capacity(Class::Oci).unwrap().unwrap();
+    observed.check().unwrap();
+    assert_eq!(observed.backings, [released.try_clone().unwrap()]);
+    assert_eq!(owner.preparations.load(Ordering::SeqCst), 1);
+    let ack = runtime.release_backing(original.key).unwrap();
+    assert_eq!(ack.key, released.key);
+    assert_eq!(ack.phase, BackingPhase::Released);
+    let stops = owner.native.stops.load(Ordering::SeqCst);
+    let fresh = runtime.prepare_backing().unwrap();
+    assert_ne!(
+        fresh.key, original.key,
+        "shared family remained pinned to its positively ended/acknowledged incarnation"
+    );
+    assert_eq!(fresh.key.pool, original.key.pool);
+    assert_eq!(fresh.cost, original.cost);
+    assert_eq!(fresh.phase, BackingPhase::Prepared);
+    assert_eq!(fresh.allocation().unwrap(), allocation);
+    assert_eq!(owner.row().key, fresh.key);
+    assert_eq!(owner.row().allocation, None);
+    assert_eq!(owner.row().init, None);
+    assert_eq!(owner.row().exit, None);
+    assert_eq!(owner.removals.load(Ordering::SeqCst), 1);
+    assert_eq!(owner.preparations.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        owner.launches.load(Ordering::SeqCst),
+        1,
+        "rearm booted an uncharged replacement"
+    );
+    assert_eq!(owner.native.stops.load(Ordering::SeqCst), stops);
+    assert!(owner.boxes.lock().unwrap().is_empty());
 }
