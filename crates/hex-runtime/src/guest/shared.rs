@@ -317,9 +317,10 @@ impl GuestRuntime {
                 identity: Some(identity),
                 ..
             } => managed::same_native(NativeRecord::Pool(record), identity)?,
-            Phase::Released { identity: None, .. } if record.init.is_some() => {
-                return Err(refused(record.key, LifecycleCause::Uncertain));
-            }
+            // A local controller publication can be absent after durable
+            // Released. Metadata preflight cannot turn that into native
+            // absence or block cleanup(None) against this exact canonical
+            // scope/commitment. No usable identity is minted here.
             Phase::Intent | Phase::Released { identity: None, .. } => {}
         }
         Ok(())
@@ -1011,7 +1012,21 @@ impl GuestRuntime {
                 capacity.backings.push(backing.offer()?);
             }
             let eligible = if backing.phase == BackingPhase::Live {
-                self.checked_physical(&definition.devices, &definition.physical)?
+                match self.checked_physical(&definition.devices, &definition.physical) {
+                    Ok(eligible) => eligible,
+                    Err(why) => {
+                        let unavailable =
+                            hex_api::BackendUnavailable::from_refusal(Class::Shards, why)?;
+                        if !matches!(&unavailable.cause, Refusal::Backing { key, .. } if *key == backing.key)
+                        {
+                            return Err(unavailable.cause);
+                        }
+                        // Capacity keeps initialized routes/canonical charges.
+                        // Qualified failures use the SAME owner's typed
+                        // physical_report; this observation supplies no bits.
+                        Vec::new()
+                    }
+                }
             } else {
                 Vec::new()
             };

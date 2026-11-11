@@ -1,0 +1,33 @@
+{
+  "status": "SOURCE ONLY narrow preflight consistency remedy after actual relevant original red; no after check dispatched",
+  "parent": "b8e0de450b0cccb95cea5cb05b6ede84dc23715e",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "actual_before": {
+    "root_source": "f7a08e5748e999ca6dba855143e8c7e581cfa44f",
+    "original": "c2d63b900f63e5fc314b155dfc9fdd2fb2a96090 plus exact setup-only bridges",
+    "name": "guest::gpu_pool::tests::released_gpu_receipt_without_identity_finishes_original_published_scope",
+    "selection": "1selected/0pass/1fail/0ignored",
+    "cause": "semantic oracle: Released without local identity blocked cleanup of SAME published scope",
+    "log_sha256": "a2d51aff3ea9753005334a8328f2ef8afa4a8c3818cbfadec78291c5b8a6f5c2",
+    "raw_archive_sha256": "30469cc35cc04fd1d00ea2b86ebc1c74b04dc3844dc5385f410ecc312377a147",
+    "raw_bytes": 330033,
+    "cleanup": "all Cargo reaped, temp0/source0diff/native0 per actual result.json"
+  },
+  "source": {
+    "path": "crates/hex-runtime/src/guest/shared.rs",
+    "sha256": "e80c715d825734aecaba1a6216760257f331446de3022f32b80e6b519dc1aea6"
+  },
+  "remedy": "remove only Pool metadata-preflight rejection of durable Released(None) with canonical initSome; existing exact receipt/config/cost/profile/scope/commitment checks remain; cleanup-only canonical attach_managed(None) performs native proof",
+  "preserved": [
+    "selected Box preflight unchanged",
+    "no usable Guest fallback or controller/socket-derived identity",
+    "native method checks and whole-scope terminal observation/finalize unchanged",
+    "charge/claims retained until actual native proof and durable canonical publication",
+    "original control/oracle/budget bytes untouched",
+    "no CPU-shared downstream cleanup behavior widened or claimed complete"
+  ],
+  "validation": "read full relevant original logs and result.json locally, rehashed exact logs/archive; scoped rustfmt parser/diff only; after/native/full gates remain ROOT",
+  "remaining": "CPU shared cleanup identityNone downstream guards remain unchanged/uncertain; this source does not claim a broader native recovery proof"
+}

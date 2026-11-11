@@ -566,10 +566,12 @@ fn checked_gpu_facts_create_a_missing_capacity_slot_and_refuse_conflicting_metad
             .is_some_and(|info| info.model != observed.model);
         let mut capacity = Books::capacity(owner.as_ref()).unwrap();
         capacity.routes = vec![native];
-        capacity.backings = vec![backing.try_clone().unwrap()];
         capacity.devices = previous.into_iter().collect();
         capacity.device_routes = vec![0; capacity.devices.len()];
         capacity.check().unwrap();
+        // add_offers stages the canonical backing immediately before its route;
+        // that intermediate pair is checked only after push_offer completes it.
+        capacity.backings = vec![backing.try_clone().unwrap()];
         let result = push_offer(&mut capacity, selected, &[observed.try_clone().unwrap()]);
         if conflict {
             assert!(

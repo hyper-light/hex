@@ -1,0 +1,34 @@
+{
+  "status": "SOURCE ONLY two test fixture selector inputs; parser0/diff0; no production remedy, no own check",
+  "parent": "bf9cb24212923ff59d74a9b0ea2cf10939af60b9",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "actual_before": {
+    "root_source": "f7a08e5748e999ca6dba855143e8c7e581cfa44f",
+    "logs": [
+      {
+        "name": "unsubmitted_handoff_requires_held_source_no_intent_and_no_route_slot",
+        "sha256": "5b9af5103ba26e5a0bce2918b6545536e36f2856286971557d3f9ddb6760268c"
+      },
+      {
+        "name": "pending_handoff_preflight_covers_creating_deleting_and_both_held_source_phases",
+        "sha256": "3a8b2f965e47963abf83fa2c8ca0ee484a2704fec18e9f918ccd73769b878aa1"
+      }
+    ],
+    "cause": "Record::intent is caller-completed configuration before write; fixture omitted exact physical S so encoder refused before present-Intent semantic oracle"
+  },
+  "change": "each exact test assigns intent.physical from SAME immutable catalog mapping of canonical boxed.spec.devices S before durable fixture write; no probe, fake metadata or native effect",
+  "source": {
+    "path": "crates/hex-runtime/src/guest/gpu_pool.rs",
+    "sha256": "27039e31fd30b750bb9b86317e201ba76c6c2118f07d7d062bb2ff50ebdf9c28"
+  },
+  "preserved": [
+    "whole file equals parent after removing only two physical assignments and mut keywords",
+    "all original assertions/oracles/budgets/claims/profiles unchanged",
+    "production and prior controls unchanged",
+    "input correction is not evidence of an implementation failure or pass"
+  ],
+  "validation": "full original relevant logs read and hashes verified locally before change; no own Cargo/native run",
+  "after": "UNRUN; ROOT exact semantic cases only"
+}

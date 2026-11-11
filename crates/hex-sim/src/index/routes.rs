@@ -708,6 +708,22 @@ impl FitIndex {
         slot.free = next_free;
         let to = bucket_slot(slot, self.last);
         if releasing {
+            // These readings came from the ending scope. Keep retained identity/metadata and
+            // Box holders, but only a subsequent actual physical refresh may grant from them.
+            for physical in self
+                .devices
+                .get_mut(at)
+                .ok_or(SimError::UnknownNode(node))?
+            {
+                if physical
+                    .id
+                    .is_some_and(|id| observed.devices.binary_search(&id).is_ok())
+                    && let Some(device) = physical.observed.as_mut()
+                {
+                    device.available = false;
+                    device.load = crate::model::GpuLoad::default();
+                }
+            }
             for holder in self.held.get_mut(at).ok_or(SimError::UnknownNode(node))? {
                 *holder = match *holder {
                     Some(Holder::Backing(key)) if key == observed.key => None,

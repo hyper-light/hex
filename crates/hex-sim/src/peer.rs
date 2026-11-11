@@ -75,6 +75,10 @@ pub trait Records {
 
 /// What nodes say to each other. A start's word comes back from the node it was sent to only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Bounded Copy protocol values retain the full original allocation for exact admission/recovery; see docs/research/measurements/hex-complete-bindings/PEER-MESSAGE-LAYOUT.md"
+)]
 pub enum Msg {
     Start {
         key: Key,
@@ -1947,7 +1951,7 @@ impl Node {
                 demand,
                 allocation,
                 route,
-            } => self.start(from, key, demand, allocation, route, records, &mut out)?,
+            } => self.start(from, key, demand, (allocation, route), records, &mut out)?,
             Msg::Delete { key, demand } => {
                 check_demand(&demand, &self.models)?;
                 if self
@@ -2019,11 +2023,11 @@ impl Node {
         owner: NodeId,
         key: Key,
         demand: Demand,
-        allocation: Option<hex_api::Allocation>,
-        route: Option<hex_api::RouteReceipt>,
+        receipt: (Option<hex_api::Allocation>, Option<hex_api::RouteReceipt>),
         records: &mut impl Records,
         out: &mut Vec<(NodeId, Msg)>,
     ) -> Result<(), Stop> {
+        let (allocation, route) = receipt;
         if owner.0 != key.owner
             || usize::try_from(owner.0)
                 .ok()

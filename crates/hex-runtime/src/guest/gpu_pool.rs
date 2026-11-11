@@ -721,7 +721,8 @@ mod tests {
         drop(pending);
         let path = runtime.selected_path(&boxed.spec.id).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let intent = super::super::selected::Record::intent(&boxed, &runtime.config).unwrap();
+        let mut intent = super::super::selected::Record::intent(&boxed, &runtime.config).unwrap();
+        intent.physical = runtime.catalog_physical(&boxed.spec.devices).unwrap();
         super::super::selected::write(&path, &intent).unwrap();
         assert!(runtime.handoff_unsubmitted(&boxed, &source).is_err());
         super::super::held::remove(&path).unwrap();
@@ -896,8 +897,9 @@ mod tests {
                     "ordinary Deleting must not silently accept a missing receipt"
                 );
                 runtime.handoff_unsubmitted(&boxed, &source).unwrap();
-                let intent =
+                let mut intent =
                     super::super::selected::Record::intent(&boxed, &runtime.config).unwrap();
+                intent.physical = runtime.catalog_physical(&boxed.spec.devices).unwrap();
                 super::super::selected::write(&path, &intent).unwrap();
                 assert!(runtime.handoff_unsubmitted(&boxed, &source).is_err());
                 super::super::held::remove(&path).unwrap();

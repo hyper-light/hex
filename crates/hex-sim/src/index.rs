@@ -943,13 +943,11 @@ impl FitIndex {
         let slot = self.slots.get(at)?;
         let choice = slot.choice(demand).ok()?;
         let backing = choice.and_then(|choice| choice.offer.backing);
-        let bit = choice
-            .map(|choice| {
-                u32::try_from(choice.at)
-                    .ok()
-                    .and_then(|at| 1u64.checked_shl(at))
-            })
-            .flatten();
+        let bit = choice.and_then(|choice| {
+            u32::try_from(choice.at)
+                .ok()
+                .and_then(|at| 1u64.checked_shl(at))
+        });
         bind_observed(
             devices.len(),
             |i| devices.get(i).and_then(|slot| slot.observed.as_ref()),
@@ -1587,15 +1585,7 @@ impl FitIndex {
         }
         let held = self.bound(at, demand).ok_or(SimError::Resources(node))?;
         let pending = self.pending_gpus(node)?;
-        self.change(
-            node,
-            demand,
-            route,
-            true,
-            |free| free.checked_sub(&charged),
-            |n| n.checked_add(1),
-            |used| used.checked_add(&charged),
-        )?;
+        self.change(node, demand, route, true, &charged)?;
         self.claim_workload(
             node,
             workload,
@@ -1691,15 +1681,7 @@ impl FitIndex {
         if !slot.free.holds(&charged) || !slot.runtime_holds_routed(demand, &charged, route) {
             return Err(SimError::Resources(node));
         }
-        self.change(
-            node,
-            demand,
-            route,
-            true,
-            |free| free.checked_sub(&charged),
-            |n| n.checked_add(1),
-            |used| used.checked_add(&charged),
-        )
+        self.change(node, demand, route, true, &charged)
     }
 
     /// Validate a durable binding against stable authority, not transient GPU utilisation.
@@ -1873,15 +1855,7 @@ impl FitIndex {
             ));
         }
         let pending = self.pending_gpus(node)?;
-        self.change(
-            node,
-            demand,
-            route,
-            true,
-            |free| free.checked_sub(&charged),
-            |n| n.checked_add(1),
-            |used| used.checked_add(&charged),
-        )?;
+        self.change(node, demand, route, true, &charged)?;
         self.claim_workload(node, workload, held, backing, pending)?;
         self.key(node)
     }
@@ -1938,15 +1912,7 @@ impl FitIndex {
                 .checked_sub(charged.gpus)
                 .ok_or(SimError::Resources(node))?;
         }
-        self.change(
-            node,
-            demand,
-            route,
-            false,
-            |free| free.checked_add(&charged),
-            |n| n.checked_sub(1),
-            |used| used.checked_sub(&charged),
-        )?;
+        self.change(node, demand, route, false, &charged)?;
         let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
         for holder in self.held.get_mut(at).into_iter().flatten() {
             if holder.and_then(Holder::workload) == Some(workload) {
@@ -1966,20 +1932,35 @@ impl FitIndex {
         demand: &Demand,
         receipt: Option<hex_api::RouteReceipt>,
         adding: bool,
-        resources: impl FnOnce(&Resources) -> Option<Resources>,
-        count: impl FnOnce(u32) -> Option<u32>,
-        class_used: impl FnOnce(&Resources) -> Option<Resources>,
+        charged: &Resources,
     ) -> Result<Key, SimError> {
         let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
         let slot = self.slots.get(at).ok_or(SimError::UnknownNode(node))?;
-        let next_free = resources(&slot.free)
-            .filter(|free| slot.capacity.holds(free))
-            .ok_or(SimError::Resources(node))?;
+        let next_free = if adding {
+            slot.free.checked_sub(charged)
+        } else {
+            slot.free.checked_add(charged)
+        }
+        .filter(|free| slot.capacity.holds(free))
+        .ok_or(SimError::Resources(node))?;
         let next_used = slot
             .used_by_class
             .get(demand.class.index())
-            .and_then(class_used)
+            .and_then(|used| {
+                if adding {
+                    used.checked_add(charged)
+                } else {
+                    used.checked_sub(charged)
+                }
+            })
             .ok_or(SimError::Resources(node))?;
+        let count = |value: u32| {
+            if adding {
+                value.checked_add(1)
+            } else {
+                value.checked_sub(1)
+            }
+        };
         let (builds, benchmarks) = match demand.kind {
             Kind::Build => (
                 count(slot.builds).ok_or(SimError::Resources(node))?,

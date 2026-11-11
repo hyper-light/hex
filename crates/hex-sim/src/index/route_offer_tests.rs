@@ -1027,3 +1027,93 @@ fn healthy_independent_native_snapshot_distinguishes_held_full_pool_from_fresh_f
     assert_eq!(free.key(NodeId(0)).unwrap().gpus, 2);
     assert_eq!(free.verdict(NodeId(0), &native).unwrap(), Verdict::Admits);
 }
+
+/// AC-T7.4.1: ending full P invalidates pressure without dropping S; only new observations restore grants.
+#[test]
+fn released_scope_keeps_selected_identity_and_charge_until_new_physical_refresh() {
+    let (offered, request, mut source) = subset_observer_fixture(true);
+    let mut index = FitIndex::new(&[offered]).unwrap();
+    let route = index.route(NodeId(0), &request).unwrap();
+    let allocation = index.allocation(NodeId(0), &request).unwrap();
+    index
+        .take_routed(NodeId(0), WorkloadId(91), &request, allocation, route)
+        .unwrap();
+    let selected: Vec<_> = index
+        .held_devices(NodeId(0), WorkloadId(91))
+        .unwrap()
+        .iter()
+        .map(Device::native_id)
+        .collect();
+    let charged = index.key(NodeId(0)).unwrap();
+    source.phase = BackingPhase::Draining;
+    index.observe_backing(NodeId(0), &source).unwrap();
+    source.phase = BackingPhase::Released;
+    index.observe_backing(NodeId(0), &source).unwrap();
+    let after = index.key(NodeId(0)).unwrap();
+    let refund = source.allocation().unwrap().resources;
+    assert_eq!(
+        after.cpu_milli.checked_sub(charged.cpu_milli),
+        Some(refund.cpu_milli)
+    );
+    assert_eq!(
+        after.mem_bytes.checked_sub(charged.mem_bytes),
+        Some(refund.mem_bytes)
+    );
+    assert_eq!(
+        index
+            .held_devices(NodeId(0), WorkloadId(91))
+            .unwrap()
+            .iter()
+            .map(Device::native_id)
+            .collect::<Vec<_>>(),
+        selected
+    );
+    assert!(index.devices(NodeId(0)).unwrap().iter().all(|physical| {
+        physical.observed.is_some_and(|device| {
+            !device.available
+                && device.load.busy_per_mille.is_none()
+                && device.load.memory_used.is_none()
+        })
+    }));
+    let native = Demand {
+        class: Class::Oci,
+        ask: Ask {
+            runtime_class: Some(hex_api::Class::Oci),
+            os: Some(Os::Linux),
+            arch: Some(crate::model::Arch::X86_64),
+            ..Ask::default()
+        },
+        ..request
+    };
+    assert_eq!(index.verdict(NodeId(0), &native).unwrap(), Verdict::NoGpu);
+
+    // A separately supplied actual-facts fixture refresh, not a time passage or release signal.
+    let (mut current, _, _) = subset_observer_fixture(true);
+    triomphe::Arc::get_mut(current.routes.as_mut().unwrap())
+        .unwrap()
+        .backings
+        .first_mut()
+        .unwrap()
+        .phase = BackingPhase::Released;
+    index.refresh_node(&current).unwrap();
+    assert_eq!(index.verdict(NodeId(0), &native).unwrap(), Verdict::Admits);
+    let fresh = index.key(NodeId(0)).unwrap();
+    // A duplicate same-key terminal acknowledgment follows the fresh snapshot. It must not
+    // erase new observations or refund the already-consumed backing charge a second time.
+    index.observe_backing(NodeId(0), &source).unwrap();
+    assert_eq!(index.key(NodeId(0)).unwrap(), fresh);
+    assert_eq!(index.verdict(NodeId(0), &native).unwrap(), Verdict::Admits);
+    assert_eq!(
+        index
+            .held_devices(NodeId(0), WorkloadId(91))
+            .unwrap()
+            .iter()
+            .map(Device::native_id)
+            .collect::<Vec<_>>(),
+        selected
+    );
+    index
+        .give_routed(NodeId(0), WorkloadId(91), &request, allocation, route)
+        .unwrap();
+    assert!(index.holds(NodeId(0), WorkloadId(91)).is_empty());
+}
