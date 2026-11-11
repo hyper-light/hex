@@ -1751,6 +1751,11 @@ impl GuestRuntime {
         let socket = self.selected_socket(&receipt.id)?;
         let mut plan = self.managed_plan(&guest_spec, &socket)?;
         if !receipt.physical.is_empty() {
+            self.check_current_luids(
+                &receipt.devices,
+                &receipt.physical,
+                super::books::uncertain(&receipt.id)?,
+            )?;
             let scope = receipt.scope.ok_or(super::books::uncertain(&receipt.id)?)?;
             plan = plan
                 .with_gpu_report(*scope.bytes(), budget.deadline())

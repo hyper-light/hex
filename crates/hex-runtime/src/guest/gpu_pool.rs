@@ -413,6 +413,11 @@ impl GuestRuntime {
         let plan = self.managed_plan(&spec, &socket)?;
         let guest = match &receipt.phase {
             Phase::Intent if fresh => {
+                self.check_current_luids(
+                    &receipt.original.devices,
+                    &receipt.physical,
+                    refused(key, LifecycleCause::Uncertain),
+                )?;
                 let plan = plan
                     .with_gpu_report(*receipt.original.scope().bytes(), budget.deadline())
                     .map_err(|why| refusal("preparing charged GPU observer report", &why))?;
