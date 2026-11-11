@@ -1,0 +1,11 @@
+{
+  "role": "coordinator",
+  "source": "9635a094e42f82500bcfbc8d04ef9e2b8715774e",
+  "results": "2542f65924e8156cdaed01c7d9837a3f7b97824d",
+  "review": "Read all exact bounded file/PID-only query source and result; no scan/kill/restart/new native work. Query received no remote acknowledgment/output. Stale advertised connected/room and running:false cannot establish original job terminality.",
+  "original_terminal": "UNKNOWN",
+  "original_child_or_resource_return": "UNVERIFIED",
+  "native_HCS_GPU": "UNVERIFIED",
+  "ARM": "PAUSED",
+  "main_merge": "not done"
+}
