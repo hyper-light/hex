@@ -349,6 +349,18 @@ fn booted_owner(booted: Booted) -> Result<triomphe::Arc<Booted>, Refusal> {
 // The guest's records live beside the link whose first dial their boot record bounds.
 pub use hex_client::guest::shards::{CLASS, recorded, recorded_boot, seed_in, slowest_in};
 
+/// The first dial's bound before this node has seen a boot ([`GuestRuntime::first_dial_bound`] with nothing
+/// learned): the managed helper's control patience at the node's start, and the bound the macOS CPU
+/// response's producer measures up to (hex-cli's example `macos_cpu_response`, AC-T7.4.1).
+pub fn recorded_dial_bound() -> Result<Duration, Refusal> {
+    dial_bound(Duration::ZERO)
+}
+
+/// Twice (the margin) the slowest of the record's boot and `seen`, the slowest boot this node has seen.
+fn dial_bound(seen: Duration) -> Result<Duration, Refusal> {
+    Ok(seen.max(recorded_boot()?).saturating_mul(2))
+}
+
 /// Boots of one guest: the first, and one more where the first hung alive past its bound, as a hung
 /// boot has another guest to try before its caller is refused.
 const BOOTS: usize = 2;
@@ -736,8 +748,7 @@ impl GuestRuntime {
     /// How long a boot may take to be ready (the lead's rule for learned waits): twice (the margin) the slowest of
     /// the record's and this node's own, so it only rises; before any boot here, twice the record's.
     pub fn first_dial_bound(&self) -> Result<Duration, Refusal> {
-        let seen = *self.slowest.lock().map_err(poisoned)?;
-        Ok(seen.max(recorded_boot()?).saturating_mul(2))
+        dial_bound(*self.slowest.lock().map_err(poisoned)?)
     }
 
     /// A boot to ready this node has seen, taking `took`: the bound rises with it, never falls.

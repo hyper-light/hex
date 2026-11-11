@@ -1,6 +1,6 @@
 /* A fake Venus Vulkan ICD for scripts/guest/vulkan-ready.sh's self-test (AC-T7.4.1): one virtual
- * GPU whose driver is MESA_VENUS ("venus"), one compute queue family, one device-local heap, and a
- * queue whose submit signals its fence at once. The real Vulkan loader loads it through an ICD
+ * GPU whose driver is MESA_VENUS ("venus"), two queue families (a transfer-only one, then the compute
+ * one), one device-local heap, and a queue whose submit signals its fence at once. The real Vulkan loader loads it through an ICD
  * manifest, so the built Program runs through its closure's own interpreter, libc and loader as a
  * guest runs it; only the driver is a stand-in. Never part of a closure. Interface: the loader's
  * LoaderDriverInterface.md (vk_icdNegotiateLoaderICDInterfaceVersion, version 5). */
@@ -143,22 +143,30 @@ static VKAPI_ATTR void VKAPI_CALL physical_memory(VkPhysicalDevice device,
     memory->memoryHeaps[0].flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
 }
 
+/* Two families, the transfer-only one first: the Program must find the compute family by its flags,
+ * and the self-test can give the Program a bound under the device's count. */
+#define FAMILIES 2u
+#define COMPUTE_FAMILY (FAMILIES - 1u)
+
 static VKAPI_ATTR void VKAPI_CALL physical_queues(VkPhysicalDevice device, uint32_t *count,
                                                   VkQueueFamilyProperties *families)
 {
     (void)device;
     if (families == NULL) {
-        *count = 1;
+        *count = FAMILIES;
         return;
     }
-    if (*count < 1)
-        return;
-    *count = 1;
-    memset(families, 0, sizeof(*families));
-    families[0].queueFlags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT;
-    families[0].queueCount = 1;
-    families[0].timestampValidBits = 64;
-    families[0].minImageTransferGranularity = (VkExtent3D){1, 1, 1};
+    uint32_t written = *count < FAMILIES ? *count : FAMILIES;
+    for (uint32_t i = 0; i < written; ++i) {
+        memset(&families[i], 0, sizeof(families[i]));
+        families[i].queueFlags = i == COMPUTE_FAMILY
+            ? VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT
+            : VK_QUEUE_TRANSFER_BIT;
+        families[i].queueCount = 1;
+        families[i].timestampValidBits = 64;
+        families[i].minImageTransferGranularity = (VkExtent3D){1, 1, 1};
+    }
+    *count = written;
 }
 
 /* The rest of the 1.0 physical-device commands every ICD exports (the loader skips one missing any):
@@ -228,7 +236,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL create_device(VkPhysicalDevice physical,
 {
     (void)physical;
     (void)allocator;
-    if (info->queueCreateInfoCount != 1 || info->pQueueCreateInfos[0].queueFamilyIndex != 0 ||
+    if (info->queueCreateInfoCount != 1 || info->pQueueCreateInfos[0].queueFamilyIndex != COMPUTE_FAMILY ||
         info->pQueueCreateInfos[0].queueCount != 1)
         return VK_ERROR_INITIALIZATION_FAILED;
     struct device *device = calloc(1, sizeof(*device));
@@ -251,7 +259,7 @@ static VKAPI_ATTR void VKAPI_CALL device_queue(VkDevice handle, uint32_t family,
                                                VkQueue *queue)
 {
     struct device *device = (struct device *)handle;
-    *queue = (family == 0 && index == 0) ? (VkQueue)&device->queue : VK_NULL_HANDLE;
+    *queue = (family == COMPUTE_FAMILY && index == 0) ? (VkQueue)&device->queue : VK_NULL_HANDLE;
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL create_fence(VkDevice device, const VkFenceCreateInfo *info,
