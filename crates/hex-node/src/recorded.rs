@@ -627,6 +627,13 @@ impl hex_runtime::devices::Transaction for Transaction<'_> {
                 return Err(self.refused(hex_api::LifecycleCause::Uncertain));
             }
             self.launch_claims(record)?;
+            let deadline = hex_runtime::devices::check_managed_report(
+                self.native.catalog,
+                record,
+                plan,
+                io.gpu_report.is_some(),
+                deadline,
+            )?;
             let scope = record
                 .scope()
                 .ok_or_else(|| self.refused(hex_api::LifecycleCause::Uncertain))?;
@@ -2298,3 +2305,7 @@ mod lifecycle_tests;
 #[cfg(test)]
 #[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_pool_tests.rs"]
 mod pool_tests;
+
+#[cfg(test)]
+#[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_report_tests.rs"]
+mod report_tests;

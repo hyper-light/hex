@@ -420,11 +420,15 @@ impl JobBox {
         }
     }
 
-    pub(super) fn create_controller(&self, spawn: &mut Spawn) -> Result<Started, Refusal> {
+    pub(super) fn create_controller(
+        &self,
+        spawn: &mut Spawn,
+        report: Option<&sys::InheritedHandle>,
+    ) -> Result<Started, Refusal> {
         if self.state.stopping.load(Ordering::SeqCst) || !self.is_vm() {
             return Err(self.uncertain());
         }
-        sys::create(spawn, &[self.native_job()?.raw()])
+        sys::create_with_report(spawn, &[self.native_job()?.raw()], report)
             .map_err(|error| Refusal::os("creating a suspended bound VM controller", error))
     }
 

@@ -2,6 +2,7 @@
 //! observes the controller. Helper completion waits observe the same nested job and never reap PIDs.
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::AsHandle;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use triomphe::Arc;
@@ -75,7 +76,10 @@ pub(super) fn check_cost(runtime: &WinRuntime, cost: &RuntimeCost) -> Result<(),
 
 // CreateProcessW and Microsoft's CRT command-line grammar operate on UTF-16, including unpaired
 // surrogates in an OS path. The core's String-only quoting cannot represent those paths losslessly.
-fn command_line(plan: &shards_api::PreparedBoot) -> Result<Vec<u16>, Refusal> {
+fn command_line(
+    plan: &shards_api::PreparedBoot,
+    report: &[std::ffi::OsString],
+) -> Result<Vec<u16>, Refusal> {
     let bound = hex_core::hcs::COMMAND_LINE_UNITS
         .checked_add(1)
         .ok_or_else(|| pending("native command-line bound overflows"))?;
@@ -84,6 +88,7 @@ fn command_line(plan: &shards_api::PreparedBoot) -> Result<Vec<u16>, Refusal> {
         .map_err(|_| super::allocation(bound))?;
     for (at, word) in std::iter::once(plan.binary().as_os_str())
         .chain(plan.arguments().iter().map(|arg| arg.as_os_str()))
+        .chain(report.iter().map(|arg| arg.as_os_str()))
         .enumerate()
     {
         if at != 0 {
@@ -256,18 +261,49 @@ pub(super) fn launch(
         .checked_add(patience)
         .filter(|_| patience != Duration::MAX && !patience.is_zero())
         .ok_or_else(|| uncertain(record))?;
+    let deadline = crate::devices::check_managed_report(
+        Some(&runtime.catalog),
+        record,
+        launch,
+        io.gpu_report.is_some(),
+        deadline,
+    )?;
+    let request = plan.gpu_report_request();
     record.scope().ok_or_else(|| uncertain(record))?;
     let bounds = host_bounds(record)?;
+    let shards_api::LaunchIo {
+        stdout,
+        stderr,
+        gpu_report,
+    } = io;
+    // Duplicate only the owned optional writer. The API's original handle/flags remain untouched;
+    // inherited handles retain THIS duplicate's value in CreateProcessW's exact child handle list.
+    let report = gpu_report
+        .as_ref()
+        .map(|writer| sys::inheritable_copy(writer.as_handle()))
+        .transpose()
+        .map_err(|error| Refusal::os("preparing the private VM report handle", error))?;
+    let report_words = match (request, report.as_ref()) {
+        (Some(request), Some(writer)) => Some(
+            shards_api::physical::report_arguments(request.scope(), writer)
+                .map_err(|_| uncertain(record))?,
+        ),
+        (None, None) => None,
+        _ => return Err(uncertain(record)),
+    };
     // Prepare every argument, path and stream before a native controller can exist.
     let vsock = copy_path(plan.vsock())?;
     let mut spawn = sys::Spawn {
-        command_line: command_line(plan)?,
+        command_line: command_line(
+            plan,
+            report_words.as_ref().map_or(&[], |words| words.as_slice()),
+        )?,
         environment: runtime_environment(paths)?,
         cwd: None,
         stdio: std_handles(Stdio {
             stdin: None,
-            stdout: Some(io.stdout),
-            stderr: Some(io.stderr),
+            stdout: Some(stdout),
+            stderr: Some(stderr),
             ask: hex_api::Ask::default(),
         })?,
     };
@@ -299,7 +335,11 @@ pub(super) fn launch(
             process,
             thread,
             pid,
-        } = boxed.create_controller(&mut spawn)?;
+        } = boxed.create_controller(&mut spawn, report.as_ref())?;
+        // The suspended child now owns the only native-launch copies. Do not hold pipe EOF open
+        // through publication/observation or send this writer into the passive keeper.
+        drop(report);
+        drop(gpu_report);
         let started = sys::created(&process)
             .map_err(|error| Refusal::os("reading the VM controller's birth", error))?;
         if pid == 0 || started == 0 {
@@ -811,6 +851,49 @@ impl ManagedProcess for JobBox {
 #[cfg(test)]
 mod runtime_environment_tests {
     use super::*;
+
+    /// AC-T7.4.1: ordinary CPU None keeps the existing CRT command line; the native report is an
+    /// explicit four-word suffix, rendered from the final handle by the caller.
+    #[test]
+    fn cpu_command_line_golden_and_explicit_report_suffix() {
+        let spec = shards_api::GuestSpec {
+            kernel: "C:\\kernel".into(),
+            init: shards_api::Init::Executable("C:\\init".into()),
+            cmdline: "console=ttyS0 quiet".into(),
+            vcpus: 1,
+            memory_mib: 256,
+            gpu: false,
+            gpu_devices: Vec::new(),
+            disks: Vec::new(),
+            shares: Vec::new(),
+            ports: vec![1024],
+            binary: None,
+        };
+        let plan = shards_api::prepare_boot(
+            &spec,
+            std::path::Path::new("C:\\native space\\shards.exe"),
+            std::path::Path::new("C:\\v"),
+            0,
+        )
+        .unwrap();
+        let cpu = "\"C:\\native space\\shards.exe\" run --kernel C:\\kernel --init C:\\init --cmdline \"console=ttyS0 quiet\" --cpus 1 --memory 256 --vsock C:\\v --no-console --console-said 0 --host-managed";
+        let expected: Vec<u16> = cpu.encode_utf16().chain([0]).collect();
+        assert_eq!(command_line(&plan, &[]).unwrap(), expected);
+        let report = [
+            "--gpu-report".into(),
+            "1234".into(),
+            "--gpu-report-scope".into(),
+            "11".repeat(16).into(),
+        ];
+        let reported = format!(
+            "{cpu} --gpu-report 1234 --gpu-report-scope {}\0",
+            "11".repeat(16)
+        );
+        assert_eq!(
+            command_line(&plan, &report).unwrap(),
+            reported.encode_utf16().collect::<Vec<_>>()
+        );
+    }
 
     /// AC-T7.4.1: native and probe receive exactly the same explicitly configured runtime pair.
     #[test]

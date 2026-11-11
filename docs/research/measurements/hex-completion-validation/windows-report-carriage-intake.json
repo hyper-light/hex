@@ -1,0 +1,36 @@
+{
+  "requirement": "AC-T7.4.1",
+  "role": "ROOTcoordinator",
+  "sources": [
+    "1c93657705296ec7071772cb3eef16748880e7ec",
+    "a7ff23d20c0c3331c2b48686b13e3d79245c4334"
+  ],
+  "review": "Complete native135line optional duplicated-handle delta and exact WindowsCRT/no-report paths reviewed; same atomic JobList launcher, source flags untouched, exact handle list lifetime through attribute-list deletion, parent copies close afterCreate beforepublication. Recorded sameTx guard uses sole catalog/native record.",
+  "files": [
+    {
+      "path": "crates/hex-node/src/recorded.rs",
+      "sha256": "b45990948fcc3edc8f1e674174de60a4e1517776572d3695d0b315d90868c6e3"
+    },
+    {
+      "path": "crates/hex-runtime/src/windows/managed.rs",
+      "sha256": "5086ca63930a4b21cb4c65ac607de165192cabbe9734f5bdb21ab3e45188cfaf"
+    },
+    {
+      "path": "crates/hex-runtime/src/windows/process.rs",
+      "sha256": "71d77da9d1fd22ca740f35c691bf2ceac9ba05cf9d42944ea0a9717b13037ac1"
+    },
+    {
+      "path": "crates/hex-runtime/src/windows/sys.rs",
+      "sha256": "0c3468920d8369324c96f199390bce6d2c6366170af3d92f83b1d4f542bceac5"
+    },
+    {
+      "path": "docs/research/measurements/hex-complete-lifecycle/recorded_report_tests.rs",
+      "sha256": "81d74d9c1cfe64bbb79db5ee367eb0749d4f55788c5ad2e967a063157d9bbc22"
+    }
+  ],
+  "root_preserved": "Applied narrowdeltas only, preserving currentWindows preflight/compiler remedies/routeprojection and canonical5fRecordedauthority/Store barrier/schema. No whole older worktree copy.",
+  "source_controls": "Two actualStore counted guard controls +CPUcommandlinegolden +privatehandleread/write/drop control; none executed at intake.",
+  "tests_executed": 0,
+  "native_invocations": 0,
+  "remaining": "Matched currentSDK21 Windowscompile and actual finalreport transfer. Existing5de immutable tester job remains source-specific. Mac writer/persistenthelper, whole native scope/race/fault/leak/resource gates open."
+}

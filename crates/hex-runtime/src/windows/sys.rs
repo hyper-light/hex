@@ -12,7 +12,7 @@
 
 use std::io;
 use std::mem::{size_of, zeroed};
-use std::os::windows::io::{AsRawHandle, BorrowedHandle, OwnedHandle};
+use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
@@ -260,6 +260,40 @@ impl Drop for Handle {
             unsafe { CloseHandle(self.0) };
         }
     }
+}
+
+/// Only this private duplicate is inheritable. The caller's original writer flags never change.
+pub(crate) struct InheritedHandle(Handle);
+
+impl AsHandle for InheritedHandle {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        self.0.borrowed()
+    }
+}
+
+pub(crate) fn inheritable_copy(source: BorrowedHandle<'_>) -> io::Result<InheritedHandle> {
+    let mut copied: HANDLE = null_mut();
+    // SAFETY: source is borrowed alive for this call; the current-process pseudo handles are
+    // documented DuplicateHandle arguments. Only the new same-access copy is made inheritable.
+    if unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            source.as_raw_handle(),
+            GetCurrentProcess(),
+            &raw mut copied,
+            0,
+            1,
+            DUPLICATE_SAME_ACCESS,
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    if copied.is_null() || copied == INVALID_HANDLE_VALUE {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    // SAFETY: successful DuplicateHandle returned the unique copy owned by this process.
+    Ok(InheritedHandle(unsafe { Handle::own(copied) }))
 }
 
 /// A member started suspended in its box's job.
@@ -570,6 +604,16 @@ pub(crate) fn started_here() -> u64 {
 /// Only its three standard handles are inherited (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`). The caller
 /// resumes it with [`resume`].
 pub fn create(spawn: &mut Spawn, jobs: &[HANDLE]) -> io::Result<Started> {
+    create_with_report(spawn, jobs, None)
+}
+
+/// The SAME atomic job-list launcher, optionally carrying one already-owned report writer.
+/// Inherited handles retain their value in this child (CreateProcessW/Inheritance contract).
+pub(crate) fn create_with_report(
+    spawn: &mut Spawn,
+    jobs: &[HANDLE],
+    report: Option<&InheritedHandle>,
+) -> io::Result<Started> {
     // The three standard handles, made inheritable, as a contiguous array for the handle-list attribute.
     let handles = spawn
         .stdio
@@ -602,7 +646,21 @@ pub fn create(spawn: &mut Spawn, jobs: &[HANDLE]) -> io::Result<Started> {
     if unsafe { InitializeProcThreadAttributeList(list, 2, 0, &mut size) } == 0 {
         return Err(last_error());
     }
-    let started = create_in(spawn, jobs, &handles, list);
+    let [input, output, error] = handles;
+    let inherited = [
+        input,
+        output,
+        error,
+        report.map_or(null_mut(), |report| report.0.raw()),
+    ];
+    let inherited = if report.is_some() {
+        inherited.as_slice()
+    } else {
+        handles.as_slice()
+    };
+    // Attribute values, including the optional fourth handle, remain alive until the list is
+    // destroyed below (UpdateProcThreadAttribute's lpValue lifetime contract).
+    let started = create_in(spawn, jobs, &handles, inherited, list);
     // SAFETY: `list` was initialized above; deleting it frees its internal allocations once, and buf
     // (its backing bytes) is still alive and dropped after.
     unsafe { DeleteProcThreadAttributeList(list) };
@@ -613,12 +671,15 @@ pub fn create(spawn: &mut Spawn, jobs: &[HANDLE]) -> io::Result<Started> {
 fn create_in(
     spawn: &mut Spawn,
     jobs: &[HANDLE],
-    handles: &[HANDLE; 3],
+    stdio: &[HANDLE; 3],
+    handles: &[HANDLE],
     list: LPPROC_THREAD_ATTRIBUTE_LIST,
 ) -> io::Result<Started> {
-    let handles_bytes = size_of::<[HANDLE; 3]>();
-    // SAFETY: the handle-list attribute points at `handles` (3 HANDLEs), alive for this call; the size
-    // matches. The list has room for 2 attributes.
+    let handles_bytes = size_of::<HANDLE>()
+        .checked_mul(handles.len())
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: the handle-list points at exactly handles.len() live inheritable handles. The three
+    // stdio handles and optional private report copy outlive this call; the list has two slots.
     if unsafe {
         windows_sys::Win32::System::Threading::UpdateProcThreadAttribute(
             list,
@@ -659,9 +720,10 @@ fn create_in(
     si.StartupInfo.cb = u32::try_from(size_of::<STARTUPINFOEXW>())
         .map_err(|_| io::Error::other("STARTUPINFOEXW exceeds a DWORD"))?;
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    si.StartupInfo.hStdInput = handles[0];
-    si.StartupInfo.hStdOutput = handles[1];
-    si.StartupInfo.hStdError = handles[2];
+    let [input, output, error] = *stdio;
+    si.StartupInfo.hStdInput = input;
+    si.StartupInfo.hStdOutput = output;
+    si.StartupInfo.hStdError = error;
     si.lpAttributeList = list;
 
     let cwd = spawn.cwd.as_ref().map_or(null(), |c| c.as_ptr());
@@ -1288,5 +1350,60 @@ mod tests {
             peak <= bound + (1 << 20) + 131_072,
             "past its bound by more than one refused ask: peak {peak}, bound {bound}"
         );
+    }
+}
+
+#[cfg(test)]
+mod report_handle_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    fn flags(handle: BorrowedHandle<'_>) -> u32 {
+        let mut flags = 0;
+        // SAFETY: a read-only handle query; the borrowed live handle and initialized output remain
+        // valid throughout this synchronous call. No original inheritability is changed.
+        let result = unsafe {
+            windows_sys::Win32::Foundation::GetHandleInformation(handle.as_raw_handle(), &mut flags)
+        };
+        assert_ne!(
+            result,
+            0,
+            "reading private report handle flags: {}",
+            last_error()
+        );
+        flags
+    }
+
+    /// AC-T7.4.1: the report names the final private duplicate, leaves the source untouched, and
+    /// closes the same pipe object after its last owned writer. No VM/job/controller is launched.
+    #[test]
+    fn report_duplicate_uses_its_own_value_and_preserves_original_flags() {
+        let (mut reader, mut original) = std::io::pipe().unwrap();
+        let original_flags = flags(original.as_handle());
+        let inherited = inheritable_copy(original.as_handle()).unwrap();
+        assert_eq!(flags(original.as_handle()), original_flags);
+        assert_ne!(
+            inherited.as_handle().as_raw_handle(),
+            original.as_raw_handle()
+        );
+        assert_ne!(flags(inherited.as_handle()) & HANDLE_FLAG_INHERIT, 0);
+        let words = shards_api::physical::report_arguments([0x11; 16], &inherited).unwrap();
+        assert_eq!(words[0], "--gpu-report");
+        assert_eq!(
+            words[1],
+            std::ffi::OsString::from(inherited.as_handle().as_raw_handle().addr().to_string())
+        );
+        assert_ne!(
+            words[1],
+            std::ffi::OsString::from(original.as_raw_handle().addr().to_string())
+        );
+        assert_eq!(words[2], "--gpu-report-scope");
+        assert_eq!(words[3], std::ffi::OsString::from("11".repeat(16)));
+        original.write_all(b"same private pipe").unwrap();
+        drop(original);
+        drop(inherited);
+        let mut observed = String::new();
+        reader.read_to_string(&mut observed).unwrap();
+        assert_eq!(observed, "same private pipe");
     }
 }
