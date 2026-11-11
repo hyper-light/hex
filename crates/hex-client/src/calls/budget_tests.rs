@@ -2870,7 +2870,9 @@ const FUSE: usize = 1_000;
 /// Answers for others that keep coming: each read hands on one message, as one `SOCK_SEQPACKET` read
 /// does, and leaves another ready.
 struct Chatter {
-    socket: UdpSocket,
+    /// Its readiness: a wake written is readable once written, on macOS too, where a loopback
+    /// datagram can arrive after its send returns and a zero-wait poll would miss it.
+    socket: Wake,
     /// The agent's next messages, ahead of the traffic: answers to the test's calls, a program's end.
     next: Mutex<VecDeque<Vec<u8>>>,
     /// Whether the traffic is on: one late answer to [`GAVE_UP`] per read.
@@ -2884,11 +2886,8 @@ struct Chatter {
 
 impl Chatter {
     fn new() -> Self {
-        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        socket.connect(socket.local_addr().unwrap()).unwrap();
-        socket.set_nonblocking(true).unwrap();
         Self {
-            socket,
+            socket: Wake::new().unwrap(),
             next: Mutex::new(VecDeque::new()),
             chatting: AtomicBool::new(false),
             turns: AtomicUsize::new(0),
@@ -2903,12 +2902,12 @@ impl Chatter {
             .lock()
             .unwrap()
             .push_back(wire::answer(id, answer, wire::MAX_MESSAGE).unwrap());
-        self.socket.send(&[1]).unwrap();
+        self.socket.wake();
     }
 
     fn chat(&self) {
         self.chatting.store(true, Ordering::SeqCst);
-        self.socket.send(&[1]).unwrap();
+        self.socket.wake();
     }
 
     /// What `poll` returned, with the turns it took and the messages for others it read.
@@ -2936,13 +2935,10 @@ impl Transport for Chatter {
     fn reading(&self) {}
     fn handle(&self) -> Handle<'_> {
         self.turns.fetch_add(1, Ordering::SeqCst);
-        #[cfg(unix)]
-        return std::os::fd::AsFd::as_fd(&self.socket);
-        #[cfg(windows)]
-        std::os::windows::io::AsSocket::as_socket(&self.socket)
+        self.socket.handle()
     }
     fn recv(&self, _: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
-        while self.socket.recv(&mut [0]).is_ok() {}
+        self.socket.drain();
         let next = self.next.lock().unwrap().pop_front();
         let message = match next {
             Some(message) => message,
@@ -2967,7 +2963,7 @@ impl Transport for Chatter {
             Vec::new(),
         )?;
         if self.chatting.load(Ordering::SeqCst) || !self.next.lock().unwrap().is_empty() {
-            self.socket.send(&[1]).unwrap();
+            self.socket.wake();
         }
         Ok(true)
     }
