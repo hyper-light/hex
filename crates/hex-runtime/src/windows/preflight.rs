@@ -380,14 +380,49 @@ mod tests {
     #[test]
     fn pending_hcs_marker_absence_or_missing_service_receipt_never_initializes_native_state() {
         let dir = tempfile::tempdir().unwrap();
-        let runtime = runtime(dir.path());
-        let record = BoxRecord::new(spec(), hex_core::record::Phase::Creating, Vec::new());
+        let mut runtime = runtime(dir.path());
+        runtime.catalog = super::super::NativeCatalog::Shared(
+            crate::devices::SharedCatalog::try_new(
+                crate::devices::Catalog::parse(
+                    b"hex-devices-1\ngpu\t256\tfixture\t4096\thcs\tPCIROOT(0)#PCI(0100)\t\n",
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let mut assigned = spec();
+        assigned.devices.push(hex_api::DeviceId {
+            kind: hex_api::DeviceKind::Gpu,
+            key: 256,
+        });
+        let record = BoxRecord::new(assigned, hex_core::record::Phase::Creating, Vec::new());
         assert!(runtime.preflight_record(&record).is_err());
         let mut native = marker(&runtime, &record);
+        native.devices = runtime.bindings(&record.spec).unwrap();
         native.creation = hcs::NativeCreate::Pending;
         let bytes = hcs::write_record(&native).unwrap();
         let path = runtime.marker(&record.spec.id).unwrap();
         std::fs::write(&path, &bytes).unwrap();
+        let ClassSpec::Oci(oci) = &record.spec.class else {
+            panic!("the fixture is structured HCS OCI")
+        };
+        let container = hcs::from_spec(
+            oci,
+            &super::super::oci::scratch_folder(&runtime.scratch_root, &record.spec.id).unwrap(),
+        )
+        .unwrap();
+        check_marker(
+            &native,
+            &record.spec.id,
+            true,
+            &runtime.bindings(&record.spec).unwrap(),
+            &container.scratch,
+        )
+        .unwrap();
+        assert!(
+            super::super::oci::service::preflight(&path, &native).is_err(),
+            "the valid pending assigned marker has no service receipt"
+        );
         assert!(runtime.preflight_record(&record).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert!(runtime.boxes().unwrap().is_empty());

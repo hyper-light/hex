@@ -1,0 +1,13 @@
+{
+  "kind": "test-only intended Pending assigned fixture construction correction",
+  "actual_source": "93abeaae82d97aaf64271e8fc29908538788bbb8",
+  "actual_result": "native compile0; exact4 preflight selected3PASS/1 fixture construction FAIL/0ignored; no HCS/WMI/GPU calls",
+  "original_source_archive_sha256": "194b9647a3812c7ff44bb6362c8a6888fa28636cb289ec6ba25ac594f956bf73",
+  "stdout_sha256": "dd5f2588bc3d6bf7efe1b88e333b227bb25fa0d15df9e8ee0a084797f2268859",
+  "stderr_sha256": "b51a7a087796bd7113781b4e8b3218d7a1dfd44e9441dc0cd38304ae2131cadb",
+  "base": "335fca8df657a2bc23294b551c318a526eee69d4",
+  "path": "crates/hex-runtime/src/windows/preflight.rs",
+  "sha256": "f5deac835ef297859bf828fe0853e2253e10e05c32bb65473dec3e2f2b8ed042",
+  "change": "Pending HCS requires actual exact bindings+same system marker. Populate the fixture immutable catalog/spec and marker with the SAME configured Hcs binding. Prove pure check_marker accepts it, then existing service preflight refuses absent receipt. Keep original public refusal/unchanged bytes/empty native state/no new files oracles unchanged.",
+  "checks": "scoped rustfmt/diff-check only; new fixture UNRUN by L3; do not repeat unchanged three passing controls. Production preflight/HCS validity rules unchanged; no backend/native bug claim."
+}
