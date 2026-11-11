@@ -1,0 +1,70 @@
+{
+  "role": "ROOT coordinator source review",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": "7f2cc0c44cee8356096432beaa517d67b7aa6c21",
+  "parent": "1c31d63d04d89ca90072285fbed0562c33e9e7c6",
+  "all1662_source_lines_reviewed": true,
+  "review_guide_seals_read": true,
+  "all9_review_members_verified": [
+    {
+      "bytes": 1059,
+      "file": "NO_EXECUTION.json",
+      "sha256": "5dc91a70e77d2692ed681fb0a08e7c96ecccc4160de51066e908f709320905ca"
+    },
+    {
+      "bytes": 10937,
+      "file": "REVIEW.md",
+      "sha256": "74ff0d11716c662d80bf015b3b9b841bf2c24dc7a2971c94299620eeea3e42fd"
+    },
+    {
+      "bytes": 4108,
+      "file": "admission.template.json",
+      "sha256": "dc2db7ead45d5f3599cec60610a461ee3f21eb0ea2880426996becac5b177949"
+    },
+    {
+      "bytes": 194381,
+      "file": "next-command.json",
+      "sha256": "16e2c77e21c0865e1efe9c6e0117669c437994e31c510bcfc196773216f26c81"
+    },
+    {
+      "bytes": 1729,
+      "file": "policy-read.json",
+      "sha256": "82bd1245e6d99aac6ff7bf26fc5ddce42fe9cb3a3068a9e7bf129224a2175416"
+    },
+    {
+      "bytes": 120559,
+      "file": "source-from-1c31.patch",
+      "sha256": "5b32ec618bc16fbad637e54dd917b0328abb00cd6ce131faea2e94ab55105e75"
+    },
+    {
+      "bytes": 1717,
+      "file": "source-seal.json",
+      "sha256": "37453be999891b748f2a784f1fe8719f7cb5296fc7158cfcc16357d91c5f0c1f"
+    },
+    {
+      "bytes": 16164,
+      "file": "transfer-contract.json",
+      "sha256": "8c3f585d300b9e02a23186a2370c28f04015ee0821a4e64324bace99da70837e"
+    },
+    {
+      "bytes": 80488,
+      "file": "transfer_00aad_inputs.py",
+      "sha256": "5484bfb3c02eb1701e3107aaeddfafe3098351c590a431fd10bf5acac88973c9"
+    }
+  ],
+  "normal_CLI_command_bytes": 95764,
+  "Linux_single_argument_bound": 131072,
+  "whole_v2_not_imported_or_executed": true,
+  "source_roles_AST_import_check_network_transfer_or_native_runs": [],
+  "original17_contract_gate_overrides": false,
+  "independent_L1_review_task_delivery": "REJECTED503; custody not accepted; no review delegated",
+  "FC_source_findings_delivery": "REJECTED503; custody not accepted; not delivered",
+  "remaining_before_any_effect": [
+    "owned-group-only observation instead of host-wide proc metadata enumeration",
+    "preserve primary failure and partial custody before cleanup can exhaust the unchanged end+20 reserve",
+    "original17 full Root source/data/input and external-control custody review remains required",
+    "all current native watch/FD/deadline/EOF/partial durability/fault/mutation checks remain UNRUN",
+    "mutable installed executable/loader identity, escaped descendants, sameUID mutation and SIGKILL/IO receipt uncertainty remain explicit"
+  ]
+}
