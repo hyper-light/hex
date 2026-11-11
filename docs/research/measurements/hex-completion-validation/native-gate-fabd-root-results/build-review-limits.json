@@ -1,0 +1,10 @@
+{
+  "driver_sha256": "b42393c03a7952b6faaa393250e30be5b22a3c2e69a7f8c69e8933d8b3ae5498",
+  "l4_source_review": "No c74 source/path/CLI/artifact mismatch. Native0.",
+  "conditional_concerns": [
+    "killpg signal error may bypass explicit reap/row finalization; final wait after KILL locally unbounded, outer hard guards remain",
+    "leader wait/reaped alone does not establish descendants terminated"
+  ],
+  "required_outer_evidence": "exact recorded driver birth absent plus whole owned scope absent/empty before any native cell; unknown signal/timeout outcome remains unverified",
+  "scope": "source observations only; no reproduced fault or driver mutation"
+}

@@ -1,0 +1,94 @@
+{
+  "case.stderr": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "case.stdout": {
+    "bytes": 215,
+    "sha256": "417394902dca19c425935c24977d6534556b99d9d83c4806721a71344d639782"
+  },
+  "comparison-result.json": {
+    "bytes": 3205,
+    "sha256": "fd0e32f6d7e338f5c6ec73290294f4736ded4d664120cf2d9f1f88a5612b338f"
+  },
+  "config.json": {
+    "bytes": 1573,
+    "sha256": "7ca9564bcfda1e7869b642beeb62f242b8028787abb4405e7cfe4b48f7ada76f"
+  },
+  "gate-WvAt6S/first.creating.record.json": {
+    "bytes": 644,
+    "sha256": "016d011e5e68dd5385655fb7f9c1a23c6f2354fee3b6976e8f844023b34aa48b"
+  },
+  "gate-WvAt6S/first.isolation-ack.json": {
+    "bytes": 745,
+    "sha256": "e6743270127475084deaba8c58b8dc44a3761ee099072c69e7b72ea4164efb3b"
+  },
+  "gate-WvAt6S/first.isolation-tail.json": {
+    "bytes": 167,
+    "sha256": "2047aa2031d2b5357de445ae7f95517139257fca6f4b0e5863cc89a6f53a7ce8"
+  },
+  "gate-WvAt6S/gate-result.json": {
+    "bytes": 210,
+    "sha256": "2c8fa2c13c11db01245acaa212d0489657022e7b249102c3d3517d44eee9018d"
+  },
+  "gate-WvAt6S/native-vm-owner.lock": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "gate-WvAt6S/parent-death.evidence.json": {
+    "bytes": 22205,
+    "sha256": "eaa799f0f3074e5bfcb5eb55b5a75e4e12fcf78006e2e10af24984fde4b807c6"
+  },
+  "gate-WvAt6S/parent.stderr": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "gate-WvAt6S/parent.stdout": {
+    "bytes": 4077,
+    "sha256": "d09f27e95712b0be2719492790ae708bb1c2a1cba271fbdf26674ea4b96ce287"
+  },
+  "gate-WvAt6S/parent.stop.json": {
+    "bytes": 508,
+    "sha256": "1613cf3dd7ec62dcef1722374628105b84c91fe2ccdfae101145afd022c937e6"
+  },
+  "gate-WvAt6S/sibling.creating.record.json": {
+    "bytes": 645,
+    "sha256": "d07993baddca67378b18e1c2bad12336a154dfe7abc61aaa6130630ea9160d7a"
+  },
+  "gate-WvAt6S/sibling.isolation-ack.json": {
+    "bytes": 750,
+    "sha256": "6dbe8edfa22f7869571726acb6ee523d1156e0399f5c12625fce2f97523cc4e7"
+  },
+  "gate-WvAt6S/sibling.isolation-tail.json": {
+    "bytes": 169,
+    "sha256": "07600fc5cd99f26c64aefaff2939e4a492c7a2d68d581ec2b6b6aa704ebe51a4"
+  },
+  "inputs.json": {
+    "bytes": 399,
+    "sha256": "ea054aca2d9b9940fa58743eb2d2a37f52cd670106c5d6bd70da915480cc3094"
+  },
+  "journal.jsonl": {
+    "bytes": 3277,
+    "sha256": "18f76d18f45893e4ab925dffe1459dbb3d5a8d8b6b867b7a89bbe32cdc6bba7e"
+  },
+  "resources-after.json": {
+    "bytes": 3096,
+    "sha256": "aed79d3fde7f05e3016c58cae5ec07c96bb10c6d9cde89182704b669070c6fbe"
+  },
+  "resources-before.json": {
+    "bytes": 2916,
+    "sha256": "d0a84b4d110e36c8a5bd90d442d6d4ed433d215fa4a79a34fd484ee0bbf4f91e"
+  },
+  "scope-restoration.json": {
+    "bytes": 440,
+    "sha256": "2c9cbd41476ebadb2fbb2a218d8540fb8efb7dd622d3180127d2045674d1f037"
+  },
+  "unit.stderr": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "unit.stdout": {
+    "bytes": 138,
+    "sha256": "16cd5dbe44bf8cecfe095728d161bc29ea0b032b562d93918ee23c1dd091984e"
+  }
+}

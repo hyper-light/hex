@@ -1,0 +1,115 @@
+{
+  "closures": {
+    "baseline": {
+      "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-gate-baseline-fabd-v1.scope",
+      "scope_absent": true,
+      "native": [
+        {
+          "role": "outer_owner",
+          "owner": {
+            "pid": 2950138,
+            "ppid": 2950137,
+            "start_ticks": 32554960
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        },
+        {
+          "role": "cell_driver",
+          "owner": {
+            "pid": 2950153,
+            "ppid": 2950138,
+            "start_ticks": 32554962
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        }
+      ]
+    },
+    "bypass": {
+      "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-gate-bypass-fabd-v1.scope",
+      "scope_absent": true,
+      "native": [
+        {
+          "role": "outer_owner",
+          "owner": {
+            "pid": 2996895,
+            "ppid": 2996894,
+            "start_ticks": 32557930
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        },
+        {
+          "role": "cell_driver",
+          "owner": {
+            "pid": 2996987,
+            "ppid": 2996895,
+            "start_ticks": 32557934
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        }
+      ]
+    },
+    "restored": {
+      "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-gate-restored-fabd-v1.scope",
+      "scope_absent": true,
+      "native": [
+        {
+          "role": "outer_owner",
+          "owner": {
+            "pid": 3108973,
+            "ppid": 3108972,
+            "start_ticks": 32565056
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        },
+        {
+          "role": "cell_driver",
+          "owner": {
+            "pid": 3109041,
+            "ppid": 3108973,
+            "start_ticks": 32565059
+          },
+          "owned_birth_absent": true,
+          "absent": true
+        }
+      ]
+    }
+  },
+  "binaries": {
+    "baseline": {
+      "path": "/home/adalundhe/.cache/hex-lead/gc5688v1/baseline/target/x86_64-unknown-linux-gnu/debug/deps/hex_node-56e249d479a053c2",
+      "bytes": 186300096,
+      "sha256": "49f9c7c87688790465c6727b46c098fb683c14d5772744b81bfa8860a7a4dcbb"
+    },
+    "bypass": {
+      "path": "/home/adalundhe/.cache/hex-lead/gc5688v1/bypass/target/x86_64-unknown-linux-gnu/debug/deps/hex_node-56e249d479a053c2",
+      "bytes": 186271856,
+      "sha256": "e58bd1d034d0ed0f5ab2eb9c0bf9343d42aa9147d3c8392d06b1a016a801e5c3"
+    },
+    "restored": {
+      "path": "/home/adalundhe/.cache/hex-lead/gc5688v1/restored/target/x86_64-unknown-linux-gnu/debug/deps/hex_node-56e249d479a053c2",
+      "bytes": 186300112,
+      "sha256": "ea3b39413a6aedbfb5e66ff2eb53b62bdc60f02d87ff645b849e967d5fc990e6"
+    }
+  },
+  "sources": {
+    "baseline": {
+      "files": 3823,
+      "whole_manifest_equal": true
+    },
+    "bypass": {
+      "files": 3823,
+      "whole_manifest_equal": true
+    },
+    "restored": {
+      "files": 3823,
+      "whole_manifest_equal": true
+    }
+  },
+  "sealed_sha256": "06ba2ce2d7e577487e7e2df8ab8298aee2fe3f529e6422abc7ab24712a094fde",
+  "symlinks": {}
+}

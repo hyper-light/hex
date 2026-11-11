@@ -1,0 +1,16 @@
+{
+  "cell": "restored",
+  "limits": {
+    "cpu.max": "100000 100000\n",
+    "memory.max": "4294967296\n",
+    "memory.swap.max": "0\n",
+    "pids.max": "256\n"
+  },
+  "owner": {
+    "pid": 3109041,
+    "ppid": 3108973,
+    "start_ticks": 32565059
+  },
+  "plan": "/home/adalundhe/.cache/hex-lead/gc5688v1/sealed.json",
+  "sha256": "06ba2ce2d7e577487e7e2df8ab8298aee2fe3f529e6422abc7ab24712a094fde"
+}

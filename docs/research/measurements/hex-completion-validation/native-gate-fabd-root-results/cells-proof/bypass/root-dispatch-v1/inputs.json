@@ -1,0 +1,16 @@
+{
+  "VM_GPU": false,
+  "cell": "bypass",
+  "hard_scope_seconds": 1800,
+  "lab": "/home/adalundhe/.cache/hex-lead/gc5688v1/bypass/l",
+  "original_native_phase_seconds": 180,
+  "outer_owner": {
+    "pid": 2996895,
+    "ppid": 2996894,
+    "start_ticks": 32557930
+  },
+  "outer_seconds": 1780,
+  "plan_sha256": "06ba2ce2d7e577487e7e2df8ab8298aee2fe3f529e6422abc7ab24712a094fde",
+  "source": "fabd73020cdd1c6e201d8028fcca5d85f28ef18c",
+  "unit": "hex-root-gate-bypass-fabd-v1.scope"
+}

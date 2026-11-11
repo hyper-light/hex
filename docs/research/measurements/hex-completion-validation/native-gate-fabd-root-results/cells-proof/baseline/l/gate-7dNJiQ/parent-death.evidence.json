@@ -1,0 +1,837 @@
+{
+  "cleanup_uncertainty": [],
+  "clock": "original std::time::Instant; event times are observer return/check times, not kernel timestamps",
+  "events": [
+    {
+      "D": {
+        "instant_debug": "Instant { tv_sec: 214216, tv_nsec: 439689677 }",
+        "ns_since_t0_decimal": "60000000000"
+      },
+      "G": {
+        "instant_debug": "Instant { tv_sec: 214276, tv_nsec: 439689677 }",
+        "ns_since_t0_decimal": "120000000000"
+      },
+      "event": "origin",
+      "gate_budget_ms": 120000,
+      "guard_ms": 60000,
+      "owner_pid": 2951303,
+      "owner_started": 32555035,
+      "t0": {
+        "instant_debug": "Instant { tv_sec: 214156, tv_nsec: 439689677 }",
+        "ns_since_t0_decimal": "0"
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214156, tv_nsec: 439856849 }",
+        "ns_since_t0_decimal": "167172"
+      },
+      "event": "parent_owned",
+      "pid": 2955360,
+      "pidfd_open": {
+        "Ok": null
+      },
+      "started": 32555287
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214156, tv_nsec: 439883399 }",
+        "ns_since_t0_decimal": "193722"
+      },
+      "event": "identities_wait_begin"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 860557082 }",
+        "ns_since_t0_decimal": "2420867405"
+      },
+      "event": "identities_received",
+      "frame": {
+        "identities": [
+          {
+            "pid": 2959085,
+            "started": 32555528,
+            "vsock": "/home/adalundhe/.cache/hex-lead/gc5688v1/baseline/l/gate-7dNJiQ/first.sock"
+          },
+          {
+            "pid": 2959088,
+            "started": 32555529,
+            "vsock": "/home/adalundhe/.cache/hex-lead/gc5688v1/baseline/l/gate-7dNJiQ/sibling.sock"
+          }
+        ],
+        "isolation_acks": [
+          {
+            "actual_byte_2_observed": true,
+            "pid": 2959085,
+            "publication_held": true,
+            "receipt": {
+              "actual_byte_2_observed": true,
+              "commitment": [
+                87,
+                194,
+                62,
+                85,
+                201,
+                131,
+                81,
+                27,
+                106,
+                101,
+                192,
+                16,
+                210,
+                133,
+                20,
+                116,
+                108,
+                18,
+                205,
+                107,
+                133,
+                40,
+                88,
+                252,
+                54,
+                79,
+                212,
+                227,
+                180,
+                117,
+                31,
+                223
+              ],
+              "eof_required_for_ack": false,
+              "legacy_gate_wait_syscall_not_sampled": 271,
+              "legacy_observation_ms_not_polled": 1,
+              "native_scope": [
+                157,
+                116,
+                137,
+                80,
+                50,
+                30,
+                224,
+                51,
+                38,
+                37,
+                21,
+                71,
+                97,
+                192,
+                82,
+                215
+              ],
+              "notification": {
+                "Ok": "Instant { tv_sec: 214158, tv_nsec: 854701740 }"
+              },
+              "suffix": "first",
+              "within_guard": true
+            },
+            "started": 32555528,
+            "tail_receipt": {
+              "after_producer_drop_fence": true,
+              "eof_required_for_ack": false,
+              "pid": 2959085,
+              "started": 32555528,
+              "suffix": "first",
+              "tail": {
+                "Ok": "eof"
+              }
+            },
+            "within_guard": true
+          },
+          {
+            "actual_byte_2_observed": true,
+            "pid": 2959088,
+            "publication_held": true,
+            "receipt": {
+              "actual_byte_2_observed": true,
+              "commitment": [
+                58,
+                251,
+                9,
+                176,
+                179,
+                159,
+                65,
+                158,
+                90,
+                75,
+                141,
+                172,
+                102,
+                229,
+                181,
+                227,
+                222,
+                244,
+                195,
+                146,
+                13,
+                196,
+                107,
+                86,
+                144,
+                136,
+                230,
+                206,
+                108,
+                176,
+                26,
+                138
+              ],
+              "eof_required_for_ack": false,
+              "legacy_gate_wait_syscall_not_sampled": 271,
+              "legacy_observation_ms_not_polled": 1,
+              "native_scope": [
+                213,
+                200,
+                188,
+                240,
+                183,
+                30,
+                194,
+                49,
+                35,
+                153,
+                96,
+                234,
+                109,
+                237,
+                199,
+                6
+              ],
+              "notification": {
+                "Ok": "Instant { tv_sec: 214158, tv_nsec: 860312866 }"
+              },
+              "suffix": "sibling",
+              "within_guard": true
+            },
+            "started": 32555529,
+            "tail_receipt": {
+              "after_producer_drop_fence": true,
+              "eof_required_for_ack": false,
+              "pid": 2959088,
+              "started": 32555529,
+              "suffix": "sibling",
+              "tail": {
+                "Ok": "eof"
+              }
+            },
+            "within_guard": true
+          }
+        ]
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 860665855 }",
+        "ns_since_t0_decimal": "2420976178"
+      },
+      "count": 2,
+      "event": "exact_native_pidfds_owned"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 860724555 }",
+        "ns_since_t0_decimal": "2421034878"
+      },
+      "event": "stopped_phase_received",
+      "frame": {
+        "identities": [
+          {
+            "pid": 2959085,
+            "started": 32555528,
+            "vsock": "/home/adalundhe/.cache/hex-lead/gc5688v1/baseline/l/gate-7dNJiQ/first.sock"
+          },
+          {
+            "pid": 2959088,
+            "started": 32555529,
+            "vsock": "/home/adalundhe/.cache/hex-lead/gc5688v1/baseline/l/gate-7dNJiQ/sibling.sock"
+          }
+        ],
+        "isolation_acks": [
+          {
+            "actual_byte_2_observed": true,
+            "pid": 2959085,
+            "publication_held": true,
+            "receipt": {
+              "actual_byte_2_observed": true,
+              "commitment": [
+                87,
+                194,
+                62,
+                85,
+                201,
+                131,
+                81,
+                27,
+                106,
+                101,
+                192,
+                16,
+                210,
+                133,
+                20,
+                116,
+                108,
+                18,
+                205,
+                107,
+                133,
+                40,
+                88,
+                252,
+                54,
+                79,
+                212,
+                227,
+                180,
+                117,
+                31,
+                223
+              ],
+              "eof_required_for_ack": false,
+              "legacy_gate_wait_syscall_not_sampled": 271,
+              "legacy_observation_ms_not_polled": 1,
+              "native_scope": [
+                157,
+                116,
+                137,
+                80,
+                50,
+                30,
+                224,
+                51,
+                38,
+                37,
+                21,
+                71,
+                97,
+                192,
+                82,
+                215
+              ],
+              "notification": {
+                "Ok": "Instant { tv_sec: 214158, tv_nsec: 854701740 }"
+              },
+              "suffix": "first",
+              "within_guard": true
+            },
+            "started": 32555528,
+            "tail_receipt": {
+              "after_producer_drop_fence": true,
+              "eof_required_for_ack": false,
+              "pid": 2959085,
+              "started": 32555528,
+              "suffix": "first",
+              "tail": {
+                "Ok": "eof"
+              }
+            },
+            "within_guard": true
+          },
+          {
+            "actual_byte_2_observed": true,
+            "pid": 2959088,
+            "publication_held": true,
+            "receipt": {
+              "actual_byte_2_observed": true,
+              "commitment": [
+                58,
+                251,
+                9,
+                176,
+                179,
+                159,
+                65,
+                158,
+                90,
+                75,
+                141,
+                172,
+                102,
+                229,
+                181,
+                227,
+                222,
+                244,
+                195,
+                146,
+                13,
+                196,
+                107,
+                86,
+                144,
+                136,
+                230,
+                206,
+                108,
+                176,
+                26,
+                138
+              ],
+              "eof_required_for_ack": false,
+              "legacy_gate_wait_syscall_not_sampled": 271,
+              "legacy_observation_ms_not_polled": 1,
+              "native_scope": [
+                213,
+                200,
+                188,
+                240,
+                183,
+                30,
+                194,
+                49,
+                35,
+                153,
+                96,
+                234,
+                109,
+                237,
+                199,
+                6
+              ],
+              "notification": {
+                "Ok": "Instant { tv_sec: 214158, tv_nsec: 860312866 }"
+              },
+              "suffix": "sibling",
+              "within_guard": true
+            },
+            "started": 32555529,
+            "tail_receipt": {
+              "after_producer_drop_fence": true,
+              "eof_required_for_ack": false,
+              "pid": 2959088,
+              "started": 32555529,
+              "suffix": "sibling",
+              "tail": {
+                "Ok": "eof"
+              }
+            },
+            "within_guard": true
+          }
+        ],
+        "kernel_stop": {
+          "pid": 2959088,
+          "returned_at_instant_debug": "Instant { tv_sec: 214158, tv_nsec: 860493213 }",
+          "signal_sent": true,
+          "started": 32555529,
+          "waitid": {
+            "Ok": {
+              "debug": "WaitIdStatus { stopped: true, exited: false, killed: false, trapped: false, dumped: false, continued: false, stopping_signal: 19 }",
+              "exit_status": null,
+              "si_code": 5,
+              "si_errno": 0,
+              "si_signo": 17,
+              "stopped": true,
+              "stopping_signal": 19,
+              "terminating_signal": null
+            }
+          }
+        },
+        "sibling_stopped": true
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 860760262 }",
+        "ns_since_t0_decimal": "2421070585"
+      },
+      "event": "canary_before_parent_death",
+      "exists": {
+        "Ok": false
+      },
+      "suffix": "first"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 860764780 }",
+        "ns_since_t0_decimal": "2421075103"
+      },
+      "event": "canary_before_parent_death",
+      "exists": {
+        "Ok": false
+      },
+      "suffix": "sibling"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 860772104 }",
+        "ns_since_t0_decimal": "2421082427"
+      },
+      "event": "parent_kill_returned",
+      "result": {
+        "Ok": null
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861080340 }",
+        "ns_since_t0_decimal": "2421390663"
+      },
+      "event": "parent_terminal_reap_returned",
+      "status": {
+        "Ok": {
+          "code": null,
+          "raw_wait_status": 9,
+          "signal": 9
+        }
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861085940 }",
+        "ns_since_t0_decimal": "2421396263"
+      },
+      "before_D": true,
+      "event": "parent_D_check"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861089537 }",
+        "ns_since_t0_decimal": "2421399860"
+      },
+      "end": {
+        "instant_debug": "Instant { tv_sec: 214218, tv_nsec: 861088836 }",
+        "ns_since_t0_decimal": "62421399159"
+      },
+      "event": "first_terminal_wait_begin"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861133209 }",
+        "ns_since_t0_decimal": "2421443532"
+      },
+      "event": "first_terminal_notification",
+      "result": {
+        "Ok": null
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861135072 }",
+        "ns_since_t0_decimal": "2421445395"
+      },
+      "before_G": true,
+      "event": "first_G_check"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861147195 }",
+        "ns_since_t0_decimal": "2421457518"
+      },
+      "event": "first_waitid_returned",
+      "status": {
+        "Ok": {
+          "debug": "WaitIdStatus { stopped: false, exited: true, killed: false, trapped: false, dumped: false, continued: false, exit_status: 127 }",
+          "exit_status": 127,
+          "si_code": 1,
+          "si_errno": 0,
+          "si_signo": 17,
+          "stopped": false,
+          "stopping_signal": null,
+          "terminating_signal": null
+        }
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861169246 }",
+        "ns_since_t0_decimal": "2421479569"
+      },
+      "event": "sibling_kernel_stat_after_first",
+      "pid": 2959088,
+      "raw_stat": "2959088 (gate-sibling) T 2951303 2950137 4186612 0 -1 4194368 16 0 0 0 0 0 0 0 39 19 1 0 32555529 303616000 445 18446744073709551615 94068262328544 94068279424128 140727922595616 0 0 0 2147221247 16781312 1088 1 0 0 17 27 0 0 0 0 0 94068280123248 94068280128344 94068563156992 140727922597556 140727922597811 140727922597811 140727922601857 19\n",
+      "started": 32555529
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861175388 }",
+        "ns_since_t0_decimal": "2421485711"
+      },
+      "event": "sibling_continue_returned",
+      "result": {
+        "Ok": null
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861178594 }",
+        "ns_since_t0_decimal": "2421488917"
+      },
+      "end": {
+        "instant_debug": "Instant { tv_sec: 214218, tv_nsec: 861177872 }",
+        "ns_since_t0_decimal": "62421488195"
+      },
+      "event": "sibling_terminal_wait_begin"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861245939 }",
+        "ns_since_t0_decimal": "2421556262"
+      },
+      "event": "sibling_terminal_notification",
+      "result": {
+        "Ok": null
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861251139 }",
+        "ns_since_t0_decimal": "2421561462"
+      },
+      "event": "sibling_waitid_returned",
+      "status": {
+        "Ok": {
+          "debug": "WaitIdStatus { stopped: false, exited: true, killed: false, trapped: false, dumped: false, continued: false, exit_status: 127 }",
+          "exit_status": 127,
+          "si_code": 1,
+          "si_errno": 0,
+          "si_signo": 17,
+          "stopped": false,
+          "stopping_signal": null,
+          "terminating_signal": null
+        }
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861260877 }",
+        "ns_since_t0_decimal": "2421571200"
+      },
+      "event": "canary_after_native_ends",
+      "exists": {
+        "Ok": false
+      },
+      "suffix": "first"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861264113 }",
+        "ns_since_t0_decimal": "2421574436"
+      },
+      "event": "canary_after_native_ends",
+      "exists": {
+        "Ok": false
+      },
+      "suffix": "sibling"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861283159 }",
+        "ns_since_t0_decimal": "2421593482"
+      },
+      "event": "observation_finished",
+      "result": {
+        "Ok": null
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861285664 }",
+        "ns_since_t0_decimal": "2421595987"
+      },
+      "event": "cleanup_parent_probe",
+      "status": {
+        "Ok": {
+          "code": null,
+          "raw_wait_status": 9,
+          "signal": 9
+        }
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861290463 }",
+        "ns_since_t0_decimal": "2421600786"
+      },
+      "event": "cleanup_parent_terminal_reap",
+      "status": {
+        "Ok": {
+          "code": null,
+          "raw_wait_status": 9,
+          "signal": 9
+        }
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861295392 }",
+        "ns_since_t0_decimal": "2421605715"
+      },
+      "event": "cleanup_native_continue",
+      "index": 0,
+      "result": {
+        "Err": "No such process (os error 3)"
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861305511 }",
+        "ns_since_t0_decimal": "2421615834"
+      },
+      "event": "cleanup_native_kill",
+      "index": 0,
+      "result": {
+        "Err": "No such process (os error 3)"
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861309288 }",
+        "ns_since_t0_decimal": "2421619611"
+      },
+      "event": "cleanup_native_terminal_notification",
+      "index": 0,
+      "result": {
+        "Ok": null
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861312474 }",
+        "ns_since_t0_decimal": "2421622797"
+      },
+      "event": "cleanup_native_waitid",
+      "index": 0,
+      "status": {
+        "Err": "No child processes (os error 10)"
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861315840 }",
+        "ns_since_t0_decimal": "2421626163"
+      },
+      "event": "cleanup_native_continue",
+      "index": 1,
+      "result": {
+        "Err": "No such process (os error 3)"
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861318214 }",
+        "ns_since_t0_decimal": "2421628537"
+      },
+      "event": "cleanup_native_kill",
+      "index": 1,
+      "result": {
+        "Err": "No such process (os error 3)"
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861321160 }",
+        "ns_since_t0_decimal": "2421631483"
+      },
+      "event": "cleanup_native_terminal_notification",
+      "index": 1,
+      "result": {
+        "Ok": null
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861324476 }",
+        "ns_since_t0_decimal": "2421634799"
+      },
+      "event": "cleanup_native_waitid",
+      "index": 1,
+      "status": {
+        "Err": "No child processes (os error 10)"
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 861332641 }",
+        "ns_since_t0_decimal": "2421642964"
+      },
+      "event": "cleanup_native_lease",
+      "result": {
+        "Ok": null
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 866692477 }",
+        "ns_since_t0_decimal": "2427002800"
+      },
+      "event": "cleanup_native_scope_store",
+      "result": {
+        "Ok": null
+      },
+      "suffix": "first"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 872076518 }",
+        "ns_since_t0_decimal": "2432386841"
+      },
+      "event": "cleanup_native_scope_store",
+      "result": {
+        "Ok": null
+      },
+      "suffix": "sibling"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 872215168 }",
+        "ns_since_t0_decimal": "2432525491"
+      },
+      "event": "cleanup_subreaper_restore",
+      "result": {
+        "Ok": null
+      }
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 872221820 }",
+        "ns_since_t0_decimal": "2432532143"
+      },
+      "event": "canary_after_cleanup",
+      "exists": {
+        "Ok": false
+      },
+      "suffix": "first"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 872225878 }",
+        "ns_since_t0_decimal": "2432536201"
+      },
+      "event": "canary_after_cleanup",
+      "exists": {
+        "Ok": false
+      },
+      "suffix": "sibling"
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 872228563 }",
+        "ns_since_t0_decimal": "2432538886"
+      },
+      "event": "cleanup_complete",
+      "uncertainty": []
+    },
+    {
+      "at": {
+        "instant_debug": "Instant { tv_sec: 214158, tv_nsec: 872266644 }",
+        "ns_since_t0_decimal": "2432576967"
+      },
+      "event": "existing_receipts_written",
+      "gate_result": {
+        "Ok": null
+      },
+      "parent_stdout": {
+        "Ok": null
+      }
+    }
+  ],
+  "observation": {
+    "Ok": null
+  },
+  "schema": "hex-parent-death-observations-1",
+  "vm_gpu_claim": false
+}

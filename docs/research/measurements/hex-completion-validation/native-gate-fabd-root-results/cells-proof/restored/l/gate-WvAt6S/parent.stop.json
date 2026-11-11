@@ -1,0 +1,18 @@
+{
+  "pid": 3118157,
+  "returned_at_instant_debug": "Instant { tv_sec: 214259, tv_nsec: 927635968 }",
+  "signal_sent": true,
+  "started": 32565636,
+  "waitid": {
+    "Ok": {
+      "debug": "WaitIdStatus { stopped: true, exited: false, killed: false, trapped: false, dumped: false, continued: false, stopping_signal: 19 }",
+      "exit_status": null,
+      "si_code": 5,
+      "si_errno": 0,
+      "si_signo": 17,
+      "stopped": true,
+      "stopping_signal": 19,
+      "terminating_signal": null
+    }
+  }
+}

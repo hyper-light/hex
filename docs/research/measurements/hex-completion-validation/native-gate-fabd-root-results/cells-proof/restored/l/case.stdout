@@ -1,0 +1,6 @@
+
+running 1 test
+test supervise::completion_native_gate_tests::completion_controller_parent_death_cancels_gate ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 378 filtered out; finished in 4.95s
+

@@ -1,0 +1,92 @@
+{
+  "VM_GPU_claim": false,
+  "cause": {
+    "D_ns": "60000000000",
+    "EOF_phase_prerequisite": false,
+    "G_ns": "120000000000",
+    "classification": "whole-guard semantic rejection",
+    "foreign_only_claim": false,
+    "preserved_raw": {
+      "first.creating.record.json": {
+        "bytes": 638,
+        "sha256": "e0f8ccf46391ecd71cbe00ac0c4d1bf5bf6a682d00981ef79bde8c69b6108056"
+      },
+      "first.isolation-ack.json": {
+        "bytes": 744,
+        "sha256": "2cbb1f8911a5b858c8657f4111fa59d33bf2bc88fa1e17d5d6a2cd72ff67924a"
+      },
+      "first.isolation-tail.json": {
+        "bytes": 168,
+        "sha256": "26047ea42096b5a83f663aacf4bfc2b8bd40062ccd8eb363f9a5b5731797f88c"
+      },
+      "gate-result.json": {
+        "bytes": 239,
+        "sha256": "1379e00738a5a56da2c11943cd904571f50ff0af030babb8227726a3a0338b5c"
+      },
+      "parent.stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "parent.stdout": {
+        "bytes": 4057,
+        "sha256": "5a3845b635bae9c69fedd53cbe46b9567bd720cfd5e76e22b36e8fc82a0bde76"
+      },
+      "parent.stop.json": {
+        "bytes": 508,
+        "sha256": "971dee760082e1479b8e5eed57c39bdc9e4a11c31ee343f803b009cef5d4a107"
+      },
+      "sibling.creating.record.json": {
+        "bytes": 640,
+        "sha256": "07ceea71c76364871f0110bd3d9697786c803faedf8419e8647ae14856eabcaf"
+      },
+      "sibling.isolation-ack.json": {
+        "bytes": 743,
+        "sha256": "b44d9f8a757f7c3d26933888a9b1df672166225e2c81e06fa807cf41b444dbbb"
+      },
+      "sibling.isolation-tail.json": {
+        "bytes": 170,
+        "sha256": "44d27f92c4de406e933fc551eaa3dfee1865fbfb4202399bdc52a9620d3ba665"
+      }
+    },
+    "sha256": "ba5270046bae46a4a4872a5946a1c041972284894352fb342c22eab44ab6937e",
+    "trace": "/home/adalundhe/.cache/hex-lead/gc5688v1/bypass/l/gate-jAfeMc/parent-death.evidence.json"
+  },
+  "cell": "bypass",
+  "cleanup": {
+    "empty": true,
+    "error": null,
+    "kill_needed": false,
+    "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-gate-bypass-fabd-v1.scope/native-0",
+    "reaped": true
+  },
+  "errors": [],
+  "expected_outcome_witnessed": true,
+  "foreign_only_claim": false,
+  "observation": {
+    "argv": [
+      "/usr/bin/python3",
+      "/home/adalundhe/.cache/hex-lead/gc5688-build-v1/source/docs/research/measurements/hex-completion-validation/native-gate-r05/root_native_gate_comparison.py",
+      "--exec-phase",
+      "/home/adalundhe/.cache/hex-lead/gc5688v1/sealed.json",
+      "06ba2ce2d7e577487e7e2df8ab8298aee2fe3f529e6422abc7ab24712a094fde",
+      "bypass",
+      "hex-root-gate-bypass-fabd-v1.scope",
+      "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-gate-bypass-fabd-v1.scope/native-0/actor",
+      "completion_controller_parent_death_cancels_gate",
+      "2996987",
+      "32557934",
+      "214363.625600353"
+    ],
+    "both_eof": true,
+    "created_pid": 2998120,
+    "error": null,
+    "identity": {
+      "pid": 2998120,
+      "ppid": 2996987,
+      "start_ticks": 32558006
+    },
+    "reaped": true,
+    "returncode": 101
+  },
+  "restored": true
+}

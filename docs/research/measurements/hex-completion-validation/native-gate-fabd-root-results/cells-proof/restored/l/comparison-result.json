@@ -1,0 +1,92 @@
+{
+  "VM_GPU_claim": false,
+  "cause": {
+    "D_ns": "60000000000",
+    "EOF_phase_prerequisite": false,
+    "G_ns": "120000000000",
+    "classification": "positive causal control",
+    "foreign_only_claim": false,
+    "preserved_raw": {
+      "first.creating.record.json": {
+        "bytes": 644,
+        "sha256": "016d011e5e68dd5385655fb7f9c1a23c6f2354fee3b6976e8f844023b34aa48b"
+      },
+      "first.isolation-ack.json": {
+        "bytes": 745,
+        "sha256": "e6743270127475084deaba8c58b8dc44a3761ee099072c69e7b72ea4164efb3b"
+      },
+      "first.isolation-tail.json": {
+        "bytes": 167,
+        "sha256": "2047aa2031d2b5357de445ae7f95517139257fca6f4b0e5863cc89a6f53a7ce8"
+      },
+      "gate-result.json": {
+        "bytes": 210,
+        "sha256": "2c8fa2c13c11db01245acaa212d0489657022e7b249102c3d3517d44eee9018d"
+      },
+      "parent.stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "parent.stdout": {
+        "bytes": 4077,
+        "sha256": "d09f27e95712b0be2719492790ae708bb1c2a1cba271fbdf26674ea4b96ce287"
+      },
+      "parent.stop.json": {
+        "bytes": 508,
+        "sha256": "1613cf3dd7ec62dcef1722374628105b84c91fe2ccdfae101145afd022c937e6"
+      },
+      "sibling.creating.record.json": {
+        "bytes": 645,
+        "sha256": "d07993baddca67378b18e1c2bad12336a154dfe7abc61aaa6130630ea9160d7a"
+      },
+      "sibling.isolation-ack.json": {
+        "bytes": 750,
+        "sha256": "6dbe8edfa22f7869571726acb6ee523d1156e0399f5c12625fce2f97523cc4e7"
+      },
+      "sibling.isolation-tail.json": {
+        "bytes": 169,
+        "sha256": "07600fc5cd99f26c64aefaff2939e4a492c7a2d68d581ec2b6b6aa704ebe51a4"
+      }
+    },
+    "sha256": "eaa799f0f3074e5bfcb5eb55b5a75e4e12fcf78006e2e10af24984fde4b807c6",
+    "trace": "/home/adalundhe/.cache/hex-lead/gc5688v1/restored/l/gate-WvAt6S/parent-death.evidence.json"
+  },
+  "cell": "restored",
+  "cleanup": {
+    "empty": true,
+    "error": null,
+    "kill_needed": false,
+    "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-gate-restored-fabd-v1.scope/native-0",
+    "reaped": true
+  },
+  "errors": [],
+  "expected_outcome_witnessed": true,
+  "foreign_only_claim": false,
+  "observation": {
+    "argv": [
+      "/usr/bin/python3",
+      "/home/adalundhe/.cache/hex-lead/gc5688-build-v1/source/docs/research/measurements/hex-completion-validation/native-gate-r05/root_native_gate_comparison.py",
+      "--exec-phase",
+      "/home/adalundhe/.cache/hex-lead/gc5688v1/sealed.json",
+      "06ba2ce2d7e577487e7e2df8ab8298aee2fe3f529e6422abc7ab24712a094fde",
+      "restored",
+      "hex-root-gate-restored-fabd-v1.scope",
+      "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-gate-restored-fabd-v1.scope/native-0/actor",
+      "completion_controller_parent_death_cancels_gate",
+      "3109041",
+      "32565059",
+      "214434.869189792"
+    ],
+    "both_eof": true,
+    "created_pid": 3110170,
+    "error": null,
+    "identity": {
+      "pid": 3110170,
+      "ppid": 3109041,
+      "start_ticks": 32565131
+    },
+    "reaped": true,
+    "returncode": 0
+  },
+  "restored": true
+}

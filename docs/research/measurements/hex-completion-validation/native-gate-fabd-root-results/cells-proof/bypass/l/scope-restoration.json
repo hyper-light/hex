@@ -1,0 +1,23 @@
+{
+  "limits_after": {
+    "cpu.max": "100000 100000\n",
+    "memory.max": "4294967296\n",
+    "memory.swap.max": "0\n",
+    "pids.max": "256\n"
+  },
+  "limits_before": {
+    "cpu.max": "100000 100000\n",
+    "memory.max": "4294967296\n",
+    "memory.swap.max": "0\n",
+    "pids.max": "256\n"
+  },
+  "owner": {
+    "pid": 2996987,
+    "ppid": 2996895,
+    "start_ticks": 32557934
+  },
+  "procs": [
+    2996987
+  ],
+  "subtree_control": ""
+}
