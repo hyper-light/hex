@@ -37,3 +37,5 @@ Five exact upstream Rust fixture sources referenced by API include!/path attribu
 | crates/api/src/{client,lib,sim}.rs | Publish managed stop intent before inline completion; add model lifetime controls and correct simulator observation. | AC-T7.4.1: signed219f804e follows an actual74481869 inline-stop failure and the retained5d8 compilation failure. | 0012-publish-managed-stop-intent-before-synchronous-native.patch |
 
 | crates/api/{Cargo.toml,src/lib.rs,src/client.rs} | Pass the canonical fallibly allocated native receipt through managed launch/attach without a wrapper; use the stable checked atomic operation name. | AC-T7.4.1: signed eee80c12 API delta plus ROOT-owned exact triomphe unsize / unsize1.1.0 dependency overlay; upstream peer Cargo/main untouched. | 0013-transfer-the-same-fallibly-allocated-native-receipt-to-the.patch |
+
+| crates/abi/src/gpu/probe.rs | Use fixed two-byte chunks and the equivalent single native PCI predicate. | AC-T7.4.1: exact9e6243da follows actual L4 ABI strict-Clippy101, preserving checked width and physical identity refusal semantics. | 0014-use-fixed-probe-chunks-and-the-equivalent-native-pci-guard.patch |

@@ -323,6 +323,7 @@ dependencies = [
  "socket2",
  "tar",
  "tempfile",
+ "triomphe",
  "windows-sys",
 ]
 

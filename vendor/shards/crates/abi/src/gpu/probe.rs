@@ -65,7 +65,9 @@ fn fixed_hex<const N: usize>(text: &str) -> Result<[u8; N], GpuProbeError> {
         _ => None,
     };
     let mut uuid = [0; N];
-    for (slot, pair) in uuid.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+    // The checked exact 2*N length above rules out a trailing byte.
+    let (pairs, _) = text.as_bytes().as_chunks::<2>();
+    for (slot, pair) in uuid.iter_mut().zip(pairs) {
         let high = pair
             .first()
             .copied()
@@ -98,10 +100,10 @@ impl GpuProbe {
             if resolved.physical != *selected || resolved.uuid == [0; 16] {
                 return Err(GpuProbeError::Identity);
             }
-            if let Some(pci) = resolved.pci {
-                if !matches!(pci, PhysicalGpu::Pci { .. }) || pci.check().is_err() {
-                    return Err(GpuProbeError::Identity);
-                }
+            if let Some(pci) = resolved.pci
+                && (!matches!(pci, PhysicalGpu::Pci { .. }) || pci.check().is_err())
+            {
+                return Err(GpuProbeError::Identity);
             }
             let matches = match resolved.physical {
                 PhysicalGpu::Pci { .. } => resolved.pci == Some(resolved.physical),

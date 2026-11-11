@@ -54,6 +54,8 @@ hex-node.workspace = true
 hex-runtime.workspace = true
 
 [dev-dependencies]
+# AC-T7.4.1: the managed API controls retain the same fallible native receipt.
+triomphe.workspace = true
 hex-api.workspace = true
 # The oci class through a Shards guest (docs/design/shards-guest.md): its simulator on Linux
 # (tests/node_socket.rs, HEX-GUEST-14) and the real client where a guest is given (tests/guest_real.rs).
