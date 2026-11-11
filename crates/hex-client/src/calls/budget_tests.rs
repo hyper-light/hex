@@ -2970,7 +2970,9 @@ impl Transport for Chatter {
     fn try_send(&self, bytes: &[u8], at: &mut usize, _: &[Lent<'_>]) -> Result<bool, Sent> {
         let (header, request) = wire::read_request_apart(bytes, wire::MAX_MESSAGE).unwrap();
         match &request {
-            Request::Call(Call::Exec { .. }) => self.queue(header.id, &Answer::Started { pid: 7 }),
+            Request::Call(Call::Exec { .. } | Call::Run { .. }) => {
+                self.queue(header.id, &Answer::Started { pid: 7 })
+            }
             Request::Call(Call::Kill { .. }) => self.queue(header.id, &Answer::Done),
             _ => {}
         }
@@ -3058,4 +3060,260 @@ fn kill_checks_once_for_an_end_while_answers_for_others_keep_coming() {
     );
     assert_eq!(kills, [exec]);
     assert!(others < FUSE, "answers for others were still coming");
+}
+
+/// AC-T7.4.1: do `wait_for` a microsecond on a remote program while answers for others keep coming;
+/// expect `Ok(None)` once its time is spent, each turn reading once, never reading on until the fuse
+/// ends the connection. Then with its end next: expect a spent wait to take that end from its read.
+#[test]
+fn a_timed_wait_ends_at_its_deadline_while_answers_for_others_keep_coming() {
+    let client = configured(Chatter::new());
+    let (mut proc, exec) = chatting_program(&client);
+    let chatter = &client.conn.shared.transport;
+    chatter.chat();
+    let wait = Duration::from_micros(1);
+    let waited = chatter.counted(|| proc.wait_for(wait));
+    chatter.queue(exec, &Answer::Exited(Exit::Code(3)));
+    let ended = proc.wait_for(wait);
+    eprintln!("client_wait_bound phase=wait_for waited={waited:?} ended={ended:?} fuse={FUSE}");
+    assert_eq!(
+        waited.0,
+        Ok(None),
+        "a timed wait came back with its time spent"
+    );
+    assert!(
+        waited.2 < FUSE,
+        "it read on until the fuse ended the connection"
+    );
+    assert_eq!(waited.1, waited.2, "each turn read once");
+    assert_eq!(ended, Ok(Some(Exit::Code(3))));
+}
+
+/// A Chatter whose transport makes an exec's asked streams, and gives the wrong one: asked for
+/// stdin, it gives stdout's end, so a run's setup fails after its start and its kill must go out.
+struct WrongEnd(Chatter);
+
+impl Transport for WrongEnd {
+    type Reading = ();
+    const MAKES_ASKED: bool = true;
+    fn answers() -> &'static [Patience; KINDS] {
+        Chatter::answers()
+    }
+    fn reading(&self) {}
+    fn handle(&self) -> Handle<'_> {
+        self.0.handle()
+    }
+    fn recv(&self, reading: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
+        self.0.recv(reading, take)
+    }
+    fn try_send(&self, bytes: &[u8], at: &mut usize, lent: &[Lent<'_>]) -> Result<bool, Sent> {
+        self.0.try_send(bytes, at, lent)
+    }
+    fn shutdown(&self) {}
+    fn carries_before(&self, _: u64, stdio: Stdio, deadline: ReplyDeadline) -> Result<(), Refusal> {
+        deadline.remaining("carrying no streams")?;
+        assert_eq!(
+            carried(&stdio),
+            Streams::default(),
+            "this run carries no pipe"
+        );
+        Ok(())
+    }
+    fn asks_before(
+        &self,
+        _: u64,
+        _: hex_api::Ask,
+        deadline: ReplyDeadline,
+    ) -> Result<hex_api::Given, Refusal> {
+        deadline.remaining("making the wrong stream")?;
+        Stdio {
+            ask: hex_api::Ask {
+                stdout: true,
+                ..hex_api::Ask::default()
+            },
+            ..Stdio::null()
+        }
+        .make_asked()
+    }
+}
+
+/// AC-T7.4.1: do `run_before`, with a deadline the test never reaches, a program whose stream setup
+/// fails after its start (stdout's end given where stdin was asked for) while answers for others keep
+/// coming; expect the setup's refusal, its kill's check for an end to take one turn and read once,
+/// and exactly one Kill for its run, answered in one more turn.
+#[test]
+fn a_failed_setups_kill_goes_out_while_answers_for_others_keep_coming() {
+    let client = configured(WrongEnd(Chatter::new()));
+    let chatter = &client.conn.shared.transport.0;
+    chatter.chat();
+    let far = Instant::now()
+        .checked_add(Duration::from_secs(3600))
+        .unwrap();
+    let ran = chatter.counted(|| {
+        client
+            .run_before(
+                absolute_spec(),
+                Program::of(&["wrong-end"]),
+                Stdio {
+                    ask: hex_api::Ask {
+                        stdin: true,
+                        ..hex_api::Ask::default()
+                    },
+                    ..Stdio::null()
+                },
+                far,
+            )
+            .map(drop)
+    });
+    let sent = chatter.sent.lock().unwrap();
+    let run = sent
+        .iter()
+        .find(|(_, request)| matches!(request, Request::Call(Call::Run { .. })))
+        .map(|(id, _)| *id);
+    let kills: Vec<u64> = sent
+        .iter()
+        .filter_map(|(_, request)| match request {
+            Request::Call(Call::Kill { exec }) => Some(*exec),
+            _ => None,
+        })
+        .collect();
+    eprintln!(
+        "client_wait_bound phase=setup_kill ran={ran:?} run={run:?} kills={kills:?} fuse={FUSE}"
+    );
+    assert!(
+        matches!(&ran.0, Err(Refusal::Broken(why)) if why.contains("stdout")),
+        "the setup's own refusal, its kill confirmed: {:?}",
+        ran.0
+    );
+    assert_eq!(
+        (ran.1, ran.2),
+        (3, 1),
+        "the run's answer, the kill's one check for an end, the kill's answer"
+    );
+    assert_eq!(kills, run.into_iter().collect::<Vec<_>>());
+}
+
+/// An agent whose answers come only as the test queues them, each with the ends it gives (a given
+/// answer's descriptors), but for a list's, which comes at once.
+struct Late {
+    wake: Wake,
+    next: Mutex<VecDeque<(Vec<u8>, Vec<hex_api::End>)>>,
+    sent: Mutex<Vec<(u64, Request)>>,
+}
+
+impl Late {
+    fn queue(&self, id: u64, answer: &Answer, ends: Vec<hex_api::End>) {
+        let bytes = wire::answer(id, answer, wire::MAX_MESSAGE).unwrap();
+        self.next.lock().unwrap().push_back((bytes, ends));
+        self.wake.wake();
+    }
+}
+
+impl Transport for Late {
+    type Reading = ();
+    fn answers() -> &'static [Patience; KINDS] {
+        static WAITS: [Patience; KINDS] =
+            [const { Patience::measuring("test.client_late_given.unarmed") }; KINDS];
+        &WAITS
+    }
+    fn reading(&self) {}
+    fn handle(&self) -> Handle<'_> {
+        self.wake.handle()
+    }
+    fn recv(&self, _: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
+        self.wake.drain();
+        let mut came = false;
+        loop {
+            let Some((bytes, ends)) = self.next.lock().unwrap().pop_front() else {
+                return Ok(came);
+            };
+            let message = Received {
+                size: bytes.len(),
+                bytes: &bytes,
+                descriptors: ends.len(),
+                descriptors_cut: false,
+            };
+            take(&message, ends)?;
+            came = true;
+        }
+    }
+    fn try_send(&self, bytes: &[u8], at: &mut usize, _: &[Lent<'_>]) -> Result<bool, Sent> {
+        let (header, request) = wire::read_request_apart(bytes, wire::MAX_MESSAGE).unwrap();
+        if request == Request::Call(Call::List) {
+            let none = Answer::Boxes {
+                infos: Vec::new(),
+                more: false,
+            };
+            self.queue(header.id, &none, Vec::new());
+        }
+        self.sent.lock().unwrap().push((header.id, request));
+        *at = bytes.len();
+        Ok(true)
+    }
+    fn shutdown(&self) {}
+}
+
+/// AC-T7.4.1: do give up on a run asking for its stdout at its deadline, the agent answering only
+/// after, with stdout's end, then make a list that reads that late answer before its own; expect
+/// the run's caller expiry, the list answered, the late end closed at once (its pipe has no reader
+/// left), nothing kept for the run, and the Taken word for it sent, so the agent lets its copy go.
+#[test]
+fn a_given_answer_after_its_caller_gave_up_closes_its_ends() {
+    let client = configured(Late {
+        wake: Wake::new().unwrap(),
+        next: Mutex::new(VecDeque::new()),
+        sent: Mutex::new(Vec::new()),
+    });
+    let late = &client.conn.shared.transport;
+    let gave_up = client
+        .run_before(
+            absolute_spec(),
+            Program::of(&["late-given"]),
+            Stdio {
+                ask: hex_api::Ask {
+                    stdout: true,
+                    ..hex_api::Ask::default()
+                },
+                ..Stdio::null()
+            },
+            Instant::now().checked_add(CAP).unwrap(),
+        )
+        .map(drop);
+    let run = late.sent.lock().unwrap()[0].0;
+    let (output, mut program) = std::io::pipe().unwrap();
+    let given = Answer::Given {
+        pid: 9,
+        given: Streams {
+            stdout: true,
+            ..Streams::default()
+        },
+    };
+    late.queue(run, &given, vec![output.into()]);
+    let listed = client.list();
+    let kept = client.conn.shared.state().unwrap().given.contains_key(&run);
+    let written = program.write(&[1]).map_err(|e| e.kind());
+    let taken = late
+        .sent
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(id, request)| *id == run && *request == Request::Taken);
+    eprintln!(
+        "client_late_given gave_up={gave_up:?} listed={listed:?} kept={kept} written={written:?} taken={taken}"
+    );
+    assert!(
+        matches!(&gave_up, Err(Refusal::Os { why, .. }) if why.contains("absolute")),
+        "{gave_up:?}"
+    );
+    assert_eq!(listed, Ok(Vec::new()));
+    assert!(
+        !kept,
+        "the late answer's ends were kept for a run no one waits on"
+    );
+    assert_eq!(
+        written,
+        Err(io::ErrorKind::BrokenPipe),
+        "the late stdout end is still open"
+    );
+    assert!(taken, "no Taken word for the late answer");
 }
