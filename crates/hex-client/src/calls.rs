@@ -1495,10 +1495,23 @@ impl<T: Transport> Conn<T> {
     /// on a stream is sent whole, waiting for room as a send does, since a frame cut short would leave the connection
     /// unable to carry another.
     fn send_now(&self, bytes: &[u8]) {
+        self.send_now_before(bytes, None);
+    }
+
+    fn send_now_before(&self, bytes: &[u8], cap: Option<ReplyDeadline>) {
         let shared = &*self.shared;
-        let Ok(budget) = ReplyDeadline::caller(shared.transport.reply_budget()) else {
-            return;
+        // A bounded run retains its original authority through Drop. Starting another relative
+        // budget here could strand its caller after the operation had already expired.
+        let budget = match cap {
+            Some(cap) => Some(cap),
+            None => match ReplyDeadline::caller(shared.transport.reply_budget()) {
+                Ok(budget) => budget,
+                Err(_) => return,
+            },
         };
+        if cap.is_some_and(|cap| cap.remaining("releasing a program").is_err()) {
+            return;
+        }
         let Ok(framed) = T::frame(bytes.to_vec()) else {
             return;
         };
@@ -1507,6 +1520,9 @@ impl<T: Transport> Conn<T> {
             let Ok(Some(whole)) = shared.sending.lock(budget.map(ReplyDeadline::at)) else {
                 return;
             };
+            if cap.is_some_and(|cap| cap.remaining("releasing a program").is_err()) {
+                return;
+            }
             // What is owed goes first: if it can't go now, neither can this, which comes after it.
             if !matches!(shared.send_owed(&whole), Ok(true)) {
                 return;
@@ -2112,6 +2128,14 @@ impl<T: Transport> Core<T> {
         let (carried, asked) = (carried(&stdio), streams(stdio.ask));
         let ending = Arc::new(Ending::default());
         let shared = &*self.conn.shared;
+        // Keep the operation's original effective caller/configured authority for Drop too.
+        // Neither a later relative policy read nor a learned answer wait is its release budget.
+        let caller = match caller {
+            Some(caller) => {
+                Some(caller.limited_by(ReplyDeadline::caller(shared.transport.reply_budget())?))
+            }
+            None => None,
+        };
         let (exec, answer, kept) = if T::MAKES_ASKED {
             let request =
                 Request::Call(launch.call(program, union(carried, asked), Streams::default()));
@@ -2127,8 +2151,10 @@ impl<T: Transport> Core<T> {
                 stderr,
                 ..Stdio::null()
             };
-            let configured = ReplyDeadline::caller(shared.transport.reply_budget())?;
-            let cap = caller.map_or(configured, |cap| Some(cap.limited_by(configured)));
+            let cap = match caller {
+                Some(caller) => Some(caller),
+                None => ReplyDeadline::caller(shared.transport.reply_budget())?,
+            };
             let (exec, answer) = self.conn.call_before(
                 self.limits.message_bytes,
                 &request,
@@ -2155,11 +2181,12 @@ impl<T: Transport> Core<T> {
             let (exec, answer) = {
                 let lent = lend(&stdio);
                 match caller {
-                    Some(cap) => self.call_before(
+                    Some(cap) => self.conn.call_before(
+                        self.limits.message_bytes,
                         &request,
-                        |_| Ok(&lent[..]),
+                        |_, _| Ok(&lent[..]),
                         Some(Arc::clone(&ending)),
-                        cap,
+                        Some(cap),
                     )?,
                     None => self.call(&request, |_| Ok(&lent[..]), Some(Arc::clone(&ending)))?,
                 }
@@ -2175,6 +2202,7 @@ impl<T: Transport> Core<T> {
                     exec,
                     pid,
                     ending,
+                    release_before: caller,
                     exit: None,
                     given: None,
                 };
@@ -2535,6 +2563,8 @@ struct RemoteProc<T: Transport> {
     exec: u64,
     pid: u32,
     ending: Arc<Ending>,
+    /// Explicit run-before's effective caller/configured cap, never workload completion.
+    release_before: Option<ReplyDeadline>,
     exit: Option<Exit>,
     /// The caller's ends of the streams its exec asked for, until taken.
     given: Option<hex_api::Given>,
@@ -2689,7 +2719,7 @@ impl<T: Transport> Drop for RemoteProc<T> {
         }
         if !ended && let Ok(bytes) = wire::request(self.exec, &Request::Release, wire::MAX_MESSAGE)
         {
-            self.conn.send_now(&bytes);
+            self.conn.send_now_before(&bytes, self.release_before);
         }
     }
 }

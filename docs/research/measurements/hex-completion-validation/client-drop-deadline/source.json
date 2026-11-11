@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "parent": "e852c1b5ba9e1e2c8eb122dfb5817cd4dc339748",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": {
+    "path": "crates/hex-client/src/calls.rs",
+    "sha256": "c9903544a07788d5ac964c826ae0780cf2185add1d0bd2c1222e12f7fd2ee617",
+    "bytes": 107141,
+    "parent_sha256": "a4b1f9fcfe8fc0dff0a2bb6036f7ef589a9ef7365306674e2dc159a485a10ed6",
+    "unchanged": false
+  },
+  "protected": [
+    {
+      "path": "crates/hex-client/src/calls/budget_tests.rs",
+      "sha256": "9e49002f5ae2866ac9f523a231cf2abc4ffc365c5309a5cefeccb0854a848461",
+      "bytes": 62114,
+      "parent_sha256": "9e49002f5ae2866ac9f523a231cf2abc4ffc365c5309a5cefeccb0854a848461",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/guest.rs",
+      "sha256": "6a9410629157e85ec4ddc507a09e34ac82e275c6ca9f28323e5145cb50a16c7c",
+      "bytes": 33015,
+      "parent_sha256": "6a9410629157e85ec4ddc507a09e34ac82e275c6ca9f28323e5145cb50a16c7c",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/calls/tests.rs",
+      "sha256": "19be01f6ba33aa7321d7aaf8e35f730d455b96b60cd7c0af9d5a6c2ebcd6dbb0",
+      "bytes": 35724,
+      "parent_sha256": "19be01f6ba33aa7321d7aaf8e35f730d455b96b60cd7c0af9d5a6c2ebcd6dbb0",
+      "unchanged": true
+    }
+  ],
+  "root_original": {
+    "test": "calls::budget_tests::absolute_run_error_return_does_not_renew_drop_sender_budget",
+    "passed": 0,
+    "failed": 1,
+    "log_sha256": "e3d2818db4d03b8d4296495ef2c0bb86bcf815f5dbee1d6f3632d823e9dfe7c0",
+    "attribution": "ROOT reported actual, not independently executed by L4"
+  },
+  "tests_executed_by_L4": 0,
+  "builds_executed_by_L4": 0,
+  "native_executed_by_L4": 0,
+  "status": "source-only effective-cap successor; ROOT check pending; settle kill gap retained",
+  "effective_authority_successor_of": "2a1b715497b33898d295ce7d326d3d07936c8e0f",
+  "explicit_operation_cap": "selected once: original caller limited by configured cap; same value passed to Conn.call_before in both branches and retained in RemoteProc",
+  "settle_error_kill_unchanged": {
+    "sha256": "e399975f5cabe6df437cac5d4f34f066c3a8bc75ff1c800f470298887e217194",
+    "unchanged": true,
+    "separate_original_control": "proposed; not implemented or executed"
+  },
+  "proc_wait_kill_methods_unchanged": {
+    "sha256": "1ecd152657ca427fffb4f3653d015a8dea367131a35f0585a1ec6bf631c89e82",
+    "unchanged": true
+  }
+}

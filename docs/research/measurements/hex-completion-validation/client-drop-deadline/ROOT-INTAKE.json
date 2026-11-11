@@ -1,0 +1,9 @@
+{
+  "source": "0e9e4bed1512ac3cb75f779b6b0ae270500950cf",
+  "parent": "2a80ea3707532bcf9119e2e9551ddebb64719a7f",
+  "original": "6753cd586cef435e08ca236a9676ee28d1500bba",
+  "original_actual_failure_log": "e3d2818db4d03b8d4296495ef2c0bb86bcf815f5dbee1d6f3632d823e9dfe7c0",
+  "test_source_unchanged_from_parent": true,
+  "protected_new_bootstrap_methods": "17e remain present;948 trait/fixture port retained",
+  "checks": "No after-remedy test yet. Settle-error kill remains original source and is separately under investigation."
+}
