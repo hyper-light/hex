@@ -38,8 +38,9 @@ def absent_process(pid, started, timeout, byte_limit):
 
 
 def within(path,scope):
-    """Whether `path`, an artifact that may be gone, lies in `scope`, a resolved directory."""
-    return path.absolute().is_relative_to(scope)
+    """Whether `path`, an artifact that may be gone, lies in `scope`, a resolved directory: its parent resolved as
+    the scope was (macOS's /var is /private/var), its own last component never followed."""
+    return (path.absolute().parent.resolve()/path.name).is_relative_to(scope)
 
 
 def main():

@@ -126,7 +126,8 @@ class EvidenceBehavior(unittest.TestCase):
 
     def test_checks_artifact_bytes_and_hash(self):
         with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory);path=root/"log";path.write_bytes(b"checked")
+            # artifact() answers under the resolved root (macOS's /var is /private/var): compare with the same.
+            root=Path(directory).resolve();path=root/"log";path.write_bytes(b"checked")
             row={"path":"log","sha256":sha256(path),"bytes":7}
             self.assertEqual(artifact(root,row),path)
             path.write_bytes(b"changed")
