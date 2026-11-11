@@ -1,0 +1,30 @@
+{
+  "base": "327aa0820d6e3d05a0696a92fd40d5e6ec442ce6",
+  "role": "implementer bindings-firecracker",
+  "policy": {
+    "revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+    "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3"
+  },
+  "status": "ONE NEW ORIGINAL / SOURCE ONLY / intended red UNRUN / no production remedy or old-oracle change",
+  "authorization": "ROOT explicitly approved one meaningful peer-recover committed-pending original after source review distinguished sole production take_pending_routed caller at peer::recover from fresh admission. Frozen6856 four cases remain separately attributed.",
+  "test": "peer::tests::remote_owner_recovers_committed_released_source_without_fresh_repick",
+  "source": {
+    "path": "crates/hex-sim/src/peer.rs",
+    "before_sha256": "c0738671cf581e9d697e100e9d69aba897beaa1a6ab2c0d097742ae909876a08",
+    "after_sha256": "d28df722bd2bfc72d597c18e7d95f6ea59e6f35ed1c54ce893623d06128a2057",
+    "new_original_sha256": "5af10cc77e61b2a029a77106822f5c974eaf03c7afe1bbe01f3b0a63706679b4",
+    "preservation": "Removing ONLY the new cfg(test) function/comment restores entire parent peer.rs byte-for-byte; production, all old fixtures/tests and wire protocol unchanged."
+  },
+  "setup": "Two real pure peer kernels/Memory rows. Owner0 has no execution capacity; receiver1 has explicit initialized synthetic Firecracker route and known synthetic GPU readings. Actual submit/Start/receiver reservation persist exact1GPU demand, original Allocation and parentP tuple. Independent healthy owner-recover baseline for remote At while P Live. Receiver consumes model full-P Draining->Released BEFORE simulated BoxCreated/Started; owner persists Created(remote1).",
+  "recovery_preconditions": "New snapshot retains exact PReleased tuple/fullIDs/profile and a different RPrepared sibling tuple. No current GPU readings/availability; fresh path chooses R and returns NoGpu. Owner boots its SAME persisted remote row through actual Node::boot ->view.take_pending_routed; runtime callback count must0 because selected remote owns the native box.",
+  "oracle": "Committed recovery must succeed, retain exact owner row/remote node/demand/allocation/route, charge original Box resources, send only Holds to same remote and emit no replacement Create. No live native/VM/hardware effect is implied by model completion or Released offer.",
+  "hypothesis": "Current pending path still uses Live-only holds_inner and may refuse valid committed remote ownership. This is a source hypothesis, not a reproduced defect until ROOT executes this original. No production correction or existing negative-test edit is included.",
+  "validation": {
+    "installed_named_rustfmt": "exit0",
+    "git_diff_check": "exit0",
+    "cargo": "not run by lane",
+    "native": "not run",
+    "result": "UNRUN; ROOT owns first actual result and any subsequent remedy authorization"
+  },
+  "bounds_and_limits": "One finite setup/recovery example, existing test_budget/CAP only; no new production constant/state/cache/manager/provider/holder/picker/DTO. Existing frozen6856 and c6a originals/evidence retained. ROOT prior4after/Clippy reported passes are not this original result."
+}

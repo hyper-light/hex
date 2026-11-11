@@ -3315,6 +3315,222 @@ mod tests {
         );
     }
 
+    /// AC-T7.4.1 ORIGINAL: a remote owner's durable committed receipt survives the source
+    /// observer's full release while a different remainder is still cold. No production remedy.
+    #[test]
+    fn remote_owner_recovers_committed_released_source_without_fresh_repick() {
+        use crate::model::{Classes, GpuLoad, RuntimeRoutes};
+        use hex_api::{
+            BackingKey, BackingOffer, BackingPhase, DeviceId, DeviceKind, Execution,
+            GpuEligibility, ImageArch, ImageOs, ImagePlatform, RouteKey, RouteOffer, RouteReceipt,
+        };
+        let ids = [7, 8].map(|key| DeviceId {
+            kind: DeviceKind::Gpu,
+            key,
+        });
+        let mut parent = BackingOffer {
+            key: BackingKey {
+                pool: [0x71; 32],
+                generation: [0x72; 16],
+            },
+            cost: cost_fixture(),
+            phase: BackingPhase::Live,
+            devices: ids.to_vec(),
+        };
+        let offer = RouteOffer {
+            key: RouteKey {
+                class: hex_api::Class::Firecracker,
+                image: ImagePlatform {
+                    os: ImageOs::Linux,
+                    arch: ImageArch::Amd64,
+                },
+                execution: Execution::Firecracker,
+                gpu: GpuEligibility::Required,
+            },
+            cost: Some(parent.cost),
+            backing: Some(parent.key),
+        };
+        let mut remote = NodeSpec::new(NodeId(1), Resources { gpus: 2, ..CAP });
+        remote.classes = Classes::NONE.with(Class::Firecracker);
+        for (device, id) in remote.devices.iter_mut().zip(ids) {
+            device.key = Some(id.key);
+            device.classes = remote.classes;
+        }
+        remote.routes = Some(
+            RuntimeRoutes {
+                admit: None,
+                offers: vec![offer],
+                device_routes: vec![1; 2],
+                backings: vec![parent.try_clone().unwrap()],
+            }
+            .share()
+            .unwrap(),
+        );
+        let mut local = NodeSpec::new(NodeId(0), Resources::default());
+        local.classes = Classes::NONE;
+        let mut specs = vec![local, remote];
+        let demand = Demand {
+            need: Resources {
+                cpu_milli: 100,
+                mem_bytes: 100,
+                gpus: 1,
+                disk_bytes: 0,
+            },
+            class: Class::Firecracker,
+            kind: Kind::Plain,
+            ask: Ask {
+                runtime_class: Some(hex_api::Class::Firecracker),
+                os: Some(Os::Linux),
+                arch: Some(Arch::X86_64),
+                ..Ask::default()
+            },
+        };
+        let mut owner_rows = Memory::default();
+        let mut runner_rows = Memory::default();
+        let mut owner = boot_test(&specs, &[], &mut owner_rows);
+        let mut runner = receiver(&specs, &mut runner_rows);
+        let (key, start) = owner.submit(demand, &mut owner_rows).unwrap();
+        let receipt = RouteReceipt {
+            key: offer.key,
+            backing: Some(parent.key),
+        };
+        let allocation = parent
+            .cost
+            .allocate(crate::model::capacity_resources(demand.need))
+            .unwrap();
+        assert_eq!(
+            start,
+            vec![(
+                NodeId(1),
+                Msg::Start {
+                    key,
+                    demand,
+                    allocation: Some(allocation),
+                    route: Some(receipt)
+                }
+            )]
+        );
+        runner
+            .hear(NodeId(0), start[0].1, &mut runner_rows)
+            .unwrap();
+        assert_eq!(runner.assigned_devices(key).unwrap().len(), 1);
+        // Independent healthy baseline: an unsubmitted remote At row survives while P is Live.
+        let mut healthy_rows = owner_rows.clone();
+        let healthy = boot_test(&specs, &[], &mut healthy_rows);
+        assert_eq!(
+            healthy.view.key(NodeId(1)).unwrap(),
+            owner.view.key(NodeId(1)).unwrap()
+        );
+        assert_eq!(
+            healthy.owned_keys().collect::<Vec<_>>(),
+            vec![(key, Some(NodeId(1)))]
+        );
+        parent.phase = BackingPhase::Draining;
+        runner.observe_backing(&parent).unwrap();
+        parent.phase = BackingPhase::Released;
+        runner.observe_backing(&parent).unwrap();
+        // The full observer release precedes the dedicated Box's simulated native completion.
+        let started = runner.created(key, &mut runner_rows).unwrap();
+        assert_eq!(started, vec![(NodeId(0), Msg::Started { key })]);
+        owner
+            .hear(NodeId(1), started[0].1, &mut owner_rows)
+            .unwrap();
+        assert!(matches!(
+            owner.owned.get(&key).unwrap().state,
+            State::Created(NodeId(1))
+        ));
+        let own_row = owner_rows.rows.get(&key.name("own")).unwrap().clone();
+        assert_eq!(
+            recorded_assignment(&own_row, &[]).unwrap(),
+            (demand, Some(allocation), Some(receipt))
+        );
+        assert_eq!(runner.assigned_route(key).unwrap(), Some(receipt));
+        assert_eq!(runner.assigned_allocation(key).unwrap(), Some(allocation));
+        let current = BackingOffer {
+            key: BackingKey {
+                pool: [0x73; 32],
+                generation: [0x74; 16],
+            },
+            cost: parent.cost,
+            phase: BackingPhase::Prepared,
+            devices: vec![ids[1]],
+        };
+        let remote = specs.get_mut(1).unwrap();
+        for device in &mut remote.devices {
+            device.available = false;
+            device.load = GpuLoad::default();
+        }
+        remote.routes = Some(
+            RuntimeRoutes {
+                admit: None,
+                offers: vec![
+                    offer,
+                    RouteOffer {
+                        backing: Some(current.key),
+                        ..offer
+                    },
+                ],
+                device_routes: vec![1, 0],
+                backings: vec![parent.try_clone().unwrap(), current.try_clone().unwrap()],
+            }
+            .share()
+            .unwrap(),
+        );
+        let fresh = FitIndex::new(&specs).unwrap();
+        assert_eq!(
+            fresh.route(NodeId(1), &demand).unwrap().unwrap().backing,
+            Some(current.key)
+        );
+        assert_eq!(fresh.verdict(NodeId(1), &demand).unwrap(), Verdict::NoGpu);
+        let callbacks = std::cell::Cell::new(0usize);
+        let recovered = Node::boot(
+            NodeId(0),
+            &specs,
+            &[],
+            test_budget(),
+            Pick::default(),
+            &mut owner_rows,
+            |_| {
+                callbacks.set(callbacks.get() + 1);
+                Boxed::Absent
+            },
+        );
+        eprintln!(
+            "remote committed pending original: restored={:?}; source={:?}; current={:?}; local_runtime_queries={}; fresh_observations=0; native_effect=false",
+            recovered.as_ref().map(|_| ()),
+            parent.key,
+            current.key,
+            callbacks.get()
+        );
+        assert!(
+            recovered.is_ok(),
+            "remote committed ownership must recover without current GPU eligibility or a replacement route"
+        );
+        let mut recovered = recovered.unwrap();
+        assert_eq!(
+            callbacks.get(),
+            0,
+            "only the selected peer owns the native box"
+        );
+        assert_eq!(
+            recovered.owned_keys().collect::<Vec<_>>(),
+            vec![(key, Some(NodeId(1)))]
+        );
+        assert_eq!(owner_rows.rows.get(&key.name("own")).unwrap(), &own_row);
+        assert_eq!(
+            recovered.view.key(NodeId(1)).unwrap().cpu_milli,
+            CAP.cpu_milli - allocation.resources.cpu_milli
+        );
+        assert_eq!(
+            recovered.link_up(NodeId(1), &mut owner_rows).unwrap(),
+            vec![(NodeId(1), Msg::Holds { key })]
+        );
+        assert!(
+            recovered.told.is_empty(),
+            "restart must not create a replacement box"
+        );
+    }
+
     fn cost_fixture() -> hex_api::RuntimeCost {
         let guest = hex_api::CapacityResources {
             cpu_milli: 1_000,
