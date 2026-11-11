@@ -4,7 +4,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use hex_api::Refusal;
+use hex_api::{ConnectFailure, ConnectPhase, ConnectReply, IoKind, Refusal};
 use hex_client::guest::{Duplex, DuplexOwner, Link, own_duplex};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use serde::Deserialize;
@@ -28,15 +28,68 @@ impl Endpoint {
     }
 }
 
-fn left(deadline: Instant) -> Result<Duration, Refusal> {
+/// Why one bounded socket step failed. The CONNECT handshake types it by its phase
+/// ([`Step::connect`]); the API witness and readiness reads keep their OS text (`From`).
+enum Step {
+    /// The step's absolute deadline passed.
+    Expired,
+    /// The peer ended the stream during the step `op`.
+    Ended(&'static str),
+    /// The OS refused the step `op`.
+    Io(&'static str, std::io::Error),
+    /// A local bound or invariant, already typed.
+    Refused(Refusal),
+}
+
+impl Step {
+    /// A failed step of Firecracker's CONNECT/OK handshake (vsock.md) as Hex's typed carrier, as the
+    /// Shards adapter carries Shards' own (hex-client guest/shards.rs): an end of stream before the
+    /// answer's newline is Closed, one while writing a zero write.
+    fn connect(self, port: u32, phase: ConnectPhase) -> Refusal {
+        let failure = match self {
+            Self::Refused(refusal) => return refusal,
+            Self::Expired => ConnectFailure::Expired { phase },
+            Self::Ended(_) if phase == ConnectPhase::Read => ConnectFailure::Closed,
+            Self::Ended(_) => ConnectFailure::Io {
+                phase,
+                kind: IoKind::new(std::io::ErrorKind::WriteZero),
+                code: None,
+            },
+            Self::Io(_, error) => ConnectFailure::Io {
+                phase,
+                kind: IoKind::new(error.kind()),
+                code: error.raw_os_error(),
+            },
+        };
+        Refusal::Connect { port, failure }
+    }
+}
+
+impl From<Step> for Refusal {
+    fn from(step: Step) -> Self {
+        match step {
+            Step::Expired => Refusal::os("waiting for Firecracker", "operation deadline elapsed"),
+            Step::Ended(op) => Refusal::os(op, "connection ended"),
+            Step::Io(op, error) => Refusal::os(op, error),
+            Step::Refused(refusal) => refusal,
+        }
+    }
+}
+
+fn left(deadline: Instant) -> Result<Duration, Step> {
     let duration = deadline.saturating_duration_since(Instant::now());
     if duration.is_zero() {
-        Err(Refusal::os(
-            "waiting for Firecracker",
-            "operation deadline elapsed",
-        ))
+        Err(Step::Expired)
     } else {
         Ok(duration)
+    }
+}
+
+/// A read or write bounded by `until` that failed: once `until` has passed, the deadline is why.
+fn failed(until: Instant, op: &'static str, error: std::io::Error) -> Step {
+    match left(until) {
+        Ok(_) => Step::Io(op, error),
+        Err(expired) => expired,
     }
 }
 
@@ -49,37 +102,31 @@ fn deadline(timeout: Duration) -> Result<Instant, Refusal> {
         .ok_or_else(|| invalid("operation deadline is unrepresentable"))
 }
 
-fn wait(fd: impl AsFd, flags: PollFlags, until: Instant) -> Result<(), Refusal> {
+fn wait(fd: impl AsFd, flags: PollFlags, until: Instant) -> Result<(), Step> {
     loop {
         let duration = left(until)?;
         let timespec = Timespec {
             tv_sec: i64::try_from(duration.as_secs())
-                .map_err(|_| invalid("operation deadline is unrepresentable"))?,
+                .map_err(|_| Step::Refused(invalid("operation deadline is unrepresentable")))?,
             tv_nsec: i64::from(duration.subsec_nanos()),
         };
         let mut descriptors = [PollFd::new(&fd, flags)];
         match rustix::event::poll(&mut descriptors, Some(&timespec)) {
-            Ok(0) => {
-                return Err(Refusal::os(
-                    "waiting for Firecracker",
-                    "operation deadline elapsed",
-                ));
-            }
+            Ok(0) => return Err(Step::Expired),
             Ok(_) => return Ok(()),
             Err(rustix::io::Errno::INTR) => continue,
-            Err(error) => return Err(Refusal::os("waiting for Firecracker", error)),
+            Err(error) => return Err(Step::Io("waiting for Firecracker", error.into())),
         }
     }
 }
 
-fn connect(path: &Path, until: Instant) -> Result<UnixStream, Refusal> {
+fn connect(path: &Path, until: Instant) -> Result<UnixStream, Step> {
     let socket = Socket::new(Domain::UNIX, Type::STREAM, None)
-        .map_err(|e| Refusal::os("opening Firecracker connection", e))?;
+        .map_err(|e| Step::Io("opening Firecracker connection", e))?;
     socket
         .set_nonblocking(true)
-        .map_err(|e| Refusal::os("making Firecracker connection nonblocking", e))?;
-    let address =
-        SockAddr::unix(path).map_err(|e| Refusal::os("naming Firecracker connection", e))?;
+        .map_err(|e| Step::Io("making Firecracker connection nonblocking", e))?;
+    let address = SockAddr::unix(path).map_err(|e| Step::Io("naming Firecracker connection", e))?;
     match socket.connect(&address) {
         Ok(()) => {}
         Err(error)
@@ -89,62 +136,52 @@ fn connect(path: &Path, until: Instant) -> Result<UnixStream, Refusal> {
             wait(&socket, PollFlags::OUT, until)?;
             if let Some(error) = socket
                 .take_error()
-                .map_err(|e| Refusal::os("checking Firecracker connection", e))?
+                .map_err(|e| Step::Io("checking Firecracker connection", e))?
             {
-                return Err(Refusal::os("connecting to Firecracker", error));
+                return Err(Step::Io("connecting to Firecracker", error));
             }
         }
-        Err(error) => return Err(Refusal::os("connecting to Firecracker", error)),
+        Err(error) => return Err(Step::Io("connecting to Firecracker", error)),
     }
     socket
         .set_nonblocking(false)
-        .map_err(|e| Refusal::os("configuring Firecracker connection", e))?;
+        .map_err(|e| Step::Io("configuring Firecracker connection", e))?;
     let descriptor: OwnedFd = socket.into();
     Ok(UnixStream::from(descriptor))
 }
 
-fn write(stream: &mut UnixStream, mut bytes: &[u8], until: Instant) -> Result<(), Refusal> {
+fn write(stream: &mut UnixStream, mut bytes: &[u8], until: Instant) -> Result<(), Step> {
     while !bytes.is_empty() {
         stream
             .set_write_timeout(Some(left(until)?))
-            .map_err(|e| Refusal::os("bounding Firecracker write", e))?;
+            .map_err(|e| Step::Io("bounding Firecracker write", e))?;
         let count = stream
             .write(bytes)
-            .map_err(|e| Refusal::os("writing Firecracker request", e))?;
+            .map_err(|e| failed(until, "writing Firecracker request", e))?;
         if count == 0 {
-            return Err(Refusal::os(
-                "writing Firecracker request",
-                "connection ended",
-            ));
+            return Err(Step::Ended("writing Firecracker request"));
         }
         bytes = bytes
             .get(count..)
-            .ok_or_else(|| invalid("write count exceeds request"))?;
+            .ok_or_else(|| Step::Refused(invalid("write count exceeds request")))?;
     }
     Ok(())
 }
 
-fn read_exact(
-    stream: &mut UnixStream,
-    mut bytes: &mut [u8],
-    until: Instant,
-) -> Result<(), Refusal> {
+fn read_exact(stream: &mut UnixStream, mut bytes: &mut [u8], until: Instant) -> Result<(), Step> {
     while !bytes.is_empty() {
         stream
             .set_read_timeout(Some(left(until)?))
-            .map_err(|e| Refusal::os("bounding Firecracker read", e))?;
+            .map_err(|e| Step::Io("bounding Firecracker read", e))?;
         let count = stream
             .read(bytes)
-            .map_err(|e| Refusal::os("reading Firecracker response", e))?;
+            .map_err(|e| failed(until, "reading Firecracker response", e))?;
         if count == 0 {
-            return Err(Refusal::os(
-                "reading Firecracker response",
-                "connection ended",
-            ));
+            return Err(Step::Ended("reading Firecracker response"));
         }
         bytes = bytes
             .get_mut(count..)
-            .ok_or_else(|| invalid("read count exceeds response"))?;
+            .ok_or_else(|| Step::Refused(invalid("read count exceeds response")))?;
     }
     Ok(())
 }
@@ -163,27 +200,36 @@ impl Link for Endpoint {
         port: u32,
         caller_deadline: Option<Instant>,
     ) -> Result<DuplexOwner, Refusal> {
-        let own = deadline(self.remaining())?;
+        // The configured operation budget is positive (config.rs), so none left is a spent create.
+        let remaining = self.remaining();
+        if remaining.is_zero() {
+            return Err(Step::Expired.connect(port, ConnectPhase::Dial));
+        }
+        let own = deadline(remaining)?;
         let until = caller_deadline.map_or(own, |caller| own.min(caller));
-        left(until)?;
+        left(until).map_err(|step| step.connect(port, ConnectPhase::Dial))?;
         // A u32 has at most ten decimal digits; the pinned vsock protocol adds this fixed
         // prefix/newline. Cursor refuses an overflow instead of allocating a formatting String.
         let mut request = [0u8; b"CONNECT ".len() + 10 + 1];
         let used = {
             let mut buffer = std::io::Cursor::new(request.as_mut_slice());
-            writeln!(&mut buffer, "CONNECT {port}")
-                .map_err(|error| Refusal::os("encoding Firecracker connect request", error))?;
+            writeln!(&mut buffer, "CONNECT {port}").map_err(|error| {
+                Step::Io("encoding Firecracker connect request", error)
+                    .connect(port, ConnectPhase::Write)
+            })?;
             usize::try_from(buffer.position())
                 .map_err(|_| invalid("vsock request size is unrepresentable"))?
         };
-        let mut stream = connect(&self.path, until)?;
+        let mut stream =
+            connect(&self.path, until).map_err(|step| step.connect(port, ConnectPhase::Dial))?;
         write(
             &mut stream,
             request
                 .get(..used)
                 .ok_or_else(|| invalid("vsock request exceeds its fixed buffer"))?,
             until,
-        )?;
+        )
+        .map_err(|step| step.connect(port, ConnectPhase::Write))?;
         // Firecracker vsock.md: `OK <host-port>\n`, the port an unsigned 32-bit integer.
         let bound = "OK "
             .len()
@@ -195,29 +241,37 @@ impl Link for Endpoint {
             .map_err(|_| exhausted("vsock response", bound))?;
         while line.len() < bound {
             let mut byte = [0u8; 1];
-            read_exact(&mut stream, &mut byte, until)?;
+            read_exact(&mut stream, &mut byte, until)
+                .map_err(|step| step.connect(port, ConnectPhase::Read))?;
             let byte = *byte.first().ok_or_else(|| invalid("empty vsock byte"))?;
             line.push(byte);
             if byte == b'\n' {
                 break;
             }
         }
-        let text = std::str::from_utf8(&line).map_err(|_| invalid("malformed vsock response"))?;
-        if text
-            .strip_prefix("OK ")
+        let reply = |reply| Refusal::Connect {
+            port,
+            failure: ConnectFailure::Reply(reply),
+        };
+        if line.last() != Some(&b'\n') {
+            return Err(reply(ConnectReply::TooLong));
+        }
+        if std::str::from_utf8(&line)
+            .ok()
+            .and_then(|text| text.strip_prefix("OK "))
             .and_then(|n| n.strip_suffix('\n'))
             .and_then(|n| n.parse::<u32>().ok())
             .filter(|n| *n > 0)
             .is_none()
         {
-            return Err(invalid(
-                "Firecracker did not acknowledge selected guest port",
-            ));
+            return Err(reply(ConnectReply::NotOk));
         }
         stream
             .set_read_timeout(None)
             .and_then(|()| stream.set_write_timeout(None))
-            .map_err(|e| Refusal::os("handing off guest stream", e))?;
+            .map_err(|e| {
+                Step::Io("handing off guest stream", e).connect(port, ConnectPhase::ClearTimeouts)
+            })?;
         if port == hex_core::stream::files::FILES_PORT {
             // A staging connection is exactly one operation. Its current client otherwise resets
             // per-read timeouts and may be uncalibrated; retain one explicit absolute stage budget.
@@ -529,7 +583,11 @@ mod tests {
             let mut request = Vec::new();
             let mut byte = [0u8; 1];
             while request.last() != Some(&b'\n') {
-                assert_eq!(stream.read(&mut byte).unwrap(), 1, "request ends at its newline");
+                assert_eq!(
+                    stream.read(&mut byte).unwrap(),
+                    1,
+                    "request ends at its newline"
+                );
                 request.push(byte[0]);
             }
             stream.write_all(answer).unwrap();
@@ -553,7 +611,10 @@ mod tests {
     #[test]
     fn a_failed_connect_keeps_its_port_phase_and_cause() {
         let dir = tempfile::tempdir().unwrap();
-        let connect = |failure| Refusal::Connect { port: 1024, failure };
+        let connect = |failure| Refusal::Connect {
+            port: 1024,
+            failure,
+        };
 
         let absent = dir.path().join("absent.sock");
         assert_eq!(
@@ -601,6 +662,24 @@ mod tests {
         let peer = vsock(&path, b"OK 1073741824\n");
         assert_eq!(dial(&path, None), Ok(()));
         assert_eq!(peer.join().unwrap(), b"CONNECT 1024\n");
+    }
+
+    /// AC-T7.4.1: an answer withheld past the deadline is Expired in Read, the socket's timed-out
+    /// read never reported as an I/O failure. Only the read step runs, so no other phase can expire.
+    #[test]
+    fn a_withheld_answer_expires_in_its_read_phase() {
+        let (mut ours, _withheld) = UnixStream::pair().unwrap();
+        let until = Instant::now() + Duration::from_millis(20);
+        let step = read_exact(&mut ours, &mut [0u8; 1], until).unwrap_err();
+        assert_eq!(
+            step.connect(1024, ConnectPhase::Read),
+            Refusal::Connect {
+                port: 1024,
+                failure: ConnectFailure::Expired {
+                    phase: ConnectPhase::Read
+                },
+            }
+        );
     }
 
     /// AC-T7.4.1: framing is finite on persistent HTTP connections and rejects ambiguous lengths.
