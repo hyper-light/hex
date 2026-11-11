@@ -4,6 +4,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio as ChildStdio};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -774,21 +775,35 @@ fn parent_body(config: Config, scope: PathBuf) -> Check<()> {
         drop(output);
         let sibling = identities.get(1).ok_or("sibling identity missing")?;
         let pidfd = exact_pidfd(sibling, std::process::id())?;
-        text(rustix::process::pidfd_send_signal(&pidfd, Signal::STOP))?;
         // This exact owned parent process is killed/reaped by its outer controller at the ONE
         // outer deadline. A kernel wait here needs no periodic probe or extra waiter thread.
         // STOPPED|NOWAIT cannot consume the Supervisor's EXITED status.
-        let stopped = text(rustix::process::waitid(
-            WaitId::PidFd(pidfd.as_fd()),
-            WaitIdOptions::STOPPED | WaitIdOptions::NOWAIT,
-        ))?
-        .ok_or("exact sibling STOP status missing")?;
+        let mut stop_sent = false;
+        let stopped = (|| {
+            text(rustix::process::pidfd_send_signal(&pidfd, Signal::STOP))?;
+            stop_sent = true;
+            text(rustix::process::waitid(
+                WaitId::PidFd(pidfd.as_fd()),
+                WaitIdOptions::STOPPED | WaitIdOptions::NOWAIT,
+            ))
+        })();
+        let kernel_stop = json!({
+            "pid":sibling.pid,"started":sibling.started,"signal_sent":stop_sent,
+            "returned_at_instant_debug":format!("{:?}",Instant::now()),
+            "waitid":stopped.as_ref().map(|status|status.as_ref().map(gate_wait_status)).map_err(String::as_str),
+        });
+        write_gate_evidence(
+            &scope.join("parent.stop.json"),
+            lab.config.byte_limit,
+            &kernel_stop,
+        )?;
+        let stopped = stopped?.ok_or("exact sibling STOP status missing")?;
         need(
             stopped.stopped() && stopped.stopping_signal() == Some(Signal::STOP.as_raw()),
             "exact sibling was not stopped by SIGSTOP",
         )?;
         let raw = text(serde_json::to_string(
-            &json!({"identities":&announced,"isolation_acks":&isolation_acks,"sibling_stopped":true}),
+            &json!({"identities":&announced,"isolation_acks":&isolation_acks,"sibling_stopped":true,"kernel_stop":&kernel_stop}),
         ))?;
         let mut output = std::io::stdout().lock();
         text(writeln!(output, "{READY}{raw}"))?;
@@ -901,18 +916,50 @@ fn text_result(raw: &str) -> Check<serde_json::Value> {
     text(serde_json::from_str(raw))
 }
 
-fn child_end(child: &mut Child, pidfd: Option<&OwnedFd>, end: Instant) -> Check<()> {
+fn gate_time(began: Instant, at: Instant) -> serde_json::Value {
+    json!({
+        "instant_debug":format!("{at:?}"),
+        "ns_since_t0_decimal":at.checked_duration_since(began).map(|elapsed| elapsed.as_nanos().to_string()),
+    })
+}
+
+fn gate_wait_status(status: &rustix::process::WaitIdStatus) -> serde_json::Value {
+    json!({
+        "si_signo":status.raw_signo(),"si_errno":status.raw_errno(),"si_code":status.raw_code(),
+        "exit_status":status.exit_status(),"terminating_signal":status.terminating_signal(),
+        "stopped":status.stopped(),"stopping_signal":status.stopping_signal(),
+        "debug":format!("{status:?}"),
+    })
+}
+
+fn gate_child_status(status: &std::process::ExitStatus) -> serde_json::Value {
+    json!({"raw_wait_status":status.into_raw(),"code":status.code(),"signal":status.signal()})
+}
+
+fn write_gate_evidence(path: &Path, bound: u64, value: &serde_json::Value) -> Check<()> {
+    let bytes = text(serde_json::to_vec_pretty(value))?;
+    need(
+        text(u64::try_from(bytes.len()))? <= bound,
+        "gate evidence byte bound",
+    )?;
+    text(fs::write(path, bytes))
+}
+
+fn child_end(
+    child: &mut Child,
+    pidfd: Option<&OwnedFd>,
+    end: Instant,
+) -> Check<std::process::ExitStatus> {
     // A previously reaped Child caches its status. Otherwise the retained exact pidfd supplies
     // readiness and this SAME Child remains the sole consuming waiter for the parent process.
-    if text(child.try_wait())?.is_some() {
-        return Ok(());
+    if let Some(status) = text(child.try_wait())? {
+        return Ok(status);
     }
     poll_exit(
         pidfd.ok_or("owned parent pidfd unavailable; retain uncertainty")?,
         end,
     )?;
-    text(child.wait())?;
-    Ok(())
+    text(child.wait())
 }
 
 /// AC-T7.1.2: parent death produces EOF before the gate deadline, with a stopped sibling
@@ -949,30 +996,69 @@ fn completion_controller_parent_death_cancels_gate() {
             .stdin(ChildStdio::null())
             .stdout(ChildStdio::piped())
             .stderr(text(File::create(scope.join("parent.stderr")))?);
+        let owner_pid = std::process::id();
+        let owner_birth = i32::try_from(owner_pid)
+            .ok()
+            .and_then(Stat::of)
+            .map(|stat| stat.start_ticks);
+        let mut events = Vec::new();
         let began = Instant::now();
         let outer_end = began
             .checked_add(config.guard())
             .ok_or("outer parent deadline overflow")?;
-        text(rustix::process::set_child_subreaper(Some(
+        let evidence_path = scope.join("parent-death.evidence.json");
+        events.push(
+            json!({"event":"origin","owner_pid":owner_pid,"owner_started":owner_birth,
+            "t0":gate_time(began,began),"D":gate_time(began,outer_end),
+            "G":began.checked_add(config.gate()).map(|at|gate_time(began,at)),
+            "guard_ms":config.guard_ms,"gate_budget_ms":config.gate_budget_ms}),
+        );
+        let subreaper = text(rustix::process::set_child_subreaper(Some(
             rustix::process::getpid(),
-        )))?;
+        )));
+        if let Err(error) = subreaper {
+            events.push(json!({"event":"subreaper_refused","at":gate_time(began,Instant::now()),"error":&error}));
+            let record = write_gate_evidence(
+                &evidence_path,
+                config.byte_limit,
+                &json!({"events":&events}),
+            );
+            return Err(format!("subreaper: {error}; evidence: {record:?}"));
+        }
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
                 let restore = rustix::process::set_child_subreaper(prior_subreaper);
+                events.push(
+                    json!({"event":"parent_spawn_refused","at":gate_time(began,Instant::now()),
+                    "error":error.to_string(),"subreaper_restore":format!("{restore:?}")}),
+                );
+                let record = write_gate_evidence(
+                    &evidence_path,
+                    config.byte_limit,
+                    &json!({"events":&events}),
+                );
                 return Err(format!(
-                    "parent spawn: {error}; subreaper restore: {restore:?}"
+                    "parent spawn: {error}; subreaper restore: {restore:?}; evidence: {record:?}"
                 ));
             }
         };
         let parent_pidfd =
             rustix::process::pidfd_open(Pid::from_child(&child), PidfdFlags::empty());
+        events.push(
+            json!({"event":"parent_owned","at":gate_time(began,Instant::now()),"pid":child.id(),
+            "started":i32::try_from(child.id()).ok().and_then(Stat::of).map(|stat|stat.start_ticks),
+            "pidfd_open":parent_pidfd.as_ref().map(|_|()).map_err(ToString::to_string)}),
+        );
         let mut owned = Vec::new();
         let mut raw = Vec::new();
         let observed = (|| -> Check<()> {
             let parent_fd = parent_pidfd.as_ref().map_err(|error| error.to_string())?;
             let mut output = child.stdout.take().ok_or("owned parent output missing")?;
             let mut cursor = 0;
+            events.push(
+                json!({"event":"identities_wait_begin","at":gate_time(began,Instant::now())}),
+            );
             let announced = read_phase(
                 &mut output,
                 &config,
@@ -981,6 +1067,7 @@ fn completion_controller_parent_death_cancels_gate() {
                 IDENTITIES,
                 outer_end,
             )?;
+            events.push(json!({"event":"identities_received","at":gate_time(began,Instant::now()),"frame":&announced}));
             let original_identities = announced
                 .get("identities")
                 .ok_or("announced owned identities missing")?;
@@ -1018,6 +1105,7 @@ fn completion_controller_parent_death_cancels_gate() {
             for identity in &identities {
                 owned.push(exact_pidfd(identity, child.id())?);
             }
+            events.push(json!({"event":"exact_native_pidfds_owned","at":gate_time(began,Instant::now()),"count":owned.len()}));
             let ready = read_phase(
                 &mut output,
                 &config,
@@ -1026,6 +1114,7 @@ fn completion_controller_parent_death_cancels_gate() {
                 READY,
                 outer_end,
             )?;
+            events.push(json!({"event":"stopped_phase_received","at":gate_time(began,Instant::now()),"frame":&ready}));
             need(
                 ready.get("identities") == Some(original_identities)
                     && ready.get("isolation_acks") == announced.get("isolation_acks")
@@ -1036,31 +1125,54 @@ fn completion_controller_parent_death_cancels_gate() {
                 "exact announced sibling stop was not observed",
             )?;
             for suffix in ["first", "sibling"] {
+                let marker = scope.join(format!("{suffix}.marker")).try_exists();
+                events.push(json!({"event":"canary_before_parent_death","at":gate_time(began,Instant::now()),
+                    "suffix":suffix,"exists":marker.as_ref().copied().map_err(ToString::to_string)}));
                 need(
-                    !text(scope.join(format!("{suffix}.marker")).try_exists())?,
+                    !text(marker)?,
                     "stand-in marker appeared before owned parent death",
                 )?;
             }
-            text(child.kill())?;
-            child_end(&mut child, Some(parent_fd), outer_end)?;
+            let killed = text(child.kill());
+            events.push(
+                json!({"event":"parent_kill_returned","at":gate_time(began,Instant::now()),
+                "result":&killed}),
+            );
+            killed?;
+            let ended = child_end(&mut child, Some(parent_fd), outer_end);
+            events.push(
+                json!({"event":"parent_terminal_reap_returned","at":gate_time(began,Instant::now()),
+                "status":ended.as_ref().map(gate_child_status).map_err(String::as_str)}),
+            );
+            ended?;
+            let parent_check_at = Instant::now();
+            events.push(json!({"event":"parent_D_check","at":gate_time(began,parent_check_at),"before_D":parent_check_at<outer_end}));
             need(
-                Instant::now() < outer_end,
+                parent_check_at < outer_end,
                 "parent terminal window missed; cannot exclude publication timeout",
             )?;
             let first = owned.first().ok_or("first pidfd missing")?;
             let earliest_gate = began
                 .checked_add(config.gate())
                 .ok_or("gate deadline overflow")?;
-            poll_exit(first, deadline(config.guard())?.min(earliest_gate))?;
+            let first_end = deadline(config.guard())?.min(earliest_gate);
+            events.push(json!({"event":"first_terminal_wait_begin","at":gate_time(began,Instant::now()),"end":gate_time(began,first_end)}));
+            let first_poll = poll_exit(first, first_end);
+            events.push(json!({"event":"first_terminal_notification","at":gate_time(began,Instant::now()),"result":&first_poll}));
+            first_poll?;
+            let first_check_at = Instant::now();
+            events.push(json!({"event":"first_G_check","at":gate_time(began,first_check_at),"before_G":first_check_at<earliest_gate}));
             need(
-                Instant::now() < earliest_gate,
+                first_check_at < earliest_gate,
                 "gate timing window missed; cannot attribute exit to EOF",
             )?;
             let status = text(rustix::process::waitid(
                 WaitId::PidFd(first.as_fd()),
                 WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
-            ))?
-            .ok_or("first held stand-in was not reaped")?;
+            ));
+            events.push(json!({"event":"first_waitid_returned","at":gate_time(began,Instant::now()),
+                "status":status.as_ref().map(|value|value.as_ref().map(gate_wait_status)).map_err(String::as_str)}));
+            let status = status?.ok_or("first held stand-in was not reaped")?;
             need(
                 status.exit_status() == Some(127),
                 "first held stand-in did not cancel before exec",
@@ -1072,34 +1184,48 @@ fn completion_controller_parent_death_cancels_gate() {
                 config.byte_limit,
             )?;
             let stat = text(std::str::from_utf8(&stat))?;
+            events.push(json!({"event":"sibling_kernel_stat_after_first","at":gate_time(began,Instant::now()),"pid":identity.pid,
+                "started":identity.started,"raw_stat":stat}));
             need(
                 stat.rsplit_once(')')
                     .and_then(|(_, tail)| tail.split_whitespace().next())
                     == Some("T"),
                 "sibling did not remain stopped during EOF observation",
             )?;
-            text(rustix::process::pidfd_send_signal(sibling, Signal::CONT))?;
-            poll_exit(sibling, deadline(config.guard())?.min(earliest_gate))?;
+            let continued = text(rustix::process::pidfd_send_signal(sibling, Signal::CONT));
+            events.push(json!({"event":"sibling_continue_returned","at":gate_time(began,Instant::now()),"result":&continued}));
+            continued?;
+            let sibling_end = deadline(config.guard())?.min(earliest_gate);
+            events.push(json!({"event":"sibling_terminal_wait_begin","at":gate_time(began,Instant::now()),"end":gate_time(began,sibling_end)}));
+            let sibling_poll = poll_exit(sibling, sibling_end);
+            events.push(json!({"event":"sibling_terminal_notification","at":gate_time(began,Instant::now()),"result":&sibling_poll}));
+            sibling_poll?;
             let status = text(rustix::process::waitid(
                 WaitId::PidFd(sibling.as_fd()),
                 WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
-            ))?
-            .ok_or("sibling was not reaped")?;
+            ));
+            events.push(json!({"event":"sibling_waitid_returned","at":gate_time(began,Instant::now()),
+                "status":status.as_ref().map(|value|value.as_ref().map(gate_wait_status)).map_err(String::as_str)}));
+            let status = status?.ok_or("sibling was not reaped")?;
             need(
                 status.exit_status() == Some(127),
                 "sibling did not cancel before exec",
             )?;
             for suffix in ["first", "sibling"] {
-                need(
-                    !text(scope.join(format!("{suffix}.marker")).try_exists())?,
-                    "parent death executed a stand-in marker",
-                )?;
+                let marker = scope.join(format!("{suffix}.marker")).try_exists();
+                events.push(json!({"event":"canary_after_native_ends","at":gate_time(began,Instant::now()),
+                    "suffix":suffix,"exists":marker.as_ref().copied().map_err(ToString::to_string)}));
+                need(!text(marker)?, "parent death executed a stand-in marker")?;
             }
             Ok(())
         })();
         // Every observation branch reaches owned-child cleanup before assertions.
+        events.push(json!({"event":"observation_finished","at":gate_time(began,Instant::now()),"result":&observed}));
         let mut cleanup = Vec::new();
-        match child.try_wait() {
+        let parent_probe = child.try_wait();
+        events.push(json!({"event":"cleanup_parent_probe","at":gate_time(began,Instant::now()),
+            "status":parent_probe.as_ref().map(|status|status.as_ref().map(gate_child_status)).map_err(ToString::to_string)}));
+        match parent_probe {
             Ok(Some(_)) => {}
             Ok(None) | Err(_) => {
                 if let Err(error) = child.kill() {
@@ -1107,28 +1233,43 @@ fn completion_controller_parent_death_cancels_gate() {
                 }
             }
         }
-        if let Err(error) = deadline(config.guard())
-            .and_then(|end| child_end(&mut child, parent_pidfd.as_ref().ok(), end))
-        {
+        let parent_cleanup = deadline(config.guard())
+            .and_then(|end| child_end(&mut child, parent_pidfd.as_ref().ok(), end));
+        events.push(
+            json!({"event":"cleanup_parent_terminal_reap","at":gate_time(began,Instant::now()),
+            "status":parent_cleanup.as_ref().map(gate_child_status).map_err(String::as_str)}),
+        );
+        if let Err(error) = parent_cleanup {
             cleanup.push(error);
         }
-        for fd in &owned {
-            match rustix::process::pidfd_send_signal(fd, Signal::CONT) {
+        for (index, fd) in owned.iter().enumerate() {
+            let continued = rustix::process::pidfd_send_signal(fd, Signal::CONT);
+            events.push(json!({"event":"cleanup_native_continue","index":index,"at":gate_time(began,Instant::now()),
+                "result":continued.as_ref().map(|_|()).map_err(ToString::to_string)}));
+            match continued {
                 Ok(()) | Err(rustix::io::Errno::SRCH) => {}
                 Err(error) => cleanup.push(error.to_string()),
             }
-            match rustix::process::pidfd_send_signal(fd, Signal::KILL) {
+            let killed = rustix::process::pidfd_send_signal(fd, Signal::KILL);
+            events.push(json!({"event":"cleanup_native_kill","index":index,"at":gate_time(began,Instant::now()),
+                "result":killed.as_ref().map(|_|()).map_err(ToString::to_string)}));
+            match killed {
                 Ok(()) | Err(rustix::io::Errno::SRCH) => {}
                 Err(error) => cleanup.push(error.to_string()),
             }
-            match deadline(config.guard()).and_then(|end| poll_exit(fd, end)) {
+            let notified = deadline(config.guard()).and_then(|end| poll_exit(fd, end));
+            events.push(json!({"event":"cleanup_native_terminal_notification","index":index,"at":gate_time(began,Instant::now()),"result":&notified}));
+            match notified {
                 Ok(()) => {}
                 Err(error) => cleanup.push(error),
             }
-            match rustix::process::waitid(
+            let waited = rustix::process::waitid(
                 WaitId::PidFd(fd.as_fd()),
                 WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
-            ) {
+            );
+            events.push(json!({"event":"cleanup_native_waitid","index":index,"at":gate_time(began,Instant::now()),
+                "status":waited.as_ref().map(|status|status.as_ref().map(gate_wait_status)).map_err(ToString::to_string)}));
+            match waited {
                 Ok(Some(_)) | Err(rustix::io::Errno::CHILD) => {}
                 other => cleanup.push(format!("exact owned orphan reap uncertain: {other:?}")),
             }
@@ -1143,6 +1284,10 @@ fn completion_controller_parent_death_cancels_gate() {
             text(lease.try_lock())?;
             Ok(lease)
         })();
+        events.push(
+            json!({"event":"cleanup_native_lease","at":gate_time(began,Instant::now()),
+            "result":lease.as_ref().map(|_|()).map_err(String::as_str)}),
+        );
         let lease = match lease {
             Ok(lease) => Some(lease),
             Err(error) => {
@@ -1189,6 +1334,7 @@ fn completion_controller_parent_death_cancels_gate() {
                 text(store.put_lifecycle(&retained))?;
                 text(store.remove(&retained.spec.id))
             })();
+            events.push(json!({"event":"cleanup_native_scope_store","suffix":suffix,"at":gate_time(began,Instant::now()),"result":&result}));
             if let Err(error) = result {
                 cleanup.push(error);
             }
@@ -1217,11 +1363,39 @@ fn completion_controller_parent_death_cancels_gate() {
                     .to_owned(),
             );
         }
-        if let Err(error) = rustix::process::set_child_subreaper(prior_subreaper) {
+        let restored = rustix::process::set_child_subreaper(prior_subreaper);
+        events.push(
+            json!({"event":"cleanup_subreaper_restore","at":gate_time(began,Instant::now()),
+            "result":restored.as_ref().map(|_|()).map_err(ToString::to_string)}),
+        );
+        if let Err(error) = restored {
             cleanup.push(error.to_string());
         }
-        text(fs::write(scope.join("parent.stdout"), raw))?;
-        record_result(&scope, "controller-parent-death", &observed, &cleanup)?;
+        for suffix in ["first", "sibling"] {
+            let marker = scope.join(format!("{suffix}.marker")).try_exists();
+            events.push(
+                json!({"event":"canary_after_cleanup","at":gate_time(began,Instant::now()),
+                "suffix":suffix,"exists":marker.as_ref().copied().map_err(ToString::to_string)}),
+            );
+        }
+        events.push(json!({"event":"cleanup_complete","at":gate_time(began,Instant::now()),"uncertainty":&cleanup}));
+        let stdout_saved = text(fs::write(scope.join("parent.stdout"), raw));
+        let summary_saved = record_result(&scope, "controller-parent-death", &observed, &cleanup);
+        events.push(
+            json!({"event":"existing_receipts_written","at":gate_time(began,Instant::now()),
+            "parent_stdout":&stdout_saved,"gate_result":&summary_saved}),
+        );
+        write_gate_evidence(
+            &evidence_path,
+            config.byte_limit,
+            &json!({
+                "schema":"hex-parent-death-observations-1","vm_gpu_claim":false,
+                "clock":"original std::time::Instant; event times are observer return/check times, not kernel timestamps",
+                "events":&events,"observation":&observed,"cleanup_uncertainty":&cleanup,
+            }),
+        )?;
+        stdout_saved?;
+        summary_saved?;
         observed?;
         need(
             cleanup.is_empty(),
