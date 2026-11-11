@@ -1,0 +1,168 @@
+{
+  "parent": "00c73b0bb992957f7f3c6135ec1469cd11c740d6",
+  "role": "implementer",
+  "agent": "01a1c7676c2d7463b227be301180d1be",
+  "policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source_files": [
+    {
+      "path": "crates/hex-node/src/node.rs",
+      "sha256": "fde083c1aff76930b9cbc362c8abf7e2febd356bf363c539bd19a7d8f0f32e15",
+      "bytes": 143887,
+      "parent_sha256": "bad59084d42a1b028b4b0a1d3fb4535ab00226fa3264505d0473a2230bbb2933",
+      "parent_blob": "61620c1ac6ff8b066d892f998de5b9cdf64345cb"
+    },
+    {
+      "path": "crates/hex-node/src/node/backends.rs",
+      "sha256": "6d732be1a70d08faeb1a0e5e766c3b6c2e725f315a2e8ec782843ef59c9ca193",
+      "bytes": 34143,
+      "parent_sha256": "e594453336fb530fff87700c6b2ef15a7026a4628b710d30b6a98bb83bc646ba",
+      "parent_blob": "edd83af7366834d3935cd8920860589919c239b5"
+    },
+    {
+      "path": "crates/hex-node/src/supervise.rs",
+      "sha256": "b110a93d428531f2ebe3b021915255e711c721ed5c50f8bbf88eb2012b1752a9",
+      "bytes": 85939,
+      "parent_sha256": "32ead3d041b7d92492eff29e1f16950a99313b9c79cf913018499de2dca19063",
+      "parent_blob": "5759a5e50d977e33ebcb4419848f63ba07376909"
+    },
+    {
+      "path": "crates/hex-runtime/src/firecracker/config.rs",
+      "sha256": "3fb98f7fde5b8a621002c85877bc677004da4288bbce26b01f7fb58042797f6c",
+      "bytes": 27099,
+      "parent_sha256": "a3d308da963da559c8b3e991a2f9252cae562dff6af12df0d3926f9834cbff4a",
+      "parent_blob": "be9239066c2af138052b60813167c21b0fab128e"
+    },
+    {
+      "path": "crates/hex-runtime/src/firecracker/native.rs",
+      "sha256": "b70a76a2d2a5dafa756fbc979a8846563398b0876976d6896c1780ab9f172567",
+      "bytes": 40620,
+      "parent_sha256": "3acc5ff92e648954dcada9a2ecc35f9a191fc52181ba0e2dc822579c70a306e8",
+      "parent_blob": "db795d133f6ceb6d6bdf4b7ec83c5d962c1655ad"
+    },
+    {
+      "path": "crates/hex-runtime/src/firecracker/pool.rs",
+      "sha256": "d0894e2be99d3c97833f90c00e04db5194feee87f1bb56074624ecad44d9136d",
+      "bytes": 24643,
+      "parent_sha256": null,
+      "parent_blob": "00c73b0bb992957f7f3c6135ec1469cd11c740d6:crates/hex-runtime/src/firecracker/pool.rs"
+    },
+    {
+      "path": "crates/hex-runtime/src/linux/process.rs",
+      "sha256": "f216d9cbe3d3d6663a0079ce67644acaf653f1b4c08d8b447c6b0ea0cdf18926",
+      "bytes": 19842,
+      "parent_sha256": "ed5051e8c55c8f3b309334a093eabec9eaa42f5c87e58e9b29a51c7f5a71392c",
+      "parent_blob": "1b9e9145eaf615672941e700973ad562bcf27dd1"
+    },
+    {
+      "path": "crates/hex-runtime/src/linux/sys.rs",
+      "sha256": "cda48ba364da31f20b8963a30a365ca2f6231d1dd5c30902d64099d0ab3f98f2",
+      "bytes": 34532,
+      "parent_sha256": "a45faa4951fee75cf0ddf2d6d1c2a98ddfd05f128f07935190753f3841c4256a",
+      "parent_blob": "f53aef72dbe624e81dfcefe29fc464231f46c8ea"
+    }
+  ],
+  "dependencies": {
+    "L4_LinkOwner": "9b242628f9d026ba27beef39010b63c02a058889",
+    "L4_owner_manifest": "3133b2bf8e17b4f39d95f12fa6e9fbec47955a85",
+    "L2_SDK_gpu_report": "493559fe4335aba943256a3c22fd4968606a6517",
+    "L2_Shards_CLI_report_handoff": "1108260cf27041209d4ae1b87016f3b2202e798f",
+    "L3_common_retained_preflight": "e52d9e7685c338c32845914eb2039853a0b0153d",
+    "L2_preflight_box": "299d35c5",
+    "L2_preflight_backing": "275b9c4dde9d4b2b904af01f39a4a5aea1a7bb63"
+  },
+  "ordinary_source_identity": {
+    "baseline": {
+      "crates/hex-runtime/src/linux/sys.rs": {
+        "sha256": "a45faa4951fee75cf0ddf2d6d1c2a98ddfd05f128f07935190753f3841c4256a",
+        "blob": "f53aef72dbe624e81dfcefe29fc464231f46c8ea"
+      },
+      "crates/hex-runtime/src/linux/process.rs": {
+        "sha256": "ed5051e8c55c8f3b309334a093eabec9eaa42f5c87e58e9b29a51c7f5a71392c",
+        "blob": "1b9e9145eaf615672941e700973ad562bcf27dd1"
+      },
+      "crates/hex-node/src/supervise.rs": {
+        "sha256": "32ead3d041b7d92492eff29e1f16950a99313b9c79cf913018499de2dca19063",
+        "blob": "5759a5e50d977e33ebcb4419848f63ba07376909"
+      },
+      "ordinary_child_body_sha256": "b2d8c8a0479ae5b02b82bd169abe3cda73ffc1a18ed16c37dbe94188486327b4"
+    },
+    "child_body_sha256": "5488efa0fae3e3292f6bb0920aec408fd34c1c024225d05e99a3f435ffe1055e",
+    "extracted_body_without_only_report_block_sha256": "5488efa0fae3e3292f6bb0920aec408fd34c1c024225d05e99a3f435ffe1055e",
+    "equal": true,
+    "unchanged_functions": [
+      {
+        "function": "mark_cloexec_from_3",
+        "sha256": "d02a6078fc3c0d92532cf300509090456d2440e50f4139f59aaa4ce3a0fcac5d",
+        "source_equal": true
+      },
+      {
+        "function": "mark_cloexec_by_proc",
+        "sha256": "7439ae67e10844d1a84bbcd4217f317843925ccb3a1ee4d4cb9b2dc6cfcf29b9",
+        "source_equal": true
+      },
+      {
+        "function": "sweep_on_exec",
+        "sha256": "6265109d8fa45caf22c01f54e1d074ad3dc70815e58caabd52450bc15a8b798f",
+        "source_equal": true
+      },
+      {
+        "function": "join_cgroup_on_exec",
+        "sha256": "b5321e828e26682a6d2425136d4f252454a7e883dc9fac466601e04203393cfe",
+        "source_equal": true
+      },
+      {
+        "function": "clone_into_cgroup",
+        "sha256": "b492b3961f42affc67891ac12418d419cc86aefc42f0d652ded668d680f14078",
+        "source_equal": true
+      },
+      {
+        "function": "pointers",
+        "sha256": "846811be3c3f75424860c196cb6cb0754b4ffb24b434a758896ef511d3af8a5d",
+        "source_equal": true
+      },
+      {
+        "function": "process::exec",
+        "sha256": "96790b6af32e353cfbeaff236ab721b9ba63f1ae46c0cfb44e12f8c070ed8319",
+        "source_equal": true
+      },
+      {
+        "function": "process::exec_limit",
+        "sha256": "669c5ac338d9552be5cc3c92cde19801660ffdaa3e66a22273703ff094f49d73",
+        "source_equal": true
+      },
+      {
+        "function": "process::fits_process",
+        "sha256": "0ad2a06a4d5ede694202c501fff3cea817952fab943cfc0b0c35bf83eb942e13",
+        "source_equal": true
+      },
+      {
+        "function": "process::exec_limit_for",
+        "sha256": "3479601d257fcd679172eb72c74ea85fc589a279eb316a64c123ffbd911e8ff3",
+        "source_equal": true
+      },
+      {
+        "function": "process::join_on_exec",
+        "sha256": "cf6648c9ab52f13b7daedb351fb09c2948a4ad7404968e4618b99f06ba867317",
+        "source_equal": true
+      }
+    ],
+    "wrapper": "unsafe fn child(spawn: &Spawn, argv: &[*const c_char], envp: &[*const c_char]) -> c_int {\n    // SAFETY: the ordinary caller has the original prepared C strings/stdio contract. None\n    // preserves the complete descriptor sweep; only the held managed path supplies a report FD.\n    unsafe { child_with_fd(spawn, argv, envp, None) }\n}",
+    "extra_report_block_sha256": "fa3c40134b2f771ffd59de4882391dfe5e5a7d81a02caca918a0fb94c94fa467",
+    "scope": "source-text equality only, no compiled or native equivalence proof"
+  },
+  "controls_unrun": [
+    "linux::process::tests::managed_report_suffix_uses_the_existing_exec_block_and_string_bounds",
+    "node::backends::report_tests::managed_report_scope_and_writer_parity_refuse_before_native_effects",
+    "firecracker::native::pool::tests::cold_observer_configuration_binds_full_claims_binary_and_fixed_profile",
+    "firecracker::native::pool::tests::cold_observer_machine_uses_granted_guest_envelope_and_charges_host_once"
+  ],
+  "checks": {
+    "scoped_rustfmt": 0,
+    "tests": "UNRUN",
+    "compile": "UNRUN",
+    "native_effects": 0,
+    "remote_jobs_started": 0
+  },
+  "integration": "Apply named owned deltas only, preserve ROOT render(fullBoxSpec,oci), all_pools attachment ports and module paths. Consume exact SDK/LinkOwner/preflight sources via ROOT existing metadata. No Cargo/vendor/CLI changes here. New pool.rs is private path module under existing native.rs. See LINUX-REPORT-AND-COLD-FC.md for real remaining bootstrap/rearm/active-Box observations gaps."
+}

@@ -1,0 +1,24 @@
+{
+  "parent": "5698ba99f86b2479312bfd174814de692118b401",
+  "role": "implementer",
+  "policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": {
+    "crates/hex-runtime/src/devices.rs": "d96174acff763c469f41a1625001428cc7ec80b353781ff0584d25196bcdc087",
+    "crates/hex-node/src/node/backends.rs": "f3838c338d2226562b9b658558f809f9a15fa007784d5ddf476e966f21d41ae6"
+  },
+  "contract": "pub fn check_managed_report(catalog:Option<&Catalog>,record:NativeRecord,plan:&ManagedLaunch,writer:bool,deadline:Instant)->Result<Instant,Refusal>",
+  "SDK_report_contract": "5ba9ca5022357807c7b70a9ffe31534475a4cc31 (getters/request/writer unchanged493559fe4335aba943256a3c22fd4968606a6517)",
+  "integration": "L3 Recorded Tx consumes same helper using its Native.catalog; no duplicate report metadata guard. Node delegates once. No API/Cargo/CLI change. Apply named owned deltas preserving ROOT current literal/render/catalog ports.",
+  "control_moved_unchanged": "devices::report_tests::managed_report_scope_and_writer_parity_refuse_before_native_effects",
+  "checks": {
+    "scoped_rustfmt": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "tests": "UNRUN",
+    "native_effects": 0,
+    "remote_jobs": 0
+  },
+  "evidence": "SHARED-MANAGED-REPORT-GUARD.md",
+  "optional_catalog": "None is valid only without a GPU report; Some(actual canonical catalog) required when requestSome. CPU-only Recorded needs no fabricated empty authority."
+}

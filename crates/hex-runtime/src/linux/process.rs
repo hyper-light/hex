@@ -181,6 +181,13 @@ impl HeldExec {
     }
 }
 
+/// One admitted report, consumed by the final native held-exec boundary. No raw parent
+/// descriptor is encoded; that boundary duplicates/owns the descriptor used by foreign exec.
+pub struct ManagedReport {
+    pub scope: [u8; 16],
+    pub writer: std::io::PipeWriter,
+}
+
 /// Start an explicitly configured VM binary, without executing it until its native identity and
 /// canonical record have been published. `gate_budget` is the caller's remaining finite create
 /// budget, never a process-completion timer. Ordinary `exec` retains its existing vfork path.
@@ -188,6 +195,7 @@ pub fn exec_held(
     cg: &BoxCgroup,
     program: &Program,
     stdio: Stdio,
+    report: Option<ManagedReport>,
     gate_budget: Duration,
 ) -> Result<HeldExec, Refusal> {
     program.check()?;
@@ -197,6 +205,22 @@ pub fn exec_held(
             "a managed VM requires an absolute configured binary and the node's own user",
         ));
     }
+    let report = report
+        .map(|report| {
+            if report.scope == [0; 16] {
+                return Err(held_invalid("GPU report scope is empty"));
+            }
+            let descriptor =
+                rustix::io::fcntl_dupfd_cloexec(&report.writer, 3).map_err(|error| {
+                    Refusal::os("duplicating the final GPU report descriptor", error)
+                })?;
+            drop(report.writer);
+            let words = shards_api::physical::report_arguments(report.scope, &descriptor)
+                .map_err(|_| held_invalid("final GPU report arguments could not be rendered"))?;
+            check_report_words(program, &words, &exec_limit())?;
+            Ok((descriptor, words))
+        })
+        .transpose()?;
     let mut paths = Vec::new();
     paths.try_reserve_exact(1).map_err(|_| held_storage(1))?;
     let first = program
@@ -205,10 +229,22 @@ pub fn exec_held(
         .ok_or_else(|| held_invalid("managed VM has no binary"))?;
     paths.push(held_string(&[first])?);
     let mut argv = Vec::new();
-    argv.try_reserve_exact(program.args.len())
-        .map_err(|_| held_storage(program.args.len()))?;
+    let count = program
+        .args
+        .len()
+        .checked_add(report.as_ref().map_or(0, |(_, words)| words.len()))
+        .ok_or_else(|| held_storage(usize::MAX))?;
+    argv.try_reserve_exact(count)
+        .map_err(|_| held_storage(count))?;
     for arg in &program.args {
         argv.push(held_string(&[arg])?);
+    }
+    if let Some((_, words)) = &report {
+        for word in words {
+            argv.push(held_string(&[word.to_str().ok_or_else(|| {
+                held_invalid("GPU report argument is not UTF-8")
+            })?])?);
+        }
     }
     let mut envp = Vec::new();
     envp.try_reserve_exact(program.env.len())
@@ -236,9 +272,47 @@ pub fn exec_held(
         .map_err(|error| Refusal::os("preparing held VM descriptors", error))?;
     let dir = cg.open_dir()?;
     let procs = cg.procs_for_joining()?;
-    sys::spawn_held(dir.as_fd(), procs.as_fd(), spawn, gate_budget)
-        .map(HeldExec)
-        .map_err(|error| Refusal::os("creating a held VM in its native envelope", error))
+    sys::spawn_held(
+        dir.as_fd(),
+        procs.as_fd(),
+        spawn,
+        report.map(|(descriptor, _)| descriptor),
+        gate_budget,
+    )
+    .map(HeldExec)
+    .map_err(|error| Refusal::os("creating a held VM in its native envelope", error))
+}
+
+fn check_report_words(
+    program: &Program,
+    words: &[std::ffi::OsString; 4],
+    limit: &ExecLimit,
+) -> Result<(), Refusal> {
+    let mut total = program.exec_size();
+    for word in words {
+        let word = word
+            .to_str()
+            .ok_or_else(|| held_invalid("GPU report argument is not UTF-8"))?;
+        let bytes = word
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| held_storage(usize::MAX))?;
+        if limit.string.is_some_and(|most| bytes > most) {
+            return Err(held_invalid(
+                "GPU report argument exceeds the native string bound",
+            ));
+        }
+        total = total
+            .checked_add(bytes)
+            .and_then(|total| total.checked_add(size_of::<usize>()))
+            .ok_or_else(|| held_storage(usize::MAX))?;
+    }
+    if total > limit.block {
+        return Err(held_invalid(
+            "GPU report suffix exceeds the native exec block",
+        ));
+    }
+    Ok(())
 }
 
 fn held_storage(bound: usize) -> Refusal {
@@ -378,6 +452,53 @@ pub fn join_on_exec(cg: &BoxCgroup, cmd: &mut Command) -> Result<(), Refusal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fixed report suffix consumes native exec space before clone; metadata-only control.
+    #[test]
+    fn managed_report_suffix_uses_the_existing_exec_block_and_string_bounds() {
+        let program = Program::of(&["/fixture/shards", "run", "--kernel", "/fixture/kernel"]);
+        let words = [
+            "--gpu-report",
+            "7",
+            "--gpu-report-scope",
+            "00112233445566778899aabbccddeeff",
+        ]
+        .map(std::ffi::OsString::from);
+        let extra: usize = words
+            .iter()
+            .map(|word| word.len() + 1 + size_of::<usize>())
+            .sum();
+        let limit = ExecLimit {
+            block: program.exec_size() + extra,
+            counts: hex_api::BlockCount::Execve,
+            string: None,
+            unit: hex_api::StringUnit::Bytes,
+            source: "synthetic exact exec boundary",
+        };
+        check_report_words(&program, &words, &limit).unwrap();
+        assert!(
+            check_report_words(
+                &program,
+                &words,
+                &ExecLimit {
+                    block: limit.block - 1,
+                    ..limit
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            check_report_words(
+                &program,
+                &words,
+                &ExecLimit {
+                    string: Some(1),
+                    ..limit
+                }
+            )
+            .is_err()
+        );
+    }
 
     /// AC-T7.4.1: prepared VM arguments preserve exact bytes and reject embedded terminators.
     #[test]

@@ -996,7 +996,8 @@ impl Node {
     /// either root, its container's state directory under the runtime directory and its rendered
     /// bundle under the bundles directory (goal 5 extended, step 5).
     pub fn recover(&self) -> Result<RecoverySummary, Refusal> {
-        let records = self.store.all()?;
+        let (records, pools) = self.retained_preflight()?;
+        self.recover_pools(&pools)?;
         // No native cleanup may run until every persisted backend is known and its own lifecycle
         // has been dispatched through the same Store/turn authority.
         let mut summary = self.recover_backends(&records)?;

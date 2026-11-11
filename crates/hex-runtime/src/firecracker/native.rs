@@ -15,6 +15,9 @@ use hex_core::record::{BoxRecord, Phase};
 
 use super::{Books, Config, Transaction, exhausted, invalid, observations, transport, vfio};
 use crate::devices::{Binding, ManagedLaunch, Route, SharedCatalog, managed_scope_id};
+
+#[path = "pool.rs"]
+mod pool;
 use crate::guest::rewrite;
 
 /// One initialized Linux KVM backend. The same Node/Store/Turns/Supervisor owns every native
@@ -23,6 +26,7 @@ pub struct FirecrackerRuntime {
     config: Config,
     catalog: SharedCatalog,
     books: Weak<dyn Books>,
+    initialized: std::sync::OnceLock<()>,
 }
 
 struct Paths {
@@ -42,10 +46,23 @@ impl FirecrackerRuntime {
         books: Weak<dyn Books>,
     ) -> Result<Self, Refusal> {
         config.verify_inputs()?;
-        let capacity = books
-            .upgrade()
-            .ok_or_else(|| Refusal::Broken("native node authority is gone".into()))?
-            .capacity()?;
+        Ok(Self {
+            config,
+            catalog,
+            books,
+            initialized: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// Called after the native owner's whole retained-state/configuration barrier. This exact
+    /// configured adapter publishes no class before these actual native prerequisites succeed.
+    pub fn initialize_native(&self) -> Result<(), Refusal> {
+        if self.initialized.get().is_some() {
+            return Ok(());
+        }
+        self.config.verify_inputs()?;
+        let config = &self.config;
+        let capacity = self.authority()?.capacity()?;
         capacity.check()?;
         if !capacity.total.holds(
             config
@@ -61,10 +78,10 @@ impl FirecrackerRuntime {
             .read(true)
             .write(true)
             .open("/dev/kvm")
-            .map_err(|e| Refusal::os("opening Firecracker KVM backend", e))?;
+            .map_err(|error| Refusal::os("opening Firecracker KVM backend", error))?;
         for path in [&config.binary, &config.kernel, &config.initrd] {
             if !fs::metadata(path)
-                .map_err(|e| Refusal::os("inspecting Firecracker boot input", e))?
+                .map_err(|error| Refusal::os("inspecting Firecracker boot input", error))?
                 .is_file()
             {
                 return Err(invalid("boot input is not a regular file"));
@@ -74,16 +91,29 @@ impl FirecrackerRuntime {
             .and_then(|()| {
                 fs::set_permissions(&config.state_dir, fs::Permissions::from_mode(0o700))
             })
-            .map_err(|e| Refusal::os("opening private Firecracker state", e))?;
-        Ok(Self {
-            config,
-            catalog,
-            books,
+            .map_err(|error| Refusal::os("opening private Firecracker state", error))?;
+        self.initialized.set(()).or_else(|()| {
+            if self.initialized.get().is_some() {
+                Ok(())
+            } else {
+                Err(invalid("Firecracker initialization was not published"))
+            }
         })
+    }
+
+    fn require_initialized(&self) -> Result<(), Refusal> {
+        if self.initialized.get().is_none() {
+            return Err(invalid("Firecracker native adapter is not initialized"));
+        }
+        Ok(())
     }
 
     fn paths(&self, record: &BoxRecord) -> Result<Paths, Refusal> {
         let scope = managed_scope_id(record)?;
+        self.scope_paths(&scope)
+    }
+
+    fn scope_paths(&self, scope: &BoxId) -> Result<Paths, Refusal> {
         let dir = path(&self.config.state_dir, scope.as_str())?;
         let vsock = path(&dir, "vsock")?;
         let mut suffix = String::new();
@@ -111,6 +141,42 @@ impl FirecrackerRuntime {
             ready,
             vsock,
             dir,
+        })
+    }
+
+    fn vm_program(&self, paths: &Paths) -> Result<Program, Refusal> {
+        let mut program = Program::default();
+        program
+            .args
+            .try_reserve_exact(6)
+            .map_err(|_| exhausted("VMM arguments", 6))?;
+        for argument in [
+            self.config.binary.as_os_str(),
+            std::ffi::OsStr::new("--enable-pci"),
+            std::ffi::OsStr::new("--api-sock"),
+            paths.api.as_os_str(),
+            std::ffi::OsStr::new("--config-file"),
+            paths.config.as_os_str(),
+        ] {
+            program.args.push(text(
+                argument
+                    .to_str()
+                    .ok_or_else(|| invalid("VMM argument is not UTF-8"))?,
+            )?);
+        }
+        Ok(program)
+    }
+
+    fn vm_io() -> Result<shards_api::LaunchIo, Refusal> {
+        let output =
+            File::open("/dev/null").map_err(|e| Refusal::os("opening VMM output sink", e))?;
+        let error = output
+            .try_clone()
+            .map_err(|e| Refusal::os("duplicating VMM output sink", e))?;
+        Ok(shards_api::LaunchIo {
+            stdout: std::io::PipeWriter::from(std::os::fd::OwnedFd::from(output)),
+            stderr: std::io::PipeWriter::from(std::os::fd::OwnedFd::from(error)),
+            gpu_report: None,
         })
     }
 
@@ -279,9 +345,9 @@ impl FirecrackerRuntime {
                 let found = capacity.devices.get(at).ok_or_else(|| {
                     invalid("assigned GPU has no matching guest native attachment")
                 })?;
-                if found.size != entry.info.size {
+                if found.size == 0 {
                     return Err(invalid(
-                        "actual assigned guest GPU metadata differs from the physical selection",
+                        "assigned GPU has no current native memory observation",
                     ));
                 }
                 if found
@@ -303,19 +369,15 @@ impl FirecrackerRuntime {
         let report = client.physical_report()?;
         let observed = observations::join(&assignments, &report)?;
         for actual in observed {
-            let at = catalog
+            if catalog
                 .binary_search_by_key(&actual.info.id, |entry| entry.info.id)
-                .map_err(|_| invalid("observed GPU is outside the original physical selection"))?;
-            let expected = catalog
-                .get(at)
-                .ok_or_else(|| invalid("observed GPU catalog index disagrees"))?;
-            if actual.info.size != expected.info.size || actual.info.model != expected.info.model {
+                .is_err()
+            {
                 return Err(invalid(
-                    "current guest-native GPU metadata differs from its selected physical binding",
+                    "observed GPU is outside the original physical selection",
                 ));
             }
-            // Independent missing counters stay None. No new host offer is published here; the
-            // canonical outer record already owns the complete selected set and VM allocation.
+            // Model/VRAM/counters are this actual native provider's facts, never admin constants.
         }
         if let Some(until) = until {
             remaining(until)?;
@@ -326,25 +388,34 @@ impl FirecrackerRuntime {
     fn create_inner(
         &self,
         spec: BoxSpec,
+        expected_scope: Option<hex_core::record::NativeScope>,
         transaction: &dyn Transaction,
+        until: Instant,
     ) -> Result<BoxInfo, Refusal> {
-        let until = Instant::now()
-            .checked_add(self.config.boot_timeout)
-            .ok_or_else(|| invalid("whole create deadline is unrepresentable"))?;
+        remaining(until)?;
         self.config.verify_inputs()?;
         let records = transaction.records()?;
-        if records.len() >= crate::MAX_BOXES {
+        if expected_scope.is_none() && records.len() >= crate::MAX_BOXES {
             return Err(Refusal::Full(crate::MAX_BOXES));
         }
         let pools = transaction.pool_records()?;
         let _selection = self.catalog.prepare(&spec, &records, &pools)?;
-        let plan = vfio::plan(&self.catalog, &spec.devices)?;
         let id = spec.id.try_clone()?;
-        // Store's first put durably introduces the ONE native incarnation, before paths or boot effects.
-        transaction.put(&BoxRecord::new(spec, Phase::Creating, Vec::new()))?;
-        let mut record = transaction
-            .read(&id)?
-            .ok_or_else(|| invalid("Creating record disappeared"))?;
+        // The optional handoff already persisted this SAME scope before stopping its observer.
+        if let Some(scope) = expected_scope {
+            let current = transaction.read(&id)?.ok_or_else(|| uncertain(&id))?;
+            if current.spec != spec
+                || current.native_scope != Some(scope)
+                || current.phase != Phase::Creating
+                || current.init.is_some()
+            {
+                return Err(uncertain(&id));
+            }
+        } else {
+            transaction.put(&BoxRecord::new(spec, Phase::Creating, Vec::new()))?;
+        }
+        let mut record = transaction.read(&id)?.ok_or_else(|| uncertain(&id))?;
+        let plan = vfio::plan(&self.catalog, &record.spec.devices)?;
         let paths = self.paths(&record)?;
         match fs::symlink_metadata(&paths.dir) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -384,40 +455,14 @@ impl FirecrackerRuntime {
         write_config(&paths.config, &vm)?;
         let listener = UnixListener::bind(&paths.ready)
             .map_err(|e| Refusal::os("binding private guest readiness endpoint", e))?;
-        let mut program = Program::default();
-        program
-            .args
-            .try_reserve_exact(6)
-            .map_err(|_| exhausted("VMM arguments", 6))?;
-        for argument in [
-            self.config.binary.as_os_str(),
-            std::ffi::OsStr::new("--enable-pci"),
-            std::ffi::OsStr::new("--api-sock"),
-            paths.api.as_os_str(),
-            std::ffi::OsStr::new("--config-file"),
-            paths.config.as_os_str(),
-        ] {
-            program.args.push(text(
-                argument
-                    .to_str()
-                    .ok_or_else(|| invalid("VMM argument is not UTF-8"))?,
-            )?);
-        }
-        let output =
-            File::open("/dev/null").map_err(|e| Refusal::os("opening VMM output sink", e))?;
-        let error = output
-            .try_clone()
-            .map_err(|e| Refusal::os("duplicating VMM output sink", e))?;
+        let program = self.vm_program(&paths)?;
+        let io = Self::vm_io()?;
         let native = transaction.launch_managed(
             &ManagedLaunch::Firecracker {
                 program: &program,
                 vsock: &paths.vsock,
             },
-            shards_api::LaunchIo {
-                stdout: std::io::PipeWriter::from(std::os::fd::OwnedFd::from(output)),
-                stderr: std::io::PipeWriter::from(std::os::fd::OwnedFd::from(error)),
-                gpu_report: None,
-            },
+            io,
             remaining(until)?,
         )?;
         // Publication happened while the child was held. Read the SAME immutable scope/spec back.
@@ -432,7 +477,7 @@ impl FirecrackerRuntime {
         }
         record = current;
         transport::ready(&listener, native.as_ref(), remaining(until)?)?;
-        let client = Client::connect(triomphe::Arc::clone(&link))?;
+        let client = Client::connect(link.clone())?;
         guest_spec.devices = self.translate(&record, &client, Some(until))?;
         let memory = self
             .config
@@ -547,6 +592,150 @@ impl FirecrackerRuntime {
         Ok(())
     }
 
+    fn current_capacity(
+        &self,
+        class: Class,
+        until: Option<Instant>,
+    ) -> Result<Option<hex_api::Capacity>, Refusal> {
+        self.require_initialized()?;
+        if class != Class::Firecracker {
+            return Err(invalid("capacity requested for another backend"));
+        }
+        let authority = self.authority()?;
+        let records = authority.records()?;
+        let pools = authority.pool_records()?;
+        let mut capacity = self.authority()?.capacity()?;
+        let observer = self.observer_record()?;
+        let guest_observed = match self.physical_observations_before(until) {
+            Ok(observed) => observed,
+            Err(refusal) => {
+                tracing::warn!(target: "hex.runtime.firecracker", event = "gpu.observation.unavailable", %refusal);
+                Vec::new()
+            }
+        };
+        let mut observed = if self
+            .catalog
+            .entries_for(Route::Vfio)
+            .any(|entry| entry.info.id.kind == DeviceKind::Gpu)
+        {
+            self.authority()?.physical_devices()?
+        } else {
+            Vec::new()
+        };
+        observed
+            .try_reserve_exact(guest_observed.len())
+            .map_err(|_| exhausted("current observer facts", guest_observed.len()))?;
+        for actual in guest_observed {
+            if let Some(host) = observed.iter_mut().find(|host| host.id == actual.info.id) {
+                *host = actual.info;
+            } else {
+                observed.push(actual.info);
+            }
+        }
+        capacity.cost = None;
+        capacity.routes.clear();
+        capacity.device_routes.clear();
+        capacity.backings.clear();
+        capacity.devices.clear();
+        capacity
+            .devices
+            .try_reserve_exact(self.catalog.entries().len())
+            .map_err(|_| exhausted("VFIO capacity", self.catalog.entries().len()))?;
+        for entry in self
+            .catalog
+            .entries()
+            .iter()
+            .filter(|entry| entry.binding(Route::Vfio).is_some())
+        {
+            if entry.info.id.kind == DeviceKind::Gpu {
+                // An administrator's catalog is not current VRAM/load evidence. Prebound VFIO
+                // may hide host NVML: only the same initialized facts provider may supply this
+                // actual identity/metadata observation (including a witnessed live guest).
+                let Some(actual) = observed.iter().find(|actual| actual.id == entry.info.id) else {
+                    continue;
+                };
+                vfio::validate(entry)?;
+                let mut actual = actual.try_clone()?;
+                actual.holder = self.catalog.holder(entry.info.id, &records, &pools)?;
+                capacity.devices.push(actual);
+                continue;
+            }
+            vfio::validate(entry)?;
+            capacity.devices.push(entry.report(self.catalog.holder(
+                entry.info.id,
+                &records,
+                &pools,
+            )?)?);
+        }
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => hex_api::ImageArch::Amd64,
+            "aarch64" => hex_api::ImageArch::Arm64,
+            _ => {
+                return Err(invalid(
+                    "native architecture is outside the supported Firecracker targets",
+                ));
+            }
+        };
+        let cpu = hex_api::RouteOffer {
+            key: hex_api::RouteKey {
+                class: Class::Firecracker,
+                image: hex_api::ImagePlatform {
+                    os: hex_api::ImageOs::Linux,
+                    arch,
+                },
+                execution: hex_api::Execution::Firecracker,
+                gpu: hex_api::GpuEligibility::None,
+            },
+            cost: Some(self.config.cost),
+            backing: None,
+        };
+        capacity
+            .routes
+            .try_reserve_exact(2)
+            .map_err(|_| exhausted("Firecracker initialized routes", 2))?;
+        capacity
+            .device_routes
+            .try_reserve_exact(capacity.devices.len())
+            .map_err(|_| exhausted("Firecracker device eligibility", capacity.devices.len()))?;
+        capacity.routes.push(cpu);
+        let gpu = observer.is_some()
+            || capacity
+                .devices
+                .iter()
+                .any(|device| device.id.kind == DeviceKind::Gpu);
+        let backing = observer.as_ref().map(|record| record.key);
+        if let Some(observer) = observer {
+            capacity
+                .backings
+                .try_reserve_exact(1)
+                .map_err(|_| exhausted("Firecracker observer offer", 1))?;
+            capacity.backings.push(observer.offer()?);
+        }
+        if gpu {
+            capacity.routes.push(hex_api::RouteOffer {
+                key: hex_api::RouteKey {
+                    gpu: hex_api::GpuEligibility::Required,
+                    ..cpu.key
+                },
+                backing,
+                ..cpu
+            });
+        }
+        capacity
+            .device_routes
+            .extend(capacity.devices.iter().map(|device| {
+                if device.id.kind == DeviceKind::Gpu {
+                    2
+                } else if gpu {
+                    3
+                } else {
+                    1
+                }
+            }));
+        capacity.check()?;
+        Ok(Some(capacity))
+    }
+
     pub fn recover(&self) -> Result<(), Refusal> {
         for (id, record) in self.authority()?.records()? {
             let record = record.map_err(|_| uncertain(&id))?;
@@ -593,121 +782,37 @@ fn lifecycle(id: &BoxId, cause: LifecycleCause) -> Result<Refusal, Refusal> {
 
 impl Runtime for FirecrackerRuntime {
     fn classes(&self) -> Vec<Class> {
-        vec![Class::Firecracker]
+        if self.initialized.get().is_some() {
+            vec![Class::Firecracker]
+        } else {
+            Vec::new()
+        }
+    }
+    fn initialize_backing(
+        &self,
+        grant: hex_api::BackingGrant,
+    ) -> Result<hex_api::BackingOffer, Refusal> {
+        self.require_initialized()?;
+        self.initialize_observer(grant)
+    }
+    fn release_backing(&self, key: hex_api::BackingKey) -> Result<hex_api::BackingOffer, Refusal> {
+        self.require_initialized()?;
+        self.release_observer(&key)
+    }
+    fn backing_usage(&self, key: &hex_api::BackingKey) -> Result<Usage, Refusal> {
+        self.require_initialized()?;
+        self.observer_usage(key)
     }
 
     fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
-        if class != Class::Firecracker {
-            return Err(invalid("capacity requested for another backend"));
-        }
-        let authority = self.authority()?;
-        let records = authority.records()?;
-        let pools = authority.pool_records()?;
-        let mut capacity = self.authority()?.capacity()?;
-        let observed = if self
-            .catalog
-            .entries_for(Route::Vfio)
-            .any(|entry| entry.info.id.kind == DeviceKind::Gpu)
-        {
-            self.authority()?.physical_devices()?
-        } else {
-            Vec::new()
-        };
-        capacity.cost = None;
-        capacity.routes.clear();
-        capacity.device_routes.clear();
-        capacity.backings.clear();
-        capacity.devices.clear();
-        capacity
-            .devices
-            .try_reserve_exact(self.catalog.entries().len())
-            .map_err(|_| exhausted("VFIO capacity", self.catalog.entries().len()))?;
-        for entry in self
-            .catalog
-            .entries()
-            .iter()
-            .filter(|entry| entry.binding(Route::Vfio).is_some())
-        {
-            if entry.info.id.kind == DeviceKind::Gpu {
-                // An administrator's catalog is not current VRAM/load evidence. Prebound VFIO
-                // may hide host NVML: only the same initialized facts provider may supply this
-                // actual identity/metadata observation (including a witnessed live guest).
-                let Some(actual) = observed.iter().find(|actual| actual.id == entry.info.id) else {
-                    continue;
-                };
-                if actual.model != entry.info.model || actual.size != entry.info.size {
-                    return Err(invalid(
-                        "current GPU observation disagrees with its native route",
-                    ));
-                }
-            }
-            vfio::validate(entry)?;
-            capacity.devices.push(entry.report(self.catalog.holder(
-                entry.info.id,
-                &records,
-                &pools,
-            )?)?);
-        }
-        let arch = match std::env::consts::ARCH {
-            "x86_64" => hex_api::ImageArch::Amd64,
-            "aarch64" => hex_api::ImageArch::Arm64,
-            _ => {
-                return Err(invalid(
-                    "native architecture is outside the supported Firecracker targets",
-                ));
-            }
-        };
-        let cpu = hex_api::RouteOffer {
-            key: hex_api::RouteKey {
-                class: Class::Firecracker,
-                image: hex_api::ImagePlatform {
-                    os: hex_api::ImageOs::Linux,
-                    arch,
-                },
-                execution: hex_api::Execution::Firecracker,
-                gpu: hex_api::GpuEligibility::None,
-            },
-            cost: Some(self.config.cost),
-            backing: None,
-        };
-        capacity
-            .routes
-            .try_reserve_exact(2)
-            .map_err(|_| exhausted("Firecracker initialized routes", 2))?;
-        capacity
-            .device_routes
-            .try_reserve_exact(capacity.devices.len())
-            .map_err(|_| exhausted("Firecracker device eligibility", capacity.devices.len()))?;
-        capacity.routes.push(cpu);
-        let gpu = capacity
-            .devices
-            .iter()
-            .any(|device| device.id.kind == DeviceKind::Gpu);
-        if gpu {
-            capacity.routes.push(hex_api::RouteOffer {
-                key: hex_api::RouteKey {
-                    gpu: hex_api::GpuEligibility::Required,
-                    ..cpu.key
-                },
-                ..cpu
-            });
-        }
-        capacity
-            .device_routes
-            .extend(capacity.devices.iter().map(|device| {
-                if device.id.kind == DeviceKind::Gpu {
-                    2
-                } else if gpu {
-                    3
-                } else {
-                    1
-                }
-            }));
-        capacity.check()?;
-        Ok(Some(capacity))
+        self.current_capacity(class, None)
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+        self.require_initialized()?;
+        let until = Instant::now()
+            .checked_add(self.config.boot_timeout)
+            .ok_or_else(|| invalid("whole create deadline is unrepresentable"))?;
         spec.check()?;
         if !matches!(spec.class, ClassSpec::Firecracker(_)) {
             return Err(invalid(
@@ -715,22 +820,53 @@ impl Runtime for FirecrackerRuntime {
             ));
         }
         if spec.route.is_some() {
-            self.capacity(Class::Firecracker)?
+            self.current_capacity(Class::Firecracker, Some(until))?
                 .ok_or_else(|| invalid("Firecracker endpoint has no initialized capacity"))?
                 .validate_route(&spec)?;
         }
+        remaining(until)?;
         let keys = self.catalog.conflict_ids(&spec.devices)?;
         let id = spec.id.try_clone()?;
+        let (spec, scope) = if let Some(key) = spec.route.and_then(|route| route.backing) {
+            let pending =
+                crate::devices::with_transaction(&self.books, &id, &keys, |transaction| {
+                    if transaction.read(&id)?.is_some() {
+                        return Err(Refusal::Exists(id.try_clone()?));
+                    }
+                    let records = transaction.records()?;
+                    if records.len() >= crate::MAX_BOXES {
+                        return Err(Refusal::Full(crate::MAX_BOXES));
+                    }
+                    let pools = transaction.pool_records()?;
+                    self.catalog.prepare(&spec, &records, &pools)?;
+                    transaction.put(&BoxRecord::new(spec, Phase::Creating, Vec::new()))?;
+                    transaction.read(&id)?.ok_or_else(|| uncertain(&id))
+                })?;
+            // No Box/device turn is held while entering this SAME owner's Pool transaction.
+            // A failed or controller-only stop retains both canonical handoff claims.
+            let released = self.release_observer_before(&key, Some(until))?;
+            if released.key != key
+                || released.phase != hex_api::BackingPhase::Released
+                || released.devices != pending.spec.devices
+            {
+                return Err(uncertain(&id));
+            }
+            let scope = pending.native_scope.ok_or_else(|| uncertain(&id))?;
+            (pending.spec, Some(scope))
+        } else {
+            (spec, None)
+        };
+        remaining(until)?;
         crate::devices::with_transaction(&self.books, &id, &keys, |transaction| {
-            if transaction.read(&id)?.is_some() {
+            if scope.is_none() && transaction.read(&id)?.is_some() {
                 return Err(Refusal::Exists(id.try_clone()?));
             }
-            match self.create_inner(spec, transaction) {
+            match self.create_inner(spec, scope, transaction, until) {
                 Ok(info) => Ok(info),
                 Err(error) => match transaction.read(&id)? {
                     Some(_) => match self.remove(&id, transaction) {
                         Ok(()) => Err(error),
-                        Err(_) => Err(lifecycle(&id, LifecycleCause::Uncertain)?),
+                        Err(_) => Err(uncertain(&id)),
                     },
                     None => Err(error),
                 },
@@ -905,4 +1041,39 @@ fn write_config(path: &Path, value: &impl serde::Serialize) -> Result<(), Refusa
     File::open(parent)
         .and_then(|file| file.sync_all())
         .map_err(|e| Refusal::os("syncing VM config directory", e))
+}
+
+#[cfg(test)]
+mod io_tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+
+    /// AC-T7.4.1: configured VMM output must accept both streams, and both exact owned
+    /// descriptors close on drop. No Config, guest, process, cgroup, KVM or GPU is created.
+    #[test]
+    fn configured_vmm_output_sinks_accept_bytes_and_close_on_drop() {
+        let shards_api::LaunchIo {
+            mut stdout,
+            mut stderr,
+            gpu_report,
+        } = FirecrackerRuntime::vm_io().unwrap();
+        assert!(gpu_report.is_none());
+        let descriptors = [stdout.as_raw_fd(), stderr.as_raw_fd()];
+        assert_ne!(descriptors[0], descriptors[1]);
+        let output = stdout.write_all(b"configured-vmm-stdout\n");
+        let error = stderr.write_all(b"configured-vmm-stderr\n");
+        drop(stdout);
+        drop(stderr);
+        for descriptor in descriptors {
+            let path = Path::new("/proc/self/fd").join(descriptor.to_string());
+            assert!(
+                matches!(fs::read_link(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+                "owned sink descriptor must close before the control returns"
+            );
+        }
+        assert!(
+            output.is_ok() && error.is_ok(),
+            "stdout={output:?}; stderr={error:?}"
+        );
+    }
 }

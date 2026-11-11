@@ -244,6 +244,7 @@ struct HeldStart<'a> {
     argv: &'a [*const c_char],
     envp: &'a [*const c_char],
     reader: RawFd,
+    report: Option<RawFd>,
     deadline: libc::timespec,
 }
 
@@ -265,8 +266,12 @@ pub fn spawn_held(
     cgroup: BorrowedFd<'_>,
     procs: BorrowedFd<'_>,
     spawn: Spawn,
+    report: Option<OwnedFd>,
     gate_budget: Duration,
 ) -> std::io::Result<HeldChild> {
+    if report.as_ref().is_some_and(|fd| fd.as_raw_fd() < 3) {
+        return Err(rustix::io::Errno::BADF.into());
+    }
     let deadline = held_deadline(gate_budget)?;
     let argv = held_pointers(&spawn.argv)?;
     let envp = held_pointers(&spawn.envp)?;
@@ -300,6 +305,7 @@ pub fn spawn_held(
                 argv: &argv,
                 envp: &envp,
                 reader: reader.as_raw_fd(),
+                report: report.as_ref().map(AsRawFd::as_raw_fd),
                 deadline,
             },
         )
@@ -440,6 +446,8 @@ unsafe fn held_child(start: &HeldStart<'_>, procs: Option<BorrowedFd<'_>>) -> ! 
         stdout.as_raw_fd(),
         stderr.as_raw_fd(),
         start.reader,
+        // None admits no extra descriptor; repeating the existing gate keeps the set fixed-size.
+        start.report.unwrap_or(start.reader),
     ];
     keep.sort_unstable();
     // Closing, not merely CLOEXEC, is necessary here: a concurrently cloned sibling must not keep
@@ -451,7 +459,7 @@ unsafe fn held_child(start: &HeldStart<'_>, procs: Option<BorrowedFd<'_>>) -> ! 
     {
         // SAFETY: same prepared exec arguments as ordinary child; the gate and native envelope
         // have now been established. child does only signal/descriptor/limit/cwd/execve syscalls.
-        let _ = unsafe { child(start.spawn, start.argv, start.envp) };
+        let _ = unsafe { child_with_fd(start.spawn, start.argv, start.envp, start.report) };
     }
     // SAFETY: _exit ends only this child without inherited Rust destructors or atexit handlers.
     unsafe { libc::_exit(127) }
@@ -568,7 +576,7 @@ fn held_errno() -> rustix::io::Errno {
     rustix::io::Errno::from_raw_os_error(unsafe { *libc::__errno_location() })
 }
 
-fn held_close_unexpected(keep: &[RawFd; 4]) -> rustix::io::Result<()> {
+fn held_close_unexpected(keep: &[RawFd; 5]) -> rustix::io::Result<()> {
     let mut first = 3u32;
     for fd in keep {
         let fd = u32::try_from(*fd).map_err(|_| rustix::io::Errno::BADF)?;
@@ -587,7 +595,7 @@ fn held_close_unexpected(keep: &[RawFd; 4]) -> rustix::io::Result<()> {
 }
 
 fn held_close_range(first: u32, last: u32) -> rustix::io::Result<bool> {
-    // SAFETY: no shared fd table (CLONE_FILES absent). These ranges exclude all four retained
+    // SAFETY: no shared fd table (CLONE_FILES absent). These ranges exclude the fixed retained
     // descriptors and 0..=2. Only this no-return child loses the other inherited descriptors.
     if unsafe { libc::syscall(libc::SYS_close_range, first, last, 0u32) } == 0 {
         return Ok(true);
@@ -598,7 +606,7 @@ fn held_close_range(first: u32, last: u32) -> rustix::io::Result<bool> {
     }
 }
 
-fn held_close_by_proc(keep: &[RawFd; 4]) -> rustix::io::Result<()> {
+fn held_close_by_proc(keep: &[RawFd; 5]) -> rustix::io::Result<()> {
     let dir = rustix::fs::open(
         c"/proc/self/fd",
         rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
@@ -723,6 +731,21 @@ fn pointers(strs: &[CString]) -> Vec<*const c_char> {
 /// # Safety
 /// Only in the child of [`clone_into_cgroup`]'s clone, with `argv` and `envp` built by [`pointers`].
 unsafe fn child(spawn: &Spawn, argv: &[*const c_char], envp: &[*const c_char]) -> c_int {
+    // SAFETY: the ordinary caller has the original prepared C strings/stdio contract. None
+    // preserves the complete descriptor sweep; only the held managed path supplies a report FD.
+    unsafe { child_with_fd(spawn, argv, envp, None) }
+}
+
+/// The SAME exec body; its sole optional descriptor is the admitted managed GPU report writer.
+/// # Safety
+/// Same prepared child contract as `child`. Some is only the held child's final owned report FD,
+/// retained by its exact allowlist in its private copied descriptor table, never a caller raw FD.
+unsafe fn child_with_fd(
+    spawn: &Spawn,
+    argv: &[*const c_char],
+    envp: &[*const c_char],
+    report: Option<RawFd>,
+) -> c_int {
     // SAFETY: __errno_location returns this thread's errno: the calling thread's, whose memory the child
     // shares while that thread waits in the vfork, so nothing else reads it meanwhile.
     let errno = || unsafe { *libc::__errno_location() };
@@ -734,6 +757,18 @@ unsafe fn child(spawn: &Spawn, argv: &[*const c_char], envp: &[*const c_char]) -
     }
     if let Err(e) = mark_cloexec_from_3() {
         return e.raw_os_error();
+    }
+    if let Some(report) = report {
+        // SAFETY: spawn_held checked >=3, owns this exact duplicate before clone, and the held
+        // child's private allowlist kept it open. Borrowing changes no ownership or parent flags.
+        let report = unsafe { BorrowedFd::borrow_raw(report) };
+        let flags = match rustix::io::fcntl_getfd(report) {
+            Ok(flags) => flags,
+            Err(error) => return error.raw_os_error(),
+        };
+        if let Err(error) = rustix::io::fcntl_setfd(report, flags & !rustix::io::FdFlags::CLOEXEC) {
+            return error.raw_os_error();
+        }
     }
     if let Err(e) = default_signals() {
         return e.raw_os_error();

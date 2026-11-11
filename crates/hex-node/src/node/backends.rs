@@ -4,9 +4,10 @@ use super::*;
 use hex_api::{
     BackingKey, BackingOffer, Capacity, DeviceId, Execution, LifecycleCause, RuntimeCost,
 };
-use hex_core::record::{NativeRecord, NativeStage};
+use hex_core::record::NativeRecord;
 use hex_runtime::devices::{
-    Books, ManagedLaunch, PoolRecords, Records, SharedCatalog, Transaction, managed_native_scope_id,
+    Books, ManagedLaunch, PoolRecords, Records, SharedCatalog, Transaction, check_managed_report,
+    managed_native_scope_id,
 };
 use hex_runtime::firecracker::FirecrackerRuntime;
 use hex_runtime::guest::GuestRuntime;
@@ -112,14 +113,32 @@ impl Node {
             .filter(|_| !patience.is_zero() && patience != Duration::MAX)
             .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
         let bounds = Self::managed_bounds(record)?;
-        if plan.class() != record.class()?
-            || record.stage() != NativeStage::Creating
-            || record.init().is_some()
-        {
-            return Err(record.refusal(LifecycleCause::Uncertain));
-        }
         self.backend(plan.class())?
             .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+        let shards_api::LaunchIo {
+            stdout,
+            stderr,
+            gpu_report,
+        } = io;
+        let request = match plan {
+            ManagedLaunch::Shards(prepared) => prepared.gpu_report_request(),
+            ManagedLaunch::Firecracker { .. } => None,
+        };
+        let until = check_managed_report(
+            Some(&self.attachments),
+            record,
+            plan,
+            gpu_report.is_some(),
+            until,
+        )?;
+        let report = match (request, gpu_report) {
+            (Some(request), Some(writer)) => Some(process::ManagedReport {
+                scope: request.scope(),
+                writer,
+            }),
+            (None, None) => None,
+            _ => return Err(record.refusal(LifecycleCause::Uncertain)),
+        };
         let owned = match plan {
             ManagedLaunch::Shards(prepared) => Some(self.shards_program(prepared)?),
             ManagedLaunch::Firecracker { .. } => None,
@@ -138,8 +157,8 @@ impl Node {
             .reserve_managed(record, cgroup, plan.vsock())?;
         let stdio = Stdio {
             stdin: None,
-            stdout: Some(io.stdout),
-            stderr: Some(io.stderr),
+            stdout: Some(stdout),
+            stderr: Some(stderr),
             ..Stdio::default()
         };
         let left = until.saturating_duration_since(Instant::now());
@@ -147,7 +166,7 @@ impl Node {
             return Err(record.refusal(LifecycleCause::Uncertain));
         }
         self.supervisor
-            .bind_managed(&native, program, stdio, left, publish)
+            .bind_managed(&native, program, stdio, report, left, publish)
     }
 
     fn attach_managed(
@@ -245,14 +264,29 @@ impl Node {
                 "node backends are already initialized".into(),
             ));
         }
+        if let Some(guest) = &shards {
+            guest.bind_books(self.backend_books())?;
+        }
+        let (_, retained_pools) =
+            self.preflight_configured(firecracker.as_deref(), shards.as_deref())?;
         let (vm_root, lease) = if firecracker.is_some() || shards.is_some() {
             let (root, lease) = self.initialize_vm_root()?;
             (Some(root), Some(lease))
         } else {
             (None, None)
         };
-        if let Some(guest) = &shards {
-            guest.bind_books(self.backend_books())?;
+        if let Some(backend) = &firecracker {
+            backend.initialize_native()?;
+            backend.prepare_backing()?;
+        }
+        if retained_pools
+            .iter()
+            .any(|record| record.execution == Execution::ShardsShared)
+        {
+            shards
+                .as_ref()
+                .ok_or_else(|| missing(Class::Shards))?
+                .prepare_backing()?;
         }
         for (class, backend) in [
             (
@@ -298,6 +332,83 @@ impl Node {
             })
     }
 
+    fn preflight_configured(
+        &self,
+        firecracker: Option<&FirecrackerRuntime>,
+        shards: Option<&GuestRuntime>,
+    ) -> Result<(Records, PoolRecords), Refusal> {
+        let records = self.store.retained_records()?;
+        let pools = self.store.all_pools()?;
+        crate::recorded::preflight_records(&records, &pools, Some(self.attachments.as_ref()))?;
+        for (id, record) in &records {
+            let record = record.as_ref().map_err(|_| uncertain(id))?;
+            match record.spec.backend_class()? {
+                Class::Firecracker => firecracker
+                    .ok_or_else(|| uncertain(id))?
+                    .preflight_record(record)?,
+                Class::Shards => shards.ok_or_else(|| uncertain(id))?.preflight_box(record)?,
+                Class::Process | Class::Oci => {}
+            }
+        }
+        for record in &pools {
+            let refused = || Refusal::Backing {
+                key: record.key,
+                cause: LifecycleCause::Uncertain,
+            };
+            match record.execution {
+                Execution::Firecracker => {
+                    firecracker.ok_or_else(refused)?.preflight_backing(record)?
+                }
+                Execution::ShardsShared | Execution::ShardsDedicated => {
+                    shards.ok_or_else(refused)?.preflight_backing(record)?
+                }
+                Execution::Native => return Err(refused()),
+            }
+        }
+        Ok((records, pools))
+    }
+
+    pub(super) fn retained_preflight(&self) -> Result<(Records, PoolRecords), Refusal> {
+        let backends = self.backends.get();
+        self.preflight_configured(
+            backends.and_then(|backends| backends.firecracker.as_deref()),
+            backends.and_then(|backends| backends.shards.as_deref()),
+        )
+    }
+
+    /// Read-only whole-owner barrier, also usable by CLI before any explicit pool preparation.
+    pub fn preflight_recovery(&self) -> Result<(), Refusal> {
+        self.retained_preflight().map(|_| ())
+    }
+
+    pub(super) fn recover_pools(
+        &self,
+        pools: &[hex_core::record::PoolRecord],
+    ) -> Result<(), Refusal> {
+        for record in pools {
+            let refused = || Refusal::Backing {
+                key: record.key,
+                cause: LifecycleCause::Uncertain,
+            };
+            match record.execution {
+                Execution::Firecracker => self
+                    .backends
+                    .get()
+                    .and_then(|backends| backends.firecracker.as_ref())
+                    .ok_or_else(refused)?
+                    .recover_backing()?,
+                Execution::ShardsShared | Execution::ShardsDedicated => self
+                    .backends
+                    .get()
+                    .and_then(|backends| backends.shards.as_ref())
+                    .ok_or_else(refused)?
+                    .recover_backing()?,
+                Execution::Native => return Err(refused()),
+            }
+        }
+        Ok(())
+    }
+
     fn native_authority(&self) -> Result<String, Refusal> {
         let mut authority = String::new();
         let bytes = "node:"
@@ -324,10 +435,45 @@ impl Node {
             Refusal::Broken("the native physical provider is not initialized".into())
         })?;
         let authority = self.native_authority()?;
-        provider
+        let mut report = provider
             .lock()
             .map_err(|_| Refusal::Broken("physical facts provider lock poisoned".into()))?
-            .physical_report(authority)
+            .physical_report(authority)?;
+        if let Some(backend) = self
+            .backends
+            .get()
+            .and_then(|backends| backends.firecracker.as_ref())
+        {
+            let observations = match backend.physical_observations() {
+                Ok(observations) => observations,
+                Err(refusal) => {
+                    tracing::warn!(target: "hex.node", event = "gpu.observation.unavailable", %refusal);
+                    Vec::new()
+                }
+            };
+            report
+                .devices
+                .try_reserve_exact(observations.len())
+                .map_err(|_| Refusal::Exhausted {
+                    what: "current native observer facts",
+                    bound: hex_api::MAX_DEVICES,
+                })?;
+            for observed in observations {
+                if let Some(native) = report
+                    .devices
+                    .iter_mut()
+                    .find(|native| native.info.id == observed.info.id)
+                {
+                    // A real VFIO assignment/guest driver is the current provider for this exact
+                    // host ID. Stale host-driver inventory cannot replace its independent counters.
+                    *native = observed;
+                } else {
+                    report.devices.push(observed);
+                }
+            }
+        }
+        report.check()?;
+        Ok(report)
     }
 
     /// Dispatch from the retained configuration/generation before entering its method/native turn.

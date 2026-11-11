@@ -132,6 +132,8 @@ pub(super) struct Passthrough {
 #[serde(rename_all = "kebab-case")]
 pub(super) struct VmConfig<'a> {
     boot_source: BootSource<'a>,
+    // Pinned resources::VmmConfig requires this Vec even for an initrd-only VM; it has no default.
+    drives: [(); 0],
     machine_config: MachineConfig,
     vsock: Vsock<'a>,
     device_passthrough: &'a [Passthrough],
@@ -348,25 +350,59 @@ impl Config {
                 "this endpoint executes only explicit Firecracker payloads",
             ));
         }
-        let count = self
-            .guest(spec)?
+        self.machine_guest(self.guest(spec)?, vsock, devices)
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn machine_guest<'a>(
+        &'a self,
+        guest: hex_api::CapacityResources,
+        vsock: &'a Path,
+        devices: &'a [Passthrough],
+    ) -> Result<VmConfig<'a>, Refusal> {
+        self.check()?;
+        if !self.cost.ceiling.holds(guest)
+            || !guest.holds(self.cost.floor)
+            || guest.cpu_milli.checked_rem(1000) != Some(0)
+            || guest.mem_bytes.checked_rem(1 << 20) != Some(0)
+        {
+            return Err(invalid(
+                "guest envelope differs from configured native units/bounds",
+            ));
+        }
+        let count = guest
             .cpu_milli
             .checked_div(1000)
             .and_then(|n| u8::try_from(n).ok())
             .filter(|n| *n > 0 && *n <= 32)
             .ok_or_else(|| invalid("vCPU count exceeds Firecracker's pinned 1..=32 API bound"))?;
+        let prefix = "console=ttyS0 panic=-1 hex.firecracker-ready hex.firecracker-ready-ms=";
+        let mut boot_args = String::new();
+        let bound = prefix
+            .len()
+            .checked_add(10)
+            .ok_or_else(|| invalid("boot argument size overflows"))?;
+        boot_args
+            .try_reserve_exact(bound)
+            .map_err(|_| invalid("boot argument allocation refused"))?;
+        boot_args.push_str(prefix);
+        use std::fmt::Write as _;
+        write!(&mut boot_args, "{}", self.boot_millis()?)
+            .map_err(|_| invalid("boot budget cannot be encoded"))?;
         Ok(VmConfig {
             boot_source: BootSource {
                 kernel_image_path: &self.kernel,
                 initrd_path: &self.initrd,
-                boot_args: format!(
-                    "console=ttyS0 panic=-1 hex.firecracker-ready hex.firecracker-ready-ms={}",
-                    self.boot_millis()?
-                ),
+                boot_args,
             },
+            drives: [],
             machine_config: MachineConfig {
                 vcpu_count: count,
-                mem_size_mib: self.machine_memory(spec)?,
+                mem_size_mib: guest
+                    .mem_bytes
+                    .checked_div(1 << 20)
+                    .filter(|mib| *mib > 0)
+                    .ok_or_else(|| invalid("guest memory must contain complete positive MiB"))?,
                 smt: false,
             },
             // CID3 is the first guest CID after reserved hypervisor0/local1/host2 (vsock(7)).
@@ -507,7 +543,6 @@ mod tests {
 
     fn spec() -> BoxSpec {
         BoxSpec {
-            route: None,
             id: BoxId::new("fixture").unwrap(),
             bounds: Bounds {
                 cpu_max_milli: Some(1500),
@@ -524,6 +559,7 @@ mod tests {
             })),
             owner: None,
             devices: Vec::new(),
+            route: None,
             allocation: Some(
                 cost()
                     .allocate(hex_api::CapacityResources {
@@ -563,6 +599,31 @@ mod tests {
                 .contains("hex.firecracker-ready-ms=3000")
         );
         assert_eq!(value["vsock"]["uds_path"], "/private/owned/vsock");
+    }
+
+    /// AC-T7.4.1: pinned FC500ef/6b1a resources.rs:98-118 requires drives with no serde default.
+    /// Native QA's actual VMM parser rejected the omitted field before any guest boot.
+    #[test]
+    fn initrd_only_config_satisfies_the_pinned_required_drives_schema() {
+        #[derive(Deserialize)]
+        struct PinnedRequired {
+            #[serde(rename = "boot-source")]
+            _boot_source: serde::de::IgnoredAny,
+            drives: Vec<serde::de::IgnoredAny>,
+        }
+        let config = config();
+        let spec = spec();
+        let value = serde_json::to_value(
+            config
+                .machine(&spec, Path::new("/private/owned/vsock"), &[])
+                .unwrap(),
+        )
+        .unwrap();
+        let parsed: PinnedRequired = serde_json::from_value(value.clone()).unwrap();
+        assert!(parsed.drives.is_empty());
+        let mut omitted = value;
+        omitted.as_object_mut().unwrap().remove("drives");
+        assert!(serde_json::from_value::<PinnedRequired>(omitted).is_err());
     }
 
     /// AC-T7.4.1: deadline precision/overflow and missing finite reservations refuse as data.

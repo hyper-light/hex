@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, BoxSpec, DeviceId, DeviceInfo, DeviceKind, Refusal};
-use hex_core::record::{BoxRecord, NativeRecord, PoolRecord};
+use hex_core::record::{BoxRecord, NativeRecord, NativeStage, PoolRecord};
 
 /// The already initialized native adapter supplies its actual payload platform. This helper
 /// describes native execution only; it never substitutes a guest for an OCI implementation.
@@ -233,6 +233,119 @@ impl ManagedLaunch<'_> {
             Self::Firecracker { vsock, .. } => vsock,
         }
     }
+}
+
+/// Shared pre-effect guard for the existing Node/Recorded native transaction consumers. The
+/// writer's final OS duplication/rendering stays at its native launcher, never in this metadata.
+pub fn check_managed_report(
+    catalog: Option<&Catalog>,
+    record: NativeRecord<'_>,
+    plan: &ManagedLaunch<'_>,
+    writer: bool,
+    deadline: Instant,
+) -> Result<Instant, Refusal> {
+    let refused = || record.refusal(hex_api::LifecycleCause::Uncertain);
+    match record {
+        NativeRecord::Box(record) => record.spec.check()?,
+        NativeRecord::Pool(record) => record.check()?,
+    }
+    if plan.class() != record.class()?
+        || record.stage() != NativeStage::Creating
+        || record.init().is_some()
+        || record.scope().is_none()
+    {
+        return Err(refused());
+    }
+    let request = match plan {
+        ManagedLaunch::Shards(prepared) => prepared.gpu_report_request(),
+        ManagedLaunch::Firecracker { .. } => None,
+    };
+    let required = matches!(plan, ManagedLaunch::Shards(_)) && !record.devices().is_empty();
+    check_report_scope(
+        record,
+        request.as_ref().map(|request| request.scope()),
+        writer,
+        required,
+    )?;
+    let deadline = if let Some(request) = request {
+        check_report_selection(catalog.ok_or_else(refused)?, record, request.selected())?;
+        deadline.min(request.deadline())
+    } else {
+        deadline
+    };
+    if deadline <= Instant::now() {
+        return Err(record.refusal(hex_api::LifecycleCause::Pending));
+    }
+    Ok(deadline)
+}
+
+fn check_report_scope(
+    record: NativeRecord<'_>,
+    requested: Option<[u8; 16]>,
+    writer: bool,
+    required: bool,
+) -> Result<(), Refusal> {
+    if requested.is_some() != writer
+        || requested.is_some() != required
+        || requested.is_some_and(|requested| {
+            record
+                .scope()
+                .is_none_or(|scope| *scope.bytes() != requested)
+        })
+    {
+        return Err(record.refusal(hex_api::LifecycleCause::Uncertain));
+    }
+    Ok(())
+}
+
+fn check_report_selection(
+    catalog: &Catalog,
+    record: NativeRecord<'_>,
+    selected: &[shards_api::PhysicalGpu],
+) -> Result<(), Refusal> {
+    let refused = || record.refusal(hex_api::LifecycleCause::Uncertain);
+    shards_api::physical::check_selection(selected).map_err(|_| refused())?;
+    if selected.len() != record.devices().len() {
+        return Err(refused());
+    }
+    let mut indexed = Vec::new();
+    indexed
+        .try_reserve_exact(catalog.entries().len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "managed report catalog index",
+            bound: hex_api::MAX_DEVICES,
+        })?;
+    indexed.extend(catalog.entries());
+    indexed.sort_unstable_by_key(|entry| entry.info.id);
+    let mut expected = Vec::new();
+    expected
+        .try_reserve_exact(record.devices().len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "managed report physical selection",
+            bound: hex_api::MAX_DEVICES,
+        })?;
+    for id in record.devices() {
+        let entry = indexed
+            .binary_search_by_key(id, |entry| entry.info.id)
+            .ok()
+            .and_then(|at| indexed.get(at))
+            .ok_or_else(refused)?;
+        let Some(Binding::ShardsGpu { physical }) = entry.binding(Route::ShardsGpu) else {
+            return Err(refused());
+        };
+        expected.push(*physical);
+    }
+    expected.sort_unstable();
+    if expected
+        .windows(2)
+        .any(|pair| matches!(pair, [a,b] if a == b))
+        || selected
+            .iter()
+            .any(|physical| expected.binary_search(physical).is_err())
+    {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 /// The existing native record owner, shared by OCI, Firecracker and Shards. The callback is
@@ -1270,5 +1383,66 @@ mod authority_tests {
             let text = format!("hex-devices-1\ngpu\t1\tfixture\t4096\tshards-gpu\t{source}\t\n");
             assert!(Catalog::parse(text.as_bytes()).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+    use hex_api::{
+        BackingKey, BackingPhase, CapacityResources, Execution, LifecycleCause, RuntimeCost,
+    };
+    use hex_core::record::{PoolRecord, RECORD_VERSION};
+
+    #[test]
+    fn managed_report_scope_and_writer_parity_refuse_before_native_effects() {
+        let guest = CapacityResources {
+            cpu_milli: 1_000,
+            mem_bytes: 64 << 20,
+            disk_bytes: 0,
+        };
+        let cost = RuntimeCost {
+            id: [1; 32],
+            floor: guest,
+            ceiling: guest,
+            quantum: CapacityResources {
+                cpu_milli: 1_000,
+                mem_bytes: 1,
+                disk_bytes: 1,
+            },
+            guest_overhead: CapacityResources::default(),
+            overhead: CapacityResources::default(),
+        };
+        let pool = PoolRecord {
+            version: RECORD_VERSION,
+            key: BackingKey {
+                pool: [2; 32],
+                generation: [3; 16],
+            },
+            execution: Execution::ShardsDedicated,
+            cost,
+            allocation: Some(cost.allocate(CapacityResources::default()).unwrap()),
+            devices: vec![DeviceId {
+                kind: hex_api::DeviceKind::Gpu,
+                key: 7,
+            }],
+            phase: BackingPhase::Granted,
+            init: None,
+            exit: None,
+        };
+        let record = NativeRecord::Pool(&pool);
+        check_report_scope(record, Some([3; 16]), true, true).unwrap();
+        for (scope, writer, required) in [
+            (Some([4; 16]), true, true),
+            (Some([3; 16]), false, true),
+            (None, true, false),
+            (None, false, true),
+        ] {
+            assert!(
+                matches!(check_report_scope(record, scope, writer, required), Err(Refusal::Backing { key, cause:LifecycleCause::Uncertain }) if key == pool.key)
+            );
+        }
+        // CPU/Firecracker's separate factual RPC path supplies no Shards writer or request.
+        check_report_scope(record, None, false, false).unwrap();
     }
 }
