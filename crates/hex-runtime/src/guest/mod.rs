@@ -1272,7 +1272,7 @@ impl<P: Runtime> Runtime for WithGuest<P> {
                         if !native.devices.is_empty() {
                             let actual = self.oci.authority()?.capacity()?;
                             actual.check()?;
-                            devices::normalize_capacity_devices(
+                            crate::devices::normalize_capacity_devices(
                                 &mut native.devices,
                                 &actual.devices,
                             )?;
