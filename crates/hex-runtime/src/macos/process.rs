@@ -1916,6 +1916,10 @@ fn killpg(pgid: i32, signal: i32) -> Result<bool, Refusal> {
 }
 
 #[cfg(test)]
+#[path = "../../../../docs/research/measurements/hex-complete-lifecycle/macos_scope_completion_root005_tests.rs"]
+mod scope_completion_tests;
+
+#[cfg(test)]
 mod storage_tests {
     use super::*;
 

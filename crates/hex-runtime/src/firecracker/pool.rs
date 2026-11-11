@@ -84,126 +84,6 @@ pub(super) fn observer_configuration(
     Ok(hash.finalize().into())
 }
 
-#[cfg(test)]
-pub(super) mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    pub(in super::super) fn config() -> Config {
-        let guest = CapacityResources {
-            cpu_milli: 1_000,
-            mem_bytes: 64 << 20,
-            disk_bytes: 0,
-        };
-        Config {
-            binary: "/fixture/firecracker".into(),
-            binary_sha256: [1; 32],
-            kernel: "/fixture/kernel".into(),
-            initrd: "/fixture/initrd".into(),
-            state_dir: "/fixture/state".into(),
-            pool_id: "configured fixture pool".into(),
-            boot_timeout: Duration::from_secs(3),
-            stop_timeout: Duration::from_secs(1),
-            operation_timeout: Duration::from_secs(1),
-            cost_evidence: "/fixture/evidence".into(),
-            cost: RuntimeCost {
-                id: [2; 32],
-                floor: guest,
-                ceiling: CapacityResources {
-                    cpu_milli: 2_000,
-                    mem_bytes: 128 << 20,
-                    disk_bytes: 0,
-                },
-                quantum: CapacityResources {
-                    cpu_milli: 1_000,
-                    mem_bytes: 1 << 20,
-                    disk_bytes: 1,
-                },
-                guest_overhead: CapacityResources {
-                    mem_bytes: 3 << 20,
-                    ..CapacityResources::default()
-                },
-                overhead: CapacityResources {
-                    cpu_milli: 100,
-                    mem_bytes: 5 << 20,
-                    disk_bytes: 0,
-                },
-            },
-            stage_limits: hex_core::stream::files::Limits {
-                entries: 10,
-                bytes: 1 << 20,
-                path: 100,
-            },
-        }
-    }
-
-    /// AC-T7.4.1: a metadata-only cold observer's fixed charge carries the full physical set;
-    /// changing config, executable or a selected identity cannot reuse its configuration key.
-    #[test]
-    fn cold_observer_configuration_binds_full_claims_binary_and_fixed_profile() {
-        let mut config = config();
-        let claims = [
-            DeviceId {
-                kind: DeviceKind::Gpu,
-                key: 1,
-            },
-            DeviceId {
-                kind: DeviceKind::Gpu,
-                key: 2,
-            },
-        ];
-        let original = observer_configuration(&config, &claims).unwrap();
-        assert_ne!(
-            original,
-            observer_configuration(&config, &claims[..1]).unwrap()
-        );
-        config.binary_sha256 = [3; 32];
-        assert_ne!(original, observer_configuration(&config, &claims).unwrap());
-        config.binary_sha256 = [1; 32];
-        config.cost.overhead.mem_bytes += 1 << 20;
-        assert_ne!(original, observer_configuration(&config, &claims).unwrap());
-        assert!(observer_configuration(&config, &[claims[1], claims[0]]).is_err());
-        assert!(observer_configuration(&config, &[claims[0], claims[0]]).is_err());
-        assert!(
-            observer_configuration(
-                &config,
-                &[DeviceId {
-                    kind: DeviceKind::Vfio,
-                    key: 1
-                }]
-            )
-            .is_err()
-        );
-    }
-
-    /// AC-T7.4.1: the configured guest consumes its granted envelope, with one host allowance and
-    /// no invented BoxSpec/row. These synthetic unit values are not measured runtime costs.
-    #[test]
-    fn cold_observer_machine_uses_granted_guest_envelope_and_charges_host_once() {
-        let config = config();
-        let cost = observer_cost(&config).unwrap();
-        assert_eq!(cost.floor, cost.ceiling);
-        let allocation = cost.allocate(CapacityResources::default()).unwrap();
-        let value = serde_json::to_value(
-            config
-                .machine_guest(
-                    allocation.guest().unwrap(),
-                    Path::new("/fixture/vsock"),
-                    &[],
-                )
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(value["machine-config"]["vcpu_count"], 1);
-        assert_eq!(value["machine-config"]["mem_size_mib"], 64);
-        assert_eq!(allocation.resources.cpu_milli, 1_100);
-        assert_eq!(allocation.resources.mem_bytes, 69 << 20);
-        let mut malformed = config;
-        malformed.cost.floor.cpu_milli = 500;
-        assert!(observer_cost(&malformed).is_err());
-    }
-}
-
 impl FirecrackerRuntime {
     fn observer_claims(&self) -> Result<Vec<DeviceId>, Refusal> {
         let mut claims = Vec::new();
@@ -732,5 +612,125 @@ impl FirecrackerRuntime {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    pub(in super::super) fn config() -> Config {
+        let guest = CapacityResources {
+            cpu_milli: 1_000,
+            mem_bytes: 64 << 20,
+            disk_bytes: 0,
+        };
+        Config {
+            binary: "/fixture/firecracker".into(),
+            binary_sha256: [1; 32],
+            kernel: "/fixture/kernel".into(),
+            initrd: "/fixture/initrd".into(),
+            state_dir: "/fixture/state".into(),
+            pool_id: "configured fixture pool".into(),
+            boot_timeout: Duration::from_secs(3),
+            stop_timeout: Duration::from_secs(1),
+            operation_timeout: Duration::from_secs(1),
+            cost_evidence: "/fixture/evidence".into(),
+            cost: RuntimeCost {
+                id: [2; 32],
+                floor: guest,
+                ceiling: CapacityResources {
+                    cpu_milli: 2_000,
+                    mem_bytes: 128 << 20,
+                    disk_bytes: 0,
+                },
+                quantum: CapacityResources {
+                    cpu_milli: 1_000,
+                    mem_bytes: 1 << 20,
+                    disk_bytes: 1,
+                },
+                guest_overhead: CapacityResources {
+                    mem_bytes: 3 << 20,
+                    ..CapacityResources::default()
+                },
+                overhead: CapacityResources {
+                    cpu_milli: 100,
+                    mem_bytes: 5 << 20,
+                    disk_bytes: 0,
+                },
+            },
+            stage_limits: hex_core::stream::files::Limits {
+                entries: 10,
+                bytes: 1 << 20,
+                path: 100,
+            },
+        }
+    }
+
+    /// AC-T7.4.1: a metadata-only cold observer's fixed charge carries the full physical set;
+    /// changing config, executable or a selected identity cannot reuse its configuration key.
+    #[test]
+    fn cold_observer_configuration_binds_full_claims_binary_and_fixed_profile() {
+        let mut config = config();
+        let claims = [
+            DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 1,
+            },
+            DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 2,
+            },
+        ];
+        let original = observer_configuration(&config, &claims).unwrap();
+        assert_ne!(
+            original,
+            observer_configuration(&config, &claims[..1]).unwrap()
+        );
+        config.binary_sha256 = [3; 32];
+        assert_ne!(original, observer_configuration(&config, &claims).unwrap());
+        config.binary_sha256 = [1; 32];
+        config.cost.overhead.mem_bytes += 1 << 20;
+        assert_ne!(original, observer_configuration(&config, &claims).unwrap());
+        assert!(observer_configuration(&config, &[claims[1], claims[0]]).is_err());
+        assert!(observer_configuration(&config, &[claims[0], claims[0]]).is_err());
+        assert!(
+            observer_configuration(
+                &config,
+                &[DeviceId {
+                    kind: DeviceKind::Vfio,
+                    key: 1
+                }]
+            )
+            .is_err()
+        );
+    }
+
+    /// AC-T7.4.1: the configured guest consumes its granted envelope, with one host allowance and
+    /// no invented BoxSpec/row. These synthetic unit values are not measured runtime costs.
+    #[test]
+    fn cold_observer_machine_uses_granted_guest_envelope_and_charges_host_once() {
+        let config = config();
+        let cost = observer_cost(&config).unwrap();
+        assert_eq!(cost.floor, cost.ceiling);
+        let allocation = cost.allocate(CapacityResources::default()).unwrap();
+        let value = serde_json::to_value(
+            config
+                .machine_guest(
+                    allocation.guest().unwrap(),
+                    Path::new("/fixture/vsock"),
+                    &[],
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["machine-config"]["vcpu_count"], 1);
+        assert_eq!(value["machine-config"]["mem_size_mib"], 64);
+        assert_eq!(allocation.resources.cpu_milli, 1_100);
+        assert_eq!(allocation.resources.mem_bytes, 69 << 20);
+        let mut malformed = config;
+        malformed.cost.floor.cpu_milli = 500;
+        assert!(observer_cost(&malformed).is_err());
     }
 }

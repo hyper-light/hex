@@ -551,6 +551,10 @@ mod tests {
         .unwrap();
         let runtime = GuestRuntime::new(standalone.clone(), config)
             .recorded_at(dir.path().join("guest"))
+            .with_runtime_paths(
+                shards_api::RuntimePaths::new(dir.path().join("cache"), dir.path().join("home"))
+                    .unwrap(),
+            )
             .with_runtime_cost(allocation.cost)
             .unwrap()
             .with_gpu_catalog(triomphe::Arc::try_new(catalog).unwrap())
@@ -652,6 +656,10 @@ mod tests {
         let catalog = devices::Catalog::parse(b"hex-devices-1\ngpu\t256\tunmeasured\t777\tshards-gpu\tpci:0000:01:00.0\t\ngpu\t512\tunmeasured\t777\tshards-gpu\tpci:0000:02:00.0\t\n").unwrap();
         let runtime = GuestRuntime::new(standalone.clone(), config)
             .recorded_at(dir.path().join("guest"))
+            .with_runtime_paths(
+                shards_api::RuntimePaths::new(dir.path().join("cache"), dir.path().join("home"))
+                    .unwrap(),
+            )
             .with_runtime_cost(allocation.cost)
             .unwrap()
             .with_gpu_catalog(triomphe::Arc::try_new(catalog).unwrap())

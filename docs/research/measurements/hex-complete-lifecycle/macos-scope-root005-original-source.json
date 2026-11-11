@@ -1,0 +1,36 @@
+{
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "fixed_root_production": "005f3a23bbfb173718a520160a48c83f66ca56d3",
+  "isolated_branch": "cp/t7-lifecycle-cc2-root005-original-v1",
+  "old_original_pin_preserved": "cc2bfd1445e414fe9f491fc5eb8fae251a4feb5e",
+  "old_original_leaf_sha256": "80c74c8bdf7ccafc064a06874c61fed910e08ff25633c391a5021bb2b6b66a58",
+  "status": "SOURCE ONLY: compiler/Clippy/tests/native all UNRUN; no lane dispatch",
+  "kernel_peer_pid": "UNAVAILABLE in exactROOT005, no sys/unsafe imported. UserACK test-only direct Child.id+nativebirth and immutable controller actual child-id forwarding on same private connection. Not same proof as cc2 kernelpeer.",
+  "compatibility": [
+    "Scope::new(record,Ownership::Child) instead of future CpuControl/baseline",
+    "same direct ProcessBox::prepared/Shared/BoxProc current signatures",
+    "same original setup/lifeline/native facts/cleanup-before-oracle/deadline",
+    "kernel connected peerPID unavailable; parent native Child receipt plus controller actual spawned Child receipt joins exact birth/group/session/sameUID"
+  ],
+  "production_process_sha256_before": "47514b6f25472a3f96a1595de7b11c8f9ce45d63faaa25dece57edb4dbe9fab1",
+  "production_process_unchanged_except_cfg_test_registration": true,
+  "native_symbols_added": [],
+  "no_other_source_or_metadata_changes": true,
+  "remaining": "ROOT matched compile and admitted native original/control. Production remedy remains held until actual original. Missing cleanup absence =>INCOMPLETE, not semanticred/green.",
+  "source_hashes": {
+    "crates/hex-runtime/src/macos/process.rs": {
+      "bytes": 81063,
+      "sha256": "67104fd21a9a75a9417272260004c1cc149c40b48b558b600816c5f92484d103"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/macos_scope_completion_root005_tests.rs": {
+      "bytes": 15908,
+      "sha256": "5b021ba52a4652fa9ec8bea376457b557d9decbb30c15096bdd1e8bf9aaad217"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/macos-scope-root005-original.md": {
+      "bytes": 4472,
+      "sha256": "903d84a70c5ad4777be1f72bff6d25b1189fc68fe140f7a98cd9119a938c45b1"
+    }
+  }
+}

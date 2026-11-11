@@ -1,0 +1,16 @@
+{
+  "role": "coordinator",
+  "base": "c6baf52db5379b9edfa1d037ccc70e684cda8958",
+  "pins": [
+    "b1f7a19d2524eaad61f9502ddd64239fde965ac3",
+    "baa61939599619635ff11df5848bb3166cd22ee6",
+    "c8f9184d8661d88374dde8ab645809f5f57d27fa"
+  ],
+  "review": "Complete module-move diff and byte identity; exact two fixture path insertions; full native test leaf and diff to preservedcc2. Only test/registration/guide changes, no production semantics, no new sys/unsafe/2ef.",
+  "checks": "Source only; compiler/test/native UNRUN for these deltas. No failing oracle changed. Native original uses Child receipt/birth and sameUID, kernelpeerPID unavailable.",
+  "sources": {
+    "crates/hex-runtime/src/firecracker/pool.rs": "f693b21f9a08b213b2200f3d90bf25d540ddc7bc3c07527f6cadc584b223b031",
+    "crates/hex-runtime/src/guest/gpu_pool.rs": "66e995a000906c9bf13325a79c63f5e8a2d701af93d2595a30e22c02df4bb467",
+    "crates/hex-runtime/src/macos/process.rs": "67104fd21a9a75a9417272260004c1cc149c40b48b558b600816c5f92484d103"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "053bb929f3a8b311b5080379ded1ae0cb6e8ce1f",
+  "actual_source": "d87bcf9b6a6bb6d6e669d5179b666a2ef38041c4",
+  "actual_log_sha256": "213e823e9c31af49591c61e9d4a3016d0dcde7dee85c13c7d53e040fa6b6a466",
+  "change": "Move entire cfg(test) module below existing production impl. No body/visibility/logic/oracle changes. Old8d1 pool blob exact-equal to actualROOTd87 before move.",
+  "test_module_sha256": "a62a8f821b24c556cd2ba7a653f677a7c67a417eda8d5afc1867ea2c432e8a40",
+  "body_before_after_equal": true,
+  "source_sha256": "f693b21f9a08b213b2200f3d90bf25d540ddc7bc3c07527f6cadc584b223b031",
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compiler": "UNRUN",
+    "tests": "UNRUN/no pass replay",
+    "native": 0,
+    "dispatches": 0
+  },
+  "preserved": "Production items remain byte-identical after excluding moved module; independent keyed CPU remedy and dirty Node draft are NOT included. No lint allowance/dependency added."
+}
