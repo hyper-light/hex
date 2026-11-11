@@ -678,7 +678,14 @@ impl Service {
         }
         let order = order::Order::open_with_peers(&config.state.join("transport"), &routes)?;
         let epoch = order.epoch;
-        let cache = cache::Cache::open(&config.state.join("peers"), &routes, &mut cluster)?;
+        let cache = cache::Cache::open(
+            &config.state.join("peers"),
+            &routes,
+            &mut cluster,
+            |aside| {
+                report(aside.peer().unwrap_or(id), &aside.to_string());
+            },
+        )?;
         let mut classes = Classes::NONE;
         let mut backends = Vec::new();
         for backend in &config.backends {
