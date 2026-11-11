@@ -1,0 +1,27 @@
+{
+  "original_source": "60dedf289e232f993627c582ff9b8ba3bfcccaf6",
+  "compiler": "Mac arm64 Rust1.99.1 feature strict; exit101,0 tests executed",
+  "log": {
+    "bytes": 5543,
+    "sha256": "fd8bb5537eb24a59b181690a57b8b7ff11350f4bb3f26ee076c31ee6c3609694"
+  },
+  "cause": "Local BoxProc binding process shadows private helper process<T>; E0618 at1178/1202 and derivativeE0282",
+  "port": "Rename only private helper and four calls to with_process; its body, local native owners and all controls unchanged",
+  "before_sha256": "976902dddf4a5b4dfe218344ecd655ff631b960dd0f9a2d22a26a6475fd80ff0",
+  "after_sha256": "eb9b909214fc3627340351082346905a93e8b9768419e6536c82a6a8aecad201",
+  "old_reconstructed_from_new_by_token_rename": true,
+  "lane_original_04ece338_untouched": true,
+  "source_owner_notification": "agents_send attempted for exact compiler cause, REJECTED503/custody not accepted; not delivered",
+  "proof": {
+    "raw_bytes": 382558,
+    "raw_sha256": "1458973f0de8ab1c7eba57c0aa1ee0bda6e7e71383e449583167aaba04b42d33",
+    "all_members_source_archives_verified": true,
+    "all_compiler_log_read": true,
+    "driver33852_and_cargo34271_absent": true,
+    "owned_group34271_absent": true,
+    "source_changes": [],
+    "temp_entries": 0,
+    "native": 0
+  },
+  "remaining": "All8 new pure controls and feature/default strict remain unexecuted until matched compilation; native dispatch/foreignCONT/worker/fullhelper held. Conditional harness metadata-query failure cleanup needs completion before any later run; original normal PS query succeeded and no such branch entered."
+}

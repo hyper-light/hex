@@ -736,7 +736,7 @@ fn entry(input: EntryInput, scratch: &mut EntryScratch) -> Result<(), Fault> {
     }
 }
 
-fn process<T>(
+fn with_process<T>(
     receipt: &mut Receipt,
     call: impl FnOnce(&mut crate::macos::proc::BoxProc) -> Result<T, Fault>,
 ) -> Result<T, Fault> {
@@ -776,7 +776,7 @@ fn cleanup(receipt: &mut Receipt, expiry: Duration) -> Result<Exit, Fault> {
             native::MemberSignal::Kill,
         )?;
     }
-    let exit = process(receipt, |p| {
+    let exit = with_process(receipt, |p| {
         loop {
             if let Some(exit) = p.native_poll().map_err(Fault::Process)? {
                 break Ok(exit);
@@ -785,7 +785,7 @@ fn cleanup(receipt: &mut Receipt, expiry: Duration) -> Result<Exit, Fault> {
                 .map_err(Fault::Process)?;
         }
     })?;
-    process(receipt, |p| p.finalize_retained().map_err(Fault::Process))?;
+    with_process(receipt, |p| p.finalize_retained().map_err(Fault::Process))?;
     receipt.reaped = true;
     Ok(exit)
 }
@@ -1175,7 +1175,8 @@ pub fn run(
                 input.journal,
                 expiry,
             )?;
-            if let Some(exit) = process(&mut receipt, |p| p.native_poll().map_err(Fault::Process))?
+            if let Some(exit) =
+                with_process(&mut receipt, |p| p.native_poll().map_err(Fault::Process))?
             {
                 return Err(Fault::EarlyExit(exit));
             }
@@ -1199,7 +1200,7 @@ pub fn run(
             }
             if event.waitable
                 && let Some(exit) =
-                    process(&mut receipt, |p| p.native_poll().map_err(Fault::Process))?
+                    with_process(&mut receipt, |p| p.native_poll().map_err(Fault::Process))?
             {
                 return Err(Fault::EarlyExit(exit));
             }

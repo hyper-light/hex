@@ -1,0 +1,68 @@
+{
+  "bytes": 382558,
+  "sha256": "1458973f0de8ab1c7eba57c0aa1ee0bda6e7e71383e449583167aaba04b42d33",
+  "members": {
+    "cohort-60dedf28-mac-trusted-entry-60de-mac/entry-feature-strict.log": {
+      "bytes": 5543,
+      "sha256": "fd8bb5537eb24a59b181690a57b8b7ff11350f4bb3f26ee076c31ee6c3609694"
+    },
+    "cohort-60dedf28-mac-trusted-entry-60de-mac/running.json": {
+      "bytes": 1671,
+      "sha256": "a01dbb1bd5867610930fe37ba6710c751e83225e1940d780cfe219ac7538f9a2"
+    },
+    "cohort-60dedf28-mac-trusted-entry-60de-mac/result.json": {
+      "bytes": 1788,
+      "sha256": "ce88d3787d43a0c44e4c1f6614030455233faec8b23cae85e6c309ccc3772f9d"
+    },
+    "cohort-60dedf28-mac-trusted-entry-60de-mac/source-before.json": {
+      "bytes": 620842,
+      "sha256": "7b64233d7b5b2f93dcb712d1f895a915a6c2978dd10442e328fd2b3d56de09e6"
+    },
+    "cohort-60dedf28-mac-trusted-entry-60de-mac/source-after.json": {
+      "bytes": 620842,
+      "sha256": "7b64233d7b5b2f93dcb712d1f895a915a6c2978dd10442e328fd2b3d56de09e6"
+    },
+    "cohort-60dedf28-mac-trusted-entry-60de-mac/public-registry-seed.json": {
+      "bytes": 31631,
+      "sha256": "c2c12e92138b859cf684cf74f9b15857b52e71a5ad84b7124060e8b56e2bb71c"
+    },
+    "outer-closures.json": {
+      "bytes": 681,
+      "sha256": "c2e10bebbe82618e18c4cccc3f24c3ecd891a3081d2acff073d733939fdc83fc"
+    }
+  },
+  "closures": {
+    "cohort-60dedf28-mac-trusted-entry-60de-mac": {
+      "owners": [
+        {
+          "kind": "driver",
+          "pid": 33852,
+          "pid_absent": true,
+          "query_exit": 1,
+          "observed": "",
+          "error": ""
+        },
+        {
+          "kind": "phase:entry-feature-strict",
+          "pid": 34271,
+          "pid_absent": true,
+          "query_exit": 1,
+          "observed": "",
+          "error": ""
+        }
+      ],
+      "groups": [
+        {
+          "phase": "entry-feature-strict",
+          "pgid": 34271,
+          "group_absent": true
+        }
+      ],
+      "scope_note": "Mac admitted build has no Linux hard Scope; exact owned Popen groups queried, no whole nativeScope proof"
+    }
+  },
+  "collector_exit": 0,
+  "collector_reaped": true,
+  "all_members_verified": true,
+  "source_archives_verified": true
+}
