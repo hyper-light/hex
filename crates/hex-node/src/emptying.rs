@@ -8,8 +8,9 @@ use hex_core::patience::Patience;
 
 /// How long a killed box takes to empty, from its kill (decision 9; Ada's 2026-11-06 rule, the lead's
 /// failure-bound rule): twice the slowest emptying recorded by this process's nodes, from every delete, scrub
-/// and removal, since all wait on one kernel. A wait that runs out is a fault to report (the kernel is
-/// wedged), not a limit to raise (CLAUDE.md §4). Its programs' reaping and its init's end, which a box's
+/// and removal, since all wait on one kernel. A wait that runs out is a fault to report for that kill, yet a
+/// slow emptying, not a wedged kernel (run 3's debug seed ran out at 255.505 ms where run 5 answered in up to
+/// 904.705 ms), so the next wait backs off (Karn's point, `Patience::ran_out`). Its programs' reaping and its init's end, which a box's
 /// emptying waits on, share the wait, as do the socket's waits for the programs it killed. Seeded by build profile
 /// from the `node.emptying` rows of `bench/competitive/probes/waits_census.md` (a box's kill to `populated 0`):
 /// release, run 4's largest max of the release arms, 19.771 ms (adacachy2, its tmpfs arm, of 17,569); debug, run 5's

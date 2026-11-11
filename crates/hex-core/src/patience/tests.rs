@@ -103,9 +103,10 @@ fn answers_from_many_threads_keep_the_slowest() {
 
 /// The census (the waits census probe, `bench/competitive/probes/waits_census.md`): every answer a wait records, and
 /// every time it runs out, reaches the installed sink by the wait's name, from the wait's own timing point; a run-out
-/// is no sample (Karn's point), so the wait's slowest stays its answers' (decision 9; the lead, 2026-11-09). Do:
-/// install a sink, answer a wait named `census.test` in 7 ms and 9 ms, and say it ran out at 20 ms. Expect: the sink
-/// told the two answers and the run-out, by that name, and the wait's slowest 9 ms.
+/// is no sample (Karn's point), told apart from the answers, but the least the slow answer took, which the wait takes
+/// as its slowest from then (decision 9; the lead, 2026-11-09; RFC 6298 §5.5). Do: install a sink, answer a wait named
+/// `census.test` in 7 ms and 9 ms, and say it ran out at 20 ms. Expect: the sink told the two answers and the
+/// run-out, by that name, and the wait's slowest 20 ms.
 #[test]
 fn every_answer_and_run_out_reaches_the_census_by_its_waits_name() {
     static TOLD: std::sync::Mutex<Vec<(&'static str, Sample)>> = std::sync::Mutex::new(Vec::new());
@@ -132,7 +133,11 @@ fn every_answer_and_run_out_reaches_the_census_by_its_waits_name() {
             Sample::RanOut(ms(20))
         ]
     );
-    assert_eq!(p.slowest(), Some(ms(9)), "a run-out is no sample");
+    assert_eq!(
+        p.slowest(),
+        Some(ms(20)),
+        "a run-out is no sample, but its answer is slower than its bound"
+    );
 }
 
 /// The census's file form, which `waits_census.py` reads: an answer `name nanos`, a run-out `name >nanos`.
