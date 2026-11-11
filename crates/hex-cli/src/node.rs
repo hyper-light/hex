@@ -380,6 +380,11 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
         hex_core::watch::lateness_seed(&model),
     )
     .map_err(failed)?;
+    let managed = guest_config
+        .as_ref()
+        .map(|inputs| managed_control(inputs, &model))
+        .transpose()
+        .map_err(failed)?;
     let prober = hex_node::facts::shared_prober(&args.state, hex_node::facts::Declared::default())
         .map_err(failed)?;
     let catalog = hex_runtime::devices::shared_catalog(
@@ -393,6 +398,19 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
         runtime_paths(&args.state).map_err(failed)?,
     )? {
         Some(guest) => {
+            let (control, cost) = managed.ok_or_else(|| {
+                failed(Refusal::Broken(
+                    "a configured guest lost its managed CPU control".to_owned(),
+                ))
+            })?;
+            let process = managed_host(
+                process,
+                &args.state,
+                control,
+                &cost,
+                guest.first_dial_bound().map_err(failed)?,
+            )
+            .map_err(failed)?;
             let routed = WithGuest::configured(process, guest, hex_runtime::guest::by_class);
             let node =
                 Arc::new(Recorded::open_with_prober(routed, &args.state, prober).map_err(failed)?);
@@ -574,6 +592,7 @@ fn configured_guest(
         config,
         cost,
         native_images,
+        cpu_responses: _,
     }) = configuration
     else {
         return Ok(None);
@@ -604,6 +623,74 @@ fn configured_guest(
         guest = guest.with_gpu_observer(input).map_err(failed)?;
     }
     Ok(Some(guest))
+}
+
+/// AC-T7.4.1: a managed VM on macOS runs only under its measured CPU control. The response is the cost
+/// evidence's row for this host class (the same evidence the cost id hashes); a host with none is
+/// refused, typed, naming the evidence it lacks. Nothing is defaulted.
+#[cfg(target_os = "macos")]
+fn managed_control(
+    inputs: &hex_runtime::guest::GuestInputs,
+    model: &str,
+) -> Result<(hex_runtime::macos::CpuControl, hex_api::RuntimeCost), Refusal> {
+    let row = inputs
+        .cpu_responses
+        .iter()
+        .find(|row| row.host == model)
+        .ok_or_else(|| {
+            let mut id = String::new();
+            for byte in inputs.cost.id {
+                use std::fmt::Write as _;
+                let _ = write!(id, "{byte:02x}");
+            }
+            Refusal::Invalid {
+                what: "managed VM CPU response evidence",
+                why: format!(
+                    "cost evidence {id} has no measured CPU-response row for host class {model}"
+                ),
+            }
+        })?;
+    Ok((
+        hex_runtime::macos::CpuControl {
+            cost_id: inputs.cost.id,
+            response: row.response(),
+        },
+        inputs.cost,
+    ))
+}
+
+/// The macOS runtime with its measured CPU control and its persistent managed-VM owner: this same
+/// binary, its endpoint and receipt in the node's private `managed-helper` folder (0700), its control
+/// patience the guest's own measured boot bound. Nothing starts here; the helper starts with the first
+/// admitted scope (AC-T7.4.1).
+#[cfg(target_os = "macos")]
+fn managed_host(
+    process: hex_runtime::macos::MacRuntime,
+    state: &Path,
+    control: hex_runtime::macos::CpuControl,
+    cost: &hex_api::RuntimeCost,
+    patience: std::time::Duration,
+) -> Result<hex_runtime::macos::MacRuntime, Refusal> {
+    use std::os::unix::fs::DirBuilderExt;
+    let directory = backend_path(state, "managed-helper")?;
+    match std::fs::DirBuilder::new().mode(0o700).create(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(Refusal::os("making the managed helper's folder", error)),
+    }
+    let binary = std::env::current_exe()
+        .map_err(|error| Refusal::os("naming this binary for its managed helper", error))?;
+    let helper = hex_runtime::macos::ManagedHelper::new(
+        binary,
+        directory.join("helper.sock"),
+        directory.join("helper.receipt"),
+        patience,
+    )?;
+    let runtime = process
+        .with_cpu_control(control)?
+        .with_managed_helper(helper)?;
+    runtime.check_vm_cost(cost)?;
+    Ok(runtime)
 }
 
 #[cfg(any(target_os = "macos", windows))]

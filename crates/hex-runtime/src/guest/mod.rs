@@ -59,7 +59,8 @@ fn evented_owner(client: Client) -> Result<EventedClient, Refusal> {
 }
 
 pub use cost::{
-    ENV_COST_EVIDENCE, ENV_COST_FILE, ENV_COST_SHA256, GuestInputs, load_runtime_cost,
+    CpuResponse, ENV_COST_EVIDENCE, ENV_COST_FILE, ENV_COST_SHA256, GuestInputs,
+    cpu_response_section, cpu_response_split, load_runtime_cost, load_runtime_evidence,
     load_runtime_inputs,
 };
 
