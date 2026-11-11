@@ -334,6 +334,22 @@ fn shared_retained_preflight_rejects_replaced_profile_key_or_generation_before_e
     assert!(pool::read(&dir.path().join("@guest")).unwrap().is_none());
 }
 
+/// A retained configuration key includes its original cost; it must ALSO
+/// match the currently initialized measured cost before any owner effect.
+#[test]
+fn retained_backing_refuses_a_replaced_initialized_cost_without_inner_boxes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, owner) = configured(dir.path());
+    runtime.prepare_backing().unwrap();
+    let original = owner.row();
+    let (mut replaced, replacement_owner) = configured(dir.path());
+    replaced.runtime_cost.as_mut().unwrap().id = [8; 32];
+    assert!(replaced.preflight_backing(&original).is_err());
+    assert_eq!(owner.launches.load(Ordering::SeqCst), 0);
+    assert_eq!(replacement_owner.launches.load(Ordering::SeqCst), 0);
+    assert!(owner.boxes.lock().unwrap().is_empty());
+}
+
 #[test]
 fn interrupted_shared_launch_keeps_the_exact_charge_and_never_reboots_an_intent() {
     let dir = socket_fixture();
