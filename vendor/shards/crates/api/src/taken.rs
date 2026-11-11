@@ -97,10 +97,7 @@ mod linux {
             env!("CARGO_MANIFEST_DIR"),
             "/../../docs/research/measurements/managed-proc-main/repro.rs"
         ));
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/research/measurements/managed-proc-main/reader-tests.rs"
-        ));
+        include!("taken/reader_tests.rs");
     }
 
     pub(super) fn started(pid: u32) -> Result<u64, ProcessFailure> {
