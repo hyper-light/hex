@@ -306,6 +306,17 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   that observation handle (`CloseHandle`). These Windows calls are unsafe foreign functions; the handle
   owns no VM lifecycle and has no termination or duplication rights (HEX-RT-17).
 
+- `vendor/shards/crates/api/src/physical/report/unix.rs`: the managed GPU report's private
+  pipe uses `fcntl` to retain its flags while making only its read end nonblocking, and `poll`
+  spends the caller's original absolute deadline. libc exposes these native descriptor calls as
+  unsafe; the fixed stack poll entry and the private descriptor remain owned for the whole call.
+- `vendor/shards/crates/api/src/physical/report/windows.rs`: the managed GPU report owns one
+  private named pipe/event and heap-stable `OVERLAPPED`/buffer cells through native completion.
+  `CreateNamedPipeW`, `CreateFileW`, `ReadFile`, `GetOverlappedResult`, `CancelIoEx`, event waits
+  and peer-PID queries are unsafe SDK calls. The existing managed watcher retains pending storage
+  after errors and observes its actual private completion event before release; that event grants
+  storage ownership only, never native-scope release. A failed completion wait retains uncertainty.
+
 ## 13. Lean code
 
 Code states what the system does now: no speculative abstraction, no dead or commented-out code.

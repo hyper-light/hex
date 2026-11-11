@@ -416,6 +416,7 @@ impl FirecrackerRuntime {
             shards_api::LaunchIo {
                 stdout: std::io::PipeWriter::from(std::os::fd::OwnedFd::from(output)),
                 stderr: std::io::PipeWriter::from(std::os::fd::OwnedFd::from(error)),
+                gpu_report: None,
             },
             remaining(until)?,
         )?;
