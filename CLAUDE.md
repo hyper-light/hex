@@ -161,6 +161,14 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   existing kqueue observes waitable zombie publication without changing handlers or masks. The sole
   waiter retains WNOWAIT ownership until durable Released/finalization. These calls need the same
   foreign ABI isolation; they do not establish cold cleanup authority or an aggregate CPU cap.
+  Its managed helper also reads `clock_gettime(CLOCK_UPTIME_RAW)` into one initialized,
+  checked timespec to transfer an original same-host absolute operation deadline. This is
+  Rust1.99.1 Instant's Apple clock; locked rustix1.1.5 exposes no safe Apple uptime-raw
+  clock variant. The sender samples the native clock before the remaining Instant budget
+  so conversion cannot extend authority; the receiver checks the same clock and exact
+  helper identity. Read failure, negative/invalid timespec or arithmetic overflow refuses.
+  This read-only foreign call needs the existing file's isolation and SAFETY invariant;
+  it changes no clock and grants no lifecycle, release or resource authority.
 - `crates/hex-runtime/src/macos/helper_sys.rs`: the macOS box helper daemon's privileged syscalls (the
   `process` class's box-user mode, decision "each OS runs its own boxes natively"; step 2). The daemon,
   as root, starts a box's programs as the box's pool user: a `fork` whose child drops to the user
