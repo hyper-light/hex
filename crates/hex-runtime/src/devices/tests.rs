@@ -20,6 +20,7 @@ fn spec(name: &str, key: u64) -> BoxSpec {
         })),
         owner: None,
         allocation: None,
+        route: None,
         devices: vec![DeviceId {
             kind: DeviceKind::Gpu,
             key,
@@ -27,23 +28,153 @@ fn spec(name: &str, key: u64) -> BoxSpec {
     }
 }
 
+fn pool(phase: hex_api::BackingPhase) -> PoolRecord {
+    let guest = hex_api::CapacityResources {
+        cpu_milli: 1000,
+        mem_bytes: hex_api::MIN_MEMORY,
+        disk_bytes: 0,
+    };
+    let cost = hex_api::RuntimeCost {
+        id: [7; 32],
+        floor: guest,
+        ceiling: guest,
+        quantum: hex_api::CapacityResources {
+            cpu_milli: 1,
+            mem_bytes: 1,
+            disk_bytes: 1,
+        },
+        guest_overhead: hex_api::CapacityResources::default(),
+        overhead: hex_api::CapacityResources::default(),
+    };
+    PoolRecord {
+        version: hex_core::record::RECORD_VERSION,
+        key: hex_api::BackingKey {
+            pool: [8; 32],
+            generation: [9; 16],
+        },
+        execution: hex_api::Execution::ShardsDedicated,
+        cost,
+        allocation: (phase != hex_api::BackingPhase::Prepared).then(|| {
+            cost.allocate(hex_api::CapacityResources::default())
+                .unwrap()
+        }),
+        devices: vec![DeviceId {
+            kind: DeviceKind::Gpu,
+            key: 256,
+        }],
+        phase,
+        init: matches!(
+            phase,
+            hex_api::BackingPhase::Live
+                | hex_api::BackingPhase::Draining
+                | hex_api::BackingPhase::Released
+        )
+        .then_some(hex_core::record::ProcId {
+            pid: 1,
+            start_ticks: 1,
+        }),
+        exit: (phase == hex_api::BackingPhase::Released).then_some(hex_api::Exit::Unknown),
+    }
+}
+
+/// AC-T7.4.1: synthetic native receipts exercise the SAME catalog owner join, not native proof.
+#[test]
+fn canonical_pool_holder_retains_grant_until_released_and_fences_exact_handoff() {
+    use hex_api::{
+        BackingPhase, DeviceHolder, Execution, GpuEligibility, ImageArch, ImageOs, ImagePlatform,
+        RouteKey, RouteReceipt,
+    };
+    let catalog = catalog();
+    let id = DeviceId {
+        kind: DeviceKind::Gpu,
+        key: 256,
+    };
+    for phase in [
+        BackingPhase::Prepared,
+        BackingPhase::Granted,
+        BackingPhase::Live,
+        BackingPhase::Draining,
+        BackingPhase::Released,
+    ] {
+        let pool = pool(phase);
+        pool.check().unwrap();
+        let key = pool.key;
+        let records = vec![pool];
+        let holder = catalog.holder(id, &Records::new(), &records).unwrap();
+        assert_eq!(
+            holder,
+            (!matches!(phase, BackingPhase::Prepared | BackingPhase::Released))
+                .then_some(DeviceHolder::Backing(key))
+        );
+    }
+    let live = pool(BackingPhase::Live);
+    let mut selected = spec("handoff", 256);
+    selected.bounds.cpu_max_milli = Some(hex_api::MIN_CPU_MILLI);
+    selected.bounds.memory_max = Some(hex_api::MIN_MEMORY);
+    selected.allocation = live.allocation;
+    selected.route = Some(RouteReceipt {
+        key: RouteKey {
+            class: hex_api::Class::Oci,
+            image: ImagePlatform {
+                os: ImageOs::Linux,
+                arch: ImageArch::Amd64,
+            },
+            execution: Execution::ShardsDedicated,
+            gpu: GpuEligibility::Required,
+        },
+        backing: Some(live.key),
+    });
+    let pools = vec![live];
+    assert!(catalog.prepare(&selected, &Records::new(), &pools).is_ok());
+    let mut record = BoxRecord::new(selected.clone(), Phase::Creating, Vec::new());
+    record.native_scope = Some(hex_core::record::NativeScope::from_bytes([10; 16]));
+    let boxes = Records::from([(selected.id.clone(), Ok(record))]);
+    assert_eq!(
+        catalog.holder(id, &boxes, &pools).unwrap(),
+        Some(DeviceHolder::Box(selected.id.clone()))
+    );
+    selected
+        .route
+        .as_mut()
+        .unwrap()
+        .backing
+        .as_mut()
+        .unwrap()
+        .generation = [11; 16];
+    assert!(catalog.prepare(&selected, &Records::new(), &pools).is_err());
+    let boxes = Records::from([(
+        selected.id.clone(),
+        Ok(BoxRecord::new(selected, Phase::Creating, Vec::new())),
+    )]);
+    assert!(
+        catalog.holder(id, &boxes, &pools).is_err(),
+        "stale generation cannot turn a conflicting owner into free capacity"
+    );
+    let duplicate = vec![pool(BackingPhase::Live), pool(BackingPhase::Live)];
+    assert!(catalog.holder(id, &Records::new(), &duplicate).is_err());
+}
+
 /// AC-T7.4.1: a request selects the configured physical resource, never its neighbor's edit plan.
 #[test]
 fn selected_identity_returns_only_its_native_binding() {
     let catalog = catalog();
-    let selected = catalog.prepare(&spec("one", 512), &Records::new()).unwrap();
+    let selected = catalog
+        .prepare(&spec("one", 512), &Records::new(), &[])
+        .unwrap();
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0].info.id.key, 512);
     assert!(
         matches!(selected[0].binding(Route::Hcs), Some(Binding::Hcs { location }) if location == "PCIROOT(0)#PCI(0200)")
     );
-    let selected = catalog.prepare(&spec("two", 256), &Records::new()).unwrap();
+    let selected = catalog
+        .prepare(&spec("two", 256), &Records::new(), &[])
+        .unwrap();
     assert!(
         matches!(selected[0].binding(Route::Cdi), Some(Binding::Cdi { file, qualified }) if file == "/private/fixture.json" && qualified == "fixture.test/gpu=a")
     );
     assert!(
         catalog
-            .prepare(&spec("unknown", 768), &Records::new())
+            .prepare(&spec("unknown", 768), &Records::new(), &[])
             .is_err()
     );
 }
@@ -58,11 +189,15 @@ fn every_recorded_phase_retains_the_device_until_physical_removal() {
         let bytes = record.encode().unwrap();
         let records = BTreeMap::from([(held.id.clone(), Ok(record))]);
         assert_eq!(
-            catalog.holder(held.devices[0], &records).unwrap(),
+            catalog.holder(held.devices[0], &records, &[]).unwrap(),
             Some(hex_api::DeviceHolder::Box(held.id.try_clone().unwrap()))
         );
-        assert!(catalog.prepare(&spec("next", 256), &records).is_err());
-        assert!(catalog.prepare(&spec("neighbor", 512), &records).is_ok());
+        assert!(catalog.prepare(&spec("next", 256), &records, &[]).is_err());
+        assert!(
+            catalog
+                .prepare(&spec("neighbor", 512), &records, &[])
+                .is_ok()
+        );
         assert_eq!(
             records
                 .get(&held.id)
@@ -76,7 +211,7 @@ fn every_recorded_phase_retains_the_device_until_physical_removal() {
     }
     assert!(
         catalog
-            .prepare(&spec("after-removal", 256), &Records::new())
+            .prepare(&spec("after-removal", 256), &Records::new(), &[])
             .is_ok()
     );
 }
@@ -98,7 +233,7 @@ fn malformed_records_and_multiple_holders_refuse_without_repairing_them() {
         ),
     ]);
     assert!(matches!(
-        catalog.prepare(&spec("next", 256), &records),
+        catalog.prepare(&spec("next", 256), &records, &[]),
         Err(Refusal::Broken(_))
     ));
     assert_eq!(records.len(), 2);
@@ -106,7 +241,10 @@ fn malformed_records_and_multiple_holders_refuse_without_repairing_them() {
         BoxId::new("damaged").unwrap(),
         Err("private corrupt content".into()),
     )]);
-    let error = catalog.prepare(&spec("next", 512), &broken).err().unwrap();
+    let error = catalog
+        .prepare(&spec("next", 512), &broken, &[])
+        .err()
+        .unwrap();
     assert!(matches!(error, Refusal::Broken(_)));
     assert!(!error.to_string().contains("private corrupt content"));
     assert_eq!(broken.len(), 1);
@@ -176,15 +314,19 @@ fn explicit_consistent_backend_aliases_keep_one_physical_entry_and_holder() {
         Ok(BoxRecord::new(held.clone(), Phase::Creating, Vec::new())),
     )]);
     assert_eq!(
-        catalog.holder(held.devices[0], &records).unwrap(),
+        catalog.holder(held.devices[0], &records, &[]).unwrap(),
         Some(hex_api::DeviceHolder::Box(held.id.try_clone().unwrap()))
     );
     assert!(
         catalog
-            .prepare(&spec("another-backend", 256), &records)
+            .prepare(&spec("another-backend", 256), &records, &[])
             .is_err()
     );
-    assert!(catalog.prepare(&spec("independent", 512), &records).is_ok());
+    assert!(
+        catalog
+            .prepare(&spec("independent", 512), &records, &[])
+            .is_ok()
+    );
     assert_eq!(catalog.conflict_ids(&held.devices).unwrap(), held.devices);
 }
 

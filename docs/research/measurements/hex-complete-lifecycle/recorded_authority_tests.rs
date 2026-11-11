@@ -20,6 +20,7 @@ fn guest_spec(id: &str) -> BoxSpec {
 }
 fn info(record: &BoxRecord) -> BoxInfo {
     BoxInfo {
+        route: record.spec.route,
         id: record.spec.id.clone(),
         class: record.spec.class.class(),
         state: BoxState::Empty,

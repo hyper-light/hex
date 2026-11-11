@@ -130,19 +130,23 @@ pub(super) fn same_init(
     record: &hex_core::record::BoxRecord,
     identity: &shards_api::Identity,
 ) -> Result<(), Refusal> {
-    if record.native_scope.is_none()
+    same_native(hex_core::record::NativeRecord::Box(record), identity)
+}
+
+pub(super) fn same_native(
+    record: hex_core::record::NativeRecord<'_>,
+    identity: &shards_api::Identity,
+) -> Result<(), Refusal> {
+    if record.scope().is_none()
         || identity.pid == 0
         || identity.started == 0
-        || record.init
+        || record.init()
             != Some(hex_core::record::ProcId {
                 pid: identity.pid,
                 start_ticks: identity.started,
             })
     {
-        return Err(Refusal::Lifecycle {
-            id: record.spec.id.try_clone()?,
-            cause: hex_api::LifecycleCause::Uncertain,
-        });
+        return Err(record.refusal(hex_api::LifecycleCause::Uncertain));
     }
     Ok(())
 }
@@ -155,7 +159,27 @@ pub(super) fn stop(
     identity: Option<&shards_api::Identity>,
     patience: Duration,
 ) -> Result<shards_api::ManagedEnd, Refusal> {
+    stop_scope(
+        transaction,
+        identity,
+        patience,
+        super::books::uncertain(id)?,
+    )
+}
+
+pub(super) fn stop_scope(
+    transaction: &dyn Transaction,
+    identity: Option<&shards_api::Identity>,
+    patience: Duration,
+    uncertain: Refusal,
+) -> Result<shards_api::ManagedEnd, Refusal> {
     let process = transaction.attach_managed(identity)?;
+    let before = process.terminal();
+    if let Ok(Some(end)) = &before
+        && end.scope == shards_api::TerminalScope::Released
+    {
+        return Ok(*end);
+    }
     let stopped = process.stop();
     let observed = process
         .wait_for(patience)
@@ -166,10 +190,10 @@ pub(super) fn stop(
     if let Err(why) = stopped {
         return Err(refusal("stopping managed Shards scope", &why));
     }
-    Err(Refusal::Lifecycle {
-        id: id.try_clone()?,
-        cause: hex_api::LifecycleCause::Uncertain,
-    })
+    if let Err(why) = before {
+        return Err(refusal("observing original managed native scope", &why));
+    }
+    Err(uncertain)
 }
 
 #[cfg(test)]

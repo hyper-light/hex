@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, Weak}
 use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, Exit, Proc, Refusal};
-use hex_core::record::{BoxRecord, NativeScope, ProcId};
+use hex_core::record::{NativeRecord, NativeScope, OwnerKey, OwnerRef, ProcId};
 use rustix::buffer::spare_capacity;
 use rustix::event::epoll::{self, CreateFlags, EventData, EventFlags};
 use rustix::event::{PollFd, PollFlags, Timespec};
@@ -98,10 +98,10 @@ enum ManagedPhase {
     Finalized(Exit),
 }
 
-/// The SAME fallibly allocated receipt is retained in Inits.by_box and returned through the SDK.
+/// The SAME fallibly allocated receipt is retained in Inits.rows and returned through the SDK.
 /// The controller pidfd is reaped by this Supervisor, while cgroup.events proves whole-scope absence.
 pub(crate) struct ManagedVm {
-    id: BoxId,
+    owner: OwnerKey,
     scope: NativeScope,
     commitment: [u8; 32],
     cgroup: hex_runtime::linux::cgroup::BoxCgroup,
@@ -139,9 +139,10 @@ pub struct Live {
 
 #[derive(Default)]
 struct Inits {
-    by_box: BTreeMap<BoxId, Init>,
-    /// The epoll token each watched init's pidfd carries, back to its box.
-    by_token: BTreeMap<u64, BoxId>,
+    /// One bounded table for containers and managed Box/Pool controllers, sorted by native owner.
+    rows: Vec<(OwnerKey, Init)>,
+    /// The existing epoll index, sorted by token. Neither index allocates during lookup.
+    tokens: Vec<(u64, OwnerKey)>,
     /// The next epoll token, an init's or a run's.
     next_token: u64,
     /// Creates and runs under way that hold a place in the budget.
@@ -153,6 +154,91 @@ struct Inits {
 }
 
 impl Inits {
+    fn position(&self, owner: OwnerRef<'_>) -> Result<usize, usize> {
+        self.rows
+            .binary_search_by(|(key, _)| key.as_ref().cmp(&owner))
+    }
+
+    fn get(&self, owner: OwnerRef<'_>) -> Option<&Init> {
+        self.position(owner)
+            .ok()
+            .and_then(|at| self.rows.get(at).map(|(_, init)| init))
+    }
+
+    fn get_mut(&mut self, owner: OwnerRef<'_>) -> Option<&mut Init> {
+        self.position(owner)
+            .ok()
+            .and_then(|at| self.rows.get_mut(at).map(|(_, init)| init))
+    }
+
+    fn token_owner(&self, token: u64) -> Option<&OwnerKey> {
+        self.tokens
+            .binary_search_by_key(&token, |(token, _)| *token)
+            .ok()
+            .and_then(|at| self.tokens.get(at).map(|(_, owner)| owner))
+    }
+
+    fn reserve_place(&mut self) -> Result<(), Refusal> {
+        self.rows
+            .len()
+            .checked_add(self.reserved)
+            .and_then(|count| count.checked_add(self.runs.len()))
+            .and_then(|count| count.checked_add(1))
+            .filter(|count| *count <= self.budget)
+            .ok_or(Refusal::Exhausted {
+                what: PIDFDS,
+                bound: self.budget,
+            })?;
+        let additional = self.reserved.checked_add(1).ok_or_else(managed_storage)?;
+        // Every outstanding Slot can publish one row in either order. Reserve both existing
+        // indexes before any caller can spawn; publication cannot invoke the allocator.
+        self.rows
+            .try_reserve_exact(additional)
+            .map_err(|_| managed_storage())?;
+        self.tokens
+            .try_reserve_exact(additional)
+            .map_err(|_| managed_storage())?;
+        self.reserved = additional;
+        Ok(())
+    }
+
+    fn insert(
+        &mut self,
+        owner: OwnerKey,
+        token_owner: OwnerKey,
+        token: u64,
+        init: Init,
+    ) -> Result<(), Refusal> {
+        let at = self
+            .position(owner.as_ref())
+            .err()
+            .ok_or_else(managed_table_invalid)?;
+        let token_at = self
+            .tokens
+            .binary_search_by_key(&token, |(token, _)| *token)
+            .err()
+            .ok_or_else(managed_table_invalid)?;
+        if self.rows.len() == self.rows.capacity()
+            || self.tokens.len() == self.tokens.capacity()
+            || owner.as_ref() != token_owner.as_ref()
+            || (matches!(&owner, OwnerKey::Pool(_)) && matches!(&init, Init::Container(_)))
+        {
+            return Err(managed_table_invalid());
+        }
+        // The search positions are in 0..=len and both vectors have a reserved slot. Mutation is
+        // O(n) shifts under this short lock, with no OS/Store call and no allocator invocation.
+        self.rows.insert(at, (owner, init));
+        self.tokens.insert(token_at, (token, token_owner));
+        Ok(())
+    }
+
+    fn remove(&mut self, owner: OwnerRef<'_>) -> Option<Init> {
+        let at = self.position(owner).ok()?;
+        self.tokens.retain(|(_, key)| key.as_ref() != owner);
+        // A successful binary search identifies an existing row; neither operation changes it.
+        Some(self.rows.remove(at).1)
+    }
+
     /// The next epoll token, refused once they have run out.
     fn token(&mut self) -> Result<u64, Refusal> {
         let token = self.next_token;
@@ -237,35 +323,36 @@ impl Supervisor {
     /// helpers remain owned through the exact persisted scope and cgroup.events observation.
     pub(crate) fn recover_managed(
         self: &Arc<Self>,
-        record: &BoxRecord,
+        record: NativeRecord<'_>,
         cgroup: hex_runtime::linux::cgroup::BoxCgroup,
         identity: Option<&shards_api::Identity>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
-        let id = &record.spec.id;
-        if record.native_scope.is_none() {
-            return Err(managed_uncertain(id));
+        if record.scope().is_none() {
+            return Err(record.refusal(hex_api::LifecycleCause::Uncertain));
         }
         let path = identity.map_or(Path::new(""), |identity| identity.vsock.as_path());
         let native = self.reserve_managed(record, cgroup, path)?;
         let phase = match identity {
             None => ManagedPhase::Exited(Exit::Unknown),
             Some(identity) => {
-                if record.init
+                if record.init()
                     != Some(ProcId {
                         pid: identity.pid,
                         start_ticks: identity.started,
                     })
                     || identity.started == 0
                 {
-                    return Err(managed_uncertain(id));
+                    return Err(record.refusal(hex_api::LifecycleCause::Uncertain));
                 }
                 let copied = copy_managed_identity(identity)?;
                 native
                     .identity
                     .set(copied)
-                    .map_err(|_| managed_uncertain(id))?;
-                let pid = i32::try_from(identity.pid).map_err(|_| managed_uncertain(id))?;
-                let raw = Pid::from_raw(pid).ok_or_else(|| managed_uncertain(id))?;
+                    .map_err(|_| record.refusal(hex_api::LifecycleCause::Uncertain))?;
+                let pid = i32::try_from(identity.pid)
+                    .map_err(|_| record.refusal(hex_api::LifecycleCause::Uncertain))?;
+                let raw = Pid::from_raw(pid)
+                    .ok_or_else(|| record.refusal(hex_api::LifecycleCause::Uncertain))?;
                 match rustix::process::pidfd_open(raw, PidfdFlags::empty()) {
                     Err(Errno::SRCH) => ManagedPhase::Exited(Exit::Unknown),
                     Err(error) => {
@@ -277,7 +364,7 @@ impl Supervisor {
                             && !ended(pidfd.as_fd())?
                         {
                             if !native.cgroup.procs()?.contains(&identity.pid) {
-                                return Err(managed_uncertain(id));
+                                return Err(record.refusal(hex_api::LifecycleCause::Uncertain));
                             }
                             ManagedPhase::Observed {
                                 pid: i64::from(pid),
@@ -314,27 +401,35 @@ impl Supervisor {
     /// No global table lock spans spawn, identity I/O, record publication or gate release.
     pub(crate) fn reserve_managed(
         self: &Arc<Self>,
-        record: &BoxRecord,
+        record: NativeRecord<'_>,
         cgroup: hex_runtime::linux::cgroup::BoxCgroup,
         vsock: &Path,
     ) -> Result<triomphe::Arc<ManagedVm>, Refusal> {
-        let id = &record.spec.id;
-        let scope = record.native_scope.ok_or_else(|| managed_uncertain(id))?;
-        let commitment = record.native_commitment()?;
+        let owner = record.owner();
+        let scope = record
+            .scope()
+            .ok_or_else(|| record.refusal(hex_api::LifecycleCause::Uncertain))?;
+        let commitment = record.commitment()?;
         let mut slot = self.reserve()?;
         let token = self.inits()?.token()?;
         let mut path = PathBuf::new();
         path.try_reserve_exact(vsock.as_os_str().len())
             .map_err(|_| managed_storage())?;
         path.push(vsock);
-        let events = match rustix::fs::open(
-            cgroup.dir().join("cgroup.events"),
-            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(),
-        ) {
-            Ok(events) => Some(events),
-            Err(Errno::NOENT) if cgroup.populated_if_present()?.is_none() => None,
-            Err(error) => return Err(Refusal::os("opening the managed scope's events", error)),
+        let events = match cgroup.populated_if_present()? {
+            None => None,
+            Some(_) => {
+                let dir = cgroup.open_dir()?;
+                Some(
+                    rustix::fs::openat(
+                        &dir,
+                        "cgroup.events",
+                        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+                        rustix::fs::Mode::empty(),
+                    )
+                    .map_err(|error| Refusal::os("opening the managed scope's events", error))?,
+                )
+            }
         };
         let phase = if events.is_some() {
             ManagedPhase::Reserved
@@ -342,7 +437,7 @@ impl Supervisor {
             ManagedPhase::Absent
         };
         let native = triomphe::Arc::try_new(ManagedVm {
-            id: id.try_clone()?,
+            owner: owner.try_owned()?,
             scope,
             commitment,
             cgroup,
@@ -354,18 +449,18 @@ impl Supervisor {
             token,
         })
         .map_err(|_| managed_storage())?;
+        let row_owner = owner.try_owned()?;
+        let token_owner = owner.try_owned()?;
         let mut inits = self.inits()?;
-        if inits.by_box.contains_key(id) {
-            return Err(managed_uncertain(id));
+        if inits.get(owner).is_some() {
+            return Err(record.refusal(hex_api::LifecycleCause::Uncertain));
         }
-        // The existing BTree table insertion is deliberately before native creation; no map entry
-        // or Arc allocation is attempted after a child exists. Its inherited allocation contract
-        // remains part of ROOT's complete supervisor R01 review.
-        inits.by_token.insert(token, id.try_clone()?);
-        inits.by_box.insert(
-            id.try_clone()?,
+        inits.insert(
+            row_owner,
+            token_owner,
+            token,
             Init::Managed(triomphe::Arc::clone(&native)),
-        );
+        )?;
         inits.reserved = inits.reserved.saturating_sub(1);
         slot.held = false;
         Ok(native)
@@ -384,7 +479,7 @@ impl Supervisor {
         let gate = {
             let mut phase = native.phase.lock().map_err(poisoned)?;
             if !matches!(*phase, ManagedPhase::Reserved) {
-                return Err(managed_uncertain(&native.id));
+                return Err(native.uncertain());
             }
             // The per-VM lock was acquired before creation. Ownership publication below cannot
             // fail through a poisoned lock, conversion, allocation or a second native owner.
@@ -409,7 +504,7 @@ impl Supervisor {
                 )
                 .map_err(|error| Refusal::os("watching the managed controller", error))?;
             } else {
-                return Err(managed_uncertain(&native.id));
+                return Err(native.uncertain());
             }
         }
         let identity = native.observe_identity()?;
@@ -427,21 +522,23 @@ impl Supervisor {
     }
 
     fn same_managed(&self, native: &triomphe::Arc<ManagedVm>) -> Result<(), Refusal> {
-        match self.inits()?.by_box.get(&native.id) {
+        match self.inits()?.get(native.owner.as_ref()) {
             Some(Init::Managed(current)) if triomphe::Arc::ptr_eq(current, native) => Ok(()),
-            _ => Err(managed_uncertain(&native.id)),
+            _ => Err(native.uncertain()),
         }
     }
 
     pub(crate) fn observe_managed(
         &self,
-        record: &BoxRecord,
+        record: NativeRecord<'_>,
         identity: Option<&shards_api::Identity>,
     ) -> Result<Option<shards_api::ManagedReceipt>, Refusal> {
-        let id = &record.spec.id;
-        let native = match self.inits()?.by_box.get(id) {
+        let owner = record.owner();
+        let native = match self.inits()?.get(owner) {
             Some(Init::Managed(native)) => triomphe::Arc::clone(native),
-            Some(Init::Container(_)) => return Err(managed_uncertain(id)),
+            Some(Init::Container(_)) => {
+                return Err(record.refusal(hex_api::LifecycleCause::Uncertain));
+            }
             None => return Ok(None),
         };
         native.matches_record(record)?;
@@ -452,48 +549,56 @@ impl Supervisor {
                 ManagedPhase::Reserved
             )
         {
-            return Err(managed_uncertain(id));
+            return Err(record.refusal(hex_api::LifecycleCause::Uncertain));
         }
         Ok(Some(shards_api::managed_receipt(native)))
     }
 
-    pub(crate) fn managed_usage(&self, record: &BoxRecord) -> Result<hex_api::Usage, Refusal> {
-        let native = match self.inits()?.by_box.get(&record.spec.id) {
+    pub(crate) fn managed_usage(
+        &self,
+        record: NativeRecord<'_>,
+    ) -> Result<hex_api::Usage, Refusal> {
+        let native = match self.inits()?.get(record.owner()) {
             Some(Init::Managed(native)) => triomphe::Arc::clone(native),
-            _ => return Err(managed_uncertain(&record.spec.id)),
+            _ => return Err(record.refusal(hex_api::LifecycleCause::Uncertain)),
         };
         native.matches_record(record)?;
         if native.cgroup.populated_if_present()?.is_none() {
-            return Err(managed_uncertain(&record.spec.id));
+            return Err(record.refusal(hex_api::LifecycleCause::Uncertain));
         }
-        Ok(native.cgroup.usage())
+        native
+            .cgroup
+            .managed_usage()
+            .map_err(|_| record.refusal(hex_api::LifecycleCause::Uncertain))
     }
 
     pub(crate) fn finalize_managed(
         &self,
-        record: &BoxRecord,
+        record: NativeRecord<'_>,
         identity: Option<&shards_api::Identity>,
     ) -> Result<(), Refusal> {
-        let id = &record.spec.id;
+        let owner = record.owner();
         use shards_api::ManagedProcess;
-        let native = match self.inits()?.by_box.get(id) {
+        let native = match self.inits()?.get(owner) {
             Some(Init::Managed(native)) => triomphe::Arc::clone(native),
-            Some(Init::Container(_)) => return Err(managed_uncertain(id)),
-            None => return Err(managed_uncertain(id)),
+            Some(Init::Container(_)) => {
+                return Err(record.refusal(hex_api::LifecycleCause::Uncertain));
+            }
+            None => return Err(record.refusal(hex_api::LifecycleCause::Uncertain)),
         };
         native.matches_record(record)?;
         native.matches(identity)?;
         let end = native
             .terminal()
-            .map_err(|_| managed_uncertain(id))?
+            .map_err(|_| record.refusal(hex_api::LifecycleCause::Uncertain))?
             .filter(|end| end.scope == shards_api::TerminalScope::Released)
-            .ok_or_else(|| managed_uncertain(id))?;
+            .ok_or_else(|| record.refusal(hex_api::LifecycleCause::Uncertain))?;
         // The backend has durably recorded Released before calling this function. Its canonical
         // method/device turns exclude reuse until this same Arc and cgroup have been finalized.
         if native.events.is_some() {
             native.cgroup.remove()?;
         } else if native.cgroup.populated_if_present()?.is_some() {
-            return Err(managed_uncertain(id));
+            return Err(record.refusal(hex_api::LifecycleCause::Uncertain));
         }
         self.same_managed(&native)?;
         *native.phase.lock().map_err(poisoned)? = ManagedPhase::Finalized(match end.status {
@@ -502,14 +607,13 @@ impl Supervisor {
             shards_api::ManagedStatus::Unknown => Exit::Unknown,
         });
         let mut inits = self.inits()?;
-        inits.by_token.remove(&native.token);
-        inits.by_box.remove(id);
+        inits.remove(owner);
         Ok(())
     }
 
     fn managed_pid(&self, pid: i32) -> Result<bool, Refusal> {
         let inits = self.inits()?;
-        for init in inits.by_box.values() {
+        for (_, init) in &inits.rows {
             if let Init::Managed(native) = init {
                 let phase = native.phase.lock().map_err(poisoned)?;
                 if matches!(&*phase, ManagedPhase::Held { pid: owned, .. } | ManagedPhase::Observed { pid: owned, .. } | ManagedPhase::Running { pid: owned, .. } if *owned == i64::from(pid))
@@ -578,18 +682,7 @@ impl Supervisor {
         if let Some(fault) = self.fault.lock().map_err(poisoned)?.as_ref() {
             return Err(Refusal::Broken(format!("the node's supervisor: {fault}")));
         }
-        let held = inits
-            .by_box
-            .len()
-            .checked_add(inits.reserved)
-            .and_then(|h| h.checked_add(inits.runs.len()));
-        if held.is_none_or(|h| h >= inits.budget) {
-            return Err(Refusal::Exhausted {
-                what: PIDFDS,
-                bound: inits.budget,
-            });
-        }
-        inits.reserved = inits.reserved.saturating_add(1);
+        inits.reserve_place()?;
         Ok(Slot {
             supervisor: Arc::clone(self),
             held: true,
@@ -634,6 +727,8 @@ impl Supervisor {
                 stat.ppid, stat.start_ticks
             )));
         }
+        let owner = OwnerKey::Box(id.try_clone()?);
+        let token_owner = owner.try_clone()?;
         let mut inits = self.inits()?;
         let token = inits.token()?;
         epoll::add(
@@ -644,9 +739,10 @@ impl Supervisor {
         )
         .map_err(|e| Refusal::os("watching a container's init", e))?;
         owned()?.insert(who.pid);
-        inits.by_token.insert(token, id.clone());
-        inits.by_box.insert(
-            id.clone(),
+        inits.insert(
+            owner,
+            token_owner,
+            token,
             Init::Container(ContainerInit {
                 pid,
                 who,
@@ -654,7 +750,7 @@ impl Supervisor {
                 exit: None,
                 container: Arc::new(container),
             }),
-        );
+        )?;
         inits.reserved = inits.reserved.saturating_sub(1);
         slot.held = false;
         Ok(())
@@ -665,7 +761,7 @@ impl Supervisor {
     /// `oci` box mid-create or stopped, or no box.
     pub fn live(&self, id: &BoxId) -> Result<Option<Live>, Refusal> {
         let inits = self.inits()?;
-        let Some((init, pidfd)) = inits.by_box.get(id).and_then(|init| match init {
+        let Some((init, pidfd)) = inits.get(OwnerRef::Box(id)).and_then(|init| match init {
             Init::Container(init) => init.pidfd.as_ref().map(|fd| (init, fd)),
             Init::Managed(_) => None,
         }) else {
@@ -696,11 +792,10 @@ impl Supervisor {
     /// a box whose init isn't watched: a `process` box, or one the node took back after a restart.
     pub fn forget(&self, id: &BoxId) -> Result<Option<Forgotten>, Refusal> {
         let mut inits = self.inits()?;
-        if matches!(inits.by_box.get(id), Some(Init::Managed(_))) {
+        if matches!(inits.get(OwnerRef::Box(id)), Some(Init::Managed(_))) {
             return Err(managed_uncertain(id));
         }
-        inits.by_token.retain(|_, b| b != id);
-        let Some(Init::Container(init)) = inits.by_box.remove(id) else {
+        let Some(Init::Container(init)) = inits.remove(OwnerRef::Box(id)) else {
             return Ok(None);
         };
         let pidfd = init.pidfd;
@@ -841,19 +936,26 @@ impl Supervisor {
     /// the record naming this init, so an exit recorded as its box is deleted, and another made under
     /// its id, goes into no other box's record.
     fn collect(&self, id: &BoxId) -> Result<Option<Exit>, Refusal> {
+        self.collect_owner(OwnerRef::Box(id))
+    }
+
+    fn collect_owner(&self, owner: OwnerRef<'_>) -> Result<Option<Exit>, Refusal> {
         let managed = {
             let inits = self.inits()?;
-            match inits.by_box.get(id) {
+            match inits.get(owner) {
                 Some(Init::Managed(managed)) => Some(triomphe::Arc::clone(managed)),
                 _ => None,
             }
         };
         if let Some(managed) = managed {
-            return managed.collect().map_err(|_| managed_uncertain(id));
+            return managed.collect().map_err(|_| managed.uncertain());
         }
+        let OwnerRef::Box(id) = owner else {
+            return Ok(None);
+        };
         let (who, exit) = {
             let mut inits = self.inits()?;
-            let Some(Init::Container(init)) = inits.by_box.get_mut(id) else {
+            let Some(Init::Container(init)) = inits.get_mut(OwnerRef::Box(id)) else {
                 return Ok(None);
             };
             if let Some(pidfd) = &init.pidfd {
@@ -886,35 +988,39 @@ impl Supervisor {
         })?;
         let mut inits = self.inits()?;
         if inits
-            .by_box
-            .get(id)
+            .get(OwnerRef::Box(id))
             .is_some_and(|init| matches!(init, Init::Container(init) if init.who == who))
         {
-            inits.by_box.remove(id);
-            inits.by_token.retain(|_, b| b != id);
+            inits.remove(OwnerRef::Box(id));
         }
         Ok(exit)
     }
 
     /// The supervising thread's pass over the inits and runs whose pidfds turned readable.
     fn ready(&self, tokens: &[u64]) -> Result<(), Refusal> {
-        let (ids, runs): (Vec<BoxId>, Vec<Arc<Run>>) = {
+        let (owners, runs) = {
             let inits = self.inits()?;
-            (
-                tokens
-                    .iter()
-                    .filter_map(|token| inits.by_token.get(token).cloned())
-                    .collect(),
-                tokens
-                    .iter()
-                    .filter_map(|token| inits.runs.by_token(*token))
-                    .collect(),
-            )
+            let mut owners = Vec::new();
+            let mut runs = Vec::new();
+            owners
+                .try_reserve_exact(tokens.len())
+                .map_err(|_| managed_storage())?;
+            runs.try_reserve_exact(tokens.len())
+                .map_err(|_| managed_storage())?;
+            for token in tokens {
+                if let Some(owner) = inits.token_owner(*token) {
+                    owners.push(owner.try_clone()?);
+                }
+                if let Some(run) = inits.runs.by_token(*token) {
+                    runs.push(run);
+                }
+            }
+            (owners, runs)
         };
         let mut first_error = self.runs_ready(&runs).err();
-        for id in &ids {
-            if let Err(e) = self.collect(id) {
-                first_error.get_or_insert(e);
+        for owner in &owners {
+            if let Err(error) = self.collect_owner(owner.as_ref()) {
+                first_error.get_or_insert(error);
             }
         }
         first_error.map_or(Ok(()), Err)
@@ -927,9 +1033,9 @@ impl Supervisor {
         let unrecorded = {
             let inits = self.inits()?;
             let mut ids = Vec::new();
-            ids.try_reserve_exact(inits.by_box.len())
+            ids.try_reserve_exact(inits.rows.len())
                 .map_err(|_| managed_storage())?;
-            for (id, init) in &inits.by_box {
+            for (owner, init) in &inits.rows {
                 let pending = match init {
                     Init::Container(init) => init.exit.is_some(),
                     // If epoll registration failed, the held child is still owned. The existing
@@ -940,13 +1046,13 @@ impl Supervisor {
                     ),
                 };
                 if pending {
-                    ids.push(id.try_clone()?);
+                    ids.push(owner.try_clone()?);
                 }
             }
             ids
         };
-        for id in &unrecorded {
-            self.collect(id)?;
+        for owner in &unrecorded {
+            self.collect_owner(owner.as_ref())?;
         }
         let _no_spawns = SPAWNING.write().map_err(poisoned)?;
         let owned = owned()?;
@@ -1038,6 +1144,16 @@ fn managed_storage() -> Refusal {
     }
 }
 
+fn managed_table_invalid() -> Refusal {
+    let message = "native supervisor publication has no unique reserved owner slot";
+    let mut why = String::new();
+    if why.try_reserve_exact(message.len()).is_err() {
+        return managed_storage();
+    }
+    why.push_str(message);
+    Refusal::Broken(why)
+}
+
 fn managed_uncertain(id: &BoxId) -> Refusal {
     match id.try_clone() {
         Ok(id) => Refusal::Lifecycle {
@@ -1062,12 +1178,25 @@ fn managed_os(operation: shards_api::ProcessOperation, error: Errno) -> shards_a
 }
 
 impl ManagedVm {
-    fn matches_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
-        if self.id != record.spec.id
-            || Some(self.scope) != record.native_scope
-            || self.commitment != record.native_commitment()?
+    fn uncertain(&self) -> Refusal {
+        match self.owner.as_ref() {
+            OwnerRef::Box(id) => managed_uncertain(id),
+            OwnerRef::Pool(pool) => Refusal::Backing {
+                key: hex_api::BackingKey {
+                    pool: *pool,
+                    generation: *self.scope.bytes(),
+                },
+                cause: hex_api::LifecycleCause::Uncertain,
+            },
+        }
+    }
+
+    fn matches_record(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
+        if self.owner.as_ref() != record.owner()
+            || Some(self.scope) != record.scope()
+            || self.commitment != record.commitment()?
         {
-            return Err(managed_uncertain(&record.spec.id));
+            return Err(record.refusal(hex_api::LifecycleCause::Uncertain));
         }
         Ok(())
     }
@@ -1078,35 +1207,33 @@ impl ManagedVm {
         }
         let pid = match &*self.phase.lock().map_err(poisoned)? {
             ManagedPhase::Held { pid, .. } | ManagedPhase::Running { pid, .. } => *pid,
-            _ => return Err(managed_uncertain(&self.id)),
+            _ => return Err(self.uncertain()),
         };
-        let raw = i32::try_from(pid).map_err(|_| managed_uncertain(&self.id))?;
-        let stat = Stat::of(raw).ok_or_else(|| managed_uncertain(&self.id))?;
+        let raw = i32::try_from(pid).map_err(|_| self.uncertain())?;
+        let stat = Stat::of(raw).ok_or_else(|| self.uncertain())?;
         if stat.ppid != rustix::process::getpid().as_raw_nonzero().get() || stat.start_ticks == 0 {
-            return Err(managed_uncertain(&self.id));
+            return Err(self.uncertain());
         }
         let vsock = self
             .pending_path
             .lock()
             .map_err(poisoned)?
             .take()
-            .ok_or_else(|| managed_uncertain(&self.id))?;
+            .ok_or_else(|| self.uncertain())?;
         self.identity
             .set(shards_api::Identity {
-                pid: u32::try_from(pid).map_err(|_| managed_uncertain(&self.id))?,
+                pid: u32::try_from(pid).map_err(|_| self.uncertain())?,
                 started: stat.start_ticks,
                 vsock,
             })
-            .map_err(|_| managed_uncertain(&self.id))?;
-        self.identity
-            .get()
-            .ok_or_else(|| managed_uncertain(&self.id))
+            .map_err(|_| self.uncertain())?;
+        self.identity.get().ok_or_else(|| self.uncertain())
     }
 
     fn matches(&self, identity: Option<&shards_api::Identity>) -> Result<(), Refusal> {
         if let Some(expected) = identity {
             if self.identity.get() != Some(expected) {
-                return Err(managed_uncertain(&self.id));
+                return Err(self.uncertain());
             }
         }
         Ok(())
@@ -1704,6 +1831,166 @@ impl Stat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pool() -> hex_core::record::PoolRecord {
+        let fixed = hex_api::CapacityResources {
+            cpu_milli: 1000,
+            mem_bytes: hex_api::MIN_MEMORY,
+            disk_bytes: 0,
+        };
+        let cost = hex_api::RuntimeCost {
+            id: [3; 32],
+            floor: fixed,
+            ceiling: fixed,
+            quantum: hex_api::CapacityResources {
+                cpu_milli: 1,
+                mem_bytes: 1,
+                disk_bytes: 1,
+            },
+            guest_overhead: hex_api::CapacityResources::default(),
+            overhead: hex_api::CapacityResources::default(),
+        };
+        hex_core::record::PoolRecord {
+            version: hex_core::record::RECORD_VERSION,
+            key: hex_api::BackingKey {
+                pool: [1; 32],
+                generation: [2; 16],
+            },
+            execution: hex_api::Execution::ShardsShared,
+            cost,
+            allocation: Some(
+                cost.allocate(hex_api::CapacityResources::default())
+                    .unwrap(),
+            ),
+            devices: Vec::new(),
+            phase: hex_api::BackingPhase::Granted,
+            init: None,
+            exit: None,
+        }
+    }
+
+    fn pool_receipt(record: &hex_core::record::PoolRecord) -> triomphe::Arc<ManagedVm> {
+        triomphe::Arc::try_new(ManagedVm {
+            owner: OwnerKey::Pool(record.key.pool),
+            scope: record.scope(),
+            commitment: record.native_commitment().unwrap(),
+            cgroup: hex_runtime::linux::cgroup::BoxCgroup::at(PathBuf::new()),
+            events: None,
+            identity: OnceLock::new(),
+            pending_path: Mutex::new(None),
+            phase: Mutex::new(ManagedPhase::Absent),
+            supervisor: Weak::new(),
+            token: 3,
+        })
+        .ok()
+        .unwrap()
+    }
+
+    /// AC-T7.4.1: a real Pool owner consumes the SAME init budget and token namespace as a Box.
+    /// This is a pure receipt-table control: no Supervisor/thread/process/cgroup is opened.
+    #[test]
+    fn managed_pool_and_box_share_one_bounded_preallocated_init_table() {
+        let mut inits = Inits {
+            budget: 2,
+            ..Inits::default()
+        };
+        inits.reserve_place().unwrap();
+        inits.reserve_place().unwrap();
+        assert!(matches!(
+            inits.reserve_place(),
+            Err(Refusal::Exhausted {
+                what: PIDFDS,
+                bound: 2
+            })
+        ));
+        let capacities = (inits.rows.capacity(), inits.tokens.capacity());
+        let id = BoxId::new("pool-shaped-box-id").unwrap();
+        inits
+            .insert(
+                OwnerKey::Box(id.try_clone().unwrap()),
+                OwnerKey::Box(id.try_clone().unwrap()),
+                9,
+                Init::Container(ContainerInit {
+                    pid: 7,
+                    who: ProcId {
+                        pid: 7,
+                        start_ticks: 11,
+                    },
+                    pidfd: None,
+                    exit: None,
+                    container: Arc::new(Container {
+                        bundle: String::new(),
+                        cgroup: None,
+                        pid_namespace: false,
+                    }),
+                }),
+            )
+            .unwrap();
+        inits.reserved -= 1;
+        let record = pool();
+        let native = pool_receipt(&record);
+        inits
+            .insert(
+                OwnerKey::Pool(record.key.pool),
+                OwnerKey::Pool(record.key.pool),
+                3,
+                Init::Managed(triomphe::Arc::clone(&native)),
+            )
+            .unwrap();
+        inits.reserved -= 1;
+        assert_eq!((inits.rows.capacity(), inits.tokens.capacity()), capacities);
+        assert_eq!(inits.token_owner(9).unwrap().as_ref(), OwnerRef::Box(&id));
+        assert_eq!(
+            inits.token_owner(3).unwrap().as_ref(),
+            OwnerRef::Pool(&record.key.pool)
+        );
+        assert!(matches!(
+            inits.get(OwnerRef::Box(&id)),
+            Some(Init::Container(_))
+        ));
+        assert!(matches!(
+            inits.get(OwnerRef::Pool(&record.key.pool)),
+            Some(Init::Managed(known)) if triomphe::Arc::ptr_eq(known, &native)
+        ));
+        assert!(inits.reserve_place().is_err());
+        assert!(inits.remove(OwnerRef::Pool(&record.key.pool)).is_some());
+        assert!(inits.token_owner(3).is_none());
+        assert!(inits.get(OwnerRef::Box(&id)).is_some());
+        inits.reserve_place().unwrap();
+    }
+
+    /// AC-T7.4.1: a same-pool retry may not replace the retained scope or admitted charge.
+    /// Record/commitment checks precede all native observation and effects.
+    #[test]
+    fn managed_pool_receipt_rejects_another_generation_or_admitted_charge() {
+        let mut record = pool();
+        let native = pool_receipt(&record);
+        native.matches_record(NativeRecord::Pool(&record)).unwrap();
+        record.key.generation = [4; 16];
+        assert!(matches!(
+            native.matches_record(NativeRecord::Pool(&record)),
+            Err(Refusal::Backing { key, cause: hex_api::LifecycleCause::Uncertain })
+                if key == record.key
+        ));
+        record.key.generation = [2; 16];
+        record.cost.id = [5; 32];
+        record.allocation = Some(
+            record
+                .cost
+                .allocate(hex_api::CapacityResources::default())
+                .unwrap(),
+        );
+        assert!(native.matches_record(NativeRecord::Pool(&record)).is_err());
+        record.cost.id = [3; 32];
+        record.allocation = Some(
+            record
+                .cost
+                .allocate(hex_api::CapacityResources::default())
+                .unwrap(),
+        );
+        native.matches_record(NativeRecord::Pool(&record)).unwrap();
+        assert!(matches!(native.uncertain(), Refusal::Backing { key, .. } if key == record.key));
+    }
 
     /// Decision 3 (HEX-RT-7): a deleted box's programs are reaped by its delete, each exit recorded for
     /// its caller's wait, and a caller whose own wait meets the program already reaped reads the record.

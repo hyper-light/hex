@@ -251,34 +251,38 @@ impl Record {
             writeln!(text, "gpu {}", id.key)?;
             writeln!(text, "native {physical}")?;
         }
-        match &self.phase {
-            Phase::Intent => writeln!(text, "intent"),
-            Phase::Released {
-                identity: None,
-                status,
-            } => {
-                writeln!(text, "released-unpublished")?;
-                render_status(text, *status)
+        render_phase(text, &self.phase)
+    }
+}
+
+pub(super) fn render_phase(text: &mut impl std::fmt::Write, phase: &Phase) -> std::fmt::Result {
+    match phase {
+        Phase::Intent => writeln!(text, "intent"),
+        Phase::Released {
+            identity: None,
+            status,
+        } => {
+            writeln!(text, "released-unpublished")?;
+            render_status(text, *status)
+        }
+        Phase::Running(id)
+        | Phase::Stopping(id)
+        | Phase::Released {
+            identity: Some(id), ..
+        } => {
+            let name = match phase {
+                Phase::Running(_) => "running",
+                Phase::Released { .. } => "released",
+                _ => "stopping",
+            };
+            writeln!(text, "{name}")?;
+            writeln!(text, "pid {}", id.pid)?;
+            writeln!(text, "started {}", id.started)?;
+            writeln!(text, "vsock {}", id.vsock.display())?;
+            if let Phase::Released { status, .. } = phase {
+                render_status(text, *status)?;
             }
-            Phase::Running(id)
-            | Phase::Stopping(id)
-            | Phase::Released {
-                identity: Some(id), ..
-            } => {
-                let phase = match self.phase {
-                    Phase::Running(_) => "running",
-                    Phase::Released { .. } => "released",
-                    _ => "stopping",
-                };
-                writeln!(text, "{phase}")?;
-                writeln!(text, "pid {}", id.pid)?;
-                writeln!(text, "started {}", id.started)?;
-                writeln!(text, "vsock {}", id.vsock.display())?;
-                if let Phase::Released { status, .. } = self.phase {
-                    render_status(text, status)?;
-                }
-                Ok(())
-            }
+            Ok(())
         }
     }
 }
@@ -456,6 +460,24 @@ fn parse(text: &str) -> Result<Record, Refusal> {
             ));
         }
     }
+    let phase = parse_phase(&mut lines)?;
+    if lines.next().is_some() {
+        return Err(invalid("receipt has trailing data"));
+    }
+    Ok(Record {
+        id,
+        devices,
+        class,
+        scope,
+        route,
+        physical,
+        vcpus,
+        memory_mib,
+        phase,
+    })
+}
+
+pub(super) fn parse_phase<'a>(lines: &mut impl Iterator<Item = &'a str>) -> Result<Phase, Refusal> {
     let phase = match lines.next() {
         Some("intent") => Phase::Intent,
         Some("released-unpublished") => Phase::Released {
@@ -500,20 +522,7 @@ fn parse(text: &str) -> Result<Record, Refusal> {
         }
         _ => return Err(invalid("unknown launch phase")),
     };
-    if lines.next().is_some() {
-        return Err(invalid("receipt has trailing data"));
-    }
-    Ok(Record {
-        id,
-        devices,
-        class,
-        scope,
-        route,
-        physical,
-        vcpus,
-        memory_mib,
-        phase,
-    })
+    Ok(phase)
 }
 
 fn parse_scope(text: &str) -> Result<Option<NativeScope>, Refusal> {

@@ -5,9 +5,17 @@ use super::*;
 use crate::devices::{Binding, Route};
 
 fn invalid(why: &'static str) -> Refusal {
+    let mut message = String::new();
+    if message.try_reserve_exact(why.len()).is_err() {
+        return Refusal::Exhausted {
+            what: "physical correspondence refusal bytes",
+            bound: why.len(),
+        };
+    }
+    message.push_str(why);
     Refusal::Invalid {
         what: "Shards physical GPU correspondence",
-        why: why.into(),
+        why: message,
     }
 }
 
@@ -49,23 +57,36 @@ fn joined_key(device: &shards_api::ResolvedGpu) -> Result<u64, Refusal> {
 }
 
 impl GuestRuntime {
-    pub(super) fn catalog_physical(
-        &self,
-        devices: &[hex_api::DeviceId],
-    ) -> Result<Vec<shards_api::PhysicalGpu>, Refusal> {
+    /// A transient sorted view of the one immutable catalog. References provide
+    /// lookup only: no copied metadata, inventory cache or selection authority.
+    pub(super) fn physical_entries(&self) -> Result<Vec<&crate::devices::Entry>, Refusal> {
         let catalog = self
             .gpu_catalog
             .as_ref()
             .ok_or_else(|| invalid("no exact physical catalog"))?;
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(catalog.entries().len())
+            .map_err(|_| Refusal::Full(hex_api::MAX_DEVICES))?;
+        entries.extend(catalog.entries_for(Route::ShardsGpu));
+        entries.sort_unstable_by_key(|entry| entry.info.id);
+        Ok(entries)
+    }
+
+    pub(super) fn catalog_physical(
+        &self,
+        devices: &[hex_api::DeviceId],
+    ) -> Result<Vec<shards_api::PhysicalGpu>, Refusal> {
+        let entries = self.physical_entries()?;
         let mut physical = Vec::new();
         physical
             .try_reserve_exact(devices.len())
             .map_err(|_| Refusal::Full(hex_api::MAX_DEVICES))?;
         for id in devices {
-            let entry = catalog
-                .entries()
-                .iter()
-                .find(|entry| entry.info.id == *id)
+            let entry = entries
+                .binary_search_by_key(id, |entry| entry.info.id)
+                .ok()
+                .and_then(|index| entries.get(index))
                 .ok_or_else(|| invalid("claim is absent from the configured catalog"))?;
             let Some(Binding::ShardsGpu { physical: native }) = entry.binding(Route::ShardsGpu)
             else {
@@ -91,6 +112,7 @@ impl GuestRuntime {
         }
         let authority = self.authority()?;
         let records = authority.records()?;
+        let pools = authority.pool_records()?;
         let mut native = authority.physical_devices()?;
         if native.len() > hex_api::MAX_DEVICES {
             return Err(Refusal::Full(hex_api::MAX_DEVICES));
@@ -127,62 +149,85 @@ impl GuestRuntime {
         offers
             .try_reserve_exact(ids.len())
             .map_err(|_| Refusal::Full(hex_api::MAX_DEVICES))?;
+        if ids
+            .windows(2)
+            .any(|pair| matches!(pair, [left, right] if left >= right))
+        {
+            return Err(invalid(
+                "physical claims are not canonical sorted unique identities",
+            ));
+        }
+        let mut native = native.into_iter().peekable();
         for (id, resolved) in ids.iter().zip(&probe.devices) {
             if id.kind != hex_api::DeviceKind::Gpu || joined_key(resolved)? != id.key {
                 return Err(invalid(
                     "complete native identity disagrees with the stable physical claim",
                 ));
             }
-            let index = native
-                .binary_search_by_key(id, |info| info.id)
-                .map_err(|_| invalid("the same native provider has no current selected device"))?;
-            let info = native
-                .get_mut(index)
-                .ok_or_else(|| invalid("native device index changed"))?;
+            while native.peek().is_some_and(|info| info.id < *id) {
+                let _ = native.next();
+            }
+            let mut info = native.next().filter(|info| info.id == *id).ok_or_else(|| {
+                invalid("the same native provider has no current selected device")
+            })?;
             info.check()?;
             if info.holder.is_some() {
                 return Err(invalid("native facts cannot assert a holder"));
             }
-            // Move actual model/size without an unchecked clone. Only the sole
-            // durable Store supplies holders; catalog metadata is never capacity.
-            let mut info = std::mem::replace(
-                info,
-                hex_api::DeviceInfo {
-                    id: *id,
-                    model: String::new(),
-                    size: 0,
-                    holder: None,
-                },
-            );
-            info.holder = catalog.holder(*id, &records)?;
+            // Move actual metadata once, without a fake placeholder DeviceInfo.
+            // Only the canonical Box+Pool records supply the physical holder.
+            info.holder = catalog.holder(*id, &records, &pools)?;
             offers.push(info);
         }
         Ok(offers)
     }
 
     pub fn attachment_offers(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
-        let Some(catalog) = &self.gpu_catalog else {
+        if self.gpu_catalog.is_none() {
             return Ok(Vec::new());
-        };
+        }
+        let entries = self.physical_entries()?;
+        let native = self.authority()?.physical_devices()?;
+        if native.len() > hex_api::MAX_DEVICES {
+            return Err(Refusal::Full(hex_api::MAX_DEVICES));
+        }
         let mut ids = Vec::new();
-        for entry in catalog.entries() {
-            if entry.binding(Route::ShardsGpu).is_some() {
-                if ids.len() >= hex_api::MAX_DEVICES {
-                    return Err(Refusal::Full(hex_api::MAX_DEVICES));
-                }
-                ids.try_reserve(1)
-                    .map_err(|_| Refusal::Full(hex_api::MAX_DEVICES))?;
-                ids.push(entry.info.id);
+        ids.try_reserve_exact(native.len())
+            .map_err(|_| Refusal::Full(hex_api::MAX_DEVICES))?;
+        for device in native {
+            if entries
+                .binary_search_by_key(&device.id, |entry| entry.info.id)
+                .is_ok()
+            {
+                ids.push(device.id);
             }
         }
         ids.sort_unstable();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if ids.windows(2).any(|pair| matches!(pair, [a,b] if a >= b)) {
+            return Err(invalid(
+                "native provider repeated a selected device identity",
+            ));
+        }
         let physical = self.catalog_physical(&ids)?;
         self.checked_physical(&ids, &physical)
     }
 
     /// Explicit initialization uses the same production join as later admission.
     pub fn initialize_gpu(&self) -> Result<(), Refusal> {
-        self.attachment_offers().map(drop)
+        if self.gpu_catalog.is_none() {
+            return Ok(());
+        }
+        let expected = self.physical_entries()?.len();
+        let actual = self.attachment_offers()?;
+        if expected != actual.len() {
+            return Err(invalid(
+                "configured physical identities have no complete current native/renderer join",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -207,6 +252,8 @@ mod tests {
             uuid: [1; 16],
             pci: None,
             luid: Some(9u64.to_le_bytes()),
+            name: None,
+            device_local_bytes: None,
         };
         assert!(joined_key(&resolved).is_err());
         resolved.pci = Some(pci);

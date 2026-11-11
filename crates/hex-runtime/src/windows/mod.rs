@@ -30,6 +30,7 @@ use hex_api::{
 
 use crate::devices::{Binding, Catalog, Route, SharedCatalog};
 use crate::guest::Side;
+use hex_core::record::{NativeRecord, OwnerKey, OwnerRef};
 use hex_core::setup::{self, WindowsFeature};
 use oci::OciBox;
 use process::JobBox;
@@ -48,7 +49,7 @@ fn native_held(boxed: JobBox) -> Result<Held, Refusal> {
         .map_err(|_| allocation(std::mem::size_of::<JobBox>()))
 }
 
-fn remove_vm_keeper_file(state: &Path, id: &BoxId, boxed: &JobBox) -> Result<(), Refusal> {
+fn remove_vm_keeper_file(state: &Path, id: OwnerRef<'_>, boxed: &JobBox) -> Result<(), Refusal> {
     let path = keeper::vm::path(state, id)?;
     let Some(held) = keeper::vm::read(&path)? else {
         return Ok(());
@@ -82,6 +83,7 @@ impl Held {
 struct Slot {
     devices: Vec<DeviceId>,
     marker: Option<PathBuf>,
+    route: Option<hex_api::RouteReceipt>,
     keeper: KeeperHold,
     state: SlotState,
 }
@@ -164,8 +166,12 @@ fn inconsistent_slots() -> Refusal {
     Refusal::Broken("native holding entry changed during its owned operation".to_owned())
 }
 
-fn slot_index(boxes: &[(BoxId, Slot)], id: &BoxId) -> Result<usize, usize> {
-    boxes.binary_search_by(|(key, _)| key.cmp(id))
+fn owner_index(boxes: &[(OwnerKey, Slot)], id: OwnerRef<'_>) -> Result<usize, usize> {
+    boxes.binary_search_by(|(key, _)| key.as_ref().cmp(&id))
+}
+
+fn slot_index(boxes: &[(OwnerKey, Slot)], id: &BoxId) -> Result<usize, usize> {
+    owner_index(boxes, OwnerRef::Box(id))
 }
 
 fn copy_devices(devices: &[DeviceId]) -> Result<Vec<DeviceId>, Refusal> {
@@ -380,7 +386,7 @@ impl std::ops::Deref for NativeCatalog {
 /// A runtime's boxes and the keeper holding their jobs: shared with a run's thread, which removes its box
 /// through [`Holding::remove`] as the runtime's delete does.
 struct Holding {
-    boxes: Mutex<Vec<(BoxId, Slot)>>,
+    boxes: Mutex<Vec<(OwnerKey, Slot)>>,
     /// Where its boxes outlive it: the keeper holding a second handle to each box's job, and the state
     /// folder their handle values are kept in. `None` for a runtime driven in process.
     keeper: Option<Keeping>,
@@ -393,10 +399,10 @@ impl Holding {
         if boxed.released() {
             return Ok(());
         }
-        let id = boxed.id();
+        let id = boxed.owner();
         let held = {
             let mut boxes = self.boxes()?;
-            let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+            let at = owner_index(&boxes, id).map_err(|_| inconsistent_slots())?;
             let (_, slot) = boxes.get_mut(at).ok_or_else(inconsistent_slots)?;
             let held = match &slot.state {
                 SlotState::Ready(Held::Process(current))
@@ -427,7 +433,7 @@ impl Holding {
             self.drop_vm_from_keeper(id, boxed)
         })();
         let mut boxes = self.boxes()?;
-        let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+        let at = owner_index(&boxes, id).map_err(|_| inconsistent_slots())?;
         let (_, slot) = boxes.get_mut(at).ok_or_else(inconsistent_slots)?;
         if !matches!(&slot.state, SlotState::Removing(Held::Process(current))
             if std::ptr::eq(NativeArc::as_ptr(current), boxed))
@@ -447,7 +453,7 @@ impl Holding {
         }
     }
 
-    fn boxes(&self) -> Result<std::sync::MutexGuard<'_, Vec<(BoxId, Slot)>>, Refusal> {
+    fn boxes(&self) -> Result<std::sync::MutexGuard<'_, Vec<(OwnerKey, Slot)>>, Refusal> {
         self.boxes
             .lock()
             .map_err(|_| Refusal::Broken("the node's box map lock is poisoned".to_owned()))
@@ -455,17 +461,23 @@ impl Holding {
 
     fn reserve(
         &self,
-        id: &BoxId,
+        id: OwnerRef<'_>,
         devices: &[DeviceId],
         marker: Option<PathBuf>,
+        route: Option<hex_api::RouteReceipt>,
     ) -> Result<(), Refusal> {
-        let key = id.try_clone()?;
+        let key = id.try_owned()?;
         let owned = copy_devices(devices)?;
         let mut selected = copy_devices(devices)?;
         selected.sort_unstable();
         let mut boxes = self.boxes()?;
-        let at = match slot_index(&boxes, id) {
-            Ok(_) => return Err(Refusal::Exists(key)),
+        let at = match owner_index(&boxes, id) {
+            Ok(_) => {
+                return Err(match key {
+                    OwnerKey::Box(id) => Refusal::Exists(id),
+                    OwnerKey::Pool(_) => pending("the native pool owner is already held"),
+                });
+            }
             Err(at) => at,
         };
         if boxes.len() >= crate::MAX_BOXES {
@@ -495,6 +507,7 @@ impl Holding {
                 Slot {
                     devices: owned,
                     marker,
+                    route,
                     keeper: KeeperHold::Unheld,
                     state: SlotState::Creating,
                 },
@@ -516,9 +529,9 @@ impl Holding {
         Ok(())
     }
 
-    fn made(&self, id: &BoxId, held: Held) -> Result<bool, Refusal> {
+    fn made(&self, id: OwnerRef<'_>, held: Held) -> Result<bool, Refusal> {
         let mut boxes = self.boxes()?;
-        let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+        let at = owner_index(&boxes, id).map_err(|_| inconsistent_slots())?;
         let (_, slot) = boxes.get_mut(at).ok_or_else(inconsistent_slots)?;
         let cancelled = match slot.state {
             SlotState::Creating => false,
@@ -533,9 +546,9 @@ impl Holding {
         Ok(cancelled)
     }
 
-    fn ready(&self, id: &BoxId) -> Result<bool, Refusal> {
+    fn ready(&self, id: OwnerRef<'_>) -> Result<bool, Refusal> {
         let mut boxes = self.boxes()?;
-        let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+        let at = owner_index(&boxes, id).map_err(|_| inconsistent_slots())?;
         let (_, slot) = boxes.get_mut(at).ok_or_else(inconsistent_slots)?;
         match &slot.state {
             SlotState::Finishing(held) => {
@@ -550,9 +563,9 @@ impl Holding {
         }
     }
 
-    fn uncertain(&self, id: &BoxId) -> Result<(), Refusal> {
+    fn uncertain(&self, id: OwnerRef<'_>) -> Result<(), Refusal> {
         let mut boxes = self.boxes()?;
-        let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+        let at = owner_index(&boxes, id).map_err(|_| inconsistent_slots())?;
         let (_, slot) = boxes.get_mut(at).ok_or_else(inconsistent_slots)?;
         slot.state = match &slot.state {
             SlotState::Creating | SlotState::Cancelled => SlotState::Uncertain,
@@ -577,9 +590,9 @@ impl Holding {
         Ok(())
     }
 
-    fn keeper_receipt(&self, id: &BoxId, receipt: KeeperHold) -> Result<(), Refusal> {
+    fn keeper_receipt(&self, id: OwnerRef<'_>, receipt: KeeperHold) -> Result<(), Refusal> {
         let mut boxes = self.boxes()?;
-        let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+        let at = owner_index(&boxes, id).map_err(|_| inconsistent_slots())?;
         boxes.get_mut(at).ok_or_else(inconsistent_slots)?.1.keeper = receipt;
         Ok(())
     }
@@ -605,12 +618,12 @@ impl Holding {
     fn write_keeper_receipt(
         &self,
         keeping: &Keeping,
-        id: &BoxId,
+        id: OwnerRef<'_>,
         receipt: KeeperReceipt,
     ) -> Result<(), Refusal> {
         let commitment = {
             let boxes = self.boxes()?;
-            let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+            let at = owner_index(&boxes, id).map_err(|_| inconsistent_slots())?;
             let (_, slot) = boxes.get(at).ok_or_else(inconsistent_slots)?;
             match slot.physical() {
                 Some(Held::Process(boxed)) => boxed.vm_commitment(),
@@ -631,6 +644,9 @@ impl Holding {
                 },
             )
         } else {
+            let OwnerRef::Box(id) = id else {
+                return Err(inconsistent_slots());
+            };
             keeper::write_held(
                 &keeping.state,
                 id.as_str(),
@@ -649,7 +665,7 @@ impl Holding {
         pid: u32,
         created: u64,
         mut hold: impl FnMut(&Held) -> Result<usize, Refusal>,
-        mut record: impl FnMut(&BoxId, KeeperReceipt) -> Result<(), Refusal>,
+        mut record: impl FnMut(OwnerRef<'_>, KeeperReceipt) -> Result<(), Refusal>,
     ) -> Result<(), Refusal> {
         let ready = {
             let boxes = self.boxes()?;
@@ -671,8 +687,8 @@ impl Holding {
                 value: hold(&held)?,
             };
             // Store ownership before disk I/O. A failed record write retains the exact remote handle.
-            self.keeper_receipt(&id, KeeperHold::Held(receipt))?;
-            record(&id, receipt)?;
+            self.keeper_receipt(id.as_ref(), KeeperHold::Held(receipt))?;
+            record(id.as_ref(), receipt)?;
         }
         Ok(())
     }
@@ -685,12 +701,15 @@ impl Holding {
         Ok(Some(keeping))
     }
 
-    fn keep(&self, id: &BoxId, held: &Held) -> Result<(), Refusal> {
+    fn keep(&self, id: OwnerRef<'_>, held: &Held) -> Result<(), Refusal> {
         if let Held::Process(boxed) = held
             && boxed.is_vm()
         {
             return self.keep_vm(id, boxed);
         }
+        let OwnerRef::Box(id) = id else {
+            return Err(inconsistent_slots());
+        };
         let Some(keeping) = self.keeping()? else {
             return Ok(());
         };
@@ -706,7 +725,7 @@ impl Holding {
                         |error| Refusal::os("checking the original VM keeper job", error),
                     )?
                 {
-                    self.keeper_receipt(id, KeeperHold::Uncertain)?;
+                    self.keeper_receipt(OwnerRef::Box(id), KeeperHold::Uncertain)?;
                     return Err(pending(
                         "the VM keeper value names a different kernel object",
                     ));
@@ -724,7 +743,7 @@ impl Holding {
             },
         };
         // Save the exact owned remote handle before the file write: an error cannot lose its cleanup.
-        self.keeper_receipt(id, KeeperHold::Held(receipt))?;
+        self.keeper_receipt(OwnerRef::Box(id), KeeperHold::Held(receipt))?;
         keeper::write_held(
             &keeping.state,
             id.as_str(),
@@ -735,7 +754,7 @@ impl Holding {
         .map_err(|e| Refusal::os("recording a box's keeper handle", e))
     }
 
-    fn keep_vm(&self, id: &BoxId, boxed: &JobBox) -> Result<(), Refusal> {
+    fn keep_vm(&self, id: OwnerRef<'_>, boxed: &JobBox) -> Result<(), Refusal> {
         let Some(keeping) = self.keeping()? else {
             return Ok(());
         };
@@ -826,12 +845,12 @@ impl Holding {
                 && let Err(error) = keeper.drop_held(receipt.value)
             {
                 if known.is_some() {
-                    self.keeper_receipt(id, KeeperHold::Uncertain)?;
+                    self.keeper_receipt(OwnerRef::Box(id), KeeperHold::Uncertain)?;
                 }
                 return Err(error);
             }
             if known.is_some() {
-                self.keeper_receipt(id, KeeperHold::Closed)?;
+                self.keeper_receipt(OwnerRef::Box(id), KeeperHold::Closed)?;
             }
         }
         match std::fs::remove_file(keeper::held_file(&keeping.state, id.as_str())) {
@@ -841,13 +860,13 @@ impl Holding {
         }
     }
 
-    fn drop_vm_from_keeper(&self, id: &BoxId, boxed: &JobBox) -> Result<(), Refusal> {
+    fn drop_vm_from_keeper(&self, id: OwnerRef<'_>, boxed: &JobBox) -> Result<(), Refusal> {
         let Some(keeping) = self.keeper.as_ref() else {
             return Ok(());
         };
         let state = {
             let boxes = self.boxes()?;
-            let at = slot_index(&boxes, id).map_err(|_| inconsistent_slots())?;
+            let at = owner_index(&boxes, id).map_err(|_| inconsistent_slots())?;
             boxes.get(at).ok_or_else(inconsistent_slots)?.1.keeper
         };
         let receipt = match state {
@@ -1041,7 +1060,12 @@ impl Holding {
                     return Err(inconsistent_slots());
                 }
             }
-            holders.extend(slot.devices.iter().map(|device| (*device, id)));
+            if !slot.devices.is_empty() {
+                let OwnerKey::Box(id) = id else {
+                    return Err(inconsistent_slots());
+                };
+                holders.extend(slot.devices.iter().map(|device| (*device, id)));
+            }
         }
         holders.sort_unstable_by_key(|(device, _)| *device);
         if holders
@@ -1245,9 +1269,13 @@ impl WinRuntime {
         ids.extend_from_slice(&spec.devices);
         ids.sort_unstable();
         ids.dedup();
-        self.holding
-            .reserve(&spec.id, &ids, Some(self.marker(&spec.id)))?;
-        self.holding.uncertain(&spec.id)
+        self.holding.reserve(
+            OwnerRef::Box(&spec.id),
+            &ids,
+            Some(self.marker(&spec.id)),
+            spec.route,
+        )?;
+        self.holding.uncertain(OwnerRef::Box(&spec.id))
     }
 
     /// The pid of the keeper holding this node's boxes' jobs, where its boxes outlive it; a keeper found
@@ -1272,7 +1300,7 @@ impl WinRuntime {
 
     pub fn launch_managed(
         &self,
-        record: &hex_core::record::BoxRecord,
+        record: NativeRecord<'_>,
         plan: &crate::devices::ManagedLaunch<'_>,
         io: shards_api::LaunchIo,
         patience: std::time::Duration,
@@ -1283,7 +1311,7 @@ impl WinRuntime {
 
     pub fn attach_managed(
         &self,
-        record: &hex_core::record::BoxRecord,
+        record: NativeRecord<'_>,
         identity: Option<&shards_api::Identity>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
         managed::attach(self, record, identity)
@@ -1291,13 +1319,13 @@ impl WinRuntime {
 
     pub fn finalize_managed(
         &self,
-        record: &hex_core::record::BoxRecord,
+        record: NativeRecord<'_>,
         identity: Option<&shards_api::Identity>,
     ) -> Result<(), Refusal> {
         managed::finalize(self, record, identity)
     }
 
-    pub fn managed_usage(&self, record: &hex_core::record::BoxRecord) -> Result<Usage, Refusal> {
+    pub fn managed_usage(&self, record: NativeRecord<'_>) -> Result<Usage, Refusal> {
         managed::usage(self, record)
     }
 
@@ -1305,8 +1333,37 @@ impl WinRuntime {
     /// by the node's recovery before it takes a box back or removes it): for an `oci` box, whether its
     /// record names a box [`WinRuntime::adopt`] takes back ([`oci::alive`]); `None` for a `process` box,
     /// which has no init.
-    pub fn alive(&self, spec: &BoxSpec) -> Result<Option<bool>, Refusal> {
+    /// Validate the persisted route before an ordinary native create, adoption or cleanup.
+    pub fn check_native_spec(&self, spec: &BoxSpec) -> Result<(), Refusal> {
         spec.check()?;
+        if !matches!(
+            spec.class,
+            ClassSpec::Process | ClassSpec::Oci(_) | ClassSpec::Bundle(_)
+        ) {
+            return Err(wrong_backend(spec));
+        }
+        if let Some(route) = spec.route {
+            #[cfg(target_arch = "x86_64")]
+            let arch = hex_api::ImageArch::Amd64;
+            #[cfg(target_arch = "aarch64")]
+            let arch = hex_api::ImageArch::Arm64;
+            if route.key.execution != hex_api::Execution::Native
+                || route.key.image.os != hex_api::ImageOs::Windows
+                || route.key.image.arch != arch
+            {
+                return Err(Refusal::Invalid {
+                    what: "Windows native route",
+                    why: copy_text(
+                        "the committed execution or image platform belongs to another initialized backend",
+                    )?,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn alive(&self, spec: &BoxSpec) -> Result<Option<bool>, Refusal> {
+        self.check_native_spec(spec)?;
         match &spec.class {
             ClassSpec::Process => {
                 spec.check_no_devices("windows process")?;
@@ -1338,7 +1395,7 @@ impl WinRuntime {
     /// where any of them is gone ([`OciBox::take_back`]), for recovery to end it. Refused for a runtime whose
     /// boxes don't outlive it.
     pub fn adopt(&self, spec: &BoxSpec) -> Result<(), Refusal> {
-        spec.check()?;
+        self.check_native_spec(spec)?;
         if matches!(spec.class, ClassSpec::Process) {
             spec.check_no_devices("windows process")?;
         }
@@ -1353,7 +1410,8 @@ impl WinRuntime {
                 return Err(error);
             }
         }
-        self.holding.reserve(&spec.id, &spec.devices, marker)?;
+        self.holding
+            .reserve(OwnerRef::Box(&spec.id), &spec.devices, marker, spec.route)?;
         let made = match &spec.class {
             ClassSpec::Process => {
                 JobBox::take_back(spec.id.try_clone()?, &spec.bounds, self.processors, &name)
@@ -1389,8 +1447,9 @@ impl WinRuntime {
                             .try_reserve_exact(record.devices.len())
                             .map_err(|_| allocation(record.devices.len()))?;
                         devices.extend(record.devices.iter().map(|binding| binding.id));
-                        self.holding.reserve(id, &devices, Some(marker))?;
-                        self.holding.uncertain(id)?;
+                        self.holding
+                            .reserve(OwnerRef::Box(id), &devices, Some(marker), None)?;
+                        self.holding.uncertain(OwnerRef::Box(id))?;
                         return self.holding.remove(id);
                     }
                 }
@@ -1480,7 +1539,7 @@ impl WinRuntime {
         Self::with(processors, default_scratch_root())
     }
 
-    fn boxes(&self) -> Result<std::sync::MutexGuard<'_, Vec<(BoxId, Slot)>>, Refusal> {
+    fn boxes(&self) -> Result<std::sync::MutexGuard<'_, Vec<(OwnerKey, Slot)>>, Refusal> {
         self.holding.boxes()
     }
 
@@ -1502,10 +1561,10 @@ impl WinRuntime {
     }
 
     fn info(&self, b: &Held) -> Result<BoxInfo, Refusal> {
-        match b {
+        let mut info = match b {
             Held::Process(b) => Ok(BoxInfo {
                 route: None,
-                id: b.id().clone(),
+                id: b.id()?.try_clone()?,
                 class: Class::Process,
                 state: if b.running()? {
                     BoxState::Running
@@ -1521,7 +1580,22 @@ impl WinRuntime {
                 allocation: None,
             }),
             Held::Oci(b) => oci::info(b),
+        }?;
+        let boxes = self.boxes()?;
+        let at = slot_index(&boxes, &info.id).map_err(|_| inconsistent_slots())?;
+        let (_, slot) = boxes.get(at).ok_or_else(inconsistent_slots)?;
+        let same = match (b, slot.physical()) {
+            (Held::Process(expected), Some(Held::Process(actual))) => {
+                NativeArc::ptr_eq(expected, actual)
+            }
+            (Held::Oci(expected), Some(Held::Oci(actual))) => Arc::ptr_eq(expected, actual),
+            _ => false,
+        };
+        if !same || info.route.is_some_and(|route| Some(route) != slot.route) {
+            return Err(inconsistent_slots());
         }
+        info.route = slot.route;
+        Ok(info)
     }
 
     /// The container `oci` box `spec` asks for, refused by name where a feature it needs is off.
@@ -1619,7 +1693,7 @@ impl WinRuntime {
         let held = match made {
             Ok(held) => held,
             Err(error) => {
-                self.holding.uncertain(id)?;
+                self.holding.uncertain(OwnerRef::Box(id))?;
                 return match self.holding.remove(id) {
                     Ok(()) => Err(error),
                     Err(cleanup) => Err(Refusal::Broken(format!(
@@ -1628,7 +1702,7 @@ impl WinRuntime {
                 };
             }
         };
-        if self.holding.made(id, held.clone())? {
+        if self.holding.made(OwnerRef::Box(id), held.clone())? {
             self.holding.remove(id)?;
             return Err(pending(
                 "creation was cancelled and its physical box was removed",
@@ -1636,9 +1710,9 @@ impl WinRuntime {
         }
         let result = self
             .info(&held)
-            .and_then(|info| self.holding.keep(id, &held).map(|()| info));
+            .and_then(|info| self.holding.keep(OwnerRef::Box(id), &held).map(|()| info));
         match result {
-            Ok(info) if self.holding.ready(id)? => Ok(info),
+            Ok(info) if self.holding.ready(OwnerRef::Box(id))? => Ok(info),
             Ok(_) => {
                 self.holding.remove(id)?;
                 Err(pending(
@@ -1646,7 +1720,7 @@ impl WinRuntime {
                 ))
             }
             Err(error) => {
-                self.holding.uncertain(id)?;
+                self.holding.uncertain(OwnerRef::Box(id))?;
                 match self.holding.remove(id) {
                     Ok(()) => Err(error),
                     Err(cleanup) => Err(Refusal::Broken(format!(
@@ -1675,16 +1749,62 @@ impl Default for WinRuntime {
     }
 }
 
+fn native_route_offer(
+    report: &mut Capacity,
+    class: Class,
+    initialized: bool,
+) -> Result<(), Refusal> {
+    if !initialized {
+        return Ok(());
+    }
+    #[cfg(target_arch = "x86_64")]
+    let arch = hex_api::ImageArch::Amd64;
+    #[cfg(target_arch = "aarch64")]
+    let arch = hex_api::ImageArch::Arm64;
+    report
+        .routes
+        .try_reserve_exact(1)
+        .map_err(|_| allocation(1))?;
+    report
+        .device_routes
+        .try_reserve_exact(report.devices.len())
+        .map_err(|_| allocation(report.devices.len()))?;
+    report.routes.push(hex_api::RouteOffer {
+        key: hex_api::RouteKey {
+            class,
+            image: hex_api::ImagePlatform {
+                os: hex_api::ImageOs::Windows,
+                arch,
+            },
+            execution: hex_api::Execution::Native,
+            gpu: if class == Class::Process {
+                hex_api::GpuEligibility::None
+            } else {
+                hex_api::GpuEligibility::Any
+            },
+        },
+        cost: None,
+        backing: None,
+    });
+    // This is the first route in this fresh native snapshot; bit zero has no persisted identity.
+    for device in &report.devices {
+        report
+            .device_routes
+            .push(u64::from(device.classes.contains(&class)));
+    }
+    Ok(())
+}
+
 impl Runtime for WinRuntime {
     fn capacity(&self, class: Class) -> Result<Option<Capacity>, Refusal> {
-        if !self
-            .catalog
-            .entries()
-            .iter()
-            .any(|entry| entry.binding(Route::Hcs).is_some())
-        {
+        if !matches!(class, Class::Process | Class::Oci) {
             return Ok(None);
         }
+        // The native capability is initialized independently of whether a GPU was configured.
+        // The guest augments this same physical envelope with its separately initialized routes.
+        let initialized = class == Class::Process
+            || (oci::available().is_ok()
+                && !self.features_off()?.contains(&WindowsFeature::Containers));
         let (memory, free_memory) =
             sys::memory().map_err(|e| Refusal::os("reading native memory capacity", e))?;
         let (disk, free_disk) = sys::disk_space(&self.scratch_root)
@@ -1701,7 +1821,7 @@ impl Runtime for WinRuntime {
         id.try_reserve_exact(identity.len())
             .map_err(|_| allocation(identity.len()))?;
         id.push_str(identity);
-        let report = Capacity {
+        let mut report = Capacity {
             routes: Vec::new(),
             device_routes: Vec::new(),
             backings: Vec::new(),
@@ -1723,6 +1843,7 @@ impl Runtime for WinRuntime {
                 Vec::new()
             },
         };
+        native_route_offer(&mut report, class, initialized)?;
         report.check()?;
         Ok(Some(report))
     }
@@ -1736,7 +1857,7 @@ impl Runtime for WinRuntime {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        spec.check()?;
+        self.check_native_spec(&spec)?;
         // This ordinary native route advertises legacy identity cost (None). Managed VM launches
         // enter the canonical Books transaction and configure their explicit allocation instead.
         if spec.allocation.is_some() {
@@ -1760,7 +1881,8 @@ impl Runtime for WinRuntime {
             return Err(Refusal::Exists(spec.id));
         }
         let physical_id = spec.id.try_clone()?;
-        self.holding.reserve(&spec.id, &spec.devices, marker)?;
+        self.holding
+            .reserve(OwnerRef::Box(&spec.id), &spec.devices, marker, spec.route)?;
         let held = match &spec.class {
             ClassSpec::Process => match self.job_name(&spec.id) {
                 Some(name) => {
@@ -2021,6 +2143,58 @@ mod tests {
         }
     }
 
+    /// AC-T7.1.1: initialized CPU-only HCS remains an actual native route without a GPU catalog.
+    #[test]
+    fn native_windows_route_does_not_require_a_configured_gpu() {
+        let mut report = Capacity {
+            id: "native-control".into(),
+            total: CapacityResources::default(),
+            free: CapacityResources::default(),
+            devices: Vec::new(),
+            cost: None,
+            routes: Vec::new(),
+            device_routes: Vec::new(),
+            backings: Vec::new(),
+        };
+        native_route_offer(&mut report, Class::Oci, true).unwrap();
+        assert_eq!(report.routes.len(), 1);
+        let route = report.routes.first().unwrap();
+        assert_eq!(route.key.image.os, hex_api::ImageOs::Windows);
+        assert_eq!(route.key.execution, hex_api::Execution::Native);
+        assert_eq!(route.key.class, Class::Oci);
+        assert!(report.devices.is_empty() && report.device_routes.is_empty());
+        report.check().unwrap();
+    }
+
+    /// AC-T7.4.1: one bounded native table, with real Box and Pool keys and no fabricated BoxId.
+    #[test]
+    fn native_owner_table_keeps_pool_and_box_names_distinct() {
+        let holding = Holding {
+            boxes: Mutex::new(Vec::new()),
+            keeper: None,
+        };
+        let id = BoxId::new("pool-identity").unwrap();
+        let pool = [7; 32];
+        holding
+            .reserve(OwnerRef::Pool(&pool), &[], None, None)
+            .unwrap();
+        holding
+            .reserve(OwnerRef::Box(&id), &[], None, None)
+            .unwrap();
+        assert!(
+            holding
+                .reserve(OwnerRef::Pool(&pool), &[], None, None)
+                .is_err()
+        );
+        let boxes = holding.boxes().unwrap();
+        assert_eq!(boxes.len(), 2);
+        assert_ne!(
+            owner_index(&boxes, OwnerRef::Pool(&pool)),
+            slot_index(&boxes, &id)
+        );
+        assert!(boxes.iter().all(|(_, slot)| slot.devices.is_empty()));
+    }
+
     fn device_spec(name: &str, key: u64) -> BoxSpec {
         BoxSpec {
             route: None,
@@ -2188,18 +2362,26 @@ mod tests {
         let rt = device_runtime(scratch.path());
         let first = device_spec("first", 256);
         let sibling = device_spec("sibling", 512);
-        rt.holding.reserve(&first.id, &first.devices, None).unwrap();
+        rt.holding
+            .reserve(OwnerRef::Box(&first.id), &first.devices, None, None)
+            .unwrap();
         assert!(matches!(
-            rt.holding.reserve(&first.id, &first.devices, None),
+            rt.holding
+                .reserve(OwnerRef::Box(&first.id), &first.devices, None, None),
             Err(Refusal::Exists(_))
         ));
         assert!(
             rt.holding
-                .reserve(&BoxId::new("overlap").unwrap(), &first.devices, None)
+                .reserve(
+                    OwnerRef::Box(&BoxId::new("overlap").unwrap()),
+                    &first.devices,
+                    None,
+                    None
+                )
                 .is_err()
         );
         rt.holding
-            .reserve(&sibling.id, &sibling.devices, None)
+            .reserve(OwnerRef::Box(&sibling.id), &sibling.devices, None, None)
             .unwrap();
         assert!(matches!(
             rt.delete(&first.id),
@@ -2209,7 +2391,7 @@ mod tests {
             })
         ));
         assert!(!matches!(rt.inspect(&first.id), Err(Refusal::NoSuchBox(_))));
-        rt.holding.uncertain(&first.id).unwrap();
+        rt.holding.uncertain(OwnerRef::Box(&first.id)).unwrap();
         assert!(rt.delete(&first.id).is_err()); // No marker/absence witness: cannot release it.
         let report = rt.holding.report(&rt.catalog).unwrap();
         assert_eq!(
@@ -2223,7 +2405,12 @@ mod tests {
         assert_eq!(rt.boxes().unwrap().len(), 2);
         assert!(
             rt.holding
-                .reserve(&BoxId::new("still-overlap").unwrap(), &first.devices, None)
+                .reserve(
+                    OwnerRef::Box(&BoxId::new("still-overlap").unwrap()),
+                    &first.devices,
+                    None,
+                    None
+                )
                 .is_err()
         );
     }
@@ -2297,10 +2484,12 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let rt = device_runtime(scratch.path());
         let spec = device_spec("keeper-uncertain", 256);
-        rt.holding.reserve(&spec.id, &spec.devices, None).unwrap();
-        rt.holding.uncertain(&spec.id).unwrap();
         rt.holding
-            .keeper_receipt(&spec.id, KeeperHold::Uncertain)
+            .reserve(OwnerRef::Box(&spec.id), &spec.devices, None, spec.route)
+            .unwrap();
+        rt.holding.uncertain(OwnerRef::Box(&spec.id)).unwrap();
+        rt.holding
+            .keeper_receipt(OwnerRef::Box(&spec.id), KeeperHold::Uncertain)
             .unwrap();
         assert_eq!(
             rt.holding.report(&rt.catalog).unwrap()[0].holder,
@@ -2309,7 +2498,12 @@ mod tests {
         assert!(!matches!(rt.inspect(&spec.id), Err(Refusal::NoSuchBox(_))));
         assert!(
             rt.holding
-                .reserve(&BoxId::new("contender").unwrap(), &spec.devices, None)
+                .reserve(
+                    OwnerRef::Box(&BoxId::new("contender").unwrap()),
+                    &spec.devices,
+                    None,
+                    None
+                )
                 .is_err()
         );
     }
@@ -2336,9 +2530,14 @@ mod tests {
         let bytes = hex_core::hcs::write_record(&record).unwrap();
         std::fs::write(&marker, &bytes).unwrap();
         rt.holding
-            .reserve(&spec.id, &spec.devices, Some(marker.clone()))
+            .reserve(
+                OwnerRef::Box(&spec.id),
+                &spec.devices,
+                Some(marker.clone()),
+                spec.route,
+            )
             .unwrap();
-        rt.holding.uncertain(&spec.id).unwrap();
+        rt.holding.uncertain(OwnerRef::Box(&spec.id)).unwrap();
         let calls = std::cell::Cell::new(0);
         let error = rt
             .holding
@@ -2398,7 +2597,7 @@ mod tests {
             },
             |id, receipt| {
                 assert!(rt.holding.boxes.try_lock().is_ok());
-                assert_eq!(id, &spec.id);
+                assert_eq!(id, OwnerRef::Box(&spec.id));
                 assert_eq!((receipt.pid, receipt.created, receipt.value), (11, 22, 33));
                 write_calls.set(write_calls.get() + 1);
                 Err(Refusal::os(

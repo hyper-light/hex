@@ -12,9 +12,11 @@ pub mod gpu;
 pub mod held;
 mod managed;
 mod physical;
+mod pool;
 pub mod rewrite;
 mod route;
 pub mod selected;
+mod shared;
 pub mod shares;
 
 use std::ffi::OsString;
@@ -209,6 +211,15 @@ struct Booted {
     client: Client,
     evented: Mutex<Option<Arc<Client>>>,
     owner: Option<Owner>,
+    backing: Option<shared::Binding>,
+}
+
+fn booted_owner(booted: Booted) -> Result<triomphe::Arc<Booted>, Refusal> {
+    triomphe::Arc::try_new(booted).map_err(|_| Refusal::Exhausted {
+        what: "booted guest connection owner",
+        // One such connection owner per already-admitted VM, not another VM grant.
+        bound: 1,
+    })
 }
 
 /// The slowest recorded value of each wait that seeds a bound, by host class
@@ -301,7 +312,7 @@ pub trait Joins: Send + Sync {
 pub struct GuestRuntime {
     guests: Arc<dyn shards_api::Guests>,
     config: GuestConfig,
-    booted: Mutex<Option<Arc<Booted>>>,
+    booted: Mutex<Option<triomphe::Arc<Booted>>>,
     /// The slowest boot to ready this node has seen, the learned half of the first dial's bound.
     slowest: Mutex<Duration>,
     /// Guests stopped for hanging alive past the bound, never ready.
@@ -321,6 +332,7 @@ pub struct GuestRuntime {
     books: OnceLock<Weak<dyn crate::devices::Books>>,
     runtime_cost: Option<hex_api::RuntimeCost>,
     native_paths: Option<shards_api::RuntimePaths>,
+    shared_pool: OnceLock<hex_api::BackingKey>,
     /// What joins each guest's evented connection to the node's loop ([`GuestRuntime::join_loop`]).
     joins: Mutex<Option<Arc<dyn Joins>>>,
 }
@@ -427,6 +439,7 @@ impl GuestRuntime {
             books: OnceLock::new(),
             runtime_cost: None,
             native_paths: None,
+            shared_pool: OnceLock::new(),
             joins: Mutex::new(None),
         }
     }
@@ -444,6 +457,9 @@ impl GuestRuntime {
     /// node calls it when it starts, before it accepts a box ([`WithGuest::new`]). Where Shards has no backend
     /// there is no guest to boot, and the `oci` class is refused at create by name (§5).
     pub fn boot(&self) -> Result<(), Refusal> {
+        if self.managed_shared() {
+            return self.recover_backing();
+        }
         if self.guests.backend().is_err() {
             return Ok(());
         }
@@ -478,13 +494,14 @@ impl GuestRuntime {
         match Client::connect(Arc::clone(&link)) {
             Ok(client) => {
                 // The binary that booted it isn't known here: no warm-up is asked for it.
-                let b = Arc::new(Booted {
+                let b = booted_owner(Booted {
                     guest: GuestHandle::Shared(guest),
                     link,
                     client,
                     evented: Mutex::new(None),
                     owner: None,
-                });
+                    backing: None,
+                })?;
                 self.join(&b)?;
                 *self.lock()? = Some(b);
                 Ok(())
@@ -646,16 +663,19 @@ impl GuestRuntime {
         self.retired.load(Ordering::Relaxed)
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, Option<Arc<Booted>>>, Refusal> {
+    fn lock(&self) -> Result<MutexGuard<'_, Option<triomphe::Arc<Booted>>>, Refusal> {
         self.booted.lock().map_err(poisoned)
     }
 
     /// The guest, booted now if it isn't, or booted again if it ended (every box in it ended with it).
-    fn guest(&self) -> Result<Arc<Booted>, Refusal> {
+    fn guest(&self) -> Result<triomphe::Arc<Booted>, Refusal> {
+        if self.managed_shared() {
+            return self.shared_running();
+        }
         let mut booted = self.lock()?;
         if let Some(b) = booted.as_ref() {
             match b.guest.wait_for(Duration::ZERO) {
-                Ok(None) => return Ok(Arc::clone(b)),
+                Ok(None) => return Ok(triomphe::Arc::clone(b)),
                 Ok(Some(_)) | Err(_) => *booted = None,
             }
         }
@@ -684,16 +704,17 @@ impl GuestRuntime {
                         return Err(why);
                     }
                     *self.booted_binary.lock().map_err(poisoned)? = binary;
-                    let b = Arc::new(Booted {
+                    let b = booted_owner(Booted {
                         guest: GuestHandle::Shared(guest),
                         link,
                         client,
                         evented: Mutex::new(None),
                         owner: None,
-                    });
+                        backing: None,
+                    })?;
                     // The new guest's control connection joins the loop as the one before's did.
                     self.join(&b)?;
-                    *booted = Some(Arc::clone(&b));
+                    *booted = Some(triomphe::Arc::clone(&b));
                     return Ok(b);
                 }
                 Err(why) => {
@@ -720,7 +741,7 @@ impl GuestRuntime {
     }
 
     /// The guest if it is booted: a call about a box needs no boot, as there's no box before one.
-    fn running(&self) -> Result<Option<Arc<Booted>>, Refusal> {
+    fn running(&self) -> Result<Option<triomphe::Arc<Booted>>, Refusal> {
         Ok(self.lock()?.clone())
     }
 
@@ -759,7 +780,9 @@ impl Drop for GuestRuntime {
         self.finish_warm();
         if let Ok(Some(b)) = self.booted.get_mut().map(Option::take) {
             let _ = b.guest.stop();
-            if let Some(path) = &self.record {
+            if matches!(&b.guest, GuestHandle::Shared(_))
+                && let Some(path) = &self.record
+            {
                 let _ = held::remove(path);
             }
         }
@@ -791,6 +814,19 @@ fn guest_capacity(
 }
 
 impl Runtime for GuestRuntime {
+    fn backing_usage(&self, key: &hex_api::BackingKey) -> Result<Usage, Refusal> {
+        GuestRuntime::backing_usage(self, key)
+    }
+    fn initialize_backing(
+        &self,
+        grant: hex_api::BackingGrant,
+    ) -> Result<hex_api::BackingOffer, Refusal> {
+        self.initialize_pool(grant)
+    }
+
+    fn release_backing(&self, key: hex_api::BackingKey) -> Result<hex_api::BackingOffer, Refusal> {
+        self.release_pool(key)
+    }
     fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
         if !matches!(class, Class::Oci | Class::Shards) {
             return Err(Refusal::Invalid {
@@ -800,6 +836,11 @@ impl Runtime for GuestRuntime {
         }
         if self.uses_books() && class == Class::Shards {
             return self.native_capacity().map(Some);
+        }
+        if self.managed_shared() {
+            let mut capacity = self.authority()?.capacity()?;
+            self.add_offers(&mut capacity, class)?;
+            return Ok(Some(capacity));
         }
         let booted = self.guest()?;
         let capacity = booted.client.capacity(Class::Oci)?.ok_or_else(|| {
@@ -938,6 +979,9 @@ impl GuestRuntime {
                 "dedicated launch requires its canonical transaction".into(),
             ));
         }
+        if self.managed_shared() {
+            return self.create_shared(spec);
+        }
         let rewritten = self.rewrite_spec(spec)?;
         let b = self.guest()?;
         self.warm_if_changed()?;
@@ -945,9 +989,13 @@ impl GuestRuntime {
     }
 
     fn delete_payload(&self, id: &BoxId) -> Result<(), Refusal> {
-        let b = self
-            .running()?
-            .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+        let Some(b) = self.booted_for(id)? else {
+            return if self.managed_shared() {
+                Ok(())
+            } else {
+                Err(Refusal::NoSuchBox(id.try_clone()?))
+            };
+        };
         b.client.delete(id)?;
         match stage::unstage(b.link.as_ref(), id) {
             Ok(()) | Err(Refusal::NoSuchBox(_)) => Ok(()),
@@ -1150,6 +1198,19 @@ impl<P: Runtime> WithGuest<P> {
 }
 
 impl<P: Runtime> Runtime for WithGuest<P> {
+    fn backing_usage(&self, key: &hex_api::BackingKey) -> Result<Usage, Refusal> {
+        self.oci.backing_usage(key)
+    }
+    fn initialize_backing(
+        &self,
+        grant: hex_api::BackingGrant,
+    ) -> Result<hex_api::BackingOffer, Refusal> {
+        self.oci.initialize_backing(grant)
+    }
+
+    fn release_backing(&self, key: hex_api::BackingKey) -> Result<hex_api::BackingOffer, Refusal> {
+        self.oci.release_backing(key)
+    }
     fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
         match class {
             Class::Process => self.process.capacity(class),
@@ -1157,8 +1218,11 @@ impl<P: Runtime> Runtime for WithGuest<P> {
                 // Windows runs its own OCI images as well as guest Linux images. Its initialized
                 // native pool (including exact device holders) must not disappear behind the guest.
                 if self.process.classes().contains(&Class::Oci)
-                    && let Some(native) = self.process.capacity(class)?
+                    && let Some(mut native) = self.process.capacity(class)?
                 {
+                    if self.oci.managed_shared() {
+                        self.oci.add_offers(&mut native, class)?;
+                    }
                     return Ok(Some(native));
                 }
                 self.oci.capacity(class)

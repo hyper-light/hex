@@ -1,0 +1,171 @@
+{
+  "requirement": "AC-T7.4.1",
+  "base": "a53f56b12b75447a52be2c736e219ff1dd5b98ae",
+  "kind": "source only; compile/native unrun for joined cohort",
+  "patch_intakes": [
+    "7e43f841 Books/Catalog",
+    "a3571e08 Store/Turns",
+    "112ccf12 Node/Supervisor delta"
+  ],
+  "snapshots": {
+    "crates/hex-node/src/recorded.rs": {
+      "revision": "7f1b3217959f1f76084f96b4a70946ec738f7cfe",
+      "source_sha256": "0e1cfbc1021bc7d0fa69a894f8aab57bd6a7d861fc0a1bc0a981b377df939516",
+      "root_before_sha256": "0a1bf7c846584e3c8ff609e8e788fb6d110d281ae8e563681600ffea78042bcc"
+    },
+    "crates/hex-node/src/store.rs": {
+      "revision": "c94149bd25fe19b514e696306d12915430ebeaa4",
+      "source_sha256": "8a7c22a4002a17ee285a062a3d77f0dc8c32353b1addc209fc86897b295a577b",
+      "root_before_sha256": "7218b0742f2008d4d5f78d2af3b95b80a5628d40b1005d10f1cee54a132e986f"
+    },
+    "crates/hex-node/src/store/pool.rs": {
+      "revision": "c94149bd25fe19b514e696306d12915430ebeaa4",
+      "source_sha256": "ad22e9225d9b1f0bfabdc2c70ef5e8d36d9178474b1fc6426e6d6d71ffb385a1",
+      "root_before_sha256": null
+    },
+    "crates/hex-runtime/src/macos/managed.rs": {
+      "revision": "c94149bd25fe19b514e696306d12915430ebeaa4",
+      "source_sha256": "2740dfae753400b761b201c63548c25104c41ee73e67fb161261faa0e747ece8",
+      "root_before_sha256": "56c2a483b1d7f8ef53945474dbd15fa7a427bc32e69f4491b1a4aeacb67a162e"
+    },
+    "crates/hex-runtime/src/macos/mod.rs": {
+      "revision": "c94149bd25fe19b514e696306d12915430ebeaa4",
+      "source_sha256": "cec97e5672f9b26d6654d8fe482ca01588e6dc489059c242cbc142b1c3617dbc",
+      "root_before_sha256": "639733fabc21d3a095636573817c714788b6b89936506ef3762d30d2bc7ac38a"
+    },
+    "crates/hex-runtime/src/windows/keeper/vm.rs": {
+      "revision": "c94149bd25fe19b514e696306d12915430ebeaa4",
+      "source_sha256": "9ff00ece8bb0f502461ab9fde7ef333a1d2473384807cf9764c2666409c889fe",
+      "root_before_sha256": "ffc3ad06431fdbc16b0ed9a45c2530a3df300e3ed40362b2ec80d600628fbe3e"
+    },
+    "crates/hex-runtime/src/windows/managed.rs": {
+      "revision": "c94149bd25fe19b514e696306d12915430ebeaa4",
+      "source_sha256": "32d296e98476536fe23fb454f17381566e16bef310da823b4663a6f078d3e701",
+      "root_before_sha256": "6f68b63433c2058e9f5708e27dfff4f3165ccce795016f8ba413b8c3eb595481"
+    },
+    "crates/hex-runtime/src/windows/mod.rs": {
+      "revision": "c94149bd25fe19b514e696306d12915430ebeaa4",
+      "source_sha256": "c20bce038342ed369316b5c2bd4c073ae49ce31e8d1df3570b0605e6a37a2b7f",
+      "root_before_sha256": "146a14beff57e8b6eeedd50873c708d2a9c4ace3849df6c359d7d02dd8a70f62"
+    },
+    "crates/hex-runtime/src/windows/oci/launch.rs": {
+      "revision": "c94149bd25fe19b514e696306d12915430ebeaa4",
+      "source_sha256": "4c3f0fb954d0170e808b96bf8619411eca250a5436bcc63f1d8bb54fee29dd43",
+      "root_before_sha256": "3600c3592a81bbfc3bab4827184ad8a02baf04ce4afbcdd9a0469194ad67ed15"
+    },
+    "crates/hex-runtime/src/windows/oci/mod.rs": {
+      "revision": "c94149bd25fe19b514e696306d12915430ebeaa4",
+      "source_sha256": "1cc2cde1b87334aa21dd9beaa677f7fb13e081f5a7222094634bc8e9ea34c3ee",
+      "root_before_sha256": "3c2146141efcabebb869e79c1569970ca1bcda3c75901ffec49c43b0ef36e1a9"
+    },
+    "crates/hex-runtime/src/windows/process.rs": {
+      "revision": "c94149bd25fe19b514e696306d12915430ebeaa4",
+      "source_sha256": "7e83af3c2aca95b30baa1e209ec184f8d13174fa1b076159fdf6eef537899760",
+      "root_before_sha256": "fe653db977bd398f400f5fc8760782028bc03f7f4bb1012aa3459788d40c3b7c"
+    },
+    "crates/hex-runtime/src/macos/process.rs": {
+      "revision": "d849acf8828e838f8fcd279ad2be4c8e7452851e",
+      "source_sha256": "b7fe78b0a00bc1e6b18eeeef69d0f65af7411abed1f874cebc29f427583b7e85",
+      "root_before_sha256": "61a1c3aad7c546c69ff4ec4657ad865233f9c48036e0c120859edc76b4d22723"
+    },
+    "crates/hex-runtime/src/guest/books.rs": {
+      "revision": "416da4aed2b11c1f9648eb6c947f51f1b56196ed",
+      "source_sha256": "80bbe3ca79988f689840c561b0e0eeee0802fd65618d42c87bde80cb7fbe67fd",
+      "root_before_sha256": "68155d68d04914f1be9207303ca34935470d5f2b0989ff496f83e23e58557659"
+    },
+    "crates/hex-runtime/src/guest/dedicated.rs": {
+      "revision": "416da4aed2b11c1f9648eb6c947f51f1b56196ed",
+      "source_sha256": "a338770dab8d2c0436fc56d14f01ab2e037494ff9b61174df62f88a04e2f5d19",
+      "root_before_sha256": "3c5d8b9dbffe5e31d7e1a8f706fde6a3cf0133823bef3e3e03d0f8cd922c33c2"
+    },
+    "crates/hex-runtime/src/guest/managed.rs": {
+      "revision": "416da4aed2b11c1f9648eb6c947f51f1b56196ed",
+      "source_sha256": "2a13390bf3769d0b07235d9ac677cf6751273b0f174d4e56f92c7dbd0b20cc92",
+      "root_before_sha256": "0f01b331d1e757b6edded416b3726b6cc2bfe006b34ba9ade56ba719fb183a98"
+    },
+    "crates/hex-runtime/src/guest/mod.rs": {
+      "revision": "416da4aed2b11c1f9648eb6c947f51f1b56196ed",
+      "source_sha256": "b2e9e7f941fa68ad1e17b79cdfe8d2e0aef9c3603c51c666b2f4dc1cd109319a",
+      "root_before_sha256": "f3a27a1bda005f272fb8844f1799d63d552cf359410236b6307f953e6f7560ce"
+    },
+    "crates/hex-runtime/src/guest/physical.rs": {
+      "revision": "416da4aed2b11c1f9648eb6c947f51f1b56196ed",
+      "source_sha256": "12398fcf7dc87c8dc3f4588b01dedeec4dc953d6eb3bb673c441c823332fd7ab",
+      "root_before_sha256": "59eacd879b773cf3bdf8e23ba4f79289e58380781037bcd02f4b96e7f94de601"
+    },
+    "crates/hex-runtime/src/guest/pool.rs": {
+      "revision": "416da4aed2b11c1f9648eb6c947f51f1b56196ed",
+      "source_sha256": "5c3f42d0a6bf5f2f462a2adfa3fa871e1d972ad87297ea92f0804961f295c768",
+      "root_before_sha256": null
+    },
+    "crates/hex-runtime/src/guest/selected.rs": {
+      "revision": "416da4aed2b11c1f9648eb6c947f51f1b56196ed",
+      "source_sha256": "4ca118df66f65af216a12d1b3f70e71fff4dacd46186a79e2ded69222def5ca3",
+      "root_before_sha256": "7217966dd9359db129297b1cff1e246ae5fda481f96607181a9474710550645b"
+    },
+    "crates/hex-runtime/src/guest/shared.rs": {
+      "revision": "416da4aed2b11c1f9648eb6c947f51f1b56196ed",
+      "source_sha256": "965b18efa83b0988ac25b55e21ca733b7df5426a7d9fb5170f0e94f708413c44",
+      "root_before_sha256": null
+    },
+    "crates/hex-runtime/src/guest/shared_tests.rs": {
+      "revision": "416da4aed2b11c1f9648eb6c947f51f1b56196ed",
+      "source_sha256": "7bfcfd5c23b83bdec151a1bdd816167663af5adb27a1cda4ecd1744f48dfd6cd",
+      "root_before_sha256": null
+    },
+    "crates/hex-runtime/src/guest/tests.rs": {
+      "revision": "416da4aed2b11c1f9648eb6c947f51f1b56196ed",
+      "source_sha256": "8aad06a9219517f657a02e73abf441a4bc83be95f03ea05c2abe35dfca17c7c4",
+      "root_before_sha256": "f096aeb1e5b889c60625fc293e09030ae6f00c7de5e164bbf9eb138fab69caac"
+    }
+  },
+  "root_adaptations": [
+    "Preserved existing typed DeviceHolder box checks via patch-based FC intake.",
+    "Preserved current Node render/attachment and supervise native-gate registration via patch intake.",
+    "Preserved canonical ROOT recorded authority/lifecycle fixture.",
+    "Restored vendor0016 ResolvedGpu fixture metadata fields.",
+    "Retained Store/lifecycle legacy route:None fixtures and canonical authority BoxInfo uses its actual recorded route."
+  ],
+  "remaining": [
+    "actual Capacity producer normalization and grant/usage pipeline",
+    "CLI shared prepare/preflight/recovery wiring",
+    "cold GPU native report transport",
+    "Mac persisted helper/CPU enforcement",
+    "joined compilation, controls, native recovery and full gates"
+  ],
+  "joined_files": {
+    "crates/hex-node/src/node.rs": "2a8151a3e44ab2b00a1b878da1dae3631da3f08e7414acf78e6b3eb78f42d902",
+    "crates/hex-node/src/node/backends.rs": "b9f685e73e9497a875f7e96849d4830ef6dd8037fbf7c67093b2e9c36570ead3",
+    "crates/hex-node/src/placement/device_binding_tests.rs": "36c7e570b322874eb0acca5d595e446e5f3800d31b6a376d8e65385b3eba0831",
+    "crates/hex-node/src/recorded.rs": "0e1cfbc1021bc7d0fa69a894f8aab57bd6a7d861fc0a1bc0a981b377df939516",
+    "crates/hex-node/src/store.rs": "ac89cdd0c72448b67af0888c9d8f58ac6ae4f0f86ea5921a2137eb517f652286",
+    "crates/hex-node/src/supervise.rs": "68b65452871a040d459e1846059980a82e551cd5128b29700e8205281204bc1b",
+    "crates/hex-node/src/turns.rs": "76a75dddc706e74d7e2458888290decf04977413e8ede4bbac8760f61c06e2b1",
+    "crates/hex-runtime/src/devices.rs": "9bdb873fdf5fe43eb1b93f164f2041d3412812be436adbebaf8a2942eef75cfd",
+    "crates/hex-runtime/src/devices/tests.rs": "a729f9bbd89b98e822ea32da4dc61a5c838aad42b78fba9735a5a69843b5bc87",
+    "crates/hex-runtime/src/firecracker/native.rs": "316e69315ff763848cc7e161c3066b7524760b6d714b95599d15ed62e038b1ce",
+    "crates/hex-runtime/src/guest/books.rs": "80bbe3ca79988f689840c561b0e0eeee0802fd65618d42c87bde80cb7fbe67fd",
+    "crates/hex-runtime/src/guest/dedicated.rs": "a338770dab8d2c0436fc56d14f01ab2e037494ff9b61174df62f88a04e2f5d19",
+    "crates/hex-runtime/src/guest/managed.rs": "2a13390bf3769d0b07235d9ac677cf6751273b0f174d4e56f92c7dbd0b20cc92",
+    "crates/hex-runtime/src/guest/mod.rs": "b2e9e7f941fa68ad1e17b79cdfe8d2e0aef9c3603c51c666b2f4dc1cd109319a",
+    "crates/hex-runtime/src/guest/physical.rs": "fa10648ea8950e251e921fade946acc6d793915736bb127dc8daea48fc9750b9",
+    "crates/hex-runtime/src/guest/selected.rs": "4ca118df66f65af216a12d1b3f70e71fff4dacd46186a79e2ded69222def5ca3",
+    "crates/hex-runtime/src/guest/tests.rs": "8aad06a9219517f657a02e73abf441a4bc83be95f03ea05c2abe35dfca17c7c4",
+    "crates/hex-runtime/src/macos/managed.rs": "2740dfae753400b761b201c63548c25104c41ee73e67fb161261faa0e747ece8",
+    "crates/hex-runtime/src/macos/mod.rs": "cec97e5672f9b26d6654d8fe482ca01588e6dc489059c242cbc142b1c3617dbc",
+    "crates/hex-runtime/src/macos/process.rs": "b7fe78b0a00bc1e6b18eeeef69d0f65af7411abed1f874cebc29f427583b7e85",
+    "crates/hex-runtime/src/windows/keeper/vm.rs": "9ff00ece8bb0f502461ab9fde7ef333a1d2473384807cf9764c2666409c889fe",
+    "crates/hex-runtime/src/windows/managed.rs": "32d296e98476536fe23fb454f17381566e16bef310da823b4663a6f078d3e701",
+    "crates/hex-runtime/src/windows/mod.rs": "c20bce038342ed369316b5c2bd4c073ae49ce31e8d1df3570b0605e6a37a2b7f",
+    "crates/hex-runtime/src/windows/oci/launch.rs": "4c3f0fb954d0170e808b96bf8619411eca250a5436bcc63f1d8bb54fee29dd43",
+    "crates/hex-runtime/src/windows/oci/mod.rs": "1cc2cde1b87334aa21dd9beaa677f7fb13e081f5a7222094634bc8e9ea34c3ee",
+    "crates/hex-runtime/src/windows/process.rs": "7e83af3c2aca95b30baa1e209ec184f8d13174fa1b076159fdf6eef537899760",
+    "docs/research/measurements/hex-complete-lifecycle/recorded_authority_tests.rs": "6f6d3854ce282ac88b91421e4ed4fbddcab0473e14d23f90db2279abcc97f59d",
+    "docs/research/measurements/hex-complete-lifecycle/recorded_lifecycle_tests.rs": "64a3bfc348315b41c9cf1435e3c80cc2dd6686f25c45ea152d6a12ae3f0a1d1c",
+    "crates/hex-node/src/store/pool.rs": "ad22e9225d9b1f0bfabdc2c70ef5e8d36d9178474b1fc6426e6d6d71ffb385a1",
+    "crates/hex-runtime/src/guest/pool.rs": "5c3f42d0a6bf5f2f462a2adfa3fa871e1d972ad87297ea92f0804961f295c768",
+    "crates/hex-runtime/src/guest/shared.rs": "965b18efa83b0988ac25b55e21ca733b7df5426a7d9fb5170f0e94f708413c44",
+    "crates/hex-runtime/src/guest/shared_tests.rs": "7bfcfd5c23b83bdec151a1bdd816167663af5adb27a1cda4ecd1744f48dfd6cd",
+    "docs/research/measurements/hex-complete-lifecycle/recorded_pool_tests.rs": "857c1e3bdcca8db77701236a8bbf0ab60af9b59a4f0ee212c995c4a53cec4667"
+  }
+}

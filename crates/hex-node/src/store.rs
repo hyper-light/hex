@@ -31,10 +31,10 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 #[cfg(all(debug_assertions, target_os = "linux"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hex_api::{BoxId, Refusal};
@@ -42,6 +42,9 @@ use hex_core::patience::Patience;
 use hex_core::record::{BoxRecord, Phase};
 
 use crate::turns::{Turn, Turns};
+
+mod pool;
+use pool::scoped_paths;
 
 /// How many subdirectories the runtime directory's records are spread over, by their box's id: 64, the shard's
 /// name two hex digits of [`SHARD_MASK`]. Each create makes its box's record file and each delete removes it, and
@@ -97,6 +100,9 @@ pub struct Store {
 
 #[derive(Debug, Default)]
 struct Synced {
+    // Only first pool configuration publication spans this lock. No holder inventory or native
+    // callback is stored here; clones share it so count-before-create has one bounded owner.
+    pool_preparation: Mutex<()>,
     files: AtomicU64,
     dirs: AtomicU64,
 }
@@ -367,12 +373,7 @@ impl Store {
         if record.phase != Phase::Creating {
             return Err(uncertain(&record.spec.id));
         }
-        let mut bytes = [0u8; 16];
-        // One checked OS fill; no PID/time/path fallback and no entropy retry loop. Linux may block
-        // before its entropy pool initializes; the node's external startup lifetime guard is required.
-        getrandom::fill(&mut bytes)
-            .map_err(|error| Refusal::os("creating a fresh native scope identity", error))?;
-        let scope = hex_core::record::NativeScope::from_bytes(bytes);
+        let scope = fresh_scope()?;
         self.write_encoded(record, record.encode_fresh_scope(scope)?, true)
     }
 
@@ -391,6 +392,10 @@ impl Store {
         } else {
             self.place(record)
         };
+        if scoped {
+            let (temporary, final_path) = scoped_paths(dir, record.spec.id.as_str())?;
+            return self.publish_durable(dir, &temporary, &final_path, &bytes);
+        }
         #[cfg(target_os = "linux")]
         let dir_fd = if durable { &self.disk_fd } else { &self.run_fd };
         // A non-durable record goes to its shard of the runtime directory: a name under it on linux, where
@@ -598,6 +603,15 @@ impl Store {
         self.synced.dirs.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
+}
+
+fn fresh_scope() -> Result<hex_core::record::NativeScope, Refusal> {
+    let mut bytes = [0u8; 16];
+    // One checked OS fill for BOTH canonical owner kinds; no PID/time/path fallback or retry loop.
+    // Early-boot entropy may block. The node's external startup lifetime guard remains required.
+    getrandom::fill(&mut bytes)
+        .map_err(|error| Refusal::os("creating a fresh native scope identity", error))?;
+    Ok(hex_core::record::NativeScope::from_bytes(bytes))
 }
 
 /// A stale absence preserves an observed fact; two different positive facts are uncertainty.

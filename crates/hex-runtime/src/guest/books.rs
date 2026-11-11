@@ -175,6 +175,7 @@ impl GuestRuntime {
             }
             self.prepare_selected_create(&id)?;
             let records = transaction.records()?;
+            let pools = transaction.pool_records()?;
             if records.len() >= crate::MAX_BOXES {
                 return Err(Refusal::Full(crate::MAX_BOXES));
             }
@@ -182,7 +183,7 @@ impl GuestRuntime {
                 let catalog = self.gpu_catalog.as_ref().ok_or_else(|| {
                     Refusal::Broken("guest has no initialized device catalog".into())
                 })?;
-                let _selection = catalog.prepare(&spec, &records)?;
+                let _selection = catalog.prepare(&spec, &records, &pools)?;
             }
             // Store the original workload and immutable admission receipt, never
             // the rewritten inner OCI payload. Any failed effect retains Creating.
@@ -278,12 +279,7 @@ impl GuestRuntime {
     pub(super) fn native_capacity(&self) -> Result<hex_api::Capacity, Refusal> {
         let authority = self.authority()?;
         let mut capacity = authority.capacity()?;
-        capacity.cost = Some(self.runtime_cost.ok_or_else(|| Refusal::Invalid {
-            what: "Shards runtime cost",
-            why: "measured backend cost has not been initialized".into(),
-        })?);
-        capacity.devices = self.attachment_offers()?;
-        capacity.check()?;
+        self.add_offers(&mut capacity, Class::Shards)?;
         Ok(capacity)
     }
 
@@ -329,6 +325,27 @@ mod tests {
         calls: AtomicUsize,
     }
     impl Transaction for Owner {
+        fn pool_records(&self) -> Result<crate::devices::PoolRecords, Refusal> {
+            Ok(Vec::new())
+        }
+        fn read_pool(
+            &self,
+            _: &hex_api::BackingKey,
+        ) -> Result<Option<hex_core::record::PoolRecord>, Refusal> {
+            panic!("box control must not read a pool")
+        }
+        fn put_pool(&self, _: &hex_core::record::PoolRecord) -> Result<(), Refusal> {
+            panic!("box control must not write a pool")
+        }
+        fn grant_pool(
+            &self,
+            _: &hex_api::BackingGrant,
+        ) -> Result<hex_core::record::PoolRecord, Refusal> {
+            panic!("box control must not grant a pool")
+        }
+        fn remove_pool(&self, _: &hex_api::BackingKey) -> Result<(), Refusal> {
+            panic!("box control must not remove a pool")
+        }
         fn records(&self) -> Result<Records, Refusal> {
             Ok(self.records.lock().unwrap().clone())
         }
@@ -375,6 +392,26 @@ mod tests {
         }
     }
     impl Books for Owner {
+        fn pool_records(&self) -> Result<crate::devices::PoolRecords, Refusal> {
+            Ok(Vec::new())
+        }
+        fn prepare_pool(
+            &self,
+            _: [u8; 32],
+            _: hex_api::Execution,
+            _: hex_api::RuntimeCost,
+            _: &[hex_api::DeviceId],
+        ) -> Result<hex_api::BackingOffer, Refusal> {
+            panic!("box control must not prepare a pool")
+        }
+        fn with_pool_transaction(
+            &self,
+            _: &hex_api::BackingKey,
+            _: &[hex_api::DeviceId],
+            _: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+        ) -> Result<(), Refusal> {
+            panic!("box control must not enter a pool")
+        }
         fn physical_devices(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
             Ok(Vec::new())
         }

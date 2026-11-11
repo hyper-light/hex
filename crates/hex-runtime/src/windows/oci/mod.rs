@@ -735,7 +735,7 @@ impl OciBox {
         let image = sys::file_build(&ntdll)
             .map_err(|e| Refusal::os("reading the image's Windows build from its base layer", e))?;
         hcs::image_runs(host, image)?;
-        let id = job.id().clone();
+        let id = job.id()?.try_clone()?;
         let mut mounted = scratch(container, base, marker, &id, lifetime, &devices)?;
         if !container.hosts.is_empty() {
             append_hosts(&mounted.volume, &hcs::hosts_lines(&container.hosts))?;
@@ -818,7 +818,7 @@ impl OciBox {
         &self.devices
     }
 
-    pub fn id(&self) -> &BoxId {
+    pub fn id(&self) -> Result<&BoxId, Refusal> {
         self.job.id()
     }
 
@@ -941,14 +941,14 @@ impl OciBox {
         validate_storage(&record, &container.scratch)?;
         if record.devices != devices
             || record.creation != hcs::NativeCreate::Created
-            || (!devices.is_empty() && record.system.as_ref() != Some(job.id()))
+            || (!devices.is_empty() && record.system.as_ref() != Some(job.id()?))
         {
             return Err(Refusal::Invalid {
                 what: "native device recovery",
                 why: "recorded exact bindings or system identity disagree".to_owned(),
             });
         }
-        let id = job.id().clone();
+        let id = job.id()?.try_clone()?;
         let Reopened {
             system,
             init,
@@ -1005,7 +1005,7 @@ impl OciBox {
         if life.started {
             return Err(Refusal::Invalid {
                 what: "start",
-                why: format!("box {} has started already", self.id()),
+                why: format!("box {} has started already", self.id()?),
             });
         }
         // An outliving box's record says a start was asked before HCS is, and names its init once it runs,
@@ -1040,7 +1040,7 @@ impl OciBox {
         stdio: [OwnedHandle; 3],
     ) -> Result<Box<dyn Proc>, Refusal> {
         if !matches!(self.state()?, BoxState::Running) {
-            return Err(Refusal::NotRunning(self.id().clone(), "exec"));
+            return Err(Refusal::NotRunning(self.id()?.try_clone()?, "exec"));
         }
         Ok(Box::new(self.launch(process, stdio)?))
     }
@@ -1240,7 +1240,7 @@ fn append_hosts(volume: &str, lines: &str) -> Result<(), Refusal> {
 pub fn info(b: &OciBox) -> Result<hex_api::BoxInfo, Refusal> {
     Ok(hex_api::BoxInfo {
         route: None,
-        id: b.id().clone(),
+        id: b.id()?.try_clone()?,
         class: hex_api::Class::Oci,
         state: b.state()?,
         bounds: b.bounds(),

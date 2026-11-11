@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use hex_api::{BoxId, BoxSpec, DeviceId, DeviceInfo, DeviceKind, Refusal};
-use hex_core::record::BoxRecord;
+use hex_core::record::{BoxRecord, NativeRecord, PoolRecord};
 
 /// A trusted administrator binds one physical resource to an existing native adapter.
 /// CDI hooks/paths and HCS location paths are backend configuration, never peer payloads.
@@ -113,14 +113,12 @@ pub fn shared_catalog(path: &Path) -> Result<SharedCatalog, Refusal> {
 
 /// Encode the persisted incarnation, never a reusable workload id, as a native path component.
 pub fn managed_scope_id(record: &BoxRecord) -> Result<BoxId, Refusal> {
-    let refused = || match record.spec.id.try_clone() {
-        Ok(id) => Refusal::Lifecycle {
-            id,
-            cause: hex_api::LifecycleCause::Uncertain,
-        },
-        Err(error) => error,
-    };
-    let scope = record.native_scope.ok_or_else(refused)?;
+    managed_native_scope_id(NativeRecord::Box(record))
+}
+
+pub fn managed_native_scope_id(record: NativeRecord<'_>) -> Result<BoxId, Refusal> {
+    let refused = || record.refusal(hex_api::LifecycleCause::Uncertain);
+    let scope = record.scope().ok_or_else(refused)?;
     let room = scope.bytes().len().checked_mul(2).ok_or_else(refused)?;
     let mut name = String::new();
     name.try_reserve_exact(room)
@@ -146,6 +144,7 @@ pub struct CdiPlan<'a> {
 }
 
 pub type Records = BTreeMap<BoxId, Result<BoxRecord, String>>;
+pub type PoolRecords = Vec<PoolRecord>;
 
 /// Two actual native command sources, consumed by the SAME canonical record/native owner.
 /// This is an internal borrowed launch input, never a peer-supplied payload or backend fallback.
@@ -178,6 +177,14 @@ impl ManagedLaunch<'_> {
 /// It performs no implicit commit: every physical/record transition remains explicit to its caller.
 pub trait Books: Send + Sync {
     fn records(&self) -> Result<Records, Refusal>;
+    fn pool_records(&self) -> Result<PoolRecords, Refusal>;
+    fn prepare_pool(
+        &self,
+        pool: [u8; 32],
+        execution: hex_api::Execution,
+        cost: hex_api::RuntimeCost,
+        devices: &[DeviceId],
+    ) -> Result<hex_api::BackingOffer, Refusal>;
     fn capacity(&self) -> Result<hex_api::Capacity, Refusal>;
     /// Direct current native observations from this Node's SAME facts provider. Never reenter
     /// capacity/attachment_offers here: those consumers validate routes against this view.
@@ -188,10 +195,21 @@ pub trait Books: Send + Sync {
         devices: &[DeviceId],
         callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
     ) -> Result<(), Refusal>;
+    fn with_pool_transaction(
+        &self,
+        key: &hex_api::BackingKey,
+        devices: &[DeviceId],
+        callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal>;
 }
 
 pub trait Transaction {
     fn records(&self) -> Result<Records, Refusal>;
+    fn pool_records(&self) -> Result<PoolRecords, Refusal>;
+    fn read_pool(&self, key: &hex_api::BackingKey) -> Result<Option<PoolRecord>, Refusal>;
+    fn put_pool(&self, record: &PoolRecord) -> Result<(), Refusal>;
+    fn grant_pool(&self, grant: &hex_api::BackingGrant) -> Result<PoolRecord, Refusal>;
+    fn remove_pool(&self, key: &hex_api::BackingKey) -> Result<(), Refusal>;
     fn read(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal>;
     fn put(&self, record: &BoxRecord) -> Result<(), Refusal>;
     /// Called only after physical termination/absence and owned state removal are proved.
@@ -226,25 +244,56 @@ pub fn with_transaction<T>(
     devices: &[DeviceId],
     operation: impl FnOnce(&dyn Transaction) -> Result<T, Refusal>,
 ) -> Result<T, Refusal> {
+    transaction(books, operation, |books, callback| {
+        books.with_transaction(id, devices, callback)
+    })
+}
+
+pub fn with_pool_transaction<T>(
+    books: &std::sync::Weak<dyn Books>,
+    key: &hex_api::BackingKey,
+    devices: &[DeviceId],
+    operation: impl FnOnce(&dyn Transaction) -> Result<T, Refusal>,
+) -> Result<T, Refusal> {
+    transaction(books, operation, |books, callback| {
+        books.with_pool_transaction(key, devices, callback)
+    })
+}
+
+fn transaction<T>(
+    books: &std::sync::Weak<dyn Books>,
+    operation: impl FnOnce(&dyn Transaction) -> Result<T, Refusal>,
+    enter: impl FnOnce(
+        &dyn Books,
+        &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal>,
+) -> Result<T, Refusal> {
     let books = books
         .upgrade()
-        .ok_or_else(|| Refusal::Broken("native record authority is gone".into()))?;
+        .ok_or_else(|| broken("native record authority is gone"))?;
     let mut operation = Some(operation);
     let mut result = None;
-    books.with_transaction(id, devices, &mut |transaction| {
-        let operation = operation.take().ok_or_else(|| {
-            Refusal::Broken("record transaction callback invoked more than once".into())
-        })?;
+    enter(books.as_ref(), &mut |transaction| {
+        let operation = operation
+            .take()
+            .ok_or_else(|| broken("record transaction callback invoked more than once"))?;
         result = Some(operation(transaction));
         Ok(())
     })?;
-    result.ok_or_else(|| Refusal::Broken("record transaction callback was not invoked".into()))?
+    result.ok_or_else(|| broken("record transaction callback was not invoked"))?
+}
+
+fn broken(why: &'static str) -> Refusal {
+    copy(why).map_or_else(|error| error, Refusal::Broken)
 }
 
 fn invalid(why: &'static str) -> Refusal {
-    Refusal::Invalid {
-        what: "runtime device catalog",
-        why: why.into(),
+    match copy(why) {
+        Ok(why) => Refusal::Invalid {
+            what: "runtime device catalog",
+            why,
+        },
+        Err(error) => error,
     }
 }
 
@@ -643,17 +692,16 @@ impl Catalog {
         &self,
         id: DeviceId,
         records: &Records,
+        pools: &[PoolRecord],
     ) -> Result<Option<hex_api::DeviceHolder>, Refusal> {
         let mut holder = None;
         for (box_id, record) in records {
             let record = record.as_ref().map_err(|_| {
-                Refusal::Broken(
-                    "cannot establish device holders from a malformed box record".into(),
-                )
+                broken("cannot establish device holders from a malformed box record")
             })?;
             if record.spec.id != *box_id || record.spec.check().is_err() {
-                return Err(Refusal::Broken(
-                    "cannot establish device holders from an inconsistent box record".into(),
+                return Err(broken(
+                    "cannot establish device holders from an inconsistent box record",
                 ));
             }
             if record
@@ -663,14 +711,63 @@ impl Catalog {
                 .any(|claim| self.conflicts(*claim, id))
             {
                 if holder.is_some() {
-                    return Err(Refusal::Broken(
-                        "a physical device has multiple recorded holders".into(),
-                    ));
+                    return Err(broken("a physical device has multiple recorded holders"));
                 }
                 holder = Some(hex_api::DeviceHolder::Box(box_id.try_clone()?));
             }
         }
+        for record in pools {
+            record.check()?;
+            if matches!(
+                record.phase,
+                hex_api::BackingPhase::Prepared | hex_api::BackingPhase::Released
+            ) || !record
+                .devices
+                .iter()
+                .any(|claim| self.conflicts(*claim, id))
+            {
+                continue;
+            }
+            match holder.as_ref() {
+                None => holder = Some(hex_api::DeviceHolder::Backing(record.key)),
+                Some(hex_api::DeviceHolder::Box(id)) => {
+                    let boxed = records
+                        .get(id)
+                        .and_then(|record| record.as_ref().ok())
+                        .ok_or_else(|| record_error(record.key))?;
+                    if boxed.phase != hex_core::record::Phase::Creating
+                        || boxed.init.is_some()
+                        || !self.handoff(&boxed.spec, record)?
+                    {
+                        return Err(record_error(record.key));
+                    }
+                }
+                Some(hex_api::DeviceHolder::Backing(_)) => return Err(record_error(record.key)),
+            }
+        }
         Ok(holder)
+    }
+
+    fn handoff(&self, spec: &BoxSpec, pool: &PoolRecord) -> Result<bool, Refusal> {
+        let Some(route) = spec.route.filter(|route| route.backing == Some(pool.key)) else {
+            return Ok(false);
+        };
+        if route.key.backend_class() != NativeRecord::Pool(pool).class()?
+            || spec.devices.len() != pool.devices.len()
+            || spec
+                .devices
+                .iter()
+                .any(|id| pool.devices.binary_search(id).is_err())
+        {
+            return Ok(false);
+        }
+        hex_api::RouteOffer {
+            key: route.key,
+            cost: spec.allocation.map(|allocation| allocation.cost),
+            backing: route.backing,
+        }
+        .check_backing_parts(pool.key, pool.cost, &pool.devices)?;
+        Ok(true)
     }
 
     /// Physical identities may be in one inseparable IOMMU group. The same recorded claims then
@@ -694,6 +791,7 @@ impl Catalog {
         &'a self,
         spec: &BoxSpec,
         records: &Records,
+        pools: &[PoolRecord],
     ) -> Result<Vec<&'a Entry>, Refusal> {
         spec.check()?;
         let mut selected = Vec::new();
@@ -706,12 +804,32 @@ impl Catalog {
                 .iter()
                 .find(|entry| entry.info.id == *id)
                 .ok_or_else(|| invalid("requested physical device has no native binding"))?;
-            if self.holder(*id, records)?.is_some() {
-                return Err(invalid("requested physical device is already held"));
+            if let Some(holder) = self.holder(*id, records, pools)? {
+                let handoff = match holder {
+                    hex_api::DeviceHolder::Backing(key) => pools
+                        .iter()
+                        .find(|record| {
+                            record.key == key && record.phase == hex_api::BackingPhase::Live
+                        })
+                        .map(|pool| self.handoff(spec, pool))
+                        .transpose()?
+                        .unwrap_or(false),
+                    hex_api::DeviceHolder::Box(_) => false,
+                };
+                if !handoff {
+                    return Err(invalid("requested physical device is already held"));
+                }
             }
             selected.push(entry);
         }
         Ok(selected)
+    }
+}
+
+fn record_error(key: hex_api::BackingKey) -> Refusal {
+    Refusal::Backing {
+        key,
+        cause: hex_api::LifecycleCause::Uncertain,
     }
 }
 
@@ -798,6 +916,21 @@ mod authority_tests {
         fn records(&self) -> Result<Records, Refusal> {
             Ok(Records::new())
         }
+        fn pool_records(&self) -> Result<PoolRecords, Refusal> {
+            Ok(Vec::new())
+        }
+        fn read_pool(&self, _: &hex_api::BackingKey) -> Result<Option<PoolRecord>, Refusal> {
+            Ok(None)
+        }
+        fn put_pool(&self, _: &PoolRecord) -> Result<(), Refusal> {
+            Err(invalid("fixture has no pool"))
+        }
+        fn grant_pool(&self, _: &hex_api::BackingGrant) -> Result<PoolRecord, Refusal> {
+            Err(invalid("fixture has no pool"))
+        }
+        fn remove_pool(&self, _: &hex_api::BackingKey) -> Result<(), Refusal> {
+            Err(invalid("fixture has no pool"))
+        }
         fn read(&self, _: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
             Ok(None)
         }
@@ -831,6 +964,37 @@ mod authority_tests {
     impl Books for Owner {
         fn records(&self) -> Result<Records, Refusal> {
             Ok(Records::new())
+        }
+        fn pool_records(&self) -> Result<PoolRecords, Refusal> {
+            Ok(Vec::new())
+        }
+        fn prepare_pool(
+            &self,
+            _: [u8; 32],
+            _: hex_api::Execution,
+            _: hex_api::RuntimeCost,
+            _: &[DeviceId],
+        ) -> Result<hex_api::BackingOffer, Refusal> {
+            Err(invalid("fixture has no pool"))
+        }
+        fn with_pool_transaction(
+            &self,
+            key: &hex_api::BackingKey,
+            _: &[DeviceId],
+            callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+        ) -> Result<(), Refusal> {
+            match self.0 {
+                Mode::Once => callback(&TransactionView),
+                Mode::Missing => Ok(()),
+                Mode::Double => {
+                    callback(&TransactionView)?;
+                    callback(&TransactionView)
+                }
+                Mode::Refused => Err(Refusal::Backing {
+                    key: *key,
+                    cause: hex_api::LifecycleCause::Busy,
+                }),
+            }
         }
         fn capacity(&self) -> Result<hex_api::Capacity, Refusal> {
             Err(invalid("fixture has no hardware"))
@@ -868,6 +1032,7 @@ mod authority_tests {
                 owner: None,
                 devices: Vec::new(),
                 allocation: None,
+                route: None,
             },
             hex_core::record::Phase::Creating,
             Vec::new(),
@@ -901,6 +1066,17 @@ mod authority_tests {
             });
             assert_eq!(effects.load(Ordering::SeqCst), calls);
             assert_eq!(result.is_ok(), succeeds);
+            let key = hex_api::BackingKey {
+                pool: [1; 32],
+                generation: [2; 16],
+            };
+            let effects = AtomicUsize::new(0);
+            let result = with_pool_transaction(&Arc::downgrade(&owner), &key, &[], |_| {
+                effects.fetch_add(1, Ordering::SeqCst);
+                Ok(7)
+            });
+            assert_eq!(effects.load(Ordering::SeqCst), calls);
+            assert_eq!(result.is_ok(), succeeds);
         }
         let owner: Arc<dyn Books> = Arc::new(Owner(Mode::Once));
         let weak = Arc::downgrade(&owner);
@@ -909,6 +1085,18 @@ mod authority_tests {
             with_transaction(&weak, &id, &[], |_| -> Result<(), Refusal> {
                 panic!("dead owner invoked operation")
             })
+            .is_err()
+        );
+        assert!(
+            with_pool_transaction(
+                &weak,
+                &hex_api::BackingKey {
+                    pool: [1; 32],
+                    generation: [2; 16]
+                },
+                &[],
+                |_| -> Result<(), Refusal> { panic!("dead owner invoked pool operation") },
+            )
             .is_err()
         );
         let owner: Arc<dyn Books> = Arc::new(Owner(Mode::Once));

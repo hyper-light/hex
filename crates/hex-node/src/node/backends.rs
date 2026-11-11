@@ -1,9 +1,12 @@
 //! AC-T7.4.1: initialized backend routing on the existing Node/Store/Turns owner.
 
 use super::*;
-use hex_api::{Capacity, DeviceId, LifecycleCause};
+use hex_api::{
+    BackingKey, BackingOffer, Capacity, DeviceId, Execution, LifecycleCause, RuntimeCost,
+};
+use hex_core::record::{NativeRecord, NativeStage};
 use hex_runtime::devices::{
-    Books, ManagedLaunch, Records, SharedCatalog, Transaction, managed_scope_id,
+    Books, ManagedLaunch, PoolRecords, Records, SharedCatalog, Transaction, managed_native_scope_id,
 };
 use hex_runtime::firecracker::FirecrackerRuntime;
 use hex_runtime::guest::GuestRuntime;
@@ -16,36 +19,41 @@ pub(super) struct Backends {
 }
 
 impl Node {
-    fn managed_bounds(record: &BoxRecord) -> Result<hex_api::Bounds, Refusal> {
-        let spec = &record.spec;
-        spec.check()?;
-        let dedicated_oci = matches!(spec.class, ClassSpec::Oci(_))
-            && matches!(
-                spec.route_execution(),
-                Some(hex_api::Execution::ShardsDedicated | hex_api::Execution::Firecracker)
-            );
-        if (!matches!(spec.class, ClassSpec::Shards(_) | ClassSpec::Firecracker(_))
-            && !dedicated_oci)
-            || record.native_scope.is_none()
-        {
-            return Err(uncertain(&spec.id));
+    fn managed_bounds(record: NativeRecord<'_>) -> Result<hex_api::Bounds, Refusal> {
+        let refused = || record.refusal(LifecycleCause::Uncertain);
+        match record {
+            NativeRecord::Box(record) => {
+                record.spec.check()?;
+                if record.spec.route_execution() == Some(Execution::ShardsShared) {
+                    return Err(refused());
+                }
+            }
+            NativeRecord::Pool(record) => record.check()?,
         }
-        let allocation = spec.allocation.ok_or_else(|| uncertain(&spec.id))?;
+        if !matches!(record.class()?, Class::Shards | Class::Firecracker)
+            || record.scope().is_none()
+        {
+            return Err(refused());
+        }
+        let allocation = record
+            .allocation()
+            .ok_or_else(|| record.refusal(LifecycleCause::Pending))?;
         allocation.guest()?;
+        record.commitment()?;
         Ok(hex_api::Bounds {
             cpu_max_milli: Some(
-                u32::try_from(allocation.resources.cpu_milli).map_err(|_| uncertain(&spec.id))?,
+                u32::try_from(allocation.resources.cpu_milli).map_err(|_| refused())?,
             ),
             memory_max: Some(allocation.resources.mem_bytes),
             ..hex_api::Bounds::default()
         })
     }
 
-    fn vm_root(&self, id: &BoxId) -> Result<&BoxRoot, Refusal> {
+    fn vm_root(&self, record: NativeRecord<'_>) -> Result<&BoxRoot, Refusal> {
         self.backends
             .get()
             .and_then(|backends| backends.vm_root.as_ref())
-            .ok_or_else(|| uncertain(id))
+            .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))
     }
 
     /// Exact node-owned inputs shared with the configured Shards provider's initialization probe.
@@ -93,26 +101,25 @@ impl Node {
 
     fn launch_managed(
         &self,
-        record: &BoxRecord,
+        record: NativeRecord<'_>,
         plan: &ManagedLaunch<'_>,
         io: shards_api::LaunchIo,
         patience: Duration,
         publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
-        let spec = &record.spec;
         let until = Instant::now()
             .checked_add(patience)
             .filter(|_| !patience.is_zero() && patience != Duration::MAX)
-            .ok_or_else(|| uncertain(&spec.id))?;
+            .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
         let bounds = Self::managed_bounds(record)?;
-        if plan.class() != spec.backend_class()?
-            || record.phase != Phase::Creating
-            || record.init.is_some()
+        if plan.class() != record.class()?
+            || record.stage() != NativeStage::Creating
+            || record.init().is_some()
         {
-            return Err(uncertain(&spec.id));
+            return Err(record.refusal(LifecycleCause::Uncertain));
         }
         self.backend(plan.class())?
-            .ok_or_else(|| uncertain(&spec.id))?;
+            .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
         let owned = match plan {
             ManagedLaunch::Shards(prepared) => Some(self.shards_program(prepared)?),
             ManagedLaunch::Firecracker { .. } => None,
@@ -120,12 +127,12 @@ impl Node {
         let program = match (plan, owned.as_ref()) {
             (ManagedLaunch::Shards(_), Some(program)) => program,
             (ManagedLaunch::Firecracker { program, .. }, None) => *program,
-            _ => return Err(uncertain(&spec.id)),
+            _ => return Err(record.refusal(LifecycleCause::Uncertain)),
         };
         program.check()?;
         program.fits(&process::exec_limit())?;
-        let scope = managed_scope_id(record)?;
-        let cgroup = self.vm_root(&spec.id)?.create(&scope, &bounds)?;
+        let scope = managed_native_scope_id(record)?;
+        let cgroup = self.vm_root(record)?.create(&scope, &bounds)?;
         let native = self
             .supervisor
             .reserve_managed(record, cgroup, plan.vsock())?;
@@ -137,7 +144,7 @@ impl Node {
         };
         let left = until.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return Err(uncertain(&spec.id));
+            return Err(record.refusal(LifecycleCause::Uncertain));
         }
         self.supervisor
             .bind_managed(&native, program, stdio, left, publish)
@@ -145,30 +152,31 @@ impl Node {
 
     fn attach_managed(
         &self,
-        record: &BoxRecord,
+        record: NativeRecord<'_>,
         identity: Option<&shards_api::Identity>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
         Self::managed_bounds(record)?;
         if let Some(native) = self.supervisor.observe_managed(record, identity)? {
             return Ok(native);
         }
-        let scope = managed_scope_id(record)?;
-        let root = self.vm_root(&record.spec.id)?;
-        let cgroup = root
-            .get(&scope)
-            .unwrap_or_else(|| BoxCgroup::at(root.dir().join(scope.as_str())));
+        let scope = managed_native_scope_id(record)?;
+        let root = self.vm_root(record)?;
+        let cgroup = match root.get(&scope) {
+            Some(cgroup) => cgroup,
+            None => BoxCgroup::at(native_path(root.dir(), scope.as_str())?),
+        };
         self.supervisor.recover_managed(record, cgroup, identity)
     }
 
     fn finalize_managed(
         &self,
-        record: &BoxRecord,
+        record: NativeRecord<'_>,
         identity: Option<&shards_api::Identity>,
     ) -> Result<(), Refusal> {
         Self::managed_bounds(record)?;
-        let scope = managed_scope_id(record)?;
+        let scope = managed_native_scope_id(record)?;
         self.supervisor.finalize_managed(record, identity)?;
-        self.vm_root(&record.spec.id)?.forget(scope.as_str());
+        self.vm_root(record)?.forget(scope.as_str());
         Ok(())
     }
 
@@ -285,19 +293,12 @@ impl Node {
             })
     }
 
-    pub(super) fn native_capacity(&self) -> Result<Capacity, Refusal> {
-        crate::facts::capacity(&self.bundles, format!("node:{}", self.key))
-    }
-
-    pub(super) fn native_physical_report(&self) -> Result<hex_api::PhysicalReport, Refusal> {
-        let provider = self.prober.get().ok_or_else(|| {
-            Refusal::Broken("the native physical provider is not initialized".into())
-        })?;
+    fn native_authority(&self) -> Result<String, Refusal> {
         let mut authority = String::new();
         let bytes = "node:"
             .len()
             .checked_add(self.key.len())
-            .ok_or_else(|| Refusal::Full(MAX_BOXES))?;
+            .ok_or(Refusal::Full(MAX_BOXES))?;
         authority
             .try_reserve_exact(bytes)
             .map_err(|_| Refusal::Exhausted {
@@ -306,10 +307,40 @@ impl Node {
             })?;
         authority.push_str("node:");
         authority.push_str(&self.key);
+        Ok(authority)
+    }
+
+    pub(super) fn native_capacity(&self) -> Result<Capacity, Refusal> {
+        crate::facts::capacity(&self.bundles, self.native_authority()?)
+    }
+
+    pub(super) fn native_physical_report(&self) -> Result<hex_api::PhysicalReport, Refusal> {
+        let provider = self.prober.get().ok_or_else(|| {
+            Refusal::Broken("the native physical provider is not initialized".into())
+        })?;
+        let authority = self.native_authority()?;
         provider
             .lock()
             .map_err(|_| Refusal::Broken("physical facts provider lock poisoned".into()))?
             .physical_report(authority)
+    }
+
+    /// Dispatch from the retained configuration/generation before entering its method/native turn.
+    /// A current offer cannot replace a recovered grant or choose a different VM implementation.
+    pub(super) fn pool_backend(&self, key: &BackingKey) -> Result<&dyn Runtime, Refusal> {
+        let refused = |cause| Refusal::Backing { key: *key, cause };
+        let record = self
+            .store
+            .read_pool(&key.pool)?
+            .ok_or_else(|| refused(LifecycleCause::Pending))?;
+        record.check()?;
+        if record.key != *key {
+            return Err(refused(LifecycleCause::Uncertain));
+        }
+        let class = NativeRecord::Pool(&record).class()?;
+        self.backend(class)
+            .map_err(|_| refused(LifecycleCause::Uncertain))?
+            .ok_or_else(|| refused(LifecycleCause::Uncertain))
     }
 
     pub(super) fn backend(&self, class: Class) -> Result<Option<&dyn Runtime>, Refusal> {
@@ -444,9 +475,76 @@ fn native_argument(argument: &std::ffi::OsStr) -> Result<String, Refusal> {
     Ok(value)
 }
 
+#[derive(Clone, Copy)]
+enum BookOwner<'a> {
+    Box(&'a BoxId),
+    Pool(&'a BackingKey),
+}
+
+impl Node {
+    fn book_transaction(
+        &self,
+        owner: BookOwner<'_>,
+        devices: &[DeviceId],
+        callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        let keys = self.attachments.conflict_ids(devices)?;
+        let _method = match owner {
+            BookOwner::Box(id) => self.turns.try_take_devices(id, &keys)?,
+            BookOwner::Pool(key) => self.turns.try_take_pool(key, &keys)?,
+        };
+        let _devices = self.hold_attachments(&keys)?;
+        let launch =
+            |record: NativeRecord<'_>,
+             plan: &ManagedLaunch<'_>,
+             io: shards_api::LaunchIo,
+             patience: Duration,
+             publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>| {
+                self.launch_managed(record, plan, io, patience, publish)
+            };
+        let attach = |record: NativeRecord<'_>, identity: Option<&shards_api::Identity>| {
+            self.attach_managed(record, identity)
+        };
+        let finalize = |record: NativeRecord<'_>, identity: Option<&shards_api::Identity>| {
+            self.finalize_managed(record, identity)
+        };
+        let usage = |record: NativeRecord<'_>| self.supervisor.managed_usage(record);
+        let native = crate::recorded::Native {
+            catalog: Some(self.attachments.as_ref()),
+            launch: &launch,
+            attach: &attach,
+            finalize: &finalize,
+            usage: &usage,
+        };
+        match owner {
+            BookOwner::Box(id) => {
+                crate::recorded::transaction(&self.store, id, &keys, &native, callback)
+            }
+            BookOwner::Pool(key) => {
+                crate::recorded::pool_transaction(&self.store, key, &keys, &native, callback)
+            }
+        }
+    }
+}
+
 impl Books for Node {
     fn records(&self) -> Result<Records, Refusal> {
         self.store.all()
+    }
+    fn pool_records(&self) -> Result<PoolRecords, Refusal> {
+        self.store.all_pools()
+    }
+    fn prepare_pool(
+        &self,
+        pool: [u8; 32],
+        execution: Execution,
+        cost: RuntimeCost,
+        devices: &[DeviceId],
+    ) -> Result<BackingOffer, Refusal> {
+        let keys = self.attachments.conflict_ids(devices)?;
+        let _method = self.turns.try_take_pool_configuration(&pool, &keys)?;
+        let _devices = self.hold_attachments(&keys)?;
+        crate::recorded::prepare_pool(&self.store, pool, execution, cost, devices)
     }
     fn capacity(&self) -> Result<Capacity, Refusal> {
         self.native_capacity()
@@ -463,36 +561,15 @@ impl Books for Node {
         devices: &[DeviceId],
         callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
     ) -> Result<(), Refusal> {
-        let _method = self.turns.try_take(id)?;
-        let keys = self.attachments.conflict_ids(devices)?;
-        let _devices = self.hold_attachments(&keys)?;
-        let launch =
-            |record: &BoxRecord,
-             plan: &ManagedLaunch<'_>,
-             io: shards_api::LaunchIo,
-             patience: Duration,
-             publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>| {
-                self.launch_managed(record, plan, io, patience, publish)
-            };
-        let attach = |record: &BoxRecord, identity: Option<&shards_api::Identity>| {
-            self.attach_managed(record, identity)
-        };
-        let finalize = |record: &BoxRecord, identity: Option<&shards_api::Identity>| {
-            self.finalize_managed(record, identity)
-        };
-        let usage = |record: &BoxRecord| self.supervisor.managed_usage(record);
-        crate::recorded::transaction(
-            &self.store,
-            id,
-            &keys,
-            &crate::recorded::Native {
-                launch: &launch,
-                attach: &attach,
-                finalize: &finalize,
-                usage: &usage,
-            },
-            callback,
-        )
+        self.book_transaction(BookOwner::Box(id), devices, callback)
+    }
+    fn with_pool_transaction(
+        &self,
+        key: &BackingKey,
+        devices: &[DeviceId],
+        callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        self.book_transaction(BookOwner::Pool(key), devices, callback)
     }
 }
 

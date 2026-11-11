@@ -131,7 +131,7 @@ impl Runtime for DeviceRuntime {
         let devices = catalog
             .entries()
             .iter()
-            .map(|entry| entry.report(catalog.holder(entry.info.id, &records)?))
+            .map(|entry| entry.report(catalog.holder(entry.info.id, &records, &[])?))
             .collect::<Result<_, Refusal>>()?;
         let (demand, _) = request();
         let room = CapacityResources {
@@ -156,7 +156,7 @@ impl Runtime for DeviceRuntime {
             {
                 let catalog = self.catalog.lock().unwrap();
                 let records = self.records.lock().unwrap();
-                catalog.prepare(&requested, &records)?;
+                catalog.prepare(&requested, &records, &[])?;
             }
             // This extraction is ONLY the explicitly selected test model. SimRuntime itself
             // correctly refuses device claims; no production backend is made to claim support.
@@ -662,7 +662,7 @@ fn concurrent_isolation_group_admission_keeps_one_creating_holder() {
                 devices: vec![GPU_A],
             };
             let snapshot = records.lock().unwrap().clone();
-            catalog.prepare(&spec, &snapshot).unwrap();
+            catalog.prepare(&spec, &snapshot, &[]).unwrap();
             holding.send(()).unwrap();
             publishing
                 .recv_timeout(hex_api::conformance::patience())
@@ -709,7 +709,7 @@ fn concurrent_isolation_group_admission_keeps_one_creating_holder() {
                 devices: vec![GPU_B],
             };
             let snapshot = records.lock().unwrap().clone();
-            if catalog.prepare(&spec, &snapshot).is_err() {
+            if catalog.prepare(&spec, &snapshot, &[]).is_err() {
                 refused.fetch_add(1, Ordering::SeqCst);
                 return;
             }
@@ -732,7 +732,7 @@ fn concurrent_isolation_group_admission_keeps_one_creating_holder() {
     assert_eq!(records.len(), 1);
     assert_eq!(
         catalog
-            .holder(GPU_B, &records)
+            .holder(GPU_B, &records, &[])
             .unwrap()
             .unwrap()
             .box_id()

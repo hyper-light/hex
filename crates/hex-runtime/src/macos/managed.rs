@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use hex_api::{Bounds, BoxId, Class, Exit, LifecycleCause, Refusal, Usage};
-use hex_core::record::{BoxRecord, NativeScope};
+use hex_core::record::{NativeRecord, NativeScope, OwnerRef};
 use shards_api::{
     Identity, ManagedEnd, ManagedProcess, ManagedReceipt, ManagedStatus, ProcessFailure,
     ProcessOperation, TerminalScope,
@@ -16,7 +16,7 @@ use triomphe::Arc;
 
 use super::proc::{BoxProc, Prepared, Reaping, process_failure};
 use super::process::ProcessBox;
-use super::{MacRuntime, native_allocation, native_index, sys};
+use super::{MacRuntime, native_allocation, native_owner_index, sys};
 
 pub(super) fn uncertain(id: &BoxId) -> Refusal {
     match id.try_clone() {
@@ -55,70 +55,81 @@ pub(super) struct Scope {
 }
 
 impl Scope {
-    pub(super) fn new(record: &BoxRecord, ownership: Ownership) -> Result<Self, Refusal> {
-        record.spec.check()?;
+    pub(super) fn new(record: NativeRecord<'_>, ownership: Ownership) -> Result<Self, Refusal> {
         record
-            .spec
-            .allocation
-            .ok_or_else(|| uncertain(&record.spec.id))?
+            .allocation()
+            .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?
             .guest()?;
-        if !matches!(record.spec.class.class(), Class::Oci | Class::Shards) {
-            return Err(uncertain(&record.spec.id));
+        if record.class()? != Class::Shards {
+            return Err(record.refusal(LifecycleCause::Uncertain));
         }
         Ok(Self {
             scope: record
-                .native_scope
-                .ok_or_else(|| uncertain(&record.spec.id))?,
-            commitment: record.native_commitment()?,
+                .scope()
+                .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?,
+            commitment: record.commitment()?,
             ownership,
             phase: Mutex::new(Phase::Prepared),
         })
     }
+    pub(super) fn refusal(&self, owner: OwnerRef<'_>) -> Refusal {
+        match owner {
+            OwnerRef::Box(id) => uncertain(id),
+            OwnerRef::Pool(pool) => Refusal::Backing {
+                key: hex_api::BackingKey {
+                    pool: *pool,
+                    generation: *self.scope.bytes(),
+                },
+                cause: LifecycleCause::Uncertain,
+            },
+        }
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Phase>, ProcessFailure> {
         self.phase.lock().map_err(|_| ProcessFailure::Poisoned {
             what: "native scope phase",
         })
     }
-    fn matches(&self, record: &BoxRecord, commitment: [u8; 32]) -> bool {
-        record.native_scope == Some(self.scope) && commitment == self.commitment
+    fn matches(&self, record: NativeRecord<'_>, commitment: [u8; 32]) -> bool {
+        record.scope() == Some(self.scope) && commitment == self.commitment
     }
-    pub(super) fn held(&self, id: &BoxId) -> Result<(), Refusal> {
-        let mut phase = self.lock().map_err(|_| uncertain(id))?;
+    pub(super) fn held(&self, id: OwnerRef<'_>) -> Result<(), Refusal> {
+        let mut phase = self.lock().map_err(|_| self.refusal(id))?;
         if *phase != Phase::Prepared {
-            return Err(uncertain(id));
+            return Err(self.refusal(id));
         }
         *phase = Phase::Held;
         Ok(())
     }
-    pub(super) fn running(&self, id: &BoxId) -> Result<(), Refusal> {
-        let mut phase = self.lock().map_err(|_| uncertain(id))?;
+    pub(super) fn running(&self, id: OwnerRef<'_>) -> Result<(), Refusal> {
+        let mut phase = self.lock().map_err(|_| self.refusal(id))?;
         if *phase != Phase::Held {
-            return Err(uncertain(id));
+            return Err(self.refusal(id));
         }
         *phase = Phase::Running;
         Ok(())
     }
-    pub(super) fn not_submitted(&self, id: &BoxId) -> Result<(), Refusal> {
-        let mut phase = self.lock().map_err(|_| uncertain(id))?;
+    pub(super) fn not_submitted(&self, id: OwnerRef<'_>) -> Result<(), Refusal> {
+        let mut phase = self.lock().map_err(|_| self.refusal(id))?;
         if !matches!(*phase, Phase::Prepared | Phase::Held) {
-            return Err(uncertain(id));
+            return Err(self.refusal(id));
         }
         *phase = Phase::NotSubmitted;
         Ok(())
     }
-    pub(super) fn watchable(&self, id: &BoxId) -> Result<bool, Refusal> {
+    pub(super) fn watchable(&self, id: OwnerRef<'_>) -> Result<bool, Refusal> {
         self.lock()
             .map(|phase| *phase == Phase::Running)
-            .map_err(|_| uncertain(id))
+            .map_err(|_| self.refusal(id))
     }
-    pub(super) fn finalizing(&self, end: ManagedEnd, id: &BoxId) -> Result<(), Refusal> {
+    pub(super) fn finalizing(&self, end: ManagedEnd, id: OwnerRef<'_>) -> Result<(), Refusal> {
         if end.scope != TerminalScope::Released {
-            return Err(uncertain(id));
+            return Err(self.refusal(id));
         }
-        let mut phase = self.lock().map_err(|_| uncertain(id))?;
+        let mut phase = self.lock().map_err(|_| self.refusal(id))?;
         match &*phase {
             Phase::Finalizing(known) | Phase::Finalized(known) if *known != end => {
-                return Err(uncertain(id));
+                return Err(self.refusal(id));
             }
             Phase::Finalized(_) => return Ok(()),
             _ => {}
@@ -126,15 +137,15 @@ impl Scope {
         *phase = Phase::Finalizing(end);
         Ok(())
     }
-    fn finalized(&self, id: &BoxId) -> Result<(), Refusal> {
-        let mut phase = self.lock().map_err(|_| uncertain(id))?;
+    fn finalized(&self, id: OwnerRef<'_>) -> Result<(), Refusal> {
+        let mut phase = self.lock().map_err(|_| self.refusal(id))?;
         match *phase {
             Phase::Finalizing(end) => {
                 *phase = Phase::Finalized(end);
                 Ok(())
             }
             Phase::Finalized(_) => Ok(()),
-            _ => Err(uncertain(id)),
+            _ => Err(self.refusal(id)),
         }
     }
     pub(super) fn is_finalized(&self) -> bool {
@@ -152,10 +163,10 @@ impl Scope {
         &self,
         pgid: Option<i32>,
         started: Option<u64>,
-        id: &BoxId,
+        id: OwnerRef<'_>,
     ) -> Result<(), Refusal> {
         self.validate_native(pgid, started)
-            .map_err(|_| uncertain(id))
+            .map_err(|_| self.refusal(id))
     }
     pub(super) fn validate_native(
         &self,
@@ -203,14 +214,18 @@ pub(super) enum Controller {
     },
 }
 
-fn host_bounds(record: &BoxRecord) -> Result<Bounds, Refusal> {
-    let spec = &record.spec;
-    spec.check()?;
-    let allocation = spec.allocation.ok_or_else(|| uncertain(&spec.id))?;
+fn host_bounds(record: NativeRecord<'_>) -> Result<Bounds, Refusal> {
+    if record.class()? != Class::Shards {
+        return Err(record.refusal(LifecycleCause::Uncertain));
+    }
+    let allocation = record
+        .allocation()
+        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
     allocation.guest()?;
     let bounds = Bounds {
         cpu_max_milli: Some(
-            u32::try_from(allocation.resources.cpu_milli).map_err(|_| uncertain(&spec.id))?,
+            u32::try_from(allocation.resources.cpu_milli)
+                .map_err(|_| record.refusal(LifecycleCause::Uncertain))?,
         ),
         memory_max: Some(allocation.resources.mem_bytes),
         ..Bounds::default()
@@ -219,7 +234,7 @@ fn host_bounds(record: &BoxRecord) -> Result<Bounds, Refusal> {
     Ok(bounds)
 }
 
-fn bytes(value: &[u8], id: &BoxId) -> Result<CString, Refusal> {
+fn bytes(value: &[u8], record: NativeRecord<'_>) -> Result<CString, Refusal> {
     let count = value
         .len()
         .checked_add(1)
@@ -230,9 +245,13 @@ fn bytes(value: &[u8], id: &BoxId) -> Result<CString, Refusal> {
         .map_err(|_| native_allocation(count))?;
     copied.extend_from_slice(value);
     copied.push(0);
-    CString::from_vec_with_nul(copied).map_err(|_| uncertain(id))
+    CString::from_vec_with_nul(copied).map_err(|_| record.refusal(LifecycleCause::Uncertain))
 }
-fn environment(name: &[u8], path: &std::path::Path, id: &BoxId) -> Result<CString, Refusal> {
+fn environment(
+    name: &[u8],
+    path: &std::path::Path,
+    record: NativeRecord<'_>,
+) -> Result<CString, Refusal> {
     let path = path.as_os_str().as_bytes();
     let count = name
         .len()
@@ -247,27 +266,28 @@ fn environment(name: &[u8], path: &std::path::Path, id: &BoxId) -> Result<CStrin
     value.push(b'=');
     value.extend_from_slice(path);
     value.push(0);
-    CString::from_vec_with_nul(value).map_err(|_| uncertain(id))
+    CString::from_vec_with_nul(value).map_err(|_| record.refusal(LifecycleCause::Uncertain))
 }
 fn spawn(
     runtime: &MacRuntime,
-    record: &BoxRecord,
+    record: NativeRecord<'_>,
     plan: &shards_api::PreparedBoot,
     io: shards_api::LaunchIo,
     bounds: &Bounds,
 ) -> Result<sys::Spawn, Refusal> {
-    let id = &record.spec.id;
-    let paths = plan.runtime_paths().ok_or_else(|| uncertain(id))?;
+    let paths = plan
+        .runtime_paths()
+        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
     if !plan
         .arguments()
         .iter()
         .take_while(|argument| argument.as_os_str() != std::ffi::OsStr::new("--"))
         .any(|argument| argument.as_os_str() == std::ffi::OsStr::new("--host-managed"))
     {
-        return Err(uncertain(id));
+        return Err(record.refusal(LifecycleCause::Uncertain));
     }
     if !plan.binary().is_absolute() {
-        return Err(uncertain(id));
+        return Err(record.refusal(LifecycleCause::Uncertain));
     }
     let count = plan
         .arguments()
@@ -280,13 +300,13 @@ fn spawn(
     for word in std::iter::once(plan.binary().as_os_str())
         .chain(plan.arguments().iter().map(|word| word.as_os_str()))
     {
-        argv.push(bytes(word.as_bytes(), id)?);
+        argv.push(bytes(word.as_bytes(), record)?);
     }
     let mut envp = Vec::new();
     envp.try_reserve_exact(2)
         .map_err(|_| native_allocation(2))?;
-    envp.push(environment(b"SHARDS_CACHE", paths.cache(), id)?);
-    envp.push(environment(b"SHARDS_HOME", paths.home(), id)?);
+    envp.push(environment(b"SHARDS_CACHE", paths.cache(), record)?);
+    envp.push(environment(b"SHARDS_HOME", paths.home(), record)?);
     let size = argv
         .iter()
         .chain(&envp)
@@ -304,13 +324,13 @@ fn spawn(
         .checked_add(pointers)
         .is_none_or(|size| size > runtime.exec_limit.block)
     {
-        return Err(uncertain(id));
+        return Err(record.refusal(LifecycleCause::Uncertain));
     }
     let mut binaries = Vec::new();
     binaries
         .try_reserve_exact(1)
         .map_err(|_| native_allocation(1))?;
-    binaries.push(bytes(plan.binary().as_os_str().as_bytes(), id)?);
+    binaries.push(bytes(plan.binary().as_os_str().as_bytes(), record)?);
     Ok(sys::Spawn {
         paths: binaries,
         argv,
@@ -325,10 +345,13 @@ fn spawn(
     })
 }
 
-fn existing(runtime: &MacRuntime, record: &BoxRecord) -> Result<Option<Arc<ProcessBox>>, Refusal> {
-    let commitment = record.native_commitment()?;
+fn existing(
+    runtime: &MacRuntime,
+    record: NativeRecord<'_>,
+) -> Result<Option<Arc<ProcessBox>>, Refusal> {
+    let commitment = record.commitment()?;
     let boxes = runtime.boxes()?;
-    let Ok(at) = native_index(&boxes, &record.spec.id) else {
+    let Ok(at) = native_owner_index(&boxes, record.owner()) else {
         return Ok(None);
     };
     match boxes.get(at) {
@@ -339,18 +362,19 @@ fn existing(runtime: &MacRuntime, record: &BoxRecord) -> Result<Option<Arc<Proce
         {
             Ok(Some(Arc::clone(boxed)))
         }
-        _ => Err(uncertain(&record.spec.id)),
+        _ => Err(record.refusal(LifecycleCause::Uncertain)),
     }
 }
 
 fn retain(
     runtime: &MacRuntime,
-    record: &BoxRecord,
+    record: NativeRecord<'_>,
     boxed: &Arc<ProcessBox>,
 ) -> Result<(), Refusal> {
-    let id = record.spec.id.try_clone()?;
+    let id = record.owner().try_owned()?;
     let mut boxes = runtime.boxes()?;
-    let at = native_index(&boxes, &id).map_or_else(Ok, |_| Err(uncertain(&id)))?;
+    let at = native_owner_index(&boxes, id.as_ref())
+        .map_or_else(Ok, |_| Err(record.refusal(LifecycleCause::Uncertain)))?;
     if boxes.len() >= crate::MAX_BOXES {
         return Err(Refusal::Full(crate::MAX_BOXES));
     }
@@ -363,19 +387,19 @@ fn retain(
 
 pub(super) fn launch(
     runtime: &MacRuntime,
-    record: &BoxRecord,
+    record: NativeRecord<'_>,
     launch: &crate::devices::ManagedLaunch<'_>,
     io: shards_api::LaunchIo,
     patience: Duration,
     publish: &mut dyn FnMut(&Identity) -> Result<(), Refusal>,
 ) -> Result<ManagedReceipt, Refusal> {
     let crate::devices::ManagedLaunch::Shards(plan) = launch else {
-        return Err(uncertain(&record.spec.id));
+        return Err(record.refusal(LifecycleCause::Uncertain));
     };
     let deadline = Instant::now()
         .checked_add(patience)
         .filter(|_| patience != Duration::MAX && !patience.is_zero())
-        .ok_or_else(|| uncertain(&record.spec.id))?;
+        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
     let bounds = host_bounds(record)?;
     let spawn = spawn(runtime, record, plan, io, &bounds)?;
     let vsock = copy_path(plan.vsock())?;
@@ -386,20 +410,20 @@ pub(super) fn launch(
     if Instant::now() >= deadline {
         *boxed
             .scope()
-            .ok_or_else(|| uncertain(&record.spec.id))?
+            .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?
             .lock()
-            .map_err(|_| uncertain(&record.spec.id))? = Phase::NotSubmitted;
-        return Err(uncertain(&record.spec.id));
+            .map_err(|_| record.refusal(LifecycleCause::Uncertain))? = Phase::NotSubmitted;
+        return Err(record.refusal(LifecycleCause::Uncertain));
     }
     let mut controller = boxed
         .controller
         .lock()
-        .map_err(|_| uncertain(&record.spec.id))?;
+        .map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
     let prepared = match std::mem::replace(&mut *controller, Controller::Unsubmitted) {
         Controller::Prepared(prepared) => prepared,
         other => {
             *controller = other;
-            return Err(uncertain(&record.spec.id));
+            return Err(record.refusal(LifecycleCause::Uncertain));
         }
     };
     let pid = match boxed.held_exec(&spawn) {
@@ -419,31 +443,31 @@ pub(super) fn launch(
     let observed = sys::rusage(pid)
         .map_err(|error| Refusal::os("reading the held VM controller birth", error))?
         .filter(|usage| usage.started != 0)
-        .ok_or_else(|| uncertain(&record.spec.id))?;
+        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
     boxed.introduce_group(pid, observed.started)?;
     let identity = Identity {
-        pid: u32::try_from(pid).map_err(|_| uncertain(&record.spec.id))?,
+        pid: u32::try_from(pid).map_err(|_| record.refusal(LifecycleCause::Uncertain))?,
         started: observed.started,
         vsock,
     };
     boxed
         .identity
         .set(identity)
-        .map_err(|_| uncertain(&record.spec.id))?;
+        .map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
     if let Controller::Held {
         failure: Some(_), ..
     } = &*controller
     {
-        return Err(uncertain(&record.spec.id));
+        return Err(record.refusal(LifecycleCause::Uncertain));
     }
     publish(
         boxed
             .identity
             .get()
-            .ok_or_else(|| uncertain(&record.spec.id))?,
+            .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?,
     )?;
     if Instant::now() >= deadline {
-        return Err(uncertain(&record.spec.id));
+        return Err(record.refusal(LifecycleCause::Uncertain));
     }
     boxed.resume_managed()?;
     drop(controller);
@@ -461,35 +485,35 @@ fn copy_path(path: &std::path::Path) -> Result<std::path::PathBuf, Refusal> {
 
 pub(super) fn attach(
     runtime: &MacRuntime,
-    record: &BoxRecord,
+    record: NativeRecord<'_>,
     identity: Option<&Identity>,
 ) -> Result<ManagedReceipt, Refusal> {
     if let Some(boxed) = existing(runtime, record)? {
         if identity.is_some_and(|identity| boxed.identity.get() != Some(identity)) {
-            return Err(uncertain(&record.spec.id));
+            return Err(record.refusal(LifecycleCause::Uncertain));
         }
         return Ok(shards_api::managed_receipt(boxed));
     }
-    let identity = identity.ok_or_else(|| uncertain(&record.spec.id))?;
+    let identity = identity.ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
     if !record
-        .init
+        .init()
         .is_some_and(|init| init.pid == identity.pid && init.start_ticks == identity.started)
     {
-        return Err(uncertain(&record.spec.id));
+        return Err(record.refusal(LifecycleCause::Uncertain));
     }
     let pid = i32::try_from(identity.pid)
         .ok()
         .filter(|pid| *pid > 0)
-        .ok_or_else(|| uncertain(&record.spec.id))?;
+        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
     let actual = sys::rusage(pid)
         .map_err(|error| Refusal::os("reading the recorded controller", error))?
         .filter(|actual| actual.started == identity.started && !actual.ended)
-        .ok_or_else(|| uncertain(&record.spec.id))?;
+        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
     if sys::group_of(pid)
         .map_err(|error| Refusal::os("reading the recorded controller group", error))?
         != Some(pid)
     {
-        return Err(uncertain(&record.spec.id));
+        return Err(record.refusal(LifecycleCause::Uncertain));
     }
     let bounds = host_bounds(record)?;
     let boxed = ProcessBox::prepare_managed(record, &bounds, &runtime.shared, Ownership::Borrowed)?;
@@ -497,12 +521,12 @@ pub(super) fn attach(
     let mut controller = boxed
         .controller
         .lock()
-        .map_err(|_| uncertain(&record.spec.id))?;
+        .map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
     let prepared = match std::mem::replace(&mut *controller, Controller::Unsubmitted) {
         Controller::Prepared(prepared) => prepared,
         other => {
             *controller = other;
-            return Err(uncertain(&record.spec.id));
+            return Err(record.refusal(LifecycleCause::Uncertain));
         }
     };
     let (process, registered) = prepared.bind(
@@ -525,72 +549,74 @@ pub(super) fn attach(
             started: identity.started,
             vsock: copy_path(&identity.vsock)?,
         })
-        .map_err(|_| uncertain(&record.spec.id))?;
+        .map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
     *boxed
         .scope()
-        .ok_or_else(|| uncertain(&record.spec.id))?
+        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?
         .lock()
-        .map_err(|_| uncertain(&record.spec.id))? = Phase::Observing;
+        .map_err(|_| record.refusal(LifecycleCause::Uncertain))? = Phase::Observing;
     drop(controller);
     retain(runtime, record, &boxed)?;
     Ok(shards_api::managed_receipt(boxed))
 }
 
-pub(super) fn usage(runtime: &MacRuntime, record: &BoxRecord) -> Result<Usage, Refusal> {
-    let boxed = existing(runtime, record)?.ok_or_else(|| uncertain(&record.spec.id))?;
+pub(super) fn usage(runtime: &MacRuntime, record: NativeRecord<'_>) -> Result<Usage, Refusal> {
+    let boxed =
+        existing(runtime, record)?.ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
     boxed
         .scope()
-        .ok_or_else(|| uncertain(&record.spec.id))?
+        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?
         .validate(
             boxed.group()?.map(|pair| pair.0),
             boxed.group()?.map(|pair| pair.1),
-            boxed.id(),
+            boxed.owner(),
         )?;
     boxed.usage()
 }
 
 pub(super) fn finalize(
     runtime: &MacRuntime,
-    record: &BoxRecord,
+    record: NativeRecord<'_>,
     identity: Option<&Identity>,
 ) -> Result<(), Refusal> {
     let Some(boxed) = existing(runtime, record)? else {
         // Only the internal transaction calls this after exact durable Released publication.
         // An absent native slot is not independently promoted to a scope-empty observation.
         record
-            .native_scope
-            .ok_or_else(|| uncertain(&record.spec.id))?;
+            .scope()
+            .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
         return Ok(());
     };
     if identity.is_some_and(|identity| boxed.identity.get() != Some(identity)) {
-        return Err(uncertain(&record.spec.id));
+        return Err(record.refusal(LifecycleCause::Uncertain));
     }
     let end = boxed
         .terminal()
-        .map_err(|_| uncertain(&record.spec.id))?
+        .map_err(|_| record.refusal(LifecycleCause::Uncertain))?
         .filter(|end| end.scope == TerminalScope::Released)
-        .ok_or_else(|| uncertain(&record.spec.id))?;
+        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
     boxed.finalize_watcher(end)?;
     if let Controller::Held { process, .. } = &mut *boxed
         .controller
         .lock()
-        .map_err(|_| uncertain(&record.spec.id))?
+        .map_err(|_| record.refusal(LifecycleCause::Uncertain))?
     {
         process
             .finalize_retained()
-            .map_err(|_| uncertain(&record.spec.id))?;
+            .map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
     }
     boxed
         .scope()
-        .ok_or_else(|| uncertain(&record.spec.id))?
-        .finalized(&record.spec.id)?;
+        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?
+        .finalized(record.owner())?;
     let mut boxes = runtime.boxes()?;
-    let at = native_index(&boxes, &record.spec.id).map_err(|_| uncertain(&record.spec.id))?;
+    let at = native_owner_index(&boxes, record.owner())
+        .map_err(|_| record.refusal(LifecycleCause::Uncertain))?;
     if !boxes
         .get(at)
         .is_some_and(|(_, current)| Arc::ptr_eq(current, &boxed))
     {
-        return Err(uncertain(&record.spec.id));
+        return Err(record.refusal(LifecycleCause::Uncertain));
     }
     boxes.remove(at);
     Ok(())
@@ -809,18 +835,32 @@ mod tests {
         }
     }
 
+    /// AC-T7.4.1: typed uncertainty retains the exact backing generation without a Box alias.
+    #[test]
+    fn pool_scope_errors_keep_the_same_generation() {
+        let scope = scope();
+        let pool = [9; 32];
+        assert!(
+            matches!(scope.refusal(OwnerRef::Pool(&pool)), Refusal::Backing { key, .. }
+            if key.pool == pool && key.generation == [1; 16])
+        );
+        assert!(scope.running(OwnerRef::Pool(&pool)).is_err());
+        scope.held(OwnerRef::Pool(&pool)).unwrap();
+        scope.running(OwnerRef::Pool(&pool)).unwrap();
+    }
+
     /// AC-T7.4.1: a controller cannot become watchable before its held publication stage.
     #[test]
     fn preparation_cannot_skip_held_publication() {
         let id = BoxId::new("scope-order").unwrap();
         let scope = scope();
-        assert!(!scope.watchable(&id).unwrap());
-        assert!(scope.running(&id).is_err());
-        scope.held(&id).unwrap();
-        assert!(!scope.watchable(&id).unwrap());
-        scope.running(&id).unwrap();
-        assert!(scope.watchable(&id).unwrap());
-        assert!(scope.not_submitted(&id).is_err());
+        assert!(!scope.watchable(OwnerRef::Box(&id)).unwrap());
+        assert!(scope.running(OwnerRef::Box(&id)).is_err());
+        scope.held(OwnerRef::Box(&id)).unwrap();
+        assert!(!scope.watchable(OwnerRef::Box(&id)).unwrap());
+        scope.running(OwnerRef::Box(&id)).unwrap();
+        assert!(scope.watchable(OwnerRef::Box(&id)).unwrap());
+        assert!(scope.not_submitted(OwnerRef::Box(&id)).is_err());
     }
 
     /// AC-T7.4.1: cleanup retries keep the exact already observed terminal result after durable release.
@@ -839,11 +879,11 @@ mod tests {
                         status: end.status,
                         scope: TerminalScope::Process
                     },
-                    &id
+                    OwnerRef::Box(&id)
                 )
                 .is_err()
         );
-        scope.finalizing(end, &id).unwrap();
+        scope.finalizing(end, OwnerRef::Box(&id)).unwrap();
         scope.failed(ProcessFailure::InvalidStartRecord);
         assert!(scope.is_finalized());
         assert!(
@@ -853,11 +893,11 @@ mod tests {
                         status: ManagedStatus::Code(8),
                         ..end
                     },
-                    &id
+                    OwnerRef::Box(&id)
                 )
                 .is_err()
         );
-        scope.finalized(&id).unwrap();
+        scope.finalized(OwnerRef::Box(&id)).unwrap();
         assert_eq!(*scope.lock().unwrap(), Phase::Finalized(end));
     }
 }

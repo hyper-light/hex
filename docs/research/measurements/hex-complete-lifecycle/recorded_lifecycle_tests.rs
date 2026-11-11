@@ -108,6 +108,7 @@ impl Recover for Backend {
 mod authority;
 fn spec() -> BoxSpec {
     BoxSpec {
+        route: None,
         id: BoxId::new("same-identity").unwrap(),
         bounds: Bounds::default(),
         class: ClassSpec::Process,

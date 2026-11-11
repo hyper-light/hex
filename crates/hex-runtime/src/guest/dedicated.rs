@@ -9,7 +9,7 @@ use hex_core::record::BoxRecord;
 
 pub(super) struct Guest {
     receipt: Record,
-    booted: Arc<Booted>,
+    booted: triomphe::Arc<Booted>,
 }
 
 #[cfg(test)]
@@ -106,6 +106,27 @@ mod tests {
         fail_finalize: AtomicBool,
     }
     impl Transaction for Cleanup {
+        fn pool_records(&self) -> Result<crate::devices::PoolRecords, Refusal> {
+            panic!("box cleanup must not inspect unrelated pools")
+        }
+        fn read_pool(
+            &self,
+            _: &hex_api::BackingKey,
+        ) -> Result<Option<hex_core::record::PoolRecord>, Refusal> {
+            panic!("box cleanup must not read a pool")
+        }
+        fn put_pool(&self, _: &hex_core::record::PoolRecord) -> Result<(), Refusal> {
+            panic!("box cleanup must not write a pool")
+        }
+        fn grant_pool(
+            &self,
+            _: &hex_api::BackingGrant,
+        ) -> Result<hex_core::record::PoolRecord, Refusal> {
+            panic!("box cleanup must not grant a pool")
+        }
+        fn remove_pool(&self, _: &hex_api::BackingKey) -> Result<(), Refusal> {
+            panic!("box cleanup must not remove a pool")
+        }
         fn records(&self) -> Result<crate::devices::Records, Refusal> {
             panic!("cleanup has no inventory effect")
         }
@@ -252,9 +273,9 @@ mod tests {
         runtime: &GuestRuntime,
         id: &BoxId,
         guest: Arc<dyn shards_api::Guest>,
-    ) -> Arc<Booted> {
+    ) -> triomphe::Arc<Booted> {
         let (link, client) = super::super::tests::model_connection();
-        let booted = Arc::new(Booted {
+        let booted = booted_owner(Booted {
             guest: GuestHandle::Shared(guest),
             link,
             client,
@@ -265,7 +286,9 @@ mod tests {
                 allocation: None,
                 route: None,
             }),
-        });
+            backing: None,
+        })
+        .unwrap();
         let receipt = record(id);
         std::fs::create_dir_all(runtime.selected_dir().unwrap()).unwrap();
         selected::write(&runtime.selected_path(id).unwrap(), &receipt).unwrap();
@@ -274,7 +297,7 @@ mod tests {
             .unwrap()
             .publish(Some(Guest {
                 receipt,
-                booted: Arc::clone(&booted),
+                booted: triomphe::Arc::clone(&booted),
             }))
             .unwrap();
         booted
@@ -462,6 +485,7 @@ mod tests {
                 allocation,
                 route,
             }),
+            backing: None,
         };
         let mut exited = info(&id);
         exited.state = BoxState::Empty;
@@ -636,10 +660,13 @@ impl Drop for Reservation<'_> {
     }
 }
 
-fn copy_path(path: &std::path::Path) -> Result<PathBuf, Refusal> {
+pub(super) fn copy_path(path: &std::path::Path) -> Result<PathBuf, Refusal> {
     let mut text = OsString::new();
     text.try_reserve_exact(path.as_os_str().len())
-        .map_err(|_| invalid("native path storage unavailable"))?;
+        .map_err(|_| Refusal::Exhausted {
+            what: "native guest path bytes",
+            bound: path.as_os_str().len(),
+        })?;
     text.push(path.as_os_str());
     Ok(PathBuf::from(text))
 }
@@ -722,7 +749,7 @@ impl GuestRuntime {
         owner.project_in(info)
     }
 
-    pub(super) fn booted_for(&self, id: &BoxId) -> Result<Option<Arc<Booted>>, Refusal> {
+    pub(super) fn booted_for(&self, id: &BoxId) -> Result<Option<triomphe::Arc<Booted>>, Refusal> {
         let dedicated = if self.uses_books() {
             self.recorded_box(id)?
                 .is_some_and(|record| self.owns_record(&record.spec))
@@ -735,6 +762,9 @@ impl GuestRuntime {
             // Forward already owns its canonical method turn. No recursive enter;
             // recovery/create installs the native route before accepting forwards.
             self.cached_selected(id)
+        } else if self.managed_shared() {
+            let record = self.recorded_box(id)?.ok_or(super::books::uncertain(id)?)?;
+            self.shared_for_record(&record)
         } else {
             self.running()
         }
@@ -977,7 +1007,23 @@ impl GuestRuntime {
         receipt: &Record,
         record: &BoxRecord,
         budget: managed::Budget,
-    ) -> Result<Arc<Booted>, Refusal> {
+    ) -> Result<triomphe::Arc<Booted>, Refusal> {
+        let owner = Owner {
+            id: receipt.id.try_clone()?,
+            class: receipt.class,
+            allocation: record.spec.allocation,
+            route: record.spec.route,
+        };
+        self.connect_managed(guest, Some(owner), None, budget)
+    }
+
+    pub(super) fn connect_managed(
+        &self,
+        guest: shards_api::ManagedGuest,
+        owner: Option<Owner>,
+        backing: Option<shared::Binding>,
+        budget: managed::Budget,
+    ) -> Result<triomphe::Arc<Booted>, Refusal> {
         let link: Arc<dyn Link> = Arc::new(ShardsLink::managed(
             guest
                 .try_clone()
@@ -985,24 +1031,20 @@ impl GuestRuntime {
             budget.remaining()?,
         ));
         let client = Client::connect(Arc::clone(&link))?;
-        let booted = Arc::new(Booted {
+        let booted = booted_owner(Booted {
             guest: GuestHandle::Managed(guest),
             link,
             client,
             evented: Mutex::new(None),
-            owner: Some(Owner {
-                id: receipt.id.try_clone()?,
-                class: receipt.class,
-                allocation: record.spec.allocation,
-                route: record.spec.route,
-            }),
-        });
+            owner,
+            backing,
+        })?;
         budget.remaining()?;
         self.join(&booted)?;
         Ok(booted)
     }
 
-    fn cached_selected(&self, id: &BoxId) -> Result<Option<Arc<Booted>>, Refusal> {
+    fn cached_selected(&self, id: &BoxId) -> Result<Option<triomphe::Arc<Booted>>, Refusal> {
         let mut reservation = self.reserve(id, Operation::Loading)?;
         let Some(known) = reservation.previous.take() else {
             reservation.publish(None)?;
@@ -1012,7 +1054,7 @@ impl GuestRuntime {
                 Ok(None)
             };
         };
-        let booted = Arc::clone(&known.booted);
+        let booted = triomphe::Arc::clone(&known.booted);
         reservation.previous = Some(known);
         let terminal = booted
             .guest
@@ -1073,7 +1115,10 @@ impl GuestRuntime {
             .any(|slot| slot.id == *id))
     }
 
-    pub(super) fn selected_running(&self, id: &BoxId) -> Result<Option<Arc<Booted>>, Refusal> {
+    pub(super) fn selected_running(
+        &self,
+        id: &BoxId,
+    ) -> Result<Option<triomphe::Arc<Booted>>, Refusal> {
         if !self.uses_books() {
             return self.cached_selected(id);
         }
@@ -1107,7 +1152,7 @@ impl GuestRuntime {
         id: &BoxId,
         transaction: &dyn Transaction,
         record: &BoxRecord,
-    ) -> Result<Option<Arc<Booted>>, Refusal> {
+    ) -> Result<Option<triomphe::Arc<Booted>>, Refusal> {
         if self.has_selected_route(id)? {
             return self.cached_selected(id);
         }
@@ -1128,12 +1173,12 @@ impl GuestRuntime {
         let booted = self.booted(guest, &receipt, record, budget)?;
         reservation.publish(Some(Guest {
             receipt,
-            booted: Arc::clone(&booted),
+            booted: triomphe::Arc::clone(&booted),
         }))?;
         Ok(Some(booted))
     }
 
-    fn managed_plan(
+    pub(super) fn managed_plan(
         &self,
         spec: &shards_api::GuestSpec,
         socket: &std::path::Path,

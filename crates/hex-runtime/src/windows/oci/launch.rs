@@ -54,7 +54,7 @@ pub fn start(
     stdio: [OwnedHandle; 3],
 ) -> Result<(Handle, u32), Refusal> {
     if job.stopping() {
-        return Err(Refusal::NotRunning(job.id().clone(), "exec"));
+        return Err(Refusal::NotRunning(job.id()?.try_clone()?, "exec"));
     }
     let launcher = system
         .create_process(&hcs::launcher_parameters(user).to_string(), PATIENCE)

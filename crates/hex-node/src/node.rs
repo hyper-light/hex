@@ -1684,6 +1684,19 @@ impl Runtime for Node {
     fn physical_report(&self) -> Result<hex_api::PhysicalReport, Refusal> {
         self.native_physical_report()
     }
+    fn initialize_backing(
+        &self,
+        grant: hex_api::BackingGrant,
+    ) -> Result<hex_api::BackingOffer, Refusal> {
+        grant.check()?;
+        self.pool_backend(&grant.key)?.initialize_backing(grant)
+    }
+    fn release_backing(&self, key: hex_api::BackingKey) -> Result<hex_api::BackingOffer, Refusal> {
+        self.pool_backend(&key)?.release_backing(key)
+    }
+    fn backing_usage(&self, key: &hex_api::BackingKey) -> Result<Usage, Refusal> {
+        self.pool_backend(key)?.backing_usage(key)
+    }
     fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
         if let Some(backend) = self.backend(class)? {
             return backend.capacity(class);

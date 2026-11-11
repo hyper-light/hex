@@ -1,0 +1,21 @@
+{
+  "kind": "source-only",
+  "role": "implementer",
+  "policy": "ca3ab10c151aa5539e757f1cc76029746ccbb561",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "core_dependency": "d83a1eb0",
+  "sources": {
+    "crates/hex-runtime/src/devices.rs": "8c6eb964bd1b1c5d0c4e0e0f9c78451667c19bc9e3bdc312d651f7f3db7c2502",
+    "crates/hex-runtime/src/devices/tests.rs": "a729f9bbd89b98e822ea32da4dc61a5c838aad42b78fba9735a5a69843b5bc87",
+    "crates/hex-runtime/src/firecracker/native.rs": "63c71fd69c48baf2dd0933416ab7f94a2705305ef98f3160ccc1eb0ff24bb61b",
+    "crates/hex-api/src/runtime.rs": "f0bdaabd8f797ccfd83964d19d74e2285871d1c2ccdc7792308ec4f3c2ba0c10",
+    "crates/hex-node/src/placement/device_binding_tests.rs": "36c7e570b322874eb0acca5d595e446e5f3800d31b6a376d8e65385b3eba0831"
+  },
+  "checks": {
+    "format": "pass",
+    "diff": "pass",
+    "new_pure_controls": "unrun",
+    "compile": "unrun",
+    "native": "unrun"
+  }
+}

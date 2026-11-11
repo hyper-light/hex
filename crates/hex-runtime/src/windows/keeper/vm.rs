@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use hex_api::Refusal;
-use hex_core::record::NativeScope;
+use hex_core::record::{NativeScope, OwnerRef};
 
 const HEADER: &str = "hex-vm-held 1";
 
@@ -190,25 +190,35 @@ pub(crate) fn read(path: &Path) -> Result<Option<Held>, Refusal> {
     parse(text).map(Some)
 }
 
-pub(crate) fn path(state: &Path, id: &hex_api::BoxId) -> Result<PathBuf, Refusal> {
-    let prefix = "held-";
+pub(crate) fn path(state: &Path, owner: OwnerRef<'_>) -> Result<PathBuf, Refusal> {
+    let (prefix, key_size) = match owner {
+        OwnerRef::Box(id) => ("held-", id.as_str().len()),
+        // Disjoint from legacy held-<BoxId>; the receipt itself binds the full generation.
+        OwnerRef::Pool(pool) => (
+            "pool-held-",
+            pool.len()
+                .checked_mul(2)
+                .ok_or_else(|| allocation(usize::MAX))?,
+        ),
+    };
+    let name_size = prefix
+        .len()
+        .checked_add(key_size)
+        .ok_or_else(|| allocation(usize::MAX))?;
     let size = state
         .as_os_str()
         .len()
         .checked_add(1)
-        .and_then(|size| size.checked_add(prefix.len()))
-        .and_then(|size| size.checked_add(id.as_str().len()))
+        .and_then(|size| size.checked_add(name_size))
         .ok_or_else(|| allocation(usize::MAX))?;
     let mut name = String::new();
-    name.try_reserve_exact(
-        prefix
-            .len()
-            .checked_add(id.as_str().len())
-            .ok_or_else(|| allocation(size))?,
-    )
-    .map_err(|_| allocation(size))?;
+    name.try_reserve_exact(name_size)
+        .map_err(|_| allocation(size))?;
     name.push_str(prefix);
-    name.push_str(id.as_str());
+    match owner {
+        OwnerRef::Box(id) => name.push_str(id.as_str()),
+        OwnerRef::Pool(pool) => hex(&mut name, pool).map_err(|_| allocation(size))?,
+    }
     let mut path = PathBuf::new();
     path.try_reserve_exact(size).map_err(|_| allocation(size))?;
     path.push(state);
@@ -269,6 +279,19 @@ mod tests {
             value: 13,
         }
     }
+    /// AC-T7.4.1: the SAME keeper namespace separates an actual pool from every Box string.
+    #[test]
+    fn pool_receipt_path_cannot_alias_a_legacy_box_receipt() {
+        let dir = Path::new("state");
+        let pool = [3; 32];
+        let box_id = hex_api::BoxId::new("pool-held-0303").unwrap();
+        let legacy = path(dir, OwnerRef::Box(&box_id)).unwrap();
+        let backing = path(dir, OwnerRef::Pool(&pool)).unwrap();
+        assert_ne!(legacy, backing);
+        assert_eq!(legacy, dir.join("held-pool-held-0303"));
+        assert_eq!(backing.file_name().unwrap().len(), "pool-held-".len() + 64);
+    }
+
     #[test]
     fn scope_spec_and_exact_keeper_identity_roundtrip() {
         let r = receipt();

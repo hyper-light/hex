@@ -343,7 +343,8 @@ impl FirecrackerRuntime {
         if records.len() >= crate::MAX_BOXES {
             return Err(Refusal::Full(crate::MAX_BOXES));
         }
-        let _selection = self.catalog.prepare(&spec, &records)?;
+        let pools = transaction.pool_records()?;
+        let _selection = self.catalog.prepare(&spec, &records, &pools)?;
         let plan = vfio::plan(&self.catalog, &spec.devices)?;
         let id = spec.id.try_clone()?;
         // Store's first put durably introduces the ONE native incarnation, before paths or boot effects.
@@ -580,7 +581,9 @@ impl Runtime for FirecrackerRuntime {
         if class != Class::Firecracker {
             return Err(invalid("capacity requested for another backend"));
         }
-        let records = self.authority()?.records()?;
+        let authority = self.authority()?;
+        let records = authority.records()?;
+        let pools = authority.pool_records()?;
         let mut capacity = self.authority()?.capacity()?;
         let observed = if self
             .catalog
@@ -618,9 +621,11 @@ impl Runtime for FirecrackerRuntime {
                     ));
                 }
             }
-            capacity
-                .devices
-                .push(entry.report(self.catalog.holder(entry.info.id, &records)?)?);
+            capacity.devices.push(entry.report(self.catalog.holder(
+                entry.info.id,
+                &records,
+                &pools,
+            )?)?);
         }
         capacity.check()?;
         Ok(Some(capacity))
@@ -714,7 +719,9 @@ impl Runtime for FirecrackerRuntime {
         })
     }
     fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
-        let records = self.authority()?.records()?;
+        let authority = self.authority()?;
+        let records = authority.records()?;
+        let pools = authority.pool_records()?;
         let mut boxes = Vec::new();
         boxes
             .try_reserve_exact(records.len())

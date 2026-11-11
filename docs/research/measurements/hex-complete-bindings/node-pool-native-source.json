@@ -1,0 +1,45 @@
+{
+  "checks": {
+    "compile": "unrun",
+    "diff": "pass",
+    "native": "unrun",
+    "scoped_format": "pass",
+    "tests": "unrun"
+  },
+  "controls": {
+    "managed_pool_and_box_share_one_bounded_preallocated_init_table": "unrun",
+    "managed_pool_receipt_rejects_another_generation_or_admitted_charge": "unrun"
+  },
+  "dependencies": {
+    "backing_usage_api": "42de0312055be903378213d4f6f869c1149095f9",
+    "books_and_catalog": "7e43f84144b32873fea4f54b8c38aa05bbb33054",
+    "common_native_transaction": "c94149bd25fe19b514e696306d12915430ebeaa4",
+    "initialized_shards_offers": "416da4aed2b11c1f9648eb6c947f51f1b56196ed",
+    "managed_receipt": "ROOT0277 existing SDK alias",
+    "shards_preflight": "275b9c4dde9d4b2b904af01f39a4a5aea1a7bb63",
+    "strict_managed_usage": "573e8671f4415915fdfd366327a338bf1f83bf45",
+    "typed_api_and_model": "27bb0960c2af58b66899b413d41829e2d870a2ca +2d2a571a4032245643b32c665cd5ea8a47119d4e"
+  },
+  "kind": "source-only/common-native-producer",
+  "new_dependencies": false,
+  "new_owner_or_picker": false,
+  "node_runtime_delta_sha256": "1b17ee02adc116734b93fa84162f4fa8990c6cb7bec6c32c48596229140eaa23",
+  "parent": "2d2a571a4032245643b32c665cd5ea8a47119d4e",
+  "pending_gpu_or_route_remedies": false,
+  "policy": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "remaining": [
+    "initialized Capacity normalization and real grant/usage handoff",
+    "global retained-claim/backend preflight",
+    "cold GPU observation/admission/handoff",
+    "exact SDK report descriptor carriage",
+    "ROOT native/cost measurements/portability/full gates"
+  ],
+  "role": "implementer",
+  "root_render": "unchanged in delta; preserve ROOT integrated Node::render(fullBoxSpec,oci)",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": {
+    "crates/hex-node/src/node.rs": "6c8247d1a5d80286400eafdbb210c30e1ae19c70bb192322172a9aacc2ecd62f",
+    "crates/hex-node/src/node/backends.rs": "b9f685e73e9497a875f7e96849d4830ef6dd8037fbf7c67093b2e9c36570ead3",
+    "crates/hex-node/src/supervise.rs": "32ead3d041b7d92492eff29e1f16950a99313b9c79cf913018499de2dca19063"
+  }
+}

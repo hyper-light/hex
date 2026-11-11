@@ -31,6 +31,7 @@ use hex_api::{
 };
 use rustix::fs::{Mode, OFlags};
 
+use hex_core::record::{NativeRecord, OwnerKey, OwnerRef};
 use process::{ProcessBox, Shared};
 
 /// The bound macOS's execve puts on a program's arguments and environment, read from the kernel now
@@ -99,10 +100,16 @@ pub struct MacRuntime {
     exec_limit: ExecLimit,
 }
 
-type NativeBoxes = Mutex<Vec<(BoxId, NativeArc<ProcessBox>)>>;
+type NativeBoxes = Mutex<Vec<(OwnerKey, NativeArc<ProcessBox>)>>;
 
-fn native_index(boxes: &[(BoxId, NativeArc<ProcessBox>)], id: &BoxId) -> Result<usize, usize> {
-    boxes.binary_search_by(|(key, _)| key.cmp(id))
+fn native_owner_index(
+    boxes: &[(OwnerKey, NativeArc<ProcessBox>)],
+    id: OwnerRef<'_>,
+) -> Result<usize, usize> {
+    boxes.binary_search_by(|(key, _)| key.as_ref().cmp(&id))
+}
+fn native_index(boxes: &[(OwnerKey, NativeArc<ProcessBox>)], id: &BoxId) -> Result<usize, usize> {
+    native_owner_index(boxes, OwnerRef::Box(id))
 }
 
 fn native_allocation(bound: usize) -> Refusal {
@@ -117,7 +124,7 @@ impl MacRuntime {
     /// synthetic Process workload; its receipt is retained in the same native box table.
     pub fn launch_managed(
         &self,
-        record: &hex_core::record::BoxRecord,
+        record: NativeRecord<'_>,
         plan: &crate::devices::ManagedLaunch<'_>,
         io: shards_api::LaunchIo,
         patience: std::time::Duration,
@@ -127,7 +134,7 @@ impl MacRuntime {
     }
     pub fn attach_managed(
         &self,
-        record: &hex_core::record::BoxRecord,
+        record: NativeRecord<'_>,
         identity: Option<&shards_api::Identity>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
         managed::attach(self, record, identity)
@@ -135,12 +142,12 @@ impl MacRuntime {
     /// The internal Books transaction calls this only after the exact durable Released boot receipt.
     pub fn finalize_managed(
         &self,
-        record: &hex_core::record::BoxRecord,
+        record: NativeRecord<'_>,
         identity: Option<&shards_api::Identity>,
     ) -> Result<(), Refusal> {
         managed::finalize(self, record, identity)
     }
-    pub fn managed_usage(&self, record: &hex_core::record::BoxRecord) -> Result<Usage, Refusal> {
+    pub fn managed_usage(&self, record: NativeRecord<'_>) -> Result<Usage, Refusal> {
         managed::usage(self, record)
     }
 
@@ -226,7 +233,7 @@ impl MacRuntime {
         let b = ProcessBox::adopt(spec.id.clone(), &spec.bounds, self.shared.as_ref(), group)?;
         let b = NativeArc::try_new(b)
             .map_err(|_| native_allocation(std::mem::size_of::<ProcessBox>()))?;
-        boxes.insert(at, (spec.id.try_clone()?, b));
+        boxes.insert(at, (OwnerKey::Box(spec.id.try_clone()?), b));
         Ok(())
     }
 
@@ -264,7 +271,7 @@ impl MacRuntime {
 
     fn boxes(
         &self,
-    ) -> Result<std::sync::MutexGuard<'_, Vec<(BoxId, NativeArc<ProcessBox>)>>, Refusal> {
+    ) -> Result<std::sync::MutexGuard<'_, Vec<(OwnerKey, NativeArc<ProcessBox>)>>, Refusal> {
         self.boxes
             .lock()
             .map_err(|_| Refusal::Broken("the node's box map lock is poisoned".to_owned()))
@@ -289,7 +296,7 @@ impl MacRuntime {
     fn info(&self, b: &ProcessBox) -> Result<BoxInfo, Refusal> {
         Ok(BoxInfo {
             route: None,
-            id: b.id().clone(),
+            id: b.id()?.try_clone()?,
             class: Class::Process,
             state: if b.running_now()? {
                 BoxState::Running
@@ -484,7 +491,7 @@ impl Runtime for MacRuntime {
         )?)
         .map_err(|_| native_allocation(std::mem::size_of::<ProcessBox>()))?;
         let info = self.info(&b)?;
-        boxes.insert(at, (spec.id, b));
+        boxes.insert(at, (OwnerKey::Box(spec.id), b));
         Ok(info)
     }
 

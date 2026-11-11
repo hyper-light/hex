@@ -1,0 +1,51 @@
+{
+  "kind": "source-only",
+  "role": "implementer",
+  "parent": "703469ec96157f9a75388eb3e70b9699bcbe6b74",
+  "known_ROOT_receipt": "378192b78b09cec7b8ad088d5a9eb8ae32389888",
+  "policy": {
+    "current": "0c598386ca1f7c65c6e0634dba77983e4abffff2",
+    "full_read": "0c598386ca1f7c65c6e0634dba77983e4abffff2",
+    "four_blob_diff": "empty, exit0",
+    "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+    "prior_full_read": "ca3ab10c151aa5539e757f1cc76029746ccbb561"
+  },
+  "dependencies": {
+    "same_catalog_getter": "703469ec96157f9a75388eb3e70b9699bcbe6b74",
+    "API_routes_holder": "c92ca3cba80b944e1d0d737a971bc4be507ed2e0",
+    "API_backing_usage": "42de0312055be903378213d4f6f869c1149095f9",
+    "Books_catalog_pool": "7e43f84144b32873fea4f54b8c38aa05bbb33054",
+    "PoolRecord_NativeRecord": "d83a1eb097088b2b14033f6159f11cf40c0da22d",
+    "Store_Turns": "a3571e0873e32e5b1bec6fdafbb9e962d513d9af",
+    "Recorded_Win_Mac_native": "c94149bd25fe19b514e696306d12915430ebeaa4",
+    "managed_SDK": "eff3d0553d557948ab574710db057ffa8ce6c3db",
+    "managed_helper_producer": "070964eadaa6a07f16b51d30323d784ef863de1d",
+    "Index_route_consumer": "f3f99e71304a780e2a75fd143895396dbd8f2d6a"
+  },
+  "files": {
+    "crates/hex-runtime/src/guest/books.rs": "80bbe3ca79988f689840c561b0e0eeee0802fd65618d42c87bde80cb7fbe67fd",
+    "crates/hex-runtime/src/guest/dedicated.rs": "a338770dab8d2c0436fc56d14f01ab2e037494ff9b61174df62f88a04e2f5d19",
+    "crates/hex-runtime/src/guest/managed.rs": "2a13390bf3769d0b07235d9ac677cf6751273b0f174d4e56f92c7dbd0b20cc92",
+    "crates/hex-runtime/src/guest/mod.rs": "b2e9e7f941fa68ad1e17b79cdfe8d2e0aef9c3603c51c666b2f4dc1cd109319a",
+    "crates/hex-runtime/src/guest/physical.rs": "12398fcf7dc87c8dc3f4588b01dedeec4dc953d6eb3bb673c441c823332fd7ab",
+    "crates/hex-runtime/src/guest/pool.rs": "5c3f42d0a6bf5f2f462a2adfa3fa871e1d972ad87297ea92f0804961f295c768",
+    "crates/hex-runtime/src/guest/selected.rs": "4ca118df66f65af216a12d1b3f70e71fff4dacd46186a79e2ded69222def5ca3",
+    "crates/hex-runtime/src/guest/shared.rs": "965b18efa83b0988ac25b55e21ca733b7df5426a7d9fb5170f0e94f708413c44",
+    "crates/hex-runtime/src/guest/shared_tests.rs": "7bfcfd5c23b83bdec151a1bdd816167663af5adb27a1cda4ecd1744f48dfd6cd",
+    "crates/hex-runtime/src/guest/tests.rs": "8aad06a9219517f657a02e73abf441a4bc83be95f03ea05c2abe35dfca17c7c4"
+  },
+  "checks": {
+    "scoped_rustfmt": "pass",
+    "diff_check": "pass",
+    "joined_compile": "unrun",
+    "new_shared_controls": "unrun: 5 entrypoint models +2 receipt codec controls",
+    "native": "unrun"
+  },
+  "open": [
+    "Linux Node same-pool native producer/Index grant/usage credit integration belongs to L1/ROOT",
+    "ROOT CLI prepare_backing after SAME Books registration and before recovery; no unmanaged primary or optional second VM",
+    "GPU observer actual VMM-private identity/metadata report, grant/complete-set handoff and exact Scope join still open",
+    "Existing Link/Client std Arc allocation and serde decoder seams not newly proven allocation-safe",
+    "Cold Mac process-group/escape/native scope proof, all actual native/full/portability gates ROOT"
+  ]
+}

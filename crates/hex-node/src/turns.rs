@@ -18,6 +18,7 @@ use std::time::Instant;
 
 use hex_api::{BoxId, DeviceId, Refusal};
 use hex_core::patience::Patience;
+use hex_core::record::{OwnerKey, OwnerRef};
 
 /// The boxes whose turns are taken now, and what a refusal of one names.
 #[derive(Debug)]
@@ -46,25 +47,26 @@ struct Held {
 
 #[derive(Debug)]
 struct HeldBox {
-    id: BoxId,
+    id: OwnerKey,
     since: Instant,
     /// Ephemeral exclusion in this same method owner, never a physical holder ledger.
     devices: Vec<DeviceId>,
 }
 
 impl Held {
-    fn position(&self, id: &BoxId) -> Result<usize, usize> {
-        self.boxes.binary_search_by(|held| held.id.cmp(id))
+    fn position(&self, id: OwnerRef<'_>) -> Result<usize, usize> {
+        self.boxes
+            .binary_search_by(|held| held.id.as_ref().cmp(&id))
     }
 
     fn insert(
         &mut self,
-        id: &BoxId,
+        id: OwnerRef<'_>,
         devices: Vec<DeviceId>,
         since: Instant,
         what: &'static str,
         bound: usize,
-    ) -> Result<BoxId, Refusal> {
+    ) -> Result<OwnerKey, Refusal> {
         let at = match self.position(id) {
             Err(at) => at,
             Ok(_) => {
@@ -78,8 +80,8 @@ impl Held {
                 "a turn's insertion position is invalid".to_owned(),
             ));
         }
-        let entry = id.try_clone()?;
-        let receipt = id.try_clone()?;
+        let entry = id.try_owned()?;
+        let receipt = id.try_owned()?;
         self.boxes
             .try_reserve(1)
             .map_err(|_| Refusal::Exhausted { what, bound })?;
@@ -99,32 +101,33 @@ impl Held {
 /// Box `id`'s turn, given up when dropped.
 pub struct Turn<'a> {
     turns: &'a Turns,
-    id: BoxId,
+    id: OwnerKey,
     since: Instant,
 }
 
 /// A non-clonable method receipt held by an asynchronous caller's existing Arc owner.
 pub(crate) struct Hold {
-    id: BoxId,
+    id: OwnerKey,
     since: Instant,
 }
 
 impl Drop for Turn<'_> {
     fn drop(&mut self) {
-        self.turns.release_parts(&self.id, self.since);
+        self.turns.release_parts(self.id.as_ref(), self.since);
     }
 }
 
 impl Turns {
     pub(crate) fn release(&self, hold: Hold) {
-        self.release_parts(&hold.id, hold.since);
+        self.release_parts(hold.id.as_ref(), hold.since);
     }
 
-    fn release_parts(&self, id: &BoxId, since: Instant) {
+    fn release_parts(&self, id: OwnerRef<'_>, since: Instant) {
         // The set stays whole whoever held its lock (nothing panics holding it: CLAUDE.md §1), so a
         // poisoned lock still lets the box go.
         let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
-        held.boxes.retain(|held| &held.id != id);
+        held.boxes
+            .retain(|held| held.id.as_ref() != id || held.since != since);
         held.patience.answered(since.elapsed());
         drop(held);
         self.free.notify_all();
@@ -158,6 +161,62 @@ impl Turns {
         id: &BoxId,
         devices: &[DeviceId],
     ) -> Result<Hold, Refusal> {
+        self.try_hold_owner(OwnerRef::Box(id), devices, || match id.try_clone() {
+            Ok(id) => Refusal::Lifecycle {
+                id,
+                cause: hex_api::LifecycleCause::Busy,
+            },
+            Err(error) => error,
+        })
+    }
+
+    pub(crate) fn try_take_pool(
+        &self,
+        key: &hex_api::BackingKey,
+        devices: &[DeviceId],
+    ) -> Result<Turn<'_>, Refusal> {
+        let hold =
+            self.try_hold_owner(OwnerRef::Pool(&key.pool), devices, || Refusal::Backing {
+                key: *key,
+                cause: hex_api::LifecycleCause::Busy,
+            })?;
+        Ok(Turn {
+            turns: self,
+            id: hold.id,
+            since: hold.since,
+        })
+    }
+
+    pub(crate) fn try_take_pool_configuration(
+        &self,
+        pool: &[u8; 32],
+        devices: &[DeviceId],
+    ) -> Result<Turn<'_>, Refusal> {
+        let hold = self.try_hold_owner(OwnerRef::Pool(pool), devices, || {
+            let message = "native backing preparation conflicts with an active owner";
+            let mut why = String::new();
+            if why.try_reserve_exact(message.len()).is_err() {
+                return Refusal::Exhausted {
+                    what: "backing owner refusal bytes",
+                    bound: message.len(),
+                };
+            }
+            why.push_str(message);
+            Refusal::Os { op: self.op, why }
+        })?;
+        Ok(Turn {
+            turns: self,
+            id: hold.id,
+            since: hold.since,
+        })
+    }
+
+    fn try_hold_owner(
+        &self,
+        id: OwnerRef<'_>,
+        devices: &[DeviceId],
+        busy: impl FnOnce() -> Refusal,
+    ) -> Result<Hold, Refusal> {
         if devices.len() > hex_api::MAX_DEVICES {
             return Err(Refusal::Exhausted {
                 what: "method device exclusions",
@@ -186,10 +245,7 @@ impl Turns {
                     .any(|device| selected.binary_search(device).is_ok())
             })
         {
-            return Err(Refusal::Lifecycle {
-                id: id.try_clone()?,
-                cause: hex_api::LifecycleCause::Busy,
-            });
+            return Err(busy());
         }
         if held.boxes.len() >= self.bound {
             return Err(Refusal::Exhausted {
@@ -224,6 +280,44 @@ impl Turns {
     /// each holder after, since each turn let go is the answer it waited on (several changes of one box
     /// at once each wait for the one before theirs).
     pub fn take(&self, id: &BoxId) -> Result<Turn<'_>, Refusal> {
+        self.take_owner(OwnerRef::Box(id), |since| Refusal::Os {
+            op: self.op,
+            why: format!(
+                "box {id}'s change before this one was still under way after {:?}",
+                since.elapsed()
+            ),
+        })
+    }
+
+    pub(crate) fn take_pool(&self, key: &hex_api::BackingKey) -> Result<Turn<'_>, Refusal> {
+        self.take_owner(OwnerRef::Pool(&key.pool), |_| Refusal::Backing {
+            key: *key,
+            cause: hex_api::LifecycleCause::Busy,
+        })
+    }
+
+    /// Before first preparation there is no generation to put in a BackingKey refusal.
+    /// Serialize the real configuration identity without inventing a scope or a BoxId.
+    pub(crate) fn take_pool_configuration(&self, pool: &[u8; 32]) -> Result<Turn<'_>, Refusal> {
+        self.take_owner(OwnerRef::Pool(pool), |_| {
+            let message = "the previous native backing configuration change is still under way";
+            let mut why = String::new();
+            if why.try_reserve_exact(message.len()).is_err() {
+                return Refusal::Exhausted {
+                    what: "backing owner refusal bytes",
+                    bound: message.len(),
+                };
+            }
+            why.push_str(message);
+            Refusal::Os { op: self.op, why }
+        })
+    }
+
+    fn take_owner(
+        &self,
+        id: OwnerRef<'_>,
+        timed_out: impl Fn(Instant) -> Refusal,
+    ) -> Result<Turn<'_>, Refusal> {
         let mut held = self.held.lock().map_err(|e| self.poisoned(e))?;
         if held.position(id).is_ok() {
             self.waited.fetch_add(1, Ordering::Relaxed);
@@ -244,13 +338,7 @@ impl Turns {
                         if let Some(after) = patience {
                             held.patience.ran_out(after);
                         }
-                        return Err(Refusal::Os {
-                            op: self.op,
-                            why: format!(
-                                "box {id}'s change before this one was still under way after {:?}",
-                                since.elapsed()
-                            ),
-                        });
+                        return Err(timed_out(since));
                     }
                     self.free
                         .wait_timeout(held, left)
@@ -301,6 +389,34 @@ mod tests {
 
     fn id(n: &str) -> BoxId {
         BoxId::new(n).unwrap()
+    }
+
+    /// AC-T7.4.1: pool generations and ordinary boxes share one physical exclusion owner.
+    #[test]
+    fn pool_and_box_turns_exclude_the_same_native_devices_and_generations() {
+        let turns = Turns::new("method", "methods", 3, Patience::measuring("test.pool"));
+        let key = hex_api::BackingKey {
+            pool: [1; 32],
+            generation: [2; 16],
+        };
+        let next = hex_api::BackingKey {
+            pool: key.pool,
+            generation: [3; 16],
+        };
+        let gpu = DeviceId {
+            kind: hex_api::DeviceKind::Gpu,
+            key: 7,
+        };
+        let held = turns.try_take_pool(&key, &[gpu]).unwrap();
+        assert!(turns.try_take_pool(&next, &[]).is_err());
+        assert!(turns.try_take_devices(&id("box"), &[gpu]).is_err());
+        let unrelated = turns.try_take_devices(&id("cpu"), &[]).unwrap();
+        drop(held);
+        let boxed = turns.try_take_devices(&id("box"), &[gpu]).unwrap();
+        assert!(turns.try_take_pool(&next, &[gpu]).is_err());
+        drop(boxed);
+        assert!(turns.try_take_pool(&next, &[gpu]).is_ok());
+        drop(unrelated);
     }
 
     /// CLAUDE.md §2 (T-T7.1.2): the turns taken at once stop at their bound, refused by type past it. Do: turns

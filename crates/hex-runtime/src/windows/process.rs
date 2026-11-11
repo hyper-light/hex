@@ -28,6 +28,7 @@ use triomphe::Arc;
 
 use hex_api::{Bounds, BoxId, Class, Refusal, Signal, Usage};
 use hex_core::job::{self, Sent};
+use hex_core::record::{NativeRecord, OwnerKey, OwnerRef};
 
 use super::sys::{self, Job, Spawn, Started};
 
@@ -56,7 +57,7 @@ enum Deletion {
 /// One box's shared state: its job and its counts. Held behind an `Arc` by the runtime and by each
 /// member's [`super::proc::BoxProc`] (which reads `sent` to map an exit).
 pub struct State {
-    id: BoxId,
+    id: OwnerKey,
     bounds: Bounds,
     /// Introduced exactly once, after both fallible native-owner allocations succeed.
     job: OnceLock<NativeScope>,
@@ -183,7 +184,7 @@ impl JobBox {
             managed: OnceLock::new(),
             observation_failure: OnceLock::new(),
             state: Arc::try_new(State {
-                id,
+                id: OwnerKey::Box(id),
                 bounds: bounds.clone(),
                 job: OnceLock::from(NativeScope::Bound(job)),
                 limits,
@@ -195,8 +196,15 @@ impl JobBox {
         })
     }
 
-    pub fn id(&self) -> &BoxId {
-        &self.state.id
+    pub fn id(&self) -> Result<&BoxId, Refusal> {
+        match &self.state.id {
+            OwnerKey::Box(id) => Ok(id),
+            OwnerKey::Pool(_) => Err(self.uncertain()),
+        }
+    }
+
+    pub(super) fn owner(&self) -> OwnerRef<'_> {
+        self.state.id.as_ref()
     }
 
     pub fn bounds(&self) -> Bounds {
@@ -211,24 +219,22 @@ impl JobBox {
     /// Allocate the same native slot/API owner and its existing shared counts before creating a
     /// kernel job. OnceLock introduces the native handle without unsafe uninitialized storage.
     pub(super) fn prepare_vm(
-        record: &hex_core::record::BoxRecord,
+        record: NativeRecord<'_>,
         bounds: Bounds,
         processors: std::num::NonZeroU32,
         name: Option<&str>,
         owner: &std::sync::Arc<super::Holding>,
     ) -> Result<Arc<Self>, Refusal> {
-        let spec = &record.spec;
         let scope = record
-            .native_scope
+            .scope()
             .ok_or_else(|| super::pending("native scope is absent"))?;
-        let commitment = record.native_commitment()?;
-        spec.check()?;
-        let id = spec.id.try_clone()?;
-        let allocation = spec
-            .allocation
+        let commitment = record.commitment()?;
+        let id = record.owner().try_owned()?;
+        let allocation = record
+            .allocation()
             .ok_or_else(|| super::pending("VM allocation is absent"))?;
         allocation.guest()?;
-        if !matches!(spec.class.class(), Class::Shards | Class::Oci)
+        if record.class()? != Class::Shards
             || bounds.memory_max != Some(allocation.resources.mem_bytes)
             || bounds.cpu_max_milli.map(u64::from) != Some(allocation.resources.cpu_milli)
         {
@@ -252,7 +258,7 @@ impl JobBox {
             purpose: Purpose::Vm {
                 scope,
                 commitment,
-                original_init: record.init,
+                original_init: record.init(),
                 owner: std::sync::Arc::downgrade(owner),
                 released: OnceLock::new(),
             },
@@ -330,15 +336,11 @@ impl JobBox {
         }
     }
 
-    pub(super) fn matches_vm(
-        &self,
-        record: &hex_core::record::BoxRecord,
-        expected: [u8; 32],
-    ) -> bool {
+    pub(super) fn matches_vm(&self, record: NativeRecord<'_>, expected: [u8; 32]) -> bool {
         // The commitment binds the full original spec, including class and allocation profile.
         // Keep that proof rather than duplicating the complete admission receipt in each owner.
         matches!(&self.purpose, Purpose::Vm { scope, commitment, .. }
-            if Some(*scope) == record.native_scope && *commitment == expected)
+            if Some(*scope) == record.scope() && *commitment == expected)
     }
 
     pub(super) fn vm_commitment(&self) -> Option<(hex_core::record::NativeScope, [u8; 32])> {
@@ -376,12 +378,24 @@ impl JobBox {
     }
 
     fn uncertain(&self) -> Refusal {
-        match self.id().try_clone() {
-            Ok(id) => Refusal::Lifecycle {
-                id,
-                cause: hex_api::LifecycleCause::Uncertain,
+        match self.owner() {
+            OwnerRef::Box(id) => match id.try_clone() {
+                Ok(id) => Refusal::Lifecycle {
+                    id,
+                    cause: hex_api::LifecycleCause::Uncertain,
+                },
+                Err(error) => error,
             },
-            Err(error) => error,
+            OwnerRef::Pool(pool) => match self.vm_commitment() {
+                Some((scope, _)) => Refusal::Backing {
+                    key: hex_api::BackingKey {
+                        pool: *pool,
+                        generation: *scope.bytes(),
+                    },
+                    cause: hex_api::LifecycleCause::Uncertain,
+                },
+                None => super::inconsistent_slots(),
+            },
         }
     }
 
@@ -438,7 +452,7 @@ impl JobBox {
     /// pid. Nothing runs outside the job: the member is a job member from its creation.
     pub fn exec(&self, mut spawn: Spawn) -> Result<Started, Refusal> {
         if self.state.stopping.load(Ordering::SeqCst) {
-            return Err(Refusal::NoSuchBox(self.state.id.clone()));
+            return Err(Refusal::NoSuchBox(self.id()?.try_clone()?));
         }
         let started = match sys::create(&mut spawn, &[self.native_job()?.raw()]) {
             Ok(started) => started,
@@ -545,7 +559,7 @@ impl JobBox {
     pub fn signal(&self, signal: Signal) -> Result<(), Refusal> {
         job::ends_job(signal)?;
         if !self.running()? {
-            return Err(Refusal::NotRunning(self.id().clone(), "signal"));
+            return Err(Refusal::NotRunning(self.id()?.try_clone()?, "signal"));
         }
         {
             let mut c = self.state.counts()?;

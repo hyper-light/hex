@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 use triomphe::Arc;
 
 use hex_api::{Bounds, BoxId, Refusal, Signal, Usage};
+use hex_core::record::{NativeRecord, OwnerKey, OwnerRef};
 use hex_core::watch::{self, Life, Limit, Member, Rates, Verdict, Watch};
 
 use super::sys::{self, Clamp, Event, Kqueue, Timebase};
@@ -168,7 +169,7 @@ impl Shared {
 /// The state one box shares between the node's threads and its one watcher thread.
 #[derive(Debug)]
 struct State {
-    id: BoxId,
+    id: OwnerKey,
     clamp: Clamp,
     /// The bounds the box was made with, to report on inspect; the watcher holds the [`Limit`] of them it
     /// enforces. Neither changes after create (a new bound is a new box).
@@ -207,6 +208,15 @@ struct State {
 }
 
 impl State {
+    fn uncertain(&self) -> Refusal {
+        if let Some(scope) = &self.vm {
+            return scope.refusal(self.id.as_ref());
+        }
+        match &self.id {
+            OwnerKey::Box(id) => super::managed::uncertain(id),
+            OwnerKey::Pool(_) => super::native_allocation(std::mem::size_of::<State>()),
+        }
+    }
     fn validate_vm_scope(&self) -> Result<(), Refusal> {
         if let Some(scope) = &self.vm {
             scope.validate(
@@ -220,7 +230,7 @@ impl State {
                     .map_err(|_| poisoned("a box's leader"))?
                     .as_ref()
                     .copied(),
-                &self.id,
+                self.id.as_ref(),
             )?;
         }
         Ok(())
@@ -509,7 +519,7 @@ pub struct Members(Arc<State>);
 
 impl Members {
     pub(super) fn uncertain(&self) -> Refusal {
-        super::managed::uncertain(&self.0.id)
+        self.0.uncertain()
     }
     /// Tells the box a member ended: when `sigkill` and its `peak` (read from its zombie before the reap)
     /// reached the cap, counts a memory end once ([`State::killed_by_cap`]). A clean exit, another signal,
@@ -577,13 +587,13 @@ impl ProcessBox {
         shared: &Shared,
         group: Option<(i32, u64)>,
     ) -> Result<Self, Refusal> {
-        let boxed = Self::prepared(id, bounds, shared, group, None)?;
+        let boxed = Self::prepared(OwnerKey::Box(id), bounds, shared, group, None)?;
         boxed.start_watcher(shared)?;
         Ok(boxed)
     }
 
     fn prepared(
-        id: BoxId,
+        id: OwnerKey,
         bounds: &Bounds,
         shared: &Shared,
         group: Option<(i32, u64)>,
@@ -634,14 +644,14 @@ impl ProcessBox {
             .lock()
             .map_err(|_| poisoned("a box's watcher"))?;
         if held.is_some() {
-            return Err(super::managed::uncertain(self.id()));
+            return Err(self.state.uncertain());
         }
         *held = Some(watcher);
         Ok(())
     }
 
     pub(super) fn prepare_managed(
-        record: &hex_core::record::BoxRecord,
+        record: NativeRecord<'_>,
         bounds: &Bounds,
         shared: &Shared,
         ownership: super::managed::Ownership,
@@ -649,7 +659,7 @@ impl ProcessBox {
         let vm = super::managed::Scope::new(record, ownership)?;
         let observer = super::proc::Prepared::new()?;
         let boxed = Arc::try_new(Self::prepared(
-            record.spec.id.try_clone()?,
+            record.owner().try_owned()?,
             bounds,
             shared,
             None,
@@ -679,7 +689,7 @@ impl ProcessBox {
             .lock()
             .map_err(|_| poisoned("a box's group"))?;
         if pgid.is_some() {
-            return Err(super::managed::uncertain(self.id()));
+            return Err(self.state.uncertain());
         }
         let mut armed = self
             .state
@@ -690,8 +700,8 @@ impl ProcessBox {
             armed.reserve(1)?;
         }
         self.scope()
-            .ok_or_else(|| super::managed::uncertain(self.id()))?
-            .held(self.id())?;
+            .ok_or_else(|| self.state.uncertain())?
+            .held(self.owner())?;
         let pid = sys::spawn_suspended(spawn, 0, self.state.clamp)
             .map_err(|error| Refusal::os("creating the held native VM controller", error))?;
         // Keep the actual submitted PID before any further fallible observation/publication.
@@ -700,7 +710,7 @@ impl ProcessBox {
             armed.insert(pid)?;
         }
         if pid <= 0 {
-            return Err(super::managed::uncertain(self.id()));
+            return Err(self.state.uncertain());
         }
         Ok(pid)
     }
@@ -713,16 +723,16 @@ impl ProcessBox {
             .map_err(|_| poisoned("a box's group"))?
             .is_some()
         {
-            return Err(super::managed::uncertain(self.id()));
+            return Err(self.state.uncertain());
         }
         self.scope()
-            .ok_or_else(|| super::managed::uncertain(self.id()))?
-            .not_submitted(self.id())
+            .ok_or_else(|| self.state.uncertain())?
+            .not_submitted(self.owner())
     }
 
     pub(super) fn introduce_group(&self, pid: i32, started: u64) -> Result<(), Refusal> {
         if pid <= 0 || started == 0 {
-            return Err(super::managed::uncertain(self.id()));
+            return Err(self.state.uncertain());
         }
         *self
             .state
@@ -738,14 +748,12 @@ impl ProcessBox {
     }
 
     pub(super) fn resume_managed(&self) -> Result<(), Refusal> {
-        let (pid, _) = self
-            .group()?
-            .ok_or_else(|| super::managed::uncertain(self.id()))?;
+        let (pid, _) = self.group()?.ok_or_else(|| self.state.uncertain())?;
         self.scope()
-            .ok_or_else(|| super::managed::uncertain(self.id()))?
-            .running(self.id())?;
+            .ok_or_else(|| self.state.uncertain())?
+            .running(self.owner())?;
         if !signal_one(pid, rustix::process::Signal::CONT)? {
-            return Err(super::managed::uncertain(self.id()));
+            return Err(self.state.uncertain());
         }
         self.state.wake()
     }
@@ -786,8 +794,8 @@ impl ProcessBox {
 
     pub(super) fn finalize_watcher(&self, end: shards_api::ManagedEnd) -> Result<(), Refusal> {
         self.scope()
-            .ok_or_else(|| super::managed::uncertain(self.id()))?
-            .finalizing(end, self.id())?;
+            .ok_or_else(|| self.state.uncertain())?
+            .finalizing(end, self.owner())?;
         self.state.stop.store(true, Ordering::SeqCst);
         self.state.wake()?;
         if let Some(watcher) = self
@@ -796,15 +804,20 @@ impl ProcessBox {
             .map_err(|_| poisoned("a box's watcher"))?
             .take()
         {
-            watcher
-                .join()
-                .map_err(|_| super::managed::uncertain(self.id()))?;
+            watcher.join().map_err(|_| self.state.uncertain())?;
         }
         Ok(())
     }
 
-    pub fn id(&self) -> &BoxId {
-        &self.state.id
+    pub fn id(&self) -> Result<&BoxId, Refusal> {
+        match &self.state.id {
+            OwnerKey::Box(id) => Ok(id),
+            OwnerKey::Pool(_) => Err(self.state.uncertain()),
+        }
+    }
+
+    pub(super) fn owner(&self) -> OwnerRef<'_> {
+        self.state.id.as_ref()
     }
 
     /// A handle for a member's waiter to tell the box the member ended, so a kill at the fatal cap is
@@ -824,7 +837,7 @@ impl ProcessBox {
     /// box on any other OS takes a program after its last ended (HEX-DIFF-1). Returns its pid.
     pub fn exec(&self, spawn: sys::Spawn) -> Result<i32, Refusal> {
         if self.state.stop.load(Ordering::SeqCst) {
-            return Err(Refusal::NoSuchBox(self.state.id.clone()));
+            return Err(Refusal::NoSuchBox(self.id()?.try_clone()?));
         }
         let mut pgid = self
             .state
@@ -956,7 +969,9 @@ impl ProcessBox {
             what: "signal",
             why: format!("signal {} has no macOS number", signal.number()),
         })?;
-        let not_running = || Refusal::NotRunning(self.state.id.clone(), "signal");
+        let not_running = || -> Result<Refusal, Refusal> {
+            Ok(Refusal::NotRunning(self.id()?.try_clone()?, "signal"))
+        };
         match *self
             .state
             .pgid
@@ -980,10 +995,10 @@ impl ProcessBox {
                 if killpg(pgid, macos)? {
                     Ok(())
                 } else {
-                    Err(not_running())
+                    Err(not_running()?)
                 }
             }
-            _ => Err(not_running()),
+            _ => Err(not_running()?),
         }
     }
 
@@ -991,7 +1006,7 @@ impl ProcessBox {
     /// each member's own waiter to reap it. Idempotent.
     pub fn delete(&self) -> Result<(), Refusal> {
         if self.is_managed() {
-            return Err(super::managed::uncertain(self.id()));
+            return Err(self.state.uncertain());
         }
         self.state.stop.store(true, Ordering::SeqCst);
         self.state.wake()?;
@@ -1036,10 +1051,7 @@ impl ProcessBox {
                 if deadline.is_none_or(|d| Instant::now() >= d) {
                     return Err(Refusal::os(
                         "emptying a box",
-                        io::Error::other(format!(
-                            "box {} still holds a live member",
-                            self.state.id
-                        )),
+                        io::Error::other(format!("box {} still holds a live member", self.id()?)),
                     ));
                 }
                 std::thread::yield_now();
@@ -1274,14 +1286,31 @@ impl Watcher {
     }
 
     fn start(mut self) -> io::Result<JoinHandle<()>> {
-        let mut name = String::new();
-        let count = "hex-box-"
+        let (prefix, suffix) = match self.state.id.as_ref() {
+            OwnerRef::Box(id) => ("hex-box-", id.as_str().len()),
+            OwnerRef::Pool(pool) => (
+                "hex-pool-",
+                pool.len()
+                    .checked_mul(2)
+                    .ok_or(io::ErrorKind::OutOfMemory)?,
+            ),
+        };
+        let count = prefix
             .len()
-            .checked_add(self.state.id.as_str().len())
+            .checked_add(suffix)
             .ok_or(io::ErrorKind::OutOfMemory)?;
+        let mut name = String::new();
         name.try_reserve_exact(count).map_err(io::Error::from)?;
-        name.push_str("hex-box-");
-        name.push_str(self.state.id.as_str());
+        name.push_str(prefix);
+        match self.state.id.as_ref() {
+            OwnerRef::Box(id) => name.push_str(id.as_str()),
+            OwnerRef::Pool(pool) => {
+                use std::fmt::Write;
+                for byte in pool {
+                    write!(name, "{byte:02x}").map_err(|_| io::ErrorKind::OutOfMemory)?;
+                }
+            }
+        }
         std::thread::Builder::new()
             .name(name)
             .spawn(move || self.run())
@@ -1351,7 +1380,7 @@ impl Watcher {
     /// changes (it is idle).
     fn step(&mut self) -> Result<Option<Duration>, Refusal> {
         if let Some(scope) = &self.state.vm
-            && !scope.watchable(&self.state.id)?
+            && !scope.watchable(self.state.id.as_ref())?
         {
             return Ok(None);
         }
@@ -1662,8 +1691,7 @@ impl Watcher {
             {
                 continue;
             }
-            let pid =
-                i32::try_from(member.pid).map_err(|_| super::managed::uncertain(&self.state.id))?;
+            let pid = i32::try_from(member.pid).map_err(|_| self.state.uncertain())?;
             match sys::rusage(pid)
                 .map_err(|error| Refusal::os("reading a gone member's rusage", error))?
             {
