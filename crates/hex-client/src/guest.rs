@@ -124,6 +124,12 @@ pub trait Link: Send + Sync + 'static {
     fn reply_budget(&self) -> Option<Duration> {
         None
     }
+    /// The link's own bound on a connection's setup, its dial and the relay's token, spent once from
+    /// the setup's start where the caller gives no deadline. None: this link's dial has no bound of
+    /// its own (a test's loopback), and the token's read then waits as long as the relay takes.
+    fn setup_bound(&self) -> Option<Duration> {
+        None
+    }
     /// Dials within the operation's remaining absolute deadline. A link opting into a reply
     /// budget must override this; an unbounded legacy dial cannot truthfully implement the cap.
     fn dial_before(&self, port: u32, deadline: Option<Instant>) -> Result<DuplexOwner, Refusal> {
@@ -859,6 +865,12 @@ impl Stream {
         budget: Option<Duration>,
         deadline: Option<ReplyDeadline>,
     ) -> Result<Self, Refusal> {
+        // AC-T7.4.1: with no caller deadline the link's own setup bound bounds the dial and the relay's
+        // token together, so a guest that takes the connection and never sends it can't hold the caller.
+        let deadline = match deadline {
+            Some(deadline) => Some(deadline),
+            None => ReplyDeadline::link(link.setup_bound())?,
+        };
         if let Some(deadline) = deadline {
             deadline.remaining("dialing the guest control connection")?;
         }
