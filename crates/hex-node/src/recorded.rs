@@ -662,12 +662,6 @@ impl<R: Recover> Recorded<R> {
         self.books.store.remove_strays()?;
         let mut summary = RecoverySummary::default();
         let records = self.books.store.all()?;
-        if !report.devices.is_empty() {
-            native_metadata(
-                &mut report,
-                hex_runtime::devices::Books::physical_devices(self)?,
-            )?;
-        }
         let mut seen: BTreeMap<BoxId, Seen> = BTreeMap::new();
         for (id, record) in &records {
             // Without a readable class/identity this owner cannot choose a cleanup backend.
@@ -862,6 +856,12 @@ impl<R: Recover> Runtime for Recorded<R> {
         let Some(mut report) = self.runtime.capacity(class)? else {
             return Ok(None);
         };
+        if !report.devices.is_empty() {
+            native_metadata(
+                &mut report,
+                hex_runtime::devices::Books::physical_devices(self)?,
+            )?;
+        }
         let records = self.books.store.all()?;
         recorded_holders(&mut report, &records)?;
         Ok(Some(report))

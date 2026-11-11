@@ -303,9 +303,10 @@ pub(super) fn ready(
                         .map_err(|_| invalid("readiness deadline overflow"))?,
                     tv_nsec: i64::from(duration.subsec_nanos()),
                 };
+                let pidfd = proc.pidfd();
                 let mut descriptors = [
                     PollFd::new(listener, PollFlags::IN),
-                    PollFd::new(proc.pidfd(), PollFlags::IN),
+                    PollFd::new(&pidfd, PollFlags::IN),
                 ];
                 match rustix::event::poll(&mut descriptors, Some(&timespec)) {
                     Ok(0) => {

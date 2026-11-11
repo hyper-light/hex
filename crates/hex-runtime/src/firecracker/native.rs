@@ -649,7 +649,8 @@ fn recorded_running(id: &BoxId, trace: ProcId) -> Result<bool, Refusal> {
         Err(rustix::io::Errno::SRCH) => return Ok(false),
         Err(error) => return Err(Refusal::os("observing recorded VMM identity", error)),
     };
-    let mut observed = [PollFd::new(descriptor.as_fd(), PollFlags::IN)];
+    let borrowed = descriptor.as_fd();
+    let mut observed = [PollFd::new(&borrowed, PollFlags::IN)];
     let zero = Timespec {
         tv_sec: 0,
         tv_nsec: 0,

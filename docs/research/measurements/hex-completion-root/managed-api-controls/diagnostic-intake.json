@@ -1,0 +1,16 @@
+{
+  "source": "5ce665d82505ce610c270ff2510312b6fe2db026",
+  "path": "crates/hex-cli/tests/completion_managed_api.rs",
+  "before": "1f21f609ccf63f3bcbb2178098b09cae91c0bf86263005c65070eeee43e026b1",
+  "after": "17bd28956f44d239a4544bead35a6fc87348a9638e950c508d87609dd4f3ee33",
+  "actual_strict_clippy_before_exit": 101,
+  "actual_log_sha256": "e9edd01c4b88faeb556aae550f925eea1aa6ee9b70632b7605ccdc2775cedbff",
+  "change": "Only fallible writeln stderr diagnostic after cleanup, no guards/oracles/limits changed",
+  "reported_final_clippy": {
+    "evidence": "f48f4f7fc87cc1898a14bd037951dc9f5b9ff0bc",
+    "exit": 0,
+    "tests_executed": 0,
+    "log_sha256": "876c76d3cf0a926d88004c8fa703f68f1f32662c06c4836c55a2e5a2b7d89972"
+  },
+  "counts_attribution": "Four actual passing controls remain source98b/API0277; no repeated4 tests for diagnostic-only change; final raw independent verification next"
+}

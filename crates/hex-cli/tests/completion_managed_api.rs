@@ -292,7 +292,12 @@ impl Harness {
 impl Drop for Harness {
     fn drop(&mut self) {
         let cleanup = self.cleanup();
-        eprintln!("managed_api_cleanup receipt={} {cleanup:?}", self.key);
+        // Diagnostic I/O must also remain safe while another assertion unwinds.
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "managed_api_cleanup receipt={} {cleanup:?}",
+            self.key
+        );
     }
 }
 

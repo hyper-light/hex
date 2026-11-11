@@ -1,0 +1,30 @@
+diff --git a/crates/hex-runtime/src/firecracker/native.rs b/crates/hex-runtime/src/firecracker/native.rs
+index c4b255e1..6e88a553 100644
+--- a/crates/hex-runtime/src/firecracker/native.rs
++++ b/crates/hex-runtime/src/firecracker/native.rs
+@@ -686,7 +686,8 @@ fn recorded_running(id: &BoxId, trace: ProcId) -> Result<bool, Refusal> {
+         Err(rustix::io::Errno::SRCH) => return Ok(false),
+         Err(error) => return Err(Refusal::os("observing recorded VMM identity", error)),
+     };
+-    let mut observed = [PollFd::new(descriptor.as_fd(), PollFlags::IN)];
++    let borrowed = descriptor.as_fd();
++    let mut observed = [PollFd::new(&borrowed, PollFlags::IN)];
+     let zero = Timespec {
+         tv_sec: 0,
+         tv_nsec: 0,
+diff --git a/crates/hex-runtime/src/firecracker/transport.rs b/crates/hex-runtime/src/firecracker/transport.rs
+index 6704573c..a9b15615 100644
+--- a/crates/hex-runtime/src/firecracker/transport.rs
++++ b/crates/hex-runtime/src/firecracker/transport.rs
+@@ -303,9 +303,10 @@ pub(super) fn ready(
+                         .map_err(|_| invalid("readiness deadline overflow"))?,
+                     tv_nsec: i64::from(duration.subsec_nanos()),
+                 };
++                let pidfd = proc.pidfd();
+                 let mut descriptors = [
+                     PollFd::new(listener, PollFlags::IN),
+-                    PollFd::new(proc.pidfd(), PollFlags::IN),
++                    PollFd::new(&pidfd, PollFlags::IN),
+                 ];
+                 match rustix::event::poll(&mut descriptors, Some(&timespec)) {
+                     Ok(0) => {
