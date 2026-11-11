@@ -196,7 +196,7 @@ impl Reader {
             // is MAX-1. Longer finite budgets are split only at that ABI limit.
             let millis = left
                 .as_millis()
-                .checked_add(u128::from(left.subsec_nanos() % 1_000_000 != 0))
+                .checked_add(u128::from(!left.subsec_nanos().is_multiple_of(1_000_000)))
                 .ok_or(Refusal::GpuProbe(GpuProbeError::Count))?;
             let timeout = u32::try_from(millis).unwrap_or(u32::MAX - 1).min(u32::MAX - 1);
             let operation = self
