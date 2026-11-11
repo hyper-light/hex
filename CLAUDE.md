@@ -260,6 +260,11 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   (`unsafe impl`): NVML is thread-safe, and a handle stays valid until `nvmlShutdown`, which Hex never calls.
   Rust can express none of these foreign calls, the function pointers resolved at run time, nor an opaque
   handle's thread-safety, safely. (Approved by Ada, 2026-11-09: "I approve that unsafe block.")
+- `crates/hex-gpu/src/windows_identity/sys.rs`: Windows AMD's actual present PCI devnode join.
+  Configuration Manager's locate, device-ID and property calls read only the exact ADL-reported
+  PNP instance into fixed initialized buffers. Checked native type/size, termination, complete PCI
+  location grammar and BusNumber/Address corroboration establish the full segment/BDF before
+  grouping. These SDK calls are unsafe; no pointer or handle escapes and no driver state changes.
 - `crates/hex-gpu/src/adl/sys.rs`: hex-gpu's AMD telemetry on Windows (`docs/design/gpu-telemetry.md` G3).
   It loads AMD's ADL (`atiadlxx.dll`, from System32 alone) at run time through `nvml/sys.rs`'s loader, so a
   node without AMD's driver (ARM64 Windows among them) starts and says why it reads no AMD GPU; makes one ADL

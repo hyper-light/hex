@@ -67,6 +67,7 @@ windows-sys = { version = "0.61.2", features = [
     "Wdk_Graphics_Direct3D",
     "Wdk_System_SystemServices",
     "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Properties",
     "Win32_Foundation",
     "Win32_Networking_WinSock",
     "Win32_Security",

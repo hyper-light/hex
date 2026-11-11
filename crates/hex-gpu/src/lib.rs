@@ -40,6 +40,8 @@ mod apple;
 mod nvml;
 #[cfg(test)]
 mod tests;
+#[cfg(any(target_os = "windows", test))]
+pub mod windows_identity;
 
 use std::fmt;
 
@@ -148,7 +150,7 @@ pub struct Gpu {
     /// NVIDIA's framebuffer; AMD's VRAM (an APU's firmware carve-out); Apple's Metal
     /// `recommendedMaxWorkingSetSize`, a working-set budget, not dedicated VRAM or total host RAM.
     pub memory_total_bytes: u64,
-    /// Where it is. On Windows an AMD GPU's PCI segment is 0: ADL names no segment.
+    /// Where it is. Windows AMD joins the actual PNP devnode's full PCI identity to ADL's BDF.
     pub identity: Identity,
     /// NVIDIA's driver's version (`620.70.06`); amdgpu's: a DKMS module's own, else the kernel's
     /// release, the in-tree driver's; on Windows, AMD's driver release (`25.20.32.06`); on Apple,
@@ -205,6 +207,9 @@ pub enum Unread {
     /// The OS refused the read, with its error number (0: the error carried none).
     #[error("the OS refused the read: error {errno}")]
     Os { errno: i32 },
+    /// Configuration Manager refused a current devnode/property query (its CONFIGRET namespace).
+    #[error("Windows Configuration Manager refused: CONFIGRET {code}")]
+    WindowsCm { code: u32 },
     /// ADL refused, with its code.
     #[error("ADL refused: {}", adl_says(.code))]
     Adl { code: i32 },
@@ -496,5 +501,18 @@ impl Gpus {
     /// The devices a driver counts that open couldn't read, each with why.
     pub fn skipped(&self) -> &[Skipped] {
         &self.skipped
+    }
+
+    /// The Windows AMD counter receipt's actual verified PNP aliases. The last sample must still
+    /// match every retained alias; an uncertain native identity never becomes a fresh grant.
+    #[cfg(target_os = "windows")]
+    pub fn windows_aliases(
+        &self,
+        identity: Identity,
+    ) -> Result<&[windows_identity::WindowsAlias], Unread> {
+        self.adl
+            .as_ref()
+            .ok_or(Unread::Unsupported)?
+            .aliases(identity)
     }
 }

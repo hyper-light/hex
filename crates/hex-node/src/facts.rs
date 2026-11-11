@@ -125,6 +125,8 @@ impl Prober {
             .try_reserve_exact(sampled.len())
             .map_err(|_| physical_full())?;
         loads.extend_from_slice(sampled);
+        #[cfg(windows)]
+        qualify_windows(provider, &mut loads)?;
         let inventory = provider.inventory().map_err(|why| Refusal::Platform {
             what: "native physical device observation",
             platform: std::env::consts::OS,
@@ -153,6 +155,8 @@ impl Prober {
             .try_reserve_exact(sampled.len())
             .map_err(|_| physical_full())?;
         loads.extend_from_slice(sampled);
+        #[cfg(windows)]
+        qualify_windows(provider, &mut loads)?;
         let inventory = provider
             .inventory()
             .map_err(|_| Refusal::Broken("sampled native provider lost its inventory".into()))?;
@@ -213,6 +217,41 @@ fn physical_full() -> Refusal {
     }
 }
 
+#[cfg(windows)]
+fn qualify_windows(provider: &hex_gpu::Gpus, loads: &mut [hex_gpu::Load]) -> Result<(), Refusal> {
+    let inventory = provider.inventory().map_err(|_| physical_full())?;
+    qualify_readings(inventory, loads, |identity| {
+        let aliases = provider.windows_aliases(identity)?;
+        hex_gpu::windows_identity::same_luid(aliases, |instance| {
+            hex_runtime::windows::oci::sys::adapter_luid_for_instance(instance)
+                .map_err(|_| hex_gpu::Unread::Ambiguous)
+        })?;
+        Ok(())
+    })
+}
+
+#[cfg(any(windows, test))]
+fn qualify_readings(
+    inventory: &[hex_gpu::Gpu],
+    loads: &mut [hex_gpu::Load],
+    mut identity: impl FnMut(hex_gpu::Identity) -> Result<(), hex_gpu::Unread>,
+) -> Result<(), Refusal> {
+    if inventory.len() != loads.len() || inventory.len() > hex_api::MAX_DEVICES {
+        return Err(physical_full());
+    }
+    for (gpu, load) in inventory.iter().zip(loads) {
+        if gpu.vendor == hex_gpu::Vendor::Amd && identity(gpu.identity).is_err() {
+            // The native receipt retains CM's typed cause. Neither counter can be attributed to
+            // this physical device when its current CM/KMT join is missing or contradictory.
+            *load = hex_gpu::Load {
+                busy_percent: Err(hex_gpu::Unread::Ambiguous),
+                memory_used_bytes: Err(hex_gpu::Unread::Ambiguous),
+            };
+        }
+    }
+    Ok(())
+}
+
 fn physical_info(gpu: &hex_gpu::Gpu) -> Result<hex_api::DeviceInfo, Refusal> {
     let mut model = String::new();
     model
@@ -246,10 +285,6 @@ fn physical_readings(
         .try_reserve_exact(inventory.len())
         .map_err(|_| physical_full())?;
     for (gpu, load) in inventory.iter().zip(loads) {
-        #[cfg(windows)]
-        if gpu.vendor == hex_gpu::Vendor::Amd {
-            continue;
-        }
         if load.busy_percent.is_ok_and(|busy| busy > 100) {
             return Err(Refusal::Invalid {
                 what: "native GPU reading",
@@ -289,10 +324,12 @@ fn physical_snapshot(
         {
             continue;
         }
-        // ADL reports BDF without its PCI segment. Until the existing Windows provider proves
-        // the full current-boot PNP/interface/KMT/UUID join, domain0 is not a native grant.
-        #[cfg(windows)]
-        if gpu.vendor == hex_gpu::Vendor::Amd {
+        // A missing current native identity is different from an unsupported independent counter.
+        // Retain its factual report/old holders, but offer no new attachment on that observation.
+        if gpu.vendor == hex_gpu::Vendor::Amd
+            && matches!(load.busy_percent, Err(hex_gpu::Unread::Ambiguous))
+            && matches!(load.memory_used_bytes, Err(hex_gpu::Unread::Ambiguous))
+        {
             continue;
         }
         if load.busy_percent.is_ok_and(|busy| busy > 100) || gpu.memory_total_bytes == 0 {
@@ -1076,6 +1113,68 @@ mod gpu_identity_tests {
             ..known
         };
         assert!(physical_snapshot(&[gpu(1)], &[malformed]).is_err());
+    }
+
+    /// AC-T7.3.1: per-device native identity uncertainty retains factual IDs and unrelated progress.
+    #[test]
+    fn current_windows_join_qualifies_only_that_devices_fresh_offer() {
+        let gpu = |vendor, bus| hex_gpu::Gpu {
+            vendor,
+            model: "native alias fixture".into(),
+            memory_total_bytes: hex_api::MIN_MEMORY,
+            identity: hex_gpu::Identity::Pci(hex_gpu::PciAddress {
+                domain: 9,
+                bus,
+                device: 0,
+                function: 0,
+            }),
+            driver_version: "actual native fixture".into(),
+        };
+        let inventory = [
+            gpu(hex_gpu::Vendor::Amd, 1),
+            gpu(hex_gpu::Vendor::Nvidia, 2),
+            gpu(hex_gpu::Vendor::Amd, 3),
+        ];
+        let known = hex_gpu::Load {
+            busy_percent: Ok(0),
+            memory_used_bytes: Ok(0),
+        };
+        let mut loads = [
+            known,
+            known,
+            hex_gpu::Load {
+                busy_percent: Err(hex_gpu::Unread::Unsupported),
+                memory_used_bytes: Ok(19),
+            },
+        ];
+        let mut called = Vec::new();
+        super::qualify_readings(&inventory, &mut loads, |identity| {
+            called.push(identity);
+            if identity == inventory[0].identity {
+                Err(hex_gpu::Unread::Gone)
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+        assert_eq!(called, [inventory[0].identity, inventory[2].identity]);
+        let report = super::physical_readings(&inventory, &loads).unwrap();
+        assert_eq!(report.len(), 3);
+        assert_eq!(report[0].info.id.key, inventory[0].key());
+        assert_eq!(
+            (report[0].busy_per_mille, report[0].memory_used_bytes),
+            (None, None)
+        );
+        assert_eq!(
+            (report[2].busy_per_mille, report[2].memory_used_bytes),
+            (None, Some(19))
+        );
+        let fresh = super::physical_snapshot(&inventory, &loads).unwrap();
+        assert_eq!(
+            fresh.iter().map(|info| info.id.key).collect::<Vec<_>>(),
+            [inventory[1].key(), inventory[2].key()]
+        );
+        assert!(super::physical_snapshot(&[], &[]).unwrap().is_empty());
     }
 
     /// AC-T7.4.1: the RPC snapshot retains both identities, independent knowledge and real pressure.

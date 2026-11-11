@@ -1,0 +1,42 @@
+{
+  "requirement": "AC-T7.3.1/AC-T7.4.1",
+  "role": "ROOT coordinator",
+  "source": "204c22181f92e20c316e307c19fcdf9fb5f8dee8",
+  "files": [
+    {
+      "path": "crates/hex-gpu/src/lib.rs",
+      "sha256": "512201a7f43db97274ddd41e6d496a6884d598882fc62a363dca444eceb9d805",
+      "source_exact_except_named_root_capacity_fields": true
+    },
+    {
+      "path": "crates/hex-gpu/src/adl.rs",
+      "sha256": "ee003931d5cb40ba6d6d12d4a9cef8a3888b9996ae5dd8e6b54d16c02c0f66d8",
+      "source_exact_except_named_root_capacity_fields": true
+    },
+    {
+      "path": "crates/hex-gpu/src/adl/tests.rs",
+      "sha256": "643f71789e28c47f3d8240300db538b11ab47ed337b6a51ed2e002d428792b16",
+      "source_exact_except_named_root_capacity_fields": true
+    },
+    {
+      "path": "crates/hex-gpu/src/windows_identity.rs",
+      "sha256": "0a1ea8001e428e124e3663f8c714571a3f95428b2f345f8d0fa028d36dc8a09f",
+      "source_exact_except_named_root_capacity_fields": true
+    },
+    {
+      "path": "crates/hex-gpu/src/windows_identity/sys.rs",
+      "sha256": "4be9b17f9a1cfa2c403fcc8fc5a46b71026c3476d04f73a410509cc54ba59076",
+      "source_exact_except_named_root_capacity_fields": true
+    },
+    {
+      "path": "crates/hex-node/src/facts.rs",
+      "sha256": "7aeb51434968d9ed83401d6e2a7beab012c6d7943b43e4b4c79b3cc3263ca528",
+      "source_exact_except_named_root_capacity_fields": true
+    }
+  ],
+  "preserved_root_delta": "facts.rs native host capacity retains routes/device_routes/backings empty literal fields, the sole source-before difference",
+  "metadata": "Existing windows-sys Win32_Devices_Properties feature and named unsafe CM-only file rationale; no versions/Cargo.lock/new dependencies",
+  "source_review": "Reviewed six-source complete delta plus parser/native/tests/docs; actual present PNP/full PCI before ADL grouping, same aliases/counter receipt, current native KMT qualification per device. No native or performance acceptance.",
+  "tests_executed": 0,
+  "native_invocations": 0
+}

@@ -1,0 +1,38 @@
+{
+  "parent": "7f94b65566026c0662b1acb408969e99c4ffa285",
+  "policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "sources": {
+    "crates/hex-gpu/src/lib.rs": "512201a7f43db97274ddd41e6d496a6884d598882fc62a363dca444eceb9d805",
+    "crates/hex-gpu/src/adl.rs": "ee003931d5cb40ba6d6d12d4a9cef8a3888b9996ae5dd8e6b54d16c02c0f66d8",
+    "crates/hex-gpu/src/adl/tests.rs": "643f71789e28c47f3d8240300db538b11ab47ed337b6a51ed2e002d428792b16",
+    "crates/hex-gpu/src/windows_identity.rs": "0a1ea8001e428e124e3663f8c714571a3f95428b2f345f8d0fa028d36dc8a09f",
+    "crates/hex-gpu/src/windows_identity/sys.rs": "4be9b17f9a1cfa2c403fcc8fc5a46b71026c3476d04f73a410509cc54ba59076",
+    "crates/hex-node/src/facts.rs": "44639de65f48734274bf8f59c34a1650e0ce022a6dd7385c2b8d08433138aff0"
+  },
+  "actual_original_red": {
+    "production": "2c8855b220a36c57685e456a7b8c98d8368f7899",
+    "fixture": "985d7767232780f74ac95b2e2aa966130730b34d",
+    "capacity_cli_sha256": "3b34bb33a464dbf3bf8d8a7bd13acf8d7646310167fb6f0815c5c88053294655",
+    "source_note": "WINDOWS-PROVIDER-JOIN.md"
+  },
+  "checks": {
+    "scoped_rustfmt": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "new_pure_controls": "7 UNRUN",
+    "native_effects": 0,
+    "jobs_started": 0
+  },
+  "root_integration": [
+    "existing windows-sys feature Win32_Devices_Properties",
+    "CLAUDE CM-only unsafe allowlist new hex-gpu/src/windows_identity/sys.rs",
+    "existing L3 public adapter_luid_for_instance source joined"
+  ],
+  "remaining": [
+    "source-specific compile/Clippy",
+    "actual mapping/HCS/guest execution/fault/mutation",
+    "one-provider alias read I/O profiles; no performance claim"
+  ]
+}
