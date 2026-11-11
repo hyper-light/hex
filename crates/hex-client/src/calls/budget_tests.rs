@@ -2362,3 +2362,311 @@ fn isolated_ordinary_stream_hello_withheld_answer_uses_original_cap() {
     assert_eq!(shared.transport.reply_budget(), None);
     assert!(clean.unwrap());
 }
+
+/// Separate successor transport: the same real memory protocol, with all phase diagnostics
+/// deferred until cleanup. The original SettleOriginal and its selector above stay untouched.
+struct SettleAligned {
+    io: Offers,
+    prepared: Mutex<Option<hex_api::Given>>,
+    setup: Mutex<Option<(u64, hex_api::Ask, ReplyDeadline)>>,
+    started: mpsc::SyncSender<(u64, Instant)>,
+    kill: mpsc::SyncSender<(u64, u64, Instant)>,
+    exits: AtomicUsize,
+    other_answers: AtomicUsize,
+}
+
+impl Transport for SettleAligned {
+    type Reading = ();
+    const MAKES_ASKED: bool = true;
+
+    fn answers() -> &'static [Patience; KINDS] {
+        static WAITS: [Patience; KINDS] =
+            [const { Patience::measuring("test.client_settle_aligned.unarmed") }; KINDS];
+        &WAITS
+    }
+
+    fn reading(&self) {}
+    fn handle(&self) -> Handle<'_> {
+        self.io.handle()
+    }
+
+    fn recv(&self, reading: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
+        let mut observed = |message: &Received<'_>, fds| {
+            let (header, answer) =
+                wire::read_answer(message, wire::MAX_MESSAGE).map_err(Refusal::from)?;
+            take(message, fds)?;
+            match answer {
+                Answer::Started { .. } => {
+                    let _ = self.started.try_send((header.id, Instant::now()));
+                }
+                Answer::Exited(_) => {
+                    self.exits.fetch_add(1, Ordering::SeqCst);
+                    self.other_answers.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => {
+                    self.other_answers.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            Ok(())
+        };
+        let got = self.io.recv(reading, &mut observed)?;
+        if self.io.io.closed.load(Ordering::Acquire) {
+            Err(Refusal::Broken(
+                "owned aligned settle transport closed".into(),
+            ))
+        } else {
+            Ok(got)
+        }
+    }
+
+    fn try_send(&self, bytes: &[u8], at: &mut usize, _: &[Lent<'_>]) -> Result<bool, Sent> {
+        let (header, request) = wire::read_request_apart(bytes, wire::MAX_MESSAGE)
+            .map_err(|bad| Sent::Refused(Refusal::from(bad.fault)))?;
+        let killed = match &request {
+            Request::Call(Call::Run { .. }) => {
+                self.io.queue(header.id, Answer::Started { pid: 7 });
+                None
+            }
+            // Record the actual committed Kill, but never manufacture its answer or an Exit.
+            Request::Call(Call::Kill { exec }) => Some(*exec),
+            Request::Release => None,
+            _ => {
+                return Err(Sent::Refused(Refusal::Broken(
+                    "unexpected owned aligned-settle request".into(),
+                )));
+            }
+        };
+        self.io
+            .outbound
+            .lock()
+            .map_err(|why| Sent::Refused(poisoned(why)))?
+            .push((header.id, request));
+        *at = bytes.len();
+        if let Some(exec) = killed {
+            let _ = self.kill.try_send((header.id, exec, Instant::now()));
+        }
+        Ok(true)
+    }
+
+    fn asks_before(
+        &self,
+        exec: u64,
+        ask: hex_api::Ask,
+        deadline: ReplyDeadline,
+    ) -> Result<hex_api::Given, Refusal> {
+        deadline.remaining("owned prepared malformed stream setup")?;
+        *self.setup.lock().map_err(poisoned)? = Some((exec, ask, deadline));
+        self.prepared
+            .lock()
+            .map_err(poisoned)?
+            .take()
+            .ok_or_else(|| Refusal::Broken("prepared wrong end was already taken".into()))
+    }
+
+    fn carries_before(&self, _: u64, stdio: Stdio, deadline: ReplyDeadline) -> Result<(), Refusal> {
+        deadline.remaining("owned null carried streams")?;
+        stdio.check()?;
+        if carried(&stdio) != Streams::default() {
+            return Err(Refusal::Broken("unexpected owned carried pipe".into()));
+        }
+        Ok(())
+    }
+
+    fn shutdown(&self) {
+        self.io.shutdown();
+    }
+}
+
+/// AC-T7.4.1 separately pinned successor: start the same cap in an already prepared actor.
+/// ROOT must compare this SAME selector before/after69a and under the missing-Kill-cap mutation.
+#[test]
+fn prepared_actor_settle_error_retains_original_kill_answer_authority() {
+    let (io, _) = stalled(None);
+    let (entered, _) = mpsc::sync_channel(1);
+    let (starting, started) = mpsc::sync_channel(1);
+    let (killing, killed) = mpsc::sync_channel(1);
+    let (prepared, readiness) = mpsc::sync_channel(1);
+    let (release, begin) = mpsc::sync_channel(1);
+    let (arming, armed) = mpsc::sync_channel(1);
+    let (finished, answer) = mpsc::sync_channel(1);
+    let observer = Wake::new().unwrap();
+    let mut inbound = VecDeque::new();
+    inbound.try_reserve(1).unwrap();
+    let mut outbound = Vec::new();
+    outbound.try_reserve_exact(2).unwrap();
+    let mut program_ends = Stdio {
+        ask: hex_api::Ask {
+            stdout: true,
+            ..hex_api::Ask::default()
+        },
+        ..Stdio::null()
+    };
+    let wrong_end = program_ends.make_asked().unwrap();
+    let client = Arc::new(configured(SettleAligned {
+        io: Offers {
+            io,
+            inbound: Mutex::new(inbound),
+            outbound: Mutex::new(outbound),
+            entered,
+            program: Mutex::new(Some(program_ends)),
+        },
+        prepared: Mutex::new(Some(wrong_end)),
+        setup: Mutex::new(None),
+        started: starting,
+        kill: killing,
+        exits: AtomicUsize::new(0),
+        other_answers: AtomicUsize::new(0),
+    }));
+    let control = Arc::clone(&client);
+    let spec = absolute_spec();
+    let program = Program::of(&["owned-prepared-settle"]);
+    let stdio = Stdio {
+        ask: hex_api::Ask {
+            stdin: true,
+            ..hex_api::Ask::default()
+        },
+        ..Stdio::null()
+    };
+    let worker = std::thread::Builder::new()
+        .name("owned-prepared-settle".into())
+        .spawn(move || {
+            if prepared.try_send(()).is_err() || begin.recv().is_err() {
+                return;
+            }
+            let Some(original) = Instant::now().checked_add(CAP) else {
+                return;
+            };
+            // Nonblocking notices use preallocated channels; no diagnostics or argument
+            // construction separates this one anchor from the actual Core operation.
+            if arming.try_send(original).is_err() {
+                return;
+            }
+            let result = control.run_before(spec, program, stdio, original).map(drop);
+            let returned = Instant::now();
+            let _ = finished.try_send((returned, result));
+        })
+        .unwrap();
+
+    let actor_ready = readiness.recv_timeout(OBSERVE);
+    let released = actor_ready.is_ok().then(|| release.try_send(()));
+    // Every early branch closes this owned barrier so joining can never wait for a lost start.
+    drop(release);
+    let original = armed.recv_timeout(OBSERVE);
+    let actual_started = started.recv_timeout(OBSERVE);
+    let actual_kill = killed.recv_timeout(OBSERVE);
+    let expired = original.as_ref().ok().map(|at| {
+        loop {
+            let left = at.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break Ok(());
+            }
+            // Same existing readiness wait as until(), with its wake prepared before the cap.
+            if let Err(why) = ready(observer.handle(), false, None, Some(left)) {
+                break Err(why);
+            }
+        }
+    });
+    let before_cleanup = answer.recv_timeout(OBSERVE);
+    let cleanup_at = Instant::now();
+    client
+        .conn
+        .shared
+        .end(Refusal::Broken("owned prepared-settle cleanup".into()));
+    let transport = &client.conn.shared.transport;
+    let (pipe, pipe_poisoned) = match transport.io.program.lock() {
+        Ok(mut program) => (program.take(), false),
+        Err(poisoned) => (poisoned.into_inner().take(), true),
+    };
+    let (unused, end_poisoned) = match transport.prepared.lock() {
+        Ok(mut given) => (given.take(), false),
+        Err(poisoned) => (poisoned.into_inner().take(), true),
+    };
+    let pipe_was_owned = pipe.is_some();
+    let unused_end = unused.is_some();
+    drop((pipe, unused));
+    let joined = worker.join();
+    let after_cleanup = answer.try_recv();
+    let setup = *transport.setup.lock().unwrap();
+    let exits = transport.exits.load(Ordering::SeqCst);
+    let other_answers = transport.other_answers.load(Ordering::SeqCst);
+    let sent = transport.io.outbound.lock().unwrap();
+    let runs: Vec<_> = sent
+        .iter()
+        .filter_map(|(id, request)| {
+            matches!(request, Request::Call(Call::Run { .. })).then_some(*id)
+        })
+        .collect();
+    let kills: Vec<_> = sent
+        .iter()
+        .filter_map(|(id, request)| match request {
+            Request::Call(Call::Kill { exec }) => Some((*id, *exec)),
+            _ => None,
+        })
+        .collect();
+    let releases = sent
+        .iter()
+        .filter(|(_, request)| matches!(request, Request::Release))
+        .count();
+    let clean = client.conn.shared.state().map(|state| {
+        state.calls.is_empty()
+            && state.programs.is_empty()
+            && state.given.is_empty()
+            && state.waiting.is_empty()
+    });
+    let phase = actor_ready.is_ok()
+        && released.as_ref().is_some_and(|sent| sent.is_ok())
+        && original.as_ref().is_ok_and(|at| {
+            runs.len() == 1
+                && setup.is_some_and(|(exec, ask, cap)| {
+                    exec == runs[0] && ask.stdin && !ask.stdout && !ask.stderr && cap.at() == *at
+                })
+                && actual_started
+                    .as_ref()
+                    .is_ok_and(|(exec, seen)| *exec == runs[0] && seen < at)
+                && actual_kill.as_ref().is_ok_and(|(request, exec, seen)| {
+                    *exec == runs[0] && seen < at && kills == [(*request, *exec)]
+                })
+        })
+        && pipe_was_owned
+        && !unused_end;
+    // First diagnostics and all assertions occur only after the owned endpoint/ends close and join.
+    eprintln!(
+        "client_settle_prepared classification={} scope=separate_successor ready={actor_ready:?} released={released:?} original={original:?} cap={CAP:?} observation={OBSERVE:?} setup={setup:?} started={actual_started:?} kill={actual_kill:?} runs={runs:?} kills={kills:?} exits={exits} other_answers={other_answers} releases={releases} before_cleanup={before_cleanup:?} cleanup_at={cleanup_at:?} after_cleanup={after_cleanup:?} pipe_owned={pipe_was_owned} unused_end={unused_end} pipe_poisoned={pipe_poisoned} end_poisoned={end_poisoned} joined={} clean={clean:?}",
+        if phase {
+            "PHASE_WITNESSED"
+        } else {
+            "UNVERIFIED"
+        },
+        joined.is_ok()
+    );
+    joined.unwrap();
+    assert!(!pipe_poisoned && !end_poisoned);
+    assert!(transport.io.io.closed.load(Ordering::Acquire));
+    assert!(transport.io.program.lock().unwrap().is_none());
+    assert!(transport.prepared.lock().unwrap().is_none());
+    assert!(clean.unwrap());
+    assert_eq!(transport.reply_budget(), None);
+    assert!(
+        phase,
+        "UNVERIFIED: required actual prepared-settle phase missing"
+    );
+    assert_eq!(exits, 0);
+    assert_eq!(other_answers, 0);
+    assert_eq!(releases, 0);
+    expired.unwrap().unwrap();
+    let returned_error = before_cleanup
+        .as_ref()
+        .ok()
+        .or_else(|| after_cleanup.as_ref().ok());
+    assert!(
+        matches!(returned_error, Some((_, Err(Refusal::Broken(why)))) if why.contains("stdout") && why.contains("neither carried nor asked")),
+        "the exact original stream-settlement refusal must survive cleanup"
+    );
+    assert!(
+        before_cleanup.is_ok(),
+        "prepared-settle original error return exceeded its original authority awaiting Kill answer"
+    );
+    let (returned, _) = before_cleanup.unwrap();
+    assert!(returned >= original.unwrap());
+    assert!(returned <= cleanup_at);
+}

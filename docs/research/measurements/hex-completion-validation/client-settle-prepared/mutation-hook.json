@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "owner": "ROOT only; not executed by L4",
+  "selector": "calls::budget_tests::prepared_actor_settle_error_retains_original_kill_answer_authority",
+  "source": "crates/hex-client/src/calls.rs",
+  "after_69a_sha256": "2274b7d480ab9291716b0ea257f750e0e9c53fb8e86ab20bf600cbcc51b1dd59",
+  "expected_matches": 1,
+  "find": ".call_before(self.bound, &kill, |_, _| Ok(NONE), None, Some(cap))?",
+  "replace": ".call_before(self.bound, &kill, |_, _| Ok(NONE), None, None)?",
+  "predicted_mutated_source_sha256": "8b6d76132b1b0ce5656cdf898c76b9ef20e45c12033305d822bd7fe01f618305",
+  "purpose": "Remove only the retained original cap from cleanup Kill send/answer, retaining the same zero-duration exit poll and ALL identical successor controls.",
+  "expected_result": "Semantic rejection requires actual prepared Run/setup/Started/committed Kill before original deadline, no Exit/no Kill answer, original refusal returned only after cleanup. A missing phase/compile failure is not mutation rejection proof.",
+  "restoration": "ROOT restores exact after69 calls source/hash, uses isolated source/EMPTY target/provenance guards and retains mutation/raw/cleanup receipts. No owner execution."
+}
