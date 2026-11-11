@@ -557,6 +557,9 @@ impl Service {
         }
         let runtimes = Runtimes::new(backends).map_err(failed)?;
         let runtime_capacity = runtimes.capacities().map_err(failed)?;
+        let backing_owned = runtimes
+            .measured_backing_use(&runtime_capacity)
+            .map_err(failed)?;
         std::fs::create_dir_all(&config.state)
             .map_err(|e| Refusal::os("creating scheduler state", e))?;
         let (facts, physical_authority) = runtime_facts(&config.state, classes, &runtimes)?;
@@ -572,18 +575,15 @@ impl Service {
             .node(id, &mut cluster)
             .map_err(|e| Refusal::Broken(e.to_string()))?;
         let mut local = local;
-        local.costs = capacity::profiles(&runtime_capacity)?;
-        local.devices =
-            capacity::devices::offers(&runtime_capacity, &facts, &mut cluster, &namespace)?;
-        local.capacity.gpus = u32::try_from(
-            local
-                .devices
-                .iter()
-                .filter(|device| device.kind == hex_sim::model::DeviceKind::Gpu)
-                .count(),
-        )
-        .map_err(|_| Refusal::Broken("GPU count exceeds resource representation".into()))?;
-        local.runtime_pools = capacity::pools(runtime_capacity, &BTreeMap::new(), local.classes)?;
+        capacity::apply(
+            runtime_capacity,
+            &facts,
+            &mut cluster,
+            &namespace,
+            &mut local,
+            &BTreeMap::new(),
+            backing_owned,
+        )?;
         if let Some(slot) = cluster.nodes.iter_mut().find(|node| node.id == id) {
             *slot = local;
         }
@@ -889,13 +889,18 @@ impl Service {
     fn refresh(&self) -> Result<(), Refusal> {
         let owned_by_class = self.driver.measured_owned_use_by_class().map_err(failed)?;
         let runtime_capacity = self.runtimes.capacities().map_err(failed)?;
-        let owned = owned_by_class.values().try_fold(
-            hex_sim::model::Resources::default(),
-            |used, more| {
+        let backing_owned = self
+            .runtimes
+            .measured_backing_use(&runtime_capacity)
+            .map_err(failed)?;
+        let owned = owned_by_class
+            .values()
+            .try_fold(hex_sim::model::Resources::default(), |used, more| {
                 used.checked_add(more)
                     .ok_or_else(|| Refusal::Broken("measured owned resource sum overflows".into()))
-            },
-        )?;
+            })?
+            .checked_add(&backing_owned)
+            .ok_or_else(|| capacity::invalid("measured native resource sum overflows"))?;
         // All native RPCs finish before acquiring the cluster/model lock. The scheduling process
         // owns no GPU provider, and a changed Store/turn owner cannot inherit retained claims.
         let (facts, physical_authority) =
@@ -913,23 +918,21 @@ impl Service {
         let mut local = facts
             .node_with_owned(self.id, &mut cluster, owned)
             .map_err(|e| Refusal::Broken(e.to_string()))?;
-        local.costs = capacity::profiles(&runtime_capacity)?;
-        local.devices = capacity::devices::offers(
-            &runtime_capacity,
+        capacity::apply(
+            runtime_capacity,
             &facts,
             &mut cluster,
             self.driver.namespace(),
+            &mut local,
+            &owned_by_class,
+            backing_owned,
         )?;
-        local.capacity.gpus = u32::try_from(
-            local
-                .devices
-                .iter()
-                .filter(|device| device.kind == hex_sim::model::DeviceKind::Gpu)
-                .count(),
-        )
-        .map_err(|_| Refusal::Broken("GPU count exceeds resource representation".into()))?;
-        local.runtime_pools = capacity::pools(runtime_capacity, &owned_by_class, local.classes)?;
-        self.driver.refresh_node(local.clone()).map_err(failed)?;
+        self.driver
+            .refresh_node(local.try_clone().map_err(|_| Refusal::Exhausted {
+                what: "local node snapshot",
+                bound: 1,
+            })?)
+            .map_err(failed)?;
         if let Some(node) = cluster.nodes.iter_mut().find(|n| n.id == self.id) {
             *node = local;
         }

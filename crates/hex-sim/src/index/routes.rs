@@ -42,15 +42,7 @@ impl Holder {
 }
 
 pub(super) fn native_id(device: &Device) -> Option<DeviceId> {
-    Some(DeviceId {
-        kind: match device.kind {
-            DeviceKind::Gpu => hex_api::DeviceKind::Gpu,
-            DeviceKind::Vfio => hex_api::DeviceKind::Vfio,
-            DeviceKind::Block => hex_api::DeviceKind::Block,
-            DeviceKind::Net => hex_api::DeviceKind::Net,
-        },
-        key: device.key?,
-    })
+    device.native_id()
 }
 
 pub(super) fn physical(node: &NodeSpec) -> Result<Vec<PhysicalSlot>, SimError> {
@@ -73,41 +65,7 @@ pub(super) fn physical(node: &NodeSpec) -> Result<Vec<PhysicalSlot>, SimError> {
     let Some(routes) = &node.routes else {
         return Ok(out);
     };
-    let mut known = Vec::new();
-    known
-        .try_reserve_exact(out.len())
-        .map_err(|_| SimError::Resources(node.id))?;
-    for slot in &out {
-        known.push(slot.id.ok_or(SimError::Config(
-            "initialized routes require stable physical IDs",
-        ))?);
-    }
-    known.sort_unstable();
-    let count = routes
-        .backings
-        .iter()
-        .try_fold(0usize, |n, backing| n.checked_add(backing.devices.len()))
-        .ok_or(SimError::Resources(node.id))?;
-    let mut provisioned = Vec::new();
-    provisioned
-        .try_reserve_exact(count)
-        .map_err(|_| SimError::Resources(node.id))?;
-    for backing in &routes.backings {
-        provisioned.extend_from_slice(&backing.devices);
-    }
-    provisioned.sort_unstable();
-    provisioned.dedup();
-    provisioned.retain(|id| known.binary_search(id).is_err());
-    let total = out
-        .len()
-        .checked_add(provisioned.len())
-        .ok_or(SimError::Resources(node.id))?;
-    if total > crate::model::DEVICES {
-        return Err(SimError::Full {
-            what: "canonical physical slots",
-            bound: crate::model::DEVICES,
-        });
-    }
+    let provisioned = routes.unobserved_claims(&node.devices, node.id)?;
     out.try_reserve_exact(provisioned.len())
         .map_err(|_| SimError::Resources(node.id))?;
     out.extend(provisioned.into_iter().map(|id| PhysicalSlot {

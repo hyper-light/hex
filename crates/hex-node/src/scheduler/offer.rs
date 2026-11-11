@@ -64,7 +64,10 @@ fn checked_shape(spec: &NodeSpec) -> Result<(), Refusal> {
     spec.check_runtime_pools()
         .map_err(|e| invalid(e.to_string()))?;
     for class in [Class::Firecracker, Class::Shards] {
-        if spec.classes.has(class) && spec.costs.get(class.index()).is_none_or(Option::is_none) {
+        if spec.routes.is_none()
+            && spec.classes.has(class)
+            && spec.costs.get(class.index()).is_none_or(Option::is_none)
+        {
             return Err(invalid(
                 "initialized VM peer offer has no immutable runtime cost",
             ));

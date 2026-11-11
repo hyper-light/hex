@@ -198,6 +198,18 @@ fn legacy_device_classes() -> Classes {
 }
 
 impl Device {
+    pub fn native_id(&self) -> Option<hex_api::DeviceId> {
+        Some(hex_api::DeviceId {
+            kind: match self.kind {
+                DeviceKind::Gpu => hex_api::DeviceKind::Gpu,
+                DeviceKind::Vfio => hex_api::DeviceKind::Vfio,
+                DeviceKind::Block => hex_api::DeviceKind::Block,
+                DeviceKind::Net => hex_api::DeviceKind::Net,
+            },
+            key: self.key?,
+        })
+    }
+
     /// A GPU of `model` with `memory` bytes, idle.
     pub fn gpu(model: ModelId, memory: u64) -> Self {
         Self {
@@ -407,6 +419,60 @@ pub struct RuntimeRoutes {
 pub type SharedRoutes = triomphe::Arc<RuntimeRoutes>;
 
 impl RuntimeRoutes {
+    /// Provisioning authority contributes identities only, after the observed catalog's slots.
+    /// This is the SAME union consumed by Index; it supplies no model, size, load or fresh offer.
+    pub fn unobserved_claims(
+        &self,
+        devices: &[Device],
+        node: NodeId,
+    ) -> Result<Vec<hex_api::DeviceId>, crate::SimError> {
+        if devices.len() > DEVICES
+            || self.backings.len() > hex_api::MAX_RUNTIME_ROUTES
+            || self
+                .backings
+                .iter()
+                .any(|backing| backing.devices.len() > DEVICES)
+        {
+            return Err(crate::SimError::Resources(node));
+        }
+        let mut known = Vec::new();
+        known
+            .try_reserve_exact(devices.len())
+            .map_err(|_| crate::SimError::Resources(node))?;
+        for device in devices {
+            known.push(device.native_id().ok_or(crate::SimError::Config(
+                "initialized routes require stable physical IDs",
+            ))?);
+        }
+        known.sort_unstable();
+        let count = self
+            .backings
+            .iter()
+            .try_fold(0usize, |n, backing| n.checked_add(backing.devices.len()))
+            .ok_or(crate::SimError::Resources(node))?;
+        let mut provisioned = Vec::new();
+        provisioned
+            .try_reserve_exact(count)
+            .map_err(|_| crate::SimError::Resources(node))?;
+        for backing in &self.backings {
+            provisioned.extend_from_slice(&backing.devices);
+        }
+        provisioned.sort_unstable();
+        provisioned.dedup();
+        provisioned.retain(|id| known.binary_search(id).is_err());
+        if devices
+            .len()
+            .checked_add(provisioned.len())
+            .is_none_or(|total| total > DEVICES)
+        {
+            return Err(crate::SimError::Full {
+                what: "canonical physical slots",
+                bound: DEVICES,
+            });
+        }
+        Ok(provisioned)
+    }
+
     pub fn share(self) -> Result<SharedRoutes, crate::SimError> {
         if self.offers.len() > hex_api::MAX_RUNTIME_ROUTES
             || self.backings.len() > hex_api::MAX_RUNTIME_ROUTES

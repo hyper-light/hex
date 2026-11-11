@@ -57,14 +57,36 @@ fn collect_offers(
                 what: "runtime device facts",
                 bound: report.devices.len(),
             })?;
-        for offer in &report.devices {
+        for (at, offer) in report.devices.iter().enumerate() {
             let kind = match offer.id.kind {
                 hex_api::DeviceKind::Gpu => DeviceKind::Gpu,
                 hex_api::DeviceKind::Vfio => DeviceKind::Vfio,
                 hex_api::DeviceKind::Block => DeviceKind::Block,
                 hex_api::DeviceKind::Net => DeviceKind::Net,
             };
-            if !class.exposes(facts.os, kind) {
+            let mut eligible = Classes::NONE;
+            if let Some(mask) = report.device_routes.get(at) {
+                for (at, route) in report.routes.iter().enumerate() {
+                    let bit = u32::try_from(at)
+                        .ok()
+                        .and_then(|at| 1u64.checked_shl(at))
+                        .ok_or_else(|| invalid("device route mask exceeds its address space"))?;
+                    if mask & bit != 0 {
+                        eligible = eligible.with(match route.key.class {
+                            hex_api::Class::Process | hex_api::Class::Oci => Class::Oci,
+                            hex_api::Class::Firecracker => Class::Firecracker,
+                            hex_api::Class::Shards => Class::Shards,
+                        });
+                    }
+                }
+            }
+            if eligible == Classes::NONE {
+                eligible = eligible.with(*class);
+            }
+            if Class::ALL
+                .into_iter()
+                .any(|class| eligible.has(class) && !class.exposes(facts.os, kind))
+            {
                 return Err(invalid(
                     "runtime offers a device its native class cannot expose",
                 ));
@@ -124,12 +146,25 @@ fn collect_offers(
                     kind,
                     key: Some(offer.id.key),
                     available: observed
-                        && offer.holder.as_ref().is_none_or(|holder| {
-                            holder
-                                .box_id()
-                                .is_some_and(|id| id.as_str().starts_with(&own_prefix))
+                        && offer.holder.as_ref().is_none_or(|holder| match holder {
+                            hex_api::DeviceHolder::Box(id) => id.as_str().starts_with(&own_prefix),
+                            hex_api::DeviceHolder::Backing(key) => {
+                                reports.iter().any(|(_, report)| {
+                                    report.as_ref().is_some_and(|report| {
+                                        report.backings.iter().any(|backing| {
+                                            backing.key == *key
+                                                && matches!(
+                                                    backing.phase,
+                                                    hex_api::BackingPhase::Granted
+                                                        | hex_api::BackingPhase::Live
+                                                        | hex_api::BackingPhase::Draining
+                                                )
+                                        })
+                                    })
+                                })
+                            }
                         }),
-                    classes: Classes::NONE.with(*class),
+                    classes: eligible,
                     model,
                     size,
                     load,

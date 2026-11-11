@@ -721,7 +721,6 @@ impl Runtime for FirecrackerRuntime {
     fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
         let authority = self.authority()?;
         let records = authority.records()?;
-        let pools = authority.pool_records()?;
         let mut boxes = Vec::new();
         boxes
             .try_reserve_exact(records.len())

@@ -8,6 +8,46 @@ use hex_sim::model::{Class, Classes, Resources, RuntimePool};
 
 pub(super) mod devices;
 
+#[path = "capacity/initialized.rs"]
+mod initialized;
+
+/// An initialized route report replaces class-wide VM profiles/pools. Only an all-legacy cohort
+/// retains that older representation; a missing route never silently gains modern capability.
+pub(super) fn apply(
+    reports: Vec<(Class, Option<Capacity>)>,
+    facts: &hex_sim::facts::Facts,
+    cluster: &mut hex_sim::model::Cluster,
+    namespace: &str,
+    node: &mut hex_sim::model::NodeSpec,
+    owned: &BTreeMap<Class, Resources>,
+    backing_owned: Resources,
+) -> Result<(), Refusal> {
+    if reports.iter().any(|(_, report)| {
+        report
+            .as_ref()
+            .is_some_and(|report| !report.routes.is_empty())
+    }) {
+        let used = owned
+            .values()
+            .try_fold(Resources::default(), |sum, more| sum.checked_add(more))
+            .and_then(|sum| sum.checked_add(&backing_owned))
+            .ok_or_else(|| invalid("measured owned resource sum overflows"))?;
+        return initialized::apply(reports, facts, cluster, namespace, node, used);
+    }
+    node.costs = profiles(&reports)?;
+    node.devices = devices::offers(&reports, facts, cluster, namespace)?;
+    node.capacity.gpus = u32::try_from(
+        node.devices
+            .iter()
+            .filter(|device| device.kind == hex_sim::model::DeviceKind::Gpu)
+            .count(),
+    )
+    .map_err(|_| invalid("GPU count exceeds resource representation"))?;
+    node.runtime_pools = pools(reports, owned, node.classes)?;
+    node.routes = None;
+    Ok(())
+}
+
 /// VM capability includes a known per-box cost before any candidate can be admitted. Native
 /// identity-cost reports remain optional; runtime resource profiles never come from telemetry.
 pub(super) fn profiles(
@@ -40,10 +80,19 @@ pub(super) fn profiles(
     Ok(costs)
 }
 
-fn invalid(why: impl Into<String>) -> Refusal {
+pub(super) fn invalid(why: impl AsRef<str>) -> Refusal {
+    let why = why.as_ref();
+    let mut text = String::new();
+    if text.try_reserve_exact(why.len()).is_err() {
+        return Refusal::Exhausted {
+            what: "runtime capacity refusal bytes",
+            bound: why.len(),
+        };
+    }
+    text.push_str(why);
     Refusal::Invalid {
         what: "runtime capacity",
-        why: why.into(),
+        why: text,
     }
 }
 

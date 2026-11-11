@@ -172,6 +172,48 @@ impl Runtimes {
         }
         physical::coalesce(reports).map_err(Into::into)
     }
+
+    /// Read the one native scope per live backing outside all placement/model locks. A shared
+    /// guest's inner workloads have no additional native RSS; unrelated backings receive no credit.
+    pub fn measured_backing_use(
+        &self,
+        reports: &[(Class, Option<hex_api::Capacity>)],
+    ) -> Result<Resources, Error> {
+        let mut seen = Vec::new();
+        seen.try_reserve_exact(hex_api::MAX_RUNTIME_ROUTES)
+            .map_err(|_| Refusal::Exhausted {
+                what: "measured backing identities",
+                bound: hex_api::MAX_RUNTIME_ROUTES,
+            })?;
+        let mut owned = Resources::default();
+        for (class, report) in reports {
+            let Some(report) = report else { continue };
+            report.check()?;
+            for backing in &report.backings {
+                if !matches!(
+                    backing.phase,
+                    hex_api::BackingPhase::Live | hex_api::BackingPhase::Draining
+                ) || seen.contains(&backing.key)
+                {
+                    continue;
+                }
+                if seen.len() >= hex_api::MAX_RUNTIME_ROUTES {
+                    return Err(Refusal::Exhausted {
+                        what: "measured backing identities",
+                        bound: hex_api::MAX_RUNTIME_ROUTES,
+                    }
+                    .into());
+                }
+                let usage = self.get(*class)?.backing_usage(&backing.key)?;
+                owned.mem_bytes = owned
+                    .mem_bytes
+                    .checked_add(usage.memory_bytes)
+                    .ok_or_else(|| invalid_static("native backing memory sum overflows"))?;
+                seen.push(backing.key);
+            }
+        }
+        Ok(owned)
+    }
 }
 
 fn checked_namespace(namespace: &str) -> Result<&str, Refusal> {
@@ -1017,20 +1059,30 @@ impl Driver {
     pub fn measured_owned_use_by_class(&self) -> Result<BTreeMap<Class, Resources>, Error> {
         let _operation = self.operation()?;
         let state = self.lock()?;
-        let keys: Vec<_> = state
-            .node
-            .ran_keys()
-            .filter(|(_, _, ended)| !ended)
-            .map(|(key, _, _)| {
-                Ok((
-                    key,
-                    state
-                        .node
-                        .demand(key)
-                        .ok_or_else(|| bad("ran demand missing"))?,
-                ))
-            })
-            .collect::<Result<_, Stop>>()?;
+        let mut keys = Vec::new();
+        let count = state.node.ran_keys().count();
+        keys.try_reserve_exact(count)
+            .map_err(|_| Refusal::Exhausted {
+                what: "measured native box identities",
+                bound: count,
+            })?;
+        for (key, _, ended) in state.node.ran_keys() {
+            if ended
+                || state
+                    .node
+                    .assigned_route(key)?
+                    .is_some_and(|route| route.key.execution == hex_api::Execution::ShardsShared)
+            {
+                continue;
+            }
+            keys.push((
+                key,
+                state
+                    .node
+                    .demand(key)
+                    .ok_or_else(|| bad("ran demand missing"))?,
+            ));
+        }
         drop(state);
         let mut resources = BTreeMap::<Class, Resources>::new();
         for (key, demand) in keys {
