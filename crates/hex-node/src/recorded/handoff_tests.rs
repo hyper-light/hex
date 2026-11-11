@@ -639,10 +639,26 @@ fn draining_observer_refuses_first_reference_but_retains_existing_consumer() {
     );
     proposal.spec.check().unwrap();
     source.check().unwrap();
-    preflight_records(&store.retained_records().unwrap(), std::slice::from_ref(&source), Some(&catalog())).unwrap();
+    preflight_records(
+        &store.retained_records().unwrap(),
+        std::slice::from_ref(&source),
+        Some(&catalog()),
+    )
+    .unwrap();
     let before = source.encode().unwrap();
     let result = store.put_lifecycle(&proposal);
-    assert!(result.is_err(), "Draining no-ref observer admitted a new consuming reference");
+    assert!(
+        result.is_err(),
+        "Draining no-ref observer admitted a new consuming reference"
+    );
     assert!(store.read_lifecycle(&proposal.spec.id).unwrap().is_none());
-    assert_eq!(store.read_pool(&source.key.pool).unwrap().unwrap().encode().unwrap(), before);
+    assert_eq!(
+        store
+            .read_pool(&source.key.pool)
+            .unwrap()
+            .unwrap()
+            .encode()
+            .unwrap(),
+        before
+    );
 }
