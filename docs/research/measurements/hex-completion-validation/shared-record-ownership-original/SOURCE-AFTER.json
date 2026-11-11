@@ -1,0 +1,9 @@
+{
+  "baseline": "bcd5d8495d592e7ebc24ce80565d8c1d29ee51ed",
+  "tests_unchanged": "fe5dcadee1578071b1e36f71b537f5c580ecbee330d574d73d83d6dcf8abcdb2",
+  "production_path": "crates/hex-node/src/recorded.rs",
+  "production_sha256": "0b072315087e20b1a407d41b2b53c81bbc73b1d17fd02152b473267e532fff82",
+  "semantic_delta": "WithGuest Recover ownership uses existing guest.owns_record(spec), preserving exact route_for gate",
+  "dedicated_control_actual": "1 PASS / 0 FAIL / 0 IGNORE; no native guest boot",
+  "after_mutation_restored_strict": "UNRUN"
+}
