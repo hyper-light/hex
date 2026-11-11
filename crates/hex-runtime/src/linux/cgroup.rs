@@ -780,7 +780,9 @@ impl BoxCgroup {
     fn populated_from(&self, opened: rustix::io::Result<OwnedFd>) -> Result<Option<bool>, Refusal> {
         let fd = match opened {
             Ok(fd) => fd,
-            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            // Kernfs refuses the open of a node the removal deactivated (`kernfs_fop_open`), and a
+            // lookup in the removed directory finds nothing.
+            Err(rustix::io::Errno::NODEV | rustix::io::Errno::NOENT) => return Ok(None),
             Err(e) => {
                 return Err(os_err(
                     "reading a cgroup file",
