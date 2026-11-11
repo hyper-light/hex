@@ -4,6 +4,11 @@ use hex_sim::model::{Ask, Demand, Kind, Resources};
 use hex_sim::peer::Budget;
 use std::sync::mpsc::sync_channel;
 
+// A fixture's peer cache starts empty, so nothing in it is ever set aside.
+fn no_aside(aside: cache::SetAside) {
+    panic!("a fresh fixture peer cache set {aside} aside");
+}
+
 /// LB03: a reconnect republishes durable cancellation without killing that new connection.
 #[test]
 fn replayed_deletion_does_not_interrupt_the_reconnected_peer() {
@@ -65,6 +70,7 @@ fn replayed_deletion_does_not_interrupt_the_reconnected_peer() {
         &dir.path().join("peers"),
         &std::collections::BTreeSet::from([1]),
         &mut cluster,
+        no_aside,
     )
     .unwrap();
     let service = Service {
@@ -141,6 +147,7 @@ fn laptop_dispatch_and_common_wire_keep_the_box_until_explicit_delete() {
         &dir.path().join("peers"),
         &std::collections::BTreeSet::new(),
         &mut cluster.clone(),
+        no_aside,
     )
     .unwrap();
     let service = Arc::new(Service {
@@ -331,6 +338,7 @@ fn cold_remote_creation_feedback_survives_owner_publication_busy() {
                 &dir.path().join("peers"),
                 &std::collections::BTreeSet::from([1]),
                 &mut cluster,
+                no_aside,
             )
             .unwrap(),
         ),
@@ -546,6 +554,7 @@ pub(super) fn advertise_service_with_budget(
                 &dir.join("peers"),
                 &std::collections::BTreeSet::from([other.0]),
                 &mut cluster,
+                no_aside,
             )
             .unwrap(),
         ),

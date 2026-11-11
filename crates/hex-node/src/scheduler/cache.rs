@@ -1,6 +1,7 @@
 //! AC-T7.4.1/LB03: the last successfully applied remote offer, in the existing atomic file records.
 //! One wire-bounded value per configured peer restores real admission facts before Driver::boot;
-//! dense-zero placeholders remain only for peers whose facts have never been applied.
+//! dense-zero placeholders remain for peers whose facts were never applied or were set aside.
+//! A cache is not authority: what open can't restore is set aside and told, never a refused start.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -80,17 +81,149 @@ fn name(peer: NodeId) -> String {
     format!("peer-{}", peer.0)
 }
 
-fn peer_of(name: &str, configured: &BTreeSet<u32>) -> Result<NodeId, Refusal> {
-    let peer = name
-        .strip_prefix("peer-")
+/// The peer a canonical record name (`peer-<u32>`) names.
+fn peer_named(stem: &str) -> Option<NodeId> {
+    stem.strip_prefix("peer-")
         .and_then(|n| n.parse::<u32>().ok())
         .map(NodeId)
-        .filter(|peer| self::name(*peer) == name)
-        .ok_or_else(|| invalid(format!("invalid record name {name:?}")))?;
-    if !configured.contains(&peer.0) {
-        return Err(invalid(format!("record for unconfigured peer {}", peer.0)));
+        .filter(|peer| name(*peer) == stem)
+}
+
+/// A cache entry set aside at open: removed, never followed or applied. A cache is not authority,
+/// so a configured peer it named starts uncached until it advertises again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetAside {
+    /// Its name in the cache folder.
+    pub entry: String,
+    pub why: Aside,
+}
+
+/// Why an entry was set aside.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Aside {
+    /// A configured peer's record that today's rules refuse: an older build's offer, or damage.
+    Refused { peer: NodeId, why: Refusal },
+    /// A record for a peer no longer configured.
+    Unconfigured { peer: NodeId },
+    /// A link or other file that isn't regular, never followed or read.
+    NotAFile,
+    /// A regular file named as no record or temporary of this cache, never read.
+    Unknown,
+}
+
+impl SetAside {
+    /// The peer it names, to report against.
+    pub fn peer(&self) -> Option<NodeId> {
+        match &self.why {
+            Aside::Refused { peer, .. } | Aside::Unconfigured { peer } => Some(*peer),
+            Aside::NotAFile | Aside::Unknown => None,
+        }
     }
-    Ok(peer)
+}
+
+impl std::fmt::Display for SetAside {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let entry = &self.entry;
+        match &self.why {
+            Aside::Refused { why, .. } => write!(
+                f,
+                "peer offer cache set {entry} aside, its peer uncached until it advertises again: {why}"
+            ),
+            Aside::Unconfigured { peer } => write!(
+                f,
+                "peer offer cache set {entry} aside: peer {} is not configured",
+                peer.0
+            ),
+            Aside::NotAFile => write!(
+                f,
+                "peer offer cache set {entry} aside unread: not a regular file"
+            ),
+            Aside::Unknown => write!(
+                f,
+                "peer offer cache set {entry} aside unread: no record has that name"
+            ),
+        }
+    }
+}
+
+fn removed(path: &Path) -> Result<(), Refusal> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(why) => Err(io(why)),
+    }
+}
+
+/// One pass over the folder keeps each configured peer's regular record, read within the wire
+/// bound, and removes everything else, telling `aside` why; crash temporaries go silently, as
+/// Files removes them. The folder's size at open bounds the pass, and what it keeps is at most one
+/// record per configured peer, so the next open finds no more. A folder inside is refused: this
+/// cache never makes one, and removing a tree is not its to do.
+fn kept_records(
+    path: &Path,
+    configured: &BTreeSet<u32>,
+    aside: &mut impl FnMut(SetAside),
+) -> Result<Vec<(NodeId, String)>, Refusal> {
+    let mut kept = Vec::new();
+    kept.try_reserve_exact(configured.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "peer offer cache records",
+            bound: configured.len(),
+        })?;
+    let listing = match fs::read_dir(path) {
+        Ok(listing) => listing,
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(kept),
+        Err(why) => return Err(io(why)),
+    };
+    for entry in listing {
+        let entry = entry.map_err(io)?;
+        // The entry's own type: a link is a link, never its target.
+        let kind = entry.file_type().map_err(io)?;
+        let file_name = entry.file_name();
+        let shown = file_name.to_string_lossy().into_owned();
+        if kind.is_dir() {
+            return Err(invalid(format!(
+                "{shown} is a folder, which this cache never makes; it is its owner's to remove"
+            )));
+        }
+        let (stem, ext) = file_name
+            .to_str()
+            .and_then(|n| n.rsplit_once('.'))
+            .unwrap_or_default();
+        let why = match (peer_named(stem), ext) {
+            (_, "tmp") if kind.is_file() => {
+                removed(&entry.path())?;
+                continue;
+            }
+            (Some(peer), "rec") if !configured.contains(&peer.0) => Aside::Unconfigured { peer },
+            (Some(peer), "rec") if kind.is_file() => {
+                let file = fs::File::open(entry.path()).map_err(io)?;
+                match crate::records::read_record(file, &entry.path()) {
+                    Ok(value) if kept.len() < configured.len() => {
+                        kept.push((peer, value));
+                        continue;
+                    }
+                    Ok(_) => {
+                        return Err(Refusal::Exhausted {
+                            what: "peer offer cache records",
+                            bound: configured.len(),
+                        });
+                    }
+                    // Past the wire bound or not UTF-8: no offer this cache wrote.
+                    Err(Stop::Damaged(why)) => Aside::Refused {
+                        peer,
+                        why: invalid(why),
+                    },
+                    Err(why) => return Err(storage(why)),
+                }
+            }
+            _ if kind.is_file() => Aside::Unknown,
+            _ => Aside::NotAFile,
+        };
+        removed(&entry.path())?;
+        aside(SetAside { entry: shown, why });
+    }
+    Ok(kept)
 }
 
 fn checked_folder(path: &Path) -> Result<(), Refusal> {
@@ -102,29 +235,6 @@ fn checked_folder(path: &Path) -> Result<(), Refusal> {
         Err(why) if why.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(why) => Err(io(why)),
     }
-}
-
-fn checked_records(path: &Path, most: usize) -> Result<(), Refusal> {
-    // Files already applies this directory bound. Check record types before its reader opens one,
-    // so a record symlink cannot redirect the bounded read outside the leased state directory.
-    let bound = most
-        .checked_mul(2)
-        .ok_or_else(|| invalid("record directory bound overflow"))?;
-    for (at, entry) in fs::read_dir(path).map_err(io)?.enumerate() {
-        if at >= bound {
-            return Err(Refusal::Exhausted {
-                what: "peer offer cache directory entries",
-                bound,
-            });
-        }
-        let entry = entry.map_err(io)?;
-        if entry.path().extension().is_some_and(|ext| ext == "rec")
-            && !entry.file_type().map_err(io)?.is_file()
-        {
-            return Err(invalid("cache records must be regular files"));
-        }
-    }
-    Ok(())
 }
 
 fn checked_models(models: &[String]) -> Result<(), Refusal> {
@@ -148,11 +258,15 @@ pub struct Cache {
 }
 
 impl Cache {
-    /// Restores matching nodes atomically: no caller node/model mutation on any corrupt record.
+    /// Restores each configured peer's cached offer whole or not at all, and commits them to the
+    /// caller together only if the open succeeds. What can't be restored is set aside and told to
+    /// `aside`; a link is never followed. A refused open, which only a configuration error, a
+    /// folder that isn't one or holds one, or a storage error makes, changes no caller node or model.
     pub fn open(
         path: &Path,
         configured: &BTreeSet<u32>,
         cluster: &mut Cluster,
+        mut aside: impl FnMut(SetAside),
     ) -> Result<Self, Refusal> {
         checked_models(&cluster.models)?;
         for peer in configured {
@@ -165,22 +279,37 @@ impl Cache {
             }
         }
         checked_folder(path)?;
-        let mut files = Files::open_with_limit(path, configured.len()).map_err(storage)?;
-        checked_records(path, configured.len())?;
+        let mut kept = kept_records(path, configured, &mut aside)?;
+        // Peer order makes the shared model table the same whatever order the folder lists.
+        kept.sort_unstable_by_key(|(peer, _)| *peer);
         let mut staged = Cluster::single_owner(cluster.nodes.clone(), Vec::new());
         staged.models = cluster.models.clone();
-        for (record, value) in files.all().map_err(storage)? {
-            let peer = peer_of(&record, configured)?;
-            let offer: dto::Offer =
-                serde_json::from_str(&value).map_err(|why| invalid(why.to_string()))?;
-            let spec = offer::decode(&offer, peer, &mut staged)?;
-            let slot = usize::try_from(peer.0)
-                .ok()
-                .and_then(|at| staged.nodes.get_mut(at))
-                .filter(|node| node.id == peer)
-                .ok_or_else(|| invalid("cached peer has no matching cluster slot"))?;
-            *slot = spec;
+        for (peer, value) in kept {
+            // decode changes the staged models only when it returns the node.
+            let restored = serde_json::from_str::<dto::Offer>(&value)
+                .map_err(|why| invalid(why.to_string()))
+                .and_then(|offer| offer::decode(&offer, peer, &mut staged));
+            match restored {
+                Ok(spec) => {
+                    let slot = usize::try_from(peer.0)
+                        .ok()
+                        .and_then(|at| staged.nodes.get_mut(at))
+                        .filter(|node| node.id == peer)
+                        .ok_or_else(|| invalid("cached peer has no matching cluster slot"))?;
+                    *slot = spec;
+                }
+                Err(why) => {
+                    let entry = format!("{}.rec", name(peer));
+                    removed(&path.join(&entry))?;
+                    aside(SetAside {
+                        entry,
+                        why: Aside::Refused { peer, why },
+                    });
+                }
+            }
         }
+        // Files makes a missing folder and flushes the removals; what remains is in its bound.
+        let files = Files::open_with_limit(path, configured.len()).map_err(storage)?;
         cluster.nodes = staged.nodes;
         cluster.models = staged.models;
         Ok(Self {
@@ -250,8 +379,25 @@ mod tests {
         offer::from_local(&spec, &["nvidia-rtx".into(), "amd-radeon".into()]).unwrap()
     }
 
-    /// AC-T7.4.1/LB03: exactly one durable offer and temporary per configured peer fit; an extra
-    /// record refuses before model/fact staging, preserving every valid persistent offer.
+    fn no_aside(aside: SetAside) {
+        panic!("this open set {aside} aside");
+    }
+
+    // Opens, collecting what it set aside in name order: a folder lists in no fixed order.
+    fn opened(
+        dir: &Path,
+        peers: &BTreeSet<u32>,
+        facts: &mut Cluster,
+    ) -> Result<Vec<SetAside>, Refusal> {
+        let mut aside = Vec::new();
+        Cache::open(dir, peers, facts, |note| aside.push(note))?;
+        aside.sort_by(|a, b| a.entry.cmp(&b.entry));
+        Ok(aside)
+    }
+
+    /// AC-T7.4.1/LB03: exactly one durable offer and temporary per configured peer fit, and crash
+    /// temporaries go. Do leave a record behind for a peer no longer configured; expect it set aside
+    /// (removed, told as unconfigured), every configured offer restored, the folder at its bound.
     #[test]
     fn cache_read_count_is_configured_peer_cardinality() {
         let dir = tempfile::tempdir().unwrap();
@@ -260,7 +406,7 @@ mod tests {
             .nodes
             .push(NodeSpec::new(NodeId(2), Resources::default()));
         let peers = BTreeSet::from([1, 2]);
-        let mut cache = Cache::open(dir.path(), &peers, &mut facts).unwrap();
+        let mut cache = Cache::open(dir.path(), &peers, &mut facts, no_aside).unwrap();
         cache.put(NodeId(1), &advertised()).unwrap();
         let second = offer::from_local(&oci_peer(NodeId(2), Resources::default()), &[]).unwrap();
         cache.put(NodeId(2), &second).unwrap();
@@ -269,19 +415,23 @@ mod tests {
         for peer in &peers {
             fs::write(dir.path().join(format!("peer-{peer}.tmp")), "torn").unwrap();
         }
-        Cache::open(dir.path(), &peers, &mut facts).unwrap();
+        Cache::open(dir.path(), &peers, &mut facts, no_aside).unwrap();
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), peers.len());
         fs::write(dir.path().join("peer-3.rec"), "unexpected").unwrap();
         let original = facts.clone();
-        assert!(matches!(
-            Cache::open(dir.path(), &peers, &mut facts),
-            Err(Refusal::Exhausted { bound: 2, .. })
-        ));
+        assert_eq!(
+            opened(dir.path(), &peers, &mut facts).unwrap(),
+            [SetAside {
+                entry: "peer-3.rec".into(),
+                why: Aside::Unconfigured { peer: NodeId(3) },
+            }]
+        );
         assert_eq!(facts, original);
         assert_eq!(fs::read(dir.path().join("peer-1.rec")).unwrap(), before);
-        assert!(dir.path().join("peer-3.rec").is_file());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), peers.len());
         let empty = tempfile::tempdir().unwrap();
-        let mut zero = Cache::open(empty.path(), &BTreeSet::new(), &mut cluster()).unwrap();
+        let mut zero =
+            Cache::open(empty.path(), &BTreeSet::new(), &mut cluster(), no_aside).unwrap();
         assert!(zero.put(NodeId(1), &advertised()).is_err());
         assert!(fs::read_dir(empty.path()).unwrap().next().is_none());
     }
@@ -292,7 +442,7 @@ mod tests {
     fn cached_offer_survives_reboot_and_remaps_models() {
         let dir = tempfile::tempdir().unwrap();
         let mut before = cluster();
-        let mut cache = Cache::open(dir.path(), &configured(), &mut before).unwrap();
+        let mut cache = Cache::open(dir.path(), &configured(), &mut before, no_aside).unwrap();
         let mut offer = advertised();
         cache.put(NodeId(1), &offer).unwrap();
         let mut spec: NodeSpec = serde_json::from_str(&offer.spec).unwrap();
@@ -302,7 +452,7 @@ mod tests {
         drop(cache);
         let mut after = cluster();
         after.models = vec!["amd-radeon".into(), "nvidia-rtx".into()];
-        Cache::open(dir.path(), &configured(), &mut after).unwrap();
+        Cache::open(dir.path(), &configured(), &mut after, no_aside).unwrap();
         assert_eq!(after.nodes[1].capacity, spec.capacity);
         assert_eq!(after.nodes[1].devices[0].model, ModelId(1));
         assert_eq!(after.nodes[1].devices[1].model, ModelId(0));
@@ -311,32 +461,71 @@ mod tests {
         assert_eq!(Files::open(dir.path()).unwrap().all().unwrap().len(), 1);
     }
 
-    /// AC-T7.4.1/LB03: unknown peers, aliases, malformed JSON and missing models are input errors;
-    /// none partially changes the caller's boot facts.
+    /// AC-T7.4.1/LB03, a cache is not authority: do open over an unconfigured peer's record, an
+    /// alias, a stray file, malformed JSON, and an offer naming a model it doesn't carry; expect
+    /// each set aside (removed, told by type), the open to succeed, and no caller fact changed.
     #[test]
-    fn unknown_peers_and_corrupt_cached_records_are_refused() {
+    fn unknown_peers_and_corrupt_cached_records_are_set_aside() {
         let good = serde_json::to_string(&advertised()).unwrap();
         let mut bad = advertised();
         bad.models.clear();
-        for (name, value) in [
-            ("peer-2", good.clone()),
-            ("peer-01", good),
-            ("peer-1", "{".into()),
-            ("peer-1", serde_json::to_string(&bad).unwrap()),
+        let unknown_model = Refusal::Invalid {
+            what: "peer offer",
+            why: "device references an unknown offered model".into(),
+        };
+        for (entry, value, why) in [
+            (
+                "peer-2.rec",
+                good.clone(),
+                Some(Aside::Unconfigured { peer: NodeId(2) }),
+            ),
+            ("peer-01.rec", good, Some(Aside::Unknown)),
+            (".DS_Store", "finder".into(), Some(Aside::Unknown)),
+            ("peer-1.rec", "{".into(), None),
+            (
+                "peer-1.rec",
+                serde_json::to_string(&bad).unwrap(),
+                Some(Aside::Refused {
+                    peer: NodeId(1),
+                    why: unknown_model,
+                }),
+            ),
         ] {
             let dir = tempfile::tempdir().unwrap();
-            Files::open(dir.path()).unwrap().put(name, &value).unwrap();
+            fs::write(dir.path().join(entry), &value).unwrap();
             let mut facts = cluster();
             let before = facts.clone();
+            let aside = opened(dir.path(), &configured(), &mut facts).unwrap();
+            assert_eq!(aside.len(), 1, "{entry}");
+            assert_eq!(aside[0].entry, entry);
+            match why {
+                Some(why) => assert_eq!(aside[0].why, why, "{entry}"),
+                // Malformed JSON: refused by its parser, under this cache's name.
+                None => assert!(
+                    matches!(
+                        &aside[0].why,
+                        Aside::Refused {
+                            peer: NodeId(1),
+                            why: Refusal::Invalid {
+                                what: "peer offer cache",
+                                ..
+                            },
+                        }
+                    ),
+                    "{:?}",
+                    aside[0]
+                ),
+            }
+            assert_eq!(facts, before, "{entry}");
             assert!(
-                Cache::open(dir.path(), &configured(), &mut facts).is_err(),
-                "{name}"
+                fs::read_dir(dir.path()).unwrap().next().is_none(),
+                "{entry}"
             );
-            assert_eq!(facts, before);
         }
     }
 
-    /// AC-T7.4.1/LB03: a corrupt later offer cannot leave an earlier cached peer/model half applied.
+    /// AC-T7.4.1/LB03: do open over peer 1's valid offer and peer 2's corrupt one; expect peer 2's
+    /// set aside whole, nothing of it applied, and peer 1's restored whole with its own models.
     #[test]
     fn boot_cache_loading_is_atomic_across_peers() {
         let dir = tempfile::tempdir().unwrap();
@@ -349,9 +538,51 @@ mod tests {
         facts
             .nodes
             .push(NodeSpec::new(NodeId(2), Resources::default()));
+        let placeholder = facts.nodes[2].clone();
+        let aside = opened(dir.path(), &BTreeSet::from([1, 2]), &mut facts).unwrap();
+        assert_eq!(aside.len(), 1);
+        assert_eq!(aside[0].entry, "peer-2.rec");
+        assert!(matches!(
+            aside[0].why,
+            Aside::Refused {
+                peer: NodeId(2),
+                ..
+            }
+        ));
+        let mut restored: NodeSpec = serde_json::from_str(&advertised().spec).unwrap();
+        restored.devices[0].model = ModelId(0);
+        restored.devices[1].model = ModelId(1);
+        assert_eq!(facts.nodes[1], restored);
+        assert_eq!(facts.nodes[2], placeholder);
+        assert_eq!(facts.models, ["nvidia-rtx", "amd-radeon"]);
+        assert!(dir.path().join("peer-1.rec").is_file());
+        assert!(!dir.path().join("peer-2.rec").exists());
+    }
+
+    /// AC-T7.4.1/LB03, CLAUDE.md §2: do open over a record one byte past the wire bound; expect it
+    /// set aside unread past that bound and no caller fact changed.
+    #[test]
+    fn an_oversized_record_is_set_aside_past_its_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("peer-1.rec"), "x".repeat(MAX_MESSAGE + 1)).unwrap();
+        let mut facts = cluster();
         let before = facts.clone();
-        assert!(Cache::open(dir.path(), &BTreeSet::from([1, 2]), &mut facts).is_err());
+        let aside = opened(dir.path(), &configured(), &mut facts).unwrap();
+        assert!(
+            matches!(
+                &aside[..],
+                [SetAside {
+                    why: Aside::Refused {
+                        peer: NodeId(1),
+                        why: Refusal::Invalid { why, .. },
+                    },
+                    ..
+                }] if why.contains("byte bound")
+            ),
+            "{aside:?}"
+        );
         assert_eq!(facts, before);
+        assert!(!dir.path().join("peer-1.rec").exists());
     }
 
     /// CLAUDE.md §2/AC-T7.4.1: an oversized replacement is refused before it alters durable state.
@@ -359,7 +590,7 @@ mod tests {
     fn oversized_offer_cannot_replace_a_valid_cached_offer() {
         let dir = tempfile::tempdir().unwrap();
         let mut facts = cluster();
-        let mut cache = Cache::open(dir.path(), &configured(), &mut facts).unwrap();
+        let mut cache = Cache::open(dir.path(), &configured(), &mut facts, no_aside).unwrap();
         let good = advertised();
         cache.put(NodeId(1), &good).unwrap();
         let bad = dto::Offer {
@@ -377,17 +608,89 @@ mod tests {
     }
 
     /// AC-T7.4.1/LB03: a record link must not redirect boot's file read outside the leased state.
+    /// Do link peer 1's record to a valid offer outside; expect the link set aside unfollowed (it
+    /// is removed, its target untouched) and peer 1 uncached.
     #[cfg(unix)]
     #[test]
-    fn linked_cache_record_is_refused() {
+    fn linked_cache_record_is_set_aside_unfollowed() {
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::NamedTempFile::new().unwrap();
+        let offer = serde_json::to_string(&advertised()).unwrap();
+        fs::write(outside.path(), &offer).unwrap();
+        let link = dir.path().join("peer-1.rec");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let mut facts = cluster();
+        let before = facts.clone();
+        assert_eq!(
+            opened(dir.path(), &configured(), &mut facts).unwrap(),
+            [SetAside {
+                entry: "peer-1.rec".into(),
+                why: Aside::NotAFile,
+            }]
+        );
+        assert_eq!(facts, before);
+        assert!(fs::symlink_metadata(&link).is_err());
+        assert_eq!(fs::read_to_string(outside.path()).unwrap(), offer);
+    }
+
+    /// AC-T7.4.1/LB03, kept fail-closed: a folder in the cache is none this cache made, and
+    /// removing a tree is not its to do. Do open with one beside peer 1's valid offer; expect the
+    /// open refused, naming it, with no caller fact changed and nothing removed.
+    #[test]
+    fn a_folder_in_the_cache_refuses_the_open_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
         fs::write(
-            outside.path(),
+            dir.path().join("peer-1.rec"),
             serde_json::to_string(&advertised()).unwrap(),
         )
         .unwrap();
-        std::os::unix::fs::symlink(outside.path(), dir.path().join("peer-1.rec")).unwrap();
-        assert!(Cache::open(dir.path(), &configured(), &mut cluster()).is_err());
+        fs::create_dir(dir.path().join("kept")).unwrap();
+        let mut facts = cluster();
+        let before = facts.clone();
+        assert!(matches!(
+            Cache::open(dir.path(), &configured(), &mut facts, no_aside),
+            Err(Refusal::Invalid { what: "peer offer cache", why }) if why.starts_with("kept is a folder")
+        ));
+        assert_eq!(facts, before);
+        assert!(dir.path().join("peer-1.rec").is_file());
+        assert!(dir.path().join("kept").is_dir());
+    }
+
+    /// AC-T7.4.1/LB03, kept fail-closed: the cache's own path must be a folder, or its writes would
+    /// leave the leased state. Do open where it is a file, a link, or under a file; expect each
+    /// refused (the last a storage error, which stays one), no caller fact changed.
+    #[test]
+    fn a_cache_path_that_is_no_folder_refuses_the_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        fs::write(&file, "").unwrap();
+        let mut facts = cluster();
+        let before = facts.clone();
+        assert!(matches!(
+            Cache::open(&file, &configured(), &mut facts, no_aside),
+            Err(Refusal::Invalid {
+                what: "peer offer cache",
+                ..
+            })
+        ));
+        assert!(matches!(
+            Cache::open(&file.join("peers"), &configured(), &mut facts, no_aside),
+            Err(Refusal::Broken(_))
+        ));
+        #[cfg(unix)]
+        {
+            let elsewhere = tempfile::tempdir().unwrap();
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(elsewhere.path(), &link).unwrap();
+            assert!(matches!(
+                Cache::open(&link, &configured(), &mut facts, no_aside),
+                Err(Refusal::Invalid {
+                    what: "peer offer cache",
+                    ..
+                })
+            ));
+            assert!(fs::read_dir(elsewhere.path()).unwrap().next().is_none());
+        }
+        assert_eq!(facts, before);
     }
 }
