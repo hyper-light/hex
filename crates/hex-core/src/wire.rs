@@ -640,6 +640,35 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
     w.done()
 }
 
+/// A retained refusal's canonical Answer envelope, id zero, without cloning its body.
+/// Both sizing and writing use the ordinary refusal codec; output allocation is fallible.
+pub fn snapshot_refusal(refusal: &Refusal, bound: usize) -> Result<Vec<u8>, Fault> {
+    snapshot(kind::REFUSED, bound, |w| put_refusal(w, refusal))
+}
+
+/// A retained exit's canonical Answer envelope, id zero, using the ordinary exit codec.
+pub fn snapshot_exit(exit: Exit, bound: usize) -> Result<Vec<u8>, Fault> {
+    snapshot(kind::EXITED, bound, |w| {
+        put_exit(w, exit);
+        Ok(())
+    })
+}
+
+fn snapshot(
+    kind: u16,
+    bound: usize,
+    put: impl Fn(&mut Writer) -> Result<(), Fault>,
+) -> Result<Vec<u8>, Fault> {
+    let mut count = Writer::counting(bound);
+    count.header(kind, 0);
+    put(&mut count)?;
+    let bytes = count.counted()?;
+    let mut output = Writer::fixed(bytes)?;
+    output.header(kind, 0);
+    put(&mut output)?;
+    output.done()
+}
+
 /// A list's answer as messages of at most `bound` bytes each: as many boxes in each as fit, every
 /// message but the last marked `more`, so a node holding more boxes than one message carries still
 /// answers a list whole. An empty list is one message.
@@ -2168,6 +2197,15 @@ fn name(s: &str) -> Result<&'static str, Fault> {
 pub(crate) struct Writer {
     out: Vec<u8>,
     bound: usize,
+    mode: WriteMode,
+    failure: Option<Fault>,
+}
+
+#[derive(Clone, Copy)]
+enum WriteMode {
+    Ordinary,
+    Counting(usize),
+    Fixed,
 }
 
 impl Writer {
@@ -2175,11 +2213,76 @@ impl Writer {
         Self {
             out: Vec::with_capacity(HEADER_BYTES.min(bound)),
             bound,
+            mode: WriteMode::Ordinary,
+            failure: None,
         }
     }
 
+    fn counting(bound: usize) -> Self {
+        Self {
+            out: Vec::new(),
+            bound,
+            mode: WriteMode::Counting(0),
+            failure: None,
+        }
+    }
+
+    fn fixed(bytes: usize) -> Result<Self, Fault> {
+        let mut out = Vec::new();
+        out.try_reserve_exact(bytes).map_err(|_| Fault::Storage {
+            what: "wire snapshot bytes",
+            bound: bytes,
+        })?;
+        Ok(Self {
+            out,
+            bound: bytes,
+            mode: WriteMode::Fixed,
+            failure: None,
+        })
+    }
+
+    fn position(&self) -> usize {
+        match self.mode {
+            WriteMode::Counting(bytes) => bytes,
+            WriteMode::Ordinary | WriteMode::Fixed => self.out.len(),
+        }
+    }
+
+    fn status(&mut self) -> Result<(), Fault> {
+        match self.failure.take() {
+            Some(fault) => Err(fault),
+            None => Ok(()),
+        }
+    }
+
+    fn checked_growth(&self, bytes: usize) -> Result<usize, Fault> {
+        let after = self.position().checked_add(bytes);
+        if after.is_none_or(|after| after > self.bound) {
+            return Err(Fault::Oversized {
+                bytes: after.unwrap_or(usize::MAX),
+                bound: self.bound,
+            });
+        }
+        let after = after.ok_or(Fault::Oversized {
+            bytes: usize::MAX,
+            bound: self.bound,
+        })?;
+        if matches!(self.mode, WriteMode::Fixed) && after > self.out.capacity() {
+            return Err(Fault::Storage {
+                what: "wire snapshot fixed capacity",
+                bound: self.bound,
+            });
+        }
+        Ok(after)
+    }
+
+    fn counted(mut self) -> Result<usize, Fault> {
+        self.status()?;
+        Ok(self.position())
+    }
+
     pub(crate) fn header(&mut self, kind: u16, id: u64) {
-        self.out.extend_from_slice(&MAGIC);
+        self.raw(&MAGIC);
         self.u64(IDENTITY);
         self.u16(kind);
         self.u64(id);
@@ -2187,12 +2290,10 @@ impl Writer {
 
     /// The new fixed-width cost/charge tail is checked and reserved before writing any of it.
     fn reserve_fixed(&mut self, bytes: usize) -> Result<(), Fault> {
-        let after = self.out.len().checked_add(bytes);
-        if after.is_none_or(|after| after > self.bound) {
-            return Err(Fault::Oversized {
-                bytes: after.unwrap_or(usize::MAX),
-                bound: self.bound,
-            });
+        self.status()?;
+        self.checked_growth(bytes)?;
+        if !matches!(self.mode, WriteMode::Ordinary) {
+            return Ok(());
         }
         self.out
             .try_reserve_exact(bytes)
@@ -2204,10 +2305,30 @@ impl Writer {
 
     /// Bytes as they are, with no length before them: another message's header.
     pub(crate) fn raw(&mut self, b: &[u8]) {
-        self.out.extend_from_slice(b);
+        if matches!(self.mode, WriteMode::Ordinary) {
+            self.out.extend_from_slice(b);
+            return;
+        }
+        if self.failure.is_some() {
+            return;
+        }
+        match self.checked_growth(b.len()) {
+            Ok(after) => match self.mode {
+                WriteMode::Counting(_) => self.mode = WriteMode::Counting(after),
+                WriteMode::Ordinary | WriteMode::Fixed => self.out.extend_from_slice(b),
+            },
+            Err(fault) => self.failure = Some(fault),
+        }
     }
 
-    pub(crate) fn done(self) -> Result<Vec<u8>, Fault> {
+    pub(crate) fn done(mut self) -> Result<Vec<u8>, Fault> {
+        self.status()?;
+        if matches!(self.mode, WriteMode::Fixed) && self.out.len() != self.bound {
+            return Err(Fault::Storage {
+                what: "wire snapshot exact size",
+                bound: self.bound,
+            });
+        }
         if self.out.len() > self.bound {
             return Err(Fault::Oversized {
                 bytes: self.out.len(),
@@ -2218,23 +2339,23 @@ impl Writer {
     }
 
     pub(crate) fn u8(&mut self, v: u8) {
-        self.out.push(v);
+        self.raw(&[v]);
     }
 
     pub(crate) fn u16(&mut self, v: u16) {
-        self.out.extend_from_slice(&v.to_le_bytes());
+        self.raw(&v.to_le_bytes());
     }
 
     pub(crate) fn u32(&mut self, v: u32) {
-        self.out.extend_from_slice(&v.to_le_bytes());
+        self.raw(&v.to_le_bytes());
     }
 
     pub(crate) fn u64(&mut self, v: u64) {
-        self.out.extend_from_slice(&v.to_le_bytes());
+        self.raw(&v.to_le_bytes());
     }
 
     pub(crate) fn i32(&mut self, v: i32) {
-        self.out.extend_from_slice(&v.to_le_bytes());
+        self.raw(&v.to_le_bytes());
     }
 
     pub(crate) fn usize(&mut self, v: usize) -> Result<(), Fault> {
@@ -2251,7 +2372,11 @@ impl Writer {
     /// A length, refused when what follows it would pass the bound: a caller's huge argument list is
     /// refused before it is copied.
     pub(crate) fn len(&mut self, n: usize) -> Result<(), Fault> {
-        let after = self.out.len().checked_add(4).and_then(|l| l.checked_add(n));
+        self.status()?;
+        let after = self
+            .position()
+            .checked_add(4)
+            .and_then(|l| l.checked_add(n));
         if after.is_none_or(|after| after > self.bound) {
             return Err(Fault::Oversized {
                 bytes: after.unwrap_or(usize::MAX),
@@ -2268,7 +2393,7 @@ impl Writer {
 
     pub(crate) fn bytes(&mut self, b: &[u8]) -> Result<(), Fault> {
         self.len(b.len())?;
-        self.out.extend_from_slice(b);
+        self.raw(b);
         Ok(())
     }
 
@@ -2324,6 +2449,7 @@ impl Writer {
     }
 
     fn device_count(&mut self, count: usize, minimum_bytes: usize) -> Result<(), Fault> {
+        self.status()?;
         if count > MAX_DEVICES {
             return Err(Fault::value(
                 "devices",
@@ -2332,7 +2458,7 @@ impl Writer {
         }
         let after = count
             .checked_mul(minimum_bytes)
-            .and_then(|bytes| self.out.len().checked_add(4)?.checked_add(bytes));
+            .and_then(|bytes| self.position().checked_add(4)?.checked_add(bytes));
         if after.is_none_or(|after| after > self.bound) {
             return Err(Fault::Oversized {
                 bytes: after.unwrap_or(usize::MAX),

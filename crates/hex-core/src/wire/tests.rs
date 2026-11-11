@@ -3205,3 +3205,118 @@ fn route_wire_physical_reports_forbid_both_box_and_backing_holders() {
         assert!(!format!("{fault:?}").contains("private-telemetry-box"));
     }
 }
+
+/// AC-T7.4.1: retained snapshots use exactly the ordinary current Answer bytes,
+/// including every refusal variant, canonical id zero and the existing exit tags.
+#[test]
+fn snapshot_refusal_and_exit_match_canonical_answer_bytes() {
+    let mut inputs = refusals();
+    for cause in [
+        LifecycleCause::Pending,
+        LifecycleCause::Busy,
+        LifecycleCause::Uncertain,
+    ] {
+        inputs.push(Refusal::Backing {
+            key: route_wire_key(),
+            cause,
+        });
+    }
+    for refusal in inputs {
+        let ordinary = Answer::Refused(refusal);
+        let expected = answer(0, &ordinary, MAX_MESSAGE).unwrap();
+        let Answer::Refused(refusal) = &ordinary else {
+            panic!("owned refusal fixture changed its variant");
+        };
+        let snapshot = snapshot_refusal(refusal, MAX_MESSAGE).unwrap();
+        assert_eq!(snapshot, expected);
+        let mut header = Reader::new(&snapshot);
+        assert_eq!(header.header().unwrap(), (IDENTITY, kind::REFUSED, 0));
+    }
+    for exit in [
+        Exit::Code(0),
+        Exit::Code(-7),
+        Exit::Code(i32::MAX),
+        Exit::Signal(9),
+        Exit::Unknown,
+    ] {
+        let expected = answer(0, &Answer::Exited(exit), MAX_MESSAGE).unwrap();
+        assert_eq!(snapshot_exit(exit, MAX_MESSAGE).unwrap(), expected);
+    }
+}
+
+/// AC-T7.4.1: every shorter bound refuses before snapshot allocation; in
+/// particular, an Exhausted usize trailer cannot grow beyond a fitting string.
+#[test]
+fn snapshot_bounds_include_scalar_trailers_before_allocation() {
+    let mut inputs = refusals();
+    inputs.push(Refusal::Backing {
+        key: route_wire_key(),
+        cause: LifecycleCause::Uncertain,
+    });
+    for refusal in inputs {
+        let ordinary = Answer::Refused(refusal);
+        let expected = answer(0, &ordinary, MAX_MESSAGE).unwrap();
+        let Answer::Refused(refusal) = &ordinary else {
+            panic!("owned refusal fixture changed its variant");
+        };
+        assert_eq!(snapshot_refusal(refusal, expected.len()).unwrap(), expected);
+        for bound in 0..expected.len() {
+            assert!(matches!(
+                snapshot_refusal(refusal, bound),
+                Err(Fault::Oversized { .. })
+            ));
+        }
+    }
+    for exit in [Exit::Code(7), Exit::Signal(9), Exit::Unknown] {
+        let expected = answer(0, &Answer::Exited(exit), MAX_MESSAGE).unwrap();
+        for bound in 0..expected.len() {
+            assert!(matches!(
+                snapshot_exit(exit, bound),
+                Err(Fault::Oversized { .. })
+            ));
+        }
+        assert_eq!(snapshot_exit(exit, expected.len()).unwrap(), expected);
+    }
+    let refusal = Refusal::Exhausted {
+        what: "owned snapshot scalar trailer",
+        bound: usize::MAX,
+    };
+    let snapshot = snapshot_refusal(&refusal, MAX_MESSAGE).unwrap();
+    let mut count = Writer::counting(snapshot.len() - 1);
+    count.header(kind::REFUSED, 0);
+    put_refusal(&mut count, &refusal).unwrap();
+    assert_eq!((count.out.len(), count.out.capacity()), (0, 0));
+    assert!(matches!(count.counted(), Err(Fault::Oversized { .. })));
+}
+
+/// AC-T7.4.1: exact write mode refuses before an append can allocate, including
+/// a missing reserve and a scalar overrun; storage failures retain their typed mapping.
+#[test]
+fn snapshot_fixed_writer_never_grows_after_reservation() {
+    let exit = Exit::Code(7);
+    let expected = answer(0, &Answer::Exited(exit), MAX_MESSAGE).unwrap();
+    let mut output = Writer::fixed(expected.len()).unwrap();
+    let allocated = output.out.capacity();
+    output.header(kind::EXITED, 0);
+    put_exit(&mut output, exit);
+    assert_eq!(output.out, expected);
+    output.u64(0);
+    assert_eq!(output.out.capacity(), allocated);
+    assert_eq!(output.out.len(), expected.len());
+    assert!(matches!(output.done(), Err(Fault::Oversized { .. })));
+
+    // Drop the reserved buffer to challenge the independent capacity guard.
+    let mut missing = Writer::fixed(expected.len()).unwrap();
+    missing.out = Vec::new();
+    missing.header(kind::EXITED, 0);
+    put_exit(&mut missing, exit);
+    assert_eq!((missing.out.len(), missing.out.capacity()), (0, 0));
+    let fault = missing.done().unwrap_err();
+    assert!(matches!(fault, Fault::Storage { .. }));
+    assert!(matches!(Refusal::from(fault), Refusal::Exhausted { .. }));
+    // Vec rejects this capacity arithmetically; it makes no huge allocation.
+    assert!(matches!(
+        Writer::fixed(usize::MAX),
+        Err(Fault::Storage { .. })
+    ));
+}
