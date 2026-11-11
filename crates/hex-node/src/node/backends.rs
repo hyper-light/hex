@@ -19,7 +19,13 @@ impl Node {
     fn managed_bounds(record: &BoxRecord) -> Result<hex_api::Bounds, Refusal> {
         let spec = &record.spec;
         spec.check()?;
-        if !matches!(spec.class, ClassSpec::Shards(_) | ClassSpec::Firecracker(_))
+        let dedicated_oci = matches!(spec.class, ClassSpec::Oci(_))
+            && matches!(
+                spec.route_execution(),
+                Some(hex_api::Execution::ShardsDedicated | hex_api::Execution::Firecracker)
+            );
+        if (!matches!(spec.class, ClassSpec::Shards(_) | ClassSpec::Firecracker(_))
+            && !dedicated_oci)
             || record.native_scope.is_none()
         {
             return Err(uncertain(&spec.id));
@@ -99,7 +105,7 @@ impl Node {
             .filter(|_| !patience.is_zero() && patience != Duration::MAX)
             .ok_or_else(|| uncertain(&spec.id))?;
         let bounds = Self::managed_bounds(record)?;
-        if plan.class() != spec.class.class()
+        if plan.class() != spec.backend_class()?
             || record.phase != Phase::Creating
             || record.init.is_some()
         {
@@ -329,7 +335,7 @@ impl Node {
         let Some(record) = self.store.read_lifecycle(id)? else {
             return Ok(None);
         };
-        self.backend(record.spec.class.class())
+        self.backend(record.spec.backend_class()?)
             .map_err(|_| uncertain(id))
     }
 
@@ -356,13 +362,14 @@ impl Node {
             }
             record.spec.check()?;
             if matches!(
-                record.spec.class,
-                ClassSpec::Firecracker(_) | ClassSpec::Shards(_)
-            ) && record.spec.allocation.is_none()
+                record.spec.backend_class()?,
+                Class::Firecracker | Class::Shards
+            ) && record.spec.route_execution() != Some(hex_api::Execution::ShardsShared)
+                && record.spec.allocation.is_none()
             {
                 return Err(uncertain(id));
             }
-            self.backend(record.spec.class.class())
+            self.backend(record.spec.backend_class()?)
                 .map_err(|_| uncertain(id))?;
         }
         let mut summary = RecoverySummary::default();
@@ -377,7 +384,7 @@ impl Node {
         for (id, record) in records {
             let record = record.as_ref().map_err(|_| uncertain(id))?;
             let Some(backend) = self
-                .backend(record.spec.class.class())
+                .backend(record.spec.backend_class()?)
                 .map_err(|_| uncertain(id))?
             else {
                 continue;
@@ -391,7 +398,7 @@ impl Node {
                     ));
                 }
                 Phase::Ready => {
-                    match record.spec.class.class() {
+                    match record.spec.backend_class()? {
                         Class::Firecracker => self
                             .backends
                             .get()
@@ -409,6 +416,7 @@ impl Node {
                     let actual = backend.inspect(id)?;
                     if actual.class != record.spec.class.class()
                         || actual.allocation != record.spec.allocation
+                        || actual.route != record.spec.route
                     {
                         return Err(uncertain(id));
                     }

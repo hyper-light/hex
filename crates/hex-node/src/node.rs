@@ -883,7 +883,7 @@ impl Node {
     fn info(&self, record: &BoxRecord, adopted: bool) -> Result<BoxInfo, Refusal> {
         let id = &record.spec.id;
         if let Some(backend) = self
-            .backend(record.spec.class.class())
+            .backend(record.spec.backend_class()?)
             .map_err(|_| backends::uncertain(id))?
         {
             let mut info = backend.inspect(id)?;
@@ -1006,10 +1006,10 @@ impl Node {
         let mut backend_ids = BTreeSet::new();
         for (id, record) in records {
             if record.as_ref().is_ok_and(|record| {
-                matches!(
-                    record.spec.class,
-                    ClassSpec::Firecracker(_) | ClassSpec::Shards(_)
-                )
+                record
+                    .spec
+                    .backend_class()
+                    .is_ok_and(|class| matches!(class, Class::Firecracker | Class::Shards))
             }) {
                 backend_ids.insert(id);
                 continue;
@@ -1705,7 +1705,7 @@ impl Runtime for Node {
         // and an owner not well formed, is refused by name whether or not the id is taken (HEX-RT-13,
         // HEX-RT-18); then an oci box's init is held to its class's exec bound (HEX-RT-14).
         spec.check()?;
-        if let Some(backend) = self.backend(spec.class.class())? {
+        if let Some(backend) = self.backend(spec.backend_class()?)? {
             return backend.create(spec);
         }
         if !spec.devices.is_empty() && !matches!(&spec.class, ClassSpec::Oci(_)) {

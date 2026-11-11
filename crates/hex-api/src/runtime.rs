@@ -8,6 +8,15 @@ use crate::{Bounds, BoxId, BoxSpec, Class, DeviceInfo, Program, Stdio};
 /// takes milliseconds); waiting for a program is [`Proc`]'s, with a deadline. Every refusal is
 /// typed and says what and why (CLAUDE.md §3).
 pub trait Runtime: Send + Sync {
+    /// Direct native envelope counters from the SAME canonical backing owner. Inner guest usage
+    /// cannot credit host room; an unread or uninitialized native scope remains a typed refusal.
+    fn backing_usage(&self, key: &BackingKey) -> Result<Usage, Refusal> {
+        Err(Refusal::Backing {
+            key: *key,
+            cause: LifecycleCause::Pending,
+        })
+    }
+
     /// Admit and initialize this exact real pool backing through the same native owner. A capacity
     /// report is not a grant, and the default uninitialized adapter performs no effects.
     fn initialize_backing(&self, grant: BackingGrant) -> Result<BackingOffer, Refusal> {
@@ -323,7 +332,15 @@ impl BackingGrant {
 }
 
 fn check_provisioning(devices: &[crate::DeviceId]) -> Result<(), Refusal> {
-    crate::devices::check_ids(devices.iter().copied())?;
+    if devices.len() > crate::MAX_DEVICES {
+        return Err(Refusal::Exhausted {
+            what: "native backing physical claims",
+            bound: crate::MAX_DEVICES,
+        });
+    }
+    for id in devices {
+        id.check()?;
+    }
     if devices
         .windows(2)
         .any(|pair| matches!(pair, [a,b] if a >= b))
@@ -358,21 +375,37 @@ impl RouteOffer {
     /// A dedicated route may hand off its observer's exact physical grant. Its dynamic envelope
     /// extends the SAME evidence-pinned profile; a different pool/profile is not a substitute.
     pub fn check_backing(self, backing: &BackingOffer) -> Result<(), Refusal> {
-        if self.backing != Some(backing.key) {
+        self.check_backing_parts(backing.key, backing.cost, &backing.devices)
+    }
+
+    pub fn check_backing_parts(
+        self,
+        key: BackingKey,
+        profile: RuntimeCost,
+        devices: &[crate::DeviceId],
+    ) -> Result<(), Refusal> {
+        self.check()?;
+        if self.backing != Some(key) {
             return Err(invalid_route("route references another backing generation"));
         }
-        backing.allocation()?;
+        check_provisioning(devices)?;
+        profile.check()?;
+        if profile.floor != profile.ceiling {
+            return Err(invalid_route(
+                "backing profile is not its fixed configured envelope",
+            ));
+        }
         match (self.key.execution, self.cost) {
-            (Execution::ShardsShared, None) if backing.devices.is_empty() => Ok(()),
+            (Execution::ShardsShared, None) if devices.is_empty() => Ok(()),
             (Execution::ShardsDedicated | Execution::Firecracker, Some(cost))
                 if self.key.gpu == GpuEligibility::Required
-                    && !backing.devices.is_empty()
-                    && cost.id == backing.cost.id
-                    && cost.floor == backing.cost.floor
-                    && cost.quantum == backing.cost.quantum
-                    && cost.overhead == backing.cost.overhead
-                    && cost.guest_overhead == backing.cost.guest_overhead
-                    && cost.ceiling.holds(backing.cost.ceiling) =>
+                    && !devices.is_empty()
+                    && cost.id == profile.id
+                    && cost.floor == profile.floor
+                    && cost.quantum == profile.quantum
+                    && cost.overhead == profile.overhead
+                    && cost.guest_overhead == profile.guest_overhead
+                    && cost.ceiling.holds(profile.ceiling) =>
             {
                 Ok(())
             }
@@ -851,12 +884,12 @@ impl Capacity {
                     .ok_or_else(|| invalid_route("route references an absent canonical backing"))?;
                 route.check_backing(backing)?;
             }
-            if let Some(cost) = route.cost {
-                if !total.holds(cost.allocate(CapacityResources::default())?.resources) {
-                    return Err(invalid_route(
-                        "route minimum charge exceeds its physical resource pool",
-                    ));
-                }
+            if let Some(cost) = route.cost
+                && !total.holds(cost.allocate(CapacityResources::default())?.resources)
+            {
+                return Err(invalid_route(
+                    "route minimum charge exceeds its physical resource pool",
+                ));
             }
         }
         for (at, backing) in backings.iter().enumerate() {

@@ -2047,6 +2047,7 @@ impl<O: Os> Shared<O> {
                 host.initialize_backing(grant).map(Answer::BackingOffer)
             }
             Call::ReleaseBacking(key) => host.release_backing(key).map(Answer::BackingOffer),
+            Call::BackingUsage(key) => host.backing_usage(&key).map(Answer::Usage),
             Call::Create(spec) => host.create(*spec).map(Answer::Info),
             Call::Start(id) => host.start(&id).map(|()| Answer::Done),
             Call::Signal { id, signal } => host.signal(&id, signal).map(|()| Answer::Done),

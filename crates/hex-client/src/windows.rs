@@ -47,6 +47,7 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.physical_report"),
     Patience::measuring("client.answer.initialize_backing"),
     Patience::measuring("client.answer.release_backing"),
+    Patience::measuring("client.answer.backing_usage"),
 ];
 
 pub type Client = Core<Socket>;

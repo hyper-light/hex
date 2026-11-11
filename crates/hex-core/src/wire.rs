@@ -152,6 +152,7 @@ mod kind {
     pub const INITIALIZE_BACKING: u16 = 0x0014;
     pub const RELEASE_BACKING: u16 = 0x0015;
     pub const BACKING_OFFER: u16 = 0x800f;
+    pub const BACKING_USAGE: u16 = 0x0016;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -234,6 +235,8 @@ pub enum Call {
     PhysicalReport,
     InitializeBacking(BackingGrant),
     ReleaseBacking(BackingKey),
+    /// Factual host counters from the same native backing owner, answered with Usage.
+    BackingUsage(BackingKey),
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -734,6 +737,7 @@ fn parse_request(
         kind::RELEASE_BACKING => {
             Request::Call(Call::ReleaseBacking(backing_key(&mut r).map_err(bad)?))
         }
+        kind::BACKING_USAGE => Request::Call(Call::BackingUsage(backing_key(&mut r).map_err(bad)?)),
         kind::CREATE => Request::Call(Call::Create(Box::new(box_spec(&mut r).map_err(bad)?))),
         kind::START => Request::Call(Call::Start(box_id(&mut r).map_err(bad)?)),
         kind::EXEC => {
@@ -1046,6 +1050,7 @@ fn request_name(kind: u16) -> &'static str {
         kind::RUN => "a run",
         kind::INITIALIZE_BACKING => "an initialize backing",
         kind::RELEASE_BACKING => "a release backing",
+        kind::BACKING_USAGE => "a backing usage",
         _ => "a request",
     }
 }
@@ -1058,6 +1063,10 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
         }
         Call::ReleaseBacking(key) => {
             w.header(kind::RELEASE_BACKING, id);
+            put_backing_key(w, *key)
+        }
+        Call::BackingUsage(key) => {
+            w.header(kind::BACKING_USAGE, id);
             put_backing_key(w, *key)
         }
         Call::PhysicalReport => {

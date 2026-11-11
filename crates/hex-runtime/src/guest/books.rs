@@ -16,6 +16,12 @@ pub(super) fn uncertain(id: &BoxId) -> Result<Refusal, Refusal> {
 }
 
 impl GuestRuntime {
+    /// The same initialized immutable catalog for the canonical Box/Pool join;
+    /// cloning this triomphe owner allocates no new catalog or holder cache.
+    pub fn device_catalog(&self) -> Option<crate::devices::SharedCatalog> {
+        self.gpu_catalog.as_ref().map(triomphe::Arc::clone)
+    }
+
     /// Called once after the existing Arc<Node> or Arc<Recorded<WithGuest<P>>>
     /// exists. Coercing that Arc to Books and downgrading allocates no new owner.
     pub fn bind_books(&self, books: Weak<dyn Books>) -> Result<(), Refusal> {

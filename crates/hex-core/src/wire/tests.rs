@@ -656,6 +656,7 @@ fn requests() -> Vec<(u64, Request, usize)> {
             Request::Call(Call::ReleaseBacking(route_wire_key())),
             0,
         ),
+        (203, Request::Call(Call::BackingUsage(route_wire_key())), 0),
     ]
 }
 
@@ -1188,7 +1189,7 @@ fn a_given_answer_carries_a_descriptor_for_each_stream_it_names() {
     let bytes = answer(14, &given, MAX_MESSAGE).unwrap();
     assert_eq!(
         read_answer(&received(&bytes, 2), MAX_MESSAGE).map(|(_, a)| a),
-        Ok(given.clone())
+        Ok(given)
     );
     for fds in [0, 1, 3] {
         assert_eq!(
@@ -1565,7 +1566,7 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x0016, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x0017, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -2084,6 +2085,22 @@ fn route_wire_key() -> BackingKey {
     }
 }
 
+fn route_wire_shared_key() -> BackingKey {
+    BackingKey {
+        pool: [0x19; 32],
+        generation: [0x2a; 16],
+    }
+}
+
+fn route_wire_shared_backing(phase: BackingPhase) -> BackingOffer {
+    BackingOffer {
+        key: route_wire_shared_key(),
+        cost: route_wire_cost(),
+        phase,
+        devices: Vec::new(),
+    }
+}
+
 fn route_wire_cost() -> RuntimeCost {
     let fixed = CapacityResources {
         cpu_milli: 1000,
@@ -2158,7 +2175,11 @@ fn route_wire_route(execution: Execution) -> RouteOffer {
             Execution::Firecracker | Execution::ShardsDedicated => Some(route_wire_cost()),
             _ => None,
         },
-        backing: (execution == Execution::ShardsShared).then(route_wire_key),
+        backing: match execution {
+            Execution::ShardsShared => Some(route_wire_shared_key()),
+            Execution::ShardsDedicated => Some(route_wire_key()),
+            Execution::Native | Execution::Firecracker => None,
+        },
     }
 }
 
@@ -2200,7 +2221,10 @@ fn route_wire_capacity() -> Capacity {
         route_wire_route(Execution::Firecracker),
     ];
     capacity.device_routes = vec![0b110, 0b100];
-    capacity.backings = vec![route_wire_backing(BackingPhase::Live)];
+    capacity.backings = vec![
+        route_wire_backing(BackingPhase::Live),
+        route_wire_shared_backing(BackingPhase::Live),
+    ];
     capacity
 }
 
@@ -2259,9 +2283,18 @@ fn route_wire_backing_calls_and_all_phases_roundtrip() {
             0x0015,
             Request::Call(Call::ReleaseBacking(route_wire_key())),
         ),
+        (0x0016, Request::Call(Call::BackingUsage(route_wire_key()))),
     ] {
         let bytes = request(201, &expected, MAX_MESSAGE).unwrap();
         assert_eq!(&bytes[12..14], &tag.to_le_bytes());
+        assert_eq!(&bytes[HEADER_BYTES..HEADER_BYTES + 32], &[0xa7; 32]);
+        assert_eq!(
+            &bytes[HEADER_BYTES + 32..HEADER_BYTES + BACKING_KEY_BYTES],
+            &[0x6d; 16]
+        );
+        if tag != 0x0014 {
+            assert_eq!(bytes.len(), HEADER_BYTES + BACKING_KEY_BYTES);
+        }
         assert_eq!(
             read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
             expected
@@ -2303,6 +2336,23 @@ fn route_wire_backing_calls_and_all_phases_roundtrip() {
             Err(Fault::Descriptors { .. })
         ));
     }
+    let expected = Answer::Usage(Usage {
+        memory_bytes: 4096,
+        memory_peak_bytes: 8192,
+        oom_kills: 0,
+        pids: 2,
+        pids_refused: 0,
+        cpu_usec: 77,
+        io_read_bytes: 17,
+        io_write_bytes: 19,
+    });
+    let bytes = answer(203, &expected, MAX_MESSAGE).unwrap();
+    assert_eq!(&bytes[12..14], &0x8005u16.to_le_bytes());
+    assert_eq!(bytes.len(), HEADER_BYTES + 8 * size_of::<u64>());
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        expected
+    );
 }
 
 /// Fixed enum tags describe the original workload/image and initialized execution independently.
@@ -2408,6 +2458,10 @@ fn route_wire_capacity_preserves_routes_masks_and_unmeasured_backings() {
     assert_eq!(capacity.device_routes, [6, 4]);
     assert_eq!(capacity.routes[0].key.class, Class::Oci);
     assert_eq!(capacity.routes[1].key.class, Class::Oci);
+    assert_eq!(capacity.backings.len(), 2);
+    assert!(capacity.backings[1].devices.is_empty());
+    assert_eq!(capacity.routes[0].backing, Some(capacity.backings[1].key));
+    assert_eq!(capacity.routes[1].backing, Some(capacity.backings[0].key));
     assert_eq!(capacity.backings[0].devices[1].key, u64::MAX);
     assert!(
         !capacity
@@ -2518,7 +2572,7 @@ fn route_wire_backing_refusals_preserve_key_and_cause() {
 fn route_wire_hostile_masks_references_and_duplicate_pools_refuse() {
     let shared = route_wire_route(Execution::ShardsShared);
     let native = route_wire_route(Execution::Native);
-    let backing = route_wire_backing(BackingPhase::Live);
+    let backing = route_wire_shared_backing(BackingPhase::Live);
     for masks in [
         vec![],
         vec![1],
@@ -2884,11 +2938,12 @@ fn route_wire_new_messages_enforce_exact_bounds_truncation_and_trailing_bytes() 
     for expected in [
         Request::Call(Call::InitializeBacking(route_wire_grant())),
         Request::Call(Call::ReleaseBacking(route_wire_key())),
+        Request::Call(Call::BackingUsage(route_wire_key())),
         Request::Call(Call::Create(Box::new({
             let mut spec = oci_spec();
             spec.route = Some(RouteReceipt {
                 key: route_wire_route(Execution::ShardsShared).key,
-                backing: Some(route_wire_key()),
+                backing: Some(route_wire_shared_key()),
             });
             spec
         }))),
@@ -2918,7 +2973,7 @@ fn route_wire_new_messages_enforce_exact_bounds_truncation_and_trailing_bytes() 
         Answer::Info(BoxInfo {
             route: Some(RouteReceipt {
                 key: route_wire_route(Execution::ShardsShared).key,
-                backing: Some(route_wire_key()),
+                backing: Some(route_wire_shared_key()),
             }),
             ..info()
         }),

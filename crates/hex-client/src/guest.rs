@@ -179,6 +179,7 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.guest.answer.physical_report"),
     Patience::measuring("client.guest.answer.initialize_backing"),
     Patience::measuring("client.guest.answer.release_backing"),
+    Patience::measuring("client.guest.answer.backing_usage"),
 ];
 
 /// A node agent in a guest, reached through a [`Link`].

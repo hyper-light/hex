@@ -667,7 +667,7 @@ fn a_failed_offer_open_releases_the_remote_preparation_and_local_reservation() {
 #[test]
 fn runtime_capacity_wait_appends_without_moving_existing_indexes() {
     let waits = <Memory as Transport>::answers();
-    assert_eq!(KINDS, 27);
+    assert_eq!(KINDS, 28);
     for (request, index) in [
         (
             Request::Hello {
@@ -746,6 +746,10 @@ fn backing_lifecycle_waits_append_without_reordering_old_operations() {
     assert!(std::ptr::eq(
         kind_of(waits, &Request::Call(Call::ReleaseBacking(key))).unwrap(),
         &waits[26]
+    ));
+    assert!(std::ptr::eq(
+        kind_of(waits, &Request::Call(Call::BackingUsage(key))).unwrap(),
+        &waits[27]
     ));
 }
 

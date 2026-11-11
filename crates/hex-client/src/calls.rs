@@ -65,7 +65,7 @@ impl LegacyKind {
 }
 
 /// Legacy, scheduler, capacity, native physical report, then backing lifecycle: waits only append.
-pub const KINDS: usize = LegacyKind::COUNT + WaitKind::COUNT + 4;
+pub const KINDS: usize = LegacyKind::COUNT + WaitKind::COUNT + 5;
 
 /// The wait of `request`'s kind in `waits`, a client's table of its call kinds' learned waits (decision 9: a client's
 /// call's wait for its answer and its send is learned per call kind, since a delete waits on its box's emptying and a
@@ -87,6 +87,9 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
             Call::ReleaseBacking(_) => LegacyKind::COUNT
                 .checked_add(WaitKind::COUNT)?
                 .checked_add(3)?,
+            Call::BackingUsage(_) => LegacyKind::COUNT
+                .checked_add(WaitKind::COUNT)?
+                .checked_add(4)?,
             Call::Create(_) => LegacyKind::Create as usize,
             Call::Start(_) => LegacyKind::Start as usize,
             Call::Exec { .. } => LegacyKind::Exec as usize,
@@ -2195,6 +2198,14 @@ fn settle(stdio: Stdio, ends: hex_api::Given) -> Result<hex_api::Given, Refusal>
 }
 
 impl<T: Transport> Runtime for Core<T> {
+    fn backing_usage(&self, key: &hex_api::BackingKey) -> Result<Usage, Refusal> {
+        match self.plain(Call::BackingUsage(*key))? {
+            Answer::Usage(usage) => Ok(usage),
+            Answer::Refused(why) => Err(why),
+            other => Err(unexpected("native backing usage", &other)),
+        }
+    }
+
     fn initialize_backing(
         &self,
         grant: hex_api::BackingGrant,
