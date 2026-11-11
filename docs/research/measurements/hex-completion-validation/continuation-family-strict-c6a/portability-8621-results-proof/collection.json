@@ -1,0 +1,39 @@
+{
+  "bytes": 325657,
+  "sha256": "27d038877368ca02a54dd97d17cf3db055053c23bc76bc076f13ce87c5088d40",
+  "members": {
+    "cohort-8621a28d-mac-portability-8621/running.json": {
+      "bytes": 1421,
+      "sha256": "8fd23b78178599ad8440144c86b43d3f7cf722e5acdbf4be46e08e845abe5416"
+    },
+    "cohort-8621a28d-mac-portability-8621/result.json": {
+      "bytes": 1766,
+      "sha256": "d76a8049ff9bf8860202d80389af20f0d9461419468c77f9a8a3301655426682"
+    },
+    "cohort-8621a28d-mac-portability-8621/source-before.json": {
+      "bytes": 507489,
+      "sha256": "0703fa4d24a904bb6b4dcff29e1091b28e7a3c147463456d43097a8ca3a4a110"
+    },
+    "cohort-8621a28d-mac-portability-8621/source-after.json": {
+      "bytes": 507489,
+      "sha256": "0703fa4d24a904bb6b4dcff29e1091b28e7a3c147463456d43097a8ca3a4a110"
+    },
+    "cohort-8621a28d-mac-portability-8621/windows-x64-arm64-joined-strict.log": {
+      "bytes": 8318,
+      "sha256": "3d79081ab430edab37d92b6a5e11a4b637362d386cc07b9c55f03cf35d49499c"
+    },
+    "cohort-8621a28d-mac-portability-8621/public-registry-seed.json": {
+      "bytes": 202,
+      "sha256": "1328edbb1eb50f43c88ffca533b84d1b9e2a15ce42ceee344eee4086aaf13ffb"
+    },
+    "cohort-8621a28d-mac-portability-8621/collected-binaries.json": {
+      "bytes": 993,
+      "sha256": "6d6d225cd91c26c430b83e68a08d7153ce4b04ce4811f9593f5401ec4f9933b1"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

@@ -1,0 +1,39 @@
+{
+  "bytes": 2254,
+  "sha256": "193dfd23f9fc1f47cc3c37e74aee4def2b67c40831ddf25076247eb6ca169d06",
+  "members": {
+    "cohort-829b55b3-mac-setexec-fd-observation/running.json": {
+      "bytes": 3033,
+      "sha256": "8e93d10beb1afb8fbbab04e598fda44288f48bdb24c9f5338111f00c3f05fe33"
+    },
+    "cohort-829b55b3-mac-setexec-fd-observation/result.json": {
+      "bytes": 3467,
+      "sha256": "5b5defeaba397550f466aafb3721bba7021f53bb627a4ba166868849d2276d73"
+    },
+    "cohort-829b55b3-mac-setexec-fd-observation/source-before.json": {
+      "bytes": 333,
+      "sha256": "c197713864050b01da1da4250956dbc42ed80a80c28c214196b414f949e8afc6"
+    },
+    "cohort-829b55b3-mac-setexec-fd-observation/source-after.json": {
+      "bytes": 333,
+      "sha256": "c197713864050b01da1da4250956dbc42ed80a80c28c214196b414f949e8afc6"
+    },
+    "cohort-829b55b3-mac-setexec-fd-observation/compile.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "cohort-829b55b3-mac-setexec-fd-observation/native-four-cuts.log": {
+      "bytes": 966,
+      "sha256": "430882517ae142bd4482d2d99f76bfee834b0e595ff5cde334ba714430ad65fd"
+    },
+    "cohort-829b55b3-mac-setexec-fd-observation/collected-binaries.json": {
+      "bytes": 1697,
+      "sha256": "d06beaea90345793258504f4ced85a318bce3648d4f46d6db0cab0a364c189bf"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}
