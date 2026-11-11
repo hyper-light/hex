@@ -202,6 +202,20 @@ fn invalid(why: impl Into<String>) -> Refusal {
         why: why.into(),
     }
 }
+fn invalid_static(why: &'static str) -> Refusal {
+    let mut owned = String::new();
+    if owned.try_reserve_exact(why.len()).is_err() {
+        return Refusal::Exhausted {
+            what: "placement refusal bytes",
+            bound: why.len(),
+        };
+    }
+    owned.push_str(why);
+    Refusal::Invalid {
+        what: "placement",
+        why: owned,
+    }
+}
 fn bad(why: impl Into<String>) -> Stop {
     Stop::Damaged(why.into())
 }
@@ -300,8 +314,8 @@ impl Driver {
         for (key, payload) in rows.running()? {
             // Core demand is durable beside this payload; decode it through core boot below.
             // Select its runtime using the shared model codec, without a second decision format.
-            let (demand, allocation, ended) = durable_demand(&rows, key, models)?;
-            let charged = hex_sim::model::allocated_resources(demand.need, allocation)
+            let (demand, allocation, route, ended) = durable_demand(&rows, key, models)?;
+            let charged = hex_sim::model::reserved_resources(demand.need, allocation, route)
                 .map_err(|_| bad("retained allocation differs from original workload"))?;
             let runtime = runtimes.get(demand.class)?;
             validate(&demand, &payload)?;
@@ -315,7 +329,7 @@ impl Driver {
                         )
                         .into());
                     }
-                    if info.allocation != allocation {
+                    if info.allocation != allocation || info.route != route {
                         return Err(Refusal::Lifecycle {
                             id: physical.try_clone()?,
                             cause: hex_api::LifecycleCause::Uncertain,
@@ -465,6 +479,9 @@ impl Driver {
     pub fn submit(&self, demand: Demand, payload: Payload) -> Result<(Key, Step), Error> {
         let _operation = self.operation()?;
         validate(&demand, &payload)?;
+        let mut demand = demand;
+        demand.ask.runtime_class = Some(payload.spec.class.class());
+        demand.ask.native_only |= matches!(payload.spec.class, hex_api::ClassSpec::Bundle(_));
         let mut state = self.lock()?;
         state.rows.context = Context::NextOwned(payload);
         let State { node, rows, .. } = &mut *state;
@@ -519,6 +536,18 @@ impl Driver {
             }
             drop(state);
             let checked = validate(&demand, &payload).and_then(|()| {
+                if let Msg::Start {
+                    route: Some(route), ..
+                } = envelope.msg
+                    && (route.key.class != payload.spec.class.class()
+                        || matches!(payload.spec.class, hex_api::ClassSpec::Bundle(_))
+                            && route.key.execution != hex_api::Execution::Native)
+                {
+                    return Err(invalid_static(
+                        "committed route differs from the actual original payload",
+                    )
+                    .into());
+                }
                 let runtime = self.runtimes.get(demand.class)?;
                 validate_backend(&payload, &runtime)
             });
@@ -709,6 +738,8 @@ impl Driver {
             spec.id = id.clone();
             let allocation = self.lock()?.node.assigned_allocation(key)?;
             spec.allocation = allocation;
+            let route = self.lock()?.node.assigned_route(key)?;
+            spec.route = route;
             let selected = self
                 .lock()?
                 .node
@@ -725,7 +756,7 @@ impl Driver {
             assigned.extend_from_slice(&spec.devices);
             let mut launched = None;
             let made = match runtime.inspect(&id) {
-                Ok(info) if info.allocation != allocation => {
+                Ok(info) if info.allocation != allocation || info.route != route => {
                     step.notices.push(Notice::Unknown {
                         key,
                         refusal: Refusal::Lifecycle {
@@ -741,8 +772,20 @@ impl Driver {
                     // Combined launch service includes any staging performed inside create.
                     // Explicit modeled transfer/work costs omit this aggregate in the scorer.
                     // Recovery/preexisting boxes do not create a second or partial sample.
-                    launched = Some(Instant::now());
-                    runtime.create(spec)
+                    let checked = (|| -> Result<(), Refusal> {
+                        if route.is_some() {
+                            let offered =
+                                runtime.capacity(spec.class.class())?.ok_or_else(|| {
+                                    invalid_static("routed create has no initialized native offer")
+                                })?;
+                            offered.validate_route(&spec)?;
+                        }
+                        Ok(())
+                    })();
+                    checked.and_then(|()| {
+                        launched = Some(Instant::now());
+                        runtime.create(spec)
+                    })
                 }
                 Err(why) => {
                     step.notices.push(Notice::Unknown {
@@ -754,7 +797,7 @@ impl Driver {
                 }
             };
             let made = made.and_then(|info| {
-                if info.allocation != allocation {
+                if info.allocation != allocation || info.route != route {
                     return Err(Refusal::Lifecycle {
                         id: id.try_clone()?,
                         cause: hex_api::LifecycleCause::Uncertain,
@@ -1013,6 +1056,16 @@ impl Driver {
 
 fn validate(demand: &Demand, payload: &Payload) -> Result<(), Error> {
     payload.spec.check()?;
+    if payload.spec.route.is_some() {
+        return Err(invalid_static("the scheduler derives the initialized execution route").into());
+    }
+    if demand
+        .ask
+        .runtime_class
+        .is_some_and(|class| class != payload.spec.class.class())
+    {
+        return Err(invalid_static("original runtime form differs from the actual payload").into());
+    }
     if payload.spec.allocation.is_some() {
         return Err(
             invalid("the scheduler derives the allocation from the original demand").into(),
@@ -1134,13 +1187,21 @@ fn durable_demand(
     rows: &Rows,
     key: Key,
     models: &[String],
-) -> Result<(Demand, Option<hex_api::Allocation>, bool), Stop> {
+) -> Result<
+    (
+        Demand,
+        Option<hex_api::Allocation>,
+        Option<hex_api::RouteReceipt>,
+        bool,
+    ),
+    Stop,
+> {
     let row = rows.row(key)?;
     // The existing core durable grammar prefixes a ran demand with owner and lifecycle state.
     let (_, rest) = row.split_once(' ').ok_or_else(|| bad("ran owner"))?;
     let (state, _) = rest.split_once(' ').ok_or_else(|| bad("ran state"))?;
-    let (demand, allocation) = peer::recorded_demand(row, models)?;
-    Ok((demand, allocation, state == "ended"))
+    let (demand, allocation, route) = peer::recorded_assignment(row, models)?;
+    Ok((demand, allocation, route, state == "ended"))
 }
 
 #[cfg(test)]

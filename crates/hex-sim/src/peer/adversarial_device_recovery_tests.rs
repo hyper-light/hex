@@ -25,16 +25,17 @@ fn held_by(node: &Node, key: Key) -> Held {
 fn create_confirmed(node: &mut Node, records: &mut Memory, demand: Demand) -> (Key, Held) {
     let (key, start) = node.submit(demand, records).unwrap();
     assert_eq!(
-        start,
-        [(
-            NodeId(0),
-            Msg::Start {
-                allocation: None,
-                key,
-                demand
-            }
-        )]
-    );
+            start,
+            [(
+                NodeId(0),
+                Msg::Start {
+                    allocation: None,
+                    key,
+                    demand
+                route: None,
+    }
+            )]
+        );
     assert!(deliver_one(node, records, start).is_empty());
     assert_eq!(std::mem::take(&mut node.told), [Told::Create(key, demand)]);
     let assigned = held_by(node, key);
@@ -613,6 +614,7 @@ fn overlapping_recovery_claims_preserve_all_rows_until_the_whole_restore_is_vali
                     allocation: None,
                     key,
                     demand,
+                    route: None,
                 },
                 &mut records,
             )
@@ -663,18 +665,19 @@ fn legacy_cpu_only_row_recovers_with_empty_assignments_and_replay_does_not_creat
     assert_eq!(node.assigned_device_specs(unknown).unwrap(), None);
     let before = records.rows.clone();
     assert_eq!(
-        node.hear(
-            NodeId(0),
-            Msg::Start {
-                allocation: None,
-                key,
-                demand
-            },
-            &mut records
-        )
-        .unwrap(),
-        [(NodeId(0), Msg::Started { key })]
-    );
+            node.hear(
+                NodeId(0),
+                Msg::Start {
+                    allocation: None,
+                    key,
+                    demand
+                route: None,
+    },
+                &mut records
+            )
+            .unwrap(),
+            [(NodeId(0), Msg::Started { key })]
+        );
     assert_eq!(records.rows, before);
     assert!(node.told.is_empty());
     let mut assignments = BTreeMap::from([(key, held)]);
@@ -1025,13 +1028,14 @@ fn last_legal_device_index_roundtrips_and_releases_without_iterator_overflow() {
         [last]
     );
     let runner = Ran {
-        allocation: None,
         owner: NodeId(0),
         demand,
+        allocation: None,
         workload: WorkloadId(0),
         created: true,
         at: None,
         ended: false,
+        route: None,
     };
     let row = ran_text(&runner, &models, &spec.devices, &[last]).unwrap();
     assert!(row.starts_with(&format!("{encoded} running ")));

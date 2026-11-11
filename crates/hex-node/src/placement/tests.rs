@@ -1293,6 +1293,7 @@ fn restart_with_less_room(pool_limited: bool) {
     assert_eq!(rt.creates.load(Ordering::SeqCst), 1);
     let duplicate = Envelope {
         msg: Msg::Start {
+            route: None,
             allocation: None,
             key,
             demand: d,
@@ -1322,6 +1323,7 @@ fn restart_with_less_room(pool_limited: bool) {
             NodeId(0),
             Envelope {
                 msg: Msg::Start {
+                    route: None,
                     allocation: None,
                     key: foreign,
                     demand: d,

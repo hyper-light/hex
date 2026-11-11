@@ -15,9 +15,13 @@ use crate::error::SimError;
 use crate::lb::{self, BUCKETS, Index};
 use crate::model::{
     Class, Classes, Demand, Device, DeviceKind, GpuLoad, Held, Kind, NodeId, NodeSpec, Platform,
-    Resources, RuntimePool, WorkloadId, bind, fits_devices,
+    Resources, RuntimePool, WorkloadId, bind_observed, fits_observed,
 };
 use crate::start_cost::{self, Costs, Prepared, Rates, StartObservation, Terms};
+
+mod routes;
+pub(crate) use routes::PhysicalSlot;
+use routes::{Choice, Holder, Routes};
 
 /// A session is refused a node whose CPU in use, background and placed, is above this share of
 /// its CPU, per mille: `AC-T7.6.3`'s 90%.
@@ -201,7 +205,7 @@ pub enum Verdict {
     Hot,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 struct Slot {
     capacity: Resources,
     free: Resources,
@@ -214,6 +218,7 @@ struct Slot {
     used_by_class: [Resources; Class::COUNT],
     runtime_pools: [Option<RuntimePool>; Class::COUNT],
     costs: [Option<hex_api::RuntimeCost>; Class::COUNT],
+    routes: Option<Routes>,
 }
 
 /// A GPU's load as one share, in millionths: the larger of its utilisation and its memory in use, as
@@ -226,9 +231,13 @@ fn gpu_busy(d: &Device) -> Option<u64> {
 }
 
 /// How idle the GPUs `held` names are: the sum of each one's share free of its load, in millionths.
-fn gpu_idle(devices: &[Device], held: &[u16]) -> u64 {
+fn gpu_idle(devices: &[PhysicalSlot], held: &[u16]) -> u64 {
     held.iter()
-        .filter_map(|&i| devices.get(usize::from(i)))
+        .filter_map(|&i| {
+            devices
+                .get(usize::from(i))
+                .and_then(|slot| slot.observed.as_ref())
+        })
         .filter(|d| d.kind == DeviceKind::Gpu)
         // An unread GPU earns no idle credit. Fresh matching already requires both readings;
         // surviving bindings still retain their exact identity during telemetry loss.
@@ -238,17 +247,39 @@ fn gpu_idle(devices: &[Device], held: &[u16]) -> u64 {
 }
 
 impl Slot {
-    fn allocation(&self, demand: &Demand) -> Result<Option<hex_api::Allocation>, hex_api::Refusal> {
+    fn choice(&self, demand: &Demand) -> Result<Option<Choice>, Verdict> {
+        self.routes
+            .as_ref()
+            .map(|routes| routes.chosen(demand))
+            .transpose()
+    }
+
+    fn allocation(&self, demand: &Demand) -> Result<Option<hex_api::Allocation>, SimError> {
+        if let Some(routes) = &self.routes {
+            let choice = routes
+                .chosen(demand)
+                .map_err(|_| SimError::Config("no unambiguous initialized route"))?;
+            return routes
+                .allocation(choice, demand)
+                .map_err(|_| SimError::Config("invalid initialized route charge"));
+        }
         self.costs
             .get(demand.class.index())
             .copied()
             .flatten()
             .map(|cost| cost.allocate(crate::model::capacity_resources(demand.need)))
             .transpose()
+            .map_err(|_| SimError::Config("invalid runtime charge"))
     }
 
     fn charged(&self, demand: &Demand) -> Option<Resources> {
-        crate::model::allocated_resources(demand.need, self.allocation(demand).ok()?).ok()
+        let allocation = self.allocation(demand).ok()?;
+        if let Some(routes) = &self.routes {
+            return routes
+                .charged(routes.chosen(demand).ok()?, demand, allocation)
+                .ok();
+        }
+        crate::model::allocated_resources(demand.need, allocation).ok()
     }
 
     fn pool_used(&self, classes: Classes) -> Option<Resources> {
@@ -261,7 +292,13 @@ impl Slot {
         Some(used)
     }
 
-    fn runtime_holds(&self, class: Class, need: &Resources) -> bool {
+    fn runtime_holds(&self, demand: &Demand, need: &Resources) -> bool {
+        let class = demand.class;
+        if let Some(routes) = &self.routes {
+            return routes
+                .chosen(demand)
+                .is_ok_and(|choice| routes.holds_inner(choice, demand));
+        }
         #[cfg(test)]
         if IGNORE_RUNTIME_POOLS.get() {
             return true;
@@ -280,26 +317,36 @@ impl Slot {
     fn verdict(
         &self,
         demand: &Demand,
-        devices: &[Device],
+        devices: &[PhysicalSlot],
         free: impl Fn(usize) -> bool,
     ) -> Verdict {
         let (ask, class, os) = (&demand.ask, demand.class, self.platform.os);
         if !self.classes.has(class) {
             return Verdict::NoClass;
         }
+        let choice = match self.choice(demand) {
+            Ok(choice) => choice,
+            Err(why) => return why,
+        };
         let Some(need) = self.charged(demand) else {
             return Verdict::NoRoom;
         };
-        // AC-T7.4.1: VM images describe their Linux guest, independently of the VMM host.
+        // Process asks retain host meaning; an actual routed OCI/VM offer names its image.
         let image_os = match class {
             Class::Oci => os,
             Class::Shards | Class::Firecracker => crate::model::Os::Linux,
         };
-        if ask.os.is_some_and(|o| o != image_os)
-            || ask.arch.is_some_and(|a| a != self.platform.arch)
+        if choice.is_none()
+            && (ask.os.is_some_and(|o| o != image_os)
+                || ask.arch.is_some_and(|a| a != self.platform.arch))
         {
             return Verdict::NoPlatform;
         }
+        let exposed_class = match choice.map(|choice| choice.offer.key.backend_class()) {
+            Some(hex_api::Class::Shards) => Class::Shards,
+            Some(hex_api::Class::Firecracker) => Class::Firecracker,
+            _ => class,
+        };
         let gpus_only = crate::model::Ask {
             vfio: 0,
             block: 0,
@@ -307,11 +354,60 @@ impl Slot {
             kvm: false,
             ..*ask
         };
-        let exposed_device =
-            |index: usize| devices.get(index).is_some_and(|d| d.classes.has(class));
-        if need.gpus > 0
-            && (!class.exposes(os, DeviceKind::Gpu)
-                || !fits_devices(devices, exposed_device, need.gpus, &gpus_only))
+        let exposed_device = |index: usize| {
+            devices.get(index).is_some_and(|slot| {
+                slot.observed
+                    .as_ref()
+                    .is_some_and(|device| device.classes.has(class))
+                    && choice.is_none_or(|choice| {
+                        u32::try_from(choice.at)
+                            .ok()
+                            .and_then(|at| 1u64.checked_shl(at))
+                            .is_some_and(|bit| slot.routes & bit != 0)
+                    })
+                    && choice
+                        .and_then(|choice| choice.offer.backing)
+                        .is_none_or(|key| {
+                            self.routes
+                                .as_ref()
+                                .and_then(|routes| routes.backing(key))
+                                .is_some_and(|(backing, _)| {
+                                    slot.id.is_some_and(|id| {
+                                        backing.devices.binary_search(&id).is_ok()
+                                    })
+                                })
+                        })
+            })
+        };
+        let observed = |index: usize| devices.get(index).and_then(|slot| slot.observed.as_ref());
+        if let Some(key) = choice.and_then(|choice| choice.offer.backing)
+            && choice.is_some_and(|choice| {
+                choice.offer.key.execution != hex_api::Execution::ShardsShared
+            })
+        {
+            let selected = usize::try_from(demand.need.gpus)
+                .ok()
+                .and_then(|n| n.checked_add(usize::from(ask.vfio)))
+                .and_then(|n| n.checked_add(usize::from(ask.block)))
+                .and_then(|n| n.checked_add(usize::from(ask.net)));
+            if self
+                .routes
+                .as_ref()
+                .and_then(|routes| routes.backing(key))
+                .is_none_or(|(backing, _)| selected != Some(backing.devices.len()))
+            {
+                return Verdict::NoGpu;
+            }
+        }
+        if demand.need.gpus > 0
+            && (!exposed_class.exposes(os, DeviceKind::Gpu)
+                || !fits_observed(
+                    devices.len(),
+                    observed,
+                    exposed_device,
+                    demand.need.gpus,
+                    &gpus_only,
+                ))
         {
             return Verdict::NoGpu;
         }
@@ -322,17 +418,28 @@ impl Slot {
                 (ask.net, DeviceKind::Net),
             ]
             .iter()
-            .all(|&(n, kind)| n == 0 || class.exposes(os, kind));
-            let kvm = !ask.kvm || (self.kvm && class.gives_kvm(os));
-            if !exposed || !kvm || !fits_devices(devices, exposed_device, 0, ask) {
+            .all(|&(n, kind)| n == 0 || exposed_class.exposes(os, kind));
+            let kvm = !ask.kvm
+                || (self.kvm
+                    && choice.is_none_or(|choice| {
+                        choice.offer.key.execution == hex_api::Execution::Native
+                    })
+                    && class.gives_kvm(os));
+            if !exposed || !kvm || !fits_observed(devices.len(), observed, exposed_device, 0, ask) {
                 return Verdict::NoDevice;
             }
         }
-        if !self.free.holds(&need) || !self.runtime_holds(class, &need) {
+        if !self.free.holds(&need) || !self.runtime_holds(demand, &need) {
             return Verdict::NoRoom;
         }
-        if (need.gpus > 0 || ask.devices())
-            && !fits_devices(devices, |i| exposed_device(i) && free(i), need.gpus, ask)
+        if (demand.need.gpus > 0 || ask.devices())
+            && !fits_observed(
+                devices.len(),
+                observed,
+                |i| exposed_device(i) && free(i),
+                demand.need.gpus,
+                ask,
+            )
         {
             return Verdict::NoRoom;
         }
@@ -437,15 +544,15 @@ impl Slot {
 /// The nodes' room and filter state, and the kernel's index of them by free whole CPUs
 /// ([`crate::lb::Index`], kiln's `lb/index.rs`): a pick walks it from the need's bucket up, so it
 /// reads only nodes with the CPU for the need, every one of them.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct FitIndex {
     costs: Costs,
     /// By node id; ids are dense from 0.
     slots: Vec<Slot>,
     /// Each node's devices, by node id.
-    devices: Vec<Vec<Device>>,
+    devices: Vec<Vec<PhysicalSlot>>,
     /// The workload holding each of a node's devices, until it is deleted.
-    held: Vec<Vec<Option<WorkloadId>>>,
+    held: Vec<Vec<Option<Holder>>>,
     ix: Index,
     /// The highest bucket: the most whole CPUs any node has.
     last: u32,
@@ -455,6 +562,21 @@ pub struct FitIndex {
 fn bucket(free: &Resources, last: u32) -> u32 {
     let whole = free.cpu_milli.checked_div(lb::CPU).unwrap_or(0);
     u32::try_from(whole).unwrap_or(u32::MAX).min(last)
+}
+
+fn bucket_slot(slot: &Slot, last: u32) -> u32 {
+    let mut upper = slot.free;
+    upper.cpu_milli = upper
+        .cpu_milli
+        .max(slot.routes.as_ref().map_or(0, Routes::rank_cpu));
+    bucket(&upper, last)
+}
+
+pub(crate) struct PreparedRefresh {
+    node: NodeId,
+    slot: Slot,
+    devices: Vec<PhysicalSlot>,
+    holders: Vec<Option<Holder>>,
 }
 
 /// A node's capacity as the kernel's amounts: CPU, memory, disk, GPUs.
@@ -488,13 +610,91 @@ fn check_device_keys(node: &NodeSpec) -> Result<(), SimError> {
 }
 
 impl FitIndex {
+    pub fn try_clone(&self) -> Result<Self, SimError> {
+        let mut slots = Vec::new();
+        let mut devices = Vec::new();
+        let mut held = Vec::new();
+        slots
+            .try_reserve_exact(self.len())
+            .map_err(|_| SimError::Full {
+                what: "index snapshot nodes",
+                bound: self.len(),
+            })?;
+        devices
+            .try_reserve_exact(self.len())
+            .map_err(|_| SimError::Full {
+                what: "index snapshot devices",
+                bound: self.len(),
+            })?;
+        held.try_reserve_exact(self.len())
+            .map_err(|_| SimError::Full {
+                what: "index snapshot holders",
+                bound: self.len(),
+            })?;
+        for (at, slot) in self.slots.iter().enumerate() {
+            let node =
+                NodeId(u32::try_from(at).map_err(|_| SimError::Config("node index overflows"))?);
+            slots.push(Slot {
+                capacity: slot.capacity,
+                free: slot.free,
+                background_milli: slot.background_milli,
+                classes: slot.classes,
+                platform: slot.platform,
+                kvm: slot.kvm,
+                builds: slot.builds,
+                benchmarks: slot.benchmarks,
+                used_by_class: slot.used_by_class,
+                runtime_pools: slot.runtime_pools,
+                costs: slot.costs,
+                routes: slot
+                    .routes
+                    .as_ref()
+                    .map(|routes| routes.try_clone(node))
+                    .transpose()?,
+            });
+            devices.push(routes::copy(
+                self.devices.get(at).ok_or(SimError::UnknownNode(node))?,
+                node,
+            )?);
+            held.push(routes::copy(
+                self.held.get(at).ok_or(SimError::UnknownNode(node))?,
+                node,
+            )?);
+        }
+        Ok(Self {
+            costs: self.costs.try_clone()?,
+            slots,
+            devices,
+            held,
+            ix: self.ix.try_clone().ok_or(SimError::Full {
+                what: "bucket index snapshot",
+                bound: self.len(),
+            })?,
+            last: self.last,
+        })
+    }
+
     /// Nodes' ids must be dense from 0, in order.
     pub fn new(nodes: &[NodeSpec]) -> Result<Self, SimError> {
-        let mut slots = Vec::with_capacity(nodes.len());
-        let (mut devices, mut held) = (
-            Vec::with_capacity(nodes.len()),
-            Vec::with_capacity(nodes.len()),
-        );
+        let mut slots = Vec::new();
+        let (mut devices, mut held) = (Vec::new(), Vec::new());
+        devices
+            .try_reserve_exact(nodes.len())
+            .map_err(|_| SimError::Full {
+                what: "physical index nodes",
+                bound: nodes.len(),
+            })?;
+        held.try_reserve_exact(nodes.len())
+            .map_err(|_| SimError::Full {
+                what: "physical holder nodes",
+                bound: nodes.len(),
+            })?;
+        slots
+            .try_reserve_exact(nodes.len())
+            .map_err(|_| SimError::Full {
+                what: "placement index nodes",
+                bound: nodes.len(),
+            })?;
         for (at, node) in nodes.iter().enumerate() {
             if usize::try_from(node.id.0).ok() != Some(at) {
                 return Err(SimError::Config("node ids must be dense from 0, in order"));
@@ -505,9 +705,43 @@ impl FitIndex {
                 ));
             }
             check_device_keys(node)?;
+            let pools = runtime_pools(node)?;
+            let routes = node
+                .routes
+                .as_ref()
+                .map(|catalog| Routes::new(catalog, node.id))
+                .transpose()?;
+            let physical = routes::physical(node)?;
+            let mut holders = Vec::new();
+            holders
+                .try_reserve_exact(physical.len())
+                .map_err(|_| SimError::Resources(node.id))?;
+            holders.resize(physical.len(), None);
+            let mut free = node.capacity;
+            if let Some(routes) = &routes {
+                routes::restore_backings(node.id, routes, &physical, &mut holders, &mut free)?;
+            }
+            free.gpus = u32::try_from(
+                physical
+                    .iter()
+                    .zip(&holders)
+                    .filter(|(slot, holder)| {
+                        holder.is_none()
+                            && slot
+                                .observed
+                                .as_ref()
+                                .map(|device| device.kind == DeviceKind::Gpu)
+                                .unwrap_or_else(|| {
+                                    slot.id
+                                        .is_some_and(|id| id.kind == hex_api::DeviceKind::Gpu)
+                                })
+                    })
+                    .count(),
+            )
+            .map_err(|_| SimError::Resources(node.id))?;
             slots.push(Slot {
                 capacity: node.capacity,
-                free: node.capacity,
+                free,
                 background_milli: node.background_milli,
                 classes: node.classes,
                 platform: node.platform,
@@ -515,11 +749,12 @@ impl FitIndex {
                 builds: 0,
                 benchmarks: 0,
                 used_by_class: [Resources::default(); Class::COUNT],
-                runtime_pools: runtime_pools(node)?,
+                runtime_pools: pools,
                 costs: node.costs,
+                routes,
             });
-            devices.push(node.devices.clone());
-            held.push(vec![None; node.devices.len()]);
+            devices.push(physical);
+            held.push(holders);
         }
         let whole = nodes
             .iter()
@@ -541,7 +776,7 @@ impl FitIndex {
             if !ix.join(id, &amounts(&slot.capacity)) {
                 return Err(SimError::Config("the index can't hold the cluster"));
             }
-            ix.push(id, bucket(&slot.free, last));
+            ix.push(id, bucket_slot(slot, last));
         }
         Ok(Self {
             costs: Costs::new(nodes.len()),
@@ -588,34 +823,88 @@ impl FitIndex {
             .map_err(|_| SimError::Resources(node))
     }
 
+    pub fn route(
+        &self,
+        node: NodeId,
+        demand: &Demand,
+    ) -> Result<Option<hex_api::RouteReceipt>, SimError> {
+        self.slot(node)?
+            .choice(demand)
+            .map(|choice| choice.map(Choice::receipt))
+            .map_err(|_| SimError::Config("no unambiguous initialized route"))
+    }
+
+    fn physical_free(holder: Option<Holder>, backing: Option<hex_api::BackingKey>) -> bool {
+        match holder {
+            None => true,
+            Some(Holder::Backing(key)) => backing == Some(key),
+            Some(Holder::Box(_) | Holder::Handoff { .. }) => false,
+        }
+    }
+
     /// The verdict on `demand` at node `at`, its slot `slot`.
     fn judge(&self, at: usize, slot: &Slot, demand: &Demand) -> Verdict {
         let (devices, held) = (
             self.devices.get(at).map_or(&[][..], Vec::as_slice),
             self.held.get(at).map_or(&[][..], Vec::as_slice),
         );
+        let backing = slot
+            .choice(demand)
+            .ok()
+            .flatten()
+            .and_then(|choice| choice.offer.backing);
         slot.verdict(demand, devices, |i| {
-            held.get(i).is_some_and(Option::is_none) && devices.get(i).is_some_and(|d| d.available)
+            held.get(i)
+                .is_some_and(|holder| Self::physical_free(*holder, backing))
+                && devices
+                    .get(i)
+                    .and_then(|slot| slot.observed.as_ref())
+                    .is_some_and(|d| d.available)
         })
     }
 
-    /// The devices `demand` would hold on node `at` now, least loaded GPUs first.
+    /// The devices `demand` would hold on node `at` now, through the sole nullable-observation picker.
     fn bound(&self, at: usize, demand: &Demand) -> Option<Held> {
         let devices = self.devices.get(at)?;
         let held = self.held.get(at)?;
-        bind(
-            devices,
+        let slot = self.slots.get(at)?;
+        let choice = slot.choice(demand).ok()?;
+        let backing = choice.and_then(|choice| choice.offer.backing);
+        let bit = choice
+            .map(|choice| {
+                u32::try_from(choice.at)
+                    .ok()
+                    .and_then(|at| 1u64.checked_shl(at))
+            })
+            .flatten();
+        bind_observed(
+            devices.len(),
+            |i| devices.get(i).and_then(|slot| slot.observed.as_ref()),
             |i| {
-                held.get(i).is_some_and(Option::is_none)
-                    && devices.get(i).is_some_and(|d| d.available)
-                    && devices.get(i).is_some_and(|d| d.classes.has(demand.class))
+                held.get(i)
+                    .is_some_and(|holder| Self::physical_free(*holder, backing))
+                    && devices.get(i).is_some_and(|physical| {
+                        physical.observed.as_ref().is_some_and(|device| {
+                            device.available && device.classes.has(demand.class)
+                        }) && bit.is_none_or(|bit| physical.routes & bit != 0)
+                            && backing.is_none_or(|key| {
+                                slot.routes
+                                    .as_ref()
+                                    .and_then(|routes| routes.backing(key))
+                                    .is_some_and(|(backing, _)| {
+                                        physical.id.is_some_and(|id| {
+                                            backing.devices.binary_search(&id).is_ok()
+                                        })
+                                    })
+                            })
+                    })
             },
             demand.need.gpus,
             &demand.ask,
         )
     }
 
-    /// The devices `workload` holds on `node`.
+    /// The devices `workload` holds on `node`, including its one in-progress backing handoff.
     pub fn holds(&self, node: NodeId, workload: WorkloadId) -> Held {
         let at = usize::try_from(node.0).unwrap_or(usize::MAX);
         self.held
@@ -623,12 +912,12 @@ impl FitIndex {
             .into_iter()
             .flatten()
             .zip(0u16..=u16::MAX)
-            .filter(|(h, _)| **h == Some(workload))
+            .filter(|(holder, _)| holder.and_then(Holder::workload) == Some(workload))
             .map(|(_, i)| i)
             .collect()
     }
 
-    pub(crate) fn devices(&self, node: NodeId) -> Result<&[Device], SimError> {
+    pub(crate) fn devices(&self, node: NodeId) -> Result<&[PhysicalSlot], SimError> {
         usize::try_from(node.0)
             .ok()
             .and_then(|at| self.devices.get(at))
@@ -646,138 +935,273 @@ impl FitIndex {
         let devices = self.devices(node)?;
         let count = holders
             .iter()
-            .filter(|holder| **holder == Some(workload))
+            .filter(|holder| holder.and_then(Holder::workload) == Some(workload))
             .count();
         let mut selected = Vec::new();
         selected
             .try_reserve_exact(count)
             .map_err(|_| SimError::Resources(node))?;
-        for (holder, device) in holders.iter().zip(devices) {
-            if *holder == Some(workload) {
-                selected.push(*device);
+        for (holder, physical) in holders.iter().zip(devices) {
+            if holder.and_then(Holder::workload) == Some(workload) {
+                selected.push(physical.observed.ok_or(SimError::Config(
+                    "held workload has no retained physical observation",
+                ))?);
             }
         }
         Ok(selected)
     }
 
-    /// Live node facts, preserving reservations. Held devices retain index/kind/key/model/size;
-    /// capacity cannot shrink below the amounts already held. Failure changes nothing.
-    pub(crate) fn check_refresh_node(&self, node: &NodeSpec) -> Result<(), SimError> {
+    /// Prepare both peer views before committing either, so allocation/refusal cannot publish a
+    /// partial refresh. Stable physical IDs remap slots; retained holds are never repicked.
+    pub(crate) fn prepare_refresh_node(
+        &self,
+        node: &NodeSpec,
+    ) -> Result<PreparedRefresh, SimError> {
         let at = usize::try_from(node.id.0).map_err(|_| SimError::UnknownNode(node.id))?;
         let old = self.slot(node.id)?;
         let pools = runtime_pools(node)?;
+        if !node.devices_agree() {
+            return Err(SimError::Config("refreshed devices disagree with capacity"));
+        }
+        check_device_keys(node)?;
+        let routes = match (&old.routes, &node.routes) {
+            (Some(old), Some(new)) => Some(old.refreshed(new, node.id)?),
+            (None, Some(new))
+                if old
+                    .used_by_class
+                    .iter()
+                    .all(|used| *used == Resources::default()) =>
+            {
+                Some(Routes::new(new, node.id)?)
+            }
+            (Some(old), None)
+                if old
+                    .used
+                    .iter()
+                    .all(|used| *used == hex_api::CapacityResources::default())
+                    && old.phases.iter().all(|phase| {
+                        matches!(
+                            phase,
+                            hex_api::BackingPhase::Prepared | hex_api::BackingPhase::Released
+                        )
+                    }) =>
+            {
+                None
+            }
+            (None, None) => None,
+            _ => {
+                return Err(SimError::Config(
+                    "refreshed facts remove or reinterpret retained route grants",
+                ));
+            }
+        };
         for class in Class::ALL {
             let used = old
                 .used_by_class
                 .get(class.index())
                 .ok_or(SimError::Resources(node.id))?;
-            if *used != Resources::default() {
-                // Availability gates new admission; existing boxes keep their cleanup authority.
-                let was_pooled = old
+            if *used != Resources::default()
+                && old
                     .runtime_pools
                     .iter()
                     .flatten()
-                    .any(|pool| pool.classes.has(class));
-                let remains_pooled = pools.iter().flatten().any(|pool| pool.classes.has(class));
-                if was_pooled && !remains_pooled {
-                    return Err(SimError::Config(
-                        "refreshed facts remove a held runtime pool",
-                    ));
-                }
-            }
-        }
-        for pool in pools.iter().flatten() {
-            let used = old
-                .pool_used(pool.classes)
-                .ok_or(SimError::Resources(node.id))?;
-            if !pool.capacity.holds(&used) {
-                return Err(SimError::Resources(node.id));
-            }
-        }
-        if !node.devices_agree() {
-            return Err(SimError::Config("refreshed devices disagree with capacity"));
-        }
-        check_device_keys(node)?;
-        let used = old
-            .capacity
-            .checked_sub(&old.free)
-            .ok_or(SimError::Resources(node.id))?;
-        node.capacity
-            .checked_sub(&used)
-            .ok_or(SimError::Resources(node.id))?;
-        let old_devices = self.devices.get(at).ok_or(SimError::UnknownNode(node.id))?;
-        let holders = self.held.get(at).ok_or(SimError::UnknownNode(node.id))?;
-        for (i, holder) in holders.iter().enumerate() {
-            if holder.is_some()
-                && !old_devices
-                    .get(i)
-                    .zip(node.devices.get(i))
-                    .is_some_and(|(old, new)| {
-                        old.kind == new.kind
-                            && old.key == new.key
-                            && old.model == new.model
-                            && old.size == new.size
-                            && old.classes == new.classes
-                    })
+                    .any(|pool| pool.classes.has(class))
+                && !pools.iter().flatten().any(|pool| pool.classes.has(class))
+                && routes.is_none()
             {
                 return Err(SimError::Config(
-                    "refreshed facts replace or remove a held device",
+                    "refreshed facts remove a held runtime pool",
                 ));
             }
         }
+        for pool in pools.iter().flatten().filter(|_| routes.is_none()) {
+            if !pool.capacity.holds(
+                &old.pool_used(pool.classes)
+                    .ok_or(SimError::Resources(node.id))?,
+            ) {
+                return Err(SimError::Resources(node.id));
+            }
+        }
+        let mut devices = routes::physical(node)?;
+        let mut holders = Vec::new();
+        holders
+            .try_reserve_exact(devices.len())
+            .map_err(|_| SimError::Resources(node.id))?;
+        holders.resize(devices.len(), None);
+        let mut backing_free = node.capacity;
+        if let Some(routes) = &routes {
+            routes::restore_backings(node.id, routes, &devices, &mut holders, &mut backing_free)?;
+        }
+        let mut workload_used = old
+            .capacity
+            .checked_sub(&old.free)
+            .ok_or(SimError::Resources(node.id))?;
+        workload_used.gpus = 0;
+        if let Some(routes) = &old.routes {
+            for (backing, phase) in routes.catalog.backings.iter().zip(&routes.phases) {
+                if !matches!(
+                    phase,
+                    hex_api::BackingPhase::Prepared | hex_api::BackingPhase::Released
+                ) {
+                    workload_used = workload_used
+                        .checked_sub(&routes::backing_charge(backing, node.id)?)
+                        .ok_or(SimError::Resources(node.id))?;
+                }
+            }
+        }
+        let mut free = backing_free
+            .checked_sub(&workload_used)
+            .ok_or(SimError::Resources(node.id))?;
+        let old_devices = self.devices.get(at).ok_or(SimError::UnknownNode(node.id))?;
+        let old_holders = self.held.get(at).ok_or(SimError::UnknownNode(node.id))?;
+        let mut by_id = Vec::new();
+        by_id
+            .try_reserve_exact(devices.len())
+            .map_err(|_| SimError::Resources(node.id))?;
+        by_id.extend(
+            devices
+                .iter()
+                .enumerate()
+                .filter_map(|(at, physical)| physical.id.map(|id| (id, at))),
+        );
+        by_id.sort_unstable_by_key(|(id, _)| *id);
+        for (old_at, (physical, owner)) in old_devices.iter().zip(old_holders).enumerate() {
+            let Some(workload) = owner.and_then(Holder::workload) else {
+                continue;
+            };
+            let next_at = if routes.is_some() {
+                let id = physical
+                    .id
+                    .ok_or(SimError::Config("routed retained identity is synthetic"))?;
+                by_id
+                    .binary_search_by_key(&id, |(id, _)| *id)
+                    .ok()
+                    .and_then(|at| by_id.get(at))
+                    .map(|(_, at)| *at)
+                    .ok_or(SimError::Config(
+                        "refreshed facts remove a retained physical claim",
+                    ))?
+            } else {
+                old_at
+            };
+            let next = devices
+                .get_mut(next_at)
+                .ok_or(SimError::Resources(node.id))?;
+            if next.id != physical.id
+                || next
+                    .observed
+                    .zip(physical.observed)
+                    .is_some_and(|(new, old)| {
+                        new.kind != old.kind
+                            || new.key != old.key
+                            || new.model != old.model
+                            || new.size != old.size
+                    })
+            {
+                return Err(SimError::Config(
+                    "refreshed facts replace a retained physical identity",
+                ));
+            }
+            if next.observed.is_none() {
+                next.observed = physical.observed.map(|mut device| {
+                    device.available = false;
+                    device.load = GpuLoad::default();
+                    device
+                });
+            }
+            let holder = holders
+                .get_mut(next_at)
+                .ok_or(SimError::Resources(node.id))?;
+            *holder = Some(match (*holder, owner.and_then(Holder::backing)) {
+                (Some(Holder::Backing(key)), Some(old)) if key == old => Holder::Handoff {
+                    backing: key,
+                    workload,
+                },
+                (None, _) => Holder::Box(workload),
+                _ => {
+                    return Err(SimError::Config(
+                        "refreshed backing overlaps another retained physical owner",
+                    ));
+                }
+            });
+        }
+        free.gpus = u32::try_from(
+            devices
+                .iter()
+                .zip(&holders)
+                .filter(|(physical, holder)| {
+                    holder.is_none()
+                        && physical
+                            .observed
+                            .as_ref()
+                            .map(|device| device.kind == DeviceKind::Gpu)
+                            .unwrap_or_else(|| {
+                                physical
+                                    .id
+                                    .is_some_and(|id| id.kind == hex_api::DeviceKind::Gpu)
+                            })
+                })
+                .count(),
+        )
+        .map_err(|_| SimError::Resources(node.id))?;
+        Ok(PreparedRefresh {
+            node: node.id,
+            slot: Slot {
+                capacity: node.capacity,
+                free,
+                background_milli: node.background_milli,
+                classes: node.classes,
+                platform: node.platform,
+                kvm: node.virt.kvm,
+                builds: old.builds,
+                benchmarks: old.benchmarks,
+                used_by_class: old.used_by_class,
+                runtime_pools: pools,
+                costs: node.costs,
+                routes,
+            },
+            devices,
+            holders,
+        })
+    }
+
+    pub(crate) fn commit_refresh_node(
+        &mut self,
+        prepared: PreparedRefresh,
+    ) -> Result<(), SimError> {
+        let at =
+            usize::try_from(prepared.node.0).map_err(|_| SimError::UnknownNode(prepared.node))?;
+        let old = self
+            .slots
+            .get(at)
+            .ok_or(SimError::UnknownNode(prepared.node))?;
+        if self.devices.get(at).is_none() || self.held.get(at).is_none() {
+            return Err(SimError::UnknownNode(prepared.node));
+        }
+        let old_capacity = old.capacity;
+        let from = bucket_slot(old, self.last);
+        let to = bucket_slot(&prepared.slot, self.last);
+        self.ix
+            .reshape(&amounts(&old_capacity), &amounts(&prepared.slot.capacity));
+        self.ix.relink(prepared.node.0, from, to);
+        *self
+            .slots
+            .get_mut(at)
+            .ok_or(SimError::UnknownNode(prepared.node))? = prepared.slot;
+        *self
+            .devices
+            .get_mut(at)
+            .ok_or(SimError::UnknownNode(prepared.node))? = prepared.devices;
+        *self
+            .held
+            .get_mut(at)
+            .ok_or(SimError::UnknownNode(prepared.node))? = prepared.holders;
         Ok(())
     }
 
     pub fn refresh_node(&mut self, node: &NodeSpec) -> Result<(), SimError> {
-        self.check_refresh_node(node)?;
-        let at = usize::try_from(node.id.0).map_err(|_| SimError::UnknownNode(node.id))?;
-        let old = self.slot(node.id)?;
-        let used = old
-            .capacity
-            .checked_sub(&old.free)
-            .ok_or(SimError::Resources(node.id))?;
-        let free = node
-            .capacity
-            .checked_sub(&used)
-            .ok_or(SimError::Resources(node.id))?;
-        let holders = self.held.get(at).ok_or(SimError::UnknownNode(node.id))?;
-        let mut held = vec![None; node.devices.len()];
-        for (new, old) in held.iter_mut().zip(holders) {
-            *new = *old;
-        }
-        let (old_capacity, old_bucket) = (old.capacity, bucket(&old.free, self.last));
-        let builds = old.builds;
-        let benchmarks = old.benchmarks;
-        let used_by_class = old.used_by_class;
-        let runtime_pools = runtime_pools(node)?;
-        let slot = self
-            .slots
-            .get_mut(at)
-            .ok_or(SimError::UnknownNode(node.id))?;
-        *slot = Slot {
-            capacity: node.capacity,
-            free,
-            background_milli: node.background_milli,
-            classes: node.classes,
-            platform: node.platform,
-            kvm: node.virt.kvm,
-            builds,
-            benchmarks,
-            used_by_class,
-            runtime_pools,
-            costs: node.costs,
-        };
-        if let Some(devices) = self.devices.get_mut(at) {
-            *devices = node.devices.clone();
-        }
-        if let Some(holders) = self.held.get_mut(at) {
-            *holders = held;
-        }
-        self.ix
-            .reshape(&amounts(&old_capacity), &amounts(&node.capacity));
-        self.ix
-            .relink(node.id.0, old_bucket, bucket(&free, self.last));
-        Ok(())
+        let prepared = self.prepare_refresh_node(node)?;
+        self.commit_refresh_node(prepared)
     }
 
     /// A GPU's load from what isn't Hex's, as its node's agent reads it (hex-gpu's `sample()`).
@@ -791,6 +1215,7 @@ impl FitIndex {
             .ok()
             .and_then(|at| self.devices.get_mut(at))
             .and_then(|ds| ds.get_mut(device))
+            .and_then(|slot| slot.observed.as_mut())
             .filter(|d| d.kind == DeviceKind::Gpu)
             .ok_or(SimError::UnknownNode(node))?;
         d.load = load;
@@ -1058,57 +1483,123 @@ impl FitIndex {
         demand: &Demand,
         allocation: Option<hex_api::Allocation>,
     ) -> Result<Key, SimError> {
+        let route = self.route(node, demand)?;
+        self.take_routed(node, workload, demand, allocation, route)
+    }
+
+    pub fn take_routed(
+        &mut self,
+        node: NodeId,
+        workload: WorkloadId,
+        demand: &Demand,
+        allocation: Option<hex_api::Allocation>,
+        route: Option<hex_api::RouteReceipt>,
+    ) -> Result<Key, SimError> {
         let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
         let slot = self.slot(node)?;
-        if allocation.map(|receipt| receipt.cost)
-            != slot.costs.get(demand.class.index()).copied().flatten()
-        {
+        if self.route(node, demand)? != route || self.allocation(node, demand)? != allocation {
             return Err(SimError::Config(
-                "admitted runtime cost differs from the initialized profile",
+                "committed route/charge differs from initialized admission",
             ));
         }
-        let charged = crate::model::allocated_resources(demand.need, allocation)
+        if slot.routes.is_some() && self.judge(at, slot, demand) != Verdict::Admits {
+            return Err(SimError::Resources(node));
+        }
+        let charged = crate::model::reserved_resources(demand.need, allocation, route)
             .map_err(|_| SimError::Resources(node))?;
-        // Recovery also takes already-running work, whose policy filters may now differ.
-        // Resource constraints are unconditional; policy selection remains verdict's job.
-        if !slot.free.holds(&charged) || !slot.runtime_holds(demand.class, &charged) {
+        if !slot.free.holds(&charged) || !slot.runtime_holds(demand, &charged) {
             return Err(SimError::Resources(node));
         }
         let held = self.bound(at, demand).ok_or(SimError::Resources(node))?;
-        let key = self.change(
+        self.change(
             node,
             demand,
+            route,
+            true,
             |free| free.checked_sub(&charged),
             |n| n.checked_add(1),
             |used| used.checked_add(&charged),
         )?;
-        if let Some(hs) = self.held.get_mut(at) {
-            for i in held {
-                if let Some(h) = hs.get_mut(usize::from(i)) {
-                    *h = Some(workload);
-                }
-            }
-        }
-        Ok(key)
+        self.claim_workload(node, workload, &held, route.and_then(|route| route.backing))?;
+        self.key(node)
     }
 
-    /// The owner's pending remote row is resource authority only; the receiver alone retains its
-    /// exact physical binding. Recovery asks Holds without picking guessed replacement devices.
-    pub(crate) fn take_pending(
+    fn claim_workload(
+        &mut self,
+        node: NodeId,
+        workload: WorkloadId,
+        held: &[u16],
+        backing: Option<hex_api::BackingKey>,
+    ) -> Result<(), SimError> {
+        let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
+        let holders = self.held.get_mut(at).ok_or(SimError::UnknownNode(node))?;
+        for &index in held {
+            let holder = holders
+                .get_mut(usize::from(index))
+                .ok_or(SimError::Resources(node))?;
+            *holder = Some(match (*holder, backing) {
+                (Some(Holder::Backing(owned)), Some(key)) if owned == key => Holder::Handoff {
+                    backing: key,
+                    workload,
+                },
+                (None, _) => Holder::Box(workload),
+                _ => {
+                    return Err(SimError::Config(
+                        "physical handoff conflicts with another owner",
+                    ));
+                }
+            });
+        }
+        self.recount_gpus(node)
+    }
+
+    fn recount_gpus(&mut self, node: NodeId) -> Result<(), SimError> {
+        let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
+        let physical = self.devices.get(at).ok_or(SimError::UnknownNode(node))?;
+        let holders = self.held.get(at).ok_or(SimError::UnknownNode(node))?;
+        let count = physical
+            .iter()
+            .zip(holders)
+            .filter(|(slot, holder)| {
+                holder.is_none()
+                    && slot
+                        .observed
+                        .as_ref()
+                        .map(|d| d.kind == DeviceKind::Gpu)
+                        .unwrap_or_else(|| {
+                            slot.id
+                                .is_some_and(|id| id.kind == hex_api::DeviceKind::Gpu)
+                        })
+            })
+            .count();
+        let count = u32::try_from(count).map_err(|_| SimError::Resources(node))?;
+        self.slots
+            .get_mut(at)
+            .ok_or(SimError::UnknownNode(node))?
+            .free
+            .gpus = count;
+        Ok(())
+    }
+
+    /// The owner's remote row reserves its exact chosen route, never a replacement physical binding.
+    pub(crate) fn take_pending_routed(
         &mut self,
         node: NodeId,
         demand: &Demand,
         allocation: Option<hex_api::Allocation>,
+        route: Option<hex_api::RouteReceipt>,
     ) -> Result<Key, SimError> {
-        let charged = crate::model::allocated_resources(demand.need, allocation)
+        let charged = crate::model::reserved_resources(demand.need, allocation, route)
             .map_err(|_| SimError::Resources(node))?;
         let slot = self.slot(node)?;
-        if !slot.free.holds(&charged) || !slot.runtime_holds(demand.class, &charged) {
+        if !slot.free.holds(&charged) || !slot.runtime_holds(demand, &charged) {
             return Err(SimError::Resources(node));
         }
         self.change(
             node,
             demand,
+            route,
+            true,
             |free| free.checked_sub(&charged),
             |n| n.checked_add(1),
             |used| used.checked_add(&charged),
@@ -1116,28 +1607,43 @@ impl FitIndex {
     }
 
     /// Validate a durable binding against stable authority, not transient GPU utilisation.
-    pub(crate) fn check_recovered_devices(
+    pub(crate) fn check_recovered_routed_devices(
         &self,
         node: NodeId,
         demand: &Demand,
         held: &[u16],
+        receipt: Option<hex_api::RouteReceipt>,
     ) -> Result<(), SimError> {
         let slot = self.slot(node)?;
         let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
         let devices = self.devices.get(at).ok_or(SimError::UnknownNode(node))?;
         let class = demand.class;
         let os = slot.platform.os;
-        let image_os = match class {
-            Class::Oci => os,
-            Class::Shards | Class::Firecracker => crate::model::Os::Linux,
-        };
+        let image_os = receipt
+            .map(|receipt| match receipt.key.image.os {
+                hex_api::ImageOs::Linux => crate::model::Os::Linux,
+                hex_api::ImageOs::Windows => crate::model::Os::Windows,
+                hex_api::ImageOs::Macos => crate::model::Os::Macos,
+            })
+            .unwrap_or(match class {
+                Class::Oci => os,
+                Class::Shards | Class::Firecracker => crate::model::Os::Linux,
+            });
+        let image_arch = receipt
+            .map(|receipt| match receipt.key.image.arch {
+                hex_api::ImageArch::Amd64 => crate::model::Arch::X86_64,
+                hex_api::ImageArch::Arm64 => crate::model::Arch::Aarch64,
+            })
+            .unwrap_or(slot.platform.arch);
         if !slot.classes.has(class)
             || demand.ask.os.is_some_and(|asked| asked != image_os)
-            || demand
-                .ask
-                .arch
-                .is_some_and(|asked| asked != slot.platform.arch)
-            || (demand.ask.kvm && (!slot.kvm || !class.gives_kvm(os)))
+            || demand.ask.arch.is_some_and(|asked| asked != image_arch)
+            || (demand.ask.kvm
+                && (!slot.kvm
+                    || !class.gives_kvm(os)
+                    || receipt.is_some_and(|receipt| {
+                        receipt.key.execution != hex_api::Execution::Native
+                    })))
         {
             return Err(SimError::Config(
                 "recovered binding class or platform differs",
@@ -1170,7 +1676,10 @@ impl FitIndex {
             let index = usize::from(index);
             let device = devices
                 .get(index)
-                .ok_or(SimError::Config("recovered device index out of range"))?;
+                .and_then(|slot| slot.observed.as_ref())
+                .ok_or(SimError::Config(
+                    "recovered device has no retained observation",
+                ))?;
             let used = seen
                 .get_mut(index)
                 .ok_or(SimError::Config("recovered device index out of range"))?;
@@ -1218,6 +1727,7 @@ impl FitIndex {
     }
 
     /// Restore the old immutable charge, independently of the profile offered for new boxes.
+    #[cfg(test)]
     pub(crate) fn take_recovered_allocated(
         &mut self,
         node: NodeId,
@@ -1226,12 +1736,25 @@ impl FitIndex {
         held: &[u16],
         allocation: Option<hex_api::Allocation>,
     ) -> Result<Key, SimError> {
-        self.check_recovered_devices(node, demand, held)?;
-        let charged = crate::model::allocated_resources(demand.need, allocation)
+        let route = self.route(node, demand)?;
+        self.take_recovered_routed(node, workload, demand, held, allocation, route)
+    }
+
+    pub(crate) fn take_recovered_routed(
+        &mut self,
+        node: NodeId,
+        workload: WorkloadId,
+        demand: &Demand,
+        held: &[u16],
+        allocation: Option<hex_api::Allocation>,
+        route: Option<hex_api::RouteReceipt>,
+    ) -> Result<Key, SimError> {
+        self.check_recovered_routed_devices(node, demand, held, route)?;
+        let charged = crate::model::reserved_resources(demand.need, allocation, route)
             .map_err(|_| SimError::Resources(node))?;
         let slot = self.slot(node)?;
         if !slot.free.holds(&charged)
-            || !slot.runtime_holds(demand.class, &charged)
+            || !slot.runtime_holds(demand, &charged)
             || matches!(demand.kind, Kind::Build) && slot.benchmarks > 0
             || matches!(demand.kind, Kind::Benchmark) && slot.builds > 0
         {
@@ -1239,33 +1762,33 @@ impl FitIndex {
         }
         let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
         let holders = self.held.get(at).ok_or(SimError::UnknownNode(node))?;
-        if holders.contains(&Some(workload))
-            || held
-                .iter()
-                .any(|index| holders.get(usize::from(*index)).is_none_or(Option::is_some))
+        let backing = route.and_then(|route| route.backing);
+        if holders
+            .iter()
+            .any(|holder| holder.and_then(Holder::workload) == Some(workload))
+            || held.iter().any(|index| {
+                holders
+                    .get(usize::from(*index))
+                    .is_none_or(|holder| !Self::physical_free(*holder, backing))
+            })
         {
             return Err(SimError::Config(
                 "recovered device overlaps an existing reservation",
             ));
         }
-        let key = self.change(
+        self.change(
             node,
             demand,
+            route,
+            true,
             |free| free.checked_sub(&charged),
             |n| n.checked_add(1),
             |used| used.checked_add(&charged),
         )?;
-        let holders = self.held.get_mut(at).ok_or(SimError::UnknownNode(node))?;
-        for &index in held {
-            let holder = holders
-                .get_mut(usize::from(index))
-                .ok_or(SimError::Resources(node))?;
-            *holder = Some(workload);
-        }
-        Ok(key)
+        self.claim_workload(node, workload, held, backing)?;
+        self.key(node)
     }
 
-    /// Ends `workload`, of `demand`, on `node`: its devices free again; the node's new key.
     pub fn give(
         &mut self,
         node: NodeId,
@@ -1285,7 +1808,6 @@ impl FitIndex {
         self.give_allocated(node, workload, demand, None)
     }
 
-    /// Return exactly the retained charge after native release, never today's recalculated cost.
     pub fn give_allocated(
         &mut self,
         node: NodeId,
@@ -1293,55 +1815,101 @@ impl FitIndex {
         demand: &Demand,
         allocation: Option<hex_api::Allocation>,
     ) -> Result<Key, SimError> {
-        let charged = crate::model::allocated_resources(demand.need, allocation)
+        let route = self.route(node, demand)?;
+        self.give_routed(node, workload, demand, allocation, route)
+    }
+
+    pub fn give_routed(
+        &mut self,
+        node: NodeId,
+        workload: WorkloadId,
+        demand: &Demand,
+        allocation: Option<hex_api::Allocation>,
+        route: Option<hex_api::RouteReceipt>,
+    ) -> Result<Key, SimError> {
+        let charged = crate::model::reserved_resources(demand.need, allocation, route)
             .map_err(|_| SimError::Resources(node))?;
-        let key = self.change(
+        self.change(
             node,
             demand,
+            route,
+            false,
             |free| free.checked_add(&charged),
             |n| n.checked_sub(1),
             |used| used.checked_sub(&charged),
         )?;
         let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
-        for h in self.held.get_mut(at).into_iter().flatten() {
-            if *h == Some(workload) {
-                *h = None;
+        for holder in self.held.get_mut(at).into_iter().flatten() {
+            if holder.and_then(Holder::workload) == Some(workload) {
+                *holder = match *holder {
+                    Some(Holder::Handoff { backing, .. }) => Some(Holder::Backing(backing)),
+                    _ => None,
+                };
             }
         }
-        Ok(key)
+        self.recount_gpus(node)?;
+        self.key(node)
     }
 
     fn change(
         &mut self,
         node: NodeId,
         demand: &Demand,
+        receipt: Option<hex_api::RouteReceipt>,
+        adding: bool,
         resources: impl FnOnce(&Resources) -> Option<Resources>,
         count: impl FnOnce(u32) -> Option<u32>,
         class_used: impl FnOnce(&Resources) -> Option<Resources>,
     ) -> Result<Key, SimError> {
         let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
+        let slot = self.slots.get(at).ok_or(SimError::UnknownNode(node))?;
+        let next_free = resources(&slot.free)
+            .filter(|free| slot.capacity.holds(free))
+            .ok_or(SimError::Resources(node))?;
+        let next_used = slot
+            .used_by_class
+            .get(demand.class.index())
+            .and_then(class_used)
+            .ok_or(SimError::Resources(node))?;
+        let (builds, benchmarks) = match demand.kind {
+            Kind::Build => (
+                count(slot.builds).ok_or(SimError::Resources(node))?,
+                slot.benchmarks,
+            ),
+            Kind::Benchmark => (
+                slot.builds,
+                count(slot.benchmarks).ok_or(SimError::Resources(node))?,
+            ),
+            Kind::Plain | Kind::Session => (slot.builds, slot.benchmarks),
+        };
+        let route_used = match (&slot.routes, receipt) {
+            (Some(routes), Some(receipt)) => Some(routes.used_next(receipt, demand, adding)?),
+            (None, None) | (Some(_), None) => None,
+            _ => {
+                return Err(SimError::Config(
+                    "routed admission/release lacks its original receipt",
+                ));
+            }
+        };
+        let from = bucket_slot(slot, self.last);
         let slot = self.slots.get_mut(at).ok_or(SimError::UnknownNode(node))?;
-        let mut next = *slot;
-        next.free = resources(&slot.free).ok_or(SimError::Resources(node))?;
-        if !slot.capacity.holds(&next.free) {
-            return Err(SimError::Resources(node));
+        if let Some((at, next)) = route_used {
+            *slot
+                .routes
+                .as_mut()
+                .and_then(|routes| routes.used.get_mut(at))
+                .ok_or(SimError::Resources(node))? = next;
         }
-        let used = next
+        *slot
             .used_by_class
             .get_mut(demand.class.index())
-            .ok_or(SimError::Resources(node))?;
-        *used = class_used(used).ok_or(SimError::Resources(node))?;
-        match demand.kind {
-            Kind::Build => next.builds = count(slot.builds).ok_or(SimError::Resources(node))?,
-            Kind::Benchmark => {
-                next.benchmarks = count(slot.benchmarks).ok_or(SimError::Resources(node))?;
-            }
-            Kind::Plain | Kind::Session => {}
-        }
-        let (from, to) = (bucket(&slot.free, self.last), bucket(&next.free, self.last));
-        *slot = next;
+            .ok_or(SimError::Resources(node))? = next_used;
+        slot.free = next_free;
+        slot.builds = builds;
+        slot.benchmarks = benchmarks;
+        let to = bucket_slot(slot, self.last);
         self.ix.relink(node.0, from, to);
-        Ok(Key::of(node, &next.free))
+        Ok(Key::of(node, &next_free))
     }
 }
 
@@ -2565,3 +3133,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "index/route_offer_tests.rs"]
+mod route_offer_tests;

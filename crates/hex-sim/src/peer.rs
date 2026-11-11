@@ -80,6 +80,7 @@ pub enum Msg {
         key: Key,
         demand: Demand,
         allocation: Option<hex_api::Allocation>,
+        route: Option<hex_api::RouteReceipt>,
     },
     /// Durable owner cancellation; the receiver proves actual deletion before acknowledging it.
     Delete {
@@ -146,6 +147,7 @@ enum State {
 struct Owned {
     demand: Demand,
     allocation: Option<hex_api::Allocation>,
+    route: Option<hex_api::RouteReceipt>,
     workload: WorkloadId,
     /// A persisted Created is reconfirmed against its peer after every owner boot.
     ready: bool,
@@ -159,6 +161,7 @@ struct Ran {
     owner: NodeId,
     demand: Demand,
     allocation: Option<hex_api::Allocation>,
+    route: Option<hex_api::RouteReceipt>,
     workload: WorkloadId,
     created: bool,
     at: Option<lb::Handle>,
@@ -180,7 +183,15 @@ fn plain(need: Resources) -> Demand {
 }
 
 fn damaged(what: &str) -> Stop {
-    Stop::Damaged(what.to_owned())
+    let mut text = String::new();
+    if text.try_reserve_exact(what.len()).is_err() {
+        return Stop::Full {
+            what: "peer refusal bytes",
+            bound: what.len(),
+        };
+    }
+    text.push_str(what);
+    Stop::Damaged(text)
 }
 
 fn number<'a, T: std::str::FromStr>(words: &mut impl Iterator<Item = &'a str>) -> Result<T, Stop> {
@@ -204,6 +215,19 @@ fn model_id(name: &str, models: &[String]) -> Result<Option<ModelId>, Stop> {
 }
 
 fn check_demand(d: &Demand, models: &[String]) -> Result<(), Stop> {
+    if d.ask.native_only && d.class != Class::Oci {
+        return Err(damaged("native-only payload is declared as a VM backend"));
+    }
+    if d.ask.runtime_class.is_some_and(|class| match class {
+        hex_api::Class::Process => d.class != Class::Oci || d.need.gpus != 0 || d.ask.devices(),
+        hex_api::Class::Oci => d.class != Class::Oci,
+        hex_api::Class::Firecracker => d.class != Class::Firecracker,
+        hex_api::Class::Shards => d.class != Class::Shards,
+    }) {
+        return Err(damaged(
+            "original payload form differs from its placement demand",
+        ));
+    }
     if let Some(model) = d.ask.gpu_model
         && (model == ModelId::UNNAMED
             || usize::try_from(model.0)
@@ -257,9 +281,14 @@ fn write_demand(out: &mut impl std::fmt::Write, d: &Demand, models: &[String]) -
         .gpu_model
         .and_then(|m| usize::try_from(m.0).ok().and_then(|at| models.get(at)))
         .map_or("-", String::as_str);
+    let version = if d.ask.runtime_class.is_some() || d.ask.native_only {
+        "d2"
+    } else {
+        "d1"
+    };
     write!(
         out,
-        "d1 {kind} {class} {} {} {} {} {os} {arch} {model} {} {} {} {} {} {}",
+        "{version} {kind} {class} {} {} {} {} {os} {arch} {model} {} {} {} {} {} {}",
         d.need.cpu_milli,
         d.need.mem_bytes,
         d.need.gpus,
@@ -270,16 +299,29 @@ fn write_demand(out: &mut impl std::fmt::Write, d: &Demand, models: &[String]) -
         d.ask.block_size,
         d.ask.net,
         u8::from(d.ask.kvm)
-    )
+    )?;
+    if version == "d2" {
+        let form = match d.ask.runtime_class {
+            Some(hex_api::Class::Process) => "process",
+            Some(hex_api::Class::Oci) => "oci",
+            Some(hex_api::Class::Firecracker) => "firecracker",
+            Some(hex_api::Class::Shards) => "shards",
+            None => "-",
+        };
+        write!(out, " {form} {}", u8::from(d.ask.native_only))?;
+    }
+    Ok(())
 }
 
 fn demand_of<'a>(
     words: &mut impl Iterator<Item = &'a str>,
     models: &[String],
 ) -> Result<Demand, Stop> {
-    if words.next() != Some("d1") {
-        return Err(damaged("a missing or unsupported full-demand version"));
-    }
+    let has_form = match words.next() {
+        Some("d1") => false,
+        Some("d2") => true,
+        _ => return Err(damaged("a missing or unsupported full-demand version")),
+    };
     let kind = match words.next() {
         Some("plain") => Kind::Plain,
         Some("build") => Kind::Build,
@@ -315,7 +357,9 @@ fn demand_of<'a>(
             .ok_or_else(|| damaged("a demand's GPU model"))?,
         models,
     )?;
-    let ask = Ask {
+    let mut ask = Ask {
+        runtime_class: None,
+        native_only: false,
         os,
         arch,
         gpu_model,
@@ -330,15 +374,28 @@ fn demand_of<'a>(
             _ => return Err(damaged("a demand's KVM flag")),
         },
     };
+    if has_form {
+        ask.runtime_class = match words.next() {
+            Some("process") => Some(hex_api::Class::Process),
+            Some("oci") => Some(hex_api::Class::Oci),
+            Some("firecracker") => Some(hex_api::Class::Firecracker),
+            Some("shards") => Some(hex_api::Class::Shards),
+            Some("-") => None,
+            _ => return Err(damaged("a demand's original runtime form")),
+        };
+        ask.native_only = flag(words)?;
+    }
     if words.next().is_some() {
         return Err(damaged("trailing demand fields"));
     }
-    Ok(Demand {
+    let demand = Demand {
         need,
         kind,
         class,
         ask,
-    })
+    };
+    check_demand(&demand, models)?;
+    Ok(demand)
 }
 
 fn workload(next: &mut u64) -> Result<WorkloadId, Stop> {
@@ -490,22 +547,210 @@ fn allocation_of<'a>(
     Ok(Some(allocation))
 }
 
+// Exact longest enum spellings plus the two fixed hexadecimal key arrays bound the receipt.
+const ROUTE_BYTES: usize =
+    "r1:firecracker:windows:arm64:firecracker:required:".len() + 32 * 2 + 1 + 16 * 2;
+
+fn write_route(
+    out: &mut impl std::fmt::Write,
+    route: Option<hex_api::RouteReceipt>,
+) -> std::fmt::Result {
+    let Some(route) = route else {
+        return Ok(());
+    };
+    let os = match route.key.image.os {
+        hex_api::ImageOs::Linux => "linux",
+        hex_api::ImageOs::Windows => "windows",
+        hex_api::ImageOs::Macos => "macos",
+    };
+    let arch = match route.key.image.arch {
+        hex_api::ImageArch::Amd64 => "amd64",
+        hex_api::ImageArch::Arm64 => "arm64",
+    };
+    let execution = match route.key.execution {
+        hex_api::Execution::Native => "native",
+        hex_api::Execution::ShardsShared => "shared",
+        hex_api::Execution::ShardsDedicated => "dedicated",
+        hex_api::Execution::Firecracker => "firecracker",
+    };
+    let gpu = match route.key.gpu {
+        hex_api::GpuEligibility::Any => "any",
+        hex_api::GpuEligibility::None => "none",
+        hex_api::GpuEligibility::Required => "required",
+    };
+    write!(
+        out,
+        "r1:{}:{os}:{arch}:{execution}:{gpu}:",
+        route.key.class.name()
+    )?;
+    if let Some(backing) = route.backing {
+        for byte in backing.pool {
+            write!(out, "{byte:02x}")?;
+        }
+        out.write_char(':')?;
+        for byte in backing.generation {
+            write!(out, "{byte:02x}")?;
+        }
+    } else {
+        out.write_char('-')?;
+    }
+    out.write_char(' ')
+}
+
+fn route_of<'a>(
+    words: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+) -> Result<Option<hex_api::RouteReceipt>, Stop> {
+    let Some(word) = words.peek().copied().filter(|word| word.starts_with("r1:")) else {
+        return Ok(None);
+    };
+    if word.len() > ROUTE_BYTES {
+        return Err(damaged("route receipt exceeds its fixed field widths"));
+    }
+    words.next();
+    let mut fields = word.split(':');
+    if fields.next() != Some("r1") {
+        return Err(damaged("route receipt version"));
+    }
+    let class = match fields.next() {
+        Some("process") => hex_api::Class::Process,
+        Some("oci") => hex_api::Class::Oci,
+        Some("firecracker") => hex_api::Class::Firecracker,
+        Some("shards") => hex_api::Class::Shards,
+        _ => return Err(damaged("route original class")),
+    };
+    let os = match fields.next() {
+        Some("linux") => hex_api::ImageOs::Linux,
+        Some("windows") => hex_api::ImageOs::Windows,
+        Some("macos") => hex_api::ImageOs::Macos,
+        _ => return Err(damaged("route image OS")),
+    };
+    let arch = match fields.next() {
+        Some("amd64") => hex_api::ImageArch::Amd64,
+        Some("arm64") => hex_api::ImageArch::Arm64,
+        _ => return Err(damaged("route image architecture")),
+    };
+    let execution = match fields.next() {
+        Some("native") => hex_api::Execution::Native,
+        Some("shared") => hex_api::Execution::ShardsShared,
+        Some("dedicated") => hex_api::Execution::ShardsDedicated,
+        Some("firecracker") => hex_api::Execution::Firecracker,
+        _ => return Err(damaged("route execution")),
+    };
+    let gpu = match fields.next() {
+        Some("any") => hex_api::GpuEligibility::Any,
+        Some("none") => hex_api::GpuEligibility::None,
+        Some("required") => hex_api::GpuEligibility::Required,
+        _ => return Err(damaged("route GPU eligibility")),
+    };
+    fn hex<const N: usize>(text: &str) -> Result<[u8; N], Stop> {
+        if N.checked_mul(2) != Some(text.len()) {
+            return Err(damaged("route backing key width"));
+        }
+        let mut out = [0; N];
+        let (pairs, rest) = text.as_bytes().as_chunks::<2>();
+        if !rest.is_empty() {
+            return Err(damaged("route backing key width"));
+        }
+        for (byte, pair) in out.iter_mut().zip(pairs) {
+            if !pair
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+            {
+                return Err(damaged("route backing key encoding"));
+            }
+            *byte = u8::from_str_radix(
+                std::str::from_utf8(pair).map_err(|_| damaged("route backing key encoding"))?,
+                16,
+            )
+            .map_err(|_| damaged("route backing key encoding"))?;
+        }
+        Ok(out)
+    }
+    let backing = match fields.next() {
+        Some("-") => None,
+        Some(pool) => Some(hex_api::BackingKey {
+            pool: hex(pool)?,
+            generation: hex(fields
+                .next()
+                .ok_or_else(|| damaged("route backing generation"))?)?,
+        }),
+        None => return Err(damaged("route backing key")),
+    };
+    if fields.next().is_some() {
+        return Err(damaged("trailing route receipt fields"));
+    }
+    let receipt = hex_api::RouteReceipt {
+        key: hex_api::RouteKey {
+            class,
+            image: hex_api::ImagePlatform { os, arch },
+            execution,
+            gpu,
+        },
+        backing,
+    };
+    receipt
+        .check(class, gpu == hex_api::GpuEligibility::Required)
+        .map_err(|_| damaged("route topology is invalid"))?;
+    Ok(Some(receipt))
+}
+
+fn assignment(
+    demand: &Demand,
+    allocation: Option<hex_api::Allocation>,
+    route: Option<hex_api::RouteReceipt>,
+) -> Result<Resources, Stop> {
+    if let Some(route) = route {
+        if demand.ask.native_only && route.key.execution != hex_api::Execution::Native {
+            return Err(damaged("native-only payload has a guest execution receipt"));
+        }
+        route
+            .check(
+                demand.ask.runtime_class.unwrap_or(route.key.class),
+                demand.need.gpus != 0,
+            )
+            .map_err(|_| damaged("route differs from its original payload/device demand"))?;
+        let class = match route.key.class {
+            hex_api::Class::Process | hex_api::Class::Oci => Class::Oci,
+            hex_api::Class::Firecracker => Class::Firecracker,
+            hex_api::Class::Shards => Class::Shards,
+        };
+        if class != demand.class {
+            return Err(damaged("route differs from placement class"));
+        }
+    }
+    crate::model::reserved_resources(demand.need, allocation, route)
+        .map_err(|_| damaged("route allocation differs from its original demand"))
+}
+
 fn admitted_demand<'a>(
     words: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
     models: &[String],
-) -> Result<(Demand, Option<hex_api::Allocation>), Stop> {
+) -> Result<
+    (
+        Demand,
+        Option<hex_api::Allocation>,
+        Option<hex_api::RouteReceipt>,
+    ),
+    Stop,
+> {
+    let route = route_of(words)?;
     let allocation = allocation_of(words)?;
     let demand = demand_of(words, models)?;
-    crate::model::allocated_resources(demand.need, allocation)
-        .map_err(|_| damaged("allocation receipt differs from its original demand"))?;
-    Ok((demand, allocation))
+    assignment(&demand, allocation, route)?;
+    Ok((demand, allocation, route))
 }
 
-/// The original full demand and its separate immutable charge from an existing own/ran row.
-pub fn recorded_demand(
+pub fn recorded_assignment(
     row: &str,
     models: &[String],
-) -> Result<(Demand, Option<hex_api::Allocation>), Stop> {
+) -> Result<
+    (
+        Demand,
+        Option<hex_api::Allocation>,
+        Option<hex_api::RouteReceipt>,
+    ),
+    Stop,
+> {
     let mut words = row.split(' ').peekable();
     words
         .next()
@@ -514,6 +759,14 @@ pub fn recorded_demand(
         .next()
         .ok_or_else(|| damaged("record state/owner header"))?;
     admitted_demand(&mut words, models)
+}
+
+/// Legacy callers can inspect original demand/charge; route-aware consumers retain the full tuple.
+pub fn recorded_demand(
+    row: &str,
+    models: &[String],
+) -> Result<(Demand, Option<hex_api::Allocation>), Stop> {
+    recorded_assignment(row, models).map(|(demand, allocation, _)| (demand, allocation))
 }
 
 /// CP-T7.4: the one pure peer-message codec. The caller's common-wire byte budget bounds allocation;
@@ -559,11 +812,14 @@ pub fn encode_message(msg: &Msg, models: &[String], max_bytes: usize) -> Result<
     write!(&mut out, "p1 {tag} {} {} {}", key.owner, key.epoch, key.seq).map_err(|_| full())?;
     match msg {
         Msg::Start {
-            demand, allocation, ..
+            demand,
+            allocation,
+            route,
+            ..
         } => {
-            crate::model::allocated_resources(demand.need, *allocation)
-                .map_err(|_| damaged("invalid peer allocation receipt"))?;
+            assignment(demand, *allocation, *route)?;
             out.write_char(' ').map_err(|_| full())?;
+            write_route(&mut out, *route).map_err(|_| full())?;
             write_allocation(&mut out, *allocation).map_err(|_| full())?;
             write_demand(&mut out, demand, models).map_err(|_| full())?;
         }
@@ -615,16 +871,17 @@ pub fn decode_message(text: &str, models: &[String], max_bytes: usize) -> Result
     };
     let msg = match tag {
         "start" | "delete" => {
-            let (demand, allocation) = admitted_demand(&mut words, models)?;
+            let (demand, allocation, route) = admitted_demand(&mut words, models)?;
             return Ok(if tag == "start" {
                 Msg::Start {
                     key,
                     demand,
                     allocation,
+                    route,
                 }
             } else {
-                if allocation.is_some() {
-                    return Err(damaged("allocation receipt in Delete message"));
+                if allocation.is_some() || route.is_some() {
+                    return Err(damaged("allocation or route receipt in Delete message"));
                 }
                 Msg::Delete { key, demand }
             });
@@ -802,7 +1059,7 @@ impl Node {
             }
         }
         let mut view = FitIndex::new(nodes).map_err(|e| Stop::Damaged(e.to_string()))?;
-        let mut admission = view.clone();
+        let mut admission = FitIndex::new(nodes).map_err(|e| Stop::Damaged(e.to_string()))?;
         let (mut epoch, mut next_workload) = (0u64, 0u64);
         let mut epoch_seen = false;
         let mut start_rows = Vec::new();
@@ -847,8 +1104,8 @@ impl Node {
                         }
                         _ => return Err(damaged("an owned box's state")),
                     };
-                    let (demand, allocation) = admitted_demand(&mut words, models)?;
-                    if state == State::Asked && allocation.is_some() {
+                    let (demand, allocation, route) = admitted_demand(&mut words, models)?;
+                    if state == State::Asked && (allocation.is_some() || route.is_some()) {
                         return Err(damaged("unselected Asked row has an allocation receipt"));
                     }
                     if allocation.is_none()
@@ -873,6 +1130,7 @@ impl Node {
                         Owned {
                             demand,
                             allocation,
+                            route,
                             workload,
                             ready: false,
                             state,
@@ -898,7 +1156,7 @@ impl Node {
                         Some("ended") => (true, true),
                         _ => return Err(damaged("a record's end")),
                     };
-                    let (demand, allocation) = admitted_demand(&mut words, models)?;
+                    let (demand, allocation, route) = admitted_demand(&mut words, models)?;
                     if allocation.is_none()
                         && spec
                             .costs
@@ -923,7 +1181,7 @@ impl Node {
                         }
                     };
                     admission
-                        .check_recovered_devices(id, &demand, &binding)
+                        .check_recovered_routed_devices(id, &demand, &binding, route)
                         .map_err(|why| Stop::Damaged(format!("runner {key:?}: {why}")))?;
                     if ran.len() >= budget.ran {
                         return Err(Stop::Full {
@@ -938,6 +1196,7 @@ impl Node {
                                 owner,
                                 demand,
                                 allocation,
+                                route,
                                 workload: workload(&mut next_workload)?,
                                 created,
                                 ended,
@@ -951,9 +1210,9 @@ impl Node {
             }
         }
         if ran.iter().any(|(key, (r, _))| {
-            owned
-                .get(key)
-                .is_some_and(|o| o.demand != r.demand || o.allocation != r.allocation)
+            owned.get(key).is_some_and(|o| {
+                o.demand != r.demand || o.allocation != r.allocation || o.route != r.route
+            })
         }) {
             return Err(damaged("owned and runner rows disagree on the demand"));
         }
@@ -976,18 +1235,19 @@ impl Node {
                 if at == id
                     && let Some((_, binding, Boxed::Running)) = ran.get(key)
                 {
-                    view.take_recovered_allocated(
+                    view.take_recovered_routed(
                         at,
                         own.workload,
                         &own.demand,
                         binding,
                         own.allocation,
+                        own.route,
                     )
                     .map_err(|why| Stop::Damaged(format!("owner {key:?}: {why}")))?;
                 } else {
                     // The selected peer may still hold this box. Keep its old profile/charge
                     // while asking Holds; current load or a new cost cannot authorize a repick.
-                    view.take_pending(at, &own.demand, own.allocation)
+                    view.take_pending_routed(at, &own.demand, own.allocation, own.route)
                         .map_err(|why| Stop::Damaged(why.to_string()))?;
                 }
             }
@@ -1006,15 +1266,19 @@ impl Node {
                 }
                 (false, Boxed::Running) => {
                     admission
-                        .take_recovered_allocated(id, r.workload, &r.demand, &binding, r.allocation)
+                        .take_recovered_routed(
+                            id,
+                            r.workload,
+                            &r.demand,
+                            &binding,
+                            r.allocation,
+                            r.route,
+                        )
                         .map_err(|why| Stop::Damaged(format!("runner {key:?}: {why}")))?;
                     kept.push(lb::Kept {
                         owner: lb::OwnerId(r.owner.0),
                         run: lb::Handle::NONE,
-                        need: amounts(
-                            &crate::model::allocated_resources(r.demand.need, r.allocation)
-                                .map_err(|_| damaged("retained runner allocation is invalid"))?,
-                        ),
+                        need: amounts(&assignment(&r.demand, r.allocation, r.route)?),
                     });
                     keys.push(key);
                     if !r.created {
@@ -1213,17 +1477,19 @@ impl Node {
             }
         }
         // Both preflights are pure; this node cannot change between them and the updates below.
+        let view = self
+            .view
+            .prepare_refresh_node(&spec)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
+        let admission = self
+            .admission
+            .prepare_refresh_node(&spec)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
         self.view
-            .check_refresh_node(&spec)
+            .commit_refresh_node(view)
             .map_err(|e| Stop::Damaged(e.to_string()))?;
         self.admission
-            .check_refresh_node(&spec)
-            .map_err(|e| Stop::Damaged(e.to_string()))?;
-        self.view
-            .refresh_node(&spec)
-            .map_err(|e| Stop::Damaged(e.to_string()))?;
-        self.admission
-            .refresh_node(&spec)
+            .commit_refresh_node(admission)
             .map_err(|e| Stop::Damaged(e.to_string()))?;
         if spec.id == self.id {
             self.ledger
@@ -1304,6 +1570,14 @@ impl Node {
             .ok_or_else(|| damaged("allocation requested without an active runner"))
     }
 
+    pub fn assigned_route(&self, key: Key) -> Result<Option<hex_api::RouteReceipt>, Stop> {
+        self.ran
+            .get(&key)
+            .filter(|runner| !runner.ended)
+            .map(|runner| runner.route)
+            .ok_or_else(|| damaged("route requested without an active runner"))
+    }
+
     /// Selected current device metadata, copied from the receiver's sole holder authority.
     pub fn assigned_device_specs(&self, key: Key) -> Result<Option<Vec<Device>>, Stop> {
         self.ran
@@ -1322,10 +1596,10 @@ impl Node {
             .admission
             .devices(self.id)
             .map_err(|why| Stop::Damaged(why.to_string()))?;
-        ran_text(
+        ran_text_observed(
             runner,
             &self.models,
-            devices,
+            |at| devices.get(at).and_then(|slot| slot.observed.as_ref()),
             &self.admission.holds(self.id, runner.workload),
         )
     }
@@ -1355,13 +1629,14 @@ impl Node {
             .ok_or_else(|| damaged("a box number"))?;
         records.put(
             &key.name("own"),
-            &own_text(State::Asked, &demand, &self.models, None)?,
+            &own_text(State::Asked, &demand, &self.models, None, None)?,
         )?;
         self.owned.insert(
             key,
             Owned {
                 demand,
                 allocation: None,
+                route: None,
                 workload,
                 ready: false,
                 state: State::Asked,
@@ -1386,13 +1661,19 @@ impl Node {
         let Some(o) = self.owned.get(&key) else {
             return Err(damaged("deletion of a box this node does not own"));
         };
-        let (state, demand, allocation) = (o.state, o.demand, o.allocation);
+        let (state, demand, allocation, route) = (o.state, o.demand, o.allocation, o.route);
         let mut out = Vec::new();
         match state {
             State::Asked => {
                 records.put(
                     &key.name("own"),
-                    &own_text(State::Done(self.id), &demand, &self.models, allocation)?,
+                    &own_text(
+                        State::Done(self.id),
+                        &demand,
+                        &self.models,
+                        allocation,
+                        route,
+                    )?,
                 )?;
                 if let Some(o) = self.owned.get_mut(&key) {
                     o.state = State::Done(self.id);
@@ -1402,7 +1683,13 @@ impl Node {
             State::At(peer) | State::Created(peer) => {
                 records.put(
                     &key.name("own"),
-                    &own_text(State::Deleting(peer), &demand, &self.models, allocation)?,
+                    &own_text(
+                        State::Deleting(peer),
+                        &demand,
+                        &self.models,
+                        allocation,
+                        route,
+                    )?,
                 )?;
                 if let Some(o) = self.owned.get_mut(&key) {
                     o.state = State::Deleting(peer);
@@ -1442,16 +1729,21 @@ impl Node {
             .view
             .allocation(to, &demand)
             .map_err(|why| Stop::Damaged(why.to_string()))?;
+        let route = self
+            .view
+            .route(to, &demand)
+            .map_err(|why| Stop::Damaged(why.to_string()))?;
         records.put(
             &key.name("own"),
-            &own_text(State::At(to), &demand, &self.models, allocation)?,
+            &own_text(State::At(to), &demand, &self.models, allocation, route)?,
         )?;
         self.view
-            .take_allocated(to, workload, &d, allocation)
+            .take_routed(to, workload, &d, allocation, route)
             .map_err(|e| Stop::Damaged(e.to_string()))?;
         if let Some(o) = self.owned.get_mut(&key) {
             o.state = State::At(to);
             o.allocation = allocation;
+            o.route = route;
         }
         out.push((
             to,
@@ -1459,6 +1751,7 @@ impl Node {
                 key,
                 demand,
                 allocation,
+                route,
             },
         ));
         Ok(())
@@ -1489,17 +1782,18 @@ impl Node {
         if !matches!(o.state, State::At(n) | State::Created(n) if n == from) {
             return Ok(());
         }
-        let (demand, workload, allocation) = (o.demand, o.workload, o.allocation);
+        let (demand, workload, allocation, route) = (o.demand, o.workload, o.allocation, o.route);
         records.put(
             &key.name("own"),
-            &own_text(State::Asked, &demand, &self.models, None)?,
+            &own_text(State::Asked, &demand, &self.models, None, None)?,
         )?;
         self.view
-            .give_allocated(from, workload, &demand, allocation)
+            .give_routed(from, workload, &demand, allocation, route)
             .map_err(|e| Stop::Damaged(e.to_string()))?;
         if let Some(o) = self.owned.get_mut(&key) {
             o.state = State::Asked;
             o.allocation = None;
+            o.route = None;
             o.ready = false;
             o.tried.insert(from);
         }
@@ -1519,15 +1813,15 @@ impl Node {
             out.push((from, Msg::Forget { key }));
             return Ok(());
         };
-        let (demand, workload, allocation) = (o.demand, o.workload, o.allocation);
+        let (demand, workload, allocation, route) = (o.demand, o.workload, o.allocation, o.route);
         match o.state {
             State::At(n) | State::Created(n) | State::Deleting(n) if n == from => {
                 records.put(
                     &key.name("own"),
-                    &own_text(State::Done(from), &demand, &self.models, allocation)?,
+                    &own_text(State::Done(from), &demand, &self.models, allocation, route)?,
                 )?;
                 self.view
-                    .give_allocated(from, workload, &demand, allocation)
+                    .give_routed(from, workload, &demand, allocation, route)
                     .map_err(|e| Stop::Damaged(e.to_string()))?;
             }
             State::Done(n) if n == from => {}
@@ -1554,7 +1848,13 @@ impl Node {
         match o.state {
             State::At(peer) if peer == from => records.put(
                 &key.name("own"),
-                &own_text(State::Created(from), &o.demand, &self.models, o.allocation)?,
+                &own_text(
+                    State::Created(from),
+                    &o.demand,
+                    &self.models,
+                    o.allocation,
+                    o.route,
+                )?,
             )?,
             State::Created(peer) if peer == from && !o.ready => {}
             State::Asked
@@ -1603,7 +1903,8 @@ impl Node {
                 key,
                 demand,
                 allocation,
-            } => self.start(from, key, demand, allocation, records, &mut out)?,
+                route,
+            } => self.start(from, key, demand, allocation, route, records, &mut out)?,
             Msg::Delete { key, demand } => {
                 check_demand(&demand, &self.models)?;
                 if self
@@ -1676,6 +1977,7 @@ impl Node {
         key: Key,
         demand: Demand,
         allocation: Option<hex_api::Allocation>,
+        route: Option<hex_api::RouteReceipt>,
         records: &mut impl Records,
         out: &mut Vec<(NodeId, Msg)>,
     ) -> Result<(), Stop> {
@@ -1690,12 +1992,16 @@ impl Node {
         if self
             .owned
             .get(&key)
-            .is_some_and(|o| o.demand != demand || o.allocation != allocation)
+            .is_some_and(|o| o.demand != demand || o.allocation != allocation || o.route != route)
         {
             return Err(damaged("a start disagrees with its owned demand"));
         }
         if let Some(r) = self.ran.get(&key) {
-            if r.owner != owner || r.demand != demand || r.allocation != allocation {
+            if r.owner != owner
+                || r.demand != demand
+                || r.allocation != allocation
+                || r.route != route
+            {
                 return Err(damaged("a start reuses a key with a different demand"));
             }
             out.push((
@@ -1718,12 +2024,12 @@ impl Node {
         if self.ran.len() >= self.budget.ran
             || self.admission.verdict(self.id, &demand) != Ok(Verdict::Admits)
             || self.admission.allocation(self.id, &demand).ok() != Some(allocation)
+            || self.admission.route(self.id, &demand).ok() != Some(route)
         {
             out.push((owner, Msg::Refused { key }));
             return Ok(());
         }
-        let charged = crate::model::allocated_resources(demand.need, allocation)
-            .map_err(|_| damaged("start allocation differs from the original demand"))?;
+        let charged = assignment(&demand, allocation, route)?;
         let start = lb::Start {
             owner: lb::OwnerId(owner.0),
             run: lb::Handle::NONE,
@@ -1736,12 +2042,13 @@ impl Node {
         };
         let workload = workload(&mut self.next_workload)?;
         self.admission
-            .take_allocated(self.id, workload, &demand, allocation)
+            .take_routed(self.id, workload, &demand, allocation, route)
             .map_err(|e| Stop::Damaged(e.to_string()))?;
         let r = Ran {
             owner,
             demand,
             allocation,
+            route,
             workload,
             created: false,
             at: Some(at),
@@ -1817,7 +2124,7 @@ impl Node {
                 .end(at, &mut out)
                 .ok_or_else(|| damaged("a box the ledger didn't hold"))?;
             self.admission
-                .give_allocated(self.id, r.workload, &r.demand, r.allocation)
+                .give_routed(self.id, r.workload, &r.demand, r.allocation, r.route)
                 .map_err(|e| Stop::Damaged(e.to_string()))?;
         }
         Ok(())
@@ -1959,6 +2266,7 @@ fn own_text(
     demand: &Demand,
     models: &[String],
     allocation: Option<hex_api::Allocation>,
+    route: Option<hex_api::RouteReceipt>,
 ) -> Result<String, Stop> {
     let (word, n) = match state {
         State::Asked => ("asked", 0),
@@ -1967,8 +2275,7 @@ fn own_text(
         State::Deleting(n) => ("deleting", n.0),
         State::Done(n) => ("done", n.0),
     };
-    crate::model::allocated_resources(demand.need, allocation)
-        .map_err(|_| damaged("owned allocation differs from original demand"))?;
+    assignment(demand, allocation, route)?;
     let demand = demand_text(demand, models)?;
     let width = usize::try_from(u32::MAX.ilog10())
         .ok()
@@ -1986,6 +2293,13 @@ fn own_text(
                 0
             })
         })
+        .and_then(|n| {
+            n.checked_add(if route.is_some() {
+                ROUTE_BYTES.checked_add(1)?
+            } else {
+                0
+            })
+        })
         .ok_or_else(|| damaged("owned allocation row byte bound"))?;
     let mut out = BoundedText {
         text: String::new(),
@@ -1995,6 +2309,7 @@ fn own_text(
         .try_reserve_exact(max)
         .map_err(|_| damaged("owned allocation row storage"))?;
     write!(&mut out, "{word} {n} ").map_err(|_| damaged("formatting owned row"))?;
+    write_route(&mut out, route).map_err(|_| damaged("formatting owned route"))?;
     write_allocation(&mut out, allocation).map_err(|_| damaged("formatting owned allocation"))?;
     out.write_str(&demand)
         .map_err(|_| damaged("formatting owned demand"))?;
@@ -2083,8 +2398,16 @@ fn runner_owner(
 }
 
 fn ran_text(r: &Ran, models: &[String], devices: &[Device], held: &[u16]) -> Result<String, Stop> {
-    crate::model::allocated_resources(r.demand.need, r.allocation)
-        .map_err(|_| damaged("runner allocation differs from original demand"))?;
+    ran_text_observed(r, models, |at| devices.get(at), held)
+}
+
+fn ran_text_observed<'a>(
+    r: &Ran,
+    models: &[String],
+    observed: impl Fn(usize) -> Option<&'a Device>,
+    held: &[u16],
+) -> Result<String, Stop> {
+    assignment(&r.demand, r.allocation, r.route)?;
     let state = if r.ended {
         "ended"
     } else if r.created {
@@ -2124,6 +2447,13 @@ fn ran_text(r: &Ran, models: &[String], devices: &[Device], held: &[u16]) -> Res
                 0
             })
         })
+        .and_then(|n| {
+            n.checked_add(if r.route.is_some() {
+                ROUTE_BYTES.checked_add(1)?
+            } else {
+                0
+            })
+        })
         .ok_or_else(|| damaged("runner row byte bound"))?;
     let count = u32::try_from(held.len()).map_err(|_| damaged("runner binding count"))?;
     let mut out = BoundedText {
@@ -2136,9 +2466,8 @@ fn ran_text(r: &Ran, models: &[String], devices: &[Device], held: &[u16]) -> Res
     write!(&mut out, "bindings1:{}:{count}", r.owner.0)
         .map_err(|_| damaged("formatting runner bindings"))?;
     for index in held {
-        let device = devices
-            .get(usize::from(*index))
-            .ok_or_else(|| damaged("runner binding index out of range"))?;
+        let device = observed(usize::from(*index))
+            .ok_or_else(|| damaged("runner binding has no retained observation"))?;
         if let Some(key) = device.key {
             let kind = match device.kind {
                 DeviceKind::Gpu => "gpu",
@@ -2154,6 +2483,7 @@ fn ran_text(r: &Ran, models: &[String], devices: &[Device], held: &[u16]) -> Res
         }
     }
     write!(&mut out, " {state} ").map_err(|_| damaged("formatting runner row"))?;
+    write_route(&mut out, r.route).map_err(|_| damaged("formatting runner route"))?;
     write_allocation(&mut out, r.allocation)
         .map_err(|_| damaged("formatting runner allocation"))?;
     out.write_str(&demand)
@@ -2756,6 +3086,186 @@ mod adversarial_device_recovery_tests;
 mod tests {
     use super::*;
 
+    /// AC-T7.4.1: an original OCI payload keeps its actual guest route through commit, wire and
+    /// recovery. These are model callbacks/rows, not native VM receipts or execution evidence.
+    #[test]
+    fn routed_oci_receipt_commits_before_create_and_never_guesses_a_recovery_backend() {
+        use crate::model::{Classes, RuntimeRoutes};
+        use hex_api::{
+            BackingKey, BackingOffer, BackingPhase, Execution, GpuEligibility, ImageArch, ImageOs,
+            ImagePlatform, RouteKey, RouteOffer, RouteReceipt,
+        };
+        let key = BackingKey {
+            pool: [31; 32],
+            generation: [32; 16],
+        };
+        let shared = RouteOffer {
+            key: RouteKey {
+                class: hex_api::Class::Oci,
+                image: ImagePlatform {
+                    os: ImageOs::Linux,
+                    arch: ImageArch::Amd64,
+                },
+                execution: Execution::ShardsShared,
+                gpu: GpuEligibility::None,
+            },
+            cost: None,
+            backing: Some(key),
+        };
+        let native = RouteOffer {
+            key: RouteKey {
+                class: hex_api::Class::Oci,
+                image: ImagePlatform {
+                    os: ImageOs::Windows,
+                    arch: ImageArch::Amd64,
+                },
+                execution: Execution::Native,
+                gpu: GpuEligibility::Any,
+            },
+            cost: None,
+            backing: None,
+        };
+        let mut spec = NodeSpec::new(NodeId(0), CAP);
+        spec.platform.os = Os::Windows;
+        spec.classes = Classes::NONE.with(Class::Oci);
+        spec.routes = Some(
+            RuntimeRoutes {
+                offers: vec![native, shared],
+                device_routes: Vec::new(),
+                backings: vec![BackingOffer {
+                    key,
+                    cost: cost_fixture(),
+                    phase: BackingPhase::Live,
+                    devices: Vec::new(),
+                }],
+            }
+            .share()
+            .unwrap(),
+        );
+        let demand = Demand {
+            need: Resources {
+                cpu_milli: 100,
+                mem_bytes: 50,
+                ..Resources::default()
+            },
+            class: Class::Oci,
+            kind: Kind::Plain,
+            ask: Ask {
+                runtime_class: Some(hex_api::Class::Oci),
+                os: Some(Os::Linux),
+                arch: Some(Arch::X86_64),
+                ..Ask::default()
+            },
+        };
+        let mut rows = Memory::default();
+        let mut owner = boot_test(std::slice::from_ref(&spec), &[], &mut rows);
+        let (id, out) = owner.submit(demand, &mut rows).unwrap();
+        let message = out[0].1;
+        let receipt = RouteReceipt {
+            key: shared.key,
+            backing: Some(key),
+        };
+        assert_eq!(
+            message,
+            Msg::Start {
+                key: id,
+                demand,
+                allocation: None,
+                route: Some(receipt)
+            }
+        );
+        let bytes = encode_message(&message, &[], 4096).unwrap();
+        assert_eq!(decode_message(&bytes, &[], bytes.len()).unwrap(), message);
+        assert!(decode_message(&bytes, &[], bytes.len() - 1).is_err());
+        let own = rows
+            .all()
+            .unwrap()
+            .into_iter()
+            .find(|(name, _)| name == &id.name("own"))
+            .unwrap()
+            .1;
+        assert_eq!(
+            recorded_assignment(&own, &[]).unwrap(),
+            (demand, None, Some(receipt))
+        );
+        owner.hear(NodeId(0), message, &mut rows).unwrap();
+        assert_eq!(owner.assigned_route(id).unwrap(), Some(receipt));
+        let before = rows.all().unwrap();
+        assert!(
+            owner
+                .hear(
+                    NodeId(0),
+                    Msg::Start {
+                        key: id,
+                        demand,
+                        allocation: None,
+                        route: Some(RouteReceipt {
+                            key: native.key,
+                            backing: None
+                        })
+                    },
+                    &mut rows
+                )
+                .is_err()
+        );
+        assert_eq!(rows.all().unwrap(), before);
+        owner.created(id, &mut rows).unwrap();
+        let restored = Node::boot(
+            NodeId(0),
+            std::slice::from_ref(&spec),
+            &[],
+            test_budget(),
+            Pick::default(),
+            &mut rows,
+            |_| Boxed::Running,
+        )
+        .unwrap();
+        assert_eq!(restored.assigned_route(id).unwrap(), Some(receipt));
+        assert_eq!(restored.demand(id), Some(demand));
+        let replacement = BackingKey {
+            generation: [33; 16],
+            ..key
+        };
+        spec.routes = Some(
+            RuntimeRoutes {
+                offers: vec![
+                    native,
+                    RouteOffer {
+                        backing: Some(replacement),
+                        ..shared
+                    },
+                ],
+                device_routes: Vec::new(),
+                backings: vec![BackingOffer {
+                    key: replacement,
+                    cost: cost_fixture(),
+                    phase: BackingPhase::Live,
+                    devices: Vec::new(),
+                }],
+            }
+            .share()
+            .unwrap(),
+        );
+        let before = rows.all().unwrap();
+        assert!(
+            Node::boot(
+                NodeId(0),
+                &[spec],
+                &[],
+                test_budget(),
+                Pick::default(),
+                &mut rows,
+                |_| Boxed::Running
+            )
+            .is_err()
+        );
+        assert_eq!(
+            rows.all().unwrap(),
+            before,
+            "fresh generation cannot retarget an old immutable receipt"
+        );
+    }
+
     fn cost_fixture() -> hex_api::RuntimeCost {
         let guest = hex_api::CapacityResources {
             cpu_milli: 1_000,
@@ -2812,16 +3322,17 @@ mod tests {
             .allocate(crate::model::capacity_resources(demand.need))
             .unwrap();
         assert_eq!(
-            starts,
-            [(
-                NodeId(0),
-                Msg::Start {
-                    key,
-                    demand,
-                    allocation: Some(receipt)
-                }
-            )]
-        );
+                    starts,
+                    [(
+                        NodeId(0),
+                        Msg::Start {
+                            key,
+                            demand,
+                            allocation: Some(receipt)
+                        route: None,
+        }
+                    )]
+                );
         let (_, saved) = recorded_demand(records.rows.get(&key.name("own")).unwrap(), &[]).unwrap();
         assert_eq!(saved, Some(receipt));
         node.hear(NodeId(0), starts[0].1, &mut records).unwrap();
@@ -2850,18 +3361,19 @@ mod tests {
             .allocate(crate::model::capacity_resources(demand.need))
             .unwrap();
         assert!(
-            recovered
-                .hear(
-                    NodeId(0),
-                    Msg::Start {
-                        key,
-                        demand,
-                        allocation: Some(wrong)
-                    },
-                    &mut records
-                )
-                .is_err()
-        );
+                    recovered
+                        .hear(
+                            NodeId(0),
+                            Msg::Start {
+                                key,
+                                demand,
+                                allocation: Some(wrong)
+                            route: None,
+        },
+                            &mut records
+                        )
+                        .is_err()
+                );
         recovered.end(key, &mut records).unwrap();
         assert_eq!(recovered.admitted(), [0; lb::DIMS]);
     }
@@ -2891,26 +3403,28 @@ mod tests {
             key,
             demand,
             allocation: Some(receipt),
+            route: None,
         };
         let text = encode_message(&message, &[], 1_024).unwrap();
         assert_eq!(decode_message(&text, &[], text.len()).unwrap(), message);
         assert!(decode_message(&text, &[], text.len() - 1).is_err());
-        let row = own_text(State::At(NodeId(0)), &demand, &[], Some(receipt)).unwrap();
+        let row = own_text(State::At(NodeId(0)), &demand, &[], Some(receipt), None).unwrap();
         assert_eq!(recorded_demand(&row, &[]).unwrap(), (demand, Some(receipt)));
         let mut forged = receipt;
         forged.resources.cpu_milli -= 1;
         assert!(
-            encode_message(
-                &Msg::Start {
-                    key,
-                    demand,
-                    allocation: Some(forged)
-                },
-                &[],
-                1_024
-            )
-            .is_err()
-        );
+                    encode_message(
+                        &Msg::Start {
+                            key,
+                            demand,
+                            allocation: Some(forged)
+                        route: None,
+        },
+                        &[],
+                        1_024
+                    )
+                    .is_err()
+                );
         let hostile = text.replace(":1100:250:", ":1099:250:");
         assert_ne!(hostile, text);
         assert!(decode_message(&hostile, &[], 1_024).is_err());
@@ -3030,6 +3544,7 @@ mod tests {
                         cpu_milli: 1,
                         ..Resources::default()
                     }),
+                    route: None,
                 },
                 &mut records,
             )
@@ -3080,6 +3595,7 @@ mod tests {
                 allocation: None,
                 key,
                 demand,
+                route: None,
             },
             records,
         )
@@ -3116,13 +3632,14 @@ mod tests {
         assert_eq!(
             out,
             vec![(
-                NodeId(0),
-                Msg::Start {
-                    allocation: None,
-                    key,
-                    demand
-                }
-            )]
+                            NodeId(0),
+                            Msg::Start {
+                                allocation: None,
+                                key,
+                                demand
+                            route: None,
+            }
+                        )]
         );
         assert!(start(&mut node, key, demand, &mut records).is_empty());
         assert_eq!(
@@ -3292,6 +3809,8 @@ mod tests {
                 block_size: 1 << 20,
                 net: 1,
                 kvm: true,
+                runtime_class: None,
+                native_only: false,
             },
             ..requested()
         };
@@ -3378,13 +3897,14 @@ mod tests {
         assert_eq!(
             retry,
             vec![(
-                NodeId(1),
-                Msg::Start {
-                    allocation: None,
-                    key,
-                    demand
-                }
-            )]
+                            NodeId(1),
+                            Msg::Start {
+                                allocation: None,
+                                key,
+                                demand
+                            route: None,
+            }
+                        )]
         );
         assert_eq!(owner.demand(key), Some(demand));
     }
@@ -3494,18 +4014,19 @@ mod tests {
             .unwrap();
             let (key, _) = node.submit(requested(), &mut rec).unwrap();
             assert!(
-                node.hear(
-                    NodeId(0),
-                    Msg::Start {
-                        allocation: None,
-                        key,
-                        demand: requested()
-                    },
-                    &mut rec
-                )
-                .unwrap()
-                .is_empty()
-            );
+                            node.hear(
+                                NodeId(0),
+                                Msg::Start {
+                                    allocation: None,
+                                    key,
+                                    demand: requested()
+                                route: None,
+            },
+                                &mut rec
+                            )
+                            .unwrap()
+                            .is_empty()
+                        );
             assert_eq!(
                 std::mem::take(&mut node.told),
                 vec![Told::Create(key, requested())]
@@ -3573,6 +4094,7 @@ mod tests {
                 allocation: None,
                 key,
                 demand,
+                route: None,
             },
             Msg::Delete { key, demand },
             Msg::Holds { key },
@@ -3617,6 +4139,7 @@ mod tests {
                 allocation: None,
                 key,
                 demand,
+                route: None,
             },
             &models,
             budget,
@@ -3626,13 +4149,14 @@ mod tests {
         let mut remapped = demand;
         remapped.ask.gpu_model = Some(ModelId(1));
         assert_eq!(
-            decode_message(&text, &swapped, text.len()).unwrap(),
-            Msg::Start {
-                allocation: None,
-                key,
-                demand: remapped
-            }
-        );
+                    decode_message(&text, &swapped, text.len()).unwrap(),
+                    Msg::Start {
+                        allocation: None,
+                        key,
+                        demand: remapped
+                    route: None,
+        }
+                );
         for bad in [
             "p1 held 0 1 0 0 1 1",
             "p1 held 0 1 0 1 0 2",
@@ -3748,13 +4272,14 @@ mod tests {
         assert_eq!(
             start,
             vec![(
-                NodeId(1),
-                Msg::Start {
-                    allocation: None,
-                    key,
-                    demand
-                }
-            )]
+                            NodeId(1),
+                            Msg::Start {
+                                allocation: None,
+                                key,
+                                demand
+                            route: None,
+            }
+                        )]
         );
         runner
             .hear(NodeId(0), start[0].1, &mut ran_records)
@@ -4071,6 +4596,7 @@ mod tests {
                         allocation: None,
                         key,
                         demand: requested(),
+                        route: None,
                     },
                     &mut rec,
                 )

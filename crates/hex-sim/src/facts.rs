@@ -284,6 +284,7 @@ impl Facts {
             });
         }
         let node = NodeSpec {
+            routes: None,
             runtime_pools: Vec::new(),
             costs: [None; Class::COUNT],
             id,

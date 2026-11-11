@@ -99,6 +99,28 @@ impl Default for Index {
 }
 
 impl Index {
+    pub fn try_clone(&self) -> Option<Self> {
+        fn copy<T: Copy>(values: &[T]) -> Option<Vec<T>> {
+            let mut out = Vec::new();
+            out.try_reserve_exact(values.len()).ok()?;
+            out.extend_from_slice(values);
+            Some(out)
+        }
+        Some(Self {
+            nb: self.nb,
+            nw: self.nw,
+            bits: copy(&self.bits)?,
+            sum: copy(&self.sum)?,
+            slots: copy(&self.slots)?,
+            start: self.start,
+            words: self.words,
+            summary: self.summary,
+            member: copy(&self.member)?,
+            members: self.members,
+            shapes: copy(&self.shapes)?,
+        })
+    }
+
     /// An empty index whose cursors start at `start` (a node id, taken modulo the fleet).
     pub fn new(start: u32) -> Index {
         Index {

@@ -203,6 +203,25 @@ pub(crate) struct Prepared<'a> {
 }
 
 impl Costs {
+    pub(crate) fn try_clone(&self) -> Result<Self, SimError> {
+        fn copy<T: Copy>(values: &[T]) -> Result<Vec<T>, SimError> {
+            let mut out = Vec::new();
+            out.try_reserve_exact(values.len())
+                .map_err(|_| SimError::Full {
+                    what: "start-cost snapshot",
+                    bound: values.len(),
+                })?;
+            out.extend_from_slice(values);
+            Ok(out)
+        }
+        Ok(Self {
+            nodes: copy(&self.nodes)?,
+            priors: self.priors,
+            starts: copy(&self.starts)?,
+            start_priors: self.start_priors,
+        })
+    }
+
     pub(crate) fn new(nodes: usize) -> Self {
         Self {
             nodes: vec![Measured::of(Rates::default()); nodes],
