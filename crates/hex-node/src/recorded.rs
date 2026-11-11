@@ -2409,7 +2409,19 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
         records: &hex_runtime::devices::Records,
         pools: &[PoolRecord],
     ) -> Result<(), Refusal> {
-        self.host().preflight_retained(records, pools)
+        self.host().preflight_retained(records, pools)?;
+        // The guest's own receipts join the same cohort: one whose name no retained guest-routed
+        // record carries is an orphan, its native scope nobody else's to find (AC-T7.4.1).
+        for id in self.guest().receipt_ids()? {
+            let record = records
+                .get(&id)
+                .and_then(|record| record.as_ref().ok())
+                .ok_or_else(|| uncertain(&id))?;
+            if self.route_for(&record.spec)? != hex_runtime::guest::Side::Guest {
+                return Err(uncertain(&id));
+            }
+        }
+        Ok(())
     }
 
     fn initialize_native(&self) -> Result<(), Refusal> {

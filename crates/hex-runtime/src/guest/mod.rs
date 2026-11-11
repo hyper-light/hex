@@ -642,6 +642,12 @@ impl GuestRuntime {
         }
     }
 
+    /// The boxes this guest keeps a selected receipt for, by name: what the node's startup barrier
+    /// joins to its retained records (AC-T7.4.1). Reads the receipt folder's names only.
+    pub fn receipt_ids(&self) -> Result<Vec<BoxId>, Refusal> {
+        self.selected_ids()
+    }
+
     /// Joins the guest's control connection, in the event form, to the node's loop through `joins`, and
     /// every guest's booted or taken back after: a call through it is answered from the loop, holding no
     /// thread while the guest answers (native plan step 8 (1)). With no guest running, the next boot joins.
