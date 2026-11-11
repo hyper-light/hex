@@ -261,7 +261,14 @@ pub(super) fn retain_unavailable(
         .ok_or_else(|| invalid("fresh normalized route view was already published"))?;
     let mut admit = 0u64;
     for (at, offer) in current.offers.iter().enumerate() {
-        if current.admits(at) && !failed(offer) {
+        let backing = offer
+            .backing
+            .and_then(|key| current.backings.iter().find(|backing| backing.key == key));
+        let mut blocked = false;
+        for observation in unavailable {
+            blocked |= observation.blocks_route(offer, backing)?;
+        }
+        if current.admits(at) && !blocked {
             admit |= bit(at)?;
         }
     }
@@ -273,9 +280,9 @@ pub(super) fn retain_unavailable(
                 .find(|existing| existing.key == offer.key)
             {
                 if existing != offer {
-                    return Err(invalid(
-                        "unavailable route changed its immutable cost/backing receipt",
-                    ));
+                    // A successful current unrelated key may advance legitimately. Index's
+                    // retained-receipt check still refuses removal of any actual held lifetime.
+                    continue;
                 }
             } else {
                 if current.offers.len() >= hex_api::MAX_RUNTIME_ROUTES {
@@ -332,11 +339,10 @@ pub(super) fn retain_unavailable(
             let mut mask = 0u64;
             for (at, offer) in prior.offers.iter().enumerate() {
                 if old_mask & bit(at)? != 0 && failed(offer) {
-                    let at = current
-                        .offers
-                        .iter()
-                        .position(|current| current == offer)
-                        .ok_or_else(|| invalid("retained device route lost its canonical offer"))?;
+                    let Some(at) = current.offers.iter().position(|current| current == offer)
+                    else {
+                        continue;
+                    };
                     mask |= bit(at)?;
                 }
             }
@@ -839,5 +845,107 @@ mod tests {
         );
         assert_eq!(fresh, Verdict::NoGpu);
         assert_eq!(cpu, Verdict::Admits);
+    }
+    /// AC-T7.4.1: healthy report normalization fixes the expected taxonomy/authority independently of diagnostics.
+    #[test]
+    fn healthy_normalized_cold_and_live_sources_keep_no_gpu_cpu_room_and_exact_grants() {
+        use hex_sim::index::{FitIndex, Verdict};
+        let key = BackingKey {
+            pool: [0x34; 32],
+            generation: [0x35; 16],
+        };
+        let warm = BackingKey {
+            pool: [0x36; 32],
+            generation: [0x37; 16],
+        };
+        let id = DeviceId {
+            kind: DeviceKind::Gpu,
+            key: 2,
+        };
+        for phase in [BackingPhase::Prepared, BackingPhase::Live] {
+            let mut gpu = route(
+                hex_api::Class::Shards,
+                Execution::ShardsDedicated,
+                GpuEligibility::Required,
+            );
+            gpu.cost = Some(profile());
+            gpu.backing = Some(key);
+            let mut shared = route(
+                hex_api::Class::Oci,
+                Execution::ShardsShared,
+                GpuEligibility::None,
+            );
+            shared.backing = Some(warm);
+            let node = normalize(vec![
+                (
+                    Class::Oci,
+                    Some(report(
+                        vec![route(
+                            hex_api::Class::Process,
+                            Execution::Native,
+                            GpuEligibility::None,
+                        )],
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    )),
+                ),
+                (
+                    Class::Shards,
+                    Some(report(
+                        vec![gpu, shared],
+                        Vec::new(),
+                        Vec::new(),
+                        vec![
+                            BackingOffer {
+                                key,
+                                cost: profile(),
+                                phase,
+                                devices: vec![id],
+                            },
+                            BackingOffer {
+                                key: warm,
+                                cost: profile(),
+                                phase: BackingPhase::Live,
+                                devices: Vec::new(),
+                            },
+                        ],
+                    )),
+                ),
+            ])
+            .unwrap();
+            assert!(node.devices.is_empty());
+            let mut index = FitIndex::new(&[node]).unwrap();
+            assert_eq!(
+                index
+                    .verdict(NodeId(0), &original_pending_request(true))
+                    .unwrap(),
+                Verdict::NoGpu
+            );
+            assert_eq!(
+                index
+                    .verdict(NodeId(0), &original_pending_request(false))
+                    .unwrap(),
+                Verdict::Admits
+            );
+            let before = index.key(NodeId(0)).unwrap();
+            let grant = index.grant_backing(NodeId(0), key).unwrap();
+            assert_eq!(grant.devices, vec![id]);
+            assert_eq!(
+                grant.allocation,
+                profile()
+                    .allocate(hex_api::CapacityResources::default())
+                    .unwrap()
+            );
+            let after = index.key(NodeId(0)).unwrap();
+            if phase == BackingPhase::Prepared {
+                assert_eq!(
+                    before.cpu_milli.checked_sub(after.cpu_milli),
+                    Some(grant.allocation.resources.cpu_milli)
+                );
+            } else {
+                assert_eq!(after, before);
+            }
+        }
     }
 }

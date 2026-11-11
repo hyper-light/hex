@@ -364,10 +364,8 @@ impl Routes {
         }
         let mut found = None;
         let mut inactive = None;
+        let mut unavailable_gpu = false;
         for (at, offer) in self.catalog.offers.iter().enumerate() {
-            if !self.catalog.admits(at) {
-                continue;
-            }
             let form_matches = demand.ask.runtime_class.map_or_else(
                 || match demand.class {
                     Class::Oci => matches!(
@@ -401,6 +399,10 @@ impl Routes {
             {
                 continue;
             }
+            if !self.catalog.admits(at) {
+                unavailable_gpu |= demand.need.gpus != 0;
+                continue;
+            }
             if offer
                 .backing
                 .is_some_and(|key| !matches!(self.backing(key), Some((_, BackingPhase::Live))))
@@ -421,7 +423,11 @@ impl Routes {
         found
             .map(Ok)
             .or(inactive)
-            .unwrap_or(Err(Verdict::NoPlatform))
+            .unwrap_or(Err(if unavailable_gpu {
+                Verdict::NoGpu
+            } else {
+                Verdict::NoPlatform
+            }))
     }
     pub fn committed(&self, receipt: RouteReceipt) -> Result<Choice, SimError> {
         self.catalog

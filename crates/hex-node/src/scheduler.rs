@@ -97,22 +97,44 @@ impl BackingActions {
         &mut self,
         reports: &[(hex_sim::model::Class, Option<hex_api::Capacity>)],
         unavailable: &[hex_api::BackendUnavailable],
-    ) {
-        let failed = |key| {
-            reports
-                .iter()
-                .filter_map(|(_, report)| report.as_ref())
-                .any(|report| {
-                    report.routes.iter().any(|offer| {
-                        offer.backing == Some(key)
-                            && unavailable
-                                .iter()
-                                .any(|value| value.backend == offer.key.backend_class())
-                    })
-                })
+    ) -> Result<(), Refusal> {
+        let blocked = |key| -> Result<bool, Refusal> {
+            for (_, report) in reports {
+                let Some(report) = report else { continue };
+                for offer in report
+                    .routes
+                    .iter()
+                    .filter(|offer| offer.backing == Some(key))
+                {
+                    let backing = report.backings.iter().find(|backing| backing.key == key);
+                    for observation in unavailable {
+                        if observation.blocks_route(offer, backing)? {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+            Ok(false)
         };
-        self.prepared.retain(|(_, key)| !failed(*key));
-        self.released.retain(|(_, backing)| !failed(backing.key));
+        let mut refusal = None;
+        self.prepared.retain(|(_, key)| {
+            if refusal.is_some() {
+                return true;
+            }
+            match blocked(*key) {
+                Ok(blocked) => !blocked,
+                Err(why) => {
+                    refusal = Some(why);
+                    true
+                }
+            }
+        });
+        // A validated canonical Released receipt is a termination/refund witness, not a fresh
+        // observation. Unread renderer telemetry cannot suppress that existing authority.
+        if let Some(refusal) = refusal {
+            return Err(refusal);
+        }
+        Ok(())
     }
 }
 
@@ -606,7 +628,7 @@ impl Service {
             snapshot.add_unavailable(observation)?;
         }
         let mut backing_actions = BackingActions::from_reports(&snapshot.reports)?;
-        backing_actions.only_available(&snapshot.reports, &snapshot.unavailable);
+        backing_actions.only_available(&snapshot.reports, &snapshot.unavailable)?;
         let mut facts_dir = std::path::PathBuf::new();
         facts_dir
             .try_reserve_exact(config.state.as_os_str().len())
@@ -987,7 +1009,7 @@ impl Service {
             snapshot.add_unavailable(observation)?;
         }
         let mut actions = BackingActions::from_reports(&snapshot.reports)?;
-        actions.only_available(&snapshot.reports, &snapshot.unavailable);
+        actions.only_available(&snapshot.reports, &snapshot.unavailable)?;
         if physical_authority != self.physical_authority {
             return Err(Refusal::Invalid {
                 what: "native physical report authority",

@@ -408,8 +408,9 @@ pub struct RuntimePool {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeRoutes {
-    /// Fresh-admission permission only. Retained committed receipts/charges survive a missing
-    /// observation; None is the existing all-offers behavior, never an invented current reading.
+    /// Current route permission: a cold permit may provision its canonical backing, while
+    /// workload admission still requires Live and observed matching. Retained committed receipts
+    /// survive missing observations; None preserves all-offers behavior without inventing readings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admit: Option<u64>,
     #[serde(deserialize_with = "hex_api::Capacity::deserialize_routes")]

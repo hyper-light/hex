@@ -977,10 +977,12 @@ fn released_observer_siblings_require_new_observation_before_native_route_admiss
         },
         ..request
     };
-    assert_eq!(index.verdict(NodeId(0), &native).unwrap(), Verdict::NoGpu);
+    assert_eq!(index.key(NodeId(0)).unwrap().gpus, 0);
+    assert_eq!(index.verdict(NodeId(0), &native).unwrap(), Verdict::NoRoom);
     source.phase = BackingPhase::Draining;
     index.observe_backing(NodeId(0), &source).unwrap();
-    assert_eq!(index.verdict(NodeId(0), &native).unwrap(), Verdict::NoGpu);
+    assert_eq!(index.key(NodeId(0)).unwrap().gpus, 0);
+    assert_eq!(index.verdict(NodeId(0), &native).unwrap(), Verdict::NoRoom);
     source.phase = BackingPhase::Released;
     index.observe_backing(NodeId(0), &source).unwrap();
     assert_eq!(
@@ -996,4 +998,32 @@ fn released_observer_siblings_require_new_observation_before_native_route_admiss
         Verdict::NoGpu,
         "the existing catalog sample predates release; a new successful observation is required for the sibling"
     );
+}
+
+/// AC-T7.4.1: known observations do not bypass full-P charge, but an independent fresh terminal view can admit.
+#[test]
+fn healthy_independent_native_snapshot_distinguishes_held_full_pool_from_fresh_free_gpu() {
+    let (offered, request, _) = subset_observer_fixture(true);
+    let native = Demand {
+        class: Class::Oci,
+        ask: Ask {
+            runtime_class: Some(hex_api::Class::Oci),
+            os: Some(Os::Linux),
+            arch: Some(crate::model::Arch::X86_64),
+            ..Ask::default()
+        },
+        ..request
+    };
+    let held = FitIndex::new(&[offered]).unwrap();
+    assert_eq!(held.key(NodeId(0)).unwrap().gpus, 0);
+    assert_eq!(held.verdict(NodeId(0), &native).unwrap(), Verdict::NoRoom);
+
+    // This is a separate current model snapshot with no retained Box and successful readings,
+    // not a refresh that treats the preceding observer's stale samples as new observations.
+    let (mut fresh, _, _) = subset_observer_fixture(true);
+    let routes = triomphe::Arc::get_mut(fresh.routes.as_mut().unwrap()).unwrap();
+    routes.backings.first_mut().unwrap().phase = BackingPhase::Released;
+    let free = FitIndex::new(&[fresh]).unwrap();
+    assert_eq!(free.key(NodeId(0)).unwrap().gpus, 2);
+    assert_eq!(free.verdict(NodeId(0), &native).unwrap(), Verdict::Admits);
 }

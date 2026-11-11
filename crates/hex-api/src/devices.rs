@@ -231,6 +231,36 @@ impl BackendUnavailable {
         Ok(())
     }
 
+    /// Fresh permission is scoped to the actual source key. A current canonical cold envelope
+    /// can be provisioned before readings exist; workload admission still requires Live and
+    /// observed eligibility. Old retained metadata must not be passed as a current backing here.
+    pub fn blocks_route(
+        &self,
+        offer: &crate::runtime::RouteOffer,
+        backing: Option<&crate::runtime::BackingOffer>,
+    ) -> Result<bool, Refusal> {
+        self.check()?;
+        offer.check()?;
+        if let Some(backing) = backing {
+            offer.check_backing(backing)?;
+        }
+        let Refusal::Backing { key, cause } = &self.cause else {
+            return Err(invalid_report("unavailable route has no backing identity"));
+        };
+        if self.backend != offer.key.backend_class() || offer.backing != Some(*key) {
+            return Ok(false);
+        }
+        Ok(!(*cause == crate::LifecycleCause::Pending
+            && backing.is_some_and(|backing| {
+                backing.key == *key
+                    && matches!(
+                        backing.phase,
+                        crate::runtime::BackingPhase::Prepared
+                            | crate::runtime::BackingPhase::Granted
+                    )
+            })))
+    }
+
     pub fn try_clone(&self) -> Result<Self, Refusal> {
         self.check()?;
         let Refusal::Backing { key, cause } = &self.cause else {
@@ -841,5 +871,103 @@ mod unavailable_tests {
                 .to_string()
                 .contains("count exceeds")
         );
+    }
+    /// AC-T7.4.1: permission is keyed, and cold permission requires a current canonical envelope.
+    #[test]
+    fn qualified_route_permission_is_keyed_and_cannot_invent_cold_metadata() {
+        use crate::{
+            BackingKey, BackingOffer, BackingPhase, CapacityResources, Class, Execution,
+            GpuEligibility, ImageArch, ImageOs, ImagePlatform, LifecycleCause, RouteKey,
+            RouteOffer, RuntimeCost,
+        };
+        let floor = CapacityResources {
+            cpu_milli: 1000,
+            mem_bytes: crate::MIN_MEMORY,
+            disk_bytes: 0,
+        };
+        let cost = RuntimeCost {
+            id: [1; 32],
+            floor,
+            ceiling: floor,
+            quantum: CapacityResources {
+                cpu_milli: 1,
+                mem_bytes: 1,
+                disk_bytes: 1,
+            },
+            guest_overhead: CapacityResources::default(),
+            overhead: CapacityResources::default(),
+        };
+        let key = BackingKey {
+            pool: [2; 32],
+            generation: [3; 16],
+        };
+        let mut backing = BackingOffer {
+            key,
+            cost,
+            phase: BackingPhase::Prepared,
+            devices: vec![DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 1,
+            }],
+        };
+        let offer = RouteOffer {
+            key: RouteKey {
+                class: Class::Shards,
+                image: ImagePlatform {
+                    os: ImageOs::Linux,
+                    arch: ImageArch::Amd64,
+                },
+                execution: Execution::ShardsDedicated,
+                gpu: GpuEligibility::Required,
+            },
+            cost: Some(cost),
+            backing: Some(key),
+        };
+        let pending = BackendUnavailable::from_refusal(
+            Class::Shards,
+            Refusal::Backing {
+                key,
+                cause: LifecycleCause::Pending,
+            },
+        )
+        .unwrap();
+        assert!(!pending.blocks_route(&offer, Some(&backing)).unwrap());
+        assert!(pending.blocks_route(&offer, None).unwrap());
+        backing.phase = BackingPhase::Granted;
+        assert!(!pending.blocks_route(&offer, Some(&backing)).unwrap());
+        backing.phase = BackingPhase::Live;
+        assert!(pending.blocks_route(&offer, Some(&backing)).unwrap());
+        let uncertain = BackendUnavailable::from_refusal(
+            Class::Shards,
+            Refusal::Backing {
+                key,
+                cause: LifecycleCause::Uncertain,
+            },
+        )
+        .unwrap();
+        backing.phase = BackingPhase::Prepared;
+        assert!(uncertain.blocks_route(&offer, Some(&backing)).unwrap());
+        let other = BackingKey {
+            pool: [4; 32],
+            generation: [5; 16],
+        };
+        let shared = RouteOffer {
+            key: RouteKey {
+                class: Class::Oci,
+                execution: Execution::ShardsShared,
+                gpu: GpuEligibility::None,
+                ..offer.key
+            },
+            cost: None,
+            backing: Some(other),
+        };
+        let warm = BackingOffer {
+            key: other,
+            cost,
+            phase: BackingPhase::Live,
+            devices: Vec::new(),
+        };
+        assert!(!uncertain.blocks_route(&shared, Some(&warm)).unwrap());
+        assert!(pending.blocks_route(&offer, Some(&warm)).is_err());
     }
 }
