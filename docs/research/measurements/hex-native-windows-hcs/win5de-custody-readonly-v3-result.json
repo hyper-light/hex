@@ -1,0 +1,92 @@
+{
+  "observed_utc": "2026-11-11 11:57:21 UTC",
+  "kind": "one current ROOT-requested bounded read-only original5de custody query; not original workload terminal proof",
+  "original_source_revision": "5de0ea4cb4a30f3cdcfce8ff1c62499d1379028c",
+  "original_source_archive_sha256": "72f52a6ad052d60420ba8ff61de0fef481734528cf7ad29b672d8c180d771fc6",
+  "original_receipt": "runs/win5de/interruption.json",
+  "original_receipt_modified": false,
+  "query_source_commit": "9635a094",
+  "query_source_sha256": "2a761f9a66ef3d9eaa97ad0b9f542cd7060686478b6ebfe41eb293641d256bdf",
+  "query_request_path": "win5de-custody-readonly-v3-request.json",
+  "request_timeout_seconds": 45,
+  "whole_process_guard": "normal Kiln command timeout, no enlargement of any original workload guard",
+  "response": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"runner\": \"f766f09294f2e17e3b8a631ffd4e6a4b\",\n  \"output\": \"\",\n  \"running\": false,\n  \"why\": \"windows/x86_64 · 29 of 32 cores idle · 105 GB free · room for 1 CPU, 4 GiB of memory, 40 GiB of disk\",\n  \"error\": \"f766f09294f2e17e3b8a631ffd4e6a4b did not answer in 15s\"\n}"
+      }
+    ],
+    "structuredContent": {
+      "runner": "f766f09294f2e17e3b8a631ffd4e6a4b",
+      "output": "",
+      "running": false,
+      "why": "windows/x86_64 · 29 of 32 cores idle · 105 GB free · room for 1 CPU, 4 GiB of memory, 40 GiB of disk",
+      "error": "f766f09294f2e17e3b8a631ffd4e6a4b did not answer in 15s"
+    },
+    "isError": true
+  },
+  "advertised_runner_metadata": {
+    "name": "f766f09294f2e17e3b8a631ffd4e6a4b",
+    "hostname": "Jupiter",
+    "label": "jupiter",
+    "was": [
+      "jupiter"
+    ],
+    "os": "windows",
+    "arch": "x86_64",
+    "labels": [
+      "baremetal",
+      "windows",
+      "x86_64"
+    ],
+    "connected": true,
+    "reach": true,
+    "fingerprint": "e0b0edc1af73a33a04e1154468ffeb5bf1761132eb8470d39517ff024e075e3b",
+    "reach_version": 2,
+    "cpus": 32,
+    "cpu_pct": 8.528778076171875,
+    "load1": 0,
+    "mem_total": 132766306304,
+    "mem_used": 19494563840,
+    "slots": 8,
+    "busy": 0,
+    "draining": false,
+    "harnesses": [
+      "claude",
+      "codex"
+    ],
+    "via": "",
+    "facts": null,
+    "sampled_at": 1794397619555
+  },
+  "runner_metadata_limit": "sampled_at 1794397619555 (2026-11-11T11:46:59.555Z) is host-only telemetry, not original process/job/child ownership or resource-return proof; connected/room/running:false does not settle original custody",
+  "actual_remote_observations": [],
+  "original_terminal": "UNKNOWN",
+  "original_reaped": "UNVERIFIED",
+  "original_remote_job_absence": "UNVERIFIED",
+  "original_recorded_pid_birth_resource_facts": "UNAVAILABLE: no remote output",
+  "resource_return": "UNVERIFIED",
+  "query_remote_execution": "UNVERIFIED: no runner acknowledgment/output received",
+  "new_native_sdk_or_build_workloads": 0,
+  "new_campaigns": 0,
+  "stop_calls": 0,
+  "original_guards_extended": false,
+  "original_source_raw_refs_preserved": true,
+  "arm_native": "PAUSED",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "policy_fully_read_base": "0c598386ca1f7c65c6e0634dba77983e4abffff2",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "policy_receipt": "policy-resume-20261111-v4.json",
+  "role": "assigned adversarial Windows/HCS",
+  "scope": "Only own new native_windows_* leaves and docs/research/measurements/hex-native-windows-hcs/**; production and final integration remain respective owners/ROOT",
+  "prior_read_receipts": [
+    "win5de-custody-readonly-v2-result.json",
+    "win5de-facts-query-r1-after-restart.json"
+  ],
+  "prior_reads_remain_unknown": true,
+  "current_ROOT_source_family": "ff765c02; no source transfer/build/native check from this lane",
+  "owned_queue_resumed": false,
+  "source_raw_integrity": "Original local archive/submission/zero-byte CLI/interruption receipt preserved; this read creates only new local evidence files",
+  "query_dispatch_count_this_request": 1
+}
