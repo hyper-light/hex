@@ -314,13 +314,12 @@ mod tests {
         .unwrap();
         let mut stdout = Captured::new(3).unwrap();
         let mut stderr = Captured::new(3).unwrap();
-        // The drain spends its observer attempt's budget, as the node gives one (`first_dial_bound`):
-        // twice the guest's recorded boot to ready.
-        let attempt = crate::guest::recorded_boot()
-            .unwrap()
-            .saturating_mul(hex_core::patience::TIMES_SLOWEST);
         streams
-            .drain(&mut stdout, &mut stderr, Budget::new(attempt).unwrap())
+            .drain(
+                &mut stdout,
+                &mut stderr,
+                Budget::new(shards_api::conformance::PATIENCE.get()).unwrap(),
+            )
             .unwrap();
         assert_eq!(stdout.bytes().unwrap(), b"out");
         assert_eq!(stderr.bytes().unwrap(), b"err");

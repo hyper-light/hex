@@ -255,15 +255,6 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
   `hex_core::stream` (CLAUDE.md §9), with hostile-input tests (§6). A container's root is the guest's own copy, as
   a Linux host's is its own disk: a root over virtio-fs would put every exec's page cache and the overlay's upper
   layer across the share. The host rewrites `root.path` (or `Rootfs`) to the copy; the copy is deleted with its box.
-- **A staging stream ends in-band** (AC-T7.4.1, 2026-11-11): a removal at its opening, a stage at its end head
-  (`hex_core::stream::files`). The relay answers there, reading no further, and refuses by type any bytes after the
-  end before acting on it (`Refused::Trailing`). The host reads that answer with the connection whole, never
-  half-closing first: Shards carries a half-close (D12's, its conformance case below), but Firecracker's vsock makes
-  a host's half-close a full shutdown and drops what the guest sends after it (`vsock/csm/connection.rs:228-239` and
-  `:307` at upstream 500efc6), so an answer read after one never came (`native_firecracker_smoke`: "the guest's relay
-  closed a staging connection without an answer"). A packer that refuses part way can't end its stream in-band (its
-  head promised the file under way whole), so it ends its sending half: the relay removes its partial copy, and its
-  answer reaches the host where the transport carries a half-close.
 - **A root may be a tarball** (`.tar`, `.tar.gz` or `.tgz`; amended 2026-11-06): a bundle's `root.path`, a
   `Rootfs::Dir` or a layer naming one is staged from the archive's own entries, each with its Linux mode and a
   symbolic link's target text exactly as written. A Linux root unpacked into a Windows directory can't be staged
@@ -717,8 +708,7 @@ arm64, 128 MiB on x86_64), so the same refusals come from both.
 
 **The conformance suite** (`shards_api::conformance`), run against the simulator in `shards-api`'s tests and
 against the real implementation on each backend: a spec past the bounds is refused before boot; a booted guest's
-served port answers bytes both ways and a half-close reaches the other side (D12's half-close: Shards' own guarantee,
-which Hex's streams don't depend on, as Firecracker's vsock doesn't carry it: §4a's in-band end); an unserved port is
+served port answers bytes both ways and a half-close reaches the other side (D12's half-close); an unserved port is
 refused as `Channel` within its patience; `stop` ends it as `Stopped` and every later `connect` is refused
 `Ended`; a guest that powers off ends as `PowerOff`; and `backend()` on macOS x86_64 or Windows arm64 is
 `NoBackend` naming them.

@@ -2,7 +2,7 @@
 # A bound is twice (the margin) its row's value. A class with no row for a measure seeds from twice the slowest
 # row of any class (the lead's seed rule, 2026-11-07), then rises with its node's own; its own row, once its
 # record is taken and added here, becomes its seed (no code change). A measure no class records is refused.
-# Read at build time by hex_client::guest::shards (include_str!), which hex_runtime::guest re-exports.
+# Read at build time by hex_runtime::guest (include_str!).
 # Windows-WHP rows: shards.exe a debug build, AWS-LC without assembly (AWS_LC_SYS_NO_ASM), as its records say.
 # measure	class	slowest_us	record
 boot_ready	macOS-HVF	5263901	bench/native/guest/boot-ready/RECORD.md

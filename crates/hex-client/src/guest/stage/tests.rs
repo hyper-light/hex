@@ -187,8 +187,7 @@ fn a_stage_past_its_bounds_is_refused_before_it_is_sent() {
 }
 
 /// A relay stand-in: each dial a socket pair whose far end answers a stage's opening with `budget`, then
-/// reads to the stream's in-band end, as the relay does (or to the connection's end, where the packer refused
-/// part way and ended its sending half), and answers `Done`.
+/// reads to the end and answers `Done`.
 #[cfg(unix)]
 struct Budgeted {
     budget: (u64, u64),
@@ -216,21 +215,8 @@ impl super::super::Link for Budgeted {
             )
             .unwrap();
             far.write_all(&budget).unwrap();
-            let mut u = Unpack::new(LIMITS);
-            let mut buf = vec![0u8; 64 << 10];
-            let mut n = open.len();
-            buf[..n].copy_from_slice(&open);
-            while n > 0 {
-                let mut rest = &buf[..n];
-                while !rest.is_empty() {
-                    let Ok((took, _)) = u.take(rest) else { break };
-                    rest = &rest[took..];
-                }
-                if u.finish().is_ok() {
-                    break;
-                }
-                n = far.read(&mut buf).unwrap_or(0);
-            }
+            let mut rest = Vec::new();
+            let _ = far.read_to_end(&mut rest);
             let done = wire::answer(0, &Answer::Done, wire::MAX_MESSAGE).unwrap();
             let _ = far.write_all(&hex_core::stream::frame(&done, wire::MAX_MESSAGE).unwrap());
         });

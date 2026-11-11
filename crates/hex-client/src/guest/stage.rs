@@ -225,16 +225,9 @@ pub fn stage(
             },
         )
     };
-    // The stream ended in-band at its end head, where the relay answers, so its answer is read with the
-    // connection whole: a half-close first is a full shutdown over Firecracker's vsock, which then drops what
-    // the guest sends (`vsock/csm/connection.rs:228-239` and `:307` at upstream 500efc6; AC-T7.4.1). A packer
-    // that refused part way can't end the stream in-band, its head having promised the file whole, so it ends
-    // its sending half: the relay removes its partial copy and answers, the answer coming where the transport
-    // carries a half-close. The relay answers even when it refused part way, and its answer says why better
-    // than a broken pipe: read it first.
-    if sent.is_err() {
-        let _ = conn.shutdown(Shutdown::Write);
-    }
+    // The relay answers even when it refused part way, and its answer says why better than a broken
+    // pipe: read it first.
+    let _ = conn.shutdown(Shutdown::Write);
     let ended = std::time::Instant::now();
     // The answer is read first, so the relay has removed a partial copy before this returns. Its
     // answer names a stream cut short when the packer refused part way; the packer's own refusal names
@@ -258,7 +251,7 @@ pub fn unstage(link: &dyn Link, id: &BoxId) -> Result<(), Refusal> {
     let open = files::open(Op::Remove, id.as_str()).map_err(refused)?;
     conn.write_all(&open)
         .map_err(|e| Refusal::os("asking for a staged copy's removal", e))?;
-    // A removal ends at its opening, where the relay answers: read with the connection whole, as a stage's is.
+    let _ = conn.shutdown(Shutdown::Write);
     let sent = std::time::Instant::now();
     let mut deframer = Deframer::new(wire::MAX_MESSAGE);
     relay_answer(&mut *conn, &mut deframer, sent).and_then(|m| answer_of(&m))

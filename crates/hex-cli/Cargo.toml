@@ -70,11 +70,10 @@ flate2.workspace = true
 sha2.workspace = true
 tar.workspace = true
 tempfile.workspace = true
-# The records the tests' waits take, and their census (tests/completion_backends.rs's on every OS).
-hex-testkit.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 hex-node = { workspace = true, features = ["test-controls"] }
+hex-testkit.workspace = true
 
 # The macOS process class's conformance test (tests/macos_process_box.rs) drives hex-runtime's macOS
 # runtime with the `hex selftest-box` programs this crate's binary provides.

@@ -346,8 +346,87 @@ fn booted_owner(booted: Booted) -> Result<triomphe::Arc<Booted>, Refusal> {
     })
 }
 
-// The guest's records live beside the link whose first dial their boot record bounds.
-pub use hex_client::guest::shards::{CLASS, recorded, recorded_boot, seed_in, slowest_in};
+/// The slowest recorded value of each wait that seeds a bound, by host class
+/// (bench/native/guest/records.tsv). A class with no row for a measure seeds from twice the slowest row of
+/// any class ([`seed_in`]); adding its own row, once its record is taken, makes that its seed, with no code
+/// change.
+const RECORDS: &str = include_str!("../../../../bench/native/guest/records.tsv");
+
+/// This host's class, as the records name it: the hypervisor Shards boots its guests with here.
+pub const CLASS: &str = if cfg!(target_os = "macos") {
+    "macOS-HVF"
+} else if cfg!(target_os = "windows") {
+    "Windows-WHP"
+} else {
+    "Linux-KVM"
+};
+
+/// The slowest value `table` records for `measure` on host class `class`: each line `measure`, `class`,
+/// microseconds and its record, tab-separated; `#` lines are comments. `None` where no row names both.
+pub fn slowest_in(table: &str, measure: &str, class: &str) -> Option<Duration> {
+    table
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| line.split('\t'))
+        .find_map(|mut row| {
+            (row.next()? == measure && row.next()? == class)
+                .then(|| row.next()?.parse().ok().map(Duration::from_micros))?
+        })
+}
+
+/// The seed `table` gives `measure` on host class `class`: its own slowest row where it has one; else, by the
+/// lead's seed rule (2026-11-07), twice the slowest row of any class, a class with no record of its own
+/// starting from the slowest the others have seen with room to spare, then rising with its node's own (the
+/// learned bounds take the max with what the node sees). `None` where no class records the measure.
+pub fn seed_in(table: &str, measure: &str, class: &str) -> Option<Duration> {
+    if let Some(own) = slowest_in(table, measure, class) {
+        return Some(own);
+    }
+    table
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| {
+            let mut row = line.split('\t');
+            if row.next()? != measure {
+                return None;
+            }
+            row.next()?;
+            row.next()?.parse().ok().map(Duration::from_micros)
+        })
+        .max()
+        .map(|slowest| slowest.saturating_mul(2))
+}
+
+/// The seed for `measure` on this host's class ([`seed_in`] over records.tsv), or the refusal naming the
+/// record to take where no class records it.
+pub fn recorded(measure: &str) -> Result<Duration, Refusal> {
+    seed_in(RECORDS, measure, CLASS).ok_or_else(|| Refusal::Platform {
+        what: "the oci class's guest",
+        platform: std::env::consts::OS,
+        why: format!(
+            "no {measure} record for any host class yet (bench/native/guest/records.tsv): record one first"
+        ),
+    })
+}
+
+/// The seed of the first dial's bound before this node has seen a boot: the slowest boot to ready on record
+/// for this host's class, or with none, twice the slowest of any class (bench/native/guest/boot-ready/
+/// RECORD.md, its rows in records.tsv).
+pub fn recorded_boot() -> Result<Duration, Refusal> {
+    recorded("boot_ready")
+}
+
+/// The first dial's bound before this node has seen a boot ([`GuestRuntime::first_dial_bound`] with nothing
+/// learned): the managed helper's control patience at the node's start, and the bound the macOS CPU
+/// response's producer measures up to (hex-cli's example `macos_cpu_response`, AC-T7.4.1).
+pub fn recorded_dial_bound() -> Result<Duration, Refusal> {
+    dial_bound(Duration::ZERO)
+}
+
+/// Twice (the margin) the slowest of the record's boot and `seen`, the slowest boot this node has seen.
+fn dial_bound(seen: Duration) -> Result<Duration, Refusal> {
+    Ok(seen.max(recorded_boot()?).saturating_mul(2))
+}
 
 /// Boots of one guest: the first, and one more where the first hung alive past its bound, as a hung
 /// boot has another guest to try before its caller is refused.
@@ -736,8 +815,7 @@ impl GuestRuntime {
     /// How long a boot may take to be ready (the lead's rule for learned waits): twice (the margin) the slowest of
     /// the record's and this node's own, so it only rises; before any boot here, twice the record's.
     pub fn first_dial_bound(&self) -> Result<Duration, Refusal> {
-        let seen = *self.slowest.lock().map_err(poisoned)?;
-        Ok(seen.max(recorded_boot()?).saturating_mul(2))
+        dial_bound(*self.slowest.lock().map_err(poisoned)?)
     }
 
     /// A boot to ready this node has seen, taking `took`: the bound rises with it, never falls.
