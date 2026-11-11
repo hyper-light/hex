@@ -1,0 +1,51 @@
+{
+  "bytes": 299873,
+  "sha256": "54efa22e4addd35472dd62dfab6d22e3b622d209fa228872e0f75a15d1d0aeda",
+  "members": {
+    "cohort-65482a81-mac-backing-and-constructors-v2/constructor-positive-after.log": {
+      "bytes": 1646,
+      "sha256": "e2c244db93890ff9b82d9266480a452773566692eda6587dc7f15b6004574485"
+    },
+    "cohort-65482a81-mac-backing-and-constructors-v2/running.json": {
+      "bytes": 2868,
+      "sha256": "2e7bdb553a4d1f48aed75bd9c4e800b1f1a5960b17f0c56b024128268dbf3039"
+    },
+    "cohort-65482a81-mac-backing-and-constructors-v2/backing-driver-new-three.log": {
+      "bytes": 2186,
+      "sha256": "675cf39eb693aae8998ebbb97d4c50809b44c67a69eefeac7ab22e030d240da2"
+    },
+    "cohort-65482a81-mac-backing-and-constructors-v2/result.json": {
+      "bytes": 3647,
+      "sha256": "bd90ec6b5194806e4b97b6d4e189671d595aa3c220cd8eaabb95f5e413176e5f"
+    },
+    "cohort-65482a81-mac-backing-and-constructors-v2/source-before.json": {
+      "bytes": 446109,
+      "sha256": "caea4c6f4c9f8db6b5a12d2eca82b6915e5e2f973d105e23be068bf1fb114b8b"
+    },
+    "cohort-65482a81-mac-backing-and-constructors-v2/source-after.json": {
+      "bytes": 446207,
+      "sha256": "78a88bab979f601db707d44b4ec85b91fb584c2adcd95f98d703d8692d8c4846"
+    },
+    "cohort-65482a81-mac-backing-and-constructors-v2/api-lock-cohort.json": {
+      "bytes": 296,
+      "sha256": "ac11f9835c927ed6d8084b6cc53c0c7af98a3404575617bd6368ed3dab366a6f"
+    },
+    "cohort-65482a81-mac-backing-and-constructors-v2/public-registry-seed.json": {
+      "bytes": 29093,
+      "sha256": "5ac7087618bdedfc09c759f1afb5294cfb93e77cf32403190e8027f2676c9af7"
+    },
+    "cohort-65482a81-mac-backing-and-constructors-v2/constructor-negative-after.log": {
+      "bytes": 5490,
+      "sha256": "527d6fa93f69e4d5a34d3bfe5e31a7952c62462120add64d32a9ab4e221ff5bd"
+    },
+    "cohort-65482a81-mac-backing-and-constructors-v2/collected-binaries.json": {
+      "bytes": 2747,
+      "sha256": "93888ddcd25eebf3d22852e82aa2575fd60b88dd27408fa634a4e79984bbb319"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

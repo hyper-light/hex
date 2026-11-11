@@ -1,0 +1,72 @@
+{
+  "meaning": "read-only retained archive/member hash inventory; no extraction or execution",
+  "archives": [
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/gpu-compile-artifacts.tar.gz",
+      "bytes": 1468252,
+      "sha256": "03b0208c563be01c31116407288dbd3c3d3b88315c37e9f9a242655e7f4764b1",
+      "matched_members": [],
+      "nested": {
+        "member": "guest-witness-support.tar.gz",
+        "bytes": 1464940,
+        "sha256": "0f08fceb23a7e75b2dde80270e15b47c0bb815bcb530b951047834c0ea4363cc",
+        "matched_members": [
+          {
+            "member": "opt/hex-native-fc/bin/vulkan-witness",
+            "bytes": 31856,
+            "sha256": "07107852e489deee5814371e3807e6ae5c4e689a1a7eaff755797fad843a72f8"
+          },
+          {
+            "member": "opt/hex-native-fc/lib/ld-linux-x86-64.so.2",
+            "bytes": 287736,
+            "sha256": "2db4c1e54273a52f75e7124fcfd6fe0d2d8bd7fc87f29780a75ab544b41bd53d"
+          },
+          {
+            "member": "opt/hex-native-fc/lib/libc.so.6",
+            "bytes": 2370976,
+            "sha256": "911cf3db7875760dc893b464ae89bddd4f697a377c710ffc13b84f67cbe1237b"
+          },
+          {
+            "member": "opt/hex-native-fc/lib/libvulkan.so.1",
+            "bytes": 702464,
+            "sha256": "e917e0410aa0df8c6b9e6450201fe808e5934d77843843b690a4e94823944993"
+          },
+          {
+            "member": "opt/hex-native-fc/shaders/compute-no-store.spv",
+            "bytes": 1540,
+            "sha256": "46051aa9e83d91382b083c97c24c807dd1b8730a846f5e08010042e6bd1ed28b"
+          },
+          {
+            "member": "opt/hex-native-fc/shaders/compute.spv",
+            "bytes": 1624,
+            "sha256": "37c35760bba63b0abdb46aabe572ab20bf3ac35f6e35a33934b510f7fa60bf3d"
+          }
+        ]
+      }
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/gpu-contract-artifacts.tar.gz",
+      "bytes": 10187,
+      "sha256": "d72827e34baa900cf2e7bbc0737f38ce7b9b1e74ce10de21ce64daa8e97727c5",
+      "matched_members": [
+        {
+          "member": "contract-target-v1/guest-pci-gpu",
+          "bytes": 17112,
+          "sha256": "eaf1c4aee1f9420f6ef94222e467cb8aeacd9efa5c475368a55094a741141858"
+        }
+      ]
+    },
+    {
+      "path": "docs/research/measurements/hex-native-firecracker/corrected-witness-artifacts.tar.gz",
+      "bytes": 19207,
+      "sha256": "ea56843df4bfd7a09a7a03f78150dceed9b0315d35a2f8702a86498fe12774b9",
+      "matched_members": [
+        {
+          "member": "target/vulkan-witness",
+          "bytes": 31856,
+          "sha256": "07107852e489deee5814371e3807e6ae5c4e689a1a7eaff755797fad843a72f8"
+        }
+      ]
+    }
+  ]
+}
