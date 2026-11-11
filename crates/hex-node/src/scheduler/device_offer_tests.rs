@@ -308,38 +308,27 @@ fn complete_telemetry_without_backend_capability_offers_no_devices() {
 
 #[derive(Debug, Clone, Copy)]
 enum BadInput {
-    MissingPci,
-    MalformedPci,
-    WrongDomain,
-    MissingGpu,
     Model,
     Memory,
     Duplicate,
     PoolRoom,
 }
 
+/// AC-T7.4.1: a current native observation that disagrees with its route report (model, memory),
+/// a duplicate report entry, or free room above its pool's total is a typed refusal that changes
+/// neither its inputs nor the cluster.
 #[test]
-fn mismatched_identity_model_memory_and_capacity_refuse_without_mutating_inputs() {
+fn mismatched_model_memory_and_capacity_refuse_without_mutating_inputs() {
     let cases = [
-        BadInput::MissingPci,
-        BadInput::MalformedPci,
-        BadInput::WrongDomain,
-        BadInput::MissingGpu,
         BadInput::Model,
         BadInput::Memory,
         BadInput::Duplicate,
         BadInput::PoolRoom,
     ];
     for case in cases {
-        let (mut facts, mut reports) = inputs();
+        let (facts, mut reports) = inputs();
         let report = reports[0].1.as_mut().unwrap();
         match case {
-            BadInput::MissingPci => facts.gpus[0].pci = None,
-            BadInput::MalformedPci => facts.gpus[0].pci = Some("12345678:01:20.3".into()),
-            BadInput::WrongDomain => facts.gpus[0].pci = Some("12345679:01:02.3".into()),
-            BadInput::MissingGpu => {
-                facts.gpus.remove(0);
-            }
             BadInput::Model => report.devices[0].model = "other-model".into(),
             BadInput::Memory => report.devices[0].size += 1,
             BadInput::Duplicate => report.devices.push(report.devices[0].try_clone().unwrap()),
@@ -364,8 +353,90 @@ fn mismatched_identity_model_memory_and_capacity_refuse_without_mutating_inputs(
         );
     }
     eprintln!(
-        "DEVICE_OFFER 8 typed refusals/input+cluster snapshots preserved; 8 repaired positive controls"
+        "DEVICE_OFFER 4 typed refusals/input+cluster snapshots preserved; 4 repaired positive controls"
     );
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Unmatched {
+    MissingPci,
+    MalformedPci,
+    WrongDomain,
+    MissingGpu,
+}
+
+/// AC-T7.4.1: a reported GPU whose identity no current native observation has (no, a malformed or
+/// another PCI address; no measured GPU) keeps its physical key as an unavailable placeholder of
+/// unknown load that is never bound, beside the measured GPU, which still is. Inputs are unchanged.
+#[test]
+fn unmatched_gpu_identity_is_an_unavailable_placeholder_without_mutating_inputs() {
+    let cases = [
+        Unmatched::MissingPci,
+        Unmatched::MalformedPci,
+        Unmatched::WrongDomain,
+        Unmatched::MissingGpu,
+    ];
+    for case in cases {
+        let (mut facts, reports) = inputs();
+        match case {
+            Unmatched::MissingPci => facts.gpus[0].pci = None,
+            Unmatched::MalformedPci => facts.gpus[0].pci = Some("12345678:01:20.3".into()),
+            Unmatched::WrongDomain => facts.gpus[0].pci = Some("12345679:01:02.3".into()),
+            Unmatched::MissingGpu => {
+                facts.gpus.remove(0);
+            }
+        }
+        let before_inputs = (facts.clone(), copy_reports(&reports));
+        let mut cluster = service_cluster(&facts);
+        let unmatched = &reports[0].1.as_ref().unwrap().devices[0];
+        let measured = facts
+            .gpus
+            .iter()
+            .find(|gpu| gpu.pci.as_deref() == Some("00000000:01:02.3"))
+            .unwrap();
+        // The offer publishes only the placeholder's catalog name, where new, to the model table.
+        let mut expected_cluster = cluster.clone();
+        let placeholder = expected_cluster.model(&unmatched.model).unwrap();
+        let amd = expected_cluster.model(&measured.model).unwrap();
+        let actual = offered(&reports, &facts, &mut cluster);
+        eprintln!("DEVICE_OFFER unmatched {case:?}: {actual:?}");
+        assert_eq!(
+            actual,
+            vec![
+                Device {
+                    kind: DeviceKind::Gpu,
+                    key: Some(unmatched.id.key),
+                    available: false,
+                    classes: Classes::NONE.with(Route::Oci),
+                    model: placeholder,
+                    size: unmatched.size,
+                    load: GpuLoad::default()
+                },
+                Device {
+                    kind: DeviceKind::Gpu,
+                    key: Some(0x0113),
+                    available: true,
+                    classes: Classes::NONE.with(Route::Oci),
+                    model: amd,
+                    size: measured.memory,
+                    load: measured.load
+                },
+            ],
+            "{case:?}"
+        );
+        assert_eq!(
+            bind(&actual, |i| actual[i].available, 1, &Ask::default()),
+            Some(vec![1]),
+            "{case:?}: only the measured GPU is bound"
+        );
+        assert!(
+            bind(&actual, |i| actual[i].available, 2, &Ask::default()).is_none(),
+            "{case:?}: the placeholder is never bound"
+        );
+        assert_eq!(cluster, expected_cluster, "{case:?}");
+        assert_eq!((facts, reports), before_inputs, "{case:?}");
+    }
+    eprintln!("DEVICE_OFFER 4 unmatched identities: unavailable placeholders, never bound");
 }
 
 #[test]
