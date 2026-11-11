@@ -1,0 +1,141 @@
+Subject: build complete pinned AWS-LC dependency lock metadata
+Why: AC-T7.4.1: upstream's Cargo.lock at this pin lists aws-lc-rs 1.18.1 without its registry source, checksum or dependencies, so cargo build --locked refuses before compiling (native QA reproduced it on 2c62f12a). This adds that entry's published crates.io checksum and its aws-lc-sys 0.45.0 dependency closure, with every existing package version kept; no manifest, feature, source or compiler change. Hex commit 6b1a0431b389118785da07a5223bb4f0ec182fa7.
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 1475f4c614f727a839baf1c308508913adf9bed3..e233e8cf7e026f18367899227aeb6c4d2377f40b 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -101,6 +101,26 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+ [[package]]
+ name = "aws-lc-rs"
+ version = "1.18.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b281d307588d634de920874890732659e2e7672f72b5e10e81badc1a8a83621e"
++dependencies = [
++ "aws-lc-sys",
++ "untrusted",
++ "zeroize",
++]
++
++[[package]]
++name = "aws-lc-sys"
++version = "0.45.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9bff6c3b54fad79a2e60b8102caf565819711497c1f5f092f49508e2f5c31b27"
++dependencies = [
++ "cc",
++ "cmake",
++ "dunce",
++ "fs_extra",
++ "pkg-config",
++]
+ 
+ [[package]]
+ name = "base64"
+@@ -219,6 +239,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "6651c9ed80effdc7db0ff72512157f901af5e3549e341e24b1dd4887d836d838"
+ dependencies = [
+  "find-msvc-tools",
++ "jobserver",
++ "libc",
+  "shlex 2.0.1",
+ ]
+ 
+@@ -348,6 +370,15 @@ dependencies = [
+  "walkdir",
+ ]
+ 
++[[package]]
++name = "cmake"
++version = "0.1.58"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
++dependencies = [
++ "cc",
++]
++
+ [[package]]
+ name = "colorchoice"
+ version = "1.0.5"
+@@ -509,6 +540,12 @@ dependencies = [
+  "syn 3.0.7",
+ ]
+ 
++[[package]]
++name = "dunce"
++version = "1.0.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
++
+ [[package]]
+ name = "either"
+ version = "1.19.0"
+@@ -592,6 +629,12 @@ dependencies = [
+  "vmm-sys-util",
+ ]
+ 
++[[package]]
++name = "fs_extra"
++version = "1.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
++
+ [[package]]
+ name = "funty"
+ version = "2.0.0"
+@@ -791,6 +834,16 @@ dependencies = [
+  "syn 2.0.119",
+ ]
+ 
++[[package]]
++name = "jobserver"
++version = "0.1.35"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
++dependencies = [
++ "getrandom",
++ "libc",
++]
++
+ [[package]]
+ name = "js-sys"
+ version = "0.3.106"
+@@ -1001,6 +1054,12 @@ version = "0.2.17"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+ 
++[[package]]
++name = "pkg-config"
++version = "0.3.34"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
++
+ [[package]]
+ name = "portable-atomic"
+ version = "1.15.0"
+@@ -1428,6 +1487,12 @@ version = "0.2.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+ 
++[[package]]
++name = "untrusted"
++version = "0.7.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a156c684c91ea7d62626509bce3cb4e1d9ed5c4d978f7b4352658f96a4c26b4a"
++
+ [[package]]
+ name = "userfaultfd"
+ version = "0.9.0"
+@@ -1746,6 +1811,12 @@ dependencies = [
+  "syn 2.0.119",
+ ]
+ 
++[[package]]
++name = "zeroize"
++version = "1.9.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
++
+ [[package]]
+ name = "zmij"
+ version = "1.0.23"

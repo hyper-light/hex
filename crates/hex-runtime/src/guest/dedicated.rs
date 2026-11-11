@@ -1342,7 +1342,7 @@ impl GuestRuntime {
             .gpu_observer
             .as_ref()
             .ok_or(super::books::uncertain(&receipt.id)?)?;
-        let readiness = receipt.checked_readiness()?;
+        let readiness = receipt.checked_work_ready()?;
         if readiness.configuration != observer.identity()
             || readiness.max_queues != observer.queues()
         {

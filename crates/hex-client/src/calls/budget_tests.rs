@@ -942,14 +942,36 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
     );
 }
 
+/// What the offered-expiry control sees happen: its open begin, and its exec end.
+enum Offered {
+    Opening,
+    Ended(Result<(), Refusal>),
+}
+
 struct Offers {
     io: Stalled,
     inbound: Mutex<VecDeque<Vec<u8>>>,
     outbound: Mutex<Vec<(u64, Request)>>,
-    entered: mpsc::SyncSender<ReplyDeadline>,
+    seen: mpsc::Sender<Offered>,
+    /// The open holds until the sibling call has completed, a fact the test sends.
+    sibling: Mutex<mpsc::Receiver<()>>,
     program: Mutex<Option<Stdio>>,
 }
 impl Offers {
+    /// One whose open no test watches, for the fixtures that wrap it and never open an offer.
+    fn unobserved(io: Stalled) -> Self {
+        let (seen, _) = mpsc::channel();
+        let (_, sibling) = mpsc::channel();
+        Self {
+            io,
+            inbound: Mutex::new(VecDeque::new()),
+            outbound: Mutex::new(Vec::new()),
+            seen,
+            sibling: Mutex::new(sibling),
+            program: Mutex::new(None),
+        }
+    }
+
     fn queue(&self, id: u64, answer: Answer) {
         self.inbound
             .lock()
@@ -1029,7 +1051,10 @@ impl Transport for Offers {
         };
         let given = program.make_asked()?;
         *self.program.lock().unwrap() = Some(program);
-        self.entered.send(deadline).unwrap();
+        self.seen.send(Offered::Opening).unwrap();
+        // Held without the reader's turn until the sibling has completed (or its sender is gone),
+        // then until the open's own deadline has passed, so its refusal is the caller's expiry.
+        let _ = self.sibling.lock().unwrap().recv();
         until(deadline.at())?;
         drop(given);
         Err(deadline
@@ -1041,53 +1066,61 @@ impl Transport for Offers {
     }
 }
 
-/// Do stall one bounded offered-stream open while a sibling completes; expect reader progress,
-/// same-id Release, closed made ends and no remaining call/program/given reservation at expiry.
+/// Do stall one bounded offered-stream open until a sibling call has completed, then past its
+/// deadline; expect the sibling answered, the open's caller expiry, a same-id Release, its made
+/// ends closed and no call/program/given reservation left. Each step waits on the fact before it,
+/// never on an observation window (AC-T7.4.1).
 #[test]
 fn offered_expiry_releases_only_its_ownership_while_a_sibling_progresses() {
     let (io, _) = stalled(Some(OBSERVE));
-    let (entered, opening) = mpsc::sync_channel(1);
+    let (seen, events) = mpsc::channel();
+    let (sibling_done, sibling_wait) = mpsc::channel();
     let client = Arc::new(configured(Offers {
         io,
         inbound: Mutex::new(VecDeque::new()),
         outbound: Mutex::new(Vec::new()),
-        entered,
+        seen: seen.clone(),
+        sibling: Mutex::new(sibling_wait),
         program: Mutex::new(None),
     }));
     let control = Arc::clone(&client);
     let id = BoxId::new("offered-budget-unit").unwrap();
     let target = id.clone();
-    let (finished, answer) = mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
-        finished
-            .send(
-                control
-                    .exec(
-                        &target,
-                        Program::of(&["cat"]),
-                        Stdio {
-                            ask: hex_api::Ask {
-                                stdin: true,
-                                stdout: false,
-                                stderr: false,
-                            },
-                            ..Stdio::null()
+        // A fixture panic is this worker's end too, so the test's wait for it always ends.
+        let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            control
+                .exec(
+                    &target,
+                    Program::of(&["cat"]),
+                    Stdio {
+                        ask: hex_api::Ask {
+                            stdin: true,
+                            stdout: false,
+                            stderr: false,
                         },
-                    )
-                    .map(drop),
-            )
-            .unwrap()
+                        ..Stdio::null()
+                    },
+                )
+                .map(drop)
+        }))
+        .unwrap_or_else(|_| Err(Refusal::Broken("the exec's fixture panicked".into())));
+        seen.send(Offered::Ended(ended)).unwrap();
     });
-    let opened = opening.recv_timeout(OBSERVE);
-    let entered_before_expiry = opened
-        .as_ref()
-        .is_ok_and(|deadline| deadline.at() > Instant::now());
+    // The open began, or the exec ended without one: both are facts the worker sends.
+    let first = events.recv().unwrap();
+    let opened = matches!(first, Offered::Opening);
     let reading = client.conn.shared.state().unwrap().reading;
     let sibling = client.start(&id);
-    let expired = answer.recv_timeout(OBSERVE);
+    sibling_done.send(()).unwrap();
+    let ended = match first {
+        Offered::Ended(ended) => ended,
+        Offered::Opening => match events.recv().unwrap() {
+            Offered::Ended(ended) => ended,
+            Offered::Opening => panic!("the exec opened its offer twice"),
+        },
+    };
     worker.join().unwrap();
-    // Even a missing/late opening event must not strand the call actor.
-    opened.unwrap();
     let shared = &client.conn.shared;
     let outbound = shared.transport.outbound.lock().unwrap();
     let state = shared.state().unwrap();
@@ -1096,28 +1129,19 @@ fn offered_expiry_releases_only_its_ownership_while_a_sibling_progresses() {
         && state.given.is_empty()
         && state.closed.is_none();
     drop(state);
-    let mut stdin = shared
-        .transport
-        .program
-        .lock()
-        .unwrap()
-        .take()
-        .unwrap()
-        .stdin
-        .unwrap();
-    let (read, eof) = mpsc::sync_channel(1);
-    let reader = std::thread::spawn(move || read.send(stdin.read(&mut [0])).unwrap());
-    let closed = eof.recv_timeout(OBSERVE);
-    // If a future regression retained ends in the owned ledger, clear only that ledger to reap
-    // the observation actor; the earlier clean/EOF witnesses still make the test fail.
+    // A regression that kept ends in the owned ledger would hold the program's stdin open: clear
+    // only that ledger first, so the read below can't wait on it; `clean` still fails the test.
     shared.state().unwrap().given.clear();
-    reader.join().unwrap();
-    assert!(entered_before_expiry);
+    let program = shared.transport.program.lock().unwrap().take();
+    let closed = program
+        .and_then(|program| program.stdin)
+        .map(|mut stdin| stdin.read(&mut [0]).unwrap());
+    assert!(opened, "the exec ended before its offered open began");
     assert!(!reading, "an offered open must relinquish the reader turn");
     assert_eq!(sibling, Ok(()));
-    assert!(matches!(expired.unwrap(), Err(Refusal::Os { why, .. }) if why.contains("caller")));
+    assert!(matches!(ended, Err(Refusal::Os { why, .. }) if why.contains("caller")));
     assert!(clean);
-    assert_eq!(closed.unwrap().unwrap(), 0);
+    assert_eq!(closed, Some(0));
     assert_eq!(outbound.len(), 3);
     assert_eq!(outbound[0].0, outbound[2].0);
     assert!(matches!(outbound[1].1, Request::Call(Call::Start(_))));
@@ -1533,14 +1557,7 @@ impl Transport for DropOriginal {
 #[test]
 fn absolute_run_error_return_does_not_renew_drop_sender_budget() {
     let (io, _) = stalled(None);
-    let (entered, _) = mpsc::sync_channel(1);
-    let client = Arc::new(configured(DropOriginal(Offers {
-        io,
-        inbound: Mutex::new(VecDeque::new()),
-        outbound: Mutex::new(Vec::new()),
-        entered,
-        program: Mutex::new(None),
-    })));
+    let client = Arc::new(configured(DropOriginal(Offers::unobserved(io))));
     let original = Instant::now().checked_add(CAP).unwrap();
     let mut process = client
         .run_before(
@@ -1695,16 +1712,9 @@ impl Transport for BootstrapProbe {
 
 fn bootstrap_probe(reply: Option<Answer>) -> (Core<BootstrapProbe>, mpsc::Receiver<()>) {
     let (io, sent) = stalled(None);
-    let (entered, _) = mpsc::sync_channel(1);
     (
         configured(BootstrapProbe {
-            io: Offers {
-                io,
-                inbound: Mutex::new(VecDeque::new()),
-                outbound: Mutex::new(Vec::new()),
-                entered,
-                program: Mutex::new(None),
-            },
+            io: Offers::unobserved(io),
             reply: Mutex::new(reply),
         }),
         sent,
@@ -1993,17 +2003,10 @@ impl Transport for SettleOriginal {
 #[test]
 fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
     let (io, _) = stalled(None);
-    let (entered, _) = mpsc::sync_channel(1);
     let (starting, started) = mpsc::sync_channel(1);
     let (killing, killed) = mpsc::sync_channel(1);
     let client = Arc::new(configured(SettleOriginal {
-        io: Offers {
-            io,
-            inbound: Mutex::new(VecDeque::new()),
-            outbound: Mutex::new(Vec::new()),
-            entered,
-            program: Mutex::new(None),
-        },
+        io: Offers::unobserved(io),
         setup: Mutex::new(None),
         started: starting,
         kill: killing,
@@ -2161,17 +2164,10 @@ struct Settled {
 /// fixture gives an end its exec never asked for), the agent answering its Kill with `kill`.
 fn settle_failure(start: SettleStart, kill: Answer) -> Settled {
     let (io, _) = stalled(None);
-    let (entered, _) = mpsc::sync_channel(1);
     let (starting, _) = mpsc::sync_channel(1);
     let (killing, _) = mpsc::sync_channel(1);
     let client = configured(SettleOriginal {
-        io: Offers {
-            io,
-            inbound: Mutex::new(VecDeque::new()),
-            outbound: Mutex::new(Vec::new()),
-            entered,
-            program: Mutex::new(None),
-        },
+        io: Offers::unobserved(io),
         setup: Mutex::new(None),
         started: starting,
         kill: killing,
@@ -2679,7 +2675,6 @@ impl Transport for SettleAligned {
 #[test]
 fn prepared_actor_settle_error_retains_original_kill_answer_authority() {
     let (io, _) = stalled(None);
-    let (entered, _) = mpsc::sync_channel(1);
     let (starting, started) = mpsc::sync_channel(1);
     let (killing, killed) = mpsc::sync_channel(1);
     let (prepared, readiness) = mpsc::sync_channel(1);
@@ -2701,11 +2696,10 @@ fn prepared_actor_settle_error_retains_original_kill_answer_authority() {
     let wrong_end = program_ends.make_asked().unwrap();
     let client = Arc::new(configured(SettleAligned {
         io: Offers {
-            io,
             inbound: Mutex::new(inbound),
             outbound: Mutex::new(outbound),
-            entered,
             program: Mutex::new(Some(program_ends)),
+            ..Offers::unobserved(io)
         },
         prepared: Mutex::new(Some(wrong_end)),
         setup: Mutex::new(None),
@@ -2876,7 +2870,9 @@ const FUSE: usize = 1_000;
 /// Answers for others that keep coming: each read hands on one message, as one `SOCK_SEQPACKET` read
 /// does, and leaves another ready.
 struct Chatter {
-    socket: UdpSocket,
+    /// Its readiness: a wake written is readable once written, on macOS too, where a loopback
+    /// datagram can arrive after its send returns and a zero-wait poll would miss it.
+    socket: Wake,
     /// The agent's next messages, ahead of the traffic: answers to the test's calls, a program's end.
     next: Mutex<VecDeque<Vec<u8>>>,
     /// Whether the traffic is on: one late answer to [`GAVE_UP`] per read.
@@ -2890,11 +2886,8 @@ struct Chatter {
 
 impl Chatter {
     fn new() -> Self {
-        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        socket.connect(socket.local_addr().unwrap()).unwrap();
-        socket.set_nonblocking(true).unwrap();
         Self {
-            socket,
+            socket: Wake::new().unwrap(),
             next: Mutex::new(VecDeque::new()),
             chatting: AtomicBool::new(false),
             turns: AtomicUsize::new(0),
@@ -2909,12 +2902,12 @@ impl Chatter {
             .lock()
             .unwrap()
             .push_back(wire::answer(id, answer, wire::MAX_MESSAGE).unwrap());
-        self.socket.send(&[1]).unwrap();
+        self.socket.wake();
     }
 
     fn chat(&self) {
         self.chatting.store(true, Ordering::SeqCst);
-        self.socket.send(&[1]).unwrap();
+        self.socket.wake();
     }
 
     /// What `poll` returned, with the turns it took and the messages for others it read.
@@ -2942,13 +2935,10 @@ impl Transport for Chatter {
     fn reading(&self) {}
     fn handle(&self) -> Handle<'_> {
         self.turns.fetch_add(1, Ordering::SeqCst);
-        #[cfg(unix)]
-        return std::os::fd::AsFd::as_fd(&self.socket);
-        #[cfg(windows)]
-        std::os::windows::io::AsSocket::as_socket(&self.socket)
+        self.socket.handle()
     }
     fn recv(&self, _: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
-        while self.socket.recv(&mut [0]).is_ok() {}
+        self.socket.drain();
         let next = self.next.lock().unwrap().pop_front();
         let message = match next {
             Some(message) => message,
@@ -2973,14 +2963,16 @@ impl Transport for Chatter {
             Vec::new(),
         )?;
         if self.chatting.load(Ordering::SeqCst) || !self.next.lock().unwrap().is_empty() {
-            self.socket.send(&[1]).unwrap();
+            self.socket.wake();
         }
         Ok(true)
     }
     fn try_send(&self, bytes: &[u8], at: &mut usize, _: &[Lent<'_>]) -> Result<bool, Sent> {
         let (header, request) = wire::read_request_apart(bytes, wire::MAX_MESSAGE).unwrap();
         match &request {
-            Request::Call(Call::Exec { .. }) => self.queue(header.id, &Answer::Started { pid: 7 }),
+            Request::Call(Call::Exec { .. } | Call::Run { .. }) => {
+                self.queue(header.id, &Answer::Started { pid: 7 })
+            }
             Request::Call(Call::Kill { .. }) => self.queue(header.id, &Answer::Done),
             _ => {}
         }
@@ -3068,4 +3060,260 @@ fn kill_checks_once_for_an_end_while_answers_for_others_keep_coming() {
     );
     assert_eq!(kills, [exec]);
     assert!(others < FUSE, "answers for others were still coming");
+}
+
+/// AC-T7.4.1: do `wait_for` a microsecond on a remote program while answers for others keep coming;
+/// expect `Ok(None)` once its time is spent, each turn reading once, never reading on until the fuse
+/// ends the connection. Then with its end next: expect a spent wait to take that end from its read.
+#[test]
+fn a_timed_wait_ends_at_its_deadline_while_answers_for_others_keep_coming() {
+    let client = configured(Chatter::new());
+    let (mut proc, exec) = chatting_program(&client);
+    let chatter = &client.conn.shared.transport;
+    chatter.chat();
+    let wait = Duration::from_micros(1);
+    let waited = chatter.counted(|| proc.wait_for(wait));
+    chatter.queue(exec, &Answer::Exited(Exit::Code(3)));
+    let ended = proc.wait_for(wait);
+    eprintln!("client_wait_bound phase=wait_for waited={waited:?} ended={ended:?} fuse={FUSE}");
+    assert_eq!(
+        waited.0,
+        Ok(None),
+        "a timed wait came back with its time spent"
+    );
+    assert!(
+        waited.2 < FUSE,
+        "it read on until the fuse ended the connection"
+    );
+    assert_eq!(waited.1, waited.2, "each turn read once");
+    assert_eq!(ended, Ok(Some(Exit::Code(3))));
+}
+
+/// A Chatter whose transport makes an exec's asked streams, and gives the wrong one: asked for
+/// stdin, it gives stdout's end, so a run's setup fails after its start and its kill must go out.
+struct WrongEnd(Chatter);
+
+impl Transport for WrongEnd {
+    type Reading = ();
+    const MAKES_ASKED: bool = true;
+    fn answers() -> &'static [Patience; KINDS] {
+        Chatter::answers()
+    }
+    fn reading(&self) {}
+    fn handle(&self) -> Handle<'_> {
+        self.0.handle()
+    }
+    fn recv(&self, reading: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
+        self.0.recv(reading, take)
+    }
+    fn try_send(&self, bytes: &[u8], at: &mut usize, lent: &[Lent<'_>]) -> Result<bool, Sent> {
+        self.0.try_send(bytes, at, lent)
+    }
+    fn shutdown(&self) {}
+    fn carries_before(&self, _: u64, stdio: Stdio, deadline: ReplyDeadline) -> Result<(), Refusal> {
+        deadline.remaining("carrying no streams")?;
+        assert_eq!(
+            carried(&stdio),
+            Streams::default(),
+            "this run carries no pipe"
+        );
+        Ok(())
+    }
+    fn asks_before(
+        &self,
+        _: u64,
+        _: hex_api::Ask,
+        deadline: ReplyDeadline,
+    ) -> Result<hex_api::Given, Refusal> {
+        deadline.remaining("making the wrong stream")?;
+        Stdio {
+            ask: hex_api::Ask {
+                stdout: true,
+                ..hex_api::Ask::default()
+            },
+            ..Stdio::null()
+        }
+        .make_asked()
+    }
+}
+
+/// AC-T7.4.1: do `run_before`, with a deadline the test never reaches, a program whose stream setup
+/// fails after its start (stdout's end given where stdin was asked for) while answers for others keep
+/// coming; expect the setup's refusal, its kill's check for an end to take one turn and read once,
+/// and exactly one Kill for its run, answered in one more turn.
+#[test]
+fn a_failed_setups_kill_goes_out_while_answers_for_others_keep_coming() {
+    let client = configured(WrongEnd(Chatter::new()));
+    let chatter = &client.conn.shared.transport.0;
+    chatter.chat();
+    let far = Instant::now()
+        .checked_add(Duration::from_secs(3600))
+        .unwrap();
+    let ran = chatter.counted(|| {
+        client
+            .run_before(
+                absolute_spec(),
+                Program::of(&["wrong-end"]),
+                Stdio {
+                    ask: hex_api::Ask {
+                        stdin: true,
+                        ..hex_api::Ask::default()
+                    },
+                    ..Stdio::null()
+                },
+                far,
+            )
+            .map(drop)
+    });
+    let sent = chatter.sent.lock().unwrap();
+    let run = sent
+        .iter()
+        .find(|(_, request)| matches!(request, Request::Call(Call::Run { .. })))
+        .map(|(id, _)| *id);
+    let kills: Vec<u64> = sent
+        .iter()
+        .filter_map(|(_, request)| match request {
+            Request::Call(Call::Kill { exec }) => Some(*exec),
+            _ => None,
+        })
+        .collect();
+    eprintln!(
+        "client_wait_bound phase=setup_kill ran={ran:?} run={run:?} kills={kills:?} fuse={FUSE}"
+    );
+    assert!(
+        matches!(&ran.0, Err(Refusal::Broken(why)) if why.contains("stdout")),
+        "the setup's own refusal, its kill confirmed: {:?}",
+        ran.0
+    );
+    assert_eq!(
+        (ran.1, ran.2),
+        (3, 1),
+        "the run's answer, the kill's one check for an end, the kill's answer"
+    );
+    assert_eq!(kills, run.into_iter().collect::<Vec<_>>());
+}
+
+/// An agent whose answers come only as the test queues them, each with the ends it gives (a given
+/// answer's descriptors), but for a list's, which comes at once.
+struct Late {
+    wake: Wake,
+    next: Mutex<VecDeque<(Vec<u8>, Vec<hex_api::End>)>>,
+    sent: Mutex<Vec<(u64, Request)>>,
+}
+
+impl Late {
+    fn queue(&self, id: u64, answer: &Answer, ends: Vec<hex_api::End>) {
+        let bytes = wire::answer(id, answer, wire::MAX_MESSAGE).unwrap();
+        self.next.lock().unwrap().push_back((bytes, ends));
+        self.wake.wake();
+    }
+}
+
+impl Transport for Late {
+    type Reading = ();
+    fn answers() -> &'static [Patience; KINDS] {
+        static WAITS: [Patience; KINDS] =
+            [const { Patience::measuring("test.client_late_given.unarmed") }; KINDS];
+        &WAITS
+    }
+    fn reading(&self) {}
+    fn handle(&self) -> Handle<'_> {
+        self.wake.handle()
+    }
+    fn recv(&self, _: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
+        self.wake.drain();
+        let mut came = false;
+        loop {
+            let Some((bytes, ends)) = self.next.lock().unwrap().pop_front() else {
+                return Ok(came);
+            };
+            let message = Received {
+                size: bytes.len(),
+                bytes: &bytes,
+                descriptors: ends.len(),
+                descriptors_cut: false,
+            };
+            take(&message, ends)?;
+            came = true;
+        }
+    }
+    fn try_send(&self, bytes: &[u8], at: &mut usize, _: &[Lent<'_>]) -> Result<bool, Sent> {
+        let (header, request) = wire::read_request_apart(bytes, wire::MAX_MESSAGE).unwrap();
+        if request == Request::Call(Call::List) {
+            let none = Answer::Boxes {
+                infos: Vec::new(),
+                more: false,
+            };
+            self.queue(header.id, &none, Vec::new());
+        }
+        self.sent.lock().unwrap().push((header.id, request));
+        *at = bytes.len();
+        Ok(true)
+    }
+    fn shutdown(&self) {}
+}
+
+/// AC-T7.4.1: do give up on a run asking for its stdout at its deadline, the agent answering only
+/// after, with stdout's end, then make a list that reads that late answer before its own; expect
+/// the run's caller expiry, the list answered, the late end closed at once (its pipe has no reader
+/// left), nothing kept for the run, and the Taken word for it sent, so the agent lets its copy go.
+#[test]
+fn a_given_answer_after_its_caller_gave_up_closes_its_ends() {
+    let client = configured(Late {
+        wake: Wake::new().unwrap(),
+        next: Mutex::new(VecDeque::new()),
+        sent: Mutex::new(Vec::new()),
+    });
+    let late = &client.conn.shared.transport;
+    let gave_up = client
+        .run_before(
+            absolute_spec(),
+            Program::of(&["late-given"]),
+            Stdio {
+                ask: hex_api::Ask {
+                    stdout: true,
+                    ..hex_api::Ask::default()
+                },
+                ..Stdio::null()
+            },
+            Instant::now().checked_add(CAP).unwrap(),
+        )
+        .map(drop);
+    let run = late.sent.lock().unwrap()[0].0;
+    let (output, mut program) = std::io::pipe().unwrap();
+    let given = Answer::Given {
+        pid: 9,
+        given: Streams {
+            stdout: true,
+            ..Streams::default()
+        },
+    };
+    late.queue(run, &given, vec![output.into()]);
+    let listed = client.list();
+    let kept = client.conn.shared.state().unwrap().given.contains_key(&run);
+    let written = program.write(&[1]).map_err(|e| e.kind());
+    let taken = late
+        .sent
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(id, request)| *id == run && *request == Request::Taken);
+    eprintln!(
+        "client_late_given gave_up={gave_up:?} listed={listed:?} kept={kept} written={written:?} taken={taken}"
+    );
+    assert!(
+        matches!(&gave_up, Err(Refusal::Os { why, .. }) if why.contains("absolute")),
+        "{gave_up:?}"
+    );
+    assert_eq!(listed, Ok(Vec::new()));
+    assert!(
+        !kept,
+        "the late answer's ends were kept for a run no one waits on"
+    );
+    assert_eq!(
+        written,
+        Err(io::ErrorKind::BrokenPipe),
+        "the late stdout end is still open"
+    );
+    assert!(taken, "no Taken word for the late answer");
 }
