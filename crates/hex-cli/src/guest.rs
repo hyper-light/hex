@@ -307,7 +307,8 @@ fn init() -> Result<(), (u8, String)> {
     // guest catalog; do this before the node reads its configured attachment routes.
     let _ = hex_runtime::guest::gpu::initialize(state)
         .map_err(|why| fail(format!("initializing guest GPU authority: {why}")))?;
-    give_descriptors().map_err(|why| fail(format!("giving the node its descriptor limit: {why}")))?;
+    give_descriptors()
+        .map_err(|why| fail(format!("giving the node its descriptor limit: {why}")))?;
     let node = start(
         &exe,
         &[
@@ -377,12 +378,10 @@ fn read_nr_open() -> Result<u64, Refusal> {
     std::fs::File::open(NR_OPEN)
         .and_then(|file| file.take(bound).read_to_string(&mut text))
         .map_err(|e| Refusal::os("reading fs.nr_open", e))?;
-    text.trim_end()
-        .parse()
-        .map_err(|_| Refusal::Invalid {
-            what: "fs.nr_open",
-            why: format!("{text:?} isn't a count"),
-        })
+    text.trim_end().parse().map_err(|_| Refusal::Invalid {
+        what: "fs.nr_open",
+        why: format!("{text:?} isn't a count"),
+    })
 }
 
 /// The node's descriptor limit, from its `need` ([`crate::node::descriptors_needed`]'s total, which the node's own
