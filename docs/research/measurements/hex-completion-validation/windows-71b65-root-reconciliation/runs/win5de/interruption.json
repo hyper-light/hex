@@ -1,0 +1,47 @@
+{
+  "observed_utc": "2026-11-11T07:16:33.089110+00:00",
+  "kind": "interrupted original submission and changed read-only reconciliation; NOT terminal workload proof",
+  "user_report": "local Kiln restarted part-way through the turn and stopped it; exact restart time unknown",
+  "original_source_revision": "5de0ea4cb4a30f3cdcfce8ff1c62499d1379028c",
+  "original_source_archive_sha256": "72f52a6ad052d60420ba8ff61de0fef481734528cf7ad29b672d8c180d771fc6",
+  "original_driver_sha256": "3b2788a066de6da6dd97342bff44785692a8bbd3acb5ab6bfe505b6b0fd5b4f2",
+  "original_submission_sha256": "9edf9a4ab78c81a8c980270d13f639e44ee18d3e01fac92cd029f50179eba28f",
+  "original_cli_pid": 70235,
+  "recorded_original_cli_birth_local": "2026-11-10 22:57:55 America/Los_Angeles",
+  "original_exec_session": 69546,
+  "original_exec_session_on_resume": "Unknown process id",
+  "original_local_pid_observation": {
+    "command": "ps -p 70235 -o pid=,ppid=,lstart=,stat=,etime=,pcpu=,rss=,comm=",
+    "exit_code": 1,
+    "rows": 0,
+    "scope": "exact recorded owned client only, no args/foreign scan"
+  },
+  "original_exit_status": "UNKNOWN",
+  "original_reaped_receipt": "UNAVAILABLE",
+  "original_cli_log_bytes": 0,
+  "original_cli_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "original_outer_budget_seconds": 1100,
+  "original_local_budget_seconds": 1160,
+  "original_native_build_budget_seconds": 900,
+  "guards_extended": false,
+  "workload_retried": false,
+  "workload_result": "UNVERIFIED: no terminal/source/artifact/test/guard receipt",
+  "remote_process_job_absence": "UNVERIFIED",
+  "resource_return": "UNVERIFIED",
+  "original_deadline_is_not_absence_proof": true,
+  "read_only_reconciliation": {
+    "local_pid": 40150,
+    "exit": 1,
+    "reaped": true,
+    "raw_sha256": "dd8d59a24518ba456f9356823993fa97a5408ad7c7d79ebd05faece8456e5c11",
+    "raw_bytes": 89,
+    "result": "Jupiter did not answer in15s; original remote root/guard/source files not collected"
+  },
+  "metadata_query_r1": {
+    "normal_stop_requested": true,
+    "last_response_running": true,
+    "terminal_unknown": true
+  },
+  "next_workloads_dispatched": [],
+  "preservation": "all original archives/source/targets/raw retained; original submission.json not rewritten"
+}

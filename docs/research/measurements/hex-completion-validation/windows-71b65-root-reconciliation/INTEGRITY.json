@@ -1,0 +1,579 @@
+{
+  "source": "71b65b7718c04bce56cb2471d2275774be84fd3b",
+  "role": "ROOT coordinator data-integrity review only",
+  "manifest": {
+    "bytes": 107139,
+    "sha256": "b6a357ad4cf89aba59e8660f84fbd35ff14a5484943902dda526d5dbfaa1613d"
+  },
+  "terminal_run_rows": 64,
+  "local_exit_counts": {
+    "0": 34,
+    "1": 30
+  },
+  "terminal_archive_versions": 67,
+  "terminal_archives": [
+    {
+      "label": "absence3/raw-evidence.tar.gz",
+      "archive_bytes": 1307,
+      "archive_sha256": "069d52e33ae61ac331dfafbc7afe8989e1a68274f9371472ea9828641ac248fe",
+      "members": 1,
+      "member_bytes": 13126,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "absence3/raw-evidence-v2.tar.gz",
+      "archive_bytes": 4019,
+      "archive_sha256": "94c3fe55a845748cd9a671a52836c0df881dbb9f07d33891cfcf29ee2a9fa6ed",
+      "members": 3,
+      "member_bytes": 44044,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "cachedarchivecompletion1/raw-evidence.tar.gz",
+      "archive_bytes": 3244,
+      "archive_sha256": "0900016aa49dd41bc8dd857cc0ec2240ee2200139b059f17aa56787c4c2ca525",
+      "members": 1,
+      "member_bytes": 10697,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "cachedbody3/raw-evidence.tar.gz",
+      "archive_bytes": 15656,
+      "archive_sha256": "f88933cedec08bb1459e10e135ff52e2caf0d0868e481ea40849987f7d25b8ef",
+      "members": 15,
+      "member_bytes": 88882,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "cachedcontroller3/raw-evidence.tar.gz",
+      "archive_bytes": 2483,
+      "archive_sha256": "50ff785630c2b0d4f964d91a1289d9f69115eeeb25ccb51a08b45f96c4afd425",
+      "members": 4,
+      "member_bytes": 4699,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "cachedhelp1/raw-evidence.tar.gz",
+      "archive_bytes": 2685,
+      "archive_sha256": "a4185003b653f1ac19ba20c0e8a4d6a17e598a4c42b1b978d94686bf54908b38",
+      "members": 1,
+      "member_bytes": 11375,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "cachedimport3/raw-evidence.tar.gz",
+      "archive_bytes": 17836,
+      "archive_sha256": "535efb82a31036ba508ba04e0dee26054bf1d8fb81404529d5d396fb6585637d",
+      "members": 5,
+      "member_bytes": 103387,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "cachedio1/raw-evidence.tar.gz",
+      "archive_bytes": 2129,
+      "archive_sha256": "9f483c3d178f11809a8bf5f9103fe129b16edcd4da182f3be49d54bb7a079b25",
+      "members": 3,
+      "member_bytes": 11798,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "cachedpreflight1/raw-evidence.tar.gz",
+      "archive_bytes": 354,
+      "archive_sha256": "c82aebc71e877727f4c25cfae05b81ce68a66477f31ead8c5325a531c567204a",
+      "members": 1,
+      "member_bytes": 577,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "cachedpreflight2/raw-evidence.tar.gz",
+      "archive_bytes": 3358,
+      "archive_sha256": "282102ae154c14cf5d466da9b9fca15e0b18edf69d063d87ba2a3723ef9ca434",
+      "members": 8,
+      "member_bytes": 12898,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "cachedprogress1/raw-evidence.tar.gz",
+      "archive_bytes": 2822,
+      "archive_sha256": "e9f1aa42a1298e811ea8e1f8f49071e092bf5adb9a7ea4764e2e556be91c19be",
+      "members": 1,
+      "member_bytes": 8716,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "cachedprogress2/raw-evidence.tar.gz",
+      "archive_bytes": 3126,
+      "archive_sha256": "40e198778f60267a4fcc7b4879ddb3e1b83abf35c38195fdd7c84e252a3c14fb",
+      "members": 1,
+      "member_bytes": 10396,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "committedmeta1/raw-evidence.tar.gz",
+      "archive_bytes": 21465,
+      "archive_sha256": "3ded46d90edf2df2b10b06df6d93ee34c3bf6434f07fb7382315cd451d206fe7",
+      "members": 5,
+      "member_bytes": 1225309,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "controlsv1/raw-evidence.tar.gz",
+      "archive_bytes": 105078,
+      "archive_sha256": "9aafa095226b65343f10d3c26fb228d51945e3db59ab92d2c924f9e8ec15d117",
+      "members": 3,
+      "member_bytes": 307021,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "controlsv2/raw-evidence.tar.gz",
+      "archive_bytes": 130348,
+      "archive_sha256": "ffdf97b9eb1392e852c0f65309373f19b88f8d0d747d3033b6053956e956a6e0",
+      "members": 14,
+      "member_bytes": 527693,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "cpucallback1/raw-evidence.tar.gz",
+      "archive_bytes": 1126,
+      "archive_sha256": "3b6e4624ddca453646b7f7320f6906afd0e2b7aaabcb706cdbbe925f6e469e5c",
+      "members": 1,
+      "member_bytes": 2410,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "cpucallback2/raw-evidence.tar.gz",
+      "archive_bytes": 1255,
+      "archive_sha256": "f530028fed5a2eef185d13bcdc685eeb93be6b2352d431321018ca72dc1fd2f5",
+      "members": 1,
+      "member_bytes": 2580,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "cpucallback3/raw-evidence.tar.gz",
+      "archive_bytes": 1122,
+      "archive_sha256": "aa3841e26dd26e12a51306267368e0d1937069b0dea62752bb4a569ff0bd73d9",
+      "members": 1,
+      "member_bytes": 2257,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "currentidentity1/raw-evidence.tar.gz",
+      "archive_bytes": 2874,
+      "archive_sha256": "078d8a494964813ca9d384d94c1fae54900e5a53424f32fce6b3417fc4539646",
+      "members": 3,
+      "member_bytes": 8302,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "fullimagecpu1/raw-evidence.tar.gz",
+      "archive_bytes": 6868,
+      "archive_sha256": "068dc431e2812f9107308606fa169dc6daea4d2bde736046ea5d06b369cdf5f6",
+      "members": 4,
+      "member_bytes": 31558,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "fullimagegpu1/raw-evidence.tar.gz",
+      "archive_bytes": 7015,
+      "archive_sha256": "34e89e42c228a6c30b0c6c31da7f7d0f1e98c48a5a11f401042c230e4a28dc45",
+      "members": 4,
+      "member_bytes": 30310,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "hcscpu1/raw-evidence.tar.gz",
+      "archive_bytes": 504045,
+      "archive_sha256": "3057a29d667d3685b43fe0e04d321fb6a17ba4e6d53669c75f896c04c065678f",
+      "members": 12,
+      "member_bytes": 1554555,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "hcscpu2/raw-evidence.tar.gz",
+      "archive_bytes": 509240,
+      "archive_sha256": "282caf64982feaeb92775184faf8e2cad9e94ea61d4990468af80e62a7fd6cf4",
+      "members": 13,
+      "member_bytes": 1595503,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "hcsdiag1/raw-evidence.tar.gz",
+      "archive_bytes": 114221,
+      "archive_sha256": "525ff670addf714b2295b65bb32a8f7fa61479c89f37cdbb61b077346713d27f",
+      "members": 6,
+      "member_bytes": 359157,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "hcsevents1/raw-evidence.tar.gz",
+      "archive_bytes": 816,
+      "archive_sha256": "f03f50ae9ac41f2dfb8ed29815daec960ac4f44e60dd7e6f1feeeba82caa1596",
+      "members": 1,
+      "member_bytes": 6881,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "hcsevents1/raw-evidence-v2.tar.gz",
+      "archive_bytes": 2614,
+      "archive_sha256": "a0b9154af7355499975ade90bd17515c40845d13ff7b1e2f34cdf16f9ff33d6a",
+      "members": 4,
+      "member_bytes": 39405,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "hcsfixed1/raw-evidence.tar.gz",
+      "archive_bytes": 679142,
+      "archive_sha256": "7e051a99f10f5a956428c6d2422530222f989bfe6ddd631c05c5ebde03ab4634",
+      "members": 8,
+      "member_bytes": 2275373,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "hcsgpu1/raw-evidence.tar.gz",
+      "archive_bytes": 508337,
+      "archive_sha256": "21480f164b56435373ce0dc6deb48943d239ca36185e9114bc4510ec3e1809da",
+      "members": 11,
+      "member_bytes": 1593350,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "hcsgpu1cleanup/raw-evidence.tar.gz",
+      "archive_bytes": 505576,
+      "archive_sha256": "d27bed87b27bb66eac42cd4eb362e869bf005df1e625ee5580f18cd737895f3f",
+      "members": 11,
+      "member_bytes": 1578162,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "hcsgpu2/raw-evidence.tar.gz",
+      "archive_bytes": 554803,
+      "archive_sha256": "bb78d7b284dd496dc55b338eccdf0d082c7bd31e09d919ba243502c96cd8e7c6",
+      "members": 12,
+      "member_bytes": 1770509,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "hcsllvm1/raw-evidence.tar.gz",
+      "archive_bytes": 874852,
+      "archive_sha256": "1f71b509ef04f653359129848cbeed2c95e8cd55daea728abd12a9d803fece0c",
+      "members": 11,
+      "member_bytes": 2854959,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "hcsv1/raw-evidence.tar.gz",
+      "archive_bytes": 136425,
+      "archive_sha256": "09c201836210d6db37ef068d7c40e135f25b5c22b4f694462078e472313a32b3",
+      "members": 6,
+      "member_bytes": 581560,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "hcsv2/raw-evidence.tar.gz",
+      "archive_bytes": 119441,
+      "archive_sha256": "a8ea8e9b7d60274d1d723379c10d819c12529fe62d11c4d5730018bfef193a1b",
+      "members": 6,
+      "member_bytes": 430388,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "hostv1/raw-evidence.tar.gz",
+      "archive_bytes": 238,
+      "archive_sha256": "6ed7cdcd8c07fac3e60b5c65da46bddbd8716a41a5d455677354c309b768b54f",
+      "members": 1,
+      "member_bytes": 181,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "hostv2/raw-evidence.tar.gz",
+      "archive_bytes": 116227,
+      "archive_sha256": "8454fbd27572714768ab37dccbf850275fcf9f210cfaeff913f137db5c2756d5",
+      "members": 6,
+      "member_bytes": 402188,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "hostv3/raw-evidence.tar.gz",
+      "archive_bytes": 111459,
+      "archive_sha256": "51def66d6dd4638a79c119998f193fb19fc7b9302a1491764944d5b1bc04db9b",
+      "members": 6,
+      "member_bytes": 332120,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "imagemeter1/raw-evidence.tar.gz",
+      "archive_bytes": 343,
+      "archive_sha256": "d0d67ca7375fb8f161eb337f19497f5b1a0a9210a293f5bd6bb8ae572c4371fe",
+      "members": 1,
+      "member_bytes": 422,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "imagemeter2/raw-evidence.tar.gz",
+      "archive_bytes": 1144,
+      "archive_sha256": "a0ffd67f8e441e7494b153ce170853eb57ae0b626ddf5d22790223f678c5af44",
+      "members": 1,
+      "member_bytes": 3155,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "imageprep1/raw-evidence.tar.gz",
+      "archive_bytes": 903,
+      "archive_sha256": "abf1f5fc009a7c42079becddd371cfa07ed28524114a3ae8a97ea1eec264ed04",
+      "members": 1,
+      "member_bytes": 1344,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "imageprep2/raw-evidence.tar.gz",
+      "archive_bytes": 924,
+      "archive_sha256": "3cbdb697282a15b4909414df79180f3875d2913e68cb2e53d312636917c991b4",
+      "members": 1,
+      "member_bytes": 1467,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "imageverify1/raw-evidence.tar.gz",
+      "archive_bytes": 141,
+      "archive_sha256": "5aead620e926cabf8ee7b9578ede793bcf0273336019bbb541e630dfa11bb53b",
+      "members": 1,
+      "member_bytes": 44,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "imageverify2/raw-evidence.tar.gz",
+      "archive_bytes": 513,
+      "archive_sha256": "95fdf19fc56f7d5fc68597c06de7fbba72c8ef606c68e62fef0d3c25eb2ac6c2",
+      "members": 3,
+      "member_bytes": 476,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "imageverify3/raw-evidence.tar.gz",
+      "archive_bytes": 988,
+      "archive_sha256": "aa1cf41a61523395641832cdb7aed4bd9ed36f463e8a0326ff1356fb4b7b1e8d",
+      "members": 4,
+      "member_bytes": 2447,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "imageverify4/raw-evidence.tar.gz",
+      "archive_bytes": 10579,
+      "archive_sha256": "530274d306aa90d4d352dbf4aae5a3d522eb8be5770c70c198166782a26b1afd",
+      "members": 6,
+      "member_bytes": 71445,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "importreceipts1/raw-evidence.tar.gz",
+      "archive_bytes": 3969,
+      "archive_sha256": "658cf9acdcfdc8605e2674653868eb67d53fbfb1536963aaec3100e984913fa1",
+      "members": 5,
+      "member_bytes": 29199,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "inputstate1/raw-evidence.tar.gz",
+      "archive_bytes": 50695,
+      "archive_sha256": "23653b298cdcbb33941acad590aa9b07d403d51bbf0ccff024ae571a68af1b7a",
+      "members": 21,
+      "member_bytes": 1239267,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "launcherimports1/raw-evidence.tar.gz",
+      "archive_bytes": 1287,
+      "archive_sha256": "24ea6ca4f3d9053b1818c5ecdda5d3aba88049bb1560797c6fd6977285dcd90d",
+      "members": 2,
+      "member_bytes": 6256,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "launcherloader1/raw-evidence.tar.gz",
+      "archive_bytes": 5785,
+      "archive_sha256": "acd8b8c3d0d3b862c59fdc5a85416a589a2c128ca985c452543a04c06ac1ed84",
+      "members": 7,
+      "member_bytes": 18154,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "nodeclic579/raw-evidence.tar.gz",
+      "archive_bytes": 1420,
+      "archive_sha256": "45fde6ee54369edab36ca45692c76e4316ce951f642aa5c3129bfdbee1543bae",
+      "members": 1,
+      "member_bytes": 4029,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "nodeclic579/raw-evidence-v2.tar.gz",
+      "archive_bytes": 557043,
+      "archive_sha256": "20690fc57fbae706d6e7d9c89a30d9227646ec7a7a85bcbe1928ef7b36a9f669",
+      "members": 8,
+      "member_bytes": 1859801,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "ownedstate1/raw-evidence.tar.gz",
+      "archive_bytes": 287,
+      "archive_sha256": "67a8c27bd2a026231bc5c6c3f7fadfb94127773b56520eab70db66402348dfe6",
+      "members": 1,
+      "member_bytes": 405,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "ownedstate2/raw-evidence.tar.gz",
+      "archive_bytes": 10888,
+      "archive_sha256": "64f7ffa06c351b5f517bc1a7a67de7ed7df5958fdb0f7b2930b0f3bc4137e810",
+      "members": 3,
+      "member_bytes": 465415,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "pathprobe1/raw-evidence.tar.gz",
+      "archive_bytes": 599,
+      "archive_sha256": "e1c03973b4aec1ec73e0800a02ac09ad5ee85dc8f0f6f7831e087785ec2c0b93",
+      "members": 1,
+      "member_bytes": 1046,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "retainedmeter1/raw-evidence.tar.gz",
+      "archive_bytes": 957,
+      "archive_sha256": "56c567c7d7dba02a6c9a21cfae74136ec943bf702469b3a4c59306165cf7c6a0",
+      "members": 1,
+      "member_bytes": 3302,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "retainedmeter2/raw-evidence.tar.gz",
+      "archive_bytes": 3242,
+      "archive_sha256": "874de5f77a76cf9aa9b55ffd3622d0ccf1ebe2b1a6786a15477e3ed8c50fd86f",
+      "members": 3,
+      "member_bytes": 13258,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "verifystartup1/raw-evidence.tar.gz",
+      "archive_bytes": 3722,
+      "archive_sha256": "be5f4e2a9280c4567da583512465f8f3d3e8b0ac57b9167a10ed2c6e6dfd402d",
+      "members": 4,
+      "member_bytes": 25227,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "vhdcapability1/raw-evidence.tar.gz",
+      "archive_bytes": 2820,
+      "archive_sha256": "bb15778c6e22f23e816446f44f6fc1239656de75250088deac582417cea68838",
+      "members": 3,
+      "member_bytes": 16414,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "wholeenvelope1/raw-evidence.tar.gz",
+      "archive_bytes": 3455,
+      "archive_sha256": "631a39722bff9b8dff527dd809236189f463cad29d8e03e91ca139af3bf61d58",
+      "members": 3,
+      "member_bytes": 19340,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "wholepost1/raw-evidence.tar.gz",
+      "archive_bytes": 3482,
+      "archive_sha256": "8b7ba7dcef567189b71d01885fb21117b38e3ba21f3301e6b4de86ae05641e9b",
+      "members": 3,
+      "member_bytes": 25298,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "wholepost2/raw-evidence.tar.gz",
+      "archive_bytes": 3635,
+      "archive_sha256": "87740a6d1f7d498096712b70844801f0b49d759d813a08a13418267b97b19e0e",
+      "members": 3,
+      "member_bytes": 27320,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "winpreflight1/raw-evidence.tar.gz",
+      "archive_bytes": 419376,
+      "archive_sha256": "05aa30dbc200679570a91fc3d03f249d08ce094e4d5bf96af61d9cae8f5481a8",
+      "members": 7,
+      "member_bytes": 1502354,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "absence4/raw-evidence.tar.gz",
+      "archive_bytes": 5506,
+      "archive_sha256": "1f3232673bbb591f2ca5370248db4131e25eb83fe7baf7ff52af8ef92b6461b6",
+      "members": 3,
+      "member_bytes": 59644,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "hcsbasic1/raw-evidence.tar.gz",
+      "archive_bytes": 1393,
+      "archive_sha256": "b5276e2035897494873734218cdf4ba99d9e8a0911d0ba1ffd8a0c1fcb9257a9",
+      "members": 4,
+      "member_bytes": 2952,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "nodecli93/raw-evidence.tar.gz",
+      "archive_bytes": 553710,
+      "archive_sha256": "9168580362125c614fbc6cb6d5ec9fdcca582d33d558af606d9fe5739d89bcb5",
+      "members": 8,
+      "member_bytes": 1855026,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "wholepost3/raw-evidence.tar.gz",
+      "archive_bytes": 3762,
+      "archive_sha256": "ee36c85954b6e856db1e21aac270ebc0f9b98bb7e1f0c959c6f99fbdc68d4297",
+      "members": 3,
+      "member_bytes": 29340,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "winpreflight2/raw-evidence.tar.gz",
+      "archive_bytes": 947836,
+      "archive_sha256": "5be7ab54ae72783b98d266cd7e58655613750ca536069fd0022cca4827ab769c",
+      "members": 13,
+      "member_bytes": 3113088,
+      "all_member_hashes_verified": true
+    },
+    {
+      "label": "before5de/raw-evidence.tar.gz",
+      "archive_bytes": 3755,
+      "archive_sha256": "3101c306f4c3a7e2e18e7a6f6db7db8832f5e64dbd3642de39a794afe745983b",
+      "members": 3,
+      "member_bytes": 29692,
+      "all_member_hashes_verified": true
+    }
+  ],
+  "interrupted_transport": {
+    "label": "win5de/interrupted-transport-only",
+    "archive_bytes": 7684,
+    "archive_sha256": "a273944c012b1843d39739477aa7ba80dc7abe372e780b19aef71d0e80d3d331",
+    "members": 8,
+    "member_bytes": 21124,
+    "all_member_hashes_verified": true
+  },
+  "original5de_status": {
+    "exit": "UNKNOWN",
+    "reap_receipt": "UNAVAILABLE",
+    "remote_job_cleanup": "UNVERIFIED",
+    "resource_return": "UNVERIFIED",
+    "original_submission_sha256": "9edf9a4ab78c81a8c980270d13f639e44ee18d3e01fac92cd029f50179eba28f",
+    "original_cli_bytes": 0
+  },
+  "readonly_reconciliation": {
+    "local_pid": 40150,
+    "exit": 1,
+    "reaped": true,
+    "raw_sha256": "dd8d59a24518ba456f9356823993fa97a5408ad7c7d79ebd05faece8456e5c11",
+    "raw_bytes": 89,
+    "result": "Jupiter did not answer in15s; original remote root/guard/source files not collected"
+  },
+  "semantic_or_native_success_of_all64_not_inferred": true,
+  "archive_contents_not_executed": true,
+  "network_build_test_native_or_new_actor_started": false
+}

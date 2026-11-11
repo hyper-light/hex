@@ -1,0 +1,41 @@
+{
+  "archive_sha256": "a273944c012b1843d39739477aa7ba80dc7abe372e780b19aef71d0e80d3d331",
+  "members": {
+    "cli.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "collection.cli.log": {
+      "bytes": 89,
+      "sha256": "dd8d59a24518ba456f9356823993fa97a5408ad7c7d79ebd05faece8456e5c11"
+    },
+    "submission.json": {
+      "bytes": 3685,
+      "sha256": "9edf9a4ab78c81a8c980270d13f639e44ee18d3e01fac92cd029f50179eba28f"
+    },
+    "collection.json": {
+      "bytes": 578,
+      "sha256": "898f3d52d451c39dd824cf4b872b22bc5f9b633dafebcf5aa1797214a1396dfb"
+    },
+    "interruption.json": {
+      "bytes": 2273,
+      "sha256": "e4a60efface728c9bd8195242a0d4eb470f3509760d55a0689f705d5b3bc0aa0"
+    },
+    "driver.ps1": {
+      "bytes": 11795,
+      "sha256": "3b2788a066de6da6dd97342bff44785692a8bbd3acb5ab6bfe505b6b0fd5b4f2"
+    },
+    "bootstrap.ps1": {
+      "bytes": 731,
+      "sha256": "d56a707a41093df8bb660764ef80fdb9fcabd698f9b8895e9b7f3f711cd20a99"
+    },
+    "collect.ps1": {
+      "bytes": 1973,
+      "sha256": "3a4fa881456c862de1ac4ff14ee5e62b559c739b2e9f3529e154b9271d4c0876"
+    }
+  },
+  "originals_retained": true,
+  "original_workload_terminal_proven": false,
+  "original_remote_job_cleanup": "UNVERIFIED",
+  "transport_snapshot_only": true
+}
