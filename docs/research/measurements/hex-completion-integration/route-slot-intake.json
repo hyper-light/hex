@@ -1,0 +1,14 @@
+{
+  "source": "cef104c895eba94f6ca3a2c6fd4f3910abb510ab",
+  "parent": "810473e647fa5cc8d15e4fb20bcac54ad4f6fd09",
+  "review": "same existing Vec Slot, payload-free phase plus one OptionGuest; validates Ready iff Some, Busy iff None; Reservation retains prior; no extra owner/allocation/native effect",
+  "source_only": true,
+  "files": {
+    "crates/hex-runtime/src/guest/books.rs": "922881a9c48d7fe501360135bf94917f7c5b6ec4f29db4f2746d17b3947359d2",
+    "crates/hex-runtime/src/guest/dedicated.rs": "88ffc2d73b3b00447cac5c5f3c7f61af69afbbd08415960e48214f9065555acc"
+  },
+  "new_control": "guest::dedicated::tests::selected_slot_keeps_one_value_across_failed_reservation",
+  "tests_executed": 0,
+  "native_invocations": 0,
+  "preserved": "ROOT existing selected receipt schema and native-ownership ports; only exact cef two-file delta applied"
+}

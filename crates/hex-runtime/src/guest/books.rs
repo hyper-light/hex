@@ -19,7 +19,7 @@ impl GuestRuntime {
     /// The same initialized immutable catalog for the canonical Box/Pool join;
     /// cloning this triomphe owner allocates no new catalog or holder cache.
     pub fn device_catalog(&self) -> Option<crate::devices::SharedCatalog> {
-        self.gpu_catalog.as_ref().map(triomphe::Arc::clone)
+        self.gpu_catalog.clone()
     }
 
     /// Called once after the existing Arc<Node> or Arc<Recorded<WithGuest<P>>>

@@ -569,6 +569,46 @@ mod tests {
         }
         assert_eq!(process.stops.load(Ordering::SeqCst), 0);
     }
+
+    /// AC-T7.4.1: an unsuccessful method restores the same ready value; malformed
+    /// slot ownership is refused before the next native method can acquire it.
+    #[test]
+    fn selected_slot_keeps_one_value_across_failed_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = runtime(dir.path());
+        let id = BoxId::new("selected-slot").unwrap();
+        let booted = install(
+            &runtime,
+            &id,
+            Arc::new(Controlled {
+                ended: AtomicBool::new(false),
+                released: AtomicBool::new(false),
+                stops: AtomicUsize::new(0),
+                wait: Box::new(|| {}),
+            }),
+        );
+        {
+            let reservation = runtime.reserve(&id, Operation::Loading).unwrap();
+            assert!(runtime.reserve(&id, Operation::Stopping).is_err());
+            assert!(triomphe::Arc::ptr_eq(
+                &reservation.previous.as_ref().unwrap().booted,
+                &booted
+            ));
+            // Dropping the failed method restores this exact previous value.
+        }
+        let reservation = runtime.reserve(&id, Operation::Stopping).unwrap();
+        assert!(triomphe::Arc::ptr_eq(
+            &reservation.previous.as_ref().unwrap().booted,
+            &booted
+        ));
+        drop(reservation);
+        let mut routes = runtime.dedicated.lock().unwrap();
+        let slot = routes.iter_mut().find(|slot| slot.id == id).unwrap();
+        slot.route = Route::Busy(Operation::Loading);
+        assert!(slot.take(Operation::Creating).is_err());
+        assert!(slot.guest.is_some(), "invalid slot must not drop its owner");
+        slot.route = Route::Ready;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -590,12 +630,43 @@ impl Operation {
 
 enum Route {
     Busy(Operation),
-    Ready(Guest),
+    Ready,
 }
 
 pub(super) struct Slot {
     id: BoxId,
     route: Route,
+    // Ready owns exactly one value here; Busy owns none because its Reservation
+    // holds the prior value. Keeping both in this same fallibly reserved slot
+    // avoids another heap/refcount owner for a large Ready enum payload.
+    guest: Option<Guest>,
+}
+
+impl Slot {
+    fn take(&mut self, operation: Operation) -> Result<Guest, Refusal> {
+        match (&self.route, self.guest.is_some()) {
+            (Route::Ready, true) => {
+                let guest = self
+                    .guest
+                    .take()
+                    .ok_or_else(|| invalid("ready guest route lost its value"))?;
+                self.route = Route::Busy(operation);
+                Ok(guest)
+            }
+            (Route::Busy(existing), false) => Err(Refusal::Exhausted {
+                what: existing.name(),
+                bound: 1,
+            }),
+            _ => Err(invalid("guest route state and ownership disagree")),
+        }
+    }
+
+    fn check_reserved(&self) -> Result<(), Refusal> {
+        if !matches!(self.route, Route::Busy(_)) || self.guest.is_some() {
+            return Err(invalid("guest reservation lost its exclusive slot"));
+        }
+        Ok(())
+    }
 }
 
 /// Owning a reservation excludes a second same-ID operation without keeping a
@@ -622,11 +693,17 @@ impl Reservation<'_> {
             .position(|slot| slot.id == self.id)
             .ok_or_else(|| invalid("guest reservation lost its route"))?;
         if let Some(next) = next {
-            routes
+            let slot = routes
                 .get_mut(index)
-                .ok_or_else(|| invalid("guest route index changed"))?
-                .route = Route::Ready(next);
+                .ok_or_else(|| invalid("guest route index changed"))?;
+            slot.check_reserved()?;
+            slot.guest = Some(next);
+            slot.route = Route::Ready;
         } else {
+            routes
+                .get(index)
+                .ok_or_else(|| invalid("guest route index changed"))?
+                .check_reserved()?;
             routes.swap_remove(index);
         }
         Ok(())
@@ -645,16 +722,15 @@ impl Drop for Reservation<'_> {
             .dedicated
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(index) = routes.iter().position(|slot| slot.id == self.id) {
-            match self.previous.take() {
-                Some(previous) => {
-                    if let Some(slot) = routes.get_mut(index) {
-                        slot.route = Route::Ready(previous);
-                    }
-                }
-                None => {
-                    routes.swap_remove(index);
-                }
+        if let Some(index) = routes.iter().position(|slot| slot.id == self.id)
+            && let Some(slot) = routes.get_mut(index)
+            && slot.check_reserved().is_ok()
+        {
+            if let Some(previous) = self.previous.take() {
+                slot.guest = Some(previous);
+                slot.route = Route::Ready;
+            } else {
+                routes.swap_remove(index);
             }
         }
     }
@@ -792,19 +868,7 @@ impl GuestRuntime {
         let owned = id.try_clone()?;
         let mut routes = self.dedicated.lock().map_err(poisoned)?;
         let previous = if let Some(slot) = routes.iter_mut().find(|slot| slot.id == *id) {
-            match &slot.route {
-                Route::Busy(existing) => {
-                    return Err(Refusal::Exhausted {
-                        what: existing.name(),
-                        bound: 1,
-                    });
-                }
-                Route::Ready(_) => {}
-            }
-            match std::mem::replace(&mut slot.route, Route::Busy(operation)) {
-                Route::Ready(guest) => Some(guest),
-                Route::Busy(_) => return Err(invalid("guest reservation changed under its lock")),
-            }
+            Some(slot.take(operation)?)
         } else {
             if routes.len() >= crate::MAX_BOXES {
                 return Err(Refusal::Full(crate::MAX_BOXES));
@@ -816,6 +880,7 @@ impl GuestRuntime {
             routes.push(Slot {
                 id: id.try_clone()?,
                 route: Route::Busy(operation),
+                guest: None,
             });
             None
         };
