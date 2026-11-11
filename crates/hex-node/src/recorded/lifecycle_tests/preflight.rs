@@ -1,5 +1,5 @@
 //! AC-T7.4.1 / T-T7.1.2: whole retained-owner preflight precedes every backend operation.
-//! This leaf is nested in the unchanged canonical lifecycle fixture by a test-only overlay.
+//! It reuses its parent's canonical lifecycle fixture.
 //! It drives the real Recorded/Store implementation and private files; backend effects are counted
 //! SimRuntime controls, not native HCS/VM proof.
 use super::*;
@@ -339,5 +339,4 @@ fn a_runtime_without_its_retained_metadata_cross_check_is_refused_before_any_eff
     assert_eq!(node.books.store.all().unwrap(), before);
 }
 
-#[path = "recorded_adapter_preflight_tests.rs"]
 mod initialized_adapter_preflight;
