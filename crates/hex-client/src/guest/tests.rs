@@ -1002,9 +1002,11 @@ fn asked_shards_streams_wait_as_the_callers_files_do() {
             binary: None,
         })
         .unwrap();
-    // A link's bound names a finite deadline (HEX-GUEST-33): Shards' learned bound on a real guest's boot
-    // and listen (`conformance::PATIENCE`) holds the simulator's.
-    let bound = shards_api::conformance::PATIENCE.get();
+    // A link's bound names a finite deadline (HEX-GUEST-33): the first dial's, as the node gives it
+    // (`first_dial_bound`), twice the guest's recorded boot to ready, the boot and listen it waits on.
+    let bound = shards::recorded_boot()
+        .unwrap()
+        .saturating_mul(hex_core::patience::TIMES_SLOWEST);
     let transport =
         Stream::dial(own_link(shards::ShardsLink::new(Arc::from(guest), bound)).unwrap()).unwrap();
     let given = transport

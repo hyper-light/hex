@@ -1067,12 +1067,12 @@ fn a_second_hang_is_refused_by_type() {
 /// HEX-GUEST-34 (the lead's seed rule, 2026-11-07: a host class with no record seeds from 2 × the slowest record
 /// of any class, then rises with the node's own): on Linux (KVM), whose boot-to-ready row isn't in
 /// records.tsv yet, expect the first dial's bound twice that seed (twice the margin over the slowest
-/// boot_ready of any class), never a refusal; then tell it of a boot slower than the seed: expect the bound
-/// twice that boot, risen.
+/// boot_ready of any class), never a refusal, and the recorded dial bound (AC-T7.4.1's managed patience) the
+/// same; then tell it of a boot slower than the seed: expect the bound twice that boot, risen.
 #[cfg(target_os = "linux")]
 #[test]
 fn an_unrecorded_class_seeds_from_twice_the_slowest_of_any_class_and_rises() {
-    let slowest_any = RECORDS
+    let slowest_any = hex_client::guest::shards::RECORDS
         .lines()
         .filter(|l| !l.starts_with('#'))
         .filter_map(|l| {
@@ -1085,6 +1085,7 @@ fn an_unrecorded_class_seeds_from_twice_the_slowest_of_any_class_and_rises() {
     let rt = GuestRuntime::new(Arc::new(Planned::new(&[Boots::Ready])), config());
     assert_eq!(recorded_boot().unwrap(), seed);
     assert_eq!(rt.first_dial_bound().unwrap(), 2 * seed);
+    assert_eq!(recorded_dial_bound().unwrap(), 2 * seed);
     let slow = 3 * seed;
     rt.learn(slow);
     assert_eq!(rt.first_dial_bound().unwrap(), 2 * slow);

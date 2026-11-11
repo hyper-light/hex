@@ -623,6 +623,39 @@ impl Holding {
         })
     }
 
+    /// The uncertainty mark of THIS creator's VM slot after `failure`. It is keyed by the creator's own
+    /// job receipt, not by its owner's name: a slot a newer creator holds (this one's released and the
+    /// owner relaunched) is never marked, and a slot already gone, already cleanup, or being removed by
+    /// its own release needs no mark. A refused mark returns beside `failure`.
+    fn uncertain_vm_after(&self, boxed: &JobBox, failure: &Refusal) -> Result<(), Refusal> {
+        let mark = (|| {
+            let mut boxes = self.boxes()?;
+            let Ok(at) = owner_index(&boxes, boxed.owner()) else {
+                return Ok(());
+            };
+            let (_, slot) = boxes.get_mut(at).ok_or_else(inconsistent_slots)?;
+            let own = slot.physical().is_some_and(|held| {
+                matches!(held, Held::Process(current) if std::ptr::eq(NativeArc::as_ptr(current), boxed))
+            });
+            if !own {
+                return Ok(());
+            }
+            slot.state = match &slot.state {
+                SlotState::Finishing(held) | SlotState::CancelFinishing(held) => {
+                    SlotState::CleanupPending(held.clone())
+                }
+                SlotState::CleanupPending(_) | SlotState::Removing(_) => return Ok(()),
+                _ => return Err(inconsistent_slots()),
+            };
+            Ok(())
+        })();
+        mark.map_err(|mark| {
+            Refusal::Broken(format!(
+                "{failure}; its native slot's uncertainty couldn't be recorded ({mark})"
+            ))
+        })
+    }
+
     /// Only a fresh assigned create returning before HcsCreateComputeSystem can take this path.
     /// Pending/terminal native attempts return an owned OciBox, even when publication must refuse.
     fn preparation_failed(&self, id: &BoxId) -> Result<(), Refusal> {
@@ -1323,12 +1356,30 @@ impl WinRuntime {
         oci::validate_storage(record, &self.container(spec)?.scratch)
     }
 
+    /// Contradictory or absent native metadata cannot free either recorded or declared claims: their
+    /// union stays held in this box's slot, marked uncertain, and the caller gets `failure`. A slot
+    /// the box already has (an earlier alive or adopt of it) is never reserved twice or changed: it
+    /// retains them only if it holds every one. A retention refused returns beside `failure`, never
+    /// in its place.
     fn retain_recovery(
         &self,
         spec: &BoxSpec,
         record: &hex_core::hcs::BoxRecord,
+        failure: Refusal,
+    ) -> Refusal {
+        match self.retain_claims(spec, record) {
+            Ok(()) => failure,
+            Err(retained) => Refusal::Broken(format!(
+                "{failure}; its recorded claims couldn't be retained ({retained})"
+            )),
+        }
+    }
+
+    fn retain_claims(
+        &self,
+        spec: &BoxSpec,
+        record: &hex_core::hcs::BoxRecord,
     ) -> Result<(), Refusal> {
-        // Contradictory or absent native metadata cannot free either recorded or declared claims.
         // The temporary union is bounded by the two existing u16-index lists, not a new admission cap.
         let count = record
             .devices
@@ -1342,6 +1393,19 @@ impl WinRuntime {
         ids.extend_from_slice(&spec.devices);
         ids.sort_unstable();
         ids.dedup();
+        {
+            let boxes = self.holding.boxes()?;
+            if let Ok(at) = slot_index(&boxes, &spec.id) {
+                let (_, slot) = boxes.get(at).ok_or_else(inconsistent_slots)?;
+                return if ids.iter().all(|id| slot.devices.contains(id)) {
+                    Ok(())
+                } else {
+                    Err(pending(
+                        "this box's existing native slot doesn't hold all its recorded claims",
+                    ))
+                };
+            }
+        }
         self.holding.reserve(
             OwnerRef::Box(&spec.id),
             &ids,
@@ -1447,10 +1511,7 @@ impl WinRuntime {
                 if marker.exists() {
                     let record = oci::read_marker(&marker)?;
                     if let Err(error) = self.validate_bindings(spec, &record) {
-                        if slot_index(self.boxes()?.as_slice(), &spec.id).is_err() {
-                            self.retain_recovery(spec, &record)?;
-                        }
-                        return Err(error);
+                        return Err(self.retain_recovery(spec, &record, error));
                     }
                 } else if !spec.devices.is_empty() {
                     return Err(pending(
@@ -1483,8 +1544,7 @@ impl WinRuntime {
         if let Some(marker) = marker.as_ref() {
             let record = oci::read_marker(marker)?;
             if let Err(error) = self.validate_bindings(spec, &record) {
-                self.retain_recovery(spec, &record)?;
-                return Err(error);
+                return Err(self.retain_recovery(spec, &record, error));
             }
         }
         self.holding
@@ -3272,5 +3332,142 @@ mod tests {
         let pid = rt.exec(&spec.id, waiting(), Stdio::null()).unwrap().pid();
         drop(rt);
         wait_for("the program to end with its runtime", || !alive(pid));
+    }
+
+    fn invalid_recovery() -> Refusal {
+        Refusal::Invalid {
+            what: "native device recovery",
+            why: "fixture marker disagrees".to_owned(),
+        }
+    }
+
+    fn marker_record(rt: &WinRuntime, spec: &BoxSpec) -> hex_core::hcs::BoxRecord {
+        hex_core::hcs::BoxRecord {
+            folder: r"C:\fixture\scratch".to_owned(),
+            made: Vec::new(),
+            outlives: true,
+            system: Some(spec.id.clone()),
+            started: false,
+            init: None,
+            devices: rt.bindings(spec).unwrap(),
+            storage: hex_core::hcs::RecordStorage::OwnedFolder,
+            creation: hex_core::hcs::NativeCreate::Created,
+        }
+    }
+
+    /// AC-T7.4.1: recovery of a box whose marker fails validation returns that validation failure, its
+    /// claims held once in one uncertain slot. A second alive or adopt of the same box (a duplicate
+    /// adopt) reserves nothing and returns the same failure; an existing slot lacking a recorded claim
+    /// returns that refusal beside the failure, never in its place.
+    #[test]
+    fn retained_recovery_keeps_the_validation_failure_and_one_slot() {
+        let scratch = tempfile::tempdir().unwrap();
+        let rt = device_runtime(scratch.path());
+        let spec = device_spec("retained", 512);
+        let record = marker_record(&rt, &spec);
+        let first = rt.retain_recovery(&spec, &record, invalid_recovery());
+        assert!(matches!(
+            first,
+            Refusal::Invalid {
+                what: "native device recovery",
+                ..
+            }
+        ));
+        assert_eq!(rt.boxes().unwrap().len(), 1);
+        let second = rt.retain_recovery(&spec, &record, invalid_recovery());
+        assert!(matches!(
+            second,
+            Refusal::Invalid {
+                what: "native device recovery",
+                ..
+            }
+        ));
+        assert_eq!(rt.boxes().unwrap().len(), 1);
+        let mut wider = marker_record(&rt, &spec);
+        wider.devices.push(hex_core::hcs::DeviceBinding {
+            id: DeviceId {
+                kind: hex_api::DeviceKind::Gpu,
+                key: 256,
+            },
+            location: "PCIROOT(0)#PCI(0100)".to_owned(),
+        });
+        let refused = rt.retain_recovery(&spec, &wider, invalid_recovery());
+        assert!(
+            matches!(&refused, Refusal::Broken(why) if why.contains("fixture marker disagrees") && why.contains("recorded claims")),
+            "{refused:?}"
+        );
+        assert_eq!(rt.boxes().unwrap().len(), 1);
+    }
+
+    fn vm_record(name: &str) -> hex_core::record::BoxRecord {
+        let fixed = CapacityResources {
+            cpu_milli: 1000,
+            mem_bytes: shards_api::min_memory_mib(std::env::consts::ARCH) << 20,
+            disk_bytes: 0,
+        };
+        let cost = hex_api::RuntimeCost {
+            id: [0x77; 32],
+            floor: fixed,
+            ceiling: fixed,
+            quantum: CapacityResources {
+                cpu_milli: 1000,
+                mem_bytes: 1,
+                disk_bytes: 1,
+            },
+            guest_overhead: CapacityResources::default(),
+            overhead: CapacityResources::default(),
+        };
+        let mut spec = device_spec(name, 512);
+        spec.devices.clear();
+        spec.class = ClassSpec::Shards(Box::new(hex_api::OciSpec {
+            rootfs: Rootfs::Layers(vec![PathBuf::from(r"C:\fixture\base")]),
+            init: Program::of(&["cmd.exe", "/c", "exit", "0"]),
+            mounts: Vec::new(),
+            hostname: None,
+            network: hex_api::Network::Private,
+            hosts: Vec::new(),
+        }));
+        spec.allocation = Some(cost.allocate(CapacityResources::default()).unwrap());
+        let mut record =
+            hex_core::record::BoxRecord::new(spec, hex_core::record::Phase::Creating, Vec::new());
+        record.native_scope = Some(hex_core::record::NativeScope::from_bytes([0x78; 16]));
+        record
+    }
+
+    /// AC-T7.4.1: a creator marks only the slot holding its own job receipt. A stale creator whose
+    /// slot was released and relaunched never marks the newer creator's slot; its own goes to
+    /// cleanup, and one already in cleanup needs no mark.
+    #[test]
+    fn a_stale_creator_never_marks_a_newer_creators_slot() {
+        let scratch = tempfile::tempdir().unwrap();
+        let rt = device_runtime(scratch.path());
+        let record = vm_record("relaunched");
+        let native = hex_core::record::NativeRecord::Box(&record);
+        let bounds = hex_api::Bounds::default();
+        let stale =
+            JobBox::prepare_vm(native, bounds.clone(), rt.processors, None, &rt.holding).unwrap();
+        let newer = JobBox::prepare_vm(native, bounds, rt.processors, None, &rt.holding).unwrap();
+        rt.holding.reserve(native.owner(), &[], None, None).unwrap();
+        assert!(
+            !rt.holding
+                .made(native.owner(), Held::Process(NativeArc::clone(&newer)))
+                .unwrap()
+        );
+        let failure = Refusal::Broken("stale creator failed".to_owned());
+        rt.holding.uncertain_vm_after(&stale, &failure).unwrap();
+        {
+            let boxes = rt.boxes().unwrap();
+            let (_, slot) = boxes.first().unwrap();
+            assert!(
+                matches!(&slot.state, SlotState::Finishing(Held::Process(current)) if NativeArc::ptr_eq(current, &newer))
+            );
+        }
+        rt.holding.uncertain_vm_after(&newer, &failure).unwrap();
+        rt.holding.uncertain_vm_after(&newer, &failure).unwrap();
+        let boxes = rt.boxes().unwrap();
+        let (_, slot) = boxes.first().unwrap();
+        assert!(
+            matches!(&slot.state, SlotState::CleanupPending(Held::Process(current)) if NativeArc::ptr_eq(current, &newer))
+        );
     }
 }
