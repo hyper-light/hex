@@ -6,6 +6,7 @@
 //! hosts; the public seam recognizes them, and the actual backend checks host capabilities at boot.
 
 mod books;
+mod cost;
 mod dedicated;
 pub mod gpu;
 pub mod held;
@@ -31,6 +32,8 @@ use hex_client::guest::{Client, Link};
 use hex_core::stream::{self, files};
 
 use shares::Share;
+
+pub use cost::{ENV_COST_EVIDENCE, ENV_COST_FILE, ENV_COST_SHA256, load_runtime_cost};
 
 /// The guest a node boots: its kernel and initramfs (whose `/init` is Hex's static `hex`), its vCPUs and
 /// memory (the node's to give, §1), and the host folders it shares.

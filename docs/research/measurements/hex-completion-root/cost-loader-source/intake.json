@@ -1,0 +1,16 @@
+{
+  "requirement": "AC-T7.4.1",
+  "source": "619b54ab7303b57da7a410cfc9d26600b980069f",
+  "files_before": {
+    "crates/hex-runtime/src/guest/mod.rs": "168465d08e98292a75a5d9faf69a0fe6c287e9656532acb49648b85ff3cfde30",
+    "crates/hex-runtime/src/guest/cost.rs": null
+  },
+  "files_after": {
+    "crates/hex-runtime/src/guest/mod.rs": "de8d49aa0860efe0d528284cc67dc017131b2a141d404213f969a50bd971ef78",
+    "crates/hex-runtime/src/guest/cost.rs": "8386a0183378d2fc8f1c7f2cd0b10a8ad70350c89b523dfafc144caa84d271b7"
+  },
+  "scope": "Only bounded verified runtime-cost input loader; original guest implementation retained",
+  "behavior": "Require absolute profile/evidence paths and exact SHA256; RuntimeCost::check; configured VM exactguard unchanged; no guessed allowances",
+  "review": "Hash integrity is not measurement validity; ROOT reviews actual pinned hardware/cohort data. File startup I/O is not preemptible. General env/serde allocation and file-open races remain audit/fault scope, not proven native defects.",
+  "checks": "Source reviewed, fmt/diff only; two supplied controls and Clippy pending; no native calls"
+}
