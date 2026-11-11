@@ -332,25 +332,32 @@ impl Stream {
             .link
             .dial_before(stream::STDIO_PORT, deadline.map(ReplyDeadline::at))?;
         match deadline {
-            Some(deadline) => {
-                conn.set_nonblocking(true)
-                    .map_err(os("naming a stdio connection without waiting"))?;
-                protocol_write(
-                    &mut *conn,
-                    &stream::name(named),
-                    deadline,
-                    "naming a stdio connection",
-                )?;
-                // The deadline ends with setup. Copies and caller-owned descriptors are workload I/O.
-                conn.set_nonblocking(false)
-                    .map_err(os("handing off a named stdio connection"))?;
-            }
+            Some(deadline) => name_before(&mut *conn, named, deadline)?,
             None => conn
                 .write_all(&stream::name(named))
                 .map_err(os("naming a stdio connection"))?,
         }
         Ok(conn)
     }
+}
+
+/// Writes a stdio connection's name within `deadline`, by readiness, so no timeout is left on the stream.
+fn name_before(
+    conn: &mut dyn Duplex,
+    named: Named,
+    deadline: ReplyDeadline,
+) -> Result<(), Refusal> {
+    conn.set_nonblocking(true)
+        .map_err(os("naming a stdio connection without waiting"))?;
+    protocol_write(
+        conn,
+        &stream::name(named),
+        deadline,
+        "naming a stdio connection",
+    )?;
+    // The deadline ends with setup. Copies and caller-owned descriptors are workload I/O.
+    conn.set_nonblocking(false)
+        .map_err(os("handing off a named stdio connection"))
 }
 
 impl Stream {
@@ -413,11 +420,23 @@ fn caller_end(conn: &dyn Duplex) -> Result<hex_api::End, Refusal> {
 /// HEX-RT-17: an offered guest exec's streams, opened in this caller (a Windows node's, which can't lend its
 /// own across processes): each a borrowed CONNECT to the guest the offer names, taking no VM lifetime, named
 /// for the exec as the guest's own stdio dial names it, the caller's end handed off as its own.
-#[cfg(any(windows, test))]
+///
+/// AC-T7.4.1: Shards' borrowed CONNECT waits for its OK only within a finite deadline (zero patience reads it
+/// without waiting, so a guest that hasn't answered yet is refused), so the call's deadline bounds every
+/// stream's CONNECT and name, and a call with none is refused by type before any is made.
+// Windows calls it; elsewhere only its test does, which needs Linux's /proc for a stand-in VM's identity.
+#[cfg(any(windows, all(test, target_os = "linux")))]
 pub(crate) fn open_offered(
     offer: &wire::StreamOffer,
-    _deadline: Option<ReplyDeadline>,
+    deadline: Option<ReplyDeadline>,
 ) -> Result<hex_api::Given, Refusal> {
+    let deadline = deadline.ok_or_else(|| Refusal::Invalid {
+        what: "offered guest streams",
+        why:
+            "a borrowed guest's CONNECT waits for its OK only within a deadline, and this call has \
+              none: give the client a reply budget or call with a deadline"
+                .to_owned(),
+    })?;
     let identity = shards_api::Identity {
         pid: offer.pid,
         started: offer.started,
@@ -431,13 +450,15 @@ pub(crate) fn open_offered(
         if !on {
             return Ok(None);
         }
-        // The dedicated control connection has already said hello, so this is one attempt at an
-        // already-listening guest, bounded by Shards' existing CONNECT handshake and the VM's life.
-        let conn = shards_api::connect_borrowed(&identity, stream::STDIO_PORT, Duration::ZERO)
-            .map_err(|why| shards::refusal("opening an offered guest stream", &why))?;
+        const OP: &str = "opening an offered guest stream";
+        // One CONNECT to the already-listening guest, waiting for its OK within what is left of the
+        // call's deadline; one that completes past it is refused.
+        let conn =
+            shards_api::connect_borrowed(&identity, stream::STDIO_PORT, deadline.remaining(OP)?)
+                .map_err(|why| shards::refusal(OP, &why))?;
+        deadline.remaining(OP)?;
         let mut conn = shards::ShardsStream(conn);
-        conn.write_all(&stream::name(Named { exec, stream }))
-            .map_err(os("naming an offered guest stream"))?;
+        name_before(&mut conn, Named { exec, stream }, deadline)?;
         caller_end(&conn).map(Some)
     };
     Ok(hex_api::Given {

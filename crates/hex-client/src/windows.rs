@@ -11,7 +11,7 @@ use hex_core::patience::Patience;
 use hex_core::stream::{self, Deframer};
 use hex_core::wire::{self, Received};
 
-use crate::calls::{Core, Handle, KINDS, Lent, Sent, Shared, Take, Transport};
+use crate::calls::{Core, Handle, KINDS, Lent, ReplyDeadline, Sent, Shared, Take, Transport};
 
 /// The largest wire message plus its envelope's three stream handles and their count.
 const FRAME_BOUND: usize = wire::MAX_MESSAGE + socket::ENVELOPE_MAX;
@@ -82,6 +82,14 @@ impl Transport for Socket {
 
     fn open_offer(&self, offer: &wire::StreamOffer) -> Result<hex_api::Given, Refusal> {
         crate::guest::open_offered(offer, None)
+    }
+
+    fn open_offer_before(
+        &self,
+        offer: &wire::StreamOffer,
+        deadline: ReplyDeadline,
+    ) -> Result<hex_api::Given, Refusal> {
+        crate::guest::open_offered(offer, Some(deadline))
     }
 
     fn recv(&self, reading: &mut Reading, take: &mut Take<'_>) -> Result<bool, Refusal> {
