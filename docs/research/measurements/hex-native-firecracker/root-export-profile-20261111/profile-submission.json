@@ -1,0 +1,21 @@
+{
+  "pid": 38481,
+  "argv": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--quiet",
+    "--on",
+    "451397fcc585f7f7cb9aaf00e42064bb",
+    "--needs",
+    "linux/amd64,cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--timeout",
+    "210",
+    "--",
+    "/usr/bin/timeout --signal=TERM --kill-after=3s 200s /usr/bin/nice -n 10 /usr/bin/python3 -B /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/export_held451_objects.py --stage export --admission /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/reviewed.export.json --root /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01 --seal /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/held451-export.seal.json"
+  ],
+  "measurement_source": "1f89937a6171918295932c4aa3dbba5658b55218c19bbb7d8a4d902e41bab3ec",
+  "runtime_seal": "27102cb1c12a42dd247d97e820895cb1b63e961bcf6d67924400e4c4b75c031c",
+  "quiet_window_end": 1794400698731940000,
+  "role": "ROOT coordinator R14; one profiled export; no collect/build/GPU"
+}
