@@ -942,14 +942,36 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
     );
 }
 
+/// What the offered-expiry control sees happen: its open begin, and its exec end.
+enum Offered {
+    Opening,
+    Ended(Result<(), Refusal>),
+}
+
 struct Offers {
     io: Stalled,
     inbound: Mutex<VecDeque<Vec<u8>>>,
     outbound: Mutex<Vec<(u64, Request)>>,
-    entered: mpsc::SyncSender<ReplyDeadline>,
+    seen: mpsc::Sender<Offered>,
+    /// The open holds until the sibling call has completed, a fact the test sends.
+    sibling: Mutex<mpsc::Receiver<()>>,
     program: Mutex<Option<Stdio>>,
 }
 impl Offers {
+    /// One whose open no test watches, for the fixtures that wrap it and never open an offer.
+    fn unobserved(io: Stalled) -> Self {
+        let (seen, _) = mpsc::channel();
+        let (_, sibling) = mpsc::channel();
+        Self {
+            io,
+            inbound: Mutex::new(VecDeque::new()),
+            outbound: Mutex::new(Vec::new()),
+            seen,
+            sibling: Mutex::new(sibling),
+            program: Mutex::new(None),
+        }
+    }
+
     fn queue(&self, id: u64, answer: Answer) {
         self.inbound
             .lock()
@@ -1029,7 +1051,10 @@ impl Transport for Offers {
         };
         let given = program.make_asked()?;
         *self.program.lock().unwrap() = Some(program);
-        self.entered.send(deadline).unwrap();
+        self.seen.send(Offered::Opening).unwrap();
+        // Held without the reader's turn until the sibling has completed (or its sender is gone),
+        // then until the open's own deadline has passed, so its refusal is the caller's expiry.
+        let _ = self.sibling.lock().unwrap().recv();
         until(deadline.at())?;
         drop(given);
         Err(deadline
@@ -1041,53 +1066,61 @@ impl Transport for Offers {
     }
 }
 
-/// Do stall one bounded offered-stream open while a sibling completes; expect reader progress,
-/// same-id Release, closed made ends and no remaining call/program/given reservation at expiry.
+/// Do stall one bounded offered-stream open until a sibling call has completed, then past its
+/// deadline; expect the sibling answered, the open's caller expiry, a same-id Release, its made
+/// ends closed and no call/program/given reservation left. Each step waits on the fact before it,
+/// never on an observation window (AC-T7.4.1).
 #[test]
 fn offered_expiry_releases_only_its_ownership_while_a_sibling_progresses() {
     let (io, _) = stalled(Some(OBSERVE));
-    let (entered, opening) = mpsc::sync_channel(1);
+    let (seen, events) = mpsc::channel();
+    let (sibling_done, sibling_wait) = mpsc::channel();
     let client = Arc::new(configured(Offers {
         io,
         inbound: Mutex::new(VecDeque::new()),
         outbound: Mutex::new(Vec::new()),
-        entered,
+        seen: seen.clone(),
+        sibling: Mutex::new(sibling_wait),
         program: Mutex::new(None),
     }));
     let control = Arc::clone(&client);
     let id = BoxId::new("offered-budget-unit").unwrap();
     let target = id.clone();
-    let (finished, answer) = mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
-        finished
-            .send(
-                control
-                    .exec(
-                        &target,
-                        Program::of(&["cat"]),
-                        Stdio {
-                            ask: hex_api::Ask {
-                                stdin: true,
-                                stdout: false,
-                                stderr: false,
-                            },
-                            ..Stdio::null()
+        // A fixture panic is this worker's end too, so the test's wait for it always ends.
+        let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            control
+                .exec(
+                    &target,
+                    Program::of(&["cat"]),
+                    Stdio {
+                        ask: hex_api::Ask {
+                            stdin: true,
+                            stdout: false,
+                            stderr: false,
                         },
-                    )
-                    .map(drop),
-            )
-            .unwrap()
+                        ..Stdio::null()
+                    },
+                )
+                .map(drop)
+        }))
+        .unwrap_or_else(|_| Err(Refusal::Broken("the exec's fixture panicked".into())));
+        seen.send(Offered::Ended(ended)).unwrap();
     });
-    let opened = opening.recv_timeout(OBSERVE);
-    let entered_before_expiry = opened
-        .as_ref()
-        .is_ok_and(|deadline| deadline.at() > Instant::now());
+    // The open began, or the exec ended without one: both are facts the worker sends.
+    let first = events.recv().unwrap();
+    let opened = matches!(first, Offered::Opening);
     let reading = client.conn.shared.state().unwrap().reading;
     let sibling = client.start(&id);
-    let expired = answer.recv_timeout(OBSERVE);
+    sibling_done.send(()).unwrap();
+    let ended = match first {
+        Offered::Ended(ended) => ended,
+        Offered::Opening => match events.recv().unwrap() {
+            Offered::Ended(ended) => ended,
+            Offered::Opening => panic!("the exec opened its offer twice"),
+        },
+    };
     worker.join().unwrap();
-    // Even a missing/late opening event must not strand the call actor.
-    opened.unwrap();
     let shared = &client.conn.shared;
     let outbound = shared.transport.outbound.lock().unwrap();
     let state = shared.state().unwrap();
@@ -1096,28 +1129,19 @@ fn offered_expiry_releases_only_its_ownership_while_a_sibling_progresses() {
         && state.given.is_empty()
         && state.closed.is_none();
     drop(state);
-    let mut stdin = shared
-        .transport
-        .program
-        .lock()
-        .unwrap()
-        .take()
-        .unwrap()
-        .stdin
-        .unwrap();
-    let (read, eof) = mpsc::sync_channel(1);
-    let reader = std::thread::spawn(move || read.send(stdin.read(&mut [0])).unwrap());
-    let closed = eof.recv_timeout(OBSERVE);
-    // If a future regression retained ends in the owned ledger, clear only that ledger to reap
-    // the observation actor; the earlier clean/EOF witnesses still make the test fail.
+    // A regression that kept ends in the owned ledger would hold the program's stdin open: clear
+    // only that ledger first, so the read below can't wait on it; `clean` still fails the test.
     shared.state().unwrap().given.clear();
-    reader.join().unwrap();
-    assert!(entered_before_expiry);
+    let program = shared.transport.program.lock().unwrap().take();
+    let closed = program
+        .and_then(|program| program.stdin)
+        .map(|mut stdin| stdin.read(&mut [0]).unwrap());
+    assert!(opened, "the exec ended before its offered open began");
     assert!(!reading, "an offered open must relinquish the reader turn");
     assert_eq!(sibling, Ok(()));
-    assert!(matches!(expired.unwrap(), Err(Refusal::Os { why, .. }) if why.contains("caller")));
+    assert!(matches!(ended, Err(Refusal::Os { why, .. }) if why.contains("caller")));
     assert!(clean);
-    assert_eq!(closed.unwrap().unwrap(), 0);
+    assert_eq!(closed, Some(0));
     assert_eq!(outbound.len(), 3);
     assert_eq!(outbound[0].0, outbound[2].0);
     assert!(matches!(outbound[1].1, Request::Call(Call::Start(_))));
@@ -1533,14 +1557,7 @@ impl Transport for DropOriginal {
 #[test]
 fn absolute_run_error_return_does_not_renew_drop_sender_budget() {
     let (io, _) = stalled(None);
-    let (entered, _) = mpsc::sync_channel(1);
-    let client = Arc::new(configured(DropOriginal(Offers {
-        io,
-        inbound: Mutex::new(VecDeque::new()),
-        outbound: Mutex::new(Vec::new()),
-        entered,
-        program: Mutex::new(None),
-    })));
+    let client = Arc::new(configured(DropOriginal(Offers::unobserved(io))));
     let original = Instant::now().checked_add(CAP).unwrap();
     let mut process = client
         .run_before(
@@ -1695,16 +1712,9 @@ impl Transport for BootstrapProbe {
 
 fn bootstrap_probe(reply: Option<Answer>) -> (Core<BootstrapProbe>, mpsc::Receiver<()>) {
     let (io, sent) = stalled(None);
-    let (entered, _) = mpsc::sync_channel(1);
     (
         configured(BootstrapProbe {
-            io: Offers {
-                io,
-                inbound: Mutex::new(VecDeque::new()),
-                outbound: Mutex::new(Vec::new()),
-                entered,
-                program: Mutex::new(None),
-            },
+            io: Offers::unobserved(io),
             reply: Mutex::new(reply),
         }),
         sent,
@@ -1993,17 +2003,10 @@ impl Transport for SettleOriginal {
 #[test]
 fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
     let (io, _) = stalled(None);
-    let (entered, _) = mpsc::sync_channel(1);
     let (starting, started) = mpsc::sync_channel(1);
     let (killing, killed) = mpsc::sync_channel(1);
     let client = Arc::new(configured(SettleOriginal {
-        io: Offers {
-            io,
-            inbound: Mutex::new(VecDeque::new()),
-            outbound: Mutex::new(Vec::new()),
-            entered,
-            program: Mutex::new(None),
-        },
+        io: Offers::unobserved(io),
         setup: Mutex::new(None),
         started: starting,
         kill: killing,
@@ -2161,17 +2164,10 @@ struct Settled {
 /// fixture gives an end its exec never asked for), the agent answering its Kill with `kill`.
 fn settle_failure(start: SettleStart, kill: Answer) -> Settled {
     let (io, _) = stalled(None);
-    let (entered, _) = mpsc::sync_channel(1);
     let (starting, _) = mpsc::sync_channel(1);
     let (killing, _) = mpsc::sync_channel(1);
     let client = configured(SettleOriginal {
-        io: Offers {
-            io,
-            inbound: Mutex::new(VecDeque::new()),
-            outbound: Mutex::new(Vec::new()),
-            entered,
-            program: Mutex::new(None),
-        },
+        io: Offers::unobserved(io),
         setup: Mutex::new(None),
         started: starting,
         kill: killing,
@@ -2679,7 +2675,6 @@ impl Transport for SettleAligned {
 #[test]
 fn prepared_actor_settle_error_retains_original_kill_answer_authority() {
     let (io, _) = stalled(None);
-    let (entered, _) = mpsc::sync_channel(1);
     let (starting, started) = mpsc::sync_channel(1);
     let (killing, killed) = mpsc::sync_channel(1);
     let (prepared, readiness) = mpsc::sync_channel(1);
@@ -2701,11 +2696,10 @@ fn prepared_actor_settle_error_retains_original_kill_answer_authority() {
     let wrong_end = program_ends.make_asked().unwrap();
     let client = Arc::new(configured(SettleAligned {
         io: Offers {
-            io,
             inbound: Mutex::new(inbound),
             outbound: Mutex::new(outbound),
-            entered,
             program: Mutex::new(Some(program_ends)),
+            ..Offers::unobserved(io)
         },
         prepared: Mutex::new(Some(wrong_end)),
         setup: Mutex::new(None),
