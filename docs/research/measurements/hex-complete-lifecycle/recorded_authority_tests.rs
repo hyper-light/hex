@@ -341,6 +341,9 @@ fn native_offers_require_same_provider_identity_and_use_actual_metadata_without_
         holder: None,
     };
     let capacity = || Capacity {
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
         id: "same-node".into(),
         total: CapacityResources::default(),
         free: CapacityResources::default(),
@@ -353,14 +356,22 @@ fn native_offers_require_same_provider_identity_and_use_actual_metadata_without_
         }],
     };
     let mut report = capacity();
-    native_metadata(&mut report, vec![native.clone()]).unwrap();
-    assert_eq!(report.devices, vec![native.clone()]);
+    native_metadata(&mut report, vec![native.try_clone().unwrap()]).unwrap();
+    assert_eq!(report.devices, vec![native.try_clone().unwrap()]);
     assert!(native_metadata(&mut capacity(), vec![]).is_err());
-    assert!(native_metadata(&mut capacity(), vec![native.clone(), native.clone()]).is_err());
-    let mut forged = native.clone();
+    assert!(
+        native_metadata(
+            &mut capacity(),
+            vec![native.try_clone().unwrap(), native.try_clone().unwrap()]
+        )
+        .is_err()
+    );
+    let mut forged = native.try_clone().unwrap();
     forged.id.key = 8;
     assert!(native_metadata(&mut capacity(), vec![forged]).is_err());
     let mut holder = native;
-    holder.holder = Some(BoxId::new("invented-holder").unwrap());
+    holder.holder = Some(hex_api::DeviceHolder::Box(
+        BoxId::new("invented-holder").unwrap(),
+    ));
     assert!(native_metadata(&mut capacity(), vec![holder]).is_err());
 }

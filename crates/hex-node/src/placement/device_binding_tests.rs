@@ -140,6 +140,9 @@ impl Runtime for DeviceRuntime {
             disk_bytes: 0,
         };
         let report = Capacity {
+            routes: Vec::new(),
+            device_routes: Vec::new(),
+            backings: Vec::new(),
             cost: None,
             id: "device-driver-model-pool".to_owned(),
             total: room,
@@ -654,6 +657,7 @@ fn concurrent_isolation_group_admission_keeps_one_creating_holder() {
                 .map(|id| turns.take(id).unwrap())
                 .collect::<Vec<_>>();
             let spec = BoxSpec {
+                route: None,
                 id: BoxId::new("group-first").unwrap(),
                 bounds: hex_api::Bounds::default(),
                 class: hex_api::ClassSpec::Process,
@@ -701,6 +705,7 @@ fn concurrent_isolation_group_admission_keeps_one_creating_holder() {
                 return;
             };
             let spec = BoxSpec {
+                route: None,
                 id: BoxId::new("group-second").unwrap(),
                 bounds: hex_api::Bounds::default(),
                 class: hex_api::ClassSpec::Process,
