@@ -1,0 +1,9 @@
+{
+  "parent": "10d01149d6eb933dc9bca90d1011ed37d299d60a",
+  "sources": [
+    "3676216961048a06f4c7aaf539f6ccbdba7a1f56",
+    "13c021b2f7412f47146890ab91866850658d90a0"
+  ],
+  "checks": "Source-only. Two constructor fixtures correct full Deframer iteration after actual02f7 raw failures, retain smaller learned-send harness uncertainty and do not change deadlines/production. One original retained Intent recovery control has no remedy and remains unrun.",
+  "protected": "ROOT Patient absolute hook and actual-adapter test retained; gpu_pool production prefix unchanged."
+}

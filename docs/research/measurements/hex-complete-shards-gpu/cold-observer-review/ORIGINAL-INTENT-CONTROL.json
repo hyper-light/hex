@@ -1,0 +1,38 @@
+{
+  "status": "SIGNED SOURCE CONTROL ONLY; original production unchanged; no compile/test/native dispatch",
+  "parent": "0acc562d897140b88275314adcc72c3cece9ea86",
+  "policy": {
+    "revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+    "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+    "role": "implementer",
+    "byte_identity": "all four policy blobs equal previously fully read0a6"
+  },
+  "path": "crates/hex-runtime/src/guest/gpu_pool.rs",
+  "sha256": "10803bf979d6c086b5c4bc01e61b196b7a71f85c85477716dd99f532e4cc318a",
+  "production_prefix_sha256": "cd88997822a5a12fa7a0da40609a08d3af8950540754db913d0ee43143e6db1e",
+  "production_prefix_byte_identical_to_parent": true,
+  "test": "guest::gpu_pool::tests::published_gpu_scope_with_retained_intent_recovers_without_a_second_launch",
+  "command": "cargo test -p hex-runtime --lib --locked guest::gpu_pool::tests::published_gpu_scope_with_retained_intent_recovers_without_a_second_launch -- --exact --test-threads=1",
+  "requirements": [
+    "AC-T7.4.1",
+    "retain original grant/native scope and never re-boot on interrupted publication",
+    "controller exit is not a whole-scope cleanup witness"
+  ],
+  "cuts": [
+    "same canonical Granted allocation/full IDs/scope; local Intent written, canonical init then published",
+    "same single-row Books/native model starts with controller exit only; stop optionally supplies whole Released",
+    "actual production recover_gpu_backing must reach existing cleanup-only native receipt; no Guest construction or identity from socket"
+  ],
+  "oracles": [
+    "one stop, native receipt attach reached, no standalone boot/probe or physical provider query",
+    "controller-only end keeps Draining/grant/full claims and does not finalize",
+    "positive whole Released persists Released and finalizes exactly once"
+  ],
+  "source_finding": "0acc rejects Intent+canonical initSome before attach. This is not a live/native reproduction. No remedy until original control result.",
+  "native_owner_contract": "L3 readback: Tx.attach_managed(None) cleanup-only resolves SAME canonical NativeRecord scope+commitment; optional identity validates when supplied, never creates usable Guest or upgrades legacy None.",
+  "limits": [
+    "test model only; no process/renderer/VM launched",
+    "outside dependency cohort and actual red/green owned ROOT",
+    "cold macOS native helper proof and unknown child escape remain open"
+  ]
+}

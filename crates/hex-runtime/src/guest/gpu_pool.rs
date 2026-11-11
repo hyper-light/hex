@@ -507,6 +507,8 @@ mod tests {
         row: Mutex<Option<PoolRecord>>,
         effects: AtomicUsize,
         queries: AtomicUsize,
+        native: Option<triomphe::Arc<RecoveringNative>>,
+        finalized: AtomicUsize,
     }
     impl Books for Cold {
         fn records(&self) -> Result<Records, Refusal> {
@@ -583,11 +585,127 @@ mod tests {
         }
         fn with_pool_transaction(
             &self,
-            _: &BackingKey,
-            _: &[hex_api::DeviceId],
-            _: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+            key: &BackingKey,
+            devices: &[hex_api::DeviceId],
+            callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
         ) -> Result<(), Refusal> {
             self.effects.fetch_add(1, Ordering::SeqCst);
+            if self.native.is_none() {
+                return Err(refused_model());
+            }
+            {
+                let row = self.row.lock().unwrap();
+                let row = row.as_ref().unwrap();
+                assert_eq!(row.key, *key);
+                assert!(row.devices.iter().all(|id| devices.contains(id)));
+            }
+            callback(self)
+        }
+    }
+
+    struct RecoveringNative {
+        identity: shards_api::Identity,
+        release_on_stop: bool,
+        released: std::sync::atomic::AtomicBool,
+        attaches: AtomicUsize,
+        stops: AtomicUsize,
+    }
+
+    impl shards_api::ManagedProcess for RecoveringNative {
+        fn identity(&self) -> Result<&shards_api::Identity, shards_api::Refusal> {
+            Ok(&self.identity)
+        }
+        fn stop(&self) -> Result<(), shards_api::Refusal> {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            if self.release_on_stop {
+                self.released.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+        fn terminal(&self) -> Result<Option<shards_api::ManagedEnd>, shards_api::Refusal> {
+            Ok(Some(shards_api::ManagedEnd {
+                status: shards_api::ManagedStatus::Code(7),
+                scope: if self.released.load(Ordering::SeqCst) {
+                    shards_api::TerminalScope::Released
+                } else {
+                    shards_api::TerminalScope::Process
+                },
+            }))
+        }
+        fn wait_for(
+            &self,
+            _: std::time::Duration,
+        ) -> Result<Option<shards_api::ManagedEnd>, shards_api::Refusal> {
+            Ok(self
+                .terminal()?
+                .filter(|end| end.scope == shards_api::TerminalScope::Released))
+        }
+    }
+
+    impl Transaction for Cold {
+        fn records(&self) -> Result<Records, Refusal> {
+            Books::records(self)
+        }
+        fn pool_records(&self) -> Result<PoolRecords, Refusal> {
+            Books::pool_records(self)
+        }
+        fn read_pool(&self, key: &BackingKey) -> Result<Option<PoolRecord>, Refusal> {
+            Ok(Books::pool_records(self)?
+                .into_iter()
+                .find(|row| row.key == *key))
+        }
+        fn put_pool(&self, next: &PoolRecord) -> Result<(), Refusal> {
+            let mut row = self.row.lock().unwrap();
+            row.as_ref().unwrap().accepts(next)?;
+            *row = Some(PoolRecord::decode(&next.encode()?)?);
+            Ok(())
+        }
+        fn grant_pool(&self, _: &BackingGrant) -> Result<PoolRecord, Refusal> {
+            Err(refused_model())
+        }
+        fn remove_pool(&self, _: &BackingKey) -> Result<(), Refusal> {
+            Err(refused_model())
+        }
+        fn read(&self, _: &hex_api::BoxId) -> Result<Option<hex_core::record::BoxRecord>, Refusal> {
+            Err(refused_model())
+        }
+        fn put(&self, _: &hex_core::record::BoxRecord) -> Result<(), Refusal> {
+            Err(refused_model())
+        }
+        fn remove(&self, _: &hex_api::BoxId) -> Result<(), Refusal> {
+            Err(refused_model())
+        }
+        fn launch_managed(
+            &self,
+            _: &devices::ManagedLaunch<'_>,
+            _: shards_api::LaunchIo,
+            _: std::time::Duration,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            Err(refused_model())
+        }
+        fn attach_managed(
+            &self,
+            identity: Option<&shards_api::Identity>,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            let native = self.native.as_ref().ok_or_else(refused_model)?;
+            assert!(
+                identity.is_none(),
+                "the retained Intent has no local controller publication"
+            );
+            let row = self.row.lock().unwrap();
+            let row = row.as_ref().unwrap();
+            managed::same_native(NativeRecord::Pool(row), &native.identity)?;
+            native.attaches.fetch_add(1, Ordering::SeqCst);
+            Ok(shards_api::managed_receipt(native.clone()))
+        }
+        fn finalize_managed(&self, identity: Option<&shards_api::Identity>) -> Result<(), Refusal> {
+            let native = self.native.as_ref().ok_or_else(refused_model)?;
+            assert!(identity.is_none());
+            assert!(native.released.load(Ordering::SeqCst));
+            self.finalized.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn managed_usage(&self) -> Result<Usage, Refusal> {
             Err(refused_model())
         }
     }
@@ -628,6 +746,113 @@ mod tests {
         }
     }
 
+    /// AC-T7.4.1: crash after the SAME native owner publishes its controller,
+    /// before local report/Running, still cleans that admitted scope. Controller
+    /// exit alone retains the grant; only a whole-scope witness releases it.
+    /// Original production rejection is deliberately unchanged by this control.
+    #[test]
+    fn published_gpu_scope_with_retained_intent_recovers_without_a_second_launch() {
+        for release_on_stop in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (config, input, allocation) = observer::config::tests::fixture(dir.path());
+            let standalone = Arc::new(NoEffects(AtomicUsize::new(0)));
+            let catalog = devices::Catalog::parse(
+                b"hex-devices-1\ngpu\t256\tunmeasured\t777\tshards-gpu\tpci:0000:01:00.0\t\n",
+            )
+            .unwrap();
+            let runtime = GuestRuntime::new(standalone.clone(), config)
+                .recorded_at(dir.path().join("guest"))
+                .with_runtime_cost(allocation.cost)
+                .unwrap()
+                .with_runtime_paths(
+                    shards_api::RuntimePaths::new(
+                        dir.path().join("cache"),
+                        dir.path().join("home"),
+                    )
+                    .unwrap(),
+                )
+                .with_gpu_catalog(triomphe::Arc::try_new(catalog).unwrap())
+                .with_gpu_observer(input)
+                .unwrap();
+            let native = triomphe::Arc::try_new(RecoveringNative {
+                identity: shards_api::Identity {
+                    pid: 42,
+                    started: 7,
+                    vsock: "/model/v".into(),
+                },
+                release_on_stop,
+                released: std::sync::atomic::AtomicBool::new(false),
+                attaches: AtomicUsize::new(0),
+                stops: AtomicUsize::new(0),
+            })
+            .unwrap();
+            let owner = Arc::new(Cold {
+                row: Mutex::new(None),
+                effects: AtomicUsize::new(0),
+                queries: AtomicUsize::new(0),
+                native: Some(native.clone()),
+                finalized: AtomicUsize::new(0),
+            });
+            let books: Arc<dyn Books> = owner.clone();
+            runtime.bind_books(Arc::downgrade(&books)).unwrap();
+            let prepared = runtime.prepare_gpu_backing().unwrap().unwrap();
+            let mut original = Books::pool_records(owner.as_ref()).unwrap().pop().unwrap();
+            original
+                .accept_grant(&BackingGrant {
+                    key: prepared.key,
+                    allocation,
+                    devices: prepared.devices.clone(),
+                })
+                .unwrap();
+            let definition = runtime.gpu_backing_definition().unwrap().unwrap();
+            let receipt = Receipt::intent(
+                PoolRecord::decode(&original.encode().unwrap()).unwrap(),
+                definition.physical,
+                &runtime.config,
+            )
+            .unwrap();
+            pool::write(&definition.path, &receipt).unwrap();
+            // This is the precise publication/crash cut. No native process or
+            // guest Program runs; the model's SAME row supplies canonical scope.
+            original.init = Some(hex_core::record::ProcId {
+                pid: native.identity.pid,
+                start_ticks: native.identity.started,
+            });
+            *owner.row.lock().unwrap() = Some(original);
+            let recovered = runtime.recover_gpu_backing();
+            let row = Books::pool_records(owner.as_ref()).unwrap().pop().unwrap();
+            let retained = pool::read(&definition.path).unwrap().unwrap();
+            assert!(
+                native.attaches.load(Ordering::SeqCst) > 0,
+                "Intent must not prevent cleanup of the original published scope"
+            );
+            assert_eq!(native.stops.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                standalone.0.load(Ordering::SeqCst),
+                0,
+                "recovery cannot boot or probe again"
+            );
+            assert_eq!(owner.queries.load(Ordering::SeqCst), 0);
+            assert_eq!(row.devices, prepared.devices);
+            assert_eq!(row.allocation, Some(allocation));
+            if release_on_stop {
+                assert!(recovered.is_ok());
+                assert_eq!(row.phase, BackingPhase::Released);
+                assert!(matches!(retained.phase, Phase::Released { .. }));
+                assert_eq!(owner.finalized.load(Ordering::SeqCst), 1);
+            } else {
+                assert!(recovered.is_err());
+                assert_eq!(row.phase, BackingPhase::Draining);
+                assert!(matches!(retained.phase, Phase::Intent));
+                assert_eq!(
+                    owner.finalized.load(Ordering::SeqCst),
+                    0,
+                    "controller-only exit cannot release physical claims"
+                );
+            }
+        }
+    }
+
     /// AC-T7.4.1: cold full-set provisioning reaches the real capacity/bootstrap
     /// entrypoints without GPU observations, a boot or invented DeviceInfo.
     #[test]
@@ -652,6 +877,8 @@ mod tests {
             row: Mutex::new(None),
             effects: AtomicUsize::new(0),
             queries: AtomicUsize::new(0),
+            native: None,
+            finalized: AtomicUsize::new(0),
         });
         let books: Arc<dyn Books> = owner.clone();
         runtime.bind_books(Arc::downgrade(&books)).unwrap();

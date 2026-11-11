@@ -1032,14 +1032,47 @@ fn connect_pair() -> (TcpStream, TcpStream) {
     (client, peer)
 }
 
-fn constructor_hello(trace: &ConnectTrace) -> Header {
+#[derive(Debug)]
+struct ConstructorHello {
+    header: Option<Header>,
+    written: Vec<u8>,
+    pending: bool,
+    buffered: usize,
+}
+
+fn constructor_hello(trace: &ConnectTrace) -> ConstructorHello {
     let written = trace.written.lock().unwrap();
+    assert!(written.len() <= stream::MAX_FRAME);
     let mut decoder = Deframer::new(wire::MAX_MESSAGE);
-    let (took, message) = decoder.take(&written).unwrap();
-    assert_eq!(took, written.len());
-    let (header, request) = wire::read_request_apart(&message.unwrap(), wire::MAX_MESSAGE).unwrap();
-    assert!(matches!(request, Request::Hello { build } if build == wire::build()));
-    header
+    let mut consumed = 0;
+    let mut header = None;
+    // take() first consumes the length prefix, then the body. Every nonempty
+    // step must make progress, so captured bytes also bound the step count.
+    for _ in 0..written.len() {
+        if consumed == written.len() {
+            break;
+        }
+        let (took, message) = decoder.take(&written[consumed..]).unwrap();
+        assert!(took > 0 && took <= written.len() - consumed);
+        consumed += took;
+        if let Some(message) = message {
+            assert!(
+                header.is_none(),
+                "constructor emitted more than one message"
+            );
+            assert_eq!(consumed, written.len(), "bytes after the complete Hello");
+            let (got, request) = wire::read_request_apart(&message, wire::MAX_MESSAGE).unwrap();
+            assert!(matches!(request, Request::Hello { build } if build == wire::build()));
+            header = Some(got);
+        }
+    }
+    assert_eq!(consumed, written.len());
+    ConstructorHello {
+        header,
+        written: written.clone(),
+        pending: decoder.in_frame(),
+        buffered: decoder.buffered(),
+    }
 }
 
 /// AC-T7.4.1: both public constructors reject expired/invalid authority before dial,
@@ -1102,6 +1135,7 @@ fn absolute_connect_caps_partial_token_and_unanswered_hello() {
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
 
+    let mut observations = Vec::with_capacity(4);
     for form in [ConnectForm::Ordinary, ConnectForm::Evented] {
         for whole_token in [false, true] {
             let (socket, mut peer) = connect_pair();
@@ -1121,29 +1155,72 @@ fn absolute_connect_caps_partial_token_and_unanswered_hello() {
             drop(peer);
             let joined = worker.join();
             let read = trace.read.load(Ordering::SeqCst);
-            eprintln!(
-                "client_connect_absolute form={form:?} whole_token={whole_token} at={at:?} observed={observed:?} read={read} stopped={stopped:?} joined={}",
-                joined.is_ok()
-            );
-            joined.unwrap();
-            let (_, result) = observed.expect("constructor did not return before owned cleanup");
-            assert_eq!(
+            observations.push((
+                form,
+                whole_token,
+                at,
+                observed,
+                stopped,
+                joined.is_ok(),
                 read,
-                prefix.len(),
-                "missing actual read progress is a harness miss"
-            );
-            assert!(matches!(result, Err(Refusal::Os { .. })), "{result:?}");
-            assert_eq!(
-                *trace.dials.lock().unwrap(),
-                [(stream::CONTROL_PORT, Some(at))]
-            );
-            if whole_token {
-                constructor_hello(&trace);
-            } else {
-                assert!(trace.written.lock().unwrap().is_empty());
-            }
+                trace,
+            ));
         }
     }
+    let mut uncommitted = Vec::with_capacity(2);
+    // All four owned peers are closed and actors joined before any assertion.
+    for (form, whole_token, at, observed, stopped, joined, read, trace) in observations {
+        let hello = constructor_hello(&trace);
+        eprintln!(
+            "client_connect_absolute form={form:?} whole_token={whole_token} at={at:?} observed={observed:?} read={read} stopped={stopped:?} joined={joined} hello={hello:?}"
+        );
+        assert!(joined);
+        let (returned, result) = observed.expect("constructor did not return before owned cleanup");
+        assert_eq!(
+            read,
+            if whole_token { stream::TOKEN_BYTES } else { 1 },
+            "missing actual read progress is a harness miss"
+        );
+        assert!(matches!(result, Err(Refusal::Os { .. })), "{result:?}");
+        assert_eq!(
+            *trace.dials.lock().unwrap(),
+            [(stream::CONTROL_PORT, Some(at))]
+        );
+        if whole_token {
+            if let Some(header) = hello.header {
+                assert_eq!(header.id, 1);
+                assert!(!hello.pending && hello.buffered == 0);
+                eprintln!(
+                    "client_connect_hello form={form:?} phase=committed_hello withheld_answer_proof=true"
+                );
+            } else {
+                let phase = if hello.written.is_empty() {
+                    "learned_before_send"
+                } else {
+                    "learned_during_incomplete_send"
+                };
+                eprintln!(
+                    "client_connect_hello form={form:?} phase={phase} withheld_answer_proof=false status=UNVERIFIED written={:02x?}",
+                    hello.written
+                );
+                assert!(
+                    matches!(&result, Err(Refusal::Os { op: "sending to the node agent", why }) if why.contains("twice")),
+                    "uncommitted Hello must be explained by its smaller learned send bound: {result:?}"
+                );
+                uncommitted.push((form, phase));
+            }
+        } else {
+            assert!(hello.written.is_empty());
+            assert!(
+                matches!(&result, Err(Refusal::Os { why, .. }) if why.contains("absolute"))
+                    && returned >= at
+            );
+        }
+    }
+    assert!(
+        uncommitted.is_empty(),
+        "UNVERIFIED withheld-answer phase: no complete actual Hello; harness witness miss, not a production timeout failure: {uncommitted:?}"
+    );
 }
 
 /// AC-T7.4.1: a complete real hello reaches both constructors; the event form keeps
@@ -1189,7 +1266,16 @@ fn absolute_connect_completes_and_evented_retains_the_same_link() {
             ConnectForm::Ordinary => assert_eq!(evented, None),
             ConnectForm::Evented => assert_eq!(evented, Some((true, None, TOKEN))),
         }
-        assert_eq!(constructor_hello(&trace).id, 1);
+        let hello = constructor_hello(&trace);
+        eprintln!("client_connect_positive_hello form={form:?} hello={hello:?}");
+        assert!(!hello.pending && hello.buffered == 0);
+        assert_eq!(
+            hello
+                .header
+                .expect("positive requires a complete actual Hello")
+                .id,
+            1
+        );
         assert_eq!(
             *trace.dials.lock().unwrap(),
             [(stream::CONTROL_PORT, Some(at))]
