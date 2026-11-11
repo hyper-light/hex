@@ -1,0 +1,50 @@
+{
+  "requirement": "AC-T7.4.1",
+  "kind": "API/ABI source only; report observer/native consumer not yet complete",
+  "source": "218ef6df45f597a0237d6b9352c24ff95c425a19",
+  "parent_api_report": "e980c65ae2978448d6675e613488a97232c947e3",
+  "base": "eff3d0553d557948ab574710db057ffa8ce6c3db",
+  "only_changed_files": {
+    "crates/abi/src/gpu.rs": {
+      "before": "84d0d9f2397191ad1ded565be2063c319b1ade483c1cb4048928815ddf92262e",
+      "after": "1acdd27ec57b93c2396255d0739d63a1621b0d90eee8a854c5d2de3e389c25fe"
+    },
+    "crates/abi/src/gpu/probe.rs": {
+      "before": "1995c2b560eb4f907fc1656ffa211d36f72cbfd834abc9e3628581f086bb91e5",
+      "after": "60bd8ad8a7072bbb18ba2bf0899bb8e62f35afcfc3500572a1d39929bd31a285"
+    },
+    "crates/api/src/physical.rs": {
+      "before": "1ba97813fef481a1049c7f9369329963275cf1937f2307d09ab7c101527ecea3",
+      "after": "898ab562d0274bc45253d37527bc0987210dbdc8bf002173ec818e1b8e2af8d0"
+    }
+  },
+  "unchanged_complete_api_files": {
+    "crates/api/src/lib.rs": "e40ab2537c73e21ec517baac69ea56e5cafead2606cd7c9ec67620c5adf2746a",
+    "crates/api/src/client.rs": "0ac46e09cd8247ee76e6b5c59d35c7dd92b0c18df533f6619cf54cf77fe5d050"
+  },
+  "full_vmm_adopted": false,
+  "tests_executed_by_this_intake": 0,
+  "invariants": [
+    "bounded versioned report frame matches expected native scope and exact physical set",
+    "scope value is not native authority",
+    "suffix renders actual final transferred writer/read descriptor",
+    "borrowed connector and ordinary argument files byte unchanged"
+  ],
+  "remaining": [
+    "cancellable native-owned report reader and metadata publication",
+    "charged GPU observer/grant/handoff consumers",
+    "full matching VMM/renderer and native proofs"
+  ],
+  "recorded_patch": {
+    "path": "vendor/patches/shards/0017-carry-bounded-private-gpu-reports-and-final-native.patch",
+    "sha256": "ed4c011827833bfb1ea7442cd2c38e26dd994da28b421463e3fa1fa5f21c2820"
+  },
+  "metadata_verification": {
+    "command": "KILN_VENDOR_CACHE=~/.cache/hex-lead/vendor-report-api python3 scripts/vendor.py check shards --from shards=~/.cache/hex-lead/shards-source.git",
+    "exit": 0,
+    "files": 43,
+    "patches": 17,
+    "differences": 0,
+    "kind": "source reconstruction/hash check only; no Cargo/native invocation"
+  }
+}
