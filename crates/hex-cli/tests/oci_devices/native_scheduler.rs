@@ -332,7 +332,7 @@ impl Fixture<'_> {
         parse_opens(&text)
     }
 
-    fn holders(&self) -> Vec<(DeviceId, Option<BoxId>)> {
+    fn holders(&self) -> Vec<(DeviceId, Option<hex_api::DeviceHolder>)> {
         let capacity = self
             .up()
             .backend
@@ -452,8 +452,8 @@ impl Fixture<'_> {
         assert_ne!(other, selected, "new work uses the remaining physical GPU");
         let fresh_opens = self.opens(&fresh, other);
         let holders = self.holders();
-        assert!(holders.contains(&(selected, Some(first.clone()))));
-        assert!(holders.contains(&(other, Some(fresh.clone()))));
+        assert!(holders.contains(&(selected, Some(hex_api::DeviceHolder::Box(first.clone())))));
+        assert!(holders.contains(&(other, Some(hex_api::DeviceHolder::Box(fresh.clone())))));
         self.receipt(
             "after-restart",
             serde_json::json!({"first_key":first_key,"fresh_key":fresh_key,

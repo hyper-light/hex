@@ -24,7 +24,6 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, Class, Exit, Program, Refusal, Runtime, Stdio};
@@ -136,10 +135,11 @@ fn env(name: &str, default: usize) -> usize {
 fn guest_client_exec_start_and_throughput() {
     let control = TcpListener::bind("127.0.0.1:0").unwrap();
     let stdio = TcpListener::bind("127.0.0.1:0").unwrap();
-    let link = Arc::new(Loopback {
+    let link = hex_client::guest::own_link(Loopback {
         control: control.local_addr().unwrap(),
         stdio: stdio.local_addr().unwrap(),
-    });
+    })
+    .unwrap();
     std::thread::spawn(move || agent(control, stdio));
     let client = Client::connect(link).unwrap();
     let b = BoxId::new("b").unwrap();

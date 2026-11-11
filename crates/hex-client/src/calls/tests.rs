@@ -543,7 +543,9 @@ fn an_offer_is_intermediate_until_same_id_ready_and_the_programs_real_answer() {
     let client = client();
     let shared = &client.conn.shared;
     *shared.transport.offer.lock().unwrap() = Some(Ok(()));
-    let weak = Arc::downgrade(shared);
+    // The callback keeps a Weak test witness, never a strong cycle through Shared.
+    let observer = Arc::new(triomphe::Arc::clone(shared));
+    let weak = Arc::downgrade(&observer);
     *shared.transport.opening.lock().unwrap() = Some(Box::new(move |offer| {
         let shared = weak.upgrade().unwrap();
         let state = shared
