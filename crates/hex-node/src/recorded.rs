@@ -2769,3 +2769,7 @@ mod unsubmitted_pool_tests;
 #[cfg(test)]
 #[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_route_projection_tests.rs"]
 mod route_projection_tests;
+
+#[cfg(test)]
+#[path = "../../../docs/research/measurements/hex-completion-validation/shared-record-ownership-original/recorded_shared_outer_tests.rs"]
+mod shared_outer_original_tests;

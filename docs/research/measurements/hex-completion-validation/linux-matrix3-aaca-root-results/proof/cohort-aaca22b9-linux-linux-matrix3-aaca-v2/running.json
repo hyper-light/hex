@@ -1,0 +1,183 @@
+{
+  "source": "aaca22b9c05ce0b9011d2d3096611cfab01f71c6",
+  "archive_sha256": "a42c8b11c0d3dc0d6ab51348d76e60e7919ace23cd36285b6a007d97ec4489a1",
+  "scope": "ROOT three previously unverified Linux workspace all-target Clippy targets; compile only; no native or previously passed x64glibc replay",
+  "target": "linux",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver": {
+    "pid": 50899,
+    "ppid": 50811,
+    "start_ticks": 32637354
+  },
+  "phases": [
+    {
+      "target": "aarch64-unknown-linux-gnu",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--target",
+        "aarch64-unknown-linux-gnu",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "original_phase_seconds": 900,
+      "observation": {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "--target",
+          "aarch64-unknown-linux-gnu",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "both_eof": true,
+        "reaped": true,
+        "error": null,
+        "created_pid": 54258,
+        "identity": {
+          "pid": 54258,
+          "ppid": 50899,
+          "start_ticks": 32637574
+        },
+        "returncode": 0
+      },
+      "stdout": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stderr": {
+        "bytes": 4334,
+        "sha256": "e518904f3c91549f6364a9db2ba63a3907ab373d8c3818d5abea7d9869c632fa"
+      }
+    },
+    {
+      "target": "x86_64-unknown-linux-musl",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--target",
+        "x86_64-unknown-linux-musl",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "original_phase_seconds": 900,
+      "observation": {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "--target",
+          "x86_64-unknown-linux-musl",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "both_eof": true,
+        "reaped": true,
+        "error": null,
+        "created_pid": 131206,
+        "identity": {
+          "pid": 131206,
+          "ppid": 50899,
+          "start_ticks": 32642500
+        },
+        "returncode": 0
+      },
+      "stdout": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stderr": {
+        "bytes": 4081,
+        "sha256": "e964ecd9a7a6da9dce14a1cee0721333b80e1c2b02f37ce1e3467d5ed891a502"
+      }
+    },
+    {
+      "target": "aarch64-unknown-linux-musl",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--target",
+        "aarch64-unknown-linux-musl",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "original_phase_seconds": 900,
+      "observation": {
+        "argv": [
+          "nice",
+          "-n",
+          "10",
+          "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "--target",
+          "aarch64-unknown-linux-musl",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "both_eof": true,
+        "reaped": true,
+        "error": null,
+        "created_pid": 194478,
+        "identity": {
+          "pid": 194478,
+          "ppid": 50899,
+          "start_ticks": 32646603
+        },
+        "returncode": 0
+      },
+      "stdout": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stderr": {
+        "bytes": 4081,
+        "sha256": "88b5958a66b5e86204713e8e07ab187b5fb301d7ed38be1ad575527103a3f93d"
+      }
+    }
+  ]
+}
