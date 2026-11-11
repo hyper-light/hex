@@ -123,7 +123,7 @@ impl Attempt {
         if self.configuration != config.identity()
             || self.max_queues != config.queues()
             || self.stdout.limit() != config.output_bytes(expected)?
-            || self.stderr.limit() != config.stderr_bytes()
+            || self.stderr.limit() > config.stderr_bytes()
         {
             return Err(invalid(
                 "retained observer attempt differs from initialized configuration",
@@ -203,6 +203,8 @@ const DEVICE_LOCAL: u32 = 1;
 const UUID_HEX_BYTES: usize = 32;
 const HEADER: &str = "hex-vulkan-guest-inventory 1 ";
 
+const WHAT: &str = "Shards guest GPU readiness";
+
 fn invalid(why: &'static str) -> Refusal {
     let mut text = String::new();
     if text.try_reserve_exact(why.len()).is_err() {
@@ -210,9 +212,70 @@ fn invalid(why: &'static str) -> Refusal {
     }
     text.push_str(why);
     Refusal::Invalid {
-        what: "Shards guest GPU readiness",
+        what: WHAT,
         why: text,
     }
+}
+
+/// What the refusal of a Program that exited unsuccessfully says, before what it wrote to stderr.
+const EXITED: &str = "actual guest observer exited unsuccessfully";
+const SAID: &str = "; its stderr:\n";
+
+/// The Program's stderr a node keeps and shows (AC-T7.4.1): as many bytes as the refusal carrying
+/// them ([`exited`]) can hold in one wire answer, sized by the refused answer's own codec, as the
+/// Firecracker class sizes its VMM's output, so no size is configured or picked.
+pub(super) fn stderr_room() -> Result<usize, Refusal> {
+    let mut text = String::new();
+    let bound = EXITED
+        .len()
+        .checked_add(SAID.len())
+        .ok_or_else(|| invalid("observer refusal text overflows"))?;
+    text.try_reserve_exact(bound)
+        .map_err(|_| exhausted(bound))?;
+    text.push_str(EXITED);
+    text.push_str(SAID);
+    let base = hex_core::wire::snapshot_refusal(
+        &Refusal::Invalid {
+            what: WHAT,
+            why: text,
+        },
+        hex_core::wire::MAX_MESSAGE,
+    )
+    .map_err(|_| invalid("observer refusal exceeds the wire bound"))?
+    .len();
+    hex_core::wire::MAX_MESSAGE
+        .checked_sub(base)
+        .ok_or_else(|| invalid("observer refusal exceeds the wire bound"))
+}
+
+/// The refusal of a Program that exited unsuccessfully, carrying what it wrote to stderr, so the
+/// person sees the stage and number hex-vulkan-guest-ready refused with. Lossy text can outgrow its
+/// bytes (U+FFFD for an invalid one): its end is kept, as the Program's own refusal is its last line.
+fn exited(stderr: &[u8]) -> Refusal {
+    let Ok(room) = stderr_room() else {
+        return invalid(EXITED);
+    };
+    if stderr.is_empty() {
+        return invalid(EXITED);
+    }
+    let text = String::from_utf8_lossy(stderr);
+    let mut start = text.len().saturating_sub(room);
+    while start < text.len() && !text.is_char_boundary(start) {
+        start = start.saturating_add(1);
+    }
+    let tail = text.get(start..).unwrap_or_default();
+    let mut why = String::new();
+    let bound = EXITED
+        .len()
+        .saturating_add(SAID.len())
+        .saturating_add(tail.len());
+    if why.try_reserve_exact(bound).is_err() {
+        return invalid(EXITED);
+    }
+    why.push_str(EXITED);
+    why.push_str(SAID);
+    why.push_str(tail);
+    Refusal::Invalid { what: WHAT, why }
 }
 
 fn exhausted(bound: usize) -> Refusal {
@@ -537,9 +600,31 @@ fn observe_receipt(
         max_queues: configured.queues(),
         phase: AttemptPhase::Launching,
         stdout: Captured::new(output)?,
-        stderr: Captured::new(configured.stderr_bytes())?,
+        stderr: Captured::new(0)?,
         facts: Some(facts::Facts::new()),
     });
+    // The Program's stderr kept: as much as both of its carriers hold, the refusal that shows it
+    // (one wire answer, stderr_room) and this receipt beside all else it holds from launch, its
+    // three fact snapshots among them: two hex digits a byte, less the most its limit's decimal adds.
+    let digits = usize::try_from(usize::MAX.ilog10())
+        .ok()
+        .and_then(|digits| digits.checked_add(1))
+        .ok_or_else(|| exhausted(receipt.bound()))?;
+    let held = receipt
+        .encode()?
+        .len()
+        .checked_add(
+            receipt
+                .attempt()
+                .ok_or_else(uncertain)?
+                .additional_receipt_room()?,
+        )
+        .and_then(|bytes| bytes.checked_add(digits))
+        .and_then(|bytes| receipt.bound().checked_sub(bytes))
+        .and_then(|bytes| bytes.checked_div(2))
+        .ok_or_else(|| exhausted(receipt.bound()))?;
+    receipt.attempt_mut().ok_or_else(uncertain)?.stderr =
+        Captured::new(configured.stderr_bytes().min(held))?;
     let initial = receipt.encode()?;
     let extra = receipt
         .attempt()
@@ -592,7 +677,8 @@ fn observe_receipt(
         facts_mut(receipt, uncertain)?.exited(exit)?;
         receipt.write(path)?;
         if exit != Exit::Code(0) {
-            return Err(invalid("actual guest observer exited unsuccessfully"));
+            let attempt = receipt.attempt().ok_or_else(uncertain)?;
+            return Err(exited(attempt.stderr.bytes()?));
         }
         budget.remaining()?;
         receipt.attempt_mut().ok_or_else(uncertain)?.phase = AttemptPhase::Deleting;
@@ -979,5 +1065,30 @@ mod tests {
         assert!(Attempt::parse(&text.replace("draining", "success")).is_err());
         assert!(Attempt::parse(&text.replace(" 2 draining", " 0 draining")).is_err());
         assert!(Attempt::parse(&format!("{text} extra")).is_err());
+    }
+
+    /// AC-T7.4.1: give an unsuccessful Program as much stderr as the node keeps and expect its refusal
+    /// to fill one wire answer exactly; give it more and expect the refusal to keep the end, where the
+    /// Program's own refusal line is, still within one answer; give it none and expect the plain refusal.
+    #[test]
+    fn an_unsuccessful_programs_stderr_fills_its_refusal_to_the_wire_bound() {
+        let room = stderr_room().unwrap();
+        let full = exited(&vec![b'x'; room]);
+        let encoded = hex_core::wire::snapshot_refusal(&full, hex_core::wire::MAX_MESSAGE).unwrap();
+        assert_eq!(encoded.len(), hex_core::wire::MAX_MESSAGE);
+        let mut over = vec![0xff; room];
+        over.extend_from_slice(b"hex-vulkan-guest-ready: queue-families 6\n");
+        let kept = exited(&over);
+        assert!(hex_core::wire::snapshot_refusal(&kept, hex_core::wire::MAX_MESSAGE).is_ok());
+        let Refusal::Invalid { what, why } = kept else {
+            panic!("{kept:?}");
+        };
+        assert_eq!(what, WHAT);
+        assert!(why.starts_with("actual guest observer exited unsuccessfully; its stderr:\n"));
+        assert!(
+            why.ends_with("hex-vulkan-guest-ready: queue-families 6\n"),
+            "{why}"
+        );
+        assert_eq!(exited(b""), invalid(EXITED));
     }
 }
