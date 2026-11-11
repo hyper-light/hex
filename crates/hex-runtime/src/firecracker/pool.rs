@@ -455,7 +455,7 @@ impl FirecrackerRuntime {
                 .config
                 .machine_guest(grant.allocation.guest()?, &paths.vsock, &plan)?;
             let program = self.vm_program(&paths)?;
-            let io = self.vm_io()?;
+            let io = Self::vm_io()?;
             fs::create_dir(&paths.dir)
                 .and_then(|()| fs::set_permissions(&paths.dir, fs::Permissions::from_mode(0o700)))
                 .map_err(|error| Refusal::os("creating observer incarnation directory", error))?;

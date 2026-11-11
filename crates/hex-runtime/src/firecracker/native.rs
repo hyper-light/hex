@@ -606,13 +606,7 @@ impl FirecrackerRuntime {
         let pools = authority.pool_records()?;
         let mut capacity = self.authority()?.capacity()?;
         let observer = self.observer_record()?;
-        let guest_observed = match self.physical_observations_before(until) {
-            Ok(observed) => observed,
-            Err(refusal) => {
-                tracing::warn!(target: "hex.runtime.firecracker", event = "gpu.observation.unavailable", %refusal);
-                Vec::new()
-            }
-        };
+        let guest_observed = self.physical_observations_before(until)?;
         let mut observed = if self
             .catalog
             .entries_for(Route::Vfio)

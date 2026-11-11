@@ -1015,6 +1015,14 @@ impl<R: Recover> hex_runtime::devices::Books for Recorded<R> {
             .map_err(|_| broken("the shared native provider lock was poisoned"))?
             .physical_devices()
     }
+    fn physical_luid(&self, id: DeviceId) -> Result<[u8; 8], Refusal> {
+        let prober = self
+            .books
+            .prober
+            .as_ref()
+            .ok_or_else(|| broken("the recorded owner has no initialized native provider"))?;
+        crate::facts::physical_luid(prober, id)
+    }
     fn capacity(&self) -> Result<hex_api::Capacity, Refusal> {
         // Calling WithGuest::capacity here would reenter GuestRuntime -> Books. Probe the same
         // owner's host volume directly; device routes add their initialized catalog separately.
