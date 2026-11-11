@@ -81,13 +81,17 @@ for name, command, guard in phases:
             for case, error, relevant, cleanup in re.findall(r"RESULT case=(\d+) error=(\d+) relevant=(\d+) main_cleanup=(REAPED|UNKNOWN)", data.decode(errors="replace"))
         ]
         phase["expected_fixed_cases"] = 4
+        phase["selection_verified"] = (
+            [item["case"] for item in phase["actual_case_results"]] == [0, 1, 2, 3]
+            and all(item["error"] == 0 and item["relevant"] == 1 and item["main_cleanup"] == "REAPED" for item in phase["actual_case_results"])
+        )
     if phase["exit"] != 0:
         break
 after = {str(path.relative_to(source)): sha(path) for path in source.rglob("*") if path.is_file()}
 (root / "source-after.json").write_text(json.dumps(after, indent=2) + "\n")
 result["source_changes"] = [name for name in set(before) | set(after) if before.get(name) != after.get(name)]
 result["temp_entries"] = len(list((root / "temp").iterdir()))
-result["exit"] = 0 if len(result["phases"]) == 2 and all(item["exit"] == 0 for item in result["phases"]) and before == after else 1
+result["exit"] = 0 if len(result["phases"]) == 2 and all(item["exit"] == 0 and item.get("selection_verified", True) for item in result["phases"]) and before == after else 1
 (root / "result.json").write_text(json.dumps(result, indent=2) + "\n")
 print(json.dumps(result, indent=2), flush=True)
 for phase in result["phases"]:
