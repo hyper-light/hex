@@ -1,0 +1,24 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "fixed_source": "fb191e49a6e8d169a2900ee2d32c1c4544f7311a",
+  "actual_red": "ROOT fb19 strict Node Clippy101 only three owned causes; raw collection ROOT-owned",
+  "scope": [
+    "process_stat path reserve derives checked u32 decimal width, no unchecked addition",
+    "ManagedProcess matches optional identity equivalent let-chain",
+    "wait_for positive Released terminal equivalent let-chain"
+  ],
+  "source_sha256": {
+    "crates/hex-node/src/supervise.rs": "8fe7a2357cf2d6f64819b9edd7d7694bc153239af9875d23d316df10eae85cba",
+    "crates/hex-node/src/supervise/managed_preflight.rs": "f4f8d5f82ce0042659bdffd24881c69104c8aae4e0dc220079794fd01cd1d373"
+  },
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "tests": "UNRUN/no replay",
+    "clippy": "UNRUN",
+    "native_effects": 0
+  },
+  "unchanged": "No lifecycle/oracle/FD/deadline/budget authority change; cfb CPU lineage untouched. Full fixed-source Hex CLAUDE read. No checks/agents/runner changes. ROOT owns matched lint/platform/full gates and actual acceptance."
+}

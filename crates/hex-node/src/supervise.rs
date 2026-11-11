@@ -1234,10 +1234,10 @@ impl ManagedVm {
     }
 
     fn matches(&self, identity: Option<&shards_api::Identity>) -> Result<(), Refusal> {
-        if let Some(expected) = identity {
-            if self.identity.get() != Some(expected) {
-                return Err(self.uncertain());
-            }
+        if let Some(expected) = identity
+            && self.identity.get() != Some(expected)
+        {
+            return Err(self.uncertain());
         }
         Ok(())
     }
@@ -1393,10 +1393,10 @@ impl shards_api::ManagedProcess for ManagedVm {
             )
         };
         loop {
-            if let Some(end) = self.terminal()? {
-                if end.scope == shards_api::TerminalScope::Released {
-                    return Ok(Some(end));
-                }
+            if let Some(end) = self.terminal()?
+                && end.scope == shards_api::TerminalScope::Released
+            {
+                return Ok(Some(end));
             }
             let left = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
             if left.is_some_and(|left| left.is_zero()) {

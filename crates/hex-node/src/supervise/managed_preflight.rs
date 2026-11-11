@@ -267,9 +267,14 @@ fn check_members(
 }
 
 fn process_stat(pid: u32) -> Result<Option<(Stat, u32)>, Refusal> {
-    // PID/u32 decimal has at most10 digits; this string's entire capacity is reserved before fmt.
+    // Reserve the fixed spelling plus the entire u32 decimal width before formatting.
+    let width = usize::try_from(u32::MAX.ilog10())
+        .ok()
+        .and_then(|digits| digits.checked_add(1))
+        .and_then(|digits| "/proc//stat".len().checked_add(digits))
+        .ok_or_else(managed_storage)?;
     let mut path = String::new();
-    path.try_reserve_exact("/proc//stat".len() + 10)
+    path.try_reserve_exact(width)
         .map_err(|_| managed_storage())?;
     write!(path, "/proc/{pid}/stat").map_err(|_| managed_storage())?;
     let fd = match rustix::fs::open(
