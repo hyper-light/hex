@@ -192,3 +192,26 @@ fn refusal_census_preserves_learning_and_marks_only_the_optional_record() {
         "a.wait >41\n"
     );
 }
+
+/// AC-T7.4.1 (RFC 6298 §5.5, Karn's algorithm: a run-out is no sample, and the timer backs off): a wait that ran
+/// out at its bound proves its answer slower than that bound, so this process's next wait is longer, not the same
+/// bound failing every slow call until a new record lands. Do: seed a wait at 5 ms, so bounded at 10 ms, and say
+/// it ran out at that bound; then again at the next. Expect: each next bound past the one that ran out, twice it
+/// (20 ms, then 40 ms); a measuring wait's run-out arms nothing.
+#[test]
+fn a_wait_that_ran_out_waits_longer_next() {
+    let p = Patience::seeded("test", ms(5));
+    let bound = p.deadline().unwrap();
+    p.ran_out(bound);
+    let next = p.deadline().unwrap();
+    p.ran_out(next);
+    let after = p.deadline().unwrap();
+    assert!(
+        next > bound,
+        "the next wait {next:?} after one ran out at {bound:?}"
+    );
+    assert_eq!((bound, next, after), (ms(10), ms(20), ms(40)));
+    let measuring = Patience::measuring("test");
+    measuring.ran_out(ms(7));
+    assert_eq!(measuring.deadline(), None);
+}
