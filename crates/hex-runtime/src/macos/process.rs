@@ -2510,6 +2510,9 @@ fn killpg(pgid: i32, signal: i32) -> Result<bool, Refusal> {
 mod scope_completion_tests;
 
 #[cfg(test)]
+mod exec_hold_tests;
+
+#[cfg(test)]
 mod storage_tests {
     #[test]
     fn actual_helper_cost_uses_aggregate_headroom_without_becoming_a_member() {
