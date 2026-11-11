@@ -684,14 +684,14 @@ mod tests {
             panic!("fixture OCI")
         };
         spec.class = ClassSpec::Shards(payload);
-        spec.bounds.cpu_max_milli = Some(1);
-        spec.bounds.memory_max = Some(1);
+        spec.bounds.cpu_max_milli = Some(hex_api::MIN_CPU_MILLI);
+        spec.bounds.memory_max = Some(hex_api::MIN_MEMORY);
         assert!(runtime.check_allocation(&spec).is_err());
         spec.allocation = Some(
             profile
                 .allocate(CapacityResources {
-                    cpu_milli: 1,
-                    mem_bytes: 1,
+                    cpu_milli: u64::from(hex_api::MIN_CPU_MILLI),
+                    mem_bytes: hex_api::MIN_MEMORY,
                     disk_bytes: 0,
                 })
                 .unwrap(),
@@ -724,8 +724,8 @@ mod tests {
             panic!("OCI fixture")
         };
         spec.class = ClassSpec::Shards(payload);
-        spec.bounds.cpu_max_milli = Some(1);
-        spec.bounds.memory_max = Some(1);
+        spec.bounds.cpu_max_milli = Some(hex_api::MIN_CPU_MILLI);
+        spec.bounds.memory_max = Some(hex_api::MIN_MEMORY);
         spec.devices.push(hex_api::DeviceId {
             kind: hex_api::DeviceKind::Gpu,
             key: 256,
@@ -733,8 +733,8 @@ mod tests {
         spec.allocation = Some(
             profile
                 .allocate(CapacityResources {
-                    cpu_milli: 1,
-                    mem_bytes: 1,
+                    cpu_milli: u64::from(hex_api::MIN_CPU_MILLI),
+                    mem_bytes: hex_api::MIN_MEMORY,
                     disk_bytes: 0,
                 })
                 .unwrap(),

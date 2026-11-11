@@ -426,6 +426,16 @@ pub(super) fn config() -> GuestConfig {
     }
 }
 
+// A directory for controls that reach the native model callback. Its prepared
+// socket uses the platform's 103-byte minimum sun_path bound; a cohort's long
+// TMPDIR is not a valid socket fixture. TempDir still owns/removes this directory.
+pub(super) fn socket_fixture() -> tempfile::TempDir {
+    #[cfg(unix)]
+    return tempfile::tempdir_in("/tmp").unwrap();
+    #[cfg(not(unix))]
+    tempfile::tempdir().unwrap()
+}
+
 /// HEX-GUEST-17: create an oci box, its root an absolute path on this host, where Shards has no backend
 /// (macOS x86_64's refusal): expect the class refused as the platform's, naming the OS, arch and Shards, and no boot asked for; a process
 /// box refused as the host's; and a call about a box before any boot NoSuchBox, with nothing booted.
