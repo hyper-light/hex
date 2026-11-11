@@ -768,7 +768,9 @@ fn a_dial_the_guest_takes_and_never_answers_is_refused_at_its_deadline() {
     assert_eq!(first, format!("CONNECT {}\n", stream::CONTROL_PORT));
     assert_eq!(second, format!("CONNECT {}\n", stream::STDIO_PORT));
     let Ok((dialed, at)) = got else {
-        panic!("no answer within twice its bound {bound:?}: the guest's silence held the dial past its deadline");
+        panic!(
+            "no answer within twice its bound {bound:?}: the guest's silence held the dial past its deadline"
+        );
     };
     assert!(dialed.is_err(), "a silent guest's dial succeeded");
     assert!(
