@@ -12,7 +12,7 @@ use hex_api::{BackingKey, BackingPhase, CapacityResources, Execution, Proc as _,
 use hex_core::record::{NativeRecord, PoolRecord, RECORD_VERSION};
 use shards_api::{Identity, ManagedProcess as _, TerminalScope};
 
-use super::super::managed::{Controller, Ownership, Scope};
+use super::super::managed::{Controller, Scope};
 use super::super::proc::{Prepared, Reaping};
 
 // Same test hang guard and evidence as macos/tests.rs; not a runtime reaction allowance.
@@ -363,7 +363,13 @@ fn unobserved_box(controller: &Birth) -> ProcessBox {
     // has no managed CPU control API; no enforcement/performance conclusion uses these values.
     let one = std::num::NonZeroU64::new(1).unwrap();
     let shared = Shared::new(one, one, Duration::from_nanos(1)).unwrap();
-    let scope = Scope::new(native, Ownership::Child).unwrap();
+    // The record's own cost identity; the response is a test fixture, never a measured profile.
+    let control = super::super::CpuControl {
+        cost_id: record.cost.id,
+        response: Duration::from_nanos(1),
+    };
+    let cpu = record.allocation.unwrap().resources.cpu_milli;
+    let scope = Scope::new(native, Some((control, cpu)), Duration::ZERO).unwrap();
     scope.held(native.owner()).unwrap();
     scope.running(native.owner()).unwrap();
     let bounds = Bounds::default();

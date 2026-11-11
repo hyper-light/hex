@@ -252,6 +252,8 @@ impl Privileged for RealPriv {
             envp: parts.envp,
             cwd: parts.cwd,
             stdio: fds,
+            report: None,
+            lifeline: None,
             // A fork and execve, not posix_spawn, so no spawn-time jetsam cap: the daemon arms the
             // member's ledger limit itself (`arm`).
             jetsam_mib: None,

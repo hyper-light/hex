@@ -6,6 +6,7 @@
 //! recovery and socket that wrap it on Linux (`hex-node`) are not yet cross-OS, so this holds its boxes
 //! in memory and is driven in process.
 
+mod cpu;
 pub mod directory;
 pub mod helper_client;
 pub mod helper_daemon;
@@ -36,6 +37,9 @@ use rustix::fs::{Mode, OFlags};
 
 use hex_core::record::{NativeRecord, OwnerKey, OwnerRef};
 use process::{ProcessBox, Shared};
+
+pub use hex_core::helper::managed::CpuControl;
+pub use managed::remote::{ManagedHelper, run_managed_helper};
 
 /// The bound macOS's execve puts on a program's arguments and environment, read from the kernel now
 /// (`kern.argmax`, kind (a); docs/research/runtime/exec-size-bounds.md). XNU has no bound on one string apart.
@@ -101,6 +105,9 @@ pub struct MacRuntime {
     helper: Option<BoxUser>,
     /// The kernel's bound on a program's arguments and environment, read at start (`kern.argmax`).
     exec_limit: ExecLimit,
+    /// Frozen measured response and actual hardware ceiling. No absent profile has a default.
+    cpu_control: Option<(CpuControl, u64)>,
+    managed_helper: Option<NativeArc<managed::remote::Helper>>,
 }
 
 type NativeBoxEntries = Vec<(OwnerKey, NativeArc<ProcessBox>)>;
@@ -123,7 +130,112 @@ fn native_allocation(bound: usize) -> Refusal {
     }
 }
 
+/// macOS's socket, socketpair, accept and pipe take no CLOEXEC or NONBLOCK flag, so each new
+/// private descriptor gets them here before it is shared. Hex's own spawns also pass
+/// POSIX_SPAWN_CLOEXEC_DEFAULT, so no spawned member inherits one in the gap.
+pub(crate) fn private_descriptor(fd: impl AsFd, nonblocking: bool) -> rustix::io::Result<()> {
+    rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)?;
+    if nonblocking {
+        let flags = rustix::fs::fcntl_getfl(&fd)?;
+        rustix::fs::fcntl_setfl(&fd, flags | rustix::fs::OFlags::NONBLOCK)?;
+    }
+    Ok(())
+}
+
 impl MacRuntime {
+    /// Checks the same immutable cost before route registration/admission. A missing measured
+    /// control profile is not a guessed VM allowance or an initialized native route.
+    pub fn check_vm_cost(&self, cost: &hex_api::RuntimeCost) -> Result<(), Refusal> {
+        cost.check()?;
+        let (control, hardware) = self
+            .cpu_control
+            .ok_or_else(|| managed::configuration("managed VM CPU control is not initialized"))?;
+        if cost.id != control.cost_id {
+            return Err(managed::configuration(
+                "managed VM cost differs from the measured CPU response profile",
+            ));
+        }
+        let resources = cost
+            .allocate(hex_api::CapacityResources::default())?
+            .resources;
+        if resources.cpu_milli > hardware || u32::try_from(resources.cpu_milli).is_err() {
+            return Err(managed::configuration(
+                "managed VM CPU floor exceeds the actual native hardware envelope",
+            ));
+        }
+        if self.managed_helper.is_none() {
+            return Err(managed::configuration(
+                "managed VM persistent native owner is not configured",
+            ));
+        }
+        Ok(())
+    }
+    /// Same post-Arc authority, only for read-only completed-helper restart fencing.
+    pub fn bind_native_books(
+        &self,
+        books: std::sync::Weak<dyn crate::devices::Books>,
+    ) -> Result<(), Refusal> {
+        match &self.managed_helper {
+            Some(helper) => helper.bind_books(books),
+            None => Ok(()),
+        }
+    }
+
+    /// Install the same rootless persistent helper factory before native effects. Its process is
+    /// started only by an admitted managed launch; construction/registration never probes or boots.
+    pub fn with_managed_helper(mut self, config: ManagedHelper) -> Result<Self, Refusal> {
+        if self.managed_helper.is_some() || !self.boxes()?.is_empty() {
+            return Err(managed::configuration(
+                "managed helper is immutable after registration",
+            ));
+        }
+        if let Some(helper) = &self.helper
+            && !helper.boxes()?.is_empty()
+        {
+            return Err(managed::configuration(
+                "managed helper is immutable after native registration",
+            ));
+        }
+        let (cpu, _) = self.cpu_control.ok_or_else(|| {
+            managed::configuration("configure the measured CPU profile before its native helper")
+        })?;
+        self.managed_helper = Some(managed::remote::Helper::new(
+            config,
+            cpu,
+            self.shared.rates()?,
+            self.shared.lateness()?,
+        )?);
+        Ok(self)
+    }
+    /// Configure managed scope CPU control before this runtime owns any native effects. The exact
+    /// cost identity is also checked against each canonical allocation before native preparation.
+    pub fn with_cpu_control(mut self, control: CpuControl) -> Result<Self, Refusal> {
+        control.check().map_err(|_| {
+            managed::configuration("CPU control must name a positive finite measured response")
+        })?;
+        if self.cpu_control.is_some() || !self.boxes()?.is_empty() {
+            return Err(managed::configuration(
+                "CPU control is immutable after native registration",
+            ));
+        }
+        if let Some(helper) = &self.helper
+            && !helper.boxes()?.is_empty()
+        {
+            return Err(managed::configuration(
+                "CPU control is immutable after native registration",
+            ));
+        }
+        // XNU exports the maximum logical processors in the hardware; active/available thread
+        // counts could understate the CPU that a whole native scope can consume during a pulse.
+        let ceiling = sys::sysctl_number(c"hw.logicalcpu_max")
+            .map_err(|error| Refusal::os("reading the native hardware CPU ceiling", error))?
+            .checked_mul(1000)
+            .filter(|ceiling| *ceiling != 0)
+            .ok_or_else(|| managed::configuration("hardware CPU ceiling is not representable"))?;
+        self.cpu_control = Some((control, ceiling));
+        Ok(self)
+    }
+
     /// The original canonical VM row's native owner. It neither chooses devices nor creates a
     /// synthetic Process workload; its receipt is retained in the same native box table.
     pub fn launch_managed(
@@ -185,6 +297,8 @@ impl MacRuntime {
                 .map_err(|_| native_allocation(std::mem::size_of::<NativeBoxes>()))?,
             helper: None,
             exec_limit: exec_limit()?,
+            cpu_control: None,
+            managed_helper: None,
         })
     }
 
@@ -210,6 +324,8 @@ impl MacRuntime {
                         boxes: Arc::new(Mutex::new(BTreeMap::new())),
                     }),
                     exec_limit: exec_limit()?,
+                    cpu_control: None,
+                    managed_helper: None,
                 })
             }
             None => Self::new(rate_bytes, rate_processes, lateness),
@@ -663,6 +779,8 @@ fn build_spawn(
         envp: parts.envp,
         cwd: parts.cwd,
         stdio,
+        report: None,
+        lifeline: None,
         jetsam_mib: memory_max.and_then(sys::jetsam_cap_mib),
     })
 }
