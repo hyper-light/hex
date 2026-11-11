@@ -1,0 +1,45 @@
+{
+  "kind": "source-only strict managed cgroup membership/limits contract",
+  "base": "b4b32bcdb172da928e02268af8126bb5705ceb60",
+  "production_path": "crates/hex-runtime/src/linux/cgroup.rs",
+  "sha256": "b039a1eb546067fed6bae2d4a3b9c1fe58a4923ad751150def4d3d0018602e57",
+  "legacy_function_sha256_unchanged": {
+    "procs": "d158399396607e8b10000fff119fdfbe38b27f1b26f40104543a24c1bc490ee9",
+    "usage": "d504f7e52697aba846fc1d872fa7d5499aa70bee6de91f953edb2b484f3e1399"
+  },
+  "primary_sources": [
+    {
+      "revision": "05f7e89ab9731565d8a62e3b5d1ec206485eeb0b",
+      "tag": "v6.19",
+      "path": "Documentation/admin-guide/cgroup-v2.rst",
+      "bytes": 129464,
+      "sha256": "9247d0325c2cec7aa6a3a9304053cf54acf5c0ee71eba1304d3810961feea0ce",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/05f7e89ab9731565d8a62e3b5d1ec206485eeb0b/Documentation/admin-guide/cgroup-v2.rst"
+    },
+    {
+      "revision": "05f7e89ab9731565d8a62e3b5d1ec206485eeb0b",
+      "tag": "v6.19",
+      "path": "include/linux/threads.h",
+      "bytes": 1338,
+      "sha256": "ac7161de729d183418eee161e1d0bbc2253839139d20e1d8a278510b6108d130",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/05f7e89ab9731565d8a62e3b5d1ec206485eeb0b/include/linux/threads.h"
+    },
+    {
+      "revision": "05f7e89ab9731565d8a62e3b5d1ec206485eeb0b",
+      "tag": "v6.19",
+      "path": "kernel/cgroup/cgroup.c",
+      "bytes": 200760,
+      "sha256": "73dff34e37043b02f8228384bd5045c5601890a7d84794a564e789c60c389c06",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/05f7e89ab9731565d8a62e3b5d1ec206485eeb0b/kernel/cgroup/cgroup.c"
+    }
+  ],
+  "constructor_dependency": "Existing SAME pinned BoxCgroup (fd Some); no new API/dependency/reader/DTO/manager; strict core managed_usage573 unchanged",
+  "new_controls": 3,
+  "checks": {
+    "scoped_rustfmt": 0,
+    "named_diff_check": 0,
+    "build_test_native": "UNRUN by L3; no new dispatch"
+  },
+  "remaining": "Exact L1 Supervisor joins, matched light3, kernel scheduler/burst/native scope/absence/fault/resource proof remain ROOT. Empty membership never independently releases Store claims.",
+  "policy": "implementer;0a6d91b3/rulesdf2; owned runtime/linux/cgroup only, no core outside usage grant"
+}

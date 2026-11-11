@@ -1,0 +1,11 @@
+{
+  "status": "SOURCE ONLY requested public API bound, no new defect/native claim",
+  "base": "1a393c4581a11a8a44373be22ddb7de47982bfa3",
+  "path": "crates/hex-core/src/helper/managed.rs",
+  "sha256": "118708cec05a4204c850267cd3bd8db1ebba5f0b331a01f21fafe2165e5c7436",
+  "contract": "check_prepared_arguments public generic iterator counts bytes+NUL+one exec pointer for every consumed option/value BEFORE scanning bytes. Existing ARG_MAX is the sole bound; endless lazy known-option iterator terminates with typed Oversized; no new constant/parser/limit increase. Canonical option/value grammar and original d039/f1 oracles unchanged. Caller iterator next itself must return; pure core cannot preempt arbitrary user callback.",
+  "new_control": "lazy_prepared_argument_scan_has_the_native_exec_bound; UNRUN: adversarial endless known options, oversized opaque commandline value, positive literal-- consumed as data then actual host-managed marker.",
+  "prior_results": "ROOT e3 actual15PASS includes original f1 argument2 after d039, helper6/client5/Recorded2; do not repeat unchanged15. Exact original red and e3 logs retained in prior receipts.",
+  "checks": "Scoped rustfmt parser0 only. ROOT requested source guard and owns matched core lint/new1 check; no tests/native by implementer. Existing b559 timed/metadata new2 unrun separate.",
+  "policy": "7d7e0855/rulesdf2 implementer owned core/helper managed children"
+}

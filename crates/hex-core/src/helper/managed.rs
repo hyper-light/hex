@@ -357,17 +357,33 @@ pub fn check_prepared_arguments<'a>(
     words: impl IntoIterator<Item = &'a [u8]>,
 ) -> Result<(), Fault> {
     let mut words = words.into_iter();
-    if words.next() != Some(b"run".as_slice()) {
+    let mut exec = 0usize;
+    // Public callers may supply a lazy iterator. Charge each consumed word (NUL plus exec pointer)
+    // before scanning its bytes, so even an endless option stream stops at the existing ARG_MAX.
+    let mut next = || -> Result<Option<&'a [u8]>, Fault> {
+        let Some(word) = words.next() else {
+            return Ok(None);
+        };
+        exec = exec
+            .checked_add(word.len())
+            .and_then(|size| size.checked_add(1))
+            .and_then(|size| size.checked_add(size_of::<usize>()))
+            .filter(|size| *size <= ARG_MAX)
+            .ok_or(Fault::Oversized {
+                bytes: usize::MAX,
+                bound: ARG_MAX,
+            })?;
+        Ok(Some(word))
+    };
+    if next()? != Some(b"run".as_slice()) {
         return Err(invalid("prepared native action"));
     }
     let mut managed = false;
-    while let Some(option) = words.next() {
+    while let Some(option) = next()? {
         match option {
             b"--kernel" | b"--init" | b"--initrd" | b"--cmdline" | b"--cpus" | b"--memory"
             | b"--disk" | b"--share" | b"--vsock" | b"--console-said" | b"--gpu-device" => {
-                let value = words
-                    .next()
-                    .ok_or_else(|| invalid("prepared native option value"))?;
+                let value = next()?.ok_or_else(|| invalid("prepared native option value"))?;
                 if value.contains(&0) {
                     return Err(invalid("prepared native option value"));
                 }
@@ -1119,6 +1135,31 @@ mod tests {
         ] {
             assert!(check_prepared_arguments(words.into_iter().map(str::as_bytes)).is_err());
         }
+    }
+
+    /// AC-T7.4.1/R01: the public iterator API refuses within the existing native exec-byte bound,
+    /// even without a finite slice. Option values cannot bypass that same counted budget.
+    #[test]
+    fn lazy_prepared_argument_scan_has_the_native_exec_bound() {
+        use std::cell::Cell;
+        let calls = Cell::new(0usize);
+        let endless = std::iter::once(b"run".as_slice()).chain(std::iter::from_fn(|| {
+            calls.set(calls.get() + 1);
+            Some(b"--gpu".as_slice())
+        }));
+        assert!(matches!(
+            check_prepared_arguments(endless),
+            Err(Fault::Oversized { bound: ARG_MAX, .. })
+        ));
+        assert!(calls.get() > 0 && calls.get() <= ARG_MAX / (size_of::<usize>() + 1) + 1);
+        let huge = vec![b'x'; ARG_MAX];
+        assert!(matches!(
+            check_prepared_arguments([b"run".as_slice(), b"--cmdline", &huge, b"--host-managed"]),
+            Err(Fault::Oversized { bound: ARG_MAX, .. })
+        ));
+        // A finite canonical stream still reaches the required management marker after opaque values.
+        check_prepared_arguments([b"run".as_slice(), b"--cmdline", b"--", b"--host-managed"])
+            .unwrap();
     }
 
     /// AC-T7.4.1: transfer carries a pure report scope, never a parent's raw writer argument; exact
