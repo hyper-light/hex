@@ -1046,6 +1046,88 @@ fn physical_gpu_refusals_preserve_retry_category() {
     );
 }
 
+/// AC-T7.4.1 (Shards R04): pass Shards' CONNECT failure in every phase and cause through the
+/// adapter: expect Hex's typed refusal with the same port, phase, cause and raw code, a kind Hex has
+/// no tag for unnamed (never `Other`), and Shards' text-only channel refusal still an OS refusal.
+#[test]
+fn shards_connect_failures_keep_port_phase_cause_and_code() {
+    use hex_api::{ConnectFailure, ConnectPhase, ConnectReply, IoKind};
+    use shards_api::{HandshakeError, HandshakePhase, ReplyError};
+    let untagged = (1..=200)
+        .map(|code| io::Error::from_raw_os_error(code).kind())
+        .find(|kind| !IoKind::NAMED.contains(kind))
+        .unwrap();
+    let mut cases = vec![
+        (HandshakeError::Closed, ConnectFailure::Closed),
+        (
+            HandshakeError::Reply(ReplyError::TooLong),
+            ConnectFailure::Reply(ConnectReply::TooLong),
+        ),
+        (
+            HandshakeError::Reply(ReplyError::NotOk),
+            ConnectFailure::Reply(ConnectReply::NotOk),
+        ),
+    ];
+    for (sdk, hex) in [
+        (HandshakePhase::Dial, ConnectPhase::Dial),
+        (HandshakePhase::Write, ConnectPhase::Write),
+        (HandshakePhase::Read, ConnectPhase::Read),
+        (HandshakePhase::ClearTimeouts, ConnectPhase::ClearTimeouts),
+    ] {
+        cases.push((
+            HandshakeError::Expired { phase: sdk },
+            ConnectFailure::Expired { phase: hex },
+        ));
+        cases.push((
+            HandshakeError::Io {
+                phase: sdk,
+                kind: io::ErrorKind::Other,
+                code: None,
+            },
+            ConnectFailure::Io {
+                phase: hex,
+                kind: IoKind::new(io::ErrorKind::Other),
+                code: None,
+            },
+        ));
+        cases.push((
+            HandshakeError::Io {
+                phase: sdk,
+                kind: untagged,
+                code: Some(-7),
+            },
+            ConnectFailure::Io {
+                phase: hex,
+                kind: IoKind::UNNAMED,
+                code: Some(-7),
+            },
+        ));
+    }
+    for (failure, expected) in cases {
+        let connect = shards_api::Refusal::Connect { port: 77, failure };
+        assert_eq!(
+            shards::refusal("connecting to the guest", &connect),
+            Refusal::Connect {
+                port: 77,
+                failure: expected,
+            },
+            "{connect:?}"
+        );
+    }
+    assert_ne!(IoKind::new(untagged), IoKind::new(io::ErrorKind::Other));
+    let channel = shards_api::Refusal::Channel {
+        port: 77,
+        why: "closed".into(),
+    };
+    assert!(matches!(
+        shards::refusal("connecting to the guest", &channel),
+        Refusal::Os {
+            op: "connecting to the guest",
+            ..
+        }
+    ));
+}
+
 // Caller policies for these stand-ins, not production waits or calibration inputs.
 const CONNECT_CAP: Duration = Duration::from_millis(25);
 const CONNECT_OBSERVE: Duration = Duration::from_millis(100);
