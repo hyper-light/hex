@@ -4,6 +4,7 @@
 use hex_api::Refusal;
 
 pub(super) mod config;
+mod driver;
 mod facts;
 mod io;
 mod receipt;
@@ -410,7 +411,7 @@ impl Evidence {
             ));
         }
         let max_queues = word(queues)?;
-        let bound = output_bound(expected)?;
+        let bound = driver::output_bound(expected)?;
         let (pairs, tail) = frame.as_bytes().as_chunks::<2>();
         if pairs.is_empty()
             || pairs.len() > bound
@@ -510,7 +511,7 @@ fn observe_receipt(
     }
     let id = BoxId::try_new(&name)?;
     let requested = id.try_clone()?;
-    let program = configured.program(count)?;
+    let program = driver::program(configured, count, budget.remaining()?)?;
     let bounds = configured.bounds();
     let spec = BoxSpec {
         id: requested,
@@ -720,7 +721,7 @@ fn hex_array<const N: usize>(text: &str) -> Result<[u8; N], Refusal> {
 
 impl Report {
     pub fn parse(bytes: &[u8], expected: usize, max_queues: u32) -> Result<Self, Refusal> {
-        let bound = output_bound(expected)?;
+        let bound = driver::output_bound(expected)?;
         if bytes.len() > bound {
             return Err(exhausted(bound));
         }
@@ -736,7 +737,7 @@ impl Report {
     }
 
     pub fn check(&self, expected: usize, max_queues: u32) -> Result<(), Refusal> {
-        if self.text.len() > output_bound(expected)? {
+        if self.text.len() > driver::output_bound(expected)? {
             return Err(exhausted(self.text.len()));
         }
         Self::check_text(&self.text, expected, max_queues)
@@ -747,103 +748,13 @@ impl Report {
     }
 
     fn check_text(text: &str, expected: usize, max_queues: u32) -> Result<(), Refusal> {
-        if max_queues == 0 || !text.is_ascii() || text.contains('\r') || !text.ends_with('\n') {
-            return Err(invalid("readiness frame or queue bound is not canonical"));
+        if text.starts_with(driver::HEADER) {
+            return driver::check(text, expected, max_queues);
         }
-        let mut lines = text.split_terminator('\n');
-        let count = lines
-            .next()
-            .and_then(|line| line.strip_prefix(HEADER))
-            .ok_or_else(|| invalid("readiness frame has a foreign header"))?;
-        let count = usize::try_from(word(count)?)
-            .map_err(|_| invalid("readiness count exceeds this host"))?;
-        // Check the entire visible set before allocating any owned report data.
-        if count != expected || count == 0 || count > hex_api::MAX_DEVICES {
-            return Err(invalid(
-                "readiness visible count differs from the full selected set",
-            ));
-        }
-        for index in 0..count {
-            let row = lines
-                .next()
-                .ok_or_else(|| invalid("readiness device row is missing"))?;
-            let [
-                kind,
-                ordinal,
-                api,
-                driver,
-                driver_version,
-                vendor,
-                device,
-                device_type,
-                uuid,
-                device_name,
-                driver_name,
-                driver_info,
-                queues,
-                compute,
-                queue_count,
-                queue_flags,
-                heaps,
-            ] = fields::<17>(row)?;
-            let ordinal = usize::try_from(word(ordinal)?)
-                .map_err(|_| invalid("readiness device index exceeds this host"))?;
-            let api = word(api)?;
-            let queues = word(queues)?;
-            let compute = word(compute)?;
-            if kind != "device"
-                || ordinal != index
-                || api >> 29 != 0
-                || api < ((1u32 << 22) | (2u32 << 12))
-                || word(driver)? != VENUS
-                || !matches!(word(device_type)?, 1..=3)
-                || queues == 0
-                || queues > max_queues
-                || compute >= queues
-                || word(queue_count)? == 0
-                || word(queue_flags)? & COMPUTE == 0
-            {
-                return Err(invalid(
-                    "readiness has a foreign driver, device or compute queue",
-                ));
-            }
-            for scalar in [driver_version, vendor, device] {
-                word(scalar)?;
-            }
-            if uuid.len() != UUID_HEX_BYTES || !uuid.bytes().all(lower_hex) {
-                return Err(invalid(
-                    "readiness diagnostic UUID is not native lowercase hex",
-                ));
-            }
-            native_text(device_name, None)?;
-            native_text(driver_name, Some(b"venus"))?;
-            native_text(driver_info, None)?;
-            let heaps = word(heaps)?;
-            if heaps == 0 || heaps > MAX_HEAPS {
-                return Err(invalid("readiness heap count exceeds its native ABI"));
-            }
-            let mut local = 0u64;
-            for heap in 0..heaps {
-                let row = lines
-                    .next()
-                    .ok_or_else(|| invalid("readiness heap row is missing"))?;
-                let [kind, device, ordinal, flags, size] = fields::<5>(row)?;
-                if kind != "heap"
-                    || word(device)? != u32::try_from(index).map_err(|_| exhausted(count))?
-                    || word(ordinal)? != heap
-                {
-                    return Err(invalid("readiness heap order or device changed"));
-                }
-                let size = number(size)?;
-                if word(flags)? & DEVICE_LOCAL != 0 {
-                    local = local
-                        .checked_add(size)
-                        .ok_or_else(|| invalid("readiness device-local heap sum overflows"))?;
-                }
-            }
-            if local == 0 {
-                return Err(invalid("readiness has no actual nonzero device-local heap"));
-            }
+        let mut lines = frame(text, HEADER, expected, max_queues)?;
+        for index in 0..expected {
+            let count = device(lines.next(), index, max_queues)?;
+            heaps(&mut lines, index, count)?;
         }
         if lines.next().is_some() {
             return Err(invalid(
@@ -852,6 +763,120 @@ impl Report {
         }
         Ok(())
     }
+}
+
+fn frame<'a>(
+    text: &'a str,
+    header: &str,
+    expected: usize,
+    max_queues: u32,
+) -> Result<std::str::SplitTerminator<'a, char>, Refusal> {
+    if max_queues == 0 || !text.is_ascii() || text.contains('\r') || !text.ends_with('\n') {
+        return Err(invalid("readiness frame or queue bound is not canonical"));
+    }
+    let mut lines = text.split_terminator('\n');
+    let count = lines
+        .next()
+        .and_then(|line| line.strip_prefix(header))
+        .ok_or_else(|| invalid("readiness frame has a foreign header"))?;
+    let count =
+        usize::try_from(word(count)?).map_err(|_| invalid("readiness count exceeds this host"))?;
+    if count != expected || count == 0 || count > hex_api::MAX_DEVICES {
+        return Err(invalid(
+            "readiness visible count differs from the full selected set",
+        ));
+    }
+    Ok(lines)
+}
+
+fn device(row: Option<&str>, index: usize, max_queues: u32) -> Result<u32, Refusal> {
+    let row = row.ok_or_else(|| invalid("readiness device row is missing"))?;
+    let [
+        kind,
+        ordinal,
+        api,
+        driver,
+        driver_version,
+        vendor,
+        device,
+        device_type,
+        uuid,
+        device_name,
+        driver_name,
+        driver_info,
+        queues,
+        compute,
+        queue_count,
+        queue_flags,
+        heaps,
+    ] = fields::<17>(row)?;
+    let ordinal = usize::try_from(word(ordinal)?)
+        .map_err(|_| invalid("readiness device index exceeds this host"))?;
+    let api = word(api)?;
+    let queues = word(queues)?;
+    let compute = word(compute)?;
+    if kind != "device"
+        || ordinal != index
+        || api >> 29 != 0
+        || api < ((1u32 << 22) | (2u32 << 12))
+        || word(driver)? != VENUS
+        || !matches!(word(device_type)?, 1..=3)
+        || queues == 0
+        || queues > max_queues
+        || compute >= queues
+        || word(queue_count)? == 0
+        || word(queue_flags)? & COMPUTE == 0
+    {
+        return Err(invalid(
+            "readiness has a foreign driver, device or compute queue",
+        ));
+    }
+    for scalar in [driver_version, vendor, device] {
+        word(scalar)?;
+    }
+    if uuid.len() != UUID_HEX_BYTES || !uuid.bytes().all(lower_hex) {
+        return Err(invalid(
+            "readiness diagnostic UUID is not native lowercase hex",
+        ));
+    }
+    native_text(device_name, None)?;
+    native_text(driver_name, Some(b"venus"))?;
+    native_text(driver_info, None)?;
+    let heaps = word(heaps)?;
+    if heaps == 0 || heaps > MAX_HEAPS {
+        return Err(invalid("readiness heap count exceeds its native ABI"));
+    }
+    Ok(heaps)
+}
+
+fn heaps(
+    lines: &mut std::str::SplitTerminator<'_, char>,
+    index: usize,
+    heaps: u32,
+) -> Result<(), Refusal> {
+    let mut local = 0u64;
+    for heap in 0..heaps {
+        let row = lines
+            .next()
+            .ok_or_else(|| invalid("readiness heap row is missing"))?;
+        let [kind, device, ordinal, flags, size] = fields::<5>(row)?;
+        if kind != "heap"
+            || word(device)? != u32::try_from(index).map_err(|_| exhausted(index))?
+            || word(ordinal)? != heap
+        {
+            return Err(invalid("readiness heap order or device changed"));
+        }
+        let size = number(size)?;
+        if word(flags)? & DEVICE_LOCAL != 0 {
+            local = local
+                .checked_add(size)
+                .ok_or_else(|| invalid("readiness device-local heap sum overflows"))?;
+        }
+    }
+    if local == 0 {
+        return Err(invalid("readiness has no actual nonzero device-local heap"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

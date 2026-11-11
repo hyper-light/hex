@@ -209,8 +209,8 @@ mod tests {
         };
         spec.id = id.clone();
         spec.class = ClassSpec::Shards(payload);
-        spec.bounds.cpu_max_milli = Some(1);
-        spec.bounds.memory_max = Some(1);
+        spec.bounds.cpu_max_milli = Some(hex_api::MIN_CPU_MILLI);
+        spec.bounds.memory_max = Some(hex_api::MIN_MEMORY);
         let floor = runtime.dedicated_resources().unwrap();
         let cost = hex_api::RuntimeCost {
             id: [1; 32],
@@ -230,8 +230,8 @@ mod tests {
         };
         spec.allocation = Some(
             cost.allocate(hex_api::CapacityResources {
-                cpu_milli: 1,
-                mem_bytes: 1,
+                cpu_milli: u64::from(hex_api::MIN_CPU_MILLI),
+                mem_bytes: hex_api::MIN_MEMORY,
                 disk_bytes: 0,
             })
             .unwrap(),
@@ -672,16 +672,13 @@ mod tests {
     }
 
     /// One bound owner of a selected GPU create: its canonical Creating record,
-    /// its provider's current LUID, and a launcher that only counts. Unix only, like
-    /// the one test that builds it (its socket path must be short).
-    #[cfg(unix)]
+    /// its provider's current LUID, and a launcher that only counts.
     struct Preboot {
         record: BoxRecord,
         luid: Option<[u8; 8]>,
         queries: AtomicUsize,
         launches: AtomicUsize,
     }
-    #[cfg(unix)]
     impl Transaction for Preboot {
         fn check_unsubmitted_pool(&self) -> Result<(), Refusal> {
             panic!("a selected create owns no pool")
@@ -744,7 +741,6 @@ mod tests {
             panic!("a fresh create attaches nothing")
         }
     }
-    #[cfg(unix)]
     impl crate::devices::Books for Preboot {
         fn records(&self) -> Result<crate::devices::Records, Refusal> {
             panic!("a selected create reads only its own record")
@@ -809,12 +805,11 @@ mod tests {
     /// AC-T7.4.1: create a selected GPU box configured by a current-boot LUID
     /// while the SAME provider reports a stale, an unknown or the matching LUID
     /// for its stable claim; expect the launcher reached only on the match.
-    #[cfg(unix)]
+    /// Windows assigns LUIDs per boot, so this runs on every target.
     #[test]
     fn selected_gpu_create_joins_current_luid_before_native_launch() {
         for current in [Some(10u64.to_le_bytes()), None, Some(9u64.to_le_bytes())] {
-            // Short fixture: the prepared selected socket obeys the sun_path bound.
-            let dir = tempfile::tempdir_in("/tmp").unwrap();
+            let dir = super::super::tests::socket_fixture();
             let (config, input, allocation) =
                 super::super::observer::config::tests::fixture(dir.path());
             let catalog = crate::devices::Catalog::parse(
@@ -1347,7 +1342,7 @@ impl GuestRuntime {
             .gpu_observer
             .as_ref()
             .ok_or(super::books::uncertain(&receipt.id)?)?;
-        let readiness = receipt.checked_readiness()?;
+        let readiness = receipt.checked_work_ready()?;
         if readiness.configuration != observer.identity()
             || readiness.max_queues != observer.queues()
         {
