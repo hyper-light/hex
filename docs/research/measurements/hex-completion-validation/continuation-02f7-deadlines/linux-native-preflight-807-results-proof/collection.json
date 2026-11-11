@@ -1,0 +1,71 @@
+{
+  "bytes": 302778,
+  "sha256": "145474da025400a80d961f80e87f9732e76f701b75d41d644724ebba2dbf7761",
+  "members": {
+    "cohort-807168c3-linux-linux-native-preflight-v2/source-before.json": {
+      "bytes": 436027,
+      "sha256": "309858b98c26d6b8466ec992674678133813284e337a657f1b64239052866d90"
+    },
+    "cohort-807168c3-linux-linux-native-preflight-v2/public-registry-seed.json": {
+      "bytes": 29110,
+      "sha256": "4ccb122e99fd0f4b329b0adee9ce4faf0d36ed5ed7de4db9c2eaf162ab8de4a1"
+    },
+    "cohort-807168c3-linux-linux-native-preflight-v2/owned-scope-limits.json": {
+      "bytes": 261,
+      "sha256": "c23a90020b86216c8169e2bddebbfbcf607bf1282d9c839464c83444afa2f0e9"
+    },
+    "cohort-807168c3-linux-linux-native-preflight-v2/original-sink-after.log": {
+      "bytes": 3492,
+      "sha256": "f3af57461fdb8d493aef7f17bb549636a4ba80936be47c34b1c06d1bd32dbc44"
+    },
+    "cohort-807168c3-linux-linux-native-preflight-v2/running.json": {
+      "bytes": 8437,
+      "sha256": "ecd4a674c47b1b8943ea036ba40ac2e904c4451048cb9f3a1b4158e02ac6b3a3"
+    },
+    "cohort-807168c3-linux-linux-native-preflight-v2/managed_creation_uses_one_prepared_pin_and_refuses_colliding_names.log": {
+      "bytes": 451,
+      "sha256": "a8a7bf4965fa7d69fbcd430dc4b33d7d6b886f898270808a2d4c2aa4261504a2"
+    },
+    "cohort-807168c3-linux-linux-native-preflight-v2/managed_population_refuses_required_failures_and_never_follows_path_reuse.log": {
+      "bytes": 458,
+      "sha256": "e9b159895a31544c73ccd86a48c442b47a293867926299a298dea6d7e1272abc"
+    },
+    "cohort-807168c3-linux-linux-native-preflight-v2/managed_observation_is_read_only_and_keeps_one_same_directory_owner.log": {
+      "bytes": 452,
+      "sha256": "f594933f88cc379323c3a41874717f5b3682911071ab29993aef038d6f8bbf2e"
+    },
+    "cohort-807168c3-linux-linux-native-preflight-v2/managed_membership_refuses_ambiguous_incomplete_or_over_bound_rows.log": {
+      "bytes": 451,
+      "sha256": "f472ba6c75cb6aef8f39fe2ea74751ae81819440b7fc1dd7b185f179ad010703"
+    },
+    "cohort-807168c3-linux-linux-native-preflight-v2/managed_limits_compare_actual_ratios_and_retain_canonical_caps.log": {
+      "bytes": 447,
+      "sha256": "df131ee36501c177f3df7edca2942bdabbcc2e0cef17d8ee6dd32ea3ee7091e1"
+    },
+    "cohort-807168c3-linux-linux-native-preflight-v2/managed_metadata_keeps_pinned_identity_and_required_read_failures.log": {
+      "bytes": 987,
+      "sha256": "989a189c12da6acf2cc3edbfcd08dbcec5c70f6376ffbb2fd019f9a62b8903e2"
+    },
+    "cohort-807168c3-linux-linux-native-preflight-v2/cold-whole-owner-preflight-five.log": {
+      "bytes": 6893,
+      "sha256": "eb900246536498adae5d457830ffdff87d1640d587e40377869f2e46feaaa8d3"
+    },
+    "cohort-807168c3-linux-linux-native-preflight-v2/source-after.json": {
+      "bytes": 436027,
+      "sha256": "309858b98c26d6b8466ec992674678133813284e337a657f1b64239052866d90"
+    },
+    "cohort-807168c3-linux-linux-native-preflight-v2/result.json": {
+      "bytes": 8787,
+      "sha256": "65d9586e6e83c96a58d06ee91ef3b686dd037dc30dc77ca7d84b0e272c131a4c"
+    },
+    "cohort-807168c3-linux-linux-native-preflight-v2/collected-binaries.json": {
+      "bytes": 8271,
+      "sha256": "d3b68d400f9b81288a1e6055f6109b702f4ac3757e63fbb7ebe9e9cdcbf40dc1"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}
