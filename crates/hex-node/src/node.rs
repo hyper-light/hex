@@ -1739,7 +1739,8 @@ impl Runtime for Node {
         }
         let _devices = self.hold_attachments(&spec.devices)?;
         if !spec.devices.is_empty() {
-            self.attachments.prepare(&spec, &self.store.all()?)?;
+            self.attachments
+                .prepare(&spec, &self.store.all()?, &self.store.all_pools()?)?;
         }
         let source = match &spec.class {
             ClassSpec::Process => return self.create_process(spec),

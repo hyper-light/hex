@@ -26,6 +26,7 @@ impl Node {
             return Ok(Vec::new());
         }
         let records = self.store.all()?;
+        let pools = self.store.all_pools()?;
         let mut reports = Vec::new();
         reports
             .try_reserve_exact(self.attachments.entries().len())
@@ -50,7 +51,7 @@ impl Node {
                     });
                 }
             }
-            let holder = self.attachments.holder(entry.info.id, &records)?;
+            let holder = self.attachments.holder(entry.info.id, &records, &pools)?;
             reports.push(entry.report(holder)?);
         }
         Ok(reports)

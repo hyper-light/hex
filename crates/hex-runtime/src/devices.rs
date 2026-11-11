@@ -1025,7 +1025,6 @@ mod authority_tests {
     fn native_scope_path_keeps_all_bits_and_refuses_legacy_absence() {
         let mut record = BoxRecord::new(
             BoxSpec {
-                route: None,
                 id: BoxId::new("reused").unwrap(),
                 class: hex_api::ClassSpec::Process,
                 bounds: hex_api::Bounds::default(),

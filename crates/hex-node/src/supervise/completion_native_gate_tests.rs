@@ -313,7 +313,7 @@ impl Lab {
                 .create(&text(managed_scope_id(&record))?, &spec.bounds),
         )?;
         let native = match self.supervisor.reserve_managed(
-            &record,
+            hex_core::record::NativeRecord::Box(&record),
             group.clone(),
             &self.scope.join(format!("{suffix}.sock")),
         ) {
@@ -433,10 +433,10 @@ impl Lab {
                 record.exit = Some(status);
                 text(self.store.put_lifecycle(&record))?;
                 if let Some(native) = native {
-                    text(
-                        self.supervisor
-                            .finalize_managed(&record, native.identity().ok()),
-                    )?;
+                    text(self.supervisor.finalize_managed(
+                        hex_core::record::NativeRecord::Box(&record),
+                        native.identity().ok(),
+                    ))?;
                 }
                 text(self.store.remove(&record.spec.id))?;
                 need(

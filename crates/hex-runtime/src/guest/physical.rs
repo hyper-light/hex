@@ -246,8 +246,6 @@ mod tests {
             function: 3,
         };
         let mut resolved = shards_api::ResolvedGpu {
-            name: None,
-            device_local_bytes: None,
             physical: shards_api::PhysicalGpu::Luid(9),
             uuid: [1; 16],
             pci: None,

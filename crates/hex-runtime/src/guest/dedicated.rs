@@ -328,7 +328,7 @@ mod tests {
             }),
         });
         let expected = install(&runtime, &id, guest);
-        assert!(Arc::ptr_eq(
+        assert!(triomphe::Arc::ptr_eq(
             &runtime.selected_running(&id).unwrap().unwrap(),
             &expected
         ));
