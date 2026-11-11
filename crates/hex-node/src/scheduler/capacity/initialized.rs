@@ -644,4 +644,200 @@ mod tests {
         );
         hex_sim::index::FitIndex::new(&[node]).unwrap();
     }
+    fn pending_gpu_and_shared_cpu_fixture(
+        phase: BackingPhase,
+        cause: hex_api::LifecycleCause,
+    ) -> (NodeSpec, BackingKey, hex_api::DeviceId) {
+        let cold = BackingKey {
+            pool: [0x34; 32],
+            generation: [0x35; 16],
+        };
+        let warm = BackingKey {
+            pool: [0x36; 32],
+            generation: [0x37; 16],
+        };
+        let id = DeviceId {
+            kind: DeviceKind::Gpu,
+            key: 2,
+        };
+        let mut gpu = route(
+            hex_api::Class::Shards,
+            Execution::ShardsDedicated,
+            GpuEligibility::Required,
+        );
+        gpu.cost = Some(profile());
+        gpu.backing = Some(cold);
+        let mut shared = route(
+            hex_api::Class::Oci,
+            Execution::ShardsShared,
+            GpuEligibility::None,
+        );
+        shared.backing = Some(warm);
+        let reports = vec![
+            (
+                Class::Oci,
+                Some(report(
+                    vec![route(
+                        hex_api::Class::Process,
+                        Execution::Native,
+                        GpuEligibility::None,
+                    )],
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )),
+            ),
+            (
+                Class::Shards,
+                Some(report(
+                    vec![gpu, shared],
+                    Vec::new(),
+                    Vec::new(),
+                    vec![
+                        BackingOffer {
+                            key: cold,
+                            cost: profile(),
+                            phase,
+                            devices: vec![id],
+                        },
+                        BackingOffer {
+                            key: warm,
+                            cost: profile(),
+                            phase: BackingPhase::Live,
+                            devices: Vec::new(),
+                        },
+                    ],
+                )),
+            ),
+        ];
+        let mut measured = facts();
+        measured.gpus.clear();
+        let mut cluster = Cluster::single_owner(Vec::new(), Vec::new());
+        let mut node = NodeSpec::new(NodeId(0), Resources::default());
+        node.platform.os = Os::Linux;
+        node.platform.arch = hex_sim::model::Arch::X86_64;
+        node.virt.kvm = true;
+        apply(
+            reports,
+            &measured,
+            &mut cluster,
+            "00112233445566778899aabbccddeeff",
+            &mut node,
+            Resources::default(),
+        )
+        .unwrap();
+        retain_unavailable(
+            &mut node,
+            None,
+            &[hex_api::BackendUnavailable::from_refusal(
+                hex_api::Class::Shards,
+                Refusal::Backing { key: cold, cause },
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        (node, cold, id)
+    }
+
+    fn original_pending_request(gpu: bool) -> hex_sim::model::Demand {
+        hex_sim::model::Demand {
+            class: if gpu { Class::Shards } else { Class::Oci },
+            kind: hex_sim::model::Kind::Plain,
+            need: Resources {
+                cpu_milli: 100,
+                mem_bytes: hex_api::MIN_MEMORY,
+                disk_bytes: 0,
+                gpus: u32::from(gpu),
+            },
+            ask: hex_sim::model::Ask {
+                runtime_class: Some(if gpu {
+                    hex_api::Class::Shards
+                } else {
+                    hex_api::Class::Oci
+                }),
+                os: Some(Os::Linux),
+                arch: Some(hex_sim::model::Arch::X86_64),
+                ..hex_sim::model::Ask::default()
+            },
+        }
+    }
+
+    /// AC-T7.4.1 source-first: a typed cold Pending is not fresh GPU observation or lost provisioning authority.
+    #[test]
+    fn cold_pending_gpu_source_keeps_exact_charged_provisioning_and_unrelated_shared_cpu() {
+        use hex_sim::index::{FitIndex, Verdict};
+        let (node, key, id) = pending_gpu_and_shared_cpu_fixture(
+            BackingPhase::Prepared,
+            hex_api::LifecycleCause::Pending,
+        );
+        assert!(
+            node.devices.is_empty(),
+            "provisioning must not fabricate measured metadata"
+        );
+        let mut index = FitIndex::new(&[node]).unwrap();
+        let fresh = index
+            .verdict(NodeId(0), &original_pending_request(true))
+            .unwrap();
+        let cpu = index
+            .verdict(NodeId(0), &original_pending_request(false))
+            .unwrap();
+        let before = index.key(NodeId(0)).unwrap();
+        let grant = index.grant_backing(NodeId(0), key);
+        eprintln!(
+            "cold pending original: fresh={fresh:?}; unrelated_shared_cpu={cpu:?}; exact_grant={grant:?}; physical_observations=0; native_effect=false"
+        );
+        let grant = grant.expect(
+            "canonical Prepared full claims/profile must remain provisionable by the SAME Index",
+        );
+        assert_eq!(grant.key, key);
+        assert_eq!(grant.devices, vec![id]);
+        assert_eq!(
+            grant.allocation,
+            profile()
+                .allocate(hex_api::CapacityResources::default())
+                .unwrap()
+        );
+        assert_eq!(fresh, Verdict::NoGpu);
+        assert_eq!(cpu, Verdict::Admits);
+        let after = index.key(NodeId(0)).unwrap();
+        assert_eq!(
+            before.cpu_milli.checked_sub(after.cpu_milli),
+            Some(grant.allocation.resources.cpu_milli)
+        );
+        assert_eq!(
+            before.mem_bytes.checked_sub(after.mem_bytes),
+            Some(grant.allocation.resources.mem_bytes)
+        );
+    }
+
+    /// AC-T7.4.1 source-first: an unavailable Live GPU key is accounting-only, not failure of a separate shared CPU key.
+    #[test]
+    fn live_uncertain_gpu_key_does_not_suppress_unrelated_shared_cpu_or_release_claims() {
+        use hex_sim::index::{FitIndex, Verdict};
+        let (node, key, id) = pending_gpu_and_shared_cpu_fixture(
+            BackingPhase::Live,
+            hex_api::LifecycleCause::Uncertain,
+        );
+        let mut index = FitIndex::new(&[node]).unwrap();
+        let before = index.key(NodeId(0)).unwrap();
+        let fresh = index
+            .verdict(NodeId(0), &original_pending_request(true))
+            .unwrap();
+        let cpu = index
+            .verdict(NodeId(0), &original_pending_request(false))
+            .unwrap();
+        let retained = index.grant_backing(NodeId(0), key).unwrap();
+        eprintln!(
+            "live uncertain original: fresh={fresh:?}; unrelated_shared_cpu={cpu:?}; retained={retained:?}; physical_observations=0; native_effect=false"
+        );
+        assert_eq!(retained.key, key);
+        assert_eq!(retained.devices, vec![id]);
+        assert_eq!(
+            index.key(NodeId(0)).unwrap(),
+            before,
+            "a retained grant lookup cannot refund resources"
+        );
+        assert_eq!(fresh, Verdict::NoGpu);
+        assert_eq!(cpu, Verdict::Admits);
+    }
 }
