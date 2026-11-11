@@ -130,7 +130,10 @@ are checked, lifecycle/authority and waits are unchanged; primary grammar and
 derived bounds are recorded above. Scoped rustfmt/parser+diff checks only. All
 compiler/strict/new control execution, meaningful mutation, native closure, actual
 loader/ICD/driver/guest GPU compute, measured resources, supported VM effects and
-performance remain ROOT-owned/unverified. Source reuses the pre-existing Refusal
-OS factory and constructor/Bounds checks; it is not an audit claim that all those
-existing allocation/error seams are panic-free. Current separate family/layout
+performance remain ROOT-owned/unverified. Source reuses the pre-existing standard std::env::var_os OsString acquisition
+seam (the explicitly requested from_env contract), Refusal OS factory and
+constructor/Bounds checks. No new decoder-owned String/Vec/Path allocation uses
+those infallible ownership paths. Environment acquisition itself still has the
+standard library allocation boundary; this is not an audit claim that those
+existing acquisition/allocation/error seams are panic-free. Current separate family/layout
 checks and earlier green sources are not this new loader's test result.

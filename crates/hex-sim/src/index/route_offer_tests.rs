@@ -1152,18 +1152,16 @@ fn committed_subset_recovery_keeps_released_parent_and_does_not_repick_current_r
         Some(current.key)
     );
     assert_eq!(index.verdict(NodeId(0), &request).unwrap(), Verdict::NoGpu);
-    let allocation = Some(
-        profile()
-            .allocate(crate::model::capacity_resources(request.need))
-            .unwrap(),
-    );
+    let allocation = profile()
+        .allocate(crate::model::capacity_resources(request.need))
+        .unwrap();
     let before = index.key(NodeId(0)).unwrap();
     let restored = index.take_recovered_routed(
         NodeId(0),
         WorkloadId(91),
         &request,
         &[0],
-        allocation,
+        Some(allocation),
         Some(original),
     );
     eprintln!(
@@ -1180,7 +1178,7 @@ fn committed_subset_recovery_keeps_released_parent_and_does_not_repick_current_r
     );
     assert_eq!(
         index.key(NodeId(0)).unwrap().cpu_milli,
-        before.cpu_milli - allocation.unwrap().resources.cpu_milli
+        before.cpu_milli - allocation.resources.cpu_milli
     );
     let grant = index.grant_backing(NodeId(0), current.key).unwrap();
     assert_eq!(grant.devices, current.devices);
@@ -1190,7 +1188,7 @@ fn committed_subset_recovery_keeps_released_parent_and_does_not_repick_current_r
             NodeId(0),
             WorkloadId(91),
             &request,
-            allocation,
+            Some(allocation),
             Some(original),
         )
         .unwrap();

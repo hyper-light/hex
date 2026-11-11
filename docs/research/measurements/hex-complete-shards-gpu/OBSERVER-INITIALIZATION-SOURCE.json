@@ -56,9 +56,10 @@
       "sha256": "db18ddb653f60213adf01b60a9b44c35da43dd009abc11b222f868c63ad5b2a4"
     },
     "docs/research/measurements/hex-complete-shards-gpu/OBSERVER-INITIALIZATION-SOURCE.md": {
-      "bytes": 8366,
-      "sha256": "c88fbd701d6e0b36b56562ef442e751a6abb9a8a9a025b64397af44532d093ad"
+      "bytes": 8644,
+      "sha256": "c4a9919e881070c897131ec021e2528750abf6f4a1198dabf92c9d685c216872"
     }
   },
-  "remaining": "ROOT exact CLI snippet/variable registration and joined compile/new controls; actual reviewed observer artifacts/evidence/complete closure, native pre-main/worker/renderer/guest execution, resources, mutation and performance proof. Hashing/model byte files are not native readiness."
+  "remaining": "ROOT exact CLI snippet/variable registration and joined compile/new controls; actual reviewed observer artifacts/evidence/complete closure, native pre-main/worker/renderer/guest execution, resources, mutation and performance proof. Hashing/model byte files are not native readiness.",
+  "existing_seams": "from_env uses existing std::env::var_os OsString acquisition pattern required by the accepted API. Its standard-library allocation boundary, and existing Refusal::os/Bounds/constructor error allocation seams, are explicitly not a new R01 audit/completion claim. New decoder-owned strings/Vec/Path storage is fallibly reserved."
 }
