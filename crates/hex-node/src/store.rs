@@ -387,7 +387,7 @@ impl Store {
         scoped: bool,
     ) -> Result<(), Refusal> {
         let (dir, durable) = if scoped {
-            (&self.disk, true)
+            (self.disk.as_path(), true)
         } else {
             self.place(record)
         };
