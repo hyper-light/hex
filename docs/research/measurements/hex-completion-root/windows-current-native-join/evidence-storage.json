@@ -1,0 +1,20 @@
+[
+  {
+    "original": "windows-current-join-readonly-v2.cli.log",
+    "raw_sha256": "e390a3131657d42136fdd2baa1941f741f5e2f3c4e06cd2201a0c47affd4888a",
+    "raw_bytes": 1488,
+    "stored": "windows-current-join-readonly-v2.cli.log.gz",
+    "stored_sha256": "ebd32152a57bd7b66658cf0a3b300a45eb8dcbe8e2297a4d9c4121386267b35c",
+    "original_preserved": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/windows-current-join-readonly-v2.cli.log",
+    "reason": "raw native line endings retained byte-exact; no trim or lint exception"
+  },
+  {
+    "original": "windows-current-join-readonly-v3.cli.log",
+    "raw_sha256": "2743aa25e6300ac9908b7d021a3b2089b22328ad47ee83ed00a4aca0647007cf",
+    "raw_bytes": 751,
+    "stored": "windows-current-join-readonly-v3.cli.log.gz",
+    "stored_sha256": "beee4a1a75fa32edcbb13cb1ce24a875136dc2ebd9ca2b2972279d26d7f6e795",
+    "original_preserved": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/windows-current-join-readonly-v3.cli.log",
+    "reason": "raw native line endings retained byte-exact; no trim or lint exception"
+  }
+]

@@ -1,0 +1,18 @@
+{
+  "pid": 53426,
+  "command": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--on",
+    "f766f09294f2e17e3b8a631ffd4e6a4b",
+    "--needs",
+    "cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--quiet",
+    "--stdin",
+    "--",
+    "powershell.exe -NoProfile -NonInteractive -Command \"Invoke-Expression ([Console]::In.ReadToEnd())\""
+  ],
+  "script_sha256": "590508e3f4e87e67a07f28710f94cd91d1f31b5f810ba6fafdb35176ccd5141e",
+  "difference": "explicit char[] Split overload; v2 actual single positive mapping plus two empty-token harness errors retained"
+}

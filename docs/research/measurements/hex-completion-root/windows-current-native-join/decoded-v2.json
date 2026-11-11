@@ -1,0 +1,44 @@
+{
+  "scope": "ROOT exact current CM PRESENT filtered-PNP -> KMT LUID query only; no compute/HCS/VM/driver/service changes",
+  "pid": 330424,
+  "priority": "BelowNormal",
+  "pointer_bytes": 8,
+  "open_struct_bytes": 24,
+  "adapter_count": 1,
+  "rows": [
+    {
+      "pnp_instance": "PCI\\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\\4&35FE04F8&0&0041",
+      "name": "AMD Radeon(TM) 8060S Graphics",
+      "driver": "32.0.22032.6002",
+      "interface": "\\\\?\\PCI#VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1#4&35fe04f8&0&0041#{1ca05180-a699-450a-9a0c-de4fbe3ddd89}",
+      "interface_class": "1ca05180-a699-450a-9a0c-de4fbe3ddd89",
+      "open_ntstatus": 0,
+      "luid": "0000000000014e57",
+      "close_ntstatus": 0
+    },
+    {
+      "pnp_instance": "PCI\\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\\4&35FE04F8&0&0041",
+      "name": "AMD Radeon(TM) 8060S Graphics",
+      "driver": "32.0.22032.6002",
+      "interface": "",
+      "interface_class": "1ca05180-a699-450a-9a0c-de4fbe3ddd89",
+      "open_ntstatus": -1073741765,
+      "luid": null,
+      "close_ntstatus": null
+    },
+    {
+      "pnp_instance": "PCI\\VEN_1002&DEV_1586&SUBSYS_1FB31043&REV_C1\\4&35FE04F8&0&0041",
+      "name": "AMD Radeon(TM) 8060S Graphics",
+      "driver": "32.0.22032.6002",
+      "interface": "",
+      "interface_class": "1ca05180-a699-450a-9a0c-de4fbe3ddd89",
+      "open_ntstatus": -1073741765,
+      "luid": null,
+      "close_ntstatus": null
+    }
+  ],
+  "kmt_opened": 1,
+  "kmt_closed": 1,
+  "wrapper_closes_balanced": true,
+  "private_proof": "C:\\Users\\corph\\.cache\\hex-lead\\current-gpu-join-8ccb-readonly-v2"
+}
