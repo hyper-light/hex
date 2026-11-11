@@ -168,8 +168,10 @@ impl FirecrackerRuntime {
     }
 
     fn vm_io() -> Result<shards_api::LaunchIo, Refusal> {
-        let output =
-            File::open("/dev/null").map_err(|e| Refusal::os("opening VMM output sink", e))?;
+        let output = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .map_err(|e| Refusal::os("opening VMM output sink", e))?;
         let error = output
             .try_clone()
             .map_err(|e| Refusal::os("duplicating VMM output sink", e))?;

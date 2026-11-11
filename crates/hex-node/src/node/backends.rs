@@ -478,13 +478,7 @@ impl Node {
             .get()
             .and_then(|backends| backends.firecracker.as_ref())
         {
-            let observations = match backend.physical_observations() {
-                Ok(observations) => observations,
-                Err(refusal) => {
-                    tracing::warn!(target: "hex.node", event = "gpu.observation.unavailable", %refusal);
-                    Vec::new()
-                }
-            };
+            let observations = backend.physical_observations()?;
             report
                 .devices
                 .try_reserve_exact(observations.len())

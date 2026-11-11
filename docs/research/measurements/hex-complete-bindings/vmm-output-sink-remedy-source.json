@@ -1,0 +1,30 @@
+{
+  "parent": "c4680bbf38c22f4bea4ecf0380b7927c05896211",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": {
+    "path": "crates/hex-runtime/src/firecracker/native.rs",
+    "sha256": "f990fe6d2313fd770f2a826855e5430e98ed9d79a059267519917c898895393d"
+  },
+  "original_red": {
+    "pin": "0fe3013065848c67c90eb1d18e19cafa930287a7",
+    "selected": 1,
+    "passed": 0,
+    "failed": 1,
+    "stdout_errno": 9,
+    "stderr_errno": 9,
+    "log_sha256": "4e375a488abfc9ac4c54c75ae6fcc1aaf92e8b5ac2dd3e46cf1f8e950da9530e"
+  },
+  "original_io_tests_byte_identical": true,
+  "original_io_tests_sha256": "5f219026b108d3ec9993ddbd8b9aa2fe9a40be04f2367366c99ed5e3b177e5f2",
+  "change": "ONLY File::open -> write-only OpenOptions for original owned /dev/null outputs; existing duplication/RAII ownership/flags/lifecycle unchanged",
+  "checks": {
+    "rustfmt": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "targeted_green": "UNRUN",
+    "native_effects": 0,
+    "jobs_started": 0
+  }
+}
