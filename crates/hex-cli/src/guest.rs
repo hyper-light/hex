@@ -378,12 +378,10 @@ fn read_nr_open() -> Result<u64, Refusal> {
     std::fs::File::open(NR_OPEN)
         .and_then(|file| file.take(bound).read_to_string(&mut text))
         .map_err(|e| Refusal::os("reading fs.nr_open", e))?;
-    text.trim_end()
-        .parse()
-        .map_err(|_| Refusal::Invalid {
-            what: "fs.nr_open",
-            why: format!("{text:?} isn't a count"),
-        })
+    text.trim_end().parse().map_err(|_| Refusal::Invalid {
+        what: "fs.nr_open",
+        why: format!("{text:?} isn't a count"),
+    })
 }
 
 /// The node's descriptor limit, from its `need` (`hex_node::netns::needed_on_this_host`'s total, the one count, which
