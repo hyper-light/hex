@@ -53,9 +53,9 @@ fn physical_claims_reach_the_configured_backend_route_for_create_and_run() {
     assert!(node.process.list().unwrap().is_empty());
 }
 
-struct NativeReporting {
-    inner: hex_api::sim::SimRuntime,
-    report: hex_api::Capacity,
+pub(super) struct NativeReporting {
+    pub(super) inner: hex_api::sim::SimRuntime,
+    pub(super) report: hex_api::Capacity,
 }
 
 impl Runtime for NativeReporting {

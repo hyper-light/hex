@@ -567,6 +567,7 @@ mod tests {
                 vsock: "/model/v".into(),
             },
             release_on_stop: false,
+            active: false,
             released: std::sync::atomic::AtomicBool::new(true),
             attaches: AtomicUsize::new(0),
             stops: AtomicUsize::new(0),
@@ -574,6 +575,9 @@ mod tests {
         .unwrap();
         let owner = Arc::new(Cold {
             row: Mutex::new(None),
+            shared: Mutex::new(None),
+            native_report: None,
+            physical: None,
             effects: AtomicUsize::new(0),
             queries: AtomicUsize::new(0),
             native: Some(native.clone()),
@@ -963,6 +967,7 @@ mod tests {
                 vsock: "/model/v".into(),
             },
             release_on_stop: false,
+            active: false,
             released: std::sync::atomic::AtomicBool::new(false),
             attaches: AtomicUsize::new(0),
             stops: AtomicUsize::new(0),
@@ -970,6 +975,9 @@ mod tests {
         .unwrap();
         let owner = Arc::new(Cold {
             row: Mutex::new(None),
+            shared: Mutex::new(None),
+            native_report: None,
+            physical: None,
             effects: AtomicUsize::new(0),
             queries: AtomicUsize::new(0),
             native: Some(native.clone()),
@@ -1130,8 +1138,271 @@ mod tests {
         capacity.check().unwrap();
     }
 
+    /// ORIGINAL AC-T7.4.1: the actual composite OCI entrypoint must normalize its
+    /// raw native prefix through SAME Books facts/holders before strict GPU publication.
+    /// Inputs are explicit native/renderer/guest models, not execution evidence.
+    #[test]
+    fn with_guest_normalizes_native_oci_before_checked_shards_slots() {
+        use hex_api::{
+            Capacity, CapacityResources, Class, DeviceHolder, DeviceInfo, Execution,
+            GpuEligibility, ImageOs, ImagePlatform, RouteKey, RouteOffer, Runtime,
+        };
+        use std::fmt::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (config, input, allocation) = observer::config::tests::fixture(dir.path());
+        let standalone = Arc::new(NoEffects(AtomicUsize::new(0)));
+        let catalog = devices::Catalog::parse(
+            b"hex-devices-1\ngpu\t256\tunmeasured\t777\tshards-gpu\tpci:0000:01:00.0\t\n",
+        )
+        .unwrap();
+        let runtime = GuestRuntime::new(standalone.clone(), config)
+            .recorded_at(dir.path().join("guest"))
+            .with_runtime_paths(
+                shards_api::RuntimePaths::new(dir.path().join("cache"), dir.path().join("home"))
+                    .unwrap(),
+            )
+            .with_runtime_cost(allocation.cost)
+            .unwrap()
+            .with_gpu_catalog(triomphe::Arc::try_new(catalog).unwrap())
+            .with_gpu_observer(input)
+            .unwrap();
+        let definition = runtime.gpu_backing_definition().unwrap().unwrap();
+        let key = BackingKey {
+            pool: definition.pool,
+            generation: [7; 16],
+        };
+        let factual = DeviceInfo {
+            id: definition.devices[0],
+            model: "same-native-provider".into(),
+            size: 4096,
+            holder: None,
+        };
+        let mut canonical_info = factual.try_clone().unwrap();
+        canonical_info.holder = Some(DeviceHolder::Backing(key));
+        let room = CapacityResources {
+            cpu_milli: 8000,
+            mem_bytes: 1 << 30,
+            disk_bytes: 1 << 30,
+        };
+        let native = triomphe::Arc::try_new(RecoveringNative {
+            identity: shards_api::Identity {
+                pid: 42,
+                started: 7,
+                vsock: "/model/v".into(),
+            },
+            release_on_stop: false,
+            active: true,
+            released: std::sync::atomic::AtomicBool::new(false),
+            attaches: AtomicUsize::new(0),
+            stops: AtomicUsize::new(0),
+        })
+        .unwrap();
+        let owner = Arc::new(Cold {
+            row: Mutex::new(None),
+            shared: Mutex::new(None),
+            native_report: Some(Capacity {
+                id: "same-books-native-owner".into(),
+                total: room,
+                free: room,
+                devices: vec![canonical_info.try_clone().unwrap()],
+                routes: Vec::new(),
+                device_routes: Vec::new(),
+                backings: Vec::new(),
+                cost: None,
+            }),
+            physical: Some(vec![factual]),
+            effects: AtomicUsize::new(0),
+            queries: AtomicUsize::new(0),
+            native: Some(native.clone()),
+            finalized: AtomicUsize::new(0),
+            luid: None,
+            launches: AtomicUsize::new(0),
+        });
+        let books: Arc<dyn Books> = owner.clone();
+        runtime.bind_books(Arc::downgrade(&books)).unwrap();
+        let shared = runtime.prepare_backing().unwrap();
+        let prepared = runtime.prepare_gpu_backing().unwrap().unwrap();
+        assert_eq!(prepared.key, key);
+        assert_ne!(shared.key, key);
+        let mut row = owner.row.lock().unwrap().take().unwrap();
+        row.accept_grant(&BackingGrant {
+            key,
+            allocation,
+            devices: definition.devices.clone(),
+        })
+        .unwrap();
+        let mut receipt = Receipt::intent(
+            PoolRecord::decode(&row.encode().unwrap()).unwrap(),
+            definition.physical.clone(),
+            &runtime.config,
+        )
+        .unwrap();
+        let scope = row.scope();
+        let physical = receipt.physical[0];
+        receipt.report = Some(shards_api::physical::GpuReport {
+            scope: *scope.bytes(),
+            probe: shards_api::GpuProbe {
+                devices: vec![shards_api::ResolvedGpu {
+                    physical,
+                    pci: Some(physical),
+                    luid: None,
+                    uuid: [3; 16],
+                    name: None,
+                    device_local_bytes: None,
+                }],
+                host_visible_bytes: 1,
+            },
+        });
+        let inventory = format!(
+            "hex-vulkan-guest-inventory 1 1\ndevice 0 4202496 22 1 1 2 2 {} 677075 76656e7573 4d657361 2 1 1 2 1\nheap 0 0 1 4096\n",
+            "03".repeat(16)
+        );
+        let observer = runtime.gpu_observer.as_ref().unwrap();
+        receipt.readiness = Some(observer::Evidence {
+            scope,
+            configuration: observer.identity(),
+            max_queues: observer.queues(),
+            report: observer::Report::parse(inventory.as_bytes(), 1, observer.queues()).unwrap(),
+        });
+        let mut configuration = String::new();
+        for byte in observer.identity() {
+            write!(&mut configuration, "{byte:02x}").unwrap();
+        }
+        let mut stdout = String::new();
+        for byte in inventory.as_bytes() {
+            write!(&mut stdout, "{byte:02x}").unwrap();
+        }
+        receipt.attempt = observer::Attempt::parse(&format!(
+            "{configuration} {} complete eof {} {stdout} eof {} -",
+            observer.queues(),
+            observer.output_bytes(1).unwrap(),
+            observer.stderr_bytes(),
+        ))
+        .unwrap();
+        receipt.phase =
+            Phase::Running(super::super::shared::copy_identity(&native.identity).unwrap());
+        row.init = Some(hex_core::record::ProcId {
+            pid: native.identity.pid,
+            start_ticks: native.identity.started,
+        });
+        row.phase = BackingPhase::Live;
+        pool::write(&definition.path, &receipt).unwrap();
+        runtime.preflight_backing(&row).unwrap();
+        receipt.checked_readiness().unwrap();
+        *owner.row.lock().unwrap() = Some(row);
+        // Prove the actual charged observer/provider/catalog join succeeds before
+        // exercising the composite entrypoint; missing readiness is not this oracle.
+        assert_eq!(
+            runtime
+                .checked_physical(&definition.devices, &definition.physical)
+                .unwrap(),
+            [canonical_info.try_clone().unwrap()]
+        );
+        assert_eq!(
+            Books::capacity(owner.as_ref()).unwrap().devices,
+            [canonical_info.try_clone().unwrap()]
+        );
+        let image = ImagePlatform {
+            os: ImageOs::Windows,
+            arch: super::super::route::host_platform().unwrap().arch,
+        };
+        let prefix = Capacity {
+            id: "original-native-oci-pool".into(),
+            total: room,
+            free: CapacityResources {
+                cpu_milli: 4000,
+                mem_bytes: 1 << 29,
+                disk_bytes: 1 << 29,
+            },
+            devices: vec![DeviceInfo {
+                id: canonical_info.id,
+                model: "unmeasured".into(),
+                size: 777,
+                holder: None,
+            }],
+            routes: vec![
+                RouteOffer {
+                    key: RouteKey {
+                        class: Class::Process,
+                        image,
+                        execution: Execution::Native,
+                        gpu: GpuEligibility::None,
+                    },
+                    cost: None,
+                    backing: None,
+                },
+                RouteOffer {
+                    key: RouteKey {
+                        class: Class::Oci,
+                        image,
+                        execution: Execution::Native,
+                        gpu: GpuEligibility::Any,
+                    },
+                    cost: None,
+                    backing: None,
+                },
+            ],
+            device_routes: vec![2],
+            backings: Vec::new(),
+            cost: None,
+        };
+        prefix.check().unwrap();
+        assert_ne!(
+            prefix.devices,
+            Books::capacity(owner.as_ref()).unwrap().devices
+        );
+        let node = super::super::WithGuest::configured(
+            super::super::tests::native_reporting(prefix.try_clone().unwrap()),
+            runtime,
+            |_host, _class| Ok(super::super::Side::Host),
+        );
+        let result = node.capacity(Class::Oci);
+        assert_eq!(owner.launches.load(Ordering::SeqCst), 0);
+        assert_eq!(owner.finalized.load(Ordering::SeqCst), 0);
+        assert_eq!(native.stops.load(Ordering::SeqCst), 0);
+        assert_eq!(standalone.0.load(Ordering::SeqCst), 0);
+        assert!(
+            result.is_ok(),
+            "actual WithGuest normalized its native prefix too late: {result:?}"
+        );
+        let capacity = result.unwrap().unwrap();
+        assert_eq!(capacity.id, prefix.id);
+        assert_eq!(capacity.total, prefix.total);
+        assert_eq!(capacity.free, prefix.free);
+        assert_eq!(capacity.routes[..prefix.routes.len()], prefix.routes);
+        assert_eq!(capacity.device_routes[0] & 3, prefix.device_routes[0]);
+        assert_eq!(capacity.devices, [canonical_info]);
+        assert!(capacity.backings.iter().any(|backing| backing.key == key));
+        assert!(
+            capacity
+                .backings
+                .iter()
+                .any(|backing| backing.key == shared.key)
+        );
+        capacity.check().unwrap();
+        // An actual native owner assertion cannot be overwritten with the
+        // canonical holder: conflicting Some is authority failure, not a placeholder.
+        let mut conflicting = prefix;
+        conflicting.devices[0].holder = Some(DeviceHolder::Box(
+            hex_api::BoxId::new("foreign-native-owner").unwrap(),
+        ));
+        conflicting.check().unwrap();
+        let conflict = super::super::WithGuest::configured(
+            super::super::tests::native_reporting(conflicting),
+            node.oci,
+            |_host, _class| Ok(super::super::Side::Host),
+        );
+        assert!(conflict.capacity(Class::Oci).is_err());
+        assert_eq!(owner.launches.load(Ordering::SeqCst), 0);
+        assert_eq!(standalone.0.load(Ordering::SeqCst), 0);
+    }
+
     struct Cold {
         row: Mutex<Option<PoolRecord>>,
+        shared: Mutex<Option<PoolRecord>>,
+        native_report: Option<hex_api::Capacity>,
+        physical: Option<Vec<hex_api::DeviceInfo>>,
         effects: AtomicUsize,
         queries: AtomicUsize,
         native: Option<triomphe::Arc<RecoveringNative>>,
@@ -1154,13 +1425,13 @@ mod tests {
             Ok(Records::new())
         }
         fn pool_records(&self) -> Result<PoolRecords, Refusal> {
-            self.row
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|row| PoolRecord::decode(&row.encode()?))
-                .transpose()
-                .map(|row| row.into_iter().collect())
+            let mut rows = Vec::new();
+            for slot in [&self.row, &self.shared] {
+                if let Some(row) = slot.lock().unwrap().as_ref() {
+                    rows.push(PoolRecord::decode(&row.encode()?)?);
+                }
+            }
+            Ok(rows)
         }
         fn prepare_pool(
             &self,
@@ -1169,7 +1440,12 @@ mod tests {
             cost: hex_api::RuntimeCost,
             devices: &[hex_api::DeviceId],
         ) -> Result<BackingOffer, Refusal> {
-            let mut row = self.row.lock().unwrap();
+            let slot = if execution == hex_api::Execution::ShardsShared {
+                &self.shared
+            } else {
+                &self.row
+            };
+            let mut row = slot.lock().unwrap();
             if row.is_none() {
                 *row = Some(PoolRecord {
                     version: hex_core::record::RECORD_VERSION,
@@ -1189,6 +1465,9 @@ mod tests {
             row.as_ref().ok_or_else(refused_model)?.offer()
         }
         fn capacity(&self) -> Result<hex_api::Capacity, Refusal> {
+            if let Some(report) = &self.native_report {
+                return report.try_clone();
+            }
             let room = hex_api::CapacityResources {
                 cpu_milli: 8000,
                 mem_bytes: 1 << 30,
@@ -1207,7 +1486,12 @@ mod tests {
         }
         fn physical_devices(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
             self.queries.fetch_add(1, Ordering::SeqCst);
-            Err(refused_model())
+            self.physical
+                .as_ref()
+                .ok_or_else(refused_model)?
+                .iter()
+                .map(hex_api::DeviceInfo::try_clone)
+                .collect()
         }
         fn physical_luid(&self, _: hex_api::DeviceId) -> Result<[u8; 8], Refusal> {
             self.queries.fetch_add(1, Ordering::SeqCst);
@@ -1245,6 +1529,7 @@ mod tests {
     struct RecoveringNative {
         identity: shards_api::Identity,
         release_on_stop: bool,
+        active: bool,
         released: std::sync::atomic::AtomicBool,
         attaches: AtomicUsize,
         stops: AtomicUsize,
@@ -1262,6 +1547,9 @@ mod tests {
             Ok(())
         }
         fn terminal(&self) -> Result<Option<shards_api::ManagedEnd>, shards_api::Refusal> {
+            if self.active && !self.released.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
             Ok(Some(shards_api::ManagedEnd {
                 status: shards_api::ManagedStatus::Code(7),
                 scope: if self.released.load(Ordering::SeqCst) {
@@ -1425,6 +1713,7 @@ mod tests {
                     vsock: "/model/v".into(),
                 },
                 release_on_stop,
+                active: false,
                 released: std::sync::atomic::AtomicBool::new(false),
                 attaches: AtomicUsize::new(0),
                 stops: AtomicUsize::new(0),
@@ -1432,6 +1721,9 @@ mod tests {
             .unwrap();
             let owner = Arc::new(Cold {
                 row: Mutex::new(None),
+                shared: Mutex::new(None),
+                native_report: None,
+                physical: None,
                 effects: AtomicUsize::new(0),
                 queries: AtomicUsize::new(0),
                 native: Some(native.clone()),
@@ -1521,6 +1813,9 @@ mod tests {
             .unwrap();
         let owner = Arc::new(Cold {
             row: Mutex::new(None),
+            shared: Mutex::new(None),
+            native_report: None,
+            physical: None,
             effects: AtomicUsize::new(0),
             queries: AtomicUsize::new(0),
             native: None,

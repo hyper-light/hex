@@ -1533,3 +1533,11 @@ fn runtime_capacity_keeps_smaller_actual_guest_room() {
 
 #[path = "device_routing_tests.rs"]
 mod device_routing_tests;
+
+/// Reuse the actual native-prefix adapter in the same-owner composition controls.
+pub(super) fn native_reporting(report: hex_api::Capacity) -> impl Runtime {
+    device_routing_tests::NativeReporting {
+        inner: hex_api::sim::SimRuntime::new(),
+        report,
+    }
+}
