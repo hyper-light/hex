@@ -209,8 +209,8 @@ mod tests {
         };
         spec.id = id.clone();
         spec.class = ClassSpec::Shards(payload);
-        spec.bounds.cpu_max_milli = Some(1);
-        spec.bounds.memory_max = Some(1);
+        spec.bounds.cpu_max_milli = Some(hex_api::MIN_CPU_MILLI);
+        spec.bounds.memory_max = Some(hex_api::MIN_MEMORY);
         let floor = runtime.dedicated_resources().unwrap();
         let cost = hex_api::RuntimeCost {
             id: [1; 32],
@@ -230,8 +230,8 @@ mod tests {
         };
         spec.allocation = Some(
             cost.allocate(hex_api::CapacityResources {
-                cpu_milli: 1,
-                mem_bytes: 1,
+                cpu_milli: u64::from(hex_api::MIN_CPU_MILLI),
+                mem_bytes: hex_api::MIN_MEMORY,
                 disk_bytes: 0,
             })
             .unwrap(),
@@ -669,6 +669,236 @@ mod tests {
         assert_eq!(runtime.dedicated.lock().unwrap().len(), 3);
         drop((pending, sibling, boxed));
         assert!(runtime.dedicated.lock().unwrap().is_empty());
+    }
+
+    /// One bound owner of a selected GPU create: its canonical Creating record,
+    /// its provider's current LUID, and a launcher that only counts.
+    struct Preboot {
+        record: BoxRecord,
+        luid: Option<[u8; 8]>,
+        queries: AtomicUsize,
+        launches: AtomicUsize,
+    }
+    impl Transaction for Preboot {
+        fn check_unsubmitted_pool(&self) -> Result<(), Refusal> {
+            panic!("a selected create owns no pool")
+        }
+        fn records(&self) -> Result<crate::devices::Records, Refusal> {
+            panic!("a selected create reads only its own record")
+        }
+        fn pool_records(&self) -> Result<crate::devices::PoolRecords, Refusal> {
+            panic!("a selected create reads no pool")
+        }
+        fn read_pool(
+            &self,
+            _: &hex_api::BackingKey,
+        ) -> Result<Option<hex_core::record::PoolRecord>, Refusal> {
+            panic!("a selected create reads no pool")
+        }
+        fn put_pool(&self, _: &hex_core::record::PoolRecord) -> Result<(), Refusal> {
+            panic!("a selected create writes no pool")
+        }
+        fn grant_pool(
+            &self,
+            _: &hex_api::BackingGrant,
+        ) -> Result<hex_core::record::PoolRecord, Refusal> {
+            panic!("a selected create grants no pool")
+        }
+        fn remove_pool(&self, _: &hex_api::BackingKey) -> Result<(), Refusal> {
+            panic!("a selected create removes no pool")
+        }
+        fn read(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
+            Ok((self.record.spec.id == *id).then(|| self.record.clone()))
+        }
+        fn put(&self, _: &BoxRecord) -> Result<(), Refusal> {
+            panic!("outer owner persists")
+        }
+        fn remove(&self, _: &BoxId) -> Result<(), Refusal> {
+            panic!("outer owner removes")
+        }
+        fn finalize_managed(&self, _: Option<&shards_api::Identity>) -> Result<(), Refusal> {
+            panic!("no native scope was published")
+        }
+        fn managed_usage(&self) -> Result<Usage, Refusal> {
+            panic!("no native counters exist")
+        }
+        fn launch_managed(
+            &self,
+            plan: &crate::devices::ManagedLaunch<'_>,
+            _: shards_api::LaunchIo,
+            _: Duration,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            assert!(matches!(plan, crate::devices::ManagedLaunch::Shards(_)));
+            self.launches.fetch_add(1, Ordering::SeqCst);
+            Err(Refusal::Broken(
+                "this model starts no native process".into(),
+            ))
+        }
+        fn attach_managed(
+            &self,
+            _: Option<&shards_api::Identity>,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            panic!("a fresh create attaches nothing")
+        }
+    }
+    impl crate::devices::Books for Preboot {
+        fn records(&self) -> Result<crate::devices::Records, Refusal> {
+            panic!("a selected create reads only its own record")
+        }
+        fn pool_records(&self) -> Result<crate::devices::PoolRecords, Refusal> {
+            panic!("a selected create reads no pool")
+        }
+        fn prepare_pool(
+            &self,
+            _: [u8; 32],
+            _: hex_api::Execution,
+            _: hex_api::RuntimeCost,
+            _: &[hex_api::DeviceId],
+            _: (
+                &[u8; 32],
+                &[hex_api::DeviceId],
+                Option<&hex_core::record::PoolRecord>,
+            ),
+            _: &mut crate::devices::PoolPreparationCheck<'_>,
+        ) -> Result<hex_core::record::PoolRecord, Refusal> {
+            panic!("a selected create prepares no pool")
+        }
+        fn capacity(&self) -> Result<hex_api::Capacity, Refusal> {
+            panic!("a selected create reads no capacity")
+        }
+        fn physical_devices(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
+            panic!("a selected create reads no inventory")
+        }
+        fn physical_luid(&self, id: hex_api::DeviceId) -> Result<[u8; 8], Refusal> {
+            assert_eq!(self.record.spec.devices, [id]);
+            self.queries.fetch_add(1, Ordering::SeqCst);
+            self.luid
+                .ok_or_else(|| Refusal::Broken("the model provider reads no current LUID".into()))
+        }
+        fn with_transaction(
+            &self,
+            _: &BoxId,
+            _: &[hex_api::DeviceId],
+            _: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+        ) -> Result<(), Refusal> {
+            panic!("the caller already holds the canonical turn")
+        }
+        fn with_pool_transaction(
+            &self,
+            _: &hex_api::BackingKey,
+            _: &[hex_api::DeviceId],
+            _: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+        ) -> Result<(), Refusal> {
+            panic!("a selected create enters no pool")
+        }
+        fn with_handoff_transaction(
+            &self,
+            _: &BoxId,
+            _: &hex_api::BackingKey,
+            _: &[hex_api::DeviceId],
+            _: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+        ) -> Result<(), Refusal> {
+            panic!("a selected create enters no handoff")
+        }
+    }
+
+    /// AC-T7.4.1: create a selected GPU box configured by a current-boot LUID
+    /// while the SAME provider reports a stale, an unknown or the matching LUID
+    /// for its stable claim; expect the launcher reached only on the match.
+    /// Windows assigns LUIDs per boot, so this runs on every target.
+    #[test]
+    fn selected_gpu_create_joins_current_luid_before_native_launch() {
+        for current in [Some(10u64.to_le_bytes()), None, Some(9u64.to_le_bytes())] {
+            let dir = super::super::tests::socket_fixture();
+            let (config, input, allocation) =
+                super::super::observer::config::tests::fixture(dir.path());
+            let catalog = crate::devices::Catalog::parse(
+                b"hex-devices-1\ngpu\t256\tunmeasured\t777\tshards-gpu\tluid:0000000000000009\t\n",
+            )
+            .unwrap();
+            let runtime = GuestRuntime::new(
+                Arc::new(shards_api::sim::SimGuests::new(|_| {
+                    shards_api::End::PowerOff
+                })),
+                config,
+            )
+            .recorded_at(dir.path().join("g"))
+            .with_runtime_cost(allocation.cost)
+            .unwrap()
+            .with_runtime_paths(
+                shards_api::RuntimePaths::new(dir.path().join("cache"), dir.path().join("home"))
+                    .unwrap(),
+            )
+            .with_gpu_catalog(triomphe::Arc::try_new(catalog).unwrap())
+            .with_gpu_observer(input)
+            .unwrap();
+            let mut spec = super::super::tests::oci(
+                hex_api::Rootfs::Dir(dir.path().to_path_buf()),
+                Vec::new(),
+            );
+            let ClassSpec::Oci(payload) = spec.class else {
+                panic!("model OCI")
+            };
+            spec.class = ClassSpec::Shards(payload);
+            spec.bounds.cpu_max_milli = Some(hex_api::MIN_CPU_MILLI);
+            spec.bounds.memory_max = Some(hex_api::MIN_MEMORY);
+            spec.devices = vec![hex_api::DeviceId {
+                kind: hex_api::DeviceKind::Gpu,
+                key: 256,
+            }];
+            spec.allocation = Some(allocation);
+            let mut record =
+                BoxRecord::new(spec.clone(), hex_core::record::Phase::Creating, Vec::new());
+            record.native_scope = Some(hex_core::record::NativeScope::from_bytes([8; 16]));
+            let owner = Arc::new(Preboot {
+                record,
+                luid: current,
+                queries: AtomicUsize::new(0),
+                launches: AtomicUsize::new(0),
+            });
+            let books: Arc<dyn crate::devices::Books> = owner.clone();
+            runtime.bind_books(Arc::downgrade(&books)).unwrap();
+            let budget = managed::Budget::new(runtime.first_dial_bound().unwrap()).unwrap();
+            let result = runtime.create_selected(spec.clone(), owner.as_ref(), budget);
+            let allowed = current == Some(9u64.to_le_bytes());
+            assert_eq!(
+                owner.launches.load(Ordering::SeqCst),
+                usize::from(allowed),
+                "stale or unknown LUID reached the selected native launcher: {result:?}"
+            );
+            assert_eq!(
+                owner.queries.load(Ordering::SeqCst),
+                1,
+                "the SAME initialized provider must establish the preboot join: {result:?}"
+            );
+            let intent = selected::read(&runtime.selected_path(&spec.id).unwrap()).unwrap();
+            if allowed {
+                // The model launcher refuses after the join: no VM or readiness.
+                assert_eq!(
+                    result.err(),
+                    Some(Refusal::Broken(
+                        "this model starts no native process".into()
+                    ))
+                );
+                assert!(matches!(
+                    intent.map(|intent| intent.phase),
+                    Some(Phase::Intent)
+                ));
+            } else {
+                assert_eq!(
+                    result.err(),
+                    Some(Refusal::Lifecycle {
+                        id: spec.id.clone(),
+                        cause: hex_api::LifecycleCause::Uncertain,
+                    })
+                );
+                assert!(
+                    intent.is_none(),
+                    "a refused join leaves no local launch Intent"
+                );
+            }
+            assert!(runtime.dedicated.lock().unwrap().is_empty());
+        }
     }
 }
 
@@ -1210,7 +1440,9 @@ impl GuestRuntime {
             guest
                 .try_clone()
                 .map_err(|why| refusal("retaining managed guest connection", &why))?,
-            budget.remaining()?,
+            // HEX-GUEST-33: a later dial without its caller's deadline spends the whole learned bound,
+            // not what this create had left; the create's own dials carry its deadline.
+            budget.remaining().and_then(|_| self.first_dial_bound())?,
         ))?;
         let client = Client::connect_before(triomphe::Arc::clone(&link), budget.deadline())?;
         let booted = booted_owner(Booted {
@@ -1520,6 +1752,11 @@ impl GuestRuntime {
         let socket = self.selected_socket(&receipt.id)?;
         let mut plan = self.managed_plan(&guest_spec, &socket)?;
         if !receipt.physical.is_empty() {
+            self.check_current_luids(
+                &receipt.devices,
+                &receipt.physical,
+                super::books::uncertain(&receipt.id)?,
+            )?;
             let scope = receipt.scope.ok_or(super::books::uncertain(&receipt.id)?)?;
             plan = plan
                 .with_gpu_report(*scope.bytes(), budget.deadline())

@@ -426,6 +426,16 @@ pub(super) fn config() -> GuestConfig {
     }
 }
 
+// A directory for controls that reach the native model callback. Its prepared
+// socket uses the platform's 103-byte minimum sun_path bound; a cohort's long
+// TMPDIR is not a valid socket fixture. TempDir still owns/removes this directory.
+pub(super) fn socket_fixture() -> tempfile::TempDir {
+    #[cfg(unix)]
+    return tempfile::tempdir_in("/tmp").unwrap();
+    #[cfg(not(unix))]
+    tempfile::tempdir().unwrap()
+}
+
 /// HEX-GUEST-17: create an oci box, its root an absolute path on this host, where Shards has no backend
 /// (macOS x86_64's refusal): expect the class refused as the platform's, naming the OS, arch and Shards, and no boot asked for; a process
 /// box refused as the host's; and a call about a box before any boot NoSuchBox, with nothing booted.
@@ -650,10 +660,12 @@ enum Boots {
 }
 
 /// A stand-in for Shards whose guests boot as `plan` says, one entry a boot, recording each first
-/// dial's patience and each stop.
+/// dial's patience, each absolute deadline a dial carries, when each boot was asked, and each stop.
 struct Planned {
     plan: Mutex<Vec<Boots>>,
     patience: Arc<Mutex<Vec<Duration>>>,
+    deadlines: Arc<Mutex<Vec<Instant>>>,
+    booted: Mutex<Vec<Instant>>,
     stops: Arc<AtomicUsize>,
     boots: AtomicUsize,
     /// Each boot's memory, in MiB.
@@ -665,6 +677,8 @@ impl Planned {
         Self {
             plan: Mutex::new(plan.iter().rev().copied().collect()),
             patience: Arc::new(Mutex::new(Vec::new())),
+            deadlines: Arc::new(Mutex::new(Vec::new())),
+            booted: Mutex::new(Vec::new()),
             stops: Arc::new(AtomicUsize::new(0)),
             boots: AtomicUsize::new(0),
             memory: Mutex::new(Vec::new()),
@@ -675,6 +689,7 @@ impl Planned {
 struct PlannedGuest {
     boots: Boots,
     patience: Arc<Mutex<Vec<Duration>>>,
+    deadlines: Arc<Mutex<Vec<Instant>>>,
     stops: Arc<AtomicUsize>,
 }
 
@@ -823,6 +838,7 @@ impl shards_api::Guest for PlannedGuest {
         port: u32,
         at: std::time::Instant,
     ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        self.deadlines.lock().unwrap().push(at);
         let left = at
             .checked_duration_since(std::time::Instant::now())
             .filter(|left| !left.is_zero())
@@ -880,12 +896,14 @@ impl shards_api::Guests for Planned {
         &self,
         spec: &shards_api::GuestSpec,
     ) -> Result<Box<dyn shards_api::Guest>, shards_api::Refusal> {
+        self.booted.lock().unwrap().push(Instant::now());
         self.boots.fetch_add(1, Ordering::SeqCst);
         self.memory.lock().unwrap().push(spec.memory_mib);
         let boots = self.plan.lock().unwrap().pop().unwrap();
         Ok(Box::new(PlannedGuest {
             boots,
             patience: Arc::clone(&self.patience),
+            deadlines: Arc::clone(&self.deadlines),
             stops: Arc::clone(&self.stops),
         }))
     }
@@ -900,6 +918,77 @@ impl shards_api::Guests for Planned {
             why: "a stand-in boots no guest to take back".to_owned(),
         })
     }
+}
+
+/// HEX-GUEST-34, AC-T7.4.1 (CLAUDE.md §2): boot a guest: expect its first dial to reach Shards as
+/// `connect_before` with the boot's own deadline, its bound counted from before the boot, so a boot that spends
+/// the bound is refused by type at that dial; never a patience counted down after the boot, which such a boot
+/// leaves at zero and Shards' client then awaits without a bound.
+#[test]
+fn the_first_dial_spends_the_boots_own_deadline() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let guests = Arc::new(Planned::new(&[Boots::Ready]));
+    let rt = GuestRuntime::new(guests.clone(), config());
+    let bound = rt.first_dial_bound().unwrap();
+    let asked = Instant::now();
+    rt.guest().unwrap();
+    let booted = guests.booted.lock().unwrap().clone();
+    let deadlines = guests.deadlines.lock().unwrap().clone();
+    let patience = guests.patience.lock().unwrap().clone();
+    eprintln!(
+        "hex_guest_34_first_dial bound={bound:?} asked={asked:?} booted={booted:?} deadlines={deadlines:?} patience={patience:?}"
+    );
+    assert_eq!(booted.len(), 1);
+    assert_eq!(
+        deadlines.len(),
+        1,
+        "the first dial was given a patience counted after the boot, {patience:?}, not the boot's deadline"
+    );
+    assert!(
+        asked + bound <= deadlines[0] && deadlines[0] <= booted[0] + bound,
+        "deadline {:?} is not the bound from before the boot, [{:?}, {:?}]",
+        deadlines[0],
+        asked + bound,
+        booted[0] + bound
+    );
+}
+
+/// HEX-GUEST-34, AC-T7.4.1 (CLAUDE.md §2, §3): learn a boot so slow that twice it is past any monotonic deadline,
+/// then ask for the guest: expect it refused by type before anything boots or dials, never a dial handed a
+/// patience that Shards' client reads as no clock.
+#[test]
+fn a_boot_bound_past_any_deadline_is_refused_before_a_boot() {
+    if shards_api::backend().is_err() {
+        return;
+    }
+    let guests = Arc::new(Planned::new(&[Boots::Ready]));
+    let rt = GuestRuntime::new(guests.clone(), config());
+    rt.learn(Duration::MAX);
+    let refused = rt.guest().map(drop);
+    let patience = guests.patience.lock().unwrap().clone();
+    let deadlines = guests.deadlines.lock().unwrap().clone();
+    eprintln!(
+        "hex_guest_34_unbounded refused={refused:?} boots={} patience={patience:?} deadlines={deadlines:?}",
+        guests.boots.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        guests.boots.load(Ordering::SeqCst),
+        0,
+        "booted, and dialed with patience {patience:?}, deadlines {deadlines:?}"
+    );
+    assert!(patience.is_empty() && deadlines.is_empty());
+    assert!(
+        matches!(
+            refused,
+            Err(Refusal::Invalid {
+                what: "the guest's boot bound",
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
 }
 
 /// HEX-GUEST-34 (the lead's rule for learned waits): boot a guest before any boot is seen: expect its

@@ -1863,6 +1863,11 @@ struct SettleOriginal {
     started: mpsc::SyncSender<(u64, Instant)>,
     kill: mpsc::SyncSender<(u64, u64, Instant)>,
     exits: AtomicUsize,
+    /// The agent's answer to the Kill, given as it comes; none withholds it.
+    kill_answer: Mutex<Option<Answer>>,
+    /// None leaves run_before's explicit cap alone; run and exec, which have no cap of their
+    /// own, need one for the deadline-aware stream setup.
+    budget: Option<Duration>,
 }
 
 impl Transport for SettleOriginal {
@@ -1873,6 +1878,10 @@ impl Transport for SettleOriginal {
         static WAITS: [Patience; KINDS] =
             [const { Patience::measuring("test.client_settle_original.unarmed") }; KINDS];
         &WAITS
+    }
+
+    fn reply_budget(&self) -> Option<Duration> {
+        self.budget
     }
 
     fn reading(&self) {}
@@ -1915,11 +1924,17 @@ impl Transport for SettleOriginal {
             header.kind, header.id
         );
         match &request {
-            Request::Call(Call::Run { .. }) => self.io.queue(header.id, Answer::Started { pid: 7 }),
+            Request::Call(Call::Run { .. } | Call::Exec { .. }) => {
+                self.io.queue(header.id, Answer::Started { pid: 7 })
+            }
             Request::Call(Call::Kill { exec }) => {
                 eprintln!("client_settle_phase phase=kill_request exec={exec}");
-                // The real Kill reached the sender after wait(None). Withhold only its answer.
+                // The real Kill reached the sender after wait(None). Answer it as the test
+                // says, or withhold only its answer.
                 let _ = self.kill.try_send((header.id, *exec, Instant::now()));
+                if let Some(answer) = self.kill_answer.lock().unwrap().take() {
+                    self.io.queue(header.id, answer);
+                }
             }
             Request::Release => {}
             _ => {
@@ -1993,6 +2008,8 @@ fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
         started: starting,
         kill: killing,
         exits: AtomicUsize::new(0),
+        kill_answer: Mutex::new(None),
+        budget: None,
     }));
     let control = Arc::clone(&client);
     let original = Instant::now().checked_add(CAP).unwrap();
@@ -2104,8 +2121,8 @@ fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
         .ok()
         .or_else(|| after_cleanup.as_ref().ok());
     assert!(
-        matches!(returned_error, Some((_, Err(Refusal::Broken(why)))) if why.contains("stdout") && why.contains("neither carried nor asked")),
-        "the original bounded setup refusal must survive cleanup"
+        matches!(returned_error, Some((_, Err(Refusal::Lifecycle { id, cause: hex_api::LifecycleCause::Uncertain }))) if *id == absolute_spec().id),
+        "a Kill unanswered within the original authority leaves the run's end uncertain"
     );
     assert!(
         before_cleanup.is_ok(),
@@ -2113,6 +2130,184 @@ fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
     );
     let (returned, _) = before_cleanup.unwrap();
     assert!(returned <= cleanup_at);
+}
+
+/// How a settle test starts its program: under run_before's explicit cap, whose failed setup
+/// kills through kill_before, or by run or exec, which have none and kill through Proc::kill.
+#[derive(Clone, Copy, Debug)]
+enum SettleStart {
+    RunBefore,
+    Run,
+    Exec,
+}
+
+/// What a settle test saw.
+#[derive(Debug)]
+struct Settled {
+    start: SettleStart,
+    result: Result<(), Refusal>,
+    /// The box the start named.
+    id: BoxId,
+    /// The start's request id, which names its exec.
+    starts: Vec<u64>,
+    /// The execs the Kills named.
+    kills: Vec<u64>,
+    releases: usize,
+    /// No call, program, given end or wait left registered.
+    clean: bool,
+}
+
+/// Do start a program by `start` whose stream settlement fails after its actual Started (the
+/// fixture gives an end its exec never asked for), the agent answering its Kill with `kill`.
+fn settle_failure(start: SettleStart, kill: Answer) -> Settled {
+    let (io, _) = stalled(None);
+    let (entered, _) = mpsc::sync_channel(1);
+    let (starting, _) = mpsc::sync_channel(1);
+    let (killing, _) = mpsc::sync_channel(1);
+    let client = configured(SettleOriginal {
+        io: Offers {
+            io,
+            inbound: Mutex::new(VecDeque::new()),
+            outbound: Mutex::new(Vec::new()),
+            entered,
+            program: Mutex::new(None),
+        },
+        setup: Mutex::new(None),
+        started: starting,
+        kill: killing,
+        exits: AtomicUsize::new(0),
+        kill_answer: Mutex::new(Some(kill)),
+        budget: match start {
+            SettleStart::RunBefore => None,
+            SettleStart::Run | SettleStart::Exec => Some(OBSERVE),
+        },
+    });
+    let stdio = Stdio {
+        ask: hex_api::Ask {
+            stdin: true,
+            ..hex_api::Ask::default()
+        },
+        ..Stdio::null()
+    };
+    let program = Program::of(&["owned-settle-kill"]);
+    let spec = absolute_spec();
+    let (id, result) = match start {
+        SettleStart::RunBefore => {
+            let at = Instant::now().checked_add(OBSERVE).unwrap();
+            (spec.id.clone(), client.run_before(spec, program, stdio, at))
+        }
+        SettleStart::Run => (spec.id.clone(), client.run(spec, program, stdio)),
+        SettleStart::Exec => {
+            let id = BoxId::new("owned-settle-exec").unwrap();
+            let result = client.exec(&id, program, stdio);
+            (id, result)
+        }
+    };
+    let result = result.map(drop);
+    let shared = &client.conn.shared;
+    let clean = shared
+        .state()
+        .map(|state| {
+            state.calls.is_empty()
+                && state.programs.is_empty()
+                && state.given.is_empty()
+                && state.waiting.is_empty()
+        })
+        .unwrap();
+    let sent = shared.transport.io.outbound.lock().unwrap();
+    Settled {
+        start,
+        result,
+        id,
+        starts: sent
+            .iter()
+            .filter(|(_, request)| {
+                matches!(request, Request::Call(Call::Run { .. } | Call::Exec { .. }))
+            })
+            .map(|(id, _)| *id)
+            .collect(),
+        kills: sent
+            .iter()
+            .filter_map(|(_, request)| match request {
+                Request::Call(Call::Kill { exec }) => Some(*exec),
+                _ => None,
+            })
+            .collect(),
+        releases: sent
+            .iter()
+            .filter(|(_, request)| matches!(request, Request::Release))
+            .count(),
+        clean,
+    }
+}
+
+/// AC-T7.4.1: Do start a program by run_before, run and exec whose stream settlement fails after
+/// its Started, the agent refusing each Kill; expect each start refused as its box's uncertain
+/// lifecycle and no Release sent: the program may still run, and a Release lets it run on.
+#[test]
+fn a_settle_failure_whose_kill_is_refused_is_uncertain_and_never_released() {
+    let seen: Vec<Settled> = [SettleStart::RunBefore, SettleStart::Run, SettleStart::Exec]
+        .into_iter()
+        .map(|start| {
+            let refused = Refusal::os("killing the program", "the model agent refuses");
+            settle_failure(start, Answer::Refused(refused))
+        })
+        .collect();
+    for settled in &seen {
+        eprintln!("client_settle_kill kill=refused {settled:?}");
+    }
+    for settled in seen {
+        let start = settled.start;
+        assert_eq!(settled.starts.len(), 1, "{start:?}");
+        assert_eq!(
+            settled.kills, settled.starts,
+            "{start:?}: one Kill, of its exec"
+        );
+        assert_eq!(
+            settled.result,
+            Err(Refusal::Lifecycle {
+                id: settled.id,
+                cause: hex_api::LifecycleCause::Uncertain,
+            }),
+            "{start:?}: a refused kill leaves the program's end unproved"
+        );
+        assert_eq!(
+            settled.releases, 0,
+            "{start:?}: a program asked to end was released to run on"
+        );
+        assert!(settled.clean, "{start:?}");
+    }
+}
+
+/// AC-T7.4.1: Do the same with the agent confirming each Kill; expect the settlement's own
+/// refusal, and still no Release for a program asked to end.
+#[test]
+fn a_settle_failure_whose_kill_is_confirmed_keeps_its_refusal_and_never_releases() {
+    let seen: Vec<Settled> = [SettleStart::RunBefore, SettleStart::Run, SettleStart::Exec]
+        .into_iter()
+        .map(|start| settle_failure(start, Answer::Done))
+        .collect();
+    for settled in &seen {
+        eprintln!("client_settle_kill kill=done {settled:?}");
+    }
+    for settled in seen {
+        let start = settled.start;
+        assert_eq!(settled.starts.len(), 1, "{start:?}");
+        assert_eq!(
+            settled.kills, settled.starts,
+            "{start:?}: one Kill, of its exec"
+        );
+        assert!(
+            matches!(&settled.result, Err(Refusal::Broken(why)) if why.contains("stdout") && why.contains("neither carried nor asked")),
+            "{start:?}: a confirmed kill keeps the settlement's refusal: {:?}",
+            settled.result
+        );
+        assert_eq!(
+            settled.releases, 0,
+            "{start:?}: a program asked to end was released to run on"
+        );
+        assert!(settled.clean, "{start:?}");
+    }
 }
 
 /// AC-T7.4.1 control A: actual selection chooses the existing private smaller
@@ -2660,8 +2855,8 @@ fn prepared_actor_settle_error_retains_original_kill_answer_authority() {
         .ok()
         .or_else(|| after_cleanup.as_ref().ok());
     assert!(
-        matches!(returned_error, Some((_, Err(Refusal::Broken(why)))) if why.contains("stdout") && why.contains("neither carried nor asked")),
-        "the exact original stream-settlement refusal must survive cleanup"
+        matches!(returned_error, Some((_, Err(Refusal::Lifecycle { id, cause: hex_api::LifecycleCause::Uncertain }))) if *id == absolute_spec().id),
+        "a Kill unanswered within the original authority leaves the run's end uncertain"
     );
     assert!(
         before_cleanup.is_ok(),
@@ -2670,4 +2865,207 @@ fn prepared_actor_settle_error_retains_original_kill_answer_authority() {
     let (returned, _) = before_cleanup.unwrap();
     assert!(returned >= original.unwrap());
     assert!(returned <= cleanup_at);
+}
+
+/// A call that gave up waiting: its late answers have no taker.
+const GAVE_UP: u64 = u64::MAX;
+/// Messages for others before the fuse ends the connection, the only way a poll that keeps reading
+/// comes back: far more than these tests' polls and calls read (one each).
+const FUSE: usize = 1_000;
+
+/// Answers for others that keep coming: each read hands on one message, as one `SOCK_SEQPACKET` read
+/// does, and leaves another ready.
+struct Chatter {
+    socket: UdpSocket,
+    /// The agent's next messages, ahead of the traffic: answers to the test's calls, a program's end.
+    next: Mutex<VecDeque<Vec<u8>>>,
+    /// Whether the traffic is on: one late answer to [`GAVE_UP`] per read.
+    chatting: AtomicBool,
+    /// Turns taken: each waits on the connection through its handle once.
+    turns: AtomicUsize,
+    /// Messages for others handed on.
+    others: AtomicUsize,
+    sent: Mutex<Vec<(u64, Request)>>,
+}
+
+impl Chatter {
+    fn new() -> Self {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        socket.connect(socket.local_addr().unwrap()).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        Self {
+            socket,
+            next: Mutex::new(VecDeque::new()),
+            chatting: AtomicBool::new(false),
+            turns: AtomicUsize::new(0),
+            others: AtomicUsize::new(0),
+            sent: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// `answer` to `id` is the agent's next message, ahead of the traffic.
+    fn queue(&self, id: u64, answer: &Answer) {
+        self.next
+            .lock()
+            .unwrap()
+            .push_back(wire::answer(id, answer, wire::MAX_MESSAGE).unwrap());
+        self.socket.send(&[1]).unwrap();
+    }
+
+    fn chat(&self) {
+        self.chatting.store(true, Ordering::SeqCst);
+        self.socket.send(&[1]).unwrap();
+    }
+
+    /// What `poll` returned, with the turns it took and the messages for others it read.
+    fn counted<R>(&self, poll: impl FnOnce() -> R) -> (R, usize, usize) {
+        let (turns, others) = (
+            self.turns.load(Ordering::SeqCst),
+            self.others.load(Ordering::SeqCst),
+        );
+        let got = poll();
+        (
+            got,
+            self.turns.load(Ordering::SeqCst) - turns,
+            self.others.load(Ordering::SeqCst) - others,
+        )
+    }
+}
+
+impl Transport for Chatter {
+    type Reading = ();
+    fn answers() -> &'static [Patience; KINDS] {
+        static WAITS: [Patience; KINDS] =
+            [const { Patience::measuring("test.client_poll.unarmed") }; KINDS];
+        &WAITS
+    }
+    fn reading(&self) {}
+    fn handle(&self) -> Handle<'_> {
+        self.turns.fetch_add(1, Ordering::SeqCst);
+        #[cfg(unix)]
+        return std::os::fd::AsFd::as_fd(&self.socket);
+        #[cfg(windows)]
+        std::os::windows::io::AsSocket::as_socket(&self.socket)
+    }
+    fn recv(&self, _: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
+        while self.socket.recv(&mut [0]).is_ok() {}
+        let next = self.next.lock().unwrap().pop_front();
+        let message = match next {
+            Some(message) => message,
+            None if self.chatting.load(Ordering::SeqCst) => {
+                if self.others.load(Ordering::SeqCst) >= FUSE {
+                    return Err(Refusal::Broken(
+                        "the fuse: a poll kept reading answers for others".into(),
+                    ));
+                }
+                self.others.fetch_add(1, Ordering::SeqCst);
+                wire::answer(GAVE_UP, &Answer::Done, wire::MAX_MESSAGE).unwrap()
+            }
+            None => return Ok(false),
+        };
+        take(
+            &Received {
+                size: message.len(),
+                bytes: &message,
+                descriptors: 0,
+                descriptors_cut: false,
+            },
+            Vec::new(),
+        )?;
+        if self.chatting.load(Ordering::SeqCst) || !self.next.lock().unwrap().is_empty() {
+            self.socket.send(&[1]).unwrap();
+        }
+        Ok(true)
+    }
+    fn try_send(&self, bytes: &[u8], at: &mut usize, _: &[Lent<'_>]) -> Result<bool, Sent> {
+        let (header, request) = wire::read_request_apart(bytes, wire::MAX_MESSAGE).unwrap();
+        match &request {
+            Request::Call(Call::Exec { .. }) => self.queue(header.id, &Answer::Started { pid: 7 }),
+            Request::Call(Call::Kill { .. }) => self.queue(header.id, &Answer::Done),
+            _ => {}
+        }
+        self.sent.lock().unwrap().push((header.id, request));
+        *at = bytes.len();
+        Ok(true)
+    }
+    fn shutdown(&self) {}
+}
+
+/// A program started through the real exec call, and its exec's id.
+fn chatting_program(client: &Core<Chatter>) -> (Box<dyn Proc>, u64) {
+    let proc = client
+        .exec(
+            &BoxId::new("poll-bound").unwrap(),
+            Program::of(&["poll-bound"]),
+            Stdio::null(),
+        )
+        .unwrap();
+    let sent = client.conn.shared.transport.sent.lock().unwrap();
+    assert!(matches!(sent[..], [(_, Request::Call(Call::Exec { .. }))]));
+    (proc, sent[0].0)
+}
+
+/// AC-T7.4.1: do `try_wait`, then `wait_for(0)`, on a remote program while answers for others keep
+/// coming; expect each to take one turn, read one message and return `Ok(None)` with more still
+/// coming. Then with its end next: expect the end from one turn, then from none.
+#[test]
+fn a_poll_reads_once_while_answers_for_others_keep_coming() {
+    let client = configured(Chatter::new());
+    let (mut proc, exec) = chatting_program(&client);
+    let chatter = &client.conn.shared.transport;
+    chatter.chat();
+    let polled = chatter.counted(|| proc.try_wait());
+    let zero = chatter.counted(|| proc.wait_for(Duration::ZERO));
+    chatter.queue(exec, &Answer::Exited(Exit::Code(7)));
+    let ended = chatter.counted(|| proc.try_wait());
+    let again = chatter.counted(|| proc.try_wait());
+    let others = chatter.others.load(Ordering::SeqCst);
+    let state = client.conn.shared.state().unwrap();
+    let handed_on = !state.reading && state.waiting.is_empty() && state.closed.is_none();
+    drop(state);
+    eprintln!(
+        "client_poll_bound phase=try_wait polled={polled:?} zero={zero:?} ended={ended:?} again={again:?} others={others} fuse={FUSE} handed_on={handed_on}"
+    );
+    assert_eq!(
+        polled,
+        (Ok(None), 1, 1),
+        "a poll must take one turn and read once while answers for others keep coming"
+    );
+    assert_eq!(zero, (Ok(None), 1, 1));
+    assert_eq!(ended, (Ok(Some(Exit::Code(7))), 1, 0));
+    assert_eq!(again, (Ok(Some(Exit::Code(7))), 0, 0));
+    assert!(others < FUSE, "answers for others were still coming");
+    assert!(handed_on, "each poll handed the reader's turn on");
+}
+
+/// AC-T7.4.1: do `kill` on a remote program while answers for others keep coming; expect its check
+/// for an end to take one turn and read once, then exactly one Kill, answered in one more turn.
+#[test]
+fn kill_checks_once_for_an_end_while_answers_for_others_keep_coming() {
+    let client = configured(Chatter::new());
+    let (mut proc, exec) = chatting_program(&client);
+    let chatter = &client.conn.shared.transport;
+    chatter.chat();
+    let killed = chatter.counted(|| proc.kill());
+    let kills: Vec<u64> = chatter
+        .sent
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(_, request)| match request {
+            Request::Call(Call::Kill { exec }) => Some(*exec),
+            _ => None,
+        })
+        .collect();
+    let others = chatter.others.load(Ordering::SeqCst);
+    eprintln!(
+        "client_poll_bound phase=kill killed={killed:?} kills={kills:?} exec={exec} others={others} fuse={FUSE}"
+    );
+    assert_eq!(
+        killed,
+        (Ok(()), 2, 1),
+        "kill's check for an end must take one turn and read once, then one turn for its answer"
+    );
+    assert_eq!(kills, [exec]);
+    assert!(others < FUSE, "answers for others were still coming");
 }

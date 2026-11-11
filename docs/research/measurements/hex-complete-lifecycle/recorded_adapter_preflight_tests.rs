@@ -59,6 +59,20 @@ impl Recover for MetadataRecovery {
         // Structural conflicts are checked before this adapter is reached.
         Ok(())
     }
+    // Its metadata names join the complete retained cohort, as a native adapter's markers do.
+    fn preflight_retained(
+        &self,
+        records: &hex_runtime::devices::Records,
+        _: &[PoolRecord],
+    ) -> Result<(), Refusal> {
+        for entry in std::fs::read_dir(&self.metadata).unwrap() {
+            let id = BoxId::new(entry.unwrap().file_name().to_str().unwrap()).unwrap();
+            if !matches!(records.get(&id), Some(Ok(_))) {
+                return Err(uncertain(&id));
+            }
+        }
+        Ok(())
+    }
     fn initialize_native(&self) -> Result<(), Refusal> {
         self.initialized.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -153,6 +167,31 @@ fn all_initialized_cpu_metadata_passes_before_the_first_effect() {
     assert_eq!(initialized.load(Ordering::SeqCst), 1);
     assert_eq!(effects.load(Ordering::SeqCst), 4);
     assert_eq!(node.books.store.all().unwrap(), before);
+}
+
+/// AC-T7.4.1 / T-T7.1.2: recover with a native metadata name that no retained box has; expect the
+/// host's own cross-check to refuse it after every retained owner's check, before native
+/// initialization or any recovery effect, keeping the record and the metadata.
+#[test]
+fn native_metadata_no_retained_box_names_is_refused_before_initialization() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node, effects, checked, initialized) = node(dir.path(), None);
+    add(&node, "aa-cpu", b"same initialized metadata");
+    let orphan = node.runtime.metadata.join("zz-orphan");
+    std::fs::write(&orphan, b"same initialized metadata").unwrap();
+    let before = node.books.store.all().unwrap();
+    assert_eq!(
+        node.recover(),
+        Err(Refusal::Lifecycle {
+            id: BoxId::new("zz-orphan").unwrap(),
+            cause: hex_api::LifecycleCause::Uncertain,
+        })
+    );
+    assert_eq!(checked.load(Ordering::SeqCst), 1);
+    assert_eq!(initialized.load(Ordering::SeqCst), 0);
+    assert_eq!(effects.load(Ordering::SeqCst), 0);
+    assert_eq!(node.books.store.all().unwrap(), before);
+    assert_eq!(std::fs::read(orphan).unwrap(), b"same initialized metadata");
 }
 
 #[test]

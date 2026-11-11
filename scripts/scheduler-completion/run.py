@@ -11,8 +11,8 @@ import sys
 import time
 from pathlib import Path
 
-from evidence import (BACKENDS, TARGETS, POLICY, RULES, InvalidEvidence, artifact, check_run,
-                      finite_positive, hex_digest, load_json, require, sha256)
+from evidence import (BACKENDS, TARGETS, POLICY, RULES, InvalidEvidence, artifact, check_run, end_group,
+                      finite_positive, hex_digest, load_json, require, sha256, start_group, unwind_on_sigterm)
 
 
 def file_receipt(root, path):
@@ -38,7 +38,8 @@ def run(args):
     build=load_json(build_path,args.byte_limit)
     require(build.get("schema")=="hex-completion-build-1" and build.get("source")==args.source and
             build.get("target")==args.target and build.get("test")=="completion_backends" and
-            build.get("exit")==0 and build.get("reaped") is True and build.get("timed_out") is False and
+            build.get("exit")==0 and build.get("reaped") is True and build.get("group_gone") is True and
+            build.get("timed_out") is False and
             build.get("source_unchanged") is True,"missing actual successful fixed-source fixture build")
     artifact(build_path.parent,build["binary"])
     require(build["binary"]["sha256"]==args.binary_sha256,"run binary is not the recorded build artifact")
@@ -75,31 +76,24 @@ def run(args):
                "environment": {"platform": platform.platform(), "machine": platform.machine()},
                "binary": file_receipt(root, pinned), "fixture": file_receipt(root, root / "fixture.json"),
                "build":file_receipt(root,root/"build.json"),
-               "timed_out": False, "reaped": False, "exit": None,
+               "timed_out": False, "reaped": False, "group_signaled": False, "group_gone": False, "exit": None,
                "native_cleanup": "unverified until fixture cleanup stage and PID journal agree",
                "owned_pid_journal": str(root / "owned-pids.jsonl")}
     env["HEX_COMPLETION_PID_JOURNAL"] = receipt["owned_pid_journal"]
     log_path = root / "test.log"
     began = time.monotonic_ns()
     with log_path.open("xb") as log:
-        child = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
-                                 stdout=log, stderr=subprocess.STDOUT, shell=False)
+        child = start_group(command, env=env, stdin=subprocess.DEVNULL,
+                            stdout=log, stderr=subprocess.STDOUT, shell=False)
         receipt["pid"] = child.pid
         write_json(root / "run.json", receipt)
         try:
-            receipt["exit"] = child.wait(timeout=args.timeout)
+            child.wait(timeout=args.timeout)
         except subprocess.TimeoutExpired:
             receipt["timed_out"] = True
-            # This exact Popen handle is ours; no process-name search or foreign kill.
-            child.terminate()
-            try:
-                child.wait(timeout=args.cleanup_timeout)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait(timeout=args.cleanup_timeout)
-            receipt["exit"] = child.returncode
         finally:
-            receipt["reaped"] = child.poll() is not None
+            # This exact session is ours, ended on every path; no process-name search or foreign kill.
+            receipt.update(end_group(child, args.cleanup_timeout), exit=child.returncode)
             receipt["elapsed_ns"] = time.monotonic_ns() - began
             receipt["log"] = file_receipt(root, log_path)
             if events.is_file():
@@ -141,4 +135,5 @@ def main():
 
 
 if __name__ == "__main__":
+    unwind_on_sigterm()
     sys.exit(main())

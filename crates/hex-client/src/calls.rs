@@ -396,7 +396,8 @@ pub trait Transport: Send + Sync + 'static {
     }
     /// Writes what it can of `bytes` past `*at` without waiting, the descriptors lent riding with its first byte,
     /// moving `at` on: whether all of it is out. The caller holds the connection's send lock across a message's
-    /// writes, so no other message's bytes come between them.
+    /// writes, or owes the rest of one cut short ahead of all else before letting it go, so no other message's bytes
+    /// come between them.
     fn try_send(&self, bytes: &[u8], at: &mut usize, lent: &[Lent<'_>]) -> Result<bool, Sent>;
     /// Ends the connection both ways: whoever reads next sees the end.
     fn shutdown(&self);
@@ -568,12 +569,13 @@ impl Drop for Whole<'_> {
 }
 
 /// The words a client owes its agent ahead of any later request: each given answer's [`Request::Taken`], framed,
-/// queued by the read that hands the answer on before its taker wakes, so a read never waits to send. They go out
-/// whole, in order, under the send lock: first by whoever sends next, before its own message, and by the reader's
-/// turn's holder, which waits for room for them beside what comes, so one goes as soon as the agent reads. None is
-/// dropped: an unsent one leaves the agent holding the given ends, and with them its program's stdin open, until the
-/// connection closes. At most `bound` wait: the agent's budget of programs (`Hello::budgets`), which counts the given
-/// ends not yet taken, so the queue can't grow past what the agent can give (CLAUDE.md §2).
+/// queued by the read that hands the answer on before its taker wakes, so a read never waits to send; and the rest of
+/// a release cut short on a stream, queued first by its sender before it lets the send lock go ([`Conn::send_now`]).
+/// They go out whole, in order, under the send lock: first by whoever sends next, before its own message, and by the
+/// reader's turn's holder, which waits for room for them beside what comes, so one goes as soon as the agent reads.
+/// None is dropped: an unsent one leaves the agent holding the given ends, and with them its program's stdin open,
+/// until the connection closes. At most `bound` wait: the agent's budget of programs (`Hello::budgets`), which counts
+/// the given ends not yet taken, so the queue can't grow past what the agent can give (CLAUDE.md §2).
 #[derive(Default)]
 struct Owed {
     words: VecDeque<Vec<u8>>,
@@ -1491,9 +1493,10 @@ impl<T: Transport> Conn<T> {
     }
 
     /// Sends one message that has no answer (a release) now or not at all: a release that finds no room is the
-    /// agent's disconnect rule's to settle, so dropping a `Proc` never waits on the agent. One whose first bytes went
-    /// on a stream is sent whole, waiting for room as a send does, since a frame cut short would leave the connection
-    /// unable to carry another.
+    /// agent's disconnect rule's to settle, so dropping a `Proc` never waits on the agent. One cut short on a stream
+    /// has its rest owed ahead of every word ([`Owed`]) before the send lock is let go, so the next holder writes it
+    /// first and nothing comes between its bytes. One whose rest can't be owed (the words at their bound, or a write
+    /// that failed part way) leaves the stream unable to carry another message, and the connection goes.
     fn send_now(&self, bytes: &[u8]) {
         self.send_now_before(bytes, None);
     }
@@ -1515,36 +1518,35 @@ impl<T: Transport> Conn<T> {
         let Ok(framed) = T::frame(bytes.to_vec()) else {
             return;
         };
-        let mut at = 0;
-        {
-            let Ok(Some(whole)) = shared.sending.lock(budget.map(ReplyDeadline::at)) else {
-                return;
-            };
-            if cap.is_some_and(|cap| cap.remaining("releasing a program").is_err()) {
-                return;
-            }
-            // What is owed goes first: if it can't go now, neither can this, which comes after it.
-            if !matches!(shared.send_owed(&whole), Ok(true)) {
-                return;
-            }
-            match shared.transport.try_send(&framed, &mut at, NONE) {
-                Ok(true) | Err(_) => return,
-                Ok(false) if at == 0 => return,
-                Ok(false) => {}
-            }
-        }
-        // Part of it went: the rest goes as a send does, the frame whole on the stream.
-        let Ok(mut caller) = Caller::new(shared, None) else {
-            shared.transport.shutdown();
+        let Ok(Some(whole)) = shared.sending.lock(budget.map(ReplyDeadline::at)) else {
             return;
         };
-        let rest = framed.get(at..).unwrap_or_default();
-        if caller
-            .send(rest, NONE, budget.map(ReplyDeadline::at), None)
-            .is_err()
-        {
+        if cap.is_some_and(|cap| cap.remaining("releasing a program").is_err()) {
+            return;
+        }
+        // What is owed goes first: if it can't go now, neither can this, which comes after it.
+        if !matches!(shared.send_owed(&whole), Ok(true)) {
+            return;
+        }
+        let mut at = 0;
+        let sent = shared.transport.try_send(&framed, &mut at, NONE);
+        if at == 0 || matches!(sent, Ok(true)) {
+            return;
+        }
+        let queued = sent.is_ok()
+            && shared.owed.lock().is_ok_and(|mut owed| {
+                let room = owed.words.len() < owed.bound;
+                if room {
+                    owed.words
+                        .push_front(framed.get(at..).unwrap_or_default().to_vec());
+                }
+                room
+            });
+        if !queued {
             shared.transport.shutdown();
         }
+        // Only now, its rest owed first or the connection ended, can another holder write.
+        drop(whole);
     }
 }
 
@@ -2125,6 +2127,8 @@ impl<T: Transport> Core<T> {
         program.fits(&WIRE_EXEC_LIMIT)?;
         stdio.check()?;
         let name = launch.name();
+        // What a failed setup names when its kill can't confirm the program's end; the call takes `launch`.
+        let id = launch.id().try_clone()?;
         let (carried, asked) = (carried(&stdio), streams(stdio.ask));
         let ending = Arc::new(Ending::default());
         let shared = &*self.conn.shared;
@@ -2205,6 +2209,7 @@ impl<T: Transport> Core<T> {
                     release_before: caller,
                     exit: None,
                     given: None,
+                    kill_asked: false,
                 };
                 match settle(kept, ends) {
                     Ok(given) => {
@@ -2212,11 +2217,20 @@ impl<T: Transport> Core<T> {
                         Ok(Box::new(proc))
                     }
                     Err(why) => {
-                        let _ = match caller {
+                        // No caller will hold it, and unless its kill confirms its end it may still run:
+                        // the refusal is then its box's uncertain lifecycle, not the setup's or the kill's.
+                        proc.kill_asked = true;
+                        let killed = match caller {
                             Some(cap) => proc.kill_before(cap),
                             None => proc.kill(),
                         };
-                        Err(why)
+                        Err(match killed {
+                            Ok(()) => why,
+                            Err(_) => Refusal::Lifecycle {
+                                id,
+                                cause: hex_api::LifecycleCause::Uncertain,
+                            },
+                        })
                     }
                 }
             }
@@ -2270,6 +2284,14 @@ impl Launch {
         match self {
             Self::Exec(_) => "exec",
             Self::Run(_) => "run",
+        }
+    }
+
+    /// The box it starts its program in.
+    fn id(&self) -> &BoxId {
+        match self {
+            Self::Exec(id) => id,
+            Self::Run(spec) => &spec.id,
         }
     }
 }
@@ -2571,12 +2593,14 @@ struct RemoteProc<T: Transport> {
     exit: Option<Exit>,
     /// The caller's ends of the streams its exec asked for, until taken.
     given: Option<hex_api::Given>,
+    /// Asked to end because its setup failed: never released, which tells the agent to let it run on.
+    kill_asked: bool,
 }
 
 impl<T: Transport> RemoteProc<T> {
-    /// Its end if it has come, waiting for it at most `timeout` (none: not at all, but what has come read now): read by
-    /// this wait itself while it holds the reader's turn, taken when free or handed to it, else handed to it by the
-    /// thread that reads; the turn handed on as it goes.
+    /// Its end if it has come, waiting for it at most `timeout` (none or zero: not at all, but what has come read
+    /// once): read by this wait itself while it holds the reader's turn, taken when free or handed to it, else
+    /// handed to it by the thread that reads; the turn handed on as it goes.
     fn wait(&mut self, timeout: Option<Duration>) -> Result<Option<Exit>, Refusal> {
         self.wait_before(timeout, None)
     }
@@ -2591,6 +2615,9 @@ impl<T: Transport> RemoteProc<T> {
         }
         let shared = triomphe::Arc::clone(&self.conn.shared);
         let deadline = timeout.map(|t| Instant::now().checked_add(t));
+        // AC-T7.4.1: a poll (no time asked, no cap) is bounded by its work, one turn's read, so messages
+        // for others that keep coming can't hold it.
+        let poll = cap.is_none() && timeout.is_none_or(|t| t.is_zero());
         shared.state()?.waiting.insert(self.exec);
         let mut mine = false;
         // Every way out of the loop goes through its end, so the wait is never left registered.
@@ -2637,10 +2664,10 @@ impl<T: Transport> RemoteProc<T> {
             };
             if mine {
                 match shared.turn(Some(left)) {
-                    Ok(true) => continue,
+                    Ok(true) if !poll => continue,
                     Ok(false) if !left.is_zero() => continue,
-                    // Waited out: what came is its end, or none.
-                    Ok(false) => {
+                    // Waited out, or polled: what came is its end, or none.
+                    Ok(_) => {
                         let ended = match self.ending.state.lock() {
                             Ok(ended) => ended,
                             Err(e) => break Err(poisoned(e)),
@@ -2741,7 +2768,8 @@ impl<T: Transport> Proc for RemoteProc<T> {
 impl<T: Transport> Drop for RemoteProc<T> {
     /// Let go before its end came: the agent is told, and lets the program run on as dropping an
     /// in-process `Proc` does. A release that can't be sent now (no room, or the connection gone) needs none: the
-    /// agent's disconnect rule has the program.
+    /// agent's disconnect rule has the program. One asked to end is never released: its end is its kill's, else
+    /// that rule's.
     fn drop(&mut self) {
         let shared = &self.conn.shared;
         let ended = self.exit.is_some()
@@ -2754,7 +2782,9 @@ impl<T: Transport> Drop for RemoteProc<T> {
         if let Ok(mut state) = shared.state() {
             state.programs.remove(&self.exec);
         }
-        if !ended && let Ok(bytes) = wire::request(self.exec, &Request::Release, wire::MAX_MESSAGE)
+        if !ended
+            && !self.kill_asked
+            && let Ok(bytes) = wire::request(self.exec, &Request::Release, wire::MAX_MESSAGE)
         {
             self.conn.send_now_before(&bytes, self.release_before);
         }
