@@ -890,12 +890,11 @@ impl ProcessBox {
             return Err(ProcessFailure::BufferBounds);
         }
         let mut observation_error = None;
+        // A member the listing held and rusage no longer has was reaped since: it is gone, as the
+        // ordinary watcher's read_members leaves it out. A reused pid reads as live, never less.
         pids.retain(|member| match sys::rusage(*member) {
             Ok(Some(usage)) => !usage.ended,
-            Ok(None) => {
-                observation_error.get_or_insert(ProcessFailure::InvalidStartRecord);
-                false
-            }
+            Ok(None) => false,
             Err(error) => {
                 observation_error
                     .get_or_insert_with(|| process_failure(ProcessOperation::ProcPidRusage, error));
