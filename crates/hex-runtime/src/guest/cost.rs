@@ -10,14 +10,30 @@ use sha2::{Digest, Sha256};
 
 use super::GuestConfig;
 
+mod images;
+
+/// The same initialization, with optional native declarations from its existing
+/// SHA-verified evidence. Missing declarations grant no native worker authority.
+#[derive(Debug)]
+pub struct GuestInputs {
+    pub config: GuestConfig,
+    pub cost: RuntimeCost,
+    pub native_images: Option<shards_api::NativeImages>,
+}
+
 pub const ENV_COST_FILE: &str = "HEX_GUEST_COST_FILE";
 pub const ENV_COST_SHA256: &str = "HEX_GUEST_COST_SHA256";
 pub const ENV_COST_EVIDENCE: &str = "HEX_GUEST_COST_EVIDENCE";
 
 fn invalid(why: &'static str) -> Refusal {
+    let mut text = String::new();
+    if text.try_reserve_exact(why.len()).is_err() {
+        return exhausted();
+    }
+    text.push_str(why);
     Refusal::Invalid {
         what: "Shards runtime cost input",
-        why: why.into(),
+        why: text,
     }
 }
 
@@ -111,6 +127,14 @@ pub fn load_runtime_cost(
     expected_sha256: [u8; 32],
     evidence: &Path,
 ) -> Result<RuntimeCost, Refusal> {
+    load_runtime_inputs(file, expected_sha256, evidence).map(|(cost, _)| cost)
+}
+
+pub fn load_runtime_inputs(
+    file: &Path,
+    expected_sha256: [u8; 32],
+    evidence: &Path,
+) -> Result<(RuntimeCost, Option<shards_api::NativeImages>), Refusal> {
     if !file.is_absolute() || !evidence.is_absolute() {
         return Err(invalid(
             "cost and evidence paths must be explicit absolute paths",
@@ -131,7 +155,8 @@ pub fn load_runtime_cost(
             "cost identity does not match its measurement evidence",
         ));
     }
-    Ok(cost)
+    let native = images::parse(&evidence, cost.id)?;
+    Ok((cost, native))
 }
 
 impl GuestConfig {
@@ -145,6 +170,17 @@ impl GuestConfig {
     pub fn from_vars_with_cost(
         var: impl Fn(&str) -> Option<OsString>,
     ) -> Result<(Self, RuntimeCost), Refusal> {
+        let input = Self::from_vars_with_native_inputs(var)?;
+        Ok((input.config, input.cost))
+    }
+
+    pub fn from_env_with_native_inputs() -> Result<GuestInputs, Refusal> {
+        Self::from_vars_with_native_inputs(|name| std::env::var_os(name))
+    }
+
+    pub fn from_vars_with_native_inputs(
+        var: impl Fn(&str) -> Option<OsString>,
+    ) -> Result<GuestInputs, Refusal> {
         let config = Self::from_vars(&var)?;
         let file =
             input_path(var(ENV_COST_FILE).ok_or_else(|| invalid("HEX_GUEST_COST_FILE is unset"))?)?;
@@ -158,8 +194,12 @@ impl GuestConfig {
                 .to_str()
                 .ok_or_else(|| invalid("cost hash is not ASCII"))?,
         )?;
-        let cost = load_runtime_cost(&file, expected, &evidence)?;
-        Ok((config, cost))
+        let (cost, native_images) = load_runtime_inputs(&file, expected, &evidence)?;
+        Ok(GuestInputs {
+            config,
+            cost,
+            native_images,
+        })
     }
 }
 

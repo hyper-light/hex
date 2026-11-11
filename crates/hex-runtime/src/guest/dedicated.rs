@@ -1381,14 +1381,27 @@ impl GuestRuntime {
             why: "the node's configured probe and native launch require the same explicit paths"
                 .into(),
         })?;
-        shards_api::prepare_boot(
-            spec,
-            &self.config.binary,
-            socket,
-            shards_api::recorded_console_bytes(&spec.kernel),
-        )
-        .and_then(|plan| plan.with_runtime_paths(paths))
-        .map_err(|why| refusal("preparing admitted Shards scope", &why))
+        let plan = if let Some(images) = self.native_images {
+            shards_api::prepare_native_boot(
+                spec,
+                &self.config.binary,
+                socket,
+                shards_api::NativeBoot {
+                    paths,
+                    images,
+                    console_kept: shards_api::recorded_console_bytes_at(&spec.kernel, paths),
+                },
+            )
+        } else {
+            shards_api::prepare_boot(
+                spec,
+                &self.config.binary,
+                socket,
+                shards_api::recorded_console_bytes(&spec.kernel),
+            )
+            .and_then(|plan| plan.with_runtime_paths(paths))
+        };
+        plan.map_err(|why| refusal("preparing admitted Shards scope", &why))
     }
 
     pub(super) fn prepare_selected_create(&self, id: &BoxId) -> Result<(), Refusal> {

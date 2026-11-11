@@ -1,0 +1,687 @@
+diff --git a/crates/api/src/client.rs b/crates/api/src/client.rs
+index d484e947..da5a5486 100644
+--- a/crates/api/src/client.rs
++++ b/crates/api/src/client.rs
+@@ -434,7 +434,7 @@ fn launch(
+ /// `shards run --kernel …` for `spec`, its vsock at `vsock`, its console's last `said` bytes
+ /// kept to quote. `--kernel` comes first, as the command line knows a direct boot by it
+ /// (`cli/mod.rs`).
+-fn argument_copy(value: &std::ffi::OsStr) -> Result<OsString, Refusal> {
++pub(crate) fn argument_copy(value: &std::ffi::OsStr) -> Result<OsString, Refusal> {
+     let mut copy = OsString::new();
+     copy.try_reserve_exact(value.len())
+         .map_err(|_| Refusal::Launch(crate::LaunchError::Allocation))?;
+@@ -543,11 +543,36 @@ pub fn recorded_console_bytes(kernel: &Path) -> usize {
+     crate::said::kept(kernel)
+ }
+ 
++/// The same existing console learning with the initialized native runtime home,
++/// rather than ambient node/workload environment. This does not verify a kernel.
++pub fn recorded_console_bytes_at(kernel: &Path, paths: &RuntimePaths) -> usize {
++    crate::said::kept_at(paths.home(), kernel)
++}
++
+ pub fn prepare_boot(
+     spec: &GuestSpec,
+     binary: &Path,
+     vsock: &Path,
+     console_bytes: usize,
++) -> Result<crate::PreparedBoot, Refusal> {
++    prepare_boot_inner(spec, binary, vsock, console_bytes, None)
++}
++
++pub fn prepare_native_boot(
++    spec: &GuestSpec,
++    binary: &Path,
++    vsock: &Path,
++    native: crate::NativeBoot<'_>,
++) -> Result<crate::PreparedBoot, Refusal> {
++    prepare_boot_inner(spec, binary, vsock, native.console_kept, Some(native))
++}
++
++fn prepare_boot_inner(
++    spec: &GuestSpec,
++    binary: &Path,
++    vsock: &Path,
++    console_bytes: usize,
++    native: Option<crate::NativeBoot<'_>>,
+ ) -> Result<crate::PreparedBoot, Refusal> {
+     check(spec)?;
+     if !binary.is_absolute() || binary.as_os_str().as_encoded_bytes().contains(&0) {
+@@ -569,6 +594,9 @@ pub fn prepare_boot(
+         .checked_mul(ESCAPED)
+         .and_then(|n| n.checked_add(tail(0)))
+         .ok_or(Refusal::Launch(crate::LaunchError::Count))?;
++    // Retain original typed rights and pin before producing any opaque argv.
++    let startup = crate::native::Inputs::new(spec, console_bytes, native.as_ref())?;
++    let runtime_paths = native.map(|native| native.paths.try_clone()).transpose()?;
+     let mut arguments = arguments(spec, vsock, console_bytes)?;
+     arguments
+         .try_reserve_exact(1)
+@@ -587,9 +615,10 @@ pub fn prepare_boot(
+         vsock: PathBuf::from(argument_copy(vsock.as_os_str())?),
+         ports,
+         output_bytes,
+-        runtime_paths: None,
++        runtime_paths,
+         gpu_devices,
+         gpu_report: None,
++        startup,
+     })
+ }
+ 
+diff --git a/crates/api/src/lib.rs b/crates/api/src/lib.rs
+index 494b5b74..aec6b73d 100644
+--- a/crates/api/src/lib.rs
++++ b/crates/api/src/lib.rs
+@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
+ 
+ mod client;
+ pub mod conformance;
++mod native;
+ pub mod physical;
+ mod said;
+ pub mod sim;
+@@ -45,8 +46,9 @@ mod proc_allocation;
+ 
+ pub use client::{
+     ConfiguredShards, ManagedGuest, Shards, attach_managed, boot_managed, connect_borrowed, connect_prepared,
+-    prepare_boot, recorded_console_bytes,
++    prepare_boot, prepare_native_boot, recorded_console_bytes, recorded_console_bytes_at,
+ };
++pub use native::{ImageIdentity, NativeBoot, NativeImages, NativeStartup, verify_native_image};
+ pub use physical::{GpuName, GpuProbe, GpuProbeError, PhysicalGpu, PhysicalGpuError, ResolvedGpu};
+ 
+ /// A guest to boot.
+@@ -93,6 +95,7 @@ pub struct PreparedBoot {
+     runtime_paths: Option<RuntimePaths>,
+     gpu_devices: Vec<PhysicalGpu>,
+     gpu_report: Option<([u8; 16], std::time::Instant)>,
++    startup: native::Inputs,
+ }
+ 
+ /// Pure immutable request. The final native launcher separately owns and renders
+@@ -137,6 +140,9 @@ impl PreparedBoot {
+     }
+     /// Copies only the initialized node's explicit pair, before native effects.
+     pub fn with_runtime_paths(mut self, paths: &RuntimePaths) -> Result<Self, Refusal> {
++        if self.startup.is_bound() && self.runtime_paths.as_ref().is_some_and(|known| known != paths) {
++            return Err(Refusal::Launch(LaunchError::NativeInputs));
++        }
+         self.runtime_paths = Some(paths.try_clone()?);
+         Ok(self)
+     }
+@@ -187,6 +193,12 @@ pub enum LaunchError {
+     Allocation,
+     Observer,
+     NativeRefused,
++    ImageMissing,
++    ImageSize,
++    ImageDigest,
++    ImageChanged,
++    ImageDeadline,
++    NativeInputs,
+ }
+ impl std::fmt::Display for LaunchError {
+     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+@@ -200,6 +212,12 @@ impl std::fmt::Display for LaunchError {
+             Self::Allocation => "managed boot preparation storage is unavailable",
+             Self::Observer => "native observation has no positive terminal receipt",
+             Self::NativeRefused => "the canonical native owner refused the managed operation",
++            Self::ImageMissing => "native startup has no declared image for the exact role",
++            Self::ImageSize => "native image declaration requires positive byte length",
++            Self::ImageDigest => "native image bytes differ from the declared full SHA-256",
++            Self::ImageChanged => "native image identity or length changed during verification",
++            Self::ImageDeadline => "native image verification reached the original deadline",
++            Self::NativeInputs => "native startup inputs disagree with their initialized configuration",
+         })
+     }
+ }
+diff --git a/crates/api/src/native.rs b/crates/api/src/native.rs
+new file mode 100644
+index 00000000..5c710fb3
+--- /dev/null
++++ b/crates/api/src/native.rs
+@@ -0,0 +1,340 @@
++//! Checked native startup inputs. Values bind images/configuration, never a process,
++//! physical grant or permission to launch a worker. Native owners retain that authority.
++
++use std::fs::{File, Metadata, OpenOptions};
++use std::io::{Read as _, Seek as _};
++use std::path::Path;
++use std::time::Instant;
++
++use sha2::{Digest as _, Sha256};
++
++use crate::{GuestSpec, LaunchError, PreparedBoot, Refusal, RuntimePaths, Share};
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct ImageIdentity {
++    bytes: u64,
++    sha256: [u8; 32],
++}
++
++impl ImageIdentity {
++    pub fn new(bytes: u64, sha256: [u8; 32]) -> Result<Self, Refusal> {
++        if bytes == 0 {
++            return Err(Refusal::Launch(LaunchError::ImageSize));
++        }
++        Ok(Self { bytes, sha256 })
++    }
++    pub fn bytes(self) -> u64 {
++        self.bytes
++    }
++    pub fn sha256(self) -> [u8; 32] {
++        self.sha256
++    }
++}
++
++/// Declarations in the SAME cost evidence, already hashed as RuntimeCost.id by
++/// the caller. A declaration is checked against actual bytes before execution.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct NativeImages {
++    evidence: [u8; 32],
++    cli: ImageIdentity,
++    kernel: ImageIdentity,
++    cpu_vmm: Option<ImageIdentity>,
++    gpu_vmm: Option<ImageIdentity>,
++}
++
++impl NativeImages {
++    pub fn new(
++        evidence: [u8; 32],
++        cli: ImageIdentity,
++        kernel: ImageIdentity,
++        cpu_vmm: Option<ImageIdentity>,
++        gpu_vmm: Option<ImageIdentity>,
++    ) -> Result<Self, Refusal> {
++        if evidence == [0; 32] || (cpu_vmm.is_none() && gpu_vmm.is_none()) {
++            return Err(Refusal::Launch(LaunchError::ImageMissing));
++        }
++        Ok(Self {
++            evidence,
++            cli,
++            kernel,
++            cpu_vmm,
++            gpu_vmm,
++        })
++    }
++    pub fn evidence(self) -> [u8; 32] {
++        self.evidence
++    }
++    pub fn cli(self) -> ImageIdentity {
++        self.cli
++    }
++    pub fn kernel(self) -> ImageIdentity {
++        self.kernel
++    }
++    pub fn vmm(self, gpu: bool) -> Result<ImageIdentity, Refusal> {
++        (if gpu { self.gpu_vmm } else { self.cpu_vmm }).ok_or(Refusal::Launch(LaunchError::ImageMissing))
++    }
++}
++
++/// Borrowed inputs from the same initialized runtime and original console bound.
++/// The existing standalone preparation does not require these declarations.
++#[derive(Debug, Clone, Copy)]
++pub struct NativeBoot<'a> {
++    pub paths: &'a RuntimePaths,
++    pub images: NativeImages,
++    pub console_kept: usize,
++}
++
++#[derive(Debug)]
++pub(crate) struct Inputs {
++    kernel: std::path::PathBuf,
++    shares: Vec<Share>,
++    console_kept: usize,
++    gpu: bool,
++    images: Option<NativeImages>,
++}
++
++impl Inputs {
++    pub(crate) fn new(
++        spec: &GuestSpec,
++        console_kept: usize,
++        native: Option<&NativeBoot<'_>>,
++    ) -> Result<Self, Refusal> {
++        spec.shares
++            .len()
++            .checked_mul(size_of::<Share>())
++            .ok_or(Refusal::Launch(LaunchError::Count))?;
++        let mut shares = Vec::new();
++        shares
++            .try_reserve_exact(spec.shares.len())
++            .map_err(|_| Refusal::Launch(LaunchError::Allocation))?;
++        let path = |path: &Path| -> Result<std::path::PathBuf, Refusal> {
++            if native.is_some() && (!path.is_absolute() || path.as_os_str().as_encoded_bytes().contains(&0)) {
++                return Err(Refusal::Launch(LaunchError::NativeInputs));
++            }
++            Ok(crate::client::argument_copy(path.as_os_str())?.into())
++        };
++        for share in &spec.shares {
++            shares.push(Share {
++                dir: path(&share.dir)?,
++                read_only: share.read_only,
++            });
++        }
++        let gpu = spec.gpu || !spec.gpu_devices.is_empty();
++        if let Some(native) = native {
++            native.images.vmm(gpu)?;
++        }
++        Ok(Self {
++            kernel: path(&spec.kernel)?,
++            shares,
++            console_kept,
++            gpu,
++            images: native.map(|native| native.images),
++        })
++    }
++    pub(crate) fn is_bound(&self) -> bool {
++        self.images.is_some()
++    }
++}
++
++/// A view of this exact checked boot. No opaque argv parsing or new owner/copy.
++#[derive(Debug, Clone, Copy)]
++pub struct NativeStartup<'a> {
++    binary: &'a Path,
++    kernel: &'a Path,
++    shares: &'a [Share],
++    paths: &'a RuntimePaths,
++    images: NativeImages,
++    gpu: bool,
++    console_kept: usize,
++}
++
++impl PreparedBoot {
++    pub fn native_startup(&self) -> Result<NativeStartup<'_>, Refusal> {
++        let images = self
++            .startup
++            .images
++            .ok_or(Refusal::Launch(LaunchError::ImageMissing))?;
++        let paths = self
++            .runtime_paths
++            .as_ref()
++            .ok_or(Refusal::Launch(LaunchError::NativeInputs))?;
++        images.vmm(self.startup.gpu)?;
++        Ok(NativeStartup {
++            binary: &self.binary,
++            kernel: &self.startup.kernel,
++            shares: &self.startup.shares,
++            paths,
++            images,
++            gpu: self.startup.gpu,
++            console_kept: self.startup.console_kept,
++        })
++    }
++}
++
++impl NativeStartup<'_> {
++    pub fn binary(&self) -> &Path {
++        self.binary
++    }
++    pub fn kernel(&self) -> &Path {
++        self.kernel
++    }
++    pub fn shares(&self) -> &[Share] {
++        self.shares
++    }
++    pub fn paths(&self) -> &RuntimePaths {
++        self.paths
++    }
++    pub fn images(&self) -> NativeImages {
++        self.images
++    }
++    pub fn gpu(&self) -> bool {
++        self.gpu
++    }
++    pub fn console_kept(&self) -> usize {
++        self.console_kept
++    }
++    pub fn console_pin(&self) -> [u8; 32] {
++        self.images.kernel.sha256
++    }
++    pub fn verify_cli(&self, deadline: Instant) -> Result<File, Refusal> {
++        verify_native_image(self.binary, self.images.cli, deadline)
++    }
++    pub fn verify_kernel(&self, deadline: Instant) -> Result<File, Refusal> {
++        verify_native_image(self.kernel, self.images.kernel, deadline)
++    }
++}
++
++fn io(operation: &'static str, why: std::io::Error) -> Refusal {
++    Refusal::ManagedIo {
++        operation,
++        kind: why.kind(),
++        code: why.raw_os_error(),
++    }
++}
++
++fn remaining(deadline: Instant) -> Result<(), Refusal> {
++    if Instant::now() >= deadline {
++        return Err(Refusal::Launch(LaunchError::ImageDeadline));
++    }
++    Ok(())
++}
++
++fn same(before: &Metadata, after: &Metadata) -> bool {
++    if !after.is_file() || before.len() != after.len() {
++        return false;
++    }
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::MetadataExt as _;
++        before.dev() == after.dev()
++            && before.ino() == after.ino()
++            && before.mtime() == after.mtime()
++            && before.mtime_nsec() == after.mtime_nsec()
++            && before.ctime() == after.ctime()
++            && before.ctime_nsec() == after.ctime_nsec()
++    }
++    #[cfg(windows)]
++    {
++        use std::os::windows::fs::MetadataExt as _;
++        before.creation_time() == after.creation_time()
++            && before.last_write_time() == after.last_write_time()
++            && before.file_attributes() == after.file_attributes()
++    }
++    #[cfg(not(any(unix, windows)))]
++    false
++}
++
++/// Hash exactly the declared bytes from a regular, non-symlink/reparse file and
++/// retain that SAME open file. This is a file-content witness, not an exec token:
++/// the native owner must join its final held image and retain the handle until
++/// consumption. Executing a separately reopened path would reintroduce TOCTOU.
++pub fn verify_native_image(path: &Path, expected: ImageIdentity, deadline: Instant) -> Result<File, Refusal> {
++    remaining(deadline)?;
++    if !path.is_absolute() || path.as_os_str().as_encoded_bytes().contains(&0) {
++        return Err(Refusal::Launch(LaunchError::NativeInputs));
++    }
++    let located = std::fs::symlink_metadata(path).map_err(|why| io("locating native image", why))?;
++    if !located.is_file() {
++        return Err(Refusal::Launch(LaunchError::ImageChanged));
++    }
++    let mut options = OpenOptions::new();
++    options.read(true);
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::OpenOptionsExt as _;
++        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
++    }
++    #[cfg(windows)]
++    {
++        use std::os::windows::fs::OpenOptionsExt as _;
++        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
++    }
++    let mut file = options
++        .open(path)
++        .map_err(|why| io("opening native image", why))?;
++    let before = file.metadata().map_err(|why| io("sizing native image", why))?;
++    if !before.is_file() || before.len() != expected.bytes || !same(&located, &before) {
++        return Err(Refusal::Launch(LaunchError::ImageChanged));
++    }
++    #[cfg(windows)]
++    {
++        use std::os::windows::fs::MetadataExt as _;
++        if before.file_attributes() & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
++            != 0
++        {
++            return Err(Refusal::Launch(LaunchError::ImageChanged));
++        }
++    }
++    let mut digest = Sha256::new();
++    // One SHA-256 compression block (512 bits); a protocol-derived stack bound,
++    // not an empirically tuned throughput or allocation claim.
++    let mut block = [0u8; 64];
++    let mut left = expected.bytes;
++    while left != 0 {
++        remaining(deadline)?;
++        let count = usize::try_from(
++            left.min(u64::try_from(block.len()).map_err(|_| Refusal::Launch(LaunchError::Count))?),
++        )
++        .map_err(|_| Refusal::Launch(LaunchError::Count))?;
++        let room = block
++            .get_mut(..count)
++            .ok_or(Refusal::Launch(LaunchError::Count))?;
++        let got = match file.read(room) {
++            Err(why) if why.kind() == std::io::ErrorKind::Interrupted => continue,
++            read => read.map_err(|why| io("reading native image", why))?,
++        };
++        if got == 0 {
++            return Err(Refusal::Launch(LaunchError::ImageChanged));
++        }
++        digest.update(room.get(..got).ok_or(Refusal::Launch(LaunchError::Count))?);
++        left = left
++            .checked_sub(u64::try_from(got).map_err(|_| Refusal::Launch(LaunchError::Count))?)
++            .ok_or(Refusal::Launch(LaunchError::Count))?;
++    }
++    remaining(deadline)?;
++    let mut extra = [0u8; 1];
++    if file
++        .read(&mut extra)
++        .map_err(|why| io("checking native image end", why))?
++        != 0
++    {
++        return Err(Refusal::Launch(LaunchError::ImageChanged));
++    }
++    let after = file
++        .metadata()
++        .map_err(|why| io("checking native image identity", why))?;
++    let at_path = std::fs::symlink_metadata(path).map_err(|why| io("checking native image path", why))?;
++    if !same(&before, &after) || !same(&before, &at_path) {
++        return Err(Refusal::Launch(LaunchError::ImageChanged));
++    }
++    if <[u8; 32]>::from(digest.finalize()) != expected.sha256 {
++        return Err(Refusal::Launch(LaunchError::ImageDigest));
++    }
++    file.rewind()
++        .map_err(|why| io("rewinding verified native image", why))?;
++    remaining(deadline)?;
++    Ok(file)
++}
++
++#[cfg(test)]
++mod tests;
+diff --git a/crates/api/src/native/tests.rs b/crates/api/src/native/tests.rs
+new file mode 100644
+index 00000000..6643ee50
+--- /dev/null
++++ b/crates/api/src/native/tests.rs
+@@ -0,0 +1,178 @@
++use super::{ImageIdentity, NativeBoot, NativeImages, verify_native_image};
++use crate::{GuestSpec, Init, LaunchError, Refusal, RuntimePaths, Share};
++use sha2::{Digest as _, Sha256};
++use std::io::Read as _;
++use std::path::{Path, PathBuf};
++use std::time::{Duration, Instant};
++
++fn image(bytes: &[u8]) -> ImageIdentity {
++    ImageIdentity::new(u64::try_from(bytes.len()).unwrap(), Sha256::digest(bytes).into()).unwrap()
++}
++
++fn images(gpu: bool) -> NativeImages {
++    NativeImages::new(
++        [1; 32],
++        image(b"cli"),
++        image(b"kernel"),
++        Some(image(b"cpu")),
++        if gpu { Some(image(b"gpu")) } else { None },
++    )
++    .unwrap()
++}
++
++// Pure preparation creates/dials no socket. Keep only this syntactic locator
++// short even when ROOT's private TMPDIR is longer than sockaddr_un.
++fn socket(root: &Path) -> PathBuf {
++    root.ancestors().last().unwrap().join("native-model.v")
++}
++
++fn spec(root: &Path) -> GuestSpec {
++    GuestSpec {
++        kernel: root.join("kernel"),
++        init: Init::Initrd(root.join("init")),
++        cmdline: String::new(),
++        vcpus: 1,
++        memory_mib: 256,
++        gpu: false,
++        gpu_devices: Vec::new(),
++        disks: Vec::new(),
++        shares: vec![
++            Share {
++                dir: root.join("first-Ω"),
++                read_only: true,
++            },
++            Share {
++                dir: root.join("second"),
++                read_only: false,
++            },
++        ],
++        ports: vec![1],
++        binary: None,
++    }
++}
++
++/// D215/R01/R04: typed rights survive source mutation in original order, including
++/// kept0; neither flattened argv nor a replacement runtime root grants rights.
++#[test]
++fn native_preparation_retains_exact_inputs_and_legacy_has_no_worker_plan() {
++    let dir = shards_testdir::TempDir::new("native-plan").unwrap();
++    let paths = RuntimePaths::new(dir.path().join("cache"), dir.path().join("home")).unwrap();
++    let mut original = spec(dir.path());
++    let bound = images(false);
++    let plan = crate::prepare_native_boot(
++        &original,
++        &dir.path().join("cli"),
++        &socket(dir.path()),
++        NativeBoot {
++            paths: &paths,
++            images: bound,
++            console_kept: 0,
++        },
++    )
++    .unwrap();
++    let expected = original.shares.clone();
++    original.kernel = PathBuf::from("foreign");
++    original.shares.clear();
++    let view = plan.native_startup().unwrap();
++    assert_eq!(view.kernel(), dir.path().join("kernel"));
++    assert_eq!(view.shares(), expected);
++    assert_eq!(view.console_kept(), 0);
++    assert_eq!(view.console_pin(), image(b"kernel").sha256());
++    assert_eq!(view.images(), bound);
++    assert_eq!(view.paths(), &paths);
++    assert!(!view.gpu());
++    let foreign = RuntimePaths::new(dir.path().join("other-cache"), dir.path().join("home")).unwrap();
++    assert!(matches!(
++        plan.with_runtime_paths(&foreign),
++        Err(Refusal::Launch(LaunchError::NativeInputs))
++    ));
++    let legacy =
++        crate::prepare_boot(&spec(dir.path()), &dir.path().join("cli"), &socket(dir.path()), 0).unwrap();
++    assert!(matches!(
++        legacy.native_startup(),
++        Err(Refusal::Launch(LaunchError::ImageMissing))
++    ));
++}
++
++/// A CPU image declaration is never a fallback for a GPU image, and relative
++/// share/kernel inputs cannot become a native fixed-worker allowlist.
++#[test]
++fn native_preparation_refuses_missing_variant_and_unbound_paths() {
++    let dir = shards_testdir::TempDir::new("native-inputs").unwrap();
++    let paths = RuntimePaths::new(dir.path().join("cache"), dir.path().join("home")).unwrap();
++    let mut input = spec(dir.path());
++    input.gpu = true;
++    let prepare = |input: &GuestSpec, images| {
++        crate::prepare_native_boot(
++            input,
++            &dir.path().join("cli"),
++            &socket(dir.path()),
++            NativeBoot {
++                paths: &paths,
++                images,
++                console_kept: 7,
++            },
++        )
++    };
++    assert!(matches!(
++        prepare(&input, images(false)),
++        Err(Refusal::Launch(LaunchError::ImageMissing))
++    ));
++    assert!(
++        prepare(&input, images(true))
++            .unwrap()
++            .native_startup()
++            .unwrap()
++            .gpu()
++    );
++    input.shares.first_mut().unwrap().dir = PathBuf::from("relative");
++    assert!(matches!(
++        prepare(&input, images(true)),
++        Err(Refusal::Launch(LaunchError::NativeInputs))
++    ));
++    input.shares.clear();
++    input.kernel = PathBuf::from("relative");
++    assert!(matches!(
++        prepare(&input, images(true)),
++        Err(Refusal::Launch(LaunchError::NativeInputs))
++    ));
++    assert!(ImageIdentity::new(0, [1; 32]).is_err());
++}
++
++/// Actual private files exercise full digest/length/end/deadline and retained
++/// handle ownership. A checked file is not authority for a later replaced path.
++#[test]
++fn verified_native_image_retains_exact_file_and_refuses_hostile_content() {
++    let dir = shards_testdir::TempDir::new("native-file").unwrap();
++    let path = dir.path().join("image");
++    std::fs::write(&path, b"actual image").unwrap();
++    let deadline = || Instant::now() + Duration::from_secs(1);
++    let mut verified = verify_native_image(&path, image(b"actual image"), deadline()).unwrap();
++    assert!(matches!(
++        verify_native_image(&path, image(b"foreign data"), deadline()),
++        Err(Refusal::Launch(LaunchError::ImageDigest))
++    ));
++    assert!(matches!(
++        verify_native_image(&path, image(b"short"), deadline()),
++        Err(Refusal::Launch(LaunchError::ImageChanged))
++    ));
++    assert!(matches!(
++        verify_native_image(&path, image(b"actual image"), Instant::now()),
++        Err(Refusal::Launch(LaunchError::ImageDeadline))
++    ));
++    assert!(verify_native_image(dir.path(), image(b"actual image"), deadline()).is_err());
++    assert!(verify_native_image(Path::new("relative"), image(b"actual image"), deadline()).is_err());
++    let renamed = dir.path().join("held");
++    std::fs::rename(&path, &renamed).unwrap();
++    std::fs::write(&path, b"other image!").unwrap();
++    let mut bytes = Vec::new();
++    verified.read_to_end(&mut bytes).unwrap();
++    assert_eq!(bytes, b"actual image");
++    assert!(verify_native_image(&path, image(b"actual image"), deadline()).is_err());
++    #[cfg(unix)]
++    {
++        let link = dir.path().join("link");
++        std::os::unix::fs::symlink(&renamed, &link).unwrap();
++        assert!(verify_native_image(&link, image(b"actual image"), deadline()).is_err());
++    }
++}
+diff --git a/crates/api/src/said.rs b/crates/api/src/said.rs
+index 66774569..88e1cd35 100644
+--- a/crates/api/src/said.rs
++++ b/crates/api/src/said.rs
+@@ -17,8 +17,12 @@ pub(crate) fn kept(kernel: &Path) -> usize {
+     let Some(home) = home() else {
+         return console_said(ConsoleRecords::default(), ConsoleRecords::default());
+     };
++    kept_at(&home, kernel)
++}
++
++pub(crate) fn kept_at(home: &Path, kernel: &Path) -> usize {
+     let dir = home.join("said");
+-    let own = pin(&home, kernel).map_or_else(ConsoleRecords::default, |pin| read(&dir.join(pin)));
++    let own = pin(home, kernel).map_or_else(ConsoleRecords::default, |pin| read(&dir.join(pin)));
+     console_said(own, every(&dir))
+ }
+ 

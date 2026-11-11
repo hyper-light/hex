@@ -56,7 +56,10 @@ fn evented_owner(client: Client) -> Result<EventedClient, Refusal> {
     })
 }
 
-pub use cost::{ENV_COST_EVIDENCE, ENV_COST_FILE, ENV_COST_SHA256, load_runtime_cost};
+pub use cost::{
+    ENV_COST_EVIDENCE, ENV_COST_FILE, ENV_COST_SHA256, GuestInputs, load_runtime_cost,
+    load_runtime_inputs,
+};
 
 /// The guest a node boots: its kernel and initramfs (whose `/init` is Hex's static `hex`), its vCPUs and
 /// memory (the node's to give, §1), and the host folders it shares.
@@ -351,6 +354,7 @@ pub struct GuestRuntime {
     gpu_catalog: Option<crate::devices::SharedCatalog>,
     books: OnceLock<Weak<dyn crate::devices::Books>>,
     runtime_cost: Option<hex_api::RuntimeCost>,
+    native_images: Option<shards_api::NativeImages>,
     native_paths: Option<shards_api::RuntimePaths>,
     shared_pool: Mutex<Option<hex_api::BackingKey>>,
     gpu_observer: Option<GpuObserver>,
@@ -459,6 +463,7 @@ impl GuestRuntime {
             gpu_catalog: None,
             books: OnceLock::new(),
             runtime_cost: None,
+            native_images: None,
             native_paths: None,
             shared_pool: Mutex::new(None),
             gpu_observer: None,

@@ -69,6 +69,14 @@ impl GuestRuntime {
 
     pub fn with_runtime_cost(mut self, cost: hex_api::RuntimeCost) -> Result<Self, Refusal> {
         cost.check()?;
+        if self
+            .native_images
+            .is_some_and(|images| images.evidence() != cost.id)
+        {
+            return Err(super::route::invalid(
+                "native image evidence cannot change with the runtime cost",
+            ));
+        }
         let configured = self.dedicated_resources()?;
         if cost.floor.cpu_milli != configured.cpu_milli
             || cost.ceiling.cpu_milli != configured.cpu_milli
@@ -97,6 +105,22 @@ impl GuestRuntime {
                 why: "measured backend cost has not been initialized".into(),
             })?
             .allocate(hex_api::CapacityResources::default())
+    }
+
+    /// Join declarations to the SAME original measured cost before publication.
+    /// This stores values only; native code still verifies actual open images.
+    pub fn with_native_images(mut self, images: shards_api::NativeImages) -> Result<Self, Refusal> {
+        if self
+            .runtime_cost
+            .is_none_or(|cost| cost.id != images.evidence())
+            || self.native_images.is_some_and(|known| known != images)
+        {
+            return Err(super::route::invalid(
+                "native images do not belong to the initialized cost evidence",
+            ));
+        }
+        self.native_images = Some(images);
+        Ok(self)
     }
 
     pub(super) fn check_allocation(&self, spec: &BoxSpec) -> Result<(), Refusal> {

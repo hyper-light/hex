@@ -541,8 +541,7 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
 
 /// AC-T7.4.1: configure the actual renderer and its verified cost before recovery.
 /// The existing native owner supplies both catalog and Books; this constructor boots nothing.
-fn guest_configuration()
--> Result<Option<(hex_runtime::guest::GuestConfig, hex_api::RuntimeCost)>, Refusal> {
+fn guest_configuration() -> Result<Option<hex_runtime::guest::GuestInputs>, Refusal> {
     let requested = [
         hex_runtime::guest::ENV_SHARDS_BIN,
         hex_runtime::guest::ENV_KERNEL,
@@ -561,17 +560,22 @@ fn guest_configuration()
     if !requested {
         return Ok(None);
     }
-    hex_runtime::guest::GuestConfig::from_env_with_cost().map(Some)
+    hex_runtime::guest::GuestConfig::from_env_with_native_inputs().map(Some)
 }
 
 fn configured_guest(
-    configuration: Option<(hex_runtime::guest::GuestConfig, hex_api::RuntimeCost)>,
+    configuration: Option<hex_runtime::guest::GuestInputs>,
     state: &Path,
     catalog: hex_runtime::devices::SharedCatalog,
     paths: (PathBuf, PathBuf),
 ) -> Result<Option<hex_runtime::guest::GuestRuntime>, (u8, String)> {
-    use hex_runtime::guest::GuestRuntime;
-    let Some((config, cost)) = configuration else {
+    use hex_runtime::guest::{GuestInputs, GuestRuntime};
+    let Some(GuestInputs {
+        config,
+        cost,
+        native_images,
+    }) = configuration
+    else {
         return Ok(None);
     };
     let failed = |e: Refusal| (1, e.to_string());
@@ -593,6 +597,9 @@ fn configured_guest(
         .with_gpu_catalog(catalog)
         .with_runtime_cost(cost)
         .map_err(failed)?;
+    if let Some(images) = native_images {
+        guest = guest.with_native_images(images).map_err(failed)?;
+    }
     if let Some(input) = hex_runtime::guest::GpuObserverInput::from_env().map_err(failed)? {
         guest = guest.with_gpu_observer(input).map_err(failed)?;
     }
