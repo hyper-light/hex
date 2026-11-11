@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use hex_api::Refusal;
+use hex_api::{ConnectFailure, ConnectPhase, ConnectReply, IoKind, Refusal};
 
 use super::{Duplex, DuplexOwner, Link, own_duplex};
 
@@ -144,8 +144,9 @@ impl Link for ShardsLink {
     }
 }
 
-/// Shards' refusal as Hex's: a missing backend is the platform's, a bound is a spec's, the rest is the
-/// guest's channel or its end, which Hex reads as an operating-system failure naming what it did.
+/// Shards' refusal as Hex's: a missing backend is the platform's, a bound is a spec's, a CONNECT's
+/// failure keeps its port, phase and cause (Shards R04); the rest is the guest's channel or its end,
+/// which Hex reads as an operating-system failure naming what it did.
 pub fn refusal(op: &'static str, why: &shards_api::Refusal) -> Refusal {
     match why {
         shards_api::Refusal::NoBackend { os, arch } => Refusal::Platform {
@@ -187,7 +188,37 @@ pub fn refusal(op: &'static str, why: &shards_api::Refusal) -> Refusal {
                 why: reason,
             }
         }
+        shards_api::Refusal::Connect { port, failure } => Refusal::Connect {
+            port: *port,
+            failure: connect_failure(failure),
+        },
         other => Refusal::os(op, other),
+    }
+}
+
+fn connect_failure(failure: &shards_api::HandshakeError) -> ConnectFailure {
+    use shards_api::{HandshakeError, ReplyError};
+    match failure {
+        HandshakeError::Expired { phase } => ConnectFailure::Expired {
+            phase: connect_phase(*phase),
+        },
+        HandshakeError::Io { phase, kind, code } => ConnectFailure::Io {
+            phase: connect_phase(*phase),
+            kind: IoKind::new(*kind),
+            code: *code,
+        },
+        HandshakeError::Closed => ConnectFailure::Closed,
+        HandshakeError::Reply(ReplyError::TooLong) => ConnectFailure::Reply(ConnectReply::TooLong),
+        HandshakeError::Reply(ReplyError::NotOk) => ConnectFailure::Reply(ConnectReply::NotOk),
+    }
+}
+
+fn connect_phase(phase: shards_api::HandshakePhase) -> ConnectPhase {
+    match phase {
+        shards_api::HandshakePhase::Dial => ConnectPhase::Dial,
+        shards_api::HandshakePhase::Write => ConnectPhase::Write,
+        shards_api::HandshakePhase::Read => ConnectPhase::Read,
+        shards_api::HandshakePhase::ClearTimeouts => ConnectPhase::ClearTimeouts,
     }
 }
 
