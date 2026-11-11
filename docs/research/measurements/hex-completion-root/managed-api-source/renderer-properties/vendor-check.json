@@ -1,0 +1,14 @@
+{
+  "command": [
+    "/opt/homebrew/bin/python3",
+    "scripts/vendor.py",
+    "check",
+    "shards",
+    "--from",
+    "shards=/Users/adalundhe/.cache/hex-lead/shards-source.git"
+  ],
+  "exit": 0,
+  "stdout": "vendor.py: shards: 43 files at 33df95b08ad8f95bddeaa1c48acf0c64386e0eac, 16 recorded changes, 0 differences\n",
+  "stdout_sha256": "8774b7b2004e85677de0a43766e1f5e720c256604f97cdc227f971b4a435b65a",
+  "scope": "source/vendor verification only; not compile or native behavior"
+}

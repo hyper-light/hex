@@ -1,0 +1,20 @@
+{
+  "base": "aa7e028508383e58b55d622a299b263bfac064b0",
+  "source": "eff3d0553d557948ab574710db057ffa8ce6c3db",
+  "exact_incremental_patch": "vendor/patches/shards/0016-preserve-actual-renderer-name-and-device-local-memory-in-probe.patch",
+  "patch_sha256": "edddccacddf0baccff44c8eac1a5d5a82123a2a377545703325b3d263ace28fe",
+  "files": {
+    "crates/abi/src/gpu.rs": "84d0d9f2397191ad1ded565be2063c319b1ade483c1cb4048928815ddf92262e",
+    "crates/abi/src/gpu/probe.rs": "1995c2b560eb4f907fc1656ffa211d36f72cbfd834abc9e3628581f086bb91e5",
+    "crates/api/src/lib.rs": "e40ab2537c73e21ec517baac69ea56e5cafead2606cd7c9ec67620c5adf2746a",
+    "crates/api/src/physical.rs": "1ba97813fef481a1049c7f9369329963275cf1937f2307d09ab7c101527ecea3",
+    "crates/api/src/client.rs": "0ac46e09cd8247ee76e6b5c59d35c7dd92b0c18df533f6619cf54cf77fe5d050"
+  },
+  "unchanged_functions": {
+    "connect_borrowed": "b0a9188bf11d3c9ecb7adf57ff3c5cfad2fe6bfbcd44fcd8d65a46152e5cfc18",
+    "arguments": "9e7c380be65a93959b0c9afd7dbc105a3e1553c24de86f5757cd7437c87b55b3"
+  },
+  "status": "source-only API/ABI; no new compile/native pass; VMM producer070964 independent source not imported here; existing ROOT patches retained",
+  "original_git_diff_patch_sha256": "f07d1bd0786257f0bc413afcfc454a0ccc3a9a364f836f1291c7787cf3a3ad23",
+  "patch_context_only_adjustment": "blank context prefix spaces omitted; source bytes unchanged, actual vendor replay43files/16patches0diff"
+}
