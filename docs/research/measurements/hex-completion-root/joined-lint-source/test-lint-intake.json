@@ -1,0 +1,12 @@
+{
+  "source": "f85830f23fba45bab1e73a5d7aa30d7eef937d3e test-only spans adapted to ROOT pre-scope signatures",
+  "books_module_before_sha256": "433219c987284792d687805d93132e0406585b98ea7220f7d96efb1324dcaca1",
+  "books_module_after_sha256": "433219c987284792d687805d93132e0406585b98ea7220f7d96efb1324dcaca1",
+  "books_body_preserved": true,
+  "production_before_sha256": "b6f133840652b407e7ecabfec4baafba6b3ad1199de496f154f510b6847703e7",
+  "production_after_sha256": "94244907dc1615f06d4c4d7362316d181c153c7700d86c6249e25946191185b2",
+  "production_change": "one empty line removed at the test-module extraction boundary by scoped rustfmt; all nonempty production lines byte-identical",
+  "original_check": "e1cdcd68 runtime all-target Clippy101/dce49725; two cost passes retained and not repeated",
+  "adapter_correction": "Initial local adapter assumed a newer fixture and stopped after moving module. Exact owner dedicated/routing hunks were then applied; independent assertion exposed one blank-line difference after rustfmt, explicitly recorded here. No runtime check or commit before correction.",
+  "checks": "pending strict Clippy; no native effects"
+}

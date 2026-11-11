@@ -190,7 +190,7 @@ fn exact_shards_bypasses_native_ordinary_route_without_relabeling_oci() {
     };
     let payload = match oci(Rootfs::Dir("/rootfs".into()), Vec::new()).class {
         ClassSpec::Oci(payload) => payload,
-        _ => unreachable!(),
+        _ => panic!("fixture must supply an OCI payload"),
     };
     assert_eq!(
         runtime.route(&ClassSpec::Oci(payload.clone())),

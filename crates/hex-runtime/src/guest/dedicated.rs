@@ -61,10 +61,11 @@ mod tests {
         }
         fn wait_for(&self, _: Duration) -> Result<Option<shards_api::End>, shards_api::Refusal> {
             (self.wait)();
-            Ok(self
-                .ended
-                .load(Ordering::SeqCst)
-                .then_some(shards_api::End::Stopped))
+            Ok(if self.ended.load(Ordering::SeqCst) {
+                Some(shards_api::End::Stopped)
+            } else {
+                None
+            })
         }
     }
 

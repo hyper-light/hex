@@ -15,218 +15,6 @@ pub(super) fn uncertain(id: &BoxId) -> Result<Refusal, Refusal> {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::devices::{Records, Transaction};
-    use hex_api::{Capacity, CapacityResources};
-    use std::sync::atomic::AtomicUsize;
-
-    #[derive(Default)]
-    struct Owner {
-        records: Mutex<Records>,
-        calls: AtomicUsize,
-    }
-    impl Transaction for Owner {
-        fn records(&self) -> Result<Records, Refusal> {
-            Ok(self.records.lock().unwrap().clone())
-        }
-        fn read(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
-            Ok(self
-                .records
-                .lock()
-                .unwrap()
-                .get(id)
-                .map(|row| row.as_ref().unwrap().clone()))
-        }
-        fn put(&self, record: &BoxRecord) -> Result<(), Refusal> {
-            self.records
-                .lock()
-                .unwrap()
-                .insert(record.spec.id.clone(), Ok(record.clone()));
-            Ok(())
-        }
-        fn remove(&self, id: &BoxId) -> Result<(), Refusal> {
-            self.records.lock().unwrap().remove(id);
-            Ok(())
-        }
-        fn finalize_managed(&self, _: Option<&shards_api::Identity>) -> Result<(), Refusal> {
-            panic!("pure record control cannot finalize native scope")
-        }
-        fn launch_managed(
-            &self,
-            _: &shards_api::PreparedBoot,
-            _: shards_api::LaunchIo,
-        ) -> Result<shards_api::ManagedReceipt, Refusal> {
-            panic!("pure record control cannot launch")
-        }
-        fn attach_managed(
-            &self,
-            _: Option<&shards_api::Identity>,
-        ) -> Result<shards_api::ManagedReceipt, Refusal> {
-            panic!("pure record control cannot attach")
-        }
-    }
-    impl Books for Owner {
-        fn physical_devices(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
-            Ok(Vec::new())
-        }
-        fn records(&self) -> Result<Records, Refusal> {
-            Transaction::records(self)
-        }
-        fn capacity(&self) -> Result<Capacity, Refusal> {
-            Ok(Capacity {
-                id: "model-host".into(),
-                total: CapacityResources {
-                    cpu_milli: 8000,
-                    mem_bytes: 1 << 30,
-                    disk_bytes: 1 << 30,
-                },
-                free: CapacityResources {
-                    cpu_milli: 8000,
-                    mem_bytes: 1 << 30,
-                    disk_bytes: 1 << 30,
-                },
-                devices: Vec::new(),
-                cost: None,
-            })
-        }
-        fn with_transaction(
-            &self,
-            _: &BoxId,
-            _: &[hex_api::DeviceId],
-            callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
-        ) -> Result<(), Refusal> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            callback(self)
-        }
-    }
-
-    fn runtime() -> GuestRuntime {
-        GuestRuntime::new(
-            Arc::new(shards_api::sim::SimGuests::new(|_| {
-                shards_api::End::PowerOff
-            })),
-            super::super::tests::config(),
-        )
-    }
-
-    fn cost(runtime: &GuestRuntime) -> hex_api::RuntimeCost {
-        let floor = runtime.dedicated_resources().unwrap();
-        hex_api::RuntimeCost {
-            id: [1; 32],
-            floor,
-            ceiling: floor,
-            quantum: CapacityResources {
-                cpu_milli: 1000,
-                mem_bytes: 1 << 20,
-                disk_bytes: 1,
-            },
-            // Explicit model inputs for a pure test, never a native measurement.
-            guest_overhead: CapacityResources {
-                cpu_milli: 1,
-                mem_bytes: 1,
-                disk_bytes: 0,
-            },
-            overhead: CapacityResources {
-                cpu_milli: 1,
-                mem_bytes: 1,
-                disk_bytes: 0,
-            },
-        }
-    }
-
-    /// AC-T7.4.1: only the same initialized record owner can be bound, and its
-    /// death is uncertainty rather than a new Store or permissive empty ledger.
-    #[test]
-    fn weak_registration_retains_one_canonical_owner() {
-        let runtime = runtime();
-        let owner: Arc<dyn Books> = Arc::new(Owner::default());
-        let another: Arc<dyn Books> = Arc::new(Owner::default());
-        runtime.bind_books(Arc::downgrade(&owner)).unwrap();
-        runtime.bind_books(Arc::downgrade(&owner)).unwrap();
-        assert!(runtime.bind_books(Arc::downgrade(&another)).is_err());
-        assert!(runtime.uses_books());
-        drop(owner);
-        assert!(
-            runtime
-                .recorded_box(&BoxId::new("no-owner").unwrap())
-                .is_err()
-        );
-    }
-
-    /// AC-T7.4.1: scheduler charge and actual configured VM must be identical;
-    /// missing, forged, stale or smaller allocation is refused before a transaction.
-    #[test]
-    fn dedicated_cost_is_required_and_cannot_shrink_original_workload() {
-        let runtime = runtime();
-        let profile = cost(&runtime);
-        let runtime = runtime.with_runtime_cost(profile).unwrap();
-        let mut spec = super::super::tests::oci(hex_api::Rootfs::Dir("/rootfs".into()), Vec::new());
-        let ClassSpec::Oci(payload) = spec.class else {
-            panic!("fixture OCI")
-        };
-        spec.class = ClassSpec::Shards(payload);
-        spec.bounds.cpu_max_milli = Some(1);
-        spec.bounds.memory_max = Some(1);
-        assert!(runtime.check_allocation(&spec).is_err());
-        spec.allocation = Some(
-            profile
-                .allocate(CapacityResources {
-                    cpu_milli: 1,
-                    mem_bytes: 1,
-                    disk_bytes: 0,
-                })
-                .unwrap(),
-        );
-        runtime.check_allocation(&spec).unwrap();
-        let mut forged = spec.clone();
-        forged.allocation.as_mut().unwrap().resources.cpu_milli = 1;
-        assert!(runtime.check_allocation(&forged).is_err());
-        let mut stale = spec.clone();
-        stale.allocation.as_mut().unwrap().cost.id = [2; 32];
-        assert!(runtime.check_allocation(&stale).is_err());
-        spec.bounds.memory_max = Some(profile.ceiling.mem_bytes);
-        assert!(
-            runtime.check_allocation(&spec).is_err(),
-            "guest overhead cannot shrink the original cap"
-        );
-    }
-
-    /// AC-T7.4.1: canonical recorded class/phase gates every dedicated method,
-    /// while ordinary CPU OCI retains its one outer Recorded transaction.
-    #[test]
-    fn dedicated_methods_enter_canonical_turn_once_and_refuse_nonready_effects() {
-        let runtime = runtime();
-        let owner = Arc::new(Owner::default());
-        let books: Arc<dyn Books> = owner.clone();
-        runtime.bind_books(Arc::downgrade(&books)).unwrap();
-        let mut spec = super::super::tests::oci(hex_api::Rootfs::Dir("/rootfs".into()), Vec::new());
-        let id = spec.id.clone();
-        owner
-            .put(&BoxRecord::new(spec.clone(), Phase::Ready, Vec::new()))
-            .unwrap();
-        assert!(!runtime.owns_record(&spec));
-        assert_eq!(runtime.call_recorded(&id, true, || Ok(7)), Ok(7));
-        assert_eq!(owner.calls.load(Ordering::SeqCst), 0);
-        let ClassSpec::Oci(payload) = spec.class else {
-            panic!("fixture OCI")
-        };
-        spec.class = ClassSpec::Shards(payload);
-        owner
-            .put(&BoxRecord::new(spec.clone(), Phase::Creating, Vec::new()))
-            .unwrap();
-        assert!(runtime.owns_record(&spec));
-        assert!(matches!(
-            runtime.call_recorded(&id, true, || -> Result<(), Refusal> {
-                panic!("non-ready effect")
-            }),
-            Err(Refusal::Lifecycle { .. })
-        ));
-        assert_eq!(owner.calls.load(Ordering::SeqCst), 1);
-    }
-}
-
 impl GuestRuntime {
     /// Called once after the existing Arc<Node> or Arc<Recorded<WithGuest<P>>>
     /// exists. Coercing that Arc to Books and downgrading allocates no new owner.
@@ -465,5 +253,217 @@ impl GuestRuntime {
         capacity.devices = self.attachment_offers()?;
         capacity.check()?;
         Ok(capacity)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::devices::{Records, Transaction};
+    use hex_api::{Capacity, CapacityResources};
+    use std::sync::atomic::AtomicUsize;
+
+    #[derive(Default)]
+    struct Owner {
+        records: Mutex<Records>,
+        calls: AtomicUsize,
+    }
+    impl Transaction for Owner {
+        fn records(&self) -> Result<Records, Refusal> {
+            Ok(self.records.lock().unwrap().clone())
+        }
+        fn read(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
+            Ok(self
+                .records
+                .lock()
+                .unwrap()
+                .get(id)
+                .map(|row| row.as_ref().unwrap().clone()))
+        }
+        fn put(&self, record: &BoxRecord) -> Result<(), Refusal> {
+            self.records
+                .lock()
+                .unwrap()
+                .insert(record.spec.id.clone(), Ok(record.clone()));
+            Ok(())
+        }
+        fn remove(&self, id: &BoxId) -> Result<(), Refusal> {
+            self.records.lock().unwrap().remove(id);
+            Ok(())
+        }
+        fn finalize_managed(&self, _: Option<&shards_api::Identity>) -> Result<(), Refusal> {
+            panic!("pure record control cannot finalize native scope")
+        }
+        fn launch_managed(
+            &self,
+            _: &shards_api::PreparedBoot,
+            _: shards_api::LaunchIo,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            panic!("pure record control cannot launch")
+        }
+        fn attach_managed(
+            &self,
+            _: Option<&shards_api::Identity>,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            panic!("pure record control cannot attach")
+        }
+    }
+    impl Books for Owner {
+        fn physical_devices(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
+            Ok(Vec::new())
+        }
+        fn records(&self) -> Result<Records, Refusal> {
+            Transaction::records(self)
+        }
+        fn capacity(&self) -> Result<Capacity, Refusal> {
+            Ok(Capacity {
+                id: "model-host".into(),
+                total: CapacityResources {
+                    cpu_milli: 8000,
+                    mem_bytes: 1 << 30,
+                    disk_bytes: 1 << 30,
+                },
+                free: CapacityResources {
+                    cpu_milli: 8000,
+                    mem_bytes: 1 << 30,
+                    disk_bytes: 1 << 30,
+                },
+                devices: Vec::new(),
+                cost: None,
+            })
+        }
+        fn with_transaction(
+            &self,
+            _: &BoxId,
+            _: &[hex_api::DeviceId],
+            callback: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+        ) -> Result<(), Refusal> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            callback(self)
+        }
+    }
+
+    fn runtime() -> GuestRuntime {
+        GuestRuntime::new(
+            Arc::new(shards_api::sim::SimGuests::new(|_| {
+                shards_api::End::PowerOff
+            })),
+            super::super::tests::config(),
+        )
+    }
+
+    fn cost(runtime: &GuestRuntime) -> hex_api::RuntimeCost {
+        let floor = runtime.dedicated_resources().unwrap();
+        hex_api::RuntimeCost {
+            id: [1; 32],
+            floor,
+            ceiling: floor,
+            quantum: CapacityResources {
+                cpu_milli: 1000,
+                mem_bytes: 1 << 20,
+                disk_bytes: 1,
+            },
+            // Explicit model inputs for a pure test, never a native measurement.
+            guest_overhead: CapacityResources {
+                cpu_milli: 1,
+                mem_bytes: 1,
+                disk_bytes: 0,
+            },
+            overhead: CapacityResources {
+                cpu_milli: 1,
+                mem_bytes: 1,
+                disk_bytes: 0,
+            },
+        }
+    }
+
+    /// AC-T7.4.1: only the same initialized record owner can be bound, and its
+    /// death is uncertainty rather than a new Store or permissive empty ledger.
+    #[test]
+    fn weak_registration_retains_one_canonical_owner() {
+        let runtime = runtime();
+        let owner: Arc<dyn Books> = Arc::new(Owner::default());
+        let another: Arc<dyn Books> = Arc::new(Owner::default());
+        runtime.bind_books(Arc::downgrade(&owner)).unwrap();
+        runtime.bind_books(Arc::downgrade(&owner)).unwrap();
+        assert!(runtime.bind_books(Arc::downgrade(&another)).is_err());
+        assert!(runtime.uses_books());
+        drop(owner);
+        assert!(
+            runtime
+                .recorded_box(&BoxId::new("no-owner").unwrap())
+                .is_err()
+        );
+    }
+
+    /// AC-T7.4.1: scheduler charge and actual configured VM must be identical;
+    /// missing, forged, stale or smaller allocation is refused before a transaction.
+    #[test]
+    fn dedicated_cost_is_required_and_cannot_shrink_original_workload() {
+        let runtime = runtime();
+        let profile = cost(&runtime);
+        let runtime = runtime.with_runtime_cost(profile).unwrap();
+        let mut spec = super::super::tests::oci(hex_api::Rootfs::Dir("/rootfs".into()), Vec::new());
+        let ClassSpec::Oci(payload) = spec.class else {
+            panic!("fixture OCI")
+        };
+        spec.class = ClassSpec::Shards(payload);
+        spec.bounds.cpu_max_milli = Some(1);
+        spec.bounds.memory_max = Some(1);
+        assert!(runtime.check_allocation(&spec).is_err());
+        spec.allocation = Some(
+            profile
+                .allocate(CapacityResources {
+                    cpu_milli: 1,
+                    mem_bytes: 1,
+                    disk_bytes: 0,
+                })
+                .unwrap(),
+        );
+        runtime.check_allocation(&spec).unwrap();
+        let mut forged = spec.clone();
+        forged.allocation.as_mut().unwrap().resources.cpu_milli = 1;
+        assert!(runtime.check_allocation(&forged).is_err());
+        let mut stale = spec.clone();
+        stale.allocation.as_mut().unwrap().cost.id = [2; 32];
+        assert!(runtime.check_allocation(&stale).is_err());
+        spec.bounds.memory_max = Some(profile.ceiling.mem_bytes);
+        assert!(
+            runtime.check_allocation(&spec).is_err(),
+            "guest overhead cannot shrink the original cap"
+        );
+    }
+
+    /// AC-T7.4.1: canonical recorded class/phase gates every dedicated method,
+    /// while ordinary CPU OCI retains its one outer Recorded transaction.
+    #[test]
+    fn dedicated_methods_enter_canonical_turn_once_and_refuse_nonready_effects() {
+        let runtime = runtime();
+        let owner = Arc::new(Owner::default());
+        let books: Arc<dyn Books> = owner.clone();
+        runtime.bind_books(Arc::downgrade(&books)).unwrap();
+        let mut spec = super::super::tests::oci(hex_api::Rootfs::Dir("/rootfs".into()), Vec::new());
+        let id = spec.id.clone();
+        owner
+            .put(&BoxRecord::new(spec.clone(), Phase::Ready, Vec::new()))
+            .unwrap();
+        assert!(!runtime.owns_record(&spec));
+        assert_eq!(runtime.call_recorded(&id, true, || Ok(7)), Ok(7));
+        assert_eq!(owner.calls.load(Ordering::SeqCst), 0);
+        let ClassSpec::Oci(payload) = spec.class else {
+            panic!("fixture OCI")
+        };
+        spec.class = ClassSpec::Shards(payload);
+        owner
+            .put(&BoxRecord::new(spec.clone(), Phase::Creating, Vec::new()))
+            .unwrap();
+        assert!(runtime.owns_record(&spec));
+        assert!(matches!(
+            runtime.call_recorded(&id, true, || -> Result<(), Refusal> {
+                panic!("non-ready effect")
+            }),
+            Err(Refusal::Lifecycle { .. })
+        ));
+        assert_eq!(owner.calls.load(Ordering::SeqCst), 1);
     }
 }
