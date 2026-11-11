@@ -2400,13 +2400,12 @@ mod tests {
 
     /// AC-T7.4.1: grant a backing configured by a current-boot LUID while the
     /// SAME provider reports a stale, an unknown or the matching LUID for its
-    /// stable claim; expect the launcher reached only on the match.
-    #[cfg(unix)]
+    /// stable claim; expect the launcher reached only on the match. Windows
+    /// assigns LUIDs per boot, so this runs on every target.
     #[test]
     fn current_luid_join_precedes_charged_native_gpu_launch() {
         for current in [Some(10u64.to_le_bytes()), None, Some(9u64.to_le_bytes())] {
-            // Short fixture: the prepared pool socket obeys the sun_path bound.
-            let dir = tempfile::tempdir_in("/tmp").unwrap();
+            let dir = super::super::tests::socket_fixture();
             let (config, input, allocation) = observer::config::tests::fixture(dir.path());
             let standalone = Arc::new(NoEffects(AtomicUsize::new(0)));
             let catalog = devices::Catalog::parse(
