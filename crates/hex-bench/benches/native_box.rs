@@ -246,6 +246,7 @@ mod bench {
         }
         fn create(&mut self, i: usize, bound: u64) -> Option<()> {
             let spec = BoxSpec {
+                route: None,
                 allocation: None,
                 devices: Vec::new(),
                 id: self.id(i),

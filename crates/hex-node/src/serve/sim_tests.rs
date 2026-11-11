@@ -612,6 +612,7 @@ impl SimHost {
         for id in [b(), g()] {
             host.sim
                 .create(BoxSpec {
+                    route: None,
                     allocation: None,
                     devices: Vec::new(),
                     id,
@@ -814,6 +815,7 @@ fn run(id: u64, name: &str) -> Vec<u8> {
         id,
         Call::Run {
             spec: Box::new(BoxSpec {
+                route: None,
                 allocation: None,
                 devices: Vec::new(),
                 id: BoxId::new(name).unwrap(),

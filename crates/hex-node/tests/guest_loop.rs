@@ -955,6 +955,7 @@ fn a_call_its_guest_holds_holds_no_other_clients_call_through_the_guest_client()
     let host = Host(hex_api::sim::SimRuntime::new());
     let here = BoxId::new("here").unwrap();
     host.create(BoxSpec {
+        route: None,
         allocation: None,
         devices: Vec::new(),
         id: here.clone(),
@@ -1007,6 +1008,7 @@ fn a_guest_booted_again_answers_on_the_loop_too() {
     let host = Host(hex_api::sim::SimRuntime::new());
     let here = BoxId::new("here").unwrap();
     host.create(BoxSpec {
+        route: None,
         allocation: None,
         devices: Vec::new(),
         id: here.clone(),
@@ -1032,6 +1034,7 @@ fn a_guest_booted_again_answers_on_the_loop_too() {
     let rootfs = dir.path().join("root.tar");
     std::fs::File::create(&rootfs).unwrap();
     let _ = client.create(BoxSpec {
+        route: None,
         allocation: None,
         devices: Vec::new(),
         id: BoxId::new("anew").unwrap(),

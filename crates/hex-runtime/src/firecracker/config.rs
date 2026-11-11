@@ -507,6 +507,7 @@ mod tests {
 
     fn spec() -> BoxSpec {
         BoxSpec {
+            route: None,
             id: BoxId::new("fixture").unwrap(),
             bounds: Bounds {
                 cpu_max_milli: Some(1500),

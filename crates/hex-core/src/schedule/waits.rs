@@ -79,6 +79,7 @@ mod tests {
         );
         let payload = crate::schedule::Payload {
             spec: hex_api::BoxSpec {
+                route: None,
                 allocation: None,
                 devices: Vec::new(),
                 id: hex_api::BoxId::new("wait-classification").unwrap(),

@@ -1,0 +1,1043 @@
+[
+  {
+    "path": "crates/hex-bench/benches/macos_box.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 104
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 154
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-bench/benches/native_box.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 248
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-bench/benches/node_memory.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 109
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 122
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-bench/benches/seam_box.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 59
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-bench/benches/seam_oci.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 167
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-bench/benches/windows_oci.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 77
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/benches/noisy_neighbor.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 85
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 97
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/guest_create_bench.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 130
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/guest_first_create.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 90
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/guest_real.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 57
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/guest_tree.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 282
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 445
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/guest_validation.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 290
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_node_recovery.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 85
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/macos_process_box.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 63
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 233
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 269
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 335
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 405
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 435
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 473
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 519
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 558
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 686
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 799
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 859
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 933
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 986
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 1062
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 1412
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/node_socket.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 224
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 577
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 588
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 611
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 1040
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 1111
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 1164
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 1175
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 1538
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 1932
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 2001
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 2105
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_box.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 446
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 458
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 494
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 505
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 729
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 1030
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 1427
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 1576
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 1755
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 2058
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 2239
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 2363
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 2491
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 2699
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 2816
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 3050
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 3080
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 3239
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 3361
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 3476
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 3681
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 3739
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 4301
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 4420
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 4598
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 4641
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 4765
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 4816
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 4934
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 4950
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 5043
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 5184
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 5284
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_cgroupfs_box.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 132
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 156
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 254
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 282
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_devices/native_scheduler.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 192
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_devices.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 157
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 495
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_ipcuts.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 338
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_lsm.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 274
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_reuse.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 248
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 508
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 544
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 611
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 1072
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 1629
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 1935
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 2224
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 2344
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_seccomp.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 136
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/oci_spec_box.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 167
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 178
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 338
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 479
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 560
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 582
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 642
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 694
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/process_box.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 47
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_assigned_device.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 403
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_node.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 99
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_node_recovery.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 80
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_oci_box.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 113
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 547
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-cli/tests/windows_process_box.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 54
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 103
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 201
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 336
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 370
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 467
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-client/src/calls/tests.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 790
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-core/src/record.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 310
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-core/src/recovery.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 139
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 252
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-core/src/schedule/waits.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 81
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/abandoned.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 96
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/facts.rs",
+    "entries": [
+      {
+        "kind": "Capacity",
+        "line": 419
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/node.rs",
+    "entries": [
+      {
+        "kind": "BoxInfo",
+        "line": 936
+      },
+      {
+        "kind": "BoxInfo",
+        "line": 1426
+      },
+      {
+        "kind": "BoxInfo",
+        "line": 1929
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 2517
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/placement/device_binding_tests.rs",
+    "entries": [
+      {
+        "kind": "Capacity",
+        "line": 142
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/placement/tests.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 121
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/adversarial_relay_tests.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 74
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/capacity.rs",
+    "entries": [
+      {
+        "kind": "Capacity",
+        "line": 143
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/device_offer_tests.rs",
+    "entries": [
+      {
+        "kind": "Capacity",
+        "line": 79
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/tests.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 42
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 178
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 252
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 364
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 585
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 854
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/scheduler/tunnel.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 359
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/serve/linux_tests.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 209
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 877
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/serve/macos_tests.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 136
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/serve/sim_tests.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 614
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 816
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/serve/unix_tests.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 129
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-node/src/store.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 774
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-node/tests/guest_loop.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 957
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 1009
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 1034
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/devices/tests.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 10
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/devices.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 863
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/firecracker/config.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 509
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/firecracker/native.rs",
+    "entries": [
+      {
+        "kind": "BoxInfo",
+        "line": 688
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/guest/books.rs",
+    "entries": [
+      {
+        "kind": "Capacity",
+        "line": 362
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/guest/dedicated.rs",
+    "entries": [
+      {
+        "kind": "BoxInfo",
+        "line": 236
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/guest/device_routing_tests.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 26
+      },
+      {
+        "kind": "Capacity",
+        "line": 100
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/guest/gpu.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 451
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/guest/rewrite.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 96
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/guest/tests.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 109
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 337
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 450
+      },
+      {
+        "kind": "Capacity",
+        "line": 1388
+      },
+      {
+        "kind": "Capacity",
+        "line": 1450
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/macos/mod.rs",
+    "entries": [
+      {
+        "kind": "BoxInfo",
+        "line": 230
+      },
+      {
+        "kind": "BoxInfo",
+        "line": 363
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/macos/tests.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 159
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 378
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 439
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 572
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 712
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/windows/mod.rs",
+    "entries": [
+      {
+        "kind": "BoxInfo",
+        "line": 1503
+      },
+      {
+        "kind": "Capacity",
+        "line": 1700
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 2018
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 2471
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/windows/oci/mod.rs",
+    "entries": [
+      {
+        "kind": "BoxInfo",
+        "line": 1241
+      }
+    ]
+  },
+  {
+    "path": "crates/hex-runtime/src/windows/oci/sys.rs",
+    "entries": [
+      {
+        "kind": "BoxSpec",
+        "line": 1815
+      },
+      {
+        "kind": "BoxSpec",
+        "line": 1883
+      }
+    ]
+  }
+]

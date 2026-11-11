@@ -94,6 +94,7 @@ pub fn rewrite(
     };
     Ok(Rewritten {
         spec: BoxSpec {
+            route: None,
             id,
             bounds,
             class,

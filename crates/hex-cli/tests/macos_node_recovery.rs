@@ -83,6 +83,7 @@ impl Drop for Node {
 
 fn spec(id: &BoxId) -> BoxSpec {
     BoxSpec {
+        route: None,
         allocation: None,
         devices: Vec::new(),
         id: id.clone(),

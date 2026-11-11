@@ -207,6 +207,7 @@ impl Lab {
         let host = Arc::new(TestHost::default());
         host.sim
             .create(BoxSpec {
+                route: None,
                 allocation: None,
                 devices: Vec::new(),
                 id: BoxId::new("b").unwrap(),
@@ -875,6 +876,7 @@ fn a_list_longer_than_one_message_comes_whole() {
         lab.host
             .sim
             .create(BoxSpec {
+                route: None,
                 allocation: None,
                 devices: Vec::new(),
                 id: BoxId::new(&format!("many-{n:04}")).unwrap(),

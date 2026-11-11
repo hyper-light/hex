@@ -77,6 +77,9 @@ fn report(devices: Vec<DeviceInfo>) -> Capacity {
         disk_bytes: 0,
     };
     Capacity {
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
         id: "fixture-native-pool".into(),
         total: room,
         free: room,

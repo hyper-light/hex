@@ -1501,6 +1501,7 @@ impl WinRuntime {
     fn info(&self, b: &Held) -> Result<BoxInfo, Refusal> {
         match b {
             Held::Process(b) => Ok(BoxInfo {
+                route: None,
                 id: b.id().clone(),
                 class: Class::Process,
                 state: if b.running()? {
@@ -1698,6 +1699,9 @@ impl Runtime for WinRuntime {
             .map_err(|_| allocation(identity.len()))?;
         id.push_str(identity);
         let report = Capacity {
+            routes: Vec::new(),
+            device_routes: Vec::new(),
+            backings: Vec::new(),
             cost: None,
             id,
             total: CapacityResources {
@@ -2016,6 +2020,7 @@ mod tests {
 
     fn device_spec(name: &str, key: u64) -> BoxSpec {
         BoxSpec {
+            route: None,
             id: BoxId::new(name).unwrap(),
             bounds: hex_api::Bounds::default(),
             owner: None,
@@ -2469,6 +2474,7 @@ mod tests {
 
     fn process_box(id: &str) -> BoxSpec {
         BoxSpec {
+            route: None,
             devices: Vec::new(),
             id: BoxId::new(id).unwrap(),
             bounds: hex_api::Bounds::default(),

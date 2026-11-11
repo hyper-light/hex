@@ -686,6 +686,7 @@ impl Runtime for FirecrackerRuntime {
                     .map_err(|_| uncertain(id))?
             {
                 return Ok(BoxInfo {
+                    route: None,
                     id: id.try_clone()?,
                     class: Class::Firecracker,
                     state: hex_api::BoxState::Empty,

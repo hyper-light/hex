@@ -280,6 +280,7 @@ impl Side for Guest {
         let _ = self.client.delete(&walker);
         self.client
             .create(BoxSpec {
+                route: None,
                 allocation: None,
                 devices: Vec::new(),
                 id: walker.clone(),
@@ -443,6 +444,7 @@ impl Guest {
         let _ = self.client.delete(&id);
         self.client
             .create(BoxSpec {
+                route: None,
                 allocation: None,
                 devices: Vec::new(),
                 id: id.clone(),

@@ -934,6 +934,7 @@ impl Node {
             }
         };
         Ok(BoxInfo {
+            route: record.spec.route,
             membership: None,
             id: id.clone(),
             class: record.spec.class.class(),
@@ -1424,6 +1425,7 @@ impl Node {
         // The box as create made it: its container created, its init at the exec FIFO, nothing exec'd
         // in it yet, as the state create wrote says without reading it back.
         Ok(BoxInfo {
+            route: record.spec.route,
             membership: None,
             id,
             class: Class::Oci,
@@ -1927,6 +1929,7 @@ impl Runtime for Node {
                 // A box whose record can't be read is reported as its id with an empty state rather
                 // than hidden; recovery is what cleans it up.
                 out.push(BoxInfo {
+                    route: None,
                     membership: None,
                     id,
                     class: Class::Process,
@@ -2515,6 +2518,7 @@ mod tests {
     fn ac_t7_1_3_a_reaped_init_keeps_its_identity_until_its_cgroup_drains() {
         let mut record = BoxRecord::new(
             BoxSpec {
+                route: None,
                 devices: Vec::new(),
                 id: BoxId::new("ended").unwrap(),
                 bounds: hex_api::Bounds::default(),

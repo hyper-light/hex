@@ -360,6 +360,9 @@ mod tests {
         }
         fn capacity(&self) -> Result<Capacity, Refusal> {
             Ok(Capacity {
+                routes: Vec::new(),
+                device_routes: Vec::new(),
+                backings: Vec::new(),
                 id: "model-host".into(),
                 total: CapacityResources {
                     cpu_milli: 8000,

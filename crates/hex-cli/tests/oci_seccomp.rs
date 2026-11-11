@@ -134,6 +134,7 @@ fn run_probe(
 
     let id = BoxId::new(name).map_err(|e| e.to_string())?;
     let spec = BoxSpec {
+        route: None,
         allocation: None,
         devices: Vec::new(),
         id: id.clone(),

@@ -19,10 +19,14 @@ struct Memory {
 
 impl Memory {
     fn queue(&self, id: u64, answer: Answer) {
+        self.queue_borrowed(id, &answer);
+    }
+
+    fn queue_borrowed(&self, id: u64, answer: &Answer) {
         self.inbound
             .lock()
             .unwrap()
-            .push_back(wire::answer(id, &answer, wire::MAX_MESSAGE).unwrap());
+            .push_back(wire::answer(id, answer, wire::MAX_MESSAGE).unwrap());
         self.handle.send(&[1]).unwrap();
     }
 }
@@ -78,9 +82,9 @@ impl Transport for Memory {
         assert!(lent.is_empty(), "a deferred guest call lends no handles");
         self.outbound.lock().unwrap().push(bytes.to_vec());
         *at = bytes.len();
-        if let Some(answer) = self.reply.lock().unwrap().clone() {
+        if let Some(answer) = self.reply.lock().unwrap().as_ref() {
             let (header, _) = sent_request(bytes);
-            self.queue(header.id, answer);
+            self.queue_borrowed(header.id, answer);
         }
         if self.offer.lock().unwrap().is_some() {
             let (header, request) = sent_request(bytes);
@@ -788,6 +792,7 @@ mod queued_deadline_probe {
             demand: "class:oci".into(),
             payload: schedule::Payload {
                 spec: BoxSpec {
+                    route: None,
                     allocation: None,
                     devices: Vec::new(),
                     id: BoxId::new("queued-deadline-probe").unwrap(),
@@ -798,7 +803,7 @@ mod queued_deadline_probe {
                 start: true,
             },
         })));
-        let expected_request = request.clone();
+        let expected_request = wire::request(0, &request, wire::MAX_MESSAGE).unwrap();
         let answer = Answer::Scheduled(Box::new(schedule::Reply {
             key: Some(schedule::Key {
                 owner: 0,
@@ -840,7 +845,7 @@ mod queued_deadline_probe {
             ))
             .unwrap();
             let (header, submitted) = next_native_request(&mut peer);
-            assert_eq!(submitted, expected_request);
+            assert_eq!(wire::request(0, &submitted, wire::MAX_MESSAGE).unwrap(), expected_request);
             let frame = framed_answer(header.id, &answer);
             match queued {
                 Queued::Complete | Queued::Decoded => peer.write_all(&frame).unwrap(),

@@ -24,6 +24,7 @@ fn physical_claims_reach_the_configured_backend_route_for_create_and_run() {
         route: backend,
     };
     let spec = BoxSpec {
+        route: None,
         id: BoxId::new("router-selected-device").unwrap(),
         bounds: hex_api::Bounds::default(),
         class: ClassSpec::Process,
@@ -98,6 +99,9 @@ impl Runtime for NativeReporting {
 #[test]
 fn native_oci_device_capacity_remains_visible_with_a_guest_configured() {
     let native = hex_api::Capacity {
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
         cost: None,
         id: "model-native-pool".into(),
         total: hex_api::CapacityResources::default(),

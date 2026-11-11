@@ -234,6 +234,7 @@ mod tests {
 
     fn info(id: &BoxId) -> BoxInfo {
         BoxInfo {
+            route: None,
             id: id.clone(),
             class: Class::Oci,
             allocation: None,

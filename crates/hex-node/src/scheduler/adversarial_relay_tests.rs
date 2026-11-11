@@ -72,6 +72,7 @@ fn relay_start(key: Key) -> Envelope {
         },
         payload: Some(Payload {
             spec: BoxSpec {
+                route: None,
                 allocation: None,
                 devices: Vec::new(),
                 id: BoxId::new("relay-caller").unwrap(),

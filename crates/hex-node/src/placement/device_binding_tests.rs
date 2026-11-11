@@ -140,6 +140,9 @@ impl Runtime for DeviceRuntime {
             disk_bytes: 0,
         };
         let report = Capacity {
+            routes: Vec::new(),
+            device_routes: Vec::new(),
+            backings: Vec::new(),
             cost: None,
             id: "device-driver-model-pool".to_owned(),
             total: room,

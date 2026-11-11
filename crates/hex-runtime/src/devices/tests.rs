@@ -8,6 +8,7 @@ fn catalog() -> Catalog {
 
 fn spec(name: &str, key: u64) -> BoxSpec {
     BoxSpec {
+        route: None,
         id: BoxId::new(name).unwrap(),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(hex_api::OciSpec {

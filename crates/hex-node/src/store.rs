@@ -772,6 +772,7 @@ mod tests {
 
     fn record(id: &str) -> BoxRecord {
         let spec = BoxSpec {
+            route: None,
             devices: Vec::new(),
             id: BoxId::new(id).unwrap(),
             bounds: Bounds::default(),

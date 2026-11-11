@@ -141,6 +141,9 @@ mod tests {
 
     fn report(id: &str, total: u64, free: u64) -> Capacity {
         Capacity {
+            routes: Vec::new(),
+            device_routes: Vec::new(),
+            backings: Vec::new(),
             cost: None,
             devices: Vec::new(),
             id: id.into(),

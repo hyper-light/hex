@@ -107,6 +107,7 @@ fn main() {
     for i in 0..16 {
         let id = BoxId::new(&format!("warm{i}")).unwrap();
         node.create(BoxSpec {
+            route: None,
             allocation: None,
             devices: Vec::new(),
             id,
@@ -120,6 +121,7 @@ fn main() {
     for i in 0..BOXES {
         let id = BoxId::new(&format!("mem{i}")).unwrap();
         node.create(BoxSpec {
+            route: None,
             allocation: None,
             devices: Vec::new(),
             id,

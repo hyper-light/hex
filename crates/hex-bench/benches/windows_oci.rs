@@ -75,6 +75,7 @@ fn main() {
     for i in 0..warmup + n {
         let id = BoxId::new(&format!("hex-bench-{i}")).unwrap();
         let spec = BoxSpec {
+            route: None,
             allocation: None,
             devices: Vec::new(),
             id: id.clone(),

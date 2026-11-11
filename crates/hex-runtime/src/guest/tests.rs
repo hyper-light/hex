@@ -107,6 +107,7 @@ fn a_source_maps_under_the_deepest_share_that_holds_it() {
 
 pub(super) fn oci(rootfs: Rootfs, mounts: Vec<Mount>) -> BoxSpec {
     BoxSpec {
+        route: None,
         devices: Vec::new(),
         allocation: None,
         id: BoxId::new("box-1").unwrap(),
@@ -335,6 +336,7 @@ fn a_bundles_config_is_rewritten_to_the_guests_paths() {
     std::fs::write(bundle.join("config.json"), config.to_string()).unwrap();
     let shared = [share(0, "/etc", false), share(1, &base, false)];
     let spec = BoxSpec {
+        route: None,
         devices: Vec::new(),
         allocation: None,
         id: BoxId::new("box-1").unwrap(),
@@ -448,6 +450,7 @@ fn where_shards_has_no_backend_the_class_is_refused_before_anything_boots() {
     assert!(why.contains("x86_64") && why.contains("Shards"), "{why}");
     assert_eq!(guests.boots.load(Ordering::SeqCst), 0);
     let process = BoxSpec {
+        route: None,
         devices: Vec::new(),
         allocation: None,
         id: BoxId::new("p").unwrap(),
@@ -1386,6 +1389,9 @@ fn runtime_capacity_forwards_guest_room_clamps_config_and_preserves_guest_disk()
     config.vcpus = 2;
     config.memory_mib = 632;
     let reported = hex_api::Capacity {
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
         devices: Vec::new(),
         cost: None,
         id: "inner-node".into(),
@@ -1448,6 +1454,9 @@ fn runtime_capacity_keeps_smaller_actual_guest_room() {
     };
     let actual = guest_capacity(
         hex_api::Capacity {
+            routes: Vec::new(),
+            device_routes: Vec::new(),
+            backings: Vec::new(),
             devices: Vec::new(),
             cost: None,
             id: "inner".into(),

@@ -228,6 +228,7 @@ impl MacRuntime {
 
     fn info(&self, b: &ProcessBox) -> Result<BoxInfo, Refusal> {
         Ok(BoxInfo {
+            route: None,
             allocation: None,
             id: b.id().clone(),
             class: Class::Process,
@@ -361,6 +362,7 @@ fn remove_process_box(
 /// exit, and no abandoned programs (the node's disconnect rule is the helper's here).
 fn info(id: BoxId, bounds: Bounds, state: BoxState) -> BoxInfo {
     BoxInfo {
+        route: None,
         allocation: None,
         id,
         class: Class::Process,

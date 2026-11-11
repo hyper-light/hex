@@ -88,6 +88,7 @@ fn an_upgrades_first_create_is_timed() {
     let id = BoxId::new("first").unwrap();
     let creating = Instant::now();
     node.create(BoxSpec {
+        route: None,
         allocation: None,
         devices: Vec::new(),
         id: id.clone(),

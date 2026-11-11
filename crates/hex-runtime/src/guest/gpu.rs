@@ -449,6 +449,7 @@ mod tests {
         append_authority(&mut cmdline, &owner, &devices).unwrap();
         let authority = Authority::parse(&cmdline).unwrap().unwrap();
         let spec = BoxSpec {
+            route: None,
             id: owner,
             bounds: Bounds::default(),
             class: ClassSpec::Oci(Box::new(OciSpec {

@@ -401,6 +401,7 @@ impl Lab {
             scratch,
         });
         BoxSpec {
+            route: None,
             allocation: None,
             id,
             bounds: self.inputs.bounds.clone(),

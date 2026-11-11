@@ -134,6 +134,7 @@ impl Lab {
         let host = Arc::new(TestHost::default());
         host.sim
             .create(BoxSpec {
+                route: None,
                 allocation: None,
                 devices: Vec::new(),
                 id: b(),
