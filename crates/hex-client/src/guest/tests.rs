@@ -1279,7 +1279,8 @@ fn connect_pair() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let client =
         TcpStream::connect_timeout(&listener.local_addr().unwrap(), CONNECT_OBSERVE).unwrap();
-    listener.set_nonblocking(true).unwrap();
+    // The connect has succeeded, so this accept waits only for the kernel to queue that
+    // connection; a nonblocking accept could run before it (macOS: WouldBlock, os error 35).
     let (peer, _) = listener.accept().unwrap();
     (client, peer)
 }

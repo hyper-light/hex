@@ -4,7 +4,7 @@ use std::time::Duration;
 use std::{fs::File, io::Read};
 
 #[cfg(any(target_os = "linux", test))]
-use hex_api::{BoxSpec, ClassSpec};
+use hex_api::{BoxId, BoxSpec, ClassSpec};
 use hex_api::{Refusal, RuntimeCost};
 use hex_core::stream::files::Limits;
 use serde::Deserialize;
@@ -125,6 +125,9 @@ fn path(text: Text) -> Result<PathBuf, Refusal> {
 pub(super) struct Passthrough {
     pub id: String,
     pub sbdf: String,
+    /// A display or processing-accelerator function, which the guest catalogs as its own GPU.
+    #[serde(skip)]
+    pub graphics: bool,
 }
 
 #[derive(Serialize)]
@@ -350,7 +353,7 @@ impl Config {
                 "this endpoint executes only explicit Firecracker payloads",
             ));
         }
-        self.machine_guest(self.guest(spec)?, vsock, devices)
+        self.machine_guest(self.guest(spec)?, vsock, devices, &spec.id)
     }
 
     #[cfg(any(target_os = "linux", test))]
@@ -359,6 +362,7 @@ impl Config {
         guest: hex_api::CapacityResources,
         vsock: &'a Path,
         devices: &'a [Passthrough],
+        owner: &BoxId,
     ) -> Result<VmConfig<'a>, Refusal> {
         self.check()?;
         if !self.cost.ceiling.holds(guest)
@@ -389,6 +393,12 @@ impl Config {
         use std::fmt::Write as _;
         write!(&mut boot_args, "{}", self.boot_millis()?)
             .map_err(|_| invalid("boot budget cannot be encoded"))?;
+        // The guest catalogs each GPU function its VMM attaches by the guest's own PCI identity;
+        // the words carry only the owner and how many (guest::gpu::Boot::Pci).
+        let gpus = devices.iter().filter(|device| device.graphics).count();
+        if gpus != 0 {
+            crate::guest::gpu::append_pci_authority(&mut boot_args, owner, gpus)?;
+        }
         Ok(VmConfig {
             boot_source: BootSource {
                 kernel_image_path: &self.kernel,
@@ -581,6 +591,7 @@ mod tests {
         let devices = [Passthrough {
             id: "pci_100".into(),
             sbdf: "0000:01:00.0".into(),
+            graphics: true,
         }];
         let value = serde_json::to_value(
             config
@@ -658,6 +669,260 @@ mod tests {
                 .machine(&spec, Path::new("/private/vsock"), &[])
                 .is_err()
         );
+    }
+
+    use crate::devices::{Catalog, Route};
+    use crate::guest::gpu::{Boot, DrmNode, PciCatalog, PciFunction};
+    use hex_api::{DeviceId, DeviceKind};
+
+    fn gpu(key: u64) -> DeviceId {
+        DeviceId {
+            kind: DeviceKind::Gpu,
+            key,
+        }
+    }
+
+    /// The guest's own view of one function its VMM attached: amdgpu's DRM nodes and the native
+    /// facts hex-gpu reads for it (synthetic values, not a measurement).
+    fn attached(address: &str) -> (PciFunction, hex_gpu::Gpu) {
+        let address = hex_gpu::PciAddress::parse(address).unwrap();
+        let node = |name: &str, minor| DrmNode {
+            name: name.into(),
+            major: 226,
+            minor,
+        };
+        (
+            PciFunction {
+                address,
+                nodes: vec![node("card0", 0), node("renderD128", 128)],
+            },
+            hex_gpu::Gpu {
+                vendor: hex_gpu::Vendor::Amd,
+                model: "1002:13c0 rev e5".into(),
+                memory_total_bytes: 512 << 20,
+                identity: hex_gpu::Identity::Pci(address),
+                driver_version: "6.18.48".into(),
+            },
+        )
+    }
+
+    /// What the guest's PID 1 writes for `boot` when its kernel lists `functions`.
+    fn guest_catalog(
+        boot: &str,
+        owner: &BoxId,
+        functions: &[(PciFunction, hex_gpu::Gpu)],
+    ) -> Result<PciCatalog, Refusal> {
+        match Boot::parse(boot)? {
+            Some(Boot::Pci {
+                owner: granted,
+                count,
+            }) if granted == *owner => {
+                let (functions, facts): (Vec<_>, Vec<_>) = functions.iter().cloned().unzip();
+                crate::guest::gpu::pci_catalog(
+                    count,
+                    &functions,
+                    &facts,
+                    "/run/hex/state/firecracker-gpu.cdi",
+                )
+            }
+            other => panic!("a PCI guest's boot line granted {other:?}"),
+        }
+    }
+
+    /// The guest Node's OCI capacity from its catalog, as `Node::capacity` makes it.
+    fn guest_capacity(catalog: &PciCatalog) -> hex_api::Capacity {
+        use hex_api::{CapacityResources, ImageArch, ImageOs, ImagePlatform};
+        let catalog = Catalog::parse(catalog.catalog.as_bytes()).unwrap();
+        let total = CapacityResources {
+            cpu_milli: 1_000,
+            mem_bytes: 128 << 20,
+            disk_bytes: 0,
+        };
+        let mut capacity = hex_api::Capacity {
+            id: "the guest's own node".into(),
+            total,
+            free: total,
+            devices: catalog
+                .entries_for(Route::Cdi)
+                .map(|entry| entry.report(None).unwrap())
+                .collect(),
+            cost: None,
+            routes: Vec::new(),
+            device_routes: Vec::new(),
+            backings: Vec::new(),
+        };
+        crate::devices::native_routes(
+            &mut capacity,
+            hex_api::Class::Oci,
+            ImagePlatform {
+                os: ImageOs::Linux,
+                arch: ImageArch::Amd64,
+            },
+        )
+        .unwrap();
+        capacity
+    }
+
+    /// The guest Node's own facts report for the GPUs it reads.
+    fn guest_report(guests: &[DeviceId]) -> hex_api::PhysicalReport {
+        hex_api::PhysicalReport {
+            unavailable: Vec::new(),
+            authority: "the guest's own node".into(),
+            devices: guests
+                .iter()
+                .map(|id| hex_api::PhysicalDevice {
+                    info: hex_api::DeviceInfo {
+                        id: *id,
+                        model: "1002:13c0 rev e5".into(),
+                        size: 512 << 20,
+                        holder: None,
+                    },
+                    busy_per_mille: None,
+                    memory_used_bytes: None,
+                })
+                .collect(),
+        }
+    }
+
+    /// The boot line this adapter writes for `spec` with `devices` passed through.
+    fn boot_line(spec: &BoxSpec, devices: &[Passthrough]) -> String {
+        let vm = serde_json::to_value(
+            config()
+                .machine(spec, Path::new("/private/owned/vsock"), devices)
+                .unwrap(),
+        )
+        .unwrap();
+        vm["boot-source"]["boot_args"].as_str().unwrap().to_owned()
+    }
+
+    fn passthrough(id: &str, sbdf: &str, graphics: bool) -> Passthrough {
+        Passthrough {
+            id: id.into(),
+            sbdf: sbdf.into(),
+            graphics,
+        }
+    }
+
+    /// AC-T7.4.1: original. One VM given one PCI GPU (host 0000:79:00.0, which its VMM attaches at
+    /// guest 0000:00:03.0). Do: take the boot line this adapter writes, catalog what the guest's
+    /// PID 1 writes from it, make the guest Node's OCI capacity from that catalog as the Node does,
+    /// and check the binding as the observer does. Expect: the adapter accepts the GPU it passed
+    /// through. (Red at fd6d126b: the line carried no GPU words and the guest wrote no catalog.)
+    #[test]
+    fn original_adapter_accepts_the_pci_gpu_it_passed_to_its_guest() {
+        let (host, guest) = (gpu(0x79 << 8), gpu(3 << 3));
+        let mut spec = spec();
+        spec.devices = vec![host];
+        let boot = boot_line(&spec, &[passthrough("pci_7900", "0000:79:00.0", true)]);
+        let catalog = guest_catalog(&boot, &spec.id, &[attached("0000:00:03.0")]).unwrap();
+        super::super::observations::check_bindings(
+            &[super::super::observations::Assignment { host, guest }],
+            &guest_report(&[guest]),
+            &guest_capacity(&catalog),
+            Some(&spec.id),
+        )
+        .unwrap();
+    }
+
+    /// AC-T7.4.1: do write a VM's boot line with one GPU function and its audio companion passed
+    /// through; expect only the owner and the count of GPU functions, never a host identity, and
+    /// no GPU words for a VM given no GPU function.
+    #[test]
+    fn pci_boot_words_carry_only_the_owner_and_the_count_of_gpu_functions() {
+        let mut spec = spec();
+        spec.devices = vec![gpu(0x79 << 8)];
+        let boot = boot_line(
+            &spec,
+            &[
+                passthrough("pci_7900", "0000:79:00.0", true),
+                passthrough("pci_7901", "0000:79:00.1", false),
+            ],
+        );
+        assert!(
+            boot.ends_with(" hex.gpu.box=fixture hex.gpu.pci=1"),
+            "{boot}"
+        );
+        assert_eq!(
+            Boot::parse(&boot).unwrap(),
+            Some(Boot::Pci {
+                owner: spec.id.clone(),
+                count: 1
+            })
+        );
+        assert!(!boot.contains("79:00") && !boot.contains(&(0x79_u64 << 8).to_string()));
+        for devices in [
+            &[][..],
+            &[passthrough("pci_7901", "0000:79:00.1", false)][..],
+        ] {
+            assert_eq!(Boot::parse(&boot_line(&spec, devices)).unwrap(), None);
+        }
+    }
+
+    /// AC-T7.4.1: do have the guest's kernel list a GPU function at an address its VMM's witness
+    /// does not name (the right count, the wrong function); expect the binding check to refuse it.
+    #[test]
+    fn a_guest_gpu_outside_the_vmm_witness_is_refused() {
+        let (host, witnessed, listed) = (gpu(0x79 << 8), gpu(3 << 3), gpu(4 << 3));
+        let mut spec = spec();
+        spec.devices = vec![host];
+        let boot = boot_line(&spec, &[passthrough("pci_7900", "0000:79:00.0", true)]);
+        let catalog = guest_catalog(&boot, &spec.id, &[attached("0000:00:04.0")]).unwrap();
+        assert!(
+            super::super::observations::check_bindings(
+                &[super::super::observations::Assignment {
+                    host,
+                    guest: witnessed
+                }],
+                &guest_report(&[listed]),
+                &guest_capacity(&catalog),
+                Some(&spec.id),
+            )
+            .is_err()
+        );
+    }
+
+    /// AC-T7.4.1: do pass two GPUs and have the guest serve both while the VMM witnesses only
+    /// one; expect the binding check to refuse the GPU without a witness.
+    #[test]
+    fn a_missing_witness_entry_is_refused() {
+        let hosts = [gpu(0x79 << 8), gpu(0x7a << 8)];
+        let guests = [gpu(3 << 3), gpu(4 << 3)];
+        let mut spec = spec();
+        spec.devices = hosts.to_vec();
+        let boot = boot_line(
+            &spec,
+            &[
+                passthrough("pci_7900", "0000:79:00.0", true),
+                passthrough("pci_7a00", "0000:7a:00.0", true),
+            ],
+        );
+        let catalog = guest_catalog(
+            &boot,
+            &spec.id,
+            &[attached("0000:00:03.0"), attached("0000:00:04.0")],
+        )
+        .unwrap();
+        let (capacity, report) = (guest_capacity(&catalog), guest_report(&guests));
+        let check = |witnessed: &[super::super::observations::Assignment]| {
+            super::super::observations::check_bindings(
+                witnessed,
+                &report,
+                &capacity,
+                Some(&spec.id),
+            )
+        };
+        let both = [
+            super::super::observations::Assignment {
+                host: hosts[0],
+                guest: guests[0],
+            },
+            super::super::observations::Assignment {
+                host: hosts[1],
+                guest: guests[1],
+            },
+        ];
+        check(&both).unwrap();
+        assert!(check(&both[..1]).is_err());
     }
 
     fn json() -> serde_json::Value {

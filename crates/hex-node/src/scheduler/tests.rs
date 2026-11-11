@@ -622,7 +622,10 @@ fn capacity_budget_service(
     NodeSpec,
 ) {
     let (request, _) = capacity_budget_request(1);
-    let peer = NodeSpec::new(NodeId(1), request.need);
+    // An advertised VM class must carry its immutable runtime cost (offer::checked_shape); these
+    // OCI admission tests advertise an OCI-only peer.
+    let mut peer = NodeSpec::new(NodeId(1), request.need);
+    peer.classes = Classes::NONE.with(hex_sim::model::Class::Oci);
     let cluster = Cluster::single_owner(
         vec![NodeSpec::new(NodeId(0), request.need), peer.clone()],
         Vec::new(),

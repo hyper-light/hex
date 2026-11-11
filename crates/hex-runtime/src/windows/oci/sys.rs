@@ -19,7 +19,10 @@ use std::ptr::{null, null_mut};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use windows_sys::Wdk::Graphics::Direct3D::{D3DKMT_CLOSEADAPTER, D3DKMT_OPENADAPTERFROMDEVICENAME};
+use windows_sys::Wdk::Graphics::Direct3D::{
+    D3DKMT_CLOSEADAPTER, D3DKMT_OPENADAPTERFROMDEVICENAME, D3DKMT_PHYSICAL_ADAPTER_COUNT,
+    D3DKMT_QUERYADAPTERINFO, KMTQAITYPE_PHYSICALADAPTERCOUNT,
+};
 use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     CM_GET_DEVICE_INTERFACE_LIST_PRESENT, CM_Get_Device_Interface_List_SizeW,
@@ -1307,9 +1310,11 @@ pub fn device_interfaces(class: &GUID) -> io::Result<DeviceView> {
 
 type OpenAdapter = unsafe extern "system" fn(*mut D3DKMT_OPENADAPTERFROMDEVICENAME) -> i32;
 type CloseAdapter = unsafe extern "system" fn(*const D3DKMT_CLOSEADAPTER) -> i32;
+type QueryAdapter = unsafe extern "system" fn(*mut D3DKMT_QUERYADAPTERINFO) -> i32;
 
 struct AdapterCalls {
     open: OpenAdapter,
+    query: QueryAdapter,
     close: CloseAdapter,
 }
 
@@ -1398,10 +1403,24 @@ impl AdapterCalls {
                 code: unsafe { GetLastError() },
             });
         };
+        // SAFETY: same static name and module lifetime as above.
+        let query =
+            unsafe { GetProcAddress(library, windows_sys::core::s!("D3DKMTQueryAdapterInfo")) };
+        let Some(query) = query else {
+            return Err(AdapterLoadFailure {
+                op: "resolving D3DKMTQueryAdapterInfo",
+                // SAFETY: immediate capture of this thread's export lookup failure.
+                code: unsafe { GetLastError() },
+            });
+        };
         Ok(Self {
             // SAFETY: documented Gdi32 signatures, using Microsoft's generated SDK structures.
             open: unsafe {
                 std::mem::transmute::<unsafe extern "system" fn() -> isize, OpenAdapter>(open)
+            },
+            // SAFETY: documented Gdi32 query signature, using the generated SDK structure.
+            query: unsafe {
+                std::mem::transmute::<unsafe extern "system" fn() -> isize, QueryAdapter>(query)
             },
             // SAFETY: documented Gdi32 close signature; a KMT handle is never a Win32 HANDLE.
             close: unsafe {
@@ -1517,6 +1536,8 @@ fn adapter_luid_in(names: &[u16], calls: &AdapterCalls) -> Result<[u8; 8], Refus
             "native interface list is not double-NUL terminated",
         ));
     }
+    let count_bytes = u32::try_from(size_of::<D3DKMT_PHYSICAL_ADAPTER_COUNT>())
+        .map_err(|_| adapter_invalid("physical adapter count exceeds its query size"))?;
     let mut found = None;
     let mut at = 0usize;
     while at < names.len() {
@@ -1556,8 +1577,22 @@ fn adapter_luid_in(names: &[u16], calls: &AdapterCalls) -> Result<[u8; 8], Refus
             ));
         }
         let luid = adapter.AdapterLuid;
+        // A linked display adapter's one LUID covers each of its physical adapters (WDDM 2.0
+        // KMTQAITYPE_PHYSICALADAPTERCOUNT, d3dkmthk.h). Until a node map joins this PNP device to
+        // its node, only a single physical adapter's LUID names this exact GPU.
+        let mut nodes = D3DKMT_PHYSICAL_ADAPTER_COUNT::default();
+        let mut count = D3DKMT_QUERYADAPTERINFO {
+            hAdapter: adapter.hAdapter,
+            Type: KMTQAITYPE_PHYSICALADAPTERCOUNT,
+            pPrivateDriverData: (&raw mut nodes).cast(),
+            PrivateDriverDataSize: count_bytes,
+        };
+        // SAFETY: the handle this open just returned, and an initialized output of exactly the
+        // stated size that outlives this synchronous query.
+        let queried = unsafe { (calls.query)(&mut count) };
         // SAFETY: this successful open owns exactly this KMT handle; it is closed once through
-        // D3DKMTCloseAdapter, never CloseHandle. Failure is surfaced, not a successful mapping.
+        // D3DKMTCloseAdapter, never CloseHandle, whatever the query returned. Failure is surfaced,
+        // not a successful mapping.
         let closed = unsafe {
             (calls.close)(&D3DKMT_CLOSEADAPTER {
                 hAdapter: adapter.hAdapter,
@@ -1568,6 +1603,18 @@ fn adapter_luid_in(names: &[u16], calls: &AdapterCalls) -> Result<[u8; 8], Refus
                 "closing exact GPU adapter query",
                 "NTSTATUS",
                 u32::from_ne_bytes(closed.to_ne_bytes()),
+            ));
+        }
+        if queried < 0 {
+            return Err(adapter_failure(
+                "counting the exact GPU adapter's physical adapters",
+                "NTSTATUS",
+                u32::from_ne_bytes(queried.to_ne_bytes()),
+            ));
+        }
+        if nodes.Count != 1 {
+            return Err(adapter_invalid(
+                "the exact GPU's adapter is not one physical adapter, and no node map joins it",
             ));
         }
         let [a, b, c, d] = luid.LowPart.to_le_bytes();
@@ -1932,5 +1979,103 @@ mod create_tests {
             assert_eq!(calls.released, 1);
             assert_eq!(calls.budgets, vec![0, 0, 0]);
         });
+    }
+}
+
+#[cfg(test)]
+mod adapter_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// One fake adapter: the physical adapter count and query status it reports.
+    #[derive(Default)]
+    struct Adapter {
+        nodes: u32,
+        query: i32,
+        opened: usize,
+        queried: usize,
+        closed: usize,
+    }
+    thread_local! { static ADAPTER: RefCell<Adapter> = RefCell::new(Adapter::default()); }
+
+    unsafe extern "system" fn open(adapter: *mut D3DKMT_OPENADAPTERFROMDEVICENAME) -> i32 {
+        ADAPTER.with_borrow_mut(|fake| fake.opened += 1);
+        // SAFETY: adapter_luid_in passes its own initialized, exclusively borrowed structure.
+        let adapter = unsafe { &mut *adapter };
+        adapter.hAdapter = 7;
+        adapter.AdapterLuid.LowPart = 9;
+        0
+    }
+    unsafe extern "system" fn query(info: *mut D3DKMT_QUERYADAPTERINFO) -> i32 {
+        // SAFETY: adapter_luid_in passes its own initialized, exclusively borrowed structure.
+        let info = unsafe { &mut *info };
+        assert_eq!(
+            info.hAdapter, 7,
+            "the count is asked of the adapter just opened"
+        );
+        assert_eq!(info.Type, KMTQAITYPE_PHYSICALADAPTERCOUNT);
+        assert_eq!(
+            usize::try_from(info.PrivateDriverDataSize).unwrap(),
+            size_of::<D3DKMT_PHYSICAL_ADAPTER_COUNT>()
+        );
+        ADAPTER.with_borrow_mut(|fake| {
+            fake.queried += 1;
+            // SAFETY: the output above is a live D3DKMT_PHYSICAL_ADAPTER_COUNT of the checked size.
+            unsafe {
+                (*info
+                    .pPrivateDriverData
+                    .cast::<D3DKMT_PHYSICAL_ADAPTER_COUNT>())
+                .Count = fake.nodes
+            };
+            fake.query
+        })
+    }
+    unsafe extern "system" fn close(adapter: *const D3DKMT_CLOSEADAPTER) -> i32 {
+        // SAFETY: adapter_luid_in passes its own initialized structure.
+        assert_eq!(unsafe { (*adapter).hAdapter }, 7);
+        ADAPTER.with_borrow_mut(|fake| fake.closed += 1);
+        0
+    }
+
+    fn join(nodes: u32, query_status: i32) -> (Result<[u8; 8], Refusal>, Adapter) {
+        ADAPTER.with_borrow_mut(|fake| {
+            *fake = Adapter {
+                nodes,
+                query: query_status,
+                ..Adapter::default()
+            }
+        });
+        let names: Vec<u16> = "\\\\?\\exact-interface\0\0".encode_utf16().collect();
+        let calls = AdapterCalls { open, query, close };
+        let joined = adapter_luid_in(&names, &calls);
+        (joined, ADAPTER.take())
+    }
+
+    /// AC-T7.4.1: join an exact PNP interface whose adapter reports one physical adapter, then
+    /// two (a linked display adapter) and then a failed count; expect only the first to give its
+    /// LUID, and the adapter closed once in every case.
+    #[test]
+    fn only_a_single_physical_adapter_joins_its_luid() {
+        let (joined, fake) = join(1, 0);
+        assert_eq!(joined.unwrap(), [9, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!((fake.opened, fake.queried, fake.closed), (1, 1, 1));
+
+        let (joined, fake) = join(2, 0);
+        assert!(
+            matches!(
+                joined,
+                Err(Refusal::Invalid {
+                    what: "GPU PNP identity",
+                    ..
+                })
+            ),
+            "{joined:?}"
+        );
+        assert_eq!((fake.opened, fake.queried, fake.closed), (1, 1, 1));
+
+        // STATUS_INVALID_PARAMETER: a refused count leaves the node count unknown, never one.
+        let (joined, fake) = join(1, i32::from_ne_bytes(0xC000_000Du32.to_ne_bytes()));
+        assert!(matches!(joined, Err(Refusal::Os { .. })), "{joined:?}");
+        assert_eq!((fake.opened, fake.queried, fake.closed), (1, 1, 1));
     }
 }

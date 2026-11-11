@@ -6,7 +6,7 @@ pub mod census;
 
 use crate::record::{NativeRecord, NativeScope, OwnerKey, OwnerRef, ProcId};
 use crate::wire::{Fault, Reader};
-use hex_api::{Exit, Refusal, Usage};
+use hex_api::{Exit, IoKind, Refusal, Usage};
 
 use super::{ARG_MAX, BoxId, FIRST, HEADER_BYTES, MAGIC, PATH_MAX, VERSION};
 
@@ -614,51 +614,11 @@ fn put_exit(out: &mut dyn Output, exit: Exit) -> Result<(), Fault> {
     }
 }
 
-// Explicit append-only tags, not Rust's enum discriminants. A future unrepresented kind refuses
-// encoding rather than silently becoming Other; a native errno remains exact without this table.
-const IO_KINDS: &[std::io::ErrorKind] = &[
-    std::io::ErrorKind::NotFound,
-    std::io::ErrorKind::PermissionDenied,
-    std::io::ErrorKind::ConnectionRefused,
-    std::io::ErrorKind::ConnectionReset,
-    std::io::ErrorKind::HostUnreachable,
-    std::io::ErrorKind::NetworkUnreachable,
-    std::io::ErrorKind::ConnectionAborted,
-    std::io::ErrorKind::NotConnected,
-    std::io::ErrorKind::AddrInUse,
-    std::io::ErrorKind::AddrNotAvailable,
-    std::io::ErrorKind::NetworkDown,
-    std::io::ErrorKind::BrokenPipe,
-    std::io::ErrorKind::AlreadyExists,
-    std::io::ErrorKind::WouldBlock,
-    std::io::ErrorKind::NotADirectory,
-    std::io::ErrorKind::IsADirectory,
-    std::io::ErrorKind::DirectoryNotEmpty,
-    std::io::ErrorKind::ReadOnlyFilesystem,
-    std::io::ErrorKind::StaleNetworkFileHandle,
-    std::io::ErrorKind::InvalidInput,
-    std::io::ErrorKind::InvalidData,
-    std::io::ErrorKind::TimedOut,
-    std::io::ErrorKind::WriteZero,
-    std::io::ErrorKind::StorageFull,
-    std::io::ErrorKind::NotSeekable,
-    std::io::ErrorKind::QuotaExceeded,
-    std::io::ErrorKind::FileTooLarge,
-    std::io::ErrorKind::ResourceBusy,
-    std::io::ErrorKind::ExecutableFileBusy,
-    std::io::ErrorKind::Deadlock,
-    std::io::ErrorKind::CrossesDevices,
-    std::io::ErrorKind::TooManyLinks,
-    std::io::ErrorKind::InvalidFilename,
-    std::io::ErrorKind::ArgumentListTooLong,
-    std::io::ErrorKind::Interrupted,
-    std::io::ErrorKind::Unsupported,
-    std::io::ErrorKind::UnexpectedEof,
-    std::io::ErrorKind::OutOfMemory,
-    std::io::ErrorKind::Other,
-];
+// A kind's tag is its place in hex-api's `IoKind::NAMED`, the node wire's one append-only list,
+// never Rust's enum discriminants. A kind it doesn't name refuses encoding rather than silently
+// becoming Other; a native errno stays exact beside it.
 fn put_io_kind(out: &mut dyn Output, kind: std::io::ErrorKind) -> Result<(), Fault> {
-    let tag = IO_KINDS
+    let tag = IoKind::NAMED
         .iter()
         .position(|value| *value == kind)
         .and_then(|at| u8::try_from(at).ok())
@@ -666,7 +626,7 @@ fn put_io_kind(out: &mut dyn Output, kind: std::io::ErrorKind) -> Result<(), Fau
     u8(out, tag)
 }
 fn read_io_kind(input: &mut Reader<'_>) -> Result<std::io::ErrorKind, Fault> {
-    IO_KINDS
+    IoKind::NAMED
         .get(usize::from(input.u8()?))
         .copied()
         .ok_or_else(|| invalid("helper I/O failure kind"))
@@ -1297,13 +1257,13 @@ mod tests {
         let mut ambient = launch(false);
         ambient.environment.push(b"PATH=/foreign".to_vec());
         assert!(ambient.check().is_err());
-        for kind in IO_KINDS {
+        for kind in IoKind::NAMED {
             let answer = Answer::Refused {
                 key: key(),
                 failure: Failure::Io {
                     operation: Operation::Connect,
                     code: None,
-                    kind: *kind,
+                    kind,
                 },
             };
             let bytes = encode_answer(VERSION, 71, &answer).unwrap();

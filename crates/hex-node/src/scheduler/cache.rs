@@ -212,7 +212,7 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hex_sim::model::{Device, ModelId};
+    use hex_sim::model::{Class, Classes, Device, ModelId};
 
     fn configured() -> BTreeSet<u32> {
         BTreeSet::from([1])
@@ -226,8 +226,15 @@ mod tests {
             Vec::new(),
         )
     }
+    // A peer offering a VM class must carry its immutable runtime cost (offer::checked_shape),
+    // so these offers come from OCI-only peers, as offer.rs's own fixtures do.
+    fn oci_peer(id: NodeId, capacity: Resources) -> NodeSpec {
+        let mut spec = NodeSpec::new(id, capacity);
+        spec.classes = Classes::NONE.with(Class::Oci);
+        spec
+    }
     fn advertised() -> dto::Offer {
-        let mut spec = NodeSpec::new(
+        let mut spec = oci_peer(
             NodeId(1),
             Resources {
                 cpu_milli: 4_000,
@@ -255,7 +262,7 @@ mod tests {
         let peers = BTreeSet::from([1, 2]);
         let mut cache = Cache::open(dir.path(), &peers, &mut facts).unwrap();
         cache.put(NodeId(1), &advertised()).unwrap();
-        let second = offer::from_local(&facts.nodes[2], &[]).unwrap();
+        let second = offer::from_local(&oci_peer(NodeId(2), Resources::default()), &[]).unwrap();
         cache.put(NodeId(2), &second).unwrap();
         drop(cache);
         let before = fs::read(dir.path().join("peer-1.rec")).unwrap();
