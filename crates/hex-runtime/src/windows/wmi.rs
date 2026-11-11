@@ -19,7 +19,7 @@ use windows::Win32::System::Com::{
     RPC_C_IMP_LEVEL_IMPERSONATE,
 };
 use windows::Win32::System::Rpc::{RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE};
-use windows::Win32::System::Variant::VARIANT;
+use windows::Win32::System::Variant::{VARIANT, VT_BSTR, VT_I4};
 use windows::Win32::System::Wmi::{
     IEnumWbemClassObject, IWbemClassObject, IWbemLocator, IWbemServices, WBEM_FLAG_FORWARD_ONLY,
     WBEM_FLAG_RETURN_IMMEDIATELY, WBEM_S_FALSE, WBEM_S_TIMEDOUT, WbemLocator,
@@ -261,8 +261,8 @@ fn rows(
                 break;
             }
             out.push((
-                property(&row, text, |v| BSTR::try_from(v).map(|b| b.to_string()))?,
-                property(&row, number, |v| u32::try_from(v))?,
+                property(&row, text, string_value)?,
+                property(&row, number, uint32_value)?,
             ));
         }
         if hr.0 == WBEM_S_FALSE.0 {
@@ -282,7 +282,7 @@ fn rows(
 fn property<T>(
     row: &IWbemClassObject,
     name: &str,
-    as_value: impl Fn(&VARIANT) -> windows::core::Result<T>,
+    as_value: impl Fn(&VARIANT) -> Result<T, String>,
 ) -> Result<T, Refusal> {
     let mut value = VARIANT::default();
     let wide = HSTRING::from(name);
@@ -294,6 +294,35 @@ fn property<T>(
         what: "a WMI property",
         why: format!("{name}: {e}"),
     })
+}
+
+/// A CIM `string`, which WMI returns as VT_BSTR. Read from the VARIANT itself: the `windows` crate's
+/// VARIANT conversions call propsys.dll, which nanoserver doesn't carry, and hex.exe is an `oci` box's
+/// launcher there, so importing it stops the launcher loading (STATUS_DLL_NOT_FOUND) before it replies.
+fn string_value(value: &VARIANT) -> Result<String, String> {
+    if value.vt() != VT_BSTR {
+        return Err(format!(
+            "VARIANT type {} is not a string (VT_BSTR)",
+            value.vt().0
+        ));
+    }
+    // SAFETY: the tag is VT_BSTR, so `bstrVal` is the union's live field: the BSTR `Get` stored, which
+    // `value` owns until its Drop clears it. This only borrows it to copy its text.
+    Ok(unsafe { &value.Anonymous.Anonymous.Anonymous.bstrVal }.to_string())
+}
+
+/// A CIM `uint32`, which WMI returns as VT_I4 carrying its 32 bits, Automation having no larger integer
+/// (Microsoft, "Numbers (WMI)"). Read from the VARIANT itself, for [`string_value`]'s reason.
+fn uint32_value(value: &VARIANT) -> Result<u32, String> {
+    if value.vt() != VT_I4 {
+        return Err(format!(
+            "VARIANT type {} is not a uint32 (VT_I4)",
+            value.vt().0
+        ));
+    }
+    // SAFETY: the tag is VT_I4, so `lVal` is the union's live field, a plain i32.
+    let bits = unsafe { value.Anonymous.Anonymous.Anonymous.lVal };
+    Ok(u32::from_ne_bytes(bits.to_ne_bytes()))
 }
 
 #[cfg(test)]
@@ -312,6 +341,30 @@ mod tests {
 
     fn deadline() -> Instant {
         Instant::now().checked_add(request().patience).unwrap()
+    }
+
+    /// HEX-INST-9: do: decode the VARIANT types WMI returns for a CIM string and uint32, and each
+    /// other's type; expect the text, the uint32's 32 bits (VT_I4 -1 is u32::MAX), and a refusal
+    /// naming the type it needed.
+    #[test]
+    fn properties_decode_from_the_variant_type_wmi_returns() {
+        assert_eq!(
+            string_value(&VARIANT::from("Containers")),
+            Ok("Containers".to_owned())
+        );
+        assert_eq!(uint32_value(&VARIANT::from(2i32)), Ok(2));
+        assert_eq!(uint32_value(&VARIANT::from(-1i32)), Ok(u32::MAX));
+        assert!(
+            string_value(&VARIANT::from(2i32))
+                .unwrap_err()
+                .contains("VT_BSTR")
+        );
+        assert!(
+            uint32_value(&VARIANT::from("2"))
+                .unwrap_err()
+                .contains("VT_I4")
+        );
+        assert!(uint32_value(&VARIANT::default()).is_err());
     }
 
     /// HEX-INST-9: while the reader is held, a second identical caller joins that exact read; after
