@@ -1,0 +1,208 @@
+{
+  "source": "9b68269c99a5d03ec1e2a2fb033c71c4de3a4ade",
+  "archive_sha256": "ee82c1d00ba12b9a1f308a8b0b8971ab225bdad3a7872b66aa4891a5ae03613d",
+  "scope": "ROOT same prepared fixture before69a/after/missingKillcap/restored, four independent immutable source/targets; expected2semantic failures+2passes are comparison outcomes, not workspace green",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 2877437,
+  "phases": [
+    {
+      "name": "before69a",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-client",
+        "--lib",
+        "--locked",
+        "calls::budget_tests::prepared_actor_settle_error_retains_original_kill_answer_authority",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "composite_calls_sha256": "38ae331369187698244c8d679e944e39937b27915f4c7612191e9d65604f3fc1",
+      "fixture_sha256": "1a0be87518194ba141359eedfd0c1f124cb436d8a064098af9fd04c335e486ec",
+      "pid": 2880558,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "84f15a1a1f1ccf64c387bee2a881a63b4573e242e68739c120deca1173573a01",
+      "bytes": 4015,
+      "actual_counts": [
+        {
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        }
+      ],
+      "phase_witnessed": true,
+      "clean": true,
+      "binaries": [
+        {
+          "file": "before69a-target/debug/deps/hex_client-47bbd4ab177bef6c",
+          "sha256": "6bf2e0dc7110d53b255772f87b3913d6596e9d7f16749daf6b113a7e09bb99f4",
+          "bytes": 75343536
+        }
+      ],
+      "expected_result_verified": true,
+      "source_changes": []
+    },
+    {
+      "name": "after69a",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-client",
+        "--lib",
+        "--locked",
+        "calls::budget_tests::prepared_actor_settle_error_retains_original_kill_answer_authority",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "composite_calls_sha256": "2274b7d480ab9291716b0ea257f750e0e9c53fb8e86ab20bf600cbcc51b1dd59",
+      "fixture_sha256": "1a0be87518194ba141359eedfd0c1f124cb436d8a064098af9fd04c335e486ec",
+      "pid": 2933559,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "1bf328d6df7a849881c0b42e34beb71dbb27a0382bd3cdd5f369b6bed0dfef99",
+      "bytes": 3495,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "phase_witnessed": true,
+      "clean": true,
+      "binaries": [
+        {
+          "file": "after69a-target/debug/deps/hex_client-47bbd4ab177bef6c",
+          "sha256": "1193e5267ffba65073c4c1e12e0bb75450057d4df8b980370c4900a1abeb2566",
+          "bytes": 75605728
+        }
+      ],
+      "expected_result_verified": true,
+      "source_changes": []
+    },
+    {
+      "name": "missing_kill_cap",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-client",
+        "--lib",
+        "--locked",
+        "calls::budget_tests::prepared_actor_settle_error_retains_original_kill_answer_authority",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "composite_calls_sha256": "8b6d76132b1b0ce5656cdf898c76b9ef20e45c12033305d822bd7fe01f618305",
+      "fixture_sha256": "1a0be87518194ba141359eedfd0c1f124cb436d8a064098af9fd04c335e486ec",
+      "pid": 2983943,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "32ba0a3375ccb8078c25dfe17c450183febeab686e126f524665d05d21c723e2",
+      "bytes": 4057,
+      "actual_counts": [
+        {
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        }
+      ],
+      "phase_witnessed": true,
+      "clean": true,
+      "binaries": [
+        {
+          "file": "missing_kill_cap-target/debug/deps/hex_client-47bbd4ab177bef6c",
+          "sha256": "394adfbe6c2fc5e6b1717e0b45468035686b994ff4b49f77f25d5291860adb78",
+          "bytes": 75605360
+        }
+      ],
+      "expected_result_verified": true,
+      "source_changes": []
+    },
+    {
+      "name": "restored_after69a",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-client",
+        "--lib",
+        "--locked",
+        "calls::budget_tests::prepared_actor_settle_error_retains_original_kill_answer_authority",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "composite_calls_sha256": "2274b7d480ab9291716b0ea257f750e0e9c53fb8e86ab20bf600cbcc51b1dd59",
+      "fixture_sha256": "1a0be87518194ba141359eedfd0c1f124cb436d8a064098af9fd04c335e486ec",
+      "pid": 3040995,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "dc6ff58a298ffe56432c163f070cf970c52651a5c4b4105d4f8cc16c0d0d0909",
+      "bytes": 3549,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "phase_witnessed": true,
+      "clean": true,
+      "binaries": [
+        {
+          "file": "restored_after69a-target/debug/deps/hex_client-47bbd4ab177bef6c",
+          "sha256": "2b6fa2d391a32a9cf55c556a00fd675be5a3e2c93dd39c976db7273335038a0c",
+          "bytes": 75605736
+        }
+      ],
+      "expected_result_verified": true,
+      "source_changes": []
+    }
+  ],
+  "native_invocations": 0,
+  "variants": {
+    "before69a": {
+      "calls_sha256": "38ae331369187698244c8d679e944e39937b27915f4c7612191e9d65604f3fc1",
+      "source_changes": []
+    },
+    "after69a": {
+      "calls_sha256": "2274b7d480ab9291716b0ea257f750e0e9c53fb8e86ab20bf600cbcc51b1dd59",
+      "source_changes": []
+    },
+    "missing_kill_cap": {
+      "calls_sha256": "8b6d76132b1b0ce5656cdf898c76b9ef20e45c12033305d822bd7fe01f618305",
+      "source_changes": []
+    },
+    "restored_after69a": {
+      "calls_sha256": "2274b7d480ab9291716b0ea257f750e0e9c53fb8e86ab20bf600cbcc51b1dd59",
+      "source_changes": []
+    }
+  },
+  "source_changes": [],
+  "temp_entries": 0,
+  "exit": 0
+}

@@ -1,0 +1,87 @@
+{
+  "bytes": 1572428,
+  "sha256": "472f2d763752601f0ec478c9efd3cfc113d256e2003d359b380b8ef7c240a56b",
+  "members": {
+    "cohort-9b68269c-linux-settle-comparison-9b68/source-before.json": {
+      "bytes": 475398,
+      "sha256": "3082a29c594cc6ded4d1e05e7c191852fedfc2c3d7545c5412ff892eff144a39"
+    },
+    "cohort-9b68269c-linux-settle-comparison-9b68/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-9b68269c-linux-settle-comparison-9b68/owned-scope-limits.json": {
+      "bytes": 262,
+      "sha256": "f66c5ada59e927ee9e2fe50de9cd2db0e39aee2d32e4b39008cbe594a14fc938"
+    },
+    "cohort-9b68269c-linux-settle-comparison-9b68/before69a-source-before.json": {
+      "bytes": 475398,
+      "sha256": "d44eaa6ae5a92da35ab53cd7dc944bdc067f02671aa08bef7101cd6a25799fa8"
+    },
+    "cohort-9b68269c-linux-settle-comparison-9b68/before69a.log": {
+      "bytes": 4015,
+      "sha256": "84f15a1a1f1ccf64c387bee2a881a63b4573e242e68739c120deca1173573a01"
+    },
+    "cohort-9b68269c-linux-settle-comparison-9b68/running.json": {
+      "bytes": 5803,
+      "sha256": "49653f51c8ae7523968b05e23af5a28bbc70ff12edb426576d6f20aa6d895bd7"
+    },
+    "cohort-9b68269c-linux-settle-comparison-9b68/before69a-source-after.json": {
+      "bytes": 475398,
+      "sha256": "d44eaa6ae5a92da35ab53cd7dc944bdc067f02671aa08bef7101cd6a25799fa8"
+    },
+    "cohort-9b68269c-linux-settle-comparison-9b68/after69a-source-before.json": {
+      "bytes": 475398,
+      "sha256": "3082a29c594cc6ded4d1e05e7c191852fedfc2c3d7545c5412ff892eff144a39"
+    },
+    "cohort-9b68269c-linux-settle-comparison-9b68/after69a.log": {
+      "bytes": 3495,
+      "sha256": "1bf328d6df7a849881c0b42e34beb71dbb27a0382bd3cdd5f369b6bed0dfef99"
+    },
+    "cohort-9b68269c-linux-settle-comparison-9b68/after69a-source-after.json": {
+      "bytes": 475398,
+      "sha256": "3082a29c594cc6ded4d1e05e7c191852fedfc2c3d7545c5412ff892eff144a39"
+    },
+    "cohort-9b68269c-linux-settle-comparison-9b68/missing_kill_cap-source-before.json": {
+      "bytes": 475398,
+      "sha256": "e89e4e406557a37e04a187a32c1109201b0e33d6ee4cd4e1842c8642940dec18"
+    },
+    "cohort-9b68269c-linux-settle-comparison-9b68/missing_kill_cap.log": {
+      "bytes": 4057,
+      "sha256": "32ba0a3375ccb8078c25dfe17c450183febeab686e126f524665d05d21c723e2"
+    },
+    "cohort-9b68269c-linux-settle-comparison-9b68/missing_kill_cap-source-after.json": {
+      "bytes": 475398,
+      "sha256": "e89e4e406557a37e04a187a32c1109201b0e33d6ee4cd4e1842c8642940dec18"
+    },
+    "cohort-9b68269c-linux-settle-comparison-9b68/restored_after69a-source-before.json": {
+      "bytes": 475398,
+      "sha256": "3082a29c594cc6ded4d1e05e7c191852fedfc2c3d7545c5412ff892eff144a39"
+    },
+    "cohort-9b68269c-linux-settle-comparison-9b68/restored_after69a.log": {
+      "bytes": 3549,
+      "sha256": "dc6ff58a298ffe56432c163f070cf970c52651a5c4b4105d4f8cc16c0d0d0909"
+    },
+    "cohort-9b68269c-linux-settle-comparison-9b68/restored_after69a-source-after.json": {
+      "bytes": 475398,
+      "sha256": "3082a29c594cc6ded4d1e05e7c191852fedfc2c3d7545c5412ff892eff144a39"
+    },
+    "cohort-9b68269c-linux-settle-comparison-9b68/source-after.json": {
+      "bytes": 475398,
+      "sha256": "3082a29c594cc6ded4d1e05e7c191852fedfc2c3d7545c5412ff892eff144a39"
+    },
+    "cohort-9b68269c-linux-settle-comparison-9b68/result.json": {
+      "bytes": 6649,
+      "sha256": "e15ab0ff98f7e52abd9c4477b63b984d75155f8b9f397c1e38a713be580cbc5e"
+    },
+    "cohort-9b68269c-linux-settle-comparison-9b68/collected-binaries.json": {
+      "bytes": 5357,
+      "sha256": "40def796a28ad4acf943568506a1692485937003c17d82408d7935a9a8912a97"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}
