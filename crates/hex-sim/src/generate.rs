@@ -63,6 +63,7 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
         };
         let classes = os.classes(virt);
         nodes.push(NodeSpec {
+            routes: None,
             costs: [None; crate::model::Class::COUNT],
             runtime_pools: Vec::new(),
             id: NodeId(id),
@@ -378,6 +379,7 @@ pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
     }
     let nodes: Vec<NodeSpec> = (0..day.nodes)
         .map(|id| NodeSpec {
+            routes: None,
             costs: [None; crate::model::Class::COUNT],
             runtime_pools: Vec::new(),
             id: NodeId(id),
@@ -568,6 +570,7 @@ impl NodeModel {
     pub fn node(self, id: u32) -> NodeSpec {
         match self {
             NodeModel::M5dMetal => NodeSpec {
+                routes: None,
                 costs: [None; crate::model::Class::COUNT],
                 runtime_pools: Vec::new(),
                 id: NodeId(id),
@@ -602,6 +605,7 @@ impl NodeModel {
                     .into_iter()
                     .collect();
                 NodeSpec {
+                    routes: None,
                     costs: [None; crate::model::Class::COUNT],
                     runtime_pools: Vec::new(),
                     id: NodeId(id),

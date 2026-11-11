@@ -449,6 +449,7 @@ mod tests {
 
     fn node(cpu: u64, mem: u64) -> NodeSpec {
         NodeSpec {
+            routes: None,
             costs: [None; crate::model::Class::COUNT],
             runtime_pools: Vec::new(),
             id: NodeId(0),

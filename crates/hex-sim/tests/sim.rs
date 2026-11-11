@@ -464,6 +464,7 @@ fn res(cpu: u64) -> Resources {
 fn two_nodes() -> Vec<NodeSpec> {
     vec![
         NodeSpec {
+            routes: None,
             costs: [None; hex_sim::model::Class::COUNT],
             runtime_pools: Vec::new(),
             id: NodeId(0),
@@ -475,6 +476,7 @@ fn two_nodes() -> Vec<NodeSpec> {
             devices: Vec::new(),
         },
         NodeSpec {
+            routes: None,
             costs: [None; hex_sim::model::Class::COUNT],
             runtime_pools: Vec::new(),
             id: NodeId(1),

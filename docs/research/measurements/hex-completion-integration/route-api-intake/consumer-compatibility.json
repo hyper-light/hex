@@ -1,0 +1,128 @@
+{
+  "source": "f3f99e71304a780e2a75fd143895396dbd8f2d6a",
+  "inventory_base": "7bcc5b87b1f04aa9ea88d396418b2f72c91d6f64",
+  "files": [
+    {
+      "path": "crates/hex-sim/src/danger.rs",
+      "before": "8fa74c89f0304ae694aa42fb0ca5c8f756c8741cb0cc046a15a98e5351a3bdbd",
+      "legacy_routes_none": 1,
+      "original_lines": [
+        206
+      ],
+      "after": "eeb14de9f3cef393208d1c0920b3f2e424080ad4be6857ea7a4806e9b4884c87"
+    },
+    {
+      "path": "crates/hex-sim/src/fair.rs",
+      "before": "10741db2e1e32ba4d21c33e5377c52deba1e49614a1e9962c2f88c95bc3c50fc",
+      "legacy_routes_none": 1,
+      "original_lines": [
+        451
+      ],
+      "after": "796c37b5332546bfc5b5b736e86ddf7e5fb48aebe6f3b37088664a291542004f"
+    },
+    {
+      "path": "crates/hex-sim/src/faults.rs",
+      "before": "7c4c420f9fc70ac2d49717542cb64e3771540d3aee9edee30598219062d8a97c",
+      "legacy_routes_none": 2,
+      "original_lines": [
+        646,
+        866
+      ],
+      "after": "5fcf7e683b0d44918ad203c3a8c393c3faf7dd1a4058b2e26f25bb21ce6e983d"
+    },
+    {
+      "path": "crates/hex-sim/src/generate.rs",
+      "before": "020ad0fa4af5277daf767dabe8ae44d4b9149bbb9fb9aa540a681a337c4bab86",
+      "legacy_routes_none": 4,
+      "original_lines": [
+        65,
+        380,
+        570,
+        604
+      ],
+      "after": "1cc45be5df86952a2bf788cae6b4c451363d2736d2360474602d2ed845407a5f"
+    },
+    {
+      "path": "crates/hex-sim/src/packing.rs",
+      "before": "3310b7013f702daa6071d173278c71bccabd5951af7058a28e658aaa41876f54",
+      "legacy_routes_none": 1,
+      "original_lines": [
+        271
+      ],
+      "after": "9ba15ac74f9003024b1525e3b7cb746daa0b83593d795d75a07fbef7897efe13"
+    },
+    {
+      "path": "crates/hex-sim/src/replay.rs",
+      "before": "0852d4b87605a7326678fcb5dbca9e8c0379775fcd7cb987551c1ef1b441c902",
+      "legacy_routes_none": 1,
+      "original_lines": [
+        131
+      ],
+      "after": "cd381eea553c509ac49c2066dd07c7a523a4acf6be96d56ec6e273582f94d513"
+    },
+    {
+      "path": "crates/hex-sim/src/store.rs",
+      "before": "ea72f66454a5bb7d996c614ee3ab1951f080eedf13f9d9ad5345851e0c539d08",
+      "legacy_routes_none": 1,
+      "original_lines": [
+        677
+      ],
+      "after": "41c52c52ccea2994ccb1c4c14cd89a9f18428244f2d9dcfa9425386d0ddfb01d"
+    },
+    {
+      "path": "crates/hex-sim/tests/huawei.rs",
+      "before": "03cd811fc4ee4050a485dbacd9ab09a62d8f4e8b9a8ac6cefb64ad0295d54cee",
+      "legacy_routes_none": 1,
+      "original_lines": [
+        83
+      ],
+      "after": "efe8d263b400dcc3690c7ad3ebaee25f8c57b26c1913b9684f1758b071dffeef"
+    },
+    {
+      "path": "crates/hex-sim/tests/preempt.rs",
+      "before": "1c0dddc2b87abb536090bcf69e01b8c0bffc0705f08644a8ad910062b1fd8ba0",
+      "legacy_routes_none": 1,
+      "original_lines": [
+        147
+      ],
+      "after": "6a2421412a0ddf1239c1914d3333f1b06c6dcface2c0f89397cd78e612a8187d"
+    },
+    {
+      "path": "crates/hex-sim/tests/recorded.rs",
+      "before": "fe159362d1890261bce605ddd0c264949fee77be9845a9e3b3047d84c3b4eb50",
+      "legacy_routes_none": 1,
+      "original_lines": [
+        46
+      ],
+      "after": "07e7b8812f48fa4db3985b7536563337244ce74bc2d01b8195ca3f37ba486db8"
+    },
+    {
+      "path": "crates/hex-sim/tests/sim.rs",
+      "before": "e56db5fa79903865faf000ec292d986ed7186662581e8d1da8be7292d6cd6bff",
+      "legacy_routes_none": 2,
+      "original_lines": [
+        466,
+        477
+      ],
+      "after": "b0510ec623fb2762db9f7af2f1a710a2c550628de79e9ac6731468d74ec1a1d9"
+    },
+    {
+      "path": "crates/hex-node/src/scheduler/adversarial_relay_tests.rs",
+      "before": "a82d04f44db53bf66d01e02dec228f00c31f55e8e46d5e90554567599ab25a93",
+      "legacy_test_envelopes_route_none": 2,
+      "after": "f42d013c47a7ff49595c29e247441116b7aabe3b34270a84563e38a8dd7156f4"
+    }
+  ],
+  "fallible_index_copies": {
+    "path": "crates/hex-sim/src/faults.rs",
+    "count": 2,
+    "error": "FaultError::Sim"
+  },
+  "preserved": [
+    "four struct-update expressions inherit SharedRoutes",
+    "Ask struct-updates inherit original runtime form and native_only",
+    "real packet message uses d2/r1 codec; no route defaults applied there",
+    "real Capacity normalization remains L1 producer work; routesNone only legacy fixtures/generators"
+  ],
+  "scoped_format_exit": 0
+}

@@ -269,6 +269,7 @@ mod tests {
         Cluster::single_owner(
             (0..nodes)
                 .map(|i| NodeSpec {
+                    routes: None,
                     costs: [None; crate::model::Class::COUNT],
                     runtime_pools: Vec::new(),
                     id: NodeId(i),

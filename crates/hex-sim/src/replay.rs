@@ -129,6 +129,7 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
                     return Err(bad(line, "a node with no CPU"));
                 }
                 nodes.push(NodeSpec {
+                    routes: None,
                     costs: [None; crate::model::Class::COUNT],
                     runtime_pools: Vec::new(),
                     id,
