@@ -1300,6 +1300,10 @@ mod io_tests {
         let error = stderr.write_all(b"configured-vmm-stderr\n");
         drop(stdout);
         drop(stderr);
+        // Another test's descriptor taking a closed number, as one may at any moment among this
+        // binary's parallel tests: dupfd returns the lowest free number from the one given.
+        let other = fs::File::open("/dev/null").unwrap();
+        let _reuse = rustix::io::fcntl_dupfd_cloexec(&other, descriptors[0]).unwrap();
         for descriptor in descriptors {
             let path = Path::new("/proc/self/fd").join(descriptor.to_string());
             assert!(
@@ -1310,6 +1314,80 @@ mod io_tests {
         assert!(
             output.is_ok() && error.is_ok(),
             "stdout={output:?}; stderr={error:?}"
+        );
+    }
+
+    /// A stand-in VMM: a real child process, observed as the native receipt observes one.
+    struct StandIn {
+        identity: shards_api::Identity,
+        child: std::sync::Mutex<std::process::Child>,
+    }
+
+    impl StandIn {
+        fn start(script: &str, stdout: std::io::PipeWriter, stderr: std::io::PipeWriter) -> Self {
+            let child = std::process::Command::new("/bin/sh")
+                .args(["-c", script])
+                .stdin(std::process::Stdio::null())
+                .stdout(stdout)
+                .stderr(stderr)
+                .spawn()
+                .unwrap();
+            let pid = child.id();
+            let started =
+                crate::linux::oci::state::start_time(i32::try_from(pid).unwrap()).unwrap();
+            Self {
+                identity: shards_api::Identity {
+                    pid,
+                    started,
+                    vsock: PathBuf::from("/nonexistent/stand-in.vsock"),
+                },
+                child: std::sync::Mutex::new(child),
+            }
+        }
+    }
+
+    impl shards_api::ManagedProcess for StandIn {
+        fn identity(&self) -> Result<&shards_api::Identity, shards_api::Refusal> {
+            Ok(&self.identity)
+        }
+        fn wait_for(
+            &self,
+            _: std::time::Duration,
+        ) -> Result<Option<shards_api::ManagedEnd>, shards_api::Refusal> {
+            self.terminal()
+        }
+        fn stop(&self) -> Result<(), shards_api::Refusal> {
+            self.child.lock().unwrap().kill().unwrap();
+            Ok(())
+        }
+        fn terminal(&self) -> Result<Option<shards_api::ManagedEnd>, shards_api::Refusal> {
+            let status = self.child.lock().unwrap().try_wait().unwrap();
+            Ok(status.map(|status| shards_api::ManagedEnd {
+                status: shards_api::ManagedStatus::Code(status.code().unwrap_or(-1)),
+                scope: shards_api::TerminalScope::Released,
+            }))
+        }
+    }
+
+    /// AC-T7.4.1: original. A VMM that says why it stops and ends before its guest is ready (as
+    /// a DMA map refused by RLIMIT_MEMLOCK ends one). Do: start a stand-in on the configured output
+    /// sinks and wait for readiness as create does; expect the refusal to carry what it wrote. The
+    /// wait ends on the stand-in's exit; the deadline is only an outer guard.
+    #[test]
+    fn original_a_vmm_ending_before_readiness_is_refused_with_what_it_wrote() {
+        let shards_api::LaunchIo { stdout, stderr, .. } = FirecrackerRuntime::vm_io().unwrap();
+        let vmm = StandIn::start(
+            "echo 'vfio: RLIMIT_MEMLOCK (8388608) exceeded' >&2; exit 1",
+            stdout,
+            stderr,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let listener = UnixListener::bind(dir.path().join("ready")).unwrap();
+        let until = Instant::now() + std::time::Duration::from_secs(60);
+        let refusal = transport::ready(&listener, &vmm, until).unwrap_err();
+        assert!(
+            matches!(&refusal, Refusal::Broken(why) if why.contains("vfio: RLIMIT_MEMLOCK (8388608) exceeded")),
+            "{refusal:?}"
         );
     }
 }
