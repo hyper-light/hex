@@ -1,0 +1,283 @@
+{
+  "source": "e3c28025188347a04e3298472f1a75dd95696a19",
+  "archive_sha256": "523f6c47abf984961e1fd4bf1ce780beb1dde53f77ffeb2b7405f283f7254f14",
+  "scope": "ROOT matched helperargument remedy/newcensus/affectedencoder and clientabsolute+Recordedreportguard, strictClippy/harness; no nativebackend/VM/GPU, no priorPCI16/report3 repeat",
+  "target": "mac",
+  "platform": "macOS-26.2-arm64-arm-64bit",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 53251,
+  "phases": [
+    {
+      "name": "helper-argument-original-after",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-core",
+        "--test",
+        "managed_argument_original",
+        "--locked",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 53378,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "281f9a5f638585b0496dfef953b654a07621ab2aa1e002c0e8515436e8f4c797",
+      "bytes": 2179,
+      "expected_selected": 2,
+      "actual_counts": [
+        {
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "managed_valued_command_line_preserves_literal_report_flag_words",
+          "outcome": "ok"
+        },
+        {
+          "name": "managed_valued_double_dash_cannot_hide_a_later_pre_rendered_report",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "helper-new-roles-census-and-affected-encoder",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-core",
+        "--lib",
+        "--locked",
+        "helper::managed::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 53530,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "38e0a8858abed766de30df78c5ad3e00a950dda7961cc389912a80200537bf99",
+      "bytes": 1122,
+      "expected_selected": 6,
+      "actual_counts": [
+        {
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "helper::managed::census::tests::native_census_refuses_hostile_counts_and_reused_or_unordered_owners",
+          "outcome": "ok"
+        },
+        {
+          "name": "helper::managed::census::tests::native_census_roundtrips_without_reinterpreting_legacy_messages",
+          "outcome": "ok"
+        },
+        {
+          "name": "helper::managed::tests::control_and_terminal_frames_keep_native_lifetime_and_release_distinct",
+          "outcome": "ok"
+        },
+        {
+          "name": "helper::managed::tests::managed_extension_preserves_legacy_frames_and_hostile_failure_controls",
+          "outcome": "ok"
+        },
+        {
+          "name": "helper::managed::tests::preparation_fences_descriptors_and_final_launcher_report_rendering",
+          "outcome": "ok"
+        },
+        {
+          "name": "helper::managed::tests::prepared_argument_roles_keep_values_opaque_and_refuse_unprepared_effects",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "client-operation-five",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-client",
+        "--lib",
+        "--locked",
+        "calls::budget_tests::absolute_",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 53556,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "1812efd63e4804f86665973432d2d671edea2d331a3cfd9ad24f363584b56498",
+      "bytes": 3715,
+      "expected_selected": 5,
+      "actual_counts": [
+        {
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "calls::budget_tests::absolute_caller_limit_keeps_original_instant_and_smaller_bounds",
+          "outcome": "ok"
+        },
+        {
+          "name": "calls::budget_tests::absolute_delete_cap_covers_queued_sender",
+          "outcome": "ok"
+        },
+        {
+          "name": "calls::budget_tests::absolute_operations_reject_expired_before_effects",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "recorded-managed-report-guard-two",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "recorded::report_tests::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 53741,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "9c7c004665d228de8f04b4d89c2e9ab63e7fbfaf8c064268ba5dbd30a5084ab9",
+      "bytes": 1817,
+      "expected_selected": 2,
+      "actual_counts": [
+        {
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "recorded::report_tests::canonical_report_is_required_before_the_recorded_native_callback",
+          "outcome": "ok"
+        },
+        {
+          "name": "recorded::report_tests::cpu_none_reaches_the_same_callback_without_a_catalog_or_report",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "client-core-native-clippy",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-client",
+        "-p",
+        "hex-core",
+        "--all-targets",
+        "--locked",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 53795,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "d2c6bc8f76c9ec2097feb271dc1b59b0ed15f6c5e84404a85df4119cbedca42b",
+      "bytes": 8271,
+      "test_outcomes": []
+    },
+    {
+      "name": "api21-lint-only",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "--manifest-path",
+        "vendor/shards/crates/api/Cargo.toml",
+        "--all-targets",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 53851,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "d12703f71fbb5e4314fa2c88e827495174128ed9d826228d24588db5e0730770",
+      "bytes": 594,
+      "test_outcomes": []
+    },
+    {
+      "name": "node-cli-matched-check",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "check",
+        "-p",
+        "hex-node",
+        "-p",
+        "hex-cli",
+        "--all-targets",
+        "--locked"
+      ],
+      "pid": 53867,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "a78ce328bae77da89a6c9b75c0140633a48b6a1591dab506eb79f823d09abc3b",
+      "bytes": 2701,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [
+    "vendor/shards/Cargo.lock"
+  ],
+  "temp_entries": 0,
+  "native_backend_invocations": 0,
+  "api_registry_cohort": {
+    "seed_sha256": "18a1c5dd48ba3ee855841e67b59fa38512a15eb769df0b18835c8c828173f082",
+    "pruned_sha256": "dcbe9479bcbd6b91c7f1cbe46a59a482e78d8d097bd49a0af91c352880ee9c84",
+    "registry_packages": 15,
+    "all_registry_tuples_subset_of_exact_root_lock": true,
+    "private_lock_overlay_only": true
+  },
+  "exit": 1
+}
