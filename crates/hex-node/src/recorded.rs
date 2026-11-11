@@ -2121,6 +2121,10 @@ impl Recover for hex_runtime::macos::MacRuntime {
         Ok(())
     }
 
+    fn preflight_unsubmitted(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        hex_runtime::macos::MacRuntime::preflight_unsubmitted(self, record)
+    }
+
     fn preflight_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
         hex_runtime::macos::MacRuntime::preflight_record(self, record)
     }
