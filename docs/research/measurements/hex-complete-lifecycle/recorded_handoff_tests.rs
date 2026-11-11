@@ -600,3 +600,47 @@ fn missing_source_rearm_refuses_a_retained_immutable_reference() {
     assert!(!pool_path.exists());
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
+
+/// Original control for lazy coalescing: a no-ref Draining observer cannot acquire its first
+/// consumer after draining began. An already-canonical consumer still reenters/cancels normally.
+/// This is an UNRUN source hypothesis, distinct from the reproduced c9b removal failure.
+#[test]
+fn draining_observer_refuses_first_reference_but_retains_existing_consumer() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(
+        &directory.path().join("disk"),
+        &directory.path().join("run"),
+    )
+    .unwrap();
+    let mut source = live(&store);
+    let original = BoxRecord::new(
+        box_spec(directory.path(), &source, "existing-before-drain"),
+        Phase::Creating,
+        Vec::new(),
+    );
+    store.put_lifecycle(&original).unwrap();
+    let mut canonical = store.read_lifecycle(&original.spec.id).unwrap().unwrap();
+    source.phase = BackingPhase::Draining;
+    store.put_pool(&source).unwrap();
+    store.put_lifecycle(&canonical).unwrap();
+    canonical.phase = Phase::Deleting;
+    store.put_lifecycle(&canonical).unwrap();
+    store.remove_lifecycle(&canonical.spec.id).unwrap();
+    assert!(store.read_lifecycle(&canonical.spec.id).unwrap().is_none());
+
+    // The same canonical Draining scope now has no reference. The old proposal must refuse
+    // before generating a Box scope or publishing any bytes, even on the ordinary Store path.
+    let proposal = BoxRecord::new(
+        box_spec(directory.path(), &source, "stale-new-after-drain"),
+        Phase::Creating,
+        Vec::new(),
+    );
+    proposal.spec.check().unwrap();
+    source.check().unwrap();
+    preflight_records(&store.retained_records().unwrap(), std::slice::from_ref(&source), Some(&catalog())).unwrap();
+    let before = source.encode().unwrap();
+    let result = store.put_lifecycle(&proposal);
+    assert!(result.is_err(), "Draining no-ref observer admitted a new consuming reference");
+    assert!(store.read_lifecycle(&proposal.spec.id).unwrap().is_none());
+    assert_eq!(store.read_pool(&source.key.pool).unwrap().unwrap().encode().unwrap(), before);
+}
