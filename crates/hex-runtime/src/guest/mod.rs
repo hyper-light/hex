@@ -9,8 +9,10 @@ mod books;
 mod cost;
 mod dedicated;
 pub mod gpu;
+mod gpu_pool;
 pub mod held;
 mod managed;
+mod observer;
 mod physical;
 mod pool;
 pub mod rewrite;
@@ -18,6 +20,8 @@ mod route;
 pub mod selected;
 mod shared;
 pub mod shares;
+
+pub use observer::config::{GpuArtifact, GpuArtifactRole, GpuObserver, GpuObserverInput};
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -335,6 +339,7 @@ pub struct GuestRuntime {
     runtime_cost: Option<hex_api::RuntimeCost>,
     native_paths: Option<shards_api::RuntimePaths>,
     shared_pool: OnceLock<hex_api::BackingKey>,
+    gpu_observer: Option<GpuObserver>,
     /// What joins each guest's evented connection to the node's loop ([`GuestRuntime::join_loop`]).
     joins: Mutex<Option<Arc<dyn Joins>>>,
 }
@@ -442,6 +447,7 @@ impl GuestRuntime {
             runtime_cost: None,
             native_paths: None,
             shared_pool: OnceLock::new(),
+            gpu_observer: None,
             joins: Mutex::new(None),
         }
     }
@@ -823,11 +829,19 @@ impl Runtime for GuestRuntime {
         &self,
         grant: hex_api::BackingGrant,
     ) -> Result<hex_api::BackingOffer, Refusal> {
-        self.initialize_pool(grant)
+        if self.shared_pool.get() == Some(&grant.key) {
+            self.initialize_pool(grant)
+        } else {
+            self.initialize_gpu_pool(grant)
+        }
     }
 
     fn release_backing(&self, key: hex_api::BackingKey) -> Result<hex_api::BackingOffer, Refusal> {
-        self.release_pool(key)
+        if self.shared_pool.get() == Some(&key) {
+            self.release_pool(key)
+        } else {
+            self.acknowledge_gpu_release(key)
+        }
     }
     fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
         if !matches!(class, Class::Oci | Class::Shards) {

@@ -13,7 +13,8 @@ use hex_core::record::{BoxRecord, NativeScope};
 
 use super::{GuestConfig, held};
 
-const HEADER: &str = "hex-selected-guest 3";
+const HEADER: &str = "hex-selected-guest 4";
+const ROUTE_HEADER: &str = "hex-selected-guest 3";
 const SCOPE_HEADER: &str = "hex-selected-guest 2";
 const LEGACY_HEADER: &str = "hex-selected-guest 1";
 
@@ -28,7 +29,7 @@ pub(super) enum Phase {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) struct Record {
     pub id: BoxId,
     pub devices: Vec<DeviceId>,
@@ -36,6 +37,7 @@ pub(super) struct Record {
     pub scope: Option<NativeScope>,
     pub route: Option<RouteReceipt>,
     pub physical: Vec<shards_api::PhysicalGpu>,
+    pub report: Option<shards_api::physical::GpuReport>,
     pub vcpus: u32,
     pub memory_mib: u64,
     pub phase: Phase,
@@ -153,6 +155,7 @@ impl Record {
             scope: Some(scope),
             route: spec.route,
             physical: Vec::new(),
+            report: None,
             vcpus,
             memory_mib,
             phase: Phase::Intent,
@@ -212,21 +215,52 @@ impl Record {
         }
     }
 
+    /// The private frame belongs to this original scope and complete selector
+    /// set. It grants no lifecycle authority; native identity/absence is separate.
+    pub fn checked_report(&self) -> Result<Option<&shards_api::physical::GpuReport>, Refusal> {
+        if self.physical.is_empty() {
+            return if self.report.is_none() {
+                Ok(None)
+            } else {
+                Err(invalid("CPU-only receipt cannot carry a GPU report"))
+            };
+        }
+        let report = self
+            .report
+            .as_ref()
+            .ok_or(super::books::uncertain(&self.id)?)?;
+        let scope = self.scope.ok_or(super::books::uncertain(&self.id)?)?;
+        super::physical::check_report(&self.devices, &self.physical, scope, report)?;
+        Ok(Some(report))
+    }
+
     fn encode(&self) -> Result<String, Refusal> {
         let bound = hex_core::bundle::MAX_CONFIG_BYTES;
+        let report = self
+            .report
+            .as_ref()
+            .map(|report| {
+                self.checked_report()?;
+                report
+                    .encode()
+                    .map_err(|_| invalid("GPU report cannot be encoded exactly"))
+            })
+            .transpose()?;
         let mut length = Length { bytes: 0, bound };
-        self.render(&mut length).map_err(|_| allocation(bound))?;
+        self.render(&mut length, report.as_deref())
+            .map_err(|_| allocation(bound))?;
         let mut text = String::new();
         text.try_reserve_exact(length.bytes)
             .map_err(|_| allocation(bound))?;
-        self.render(&mut text).map_err(|_| allocation(bound))?;
+        self.render(&mut text, report.as_deref())
+            .map_err(|_| allocation(bound))?;
         if text.len() > bound || parse(&text)? != *self {
             return Err(invalid("receipt is oversized or cannot be encoded exactly"));
         }
         Ok(text)
     }
 
-    fn render(&self, text: &mut impl std::fmt::Write) -> std::fmt::Result {
+    fn render(&self, text: &mut impl std::fmt::Write, report: Option<&str>) -> std::fmt::Result {
         writeln!(text, "{HEADER}")?;
         writeln!(text, "box {}", self.id)?;
         writeln!(text, "class {}", self.class.name())?;
@@ -251,6 +285,7 @@ impl Record {
             writeln!(text, "gpu {}", id.key)?;
             writeln!(text, "native {physical}")?;
         }
+        render_report(text, report)?;
         render_phase(text, &self.phase)
     }
 }
@@ -388,7 +423,8 @@ fn parse(text: &str) -> Result<Record, Refusal> {
     }
     let mut lines = text.lines();
     let version = match lines.next() {
-        Some(HEADER) => 3,
+        Some(HEADER) => 4,
+        Some(ROUTE_HEADER) => 3,
         Some(SCOPE_HEADER) => 2,
         Some(LEGACY_HEADER) => 1,
         _ => return Err(invalid("unknown receipt version")),
@@ -404,7 +440,7 @@ fn parse(text: &str) -> Result<Record, Refusal> {
     } else {
         parse_scope(field(lines.next(), "scope ")?)?
     };
-    let route = if version == 3 {
+    let route = if version >= 3 {
         parse_route(field(lines.next(), "route ")?)?
     } else {
         None
@@ -460,6 +496,11 @@ fn parse(text: &str) -> Result<Record, Refusal> {
             ));
         }
     }
+    let report = if version >= 4 {
+        parse_report(field(lines.next(), "report ")?, scope, &physical)?
+    } else {
+        None
+    };
     let phase = parse_phase(&mut lines)?;
     if lines.next().is_some() {
         return Err(invalid("receipt has trailing data"));
@@ -471,10 +512,62 @@ fn parse(text: &str) -> Result<Record, Refusal> {
         scope,
         route,
         physical,
+        report,
         vcpus,
         memory_mib,
         phase,
     })
+}
+
+pub(super) fn render_report(
+    text: &mut impl std::fmt::Write,
+    report: Option<&str>,
+) -> std::fmt::Result {
+    write!(text, "report ")?;
+    match report {
+        None => writeln!(text, "none"),
+        Some(frame) => {
+            for byte in frame.as_bytes() {
+                write!(text, "{byte:02x}")?;
+            }
+            writeln!(text)
+        }
+    }
+}
+
+pub(super) fn parse_report(
+    text: &str,
+    scope: Option<NativeScope>,
+    physical: &[shards_api::PhysicalGpu],
+) -> Result<Option<shards_api::physical::GpuReport>, Refusal> {
+    if text == "none" {
+        return Ok(None);
+    }
+    let scope = scope.ok_or_else(|| invalid("GPU report has no original native scope"))?;
+    let bound = shards_api::physical::report_bytes(physical.len())
+        .map_err(|_| invalid("GPU report count exceeds its checked bound"))?;
+    let maximum = bound.checked_mul(2).ok_or_else(|| allocation(bound))?;
+    if text.is_empty()
+        || text.len() > maximum
+        || text.len().checked_rem(2) != Some(0)
+        || !text.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(invalid("GPU report has malformed or excessive bytes"));
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(text.len().checked_div(2).ok_or_else(|| allocation(bound))?)
+        .map_err(|_| allocation(bound))?;
+    for pair in text.as_bytes().chunks_exact(2) {
+        let pair = std::str::from_utf8(pair).map_err(|_| invalid("GPU report is not ASCII hex"))?;
+        bytes
+            .push(u8::from_str_radix(pair, 16).map_err(|_| invalid("GPU report has invalid hex"))?);
+    }
+    let frame =
+        std::str::from_utf8(&bytes).map_err(|_| invalid("GPU report frame is not UTF-8"))?;
+    shards_api::physical::GpuReport::parse(frame, *scope.bytes(), physical)
+        .map(Some)
+        .map_err(|_| invalid("GPU report frame differs from original scope or selectors"))
 }
 
 pub(super) fn parse_phase<'a>(lines: &mut impl Iterator<Item = &'a str>) -> Result<Phase, Refusal> {
@@ -677,6 +770,7 @@ mod tests {
                 device: 0,
                 function: 0,
             }],
+            report: None,
             vcpus: 1,
             memory_mib: 256,
             phase: Phase::Intent,
@@ -732,6 +826,53 @@ mod tests {
         }
     }
 
+    /// AC-T7.4.1: the exact native frame survives durable receipt round-trip,
+    /// bound to the original scope and selectors without a new holder ledger.
+    #[test]
+    fn private_renderer_report_round_trip_retains_original_scope_and_native_set() {
+        let mut receipt = record();
+        let physical = receipt.physical[0];
+        receipt.report = Some(shards_api::physical::GpuReport {
+            scope: *receipt.scope.unwrap().bytes(),
+            probe: shards_api::GpuProbe {
+                devices: vec![shards_api::ResolvedGpu {
+                    physical,
+                    pci: Some(physical),
+                    luid: None,
+                    uuid: [3; 16],
+                    name: None,
+                    device_local_bytes: None,
+                }],
+                host_visible_bytes: 1,
+            },
+        });
+        let text = receipt.encode().unwrap();
+        let retained = parse(&text).unwrap();
+        assert_eq!(retained, receipt);
+        assert!(retained.checked_report().unwrap().is_some());
+        receipt.scope = Some(NativeScope::from_bytes([8; 16]));
+        assert!(receipt.checked_report().is_err());
+        assert!(receipt.encode().is_err());
+        assert!(parse(&text.replace("report ", "report +")).is_err());
+    }
+
+    /// An old transport receipt remains readable for cleanup. Its missing
+    /// private observation cannot authorize Live/adoption or a replacement query.
+    #[test]
+    fn legacy_gpu_receipt_keeps_claims_without_manufacturing_private_report() {
+        let receipt = record();
+        let text = receipt
+            .encode()
+            .unwrap()
+            .replace(HEADER, ROUTE_HEADER)
+            .replace("report none\n", "");
+        let retained = parse(&text).unwrap();
+        assert_eq!(retained.devices, receipt.devices);
+        assert_eq!(retained.scope, receipt.scope);
+        assert!(retained.report.is_none());
+        assert!(retained.checked_report().is_err());
+    }
+
     /// AC-T7.4.1: legacy transport receipts decode without inventing a native
     /// incarnation; malformed or transplanted scope bytes supply no authority.
     #[test]
@@ -740,11 +881,13 @@ mod tests {
         let legacy = text
             .replace(HEADER, LEGACY_HEADER)
             .replace("scope 07070707070707070707070707070707\n", "")
-            .replace("route none\n", "");
+            .replace("route none\n", "")
+            .replace("report none\n", "");
         assert_eq!(parse(&legacy).unwrap().scope, None);
         let previous = text
             .replace(HEADER, SCOPE_HEADER)
-            .replace("route none\n", "");
+            .replace("route none\n", "")
+            .replace("report none\n", "");
         assert_eq!(parse(&previous).unwrap().route, None);
         for scope in [
             "0707070707070707070707070707070+07",
@@ -790,7 +933,7 @@ mod tests {
         ] {
             assert!(parse(&bad).is_err());
         }
-        let mut legacy = receipt.clone();
+        let mut legacy = parse(&receipt.encode().unwrap()).unwrap();
         legacy.route = None;
         assert_ne!(legacy, receipt, "legacy has no host execution provenance");
     }

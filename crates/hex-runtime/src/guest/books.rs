@@ -169,27 +169,72 @@ impl GuestRuntime {
         })?;
         let id = spec.id.try_clone()?;
         let keys = self.turn_keys(&spec.devices)?;
+        let (spec, expected_scope) = if let Some(key) = spec.route.and_then(|route| route.backing) {
+            let pending = devices::with_transaction(books, &id, &keys, |transaction| {
+                if transaction.read(&id)?.is_some() {
+                    return Err(Refusal::Exists(id.try_clone()?));
+                }
+                self.prepare_selected_create(&id)?;
+                let records = transaction.records()?;
+                if records.len() >= crate::MAX_BOXES {
+                    return Err(Refusal::Full(crate::MAX_BOXES));
+                }
+                let pools = transaction.pool_records()?;
+                self.gpu_catalog
+                    .as_ref()
+                    .ok_or(uncertain(&id)?)?
+                    .prepare(&spec, &records, &pools)?;
+                budget.remaining()?;
+                transaction.put(&BoxRecord::new(spec, Phase::Creating, Vec::new()))?;
+                transaction.read(&id)?.ok_or(uncertain(&id)?)
+            })?;
+            // Release the Box/device turns BEFORE entering the SAME owner's
+            // Pool transaction. Both canonical claims remain during handoff.
+            let released = self.stop_gpu_for_handoff(key, &pending, budget)?;
+            if released.key != key
+                || released.phase != hex_api::BackingPhase::Released
+                || released.devices != pending.spec.devices
+            {
+                return Err(uncertain(&id)?);
+            }
+            let scope = pending.native_scope.ok_or(uncertain(&id)?)?;
+            (pending.spec, Some(scope))
+        } else {
+            (spec, None)
+        };
+        budget.remaining()?;
         devices::with_transaction(books, &id, &keys, |transaction| {
-            if transaction.read(&id)?.is_some() {
+            if expected_scope.is_some() {
+                let current = transaction.read(&id)?.ok_or(uncertain(&id)?)?;
+                if current.spec != spec
+                    || current.native_scope != expected_scope
+                    || current.phase != Phase::Creating
+                    || current.init.is_some()
+                {
+                    return Err(uncertain(&id)?);
+                }
+            } else if transaction.read(&id)?.is_some() {
                 return Err(Refusal::Exists(id.try_clone()?));
             }
-            self.prepare_selected_create(&id)?;
-            let records = transaction.records()?;
-            let pools = transaction.pool_records()?;
-            if records.len() >= crate::MAX_BOXES {
-                return Err(Refusal::Full(crate::MAX_BOXES));
+            if expected_scope.is_none() {
+                self.prepare_selected_create(&id)?;
+                let records = transaction.records()?;
+                let pools = transaction.pool_records()?;
+                if records.len() >= crate::MAX_BOXES {
+                    return Err(Refusal::Full(crate::MAX_BOXES));
+                }
+                if !spec.devices.is_empty() {
+                    let catalog = self.gpu_catalog.as_ref().ok_or_else(|| {
+                        Refusal::Broken("guest has no initialized device catalog".into())
+                    })?;
+                    let _selection = catalog.prepare(&spec, &records, &pools)?;
+                }
+                // Original workload/charge/route remains canonical. The inner
+                // OCI rewrite cannot mint or replace this receipt.
+                budget.remaining()?;
+                transaction.put(&BoxRecord::new(spec, Phase::Creating, Vec::new()))?;
             }
-            if !spec.devices.is_empty() {
-                let catalog = self.gpu_catalog.as_ref().ok_or_else(|| {
-                    Refusal::Broken("guest has no initialized device catalog".into())
-                })?;
-                let _selection = catalog.prepare(&spec, &records, &pools)?;
-            }
-            // Store the original workload and immutable admission receipt, never
-            // the rewritten inner OCI payload. Any failed effect retains Creating.
-            budget.remaining()?;
-            let record = BoxRecord::new(spec, Phase::Creating, Vec::new());
-            transaction.put(&record)?;
+            let record = transaction.read(&id)?.ok_or(uncertain(&id)?)?;
             let info = self.create_selected(record.spec, transaction, budget)?;
             let mut record = transaction.read(&id)?.ok_or(uncertain(&id)?)?;
             if record.phase != Phase::Creating

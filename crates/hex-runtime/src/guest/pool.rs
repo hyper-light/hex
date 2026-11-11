@@ -10,7 +10,10 @@ use hex_core::record::{MAX_RECORD_BYTES, PoolRecord};
 use super::selected::{self, Phase};
 use super::{GuestConfig, held};
 
-const HEADER: &str = "hex-guest-backing 1";
+const HEADER: &str = "hex-guest-backing 4";
+const READINESS_HEADER: &str = "hex-guest-backing 3";
+const REPORT_HEADER: &str = "hex-guest-backing 2";
+const LEGACY_HEADER: &str = "hex-guest-backing 1";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Receipt {
@@ -18,6 +21,9 @@ pub(super) struct Receipt {
     /// remains the lifecycle/holder authority as its init and phase advance.
     pub original: PoolRecord,
     pub physical: Vec<shards_api::PhysicalGpu>,
+    pub report: Option<shards_api::physical::GpuReport>,
+    pub readiness: Option<super::observer::Evidence>,
+    pub attempt: Option<super::observer::Attempt>,
     pub phase: Phase,
 }
 
@@ -58,6 +64,9 @@ impl Receipt {
         let receipt = Self {
             original,
             physical,
+            report: None,
+            readiness: None,
+            attempt: None,
             phase: Phase::Intent,
         };
         receipt.check()?;
@@ -86,7 +95,85 @@ impl Receipt {
             return Err(bad());
         }
         shards_api::physical::check_selection(&self.physical).map_err(|_| bad())?;
+        if let Some(report) = &self.report {
+            super::physical::check_report(
+                &self.original.devices,
+                &self.physical,
+                self.original.scope(),
+                report,
+            )?;
+        }
+        if let Some(readiness) = &self.readiness {
+            if self.physical.is_empty() || self.report.is_none() {
+                return Err(bad());
+            }
+            readiness.check(self.original.scope(), self.physical.len())?;
+        }
+        if let Some(attempt) = &self.attempt {
+            if self.physical.is_empty()
+                || attempt.configuration == [0; 32]
+                || attempt.max_queues == 0
+            {
+                return Err(bad());
+            }
+        }
         Ok(())
+    }
+
+    pub fn checked_report(&self) -> Result<Option<&shards_api::physical::GpuReport>, Refusal> {
+        self.check()?;
+        if self.physical.is_empty() {
+            return Ok(None);
+        }
+        self.report
+            .as_ref()
+            .map(Some)
+            .ok_or_else(|| refused(self.original.key, LifecycleCause::Uncertain))
+    }
+
+    pub fn identity(&self) -> Result<&shards_api::Identity, Refusal> {
+        match &self.phase {
+            Phase::Running(identity)
+            | Phase::Stopping(identity)
+            | Phase::Released {
+                identity: Some(identity),
+                ..
+            } => Ok(identity),
+            Phase::Intent | Phase::Released { identity: None, .. } => {
+                Err(refused(self.original.key, LifecycleCause::Uncertain))
+            }
+        }
+    }
+
+    pub fn released_identity(&self) -> Result<Option<&shards_api::Identity>, Refusal> {
+        match &self.phase {
+            Phase::Released { identity, .. } => Ok(identity.as_ref()),
+            _ => Err(refused(self.original.key, LifecycleCause::Uncertain)),
+        }
+    }
+
+    pub fn checked_readiness(&self) -> Result<&super::observer::Evidence, Refusal> {
+        self.check()?;
+        if !matches!(self.phase, Phase::Running(_)) {
+            return Err(refused(self.original.key, LifecycleCause::Uncertain));
+        }
+        let readiness = self
+            .readiness
+            .as_ref()
+            .ok_or_else(|| refused(self.original.key, LifecycleCause::Uncertain))?;
+        let attempt = self
+            .attempt
+            .as_ref()
+            .ok_or_else(|| refused(self.original.key, LifecycleCause::Uncertain))?;
+        if attempt.phase != super::observer::AttemptPhase::Complete
+            || attempt.configuration != readiness.configuration
+            || attempt.max_queues != readiness.max_queues
+            || !attempt.finished_streams()
+            || !attempt.matches_report(&readiness.report)?
+        {
+            return Err(refused(self.original.key, LifecycleCause::Uncertain));
+        }
+        Ok(readiness)
     }
 
     pub fn matches(&self, record: &PoolRecord) -> Result<(), Refusal> {
@@ -97,6 +184,9 @@ impl Receipt {
         {
             return Err(refused(record.key, LifecycleCause::Uncertain));
         }
+        if record.phase == BackingPhase::Live && !self.physical.is_empty() {
+            self.checked_readiness()?;
+        }
         Ok(())
     }
 
@@ -105,6 +195,15 @@ impl Receipt {
         // Reuse the exact canonical scalar/array codec rather than another cost
         // formula or grant schema. Its decoder's existing serde allocation seam
         // remains explicit in the source/evidence record.
+        let report = self
+            .report
+            .as_ref()
+            .map(|report| {
+                report
+                    .encode()
+                    .map_err(|_| refused(self.original.key, LifecycleCause::Uncertain))
+            })
+            .transpose()?;
         let original = self.original.encode()?;
         let original = std::str::from_utf8(&original)
             .map_err(|_| refused(self.original.key, LifecycleCause::Uncertain))?;
@@ -120,24 +219,43 @@ impl Receipt {
             }
         }
         let mut length = Length(0);
-        self.render(&mut length, original)
+        self.render(&mut length, original, report.as_deref())
             .map_err(|_| exhausted())?;
         let mut text = String::new();
         text.try_reserve_exact(length.0).map_err(|_| exhausted())?;
-        self.render(&mut text, original).map_err(|_| exhausted())?;
+        self.render(&mut text, original, report.as_deref())
+            .map_err(|_| exhausted())?;
         if parse(&text)? != *self {
             return Err(refused(self.original.key, LifecycleCause::Uncertain));
         }
         Ok(text)
     }
 
-    fn render(&self, out: &mut impl std::fmt::Write, original: &str) -> std::fmt::Result {
+    fn render(
+        &self,
+        out: &mut impl std::fmt::Write,
+        original: &str,
+        report: Option<&str>,
+    ) -> std::fmt::Result {
         writeln!(out, "{HEADER}")?;
         write!(out, "original {original}")?;
         writeln!(out, "physical {}", self.physical.len())?;
         for physical in &self.physical {
             writeln!(out, "native {physical}")?;
         }
+        selected::render_report(out, report)?;
+        write!(out, "readiness ")?;
+        match &self.readiness {
+            Some(readiness) => readiness.render(out)?,
+            None => write!(out, "none")?,
+        }
+        writeln!(out)?;
+        write!(out, "observer ")?;
+        match &self.attempt {
+            Some(attempt) => attempt.render(out)?,
+            None => write!(out, "none")?,
+        }
+        writeln!(out)?;
         selected::render_phase(out, &self.phase)
     }
 }
@@ -185,7 +303,11 @@ fn parse(text: &str) -> Result<Receipt, Refusal> {
     let (header, original) = text
         .split_once('\n')
         .ok_or_else(|| super::route::invalid("guest backing receipt is truncated"))?;
-    if header != HEADER {
+    if header != HEADER
+        && header != READINESS_HEADER
+        && header != REPORT_HEADER
+        && header != LEGACY_HEADER
+    {
         return Err(super::route::invalid(
             "guest backing receipt has no canonical pool provenance",
         ));
@@ -227,6 +349,35 @@ fn parse(text: &str) -> Result<Receipt, Refusal> {
                 .map_err(|_| super::route::invalid("guest backing physical selector is invalid"))?,
         );
     }
+    let report = if header != LEGACY_HEADER {
+        let frame = lines
+            .next()
+            .and_then(|line| line.strip_prefix("report "))
+            .ok_or_else(|| super::route::invalid("guest backing report is missing"))?;
+        selected::parse_report(frame, Some(snapshot.scope()), &physical)?
+    } else {
+        None
+    };
+    let readiness = if header == HEADER || header == READINESS_HEADER {
+        let frame = lines
+            .next()
+            .and_then(|line| line.strip_prefix("readiness "))
+            .ok_or_else(|| super::route::invalid("guest backing readiness is missing"))?;
+        super::observer::Evidence::parse(frame, snapshot.scope(), physical.len())?
+    } else {
+        // Legacy report-only receipts are readable for cleanup, never promoted
+        // to guest readiness or an initialized Live physical offer.
+        None
+    };
+    let attempt = if header == HEADER {
+        let line = lines
+            .next()
+            .and_then(|line| line.strip_prefix("observer "))
+            .ok_or_else(|| super::route::invalid("guest backing observer attempt is missing"))?;
+        super::observer::Attempt::parse(line)?
+    } else {
+        None
+    };
     let phase = selected::parse_phase(&mut lines)?;
     if lines.next().is_some() {
         return Err(super::route::invalid(
@@ -236,6 +387,9 @@ fn parse(text: &str) -> Result<Receipt, Refusal> {
     let receipt = Receipt {
         original: snapshot,
         physical,
+        report,
+        readiness,
+        attempt,
         phase,
     };
     receipt.check()?;
@@ -245,6 +399,46 @@ fn parse(text: &str) -> Result<Receipt, Refusal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AC-T7.4.1: a real Pool scope owns the same private renderer frame; its
+    /// canonical claim/grant survives the codec without a synthetic box row.
+    #[test]
+    fn pool_private_report_keeps_original_scope_and_exact_native_claim() {
+        let mut record = granted();
+        record.execution = Execution::ShardsDedicated;
+        record.devices = vec![hex_api::DeviceId {
+            kind: hex_api::DeviceKind::Gpu,
+            key: 256,
+        }];
+        let physical = shards_api::PhysicalGpu::Pci {
+            domain: 0,
+            bus: 1,
+            device: 0,
+            function: 0,
+        };
+        let mut receipt =
+            Receipt::intent(record, vec![physical], &super::super::tests::config()).unwrap();
+        receipt.report = Some(shards_api::physical::GpuReport {
+            scope: *receipt.original.scope().bytes(),
+            probe: shards_api::GpuProbe {
+                devices: vec![shards_api::ResolvedGpu {
+                    physical,
+                    pci: Some(physical),
+                    luid: None,
+                    uuid: [3; 16],
+                    name: None,
+                    device_local_bytes: None,
+                }],
+                host_visible_bytes: 1,
+            },
+        });
+        let text = receipt.encode().unwrap();
+        assert_eq!(parse(&text).unwrap(), receipt);
+        assert!(receipt.checked_report().unwrap().is_some());
+        receipt.report.as_mut().unwrap().scope = [8; 16];
+        assert!(receipt.encode().is_err());
+        assert!(parse(&text.replace("report ", "report +")).is_err());
+    }
 
     fn granted() -> PoolRecord {
         let config = super::super::tests::config();

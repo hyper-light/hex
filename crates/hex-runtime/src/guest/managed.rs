@@ -35,6 +35,10 @@ impl Budget {
         self.remaining_at(Instant::now())
     }
 
+    pub fn deadline(self) -> Instant {
+        self.deadline
+    }
+
     fn remaining_at(self, now: Instant) -> Result<Duration, Refusal> {
         self.deadline
             .checked_duration_since(now)

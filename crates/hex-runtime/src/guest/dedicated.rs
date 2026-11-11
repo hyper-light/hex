@@ -5,11 +5,10 @@
 use super::selected::{self, Phase, Record};
 use super::*;
 use crate::devices::Transaction;
-use hex_core::record::BoxRecord;
+use hex_core::record::{BoxRecord, OwnerKey, OwnerRef};
 
 pub(super) struct Guest {
-    receipt: Record,
-    booted: triomphe::Arc<Booted>,
+    pub booted: triomphe::Arc<Booted>,
 }
 
 #[cfg(test)]
@@ -244,6 +243,7 @@ mod tests {
             scope: Some(hex_core::record::NativeScope::from_bytes([7; 16])),
             route: None,
             physical: Vec::new(),
+            report: None,
             vcpus: 1,
             memory_mib: 256,
             phase: Phase::Running(shards_api::Identity {
@@ -296,7 +296,6 @@ mod tests {
             .reserve(id, Operation::Creating)
             .unwrap()
             .publish(Some(Guest {
-                receipt,
                 booted: triomphe::Arc::clone(&booted),
             }))
             .unwrap();
@@ -603,16 +602,45 @@ mod tests {
         ));
         drop(reservation);
         let mut routes = runtime.dedicated.lock().unwrap();
-        let slot = routes.iter_mut().find(|slot| slot.id == id).unwrap();
+        let slot = routes
+            .iter_mut()
+            .find(|slot| slot.key.as_ref() == OwnerRef::Box(&id))
+            .unwrap();
         slot.route = Route::Busy(Operation::Loading);
         assert!(slot.take(Operation::Creating).is_err());
         assert!(slot.guest.is_some(), "invalid slot must not drop its owner");
         slot.route = Route::Ready;
     }
+
+    /// AC-T7.4.1: a backing and box use the same bounded route storage, with
+    /// typed owner keys and no table lock retained by either native operation.
+    #[test]
+    fn pool_process_reservation_excludes_only_its_own_canonical_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = runtime(dir.path());
+        let pool = [7; 32];
+        let other = [8; 32];
+        let id = BoxId::new("pool-sibling").unwrap();
+        let pending = runtime
+            .reserve_owner(OwnerRef::Pool(&pool), Operation::Creating)
+            .unwrap();
+        assert!(
+            runtime
+                .reserve_owner(OwnerRef::Pool(&pool), Operation::Loading)
+                .is_err()
+        );
+        let sibling = runtime
+            .reserve_owner(OwnerRef::Pool(&other), Operation::Loading)
+            .unwrap();
+        let boxed = runtime.reserve(&id, Operation::Creating).unwrap();
+        assert_eq!(runtime.dedicated.lock().unwrap().len(), 3);
+        drop((pending, sibling, boxed));
+        assert!(runtime.dedicated.lock().unwrap().is_empty());
+    }
 }
 
 #[derive(Clone, Copy)]
-enum Operation {
+pub(super) enum Operation {
     Loading,
     Creating,
     Stopping,
@@ -634,7 +662,7 @@ enum Route {
 }
 
 pub(super) struct Slot {
-    id: BoxId,
+    key: OwnerKey,
     route: Route,
     // Ready owns exactly one value here; Busy owns none because its Reservation
     // holds the prior value. Keeping both in this same fallibly reserved slot
@@ -672,25 +700,48 @@ impl Slot {
 /// Owning a reservation excludes a second same-ID operation without keeping a
 /// mutex across callbacks. A failed operation restores its last known route;
 /// its on-disk receipt still decides whether physical absence is proved.
-struct Reservation<'a> {
+pub(super) struct Reservation<'a> {
     runtime: &'a GuestRuntime,
-    id: BoxId,
-    previous: Option<Guest>,
+    key: OwnerKey,
+    pub previous: Option<Guest>,
     finished: bool,
 }
 
 impl Reservation<'_> {
-    fn publish(mut self, next: Option<Guest>) -> Result<(), Refusal> {
+    pub fn publish(mut self, next: Option<Guest>) -> Result<(), Refusal> {
         self.restore(next)?;
         self.finished = true;
         Ok(())
     }
 
     fn restore(&self, next: Option<Guest>) -> Result<(), Refusal> {
+        if let Some(next) = &next {
+            let matches = match self.key.as_ref() {
+                OwnerRef::Box(id) => {
+                    next.booted
+                        .owner
+                        .as_ref()
+                        .is_some_and(|owner| owner.id == *id)
+                        && next.booted.backing.is_none()
+                }
+                OwnerRef::Pool(pool) => {
+                    next.booted.owner.is_none()
+                        && next
+                            .booted
+                            .backing
+                            .is_some_and(|backing| backing.key.pool == *pool)
+                }
+            };
+            if !matches {
+                return Err(invalid(
+                    "guest route publication names another canonical owner",
+                ));
+            }
+        }
         let mut routes = self.runtime.dedicated.lock().map_err(poisoned)?;
         let index = routes
             .iter()
-            .position(|slot| slot.id == self.id)
+            .position(|slot| slot.key == self.key)
             .ok_or_else(|| invalid("guest reservation lost its route"))?;
         if let Some(next) = next {
             let slot = routes
@@ -722,7 +773,7 @@ impl Drop for Reservation<'_> {
             .dedicated
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(index) = routes.iter().position(|slot| slot.id == self.id)
+        if let Some(index) = routes.iter().position(|slot| slot.key == self.key)
             && let Some(slot) = routes.get_mut(index)
             && slot.check_reserved().is_ok()
         {
@@ -865,9 +916,19 @@ impl GuestRuntime {
     }
 
     fn reserve(&self, id: &BoxId, operation: Operation) -> Result<Reservation<'_>, Refusal> {
-        let owned = id.try_clone()?;
+        self.reserve_owner(OwnerRef::Box(id), operation)
+    }
+
+    /// Box and Pool native controllers share this one process/client route table.
+    /// Its key excludes concurrent methods; the Store alone owns grants/claims.
+    pub(super) fn reserve_owner(
+        &self,
+        key: OwnerRef<'_>,
+        operation: Operation,
+    ) -> Result<Reservation<'_>, Refusal> {
+        let owned = key.try_owned()?;
         let mut routes = self.dedicated.lock().map_err(poisoned)?;
-        let previous = if let Some(slot) = routes.iter_mut().find(|slot| slot.id == *id) {
+        let previous = if let Some(slot) = routes.iter_mut().find(|slot| slot.key.as_ref() == key) {
             Some(slot.take(operation)?)
         } else {
             if routes.len() >= crate::MAX_BOXES {
@@ -878,7 +939,7 @@ impl GuestRuntime {
                 bound: crate::MAX_BOXES,
             })?;
             routes.push(Slot {
-                id: id.try_clone()?,
+                key: key.try_owned()?,
                 route: Route::Busy(operation),
                 guest: None,
             });
@@ -887,7 +948,7 @@ impl GuestRuntime {
         drop(routes);
         Ok(Reservation {
             runtime: self,
-            id: owned,
+            key: owned,
             previous,
             finished: false,
         })
@@ -912,7 +973,7 @@ impl GuestRuntime {
         Ok(PathBuf::from(text))
     }
 
-    fn selected_path(&self, id: &BoxId) -> Result<PathBuf, Refusal> {
+    pub(super) fn selected_path(&self, id: &BoxId) -> Result<PathBuf, Refusal> {
         let mut path = self.selected_dir()?;
         path.try_reserve(
             id.as_str()
@@ -1047,9 +1108,7 @@ impl GuestRuntime {
         if devices.is_empty() {
             return Ok(Vec::new());
         }
-        let physical = self.catalog_physical(devices)?;
-        self.checked_physical(devices, &physical)?;
-        Ok(physical)
+        self.catalog_physical(devices)
     }
 
     pub fn validate_binding(&self, spec: &BoxSpec) -> Result<(), Refusal> {
@@ -1137,22 +1196,25 @@ impl GuestRuntime {
             }
             return Err(super::books::uncertain(id)?);
         }
-        if reservation
-            .previous
-            .as_ref()
-            .is_some_and(|known| !matches!(known.receipt.phase, Phase::Running(_)))
-        {
+        // The durable VM receipt is authoritative. It was already reread by the
+        // old binding check; retain only the actual native/client owner in RAM.
+        let receipt =
+            selected::read(&self.selected_path(id)?)?.ok_or(super::books::uncertain(id)?)?;
+        if !matches!(receipt.phase, Phase::Running(_)) {
             return Err(super::books::uncertain(id)?);
+        }
+        if let Some(report) = receipt.checked_report()? {
+            self.check_native_report(
+                &receipt.devices,
+                &receipt.physical,
+                receipt.scope.ok_or(super::books::uncertain(id)?)?,
+                report,
+            )?;
         }
         if self.uses_books() {
             let record = self.recorded_box(id)?.ok_or(super::books::uncertain(id)?)?;
-            reservation
-                .previous
-                .as_ref()
-                .ok_or(super::books::uncertain(id)?)?
-                .receipt
-                .matches_record(&record)?;
-            self.validate_binding(&record.spec)?;
+            receipt.matches_record(&record)?;
+            self.selected_spec(&receipt)?;
             let identity = booted
                 .guest
                 .identity()
@@ -1177,7 +1239,7 @@ impl GuestRuntime {
             .lock()
             .map_err(poisoned)?
             .iter()
-            .any(|slot| slot.id == *id))
+            .any(|slot| slot.key.as_ref() == OwnerRef::Box(id)))
     }
 
     pub(super) fn selected_running(
@@ -1232,12 +1294,18 @@ impl GuestRuntime {
             return Err(super::books::uncertain(id)?);
         }
         let spec = self.selected_spec(&receipt)?;
-        self.checked_physical(&receipt.devices, &receipt.physical)?;
+        if let Some(report) = receipt.checked_report()? {
+            self.check_native_report(
+                &receipt.devices,
+                &receipt.physical,
+                receipt.scope.ok_or(super::books::uncertain(id)?)?,
+                report,
+            )?;
+        }
         let plan = self.managed_plan(&spec, &identity.vsock)?;
         let guest = managed::attach(transaction, plan, identity, budget)?;
         let booted = self.booted(guest, &receipt, record, budget)?;
         reservation.publish(Some(Guest {
-            receipt,
             booted: triomphe::Arc::clone(&booted),
         }))?;
         Ok(Some(booted))
@@ -1315,7 +1383,13 @@ impl GuestRuntime {
                 .map_err(|e| Refusal::os("syncing selected guest receipt directory", e))?;
         }
         let socket = self.selected_socket(&receipt.id)?;
-        let plan = self.managed_plan(&guest_spec, &socket)?;
+        let mut plan = self.managed_plan(&guest_spec, &socket)?;
+        if !receipt.physical.is_empty() {
+            let scope = receipt.scope.ok_or(super::books::uncertain(&receipt.id)?)?;
+            plan = plan
+                .with_gpu_report(*scope.bytes(), budget.deadline())
+                .map_err(|why| refusal("preparing selected renderer report", &why))?;
+        }
         budget.remaining()?;
         selected::write(&path, &receipt)?;
         let guest = managed::boot(transaction, plan, budget)?;
@@ -1326,12 +1400,30 @@ impl GuestRuntime {
             .ok_or(super::books::uncertain(&receipt.id)?)?;
         managed::same_init(&record, &identity)?;
         receipt.matches_record(&record)?;
+        if !receipt.physical.is_empty() {
+            let report = guest.take_gpu_report(budget.remaining()?).map_err(|why| {
+                refusal(
+                    "observing the selected renderer in its original scope",
+                    &why,
+                )
+            })?;
+            receipt.report = Some(report);
+            let report = receipt
+                .checked_report()?
+                .ok_or(super::books::uncertain(&receipt.id)?)?;
+            self.check_native_report(
+                &receipt.devices,
+                &receipt.physical,
+                receipt.scope.ok_or(super::books::uncertain(&receipt.id)?)?,
+                report,
+            )?;
+        }
         receipt.phase = Phase::Running(identity);
         selected::write(&path, &receipt)?;
         let booted = self.booted(guest, &receipt, &record, budget)?;
         budget.remaining()?;
         let created = self.create_in(&booted, rewritten);
-        reservation.publish(Some(Guest { receipt, booted }))?;
+        reservation.publish(Some(Guest { booted }))?;
         created
     }
 
@@ -1340,7 +1432,7 @@ impl GuestRuntime {
         id: &BoxId,
         transaction: &dyn Transaction,
     ) -> Result<(), Refusal> {
-        let mut reservation = self.reserve(id, Operation::Stopping)?;
+        let reservation = self.reserve(id, Operation::Stopping)?;
         let path = self.selected_path(id)?;
         let receipt = selected::read(&path)?;
         let record = transaction.read(id)?.ok_or(super::books::uncertain(id)?)?;
@@ -1384,9 +1476,6 @@ impl GuestRuntime {
                 vsock: copy_path(&identity.vsock)?,
             });
             selected::write(&path, &stopping)?;
-            if let Some(known) = reservation.previous.as_mut() {
-                known.receipt = stopping;
-            }
         }
         // The native transaction names the original scope even before publication.
         // PID exit/Gone/observer error never substitutes for complete scope release.

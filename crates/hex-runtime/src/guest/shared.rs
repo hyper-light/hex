@@ -18,10 +18,126 @@ pub(super) struct Binding {
     pub commitment: [u8; 32],
 }
 
+/// A transient view of initialized configuration, never inventory or a holder.
+pub(super) struct GpuBacking {
+    pub pool: [u8; 32],
+    pub cost: hex_api::RuntimeCost,
+    pub devices: Vec<hex_api::DeviceId>,
+    pub physical: Vec<shards_api::PhysicalGpu>,
+    pub path: PathBuf,
+}
+
 impl GuestRuntime {
-    /// Pure initialized-backend validation during the SAME owner's whole-record
-    /// preflight. The caller separately joins every backing/holder before any
-    /// native effect; this method reads no file, provider, capacity or process.
+    /// Configure the real guest readiness workload after the exact measured VM
+    /// cost and read-only shares. This verifies files only; it never queries GPU
+    /// hardware, starts a Program/VM or creates a resource/holder record.
+    pub fn with_gpu_observer(mut self, input: GpuObserverInput) -> Result<Self, Refusal> {
+        self.gpu_observer = Some(GpuObserver::new(
+            input,
+            &self.config,
+            self.configured_allocation()?,
+        )?);
+        Ok(self)
+    }
+
+    /// Persist a real Prepared Pool scope before Index admission. Configured IDs
+    /// are claims only; this reads no GPU/provider and creates no VM or metadata.
+    pub fn prepare_gpu_backing(&self) -> Result<Option<hex_api::BackingOffer>, Refusal> {
+        let Some(definition) = self.gpu_backing_definition()? else {
+            return Ok(None);
+        };
+        let authority = self.authority()?;
+        if let Some(receipt) = pool::read(&definition.path)? {
+            let record = self.pool_record(receipt.original.key)?;
+            receipt.matches(&record)?;
+            self.preflight_backing(&record)?;
+        }
+        let offer = authority.prepare_pool(
+            definition.pool,
+            Execution::ShardsDedicated,
+            definition.cost,
+            &definition.devices,
+        )?;
+        self.preflight_backing(&self.pool_record(offer.key)?)?;
+        Ok(Some(offer))
+    }
+
+    pub(super) fn gpu_backing_definition(&self) -> Result<Option<GpuBacking>, Refusal> {
+        if self.gpu_catalog.is_none() {
+            return Ok(None);
+        }
+        let Some(observer) = self.gpu_observer.as_ref() else {
+            // CPU preparation works without a Vulkan observer. No GPU route or
+            // fabricated metadata is advertised for an uninitialized observer.
+            return Ok(None);
+        };
+        let entries = self.physical_entries()?;
+        if entries.is_empty() {
+            return Ok(None);
+        }
+        observer.output_bytes(entries.len())?;
+        let allocation = self.configured_allocation()?;
+        observer.check_allocation(allocation)?;
+        let cost = allocation.cost;
+        let mut devices = Vec::new();
+        devices
+            .try_reserve_exact(entries.len())
+            .map_err(|_| Refusal::Full(hex_api::MAX_DEVICES))?;
+        for entry in entries {
+            devices.push(entry.info.id);
+        }
+        if devices
+            .windows(2)
+            .any(|pair| matches!(pair, [left,right] if left >= right))
+        {
+            return Err(route::invalid(
+                "configured GPU backing claims are not unique",
+            ));
+        }
+        let physical = self.catalog_physical(&devices)?;
+        let mut digest = Sha256::new();
+        digest.update(b"hex-shards-gpu-observer/v2");
+        digest.update(self.pool_configuration(cost)?);
+        digest.update(observer.identity());
+        for (device, selector) in devices.iter().zip(&physical) {
+            digest.update(device.key.to_be_bytes());
+            let argument = shards_api::physical::argument(*selector).map_err(|why| {
+                refusal(
+                    "encoding configured GPU backing selector",
+                    &shards_api::Refusal::Gpu(why),
+                )
+            })?;
+            digest.update(
+                u64::try_from(argument.len())
+                    .map_err(|_| route::invalid("GPU backing selector length overflows"))?
+                    .to_be_bytes(),
+            );
+            digest.update(argument.as_encoded_bytes());
+        }
+        let original = self.pool_path()?;
+        let suffix = ".gpu-observer";
+        let mut path = OsString::new();
+        path.try_reserve_exact(
+            original
+                .as_os_str()
+                .len()
+                .checked_add(suffix.len())
+                .ok_or_else(|| route::invalid("GPU backing receipt path length overflows"))?,
+        )
+        .map_err(|_| route::invalid("GPU backing receipt path storage is unavailable"))?;
+        path.push(original.as_os_str());
+        path.push(suffix);
+        Ok(Some(GpuBacking {
+            pool: digest.finalize().into(),
+            cost,
+            devices,
+            physical,
+            path: PathBuf::from(path),
+        }))
+    }
+    /// Read-only initialized-backend and retained VM-receipt validation during
+    /// the SAME owner's whole-record preflight. The caller joins every canonical
+    /// backing/holder first; this never probes, launches, cleans up or writes.
     pub fn preflight_box(&self, record: &hex_core::record::BoxRecord) -> Result<(), Refusal> {
         let spec = &record.spec;
         route::guest_spec(spec)?;
@@ -52,7 +168,7 @@ impl GuestRuntime {
                     // observation. The full native/report join is still required.
                     self.catalog_physical(&spec.devices)?;
                 }
-                Ok(())
+                self.preflight_selected_receipt(record)
             }
             // Only an already charged exact dedicated legacy record is
             // unambiguous here. A legacy shared VM cannot acquire a new grant.
@@ -62,10 +178,46 @@ impl GuestRuntime {
                 if !spec.devices.is_empty() {
                     self.catalog_physical(&spec.devices)?;
                 }
-                Ok(())
+                self.preflight_selected_receipt(record)
             }
             Some(_) | None => Err(super::books::uncertain(&spec.id)?),
         }
+    }
+
+    fn preflight_selected_receipt(
+        &self,
+        record: &hex_core::record::BoxRecord,
+    ) -> Result<(), Refusal> {
+        let id = &record.spec.id;
+        let receipt = match selected::read(&self.selected_path(id)?)? {
+            Some(receipt) => receipt,
+            None if record.phase == hex_core::record::Phase::Creating && record.init.is_none() => {
+                return Ok(());
+            }
+            None => return Err(super::books::uncertain(id)?),
+        };
+        receipt.matches_record(record)?;
+        if !receipt.devices.is_empty()
+            && self.catalog_physical(&receipt.devices)? != receipt.physical
+        {
+            return Err(super::books::uncertain(id)?);
+        }
+        match &receipt.phase {
+            Phase::Running(identity)
+            | Phase::Stopping(identity)
+            | Phase::Released {
+                identity: Some(identity),
+                ..
+            } => managed::same_init(record, identity)?,
+            Phase::Released { identity: None, .. } if record.init.is_some() => {
+                return Err(super::books::uncertain(id)?);
+            }
+            Phase::Intent | Phase::Released { identity: None, .. } => {}
+        }
+        if receipt.report.is_some() {
+            receipt.checked_report()?;
+        }
+        Ok(())
     }
 
     /// Read-only route/profile validation for the SAME owner's retained-record
@@ -73,14 +225,31 @@ impl GuestRuntime {
     pub fn preflight_backing(&self, record: &PoolRecord) -> Result<(), Refusal> {
         record.check()?;
         let key = record.key;
-        if record.execution != Execution::ShardsShared
-            || !record.devices.is_empty()
-            || self.runtime_cost != Some(record.cost)
-            || self.shared_pool.get().is_some_and(|bound| *bound != key)
-            || key.pool != self.pool_configuration(record.cost)?
-        {
+        if self.runtime_cost != Some(record.cost) {
             return Err(refused(key, LifecycleCause::Uncertain));
         }
+        let gpu = match record.execution {
+            Execution::ShardsShared
+                if record.devices.is_empty()
+                    && self.shared_pool.get().is_none_or(|bound| *bound == key)
+                    && key.pool == self.pool_configuration(record.cost)? =>
+            {
+                None
+            }
+            Execution::ShardsDedicated => {
+                let definition = self
+                    .gpu_backing_definition()?
+                    .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
+                if key.pool != definition.pool
+                    || record.devices != definition.devices
+                    || record.cost != definition.cost
+                {
+                    return Err(refused(key, LifecycleCause::Uncertain));
+                }
+                Some(definition)
+            }
+            _ => return Err(refused(key, LifecycleCause::Uncertain)),
+        };
         let allocation = record
             .cost
             .allocate(hex_api::CapacityResources::default())?;
@@ -93,6 +262,65 @@ impl GuestRuntime {
             || guest.mem_bytes != configured.mem_bytes
         {
             return Err(refused(key, LifecycleCause::Uncertain));
+        }
+        let (path, physical): (&Path, &[shards_api::PhysicalGpu]) = match &gpu {
+            Some(definition) => (definition.path.as_path(), &definition.physical),
+            None => (self.pool_path()?, &[]),
+        };
+        self.preflight_pool_receipt_at(record, path, physical)?;
+        Ok(())
+    }
+
+    fn preflight_pool_receipt_at(
+        &self,
+        record: &PoolRecord,
+        path: &Path,
+        physical: &[shards_api::PhysicalGpu],
+    ) -> Result<(), Refusal> {
+        let receipt = match pool::read(path)? {
+            Some(receipt) => receipt,
+            None if record.phase == BackingPhase::Prepared => return Ok(()),
+            None if record.phase == BackingPhase::Granted && record.init.is_none() => return Ok(()),
+            // prepare_backing removes a positively completed local receipt before
+            // issuing a new generation; the canonical terminal row is retained.
+            None if record.phase == BackingPhase::Released && record.exit.is_some() => {
+                return Ok(());
+            }
+            None => return Err(refused(record.key, LifecycleCause::Uncertain)),
+        };
+        receipt.matches(record)?;
+        if receipt.physical != physical {
+            return Err(refused(record.key, LifecycleCause::Uncertain));
+        }
+        if let Some(readiness) = &receipt.readiness {
+            let observer = self
+                .gpu_observer
+                .as_ref()
+                .ok_or_else(|| refused(record.key, LifecycleCause::Uncertain))?;
+            if readiness.configuration != observer.identity()
+                || readiness.max_queues != observer.queues()
+            {
+                return Err(refused(record.key, LifecycleCause::Uncertain));
+            }
+        }
+        if let Some(attempt) = &receipt.attempt {
+            let observer = self
+                .gpu_observer
+                .as_ref()
+                .ok_or_else(|| refused(record.key, LifecycleCause::Uncertain))?;
+            attempt.check_config(observer, physical.len())?;
+        }
+        match &receipt.phase {
+            Phase::Running(identity)
+            | Phase::Stopping(identity)
+            | Phase::Released {
+                identity: Some(identity),
+                ..
+            } => managed::same_native(NativeRecord::Pool(record), identity)?,
+            Phase::Released { identity: None, .. } if record.init.is_some() => {
+                return Err(refused(record.key, LifecycleCause::Uncertain));
+            }
+            Phase::Intent | Phase::Released { identity: None, .. } => {}
         }
         Ok(())
     }
@@ -231,7 +459,7 @@ impl GuestRuntime {
         Ok(hash.finalize().into())
     }
 
-    fn pool_record(&self, key: BackingKey) -> Result<PoolRecord, Refusal> {
+    pub(super) fn pool_record(&self, key: BackingKey) -> Result<PoolRecord, Refusal> {
         self.authority()?
             .pool_records()?
             .into_iter()
@@ -242,6 +470,7 @@ impl GuestRuntime {
     /// Recovery consumes the original already-admitted grant. It never invents
     /// a new generation or restarts an interrupted native launch.
     pub fn recover_backing(&self) -> Result<(), Refusal> {
+        self.recover_gpu_backing()?;
         let key = *self
             .shared_pool
             .get()
@@ -404,6 +633,7 @@ impl GuestRuntime {
         let plan = self.managed_plan(&spec, &socket)?;
         let guest = match &receipt.phase {
             Phase::Running(identity) => {
+                receipt.checked_report()?;
                 let canonical = transaction
                     .read_pool(&key)?
                     .ok_or_else(|| refused(key, LifecycleCause::Uncertain))?;
@@ -437,6 +667,7 @@ impl GuestRuntime {
         if identity.vsock != socket {
             return Err(refused(key, LifecycleCause::Uncertain));
         }
+        receipt.checked_report()?;
         receipt.phase = Phase::Running(identity);
         pool::write(path, &receipt)?;
         let booted = self.connect_managed(guest, None, Some(binding), budget)?;
@@ -460,7 +691,7 @@ impl GuestRuntime {
         Ok(booted)
     }
 
-    fn pool_spec(&self, receipt: &Receipt) -> Result<shards_api::GuestSpec, Refusal> {
+    pub(super) fn pool_spec(&self, receipt: &Receipt) -> Result<shards_api::GuestSpec, Refusal> {
         receipt.check()?;
         let guest = receipt
             .original
@@ -487,7 +718,7 @@ impl GuestRuntime {
         Ok(spec)
     }
 
-    fn pool_socket(&self, key: BackingKey) -> Result<PathBuf, Refusal> {
+    pub(super) fn pool_socket(&self, key: BackingKey) -> Result<PathBuf, Refusal> {
         use std::fmt::Write as _;
         let parent = self
             .pool_path()?
@@ -529,7 +760,7 @@ impl GuestRuntime {
         Ok(path)
     }
 
-    fn matches_pool(&self, booted: &Booted, record: &PoolRecord) -> Result<(), Refusal> {
+    pub(super) fn matches_pool(&self, booted: &Booted, record: &PoolRecord) -> Result<(), Refusal> {
         if booted.backing
             != Some(Binding {
                 key: record.key,
@@ -541,7 +772,7 @@ impl GuestRuntime {
         Ok(())
     }
 
-    fn pool_alive(&self, booted: &Booted, key: BackingKey) -> Result<(), Refusal> {
+    pub(super) fn pool_alive(&self, booted: &Booted, key: BackingKey) -> Result<(), Refusal> {
         let exited = booted
             .guest
             .process_exited()
@@ -658,7 +889,7 @@ impl GuestRuntime {
     pub fn backing_usage(&self, key: &BackingKey) -> Result<Usage, Refusal> {
         let key = *key;
         if self.shared_pool.get() != Some(&key) {
-            return Err(refused(key, LifecycleCause::Uncertain));
+            return self.gpu_backing_usage(key);
         }
         let books = self
             .books
@@ -753,32 +984,37 @@ impl GuestRuntime {
                 "Shards offers require OCI or explicit Shards class",
             ));
         }
-        // Cold provisioning IDs are separate from this measured canonical list.
-        // They get no model/size/eligibility until the real backing join reports it.
-        let mut ids = Vec::new();
-        if self.gpu_catalog.is_some() {
-            let entries = self.physical_entries()?;
-            ids.try_reserve_exact(capacity.devices.len())
-                .map_err(|_| Refusal::Exhausted {
-                    what: "Shards eligibility join",
-                    bound: hex_api::MAX_DEVICES,
+        // Prepared full IDs are provisioning claims only. Bootstrap may reserve
+        // them without a running GPU provider; actual DeviceInfo/route bits wait
+        // for charged native+guest readiness, never a fabricated cold inventory.
+        if let Some(definition) = self.gpu_backing_definition()? {
+            let records = self.authority()?.pool_records()?;
+            let backing = records
+                .iter()
+                .find(|record| record.key.pool == definition.pool)
+                .ok_or_else(|| {
+                    route::invalid("prepare the GPU backing before advertising its route")
                 })?;
-            ids.extend(
+            self.preflight_backing(backing)?;
+            if !capacity
+                .backings
+                .iter()
+                .any(|known| known.key == backing.key)
+            {
                 capacity
-                    .devices
-                    .iter()
-                    .filter(|device| {
-                        entries
-                            .binary_search_by_key(&device.id, |entry| entry.info.id)
-                            .is_ok()
-                    })
-                    .map(|device| device.id),
-            );
-        }
-        ids.sort_unstable();
-        let physical = self.catalog_physical_if_any(&ids)?;
-        let eligible = self.checked_physical(&ids, &physical)?;
-        if !eligible.is_empty() {
+                    .backings
+                    .try_reserve_exact(1)
+                    .map_err(|_| Refusal::Exhausted {
+                        what: "initialized GPU backing",
+                        bound: hex_api::MAX_RUNTIME_ROUTES,
+                    })?;
+                capacity.backings.push(backing.offer()?);
+            }
+            let eligible = if backing.phase == BackingPhase::Live {
+                self.checked_physical(&definition.devices, &definition.physical)?
+            } else {
+                Vec::new()
+            };
             push_offer(
                 capacity,
                 RouteOffer {
@@ -789,7 +1025,7 @@ impl GuestRuntime {
                         gpu: GpuEligibility::Required,
                     },
                     cost: Some(allocation.cost),
-                    backing: None,
+                    backing: Some(backing.key),
                 },
                 &eligible,
             )?;
@@ -797,17 +1033,6 @@ impl GuestRuntime {
         // There is no class-wide VM cost: explicit route+backing describes it.
         capacity.cost = None;
         capacity.check()
-    }
-
-    fn catalog_physical_if_any(
-        &self,
-        ids: &[hex_api::DeviceId],
-    ) -> Result<Vec<shards_api::PhysicalGpu>, Refusal> {
-        if ids.is_empty() {
-            Ok(Vec::new())
-        } else {
-            self.catalog_physical(ids)
-        }
     }
 
     pub(super) fn create_shared(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
@@ -963,7 +1188,9 @@ fn remove_receipt(path: &Path) -> Result<(), Refusal> {
         .map_err(|why| Refusal::os("syncing removed shared guest receipt", why))
 }
 
-fn copy_identity(identity: &shards_api::Identity) -> Result<shards_api::Identity, Refusal> {
+pub(super) fn copy_identity(
+    identity: &shards_api::Identity,
+) -> Result<shards_api::Identity, Refusal> {
     Ok(shards_api::Identity {
         pid: identity.pid,
         started: identity.started,
@@ -971,7 +1198,7 @@ fn copy_identity(identity: &shards_api::Identity) -> Result<shards_api::Identity
     })
 }
 
-fn exit_of(status: shards_api::ManagedStatus) -> hex_api::Exit {
+pub(super) fn exit_of(status: shards_api::ManagedStatus) -> hex_api::Exit {
     match status {
         shards_api::ManagedStatus::Code(code) => hex_api::Exit::Code(code),
         shards_api::ManagedStatus::Signal(signal) => hex_api::Exit::Signal(signal),

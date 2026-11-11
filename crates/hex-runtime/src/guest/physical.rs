@@ -37,7 +37,7 @@ fn key(physical: shards_api::PhysicalGpu) -> Result<u64, Refusal> {
     }
 }
 
-fn joined_key(device: &shards_api::ResolvedGpu) -> Result<u64, Refusal> {
+pub(super) fn joined_key(device: &shards_api::ResolvedGpu) -> Result<u64, Refusal> {
     match device.physical {
         shards_api::PhysicalGpu::Luid(luid) => {
             // No integer equality between DeviceId and LUID. Without complete
@@ -56,7 +56,71 @@ fn joined_key(device: &shards_api::ResolvedGpu) -> Result<u64, Refusal> {
     }
 }
 
+pub(super) fn check_report(
+    devices: &[hex_api::DeviceId],
+    physical: &[shards_api::PhysicalGpu],
+    scope: hex_core::record::NativeScope,
+    report: &shards_api::physical::GpuReport,
+) -> Result<(), Refusal> {
+    report
+        .check(*scope.bytes(), physical)
+        .map_err(|_| invalid("GPU report differs from the original scope or selector set"))?;
+    if report.probe.devices.len() != devices.len() {
+        return Err(invalid("GPU report differs from the original claim count"));
+    }
+    for (id, resolved) in devices.iter().zip(&report.probe.devices) {
+        let known_key = match resolved.physical {
+            shards_api::PhysicalGpu::Luid(luid) if resolved.pci.is_none() => {
+                if resolved.luid != Some(luid.to_le_bytes()) {
+                    return Err(invalid("report LUID bytes differ from the exact selector"));
+                }
+                // A durable codec cannot query native current-boot identity.
+                // No PCIEXT is fabricated; the initialized SAME Books provider
+                // MUST establish stable DeviceId -> live LUID before use.
+                None
+            }
+            _ => Some(joined_key(resolved)?),
+        };
+        if id.kind != hex_api::DeviceKind::Gpu || known_key.is_some_and(|key| key != id.key) {
+            return Err(invalid(
+                "GPU report has no exact stable native claim correspondence",
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl GuestRuntime {
+    pub(super) fn check_native_report(
+        &self,
+        devices: &[hex_api::DeviceId],
+        physical: &[shards_api::PhysicalGpu],
+        scope: hex_core::record::NativeScope,
+        report: &shards_api::physical::GpuReport,
+    ) -> Result<(), Refusal> {
+        check_report(devices, physical, scope, report)?;
+        for (id, resolved) in devices.iter().zip(&report.probe.devices) {
+            if matches!(resolved.physical, shards_api::PhysicalGpu::Luid(_)) {
+                if resolved.pci.is_none() {
+                    // LUID alone does not identify a physical node in an LDA.
+                    // The typed native-node witness and renderer node mask are
+                    // not yet part of this signed API; do not publish Live from
+                    // a merely unique enumeration or matching adapter integer.
+                    return Err(invalid(
+                        "native physical-node correspondence is not initialized",
+                    ));
+                }
+                let luid = self.authority()?.physical_luid(*id)?;
+                if resolved.luid != Some(luid) {
+                    return Err(invalid(
+                        "same native provider reports another current-boot LUID",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// A transient sorted view of the one immutable catalog. References provide
     /// lookup only: no copied metadata, inventory cache or selection authority.
     pub(super) fn physical_entries(&self) -> Result<Vec<&crate::devices::Entry>, Refusal> {
@@ -99,6 +163,83 @@ impl GuestRuntime {
         Ok(physical)
     }
 
+    /// Read only facts from the original charged live observer. A file/report
+    /// alone is insufficient: the SAME canonical native scope must still exist.
+    fn live_gpu_receipt(&self) -> Result<Option<super::pool::Receipt>, Refusal> {
+        let Some(definition) = self.gpu_backing_definition()? else {
+            return Ok(None);
+        };
+        let authority = self.authority()?;
+        let records = authority.pool_records()?;
+        let Some(record) = records
+            .iter()
+            .find(|record| record.key.pool == definition.pool)
+        else {
+            return Ok(None);
+        };
+        if record.phase != hex_api::BackingPhase::Live {
+            return Ok(None);
+        }
+        self.preflight_backing(record)?;
+        let receipt = super::pool::read(&definition.path)?
+            .ok_or_else(|| super::pool::refused(record.key, hex_api::LifecycleCause::Uncertain))?;
+        receipt.matches(record)?;
+        if !matches!(receipt.phase, selected::Phase::Running(_)) {
+            return Err(super::pool::refused(
+                record.key,
+                hex_api::LifecycleCause::Uncertain,
+            ));
+        }
+        let report = receipt
+            .checked_report()?
+            .ok_or_else(|| invalid("live GPU backing lacks its scoped renderer report"))?;
+        self.check_native_report(
+            &receipt.original.devices,
+            &receipt.physical,
+            receipt.original.scope(),
+            report,
+        )?;
+        receipt.checked_readiness()?;
+        let identity = receipt.identity()?;
+        managed::same_native(hex_core::record::NativeRecord::Pool(record), identity)?;
+        let books = self
+            .books
+            .get()
+            .ok_or_else(|| super::pool::refused(record.key, hex_api::LifecycleCause::Uncertain))?;
+        let keys = self.turn_keys(&record.devices)?;
+        crate::devices::with_pool_transaction(books, &record.key, &keys, |transaction| {
+            let current = transaction.read_pool(&record.key)?.ok_or_else(|| {
+                super::pool::refused(record.key, hex_api::LifecycleCause::Uncertain)
+            })?;
+            if current.phase != hex_api::BackingPhase::Live
+                || current.native_commitment()? != record.native_commitment()?
+                || current.init != record.init
+            {
+                return Err(super::pool::refused(
+                    record.key,
+                    hex_api::LifecycleCause::Uncertain,
+                ));
+            }
+            let native = transaction.attach_managed(Some(identity))?;
+            if native
+                .identity()
+                .map_err(|why| refusal("observing original GPU backing identity", &why))?
+                != identity
+                || native
+                    .terminal()
+                    .map_err(|why| refusal("observing original GPU backing scope", &why))?
+                    .is_some()
+            {
+                return Err(super::pool::refused(
+                    record.key,
+                    hex_api::LifecycleCause::Uncertain,
+                ));
+            }
+            Ok(())
+        })?;
+        Ok(Some(receipt))
+    }
+
     pub(super) fn checked_physical(
         &self,
         ids: &[hex_api::DeviceId],
@@ -110,6 +251,15 @@ impl GuestRuntime {
         if ids.len() != physical.len() || ids.len() > hex_api::MAX_DEVICES {
             return Err(invalid("physical claim count changed"));
         }
+        let Some(receipt) = self.live_gpu_receipt()? else {
+            // Prepared/Granted remains explicit in Capacity.backings; there is
+            // no observed GPU eligibility before native+guest readiness is Live.
+            return Ok(Vec::new());
+        };
+        let probe = &receipt
+            .checked_report()?
+            .ok_or_else(|| invalid("live GPU backing has no private renderer facts"))?
+            .probe;
         let authority = self.authority()?;
         let records = authority.records()?;
         let pools = authority.pool_records()?;
@@ -125,22 +275,6 @@ impl GuestRuntime {
         }) {
             return Err(invalid("native provider repeated a physical DeviceId"));
         }
-        let mut spec = self.config.spec();
-        spec.gpu = true;
-        spec.gpu_devices
-            .try_reserve_exact(physical.len())
-            .map_err(|_| Refusal::Full(hex_api::MAX_DEVICES))?;
-        spec.gpu_devices.extend_from_slice(physical);
-        let probe = self
-            .guests
-            .probe_gpu(&spec, self.first_dial_bound()?)
-            .map_err(|why| refusal("initializing exact renderer GPU correspondence", &why))?;
-        probe.check(physical).map_err(|why| {
-            refusal(
-                "checking exact renderer GPU correspondence",
-                &shards_api::Refusal::GpuProbe(why),
-            )
-        })?;
         let catalog = self
             .gpu_catalog
             .as_ref()
@@ -158,8 +292,18 @@ impl GuestRuntime {
             ));
         }
         let mut native = native.into_iter().peekable();
-        for (id, resolved) in ids.iter().zip(&probe.devices) {
-            if id.kind != hex_api::DeviceKind::Gpu || joined_key(resolved)? != id.key {
+        for (id, selector) in ids.iter().zip(physical) {
+            let resolved = probe
+                .devices
+                .iter()
+                .find(|resolved| resolved.physical == *selector)
+                .ok_or_else(|| {
+                    invalid("live renderer does not contain the complete requested selector")
+                })?;
+            if id.kind != hex_api::DeviceKind::Gpu
+                || (!matches!(resolved.physical, shards_api::PhysicalGpu::Luid(_))
+                    && joined_key(resolved)? != id.key)
+            {
                 return Err(invalid(
                     "complete native identity disagrees with the stable physical claim",
                 ));
@@ -167,9 +311,30 @@ impl GuestRuntime {
             while native.peek().is_some_and(|info| info.id < *id) {
                 let _ = native.next();
             }
-            let mut info = native.next().filter(|info| info.id == *id).ok_or_else(|| {
-                invalid("the same native provider has no current selected device")
-            })?;
+            let mut info = match native.peek().map(|info| info.id) {
+                Some(native_id) if native_id == *id => native
+                    .next()
+                    .ok_or_else(|| invalid("native physical snapshot changed"))?,
+                _ => {
+                    let (Some(name), Some(size)) = (&resolved.name, resolved.device_local_bytes)
+                    else {
+                        // Unknown native properties stay unknown, not zero or
+                        // configuration metadata. No offer can be published.
+                        return Ok(Vec::new());
+                    };
+                    hex_api::DeviceInfo {
+                        id: *id,
+                        model: name.try_text().map_err(|why| {
+                            refusal(
+                                "copying actual renderer device name",
+                                &shards_api::Refusal::GpuProbe(why),
+                            )
+                        })?,
+                        size,
+                        holder: None,
+                    }
+                }
+            };
             info.check()?;
             if info.holder.is_some() {
                 return Err(invalid("native facts cannot assert a holder"));
@@ -187,21 +352,10 @@ impl GuestRuntime {
             return Ok(Vec::new());
         }
         let entries = self.physical_entries()?;
-        let native = self.authority()?.physical_devices()?;
-        if native.len() > hex_api::MAX_DEVICES {
-            return Err(Refusal::Full(hex_api::MAX_DEVICES));
-        }
         let mut ids = Vec::new();
-        ids.try_reserve_exact(native.len())
+        ids.try_reserve_exact(entries.len())
             .map_err(|_| Refusal::Full(hex_api::MAX_DEVICES))?;
-        for device in native {
-            if entries
-                .binary_search_by_key(&device.id, |entry| entry.info.id)
-                .is_ok()
-            {
-                ids.push(device.id);
-            }
-        }
+        ids.extend(entries.into_iter().map(|entry| entry.info.id));
         ids.sort_unstable();
         if ids.is_empty() {
             return Ok(Vec::new());
