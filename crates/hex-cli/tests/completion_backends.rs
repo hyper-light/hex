@@ -1895,3 +1895,101 @@ fn completion_output_expired_deadline_does_not_wait_for_writer() {
     assert!(matches!(output.end, OutputEnd::Deadline));
     assert!(output.bytes.is_empty());
 }
+
+fn creating_capture_record(id: &str) -> BoxRecord {
+    let mut record = BoxRecord::new(
+        BoxSpec {
+            id: BoxId::new(id).unwrap(),
+            bounds: hex_api::Bounds::default(),
+            class: hex_api::ClassSpec::Process,
+            owner: None,
+            devices: Vec::new(),
+            allocation: None,
+            route: None,
+        },
+        Phase::Creating,
+        Vec::new(),
+    );
+    record.native_scope = Some(hex_core::record::NativeScope::from_bytes([3; 16]));
+    record
+}
+
+/// AC-T7.4.1: Ready, missing scope and already-published init cannot become Creating evidence.
+#[test]
+fn completion_creating_capture_retains_only_the_original_unpublished_scoped_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let original = creating_capture_record("creating");
+    let mut ready = creating_capture_record("ready");
+    ready.phase = Phase::Ready;
+    let mut missing_scope = creating_capture_record("unscoped");
+    missing_scope.native_scope = None;
+    let mut published = creating_capture_record("published");
+    published.init = Some(hex_api::ProcId {
+        pid: 1,
+        start_ticks: 1,
+    });
+    let records = [original.clone(), ready, missing_scope, published];
+    let mut entries = 0u64;
+    for record in &records {
+        let path = hex_node::store::runtime_record(dir.path(), &record.spec.id);
+        if !path.parent().unwrap().exists() {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            entries += 1;
+        }
+        fs::write(path, record.encode().unwrap()).unwrap();
+        entries += 1;
+    }
+    let mut captured = Vec::new();
+    capture_creating(
+        dir.path(),
+        Class::Process,
+        entries,
+        hex_core::record::MAX_RECORD_BYTES as u64,
+        &mut captured,
+    )
+    .unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].0, original.spec.id);
+    assert_eq!(captured[0].1, original.encode().unwrap());
+    let mut now_ready = original.clone();
+    now_ready.phase = Phase::Ready;
+    fs::write(
+        hex_node::store::runtime_record(dir.path(), &original.spec.id),
+        now_ready.encode().unwrap(),
+    )
+    .unwrap();
+    capture_creating(
+        dir.path(),
+        Class::Process,
+        entries,
+        hex_core::record::MAX_RECORD_BYTES as u64,
+        &mut captured,
+    )
+    .unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(BoxRecord::decode(&captured[0].1).unwrap(), original);
+}
+
+/// AC-T7.4.1: refused output bounds retain both the source row and empty evidence.
+#[test]
+fn completion_creating_capture_refuses_an_oversized_record_without_publishing_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let record = creating_capture_record("creating");
+    let path = hex_node::store::runtime_record(dir.path(), &record.spec.id);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let raw = record.encode().unwrap();
+    fs::write(&path, &raw).unwrap();
+    let mut captured = Vec::new();
+    assert!(
+        capture_creating(
+            dir.path(),
+            Class::Process,
+            2,
+            u64::try_from(raw.len() - 1).unwrap(),
+            &mut captured
+        )
+        .is_err()
+    );
+    assert!(captured.is_empty());
+    assert_eq!(fs::read(path).unwrap(), raw);
+}
