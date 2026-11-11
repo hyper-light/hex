@@ -1,0 +1,9 @@
+# Focused ROOT e028 follow-up
+
+Exact sourcee028e005b00a8d5c0a6dcd7eae27faaaa36d3b44, Linux00aad1CPU4GiB12GiB/nice10/jobs1/threads1. Policy7d7e0855/rulesdf2, coordinator. Six selected: fivePASS, one relevant originalFAIL, zeroignored. Passed: checked actual GPU slot publication AFTER8004aa10; Mac telemetry fixture61e75538; generator original AFTERe077b98e; new initialized mixed-class GPU control0019307d; adversarial swapped-reading recovery4ad0b215. No190sim passes replayed.
+
+The new original draining_observer_refuses_first_reference_but_retains_existing_consumer failed at its final semantic assertion643 (log1fc09bd5913b7fed4dac67f8609b5aeb2ec408d5fb4830ebe00082d751b59715). Actual existingLive consumer had enteredDraining, reentered/cancelled/removed successfully. Same no-ref Draining source then admitted a NEW consuming reference. L3's507a Store-only guard is a source remedy until a separate AFTER check. Exact original body is unchanged.
+
+Strict joined all-target seven-crate Clippy now advanced beyond the repaired CLI fixture and found two Node test causes: placement/tests197 cloned reference slice; supervise/completion_native_gate_tests201 forbidden sleep polling. ROOT fixed the one slice to from_ref with identical fixture input. L4 owns an event/sole-waiter repair of the three native-gate observation callers; no alias/park/sleep warning waiver. No production or native effect follows from lint diagnostics.
+
+Whole check exit1. All seven Cargo processes1280098/1339943/1405593/1405773/1405874/1405894/1477601 reaped, temp0/source0diff/native0. CLI22993 and collector62244 terminal/reaped. Archive331405B SHA67a6d26f5cd5de0042ed21605ece2b53f3e3e969a486f89a7c9d1e32c5fccf68, all members/Git-source checked. Full commands, exact logs/binaries/limits in result/raw. No all-platform/native/fault/mutation/alloc/performance completion is claimed. Full R01-R16 gate remains owed.

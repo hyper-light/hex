@@ -241,6 +241,19 @@ impl Store {
             .ok_or_else(|| refused(source))?;
         crate::recorded::check_backing_reference(record, &pool)?;
         if route.key.execution != Execution::ShardsShared {
+            if pool.phase == BackingPhase::Draining
+                && self
+                    .read_lifecycle(&record.spec.id)?
+                    .is_none_or(|current| current.spec != record.spec)
+            {
+                // Coalescing has already excluded new consumers. Only this SAME canonical
+                // reference can reenter/cancel while the old full scope is still draining.
+                // The writer holds source then Box Store turns across this check/publication.
+                return Err(Refusal::Backing {
+                    key: source,
+                    cause: LifecycleCause::Busy,
+                });
+            }
             crate::recorded::check_single_consumer(
                 &self.retained_records()?,
                 source,

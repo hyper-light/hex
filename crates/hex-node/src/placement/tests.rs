@@ -194,7 +194,7 @@ fn dedicated_vm_driver_preserves_original_payload_and_effective_charge_on_reboot
                 node: NodeId(0),
                 namespace: TEST_NAMESPACE,
             },
-            &[node.clone()],
+            std::slice::from_ref(node),
             &[],
             Budget { owned: 4, ran: 4 },
             Pick::default(),

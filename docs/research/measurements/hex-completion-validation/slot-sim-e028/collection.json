@@ -1,0 +1,67 @@
+{
+  "bytes": 331405,
+  "sha256": "67a6d26f5cd5de0042ed21605ece2b53f3e3e969a486f89a7c9d1e32c5fccf68",
+  "members": {
+    "cohort-e028e005-linux-slot-sim-e028/source-before.json": {
+      "bytes": 481129,
+      "sha256": "2eab2da4055829e8b03bc3f0766e1f86f080e9b16ec9e61fb64e1cb6f928ff3c"
+    },
+    "cohort-e028e005-linux-slot-sim-e028/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-e028e005-linux-slot-sim-e028/owned-scope-limits.json": {
+      "bytes": 253,
+      "sha256": "605b0a57962cc22624b9100aab839ff73fd6702ab43d3c5dc115773975cafe81"
+    },
+    "cohort-e028e005-linux-slot-sim-e028/factual-slot-original-after.log": {
+      "bytes": 3397,
+      "sha256": "8004aa1066eecc156d1ef8627f44e20782583980b26807bdd5b161fc7de0df44"
+    },
+    "cohort-e028e005-linux-slot-sim-e028/running.json": {
+      "bytes": 7109,
+      "sha256": "692ff67bad38f1ea5fbc6c434c38baebcdb82960e4f8bbdcce19d217046e685e"
+    },
+    "cohort-e028e005-linux-slot-sim-e028/sim-mac-facts-input-after.log": {
+      "bytes": 1141,
+      "sha256": "61e7553867720b0089efa1d20d4aabe0040d13d04db81e61be79a4eda38d8f94"
+    },
+    "cohort-e028e005-linux-slot-sim-e028/sim-generator-original-after.log": {
+      "bytes": 410,
+      "sha256": "e077b98e7e63fad1f185e9a4eea076053ed243e5d3faaa07f6d18507c6978ea0"
+    },
+    "cohort-e028e005-linux-slot-sim-e028/sim-generator-mixed-new.log": {
+      "bytes": 433,
+      "sha256": "0019307d37c9412d1ec18ccf075d6d2bc595ca3af10b35ce79e7c92616a5a442"
+    },
+    "cohort-e028e005-linux-slot-sim-e028/sim-device-recovery-input-after.log": {
+      "bytes": 1762,
+      "sha256": "4ad0b2152578477395c54c17c564d4ce5c044c4681c9b740bc05daeae23b3ffe"
+    },
+    "cohort-e028e005-linux-slot-sim-e028/store-draining-first-reference-original.log": {
+      "bytes": 1567,
+      "sha256": "1fc09bd5913b7fed4dac67f8609b5aeb2ec408d5fb4830ebe00082d751b59715"
+    },
+    "cohort-e028e005-linux-slot-sim-e028/joined-strict-clippy.log": {
+      "bytes": 4760,
+      "sha256": "e6399760f4a071fbd561b5705341a50173cf90addbd7374b703c7ab80a86851c"
+    },
+    "cohort-e028e005-linux-slot-sim-e028/source-after.json": {
+      "bytes": 481129,
+      "sha256": "2eab2da4055829e8b03bc3f0766e1f86f080e9b16ec9e61fb64e1cb6f928ff3c"
+    },
+    "cohort-e028e005-linux-slot-sim-e028/result.json": {
+      "bytes": 7367,
+      "sha256": "45ca3d68ae02be5e68258e409dc52c8a72128d544737954c8094e4ac8b7f1eda"
+    },
+    "cohort-e028e005-linux-slot-sim-e028/collected-binaries.json": {
+      "bytes": 7201,
+      "sha256": "7b832e2f394babcf07f17b35ea0304849a81c923a696bb07f44bc3573147b01b"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

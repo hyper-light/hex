@@ -1,0 +1,27 @@
+{
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "parent": "2ba039ccc73d0378eb9567a8743df7ef381f5e61",
+  "original": "de2a92a116e39e97a6192055b9218cfea77fda90",
+  "actual_original_result": "0pass/1fail/0ignored at exact new first-reference oracle; canonical positive preconditions passed",
+  "actual_original_log_sha256": "1fc09bd5913b7fed4dac67f8609b5aeb2ec408d5fb4830ebe00082d751b59715",
+  "original_leaf_unchanged": true,
+  "after_status": "UNRUN, no own check/native dispatch",
+  "source_scope": "ONLY Store::check_box_backing dedicated Draining first-publication guard; canonical existing spec may reenter/cancel",
+  "metadata": "existing source->Box turns, plus8b same shared metadata fence; no new owner",
+  "source_hashes": {
+    "crates/hex-node/src/store/pool.rs": {
+      "bytes": 28227,
+      "sha256": "c6b0ccfa79dc9d5489503646c4a2f21d3d6713ae9ffa6ce8e2b560c53cdcd44c"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs": {
+      "bytes": 23832,
+      "sha256": "2bd74bc8a07dcc69033cad1b0696271bceacea7ef3536ac366458a03d41e3afe"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/draining-first-reference-remedy.md": {
+      "bytes": 2848,
+      "sha256": "da4067bdfde644a23af6a7e49fcdbf99a8fe57edf79feb36aa97678dcf6681e6"
+    }
+  }
+}
