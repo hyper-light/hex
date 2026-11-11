@@ -606,9 +606,21 @@ impl Holding {
             SlotState::Finishing(held) | SlotState::CancelFinishing(held) => {
                 SlotState::CleanupPending(held.clone())
             }
+            // A creator cancelled while finishing has already handed its box to cleanup (`ready`).
+            SlotState::CleanupPending(_) => return Ok(()),
             _ => return Err(inconsistent_slots()),
         };
         Ok(())
+    }
+
+    /// The uncertainty mark of a path that failed with `failure`. A refused mark leaves the slot
+    /// unmarked, so it returns beside `failure`, typed as the node's broken state.
+    fn uncertain_after(&self, id: OwnerRef<'_>, failure: &Refusal) -> Result<(), Refusal> {
+        self.uncertain(id).map_err(|mark| {
+            Refusal::Broken(format!(
+                "{failure}; its native slot's uncertainty couldn't be recorded ({mark})"
+            ))
+        })
     }
 
     /// Only a fresh assigned create returning before HcsCreateComputeSystem can take this path.
@@ -1771,7 +1783,7 @@ impl WinRuntime {
         let held = match made {
             Ok(held) => held,
             Err(error) => {
-                self.holding.uncertain(OwnerRef::Box(id))?;
+                self.holding.uncertain_after(OwnerRef::Box(id), &error)?;
                 return match self.holding.remove(id) {
                     Ok(()) => Err(error),
                     Err(cleanup) => Err(Refusal::Broken(format!(
@@ -1798,7 +1810,7 @@ impl WinRuntime {
                 ))
             }
             Err(error) => {
-                self.holding.uncertain(OwnerRef::Box(id))?;
+                self.holding.uncertain_after(OwnerRef::Box(id), &error)?;
                 match self.holding.remove(id) {
                     Ok(()) => Err(error),
                     Err(cleanup) => Err(Refusal::Broken(format!(
@@ -2768,6 +2780,205 @@ mod tests {
             ));
         }
         rt.delete(&spec.id).unwrap(); // No keeper exists; no synthetic remote value is closed.
+        assert!(rt.list().unwrap().is_empty());
+    }
+
+    /// Poisons the native holding table, as a panic elsewhere while holding it does.
+    fn poison(holding: &Arc<Holding>) {
+        let holding = Arc::clone(holding);
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = holding.boxes.lock().unwrap();
+                panic!("owned injected native holding poison");
+            })
+            .join()
+            .is_err()
+        );
+    }
+
+    /// The poisoned table's slots, read without restoring the table to the runtime.
+    fn poisoned(holding: &Holding) -> std::sync::MutexGuard<'_, Vec<(OwnerKey, Slot)>> {
+        match holding.boxes.lock() {
+            Err(poisoned) => poisoned.into_inner(),
+            Ok(_) => panic!("the native holding table isn't poisoned"),
+        }
+    }
+
+    /// AC-T7.4.1: do fail a create whose uncertainty mark the poisoned holding table refuses; expect
+    /// the creation failure kept beside that refusal, typed Broken, and its slot held, never Ready.
+    #[test]
+    fn a_refused_uncertainty_mark_after_a_failed_create_keeps_the_failure() {
+        let scratch = tempfile::tempdir().unwrap();
+        let rt = device_runtime(scratch.path());
+        let id = BoxId::new("unmarked-create").unwrap();
+        rt.holding
+            .reserve(OwnerRef::Box(&id), &[], None, None)
+            .unwrap();
+        poison(&rt.holding);
+        let failure = Refusal::os("creating a box's job", "owned injected creation refusal");
+        let error = rt.finish_make(&id, Err(failure.clone())).unwrap_err();
+        let Refusal::Broken(why) = &error else {
+            panic!("a refused uncertainty mark isn't typed as broken state: {error:?}");
+        };
+        assert!(
+            why.contains(&failure.to_string()),
+            "the creation failure was dropped: {why}"
+        );
+        assert!(why.contains("the node's box map lock is poisoned"), "{why}");
+        let boxes = poisoned(&rt.holding);
+        let at = slot_index(&boxes, &id).unwrap();
+        assert!(matches!(boxes[at].1.state, SlotState::Creating));
+    }
+
+    /// AC-T7.4.1: do launch a managed VM whose controller exists but whose publication fails, with
+    /// the holding table poisoned first so the failure path's uncertainty mark is refused; expect the
+    /// launch failure kept beside that refusal, typed Broken, and the slot still holding the
+    /// creator's job, never Ready.
+    #[test]
+    fn a_refused_uncertainty_mark_after_a_failed_managed_launch_keeps_the_failure() {
+        let scratch = tempfile::tempdir().unwrap();
+        let rt = device_runtime(scratch.path());
+        let guest = CapacityResources {
+            cpu_milli: 1_000,
+            mem_bytes: 256 << 20,
+            disk_bytes: 0,
+        };
+        let cost = hex_api::RuntimeCost {
+            id: [1; 32],
+            floor: guest,
+            ceiling: guest,
+            quantum: CapacityResources {
+                cpu_milli: 1_000,
+                mem_bytes: 1,
+                disk_bytes: 1,
+            },
+            guest_overhead: CapacityResources::default(),
+            overhead: CapacityResources::default(),
+        };
+        // A dedicated Shards VM's granted row, as the canonical Store hands it to the launch.
+        let pool = hex_core::record::PoolRecord {
+            version: hex_core::record::RECORD_VERSION,
+            key: hex_api::BackingKey {
+                pool: [2; 32],
+                generation: [3; 16],
+            },
+            execution: hex_api::Execution::ShardsDedicated,
+            cost,
+            allocation: Some(cost.allocate(CapacityResources::default()).unwrap()),
+            devices: Vec::new(),
+            phase: hex_api::BackingPhase::Granted,
+            init: None,
+            exit: None,
+        };
+        let record = NativeRecord::Pool(&pool);
+        let spec = shards_api::GuestSpec {
+            kernel: "C:\\kernel".into(),
+            init: shards_api::Init::Executable("C:\\init".into()),
+            cmdline: "console=ttyS0 quiet".into(),
+            vcpus: 1,
+            memory_mib: 256,
+            gpu: false,
+            gpu_devices: Vec::new(),
+            disks: Vec::new(),
+            shares: Vec::new(),
+            ports: vec![1024],
+            binary: None,
+        };
+        // The controller is made suspended and never resumed, so this test's own executable serves.
+        let plan = shards_api::prepare_boot(
+            &spec,
+            &std::env::current_exe().unwrap(),
+            Path::new("C:\\v"),
+            0,
+        )
+        .unwrap()
+        .with_runtime_paths(
+            &shards_api::RuntimePaths::new(
+                scratch.path().join("cache"),
+                scratch.path().join("home"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let (_stdout, stdout) = std::io::pipe().unwrap();
+        let (_stderr, stderr) = std::io::pipe().unwrap();
+        let failure = Refusal::os(
+            "publishing the VM controller",
+            "owned injected publication refusal",
+        );
+        let published = std::cell::Cell::new(false);
+        let mut publish = |_: &shards_api::Identity| -> Result<(), Refusal> {
+            published.set(true);
+            poison(&rt.holding);
+            Err(failure.clone())
+        };
+        let Err(error) = rt.launch_managed(
+            record,
+            &crate::devices::ManagedLaunch::Shards(&plan),
+            shards_api::LaunchIo {
+                stdout,
+                stderr,
+                gpu_report: None,
+            },
+            // A finite launch bound this test never spends: publication refuses first.
+            std::time::Duration::from_secs(3_600),
+            &mut publish,
+        ) else {
+            panic!("a launch whose publication was refused succeeded");
+        };
+        assert!(
+            published.get(),
+            "the launch failed before publication: {error:?}"
+        );
+        let Refusal::Broken(why) = &error else {
+            panic!("the refused uncertainty mark was dropped: {error:?}");
+        };
+        assert!(
+            why.contains(&failure.to_string()),
+            "the launch failure was dropped: {why}"
+        );
+        assert!(why.contains("the node's box map lock is poisoned"), "{why}");
+        let boxes = poisoned(&rt.holding);
+        let at = owner_index(&boxes, record.owner()).unwrap();
+        assert!(matches!(
+            boxes[at].1.state,
+            SlotState::Finishing(Held::Process(_))
+        ));
+    }
+
+    /// AC-T7.4.1: do cancel a create while it finishes, so its own readiness step hands the slot to
+    /// cleanup, then run its failure path's uncertainty mark; expect the mark satisfied, not refused
+    /// as broken state, and the slot keeping its job until a delete removes it.
+    #[test]
+    fn a_cancelled_finishing_slot_already_satisfies_its_failure_mark() {
+        let scratch = tempfile::tempdir().unwrap();
+        let rt = device_runtime(scratch.path());
+        let spec = process_box("cancelled-finishing");
+        let id = &spec.id;
+        rt.holding
+            .reserve(OwnerRef::Box(id), &[], None, None)
+            .unwrap();
+        let job = JobBox::create(id.clone(), &spec.bounds, NonZeroU32::MIN).unwrap();
+        assert!(
+            !rt.holding
+                .made(OwnerRef::Box(id), native_held(job).unwrap())
+                .unwrap()
+        );
+        assert!(rt.holding.remove(id).is_err()); // The cancel: its keeper handoff is pending.
+        assert!(!rt.holding.ready(OwnerRef::Box(id)).unwrap());
+        let failure = Refusal::os("finishing a box", "owned injected cancelled creation");
+        rt.holding
+            .uncertain_after(OwnerRef::Box(id), &failure)
+            .unwrap();
+        {
+            let boxes = rt.boxes().unwrap();
+            let at = slot_index(&boxes, id).unwrap();
+            assert!(matches!(
+                boxes[at].1.state,
+                SlotState::CleanupPending(Held::Process(_))
+            ));
+        }
+        rt.delete(id).unwrap();
         assert!(rt.list().unwrap().is_empty());
     }
 

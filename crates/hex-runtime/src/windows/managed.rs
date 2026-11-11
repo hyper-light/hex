@@ -371,10 +371,11 @@ pub(super) fn launch(
         }
         Ok(shards_api::managed_receipt(Arc::clone(&boxed)))
     })();
-    if result.is_err() {
-        // The original slot/job/keeper retain cleanup authority and exact claims on every failure.
-        // No error is promoted to scope absence; the caller's same Creating row remains durable.
-        let _ = runtime.holding.uncertain(record.owner());
+    if let Err(error) = &result {
+        // On every failure the original slot/job/keeper keep the exact claims, marked for cleanup; a
+        // refused mark returns beside the failure. No error is promoted to scope absence; the
+        // caller's same Creating row remains durable.
+        runtime.holding.uncertain_after(record.owner(), error)?;
     }
     result
 }
