@@ -83,6 +83,15 @@ fn mapped(artifact: &GpuArtifact, config: &GuestConfig) -> Result<(), Refusal> {
         ));
     }
     guest_path(&artifact.guest)?;
+    if config
+        .shares
+        .iter()
+        .any(|share| !share.read_only && artifact.host.starts_with(&share.dir))
+    {
+        return Err(invalid(
+            "observer artifact is writable through another configured share",
+        ));
+    }
     let matches = config.shares.iter().any(|share| {
         if !share.read_only {
             return false;

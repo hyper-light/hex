@@ -409,10 +409,10 @@ impl GuestRuntime {
                     managed::same_native(NativeRecord::Pool(&record), identity)?;
                     Some(super::shared::copy_identity(identity)?)
                 }
-                Phase::Intent | Phase::Released { identity: None, .. } if record.init.is_none() => {
-                    None
-                }
-                _ => return Err(refused(key, LifecycleCause::Uncertain)),
+                // Local publication can lag the canonical native init. None is
+                // cleanup-only against this SAME record's scope/commitment; it
+                // never reconstructs a Guest or a socket-derived identity.
+                Phase::Intent | Phase::Released { identity: None, .. } => None,
             };
             let native = transaction.attach_managed(identity.as_ref())?;
             let observed = native.terminal().map_err(|why| {
