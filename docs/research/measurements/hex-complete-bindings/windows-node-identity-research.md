@@ -3,7 +3,7 @@
 Read-only research, 2026-11-11; L1 implementer. Policy receipt remains
 `7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506`, rules SHA-256
 `df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3`.
-Only this note is added. No production/FFI/ABI edits, native queries, build/test,
+Only this note is added/extended. No production/FFI/ABI edits, native queries, build/test,
 driver action or extra agent. Primary-source downloads are retained under
 `~/.cache/hex-complete-bindings/windows-node-identity-primary-v1/`; earlier SDK
 headers remain under `windows-node-mask-primary-v1/`.
@@ -153,3 +153,167 @@ native compute, reordering/restart/recovery, and scope/claim cleanup remain
 unverified. Source review cannot establish those effects. Existing historical
 host-compute and CM/KMT receipts retain their own source/boot attribution; this
 research made no new hardware observation or acceptance claim.
+
+## Segment/domain follow-up: current Prober before alternatives
+
+This extension answers the missing-segment question at frozen ROOT
+`4cb960811fd7d5dd5b86fc33873ad5451f178845`. The seven identity/facts source files
+below are byte-identical to ROOT `8621a28d85fa05cf0a080aac342fdc77ce899815`, the
+base of the private research worktree. The earlier `2a80` renderer discussion
+above remains historical, not a claim about a newly implemented fallback.
+The research skill's delegation default is overridden by the explicit no-new-agent
+instruction; this investigation was performed directly, without native queries.
+
+**Windows does expose the segment through a documented user-mode property route,
+and the current AMD Prober already uses that route.** The problem is not resolved
+by defaulting a segment or declaring the GPU unusable. These are the actual source
+paths, read before considering another observer:
+
+| Current producer | Exact behavior and boundary |
+| --- | --- |
+| `hex-node/facts.rs`: `Prober`, `shared_prober` | One retained `hex_gpu::Gpus` owner. Physical views reuse it; the split scheduler does not open another provider. |
+| `hex-gpu/nvml.rs`: `identify` | NVML's actual bus-ID string is parsed as full PCI domain/BDF. This producer does not obtain a missing domain from an ordinal or the AMD path. |
+| `hex-gpu/adl.rs`: `identify`, `current` | ADL's segment-less BDF is corroborated against the full address of its exact PNP instance before grouping. Each retained alias is checked again when sampling. Unknown/conflicting identity remains per-device `Unread`/skipped evidence. |
+| `hex-gpu/windows_identity/sys.rs`: `pci_for_instance` | Resolves the exact present PCI instance with `CM_LOCATE_DEVNODE_NORMAL`, reads back and compares its instance ID, then reads LocationInfo on that same devnode. No device-wide scan or phantom lookup. |
+| `hex-gpu/windows_identity.rs`: `location`, `corroborate` | Fixed grammar-derived UTF16 frame; exact returned byte count, STRING type at the caller, terminating NUL, no embedded NUL/non-ASCII replacement, unsigned/range-checked complete grammar. BusNumber and Address independently corroborate BDF. |
+| `hex-node/facts.rs`: `physical_luid`, `qualify_windows`; `hex-gpu/lib.rs`: `windows_aliases` | The retained verified AMD aliases feed the same current full-LUID resolver. That alias accessor currently belongs to ADL; it is not proof that every vendor has a PNP/LUID producer. |
+| `hex-runtime/windows/oci/sys.rs`: `adapter_luid_for_instance` | Exact present `GUID_DISPLAY_DEVICE_ARRIVAL` interfaces are opened by KMT, full eight-byte LUIDs must agree, and each successful native adapter handle is closed. This supplies current adapter correspondence, not an LDA physical-node mask. |
+
+Those source observations establish implementation structure, not success on the
+person's current device. In particular, a failed property query or unsupported
+identity producer is missing metadata; it does not establish inability to render
+or compute. Current facts retain open-time identity/metadata with unknown counter
+options; new attachment eligibility requires a current attributable identity.
+Existing Store holders are not released by discovery failure.
+
+### Documented LocationInfo and its strict limits
+
+Microsoft's [segment article](https://github.com/MicrosoftDocs/windows-driver-docs/blob/e33653d9339e4bc9ee46cb5b3122315516d8577b/windows-driver-docs-pr/pci/obtaining-pci-segment-values.md)
+explicitly names both user-mode property APIs. It documents the complete forms
+`PCI bus 1, device 2, function 3` and
+`PCI segment 1 bus 2, device 3, function 4`. The existing parser accepts those
+grammars, not arbitrary strings containing numbers. Its single-form zero follows
+the topology-specific Microsoft contract plus the cited UEFI single-segment
+definition. A failed/missing/empty/unrecognized/truncated property does not satisfy
+that contract. Explicit multi-segment values and contradictory full-PCI evidence
+cannot be replaced by zero.
+
+The actual frame bound is derived from the accepted grammar and supported field
+widths, including the final UTF16 NUL. A larger required property size is an
+unavailable observation, not permission to truncate, grow without a bound or retry
+on a fresh lifetime. Require a successful property call, native STRING type and
+valid complete returned frame before interpreting any number. The
+[CM property contract](https://learn.microsoft.com/en-us/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_get_devnode_propertyw)
+defines byte-sized capacity and returned size; partial contents after an error
+cannot be used as identity. The existing BusNumber/Address corroboration is also
+essential: those fields describe bus/address, not an encoded segment.
+
+There is a real localization qualification, not a reason for permissive parsing:
+the [property reference](https://github.com/MicrosoftDocs/windows-driver-docs/blob/c708f7b244f8d1f9dfbb35238226b08e44a8cf02/windows-driver-docs-pr/install/devpkey-device-locationinfo.md)
+labels LocationInfo nonlocalized, but the same pinned
+[SDK `devpkey.h`](https://github.com/microsoft/win32metadata/blob/71033001b4479c6566546b68d32276e70a8d68b9/generation/WinSDK/RecompiledIdlHeaders/shared/devpkey.h#L55)
+marks it localizable. The generic
+[bus device-text contract](https://github.com/MicrosoftDocs/windows-driver-docs/blob/e33653d9339e4bc9ee46cb5b3122315516d8577b/windows-driver-docs-pr/kernel/irp-mn-query-device-text.md)
+allows optional bus-dependent text and an LCID. Installation software can also
+write the property. Thus exact recognized PCI text from the actual devnode is
+useful OS evidence, not a universal locale promise or cryptographic hardware ID.
+Alternate driver/language/format, wrong native type or inconsistent aliases remain
+typed metadata uncertainty. The same full-LUID/current-PNP check must still agree.
+
+### Root bridges: `_UID` is not `_SEG`
+
+[ACPI 6.6 §6.1.12 and §6.5.6](https://uefi.org/specs/ACPI/6.6/06_Device_Configuration.html#seg-segment)
+give different jobs to `_UID` and `_SEG`: the former distinguishes logical devices;
+the latter identifies the PCI segment group of a host bridge. A segment can contain
+several host bridges, and BDF numbers may repeat in different segments. `_BBN`
+supplies a base bus, not the segment. The specification's OS rule for an actually
+absent `_SEG` is not evidence that a failed user-mode property read means zero.
+
+Windows [LocationPaths](https://github.com/MicrosoftDocs/windows-driver-docs/blob/c708f7b244f8d1f9dfbb35238226b08e44a8cf02/windows-driver-docs-pr/install/devpkey-device-locationpaths.md)
+represents a device-tree path; it does not define its root token as the PCI segment.
+Separately, UEFI's
+[PciRoot device-path examples](https://uefi.org/specs/UEFI/2.11/10_Protocols_Device_Path_Protocol.html#fibre-channel-ex-device-path)
+encode the root bridge's ACPI `_HID`/`_UID`. They are not a normative translation
+of Windows LocationPaths. Neither contract permits treating `PCIROOT(n)`, an ACPI
+instance suffix, `_UID`, or a root's display number as `_SEG`.
+
+The pinned [PCI property header](https://github.com/microsoft/win32metadata/blob/71033001b4479c6566546b68d32276e70a8d68b9/generation/WinSDK/RecompiledIdlHeaders/shared/pciprop.h#L123-L127)
+does expose `DEVPKEY_PciRootBus_PCISegmentGroupsSupport`, but its type is BOOLEAN
+and its meaning is OS support. It is neither the number of segments nor this
+device's segment. No numeric root-to-`_SEG` user-mode property join was established
+in these reviewed headers/contracts. That is a bounded research finding, not a
+claim that Windows has no other interface. Reading arbitrary firmware or walking
+all roots would need a separately established ancestry/API contract and is not the
+smallest existing-owner route when LocationInfo is available.
+
+### Can Vulkan supply a missing domain?
+
+**It can report a domain for its own physical handle; it cannot by itself prove
+which PNP physical member that handle belongs to.** On a device advertising
+`VK_EXT_pci_bus_info`, the same properties2 query can obtain the full PCI tuple and
+valid full LUID plus the actual node mask. That avoids guessing the missing field
+only after current PNP/KMT correspondence is unambiguous. Read the returned mask;
+never fabricate 1, derive it from a physical enumeration index, or query another
+handle and combine the results. The
+[PCI extension contract](https://github.com/KhronosGroup/Vulkan-Docs/blob/fa30d4e312e843193601be7cb926c7e25d9ec885/appendices/VK_EXT_pci_bus_info.adoc)
+explicitly requires per-device availability checks. Its absence is unavailable
+PCI metadata, not proof the GPU cannot run Vulkan.
+
+For an independently verified one-physical-member adapter, exact PNP/current LUID
+and BDF agreement can support a conditional same-handle domain observation. A
+filtered candidate count is not that proof. With LDA, several physical members
+can share a LUID: the observed Vulkan bit identifies a D3D12 node, while KMT's PNP
+query names a member by KMT physical-adapter index. The pinned sources establish
+no conversion between those numbering schemes. Without an actual authoritative
+PNP-to-node correspondence, LUID+BDF+one-bit mask is insufficient in general,
+especially where BDF can repeat across segments. Keep that join unavailable rather
+than inventing an index shift. This is a conditional research inference, not an
+implemented fallback or native acceptance. The exact earlier Vulkan/KMT pins above
+remain authoritative; no new ABI or UUID map follows from this note.
+
+### Smallest existing-owner proposal, before code
+
+1. **Reuse the implemented exact-devnode path.** Keep `Calls::physical_address` /
+   `windows_identity::pci_for_instance` as the one AMD segment resolver, with its
+   fixed native frame and strict pure parser. Do not add another scan, provider,
+   inventory, registry, root parser or external program to obtain the same property.
+2. Keep actual ADL BDF, returned PNP identity, BusNumber/Address and every current
+   alias/full-LUID corroboration together at the existing Prober/native owner.
+   Do not weaken strict property handling to hide a missing observation. Current
+   pure source controls cover malformed frames and nonzero domains; ROOT/native
+   evidence must establish the person's exact actual property/alias/LUID result.
+3. Distinguish unavailable segment, conflicting correspondence and unavailable
+   independent pressure counters from device unusability. Preserve established
+   holders/accounting and unrelated CPU/device progress. None/Unread is not zero
+   load or free VRAM. A source/parser pass alone cannot authorize a new binding.
+4. Only if the actual LocationInfo route is unavailable, consider the same renderer
+   handle's supported PCI+valid LUID+observed mask as an alternative observation
+   under the existing selected boot/grant authority. Require independent PNP/node
+   correspondence; general LDA remains unresolved without it. The current Prober
+   has no Vulkan property producer, so this alternative requires a separately
+   reviewed source seam and native evidence before implementation or fresh grants.
+
+No new code is proposed merely to recreate the already present CM route. No
+production source, ABI, driver state, native query, build/test or agent was changed
+for this extension. Future behavior changes still require their actual relevant
+control/evidence and exact owner review.
+
+### Follow-up source receipts
+
+The primary segment/LocationInfo/LocationPaths/BDF and KMT/Vulkan pins above were
+reused, not replaced by floating revisions. New public raw downloads are retained
+only in `~/.cache/hex-complete-bindings/windows-node-identity-primary-v1/`:
+
+| Retained raw file | Immutable version/commit | SHA-256 |
+| --- | --- | --- |
+| `ms-irp-device-text-e336.md` | MicrosoftDocs/windows-driver-docs `e33653d9339e4bc9ee46cb5b3122315516d8577b` | `091c8d6e8263f65ba14388e0581675682180cc243d5c3a8268133beed84b0d87` |
+| `ms-device-address-c708.md` | Same repository `c708f7b244f8d1f9dfbb35238226b08e44a8cf02` | `821ebcddaf02392adc08580083c2b6e68028d02874651fccd72eae984f029288` |
+| `sdk710-devpkey.h` | microsoft/win32metadata `71033001b4479c6566546b68d32276e70a8d68b9` | `6d59670e0157b4dbe3b279785491d74058fea7c548016cfc90696542f7094a80` |
+| `sdk710-pciprop.h` | Same SDK commit | `c7a078b7d0ac5f0da7c1de48be86cdb0f7bbfd6f9bb503fead0bb83de04c3f5e` |
+| `acpi-6.6-device-configuration.html` | UEFI official ACPI6.6 chapter6 versioned URL | `91f2499f6228f3090344d2c9dea84a2649ec1008bfac659dd2f33a22dc1967db` |
+| `uefi-2.11-device-path.html` | UEFI official2.11 chapter10 versioned URL | `de414088affb0391173e76a1218b79d880943bb601b8f2b98193bbb9ca1ff8e6` |
+
+The official Microsoft/Khronos/UEFI rendered pages were also read on2026-11-11.
+The initial CM URL under the driver-DDI namespace failed; its correct Win32 API
+URL linked above succeeded. Neither event was a native query. The research made
+no new hardware-availability claim and did not replay historical native results.
