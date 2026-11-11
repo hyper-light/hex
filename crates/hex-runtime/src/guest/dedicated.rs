@@ -841,6 +841,8 @@ mod tests {
                 panic!("model OCI")
             };
             spec.class = ClassSpec::Shards(payload);
+            spec.bounds.cpu_max_milli = Some(hex_api::MIN_CPU_MILLI);
+            spec.bounds.memory_max = Some(hex_api::MIN_MEMORY);
             spec.devices = vec![hex_api::DeviceId {
                 kind: hex_api::DeviceKind::Gpu,
                 key: 256,
@@ -863,12 +865,12 @@ mod tests {
             assert_eq!(
                 owner.launches.load(Ordering::SeqCst),
                 usize::from(allowed),
-                "stale or unknown LUID reached the selected native launcher"
+                "stale or unknown LUID reached the selected native launcher: {result:?}"
             );
             assert_eq!(
                 owner.queries.load(Ordering::SeqCst),
                 1,
-                "the SAME initialized provider must establish the preboot join"
+                "the SAME initialized provider must establish the preboot join: {result:?}"
             );
             let intent = selected::read(&runtime.selected_path(&spec.id).unwrap()).unwrap();
             if allowed {
