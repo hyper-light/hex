@@ -1719,7 +1719,6 @@ fn physical_report(r: &mut Reader<'_>) -> Result<PhysicalReport, Fault> {
         )?
     };
     let report = PhysicalReport {
-        unavailable: Vec::new(),
         authority,
         devices,
         unavailable,

@@ -114,7 +114,6 @@ pub(super) fn coalesce(reports: Vec<PhysicalReport>) -> Result<Option<PhysicalRe
         }
     }
     let report = PhysicalReport {
-        unavailable: Vec::new(),
         authority,
         devices: unique,
         unavailable,
