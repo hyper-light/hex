@@ -1,0 +1,193 @@
+{
+  "source": "6856c1d26e72c1844c95064e3649b9f3a79c4f1c",
+  "archive_sha256": "b8845022384b56a352c487859eaec8915e58f34e2f103170280c7484f21b3ad8",
+  "scope": "ROOT6856 exact two c6a regressions AFTER plus2new negative authority controls, current7crate all-target strict after actuallint remedies; no prior23/loader3 replay; no native/VM/GPU.",
+  "target": "linux",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 1884298,
+  "phases": [
+    {
+      "name": "released-parent-recovery-after",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-sim",
+        "--lib",
+        "--locked",
+        "committed_subset_recovery_keeps_released_parent_and_does_not_repick_current_remainder",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 1894059,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "f1b8e05791a5ed490061e99208c6f33879b2802f1ca2e4c7b558871b11579b92",
+      "bytes": 2986,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "released-recovery-negative-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-sim",
+        "--lib",
+        "--locked",
+        "released_source_recovery_preserves_fresh_phase_and_single_consumer_guards",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2025840,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "3cbe276799b80b7c01eb7d0fcb69a2e99b339b9b36be32ce26753359ee589257",
+      "bytes": 450,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "index::route_offer_tests::released_source_recovery_preserves_fresh_phase_and_single_consumer_guards",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "uncertain-drain-cpu-after",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "uncertain_canonical_drain_keeps_cpu_progress_and_retains_original_charge",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2025882,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "6c6f8c27161ef60d1e11251c1e9b023c3123dc89686e9acca4f01d0f6ff197aa",
+      "bytes": 3080,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": []
+    },
+    {
+      "name": "qualified-cleanup-negative-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "cleanup_diagnostics_preserve_exact_identity_and_refuse_unqualified_failures",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 2235375,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "39b60bb4cd27cca8b01b6f2889bcf5b81f7fa78603fbaa242414abc62f2a91c0",
+      "bytes": 458,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "scheduler::observer_cpu_tests::cleanup_diagnostics_preserve_exact_identity_and_refuse_unqualified_failures",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "current-seven-strict",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "clippy",
+        "-p",
+        "hex-api",
+        "-p",
+        "hex-sim",
+        "-p",
+        "hex-core",
+        "-p",
+        "hex-client",
+        "-p",
+        "hex-runtime",
+        "-p",
+        "hex-node",
+        "-p",
+        "hex-cli",
+        "--all-targets",
+        "--locked",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 2235532,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "ace120d74a2df89156d3c849de04d0c6d24899ab8670689890fd13fef42ea907",
+      "bytes": 3755,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_invocations": 0,
+  "exit": 0
+}
