@@ -1323,7 +1323,7 @@ impl Service {
 
 /// Machine resources are local facts; GPU observations come only from the initialized native
 /// Store/turn owner over Runtime. No Prober/Gpus is opened or cached in this process.
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 fn runtime_facts(
     state: &Path,
     initialized: Classes,

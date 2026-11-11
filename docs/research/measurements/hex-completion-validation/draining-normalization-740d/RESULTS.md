@@ -1,0 +1,7 @@
+# Actual ROOT 740d focused result
+
+Exact740d38f6e2987f8dbb64a9a78628a1e5802911ee, Linux00aad1CPU4GiB12GiB/nice10/jobs1/threads1, policy7d7e0855/rulesdf2/coordinator. Two selected,1passed1failed0ignored. Store Draining first-reference original AFTER507a passed b34ca664537017d66ff48e5189ef44a137cd57ab33a577b6d24d9ef040ab8251; existing canonical consumer reentry/cancel retained, a new consuming reference now refuses.
+
+The actual WithGuest.capacity(Oci) normalization ORIGINAL failed at its intended assertion1365: Invalid guest execution route, checked physical metadata or holder conflicts with capacity. Positive configured native/renderer/readiness/checked_physical and SAME Books model facts preconditions passed; no native effects were invoked. This reproduces augmentation before normalization of a raw native catalog row, while the outer Recorded owner normalizes only after composition. Log038ebf62ed5871650397c63be5abd3d6d90116c14fd2a2da0f77398c7f43a4ec. L1/L2/L3 own the shared pure devices normalizer plus actual WithGuest/Recorded callers; no new provider/cache or weakened conflict check. No source remedy or semantic green claimed in this result.
+
+Cargo2296793/2499982, localCLI2547 and collector22467 reaped; source0diff/temp0/native0. Raw329739B SHAa75d5a43043f16cd082c962b152e8b59aa9a118215d490fd307b12b65705d2ad, allmembers/archive-versus-Git independently verified. Strict is not repeated while L4's nativegate event/solewaiter cause remains open; other passed controls not replayed. Full R01-R16/native/fault/mutation/performance/platform gates owed.
