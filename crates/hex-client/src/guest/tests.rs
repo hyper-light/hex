@@ -604,24 +604,177 @@ impl shards_api::Guest for Patient {
     }
 }
 
-/// HEX-GUEST-33 (§2, CLAUDE.md §4): dial a booted guest three times: expect the first dial given the
-/// caller's bound on the boot, and each later one a single try (`Duration::ZERO`), as the guest's relay
-/// already listens and a refusal then is its end, not its boot.
+/// HEX-GUEST-33, AC-T7.4.1 (§2, CLAUDE.md §2): dial a booted guest three times with no caller deadline, the
+/// later two after its relay listens: expect each dial to reach Shards as `connect_before` with one finite
+/// absolute deadline, the link's bound from that dial's start; never a relative patience, as Shards' client
+/// awaits a zero patience's CONNECT answer without a bound.
 #[test]
-fn the_first_dial_waits_for_the_guest_and_later_ones_try_once() {
+fn every_dial_carries_a_finite_deadline_after_the_first_listen() {
     let guest = Arc::new(Patient {
         listener: TcpListener::bind("127.0.0.1:0").unwrap(),
         given: std::sync::Mutex::new(Vec::new()),
         absolute: std::sync::Mutex::new(Vec::new()),
     });
-    let first = Duration::from_millis(354);
-    let link = shards::ShardsLink::new(guest.clone(), first);
+    let bound = Duration::from_millis(354);
+    let link = shards::ShardsLink::new(guest.clone(), bound);
+    let mut windows = Vec::new();
     for port in [stream::CONTROL_PORT, stream::STDIO_PORT, stream::STDIO_PORT] {
+        let began = Instant::now();
         link.dial(port).unwrap();
+        windows.push((began + bound, Instant::now() + bound));
     }
+    let absolute = guest.absolute.lock().unwrap().clone();
+    let given = guest.given.lock().unwrap().clone();
+    eprintln!("hex_guest_33_dials bound={bound:?} absolute={absolute:?} given={given:?}");
     assert_eq!(
-        *guest.given.lock().unwrap(),
-        [first, Duration::ZERO, Duration::ZERO]
+        absolute.len(),
+        windows.len(),
+        "dials reached Shards with relative patience {given:?}, not a deadline (zero: an unbounded CONNECT)"
+    );
+    for (at, (earliest, latest)) in absolute.iter().zip(windows) {
+        assert!(
+            earliest <= *at && *at <= latest,
+            "deadline {at:?} is not the bound from its dial's start, [{earliest:?}, {latest:?}]"
+        );
+    }
+}
+
+/// HEX-GUEST-33, AC-T7.4.1 (CLAUDE.md §2, §3): give a link a bound that names no finite deadline, zero (a boot
+/// that spent its bound) or `Duration::MAX`, and dial: expect each refused by type before Shards is asked, as
+/// Shards' client awaits either's CONNECT answer without a bound.
+#[test]
+fn a_link_bound_with_no_finite_deadline_is_refused_before_shards() {
+    for bound in [Duration::ZERO, Duration::MAX] {
+        let guest = Arc::new(Patient {
+            listener: TcpListener::bind("127.0.0.1:0").unwrap(),
+            given: std::sync::Mutex::new(Vec::new()),
+            absolute: std::sync::Mutex::new(Vec::new()),
+        });
+        let link = shards::ShardsLink::new(guest.clone(), bound);
+        let dialed = link.dial(stream::CONTROL_PORT).map(drop);
+        let given = guest.given.lock().unwrap().clone();
+        let absolute = guest.absolute.lock().unwrap().clone();
+        eprintln!(
+            "hex_guest_33_unbounded bound={bound:?} dialed={dialed:?} given={given:?} absolute={absolute:?}"
+        );
+        assert!(
+            given.is_empty() && absolute.is_empty(),
+            "bound {bound:?} reached Shards: patience {given:?}, deadlines {absolute:?}"
+        );
+        assert!(
+            matches!(
+                dialed,
+                Err(Refusal::Invalid {
+                    what: "guest dial bound",
+                    ..
+                })
+            ),
+            "{dialed:?}"
+        );
+    }
+}
+
+/// HEX-GUEST-33, AC-T7.4.1 (CLAUDE.md §2, §3): through Shards' own client, a guest whose muxer answers the first
+/// CONNECT, then takes the next and never answers it: expect that dial refused by type at its deadline, the link's
+/// bound from its start, not held for as long as the guest is silent. A child `cat` stands in for the guest's VM
+/// process, which Shards holds by its pidfd and kills as the guest drops. The bound is Shards' own input for a
+/// withheld answer (`conformance::UNSERVED_PATIENCE`), and twice it releases the muxer only where the dial overran,
+/// as Shards' `withheld_reply_expires_before_fixture_release` does.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_dial_the_guest_takes_and_never_answers_is_refused_at_its_deadline() {
+    use shards_api::Guests;
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::process::{Command, Stdio};
+
+    let dir = tempfile::tempdir().unwrap();
+    let vsock = dir.path().join("v");
+    let listener = UnixListener::bind(&vsock).unwrap();
+    let mut vm = Command::new("cat")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    // proc(5): starttime is field 22, the 20th after the command's closing parenthesis.
+    let stat = std::fs::read(format!("/proc/{}/stat", vm.id())).unwrap();
+    let after = stat.iter().rposition(|b| *b == b')').unwrap() + 1;
+    let started: u64 = std::str::from_utf8(&stat[after..])
+        .unwrap()
+        .split_ascii_whitespace()
+        .nth(19)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let spec = shards_api::GuestSpec {
+        kernel: "kernel".into(),
+        init: shards_api::Init::Executable("init".into()),
+        cmdline: String::new(),
+        vcpus: 1,
+        gpu: false,
+        gpu_devices: Vec::new(),
+        memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
+        disks: vec![],
+        shares: vec![],
+        ports: vec![stream::CONTROL_PORT, stream::STDIO_PORT],
+        binary: None,
+    };
+    let guest = shards_api::Shards::new()
+        .attach(
+            &shards_api::Identity {
+                pid: vm.id(),
+                started,
+                vsock,
+            },
+            &spec,
+        )
+        .unwrap();
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let muxer = std::thread::spawn(move || {
+        let ask = |conn: &UnixStream| {
+            let mut line = String::new();
+            BufReader::new(conn).read_line(&mut line).unwrap();
+            line
+        };
+        let (mut answered, _) = listener.accept().unwrap();
+        let first = ask(&answered);
+        answered.write_all(b"OK 1\n").unwrap();
+        let (silent, _) = listener.accept().unwrap();
+        let second = ask(&silent);
+        // Released, both close: a dial still waiting on `silent` then reads its end.
+        let _ = held.recv();
+        (first, second)
+    });
+    let bound = shards_api::conformance::UNSERVED_PATIENCE;
+    let link = shards::ShardsLink::new(Arc::from(guest), bound);
+    let control = link.dial(stream::CONTROL_PORT).unwrap();
+    let (sent, answer) = std::sync::mpsc::channel();
+    let began = Instant::now();
+    let dialing = std::thread::spawn(move || {
+        let dialed = link.dial(stream::STDIO_PORT).map(drop);
+        let _ = sent.send((dialed, Instant::now()));
+        link
+    });
+    let got = answer.recv_timeout(bound.saturating_mul(2));
+    let _ = release.send(());
+    let link = dialing.join().unwrap();
+    let (first, second) = muxer.join().unwrap();
+    // Shards kills the stand-in by its pidfd as the guest drops; reaping it is this test's, its parent's.
+    drop((control, link));
+    let reaped = vm.wait();
+    eprintln!(
+        "hex_guest_33_silent bound={bound:?} began={began:?} got={got:?} first={first:?} second={second:?} reaped={reaped:?}"
+    );
+    assert_eq!(first, format!("CONNECT {}\n", stream::CONTROL_PORT));
+    assert_eq!(second, format!("CONNECT {}\n", stream::STDIO_PORT));
+    let Ok((dialed, at)) = got else {
+        panic!("no answer within twice its bound {bound:?}: the guest's silence held the dial past its deadline");
+    };
+    assert!(dialed.is_err(), "a silent guest's dial succeeded");
+    assert!(
+        at >= began + bound,
+        "refused at {at:?}, before its deadline {:?}",
+        began + bound
     );
 }
 
