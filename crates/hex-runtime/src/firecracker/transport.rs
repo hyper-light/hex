@@ -171,7 +171,7 @@ impl Link for Endpoint {
         let mut request = [0u8; b"CONNECT ".len() + 10 + 1];
         let used = {
             let mut buffer = std::io::Cursor::new(request.as_mut_slice());
-            write!(&mut buffer, "CONNECT {port}\n")
+            writeln!(&mut buffer, "CONNECT {port}")
                 .map_err(|error| Refusal::os("encoding Firecracker connect request", error))?;
             usize::try_from(buffer.position())
                 .map_err(|_| invalid("vsock request size is unrepresentable"))?

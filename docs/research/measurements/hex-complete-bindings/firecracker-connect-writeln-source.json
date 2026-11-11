@@ -1,0 +1,18 @@
+{
+  "parent": "85d57d908ca8047068594cd4f4ef45aa521526e3",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": "crates/hex-runtime/src/firecracker/transport.rs",
+  "sha256": "c3a6ef9639454268043d393eba9d44c8d8d871da5fb7a082002c0a7a95309ce8",
+  "actual_original": "ROOT25d9 strict Clippy101 only write_with_newline; raw prefixc50667 retained by ROOT",
+  "correction": "Only write!(CONNECT...newline) ->writeln!(CONNECT...), same Cursor bytes/newline/fixed19B bound/error path. No oracle/behavior/budget/FD/deadline change.",
+  "checks": {
+    "fmtparser": 0,
+    "compile": "UNRUN",
+    "tests": "UNRUN",
+    "dispatches": 0,
+    "native_effects": 0
+  },
+  "unchanged": "Actual newDriver3 passes and all original CPU/subset/sink controls remain attributed/unchanged; no replay."
+}
