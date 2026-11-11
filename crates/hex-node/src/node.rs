@@ -998,7 +998,7 @@ impl Node {
     /// either root, its container's state directory under the runtime directory and its rendered
     /// bundle under the bundles directory (goal 5 extended, step 5).
     pub fn recover(&self) -> Result<RecoverySummary, Refusal> {
-        let (records, pools) = self.retained_preflight()?;
+        let (records, pools, torn) = self.retained_preflight()?;
         self.recover_pools(&pools)?;
         // No native cleanup may run until every persisted backend is known and its own lifecycle
         // has been dispatched through the same Store/turn authority.
@@ -1018,6 +1018,11 @@ impl Node {
                 continue;
             }
             seen.entry(id).or_default().record = Some(record);
+        }
+        // A torn record's box is a native one (`preflight_configured`): removed below as unreadable,
+        // ended by its own cgroup first.
+        for (id, why) in torn {
+            seen.entry(id).or_default().record = Some(Err(why));
         }
         let slots: BTreeSet<u64> = slots_in(&self.oci_boxes)?.into_iter().collect();
         // Both roots' cgroups; the oci boxes' root itself is no box (its name is no id).
