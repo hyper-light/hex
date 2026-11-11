@@ -1119,36 +1119,15 @@ fn recorded_holders(
 
 fn native_metadata(
     report: &mut hex_api::Capacity,
-    mut physical: Vec<hex_api::DeviceInfo>,
+    physical: Vec<hex_api::DeviceInfo>,
 ) -> Result<(), Refusal> {
     report.check()?;
-    for native in &physical {
-        native.check()?;
+    if physical.iter().any(|native| native.holder.is_some()) {
+        return Err(broken(
+            "native discovery cannot declare reservation holders",
+        ));
     }
-    for offer in &mut report.devices {
-        if physical
-            .iter()
-            .filter(|native| native.id == offer.id)
-            .count()
-            != 1
-        {
-            return Err(broken(
-                "an initialized route has no unambiguous native physical identity",
-            ));
-        }
-        let native = physical
-            .iter_mut()
-            .find(|native| native.id == offer.id)
-            .ok_or_else(|| broken("native physical identity disappeared within its snapshot"))?;
-        if native.holder.is_some() {
-            return Err(broken(
-                "native discovery cannot declare reservation holders",
-            ));
-        }
-        // Move actual metadata out of this fresh snapshot; no string clone or retained cache.
-        offer.model = std::mem::take(&mut native.model);
-        offer.size = native.size;
-    }
+    hex_runtime::devices::normalize_capacity_devices(&mut report.devices, &physical)?;
     report.check()
 }
 

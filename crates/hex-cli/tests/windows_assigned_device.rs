@@ -74,7 +74,7 @@ fn interface(catalog: &Catalog, prefix: &str) -> Interface {
         .iter()
         .find(|entry| entry.info.id == id)
         .unwrap_or_else(|| panic!("UNVERIFIED {id:?} absent from ROOT catalog"));
-    let Binding::Hcs { location } = &entry.binding else {
+    let Some(Binding::Hcs { location }) = entry.binding(hex_runtime::devices::Route::Hcs) else {
         panic!("UNVERIFIED GPU has no HCS binding")
     };
     eprintln!(
@@ -428,9 +428,10 @@ impl Lab {
             .filter(|info| info.id == self.inputs.selected.id)
             .collect();
         assert_eq!(entries.len(), 1, "selected GPU lost/duplicated in capacity");
+        let expected = expected.map(|id| hex_api::DeviceHolder::Box(id.clone()));
         assert_eq!(
             entries[0].holder.as_ref(),
-            expected,
+            expected.as_ref(),
             "native holder differs: {capacity:?}"
         );
         if let Some(other) = &self.inputs.foreign {

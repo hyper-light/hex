@@ -1269,6 +1269,14 @@ impl<P: Runtime> Runtime for WithGuest<P> {
                     && let Some(mut native) = self.process.capacity(class)?
                 {
                     if self.oci.managed_shared() {
+                        if !native.devices.is_empty() {
+                            let actual = self.oci.authority()?.capacity()?;
+                            actual.check()?;
+                            devices::normalize_capacity_devices(
+                                &mut native.devices,
+                                &actual.devices,
+                            )?;
+                        }
                         self.oci.add_offers(&mut native, class)?;
                     }
                     return Ok(Some(native));

@@ -1,0 +1,41 @@
+{
+  "requirement": "AC-T7.4.1",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "a5680320715d8f9e18dcfd089158630b9d3464ae",
+  "source": "crates/hex-runtime/src/devices.rs",
+  "before_sha256": "2bfbf5cdb59dd84b32616cb9bea63ad84ff8c4f3590a6369f75037c32061fdff",
+  "after_sha256": "cedd8282d978ef98fe10eb08203cc3e339517cdae84b4fc9ea544a3e2f91020e",
+  "api": "devices::normalize_capacity_devices(devices:&mut [DeviceInfo],actual:&[DeviceInfo])->Result<(),Refusal>",
+  "original": {
+    "source": "6fb9a9816131232f69ebaa85462510c9a3423702",
+    "root_cohort": "740d38f6",
+    "log": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/draining-normalization-740d-results-proof/cohort-740d38f6-linux-draining-normalization-740d/withguest-normalization-original.log",
+    "log_sha256": "038ebf62ed5871650397c63be5abd3d6d90116c14fd2a2da0f77398c7f43a4ec",
+    "result": "1 selected/0 pass/1 fail: actual WithGuest strict push_offer metadata/holder conflict, after all real model Live/readiness/provider preconditions passed"
+  },
+  "decision": {
+    "roles": [
+      "L2 actual WithGuest joins SAME Books.capacity canonical metadata+holders BEFORE Shards add_offers",
+      "L3 existing Recorded native_metadata joins SAME raw Prober snapshot without holders",
+      "Only current exact-ID metadata replaces configured placeholders. A positive current holder fills None or must equal Some. Discovery None never releases an existing Some.",
+      "Missing current ID retains existing fail-closed Recorded behavior; duplicate IDs/invalid IDs refuse before publication.",
+      "No append/delete/reorder, new provider, route/mask/resources/authority mutation, cache, wait, picker or runtime hook."
+    ],
+    "allocation": "Two transient fallibly reserved sorted reference lists validate MAX_DEVICES bounds and uniqueness; first list drops before output copies. A fallibly reserved replacement vector and DeviceInfo::try_clone prepare metadata/owner copies before all mutation. Each copy is bounded by supplied existing metadata/holder length; no new guessed byte cap. Existing external decoding/native observation bounds remain authoritative. Typed allocation failure leaves inputs unchanged.",
+    "complexity": "O(n log n + m log m + n log m) comparisons and O(n+m) temporary references/output copies. No persistent cache or quadratic per-ID scan. No measured speed/allocation-free claim.",
+    "alternatives": "Kept strict push_offer unchanged. Replacing only at L2 would duplicate Recorded current-metadata ownership join; moving metadata before validation can partially publish on a later holder mismatch. Shared pure staged join implements both real roles."
+  },
+  "controls": [
+    "devices::capacity_metadata_tests::current_metadata_replaces_placeholders_without_erasing_or_inventing_holders",
+    "devices::capacity_metadata_tests::invalid_current_identity_or_owner_refuses_before_any_metadata_publication"
+  ],
+  "validation": {
+    "rustfmt": "installed stable rustfmt parser/format exit0 only",
+    "diff": "git diff --check exit0",
+    "tests": "UNRUN; no check/native dispatch by implementer",
+    "original_test": "unchanged; L2 caller and L3 wrapper still must consume actual helper before ROOT matched original after"
+  },
+  "remaining": "ROOT original-after, new targeted controls, cross-target strict gates, mutation/native ownership and R14 audit/profile remain unrun/owed. Lazy family producer/projection is separate unfinished work."
+}

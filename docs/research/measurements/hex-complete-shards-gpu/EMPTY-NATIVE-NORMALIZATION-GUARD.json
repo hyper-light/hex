@@ -1,0 +1,23 @@
+{
+  "status": "SOURCE ONLY / new completeness control UNRUN",
+  "parent": "892dfe65b68652f2ea2170a383e3c0a911e88cd8",
+  "review": "ROOT scope review of unaccepted new caller, not claimed reproduced old defect",
+  "dependency": "b764 shared normalizer; exact6fb9a9816131232f69ebaa85462510c9a3423702 existing NativeReporting factory already integrated by ROOT",
+  "change": "Normalize only existing nonempty native.devices; ordinary add_offers remains outside guard. Empty-prefix native room/id/routes continue without Books.capacity physical facts query. No new owner/provider/cache.",
+  "unit": "guest::shared::tests::empty_native_oci_prefix_adds_guest_route_without_native_facts_query",
+  "oracle": "actual WithGuest.capacity Oci succeeds, capacity_calls0 before/after, native id/total/free/prefix routes unchanged, shared OCI route/backing added, no devices/masks/launch",
+  "preserved": "6fb original and strict positive-owner conflict path unchanged; existing shared Owner controls only gain observational capacity_calls counter, no semantic fixture/default change",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer shards-gpu",
+  "checks": {
+    "scoped_rustfmt_parser": "exit0",
+    "diff_check": "exit0",
+    "cargo": "NOT RUN",
+    "native": "NOT RUN"
+  },
+  "files": {
+    "crates/hex-runtime/src/guest/mod.rs": "a641b17ef3848f3eae085c3267fb118d77b50f9846161002f78d5b18bbc43383",
+    "crates/hex-runtime/src/guest/shared_tests.rs": "dc183f545d0351c0fe7b9c8887dac1ebb426ab15cae90645c85a8aaf40afaedc"
+  }
+}

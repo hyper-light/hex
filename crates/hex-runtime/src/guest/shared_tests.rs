@@ -44,6 +44,7 @@ struct Owner {
     pool: Mutex<Option<PoolRecord>>,
     boxes: Mutex<Records>,
     launches: AtomicUsize,
+    capacity_calls: AtomicUsize,
     finalized: AtomicUsize,
     fail_finalize: AtomicBool,
     native: triomphe::Arc<Native>,
@@ -55,6 +56,7 @@ impl Owner {
             pool: Mutex::new(None),
             boxes: Mutex::new(Records::new()),
             launches: AtomicUsize::new(0),
+            capacity_calls: AtomicUsize::new(0),
             finalized: AtomicUsize::new(0),
             fail_finalize: AtomicBool::new(false),
             native: triomphe::Arc::try_new(Native::default()).unwrap(),
@@ -207,6 +209,7 @@ impl Books for Owner {
         Ok(Vec::new())
     }
     fn capacity(&self) -> Result<Capacity, Refusal> {
+        self.capacity_calls.fetch_add(1, Ordering::SeqCst);
         let room = CapacityResources {
             cpu_milli: 8000,
             mem_bytes: 1 << 30,
@@ -594,4 +597,87 @@ fn checked_gpu_facts_create_a_missing_capacity_slot_and_refuse_conflicting_metad
     assert_eq!(owner.launches.load(Ordering::SeqCst), 0);
     assert!(owner.pool.lock().unwrap().is_none());
     assert!(owner.boxes.lock().unwrap().is_empty());
+}
+
+/// AC-T7.4.1: an empty native prefix has no physical slots to normalize. The
+/// actual OCI wrapper must still add its initialized guest route, without a
+/// Books capacity/provider call or an uncharged shared guest boot.
+#[test]
+fn empty_native_oci_prefix_adds_guest_route_without_native_facts_query() {
+    use hex_api::{GpuEligibility, ImageOs, ImagePlatform, RouteKey, RouteOffer};
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, owner) = configured(dir.path());
+    let shared = runtime.prepare_backing().unwrap();
+    let image = ImagePlatform {
+        os: ImageOs::Windows,
+        arch: route::host_platform().unwrap().arch,
+    };
+    let native = Capacity {
+        id: "native-cpu-only-prefix".into(),
+        total: CapacityResources {
+            cpu_milli: 8000,
+            mem_bytes: 1 << 30,
+            disk_bytes: 1 << 30,
+        },
+        free: CapacityResources {
+            cpu_milli: 4000,
+            mem_bytes: 1 << 29,
+            disk_bytes: 1 << 29,
+        },
+        devices: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        cost: None,
+        routes: vec![
+            RouteOffer {
+                key: RouteKey {
+                    class: Class::Process,
+                    image,
+                    execution: Execution::Native,
+                    gpu: GpuEligibility::None,
+                },
+                cost: None,
+                backing: None,
+            },
+            RouteOffer {
+                key: RouteKey {
+                    class: Class::Oci,
+                    image,
+                    execution: Execution::Native,
+                    gpu: GpuEligibility::Any,
+                },
+                cost: None,
+                backing: None,
+            },
+        ],
+    };
+    native.check().unwrap();
+    assert_eq!(owner.capacity_calls.load(Ordering::SeqCst), 0);
+    let node = super::super::WithGuest::configured(
+        super::super::tests::native_reporting(native.try_clone().unwrap()),
+        runtime,
+        |_host, _class| Ok(super::super::Side::Host),
+    );
+    let actual = node.capacity(Class::Oci).unwrap().unwrap();
+    assert_eq!(
+        owner.capacity_calls.load(Ordering::SeqCst),
+        0,
+        "empty native slots queried physical facts"
+    );
+    assert_eq!(actual.id, native.id);
+    assert_eq!(actual.total, native.total);
+    assert_eq!(actual.free, native.free);
+    assert_eq!(actual.routes[..native.routes.len()], native.routes);
+    assert!(actual.devices.is_empty());
+    assert!(actual.device_routes.is_empty());
+    assert!(
+        actual
+            .routes
+            .iter()
+            .any(|route| route.key.execution == Execution::ShardsShared
+                && route.backing == Some(shared.key))
+    );
+    assert_eq!(actual.backings, [shared]);
+    actual.check().unwrap();
+    assert_eq!(owner.launches.load(Ordering::SeqCst), 0);
 }

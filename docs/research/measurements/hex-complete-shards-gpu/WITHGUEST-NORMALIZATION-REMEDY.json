@@ -1,0 +1,30 @@
+{
+  "status": "SOURCE ONLY / AFTER UNRUN; original relevant RED retained",
+  "parent": "2b7b555d8ecef37f0346d6cddabfc5f68e5c1f9e",
+  "dependency": "b7645ef30f8eb08e0a11b4712a8ba8be72bd82d6 ONE devices::normalize_capacity_devices pure helper",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer shards-gpu",
+  "original": "6fb9a9816131232f69ebaa85462510c9a3423702 guest::gpu_pool::tests::with_guest_normalizes_native_oci_before_checked_shards_slots; bytes unchanged",
+  "actual_red": {
+    "source": "740d38f6e2987f8dbb64a9a78628a1e5802911ee",
+    "selected": 1,
+    "passed": 0,
+    "failed": 1,
+    "ignored": 0,
+    "log": "draining-normalization-740d-results-proof/cohort-740d38f6-linux-draining-normalization-740d/withguest-normalization-original.log",
+    "sha256": "038ebf62ed5871650397c63be5abd3d6d90116c14fd2a2da0f77398c7f43a4ec",
+    "cause": "all charged/readiness/checked_physical/Books factual preconditions passed; intended checked physical metadata or holder conflict"
+  },
+  "change": "Only WithGuest Runtime::capacity Oci native-prefix managed branch: read SAME Books.capacity() directly, validate, normalize devices BEFORE existing add_offers. No capacity/attachment-offers recursion; no new provider/cache. Existing strict push_offer unchanged.",
+  "semantics": "SAME canonical metadata/Some owner normalizes raw catalog prefix. Discovery None cannot erase actual Some. Missing/duplicate current identity and Some-holder disagreement remain typed refusal. Prefix id/total/free/order/routes/masks untouched.",
+  "file": "crates/hex-runtime/src/guest/mod.rs",
+  "sha256": "5002048725736c3a480012782933b7cafd03233f07722764c8fd918aab60c130",
+  "checks": {
+    "scoped_rustfmt_parser": "exit0",
+    "diff_check": "exit0",
+    "cargo": "NOT RUN; ROOT matched helper+L3 after only",
+    "native": "NOT RUN"
+  },
+  "remaining": "ROOT original AFTER +affected shared helper controls; not native/renderer readiness."
+}

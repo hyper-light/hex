@@ -10,6 +10,74 @@ use std::time::{Duration, Instant};
 use hex_api::{BoxId, BoxSpec, DeviceId, DeviceInfo, DeviceKind, Refusal};
 use hex_core::record::{BoxRecord, NativeRecord, NativeStage, PoolRecord};
 
+/// Join an initialized capacity's existing IDs with the SAME owner's current metadata.
+/// `actual` may be raw discovery (no holders) or Books capacity (canonical holders). Discovery
+/// cannot release a retained holder; a conflicting positive owner is always a refusal.
+/// Validate and prepare every fallible copy before publishing any replacement.
+pub fn normalize_capacity_devices(
+    devices: &mut [DeviceInfo],
+    actual: &[DeviceInfo],
+) -> Result<(), Refusal> {
+    device_snapshot_order(devices)?;
+    let actual = device_snapshot_order(actual)?;
+    let mut replacements = Vec::new();
+    replacements
+        .try_reserve_exact(devices.len())
+        .map_err(|_| allocation(devices.len()))?;
+    for device in devices.iter() {
+        let at = actual
+            .binary_search_by_key(&device.id, |observed| observed.id)
+            .map_err(|_| broken("an initialized route has no current native physical identity"))?;
+        let observed = actual
+            .get(at)
+            .ok_or_else(|| broken("native physical identity disappeared within its snapshot"))?;
+        if let (Some(held), Some(observed)) = (&device.holder, &observed.holder)
+            && held != observed
+        {
+            return Err(broken("native and canonical physical owners disagree"));
+        }
+        let mut replacement = observed.try_clone()?;
+        if replacement.holder.is_none() {
+            replacement.holder = device
+                .holder
+                .as_ref()
+                .map(hex_api::DeviceHolder::try_clone)
+                .transpose()?;
+        }
+        replacements.push(replacement);
+    }
+    for (device, replacement) in devices.iter_mut().zip(replacements) {
+        *device = replacement;
+    }
+    Ok(())
+}
+
+fn device_snapshot_order(devices: &[DeviceInfo]) -> Result<Vec<&DeviceInfo>, Refusal> {
+    if devices.len() > hex_api::MAX_DEVICES {
+        return Err(Refusal::Exhausted {
+            what: "native physical metadata identities",
+            bound: hex_api::MAX_DEVICES,
+        });
+    }
+    let mut ordered = Vec::new();
+    ordered
+        .try_reserve_exact(devices.len())
+        .map_err(|_| allocation(devices.len()))?;
+    for device in devices {
+        device.check()?;
+        ordered.push(device);
+    }
+    ordered.sort_unstable_by_key(|device| device.id);
+    let mut previous = None;
+    for device in &ordered {
+        if previous == Some(device.id) {
+            return Err(invalid("native physical metadata identity is duplicated"));
+        }
+        previous = Some(device.id);
+    }
+    Ok(ordered)
+}
+
 /// The already initialized native adapter supplies its actual payload platform. This helper
 /// describes native execution only; it never substitutes a guest for an OCI implementation.
 pub fn native_routes(
@@ -1159,6 +1227,116 @@ fn read_bounded(path: &Path, bound: usize) -> Result<Vec<u8>, Refusal> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod capacity_metadata_tests {
+    use super::*;
+    use hex_api::DeviceHolder;
+
+    fn device(key: u64, model: &str, size: u64, holder: Option<DeviceHolder>) -> DeviceInfo {
+        DeviceInfo {
+            id: DeviceId {
+                kind: DeviceKind::Gpu,
+                key,
+            },
+            model: model.into(),
+            size,
+            holder,
+        }
+    }
+
+    /// AC-T7.4.1: discovery metadata is factual, while only a positive canonical owner can fill
+    /// a holder. Raw discovery never authorizes releasing an existing Box or Backing holder.
+    #[test]
+    fn current_metadata_replaces_placeholders_without_erasing_or_inventing_holders() {
+        let key = hex_api::BackingKey {
+            pool: [7; 32],
+            generation: [9; 16],
+        };
+        let owner = DeviceHolder::Box(BoxId::new("canonical-box").unwrap());
+        let mut devices = vec![
+            device(1, "unmeasured", 777, None),
+            device(2, "old-metadata", 888, Some(owner.try_clone().unwrap())),
+        ];
+        let actual = vec![
+            device(2, "current-native-b", 8192, None),
+            device(
+                1,
+                "current-native-a",
+                4096,
+                Some(DeviceHolder::Backing(key)),
+            ),
+        ];
+        normalize_capacity_devices(&mut devices, &actual).unwrap();
+        assert_eq!(devices[0].id.key, 1);
+        assert_eq!(devices[0].model, "current-native-a");
+        assert_eq!(devices[0].size, 4096);
+        assert_eq!(devices[0].holder, Some(DeviceHolder::Backing(key)));
+        assert_eq!(devices[1].id.key, 2);
+        assert_eq!(devices[1].model, "current-native-b");
+        assert_eq!(devices[1].size, 8192);
+        assert_eq!(devices[1].holder.as_ref(), Some(&owner));
+        // The next raw discovery is not a terminal/release receipt for the backing either.
+        let raw = vec![
+            device(1, "new-current-a", 4096, None),
+            device(2, "new-current-b", 8192, None),
+        ];
+        normalize_capacity_devices(&mut devices, &raw).unwrap();
+        assert_eq!(devices[0].holder, Some(DeviceHolder::Backing(key)));
+        assert_eq!(devices[1].holder.as_ref(), Some(&owner));
+    }
+
+    /// AC-T7.4.1: a late owner conflict, missing identity or duplicate in either source refuses
+    /// the complete publication; a valid earlier entry cannot be partially normalized.
+    #[test]
+    fn invalid_current_identity_or_owner_refuses_before_any_metadata_publication() {
+        let original = vec![
+            device(1, "old-a", 1, None),
+            device(
+                2,
+                "old-b",
+                2,
+                Some(DeviceHolder::Box(BoxId::new("first-owner").unwrap())),
+            ),
+        ];
+        let cases = [
+            vec![
+                device(1, "current-a", 4096, None),
+                device(
+                    2,
+                    "current-b",
+                    8192,
+                    Some(DeviceHolder::Box(BoxId::new("foreign-owner").unwrap())),
+                ),
+            ],
+            vec![device(1, "current-a", 4096, None)],
+            vec![
+                device(1, "current-a", 4096, None),
+                device(2, "current-b", 8192, None),
+                device(2, "duplicate-b", 8192, None),
+            ],
+        ];
+        for actual in cases {
+            let mut devices: Vec<_> = original
+                .iter()
+                .map(|device| device.try_clone().unwrap())
+                .collect();
+            assert!(normalize_capacity_devices(&mut devices, &actual).is_err());
+            assert_eq!(devices, original);
+        }
+        let mut duplicate: Vec<_> = original
+            .iter()
+            .map(|device| device.try_clone().unwrap())
+            .collect();
+        duplicate.push(original[1].try_clone().unwrap());
+        let retained: Vec<_> = duplicate
+            .iter()
+            .map(|device| device.try_clone().unwrap())
+            .collect();
+        assert!(normalize_capacity_devices(&mut duplicate, &original).is_err());
+        assert_eq!(duplicate, retained);
+    }
+}
 
 #[cfg(test)]
 mod native_route_tests {
