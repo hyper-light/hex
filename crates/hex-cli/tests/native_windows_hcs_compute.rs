@@ -18,14 +18,19 @@
 
 use hex_api::{BackingKey, BoxId, DeviceHolder};
 
+/// AC-T7.4.1: the selected GPU's capacity holder is exactly `expected`: free is no holder at all,
+/// and a box's grant names that box. A canonical `Backing` claim names no box, so a projection
+/// through `DeviceHolder::box_id` would report a Backing-held GPU as free.
 fn ordinary_holder_matches(actual: Option<&DeviceHolder>, expected: Option<&BoxId>) -> bool {
-    // Preserve the original native fixture predicate for the first live counterexample.
-    // This source-only regression is not an accepted native result or a repaired guard.
-    actual.and_then(DeviceHolder::box_id) == expected
+    match (actual, expected) {
+        (None, None) => true,
+        (Some(DeviceHolder::Box(held)), Some(id)) => held == id,
+        _ => false,
+    }
 }
 
-/// A canonical backing claim is occupied even when it has no BoxId projection.
-/// This control calls no native backend; run the original predicate before repairing it.
+/// AC-T7.4.1: do: match free, box-held and Backing-held devices against free and a box's grant;
+/// expect a Backing claim never to count as free. Pure: it calls no native backend.
 #[test]
 fn native_windows_backing_holder_never_counts_as_unclaimed() {
     let id = BoxId::new("native-holder-control").unwrap();
