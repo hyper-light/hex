@@ -1,0 +1,67 @@
+{
+  "bytes": 239712,
+  "sha256": "fa6a880e96d9662024370d0295d4b7556536199f2c4e9e55ab9ce5393a9e8c16",
+  "members": {
+    "cohort-b0d12c98-linux-second-remedies-v1/source-before.json": {
+      "bytes": 334049,
+      "sha256": "f336e2e2010c1fd88d9ea86df54df55d4326add9d052e24ed44f977a84ca15ed"
+    },
+    "cohort-b0d12c98-linux-second-remedies-v1/public-registry-seed.json": {
+      "bytes": 29301,
+      "sha256": "d2b2bb5bd3b50ee48d654721e398e546d932d5bb6f56e146196347560db82194"
+    },
+    "cohort-b0d12c98-linux-second-remedies-v1/owned-scope-limits.json": {
+      "bytes": 260,
+      "sha256": "e18d395ea0e1cbe7e10fff53415062407c066ced6ec7ef5699a1d96adb3bc1b2"
+    },
+    "cohort-b0d12c98-linux-second-remedies-v1/uppercase-pool-original-after.log": {
+      "bytes": 3804,
+      "sha256": "ac2ab451073bd9d2f8309e83ef0eae9a22c4b3f0e71a65e0872569de90a46b4d"
+    },
+    "cohort-b0d12c98-linux-second-remedies-v1/running.json": {
+      "bytes": 6658,
+      "sha256": "71376d070c5c2e0bd9932b9b3f63ffd03c0c55b212bb569b6fc870a0fb59b6c3"
+    },
+    "cohort-b0d12c98-linux-second-remedies-v1/canonical-json-alias-positive.log": {
+      "bytes": 437,
+      "sha256": "7d7b178d09b88242095d0b065ec0a1105873031b939a3a972cd19b63208b6153"
+    },
+    "cohort-b0d12c98-linux-second-remedies-v1/unavailable-gpu-original-after.log": {
+      "bytes": 1743,
+      "sha256": "4f6fdb26fddcd1f9e5d1e7706bf4685983a6d413296d40fcdeb71c5921bd6015"
+    },
+    "cohort-b0d12c98-linux-second-remedies-v1/pending-shape-relevant-control.log": {
+      "bytes": 576,
+      "sha256": "e04df5e3e7f6b368131924a962b65a25deb8cb5613bb823498f00cc514d7d5ca"
+    },
+    "cohort-b0d12c98-linux-second-remedies-v1/pending-refund-relevant-control.log": {
+      "bytes": 458,
+      "sha256": "bf8e21004e88d84a986c994fe4e1cbc2fe49e48f07df2b02b1a55747da49bad2"
+    },
+    "cohort-b0d12c98-linux-second-remedies-v1/creating-evidence-corrected-fixture.log": {
+      "bytes": 791,
+      "sha256": "fe2e38507402fb943c54b0b98e370c57a8fc9f2d55c76f050cce5748e15943de"
+    },
+    "cohort-b0d12c98-linux-second-remedies-v1/joined-production-check.log": {
+      "bytes": 3068,
+      "sha256": "f6bda5c78d96426f4f14081b0517be3a8fcef435408a3f25fa3a1dcc0025a532"
+    },
+    "cohort-b0d12c98-linux-second-remedies-v1/source-after.json": {
+      "bytes": 334049,
+      "sha256": "f336e2e2010c1fd88d9ea86df54df55d4326add9d052e24ed44f977a84ca15ed"
+    },
+    "cohort-b0d12c98-linux-second-remedies-v1/result.json": {
+      "bytes": 6914,
+      "sha256": "3d3c8db43dab4154c121d4e6d04b20acebad29f07f80748d076a176669b0fa5c"
+    },
+    "cohort-b0d12c98-linux-second-remedies-v1/collected-binaries.json": {
+      "bytes": 6570,
+      "sha256": "cc84fb61b36c3b7f36ecd727f3fcb1f2d73c649170bf21bf6747456544d23963"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}
