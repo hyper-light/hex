@@ -8,7 +8,7 @@ use std::path::{Component, PathBuf};
 use hex_api::{Allocation, Bounds, CapacityResources, Program, Refusal};
 use sha2::{Digest, Sha256};
 
-use super::{exhausted, invalid, output_bound};
+use super::{driver, exhausted, invalid};
 use crate::guest::{GuestConfig, shares};
 
 mod load;
@@ -206,7 +206,7 @@ impl GpuObserver {
             hash.update(bytes);
             Ok(())
         };
-        part(b"hex-shards-guest-observer/v1")?;
+        part(b"hex-shards-guest-observer/v2-work-ready")?;
         part(&input.evidence)?;
         part(&input.max_queue_families.to_be_bytes())?;
         for count in [input.max_allocation_bytes, input.stderr_bytes] {
@@ -442,7 +442,7 @@ impl GpuObserver {
     }
 
     pub fn output_bytes(&self, expected: usize) -> Result<usize, Refusal> {
-        let output = output_bound(expected)?;
+        let output = driver::output_bound(expected)?;
         let combined = output
             .checked_add(self.input.stderr_bytes)
             .and_then(|bytes| u64::try_from(bytes).ok())
@@ -619,6 +619,26 @@ pub(in crate::guest) mod tests {
         );
         std::fs::write(dir.path().join("venus.so"), b"changed driver").unwrap();
         assert!(observer.verify(&config).is_err());
+    }
+
+    /// AC-T7.4.1: the readiness child spends only its original finite remainder.
+    #[test]
+    fn work_ready_program_uses_only_explicit_artifacts_and_finite_remaining_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, input, allocation) = fixture(dir.path());
+        let observer = GpuObserver::new(input, &config, allocation).unwrap();
+        let remaining = std::time::Duration::from_nanos(123_456);
+        let program = driver::program(&observer, 1, remaining).unwrap();
+        let suffix = program.args.get(program.args.len() - 2..).unwrap();
+        assert_eq!(suffix, ["--wait-ns", "123456"]);
+        assert_eq!(program.env, observer.program(1).unwrap().env);
+        for invalid in [
+            std::time::Duration::ZERO,
+            std::time::Duration::MAX,
+            std::time::Duration::from_nanos(u64::MAX),
+        ] {
+            assert!(driver::program(&observer, 1, invalid).is_err());
+        }
     }
 
     /// AC-T7.4.1: unknown/mutable/aliased artifacts and an observer exceeding
