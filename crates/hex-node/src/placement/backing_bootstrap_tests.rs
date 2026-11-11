@@ -285,7 +285,7 @@ fn route_snapshot_requires_the_real_backend_in_the_originating_endpoint() {
 #[test]
 fn native_rearm_waits_for_the_original_released_snapshot() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut report, mut node, key) = fixture();
+    let (mut report, mut node, _) = fixture();
     report.backings[0].phase = BackingPhase::Live;
     let catalog = node.routes.as_ref().unwrap();
     node.routes = Some(

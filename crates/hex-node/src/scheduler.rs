@@ -920,15 +920,13 @@ impl Service {
             initialized = true;
         }
         for (endpoint, key) in actions.prepared {
-            if self
+            // Ok(false) performs no native effect: the canonical typed Prepared receipt stays
+            // observable in capacity. Leave it pending for an ordinary refresh without blocking
+            // unrelated CPU work. Actual initialization errors still propagate to the caller.
+            initialized |= self
                 .driver
                 .initialize_backing(endpoint, key)
-                .map_err(failed)?
-            {
-                initialized = true;
-            } else {
-                tracing::warn!(target: "hex.node", event = "backing.initialization.pending", ?key);
-            }
+                .map_err(failed)?;
         }
         if initialized {
             // Do not recursively initialize any new generation discovered in the result. Its
