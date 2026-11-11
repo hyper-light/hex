@@ -82,7 +82,7 @@ impl Reader {
             }
             let millis = left
                 .as_millis()
-                .checked_add(u128::from(left.subsec_nanos() % 1_000_000 != 0))
+                .checked_add(u128::from(!left.subsec_nanos().is_multiple_of(1_000_000)))
                 .ok_or(Refusal::GpuProbe(GpuProbeError::Count))?;
             let timeout = i32::try_from(millis).unwrap_or(i32::MAX);
             let mut event = libc::pollfd {

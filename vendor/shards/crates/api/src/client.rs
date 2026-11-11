@@ -2298,9 +2298,9 @@ mod tests {
             deadline: Instant::now().checked_add(patience).unwrap(),
         };
         let (receiver, mut writer) = crate::physical::report::Receiver::new(request).unwrap();
-        // Model two exact failed native cancellation calls: the deadline-bound
-        // caller's, then the observer's. A real overlapped read remains pending.
-        receiver.fail_cancel_calls_for_test(2);
+        // Caller error, first observer error, then the old observer's retry
+        // after last-drop. New native-event waiting does not need that retry.
+        receiver.fail_cancel_calls_for_test(3);
         let shared = managed_shared(0, true, Some(receiver)).unwrap();
         let native = triomphe::Arc::try_new(ModelNative {
             identity: Identity {
@@ -2331,8 +2331,9 @@ mod tests {
         // Collect every oracle before asserting: even an old stuck-watcher
         // regression must close this fixture's writer and join its own worker.
         let report = guest.take_gpu_report(patience);
-        drop(guest);
-        let owners = shared.managed_owners.load(Ordering::Acquire);
+        // The observer must first enter its error path while an API owner still
+        // exists; otherwise Requested at its first failure can mask the old gap.
+        native.publish(crate::TerminalScope::Released);
         let (cleanup_before, uncertainty_timed_out) = {
             let state = lock(&shared.state);
             let (state, timed) = shared
@@ -2343,6 +2344,8 @@ mod tests {
                 .unwrap_or_else(PoisonError::into_inner);
             (state.report_cleanup, timed.timed_out())
         };
+        drop(guest);
+        let owners = shared.managed_owners.load(Ordering::Acquire);
         // No API owner exists and no Shared notification is sent here. The OS
         // alone completes its pending read as this owned writer writes/closes.
         let wrote = writer.write_all(b"later kernel completion");

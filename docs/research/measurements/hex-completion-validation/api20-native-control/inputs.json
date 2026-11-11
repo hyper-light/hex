@@ -1,0 +1,15 @@
+{
+  "scope": "ROOT-only original function replay, not full original5ba cohort; never applied to shipping tree",
+  "original_function_source": "5ba9ca5022357807c7b70a9ffe31534475a4cc31",
+  "restored_sdk_source": "e4411330d36b408aabc84a4a65842c91157140af",
+  "expected_final_file_sha256": "8d23d27b08a4eb3baa1be24b282f69965950ffe8306bfbf8f6f38c4b11ce9968",
+  "original_function_sha256": "d6719d7a0be122b3c8f8937843092475c5fe727da6ce8d27a9401416fd00d022",
+  "restored_function_sha256": "1fd062b5e97591cd71ea81b81433740cd9e971586d59fedd9f0102b7cceb7d67",
+  "expected_private_mutant_file_sha256": "54b9e343a53831a3bd3a15058f51dfda382f65333b46f489e81702a2678d5cc2",
+  "patch_sha256": "60446041910274b5f3e8262ea65a8ede16bc4b48ff757937bdd881822ce314bb",
+  "changes": "Only finish_managed_report original comment/function block; same corrected3-error/native-pipe fixture and cfgtest error injection remain. Every other byte identical.",
+  "expected_red": "Only managed_report_last_api_drop_before_later_native_completion_reclaims_owner selected; capture native completion absent without API wake, then close writer/explicit failure-only wake and join owned watcher before final assertion. Timeout/compile/other assertion is not reproduction.",
+  "restored_positive": "New fresh immutable source/target: exact original shipping source hash restored before compile; same one ordered control must pass. Basic Windows private-report3 are separate platform checks.",
+  "budget": "Normal admitted1CPU/4GiB/40GiB BelowNormal/jobs1/threads1 with existing finite at-creation whole-process Job guards. No HCS/GPU/VM/service/security effects; no hard-quota proof claimed.",
+  "tests_executed": 0
+}
