@@ -1,5 +1,5 @@
 // TEST/MEASUREMENT ONLY. ROOT builds/runs on admitted macOS arm64; no production adapter.
-// Read macos-setexec-preseal-control.md and macos-setexec-child-cloexec.md before execution. All child-trampoline storage,
+// Read macos-setexec-preseal-control.md, macos-setexec-child-cloexec.md and macos-setexec-exit-decoder.md before execution. All child-trampoline storage,
 // attributes/actions/argv/env are prepared before COW fork; no child heap/format/lock/destructor.
 #if !defined(__APPLE__) || !defined(__aarch64__)
 #error This measurement is for the supported macOS arm64 target only
@@ -64,6 +64,122 @@ struct prepared {
     char path[PATH_MAX], missing_path[PATH_MAX], fd_text[32], denied_text[32], deadline_text[32], memory_text[32];
     char *argv[8], *env[3];
 };
+
+struct exit_observation {
+    bool captured;
+    int validation;
+    struct kevent raw;
+};
+
+// Pure decoder over the SAME owned queue. f621 kern_event.c:1234-1316 puts detail
+// in data, with NOTE_EXIT_DETAIL only its fflags marker. Native wait status is separate.
+// No logging/allocation/native call here: the trusted trampoline also uses terminal().
+static int retain_exit_event(pid_t pid, const struct kevent *event, struct exit_observation *out) {
+    if (pid <= 0) return EINVAL;
+    if (event->filter == EVFILT_SIGNAL && event->ident == SIGCHLD && !(event->flags & EV_ERROR)) return 0;
+    if (event->filter != EVFILT_PROC) return EPROTO;
+    if (event->ident != (uintptr_t)pid) return ESTALE;
+    if (!(event->fflags & NOTE_EXIT)) {
+        return event->fflags == NOTE_EXEC && !(event->flags & EV_ERROR) ? 0 : EPROTO;
+    }
+    if (out->captured) {
+        if (out->raw.flags != event->flags || out->raw.fflags != event->fflags || out->raw.data != event->data)
+            out->validation = EPROTO;
+        return out->validation;
+    }
+    out->captured = true;
+    out->raw = *event;
+    // NOTE_REAP is not requested, so the pinned exit contract supplies EOF/ONESHOT.
+    if ((event->flags & (EV_ERROR | EV_EOF | EV_ONESHOT)) != (EV_EOF | EV_ONESHOT) ||
+        !(event->fflags & NOTE_EXITSTATUS) || (event->fflags & NOTE_PDATAMASK))
+        out->validation = EPROTO;
+    else if (event->data < 0 || (uint64_t)event->data > UINT32_MAX)
+        out->validation = ERANGE;
+    return out->validation;
+}
+static bool memory_detail(const struct exit_observation *event) {
+    return event->captured && !event->validation && (event->raw.fflags & NOTE_EXIT_DETAIL) &&
+        ((uint32_t)event->raw.data & NOTE_EXIT_MEMORY);
+}
+static bool memory_relevant(int native_wait_status, uint64_t peak, uint64_t bound, const struct exit_observation *event) {
+    return WIFSIGNALED(native_wait_status) && WTERMSIG(native_wait_status) == SIGKILL &&
+        peak >= bound && memory_detail(event);
+}
+static void print_exit(enum scenario which, pid_t pid, const struct exit_observation *event) {
+    fprintf(stderr, "EXIT_EVENT case=%d expected_pid=%d captured=%d validation=%d ident=%" PRIuPTR " filter=%d flags=%u fflags=%u raw_data=%" PRIdPTR " memory_detail=%d\n",
+        which, pid, event->captured, event->validation, event->raw.ident, event->raw.filter,
+        (unsigned)event->raw.flags, event->raw.fflags, event->raw.data, memory_detail(event));
+}
+
+// One pure behavior control: identical notification markers cannot substitute for
+// the payload, wait status, PID/filter or valid native event. No process/resource
+// query or effect; output is diagnostic only.
+static int exit_decoder_control(void) {
+    const pid_t owned = 17; // Pure synthetic input, never used for a native PID query.
+    struct kevent actual;
+    EV_SET(&actual, (uintptr_t)owned, EVFILT_PROC, EV_EOF | EV_ONESHOT,
+        NOTE_EXIT | NOTE_EXITSTATUS | NOTE_EXIT_DETAIL, NOTE_EXIT_MEMORY | SIGKILL, NULL);
+    struct exit_observation positive = {0};
+    if (retain_exit_event(owned, &actual, &positive) || !memory_relevant(SIGKILL, MIB, MIB, &positive) ||
+        positive.raw.data != actual.data || positive.raw.fflags != actual.fflags ||
+        memory_relevant(0, MIB, MIB, &positive) || memory_relevant(SIGKILL, MIB - 1, MIB, &positive)) {
+        fprintf(stderr, "FIELD_DECODER failed=payload-or-independent-wait-status-and-peak\n"); return 1;
+    }
+    struct kevent changed = actual;
+    struct exit_observation observed = {0};
+    changed.data = SIGKILL;
+    if (retain_exit_event(owned, &changed, &observed) || memory_relevant(SIGKILL, MIB, MIB, &observed)) {
+        fprintf(stderr, "FIELD_DECODER failed=marker-sigkill-peak-without-memory-payload\n"); return 1;
+    }
+    changed.fflags |= NOTE_EXIT_MEMORY;
+    observed = (struct exit_observation){0};
+    if (retain_exit_event(owned, &changed, &observed) != EPROTO || memory_detail(&observed) || observed.raw.data != SIGKILL) {
+        fprintf(stderr, "FIELD_DECODER failed=payload-bit-in-wrong-field\n"); return 1;
+    }
+    changed = actual; changed.ident = (uintptr_t)owned + 1;
+    observed = (struct exit_observation){0};
+    if (retain_exit_event(owned, &changed, &observed) != ESTALE || observed.captured || memory_detail(&observed)) {
+        fprintf(stderr, "FIELD_DECODER failed=foreign-pid\n"); return 1;
+    }
+    changed = actual; changed.filter = EVFILT_READ;
+    if (retain_exit_event(owned, &changed, &observed) != EPROTO || observed.captured || memory_detail(&observed)) {
+        fprintf(stderr, "FIELD_DECODER failed=wrong-filter\n"); return 1;
+    }
+    changed = actual; changed.fflags &= ~NOTE_EXIT_DETAIL;
+    if (retain_exit_event(owned, &changed, &observed) || memory_detail(&observed)) {
+        fprintf(stderr, "FIELD_DECODER failed=payload-without-detail-marker\n"); return 1;
+    }
+    changed = actual; changed.flags |= EV_ERROR;
+    observed = (struct exit_observation){0};
+    if (retain_exit_event(owned, &changed, &observed) != EPROTO || memory_detail(&observed) || observed.raw.data != actual.data) {
+        fprintf(stderr, "FIELD_DECODER failed=invalid-event-flags-or-lost-raw-data\n"); return 1;
+    }
+    changed = actual; changed.data = -1;
+    observed = (struct exit_observation){0};
+    if (retain_exit_event(owned, &changed, &observed) != ERANGE || memory_detail(&observed)) {
+        fprintf(stderr, "FIELD_DECODER failed=negative-payload\n"); return 1;
+    }
+    changed.data = (intptr_t)UINT32_MAX + 1;
+    observed = (struct exit_observation){0};
+    if (retain_exit_event(owned, &changed, &observed) != ERANGE || memory_detail(&observed)) {
+        fprintf(stderr, "FIELD_DECODER failed=overwide-payload\n"); return 1;
+    }
+    changed = actual; changed.data = SIGKILL;
+    if (retain_exit_event(owned, &changed, &positive) != EPROTO || memory_detail(&positive) || positive.raw.data != actual.data) {
+        fprintf(stderr, "FIELD_DECODER failed=conflicting-terminal-fact\n"); return 1;
+    }
+    observed = (struct exit_observation){0};
+    EV_SET(&changed, (uintptr_t)owned, EVFILT_PROC, 0, NOTE_EXEC, 0, NULL);
+    if (retain_exit_event(owned, &changed, &observed) || observed.captured) {
+        fprintf(stderr, "FIELD_DECODER failed=exec-is-not-exit\n"); return 1;
+    }
+    EV_SET(&changed, SIGCHLD, EVFILT_SIGNAL, 0, 0, 0, NULL);
+    if (retain_exit_event(owned, &changed, &observed) || observed.captured) {
+        fprintf(stderr, "FIELD_DECODER failed=wakeup-is-not-exit\n"); return 1;
+    }
+    fprintf(stderr, "FIELD_DECODER selected=1 passed=1 failed=0 native_process_calls=0\n");
+    return 0;
+}
 
 // SAFETY: fixed initialized timespec owned for the call; validate the returned native representation.
 static int raw_now(uint64_t *out) {
@@ -345,7 +461,7 @@ static int event(int kq, uint64_t deadline, struct kevent *out) {
     }
 }
 // SAME parent is the sole terminal waiter. Peek/reap are distinct, never signal after reaping.
-static int terminal(pid_t pid, int kq, uint64_t deadline, int *status, uint64_t *peak, uint32_t *exit_flags) {
+static int terminal(pid_t pid, int kq, uint64_t deadline, int *status, uint64_t *peak, struct exit_observation *exit) {
     for (;;) {
         siginfo_t info = {0};
         if (waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT) != 0) return errno;
@@ -356,8 +472,8 @@ static int terminal(pid_t pid, int kq, uint64_t deadline, int *status, uint64_t 
             int count = kevent(kq, NULL, 0, queued, 2, &zero_wait);
             if (count < 0 && errno != EINTR) return errno;
             for (int at = 0; at < count; ++at) {
-                if (queued[at].filter == EVFILT_PROC && queued[at].ident == (uintptr_t)pid)
-                    *exit_flags |= queued[at].fflags;
+                int error = retain_exit_event(pid, &queued[at], exit);
+                if (error) return error;
             }
             struct rusage_info_v4 usage;
             int error = native_usage(pid, &usage);
@@ -376,7 +492,7 @@ static int terminal(pid_t pid, int kq, uint64_t deadline, int *status, uint64_t 
         struct kevent ended;
         int error = event(kq, deadline, &ended);
         if (error) return error;
-        if (ended.filter == EVFILT_PROC && ended.ident == (uintptr_t)pid) *exit_flags |= ended.fflags;
+        if ((error = retain_exit_event(pid, &ended, exit))) return error;
     }
 }
 static int cleanup_native(pid_t pid, uint64_t *birth, int kq, uint64_t deadline,
@@ -394,8 +510,8 @@ static int cleanup_native(pid_t pid, uint64_t *birth, int kq, uint64_t deadline,
         // SAFETY: still this parent's exact unreaped direct child, joined to native birth.
         if (kill(pid, SIGKILL) != 0 && errno != ESRCH) return errno;
     }
-    uint32_t exit_flags = 0;
-    int error = terminal(pid, kq, deadline, status, peak, &exit_flags);
+    struct exit_observation exit = {0};
+    int error = terminal(pid, kq, deadline, status, peak, &exit);
     if (!error) *reaped = true;
     return error;
 }
@@ -601,14 +717,17 @@ static int run_case(enum scenario which, int memory_mib, uint64_t deadline, cons
         fprintf(stderr, "NEGATIVE native_errno=%d kind=%u\n", failure.operation_errno, failure.kind);
         if (failure.kind != PREEXEC_ERROR || failure.operation_errno != ENOENT) { error = EPROTO; goto done; }
     }
-    int status = 0; uint64_t peak = 0; uint32_t exit_flags = observed.fflags;
-    if ((error = terminal(pid, p.kq, deadline, &status, &peak, &exit_flags))) goto done;
+    int status = 0; uint64_t peak = 0;
+    struct exit_observation exit = {0};
+    error = retain_exit_event(pid, &observed, &exit);
+    if (!error) error = terminal(pid, p.kq, deadline, &status, &peak, &exit);
+    print_exit(which, pid, &exit);
+    if (error) goto done;
     reaped = true;
     relevant = which == NORMAL ? WIFEXITED(status) && WEXITSTATUS(status) == 0 :
         which == MISSING ? WIFEXITED(status) && WEXITSTATUS(status) == 127 :
         WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL;
-    if (which == MEMORY && (peak < (uint64_t)memory_mib * MIB || !(exit_flags & NOTE_EXIT_MEMORY))) relevant = false;
-    fprintf(stderr, "EXIT_FLAGS case=%d fflags=%u memory_detail=%d\n", which, exit_flags, (exit_flags & NOTE_EXIT_MEMORY) != 0);
+    if (which == MEMORY) relevant = memory_relevant(status, peak, (uint64_t)memory_mib * MIB, &exit);
     fprintf(stderr, "TERMINAL case=%d pid=%d status=%d peak=%" PRIu64 " memory_mib=%d relevant=%d reaped=1\n", which, pid, status, peak, memory_mib, relevant);
 done:
     for (int at = 0; at < 2; ++at) {
@@ -633,11 +752,14 @@ done:
     return error || !relevant || !reaped;
 }
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--check-exit-decoder") == 0) return exit_decoder_control();
     if (argc > 1 && strcmp(argv[1], "--noop") == 0) return 0;
     if (argc > 1 && (strcmp(argv[1], "--image") == 0 || strcmp(argv[1], "--image-memory") == 0)) return image(argc, argv, strcmp(argv[1], "--image-memory") == 0);
     uint64_t memory_mib;
-    if (argc != 3 || strcmp(argv[1], "--memory-mib") || number(argv[2], &memory_mib) || memory_mib == 0 || memory_mib > INT_MAX) {
-        fprintf(stderr, "usage: ROOT-admitted-control --memory-mib EXPLICIT_NATIVE_BOUND\n"); return 2;
+    bool memory_only = argc == 4 && strcmp(argv[1], "--memory-only") == 0;
+    int input = memory_only ? 2 : 1;
+    if ((!memory_only && argc != 3) || strcmp(argv[input], "--memory-mib") || number(argv[input + 1], &memory_mib) || memory_mib == 0 || memory_mib > INT_MAX) {
+        fprintf(stderr, "usage: ROOT-admitted-control [--memory-only] --memory-mib EXPLICIT_NATIVE_BOUND | --check-exit-decoder\n"); return 2;
     }
     if (getuid() == 0 || geteuid() == 0 || getuid() != geteuid()) { fprintf(stderr, "REFUSE root/credential transition\n"); return 2; }
     struct sigaction child_action;
@@ -652,7 +774,9 @@ int main(int argc, char **argv) {
     if (raw_now(&start) || start > UINT64_MAX - GUARD_NS) return 2;
     uint64_t deadline = start + GUARD_NS;
     int failed = 0;
-    for (int which = NORMAL; which <= MEMORY; ++which) {
+    fprintf(stderr, "SELECTION first_case=%d last_case=%d selected=%d memory_mib=%" PRIu64 " guard_ns=%" PRIu64 "\n",
+        memory_only ? MEMORY : NORMAL, MEMORY, memory_only ? 1 : MEMORY - NORMAL + 1, memory_mib, GUARD_NS);
+    for (int which = memory_only ? MEMORY : NORMAL; which <= MEMORY; ++which) {
         failed |= run_case((enum scenario)which, (int)memory_mib, deadline, self);
         if (failed) break; // preserve failed setup/cleanup; never retry or extend the guard
     }

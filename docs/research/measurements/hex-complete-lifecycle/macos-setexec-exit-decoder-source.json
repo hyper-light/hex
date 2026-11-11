@@ -1,0 +1,47 @@
+{
+  "requirement": "AC-T7.4.1",
+  "role": "implementer L3",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "base": "e4a9cf8cf5f901a1fef1424e6addfae99456fac5",
+  "original_fixture": "baff74c55cd8f351a11aff9e116143fbfb035f06",
+  "scope": "MEASUREMENT ONLY existing kevent field retention/decoder at actual cause; no production/SDK/native function/attribute change.",
+  "actual_before": {
+    "root": "4cb960811fd7d5dd5b86fc33873ad5451f178845",
+    "native_sha256": "fe8d3bdb67002c350a904edeac9f7673a086aca20665f65427ac17746478311e",
+    "bytes": 5245,
+    "independently_hash_matched": true,
+    "first3": "NORMAL/missing/badsession error0 relevant1 reaped1; DO NOT REPEAT.",
+    "memory": "SIGKILL9/peak67109272/reaped1 but relevant0; fixture discarded event.data and tested NOTE_EXIT_MEMORY in fflags. No installed detail absence proved."
+  },
+  "decoder": "Same queue only. Exact PID/filter, NOTE_EXIT+STATUS and EOF/ONESHOT/noERROR, payload range and detail marker. Store raw full kevent; waitpid remains separate. Memory requires statusSIGKILL+oldpeakbound+actualNOTE_EXIT_MEMORY in data, not fflags. Missing/conflicting/malformed fact fails.",
+  "new_pure_control": "--check-exit-decoder: one selected behavior control, no process/resource query or effect; positive payload vs marker-only+SIGKILL+peak, wrong field/PID/filter/flags, missingmarker, invalidwidth, conflictingdata, nativewaitstatus and peak independence, exec/wakeup nonauthority. UNRUN.",
+  "next_native_invocation": [
+    "setexec-control",
+    "--memory-only",
+    "--memory-mib",
+    "64"
+  ],
+  "next_native_selection": "Only existing case3 selected1; original39507000000ns absoluteguard, ROOTfiniteouterguard; old3 passes excluded. UNRUN.",
+  "unchanged_blocks_sha256": {
+    "prepare": "c87f69d81dc826d37de6ef1fa60c72e2c831593ef503f31b4d8d8d200ac8b651",
+    "trampoline": "f83f255dcbcdc661ac302d486c0ca6cd9c31cb75996e999ec4bbeae5b188d9da",
+    "foreign_image": "c84656186731a3f028f38882072b867c86d3113b7077481022c8055c62bf8db9",
+    "parent_cleanup": "1c26cacd09fb416ac75ed72109878fedce302912750f5353550d4177a6adfdda",
+    "absolute_guard": "909720795d17d1f17414c3b981fd0f0bbbc1f77eb1af1593ca697c6afc728caf"
+  },
+  "new_native_symbols": [],
+  "production_changes": false,
+  "files": {
+    "docs/research/measurements/hex-complete-lifecycle/macos_setexec_preseal_control.c": {
+      "bytes": 45313,
+      "sha256": "e6da713454118a3949b12d8a39a65c08d55c970fcdecdc9eed8fee66e51d6158"
+    },
+    "docs/research/measurements/hex-complete-lifecycle/macos-setexec-exit-decoder.md": {
+      "bytes": 4055,
+      "sha256": "2e02a6de32bb3dca0492c0ec699ffd672d739df8440750093ce77f78f43d7076"
+    }
+  },
+  "validation": "git diff --check only. No local C compile/pure run/native job; ROOT owns remote compile+newpure1+memory-only1. Full oldsource/raw retained.",
+  "remaining": "Installed memory cause/whole-memory bound, HVF/Vulkan/fixed-worker compatibility, helper death/charge/scope completion and native/fullgates remain unproved. Production2ef remains held."
+}
