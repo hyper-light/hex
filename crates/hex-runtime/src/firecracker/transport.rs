@@ -155,9 +155,13 @@ fn write(stream: &mut impl Duplex, mut bytes: &[u8], until: Instant) -> Result<(
         stream
             .set_write_timeout(Some(left(until)?))
             .map_err(|e| Step::Io("bounding Firecracker write", e))?;
-        let count = stream
-            .write(bytes)
-            .map_err(|e| failed(until, "writing Firecracker request", e))?;
+        let count = match stream.write(bytes) {
+            Ok(count) => count,
+            // A signal fails a socket call with a timeout set, never restarted (signal(7)). Make
+            // it again: the next pass checks the same absolute deadline first, adding no wait.
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(failed(until, "writing Firecracker request", error)),
+        };
         if count == 0 {
             return Err(Step::Ended("writing Firecracker request"));
         }
@@ -173,9 +177,12 @@ fn read_exact(stream: &mut impl Duplex, mut bytes: &mut [u8], until: Instant) ->
         stream
             .set_read_timeout(Some(left(until)?))
             .map_err(|e| Step::Io("bounding Firecracker read", e))?;
-        let count = stream
-            .read(bytes)
-            .map_err(|e| failed(until, "reading Firecracker response", e))?;
+        let count = match stream.read(bytes) {
+            Ok(count) => count,
+            // As in `write`: interrupted, made again within the same absolute deadline.
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(failed(until, "reading Firecracker response", error)),
+        };
         if count == 0 {
             return Err(Step::Ended("reading Firecracker response"));
         }
@@ -493,9 +500,12 @@ fn witness(socket: &mut impl Duplex, until: Instant) -> Result<Attachment, Refus
             .get_mut(used..end)
             .filter(|tail| !tail.is_empty())
             .ok_or_else(|| exhausted("Firecracker API response", bound))?;
-        let count = socket
-            .read(tail)
-            .map_err(|e| Refusal::os("reading Firecracker API", e))?;
+        let count = match socket.read(tail) {
+            Ok(count) => count,
+            // As in `write`: interrupted, made again within the same absolute deadline.
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(Refusal::os("reading Firecracker API", error)),
+        };
         if count == 0 {
             return Err(invalid(
                 "attachment witness response ended before its Content-Length",
