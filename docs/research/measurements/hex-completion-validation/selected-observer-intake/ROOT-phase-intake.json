@@ -1,0 +1,8 @@
+{
+  "role": "coordinator",
+  "pin": "701f3a5580f7c9b814c382a2734db4b215c53176",
+  "test": "guest::gpu_pool::tests::pending_handoff_preflight_covers_creating_deleting_and_both_held_source_phases",
+  "status": "UNRUN; next matched cohort only, active d87 frozen source not mutated",
+  "production_unchanged": true,
+  "source_sha256": "c4861816c3388f30826992308258d5627291f76f2c5f0cc9a9c5606a26bad6d3"
+}

@@ -728,6 +728,192 @@ mod tests {
         assert!(runtime.dedicated.lock().unwrap().is_empty());
     }
 
+    /// AC-T7.4.1: the caller must choose the guarded two-borrow proof for a
+    /// pending handoff. Ordinary Deleting validation deliberately remains strict;
+    /// after source Released, missing Intent is never submission/absence proof.
+    #[test]
+    fn pending_handoff_preflight_covers_creating_deleting_and_both_held_source_phases() {
+        use hex_api::{
+            Class, Execution, GpuEligibility, ImageOs, ImagePlatform, RouteKey, RouteReceipt,
+        };
+        use std::fmt::Write as _;
+        fn hex(bytes: &[u8]) -> String {
+            let mut text = String::new();
+            for byte in bytes {
+                write!(&mut text, "{byte:02x}").unwrap();
+            }
+            text
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (config, input, allocation) = observer::config::tests::fixture(dir.path());
+        let standalone = Arc::new(NoEffects(AtomicUsize::new(0)));
+        let catalog = devices::Catalog::parse(b"hex-devices-1\ngpu\t256\tunmeasured\t777\tshards-gpu\tpci:0000:01:00.0\t\ngpu\t512\tunmeasured\t777\tshards-gpu\tpci:0000:02:00.0\t\n").unwrap();
+        let runtime = GuestRuntime::new(standalone.clone(), config)
+            .recorded_at(dir.path().join("guest"))
+            .with_runtime_cost(allocation.cost)
+            .unwrap()
+            .with_gpu_catalog(triomphe::Arc::try_new(catalog).unwrap())
+            .with_gpu_observer(input)
+            .unwrap();
+        let definition = runtime.gpu_backing_definition().unwrap().unwrap();
+        let mut source = PoolRecord {
+            version: hex_core::record::RECORD_VERSION,
+            key: BackingKey {
+                pool: definition.pool,
+                generation: [7; 16],
+            },
+            execution: Execution::ShardsDedicated,
+            cost: allocation.cost,
+            allocation: Some(allocation),
+            devices: definition.devices,
+            phase: BackingPhase::Granted,
+            init: None,
+            exit: None,
+        };
+        let mut receipt = Receipt::intent(
+            PoolRecord::decode(&source.encode().unwrap()).unwrap(),
+            definition.physical,
+            &runtime.config,
+        )
+        .unwrap();
+        let scope = source.scope();
+        receipt.report = Some(shards_api::physical::GpuReport {
+            scope: *scope.bytes(),
+            probe: shards_api::GpuProbe {
+                devices: receipt
+                    .physical
+                    .iter()
+                    .copied()
+                    .zip([3, 4])
+                    .map(|(physical, byte)| shards_api::ResolvedGpu {
+                        physical,
+                        pci: Some(physical),
+                        luid: None,
+                        uuid: [byte; 16],
+                        name: None,
+                        device_local_bytes: None,
+                    })
+                    .collect(),
+                host_visible_bytes: 1,
+            },
+        });
+        // Model bytes exercise the actual receipt/read-only adapter, not a
+        // native renderer, guest Program, driver or whole-scope witness.
+        let mut inventory = String::from("hex-vulkan-guest-inventory 1 2\n");
+        for (ordinal, byte) in [3u8, 4].into_iter().enumerate() {
+            writeln!(
+                &mut inventory,
+                "device {ordinal} 4202496 22 1 1 2 2 {} 677075 76656e7573 4d657361 2 1 1 2 1",
+                format!("{byte:02x}").repeat(16)
+            )
+            .unwrap();
+            writeln!(&mut inventory, "heap {ordinal} 0 1 4096").unwrap();
+        }
+        let observer = runtime.gpu_observer.as_ref().unwrap();
+        receipt.readiness = Some(observer::Evidence {
+            scope,
+            configuration: observer.identity(),
+            max_queues: observer.queues(),
+            report: observer::Report::parse(inventory.as_bytes(), 2, observer.queues()).unwrap(),
+        });
+        let mut attempt = observer::Attempt::parse(&format!(
+            "{} {} complete eof {} {} eof {} -",
+            hex(&observer.identity()),
+            observer.queues(),
+            observer.output_bytes(2).unwrap(),
+            hex(inventory.as_bytes()),
+            observer.stderr_bytes(),
+        ))
+        .unwrap()
+        .unwrap();
+        let exit =
+            hex_core::wire::snapshot_exit(hex_api::Exit::Code(0), hex_core::wire::MAX_MESSAGE)
+                .unwrap();
+        attempt.parse_facts(&mut format!("observer-exit\t1\t{:016x}\t{}\t{}\nobserver-failure\tnone\nobserver-cleanup\tdeleted\n", hex_core::wire::IDENTITY, exit.len(), hex(&exit)).lines()).unwrap();
+        receipt.attempt = Some(attempt);
+        let identity = shards_api::Identity {
+            pid: 42,
+            started: 7,
+            vsock: "/model/v".into(),
+        };
+        source.init = Some(hex_core::record::ProcId {
+            pid: identity.pid,
+            start_ticks: identity.started,
+        });
+        let mut spec =
+            super::super::tests::oci(hex_api::Rootfs::Dir(dir.path().to_path_buf()), Vec::new());
+        spec.bounds.cpu_max_milli = Some(hex_api::MIN_CPU_MILLI);
+        spec.bounds.memory_max = Some(hex_api::MIN_MEMORY);
+        spec.devices = vec![source.devices[0]];
+        spec.allocation = Some(allocation);
+        spec.route = Some(RouteReceipt {
+            key: RouteKey {
+                class: Class::Oci,
+                image: ImagePlatform {
+                    os: ImageOs::Linux,
+                    arch: super::super::route::host_platform().unwrap().arch,
+                },
+                execution: Execution::ShardsDedicated,
+                gpu: GpuEligibility::Required,
+            },
+            backing: Some(source.key),
+        });
+        let mut boxed =
+            hex_core::record::BoxRecord::new(spec, hex_core::record::Phase::Creating, Vec::new());
+        boxed.native_scope = Some(hex_core::record::NativeScope::from_bytes([8; 16]));
+        let path = runtime.selected_path(&boxed.spec.id).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for phase in [BackingPhase::Live, BackingPhase::Draining] {
+            source.phase = phase;
+            receipt.phase = if phase == BackingPhase::Live {
+                Phase::Running(super::super::shared::copy_identity(&identity).unwrap())
+            } else {
+                Phase::Stopping(super::super::shared::copy_identity(&identity).unwrap())
+            };
+            pool::write(&definition.path, &receipt).unwrap();
+            runtime.preflight_backing(&source).unwrap();
+            for phase in [
+                hex_core::record::Phase::Creating,
+                hex_core::record::Phase::Deleting,
+            ] {
+                boxed.phase = phase;
+                assert_eq!(
+                    runtime.preflight_box(&boxed).is_ok(),
+                    phase == hex_core::record::Phase::Creating,
+                    "ordinary Deleting must not silently accept a missing receipt"
+                );
+                runtime.handoff_unsubmitted(&boxed, &source).unwrap();
+                let intent =
+                    super::super::selected::Record::intent(&boxed, &runtime.config).unwrap();
+                super::super::selected::write(&path, &intent).unwrap();
+                assert!(runtime.handoff_unsubmitted(&boxed, &source).is_err());
+                super::super::held::remove(&path).unwrap();
+            }
+        }
+        source.phase = BackingPhase::Released;
+        source.exit = Some(hex_api::Exit::Code(0));
+        receipt.phase = Phase::Released {
+            identity: Some(identity),
+            status: shards_api::ManagedStatus::Code(0),
+        };
+        pool::write(&definition.path, &receipt).unwrap();
+        runtime.preflight_backing(&source).unwrap();
+        for phase in [
+            hex_core::record::Phase::Creating,
+            hex_core::record::Phase::Deleting,
+        ] {
+            boxed.phase = phase;
+            assert!(runtime.handoff_unsubmitted(&boxed, &source).is_err());
+        }
+        assert!(runtime.preflight_box(&boxed).is_err());
+        assert_eq!(boxed.spec.devices.len(), 1);
+        assert_eq!(source.devices.len(), 2);
+        assert_eq!(source.allocation, Some(allocation));
+        assert_eq!(standalone.0.load(Ordering::SeqCst), 0);
+        assert!(runtime.dedicated.lock().unwrap().is_empty());
+    }
+
     struct Cold {
         row: Mutex<Option<PoolRecord>>,
         effects: AtomicUsize,
