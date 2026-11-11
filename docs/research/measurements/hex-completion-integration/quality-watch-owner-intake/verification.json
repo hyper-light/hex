@@ -1,0 +1,55 @@
+{
+  "quality": {
+    "revision": "30d588ca59bac86949828d44ef27eb52598eecdf",
+    "ported_production_blocks": {
+      "crates/hex-sim/src/model.rs:pub struct GpuLoad {": "9aa0a81431608d45a6790c0b2137c1ccce70ffe4239b1f397abe777e1d3ab6c2",
+      "crates/hex-sim/src/model.rs:impl Device {": "48b2111ea0c03eec77026a469eb27978020b1248f1a9bb79ba2f8238b3751594",
+      "crates/hex-sim/src/model.rs:pub fn bind(": "4c9bae402d0356d0d1e9c09a359f4d890471a474c5b1e59a7db5d9e67a9ea4c5",
+      "crates/hex-sim/src/model.rs:pub fn matches(": "7f1cb0acc9e00b87b24fe41881bb540a965d6858a0c4efa52bbcda95680bb728",
+      "crates/hex-sim/src/index.rs:fn gpu_busy(": "7d9653629dea54e84f2eb0b2f037ba770837122bcc4d5c4da254a5753bd97915",
+      "crates/hex-sim/src/index.rs:fn gpu_idle(": "ae42d1b0cfd9bb820b9c07d897d932ac93ce55ced0806d98e3ef7768fcd05b42",
+      "crates/hex-node/src/facts.rs:pub fn gpu_facts(": "7637a7c61c607a1b045ac20d69e344cddaef251d65ec5f357e22fa935b5ead04"
+    },
+    "green": {
+      "test": "device_offer_tests::unread_native_counters_never_become_a_fresh_idle_free_offer",
+      "cargo_pid": 45472,
+      "exit": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 12,
+      "selected": "None",
+      "log_sha256": "a56bb3d4d9d26f871b26465c17dfd7c9e34220b882dd84f4b5ecfb22cea7a7d6",
+      "binary_sha256": "0c7857195899917f78fe0b4b0b4bd606ce23150040480f03e39479103f719fe4"
+    },
+    "retained_cpu": {
+      "test": "index::tests::unread_gpu_load_preserves_held_identity_and_independent_cpu_progress",
+      "cargo_pid": 47992,
+      "exit": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 170,
+      "log_sha256": "eec27bb7c78f062c18262b9aedbe3b05ff69ff3c80de98afcbc115ebfa574698",
+      "binary_sha256": "3761a35a17900c58262b400e69a959fd6918e02d6c52d32061debb6ff08d2a1b",
+      "source_index_sha256": "bb13d9b1bc4b9efe1387e5423a7a67f3f107362e52e65672ff7fd660e7ff75ff",
+      "workspace_lock_sha256": "928ec4cd4766e999746f50810eb4e0ad0cc9322ba70a5344e16c9bdccfb47a25"
+    },
+    "source_manifest_files": 10
+  },
+  "watch": {
+    "revision": "057ddc2e917629922578eb9418b69113c800f09d",
+    "cohort_root": "c3bd27e84680ee4d587c5be374b361a567f2419f plus exact6efa core record/watch and recorded cohort metadata",
+    "all_git_input_hashes_verified": 2191,
+    "units": [
+      29,
+      0,
+      0
+    ],
+    "strict_core_lib_clippy": 0,
+    "remote_source_after_unchanged": "signed collector reports true; no retained independent after-manifest in this bundle",
+    "children_reaped": true,
+    "temp_entries": 0
+  },
+  "limit": "Original source-specific pure checks only. No new tests, native GPU/VM/HCS, fault injection, mutations or new joined source gate performed by intake."
+}
