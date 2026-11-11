@@ -1,7 +1,9 @@
-//! A node's descriptors (AC-T7.1.1): a node embedded in a process starts within that process's descriptor limit,
-//! holding its own descriptors at its pools' bounds, or is refused at its start. The root lab of 2026-11-11 ran a
-//! node in a container whose soft limit was 2048 of a 2,097,152 hard one: it ran out at its namespaces' refill
-//! (EMFILE) and a create failed, where `hex node` alone had raised its soft limit to its hard one.
+//! A node's descriptors (AC-T7.1.1): a node embedded in a process starts within that process's descriptor limit. Its
+//! start raises the soft limit to the hard one, derives every bound that holds descriptors from what that leaves, so
+//! its own fit by construction and what it admits past them is refused by type, and refuses to start only where the
+//! hard limit can't hold the least node (one box and one connection). The root lab of 2026-11-11 ran a node in a
+//! container whose soft limit was 2048 of a 2,097,152 hard one: it ran out at its namespaces' refill (EMFILE) and a
+//! create failed, where `hex node` alone had raised its soft limit to its hard one.
 //!
 //! It needs a cgroup v2 subtree the test owns, with cpu, io, memory and pids delegated, to start nodes in. Where this
 //! binary's own cgroup is delegated to it alone (HEX_DELEGATED's runner), it uses it; where it is shared, it re-runs
@@ -20,22 +22,31 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Program, Refusal, Runtime, Signal, Stdio};
 use hex_node::Node;
 use hex_node::netns::{FilesBound, Pools, open_descriptors};
 use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 
 const TEST: &str = "a_node_starting_under_a_low_descriptor_limit_holds_its_own_or_refuses_typed";
 /// Set in the copy of this binary re-run to start a node under a lowered descriptor limit: `soft` lowers the soft
-/// limit alone, `hard` the hard one with it.
+/// limit alone; `hard` the hard one with it, to [`FIT`]; `least` both to just past what the copy holds already.
 const MODE_ENV: &str = "HEX_NODE_DESCRIPTORS_MODE";
 const PASS: &str = "low descriptor limit: the node's start held its own or refused";
 /// The root lab's container's soft limit (the fedora image's), under which an embedded node ran out mid-refill.
 const LOW: u64 = 2048;
+/// A hard limit far under a node's own at its memory-derived bounds (hundreds of thousands on these hosts) and past the
+/// least node's: its fitted budget is a few dozen programs, which the case runs to the end of.
+const FIT: u64 = 256;
+/// What the least case leaves past the descriptors the copy holds as it lowers its limit: room for the node's start
+/// to open what it opens before it fits its bounds (its box root, store, keeper and key), never for the least node,
+/// whose one box, seed, exec seed, init, device program and pruned namespace hold 11 descriptors past those held.
+const LEAST_ROOM: u64 = 8;
 
-/// AC-T7.1.1. Do: start a node in a process whose soft descriptor limit is 2048 and its hard one as given; then in one
-/// whose hard limit is 2048 too. Expect: the first node's start raises the soft limit to the hard one its sizes count
-/// on, which holds its own descriptors at its pools' bounds; the second's start is refused by type, naming the hard
-/// limit, never failing calls at random later.
+/// AC-T7.1.1. Do: start a node in a process whose soft descriptor limit is 2048 and its hard one as given; in one whose
+/// hard limit is 256, then run programs in it until one is refused; in one whose hard limit leaves less than the least
+/// node needs. Expect: the first start raises the soft limit to the hard one; the second starts with bounds that fit
+/// that limit and refuses the run past its budget by type, never EMFILE; the third start is refused by type, naming
+/// the hard limit.
 #[test]
 fn a_node_starting_under_a_low_descriptor_limit_holds_its_own_or_refuses_typed() {
     if let Some(mode) = std::env::var_os(MODE_ENV) {
@@ -66,7 +77,7 @@ fn a_node_starting_under_a_low_descriptor_limit_holds_its_own_or_refuses_typed()
             return;
         }
     };
-    for mode in ["soft", "hard"] {
+    for mode in ["soft", "hard", "least"] {
         // Each copy alone in a fresh cgroup of its own, written before exec, as its node subdivides it.
         let own = parent.join(format!("hex-nofile-{mode}-{}", std::process::id()));
         std::fs::create_dir(&own).expect("a fresh cgroup for the copy");
@@ -100,19 +111,22 @@ fn a_node_starting_under_a_low_descriptor_limit_holds_its_own_or_refuses_typed()
 /// The copy's half: lower this process's descriptor limit as `mode` says, start a node in this copy's own cgroup, and
 /// hold it to what its start must do.
 fn start_under_a_low_limit(mode: &str) {
-    let hard = getrlimit(Resource::Nofile)
-        .maximum
-        .expect("a finite hard descriptor limit");
-    let low = LOW.min(hard);
-    let maximum = match mode {
-        "soft" => hard,
-        "hard" => low,
+    let given = getrlimit(Resource::Nofile);
+    let hard = given.maximum.expect("a finite hard descriptor limit");
+    let held = open_descriptors(&given).expect("this process's descriptors");
+    let (soft, maximum) = match mode {
+        "soft" => (LOW.min(hard), hard),
+        "hard" => (FIT.min(hard), FIT.min(hard)),
+        "least" => {
+            let least = held + LEAST_ROOM;
+            (least.min(hard), least.min(hard))
+        }
         other => panic!("unknown mode {other}"),
     };
     setrlimit(
         Resource::Nofile,
         Rlimit {
-            current: Some(low),
+            current: Some(soft),
             maximum: Some(maximum),
         },
     )
@@ -123,42 +137,91 @@ fn start_under_a_low_limit(mode: &str) {
         .prefix("nofile-")
         .tempdir_in(&cache)
         .expect("state dir");
-    let needed = FilesBound::needed(
-        Pools::rootless(hex_node::sizes::Sizes::now().expect("this host's sizes")),
-        open_descriptors(&getrlimit(Resource::Nofile)).expect("this process's descriptors"),
-    );
-    assert!(
-        needed.own > low,
-        "the case needs a node whose own descriptors exceed {low}: {needed:?}"
-    );
     let opened = Node::open(&own.join("hex-boxes-nofile"), state.path(), state.path());
-    let limit = getrlimit(Resource::Nofile);
-    if mode == "soft" {
-        assert!(opened.is_ok(), "the node's start: {:?}", opened.err());
-        assert_eq!(
-            limit.current,
-            Some(hard),
-            "the start raised its soft limit to the hard one"
-        );
-        assert!(
-            limit.current.is_some_and(|soft| soft >= needed.own),
-            "{limit:?} holds the node's own {} descriptors",
-            needed.own
-        );
-    } else {
-        match opened {
-            Err(hex_api::Refusal::Platform { why, .. }) => assert!(
-                why.contains(&format!("hard limit of {low}")),
+    match mode {
+        "soft" => {
+            let needed = FilesBound::needed(
+                Pools::rootless(hex_node::sizes::Sizes::now().expect("this host's sizes")),
+                held,
+            );
+            assert!(opened.is_ok(), "the node's start: {:?}", opened.err());
+            let limit = getrlimit(Resource::Nofile);
+            assert_eq!(
+                limit.current,
+                Some(hard),
+                "the start raised its soft limit to the hard one"
+            );
+            assert!(
+                limit.current.is_some_and(|soft| soft >= needed.own),
+                "{limit:?} holds the node's own {} descriptors",
+                needed.own
+            );
+        }
+        "hard" => {
+            let node = opened.expect("a node whose bounds fit its hard limit starts");
+            runs_past_the_budget_are_refused(&node, maximum);
+        }
+        _ => match opened {
+            Err(Refusal::Platform { why, .. }) => assert!(
+                why.contains(&format!("hard limit of {maximum}")),
                 "the refusal names the hard limit: {why}"
             ),
             Err(other) => panic!("refused, but not for its descriptors: {other}"),
             Ok(_) => panic!(
-                "a node whose own {} descriptors exceed the hard limit {low} started",
-                needed.own
+                "a node started under a hard limit of {maximum}, past which it can hold no box"
             ),
-        }
+        },
     }
     eprintln!("{PASS}");
+}
+
+/// Runs a program in a box of its own, each held, until the node refuses one: the refusal is its budget's, by type,
+/// at the budget its start fitted to the limit, and the descriptors held stay within the limit.
+fn runs_past_the_budget_are_refused(node: &Node, hard: u64) {
+    let budget = node.sizes().inits;
+    assert!(
+        budget < hex_runtime::MAX_BOXES,
+        "the budget fits the limit: {budget}"
+    );
+    let program = Program::of(&[env!("CARGO_BIN_EXE_hex"), "selftest-box", "wait"]);
+    let mut ran = Vec::new();
+    let refused = loop {
+        assert!(
+            ran.len() <= budget,
+            "{} runs past a budget of {budget}",
+            ran.len()
+        );
+        let id = BoxId::new(&format!("nofile-{}", ran.len())).unwrap();
+        let spec = BoxSpec {
+            route: None,
+            allocation: None,
+            devices: Vec::new(),
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Process,
+            owner: None,
+        };
+        match node.run(spec, program.clone(), Stdio::null()) {
+            Ok(proc) => ran.push((id, proc)),
+            Err(refusal) => break refusal,
+        }
+    };
+    let held = open_descriptors(&getrlimit(Resource::Nofile)).expect("the node's descriptors");
+    let count = ran.len();
+    for (id, proc) in ran {
+        let _ = node.signal(&id, Signal::KILL);
+        drop(proc);
+        node.delete(&id).expect("deleting a run's box");
+    }
+    assert!(
+        matches!(&refused, Refusal::Exhausted { bound, .. } if *bound == budget),
+        "the run past the budget is refused by its budget, by type: {refused}"
+    );
+    assert_eq!(count, budget, "every run within the budget ran");
+    assert!(
+        held < hard,
+        "{held} descriptors held within the hard limit of {hard}"
+    );
 }
 
 fn have_systemd() -> bool {
