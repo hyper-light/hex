@@ -111,6 +111,17 @@ pub trait Recover: Runtime {
         Ok(Vec::new())
     }
 
+    /// Register a weak view of the SAME canonical owner after the existing Recorded Arc exists.
+    /// A native persistent owner may read records/pools for its restart fence, never capacity or
+    /// callbacks; a runtime without one keeps nothing.
+    fn bind_native_books(
+        &self,
+        books: std::sync::Weak<dyn hex_runtime::devices::Books>,
+    ) -> Result<(), Refusal> {
+        let _ = books;
+        Ok(())
+    }
+
     /// A pending/cancelled source handoff has no boot Intent. This is metadata validation only,
     /// never scope termination, permission to adopt a Guest, or release from absence alone.
     fn handoff_unsubmitted(&self, record: &BoxRecord, pool: &PoolRecord) -> Result<(), Refusal> {
@@ -1636,6 +1647,16 @@ impl<R: Recover> Recorded<R> {
     /// names: a record made is the box, whatever runs in it now, so it is taken back; one being made or
     /// removed when the node stopped is removed, with what its record names ended. Safe to call again after
     /// a crash during it: ending a box tolerates its processes being gone already.
+    /// After the caller's one Arc, give the native owner a weak view of this SAME authority, as
+    /// [`Recorded::bind_guest_books`] does for a host beside its guest. No second owner is made.
+    pub fn bind_native_books(self: &Arc<Self>) -> Result<(), Refusal>
+    where
+        R: 'static,
+    {
+        let authority: Arc<dyn hex_runtime::devices::Books> = self.clone();
+        self.runtime.bind_native_books(Arc::downgrade(&authority))
+    }
+
     pub fn recover(&self) -> Result<RecoverySummary, Refusal> {
         let records = self.preflight_snapshot()?;
         self.runtime.initialize_native()?;
@@ -1742,7 +1763,9 @@ impl<P: Recover + 'static> Recorded<hex_runtime::guest::WithGuest<P>> {
     /// The guest holds no strong back-reference and no second Store/holder owner is created.
     pub fn bind_guest_books(self: &Arc<Self>) -> Result<(), Refusal> {
         let authority: Arc<dyn hex_runtime::devices::Books> = self.clone();
-        self.runtime.guest().bind_books(Arc::downgrade(&authority))
+        let weak = Arc::downgrade(&authority);
+        self.runtime.host().bind_native_books(weak.clone())?;
+        self.runtime.guest().bind_books(weak)
     }
 
     /// Publish only the configured shared backing after the complete retained-owner preflight.
@@ -2112,6 +2135,12 @@ impl<R: Recover> Host for Recorded<R> {
 /// time (`proc_pid_rusage`'s Mach absolute time, in [`ProcId::start_ticks`]).
 #[cfg(target_os = "macos")]
 impl Recover for hex_runtime::macos::MacRuntime {
+    fn bind_native_books(
+        &self,
+        books: std::sync::Weak<dyn hex_runtime::devices::Books>,
+    ) -> Result<(), Refusal> {
+        hex_runtime::macos::MacRuntime::bind_native_books(self, books)
+    }
     fn project_routes(
         &self,
         pools: &[PoolRecord],
@@ -2380,7 +2409,19 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
         records: &hex_runtime::devices::Records,
         pools: &[PoolRecord],
     ) -> Result<(), Refusal> {
-        self.host().preflight_retained(records, pools)
+        self.host().preflight_retained(records, pools)?;
+        // The guest's own receipts join the same cohort: one whose name no retained guest-routed
+        // record carries is an orphan, its native scope nobody else's to find (AC-T7.4.1).
+        for id in self.guest().receipt_ids()? {
+            let record = records
+                .get(&id)
+                .and_then(|record| record.as_ref().ok())
+                .ok_or_else(|| uncertain(&id))?;
+            if self.route_for(&record.spec)? != hex_runtime::guest::Side::Guest {
+                return Err(uncertain(&id));
+            }
+        }
+        Ok(())
     }
 
     fn initialize_native(&self) -> Result<(), Refusal> {
@@ -2785,13 +2826,32 @@ mod macos_unsubmitted_tests {
         RouteReceipt, RuntimeCost,
     };
 
-    fn runtime() -> hex_runtime::macos::MacRuntime {
+    /// A launch-capable host: the row's measured cost identity (the response is a test fixture,
+    /// no enforcement conclusion) and its persistent helper's private paths in `dir`. Configuring
+    /// them starts and reads nothing.
+    fn runtime(dir: &Path) -> hex_runtime::macos::MacRuntime {
+        std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
         let model = hex_runtime::macos::machine_model().unwrap();
         let rates = hex_core::watch::seed(&model);
         hex_runtime::macos::MacRuntime::new(
             rates.bytes,
             rates.processes,
             hex_core::watch::lateness_seed(&model),
+        )
+        .unwrap()
+        .with_cpu_control(hex_runtime::macos::CpuControl {
+            cost_id: [0x91; 32],
+            response: std::time::Duration::from_nanos(1),
+        })
+        .unwrap()
+        .with_managed_helper(
+            hex_runtime::macos::ManagedHelper::new(
+                dir.join("hex"),
+                dir.join("helper.sock"),
+                dir.join("helper.receipt"),
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap(),
         )
         .unwrap()
     }
@@ -2866,7 +2926,7 @@ mod macos_unsubmitted_tests {
     #[test]
     fn original_macos_pending_handoff_with_no_native_slot_passes_the_host_half() {
         let root = tempfile::tempdir().unwrap();
-        let native = runtime();
+        let native = runtime(root.path());
         let mut record = pending(root.path());
         assert!(native.list().unwrap().is_empty());
         let proved = Recover::preflight_unsubmitted(&native, &record);

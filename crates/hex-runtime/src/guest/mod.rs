@@ -59,7 +59,8 @@ fn evented_owner(client: Client) -> Result<EventedClient, Refusal> {
 }
 
 pub use cost::{
-    ENV_COST_EVIDENCE, ENV_COST_FILE, ENV_COST_SHA256, GuestInputs, load_runtime_cost,
+    CpuResponse, ENV_COST_EVIDENCE, ENV_COST_FILE, ENV_COST_SHA256, GuestInputs,
+    cpu_response_section, cpu_response_split, load_runtime_cost, load_runtime_evidence,
     load_runtime_inputs,
 };
 
@@ -640,6 +641,12 @@ impl GuestRuntime {
                 held::remove(path)
             }
         }
+    }
+
+    /// The boxes this guest keeps a selected receipt for, by name: what the node's startup barrier
+    /// joins to its retained records (AC-T7.4.1). Reads the receipt folder's names only.
+    pub fn receipt_ids(&self) -> Result<Vec<BoxId>, Refusal> {
+        self.selected_ids()
     }
 
     /// Joins the guest's control connection, in the event form, to the node's loop through `joins`, and

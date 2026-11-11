@@ -302,6 +302,47 @@ impl Needed {
     }
 }
 
+/// A node's start within its descriptor limit, whatever process it runs in, `hex node` or an embedding: the soft
+/// limit raised to the hard one its sizes count on ([`crate::sizes::Host::descriptors`]), as a process may (setrlimit(2)),
+/// and the start refused by type where even that can't hold the node's own descriptors at its pools' bounds
+/// ([`FilesBound::needed`]'s `own`), which would otherwise run out wherever its pools reached the limit, EMFILE in
+/// whichever call came next. The kept namespaces' files need not fit: [`FilesBound::of`] bounds them by what is left.
+pub fn hold_descriptors(pools: Pools) -> Result<(), Refusal> {
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+    let given = getrlimit(Resource::Nofile);
+    if let (Some(soft), Some(hard)) = (given.current, given.maximum)
+        && soft < hard
+    {
+        setrlimit(
+            Resource::Nofile,
+            Rlimit {
+                current: Some(hard),
+                maximum: Some(hard),
+            },
+        )
+        .map_err(|e| Refusal::os("raising the descriptor limit to its hard one", e))?;
+    }
+    let limit = getrlimit(Resource::Nofile);
+    let needed = FilesBound::needed(pools, open_descriptors(&limit)?);
+    let shown = |n: Option<u64>| n.map_or_else(|| "unlimited".to_owned(), |n| n.to_string());
+    match limit.current {
+        Some(soft) if needed.own > soft => Err(Refusal::Platform {
+            what: "a node within its descriptor limit",
+            platform: "linux",
+            why: format!(
+                "its own {} descriptors at its pools' bounds exceed RLIMIT_NOFILE: the hard limit of {}, its soft one \
+                 raised to {soft} from {} as given; give its service LimitNOFILE={} or more, as `hex node --descriptors` \
+                 says",
+                needed.own,
+                shown(limit.maximum),
+                shown(given.current),
+                needed.total()
+            ),
+        }),
+        _ => Ok(()),
+    }
+}
+
 /// How many descriptors this process holds now: the entries of `/proc/self/fd` (proc(5)), less the one the
 /// listing itself opens. The listing ends within the soft limit's entries, since no process holds more
 /// (getrlimit(2), `RLIMIT_NOFILE`), and refuses by type past it. Linux's alone, as this module is: macOS

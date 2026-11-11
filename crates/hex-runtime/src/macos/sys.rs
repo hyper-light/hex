@@ -287,6 +287,16 @@ fn list_pids(flavor: u32, arg: u32, pids: &mut Vec<i32>) -> io::Result<bool> {
 /// node's own cost, for the class bench to charge a box's watcher (bench/native/macos) and for
 /// observability (CLAUDE.md §10).
 pub fn process_cpu() -> io::Result<Duration> {
+    let ru = own_rusage()?;
+    let secs = |tv: libc::timeval| {
+        let s = u64::try_from(tv.tv_sec).unwrap_or(0);
+        let us = u64::try_from(tv.tv_usec).unwrap_or(0);
+        Duration::from_secs(s).saturating_add(Duration::from_micros(us))
+    };
+    Ok(secs(ru.ru_utime).saturating_add(secs(ru.ru_stime)))
+}
+
+fn own_rusage() -> io::Result<libc::rusage> {
     let mut ru = MaybeUninit::<libc::rusage>::zeroed();
     // SAFETY: getrusage writes one `rusage` into the buffer given, which is zeroed and outlives the call.
     let r = unsafe { libc::getrusage(libc::RUSAGE_SELF, ru.as_mut_ptr()) };
@@ -294,13 +304,73 @@ pub fn process_cpu() -> io::Result<Duration> {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: zeroed and written by the kernel on success; every field is an integer, so any bytes are valid.
-    let ru = unsafe { ru.assume_init() };
-    let secs = |tv: libc::timeval| {
-        let s = u64::try_from(tv.tv_sec).unwrap_or(0);
-        let us = u64::try_from(tv.tv_usec).unwrap_or(0);
-        Duration::from_secs(s).saturating_add(Duration::from_micros(us))
+    Ok(unsafe { ru.assume_init() })
+}
+
+/// Managed CPU credit cannot turn a malformed/overflowing required counter into free CPU room.
+pub(super) fn managed_process_cpu() -> io::Result<Duration> {
+    let ru = own_rusage()?;
+    checked_process_cpu(ru.ru_utime, ru.ru_stime)
+}
+
+fn checked_process_cpu(user: libc::timeval, system: libc::timeval) -> io::Result<Duration> {
+    let part = |value: libc::timeval| -> io::Result<Duration> {
+        let seconds = u64::try_from(value.tv_sec).map_err(|_| io::ErrorKind::InvalidData)?;
+        let micros = u64::try_from(value.tv_usec).map_err(|_| io::ErrorKind::InvalidData)?;
+        // timeval's fractional field is microseconds in one second, not an unbounded counter.
+        if micros >= 1_000_000 {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Duration::from_secs(seconds)
+            .checked_add(Duration::from_micros(micros))
+            .ok_or_else(|| io::ErrorKind::InvalidData.into())
     };
-    Ok(secs(ru.ru_utime).saturating_add(secs(ru.ru_stime)))
+    part(user)?
+        .checked_add(part(system)?)
+        .ok_or_else(|| io::ErrorKind::InvalidData.into())
+}
+
+#[cfg(test)]
+mod managed_cpu_counter_tests {
+    use super::*;
+
+    /// AC-T7.4.1: required user/system CPU values cannot manufacture free credit on malformed input.
+    #[test]
+    fn required_cpu_counters_refuse_bad_fields_and_sum_both_thread_totals() {
+        let valid = libc::timeval {
+            tv_sec: 1,
+            tv_usec: 750_000,
+        };
+        let other = libc::timeval {
+            tv_sec: 2,
+            tv_usec: 250_000,
+        };
+        assert_eq!(
+            checked_process_cpu(valid, other).unwrap(),
+            Duration::from_secs(4)
+        );
+        for malformed in [
+            libc::timeval {
+                tv_sec: -1,
+                tv_usec: 0,
+            },
+            libc::timeval {
+                tv_sec: 0,
+                tv_usec: -1,
+            },
+            libc::timeval {
+                tv_sec: 0,
+                tv_usec: 1_000_000,
+            },
+        ] {
+            for (user, system) in [(valid, malformed), (malformed, other)] {
+                assert_eq!(
+                    checked_process_cpu(user, system).unwrap_err().kind(),
+                    io::ErrorKind::InvalidData
+                );
+            }
+        }
+    }
 }
 
 /// The system's 1-minute load average (`getloadavg(3)`), for a bench to record the host's load with its
@@ -426,6 +496,15 @@ unsafe extern "C" {
     fn posix_spawnattr_set_qos_class_np(attr: *mut libc::posix_spawnattr_t, qos: u32) -> c_int;
 }
 
+// SAFETY: pinned libsyscall's spawn implementation declares this initialized file-actions pointer
+// and scalar descriptor. PSFA_INHERIT clears the child's CLOEXEC and marks that exact fd inherited.
+unsafe extern "C" {
+    fn posix_spawn_file_actions_addinherit_np(
+        actions: *mut libc::posix_spawn_file_actions_t,
+        fd: c_int,
+    ) -> c_int;
+}
+
 // SAFETY: declared as `spawn_private.h` declares it ("All memory limits are in MiB."): it writes a
 // per-process jetsam memory limit into the spawn attribute and returns 0 or an errno. The symbol is
 // exported from libsystem_kernel.dylib (`_posix_spawnattr_setjetsam_ext`); the macOS 26 CommandLineTools
@@ -502,6 +581,10 @@ pub struct Spawn {
     pub cwd: Option<CString>,
     /// stdin, stdout and stderr: each is dup2'd onto 0, 1 and 2, and nothing else is inherited.
     pub stdio: [OwnedFd; 3],
+    /// Only the actual final launcher-owned descriptors are carried beyond stdio. Their numeric
+    /// argv suffixes are rendered after transfer/duplication; neither is a parent-side raw value.
+    pub report: Option<OwnedFd>,
+    pub lifeline: Option<OwnedFd>,
     /// The box's whole memory bound in MiB, when it has one: each spawned member is armed with a fatal
     /// per-process cap at it (native plan step 1's `_ext` backstop), so the kernel bounds a single-member
     /// box with no overshoot. `None` leaves the member uncapped (the watcher's rule bounds the box).
@@ -657,6 +740,16 @@ impl PreparedSpawn {
                     target,
                 )
             })?;
+        }
+        for fd in [&s.report, &s.lifeline].into_iter().flatten() {
+            let raw = fd.as_fd().as_raw_fd();
+            if raw < 3 {
+                return Err(io::Error::from(io::ErrorKind::InvalidInput));
+            }
+            // SAFETY: fd is owned by Spawn throughout launch. This explicit action clears CLOEXEC only
+            // in the child and marks the same numeric target inherited (pinned exec_handle_file_actions
+            // PSFA_INHERIT); the parent's CLOEXEC stays set and no unused pipe end is carried.
+            errno(unsafe { posix_spawn_file_actions_addinherit_np(&raw mut actions.0, raw) })?;
         }
         if let Some(cwd) = &s.cwd {
             // SAFETY: records a chdir to a NUL-terminated path the action list copies. The `_np` form is the one
@@ -1027,6 +1120,408 @@ pub fn peer_euid(fd: impl AsFd) -> io::Result<u32> {
     Ok(uid)
 }
 
+/// A failed/invalid clock observation cannot grant a new native deadline.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum UptimeFailure {
+    #[error("CLOCK_UPTIME_RAW failed: {0}")]
+    Native(#[source] io::Error),
+    #[error("CLOCK_UPTIME_RAW returned negative/unrepresentable seconds {0}")]
+    Seconds(libc::time_t),
+    #[error("CLOCK_UPTIME_RAW returned invalid nanoseconds {0}")]
+    Nanoseconds(libc::c_long),
+    #[error("CLOCK_UPTIME_RAW duration overflow")]
+    Overflow,
+}
+
+/// Rust 1.99.1 Instant uses CLOCK_UPTIME_RAW on Apple. Use the SAME native clock to
+/// transfer an absolute expiry between node and helper; no cross-clock rebase or tolerance.
+pub(crate) fn uptime_raw() -> Result<Duration, UptimeFailure> {
+    let mut value = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: the fixed native clock is read-only. The fully initialized timespec is live and
+    // writable for exactly its ABI extent; errno is read only after the call reports failure.
+    if unsafe { libc::clock_gettime(libc::CLOCK_UPTIME_RAW, &raw mut value) } != 0 {
+        return Err(UptimeFailure::Native(io::Error::last_os_error()));
+    }
+    checked_uptime(value)
+}
+fn checked_uptime(value: libc::timespec) -> Result<Duration, UptimeFailure> {
+    let seconds = u64::try_from(value.tv_sec).map_err(|_| UptimeFailure::Seconds(value.tv_sec))?;
+    if !(0..1_000_000_000).contains(&value.tv_nsec) {
+        return Err(UptimeFailure::Nanoseconds(value.tv_nsec));
+    }
+    let nanos =
+        u64::try_from(value.tv_nsec).map_err(|_| UptimeFailure::Nanoseconds(value.tv_nsec))?;
+    Duration::from_secs(seconds)
+        .checked_add(Duration::from_nanos(nanos))
+        .ok_or(UptimeFailure::Overflow)
+}
+
+#[cfg(test)]
+mod uptime_controls {
+    use super::*;
+    /// AC-T7.4.1/R01: invalid native counters cannot normalize into a later transferred deadline.
+    #[test]
+    fn invalid_native_uptime_never_extends_an_expiry() {
+        assert!(matches!(
+            checked_uptime(libc::timespec {
+                tv_sec: -1,
+                tv_nsec: 0
+            }),
+            Err(UptimeFailure::Seconds(-1))
+        ));
+        for nanos in [-1, 1_000_000_000] {
+            assert!(matches!(
+                checked_uptime(libc::timespec {
+                    tv_sec: 1,
+                    tv_nsec: nanos
+                }),
+                Err(UptimeFailure::Nanoseconds(_))
+            ));
+        }
+        assert_eq!(
+            checked_uptime(libc::timespec {
+                tv_sec: 2,
+                tv_nsec: 999_999_999
+            })
+            .unwrap(),
+            Duration::new(2, 999_999_999)
+        );
+        assert_eq!(
+            checked_uptime(libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0
+            })
+            .unwrap(),
+            Duration::ZERO
+        );
+    }
+}
+
+/// A peer PID query failure is not an absent or released native scope.
+#[derive(Debug, thiserror::Error)]
+pub enum PeerPidFailure {
+    #[error("LOCAL_PEERPID failed: {0}")]
+    Native(#[source] io::Error),
+    #[error("LOCAL_PEERPID length cannot represent pid_t")]
+    LengthUnrepresentable,
+    #[error("LOCAL_PEERPID returned {got} bytes, expected {expected}")]
+    Length {
+        got: libc::socklen_t,
+        expected: libc::socklen_t,
+    },
+    #[error("LOCAL_PEERPID returned nonpositive PID {0}")]
+    Nonpositive(libc::pid_t),
+}
+
+/// The connected peer socket's last PID, not a birth or ownership proof (XNU f6217f891ac0,
+/// bsd/kern/uipc_usrreq.c uipc_ctloutput). Join with same UID, recorded birth, live helper and the
+/// exact scope/commitment before any control; a disconnected peer is refused by the native query.
+pub fn peer_pid(fd: impl AsFd) -> Result<libc::pid_t, PeerPidFailure> {
+    let expected = libc::socklen_t::try_from(size_of::<libc::pid_t>())
+        .map_err(|_| PeerPidFailure::LengthUnrepresentable)?;
+    let mut length = expected;
+    let mut pid: libc::pid_t = 0;
+    // SAFETY: fd is borrowed for the call; getsockopt reads no option input and writes at most
+    // length (the initialized size of pid) bytes to pid, and the actual length to its live scalar.
+    let result = unsafe {
+        libc::getsockopt(
+            fd.as_fd().as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&raw mut pid).cast::<c_void>(),
+            &raw mut length,
+        )
+    };
+    if result != 0 {
+        return Err(PeerPidFailure::Native(io::Error::last_os_error()));
+    }
+    if length != expected {
+        return Err(PeerPidFailure::Length {
+            got: length,
+            expected,
+        });
+    }
+    if pid <= 0 {
+        return Err(PeerPidFailure::Nonpositive(pid));
+    }
+    Ok(pid)
+}
+
+// XNU f6217f891ac0 mach/message.h and mach/task_info.h: audit_token_t is eight
+// unsigned words; TASK_AUDIT_TOKEN is flavor 15 and returns that many natural_t words.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct AuditToken {
+    words: [u32; 8],
+}
+const TASK_AUDIT_TOKEN: libc::task_flavor_t = 15;
+
+// SAFETY: declarations match pinned mach/task.h, mach/mach_port.h and libproc.h.
+// All pointers name live caller-owned scalars; proc_signal_with_audittoken returns errno directly.
+unsafe extern "C" {
+    fn mach_task_self() -> libc::mach_port_t;
+    fn task_name_for_pid(
+        task: libc::mach_port_t,
+        pid: libc::pid_t,
+        name: *mut libc::mach_port_t,
+    ) -> libc::kern_return_t;
+    fn mach_port_deallocate(
+        task: libc::mach_port_t,
+        name: libc::mach_port_t,
+    ) -> libc::kern_return_t;
+}
+
+// SAFETY: pinned libproc.h declares one audit_token_t input and signal; the direct return is errno.
+#[link(name = "proc")]
+unsafe extern "C" {
+    fn proc_signal_with_audittoken(token: *mut AuditToken, signal: c_int) -> c_int;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(super) enum TokenFailure {
+    #[error("native member identity is not positive")]
+    InvalidIdentity,
+    #[error("{operation} failed with errno {code:?}, kind {kind:?}")]
+    Io {
+        operation: &'static str,
+        code: Option<i32>,
+        kind: io::ErrorKind,
+    },
+    #[error("native member birth changed or is unavailable (observed {observed:?})")]
+    Changed { observed: Option<u64> },
+    #[error("{operation} failed with Mach status {code}")]
+    Mach {
+        operation: &'static str,
+        code: libc::kern_return_t,
+    },
+    #[error("task audit query failed {query}, and owned right release failed {release}")]
+    QueryAndRelease {
+        query: libc::kern_return_t,
+        release: libc::kern_return_t,
+    },
+    #[error("native task audit token returned {got} words, expected {expected}")]
+    Length {
+        got: libc::mach_msg_type_number_t,
+        expected: libc::mach_msg_type_number_t,
+    },
+    #[error("task-name query returned no owned right")]
+    NoRight,
+}
+
+fn token_io(operation: &'static str, error: io::Error) -> TokenFailure {
+    TokenFailure::Io {
+        operation,
+        code: error.raw_os_error(),
+        kind: error.kind(),
+    }
+}
+
+/// A genuine native incarnation retained in the SAME Hold entry; no public token constructor.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct MemberToken {
+    pid: i32,
+    birth: u64,
+    token: AuditToken,
+}
+impl std::fmt::Debug for MemberToken {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output
+            .debug_struct("MemberToken")
+            .field("pid", &self.pid)
+            .field("birth", &self.birth)
+            .finish_non_exhaustive()
+    }
+}
+impl MemberToken {
+    pub(super) fn pid(&self) -> i32 {
+        self.pid
+    }
+    pub(super) fn birth(&self) -> u64 {
+        self.birth
+    }
+}
+
+fn member_birth(pid: i32, expected: u64) -> Result<(), TokenFailure> {
+    let actual = rusage(pid).map_err(|error| token_io("reading native member birth", error))?;
+    if actual.is_none_or(|usage| usage.started != expected || usage.ended) {
+        return Err(TokenFailure::Changed {
+            observed: actual.map(|usage| usage.started),
+        });
+    }
+    Ok(())
+}
+
+/// Capture only a genuine task-name-derived token, joining the expected PID/birth on both sides.
+/// A task-name port has no task-control rights; the acquired send right is released on every path.
+pub(super) fn capture_member(pid: i32, birth: u64) -> Result<MemberToken, TokenFailure> {
+    join_member_token(pid, birth, || member_birth(pid, birth), || task_audit(pid))
+}
+
+fn join_member_token(
+    pid: i32,
+    birth: u64,
+    mut observe: impl FnMut() -> Result<(), TokenFailure>,
+    capture: impl FnOnce() -> Result<AuditToken, TokenFailure>,
+) -> Result<MemberToken, TokenFailure> {
+    if pid <= 0 || birth == 0 {
+        return Err(TokenFailure::InvalidIdentity);
+    }
+    observe()?;
+    let token = capture()?;
+    observe()?;
+    Ok(MemberToken { pid, birth, token })
+}
+
+fn task_audit(pid: i32) -> Result<AuditToken, TokenFailure> {
+    let mut port: libc::mach_port_t = 0;
+    // SAFETY: mach_task_self names this process's task; task_name_for_pid writes only its live
+    // out-parameter. Success transfers one task-name send right, owned until deallocated below.
+    let status = unsafe { task_name_for_pid(mach_task_self(), pid, &raw mut port) };
+    if status != 0 {
+        return Err(TokenFailure::Mach {
+            operation: "task_name_for_pid",
+            code: status,
+        });
+    }
+    if port == 0 {
+        return Err(TokenFailure::NoRight);
+    }
+    let mut token = AuditToken { words: [0; 8] };
+    let expected: libc::mach_msg_type_number_t = 8;
+    let mut count = expected;
+    // SAFETY: the owned name port authorizes TASK_AUDIT_TOKEN. The initialized output is exactly
+    // eight natural_t words, and count describes its whole writable extent for the MIG call.
+    let query = unsafe {
+        libc::task_info(
+            port,
+            TASK_AUDIT_TOKEN,
+            (&raw mut token).cast::<i32>(),
+            &raw mut count,
+        )
+    };
+    // SAFETY: this is the one task-name send right acquired above; no early return or other
+    // operation transfers/releases it. Its name is not reused by this owner after this call.
+    let release = unsafe { mach_port_deallocate(mach_task_self(), port) };
+    if release != 0 {
+        return Err(TokenFailure::QueryAndRelease { query, release });
+    }
+    if query != 0 {
+        return Err(TokenFailure::Mach {
+            operation: "TASK_AUDIT_TOKEN",
+            code: query,
+        });
+    }
+    if count != expected {
+        return Err(TokenFailure::Length {
+            got: count,
+            expected,
+        });
+    }
+    Ok(token)
+}
+
+#[cfg(test)]
+pub(super) fn simulated_member(pid: i32, birth: u64, version: u32) -> MemberToken {
+    // A pure fake-kernel receipt for adversarial state tests; never sent to a native syscall.
+    join_member_token(
+        pid,
+        birth,
+        || Ok(()),
+        || {
+            Ok(AuditToken {
+                words: [version; 8],
+            })
+        },
+    )
+    .unwrap()
+}
+
+#[cfg(test)]
+mod token_controls {
+    use super::*;
+    use std::cell::Cell;
+
+    /// AC-T7.4.1: a reused/unavailable birth at either observation never produces a native-control
+    /// receipt. Count capture calls to show an invalid initial fact cannot even acquire a task right.
+    #[test]
+    fn member_capture_rejects_reused_birth_before_and_after_genuine_capture() {
+        for failed_at in [0, 1] {
+            let observations = Cell::new(0);
+            let captures = Cell::new(0);
+            let receipt = join_member_token(
+                71,
+                73,
+                || {
+                    let at = observations.get();
+                    observations.set(at + 1);
+                    if at == failed_at {
+                        Err(TokenFailure::Changed { observed: Some(79) })
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    captures.set(captures.get() + 1);
+                    Ok(AuditToken { words: [83; 8] })
+                },
+            );
+            assert!(matches!(
+                receipt,
+                Err(TokenFailure::Changed { observed: Some(79) })
+            ));
+            assert_eq!(captures.get(), failed_at);
+        }
+        let observations = Cell::new(0);
+        assert!(matches!(
+            join_member_token(
+                0,
+                73,
+                || {
+                    observations.set(1);
+                    Ok(())
+                },
+                || Ok(AuditToken { words: [0; 8] })
+            ),
+            Err(TokenFailure::InvalidIdentity)
+        ));
+        assert_eq!(observations.get(), 0);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum MemberSignal {
+    Stop,
+    Continue,
+    Kill,
+}
+
+/// The kernel resolves the token's incarnation and checks signal authority while retaining the
+/// exact proc reference. ESRCH/permission/changed identities remain typed failures, never PID fallback.
+pub(super) fn signal_member(
+    member: &MemberToken,
+    signal: MemberSignal,
+) -> Result<(), TokenFailure> {
+    let mut token = member.token;
+    let signal = match signal {
+        MemberSignal::Stop => libc::SIGSTOP,
+        MemberSignal::Continue => libc::SIGCONT,
+        MemberSignal::Kill => libc::SIGKILL,
+    };
+    // SAFETY: token is a copy of the genuine kernel-produced token in the immutable native Hold
+    // receipt. libproc reads its full fixed ABI extent and forwards only the allowed signal above.
+    let error = unsafe { proc_signal_with_audittoken(&raw mut token, signal) };
+    if error != 0 {
+        return Err(token_io(
+            "proc_signal_with_audittoken",
+            io::Error::from_raw_os_error(error),
+        ));
+    }
+    Ok(())
+}
+
 /// An `EV_SET` (`sys/event.h`), its tag carried in `udata` as a number.
 fn kevent(
     ident: usize,
@@ -1055,7 +1550,9 @@ pub(crate) mod trusted_entry_native {
     use std::os::unix::ffi::OsStringExt as _;
     use std::time::{Duration, Instant};
 
-    use super::{Clamp, Kqueue, PreparedSpawn, Spawn, Start, kevent, rusage};
+    use super::{
+        Clamp, Kqueue, PreparedSpawn, Spawn, Start, UptimeFailure, kevent, rusage, uptime_raw,
+    };
 
     #[derive(Debug, thiserror::Error)]
     pub(crate) enum Error {
@@ -1527,46 +2024,6 @@ pub(crate) mod trusted_entry_native {
                 return Ok(result);
             }
         }
-    }
-
-    /// A failed/invalid clock observation cannot grant a new native deadline.
-    #[derive(Debug, thiserror::Error)]
-    pub(crate) enum UptimeFailure {
-        #[error("CLOCK_UPTIME_RAW failed: {0}")]
-        Native(#[source] io::Error),
-        #[error("CLOCK_UPTIME_RAW returned negative/unrepresentable seconds {0}")]
-        Seconds(libc::time_t),
-        #[error("CLOCK_UPTIME_RAW returned invalid nanoseconds {0}")]
-        Nanoseconds(libc::c_long),
-        #[error("CLOCK_UPTIME_RAW duration overflow")]
-        Overflow,
-    }
-
-    /// Rust 1.99.1 Instant uses CLOCK_UPTIME_RAW on Apple. Use the SAME native clock to
-    /// transfer an absolute expiry between node and helper; no cross-clock rebase or tolerance.
-    pub(crate) fn uptime_raw() -> Result<Duration, UptimeFailure> {
-        let mut value = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        // SAFETY: the fixed native clock is read-only. The fully initialized timespec is live and
-        // writable for exactly its ABI extent; errno is read only after the call reports failure.
-        if unsafe { libc::clock_gettime(libc::CLOCK_UPTIME_RAW, &raw mut value) } != 0 {
-            return Err(UptimeFailure::Native(io::Error::last_os_error()));
-        }
-        checked_uptime(value)
-    }
-    fn checked_uptime(value: libc::timespec) -> Result<Duration, UptimeFailure> {
-        let seconds =
-            u64::try_from(value.tv_sec).map_err(|_| UptimeFailure::Seconds(value.tv_sec))?;
-        if !(0..1_000_000_000).contains(&value.tv_nsec) {
-            return Err(UptimeFailure::Nanoseconds(value.tv_nsec));
-        }
-        let nanos =
-            u64::try_from(value.tv_nsec).map_err(|_| UptimeFailure::Nanoseconds(value.tv_nsec))?;
-        Duration::from_secs(seconds)
-            .checked_add(Duration::from_nanos(nanos))
-            .ok_or(UptimeFailure::Overflow)
     }
 
     // XNU f6217f891ac0 mach/message.h and mach/task_info.h: audit_token_t is eight

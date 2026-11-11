@@ -295,19 +295,21 @@ impl Node {
             .map_err(|e| Refusal::os("making the bundles directory", e))?;
         // A namespace made ahead belongs to the agent's user namespace, so only a node whose
         // containers are in it, a root node's, makes them; a rootless node's containers each have a
-        // user namespace of their own (decision 4). The kept ones hold their files within the descriptor
-        // limit the node was given, never raised, past what both pools hold.
+        // user namespace of their own (decision 4). The kept ones hold their files within the hard descriptor
+        // limit this start raised its soft one to, never past it, beyond what both pools hold.
         // Every pool's bound is derived from this host and its last start's demand, and its size learned from the
         // demand it sees from where the last start peaked (the host's parallelism on a first start), so a restart
         // takes no cold miss the last start had learned past (Ada's rule and the lead's calls, 2026-11-06;
         // crate::sizes).
         let keeper = Keeper::open(state_dir)?;
         let sizes = Sizes::learned(&keeper.base())?;
-        let supervisor = Supervisor::start(root.dir(), store.clone(), sizes.inits)?;
         let pools = match owner {
             Owner::Root => Pools::root(sizes),
             Owner::Rootless { .. } => Pools::rootless(sizes),
         };
+        // Before any thread or pool holds a descriptor: the sizes count on the hard limit (crate::sizes::Host).
+        crate::netns::hold_descriptors(pools)?;
+        let supervisor = Supervisor::start(root.dir(), store.clone(), sizes.inits)?;
         let netns = pool(owner, lacks()?, pools, sizes)?;
         let ipc_uts = IpcUtsPool::learning(sizes.starts.ipc_uts, pools.ipc_uts)?;
         let oci_boxes = BoxRoot::open(&root.dir().join(OCI_BOXES), root.disks().to_vec())?;
