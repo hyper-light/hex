@@ -29,6 +29,22 @@ fn have_systemd() -> bool {
         .unwrap_or(false)
 }
 
+/// A process's cgroup v2 path, from its `/proc/<pid>/cgroup` text.
+fn cgroup_of(text: &str) -> String {
+    text.lines()
+        .find_map(|l| l.strip_prefix("0::"))
+        .expect("a 0:: cgroup line")
+        .to_owned()
+}
+
+/// The cgroup this test binary started in, read once, before anything here moves it.
+fn started_in() -> &'static str {
+    static STARTED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    STARTED.get_or_init(|| {
+        cgroup_of(&std::fs::read_to_string("/proc/self/cgroup").expect("reading /proc/self/cgroup"))
+    })
+}
+
 /// Runs `hex box run <limits> -- program…` in its own delegated scope, capturing its output.
 fn box_run(limits: &[&str], program: &[&str]) -> std::process::Output {
     let mut cmd = Command::new("systemd-run");
@@ -132,5 +148,32 @@ fn box_run_keeps_its_callers_descriptor_limit() {
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
         format!("{soft}:{hard}")
+    );
+}
+
+/// AC-T7.1.1: run alone in a cgroup delegated to it (HEX_DELEGATED: a runner that holds a whole test
+/// suite in one capped scope gives each test binary a cgroup of its own), every `hex box run` here and
+/// its program stay inside that cgroup, under its caps, never in a scope of their own beside it.
+#[test]
+fn box_run_stays_inside_its_delegated_callers_cgroup() {
+    let own = started_in();
+    if std::env::var_os("HEX_DELEGATED").is_none() {
+        hex_testkit::skip(
+            "box_run_stays_inside_its_delegated_callers_cgroup",
+            "HEX_DELEGATED",
+            "not run alone in a delegated cgroup; a suite runner that gives each test binary one sets it",
+        )
+        .expect("recording the skip");
+        return;
+    }
+    let out = box_run(
+        &["--memory-max", "134217728"],
+        &["/bin/cat", "/proc/self/cgroup"],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let program = cgroup_of(&String::from_utf8_lossy(&out.stdout));
+    assert!(
+        program.starts_with(&format!("{own}/")) && program.contains("/.hexbox/"),
+        "the boxed program's cgroup {program} lies outside this binary's delegated {own}"
     );
 }
