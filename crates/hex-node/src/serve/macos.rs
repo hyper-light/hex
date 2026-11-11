@@ -261,7 +261,8 @@ impl Os for MacOs {
                         ended,
                     )
                 }
-                sys::Event::Timer | sys::Event::Fork { .. } => continue,
+                // This socket kqueue registers no signal or timer filters.
+                sys::Event::Signal { .. } | sys::Event::Timer | sys::Event::Fork { .. } => continue,
             };
             match events
                 .iter_mut()

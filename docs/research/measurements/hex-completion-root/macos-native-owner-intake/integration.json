@@ -1,0 +1,35 @@
+{
+  "inputs": {
+    "crates/hex-runtime/src/macos/managed.rs": {
+      "source": "4839af22e617889f9448db7f1bc6de47f57373e7",
+      "source_sha256": "56c2a483b1d7f8ef53945474dbd15fa7a427bc32e69f4491b1a4aeacb67a162e"
+    },
+    "crates/hex-runtime/src/macos/mod.rs": {
+      "source": "4839af22e617889f9448db7f1bc6de47f57373e7",
+      "source_sha256": "29af932c71a56faa9eed379ca845449947ee2e81770875f97eb9bda0b2acbaf6"
+    },
+    "crates/hex-runtime/src/macos/proc.rs": {
+      "source": "37b4b161e829217826a84068adf6d9701644e08a",
+      "source_sha256": "787c82300b601f3ea208a65d3e019421a161969d52a8e70c1e19613b4f04a182"
+    },
+    "crates/hex-runtime/src/macos/process.rs": {
+      "source": "4839af22e617889f9448db7f1bc6de47f57373e7",
+      "source_sha256": "bc1efd17fb29665aa074c08e278dcd08c3b0faebf24f9243bf93ba8d38e2e77c"
+    },
+    "crates/hex-runtime/src/macos/sys.rs": {
+      "source": "4839af22e617889f9448db7f1bc6de47f57373e7",
+      "source_sha256": "42dd2de55774ee45e03e844849a8cd63c00580f769eb14e49d08f6398e3dc7fd"
+    },
+    "crates/hex-node/src/recorded.rs": {
+      "source": "4839af22e617889f9448db7f1bc6de47f57373e7",
+      "source_sha256": "781f9050586c314d600e18439ecc7e16d086cb49b5da5b9d5e506a4dfef749b2"
+    }
+  },
+  "root_compatibility": [
+    "ordinary Mac BoxInfo routeNone",
+    "restore Node test routeNone after exact owner projection copy",
+    "socket kqueue exhaustive passive signal variant",
+    "CLAUDE exact unsafe rationale"
+  ],
+  "remaining": "cold no-parent cleanup and aggregate CPU cap remain explicit owner implementation gaps; compiler/pure/native/fault/mutation/gates unrun for this source"
+}

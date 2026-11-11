@@ -111,6 +111,41 @@ pub fn rusage(pid: i32) -> io::Result<Option<Rusage>> {
     }))
 }
 
+/// A positive group identity for a still existing process. Absence grants no cleanup authority.
+pub(crate) fn group_of(pid: i32) -> io::Result<Option<i32>> {
+    if pid <= 0 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    // SAFETY: getpgid reads this positive PID's group and writes no caller memory.
+    let group = unsafe { libc::getpgid(pid) };
+    if group > 0 {
+        return Ok(Some(group));
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(None),
+        _ => Err(error),
+    }
+}
+
+/// The same native waiter must retain the direct child's zombie until durable Released. Querying
+/// the disposition changes no handler, mask or process state; a foreign handler may reap children.
+pub(crate) fn retained_children() -> io::Result<()> {
+    let mut action = MaybeUninit::<libc::sigaction>::zeroed();
+    // SAFETY: null act requests only the current SIGCHLD action, written into one live sigaction.
+    if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: sigaction succeeded and initialized the whole output value.
+    let action = unsafe { action.assume_init() };
+    if action.sa_sigaction != libc::SIG_DFL || action.sa_flags & libc::SA_NOCLDWAIT != 0 {
+        return Err(io::Error::other(
+            "SIGCHLD does not retain children for their sole native waiter",
+        ));
+    }
+    Ok(())
+}
+
 /// Where a process is in its life, as `proc_pidinfo(PROC_PIDTBSDINFO)` reads it: XNU copies the process's
 /// `p_stat` into `pbi_status` (`bsd/kern/proc_info.c`), whose values are `sys/proc.h`'s (`SSTOP` 4, `SZOMB`
 /// 5), and a stop signal sets `SSTOP` (`bsd/kern/kern_sig.c`).
@@ -292,7 +327,9 @@ pub fn listing() -> io::Result<Vec<i32>> {
 /// testable).
 pub fn listing_from(max: io::Result<usize>) -> io::Result<Vec<i32>> {
     let max = max.map_err(|e| io::Error::new(e.kind(), format!("reading kern.maxproc: {e}")))?;
-    Ok(Vec::with_capacity(max))
+    let mut pids = Vec::new();
+    pids.try_reserve_exact(max).map_err(io::Error::from)?;
+    Ok(pids)
 }
 
 /// The most processes one uid may hold (`kern.maxprocperuid`, `bsd/kern/kern_resource.c:169-170`): a
@@ -510,13 +547,34 @@ impl Drop for Actions {
 /// posix_spawn makes the child whole in the kernel, so it is safe from a multi-threaded process. Returns its
 /// pid; a path that isn't there, or isn't executable, is skipped for the next, as execvp(3) does.
 pub fn spawn(s: &Spawn, pgroup: i32, clamp: Clamp) -> io::Result<i32> {
+    spawn_using(s, pgroup, clamp, Start::Running)
+}
+
+/// The same native group/jetsam launch, stopped by the kernel before its first instruction.
+/// Its native owner publishes pid/birth durably before SIGCONT; no post-spawn placement occurs.
+pub(crate) fn spawn_suspended(s: &Spawn, pgroup: i32, clamp: Clamp) -> io::Result<i32> {
+    spawn_using(s, pgroup, clamp, Start::Suspended)
+}
+
+#[derive(Clone, Copy)]
+enum Start {
+    Running,
+    Suspended,
+}
+
+fn spawn_using(s: &Spawn, pgroup: i32, clamp: Clamp, start: Start) -> io::Result<i32> {
     let mut attr = Attr(std::ptr::null_mut());
     // SAFETY: posix_spawnattr_init initializes the attribute object it is given; `attr` destroys it once.
     errno(unsafe { libc::posix_spawnattr_init(&raw mut attr.0) })?;
-    let flags = libc::POSIX_SPAWN_SETPGROUP
+    let mut flags = libc::POSIX_SPAWN_SETPGROUP
         | libc::POSIX_SPAWN_SETSIGMASK
         | libc::POSIX_SPAWN_SETSIGDEF
         | libc::POSIX_SPAWN_CLOEXEC_DEFAULT;
+    if matches!(start, Start::Suspended) {
+        // XNU kern_exec.c applies START_SUSPENDED before returning the new thread to user mode.
+        // This is Apple's public spawn.h flag, not a signal sent after the child starts running.
+        flags |= libc::POSIX_SPAWN_START_SUSPENDED;
+    }
     let flags =
         i16::try_from(flags).map_err(|_| io::Error::other("posix_spawn flags past a short"))?;
     let mut none: libc::sigset_t = 0;
@@ -568,8 +626,8 @@ pub fn spawn(s: &Spawn, pgroup: i32, clamp: Clamp) -> io::Result<i32> {
             libc::posix_spawn_file_actions_addchdir_np(&raw mut actions.0, cwd.as_ptr())
         })?;
     }
-    let argv = nul_terminated(&s.argv);
-    let envp = nul_terminated(&s.envp);
+    let argv = nul_terminated(&s.argv)?;
+    let envp = nul_terminated(&s.envp)?;
     let mut refused = None;
     for path in &s.paths {
         let mut pid: libc::pid_t = 0;
@@ -598,17 +656,23 @@ pub fn spawn(s: &Spawn, pgroup: i32, clamp: Clamp) -> io::Result<i32> {
 }
 
 /// `strings` as the NULL-terminated list of pointers exec takes; it borrows them.
-fn nul_terminated(strings: &[CString]) -> Vec<*mut c_char> {
-    strings
-        .iter()
-        .map(|s| s.as_ptr().cast_mut())
-        .chain(std::iter::once(std::ptr::null_mut()))
-        .collect()
+fn nul_terminated(strings: &[CString]) -> io::Result<Vec<*mut c_char>> {
+    let count = strings
+        .len()
+        .checked_add(1)
+        .ok_or(io::ErrorKind::InvalidInput)?;
+    let mut pointers = Vec::new();
+    pointers.try_reserve_exact(count).map_err(io::Error::from)?;
+    pointers.extend(strings.iter().map(|value| value.as_ptr().cast_mut()));
+    pointers.push(std::ptr::null_mut());
+    Ok(pointers)
 }
 
 /// What woke a [`Kqueue`] wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
+    /// A subscribed signal was delivered; the native waiter still checks only its owned child.
+    Signal { number: i32 },
     /// Its timer fired.
     Timer,
     /// Another thread triggered it.
@@ -667,6 +731,20 @@ impl Kqueue {
         self.change(&[kevent(USER, libc::EVFILT_USER, 0, libc::NOTE_TRIGGER, 0, 0)])
     }
 
+    /// Observe child completion without changing a signal handler or mask. XNU posts SIGCHLD
+    /// after SZOMB, whereas NOTE_EXIT can precede waitable zombie publication.
+    pub fn child_completions(&self) -> io::Result<()> {
+        let signal = usize::try_from(libc::SIGCHLD).map_err(|_| io::ErrorKind::InvalidData)?;
+        self.change(&[kevent(
+            signal,
+            libc::EVFILT_SIGNAL,
+            libc::EV_ADD | libc::EV_CLEAR,
+            0,
+            0,
+            0,
+        )])
+    }
+
     /// Watches each of `pids` for its forks and its end with the end's wait status (`EVFILT_PROC` with
     /// `NOTE_FORK | NOTE_EXIT | NOTE_EXITSTATUS`, `bsd/kern/kern_event.c:1099-1155`), tagged `tag`. XNU
     /// attaches `NOTE_EXITSTATUS` only for the process's parent (`EACCES` otherwise, :1116-1133), so each
@@ -678,6 +756,35 @@ impl Kqueue {
             tag,
             libc::NOTE_FORK | libc::NOTE_EXIT | NOTE_EXITSTATUS,
         )
+    }
+
+    /// One native controller registration uses fixed stack storage after its prepared launch.
+    /// True means ESRCH; it supplies no process or whole-scope terminal fact by itself.
+    pub fn watch_one(&self, pid: i32, tag: u64, child: bool) -> io::Result<bool> {
+        let ident = usize::try_from(pid)
+            .ok()
+            .filter(|pid| *pid != 0)
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        let flags = libc::NOTE_EXIT | libc::NOTE_FORK | if child { NOTE_EXITSTATUS } else { 0 };
+        let changes = [kevent(
+            ident,
+            libc::EVFILT_PROC,
+            libc::EV_ADD | libc::EV_RECEIPT,
+            flags,
+            0,
+            tag,
+        )];
+        let mut receipts = [kevent(0, 0, 0, 0, 0, 0)];
+        if self.kevent(&changes, &mut receipts, Some(Duration::ZERO))? != receipts.len() {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        let receipt = receipts.first().ok_or(io::ErrorKind::UnexpectedEof)?;
+        let code = c_int::try_from(receipt.data).map_err(|_| io::ErrorKind::InvalidData)?;
+        match code {
+            0 => Ok(false),
+            libc::ESRCH => Ok(true),
+            code => Err(io::Error::from_raw_os_error(code)),
+        }
     }
 
     /// Watches process `pid`, which needn't be this process's child (a box-user program is the helper's),
@@ -780,6 +887,8 @@ impl Kqueue {
         timeout: Option<Duration>,
         out: &mut Vec<Event>,
     ) -> io::Result<()> {
+        out.try_reserve(EVENTS.saturating_sub(out.len()))
+            .map_err(io::Error::from)?;
         out.clear();
         let armed;
         let changes: &[libc::kevent] = match timer {
@@ -812,6 +921,7 @@ impl Kqueue {
             let tag = u64::try_from(e.udata.addr()).unwrap_or(u64::MAX);
             let pid = i32::try_from(e.ident).unwrap_or(0);
             let event = match e.filter {
+                libc::EVFILT_SIGNAL => Event::Signal { number: pid },
                 libc::EVFILT_TIMER => Event::Timer,
                 libc::EVFILT_USER => Event::User,
                 libc::EVFILT_PROC if e.fflags & libc::NOTE_FORK != 0 => Event::Fork {

@@ -1148,6 +1148,37 @@ impl<R: Recover> Host for Recorded<R> {
 /// time (`proc_pid_rusage`'s Mach absolute time, in [`ProcId::start_ticks`]).
 #[cfg(target_os = "macos")]
 impl Recover for hex_runtime::macos::MacRuntime {
+    fn managed_usage(&self, record: &BoxRecord) -> Result<Usage, Refusal> {
+        hex_runtime::macos::MacRuntime::managed_usage(self, record)
+    }
+
+    fn launch_managed(
+        &self,
+        record: &BoxRecord,
+        plan: &hex_runtime::devices::ManagedLaunch<'_>,
+        io: shards_api::LaunchIo,
+        patience: std::time::Duration,
+        publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
+    ) -> Result<shards_api::ManagedReceipt, Refusal> {
+        hex_runtime::macos::MacRuntime::launch_managed(self, record, plan, io, patience, publish)
+    }
+
+    fn attach_managed(
+        &self,
+        record: &BoxRecord,
+        identity: Option<&shards_api::Identity>,
+    ) -> Result<shards_api::ManagedReceipt, Refusal> {
+        hex_runtime::macos::MacRuntime::attach_managed(self, record, identity)
+    }
+
+    fn finalize_managed(
+        &self,
+        record: &BoxRecord,
+        identity: Option<&shards_api::Identity>,
+    ) -> Result<(), Refusal> {
+        hex_runtime::macos::MacRuntime::finalize_managed(self, record, identity)
+    }
+
     fn trace(&self, id: &BoxId) -> Result<Option<ProcId>, Refusal> {
         Ok(self.group(id)?.and_then(|(pgid, started)| {
             Some(ProcId {

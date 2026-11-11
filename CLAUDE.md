@@ -154,7 +154,13 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   Hex declares itself (the macOS 26 SDK ships neither prototype, nor the jetsam flag values, which are
   xnu's `bsd/sys/spawn_internal.h`, though libSystem exports the symbols). Rust can express none of these
   foreign calls, nor the raw `posix_spawnattr_t` the spawn-attribute setters write, safely, and macOS
-  offers no safe wrapper.
+  offers no safe wrapper. Managed VM controllers use the SAME native owner and process group:
+  `POSIX_SPAWN_START_SUSPENDED` holds foreign code until its exact canonical PID/birth is durable;
+  read-only `sigaction` rejects auto-reaping/custom child ownership before launch, and `getpgid`
+  positively checks native membership. Passive `EVFILT_SIGNAL` for SIGCHLD on that controller's
+  existing kqueue observes waitable zombie publication without changing handlers or masks. The sole
+  waiter retains WNOWAIT ownership until durable Released/finalization. These calls need the same
+  foreign ABI isolation; they do not establish cold cleanup authority or an aggregate CPU cap.
 - `crates/hex-runtime/src/macos/helper_sys.rs`: the macOS box helper daemon's privileged syscalls (the
   `process` class's box-user mode, decision "each OS runs its own boxes natively"; step 2). The daemon,
   as root, starts a box's programs as the box's pool user: a `fork` whose child drops to the user
