@@ -1,0 +1,14 @@
+{
+  "joined-next-mac-proof": {
+    "bytes": 615032,
+    "sha256": "780a82e9883f8a254b6c90ecb98f4031380c9185f987e527c1cc3f7b02441bc8",
+    "members": 22,
+    "all_members_verified": true
+  },
+  "joined-next-linux-proof": {
+    "bytes": 210269,
+    "sha256": "fc90da68edb027fc9e4c5c1b640aebadd247a920cffd17c91f6986b003292efa",
+    "members": 7,
+    "all_members_verified": true
+  }
+}

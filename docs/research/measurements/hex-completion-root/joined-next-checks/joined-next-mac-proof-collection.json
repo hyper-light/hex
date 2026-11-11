@@ -1,0 +1,99 @@
+{
+  "bytes": 615032,
+  "sha256": "780a82e9883f8a254b6c90ecb98f4031380c9185f987e527c1cc3f7b02441bc8",
+  "members": {
+    "cohort-9c414816-mac-windows-clippy-v1/running.json": {
+      "bytes": 1107,
+      "sha256": "1b6db569c1e9ed087db126aa7aa1e9059dfa56be8ea14506f11ec15855e25de1"
+    },
+    "cohort-9c414816-mac-windows-clippy-v1/result.json": {
+      "bytes": 1361,
+      "sha256": "f315f4edfe3b3a810a3d2ad0022785b3c4904e0aa11898cec2d80f8e4d20c864"
+    },
+    "cohort-9c414816-mac-windows-clippy-v1/source-before.json": {
+      "bytes": 293627,
+      "sha256": "2f2e9fadaf7ce01cf6b1230bc0bb1753d9796b0f11f55ba7e58013da6dcec221"
+    },
+    "cohort-9c414816-mac-windows-clippy-v1/source-after.json": {
+      "bytes": 293627,
+      "sha256": "2f2e9fadaf7ce01cf6b1230bc0bb1753d9796b0f11f55ba7e58013da6dcec221"
+    },
+    "cohort-9c414816-mac-windows-clippy-v1/production-check.log": {
+      "bytes": 8262,
+      "sha256": "f308055554b97677bbcf82affcb14867ee2ac9b0071757eae2e10c193cce5288"
+    },
+    "cohort-9c414816-mac-windows-clippy-v1/public-registry-seed.json": {
+      "bytes": 25211,
+      "sha256": "a2d55ceeaf67a0da2c0a16d485439089ad7b2b0e4922b4d7a4fdaa0423ec12ae"
+    },
+    "cohort-9c414816-mac-windows-clippy-v1/collected-binaries.json": {
+      "bytes": 754,
+      "sha256": "b2ed46dc49dea87c448b950dc51a60aac9a465b9446ca32adbb6a01008183c0c"
+    },
+    "cohort-e1cdcd68-mac-cost-controls-v1/running.json": {
+      "bytes": 1567,
+      "sha256": "f42dbe9e09c279482ab4adf57aa796909d908ef8478e9e086af10a6edf96c39a"
+    },
+    "cohort-e1cdcd68-mac-cost-controls-v1/result.json": {
+      "bytes": 1798,
+      "sha256": "4399109ccdf9e2ef644d5df0d7aad255ba8c24f1be099035a0420259b38c8cdc"
+    },
+    "cohort-e1cdcd68-mac-cost-controls-v1/source-before.json": {
+      "bytes": 293888,
+      "sha256": "e748cd5c5fd35640f1489117775a4861e3c1273c148ddbb5874a0de15bd67036"
+    },
+    "cohort-e1cdcd68-mac-cost-controls-v1/source-after.json": {
+      "bytes": 293888,
+      "sha256": "e748cd5c5fd35640f1489117775a4861e3c1273c148ddbb5874a0de15bd67036"
+    },
+    "cohort-e1cdcd68-mac-cost-controls-v1/runtime-clippy.log": {
+      "bytes": 5897,
+      "sha256": "dce49725aae7160afb9d43b73c6562c88ecbfe1cd5ac5ed82bbf047730910f13"
+    },
+    "cohort-e1cdcd68-mac-cost-controls-v1/cost-controls.log": {
+      "bytes": 4334,
+      "sha256": "622588e197e0b98ec1e9a77a69f4968fb5df1aad26c709d3e414c332185ce41a"
+    },
+    "cohort-e1cdcd68-mac-cost-controls-v1/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-e1cdcd68-mac-cost-controls-v1/collected-binaries.json": {
+      "bytes": 1209,
+      "sha256": "f04ddb3fa63c3cbbf420fc93e3e46bc3aed4e2406149fbe37b90c4f4a811f8ff"
+    },
+    "cohort-b5b67b38-mac-compile-v1/running.json": {
+      "bytes": 993,
+      "sha256": "49b67cbc977fdabf3512398d8e4f55ac06f6392232b046ff218dcea47f25a48a"
+    },
+    "cohort-b5b67b38-mac-compile-v1/result.json": {
+      "bytes": 1245,
+      "sha256": "83476d30a6a2616adc361d804bea5515da1092d0fe9a164b5a83feed4f37983c"
+    },
+    "cohort-b5b67b38-mac-compile-v1/source-before.json": {
+      "bytes": 295639,
+      "sha256": "761e1cc664f372fba54275f81d702f3c529695bf8f8d02f723e6979aa7b786ce"
+    },
+    "cohort-b5b67b38-mac-compile-v1/source-after.json": {
+      "bytes": 295639,
+      "sha256": "761e1cc664f372fba54275f81d702f3c529695bf8f8d02f723e6979aa7b786ce"
+    },
+    "cohort-b5b67b38-mac-compile-v1/production-check.log": {
+      "bytes": 3455,
+      "sha256": "0e6fdc776c601034a1bac23de496b3013efd65060c68bea42524d13b4b3e04d3"
+    },
+    "cohort-b5b67b38-mac-compile-v1/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-b5b67b38-mac-compile-v1/collected-binaries.json": {
+      "bytes": 594,
+      "sha256": "3eff58448deeba38ad5ae4af62764e5693855aa33f3794df764245457f5e4bdd"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}
