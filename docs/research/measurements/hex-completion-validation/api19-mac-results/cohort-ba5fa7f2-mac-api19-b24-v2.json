@@ -1,0 +1,115 @@
+{
+  "source": "ba5fa7f2bb787f7cbff5ce041e83c5618e305f9b",
+  "archive_sha256": "696905c44d0081f9d7ff9fb51c58f54242ff0380ea8b9347db3b6f0fbfcf5b9f",
+  "scope": "ROOT macARM64 API19 three new private-pipe report tests, APIalltargetClippy and changed-consumer harness compile; no priorSlot/7repeat and no nativebackend/VM/GPU",
+  "target": "mac",
+  "platform": "macOS-26.2-arm64-arm-64bit",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 36955,
+  "phases": [
+    {
+      "name": "api-private-report-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "test",
+        "--manifest-path",
+        "vendor/shards/crates/api/Cargo.toml",
+        "--lib",
+        "physical::report::tests::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 37743,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "1e72e4645a630bdf05c5eab8e4a9e39ecebcf9d823c897968f1481e4765a596c",
+      "bytes": 1406,
+      "expected_selected": 3,
+      "actual_counts": [
+        {
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "physical::report::tests::private_report_expired_caller_budget_does_not_wait_or_retry",
+          "outcome": "ok"
+        },
+        {
+          "name": "physical::report::tests::private_report_refuses_missing_torn_and_over_bound_bytes",
+          "outcome": "ok"
+        },
+        {
+          "name": "physical::report::tests::private_report_transfers_exactly_once_after_writer_eof",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "api19-native-clippy",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "clippy",
+        "--manifest-path",
+        "vendor/shards/crates/api/Cargo.toml",
+        "--all-targets",
+        "--locked",
+        "--no-deps",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "pid": 37792,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "a29974db059aea6396282c634f5e54dc915ed2dcc3dadc09523fcbfcc19cad62",
+      "bytes": 1457,
+      "test_outcomes": []
+    },
+    {
+      "name": "node-cli-api19-harness-check",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Users/adalundhe/.cache/hex-lead/rustup-scheduler-copy/toolchains/1.99.1-aarch64-apple-darwin/bin/cargo",
+        "check",
+        "-p",
+        "hex-node",
+        "-p",
+        "hex-cli",
+        "--all-targets",
+        "--locked"
+      ],
+      "pid": 37823,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "f2442259735794fc196faad7d52cff556d92de1c15df10c9d4181e6714fdee0b",
+      "bytes": 3311,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [
+    "vendor/shards/Cargo.lock"
+  ],
+  "temp_entries": 0,
+  "native_backend_invocations": 0,
+  "api_registry_cohort": {
+    "seed_sha256": "18a1c5dd48ba3ee855841e67b59fa38512a15eb769df0b18835c8c828173f082",
+    "pruned_sha256": "dcbe9479bcbd6b91c7f1cbe46a59a482e78d8d097bd49a0af91c352880ee9c84",
+    "registry_packages": 15,
+    "all_registry_tuples_subset_of_exact_root_lock": true,
+    "private_lock_overlay_only": true
+  },
+  "exit": 1
+}

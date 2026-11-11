@@ -1,0 +1,79 @@
+{
+  "bytes": 469402,
+  "sha256": "a5dfbeb07ab00ef95ad23ed56cf931188580f9ef5e60487e9f89aa2587ccd27f",
+  "members": {
+    "cohort-3d31cb88-mac-api19-b24-v1/running.json": {
+      "bytes": 1091,
+      "sha256": "fa70dca1e245e5a2b9d6e585cf723152723c5ad2adb67c76eaf38da49c4f9cf6"
+    },
+    "cohort-3d31cb88-mac-api19-b24-v1/result.json": {
+      "bytes": 1448,
+      "sha256": "ced9fefe94756880cc5904cdf6114b4973480d993051a4aa7700bda5d2ac53a5"
+    },
+    "cohort-3d31cb88-mac-api19-b24-v1/source-before.json": {
+      "bytes": 340637,
+      "sha256": "27129e6b66004ea91785d4e3795980b02fb4e916c57e13c154bfed507cecf8a4"
+    },
+    "cohort-3d31cb88-mac-api19-b24-v1/source-after.json": {
+      "bytes": 340637,
+      "sha256": "27129e6b66004ea91785d4e3795980b02fb4e916c57e13c154bfed507cecf8a4"
+    },
+    "cohort-3d31cb88-mac-api19-b24-v1/api-private-report-new.log": {
+      "bytes": 119,
+      "sha256": "ec1157d5ec9c86a8663d82c4a9dc9f398e34f6a93b75e45366411f9c5a875628"
+    },
+    "cohort-3d31cb88-mac-api19-b24-v1/public-registry-seed.json": {
+      "bytes": 29092,
+      "sha256": "a3b054069beb140848548948af37419c2e7cbfd5ebe1f8d9a1f18c7bfbac7909"
+    },
+    "cohort-3d31cb88-mac-api19-b24-v1/collected-binaries.json": {
+      "bytes": 786,
+      "sha256": "3ca42ec3397977e76c14aaaa6b605a1aed528280bcf9049dab522cac13fd04a6"
+    },
+    "cohort-ba5fa7f2-mac-api19-b24-v2/node-cli-api19-harness-check.log": {
+      "bytes": 3311,
+      "sha256": "f2442259735794fc196faad7d52cff556d92de1c15df10c9d4181e6714fdee0b"
+    },
+    "cohort-ba5fa7f2-mac-api19-b24-v2/running.json": {
+      "bytes": 2951,
+      "sha256": "8b7af15dc301ca3cc1c316d0588375913c558ef54116091b1b335ed1e2b4e157"
+    },
+    "cohort-ba5fa7f2-mac-api19-b24-v2/result.json": {
+      "bytes": 3583,
+      "sha256": "e2400d784898c36b3b09aad443ea4b11b2ecd7758a0295338a79211f31f8cd3a"
+    },
+    "cohort-ba5fa7f2-mac-api19-b24-v2/source-before.json": {
+      "bytes": 340637,
+      "sha256": "16cb282ffd278b0c204358ce7bf67540fee72e44a98b5a9c18045a4b573d8be8"
+    },
+    "cohort-ba5fa7f2-mac-api19-b24-v2/source-after.json": {
+      "bytes": 340735,
+      "sha256": "fb5762692e2e1057d3406f8d9b6072cc218c96a3f6cb40e64ffdf522a27d4040"
+    },
+    "cohort-ba5fa7f2-mac-api19-b24-v2/api-lock-cohort.json": {
+      "bytes": 296,
+      "sha256": "cdd8326f99d757c13010fc2c8751bd99d2b62d34c1d828e20d11fc947157d804"
+    },
+    "cohort-ba5fa7f2-mac-api19-b24-v2/api19-native-clippy.log": {
+      "bytes": 1457,
+      "sha256": "a29974db059aea6396282c634f5e54dc915ed2dcc3dadc09523fcbfcc19cad62"
+    },
+    "cohort-ba5fa7f2-mac-api19-b24-v2/api-private-report-new.log": {
+      "bytes": 1406,
+      "sha256": "1e72e4645a630bdf05c5eab8e4a9e39ecebcf9d823c897968f1481e4765a596c"
+    },
+    "cohort-ba5fa7f2-mac-api19-b24-v2/public-registry-seed.json": {
+      "bytes": 29092,
+      "sha256": "a3b054069beb140848548948af37419c2e7cbfd5ebe1f8d9a1f18c7bfbac7909"
+    },
+    "cohort-ba5fa7f2-mac-api19-b24-v2/collected-binaries.json": {
+      "bytes": 2738,
+      "sha256": "7dc60601e439f8439762694d81f3d9c3688e252ad700e688027962b692e693e1"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}
