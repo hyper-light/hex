@@ -1,0 +1,11 @@
+{
+  "kind": "test-only original-source backing-reference hypothesis; no production remedy",
+  "base": "fa3535bbf5270a7c0d1b9b69b518f63c20ac98f6",
+  "production_pool_prefix_sha256_unchanged": "7317f21bb31f697c9dd66c348763eb98798c307aef52727c705253130faf66a0",
+  "leaf": "docs/research/measurements/hex-complete-lifecycle/store_backing_reference_tests.rs",
+  "leaf_sha256": "5ae2c99db205a592e35689b59c1d12ef3402d4e1e6523c631704ab894ac222e4",
+  "registration": "Four-line cfg(test) child at EOF of existing store/pool.rs; all original production/test bodies byte-identical prefix",
+  "control": "Real Store injects Released backing +canonical Creating Shards Box carrying exact backing key and fresh scope. Require removal refusal/unchanged Box+Pool bytes/no rearm; Deleting still retains reference. After canonical Box removal positive removal/replacement succeeds. Pure record facts only, no native scope/controller/GPU exists.",
+  "source_observation": "remove_pool currently checks only same key+Released; it does not scan canonical Box route references. This is not yet a reproduced behavioral red or a claim that public release adapters lack another guard.",
+  "checks": "UNRUN; no new test/native dispatch by L3. Hold production remedy until ROOT actual original outcome."
+}

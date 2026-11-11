@@ -469,3 +469,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../docs/research/measurements/hex-complete-lifecycle/store_backing_reference_tests.rs"]
+mod retained_reference;
