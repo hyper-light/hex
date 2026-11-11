@@ -1,0 +1,7 @@
+# Strict lint cohort refusals (AC-T7.4.1)
+
+ROOT exact signedb87fb51c97d81793dd9e22e16314a0e04a5ac35a, d132 arm64 macOS26.4/Rust1.99.1, admitted1CPU/4GiB/12GiB,nice10/jobs1/threads1/private no-sync. Cargo36684 exited101 before Rust compilation because --locked refused the missing unsize build-dependency edge. Zero tests or native invocations; no lint success. Log28af341192b2aade7147bce8f7ee82505b7db9aeb73a2907b027de88090ff412. Source unchanged/temp0/child reaped; CLI57884 reaped1.
+
+Data-only collection archive188450B SHA74bb430ed1c01c4fa57dfd3e603e7683475cc038c83bee95585a0233a34bb5c2. Every member/input/post-source hash independently verified; b87-collection.json is authoritative. Corrected edge and published crate build manifest are in ../managed-api-source/build-dependency-correction.json, signed2af7dd6a. This correction did not change registry versions/checksums or production Rust.
+
+The exact2af successor compiled the corrected graph and passed the previous simulator lint sites, then strict all-target Clippy found two E0433 integration-test literal paths. ROOT correction is recorded in ../cost-source/test-literal-intake.json. Source/targets/failed raw remain on the remote while their data-only collection completes. The five actual853 cost/client controls remain separate passing results; they are not rerun for metadata/literal-only corrections. Overall final/source/native/full gates remain pending.

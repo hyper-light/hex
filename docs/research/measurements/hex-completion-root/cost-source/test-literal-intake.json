@@ -1,0 +1,15 @@
+{
+  "source": "2af7dd6adabe4b949def667802d679f9a3ebbe05",
+  "actual_clippy_exit": 101,
+  "actual_errors": "E0433 crates/hex-sim/tests/sim.rs467/478; integration crate has no crate::model",
+  "log_sha256": "d48fe9bb4d4358cb9f53859edcaf3455b9784638f667837b28742fc6a174528b",
+  "owned_cargo_pid": 38475,
+  "child_reaped": true,
+  "source_unchanged": true,
+  "temp_entries": 0,
+  "change": "Only two mechanical None-cost array paths use the actual external hex_sim::model::Class",
+  "before": "7b8e58fd1e30d0e2381c770d28bd89a6f5e663e7a0fae7502a00da5064f9dcf5",
+  "after": "e56db5fa79903865faf000ec292d986ed7186662581e8d1da8be7292d6cd6bff",
+  "tests_executed": 0,
+  "clippy_success_claim": false
+}
