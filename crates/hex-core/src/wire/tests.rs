@@ -750,9 +750,56 @@ fn refusals() -> Vec<Refusal> {
             id: id("retained-box"),
             cause: LifecycleCause::Busy,
         },
+        Refusal::Uncertain {
+            id: id("unclean-box"),
+            refusal: Box::new(Refusal::Broken(
+                "Firecracker ended before guest readiness; its last output:\nno root".to_owned(),
+            )),
+            cleanup: Box::new(Refusal::Os {
+                op: "attaching the box's native scope",
+                why: "ESRCH".to_owned(),
+            }),
+        },
     ];
     out.extend(connect_refusals());
     out
+}
+
+/// AC-T7.4.1: an `Uncertain` refusal's causes are each any refusal but another `Uncertain`, so no message nests them
+/// past one. Do: write one whose cause is itself uncertain; then read an `Uncertain` refusal's bytes with its first
+/// cause's tag made `Uncertain`'s. Expect both refused by type, and the reader to stop at that tag.
+#[test]
+fn an_uncertain_refusals_causes_never_nest() {
+    let leaf = |why: &str| Box::new(Refusal::Broken(why.to_owned()));
+    let flat = Refusal::Uncertain {
+        id: id("unclean-box"),
+        refusal: leaf("first"),
+        cleanup: leaf("second"),
+    };
+    let nested = Refusal::Uncertain {
+        id: id("unclean-box"),
+        refusal: Box::new(flat.clone()),
+        cleanup: leaf("third"),
+    };
+    assert!(matches!(
+        answer(1, &Answer::Refused(nested), MAX_MESSAGE),
+        Err(Fault::Value { what: "uncertain refusal", .. })
+    ));
+    let mut bytes = answer(1, &Answer::Refused(flat), MAX_MESSAGE).unwrap();
+    // The header, the refusal's tag, then the id's length and bytes: the first cause's tag follows.
+    let at = HEADER_BYTES + 1 + 4 + "unclean-box".len();
+    assert_eq!(bytes[at], 8, "the first cause is Broken's tag");
+    bytes[at] = 12;
+    let received = Received {
+        bytes: &bytes,
+        size: bytes.len(),
+        descriptors: 0,
+        descriptors_cut: false,
+    };
+    assert!(matches!(
+        read_answer(&received, MAX_MESSAGE),
+        Err(Fault::Value { what: "uncertain refusal", .. })
+    ));
 }
 
 /// Every CONNECT cause in every phase, every named I/O kind and an unnamed one, and codes at their
@@ -1960,6 +2007,20 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
 const SOME_NAMES: [&str; 4] = ["cpu_weight", "start", "connections", "an op"];
 
 fn any_refusal() -> impl Strategy<Value = Refusal> {
+    prop_oneof![
+        any_cause(),
+        (any_id(), any_cause(), any_cause()).prop_map(|(id, refusal, cleanup)| {
+            Refusal::Uncertain {
+                id,
+                refusal: Box::new(refusal),
+                cleanup: Box::new(cleanup),
+            }
+        }),
+    ]
+}
+
+/// Any refusal but an `Uncertain` one: what an `Uncertain` refusal's causes are.
+fn any_cause() -> impl Strategy<Value = Refusal> {
     let name = proptest::sample::select(&SOME_NAMES[..]);
     prop_oneof![
         (name.clone(), any_text()).prop_map(|(what, why)| Refusal::Invalid { what, why }),

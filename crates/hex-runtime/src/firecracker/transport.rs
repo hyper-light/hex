@@ -4,7 +4,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use hex_api::{ConnectFailure, ConnectPhase, ConnectReply, IoKind, Refusal};
+use hex_api::{BoxId, ConnectFailure, ConnectPhase, ConnectReply, IoKind, Refusal};
 use hex_client::guest::{Duplex, DuplexOwner, Link, own_duplex};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use serde::Deserialize;
@@ -437,26 +437,61 @@ impl Tail {
         }
         raw.extend_from_slice(front);
         raw.extend_from_slice(back);
-        let text = String::from_utf8_lossy(&raw);
         // A lossy text can outgrow its bytes (U+FFFD for an invalid one): keep its end.
-        let mut start = text.len().saturating_sub(self.room);
-        while start < text.len() && !text.is_char_boundary(start) {
-            start = start.saturating_add(1);
-        }
-        let tail = text.get(start..).unwrap_or_default();
-        let mut why = String::new();
-        let bound = ENDED
-            .len()
-            .saturating_add(SAID.len())
-            .saturating_add(tail.len());
-        if why.try_reserve_exact(bound).is_err() {
-            return Refusal::Broken(ENDED.into());
-        }
-        why.push_str(ENDED);
-        why.push_str(SAID);
-        why.push_str(tail);
-        Refusal::Broken(why)
+        readiness(&String::from_utf8_lossy(&raw), self.room)
     }
+}
+
+/// A readiness refusal: `ENDED`, `SAID`, then the end of `output` that `room` bytes hold, cut at a character.
+fn readiness(output: &str, room: usize) -> Refusal {
+    let mut start = output.len().saturating_sub(room);
+    while start < output.len() && !output.is_char_boundary(start) {
+        start = start.saturating_add(1);
+    }
+    let tail = output.get(start..).unwrap_or_default();
+    let mut why = String::new();
+    let bound = ENDED
+        .len()
+        .saturating_add(SAID.len())
+        .saturating_add(tail.len());
+    if why.try_reserve_exact(bound).is_err() {
+        return Refusal::Broken(ENDED.into());
+    }
+    why.push_str(ENDED);
+    why.push_str(SAID);
+    why.push_str(tail);
+    Refusal::Broken(why)
+}
+
+/// A create's `refusal` and its failed `cleanup` together, as [`Refusal::Uncertain`] (AC-T7.4.1), within one refused
+/// answer under the wire bound, as a readiness refusal is alone: a readiness refusal keeps the end of its VMM's output
+/// that fits beside the box's id and the cleanup's refusal, the room measured by the wire itself, as [`Tail::new`]
+/// measures it.
+pub(super) fn uncertain_after(id: BoxId, refusal: Refusal, cleanup: Refusal) -> Refusal {
+    let output = match &refusal {
+        Refusal::Broken(why) => why
+            .strip_prefix(ENDED)
+            .and_then(|rest| rest.strip_prefix(SAID)),
+        _ => None,
+    };
+    let Some(output) = output else {
+        return Refusal::Uncertain {
+            id,
+            refusal: Box::new(refusal),
+            cleanup: Box::new(cleanup),
+        };
+    };
+    let mut whole = Refusal::Uncertain {
+        id,
+        refusal: Box::new(readiness("", 0)),
+        cleanup: Box::new(cleanup),
+    };
+    let room = hex_core::wire::snapshot_refusal(&whole, hex_core::wire::MAX_MESSAGE)
+        .map_or(0, |bytes| hex_core::wire::MAX_MESSAGE.saturating_sub(bytes.len()));
+    if let Refusal::Uncertain { refusal: kept, .. } = &mut whole {
+        **kept = readiness(output, room);
+    }
+    whole
 }
 
 /// Waits for the guest's private readiness frame. While it waits it keeps the end of the VMM's
@@ -970,5 +1005,45 @@ mod tests {
         ] {
             assert!(content_length(header).is_err());
         }
+    }
+
+    /// AC-T7.4.1: a create refused for a VMM that ended before readiness, its output past what one wire answer holds,
+    /// whose cleanup failed too. Do: keep both as one `Uncertain` refusal. Expect it within one refused answer under
+    /// the wire bound, the readiness refusal first with the end of the output, then the cleanup's refusal whole; and a
+    /// refusal of any other kind kept as it was.
+    #[test]
+    fn an_uncertain_refusal_keeps_both_causes_within_one_wire_answer() {
+        let output = format!("{}the last words\n", "x".repeat(hex_core::wire::MAX_MESSAGE * 2));
+        let refusal = readiness(&output, usize::MAX);
+        let cleanup = Refusal::Os {
+            op: "attaching the box's native scope",
+            why: "ESRCH".to_owned(),
+        };
+        let whole = uncertain_after(BoxId::new("unclean").unwrap(), refusal, cleanup.clone());
+        let bytes = hex_core::wire::snapshot_refusal(&whole, hex_core::wire::MAX_MESSAGE).unwrap();
+        assert!(bytes.len() <= hex_core::wire::MAX_MESSAGE);
+        let Refusal::Uncertain { id, refusal, cleanup: kept } = &whole else {
+            panic!("{whole:?}");
+        };
+        assert_eq!(id.as_str(), "unclean");
+        let Refusal::Broken(why) = &**refusal else {
+            panic!("{refusal:?}");
+        };
+        assert!(why.starts_with("Firecracker ended before guest readiness; its last output:\nxxx"));
+        assert!(why.ends_with("xthe last words\n"));
+        assert_eq!(**kept, cleanup);
+        let other = Refusal::Os {
+            op: "creating private VM directory",
+            why: "ENOENT".to_owned(),
+        };
+        let whole = uncertain_after(BoxId::new("unclean").unwrap(), other.clone(), cleanup.clone());
+        assert_eq!(
+            whole,
+            Refusal::Uncertain {
+                id: BoxId::new("unclean").unwrap(),
+                refusal: Box::new(other),
+                cleanup: Box::new(cleanup),
+            }
+        );
     }
 }

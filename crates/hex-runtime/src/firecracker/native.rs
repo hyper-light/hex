@@ -737,15 +737,19 @@ impl FirecrackerRuntime {
         transaction: &dyn Transaction,
         until: Instant,
     ) -> Result<BoxInfo, Refusal> {
-        match self.create_inner(spec, scope, transaction, until) {
-            Ok(info) => Ok(info),
-            Err(error) => match transaction.read(id)? {
-                Some(_) => match self.remove(id, transaction) {
-                    Ok(()) => Err(error),
-                    Err(_) => Err(uncertain(id)),
-                },
-                None => Err(error),
-            },
+        let refusal = match self.create_inner(spec, scope, transaction, until) {
+            Ok(info) => return Ok(info),
+            Err(refusal) => refusal,
+        };
+        // The create's refusal is kept whatever its cleanup meets: a cleanup that fails leaves the box uncertain, and
+        // its refusal carries both causes, the create's first (AC-T7.4.1).
+        let cleanup = transaction.read(id).and_then(|record| match record {
+            Some(_) => self.remove(id, transaction),
+            None => Ok(()),
+        });
+        match cleanup {
+            Ok(()) => Err(refusal),
+            Err(cleanup) => Err(transport::uncertain_after(id.try_clone()?, refusal, cleanup)),
         }
     }
 
@@ -1285,10 +1289,43 @@ mod io_tests {
     use super::*;
     use std::os::fd::AsRawFd;
 
+    /// The descriptors this process holds on `pipe`'s write end now: its `/proc/self/fd` entries naming the same pipe
+    /// (`pipe:[<inode>]`) open for writing (their fdinfo's `flags`, O_ACCMODE; proc(5)). By the pipe, not by number,
+    /// so another file under a closed number is no write end; by this process's own table, so a child another test
+    /// forks, holding a copy until its exec, is never counted.
+    fn write_ends(pipe: &impl std::os::fd::AsFd) -> Vec<String> {
+        let target = format!("pipe:[{}]", rustix::fs::fstat(pipe).unwrap().st_ino);
+        let mut ends = Vec::new();
+        for entry in fs::read_dir("/proc/self/fd").unwrap() {
+            let entry = entry.unwrap();
+            // A descriptor another test closed since the listing names nothing now.
+            let Ok(link) = fs::read_link(entry.path()) else {
+                continue;
+            };
+            let fd = entry.file_name().into_string().unwrap();
+            let Ok(info) = fs::read_to_string(format!("/proc/self/fdinfo/{fd}")) else {
+                continue;
+            };
+            let flags = info
+                .lines()
+                .find_map(|line| line.strip_prefix("flags:"))
+                .map(|flags| u32::from_str_radix(flags.trim(), 8).unwrap())
+                .unwrap();
+            if link.as_os_str() == target.as_str() && flags & 0o3 == 0o1 {
+                ends.push(fd);
+            }
+        }
+        ends.sort();
+        ends
+    }
+
     /// AC-T7.4.1: configured VMM output must accept both streams, and both exact owned
-    /// descriptors close on drop: their pipe's reader then reads what they wrote to its end. The
-    /// end is the pipe's own, which no descriptor number can fake (red at 37dc9d9f: another file
-    /// took a closed number). No Config, guest, process, cgroup, KVM or GPU is created.
+    /// descriptors close on drop: no descriptor of this process holds their pipe's write end
+    /// after, and its reader reads what they wrote. The end is told by the pipe, which no
+    /// descriptor number can fake (red at 37dc9d9f: another file took a closed number), in this
+    /// process's own table: a read to the pipe's end also waited for a child another test had
+    /// forked, holding the write end until its exec (WouldBlock under this binary's parallel
+    /// tests). No Config, guest, process, cgroup, KVM or GPU is created.
     #[test]
     fn configured_vmm_output_sinks_accept_bytes_and_close_on_drop() {
         use std::io::Read;
@@ -1303,6 +1340,13 @@ mod io_tests {
         assert!(gpu_report.is_none());
         let descriptors = [stdout.as_raw_fd(), stderr.as_raw_fd()];
         assert_ne!(descriptors[0], descriptors[1]);
+        let mut sinks = descriptors.map(|fd| fd.to_string());
+        sinks.sort();
+        assert_eq!(
+            write_ends(&reader),
+            sinks,
+            "the sinks are the pipe's two write ends"
+        );
         stdout.write_all(b"configured-vmm-stdout\n").unwrap();
         stderr.write_all(b"configured-vmm-stderr\n").unwrap();
         drop(stdout);
@@ -1311,12 +1355,11 @@ mod io_tests {
         // binary's parallel tests: dupfd returns the lowest free number from the one given.
         let other = fs::File::open("/dev/null").unwrap();
         let _reuse = rustix::io::fcntl_dupfd_cloexec(&other, descriptors[0]).unwrap();
-        // Nonblocking, so a writer still open shows at once as WouldBlock, never as a wait.
-        let flags = rustix::fs::fcntl_getfl(&reader).unwrap();
-        rustix::fs::fcntl_setfl(&reader, flags | rustix::fs::OFlags::NONBLOCK).unwrap();
-        let mut read = Vec::new();
-        reader.read_to_end(&mut read).unwrap();
-        assert_eq!(read, b"configured-vmm-stdout\nconfigured-vmm-stderr\n");
+        assert_eq!(write_ends(&reader), Vec::<String>::new(), "closed on drop");
+        let wrote = b"configured-vmm-stdout\nconfigured-vmm-stderr\n";
+        let mut read = [0u8; 44];
+        reader.read_exact(&mut read).unwrap();
+        assert_eq!(&read, wrote);
     }
 
     /// A stand-in VMM: a real child process, observed as the native receipt observes one.
@@ -1701,6 +1744,174 @@ mod handoff_tests {
             runtime
                 .project_routes(&[wrong], None, &mut crate::devices::RouteProjection::new())
                 .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::devices::{Catalog, PoolRecords, Records};
+    use hex_api::{
+        CapacityResources, Execution, GpuEligibility, ImageArch, ImageOs, ImagePlatform, RouteKey,
+        RouteReceipt,
+    };
+    use sha2::{Digest, Sha256};
+    use std::cell::RefCell;
+
+    /// One box's record as a Store keeps it, its fresh write given a native scope, whose native scope a cleanup can't
+    /// attach: as one that can't reach its VMM meets it.
+    struct Unattachable(RefCell<Option<BoxRecord>>);
+
+    impl Transaction for Unattachable {
+        fn records(&self) -> Result<Records, Refusal> {
+            Ok(Records::new())
+        }
+        fn pool_records(&self) -> Result<PoolRecords, Refusal> {
+            Ok(PoolRecords::new())
+        }
+        fn read_pool(&self, _: &hex_api::BackingKey) -> Result<Option<PoolRecord>, Refusal> {
+            panic!("a CPU box reads no pool")
+        }
+        fn put_pool(&self, _: &PoolRecord) -> Result<(), Refusal> {
+            panic!("a CPU box writes no pool")
+        }
+        fn grant_pool(&self, _: &hex_api::BackingGrant) -> Result<PoolRecord, Refusal> {
+            panic!("a CPU box is granted no pool")
+        }
+        fn remove_pool(&self, _: &hex_api::BackingKey) -> Result<(), Refusal> {
+            panic!("a CPU box removes no pool")
+        }
+        fn check_unsubmitted_pool(&self) -> Result<(), Refusal> {
+            panic!("a CPU box checks no pool")
+        }
+        fn read(&self, _: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
+            Ok(self.0.borrow().clone())
+        }
+        fn put(&self, record: &BoxRecord) -> Result<(), Refusal> {
+            let mut kept = record.clone();
+            kept.native_scope
+                .get_or_insert(hex_core::record::NativeScope::from_bytes([7; 16]));
+            *self.0.borrow_mut() = Some(kept);
+            Ok(())
+        }
+        fn remove(&self, _: &BoxId) -> Result<(), Refusal> {
+            *self.0.borrow_mut() = None;
+            Ok(())
+        }
+        fn launch_managed(
+            &self,
+            _: &ManagedLaunch<'_>,
+            _: shards_api::LaunchIo,
+            _: std::time::Duration,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            panic!("this create is refused before its VMM")
+        }
+        fn attach_managed(
+            &self,
+            _: Option<&shards_api::Identity>,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            Err(Refusal::Os {
+                op: "attaching the box's native scope",
+                why: "the test refuses it".to_owned(),
+            })
+        }
+        fn finalize_managed(&self, _: Option<&shards_api::Identity>) -> Result<(), Refusal> {
+            panic!("an unattached scope is never finalized")
+        }
+        fn managed_usage(&self) -> Result<hex_api::Usage, Refusal> {
+            panic!("a refused create reads no usage")
+        }
+    }
+
+    /// AC-T7.4.1 (original): a create refused whose cleanup fails too keeps both causes, typed, its own first. Do:
+    /// create a CPU box whose VM folder can't be made (its state folder is absent), on records whose native scope its
+    /// cleanup can't attach. Expect `Uncertain` carrying the create's refusal, then the cleanup's: the cleanup's
+    /// failure had replaced both with a bare `Lifecycle` `Uncertain`.
+    #[test]
+    fn original_a_create_whose_cleanup_fails_keeps_both_causes_its_own_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let pinned = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            fs::write(&path, bytes).unwrap();
+            (path, <[u8; 32]>::from(Sha256::digest(bytes)))
+        };
+        let mut config = pool::tests::config();
+        (config.binary, config.binary_sha256) = pinned("firecracker", b"a stand-in VMM, never run");
+        (config.cost_evidence, config.cost.id) = pinned("evidence", b"a stand-in cost's evidence");
+        config.state_dir = dir.path().join("absent");
+        let catalog = Catalog::parse(b"hex-devices-1\ngpu\t256\ta\t1\tvfio\t0000:01:00.0\t7\n").unwrap();
+        let owner: Arc<dyn Books> = Arc::new(super::handoff_tests::NoOwnerCalls);
+        let allocation = config
+            .cost
+            .allocate(CapacityResources {
+                cpu_milli: 1000,
+                mem_bytes: hex_api::MIN_MEMORY,
+                disk_bytes: 0,
+            })
+            .unwrap();
+        let runtime = FirecrackerRuntime {
+            config,
+            catalog: triomphe::Arc::try_new(catalog).unwrap(),
+            books: Arc::downgrade(&owner),
+            initialized: std::sync::OnceLock::new(),
+        };
+        let id = BoxId::new("cleanup-refused").unwrap();
+        let spec = BoxSpec {
+            id: id.clone(),
+            bounds: hex_api::Bounds {
+                cpu_max_milli: Some(1000),
+                memory_max: Some(hex_api::MIN_MEMORY),
+                ..hex_api::Bounds::default()
+            },
+            class: ClassSpec::Firecracker(Box::new(hex_api::OciSpec {
+                rootfs: hex_api::Rootfs::Dir("/fixture/root".into()),
+                init: Program::of(&["true"]),
+                mounts: Vec::new(),
+                hostname: None,
+                network: hex_api::Network::Private,
+                hosts: Vec::new(),
+            })),
+            owner: None,
+            devices: Vec::new(),
+            allocation: Some(allocation),
+            route: Some(RouteReceipt {
+                key: RouteKey {
+                    class: Class::Firecracker,
+                    image: ImagePlatform {
+                        os: ImageOs::Linux,
+                        arch: ImageArch::Amd64,
+                    },
+                    execution: Execution::Firecracker,
+                    gpu: GpuEligibility::None,
+                },
+                backing: None,
+            }),
+        };
+        let records = Unattachable(RefCell::new(None));
+        let until = Instant::now() + std::time::Duration::from_secs(30);
+        let refused = runtime
+            .create_or_cleanup(&id, spec, None, &records, until)
+            .unwrap_err();
+        let Refusal::Uncertain {
+            id: named,
+            refusal,
+            cleanup,
+        } = &refused
+        else {
+            panic!("both causes kept: {refused:?}");
+        };
+        assert_eq!(named, &id);
+        assert!(
+            matches!(&**refusal, Refusal::Os { op: "creating private VM directory", .. }),
+            "{refusal:?}"
+        );
+        assert_eq!(
+            **cleanup,
+            Refusal::Os {
+                op: "attaching the box's native scope",
+                why: "the test refuses it".to_owned(),
+            }
         );
     }
 }

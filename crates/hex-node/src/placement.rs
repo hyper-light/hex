@@ -1305,7 +1305,7 @@ impl Driver {
                         }),
                     }
                 }
-                Err(why @ (Refusal::Exists(_) | Refusal::Lifecycle { .. })) => {
+                Err(why @ (Refusal::Exists(_) | Refusal::Lifecycle { .. } | Refusal::Uncertain { .. })) => {
                     step.notices.push(Notice::Unknown {
                         key,
                         refusal: why,

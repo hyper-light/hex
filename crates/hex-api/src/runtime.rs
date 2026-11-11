@@ -1386,6 +1386,16 @@ pub enum Refusal {
     /// says nothing of whether the guest ended.
     #[error("connecting to the guest's port {port} failed: {failure}")]
     Connect { port: u32, failure: ConnectFailure },
+    /// A create refused whose cleanup failed too (AC-T7.4.1): the box may still hold its resources, its physical
+    /// termination or absence unproved, as `Lifecycle`'s `Uncertain` says, and neither cause is dropped: the
+    /// create's own refusal first, then its cleanup's, each typed. Neither is itself an `Uncertain`, which the
+    /// wire refuses, so its depth is one.
+    #[error("box {id}: physical termination or absence has not been proved: {refusal}; its cleanup: {cleanup}")]
+    Uncertain {
+        id: BoxId,
+        refusal: Box<Refusal>,
+        cleanup: Box<Refusal>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
