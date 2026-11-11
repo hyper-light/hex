@@ -101,11 +101,11 @@ fn a_lost_shard_is_taken_over_within_five_seconds_on_the_fleet() {
 fn lose_a_shard(model: NodeModel) {
     let cluster = million(model);
     let config = eight_shards(lose_after_submits(&cluster));
-    let run = sim::run(&cluster, &config).unwrap();
-    check_takeover(model, &cluster, &config, &run);
+    let mut run = sim::run(&cluster, &config).unwrap();
+    check_takeover(model, &cluster, &config, &mut run);
 }
 
-fn check_takeover(model: NodeModel, cluster: &Cluster, config: &Config, run: &Run) {
+fn check_takeover(model: NodeModel, cluster: &Cluster, config: &Config, run: &mut Run) {
     let end = spec::check_end(cluster, run);
     assert_eq!(end.lost_or_double(), 0, "{end:?}");
     assert_eq!(end.complete, 1_000_000, "{end:?}");
@@ -115,11 +115,11 @@ fn check_takeover(model: NodeModel, cluster: &Cluster, config: &Config, run: &Ru
     assert_eq!(slices.len(), 8);
     // A run that kept no planes is checked against the layout it was made on, to the same verdicts.
     let layout = Layout::new(&cluster.nodes, config.shards).unwrap();
-    let bare = Run {
-        planes: Vec::new(),
-        ..run.clone()
-    };
-    assert_eq!(spec::check_layout(&layout, &bare).unwrap(), slices);
+    // AC-T7.4.1: this oracle needs the same finished records, not a copied live FitIndex.
+    let planes = std::mem::take(&mut run.planes);
+    let bare = spec::check_layout(&layout, run);
+    run.planes = planes;
+    assert_eq!(bare.unwrap(), slices);
     assert!(slices.iter().all(|s| s.placements > 0), "{slices:?}");
     assert!(run.planes.iter().all(|p| p.pending() == 0));
 

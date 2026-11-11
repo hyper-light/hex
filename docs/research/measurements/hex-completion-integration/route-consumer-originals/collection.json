@@ -1,0 +1,119 @@
+{
+  "bytes": 654362,
+  "sha256": "e665c42537ddf5799ce1870fd8a94262672ad539b7852af961b0244958f96de8",
+  "members": {
+    "cohort-378192b7-mac-route-contract-v1/running.json": {
+      "bytes": 1779,
+      "sha256": "1b185f6886587b4616372bd9f01f3fd7612bf250de3b504a779f964275fb39ff"
+    },
+    "cohort-378192b7-mac-route-contract-v1/route-wire-controls.log": {
+      "bytes": 2464,
+      "sha256": "1365282b8b11a8f9cb3b28e8de59fb43b6e90507783dad22d49b79c94cc1a739"
+    },
+    "cohort-378192b7-mac-route-contract-v1/result.json": {
+      "bytes": 2076,
+      "sha256": "97cb5533ee338b64b46ca0016e125aa89fe73ba9b5666bbae6c9ec4f3b8c8532"
+    },
+    "cohort-378192b7-mac-route-contract-v1/source-before.json": {
+      "bytes": 312372,
+      "sha256": "4a4cfb3a78187308b8a615ed1365ba394d07bd84205841631792a23ab655cc7a"
+    },
+    "cohort-378192b7-mac-route-contract-v1/source-after.json": {
+      "bytes": 312372,
+      "sha256": "4a4cfb3a78187308b8a615ed1365ba394d07bd84205841631792a23ab655cc7a"
+    },
+    "cohort-378192b7-mac-route-contract-v1/core-pool-record-controls.log": {
+      "bytes": 3333,
+      "sha256": "afe48a3b646df5b2b22c6e48f174e80daa692af406137ed7e62314427a01156d"
+    },
+    "cohort-378192b7-mac-route-contract-v1/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-378192b7-mac-route-contract-v1/collected-binaries.json": {
+      "bytes": 1566,
+      "sha256": "e911bf4f4ef155391f69aa4042fc5ff99a1f6515e06ab97334835d5629dfb83b"
+    },
+    "cohort-a39b9dd5-mac-route-contract-v1/joined-production-check.log": {
+      "bytes": 3910,
+      "sha256": "410fc80566af0c7de0a327039dbe8786138d4d0f0eb00e9e7f34bca0a011e02f"
+    },
+    "cohort-a39b9dd5-mac-route-contract-v1/running.json": {
+      "bytes": 3220,
+      "sha256": "d234ce675b7ee33a16696e0bc45d9dc5bbbc9ca882cdcbb41a2dfe4b9ec57a67"
+    },
+    "cohort-a39b9dd5-mac-route-contract-v1/result.json": {
+      "bytes": 3451,
+      "sha256": "e46fed39cb937a285227c3b4ce42cb0786a2fe0a8b255a68f2d548b93ae0e029"
+    },
+    "cohort-a39b9dd5-mac-route-contract-v1/source-before.json": {
+      "bytes": 314867,
+      "sha256": "be14b0305fbf803a8ea4a5412260f2a9fc4901f68b326b38244ef2917dd63fba"
+    },
+    "cohort-a39b9dd5-mac-route-contract-v1/wire-valid-route-tail.log": {
+      "bytes": 3052,
+      "sha256": "bb5c6e2f7358b15a7b2733616a58a68113d800884ced41404ed42709fe11babf"
+    },
+    "cohort-a39b9dd5-mac-route-contract-v1/source-after.json": {
+      "bytes": 314867,
+      "sha256": "be14b0305fbf803a8ea4a5412260f2a9fc4901f68b326b38244ef2917dd63fba"
+    },
+    "cohort-a39b9dd5-mac-route-contract-v1/client-new-backing-usage-index.log": {
+      "bytes": 1738,
+      "sha256": "dc4c576735a38c653bb758e40966c001d85bfba3ac821c024aff4cebef6a2317"
+    },
+    "cohort-a39b9dd5-mac-route-contract-v1/wire-inconsistent-route-refusal.log": {
+      "bytes": 423,
+      "sha256": "8b2b719441a4bab76fb289030cbb0789ba0cb556efdd34233959b7db0bf40338"
+    },
+    "cohort-a39b9dd5-mac-route-contract-v1/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-a39b9dd5-mac-route-contract-v1/collected-binaries.json": {
+      "bytes": 3123,
+      "sha256": "3e591d3095fd1997847a586118abf1aa5d8971fc9efa6f180ded2e20e545d56a"
+    },
+    "cohort-4f0922ae-mac-route-consumer-v1/joined-production-check.log": {
+      "bytes": 4747,
+      "sha256": "612555c7721c88cf04420b8a5fef861999003759c3b64431bbbf82d34c27ad75"
+    },
+    "cohort-4f0922ae-mac-route-consumer-v1/route-index-original-controls.log": {
+      "bytes": 10921,
+      "sha256": "7d949759de7b25908ba0979e69af78b8a077693a708684f7627da8be862fe0d6"
+    },
+    "cohort-4f0922ae-mac-route-consumer-v1/running.json": {
+      "bytes": 2573,
+      "sha256": "2f0803c6f4ee08267340fae0a0db7b855d5e6c97c9229d15ad24607c2f9a2ae9"
+    },
+    "cohort-4f0922ae-mac-route-consumer-v1/result.json": {
+      "bytes": 2831,
+      "sha256": "d207fb7f9d394144fa4d9d59cb78926bf8f714e19b824fc2f09fd2ab82826526"
+    },
+    "cohort-4f0922ae-mac-route-consumer-v1/source-before.json": {
+      "bytes": 316176,
+      "sha256": "ea63133bb818c9b2a7272b61caea1bd4be1810d757fe9a03984711a50cdb4b84"
+    },
+    "cohort-4f0922ae-mac-route-consumer-v1/source-after.json": {
+      "bytes": 316176,
+      "sha256": "ea63133bb818c9b2a7272b61caea1bd4be1810d757fe9a03984711a50cdb4b84"
+    },
+    "cohort-4f0922ae-mac-route-consumer-v1/peer-route-receipt-control.log": {
+      "bytes": 8265,
+      "sha256": "3151fc9c59800eeb60dbd3df0408728e98e19db9e93158af5cf28aeb7bd328e5"
+    },
+    "cohort-4f0922ae-mac-route-consumer-v1/public-registry-seed.json": {
+      "bytes": 22473,
+      "sha256": "2f9e3af2b8a29fdee9e626d8f4a96da3522bb360399c26db8d7061605deb7962"
+    },
+    "cohort-4f0922ae-mac-route-consumer-v1/collected-binaries.json": {
+      "bytes": 2074,
+      "sha256": "c1e14798de9952607d048275503530e6d6e1af8cfe56124737eb822cb97a8e24"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

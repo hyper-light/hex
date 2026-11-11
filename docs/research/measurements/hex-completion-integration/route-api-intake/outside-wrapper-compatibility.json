@@ -1,0 +1,14 @@
+{
+  "requirement": "AC-T7.4.1",
+  "source_base": "4f0922ae79a9e3fa500a2ec021edceeff05fd926",
+  "kind": "outside wrapper compatibility; source only",
+  "changes": [
+    "Temporarily move finished control planes out and restore them around the explicit-layout oracle; no live index clone.",
+    "Borrow surviving cells directly for the unchanged cell oracles."
+  ],
+  "files": {
+    "crates/hex-sim/tests/shards.rs": "00293e021ba7da2f6a6c52f1c7e38f8dc7505da553cc6fb8b8d5ebe80edda86e",
+    "crates/hex-sim/tests/cells.rs": "a0d72f9081027d0ec12d3da26748d3e1a0974278cf5e3cf43a8da6f49d2cbcd4"
+  },
+  "tests_executed": 0
+}
