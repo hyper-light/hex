@@ -257,9 +257,9 @@ fn gpu_node(reordered: bool) -> NodeSpec {
         ..Device::gpu(ModelId(0), hex_api::MIN_MEMORY)
     };
     node.devices = if reordered {
-        vec![gpu(GPU_B, 0, true), gpu(GPU_A, 1000, false)]
+        vec![gpu(GPU_B, Some(0), true), gpu(GPU_A, Some(1000), false)]
     } else {
-        vec![gpu(GPU_A, 0, true), gpu(GPU_B, 1000, true)]
+        vec![gpu(GPU_A, Some(0), true), gpu(GPU_B, Some(1000), true)]
     };
     node
 }

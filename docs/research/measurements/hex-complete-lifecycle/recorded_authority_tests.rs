@@ -33,6 +33,7 @@ fn info(record: &BoxRecord) -> BoxInfo {
 }
 struct Registered {
     books: OnceLock<Weak<dyn Authority>>,
+    programs: Backend,
     created: AtomicUsize,
     deleted: AtomicUsize,
 }
@@ -73,6 +74,9 @@ impl Runtime for Registered {
     }
     fn exec(&self, _: &BoxId, _: Program, _: Stdio) -> Result<Box<dyn Proc>, Refusal> {
         Err(Refusal::Broken("test backend has no program effect".into()))
+    }
+    fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        self.programs.run(spec, program, stdio)
     }
     fn signal(&self, id: &BoxId, _: Signal) -> Result<(), Refusal> {
         self.start(id)
@@ -123,6 +127,13 @@ impl Runtime for Routed {
     fn exec(&self, id: &BoxId, p: Program, s: Stdio) -> Result<Box<dyn Proc>, Refusal> {
         self.host.exec(id, p, s)
     }
+    fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        if spec.class.class() == Class::Shards {
+            self.guest.run(spec, program, stdio)
+        } else {
+            self.host.run(spec, program, stdio)
+        }
+    }
     fn signal(&self, id: &BoxId, s: Signal) -> Result<(), Refusal> {
         self.host.signal(id, s)
     }
@@ -171,6 +182,7 @@ fn registered_backend_uses_same_arc_store_and_turns_without_outer_record_or_reen
                 host: Backend(Arc::clone(&gate)),
                 guest: Registered {
                     books: OnceLock::new(),
+                    programs: Backend(Arc::clone(&gate)),
                     created: AtomicUsize::new(0),
                     deleted: AtomicUsize::new(0),
                 },
