@@ -1499,3 +1499,170 @@ fn absolute_run_caps_named_stdio_and_preserves_headers() {
     assert_eq!(names[2].stream, stream::Stdio::Err);
     assert!(state_clean);
 }
+
+/// The existing in-memory offer fixture supplies an actual Started response,
+/// while no Exit is ever published. It has no relative transport reply cap.
+struct DropOriginal(Offers);
+
+impl Transport for DropOriginal {
+    type Reading = ();
+
+    fn answers() -> &'static [Patience; KINDS] {
+        static WAITS: [Patience; KINDS] =
+            [const { Patience::measuring("test.client_drop_original.unarmed") }; KINDS];
+        &WAITS
+    }
+    fn reading(&self) {}
+    fn handle(&self) -> Handle<'_> {
+        self.0.handle()
+    }
+    fn recv(&self, reading: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
+        self.0.recv(reading, take)
+    }
+    fn try_send(&self, bytes: &[u8], at: &mut usize, lent: &[Lent<'_>]) -> Result<bool, Sent> {
+        let (header, request) = wire::read_request_apart(bytes, wire::MAX_MESSAGE).unwrap();
+        if matches!(&request, Request::Call(Call::Run { .. })) {
+            self.0.queue(header.id, Answer::Started { pid: 7 });
+            self.0.outbound.lock().unwrap().push((header.id, request));
+            *at = bytes.len();
+            Ok(true)
+        } else {
+            self.0.try_send(bytes, at, lent)
+        }
+    }
+    fn shutdown(&self) {
+        self.0.shutdown();
+    }
+}
+
+/// AC-T7.4.1 original regression: after run_before's absolute cap expires,
+/// returning an observer error must not renew authority while dropping its actual
+/// unfinished RemoteProc. Only the existing sender guard delays that Drop here.
+#[test]
+fn absolute_run_error_return_does_not_renew_drop_sender_budget() {
+    let (io, _) = stalled(None);
+    let (entered, _) = mpsc::sync_channel(1);
+    let client = Arc::new(configured(DropOriginal(Offers {
+        io,
+        inbound: Mutex::new(VecDeque::new()),
+        outbound: Mutex::new(Vec::new()),
+        entered,
+        program: Mutex::new(None),
+    })));
+    let original = Instant::now().checked_add(CAP).unwrap();
+    let mut process = client
+        .run_before(
+            absolute_spec(),
+            Program::of(&["owned-drop-original"]),
+            Stdio::null(),
+            original,
+        )
+        .unwrap();
+    let run_id = {
+        let sent = client.conn.shared.transport.0.outbound.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        let (id, request) = &sent[0];
+        assert!(matches!(request, Request::Call(Call::Run { .. })));
+        *id
+    };
+    assert_eq!(process.pid(), 7);
+    assert_eq!(process.try_wait().unwrap(), None);
+    assert_eq!(client.conn.shared.state().unwrap().programs.len(), 1);
+    assert_eq!(client.conn.shared.transport.reply_budget(), None);
+
+    let (release, begin) = mpsc::sync_channel(1);
+    let (starting, started) = mpsc::sync_channel(1);
+    let (finished, answer) = mpsc::sync_channel(1);
+    // Spawn before holding the sender guard: even spawn failure drops the
+    // captured Proc without a self-owned guard that could strand its destructor.
+    let worker = std::thread::Builder::new()
+        .name("owned-drop-original".into())
+        .spawn(move || {
+            let permitted = begin.recv();
+            let began = Instant::now();
+            let _ = starting.send((began, permitted.is_ok()));
+            let fail_observer = move || -> Result<(), Refusal> {
+                let _unfinished = process;
+                Err(Refusal::os(
+                    "owned observer original-deadline failure",
+                    io::ErrorKind::TimedOut,
+                ))
+            };
+            // This return must run RemoteProc::drop before the result can be sent.
+            let result = fail_observer();
+            let _ = finished.send((Instant::now(), result));
+        })
+        .unwrap();
+
+    // From this point every observation is captured; cleanup/join precedes ALL
+    // assertions. No production hook, fake clock, new timer or periodic wait.
+    let held = client.conn.shared.sending.lock(None);
+    let held_exact_guard = matches!(&held, Ok(Some(_)));
+    let expired = until(original);
+    let released = release.send(());
+    let began = started.recv_timeout(OBSERVE);
+    let before_cleanup = answer.recv_timeout(OBSERVE);
+    let before_release_at = Instant::now();
+    drop(held);
+    client.conn.shared.end(Refusal::Broken(
+        "owned Drop original observation cleanup".into(),
+    ));
+    let joined = worker.join();
+    let after_cleanup = answer.try_recv();
+    let (release_count, other_count) = {
+        let sent = client.conn.shared.transport.0.outbound.lock().unwrap();
+        let releases = sent
+            .iter()
+            .filter(|(_, request)| matches!(request, Request::Release))
+            .count();
+        let other = sent
+            .iter()
+            .filter(|(_, request)| {
+                !matches!(request, Request::Call(Call::Run { .. }) | Request::Release)
+            })
+            .count();
+        (releases, other)
+    };
+    let clean =
+        client.conn.shared.state().map(|state| {
+            state.calls.is_empty() && state.programs.is_empty() && state.given.is_empty()
+        });
+    eprintln!(
+        "client_drop_original run_id={run_id} original={original:?} cap={CAP:?} observation={OBSERVE:?} held={held_exact_guard} expired={expired:?} gate={released:?} began={began:?} before_release={before_release_at:?} before_cleanup={before_cleanup:?} after_cleanup={after_cleanup:?} release_count={release_count} other_count={other_count} joined={} clean={clean:?}",
+        joined.is_ok()
+    );
+    joined.unwrap();
+    expired.unwrap();
+    released.unwrap();
+    assert!(held_exact_guard, "the exact existing sender must be held");
+    let (began, permitted) = began.unwrap();
+    assert!(
+        permitted && began >= original,
+        "Drop must begin after the original cap"
+    );
+    assert_eq!(other_count, 0);
+    assert!(clean.unwrap());
+    assert!(
+        client
+            .conn
+            .shared
+            .transport
+            .0
+            .io
+            .closed
+            .load(Ordering::Acquire)
+    );
+    assert!(
+        before_cleanup.is_ok(),
+        "original absolute deadline was lost: the observer's final error return waited in unfinished Proc::drop until its held sender was released"
+    );
+    let (returned, result) = before_cleanup.unwrap();
+    assert!(returned <= before_release_at);
+    assert!(matches!(
+        result,
+        Err(Refusal::Os {
+            op: "owned observer original-deadline failure",
+            ..
+        })
+    ));
+}

@@ -1,0 +1,8 @@
+{
+  "source": "6753cd586cef435e08ca236a9676ee28d1500bba",
+  "root_method": "test-only append mapped onto current testmodule; no RemoteProc/Drop/send_now remedy",
+  "test_source_sha256": "9e49002f5ae2866ac9f523a231cf2abc4ffc365c5309a5cefeccb0854a848461",
+  "results": "UNRUN at intake",
+  "outside_production_change": "ROOT122586 only new backing-grant owned-payload type; Run/RemoteProc/send_now body unchanged",
+  "remaining": "ROOT executes original regression once before any remedy; bounded cleanup performed before assertion"
+}
