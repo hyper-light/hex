@@ -1,0 +1,17 @@
+{
+  "role": "implementer",
+  "base": "afbf135a39b0f2d19ac280faa887940b50f54578",
+  "path": "crates/hex-node/src/recorded.rs",
+  "base_sha256": "d11b03ce26f379db4c7627eda1ea44c6c3b863bd82933be060b237e230621b40",
+  "sha256": "ab18e8a8e0949cf23880e4a964fd3df0477d27717860cfd706a193fbee4f97cf",
+  "api_dependency": "b2e5e185652cb87336eca993e8eec3aeb892045e",
+  "actual_precondition_failure": {
+    "cohort": "df29",
+    "log_sha256": "fd8e2ba8ebd31e160e2e5175686bf4db40059679de2b2fbedaba1d5c736e10b5",
+    "source": "original c9b body preserved; failed at initial put due valid factual ClassShards Any+nonempty selection being treated as initialized offer Required"
+  },
+  "change": "Common structural/Store and native-launch validation consume exact RouteReceipt::check_backing_parts(cost,key,profile,P,S), retaining shared CPU and actual-selection semantics. No workload rewrite, new formula, initialized offer eligibility widening, or guard/oracle weakening.",
+  "validation": "scopedfmt/diff0 only; no checks/replay/native",
+  "original_c9b_unchanged": true,
+  "after_guard_result": "UNRUN; actual7197 original removalred remains independent from df29 precondition"
+}

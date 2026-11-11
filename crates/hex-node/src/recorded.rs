@@ -312,16 +312,16 @@ pub(crate) fn check_backing_reference(
     {
         return Err(bad());
     }
-    hex_api::RouteOffer {
-        key: route.key,
-        cost: record.spec.allocation.map(|allocation| allocation.cost),
-        backing: route.backing,
-    }
-    .check_backing_parts(pool.key, pool.cost, &pool.devices)?;
+    route.check_backing_parts(
+        record.spec.allocation.map(|allocation| allocation.cost),
+        pool.key,
+        pool.cost,
+        &pool.devices,
+        &record.spec.devices,
+    )?;
     if route.key.execution == hex_api::Execution::ShardsShared {
         return Ok(());
     }
-    hex_api::BackingOffer::check_selection_parts(&pool.devices, &record.spec.devices)?;
     match pool.phase {
         hex_api::BackingPhase::Live | hex_api::BackingPhase::Draining
             if matches!(record.phase, Phase::Creating | Phase::Deleting)
@@ -695,12 +695,13 @@ impl Transaction<'_> {
                             cause: hex_api::LifecycleCause::Pending,
                         });
                     }
-                    hex_api::RouteOffer {
-                        key: route.key,
-                        cost: record.spec.allocation.map(|allocation| allocation.cost),
-                        backing: route.backing,
-                    }
-                    .check_backing_parts(pool.key, pool.cost, &pool.devices)?;
+                    route.check_backing_parts(
+                        record.spec.allocation.map(|allocation| allocation.cost),
+                        pool.key,
+                        pool.cost,
+                        &pool.devices,
+                        &record.spec.devices,
+                    )?;
                 }
                 Ok(())
             }

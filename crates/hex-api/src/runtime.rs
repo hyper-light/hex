@@ -488,34 +488,23 @@ impl RouteOffer {
         devices: &[crate::DeviceId],
     ) -> Result<(), Refusal> {
         self.check()?;
-        if self.backing != Some(key) {
-            return Err(invalid_route("route references another backing generation"));
-        }
-        check_provisioning(devices)?;
-        profile.check()?;
-        if profile.floor != profile.ceiling {
+        if matches!(
+            self.key.execution,
+            Execution::ShardsDedicated | Execution::Firecracker
+        ) && self.key.gpu != GpuEligibility::Required
+        {
             return Err(invalid_route(
-                "backing profile is not its fixed configured envelope",
+                "initialized backing route requires explicit selected-GPU eligibility",
             ));
         }
-        match (self.key.execution, self.cost) {
-            (Execution::ShardsShared, None) if devices.is_empty() => Ok(()),
-            (Execution::ShardsDedicated | Execution::Firecracker, Some(cost))
-                if self.key.gpu == GpuEligibility::Required
-                    && !devices.is_empty()
-                    && cost.id == profile.id
-                    && cost.floor == profile.floor
-                    && cost.quantum == profile.quantum
-                    && cost.overhead == profile.overhead
-                    && cost.guest_overhead == profile.guest_overhead
-                    && cost.ceiling.holds(profile.ceiling) =>
-            {
-                Ok(())
-            }
-            _ => Err(invalid_route(
-                "route and backing disagree about topology, profile or physical grant",
-            )),
-        }
+        check_backing_profile(
+            self.key.execution,
+            self.cost,
+            self.backing,
+            key,
+            profile,
+            devices,
+        )
     }
 
     pub fn check(self) -> Result<(), Refusal> {
@@ -530,6 +519,46 @@ impl RouteOffer {
     }
 }
 
+fn check_backing_profile(
+    execution: Execution,
+    cost: Option<RuntimeCost>,
+    backing: Option<BackingKey>,
+    key: BackingKey,
+    profile: RuntimeCost,
+    devices: &[crate::DeviceId],
+) -> Result<(), Refusal> {
+    if backing != Some(key) {
+        return Err(invalid_route("route references another backing generation"));
+    }
+    check_provisioning(devices)?;
+    profile.check()?;
+    if let Some(cost) = cost {
+        cost.check()?;
+    }
+    if profile.floor != profile.ceiling {
+        return Err(invalid_route(
+            "backing profile is not its fixed configured envelope",
+        ));
+    }
+    match (execution, cost) {
+        (Execution::ShardsShared, None) if devices.is_empty() => Ok(()),
+        (Execution::ShardsDedicated | Execution::Firecracker, Some(cost))
+            if !devices.is_empty()
+                && cost.id == profile.id
+                && cost.floor == profile.floor
+                && cost.quantum == profile.quantum
+                && cost.overhead == profile.overhead
+                && cost.guest_overhead == profile.guest_overhead
+                && cost.ceiling.holds(profile.ceiling) =>
+        {
+            Ok(())
+        }
+        _ => Err(invalid_route(
+            "route and backing disagree about topology, profile or physical grant",
+        )),
+    }
+}
+
 /// Immutable chosen route beside the original BoxSpec. This factual receipt never relabels the
 /// workload class and cannot alone initialize a backing, assert native readiness or grant devices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -539,6 +568,41 @@ pub struct RouteReceipt {
     pub backing: Option<BackingKey>,
 }
 impl RouteReceipt {
+    /// Validate a factual retained receipt against its original source; this does not advertise
+    /// a fresh initialized offer or turn a legacy Any eligibility key into new GPU capability.
+    pub fn check_backing_parts(
+        self,
+        cost: Option<RuntimeCost>,
+        key: BackingKey,
+        profile: RuntimeCost,
+        provisioned: &[crate::DeviceId],
+        selected: &[crate::DeviceId],
+    ) -> Result<(), Refusal> {
+        self.check(
+            self.key.class,
+            selected.iter().any(|id| id.kind == crate::DeviceKind::Gpu),
+        )?;
+        check_backing_profile(
+            self.key.execution,
+            cost,
+            self.backing,
+            key,
+            profile,
+            provisioned,
+        )?;
+        if self.key.execution == Execution::ShardsShared {
+            check_provisioning(selected)?;
+            if !selected.is_empty() {
+                return Err(invalid_route(
+                    "shared backing has no selected physical grant",
+                ));
+            }
+            Ok(())
+        } else {
+            BackingOffer::check_selection_parts(provisioned, selected)
+        }
+    }
+
     /// One formula for candidate, durable admission and recovery. Shared payload limits are
     /// unchanged; its separately granted backing pays the host envelope exactly once.
     pub fn charged(
@@ -1955,5 +2019,121 @@ mod subset_selection_tests {
         assert!(BackingOffer::check_selection_parts(&[id(2), id(1)], &[id(1)]).is_err());
         assert!(BackingOffer::check_selection_parts(&[], &[id(1)]).is_err());
         assert_eq!(full, [id(1), id(2)]);
+    }
+}
+
+#[cfg(test)]
+mod factual_backing_receipt_tests {
+    use super::*;
+    use crate::{Class, DeviceId, DeviceKind};
+
+    /// AC-T7.4.1: a factual legacy receipt is validated without widening initialized offers.
+    #[test]
+    fn factual_any_receipt_keeps_profile_subset_and_fresh_offer_rules_distinct() {
+        let floor = CapacityResources {
+            cpu_milli: 1000,
+            mem_bytes: crate::MIN_MEMORY,
+            disk_bytes: 0,
+        };
+        let profile = RuntimeCost {
+            id: [1; 32],
+            floor,
+            ceiling: floor,
+            quantum: CapacityResources {
+                cpu_milli: 1,
+                mem_bytes: 1,
+                disk_bytes: 1,
+            },
+            guest_overhead: CapacityResources::default(),
+            overhead: CapacityResources::default(),
+        };
+        let key = BackingKey {
+            pool: [2; 32],
+            generation: [3; 16],
+        };
+        let p = [7, 8].map(|key| DeviceId {
+            kind: DeviceKind::Gpu,
+            key,
+        });
+        let receipt = RouteReceipt {
+            key: RouteKey {
+                class: Class::Shards,
+                image: ImagePlatform {
+                    os: ImageOs::Linux,
+                    arch: ImageArch::Amd64,
+                },
+                execution: Execution::ShardsDedicated,
+                gpu: GpuEligibility::Any,
+            },
+            backing: Some(key),
+        };
+        receipt
+            .check_backing_parts(Some(profile), key, profile, &p, &p[..1])
+            .unwrap();
+        let offer = RouteOffer {
+            key: receipt.key,
+            cost: Some(profile),
+            backing: Some(key),
+        };
+        assert!(offer.check_backing_parts(key, profile, &p).is_err());
+        RouteOffer {
+            key: RouteKey {
+                gpu: GpuEligibility::Required,
+                ..offer.key
+            },
+            ..offer
+        }
+        .check_backing_parts(key, profile, &p)
+        .unwrap();
+        assert!(
+            receipt
+                .check_backing_parts(Some(profile), key, profile, &p, &[])
+                .is_err()
+        );
+        assert!(
+            receipt
+                .check_backing_parts(
+                    Some(profile),
+                    key,
+                    profile,
+                    &p,
+                    &[DeviceId {
+                        kind: DeviceKind::Gpu,
+                        key: 9
+                    }]
+                )
+                .is_err()
+        );
+        assert!(
+            receipt
+                .check_backing_parts(
+                    Some(profile),
+                    key,
+                    RuntimeCost {
+                        id: [4; 32],
+                        ..profile
+                    },
+                    &p,
+                    &p[..1]
+                )
+                .is_err()
+        );
+        let shared = RouteReceipt {
+            key: RouteKey {
+                class: Class::Oci,
+                execution: Execution::ShardsShared,
+                gpu: GpuEligibility::None,
+                ..receipt.key
+            },
+            backing: Some(key),
+        };
+        shared
+            .check_backing_parts(None, key, profile, &[], &[])
+            .unwrap();
+        assert!(
+            shared
+                .check_backing_parts(None, key, profile, &[], &p[..1])
+                .is_err()
+        );
     }
 }
