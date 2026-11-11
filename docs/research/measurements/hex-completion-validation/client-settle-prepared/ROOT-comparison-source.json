@@ -1,0 +1,34 @@
+{
+  "role": "coordinator",
+  "base": "f7a08e5748e999ca6dba855143e8c7e581cfa44f",
+  "source": "crates/hex-client/src/calls.rs",
+  "fixture": "crates/hex-client/src/calls/budget_tests.rs",
+  "fixture_sha256": "1a0be87518194ba141359eedfd0c1f124cb436d8a064098af9fd04c335e486ec",
+  "selector": "calls::budget_tests::prepared_actor_settle_error_retains_original_kill_answer_authority",
+  "reverse_patch_sha256": "6b15ba77556a6c4912df47e087226944df27c13e2412aede3993b151786ffb43",
+  "variants": [
+    {
+      "name": "before69a",
+      "calls_sha256": "38ae331369187698244c8d679e944e39937b27915f4c7612191e9d65604f3fc1",
+      "expected": "one semantic failure with actual Run/Started/Kill and clean original error only after cleanup"
+    },
+    {
+      "name": "after69a",
+      "calls_sha256": "2274b7d480ab9291716b0ea257f750e0e9c53fb8e86ab20bf600cbcc51b1dd59",
+      "expected": "one pass with phase witnessed and cleanup complete"
+    },
+    {
+      "name": "missing_kill_cap",
+      "calls_sha256": "8b6d76132b1b0ce5656cdf898c76b9ef20e45c12033305d822bd7fe01f618305",
+      "expected": "one relevant semantic failure; only retained Kill cap removed"
+    },
+    {
+      "name": "restored_after69a",
+      "calls_sha256": "2274b7d480ab9291716b0ea257f750e0e9c53fb8e86ab20bf600cbcc51b1dd59",
+      "expected": "fresh immutable source/target restored exact after bytes, one pass"
+    }
+  ],
+  "method": "One exact signed ROOT archive materialized into four fresh private source/target roots. Only explicitly hashed calls.rs variant differs. Same fixture/lock/dependencies/counts/25ms+100ms budgets. Pre/post full source manifest each variant, actual testbinary hash, owned finite process guard and reaping. No existing source/cache mutation.",
+  "status": "NOT RUN; expectations are not outcomes",
+  "native_VM_GPU": 0
+}

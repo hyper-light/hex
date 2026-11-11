@@ -1,0 +1,71 @@
+diff --git a/crates/hex-client/src/calls.rs b/crates/hex-client/src/calls.rs
+index 7d67fd06..ff49a1fd 100644
+--- a/crates/hex-client/src/calls.rs
++++ b/crates/hex-client/src/calls.rs
+@@ -2212,10 +2212,7 @@ impl<T: Transport> Core<T> {
+                         Ok(Box::new(proc))
+                     }
+                     Err(why) => {
+-                        let _ = match caller {
+-                            Some(cap) => proc.kill_before(cap),
+-                            None => proc.kill(),
+-                        };
++                        let _ = proc.kill();
+                         Err(why)
+                     }
+                 }
+@@ -2578,14 +2575,6 @@ impl<T: Transport> RemoteProc<T> {
+     /// this wait itself while it holds the reader's turn, taken when free or handed to it, else handed to it by the
+     /// thread that reads; the turn handed on as it goes.
+     fn wait(&mut self, timeout: Option<Duration>) -> Result<Option<Exit>, Refusal> {
+-        self.wait_before(timeout, None)
+-    }
+-
+-    fn wait_before(
+-        &mut self,
+-        timeout: Option<Duration>,
+-        cap: Option<ReplyDeadline>,
+-    ) -> Result<Option<Exit>, Refusal> {
+         if let Some(exit) = self.exit {
+             return Ok(Some(exit));
+         }
+@@ -2626,15 +2615,6 @@ impl<T: Transport> RemoteProc<T> {
+                 Some(None) => timeout.unwrap_or(Duration::ZERO),
+                 Some(Some(deadline)) => deadline.saturating_duration_since(Instant::now()),
+             };
+-            // Setup cleanup may poll for an already completed program, but continuous unrelated
+-            // traffic must not keep even that zero-duration poll past its original authority.
+-            let left = match cap {
+-                Some(cap) => match cap.remaining("waiting for a program during setup cleanup") {
+-                    Ok(remaining) => left.min(remaining),
+-                    Err(why) => break Err(why),
+-                },
+-                None => left,
+-            };
+             if mine {
+                 match shared.turn(Some(left)) {
+                     Ok(true) => continue,
+@@ -2687,23 +2667,6 @@ impl<T: Transport> RemoteProc<T> {
+         }
+         got
+     }
+-
+-    /// Only failed bounded setup uses this cap; ordinary workload kill/wait keeps its old policy.
+-    fn kill_before(&mut self, cap: ReplyDeadline) -> Result<(), Refusal> {
+-        if self.wait_before(None, Some(cap))?.is_some() {
+-            return Ok(());
+-        }
+-        let kill = Request::Call(Call::Kill { exec: self.exec });
+-        match self
+-            .conn
+-            .call_before(self.bound, &kill, |_, _| Ok(NONE), None, Some(cap))?
+-            .1
+-        {
+-            Answer::Done => Ok(()),
+-            Answer::Refused(r) => Err(r),
+-            other => Err(unexpected("kill", &other)),
+-        }
+-    }
+ }
+ 
+ impl<T: Transport> Proc for RemoteProc<T> {
