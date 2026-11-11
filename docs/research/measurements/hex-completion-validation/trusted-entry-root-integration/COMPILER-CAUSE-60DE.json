@@ -8,8 +8,8 @@
   "cause": "Local BoxProc binding process shadows private helper process<T>; E0618 at1178/1202 and derivativeE0282",
   "port": "Rename only private helper and four calls to with_process; its body, local native owners and all controls unchanged",
   "before_sha256": "976902dddf4a5b4dfe218344ecd655ff631b960dd0f9a2d22a26a6475fd80ff0",
-  "after_sha256": "eb9b909214fc3627340351082346905a93e8b9768419e6536c82a6a8aecad201",
-  "old_reconstructed_from_new_by_token_rename": true,
+  "after_sha256": "1093b2b228e3016149a6d05fb910c7b548faff172f47c598e54f8cf4c7ddf918",
+  "old_reconstructed_from_new_by_token_rename": "verified before scoped rustfmt; formatting wraps the longer helper calls, production bodies/control semantics unchanged",
   "lane_original_04ece338_untouched": true,
   "source_owner_notification": "agents_send attempted for exact compiler cause, REJECTED503/custody not accepted; not delivered",
   "proof": {
