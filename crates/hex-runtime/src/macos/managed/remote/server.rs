@@ -258,8 +258,23 @@ fn serve(
             "native helper request belongs to another user",
         ));
     }
-    let pid = sys::peer_pid(connection)
-        .map_err(|_| super::super::configuration("native client PID unavailable"))?;
+    // A command client gone before its request was read asked nothing, and no effect was made: no
+    // reply is owed, to it or to the next client. The first Prepare keeps its startup failure.
+    let command = matches!(entry, Entry::Command);
+    let pid = match sys::peer_pid(connection) {
+        Ok(pid) => pid,
+        Err(sys::PeerPidFailure::Native(error))
+            if command && error.raw_os_error() == Some(libc::ENOTCONN) =>
+        {
+            return Ok(());
+        }
+        Err(failure) => {
+            return Err(Refusal::Os {
+                op: "reading the native client PID",
+                why: diagnostic(failure)?,
+            });
+        }
+    };
     let birth = sys::rusage(pid)
         .map_err(|error| Refusal::os("reading native client birth", error))?
         .filter(|actual| !actual.ended && actual.started != 0)
@@ -272,12 +287,15 @@ fn serve(
     rustix::net::sockopt::set_socket_nosigpipe(connection, true)
         .map_err(|error| Refusal::os("protecting helper connection disconnect", error))?;
     let until = helper.until(None)?;
-    let (bytes, descriptors) = frame::receive(
+    let (bytes, descriptors) = match frame::receive(
         connection.as_fd(),
         protocol::timed::MAX_MESSAGE,
         Some(until),
-    )
-    .map_err(frame::Failure::refusal)?;
+    ) {
+        Ok(received) => received,
+        Err(frame::Failure::Closed) if command => return Ok(()),
+        Err(failure) => return Err(failure.refusal()),
+    };
     peer(connection, peer_id)?;
     if let Ok((version, id, wanted)) = protocol::census::read_request(&bytes, descriptors.len()) {
         if matches!(entry, Entry::FirstPrepare(_)) {
