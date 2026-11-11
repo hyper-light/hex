@@ -15,7 +15,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio as HostStdio};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -23,6 +23,7 @@ use hex_api::{
     BackingPhase, BoxId, BoxSpec, Class, DeviceHolder, DeviceId, Exit, Program, Runtime, Stdio,
 };
 use hex_client::Client;
+use hex_core::record::{BoxRecord, Phase};
 use hex_core::schedule::{self as dto, Payload};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -65,6 +66,10 @@ fn digest(path: &Path) -> String {
         digest.update(&buffer[..size]);
     }
     format!("{:x}", digest.finalize())
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn journal(value: Value) {
@@ -168,6 +173,421 @@ fn read_output(
         bytes,
         end,
         at: Instant::now(),
+    }
+}
+
+type CreatingRecords = Vec<(BoxId, Vec<u8>)>;
+
+fn capture_creating(
+    root: &Path,
+    class: Class,
+    entries: u64,
+    bytes: u64,
+    captured: &mut CreatingRecords,
+) -> Result<(), String> {
+    let mut inspected = 0_u64;
+    let mut retained = captured.iter().try_fold(0_u64, |sum, (_, raw)| {
+        sum.checked_add(u64::try_from(raw.len()).map_err(|error| error.to_string())?)
+            .ok_or_else(|| "Creating byte overflow".to_owned())
+    })?;
+    // Canonical Store layout: root/shard/id.json. No recursion or Store writes.
+    for shard in fs::read_dir(root).map_err(|error| error.to_string())? {
+        inspected = inspected.checked_add(1).ok_or("record count overflow")?;
+        if inspected > entries {
+            return Err("Creating directory budget exceeded".into());
+        }
+        let shard = shard.map_err(|error| error.to_string())?;
+        if !shard
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_dir()
+        {
+            continue;
+        }
+        for file in fs::read_dir(shard.path()).map_err(|error| error.to_string())? {
+            inspected = inspected.checked_add(1).ok_or("record count overflow")?;
+            if inspected > entries {
+                return Err("Creating file budget exceeded".into());
+            }
+            let file = file.map_err(|error| error.to_string())?;
+            if !file
+                .file_type()
+                .map_err(|error| error.to_string())?
+                .is_file()
+            {
+                continue;
+            }
+            let path = file.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let file = match File::open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.to_string()),
+            };
+            let mut raw = Vec::new();
+            file.take(bytes.checked_add(1).ok_or("Creating byte bound overflow")?)
+                .read_to_end(&mut raw)
+                .map_err(|error| error.to_string())?;
+            if u64::try_from(raw.len()).map_err(|error| error.to_string())? > bytes {
+                return Err("Creating record exceeds byte budget".into());
+            }
+            let record = BoxRecord::decode(&raw)?;
+            if record.phase != Phase::Creating
+                || record.init.is_some()
+                || record.spec.class.class() != class
+                || record.native_scope.is_none()
+                || hex_node::store::runtime_record(root, &record.spec.id) != path
+                || captured.iter().any(|(id, _)| id == &record.spec.id)
+            {
+                continue;
+            }
+            retained = retained
+                .checked_add(u64::try_from(raw.len()).map_err(|error| error.to_string())?)
+                .ok_or("retained Creating bytes overflow")?;
+            if retained > bytes {
+                return Err("retained Creating records exceed byte budget".into());
+            }
+            captured.push((record.spec.id, raw));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+struct CreatingChanges {
+    fd: std::os::fd::OwnedFd,
+    watched: std::collections::BTreeSet<PathBuf>,
+    buffer: Vec<std::mem::MaybeUninit<u8>>,
+}
+
+#[cfg(target_os = "linux")]
+impl CreatingChanges {
+    fn new(bytes: u64) -> Result<Self, String> {
+        use rustix::fs::inotify;
+        Ok(Self {
+            fd: inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK)
+                .map_err(|error| error.to_string())?,
+            watched: Default::default(),
+            buffer: vec![
+                std::mem::MaybeUninit::uninit();
+                usize::try_from(bytes).map_err(|error| error.to_string())?
+            ],
+        })
+    }
+    fn refresh(&mut self, root: &Path, limit: u64) -> Result<(), String> {
+        use rustix::fs::inotify;
+        let mut paths = vec![root.to_path_buf()];
+        let mut count = 0_u64;
+        for entry in fs::read_dir(root).map_err(|error| error.to_string())? {
+            count = count
+                .checked_add(1)
+                .ok_or("Creating watch count overflow")?;
+            if count > limit {
+                return Err("Creating watch entry budget exceeded".into());
+            }
+            let entry = entry.map_err(|error| error.to_string())?;
+            if entry
+                .file_type()
+                .map_err(|error| error.to_string())?
+                .is_dir()
+            {
+                paths.push(entry.path());
+            }
+        }
+        for path in paths {
+            if !self.watched.contains(&path) {
+                if u64::try_from(self.watched.len()).map_err(|error| error.to_string())? >= limit {
+                    return Err("Creating watch budget exceeded".into());
+                }
+                inotify::add_watch(
+                    &self.fd,
+                    &path,
+                    inotify::WatchFlags::CREATE
+                        | inotify::WatchFlags::MOVED_TO
+                        | inotify::WatchFlags::DELETE_SELF
+                        | inotify::WatchFlags::MOVE_SELF,
+                )
+                .map_err(|error| error.to_string())?;
+                self.watched.insert(path);
+            }
+        }
+        Ok(())
+    }
+    fn changed(
+        &mut self,
+        wake: &std::io::PipeReader,
+        until: Instant,
+        limit: u64,
+    ) -> Result<bool, String> {
+        use rustix::event::{PollFd, PollFlags, Timespec};
+        use rustix::fs::inotify;
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(false);
+            }
+            let timeout = Timespec {
+                tv_sec: i64::try_from(left.as_secs()).map_err(|error| error.to_string())?,
+                tv_nsec: i64::from(left.subsec_nanos()),
+            };
+            let mut fds = [
+                PollFd::new(&self.fd, PollFlags::IN),
+                PollFd::new(wake, PollFlags::IN | PollFlags::HUP),
+            ];
+            match rustix::event::poll(&mut fds, Some(&timeout)) {
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(error) => return Err(error.to_string()),
+                Ok(0) => return Ok(false),
+                Ok(_) => {}
+            }
+            if fds.get(1).is_some_and(|fd| !fd.revents().is_empty()) {
+                return Ok(false);
+            }
+            let mut reader = inotify::Reader::new(&self.fd, &mut self.buffer);
+            let mut count = 0_u64;
+            loop {
+                match reader.next() {
+                    Ok(event) => {
+                        count = count
+                            .checked_add(1)
+                            .ok_or("Creating event count overflow")?;
+                        if count > limit
+                            || event.events().intersects(
+                                inotify::ReadFlags::QUEUE_OVERFLOW
+                                    | inotify::ReadFlags::DELETE_SELF
+                                    | inotify::ReadFlags::MOVE_SELF
+                                    | inotify::ReadFlags::UNMOUNT
+                                    | inotify::ReadFlags::IGNORED,
+                            )
+                        {
+                            return Err(
+                                "Creating notification overflow/directory uncertainty".into()
+                            );
+                        }
+                    }
+                    Err(rustix::io::Errno::AGAIN) => return Ok(count > 0),
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+        }
+    }
+}
+
+struct CreatingObserver {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    ready: mpsc::Receiver<()>,
+    wake: Option<std::io::PipeWriter>,
+    child: Option<Child>,
+    worker: Option<JoinHandle<Result<CreatingRecords, String>>>,
+}
+
+impl CreatingObserver {
+    fn start(
+        root: PathBuf,
+        class: Class,
+        wait: Duration,
+        entries: u64,
+        events: u64,
+        bytes: u64,
+        notification_bytes: u64,
+        external: Option<Value>,
+        scope: &Path,
+    ) -> Result<Self, String> {
+        let until = Instant::now()
+            .checked_add(wait)
+            .ok_or("Creating observer deadline overflow")?;
+        if wait.is_zero() || entries == 0 || events == 0 || bytes == 0 || notification_bytes == 0 {
+            return Err("explicit positive Creating observer bounds required".into());
+        }
+        if !root.is_dir() || root.is_symlink() {
+            return Err("private Store root unavailable".into());
+        }
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (ready, armed) = mpsc::sync_channel(1);
+        #[cfg(target_os = "linux")]
+        {
+            let _ = (external, scope);
+            let signal = Arc::clone(&stop);
+            let (wake_reader, wake) = std::io::pipe().map_err(|error| error.to_string())?;
+            // Same enabled safe inotify API as tests/oci_reuse.rs, ONE instance
+            // for root+all shards. No periodic scan or extra native provider.
+            let worker = std::thread::Builder::new()
+                .name("completion-creating-observer".into())
+                .spawn(move || {
+                    let mut changes = CreatingChanges::new(notification_bytes)?;
+                    changes.refresh(&root, entries)?;
+                    let mut captured = Vec::new();
+                    ready.send(()).map_err(|error| error.to_string())?;
+                    loop {
+                        capture_creating(&root, class, entries, bytes, &mut captured)?;
+                        if signal.load(std::sync::atomic::Ordering::Acquire)
+                            || !changes.changed(&wake_reader, until, events)?
+                        {
+                            return Ok(captured);
+                        }
+                        changes.refresh(&root, entries)?;
+                    }
+                })
+                .map_err(|error| error.to_string())?;
+            Ok(Self {
+                stop,
+                ready: armed,
+                wake: Some(wake),
+                child: None,
+                worker: Some(worker),
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (until, events, notification_bytes);
+            let input =
+                external.ok_or("required pinned filesystem notification program missing")?;
+            let path = PathBuf::from(text(&input, "path"));
+            if digest(&path) != text(&input, "sha256") {
+                return Err("Creating notification executable pin changed".into());
+            }
+            let args: Vec<_> = input["args"]
+                .as_array()
+                .ok_or("notification argv missing")?
+                .iter()
+                .map(|value| value.as_str().ok_or("notification arg is not text"))
+                .collect::<Result<_, _>>()?;
+            let mut child = Command::new(&path)
+                .args(&args)
+                .stdin(HostStdio::null())
+                .stdout(HostStdio::piped())
+                .stderr(
+                    File::create(scope.join("creating-notifications.stderr"))
+                        .map_err(|error| error.to_string())?,
+                )
+                .spawn()
+                .map_err(|error| error.to_string())?;
+            let stdout = match child.stdout.take() {
+                Some(stdout) => stdout,
+                None => {
+                    let _ = child.kill();
+                    let cleanup = child.wait();
+                    return Err(format!("notification stdout missing;cleanup:{cleanup:?}"));
+                }
+            };
+            let worker = std::thread::Builder::new()
+                .name("completion-creating-observer".into())
+                .spawn(move || {
+                    let mut source = BufReader::new(
+                        stdout.take(
+                            bytes
+                                .checked_add(1)
+                                .ok_or("notification byte budget overflow")?,
+                        ),
+                    );
+                    let mut captured = Vec::new();
+                    let mut total = 0_u64;
+                    loop {
+                        let mut line = String::new();
+                        let count = source
+                            .read_line(&mut line)
+                            .map_err(|error| error.to_string())?;
+                        if count == 0 {
+                            return Ok(captured);
+                        }
+                        total = total
+                            .checked_add(u64::try_from(count).map_err(|error| error.to_string())?)
+                            .ok_or("notification bytes overflow")?;
+                        if total > bytes {
+                            return Err("notification output byte budget exceeded".into());
+                        }
+                        match line.trim_end() {
+                            "hex-completion-creating-ready" => {
+                                ready.send(()).map_err(|error| error.to_string())?;
+                            }
+                            "hex-completion-creating-changed" => {}
+                            _ => return Err("unexpected Creating notification protocol".into()),
+                        }
+                        capture_creating(&root, class, entries, bytes, &mut captured)?;
+                    }
+                });
+            match worker {
+                Ok(worker) => Ok(Self {
+                    stop,
+                    ready: armed,
+                    wake: None,
+                    child: Some(child),
+                    worker: Some(worker),
+                }),
+                Err(error) => {
+                    let _ = child.kill();
+                    let cleanup = child.wait();
+                    Err(format!("notification worker:{error};cleanup:{cleanup:?}"))
+                }
+            }
+        }
+    }
+
+    fn announce(&self) {
+        if let Some(child) = &self.child {
+            journal(json!({"event":"spawn","role":"creating-notifications","pid":child.id()}));
+        }
+    }
+
+    fn finish(&mut self) -> Result<CreatingRecords, String> {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        let mut uncertainty = None;
+        let mut reaped = None;
+        if let Some(wake) = &mut self.wake {
+            if let Err(error) = wake.write_all(b"x")
+                && error.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                uncertainty = Some(error.to_string());
+            }
+        }
+        if let Some(mut child) = self.child.take() {
+            match child.try_wait() {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    if let Err(error) = child.kill() {
+                        uncertainty = Some(error.to_string());
+                    }
+                }
+                Err(error) => {
+                    uncertainty = Some(error.to_string());
+                    let _ = child.kill();
+                }
+            }
+            match child.wait() {
+                Ok(status) => {
+                    reaped = Some(
+                        json!({"event":"reaped","role":"creating-notifications","pid":child.id(),"status":status.code()}),
+                    )
+                }
+                Err(error) => uncertainty = Some(error.to_string()),
+            }
+        }
+        let joined = match self.worker.take() {
+            Some(worker) => worker
+                .join()
+                .map_err(|_| "Creating observer worker panicked".to_owned())
+                .and_then(|result| result),
+            None => Ok(Vec::new()),
+        };
+        if let Some(reaped) = reaped {
+            journal(reaped);
+        }
+        if let Some(error) = uncertainty {
+            return Err(error);
+        }
+        joined
+    }
+}
+
+impl Drop for CreatingObserver {
+    fn drop(&mut self) {
+        if self.worker.is_some() || self.child.is_some() {
+            if let Err(error) = self.finish() {
+                eprintln!("UNVERIFIED Creating observer drop:{error}");
+            }
+        }
     }
 }
 
@@ -283,6 +703,8 @@ struct Lab {
     boxes: Vec<BoxId>,
     wait: Duration,
     budget: u64,
+    creating: Option<CreatingObserver>,
+    scope_observations: Vec<Value>,
 }
 
 impl Lab {
@@ -365,6 +787,8 @@ impl Lab {
             boxes: Vec::new(),
             wait: Duration::from_millis(wait_ms),
             budget,
+            creating: None,
+            scope_observations: Vec::new(),
         }
     }
 
@@ -421,6 +845,75 @@ impl Lab {
         Client::connect(Path::new(text(&self.input, "scheduler_socket"))).unwrap()
     }
 
+    fn resource_snapshot(&self, phase: &str) -> Value {
+        let backend = self.backend();
+        let capacity = backend
+            .capacity(self.class())
+            .unwrap()
+            .expect("initialized actual resource pool");
+        capacity.check().unwrap();
+        let physical = backend
+            .physical_report()
+            .expect("same native authority over existing Runtime RPC");
+        physical.check().unwrap();
+        let boxes: Vec<_> = backend
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                json!({
+                    "id":row.id,"class":row.class,"bounds":row.bounds,"allocation":row.allocation,
+                })
+            })
+            .collect();
+        let devices: Vec<_> = capacity
+            .devices
+            .iter()
+            .map(|row| json!({"id":row.id,"holder":row.holder}))
+            .collect();
+        let native = if self
+            .input
+            .get("native_resources")
+            .is_some_and(Value::is_object)
+        {
+            self.host("native_resources", &[("@PHASE@", phase.into())])
+        } else {
+            json!({"observed":false,"reason":"native driver/whole-scope terminal producer contract not yet supplied"})
+        };
+        let observed = native["observed"] == json!(true);
+        if observed {
+            assert_eq!(native["schema"], "hex-completion-native-resources-2");
+            assert_eq!(native["source"], self.input["source"]);
+            assert_eq!(native["backend"], self.backend);
+            assert_eq!(native["phase"], phase);
+            assert_eq!(native["authority"], physical.authority);
+        }
+        json!({"schema":"hex-completion-resources-2","scope":"root-native-resources",
+            "source":self.input["source"],"backend":self.backend,"phase":phase,
+            "observed":observed,"api_observed":true,"authority":physical.authority,"pool":capacity.id,
+            "total":capacity.total,"free":capacity.free,"boxes":boxes,"devices":devices,
+            "physical_report":physical,"owned_boxes":self.boxes,"scope_history":self.scope_observations,
+            "driver_bindings":native["driver_bindings"],"terminal_scopes":native["terminal_scopes"],
+            "owned_native_processes":native["owned_native_processes"],"owned_artifacts":native["owned_artifacts"],
+            "native_observation":native})
+    }
+
+    fn write_resources(&self, phase: &str) {
+        let variable = match phase {
+            "before" => "HEX_COMPLETION_RESOURCES_BEFORE",
+            "after" => "HEX_COMPLETION_RESOURCES_AFTER",
+            _ => panic!("unknown resource observation phase"),
+        };
+        let path = PathBuf::from(
+            std::env::var_os(variable).expect("retained resource observation output"),
+        );
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(&self.resource_snapshot(phase)).unwrap(),
+        )
+        .unwrap();
+    }
+
     fn emit(&mut self, stage: &str, mut value: Value) {
         value["stage"] = json!(stage);
         value["backend"] = json!(self.backend);
@@ -441,6 +934,63 @@ impl Lab {
             "physical creation must be durable before workload dispatch"
         );
         record
+    }
+
+    fn retain_scope_record(&self, id: &BoxId, stage: &str, raw: &[u8]) -> Value {
+        let output = PathBuf::from(
+            std::env::var_os("HEX_COMPLETION_SCOPE_EVIDENCE").expect("scope evidence directory"),
+        );
+        let history = PathBuf::from(
+            std::env::var_os("HEX_COMPLETION_SCOPE_HISTORY").expect("scope history output"),
+        );
+        assert_eq!(
+            output.parent(),
+            history.parent(),
+            "one retained runner artifact directory"
+        );
+        fs::create_dir_all(&output).unwrap();
+        let path = output.join(format!("{id}-{stage}.record.json"));
+        fs::write(&path, raw).unwrap();
+        json!({"path":path.strip_prefix(history.parent().unwrap()).unwrap().to_string_lossy().replace('\\',"/"),
+            "sha256":digest(&path),"bytes":raw.len()})
+    }
+
+    fn scope_observation(&self, id: &BoxId, stage: &str) -> Value {
+        let path = hex_node::store::runtime_record(Path::new(text(&self.input, "record_root")), id);
+        assert!(path.starts_with(&self.scope));
+        let raw = bounded(&path, self.budget);
+        let record = BoxRecord::decode(&raw).expect("native original scope record");
+        assert_eq!(&record.spec.id, id);
+        assert_eq!(record.phase, Phase::Ready);
+        json!({"stage":stage,"observed":true,"source_phase":"Ready",
+            "native_scope":hex_bytes(record.native_scope.expect("actual immutable native scope").bytes()),
+            "native_commitment":hex_bytes(&record.native_commitment().unwrap()),
+            "record":self.retain_scope_record(id,stage,&raw)})
+    }
+
+    fn append_scope_observation(&mut self, id: &BoxId, stage: &str) {
+        let observation = self.scope_observation(id, stage);
+        let history = self
+            .scope_observations
+            .iter_mut()
+            .find(|row| row["id"] == json!(id))
+            .unwrap();
+        history["observations"]
+            .as_array_mut()
+            .unwrap()
+            .push(observation);
+        self.write_scope_observations();
+    }
+
+    fn write_scope_observations(&self) {
+        let path = PathBuf::from(
+            std::env::var_os("HEX_COMPLETION_SCOPE_HISTORY").expect("scope history output"),
+        );
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(&self.scope_observations).unwrap(),
+        )
+        .unwrap();
     }
 
     fn selected(&self, id: &BoxId) -> Vec<DeviceId> {
@@ -903,6 +1453,32 @@ impl Lab {
 
     fn exercise(&mut self) {
         self.start_all();
+        self.write_resources("before");
+        assert!(
+            Path::new(text(&self.input, "record_root")).starts_with(&self.scope),
+            "private observed Store only"
+        );
+        self.creating = Some(
+            CreatingObserver::start(
+                PathBuf::from(text(&self.input, "record_root")),
+                self.class(),
+                self.wait,
+                count(&self.input, "creating_entry_limit"),
+                count(&self.input, "creating_event_limit"),
+                self.budget,
+                count(&self.input, "creating_notification_bytes"),
+                self.input.get("creating_notifications").cloned(),
+                &self.scope,
+            )
+            .expect("bounded Creating observer source"),
+        );
+        self.creating.as_ref().unwrap().announce();
+        self.creating
+            .as_ref()
+            .unwrap()
+            .ready
+            .recv_timeout(self.wait)
+            .expect("Creating observer armed BEFORE Submit");
         let payload: Payload = serde_json::from_value(self.input["payload"].clone()).unwrap();
         assert!(
             payload.spec.devices.is_empty(),
@@ -937,6 +1513,28 @@ impl Lab {
         let key = reply.key.unwrap();
         let id = reply.physical.unwrap();
         let selected = self.selected(&id);
+        let actual_creating = self.creating.as_mut().unwrap().finish();
+        self.creating = None;
+        let creating = match actual_creating {
+            Ok(rows) => match rows.into_iter().find(|(observed, _)| observed == &id) {
+                Some((_, bytes)) => {
+                    let record =
+                        BoxRecord::decode(&bytes).expect("captured actual Creating record");
+                    json!({"stage":"creating","observed":true,"source_phase":"Creating",
+                        "init_published":false,"native_scope":hex_bytes(record.native_scope.unwrap().bytes()),
+                        "native_commitment":hex_bytes(&record.native_commitment().unwrap()),
+                        "record":self.retain_scope_record(&id,"creating",&bytes)})
+                }
+                None => json!({"stage":"creating","observed":false,"source_phase":null,
+                    "reason":"actual Creating-without-init window missed; immutable Ready origin is separate"}),
+            },
+            Err(error) => json!({"stage":"creating","observed":false,"source_phase":null,
+                "reason":format!("Creating observer uncertainty: {error}")}),
+        };
+        let ready = self.scope_observation(&id, "binding");
+        self.scope_observations
+            .push(json!({"id":id,"observations":[ready,creating]}));
+        self.write_scope_observations();
         self.holder(&id, &selected);
         fs::write(
             self.scope.join("placement.json"),
@@ -1049,6 +1647,7 @@ impl Lab {
             retained["start_token"], native["start_token"],
             "scheduler restart recreated native work"
         );
+        self.append_scope_observation(&id, "scheduler-recovery");
         self.emit(
             "scheduler-recovery",
             json!({"selected":selected,"holder_count":1,
@@ -1122,6 +1721,7 @@ impl Lab {
             "load was not retained across recovery"
         );
         actor.finish();
+        self.append_scope_observation(&id, "runtime-recovery");
         self.emit("runtime-recovery", json!({"selected":selected,"holder_count":1,
             "same_physical_box":true,"compute_verified":true,"catalog_reordered":true,"load_order_changed":true}));
         self.cleanup().expect("physical and ordinary owned cleanup");
@@ -1133,6 +1733,12 @@ impl Lab {
     }
 
     fn cleanup(&mut self) -> Result<(), String> {
+        let observer = self.creating.as_mut().map(CreatingObserver::finish);
+        self.creating = None;
+        if let Some(Err(error)) = observer {
+            // Stop/join first; ordinary native deletion still runs before reporting it.
+            eprintln!("UNVERIFIED Creating observer cleanup: {error}");
+        }
         for key in &self.keys {
             self.control()
                 .schedule(dto::Command::Delete { key: *key })
@@ -1153,6 +1759,8 @@ impl Lab {
                 .capacity(self.class())
                 .map_err(|error| error.to_string())?
                 .ok_or("missing native cleanup capacity")?;
+            // This checks only the removed Box claim. Backing remains a distinct holder in
+            // the resource snapshot; Box absence cannot prove that native pool was released.
             if capacity
                 .devices
                 .iter()
@@ -1165,6 +1773,7 @@ impl Lab {
         if result["owned_native_processes"] != 0 || result["owned_artifacts"] != 0 {
             return Err(format!("actual native cleanup unverified: {result}"));
         }
+        self.write_resources("after");
         self.keys.clear();
         self.boxes.clear();
         for service in self.services.iter_mut().rev() {

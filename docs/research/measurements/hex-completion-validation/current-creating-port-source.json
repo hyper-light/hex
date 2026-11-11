@@ -1,0 +1,275 @@
+{
+  "schema": "hex-completion-current-creating-port-source-1",
+  "role": "implementer",
+  "implementer": "01a1c7676cfc7297a41236a8e71ee188",
+  "coordinator": "01a1aa77778471339bea3beff90d6bbd",
+  "policy": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "policy_status": "Full policy loaded this resumed session; current four policy blobs verified equal0a6. Full fixed-parent HexCLAUDE and current charter/validation read before edits.",
+  "scope": [
+    "crates/hex-cli/tests/completion_backends.rs",
+    "docs/research/measurements/hex-completion-validation/current-creating-port.md",
+    "docs/research/measurements/hex-completion-validation/current-creating-port-source.json"
+  ],
+  "worktree": "/Users/adalundhe/.cache/hex-lead/worktrees/complete-current-observer",
+  "branch": "cp/t7-complete-current-observer",
+  "source_parent": "d1ed4e1cf54d8d0a22da931d55832e4b38b202c9",
+  "source_commit": "42f2c8031365f2e2f6297a2936838162039b827f",
+  "original": {
+    "source": "d1ed4e1cf54d8d0a22da931d55832e4b38b202c9",
+    "path": "crates/hex-cli/tests/completion_backends.rs",
+    "sha256": "c6c2fb6053cacf8fa72fc79dde0d18bc9ecfdfbe3a2550c50bd345d2ffa23375",
+    "bytes": 49252
+  },
+  "current": {
+    "source": "42f2c8031365f2e2f6297a2936838162039b827f",
+    "path": "crates/hex-cli/tests/completion_backends.rs",
+    "sha256": "77b702f7b92576f1c20a1c279c1c54814dc0f25331c97e3aa41c9b6b39648023",
+    "bytes": 74417
+  },
+  "port_sources": [
+    {
+      "source": "c18e4482c6cf6f5482f20d124c4d8a52d5a8f671",
+      "path": "crates/hex-cli/tests/completion_backends.rs",
+      "sha256": "a239d268cf96f1463b86f61279d87ae77342b7eb4cd397184e9330ed6fe44694",
+      "bytes": 60863
+    },
+    {
+      "source": "b0a168a683f59f69481104714ee6ed664ff88a10",
+      "path": "crates/hex-cli/tests/completion_backends.rs",
+      "sha256": "24c9b7692c3454cfcaaf4d8dccda072b1a4a0f964599ee6eeae2eff492666e49",
+      "bytes": 74814
+    }
+  ],
+  "method": "Apply15 selected diff hunks from d1->b0 onto exact current d1, preserving the existing current file; no old-blob replacement.",
+  "input_patch_sha256": "e53373e629f0920b62c7230ae489bdfd5950a0c5d43a1310238e7b434e4c3b17",
+  "final_source_patch": {
+    "command": [
+      "git",
+      "diff",
+      "d1ed4e1cf54d8d0a22da931d55832e4b38b202c9",
+      "42f2c8031365f2e2f6297a2936838162039b827f",
+      "--",
+      "crates/hex-cli/tests/completion_backends.rs"
+    ],
+    "sha256": "60eebf815d23865ef7f809a6d8f6d5161ec68d7bdc9106a5816c21480cd6ae82",
+    "bytes": 29741,
+    "insertions": 610,
+    "deletions": 1,
+    "hunks": [
+      "@@ -15,7 +15,7 @@ use std::fs::{self, File, OpenOptions};",
+      "@@ -23,6 +23,7 @@ use hex_api::{",
+      "@@ -67,6 +68,10 @@ fn digest(path: &Path) -> String {",
+      "@@ -171,6 +176,421 @@ fn read_output(",
+      "@@ -283,6 +703,8 @@ struct Lab {",
+      "@@ -365,6 +787,8 @@ impl Lab {",
+      "@@ -421,6 +845,75 @@ impl Lab {",
+      "@@ -443,6 +936,63 @@ impl Lab {",
+      "@@ -903,6 +1453,32 @@ impl Lab {",
+      "@@ -937,6 +1513,28 @@ impl Lab {",
+      "@@ -1049,6 +1647,7 @@ impl Lab {",
+      "@@ -1122,6 +1721,7 @@ impl Lab {",
+      "@@ -1133,6 +1733,12 @@ impl Lab {",
+      "@@ -1153,6 +1759,8 @@ impl Lab {",
+      "@@ -1165,6 +1773,7 @@ impl Lab {"
+    ]
+  },
+  "omitted_old_hunks": [
+    "peer-origin barrier assertion in Lab::new",
+    "factory-contract pin assertion in Lab::new"
+  ],
+  "unchanged_parent_regions": [
+    {
+      "name": "EOF enums/reader",
+      "sha256": "0b1f21058563ae3d7972b6b4a789ec247aae128e082a6262bc9974fc5f79e459",
+      "bytes": 2583
+    },
+    {
+      "name": "typed holder",
+      "sha256": "774ddeb9282309c4a3d46601374361e02d851884988f7df864b97740e8e0e331",
+      "bytes": 2671
+    },
+    {
+      "name": "exec absolute deadline and callback",
+      "sha256": "0f52e4b73472f07eef94511b5cebece5286b0237b5e6acd7bf59cc23a1e8d35c",
+      "bytes": 10527
+    },
+    {
+      "name": "native join/compute/reject oracles",
+      "sha256": "1ec0ecd5a40ec43ef925bb365f59d02e75b7daea0e8ea9a0bc63c6d3d9b6fe22",
+      "bytes": 3685
+    },
+    {
+      "name": "all existing cases including three green pipe controls",
+      "sha256": "c4749da5bf214011e29717e9be665d1461ce2f5dd7a4eec66c16a45a22277ffb",
+      "bytes": 4381
+    }
+  ],
+  "unchanged_instrumentation": {
+    "observer_block": {
+      "sha256": "1084c5efc2895ce621040f047d0e5e9b4fd804002f928785d96d9e00a970537b",
+      "bytes": 16439,
+      "equal_sources": [
+        "c18e4482c6cf6f5482f20d124c4d8a52d5a8f671",
+        "b0a168a683f59f69481104714ee6ed664ff88a10",
+        "42f2c8031365f2e2f6297a2936838162039b827f"
+      ]
+    },
+    "helpers_equal_sources": [
+      "c18e4482c6cf6f5482f20d124c4d8a52d5a8f671",
+      "b0a168a683f59f69481104714ee6ed664ff88a10",
+      "42f2c8031365f2e2f6297a2936838162039b827f"
+    ],
+    "helpers": [
+      "Lab::resource_snapshot + write_resources",
+      "Lab::retain_scope_record + scope_observation + append_scope_observation + write_scope_observations"
+    ],
+    "helper_section_hashes": [
+      {
+        "start": "fn resource_snapshot(",
+        "end_before": "fn emit(",
+        "sha256": "687ed601650cbf0da585da68f567b591db5107b7364c26de5ae1a1beb8b8c72c",
+        "bytes": 2967
+      },
+      {
+        "start": "fn retain_scope_record(",
+        "end_before": "fn selected(",
+        "sha256": "5addd393931c56d3b0a0654ae11ca73d41be8bea658917f905c6ba5be8cf7272",
+        "bytes": 2379
+      }
+    ]
+  },
+  "semantics": {
+    "creating": "Arm before Submit; notification-driven bounded canonical Store scans capture actual Creating+initNone+native_scope bytes. Match actual returned BoxId; no Ready relabel.",
+    "miss": "observed:false, source_phase:null, nonempty reason, no native_scope/commitment/record invented; complete phase assessment stays unverified.",
+    "ready": "Binding and both restart observations carry actual Ready bytes, hash, size and immutable native scope/spec commitment.",
+    "history_order": [
+      "binding",
+      "creating",
+      "scheduler-recovery",
+      "runtime-recovery"
+    ],
+    "history_order_meaning": "Existing gate census, not a timestamp ordering claim.",
+    "resource_before": "After initialized service readiness and before Submit.",
+    "resource_after": "After existing native cleanup observer succeeds, before clearing owned IDs/history and stopping services.",
+    "resource_authority": "Existing backend Capacity/PhysicalReport/list RPC; no duplicate provider, inventory, holder ledger or native owner.",
+    "native_resource_gap": "Missing driver/whole-scope terminal producer emits observed:false; API-only facts never prove physical restoration.",
+    "cleanup": "Existing observer stop/wake or exact-child kill/reap followed by worker join before ordinary cleanup; external ROOT guard and actual cleanup proof remain required.",
+    "pool_boundary": "Typed Backing holder remains visible; removed Box claim is not backing/native-pool release; no new PoolRecord observer."
+  },
+  "required_configuration": {
+    "existing": [
+      "record_root under private fixture scope",
+      "positive wait_ms",
+      "positive byte_limit"
+    ],
+    "positive_new_to_current_leaf": [
+      "creating_entry_limit",
+      "creating_event_limit",
+      "creating_notification_bytes"
+    ],
+    "non_linux": "creating_notifications pinned path/sha256/args for existing ready/changed protocol",
+    "native_resources": "Optional actual producer path/sha256/args, @PHASE@=before|after; absent/unobserved remains unverified."
+  },
+  "required_runner_outputs": {
+    "HEX_COMPLETION_RESOURCES_BEFORE": "run_root/resources-before.json",
+    "HEX_COMPLETION_RESOURCES_AFTER": "run_root/resources-after.json",
+    "HEX_COMPLETION_SCOPE_HISTORY": "run_root/scope-history.json",
+    "HEX_COMPLETION_SCOPE_EVIDENCE": "run_root/scope-records"
+  },
+  "outside_integration_references": [
+    {
+      "source": "c18e4482c6cf6f5482f20d124c4d8a52d5a8f671",
+      "path": "scripts/scheduler-completion/creating_events.py",
+      "sha256": "326450de34bae855f07c251ef1f333e8fc3dc17c544bf01bca2e7741fc0a1781",
+      "bytes": 3425
+    },
+    {
+      "source": "c18e4482c6cf6f5482f20d124c4d8a52d5a8f671",
+      "path": "scripts/scheduler-completion/creating_events.ps1",
+      "sha256": "1dd56eb9ab9e468f2238f7f775161122fd7d2bd4de0b9ddeb6122d7f22abd52a",
+      "bytes": 2839
+    },
+    {
+      "source": "c18e4482c6cf6f5482f20d124c4d8a52d5a8f671",
+      "path": "scripts/scheduler-completion/prepare.py",
+      "sha256": "c0b256d8dcb1fe349196b09560a056d550aad91474c3d3d7fb6197bffa358aad",
+      "bytes": 9701
+    },
+    {
+      "source": "c18e4482c6cf6f5482f20d124c4d8a52d5a8f671",
+      "path": "scripts/scheduler-completion/run.py",
+      "sha256": "c02b9e5ea0d302a54083502a9367288674e291aca3aea8c80694a7e49c532630",
+      "bytes": 9046
+    },
+    {
+      "source": "c18e4482c6cf6f5482f20d124c4d8a52d5a8f671",
+      "path": "scripts/scheduler-completion/combined_oracle.py",
+      "sha256": "bd4df785b4e84c49d6d49b0b6adf707721e40458e38e49e944e5fd36b8a0dcec",
+      "bytes": 20523
+    }
+  ],
+  "outside_integration_status": "References specify existing source contracts; none of these files/Cargo/module registrations edited, copied or executed in this scoped patch. ROOT must match producers/runner/gate and compile.",
+  "known_prior_results": {
+    "attribution": "ROOT-reported, independently collected raw pending; not results for this observer port",
+    "source": "7022312e819424c0b7a18871865287038135e7ce",
+    "artifact_data": [
+      6,
+      0,
+      0
+    ],
+    "pipe_controls": [
+      3,
+      0,
+      0
+    ],
+    "l1_normalization": [
+      2,
+      0,
+      0
+    ],
+    "node_cli_check_exit": 0,
+    "artifact_log_sha256": "287cb2d00a1b04f3e9010bcae61e14955ce35df3dedaedd964cfb59197b7206b",
+    "pipe_log_sha256": "d76f0014e3c7c142c757ca7be7c56e4abbc69df65fb33ec4ab7465ccaaf90c8b",
+    "unchanged_reruns_requested": false
+  },
+  "results": {
+    "classification": "SOURCE ONLY / uncompiled",
+    "source_comparison_and_hashing": "Recorded section equality and patch hashes; not runtime tests",
+    "git_diff_check_exit": 0,
+    "tests_executed": 0,
+    "cargo_commands": 0,
+    "native_vm_gpu_invocations": 0,
+    "no_new_observer_design": true,
+    "new_unsafe": 0,
+    "new_dependencies": 0,
+    "new_default_budgets": 0,
+    "remote_temp_created": false,
+    "owned_runtime_children_started": 0,
+    "all_native_cases_still_ignored": true
+  },
+  "documentation": {
+    "path": "docs/research/measurements/hex-completion-validation/current-creating-port.md",
+    "sha256": "7a2fb8b2d7b51f707f0f15a0391d5894901514344c1cc91210009e48c7b390f9",
+    "bytes": 6462
+  },
+  "rules_account": {
+    "R01": "Test-only existing observer code; no production or unsafe changes.",
+    "R02": "Existing c18 implementation and exact d1 Store/BoxRecord/RPC seams read; no new architectural design.",
+    "R03": "All observation bounds caller supplied; no defaults/cap increase.",
+    "R04": "Creating initNone distinct from Ready; miss/error retains typed uncertainty and actual raw record evidence.",
+    "R05": "Existing event notifications and owner seams reused; no fixed polling/new manager/cache.",
+    "R06": "15 selected local hunks; unrelated old assertions excluded.",
+    "R07": "Existing comments preserved; separate notes specify ownership/evidence boundaries.",
+    "R08": "No performance claim; coordinator comparisons owed.",
+    "R09": "Required instrumentation port, no reproduced-production-defect claim.",
+    "R10": "Fixed parent/port source and protected-region/hunk hashes; all checks/native effects explicitly unrun.",
+    "R11": "Existing Linux and nonLinux notification interfaces retained; matched compile and supported-host results unverified.",
+    "R12": "No new platform code/framework; exact existing observer port.",
+    "R13": "One current fixture; no whole old leaf overwrite or duplicated owner.",
+    "R14": "No profiling/benchmarking; ROOT owns those.",
+    "R15": "Source-only implementer checkpoint; ROOT reviews/compiles; no agents/goals/native or unchanged check dispatch.",
+    "R16": "Own isolated worktree/docs only; no cache/foreign data deletion; no runtime children or remote temp."
+  },
+  "readiness": "Source port complete; matched compile/config/helper intake, real Creating capture/native cleanup/resource restoration and all native acceptance remain UNVERIFIED."
+}

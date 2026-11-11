@@ -1,0 +1,19 @@
+{
+  "source": "42f2c8031365f2e2f6297a2936838162039b827f",
+  "docs": "8de8d832efed9c62b0bab77b388bcb26c1dbe8d7",
+  "kind": "ROOT reviewed source only; compile/new observer behavior unrun",
+  "full_review": [
+    "capture bounds/private Store file reads",
+    "Linux inotify readiness/wake and missed-window uncertainty",
+    "caller-pinned nonLinux notification child ownership",
+    "resource snapshots distinguish API observations from missing real driver/scope producer",
+    "EOF/oracle callbacks and typedholder unchanged"
+  ],
+  "remaining": [
+    "matched Linux/Mac/Windows compile",
+    "actual Creating window and filesystem notifications",
+    "external finite owned process-tree guard required for blocking helper cleanup/native failures",
+    "real native_resources producer needed for driver/whole-scope proof"
+  ],
+  "unchanged_prior_results": "702 EOF3+artifact6 green applies old protected sections, not new observer"
+}
