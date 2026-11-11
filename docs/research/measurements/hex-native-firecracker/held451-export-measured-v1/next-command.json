@@ -1,0 +1,78 @@
+{
+  "ROOT_R14_admission_required": true,
+  "admission_template": {
+    "bundle": "held451-admission.export.template.json",
+    "bytes": 1220,
+    "sha256": "999e730fe9ffc512582160ff47137decc40568089caeb534065d5f82309a4709"
+  },
+  "code_run_program": "return await kiln.machines.run(input);",
+  "code_run_timeout_s": 220,
+  "collect_materialize_preflight_build_admitted": false,
+  "dispatch_authorized": false,
+  "finite_guards": {
+    "code_run_caller_seconds": 220,
+    "kiln_caller_seconds": 210,
+    "outer_TERM_to_KILL_seconds": 3,
+    "outer_timeout_seconds": 200,
+    "owned_scope_RuntimeMaxSec": 180,
+    "worker_deadline_seconds": 175
+  },
+  "fresh_bundle": "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1",
+  "fresh_root": "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01",
+  "fresh_unit": "hex-native-fc-held451-export-measured-v1-01",
+  "kiln_input": {
+    "command": "/usr/bin/timeout --signal=TERM --kill-after=3s 200s /usr/bin/nice -n 10 /usr/bin/python3 -B /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/export_held451_objects.py --stage export --admission /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/reviewed.export.json --root /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01 --seal /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/held451-export.seal.json",
+    "needs": "linux/amd64,cpus=1,mem=4g,disk=12g",
+    "on": "451397fcc585f7f7cb9aaf00e42064bb",
+    "sync": false,
+    "timeout_s": 210
+  },
+  "normal_kiln_argv": [
+    "/Users/adalundhe/.local/bin/kiln",
+    "run",
+    "--quiet",
+    "--on",
+    "451397fcc585f7f7cb9aaf00e42064bb",
+    "--needs",
+    "linux/amd64,cpus=1,mem=4g,disk=12g",
+    "--no-sync",
+    "--timeout",
+    "210",
+    "--",
+    "/usr/bin/timeout --signal=TERM --kill-after=3s 200s /usr/bin/nice -n 10 /usr/bin/python3 -B /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/export_held451_objects.py --stage export --admission /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/reviewed.export.json --root /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01 --seal /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/held451-export.seal.json"
+  ],
+  "normal_kiln_shell_text": "/Users/adalundhe/.local/bin/kiln run --quiet --on 451397fcc585f7f7cb9aaf00e42064bb --needs linux/amd64,cpus=1,mem=4g,disk=12g --no-sync --timeout 210 -- '/usr/bin/timeout --signal=TERM --kill-after=3s 200s /usr/bin/nice -n 10 /usr/bin/python3 -B /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/export_held451_objects.py --stage export --admission /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/reviewed.export.json --root /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01 --seal /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/held451-export.seal.json'",
+  "owned_profile_evidence": {
+    "key": "measurement_profile",
+    "source": "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01/worker-final.json",
+    "source_event_samples_limit": 3193,
+    "whole_JSON_bound_bytes": 16777216
+  },
+  "parent_API_does_not_echo_profile": "ROOT must separately collect exact worker-final evidence after its own admitted run; no read is requested now",
+  "quiet_window_requested": false,
+  "remote_argv": [
+    "/usr/bin/timeout",
+    "--signal=TERM",
+    "--kill-after=3s",
+    "200s",
+    "/usr/bin/nice",
+    "-n",
+    "10",
+    "/usr/bin/python3",
+    "-B",
+    "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/export_held451_objects.py",
+    "--stage",
+    "export",
+    "--admission",
+    "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/reviewed.export.json",
+    "--root",
+    "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01",
+    "--seal",
+    "/home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/held451-export.seal.json"
+  ],
+  "remote_shell_text": "/usr/bin/timeout --signal=TERM --kill-after=3s 200s /usr/bin/nice -n 10 /usr/bin/python3 -B /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/export_held451_objects.py --stage export --admission /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/reviewed.export.json --root /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-v1-01 --seal /home/adalundhe/.cache/hex-native-firecracker/held451-export-measured-bundle-v1/held451-export.seal.json",
+  "schema": "hex-native-fc-measurement-copy-command-candidate-v1",
+  "source_mode": "changed measurement source, no timing equivalence or faster algorithm claim",
+  "source_seal_sha256": "27102cb1c12a42dd247d97e820895cb1b63e961bcf6d67924400e4c4b75c031c",
+  "source_sha256": "1f89937a6171918295932c4aa3dbba5658b55218c19bbb7d8a4d902e41bab3ec"
+}
