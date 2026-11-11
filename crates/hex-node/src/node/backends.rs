@@ -342,17 +342,46 @@ impl Node {
         crate::recorded::preflight_records(&records, &pools, Some(self.attachments.as_ref()))?;
         for (id, record) in &records {
             let record = record.as_ref().map_err(|_| uncertain(id))?;
-            let _handoff = crate::recorded::preflight_handoff_turns(
+            let handoff = crate::recorded::preflight_handoff_turns(
                 &self.turns,
                 &self.store,
                 record,
                 Some(self.attachments.as_ref()),
             )?;
+            let source = if handoff.is_some() {
+                let key = record
+                    .spec
+                    .route
+                    .and_then(|route| route.backing)
+                    .ok_or_else(|| uncertain(id))?;
+                Some(
+                    self.store
+                        .read_pool(&key.pool)?
+                        .filter(|source| source.key == key)
+                        .ok_or_else(|| uncertain(id))?,
+                )
+            } else {
+                None
+            };
             match record.spec.backend_class()? {
-                Class::Firecracker => firecracker
-                    .ok_or_else(|| uncertain(id))?
-                    .preflight_record(record)?,
-                Class::Shards => shards.ok_or_else(|| uncertain(id))?.preflight_box(record)?,
+                Class::Firecracker => {
+                    let backend = firecracker.ok_or_else(|| uncertain(id))?;
+                    preflight_backend(
+                        record,
+                        source.as_ref(),
+                        |record| backend.preflight_record(record),
+                        |record, source| backend.handoff_unsubmitted(record, source),
+                    )?;
+                }
+                Class::Shards => {
+                    let backend = shards.ok_or_else(|| uncertain(id))?;
+                    preflight_backend(
+                        record,
+                        source.as_ref(),
+                        |record| backend.preflight_box(record),
+                        |record, source| backend.handoff_unsubmitted(record, source),
+                    )?;
+                }
                 Class::Process | Class::Oci => {}
             }
         }
@@ -639,6 +668,32 @@ impl Node {
     }
 }
 
+/// Both real backends choose exactly one proof under the canonical guard. Ordinary selected
+/// receipt rules cannot run first and reject a valid no-submission Deleting reservation.
+fn preflight_backend(
+    record: &BoxRecord,
+    source: Option<&hex_core::record::PoolRecord>,
+    ordinary: impl FnOnce(&BoxRecord) -> Result<(), Refusal>,
+    unsubmitted: impl FnOnce(&BoxRecord, &hex_core::record::PoolRecord) -> Result<(), Refusal>,
+) -> Result<(), Refusal> {
+    match source {
+        Some(source)
+            if matches!(
+                source.phase,
+                hex_api::BackingPhase::Live | hex_api::BackingPhase::Draining
+            ) =>
+        {
+            unsubmitted(record, source)
+        }
+        None => ordinary(record),
+        Some(source) if source.phase == hex_api::BackingPhase::Released => ordinary(record),
+        Some(source) => Err(Refusal::Backing {
+            key: source.key,
+            cause: LifecycleCause::Uncertain,
+        }),
+    }
+}
+
 fn native_argument(argument: &std::ffi::OsStr) -> Result<String, Refusal> {
     let argument = argument.to_str().ok_or_else(|| Refusal::Invalid {
         what: "managed native program",
@@ -818,4 +873,116 @@ fn native_path(parent: &Path, child: &str) -> Result<PathBuf, Refusal> {
     path.push(parent);
     path.push(child);
     Ok(path)
+}
+
+#[cfg(test)]
+mod preflight_dispatch_tests {
+    use super::*;
+    use hex_api::{BackingPhase, CapacityResources};
+
+    /// AC-T7.4.1: both concrete adapters use this actual mutually exclusive callback dispatch.
+    /// The adapter proof bodies are covered separately; this is not native absence evidence.
+    #[test]
+    fn guarded_creating_deleting_proof_is_exclusive_and_released_uses_ordinary_strict() {
+        let cost = RuntimeCost {
+            id: [1; 32],
+            floor: CapacityResources::default(),
+            ceiling: CapacityResources::default(),
+            quantum: CapacityResources {
+                cpu_milli: 1,
+                mem_bytes: 1,
+                disk_bytes: 1,
+            },
+            guest_overhead: CapacityResources::default(),
+            overhead: CapacityResources::default(),
+        };
+        let mut source = hex_core::record::PoolRecord {
+            version: hex_core::record::RECORD_VERSION,
+            key: BackingKey {
+                pool: [2; 32],
+                generation: [3; 16],
+            },
+            execution: Execution::ShardsDedicated,
+            cost,
+            allocation: None,
+            devices: Vec::new(),
+            phase: BackingPhase::Live,
+            init: None,
+            exit: None,
+        };
+        let spec = BoxSpec {
+            id: BoxId::new("dispatch-only").unwrap(),
+            class: hex_api::ClassSpec::Process,
+            bounds: hex_api::Bounds::default(),
+            owner: None,
+            devices: Vec::new(),
+            allocation: None,
+            route: None,
+        };
+        let mut record = BoxRecord::new(spec, Phase::Creating, Vec::new());
+        for phase in [Phase::Creating, Phase::Deleting] {
+            record.phase = phase;
+            for pool_phase in [
+                BackingPhase::Live,
+                BackingPhase::Draining,
+                BackingPhase::Released,
+            ] {
+                source.phase = pool_phase;
+                let mut ordinary = 0;
+                let mut proof = 0;
+                let checked = preflight_backend(
+                    &record,
+                    Some(&source),
+                    |_| {
+                        ordinary += 1;
+                        Err(uncertain(&record.spec.id))
+                    },
+                    |record, source| {
+                        proof += 1;
+                        assert!(record.init.is_none());
+                        assert!(matches!(
+                            source.phase,
+                            BackingPhase::Live | BackingPhase::Draining
+                        ));
+                        Ok(())
+                    },
+                );
+                if pool_phase == BackingPhase::Released {
+                    assert!(checked.is_err());
+                    assert_eq!((ordinary, proof), (1, 0));
+                } else {
+                    assert!(checked.is_ok());
+                    assert_eq!((ordinary, proof), (0, 1));
+                }
+            }
+        }
+        let mut ordinary = 0;
+        let mut proof = 0;
+        assert!(
+            preflight_backend(
+                &record,
+                None,
+                |_| {
+                    ordinary += 1;
+                    Err(uncertain(&record.spec.id))
+                },
+                |_, _| {
+                    proof += 1;
+                    Ok(())
+                }
+            )
+            .is_err()
+        );
+        assert_eq!((ordinary, proof), (1, 0));
+        source.phase = BackingPhase::Prepared;
+        assert!(
+            preflight_backend(
+                &record,
+                Some(&source),
+                |_| panic!("invalid source may not enter ordinary callback"),
+                |_, _| panic!("ungranted source may not enter proof")
+            )
+            .is_err()
+        );
+    }
 }

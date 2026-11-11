@@ -1,0 +1,29 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "280f175218eeadd8d3f49061f451a7536d9575b9",
+  "fixed_root": "502dc405cde88fe2bf2efde4090ea1bd33296696",
+  "source_sha256": "00e1aa98e8903921c652a4e1d522fb7154e76fa0420b71a2c2efc2da5df0f338",
+  "dependencies": [
+    "bd0/e4/aece shared preflight/Store guard",
+    "FC 8d1ff1199c0a8a462f25918cdf3de825232463a6 handoff_unsubmitted",
+    "Shards 5c33713d79f9a3cbbf69ebce1eedb8c8386dacf2 handoff_unsubmitted"
+  ],
+  "scope": "ONLY preflight_configured: retain SAME preflight_handoff_turns receipt, direct read SAME canonical Store source under that guard without Books reentry or new turn, borrow BoxRecord and PoolRecord into actual FC/Shards handoff_unsubmitted proofs. Released source yields no such inference and proceeds ordinary native scope preflight. Whole-owner structural preflight remains before these callbacks.",
+  "preserved": [
+    "616 real Books/Native callbacks",
+    "938/280 SAME facts merge and independently queried observers",
+    "Root constructor/render/canonical dispatch/typed holder/RPC routes",
+    "d085 Supervisor/source integration"
+  ],
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "tests": "UNRUN",
+    "native": 0,
+    "dispatches": 0
+  },
+  "limits": "Read-only metadata proof never substitutes for actual native absence after release. Source closure now has real producer/helpers, no stub/default; ROOT owns matched private-file controls/native/hardware/fault/platform/full gates and integration."
+}
