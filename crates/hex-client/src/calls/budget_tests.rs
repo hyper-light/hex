@@ -1852,3 +1852,236 @@ fn absolute_bootstrap_caps_unarmed_answer_waits() {
         ));
     }
 }
+
+struct SettleOriginal {
+    io: Offers,
+    setup: Mutex<Option<(u64, hex_api::Ask, ReplyDeadline)>>,
+    started: mpsc::SyncSender<(u64, Instant)>,
+    kill: mpsc::SyncSender<(u64, u64, Instant)>,
+    exits: AtomicUsize,
+}
+
+impl Transport for SettleOriginal {
+    type Reading = ();
+    const MAKES_ASKED: bool = true;
+
+    fn answers() -> &'static [Patience; KINDS] {
+        static WAITS: [Patience; KINDS] =
+            [const { Patience::measuring("test.client_settle_original.unarmed") }; KINDS];
+        &WAITS
+    }
+
+    fn reading(&self) {}
+    fn handle(&self) -> Handle<'_> {
+        self.io.handle()
+    }
+
+    fn recv(&self, reading: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
+        let mut observed = |message: &Received<'_>, fds| {
+            let (header, answer) =
+                wire::read_answer(message, wire::MAX_MESSAGE).map_err(Refusal::from)?;
+            take(message, fds)?;
+            match answer {
+                Answer::Started { .. } => {
+                    let _ = self.started.try_send((header.id, Instant::now()));
+                }
+                Answer::Exited(_) => {
+                    self.exits.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+            Ok(())
+        };
+        self.io.recv(reading, &mut observed)
+    }
+
+    fn try_send(&self, bytes: &[u8], at: &mut usize, _: &[Lent<'_>]) -> Result<bool, Sent> {
+        let (header, request) = wire::read_request_apart(bytes, wire::MAX_MESSAGE).unwrap();
+        match &request {
+            Request::Call(Call::Run { .. }) => self.io.queue(header.id, Answer::Started { pid: 7 }),
+            Request::Call(Call::Kill { exec }) => {
+                // The real Kill reached the sender after wait(None). Withhold only its answer.
+                let _ = self.kill.try_send((header.id, *exec, Instant::now()));
+            }
+            Request::Release => {}
+            _ => {
+                return Err(Sent::Refused(Refusal::Broken(
+                    "unexpected owned settle-original request".into(),
+                )));
+            }
+        }
+        self.io.outbound.lock().unwrap().push((header.id, request));
+        *at = bytes.len();
+        Ok(true)
+    }
+
+    fn asks_before(
+        &self,
+        exec: u64,
+        ask: hex_api::Ask,
+        deadline: ReplyDeadline,
+    ) -> Result<hex_api::Given, Refusal> {
+        deadline.remaining("owned malformed stream setup")?;
+        *self.setup.lock().unwrap() = Some((exec, ask, deadline));
+        // Deliberately return the wrong end: the caller asks for stdin only. This
+        // bounded adapter fault is refused by real settle AFTER actual Started.
+        let mut program = Stdio {
+            ask: hex_api::Ask {
+                stdout: true,
+                ..hex_api::Ask::default()
+            },
+            ..Stdio::null()
+        };
+        let given = program.make_asked()?;
+        *self.io.program.lock().unwrap() = Some(program);
+        Ok(given)
+    }
+
+    fn carries_before(&self, _: u64, stdio: Stdio, deadline: ReplyDeadline) -> Result<(), Refusal> {
+        deadline.remaining("owned null carried streams")?;
+        stdio.check()?;
+        if carried(&stdio) != Streams::default() {
+            return Err(Refusal::Broken("unexpected owned carried pipe".into()));
+        }
+        Ok(())
+    }
+
+    fn shutdown(&self) {
+        self.io.shutdown();
+    }
+}
+
+/// AC-T7.4.1 original: an actual Started followed by a bounded stream-settlement
+/// refusal must not replace run_before's authority with a fresh Kill answer wait.
+#[test]
+fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
+    let (io, _) = stalled(None);
+    let (entered, _) = mpsc::sync_channel(1);
+    let (starting, started) = mpsc::sync_channel(1);
+    let (killing, killed) = mpsc::sync_channel(1);
+    let client = Arc::new(configured(SettleOriginal {
+        io: Offers {
+            io,
+            inbound: Mutex::new(VecDeque::new()),
+            outbound: Mutex::new(Vec::new()),
+            entered,
+            program: Mutex::new(None),
+        },
+        setup: Mutex::new(None),
+        started: starting,
+        kill: killing,
+        exits: AtomicUsize::new(0),
+    }));
+    let control = Arc::clone(&client);
+    let original = Instant::now().checked_add(CAP).unwrap();
+    let (finished, answer) = mpsc::sync_channel(1);
+    let worker = std::thread::Builder::new()
+        .name("owned-settle-original".into())
+        .spawn(move || {
+            let result = control
+                .run_before(
+                    absolute_spec(),
+                    Program::of(&["owned-settle-original"]),
+                    Stdio {
+                        ask: hex_api::Ask {
+                            stdin: true,
+                            ..hex_api::Ask::default()
+                        },
+                        ..Stdio::null()
+                    },
+                    original,
+                )
+                .map(drop);
+            let _ = finished.send((Instant::now(), result));
+        })
+        .unwrap();
+
+    // Capture every error branch; end ONLY this connection, close its retained
+    // pipe, and join this worker BEFORE asserting any result or phase witness.
+    let actual_started = started.recv_timeout(OBSERVE);
+    let actual_kill = killed.recv_timeout(OBSERVE);
+    let expired = until(original);
+    let before_cleanup = answer.recv_timeout(OBSERVE);
+    let cleanup_at = Instant::now();
+    client
+        .conn
+        .shared
+        .end(Refusal::Broken("owned settle-original cleanup".into()));
+    let (pipe, pipe_poisoned) = match client.conn.shared.transport.io.program.lock() {
+        Ok(mut program) => (program.take(), false),
+        // Cleanup may recover only this test-owned guard so a poisoned fixture
+        // cannot skip its pipe close/join. The poison remains a failed witness.
+        Err(poisoned) => (poisoned.into_inner().take(), true),
+    };
+    let pipe_was_owned = pipe.is_some();
+    drop(pipe);
+    let joined = worker.join();
+    let after_cleanup = answer.try_recv();
+    let transport = &client.conn.shared.transport;
+    let setup = *transport.setup.lock().unwrap();
+    let exits = transport.exits.load(Ordering::SeqCst);
+    let sent = transport.io.outbound.lock().unwrap();
+    let run_ids: Vec<_> = sent
+        .iter()
+        .filter_map(|(id, request)| {
+            matches!(request, Request::Call(Call::Run { .. })).then_some(*id)
+        })
+        .collect();
+    let kills: Vec<_> = sent
+        .iter()
+        .filter_map(|(id, request)| match request {
+            Request::Call(Call::Kill { exec }) => Some((*id, *exec)),
+            _ => None,
+        })
+        .collect();
+    let releases = sent
+        .iter()
+        .filter(|(_, request)| matches!(request, Request::Release))
+        .count();
+    let clean = client.conn.shared.state().map(|state| {
+        state.calls.is_empty()
+            && state.programs.is_empty()
+            && state.given.is_empty()
+            && state.waiting.is_empty()
+    });
+    eprintln!(
+        "client_settle_original original={original:?} cap={CAP:?} observation={OBSERVE:?} setup={setup:?} started={actual_started:?} kill={actual_kill:?} runs={run_ids:?} kills={kills:?} exits={exits} releases={releases} before_cleanup={before_cleanup:?} cleanup_at={cleanup_at:?} after_cleanup={after_cleanup:?} pipe_owned={pipe_was_owned} pipe_poisoned={pipe_poisoned} joined={} clean={clean:?}",
+        joined.is_ok()
+    );
+    joined.unwrap();
+    expired.unwrap();
+    assert!(pipe_was_owned);
+    assert!(!pipe_poisoned);
+    assert!(transport.io.io.closed.load(Ordering::Acquire));
+    assert!(transport.io.program.lock().unwrap().is_none());
+    assert!(clean.unwrap());
+    assert_eq!(transport.reply_budget(), None);
+    assert_eq!(run_ids.len(), 1);
+    assert_eq!(exits, 0);
+    let (exec, ask, cap) = setup.unwrap();
+    assert_eq!(exec, run_ids[0]);
+    assert!(ask.stdin && !ask.stdout && !ask.stderr);
+    assert_eq!(cap.at(), original);
+    assert_eq!(actual_started.unwrap().0, exec);
+    if before_cleanup.is_err() {
+        // In the original, this positive witness localizes the delay AFTER the
+        // zero-duration wait(None) poll: it reached the real unarmed Kill call.
+        let (request, target, _) = actual_kill.expect("missing Kill is an unverified phase");
+        assert_eq!(target, exec);
+        assert_eq!(kills, [(request, exec)]);
+    }
+    let returned_error = before_cleanup
+        .as_ref()
+        .ok()
+        .or_else(|| after_cleanup.as_ref().ok());
+    assert!(
+        matches!(returned_error, Some((_, Err(Refusal::Broken(why)))) if why.contains("stdout") && why.contains("neither carried nor asked")),
+        "the original bounded setup refusal must survive cleanup"
+    );
+    assert!(
+        before_cleanup.is_ok(),
+        "original stream-settlement error return exceeded run_before authority while waiting for the ordinary Kill answer"
+    );
+    let (returned, _) = before_cleanup.unwrap();
+    assert!(returned <= cleanup_at);
+}
