@@ -59,6 +59,20 @@ impl Recover for MetadataRecovery {
         // Structural conflicts are checked before this adapter is reached.
         Ok(())
     }
+    // Its metadata names join the complete retained cohort, as a native adapter's markers do.
+    fn preflight_retained(
+        &self,
+        records: &hex_runtime::devices::Records,
+        _: &[PoolRecord],
+    ) -> Result<(), Refusal> {
+        for entry in std::fs::read_dir(&self.metadata).unwrap() {
+            let id = BoxId::new(entry.unwrap().file_name().to_str().unwrap()).unwrap();
+            if !matches!(records.get(&id), Some(Ok(_))) {
+                return Err(uncertain(&id));
+            }
+        }
+        Ok(())
+    }
     fn initialize_native(&self) -> Result<(), Refusal> {
         self.initialized.fetch_add(1, Ordering::SeqCst);
         Ok(())

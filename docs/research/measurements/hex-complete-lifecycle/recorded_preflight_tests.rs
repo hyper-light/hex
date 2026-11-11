@@ -41,6 +41,13 @@ impl Runtime for CountedRecovery {
     }
 }
 impl Recover for CountedRecovery {
+    fn preflight_retained(
+        &self,
+        records: &hex_runtime::devices::Records,
+        pools: &[PoolRecord],
+    ) -> Result<(), Refusal> {
+        self.programs.preflight_retained(records, pools)
+    }
     fn trace(&self, _: &BoxId) -> Result<Option<ProcId>, Refusal> {
         Ok(None)
     }
