@@ -241,5 +241,96 @@ fn uppercase_retained_pool_body_cannot_be_ignored_before_cpu_adoption() {
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
 
+/// Leaves the retained native-metadata cross-check to `Recover`'s default; its native
+/// initialization counts as an effect.
+struct Unchecked(CountedRecovery);
+impl Runtime for Unchecked {
+    fn classes(&self) -> Vec<Class> {
+        self.0.classes()
+    }
+    fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+        self.0.create(spec)
+    }
+    fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.0.start(id)
+    }
+    fn exec(&self, id: &BoxId, p: Program, s: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        self.0.exec(id, p, s)
+    }
+    fn run(&self, spec: BoxSpec, p: Program, s: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        self.0.run(spec, p, s)
+    }
+    fn signal(&self, id: &BoxId, s: Signal) -> Result<(), Refusal> {
+        self.0.signal(id, s)
+    }
+    fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        self.0.inspect(id)
+    }
+    fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
+        self.0.usage(id)
+    }
+    fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
+        self.0.list()
+    }
+    fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.0.delete(id)
+    }
+}
+impl Recover for Unchecked {
+    fn initialize_native(&self) -> Result<(), Refusal> {
+        self.0.effects.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn trace(&self, id: &BoxId) -> Result<Option<ProcId>, Refusal> {
+        self.0.trace(id)
+    }
+    fn alive(&self, spec: &BoxSpec) -> Result<Option<bool>, Refusal> {
+        self.0.alive(spec)
+    }
+    fn adopt(&self, spec: &BoxSpec, trace: Option<ProcId>) -> Result<(), Refusal> {
+        self.0.adopt(spec, trace)
+    }
+    fn end(&self, trace: Option<ProcId>) -> Result<(), Refusal> {
+        self.0.end(trace)
+    }
+}
+
+/// AC-T7.4.1 / T-T7.1.2: recover, preflight and initialize a node over a runtime that leaves the
+/// retained native-metadata cross-check to `Recover`'s default; expect each refused, naming the
+/// missing check, before native initialization or any recovery effect, and the retained box kept.
+#[test]
+fn a_runtime_without_its_retained_metadata_cross_check_is_refused_before_any_effect() {
+    let dir = tempfile::tempdir().unwrap();
+    let (gate, _, _) = fixture(0);
+    let effects = Arc::new(AtomicUsize::new(0));
+    let node = Recorded::open(
+        Unchecked(CountedRecovery {
+            programs: Backend(gate),
+            effects: Arc::clone(&effects),
+        }),
+        dir.path(),
+    )
+    .unwrap();
+    let mut ready = spec();
+    ready.id = BoxId::new("aa-retained-ready").unwrap();
+    node.books
+        .store
+        .put(&BoxRecord::new(ready, Phase::Ready, Vec::new()))
+        .unwrap();
+    let before = node.books.store.all().unwrap();
+    let missing = Refusal::Broken(
+        "runtime has no cross-check of its native metadata against the retained cohort".into(),
+    );
+    assert_eq!(node.recover(), Err(missing.clone()));
+    assert_eq!(node.preflight_recovery(), Err(missing.clone()));
+    assert_eq!(node.initialize_native(), Err(missing));
+    assert_eq!(
+        effects.load(Ordering::SeqCst),
+        0,
+        "the refusal precedes native initialization and every recovery effect"
+    );
+    assert_eq!(node.books.store.all().unwrap(), before);
+}
+
 #[path = "recorded_adapter_preflight_tests.rs"]
 mod initialized_adapter_preflight;
