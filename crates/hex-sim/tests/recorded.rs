@@ -44,7 +44,7 @@ fn four_recorded_repositories_on_the_largest_quarter_cluster() {
         );
     }
     day.nodes = vec![NodeSpec {
-        costs: [None; crate::model::Class::COUNT],
+        costs: [None; hex_sim::model::Class::COUNT],
         runtime_pools: Vec::new(),
         id: NodeId(0),
         capacity: node,

@@ -145,7 +145,7 @@ fn a_crash_at_every_write_with_preemption_loses_and_doubles_nothing() {
 
 fn node(cpu: u64) -> NodeSpec {
     NodeSpec {
-        costs: [None; crate::model::Class::COUNT],
+        costs: [None; hex_sim::model::Class::COUNT],
         runtime_pools: Vec::new(),
         id: NodeId(0),
         capacity: Resources {
