@@ -1,0 +1,31 @@
+{
+  "baseline": "a80fea7dec9d3c16da3df0dad9a9633ec99f5f64",
+  "lanes": [
+    {
+      "lane": "run",
+      "source": "0475e1ca2f66393ab81e4e2afe9e704b5bf9ea0d",
+      "exit": 1,
+      "log": "/home/adalundhe/.cache/kiln-lb/int/vector-study/run.log",
+      "cold_raw": "/home/adalundhe/.cache/kiln-lb/int/cold-validation/0475e1ca2f66393ab81e4e2afe9e704b5bf9ea0d",
+      "focused_raw": "/home/adalundhe/.cache/kiln-lb/int/cold-validation/0475e1ca2f66393ab81e4e2afe9e704b5bf9ea0d/focused"
+    },
+    {
+      "lane": "fit",
+      "source": "6a7a46faf04efadafdafb3862495dc5176017c3c",
+      "exit": 1,
+      "log": "/home/adalundhe/.cache/kiln-lb/int/vector-study/fit.log",
+      "cold_raw": "/home/adalundhe/.cache/kiln-lb/int/cold-validation/6a7a46faf04efadafdafb3862495dc5176017c3c",
+      "focused_raw": "/home/adalundhe/.cache/kiln-lb/int/cold-validation/6a7a46faf04efadafdafb3862495dc5176017c3c/focused"
+    },
+    {
+      "lane": "inline",
+      "source": "5503fd612de2711dee14ec6afa448bd165b65af0",
+      "exit": 1,
+      "log": "/home/adalundhe/.cache/kiln-lb/int/vector-study/inline.log",
+      "cold_raw": "/home/adalundhe/.cache/kiln-lb/int/cold-validation/5503fd612de2711dee14ec6afa448bd165b65af0",
+      "focused_raw": "/home/adalundhe/.cache/kiln-lb/int/cold-validation/5503fd612de2711dee14ec6afa448bd165b65af0/focused"
+    }
+  ],
+  "all_checks_exited_zero": false,
+  "scope": "These are experiment receipts, not acceptance of every candidate or a full10xbar verdict. Read confidence intervals/regressions/codegen before merging. Original competition source unchanged."
+}
