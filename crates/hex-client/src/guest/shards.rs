@@ -1,12 +1,11 @@
 //! The guest's ports through Shards (docs/design/shards-guest.md §2, Appendix A "Hex's side"): a
-//! [`Link`] whose every dial is `shards_api::Guest::connect`, Firecracker's `CONNECT <port>` on the
+//! [`Link`] whose every dial is `shards_api::Guest::connect_before`, Firecracker's `CONNECT <port>` on the
 //! guest's vsock, and a [`Duplex`] over the stream it returns. Hex never names Shards' stream type: on
 //! Windows it is Shards' overlapped AF_UNIX socket, whose timeouts poll first, behind the same trait.
 
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
@@ -58,14 +57,15 @@ impl Duplex for ShardsStream {
     }
 }
 
-/// A guest's ports. Until a dial has connected, a dial waits for the guest to listen, retried by
-/// Shards' client until it listens, ends, or `first` passes, the caller's bound on a boot (learned,
-/// `hex_runtime::guest::GuestRuntime::first_dial_bound`). Once one has, the guest's relay listens, so
-/// each later dial is one try (`Duration::ZERO`): a refusal then is the relay's end.
+/// A guest's ports. Each dial is one `connect_before` with a finite absolute deadline, the caller's or
+/// else `bound` from the dial's start, within which Shards' client asks again while the guest doesn't
+/// listen there yet. `bound` is the caller's learned bound on a boot to ready
+/// (`hex_runtime::guest::GuestRuntime::first_dial_bound`), whose ready includes a whole CONNECT/OK
+/// exchange. Never a relative patience: Shards' client awaits a zero or `Duration::MAX` patience's
+/// answer without a bound (HEX-GUEST-33).
 pub struct ShardsLink {
     guest: ShardsGuest,
-    first: Duration,
-    listened: AtomicBool,
+    bound: Duration,
 }
 
 enum ShardsGuest {
@@ -83,22 +83,20 @@ impl ShardsGuest {
 }
 
 impl ShardsLink {
-    pub fn new(guest: Arc<dyn shards_api::Guest>, first: Duration) -> Self {
+    pub fn new(guest: Arc<dyn shards_api::Guest>, bound: Duration) -> Self {
         Self {
             guest: ShardsGuest::Owned(guest),
-            first,
-            listened: AtomicBool::new(false),
+            bound,
         }
     }
 
     /// AC-T7.4.1: retain the API's existing native/protocol receipt directly. The
     /// caller uses ManagedGuest::try_clone when it also retains a boot handle;
     /// adapting that handle needs no second Arc allocation or lifecycle owner.
-    pub fn managed(guest: shards_api::ManagedGuest, first: Duration) -> Self {
+    pub fn managed(guest: shards_api::ManagedGuest, bound: Duration) -> Self {
         Self {
             guest: ShardsGuest::Managed(guest),
-            first,
-            listened: AtomicBool::new(false),
+            bound,
         }
     }
 }
@@ -112,23 +110,19 @@ impl Link for ShardsLink {
     }
 
     fn dial(&self, port: u32) -> Result<DuplexOwner, Refusal> {
-        let patience = if self.listened.load(Ordering::Acquire) {
-            Duration::ZERO
-        } else {
-            self.first
-        };
-        let stream = self
-            .guest
-            .guest()
-            .connect(port, patience)
-            .map_err(|why| refusal("connecting to the guest", &why))?;
-        self.listened.store(true, Ordering::Release);
-        own_duplex(ShardsStream(stream))
+        self.dial_before(port, None)
     }
 
     fn dial_before(&self, port: u32, deadline: Option<Instant>) -> Result<DuplexOwner, Refusal> {
-        let Some(at) = deadline else {
-            return self.dial(port);
+        let at = match deadline {
+            Some(at) => at,
+            None => (!self.bound.is_zero())
+                .then(|| Instant::now().checked_add(self.bound))
+                .flatten()
+                .ok_or_else(|| Refusal::Invalid {
+                    what: "guest dial bound",
+                    why: "it must be positive and fit a monotonic deadline".to_owned(),
+                })?,
         };
         let cap = crate::calls::ReplyDeadline::caller_before(at)?;
         cap.remaining("connecting to the guest within the original operation deadline")?;
@@ -139,7 +133,6 @@ impl Link for ShardsLink {
             .map_err(|why| refusal("connecting to the guest", &why))?;
         let stream = own_duplex(ShardsStream(stream))?;
         cap.remaining("retaining the guest connection within the original operation deadline")?;
-        self.listened.store(true, Ordering::Release);
         Ok(stream)
     }
 }
