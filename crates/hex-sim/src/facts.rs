@@ -582,8 +582,8 @@ mod tests {
             pci: Some("0000:01:00.0".into()),
             driver: Some("615.78.08".into()),
             load: GpuLoad {
-                busy_per_mille: 120,
-                memory_used: 1 << 30,
+                busy_per_mille: Some(120),
+                memory_used: Some(1 << 30),
             },
         };
         let vfio = Found {

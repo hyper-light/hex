@@ -84,7 +84,7 @@ fn reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_t
     let mut spec = NodeSpec::new(NodeId(0), capacity);
     spec.classes = Classes::NONE.with(Class::Oci);
     spec.devices = vec![Device::gpu(ModelId(0), 4_096); 2];
-    spec.devices[1].load.busy_per_mille = 1_000;
+    spec.devices[1].load.busy_per_mille = Some(1_000);
     let budget = Budget { owned: 4, ran: 4 };
     let gpu = Demand {
         kind: Kind::Session,
@@ -137,8 +137,8 @@ fn reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_t
 
     let mut swapped = spec.clone();
     swapped.devices[0].load = GpuLoad {
-        busy_per_mille: 1_000,
-        memory_used: 0,
+        busy_per_mille: Some(1_000),
+        memory_used: Some(0),
     };
     swapped.devices[1].load = GpuLoad::default();
     for (before, after) in spec.devices.iter().zip(&swapped.devices) {
@@ -291,7 +291,7 @@ fn retained_gpu_recovery_ignores_transient_memory_and_session_hotness() {
             let mut changed = spec.clone();
             if memory_pressure {
                 for device in &mut changed.devices {
-                    device.load.memory_used = device.size;
+                    device.load.memory_used = Some(device.size);
                 }
             } else {
                 changed.background_milli =
@@ -397,7 +397,7 @@ fn recovery_inputs() -> (NodeSpec, Vec<String>, Demand, Budget) {
     );
     spec.classes = Classes::NONE.with(Class::Oci);
     spec.devices = vec![Device::gpu(ModelId(0), 4_096); 2];
-    spec.devices[1].load.busy_per_mille = 1_000;
+    spec.devices[1].load.busy_per_mille = Some(1_000);
     let demand = Demand {
         kind: Kind::Session,
         class: Class::Oci,
@@ -715,8 +715,8 @@ fn physical_binding_survives_unheld_device_removal_and_reindex_without_reselecti
     let mut physical = BTreeMap::from([(old, (DeviceKind::Gpu, 101))]);
     drop(node);
     spec.devices.remove(0);
-    spec.devices[0].load.busy_per_mille = 1_000;
-    spec.devices[1].load.busy_per_mille = 0;
+    spec.devices[0].load.busy_per_mille = Some(1_000);
+    spec.devices[1].load.busy_per_mille = Some(0);
     let mut node = boot_local(&spec, &models, budget, &mut records, |key| {
         if physical.contains_key(&key) {
             Boxed::Running
@@ -1071,7 +1071,7 @@ fn recorded_device_specs_shares_valid_legacy_and_bad_binding_semantics() {
     );
     let mut shifted = spec.devices.clone();
     shifted.swap(0, 1);
-    shifted[0].load.memory_used = shifted[0].size;
+    shifted[0].load.memory_used = Some(shifted[0].size);
     assert_eq!(
         recorded_device_specs(&physical, &shifted).unwrap(),
         Some(vec![shifted[0]])
@@ -1098,7 +1098,7 @@ fn recorded_device_specs_shares_valid_legacy_and_bad_binding_semantics() {
             "{atom}"
         );
     }
-    assert_eq!(spec.devices[1].load.memory_used, 0);
+    assert_eq!(spec.devices[1].load.memory_used, Some(0));
     assert_eq!(spec.devices[0].key, None);
     eprintln!(
         "recorded-specs legacy=None explicit_zero=Some_empty physical_key=101 reindex_preserved=true synthetic_none=true bad_claims=typed_Damaged catalog_unchanged=true records_writes=0 runtime_effects=0"

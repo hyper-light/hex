@@ -1,0 +1,78 @@
+{
+  "requirement": "AC-T7.4.1",
+  "quality_source": "2ce0bcd477dd29a0057dd56f534fa11c15a81330",
+  "consumer_source": "9bf800c49561302c67711a65f6598e1b8fb1bb82",
+  "signed_and_root_hashes": {
+    "crates/hex-node/src/facts.rs": {
+      "signed_sha256": "5549e1820f606fafef8bf9cb6d975b6b5d09771c883931306dcedf32d2809857",
+      "root_sha256": "5549e1820f606fafef8bf9cb6d975b6b5d09771c883931306dcedf32d2809857"
+    },
+    "crates/hex-node/src/placement.rs": {
+      "signed_sha256": "65347ccf20f7a0fe9a2f079b982477d023a2c091e9c9c9ff8fa6e7899ed675fe",
+      "root_sha256": "65347ccf20f7a0fe9a2f079b982477d023a2c091e9c9c9ff8fa6e7899ed675fe"
+    },
+    "crates/hex-node/src/placement/physical.rs": {
+      "signed_sha256": "8e8c5a7f8966b8d2d3017e6fe61552899f09221056e444910e5b60177b67e1bc",
+      "root_sha256": "8e8c5a7f8966b8d2d3017e6fe61552899f09221056e444910e5b60177b67e1bc"
+    },
+    "crates/hex-node/src/scheduler.rs": {
+      "signed_sha256": "8e0fb4493e5eec209875616c779c1269009c7641755389b53c221516063c0db0",
+      "root_sha256": "7326c06b5287dbf20b3a8c67cad969f61d0a05c50a270053e68109f079cec14d"
+    },
+    "crates/hex-node/src/scheduler/capacity/devices.rs": {
+      "signed_sha256": "d4bd04619469dd471ac1d33fd41b1c67ad95da4d8f6784fbc2fca36a5b625e05",
+      "root_sha256": "d4bd04619469dd471ac1d33fd41b1c67ad95da4d8f6784fbc2fca36a5b625e05"
+    },
+    "crates/hex-node/src/scheduler/device_offer_tests.rs": {
+      "signed_sha256": "607669928da0d8e96bfc563ef8b9283769ef74d7f53188f4658d8271ee212d45",
+      "root_sha256": "607669928da0d8e96bfc563ef8b9283769ef74d7f53188f4658d8271ee212d45"
+    }
+  },
+  "original_red_members": {
+    "owner": {
+      "bytes": 72,
+      "sha256": "e69356555719ffbfe72d31dfafdb3f8ec0f40dbc0fd5144e759ae25fb9b7c15f"
+    },
+    "control.log": {
+      "bytes": 582,
+      "sha256": "851f8cdd4d4d27973557be9b5500a5c860eb04fec78646af8a35414b8fdc9172"
+    },
+    "source-hashes": {
+      "bytes": 415,
+      "sha256": "0c5f9ec2e5aec1646bcd738556da2f2d881bc7edab9a88a9522594813c365b47"
+    },
+    "metadata.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "red.log": {
+      "bytes": 3846,
+      "sha256": "9ecf2ee4fcea622a2ae7a7b5046309a2b1259304098ae24f8fcfb9793ed219a3"
+    },
+    "red.exit": {
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    "cargo.pid": {
+      "bytes": 6,
+      "sha256": "60c99707009efff56d8988c7539b54939d0da60d941fdbe87c4e17329feccced"
+    },
+    "source/docs/research/measurements/hex-complete-bindings/unread-control/Cargo.lock": {
+      "bytes": 16446,
+      "sha256": "0bee4e19d932ff2c1255e1b7ad90cd2b16877a2e389a881a29f8712d763af7d9"
+    },
+    "overlay-v5.tar.gz/L1-FENCED": {
+      "bytes": 121,
+      "sha256": "cc9ab76bbf35ea5ab286a70a93e63bdede8242cebf839bc61f7c68d843bc7f2d"
+    },
+    "v5-fence-mkdir.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "registration": "Preserved ONE existing scheduler/tests.rs device_offer_tests path registration; omitted duplicate new scheduler.rs declaration",
+  "outside_literal": "tests/needs.rs only wraps the same two synthetic numeric readings in Some",
+  "state": "Source reviewed; whole joined checks pending, source-only RPC integration, no native effect claims",
+  "quality_green": "L1 reports same original seam1pass and exact retained/CPU1pass; raw independent intake pending",
+  "native_invocations": 0
+}

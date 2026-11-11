@@ -3396,7 +3396,7 @@ mod tests {
             NodeSpec::new(NodeId(0), Resources { gpus: 1, ..CAP }),
             NodeSpec::new(NodeId(1), Resources { gpus: 1, ..CAP }),
         ];
-        specs[0].devices[0].load.busy_per_mille = 1000;
+        specs[0].devices[0].load.busy_per_mille = Some(1000);
         let mut records = Memory::default();
         let mut node = boot_test(&specs, &[], &mut records);
         let demand = Demand {
@@ -3416,7 +3416,7 @@ mod tests {
             NodeId(1),
             0,
             crate::model::GpuLoad {
-                busy_per_mille: 1000,
+                busy_per_mille: Some(1000),
                 ..crate::model::GpuLoad::default()
             },
         )

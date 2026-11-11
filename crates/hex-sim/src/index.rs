@@ -218,9 +218,11 @@ struct Slot {
 
 /// A GPU's load as one share, in millionths: the larger of its utilisation and its memory in use, as
 /// DRF takes a dominant share (Ghodsi et al., NSDI 2011).
-fn gpu_busy(d: &Device) -> u64 {
-    millionths(d.load.memory_used, d.size)
-        .max(u64::from(d.load.busy_per_mille).saturating_mul(1000))
+fn gpu_busy(d: &Device) -> Option<u64> {
+    Some(
+        millionths(d.load.memory_used?, d.size)
+            .max(u64::from(d.load.busy_per_mille?).saturating_mul(1000)),
+    )
 }
 
 /// How idle the GPUs `held` names are: the sum of each one's share free of its load, in millionths.
@@ -228,7 +230,10 @@ fn gpu_idle(devices: &[Device], held: &[u16]) -> u64 {
     held.iter()
         .filter_map(|&i| devices.get(usize::from(i)))
         .filter(|d| d.kind == DeviceKind::Gpu)
-        .map(|d| 1_000_000u64.saturating_sub(gpu_busy(d)))
+        // An unread GPU earns no idle credit. Fresh matching already requires both readings;
+        // surviving bindings still retain their exact identity during telemetry loss.
+        .filter_map(gpu_busy)
+        .map(|busy| 1_000_000u64.saturating_sub(busy))
         .fold(0, u64::saturating_add)
 }
 
@@ -2124,8 +2129,8 @@ mod tests {
             .iter()
             .map(|&(model, memory, busy)| Device {
                 load: GpuLoad {
-                    busy_per_mille: busy,
-                    memory_used: 0,
+                    busy_per_mille: Some(busy),
+                    memory_used: Some(0),
                 },
                 ..Device::gpu(ModelId(model), memory)
             })
@@ -2141,6 +2146,49 @@ mod tests {
             class,
             ask,
         }
+    }
+
+    /// AC-T7.4.1: missing telemetry prevents a new GPU grant, preserves the old exact holder and
+    /// leaves CPU-only work admissible. Release still follows the original held assignment.
+    #[test]
+    fn unread_gpu_load_preserves_held_identity_and_independent_cpu_progress() {
+        use crate::model::{Ask, GpuLoad, Os};
+        let spec = gpu_node(0, 4_000, Os::Linux, &[(1, 4096, 0), (1, 4096, 500)]);
+        let mut index = FitIndex::new(&[spec]).unwrap();
+        let owner = WorkloadId(9);
+        let gpu = asking(1, Class::Oci, Ask::default());
+        index.take(NodeId(0), owner, &gpu).unwrap();
+        let held = index.holds(NodeId(0), owner);
+        assert_eq!(held, vec![0]);
+        for device in 0..2 {
+            index
+                .set_gpu_load(NodeId(0), device, GpuLoad::default())
+                .unwrap();
+        }
+        assert_eq!(index.holds(NodeId(0), owner), held);
+        assert!(index.fit(&gpu, &Pick::default()).best.is_none());
+        let cpu = asking(0, Class::Oci, Ask::default());
+        assert_eq!(
+            index.fit(&cpu, &Pick::default()).best.map(|key| key.node),
+            Some(NodeId(0))
+        );
+        index.give(NodeId(0), owner, &gpu).unwrap();
+        assert!(index.holds(NodeId(0), owner).is_empty());
+        assert!(index.fit(&gpu, &Pick::default()).best.is_none());
+        index
+            .set_gpu_load(
+                NodeId(0),
+                1,
+                GpuLoad {
+                    busy_per_mille: Some(0),
+                    memory_used: Some(0),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            index.fit(&gpu, &Pick::default()).best.map(|key| key.node),
+            Some(NodeId(0))
+        );
     }
 
     /// AC-T7.4.1: image OS follows the initialized class; host capability classes stay unchanged.
@@ -2400,8 +2448,8 @@ mod tests {
                 NodeId(0),
                 0,
                 GpuLoad {
-                    busy_per_mille: 50,
-                    memory_used: 0,
+                    busy_per_mille: Some(50),
+                    memory_used: Some(0),
                 },
             )
             .unwrap();
@@ -2410,8 +2458,8 @@ mod tests {
                 NodeId(1),
                 0,
                 GpuLoad {
-                    busy_per_mille: 900,
-                    memory_used: 0,
+                    busy_per_mille: Some(900),
+                    memory_used: Some(0),
                 },
             )
             .unwrap();
@@ -2422,8 +2470,8 @@ mod tests {
                 NodeId(0),
                 0,
                 GpuLoad {
-                    busy_per_mille: 0,
-                    memory_used: 8 * GIB / 20 * 19,
+                    busy_per_mille: Some(0),
+                    memory_used: Some(8 * GIB / 20 * 19),
                 },
             )
             .unwrap();

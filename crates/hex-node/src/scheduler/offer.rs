@@ -82,7 +82,11 @@ fn checked_shape(spec: &NodeSpec) -> Result<(), Refusal> {
     if classes != spec.classes {
         return Err(invalid("unknown runtime class bits"));
     }
-    if spec.devices.iter().any(|d| d.load.busy_per_mille > 1000) {
+    if spec
+        .devices
+        .iter()
+        .any(|d| d.load.busy_per_mille.is_some_and(|busy| busy > 1000))
+    {
         // The field is a fraction in thousandths, not an OS load-average queue length.
         return Err(invalid(
             "device busy fraction exceeds one thousand per mille",

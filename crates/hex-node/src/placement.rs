@@ -14,6 +14,7 @@ use hex_sim::peer::{self, Boxed, Budget, Key, Msg, Stop, Told};
 
 pub mod budget;
 mod devices;
+mod physical;
 mod rows;
 use rows::{Context, Rows};
 
@@ -151,6 +152,25 @@ impl Runtimes {
                 Ok((class, runtime.capacity(form)?))
             })
             .collect()
+    }
+
+    /// The native Store/turn owner supplies facts over the existing Runtime seam. This registry
+    /// has no mutable query lock, and no provider is opened in the scheduling process.
+    pub fn physical_report(&self) -> Result<Option<hex_api::PhysicalReport>, Error> {
+        let mut reports = Vec::new();
+        reports
+            .try_reserve_exact(self.by_class.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "native runtime report count",
+                bound: Class::COUNT,
+            })?;
+        for runtime in self.by_class.values() {
+            let report = runtime.physical_report()?;
+            // A resource pool may be a guest's narrower envelope; its id is not the physical
+            // Store/turn authority. Coalesce validates actual report authorities independently.
+            reports.push(report);
+        }
+        physical::coalesce(reports).map_err(Into::into)
     }
 }
 

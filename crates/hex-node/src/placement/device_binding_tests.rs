@@ -252,7 +252,7 @@ fn gpu_node(reordered: bool) -> NodeSpec {
         available,
         load: GpuLoad {
             busy_per_mille,
-            memory_used: 0,
+            memory_used: Some(0),
         },
         ..Device::gpu(ModelId(0), hex_api::MIN_MEMORY)
     };

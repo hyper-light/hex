@@ -154,8 +154,9 @@ pub enum DeviceKind {
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
 )]
 pub struct GpuLoad {
-    pub busy_per_mille: u16,
-    pub memory_used: u64,
+    /// None is unread, never an idle sample. Independent counters retain independent quality.
+    pub busy_per_mille: Option<u16>,
+    pub memory_used: Option<u64>,
 }
 
 /// A device model's name, interned in its cluster ([`Cluster::model`]): GPU models are compared by
@@ -206,13 +207,20 @@ impl Device {
             classes: legacy_device_classes(),
             model,
             size: memory,
-            load: GpuLoad::default(),
+            // This constructor declares a synthetic idle device. Native observations supply
+            // explicit independent counters instead; their Default is unknown.
+            load: GpuLoad {
+                busy_per_mille: Some(0),
+                memory_used: Some(0),
+            },
         }
     }
 
     /// A GPU's memory free of what isn't Hex's.
-    pub fn memory_free(&self) -> u64 {
-        self.size.saturating_sub(self.load.memory_used)
+    pub fn memory_free(&self) -> Option<u64> {
+        self.load
+            .memory_used
+            .map(|used| self.size.saturating_sub(used))
     }
 }
 
@@ -302,10 +310,12 @@ pub fn bind(
             .iter()
             .enumerate()
             .filter(|&(i, d)| d.kind == kind && free(i) && matches(d, ask))
-            .map(|(i, d)| match kind {
-                DeviceKind::Gpu => (u64::from(d.load.busy_per_mille), d.load.memory_used, i),
-                DeviceKind::Block => (d.size, 0, i),
-                DeviceKind::Vfio | DeviceKind::Net => (0, 0, i),
+            .filter_map(|(i, d)| match kind {
+                DeviceKind::Gpu => {
+                    Some((u64::from(d.load.busy_per_mille?), d.load.memory_used?, i))
+                }
+                DeviceKind::Block => Some((d.size, 0, i)),
+                DeviceKind::Vfio | DeviceKind::Net => Some((0, 0, i)),
             })
             .collect();
         fit.sort_unstable();
@@ -324,7 +334,9 @@ pub fn bind(
 pub fn matches(d: &Device, ask: &Ask) -> bool {
     match d.kind {
         DeviceKind::Gpu => {
-            ask.gpu_model.is_none_or(|m| m == d.model) && d.memory_free() >= ask.gpu_memory
+            ask.gpu_model.is_none_or(|m| m == d.model)
+                && d.load.busy_per_mille.is_some_and(|busy| busy <= 1000)
+                && d.memory_free().is_some_and(|free| free >= ask.gpu_memory)
         }
         DeviceKind::Block => d.size >= ask.block_size,
         DeviceKind::Vfio | DeviceKind::Net => true,

@@ -1,0 +1,18 @@
+{
+  "status": "SOURCE ONLY; consumer and constructor uncompiled/unrun",
+  "root_public_base": "31fe8ab8",
+  "quality_dependency": "2ce0bcd477dd29a0057dd56f534fa11c15a81330",
+  "exact_source_sha256": {
+    "crates/hex-node/src/facts.rs": "5549e1820f606fafef8bf9cb6d975b6b5d09771c883931306dcedf32d2809857",
+    "crates/hex-node/src/placement.rs": "65347ccf20f7a0fe9a2f079b982477d023a2c091e9c9c9ff8fa6e7899ed675fe",
+    "crates/hex-node/src/placement/physical.rs": "8e8c5a7f8966b8d2d3017e6fe61552899f09221056e444910e5b60177b67e1bc",
+    "crates/hex-node/src/scheduler.rs": "8e0fb4493e5eec209875616c779c1269009c7641755389b53c221516063c0db0",
+    "crates/hex-node/src/scheduler/capacity/devices.rs": "d4bd04619469dd471ac1d33fd41b1c67ad95da4d8f6784fbc2fca36a5b625e05",
+    "crates/hex-node/src/scheduler/device_offer_tests.rs": "607669928da0d8e96bfc563ef8b9283769ef74d7f53188f4658d8271ee212d45"
+  },
+  "constructor": "facts::shared_prober(&Path,Declared)->Result<SharedProber,Refusal>",
+  "shared_alias": "triomphe::Arc<Mutex<Prober>>",
+  "service_constructor": "Service::open(&Config,Report)->Result<Arc<Service>,Refusal>",
+  "metadata": "hex-node normal triomphe already ROOT31f; no new version/build/seed edge",
+  "native_effects": "ROOT only; not run"
+}

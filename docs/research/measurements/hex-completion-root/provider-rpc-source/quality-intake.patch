@@ -1,0 +1,331 @@
+diff --git a/crates/hex-node/src/placement/device_binding_tests.rs b/crates/hex-node/src/placement/device_binding_tests.rs
+index 8748c7f2..f6c2fa12 100644
+--- a/crates/hex-node/src/placement/device_binding_tests.rs
++++ b/crates/hex-node/src/placement/device_binding_tests.rs
+@@ -252,7 +252,7 @@ fn gpu_node(reordered: bool) -> NodeSpec {
+         available,
+         load: GpuLoad {
+             busy_per_mille,
+-            memory_used: 0,
++            memory_used: Some(0),
+         },
+         ..Device::gpu(ModelId(0), hex_api::MIN_MEMORY)
+     };
+diff --git a/crates/hex-node/src/scheduler/offer.rs b/crates/hex-node/src/scheduler/offer.rs
+index 2e2d17d1..6bd04995 100644
+--- a/crates/hex-node/src/scheduler/offer.rs
++++ b/crates/hex-node/src/scheduler/offer.rs
+@@ -82,7 +82,11 @@ fn checked_shape(spec: &NodeSpec) -> Result<(), Refusal> {
+     if classes != spec.classes {
+         return Err(invalid("unknown runtime class bits"));
+     }
+-    if spec.devices.iter().any(|d| d.load.busy_per_mille > 1000) {
++    if spec
++        .devices
++        .iter()
++        .any(|d| d.load.busy_per_mille.is_some_and(|busy| busy > 1000))
++    {
+         // The field is a fraction in thousandths, not an OS load-average queue length.
+         return Err(invalid(
+             "device busy fraction exceeds one thousand per mille",
+diff --git a/crates/hex-sim/src/facts.rs b/crates/hex-sim/src/facts.rs
+index 0be98cfc..2efec879 100644
+--- a/crates/hex-sim/src/facts.rs
++++ b/crates/hex-sim/src/facts.rs
+@@ -582,8 +582,8 @@ mod tests {
+             pci: Some("0000:01:00.0".into()),
+             driver: Some("615.78.08".into()),
+             load: GpuLoad {
+-                busy_per_mille: 120,
+-                memory_used: 1 << 30,
++                busy_per_mille: Some(120),
++                memory_used: Some(1 << 30),
+             },
+         };
+         let vfio = Found {
+diff --git a/crates/hex-sim/src/index.rs b/crates/hex-sim/src/index.rs
+index ad0a2beb..eda264ec 100644
+--- a/crates/hex-sim/src/index.rs
++++ b/crates/hex-sim/src/index.rs
+@@ -218,9 +218,11 @@ struct Slot {
+ 
+ /// A GPU's load as one share, in millionths: the larger of its utilisation and its memory in use, as
+ /// DRF takes a dominant share (Ghodsi et al., NSDI 2011).
+-fn gpu_busy(d: &Device) -> u64 {
+-    millionths(d.load.memory_used, d.size)
+-        .max(u64::from(d.load.busy_per_mille).saturating_mul(1000))
++fn gpu_busy(d: &Device) -> Option<u64> {
++    Some(
++        millionths(d.load.memory_used?, d.size)
++            .max(u64::from(d.load.busy_per_mille?).saturating_mul(1000)),
++    )
+ }
+ 
+ /// How idle the GPUs `held` names are: the sum of each one's share free of its load, in millionths.
+@@ -228,7 +230,10 @@ fn gpu_idle(devices: &[Device], held: &[u16]) -> u64 {
+     held.iter()
+         .filter_map(|&i| devices.get(usize::from(i)))
+         .filter(|d| d.kind == DeviceKind::Gpu)
+-        .map(|d| 1_000_000u64.saturating_sub(gpu_busy(d)))
++        // An unread GPU earns no idle credit. Fresh matching already requires both readings;
++        // surviving bindings still retain their exact identity during telemetry loss.
++        .filter_map(gpu_busy)
++        .map(|busy| 1_000_000u64.saturating_sub(busy))
+         .fold(0, u64::saturating_add)
+ }
+ 
+@@ -2124,8 +2129,8 @@ mod tests {
+             .iter()
+             .map(|&(model, memory, busy)| Device {
+                 load: GpuLoad {
+-                    busy_per_mille: busy,
+-                    memory_used: 0,
++                    busy_per_mille: Some(busy),
++                    memory_used: Some(0),
+                 },
+                 ..Device::gpu(ModelId(model), memory)
+             })
+@@ -2143,6 +2148,49 @@ mod tests {
+         }
+     }
+ 
++    /// AC-T7.4.1: missing telemetry prevents a new GPU grant, preserves the old exact holder and
++    /// leaves CPU-only work admissible. Release still follows the original held assignment.
++    #[test]
++    fn unread_gpu_load_preserves_held_identity_and_independent_cpu_progress() {
++        use crate::model::{Ask, GpuLoad, Os};
++        let spec = gpu_node(0, 4_000, Os::Linux, &[(1, 4096, 0), (1, 4096, 500)]);
++        let mut index = FitIndex::new(&[spec]).unwrap();
++        let owner = WorkloadId(9);
++        let gpu = asking(1, Class::Oci, Ask::default());
++        index.take(NodeId(0), owner, &gpu).unwrap();
++        let held = index.holds(NodeId(0), owner);
++        assert_eq!(held, vec![0]);
++        for device in 0..2 {
++            index
++                .set_gpu_load(NodeId(0), device, GpuLoad::default())
++                .unwrap();
++        }
++        assert_eq!(index.holds(NodeId(0), owner), held);
++        assert!(index.fit(&gpu, &Pick::default()).best.is_none());
++        let cpu = asking(0, Class::Oci, Ask::default());
++        assert_eq!(
++            index.fit(&cpu, &Pick::default()).best.map(|key| key.node),
++            Some(NodeId(0))
++        );
++        index.give(NodeId(0), owner, &gpu).unwrap();
++        assert!(index.holds(NodeId(0), owner).is_empty());
++        assert!(index.fit(&gpu, &Pick::default()).best.is_none());
++        index
++            .set_gpu_load(
++                NodeId(0),
++                1,
++                GpuLoad {
++                    busy_per_mille: Some(0),
++                    memory_used: Some(0),
++                },
++            )
++            .unwrap();
++        assert_eq!(
++            index.fit(&gpu, &Pick::default()).best.map(|key| key.node),
++            Some(NodeId(0))
++        );
++    }
++
+     /// AC-T7.4.1: image OS follows the initialized class; host capability classes stay unchanged.
+     #[test]
+     fn image_os_matches_vm_guest_and_oci_host() {
+@@ -2400,8 +2448,8 @@ mod tests {
+                 NodeId(0),
+                 0,
+                 GpuLoad {
+-                    busy_per_mille: 50,
+-                    memory_used: 0,
++                    busy_per_mille: Some(50),
++                    memory_used: Some(0),
+                 },
+             )
+             .unwrap();
+@@ -2410,8 +2458,8 @@ mod tests {
+                 NodeId(1),
+                 0,
+                 GpuLoad {
+-                    busy_per_mille: 900,
+-                    memory_used: 0,
++                    busy_per_mille: Some(900),
++                    memory_used: Some(0),
+                 },
+             )
+             .unwrap();
+@@ -2422,8 +2470,8 @@ mod tests {
+                 NodeId(0),
+                 0,
+                 GpuLoad {
+-                    busy_per_mille: 0,
+-                    memory_used: 8 * GIB / 20 * 19,
++                    busy_per_mille: Some(0),
++                    memory_used: Some(8 * GIB / 20 * 19),
+                 },
+             )
+             .unwrap();
+diff --git a/crates/hex-sim/src/model.rs b/crates/hex-sim/src/model.rs
+index 2f8dbfed..a943fedf 100644
+--- a/crates/hex-sim/src/model.rs
++++ b/crates/hex-sim/src/model.rs
+@@ -154,8 +154,9 @@ pub enum DeviceKind {
+     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+ )]
+ pub struct GpuLoad {
+-    pub busy_per_mille: u16,
+-    pub memory_used: u64,
++    /// None is unread, never an idle sample. Independent counters retain independent quality.
++    pub busy_per_mille: Option<u16>,
++    pub memory_used: Option<u64>,
+ }
+ 
+ /// A device model's name, interned in its cluster ([`Cluster::model`]): GPU models are compared by
+@@ -206,13 +207,20 @@ impl Device {
+             classes: legacy_device_classes(),
+             model,
+             size: memory,
+-            load: GpuLoad::default(),
++            // This constructor declares a synthetic idle device. Native observations supply
++            // explicit independent counters instead; their Default is unknown.
++            load: GpuLoad {
++                busy_per_mille: Some(0),
++                memory_used: Some(0),
++            },
+         }
+     }
+ 
+     /// A GPU's memory free of what isn't Hex's.
+-    pub fn memory_free(&self) -> u64 {
+-        self.size.saturating_sub(self.load.memory_used)
++    pub fn memory_free(&self) -> Option<u64> {
++        self.load
++            .memory_used
++            .map(|used| self.size.saturating_sub(used))
+     }
+ }
+ 
+@@ -302,10 +310,12 @@ pub fn bind(
+             .iter()
+             .enumerate()
+             .filter(|&(i, d)| d.kind == kind && free(i) && matches(d, ask))
+-            .map(|(i, d)| match kind {
+-                DeviceKind::Gpu => (u64::from(d.load.busy_per_mille), d.load.memory_used, i),
+-                DeviceKind::Block => (d.size, 0, i),
+-                DeviceKind::Vfio | DeviceKind::Net => (0, 0, i),
++            .filter_map(|(i, d)| match kind {
++                DeviceKind::Gpu => {
++                    Some((u64::from(d.load.busy_per_mille?), d.load.memory_used?, i))
++                }
++                DeviceKind::Block => Some((d.size, 0, i)),
++                DeviceKind::Vfio | DeviceKind::Net => Some((0, 0, i)),
+             })
+             .collect();
+         fit.sort_unstable();
+@@ -324,7 +334,9 @@ pub fn bind(
+ pub fn matches(d: &Device, ask: &Ask) -> bool {
+     match d.kind {
+         DeviceKind::Gpu => {
+-            ask.gpu_model.is_none_or(|m| m == d.model) && d.memory_free() >= ask.gpu_memory
++            ask.gpu_model.is_none_or(|m| m == d.model)
++                && d.load.busy_per_mille.is_some_and(|busy| busy <= 1000)
++                && d.memory_free().is_some_and(|free| free >= ask.gpu_memory)
+         }
+         DeviceKind::Block => d.size >= ask.block_size,
+         DeviceKind::Vfio | DeviceKind::Net => true,
+diff --git a/crates/hex-sim/src/peer.rs b/crates/hex-sim/src/peer.rs
+index 85ddf9a6..2da1f8d6 100644
+--- a/crates/hex-sim/src/peer.rs
++++ b/crates/hex-sim/src/peer.rs
+@@ -3396,7 +3396,7 @@ mod tests {
+             NodeSpec::new(NodeId(0), Resources { gpus: 1, ..CAP }),
+             NodeSpec::new(NodeId(1), Resources { gpus: 1, ..CAP }),
+         ];
+-        specs[0].devices[0].load.busy_per_mille = 1000;
++        specs[0].devices[0].load.busy_per_mille = Some(1000);
+         let mut records = Memory::default();
+         let mut node = boot_test(&specs, &[], &mut records);
+         let demand = Demand {
+@@ -3416,7 +3416,7 @@ mod tests {
+             NodeId(1),
+             0,
+             crate::model::GpuLoad {
+-                busy_per_mille: 1000,
++                busy_per_mille: Some(1000),
+                 ..crate::model::GpuLoad::default()
+             },
+         )
+diff --git a/crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs b/crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs
+index ac21bbd9..bdbc4fa1 100644
+--- a/crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs
++++ b/crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs
+@@ -84,7 +84,7 @@ fn reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_t
+     let mut spec = NodeSpec::new(NodeId(0), capacity);
+     spec.classes = Classes::NONE.with(Class::Oci);
+     spec.devices = vec![Device::gpu(ModelId(0), 4_096); 2];
+-    spec.devices[1].load.busy_per_mille = 1_000;
++    spec.devices[1].load.busy_per_mille = Some(1_000);
+     let budget = Budget { owned: 4, ran: 4 };
+     let gpu = Demand {
+         kind: Kind::Session,
+@@ -137,8 +137,8 @@ fn reboot_with_swapped_gpu_load_keeps_surviving_assignment_and_never_grants_it_t
+ 
+     let mut swapped = spec.clone();
+     swapped.devices[0].load = GpuLoad {
+-        busy_per_mille: 1_000,
+-        memory_used: 0,
++        busy_per_mille: Some(1_000),
++        memory_used: Some(0),
+     };
+     swapped.devices[1].load = GpuLoad::default();
+     for (before, after) in spec.devices.iter().zip(&swapped.devices) {
+@@ -291,7 +291,7 @@ fn retained_gpu_recovery_ignores_transient_memory_and_session_hotness() {
+             let mut changed = spec.clone();
+             if memory_pressure {
+                 for device in &mut changed.devices {
+-                    device.load.memory_used = device.size;
++                    device.load.memory_used = Some(device.size);
+                 }
+             } else {
+                 changed.background_milli =
+@@ -397,7 +397,7 @@ fn recovery_inputs() -> (NodeSpec, Vec<String>, Demand, Budget) {
+     );
+     spec.classes = Classes::NONE.with(Class::Oci);
+     spec.devices = vec![Device::gpu(ModelId(0), 4_096); 2];
+-    spec.devices[1].load.busy_per_mille = 1_000;
++    spec.devices[1].load.busy_per_mille = Some(1_000);
+     let demand = Demand {
+         kind: Kind::Session,
+         class: Class::Oci,
+@@ -715,8 +715,8 @@ fn physical_binding_survives_unheld_device_removal_and_reindex_without_reselecti
+     let mut physical = BTreeMap::from([(old, (DeviceKind::Gpu, 101))]);
+     drop(node);
+     spec.devices.remove(0);
+-    spec.devices[0].load.busy_per_mille = 1_000;
+-    spec.devices[1].load.busy_per_mille = 0;
++    spec.devices[0].load.busy_per_mille = Some(1_000);
++    spec.devices[1].load.busy_per_mille = Some(0);
+     let mut node = boot_local(&spec, &models, budget, &mut records, |key| {
+         if physical.contains_key(&key) {
+             Boxed::Running
+@@ -1071,7 +1071,7 @@ fn recorded_device_specs_shares_valid_legacy_and_bad_binding_semantics() {
+     );
+     let mut shifted = spec.devices.clone();
+     shifted.swap(0, 1);
+-    shifted[0].load.memory_used = shifted[0].size;
++    shifted[0].load.memory_used = Some(shifted[0].size);
+     assert_eq!(
+         recorded_device_specs(&physical, &shifted).unwrap(),
+         Some(vec![shifted[0]])
+@@ -1098,7 +1098,7 @@ fn recorded_device_specs_shares_valid_legacy_and_bad_binding_semantics() {
+             "{atom}"
+         );
+     }
+-    assert_eq!(spec.devices[1].load.memory_used, 0);
++    assert_eq!(spec.devices[1].load.memory_used, Some(0));
+     assert_eq!(spec.devices[0].key, None);
+     eprintln!(
+         "recorded-specs legacy=None explicit_zero=Some_empty physical_key=101 reindex_preserved=true synthetic_none=true bad_claims=typed_Damaged catalog_unchanged=true records_writes=0 runtime_effects=0"

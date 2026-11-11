@@ -12,14 +12,43 @@
 //! is refused, typed, naming it.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use hex_api::Refusal;
 use hex_sim::facts::{self, Cpu, Disk, Facts, Found, Mem};
 use hex_sim::model::{Class, Classes, Virt};
 
 /// One explicitly initialized provider shared inside the native runtime owner.
-pub type SharedProber = Arc<Mutex<Prober>>;
+pub type SharedProber = triomphe::Arc<Mutex<Prober>>;
+
+/// Allocate the ONE native owner before initializing its driver/provider state. Nothing can
+/// observe the temporary uninitialized slot: it is uniquely owned until this function returns.
+pub fn shared_prober(state: &Path, declared: Declared) -> Result<SharedProber, Refusal> {
+    let mut dir = std::path::PathBuf::new();
+    dir.try_reserve_exact(state.as_os_str().len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "native provider state path bytes",
+            bound: state.as_os_str().len(),
+        })?;
+    dir.push(state);
+    let mut shared = triomphe::Arc::try_new(Mutex::new(Prober {
+        gpus: None,
+        dir,
+        declared,
+        classes: Classes::NONE,
+        available: None,
+    }))
+    .map_err(|_| Refusal::Exhausted {
+        what: "shared native physical provider",
+        bound: 1,
+    })?;
+    let prober = triomphe::Arc::get_mut(&mut shared)
+        .ok_or_else(|| Refusal::Broken("new native provider is not uniquely owned".into()))?
+        .get_mut()
+        .map_err(|_| Refusal::Broken("new native provider lock poisoned".into()))?;
+    prober.gpus = Some(hex_gpu::Gpus::open());
+    Ok(shared)
+}
 
 pub fn physical_devices(provider: &SharedProber) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
     provider
@@ -42,7 +71,7 @@ pub struct Declared {
 /// its administrator declares.
 #[derive(Debug)]
 pub struct Prober {
-    gpus: hex_gpu::Gpus,
+    gpus: Option<hex_gpu::Gpus>,
     dir: std::path::PathBuf,
     declared: Declared,
     classes: Classes,
@@ -54,7 +83,7 @@ impl Prober {
     /// opened), once for the node's life.
     pub fn open(dir: &Path, declared: Declared) -> Self {
         Self {
-            gpus: hex_gpu::Gpus::open(),
+            gpus: Some(hex_gpu::Gpus::open()),
             dir: dir.to_path_buf(),
             declared,
             classes: Classes::NONE,
@@ -73,11 +102,18 @@ impl Prober {
         self.classes = classes;
     }
 
+    fn provider(&mut self) -> Result<&mut hex_gpu::Gpus, Refusal> {
+        self.gpus
+            .as_mut()
+            .ok_or_else(|| Refusal::Broken("native physical provider is not initialized".into()))
+    }
+
     /// Current native correspondence, not catalog declarations or another Gpus allocation.
     /// Gone samples withhold that device. An unread independent counter does not erase its native
     /// metadata or become a known zero; DeviceInfo itself carries no load/grant/holder authority.
     pub fn physical_devices(&mut self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
-        let sampled = match self.gpus.sample() {
+        let provider = self.provider()?;
+        let sampled = match provider.sample() {
             Ok(sampled) => sampled,
             Err(_) => return Ok(Vec::new()),
         };
@@ -89,7 +125,7 @@ impl Prober {
             .try_reserve_exact(sampled.len())
             .map_err(|_| physical_full())?;
         loads.extend_from_slice(sampled);
-        let inventory = self.gpus.inventory().map_err(|why| Refusal::Platform {
+        let inventory = provider.inventory().map_err(|why| Refusal::Platform {
             what: "native physical device observation",
             platform: std::env::consts::OS,
             why: why.to_string(),
@@ -103,7 +139,8 @@ impl Prober {
         &mut self,
         authority: String,
     ) -> Result<hex_api::PhysicalReport, Refusal> {
-        let sampled = match self.gpus.sample() {
+        let provider = self.provider()?;
+        let sampled = match provider.sample() {
             Ok(sampled) => sampled,
             // NoGpus means this provider has no readable inventory, rather than a measured idle GPU.
             Err(why) => return observed_report(authority, Err(why), &[]),
@@ -116,8 +153,7 @@ impl Prober {
             .try_reserve_exact(sampled.len())
             .map_err(|_| physical_full())?;
         loads.extend_from_slice(sampled);
-        let inventory = self
-            .gpus
+        let inventory = provider
             .inventory()
             .map_err(|_| Refusal::Broken("sampled native provider lost its inventory".into()))?;
         observed_report(authority, Ok(inventory), &loads)
@@ -126,7 +162,9 @@ impl Prober {
     /// Open-time absence remains inspectable even though a CPU-only factual report is successful.
     /// This reads retained provider state; it neither opens nor samples a second provider.
     pub fn gpu_diagnostic(&self) -> Option<&hex_gpu::NoGpus> {
-        self.gpus.inventory().err()
+        self.gpus
+            .as_ref()
+            .and_then(|provider| provider.inventory().err())
     }
 
     /// Every fact of this node, read now: its GPUs' load sampled.
@@ -144,7 +182,7 @@ impl Prober {
             .filter(|&c| self.classes.has(c) && available.has(c))
             .fold(Classes::NONE, Classes::with);
         let mut f = machine(&self.dir, &self.declared, classes)?;
-        (f.gpus, f.no_gpus) = gpus(&mut self.gpus);
+        (f.gpus, f.no_gpus) = gpus(self.provider()?);
         Ok(f)
     }
 }
@@ -312,11 +350,48 @@ pub fn gpu_facts(inventory: &[hex_gpu::Gpu], loads: &[hex_gpu::Load]) -> Vec<fac
             load: hex_sim::model::GpuLoad {
                 busy_per_mille: load
                     .and_then(|l| l.busy_percent.ok())
-                    .map_or(0, |p| u16::from(p.min(100)).saturating_mul(10)),
-                memory_used: load.and_then(|l| l.memory_used_bytes.ok()).unwrap_or(0),
+                    .filter(|busy| *busy <= 100)
+                    .and_then(|busy| u16::from(busy).checked_mul(10)),
+                memory_used: load.and_then(|l| l.memory_used_bytes.ok()),
             },
         })
         .collect()
+}
+
+/// Split-process scheduling consumes the native owner's factual RPC without opening a provider.
+/// Opaque stable DeviceId keys are already native observations; vendor/driver/PCI text absent
+/// from this DTO is left absent rather than reconstructed from model labels or ordinals.
+pub(crate) fn reported_gpus(report: &hex_api::PhysicalReport) -> Result<Vec<facts::Gpu>, Refusal> {
+    report.check()?;
+    let mut gpus = Vec::new();
+    gpus.try_reserve_exact(report.devices.len())
+        .map_err(|_| physical_full())?;
+    for device in &report.devices {
+        if device.info.id.kind != hex_api::DeviceKind::Gpu {
+            continue;
+        }
+        let mut model = String::new();
+        model
+            .try_reserve_exact(device.info.model.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "reported native GPU model bytes",
+                bound: device.info.model.len(),
+            })?;
+        model.push_str(&device.info.model);
+        gpus.push(facts::Gpu {
+            vendor: String::new(),
+            model,
+            memory: device.info.size,
+            key: Some(device.info.id.key),
+            pci: None,
+            driver: None,
+            load: hex_sim::model::GpuLoad {
+                busy_per_mille: device.busy_per_mille,
+                memory_used: device.memory_used_bytes,
+            },
+        });
+    }
+    Ok(gpus)
 }
 
 /// AC-T7.4.1: basic runtime room without device discovery or GPU driver initialization. The caller
@@ -353,7 +428,11 @@ pub fn capacity(dir: &Path, id: String) -> Result<hex_api::Capacity, Refusal> {
 }
 
 /// Every fact of this node but its GPUs, read now. `dir` is the folder boxes' disks go on.
-fn machine(dir: &Path, declared: &Declared, initialized: Classes) -> Result<Facts, Refusal> {
+pub(crate) fn machine(
+    dir: &Path,
+    declared: &Declared,
+    initialized: Classes,
+) -> Result<Facts, Refusal> {
     let (os, arch) =
         facts::platform(std::env::consts::OS, std::env::consts::ARCH).ok_or(Refusal::Platform {
             what: "a node's facts",
@@ -790,7 +869,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut prober = Prober::open(dir.path(), Declared::default());
         let f = prober.probe().unwrap();
-        match prober.gpus.inventory() {
+        match prober.gpus.as_ref().unwrap().inventory() {
             Ok(listed) => {
                 assert_eq!((f.gpus.len(), &f.no_gpus), (listed.len(), &None), "{f:?}");
             }
@@ -849,15 +928,15 @@ mod tests {
         assert_eq!(
             got[0].load,
             hex_sim::model::GpuLoad {
-                busy_per_mille: 370,
-                memory_used: 1 << 30
+                busy_per_mille: Some(370),
+                memory_used: Some(1 << 30)
             }
         );
         assert_eq!(
             got[1].load,
             hex_sim::model::GpuLoad {
-                busy_per_mille: 0,
-                memory_used: 2 << 30
+                busy_per_mille: None,
+                memory_used: Some(2 << 30)
             }
         );
         // A node made from them holds both, their load the pick reads.
@@ -878,7 +957,7 @@ mod tests {
         let node = f.node(hex_sim::model::NodeId(0), &mut cluster).unwrap();
         assert_eq!(
             (node.capacity.gpus, node.devices[1].load.memory_used),
-            (2, 2 << 30)
+            (2, Some(2 << 30))
         );
     }
 
@@ -941,8 +1020,8 @@ mod gpu_identity_tests {
             (Some(u64::MAX), None, "apple")
         );
         assert_eq!(facts[0].memory, hex_api::MIN_MEMORY);
-        assert_eq!(facts[0].load.busy_per_mille, 370);
-        assert_eq!(facts[0].load.memory_used, hex_api::MIN_MEMORY / 2);
+        assert_eq!(facts[0].load.busy_per_mille, Some(370));
+        assert_eq!(facts[0].load.memory_used, Some(hex_api::MIN_MEMORY / 2));
     }
 
     /// AC-T7.4.1: direct native views preserve identity/metadata, never catalog holders or unknown load.

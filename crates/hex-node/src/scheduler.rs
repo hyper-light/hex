@@ -453,7 +453,9 @@ pub struct Service {
     driver: Driver,
     runtimes: Runtimes,
     cluster: Mutex<Cluster>,
-    prober: Mutex<crate::facts::Prober>,
+    facts_dir: std::path::PathBuf,
+    initialized: Classes,
+    physical_authority: Option<String>,
     stopping: Arc<Stopping>,
     queued: Arc<AtomicUsize>,
     control_limit: AtomicUsize,
@@ -557,10 +559,15 @@ impl Service {
         let runtime_capacity = runtimes.capacities().map_err(failed)?;
         std::fs::create_dir_all(&config.state)
             .map_err(|e| Refusal::os("creating scheduler state", e))?;
-        let mut prober =
-            crate::facts::Prober::open(&config.state, crate::facts::Declared::default())
-                .with_classes(classes);
-        let facts = prober.probe()?;
+        let (facts, physical_authority) = runtime_facts(&config.state, classes, &runtimes)?;
+        let mut facts_dir = std::path::PathBuf::new();
+        facts_dir
+            .try_reserve_exact(config.state.as_os_str().len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "scheduler machine facts path bytes",
+                bound: config.state.as_os_str().len(),
+            })?;
+        facts_dir.push(&config.state);
         let local = facts
             .node(id, &mut cluster)
             .map_err(|e| Refusal::Broken(e.to_string()))?;
@@ -652,7 +659,9 @@ impl Service {
             driver,
             runtimes,
             cluster: Mutex::new(cluster),
-            prober: Mutex::new(prober),
+            facts_dir,
+            initialized: classes,
+            physical_authority,
             stopping,
             queued,
             control_limit: AtomicUsize::new(control_limit),
@@ -887,11 +896,16 @@ impl Service {
                     .ok_or_else(|| Refusal::Broken("measured owned resource sum overflows".into()))
             },
         )?;
-        let facts = self
-            .prober
-            .lock()
-            .map_err(|_| Refusal::Broken("scheduler probe lock poisoned".into()))?
-            .probe()?;
+        // All native RPCs finish before acquiring the cluster/model lock. The scheduling process
+        // owns no GPU provider, and a changed Store/turn owner cannot inherit retained claims.
+        let (facts, physical_authority) =
+            runtime_facts(&self.facts_dir, self.initialized, &self.runtimes)?;
+        if physical_authority != self.physical_authority {
+            return Err(Refusal::Invalid {
+                what: "native physical report authority",
+                why: "the initialized Store/turn owner changed during scheduler lifetime".into(),
+            });
+        }
         let mut cluster = self
             .cluster
             .lock()
@@ -1185,6 +1199,40 @@ impl Service {
             ..dto::Reply::default()
         })
     }
+}
+
+/// Machine resources are local facts; GPU observations come only from the initialized native
+/// Store/turn owner over Runtime. No Prober/Gpus is opened or cached in this process.
+fn runtime_facts(
+    state: &Path,
+    initialized: Classes,
+    runtimes: &Runtimes,
+) -> Result<(hex_sim::facts::Facts, Option<String>), Refusal> {
+    let report = runtimes.physical_report().map_err(failed)?;
+    let mut facts = crate::facts::machine(state, &crate::facts::Declared::default(), initialized)?;
+    let authority = match report {
+        Some(report) => {
+            facts.gpus = crate::facts::reported_gpus(&report)?;
+            Some(report.authority)
+        }
+        None => None,
+    };
+    if facts.gpus.is_empty() {
+        let message = if authority.is_some() {
+            "initialized native provider reports no verified GPUs"
+        } else {
+            "no configured native physical report owner"
+        };
+        let mut why = String::new();
+        why.try_reserve_exact(message.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "native GPU report diagnostic bytes",
+                bound: message.len(),
+            })?;
+        why.push_str(message);
+        facts.no_gpus = Some(why);
+    }
+    Ok((facts, authority))
 }
 
 impl Drop for Service {

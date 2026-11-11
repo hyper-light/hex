@@ -4,7 +4,7 @@
 use super::*;
 use hex_api::{Capacity, CapacityResources, DeviceId, DeviceInfo, DeviceKind as NativeKind};
 use hex_sim::facts::{Cpu, Facts, Gpu};
-use hex_sim::model::{Class as Route, Device, DeviceKind, GpuLoad, Os, bind};
+use hex_sim::model::{Ask, Class as Route, Device, DeviceKind, GpuLoad, Os, bind};
 
 const NAMESPACE: &str = "00112233445566778899aabbccddeeff";
 const FOREIGN: &str = "ffeeddccbbaa99887766554433221100";
@@ -27,8 +27,8 @@ fn inputs() -> (Facts, Reports) {
                 memory,
                 pci: Some("12345678:01:02.3".into()),
                 load: GpuLoad {
-                    busy_per_mille: 1000 / 4,
-                    memory_used: memory / 4,
+                    busy_per_mille: Some(1000 / 4),
+                    memory_used: Some(memory / 4),
                 },
                 ..Gpu::default()
             },
@@ -38,8 +38,8 @@ fn inputs() -> (Facts, Reports) {
                 memory: memory * 2,
                 pci: Some("00000000:01:02.3".into()),
                 load: GpuLoad {
-                    busy_per_mille: 1000 / 2,
-                    memory_used: memory,
+                    busy_per_mille: Some(1000 / 2),
+                    memory_used: Some(memory),
                 },
                 ..Gpu::default()
             },
@@ -77,12 +77,125 @@ fn report(devices: Vec<DeviceInfo>) -> Capacity {
         disk_bytes: 0,
     };
     Capacity {
-        cost: None,
         id: "fixture-native-pool".into(),
         total: room,
         free: room,
         devices,
+        cost: None,
     }
+}
+
+/// AC-T7.4.1: source control at the actual Facts/offers/bind seam. Unread is uncertainty,
+/// independent known counter metadata and physical identity remain, and fresh picking refuses.
+#[test]
+fn unread_native_counters_never_become_a_fresh_idle_free_offer() {
+    let (mut facts, reports) = inputs();
+    let inventory = facts
+        .gpus
+        .iter()
+        .map(|gpu| hex_gpu::Gpu {
+            vendor: hex_gpu::Vendor::Nvidia,
+            model: gpu.model.clone(),
+            memory_total_bytes: gpu.memory,
+            identity: hex_gpu::Identity::Pci(
+                hex_gpu::PciAddress::parse(gpu.pci.as_deref().unwrap()).unwrap(),
+            ),
+            driver_version: "pure-fixture".into(),
+        })
+        .collect::<Vec<_>>();
+    let native = [
+        hex_gpu::Load {
+            busy_percent: Err(hex_gpu::Unread::Unsupported),
+            memory_used_bytes: Ok(hex_api::MIN_MEMORY / 4),
+        },
+        hex_gpu::Load {
+            busy_percent: Ok(50),
+            memory_used_bytes: Err(hex_gpu::Unread::NoSample),
+        },
+    ];
+    facts.gpus = crate::facts::gpu_facts(&inventory, &native);
+    assert_eq!(facts.gpus.len(), 2);
+    assert_eq!(
+        facts.gpus[0].key,
+        Some(reports[0].1.as_ref().unwrap().devices[0].id.key)
+    );
+    assert_eq!(
+        facts.gpus[0].load.memory_used,
+        Some(hex_api::MIN_MEMORY / 4)
+    );
+    assert_eq!(facts.gpus[1].load.busy_per_mille, Some(500));
+    assert_eq!(facts.gpus[0].load.busy_per_mille, None);
+    assert_eq!(facts.gpus[1].load.memory_used, None);
+    let mut cluster = service_cluster(&facts);
+    let offers = offered(&reports, &facts, &mut cluster);
+    let selected = bind(
+        &offers,
+        |index| offers.get(index).is_some_and(|device| device.available),
+        1,
+        &hex_sim::model::Ask::default(),
+    );
+    eprintln!("pure unread Facts/offers selected={selected:?}; hardware_effect=false");
+    assert!(
+        selected.is_none(),
+        "Unread native counters must not become a fresh known-idle/free offer"
+    );
+}
+
+/// AC-T7.4.1: split Service consumes actual native report keys/counters, with no vendor/ordinal
+/// reconstruction. An initialized empty snapshot retains unavailable identities and CPU progress.
+#[test]
+fn physical_rpc_facts_keep_unknowns_and_empty_native_inventory_cannot_grant() {
+    let (mut facts, reports) = inputs();
+    let native = hex_api::PhysicalReport {
+        authority: "native-store-owner".into(),
+        devices: reports[0]
+            .1
+            .as_ref()
+            .unwrap()
+            .devices
+            .iter()
+            .map(|info| hex_api::PhysicalDevice {
+                info: info.clone(),
+                busy_per_mille: None,
+                memory_used_bytes: Some(info.size / 2),
+            })
+            .collect(),
+    };
+    facts.gpus = crate::facts::reported_gpus(&native).unwrap();
+    assert!(
+        facts
+            .gpus
+            .iter()
+            .all(|gpu| gpu.pci.is_none() && gpu.driver.is_none() && gpu.vendor.is_empty())
+    );
+    let mut cluster = service_cluster(&facts);
+    let actual = offered(&reports, &facts, &mut cluster);
+    assert_eq!(actual.len(), 2);
+    assert_eq!(actual[0].key, Some(native.devices[0].info.id.key));
+    assert_eq!(actual[0].load.busy_per_mille, None);
+    assert!(!actual[0].available);
+    assert_eq!(
+        actual[0].load.memory_used,
+        native.devices[0].memory_used_bytes
+    );
+    assert!(bind(&actual, |i| actual[i].available, 1, &Ask::default()).is_none());
+    let empty = hex_api::PhysicalReport {
+        authority: native.authority,
+        devices: Vec::new(),
+    };
+    facts.gpus = crate::facts::reported_gpus(&empty).unwrap();
+    let actual = offered(&reports, &facts, &mut cluster);
+    assert_eq!(actual.len(), 2);
+    assert!(
+        actual
+            .iter()
+            .all(|device| !device.available && device.load == GpuLoad::default())
+    );
+    assert!(bind(&actual, |i| actual[i].available, 1, &Ask::default()).is_none());
+    assert_eq!(
+        bind(&actual, |i| actual[i].available, 0, &Ask::default()),
+        Some(Vec::new())
+    );
 }
 
 /// Mirror Service::open/refresh: Facts::node interns measured GPU models before offers runs.
@@ -140,7 +253,10 @@ fn exact_measured_pci_metadata_load_and_report_order_reach_offers() {
     );
     assert_eq!(
         actual[0].memory_free(),
-        facts.gpus[1].memory - facts.gpus[1].load.memory_used
+        facts.gpus[1]
+            .load
+            .memory_used
+            .map(|used| facts.gpus[1].memory.saturating_sub(used))
     );
     assert_eq!((facts, reports), before_inputs);
     assert_eq!(cluster, before_cluster);

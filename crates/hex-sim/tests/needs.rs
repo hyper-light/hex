@@ -74,8 +74,8 @@ fn fleet(seed: u64) -> Cluster {
     let l4 = cluster.model("NVIDIA L4").unwrap();
     let mut r = Rng::new(seed ^ 0x9e3d);
     let mut load = |memory: u64| GpuLoad {
-        busy_per_mille: u16::try_from(r.range(0, 900)).unwrap(),
-        memory_used: r.range(0, memory / 4),
+        busy_per_mille: Some(u16::try_from(r.range(0, 900)).unwrap()),
+        memory_used: Some(r.range(0, memory / 4)),
     };
     let mut a = NodeSpec::new(
         NodeId(10),

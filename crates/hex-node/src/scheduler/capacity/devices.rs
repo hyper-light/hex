@@ -69,29 +69,43 @@ fn collect_offers(
                     "runtime offers a device its native class cannot expose",
                 ));
             }
-            let (model, size, load) = if kind == DeviceKind::Gpu {
+            let (model, size, load, observed) = if kind == DeviceKind::Gpu {
                 let gpu = facts
                     .gpus
                     .iter()
-                    .find(|gpu| native_key(gpu, facts.os) == Some(offer.id.key))
-                    .ok_or_else(|| {
-                        invalid("a native GPU offer has no matching hardware identity")
-                    })?;
-                if offer.size != gpu.memory
-                    || hex_sim::model::model_name(&offer.model)
-                        != hex_sim::model::model_name(&gpu.model)
-                {
-                    return Err(invalid(
-                        "native GPU metadata disagrees with measured hardware",
-                    ));
+                    .find(|gpu| native_key(gpu) == Some(offer.id.key));
+                if let Some(gpu) = gpu {
+                    if offer.size != gpu.memory
+                        || hex_sim::model::model_name(&offer.model)
+                            != hex_sim::model::model_name(&gpu.model)
+                    {
+                        return Err(invalid(
+                            "native GPU metadata disagrees with measured hardware",
+                        ));
+                    }
+                    (
+                        cluster
+                            .model(&gpu.model)
+                            .map_err(|error| invalid(error.to_string()))?,
+                        gpu.memory,
+                        gpu.load,
+                        gpu.memory > 0
+                            && gpu.load.busy_per_mille.is_some()
+                            && gpu.load.memory_used.is_some(),
+                    )
+                } else {
+                    // Preserve the physical slot/key and retained holders across missing native
+                    // observation. Configured metadata is only an unavailable placeholder here:
+                    // it never becomes a measured GPU or grants a new assignment. CPU can proceed.
+                    (
+                        cluster
+                            .model(&offer.model)
+                            .map_err(|error| invalid(error.to_string()))?,
+                        offer.size,
+                        GpuLoad::default(),
+                        false,
+                    )
                 }
-                (
-                    cluster
-                        .model(&gpu.model)
-                        .map_err(|error| invalid(error.to_string()))?,
-                    gpu.memory,
-                    gpu.load,
-                )
             } else {
                 let model = if offer.model.is_empty() {
                     ModelId::UNNAMED
@@ -100,7 +114,7 @@ fn collect_offers(
                         .model(&offer.model)
                         .map_err(|error| invalid(error.to_string()))?
                 };
-                (model, offer.size, GpuLoad::default())
+                (model, offer.size, GpuLoad::default(), true)
             };
             candidates.push(Candidate {
                 id: offer.id,
@@ -109,10 +123,11 @@ fn collect_offers(
                 device: Device {
                     kind,
                     key: Some(offer.id.key),
-                    available: offer
-                        .holder
-                        .as_ref()
-                        .is_none_or(|holder| holder.as_str().starts_with(&own_prefix)),
+                    available: observed
+                        && offer
+                            .holder
+                            .as_ref()
+                            .is_none_or(|holder| holder.as_str().starts_with(&own_prefix)),
                     classes: Classes::NONE.with(*class),
                     model,
                     size,
@@ -172,7 +187,7 @@ fn collect_offers(
     Ok(devices)
 }
 
-fn native_key(gpu: &hex_sim::facts::Gpu, os: hex_sim::model::Os) -> Option<u64> {
+fn native_key(gpu: &hex_sim::facts::Gpu) -> Option<u64> {
     match gpu.pci.as_deref() {
         Some(text) => {
             let pci = hex_gpu::PciAddress::parse(text)?;
@@ -183,7 +198,8 @@ fn native_key(gpu: &hex_sim::facts::Gpu, os: hex_sim::model::Os) -> Option<u64> 
                 Some(key)
             }
         }
-        None if os == hex_sim::model::Os::Macos && gpu.vendor == "apple" => gpu.key,
-        None => None,
+        // Native PhysicalReport carries the provider's already checked opaque DeviceId key.
+        // Missing vendor/PCI presentation text never forces a guessed ordinal or new parser.
+        None => gpu.key,
     }
 }

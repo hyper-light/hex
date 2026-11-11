@@ -1,0 +1,25 @@
+{
+  "original_dispatch_sha256": "1a0d8d1a7b79389cb1520ee6503688ce8f677e6670580ce78d9473483609a675",
+  "submitted_remote_program_sha256": "6c5d591966644ec53f7f9265a9f74f08360315fc35995f1e804edbef34c201aa",
+  "retained_run_sha256": "6c5d591966644ec53f7f9265a9f74f08360315fc35995f1e804edbef34c201aa",
+  "remote_program_equals_retained_run": true,
+  "remote_program_equals_run_without_final_newline": false,
+  "first_lines": [
+    "set -eu",
+    "check_scope=\"$HOME/.cache/hex-complete-bindings/red696-pure-v3\"",
+    "cat > \"$check_scope/overlay-v5.tar.gz\"",
+    "shasum -a 256 \"$check_scope/overlay-v5.tar.gz\"",
+    "tar -xzf \"$check_scope/overlay-v5.tar.gz\" -C \"$check_scope/source\"",
+    "check_toolchain=\"$HOME/.rustup/toolchains/1.99.1-aarch64-apple-darwin\"",
+    "export RUSTUP_AUTO_INSTALL=0 RUSTUP_TOOLCHAIN=1.99.1"
+  ],
+  "fence": {
+    "path": "/Users/adalundhe/.cache/hex-complete-bindings/red696-pure-v3/overlay-v5.tar.gz",
+    "kind": "directory",
+    "inode": 32862950,
+    "mkdir_succeeded_at": "2026-11-11T01:00:16Z",
+    "marker_sha256": "cc9ab76bbf35ea5ab286a70a93e63bdede8242cebf839bc61f7c68d843bc7f2d",
+    "mkdir_stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "control_flow": "set -eu; cat redirection is a nonconditional straight-line command, not a pipeline/if/&&/|| exception; EISDIR stops before shasum/tar/control/Cargo"
+}
