@@ -396,7 +396,8 @@ pub trait Transport: Send + Sync + 'static {
     }
     /// Writes what it can of `bytes` past `*at` without waiting, the descriptors lent riding with its first byte,
     /// moving `at` on: whether all of it is out. The caller holds the connection's send lock across a message's
-    /// writes, so no other message's bytes come between them.
+    /// writes, or owes the rest of one cut short ahead of all else before letting it go, so no other message's bytes
+    /// come between them.
     fn try_send(&self, bytes: &[u8], at: &mut usize, lent: &[Lent<'_>]) -> Result<bool, Sent>;
     /// Ends the connection both ways: whoever reads next sees the end.
     fn shutdown(&self);
@@ -568,12 +569,13 @@ impl Drop for Whole<'_> {
 }
 
 /// The words a client owes its agent ahead of any later request: each given answer's [`Request::Taken`], framed,
-/// queued by the read that hands the answer on before its taker wakes, so a read never waits to send. They go out
-/// whole, in order, under the send lock: first by whoever sends next, before its own message, and by the reader's
-/// turn's holder, which waits for room for them beside what comes, so one goes as soon as the agent reads. None is
-/// dropped: an unsent one leaves the agent holding the given ends, and with them its program's stdin open, until the
-/// connection closes. At most `bound` wait: the agent's budget of programs (`Hello::budgets`), which counts the given
-/// ends not yet taken, so the queue can't grow past what the agent can give (CLAUDE.md §2).
+/// queued by the read that hands the answer on before its taker wakes, so a read never waits to send; and the rest of
+/// a release cut short on a stream, queued first by its sender before it lets the send lock go ([`Conn::send_now`]).
+/// They go out whole, in order, under the send lock: first by whoever sends next, before its own message, and by the
+/// reader's turn's holder, which waits for room for them beside what comes, so one goes as soon as the agent reads.
+/// None is dropped: an unsent one leaves the agent holding the given ends, and with them its program's stdin open,
+/// until the connection closes. At most `bound` wait: the agent's budget of programs (`Hello::budgets`), which counts
+/// the given ends not yet taken, so the queue can't grow past what the agent can give (CLAUDE.md §2).
 #[derive(Default)]
 struct Owed {
     words: VecDeque<Vec<u8>>,
@@ -1491,9 +1493,10 @@ impl<T: Transport> Conn<T> {
     }
 
     /// Sends one message that has no answer (a release) now or not at all: a release that finds no room is the
-    /// agent's disconnect rule's to settle, so dropping a `Proc` never waits on the agent. One whose first bytes went
-    /// on a stream is sent whole, waiting for room as a send does, since a frame cut short would leave the connection
-    /// unable to carry another.
+    /// agent's disconnect rule's to settle, so dropping a `Proc` never waits on the agent. One cut short on a stream
+    /// has its rest owed ahead of every word ([`Owed`]) before the send lock is let go, so the next holder writes it
+    /// first and nothing comes between its bytes. One whose rest can't be owed (the words at their bound, or a write
+    /// that failed part way) leaves the stream unable to carry another message, and the connection goes.
     fn send_now(&self, bytes: &[u8]) {
         self.send_now_before(bytes, None);
     }
@@ -1515,36 +1518,35 @@ impl<T: Transport> Conn<T> {
         let Ok(framed) = T::frame(bytes.to_vec()) else {
             return;
         };
-        let mut at = 0;
-        {
-            let Ok(Some(whole)) = shared.sending.lock(budget.map(ReplyDeadline::at)) else {
-                return;
-            };
-            if cap.is_some_and(|cap| cap.remaining("releasing a program").is_err()) {
-                return;
-            }
-            // What is owed goes first: if it can't go now, neither can this, which comes after it.
-            if !matches!(shared.send_owed(&whole), Ok(true)) {
-                return;
-            }
-            match shared.transport.try_send(&framed, &mut at, NONE) {
-                Ok(true) | Err(_) => return,
-                Ok(false) if at == 0 => return,
-                Ok(false) => {}
-            }
-        }
-        // Part of it went: the rest goes as a send does, the frame whole on the stream.
-        let Ok(mut caller) = Caller::new(shared, None) else {
-            shared.transport.shutdown();
+        let Ok(Some(whole)) = shared.sending.lock(budget.map(ReplyDeadline::at)) else {
             return;
         };
-        let rest = framed.get(at..).unwrap_or_default();
-        if caller
-            .send(rest, NONE, budget.map(ReplyDeadline::at), None)
-            .is_err()
-        {
+        if cap.is_some_and(|cap| cap.remaining("releasing a program").is_err()) {
+            return;
+        }
+        // What is owed goes first: if it can't go now, neither can this, which comes after it.
+        if !matches!(shared.send_owed(&whole), Ok(true)) {
+            return;
+        }
+        let mut at = 0;
+        let sent = shared.transport.try_send(&framed, &mut at, NONE);
+        if at == 0 || matches!(sent, Ok(true)) {
+            return;
+        }
+        let queued = sent.is_ok()
+            && shared.owed.lock().is_ok_and(|mut owed| {
+                let room = owed.words.len() < owed.bound;
+                if room {
+                    owed.words
+                        .push_front(framed.get(at..).unwrap_or_default().to_vec());
+                }
+                room
+            });
+        if !queued {
             shared.transport.shutdown();
         }
+        // Only now, its rest owed first or the connection ended, can another holder write.
+        drop(whole);
     }
 }
 
