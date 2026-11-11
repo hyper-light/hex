@@ -306,7 +306,7 @@ impl Config {
         millis(self.boot_timeout)
     }
 
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(target_os = "linux")]
     pub(super) fn machine_memory(&self, spec: &BoxSpec) -> Result<u64, Refusal> {
         self.guest(spec)?
             .mem_bytes

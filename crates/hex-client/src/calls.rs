@@ -1949,6 +1949,75 @@ impl<T: Transport> Core<T> {
         }
     }
 
+    /// Reads capacity within the caller's original operation deadline on this connection.
+    /// A smaller configured or learned wait still wins; telemetry grants no ownership.
+    pub fn capacity_before(
+        &self,
+        class: Class,
+        deadline: Instant,
+    ) -> Result<Option<hex_api::Capacity>, Refusal> {
+        let (cap, answer) = self.plain_before(Call::Capacity(class), deadline)?;
+        match answer {
+            Answer::Capacity(capacity) => {
+                if let Some(capacity) = &capacity {
+                    capacity.check()?;
+                }
+                cap.remaining("returning the agent's capacity")?;
+                Ok(capacity)
+            }
+            Answer::Refused(why) => Err(why),
+            other => Err(unexpected("capacity", &other)),
+        }
+    }
+
+    /// Reads the same native physical report within the original operation deadline.
+    /// It retains the ordinary report validation and conveys no holder authority.
+    pub fn physical_report_before(
+        &self,
+        deadline: Instant,
+    ) -> Result<hex_api::PhysicalReport, Refusal> {
+        let (cap, answer) = self.plain_before(Call::PhysicalReport, deadline)?;
+        match answer {
+            Answer::PhysicalReport(report) => {
+                report.check()?;
+                cap.remaining("returning the native physical report")?;
+                Ok(report)
+            }
+            Answer::Refused(why) => Err(why),
+            other => Err(unexpected("native physical report", &other)),
+        }
+    }
+
+    /// Creates within the caller's original operation deadline on this connection.
+    /// Caller timeout leaves receiver-side creation uncertain: it proves neither that
+    /// creation stopped nor that the workload never ran.
+    pub fn create_before(&self, spec: BoxSpec, deadline: Instant) -> Result<BoxInfo, Refusal> {
+        let cap = ReplyDeadline::caller_before(deadline)?;
+        self.create_with_cap(spec, Some(cap))
+    }
+
+    fn create_with_cap(
+        &self,
+        spec: BoxSpec,
+        cap: Option<ReplyDeadline>,
+    ) -> Result<BoxInfo, Refusal> {
+        if let hex_api::ClassSpec::Oci(oci) = &spec.class {
+            oci.init.fits(&WIRE_EXEC_LIMIT)?;
+        }
+        let call = Call::Create(Box::new(spec));
+        let Some(cap) = cap else {
+            return self.info(call, "create");
+        };
+        match self
+            .call_before(&Request::Call(call), |_| Ok(NONE), None, cap)?
+            .1
+        {
+            Answer::Info(info) => Ok(info),
+            Answer::Refused(why) => Err(why),
+            other => Err(unexpected("create", &other)),
+        }
+    }
+
     /// CP-T7.4: scheduler control through this connection's existing bounded reader.
     pub fn schedule(
         &self,
@@ -1964,6 +2033,28 @@ impl<T: Transport> Core<T> {
     /// A call that carries nothing beside its message.
     fn plain(&self, call: Call) -> Result<Answer, Refusal> {
         Ok(self.call(&Request::Call(call), |_| Ok(NONE), None)?.1)
+    }
+
+    /// A metadata call retains the same effective caller/configured cap through validation.
+    fn plain_before(
+        &self,
+        call: Call,
+        deadline: Instant,
+    ) -> Result<(ReplyDeadline, Answer), Refusal> {
+        let cap = ReplyDeadline::caller_before(deadline)?.limited_by(ReplyDeadline::caller(
+            self.conn.shared.transport.reply_budget(),
+        )?);
+        let answer = self
+            .conn
+            .call_before(
+                self.limits.message_bytes,
+                &Request::Call(call),
+                |_, _| Ok(NONE),
+                None,
+                Some(cap),
+            )?
+            .1;
+        Ok((cap, answer))
     }
 
     /// A call whose answer is `Done`.
@@ -2378,10 +2469,7 @@ impl<T: Transport> Runtime for Core<T> {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        if let hex_api::ClassSpec::Oci(oci) = &spec.class {
-            oci.init.fits(&WIRE_EXEC_LIMIT)?;
-        }
-        self.info(Call::Create(Box::new(spec)), "create")
+        self.create_with_cap(spec, None)
     }
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {

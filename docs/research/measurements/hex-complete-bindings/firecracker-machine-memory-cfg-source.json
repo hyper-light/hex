@@ -1,0 +1,28 @@
+{
+  "parent": "2b76644391031facfc152ee108a0873766315946",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source": "crates/hex-runtime/src/firecracker/config.rs",
+  "source_sha256": "b48544c1532c830ceddfa6ca707786ff04de75a358d92e1835da16407530514a",
+  "actual_original": {
+    "ROOT_source": "02f7c4f1ce6989303e307e0a8328fe3f3295aa30",
+    "check": "strict Mac hex-runtime all-target Clippy",
+    "exit": 101,
+    "cause": "Config::machine_memory dead_code in Mac test compilation",
+    "log_sha256": "0dd238623691bdca9de005c15282c5fe5ccf28b094d738d593a3f97c7b9ea7a7",
+    "log_collection": "ROOT absolute-connect-after-02f7-results-proof"
+  },
+  "diagnosis": "Only two callers are in cfg(target_os=linux) firecracker/native.rs (creation staging-memory limit and retained preflight). No config test calls machine_memory. Its broader cfg(any(linux,test)) compiled an unused helper for Mac/Windows test targets; guest/machine configuration fixture methods legitimately retain test gates.",
+  "correction": "Narrow ONLY machine_memory cfg to target_os=linux. Exact helper body and all other bytes preserved; Linux normal/test callers and non-Linux config serialization tests remain unchanged. No allow/expect/deletion/stub.",
+  "only_intended_gate_changed": true,
+  "checks": {
+    "scoped_rustfmt_check": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "Clippy_green": "UNRUN/ROOT matched check",
+    "test_dispatches": 0,
+    "native_effects": 0
+  },
+  "originals": "CPU observer e5c/subset89ec/sink original controls unchanged; no prior six Linux/SDK three passes rerun. No native/CLI/backend/metadata change."
+}

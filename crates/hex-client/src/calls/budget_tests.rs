@@ -1666,3 +1666,200 @@ fn absolute_run_error_return_does_not_renew_drop_sender_budget() {
         })
     ));
 }
+
+struct BootstrapProbe {
+    io: Offers,
+    reply: Mutex<Option<Answer>>,
+}
+
+impl Transport for BootstrapProbe {
+    type Reading = ();
+
+    fn answers() -> &'static [Patience; KINDS] {
+        static WAITS: [Patience; KINDS] =
+            [const { Patience::measuring("test.client_bootstrap.unarmed") }; KINDS];
+        &WAITS
+    }
+
+    fn reading(&self) {}
+    fn handle(&self) -> Handle<'_> {
+        self.io.handle()
+    }
+    fn recv(&self, reading: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
+        self.io.recv(reading, take)
+    }
+    fn try_send(&self, bytes: &[u8], at: &mut usize, lent: &[Lent<'_>]) -> Result<bool, Sent> {
+        let (header, request) = wire::read_request_apart(bytes, wire::MAX_MESSAGE).unwrap();
+        self.io.outbound.lock().unwrap().push((header.id, request));
+        if let Some(answer) = self.reply.lock().unwrap().take() {
+            self.io.queue(header.id, answer);
+        }
+        self.io.io.try_send(bytes, at, lent)
+    }
+    fn shutdown(&self) {
+        self.io.shutdown();
+    }
+}
+
+fn bootstrap_probe(reply: Option<Answer>) -> (Core<BootstrapProbe>, mpsc::Receiver<()>) {
+    let (io, sent) = stalled(None);
+    let (entered, _) = mpsc::sync_channel(1);
+    (
+        configured(BootstrapProbe {
+            io: Offers {
+                io,
+                inbound: Mutex::new(VecDeque::new()),
+                outbound: Mutex::new(Vec::new()),
+                entered,
+                program: Mutex::new(None),
+            },
+            reply: Mutex::new(reply),
+        }),
+        sent,
+    )
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BootstrapCall {
+    Capacity,
+    PhysicalReport,
+    Create,
+}
+
+impl BootstrapCall {
+    fn invoke(self, client: &Core<BootstrapProbe>, at: Instant) -> Result<Answer, Refusal> {
+        match self {
+            Self::Capacity => client.capacity_before(Class::Oci, at).map(Answer::Capacity),
+            Self::PhysicalReport => client
+                .physical_report_before(at)
+                .map(Answer::PhysicalReport),
+            Self::Create => client.create_before(absolute_spec(), at).map(Answer::Info),
+        }
+    }
+
+    fn reply(self) -> Answer {
+        match self {
+            Self::Capacity => Answer::Capacity(None),
+            Self::PhysicalReport => Answer::PhysicalReport(hex_api::PhysicalReport {
+                authority: "owned-bootstrap-stand-in".into(),
+                devices: Vec::new(),
+            }),
+            Self::Create => {
+                let spec = absolute_spec();
+                Answer::Info(BoxInfo {
+                    id: spec.id,
+                    class: Class::Process,
+                    state: hex_api::BoxState::Empty,
+                    bounds: spec.bounds,
+                    allocation: None,
+                    adopted: false,
+                    membership: None,
+                    exit: None,
+                    abandoned: 0,
+                    route: None,
+                })
+            }
+        }
+    }
+
+    fn matches_request(self, request: &Request) -> bool {
+        match (self, request) {
+            (Self::Capacity, Request::Call(Call::Capacity(Class::Oci)))
+            | (Self::PhysicalReport, Request::Call(Call::PhysicalReport)) => true,
+            (Self::Create, Request::Call(Call::Create(spec))) => **spec == absolute_spec(),
+            _ => false,
+        }
+    }
+}
+
+/// AC-T7.4.1: all three bootstrap wrappers retain typed request/answer/refusal
+/// behavior and reject an already expired original deadline before any send.
+#[test]
+fn absolute_bootstrap_preserves_requests_and_typed_answers() {
+    for kind in [
+        BootstrapCall::Capacity,
+        BootstrapCall::PhysicalReport,
+        BootstrapCall::Create,
+    ] {
+        let (client, sent) = bootstrap_probe(None);
+        let expired = kind.invoke(&client, Instant::now());
+        assert!(matches!(expired, Err(Refusal::Os { .. })));
+        assert!(matches!(sent.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert!(
+            client
+                .conn
+                .shared
+                .transport
+                .io
+                .outbound
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+
+        let reply = kind.reply();
+        let expected = wire::answer(0, &reply, wire::MAX_MESSAGE).unwrap();
+        let (client, _) = bootstrap_probe(Some(reply));
+        let at = Instant::now().checked_add(OBSERVE).unwrap();
+        let got = kind.invoke(&client, at).unwrap();
+        assert_eq!(wire::answer(0, &got, wire::MAX_MESSAGE).unwrap(), expected);
+        let outbound = client.conn.shared.transport.io.outbound.lock().unwrap();
+        assert_eq!(outbound.len(), 1);
+        assert!(kind.matches_request(&outbound[0].1));
+        assert!(client.conn.shared.state().unwrap().programs.is_empty());
+        drop(outbound);
+
+        let (client, _) = bootstrap_probe(Some(Answer::Done));
+        let at = Instant::now().checked_add(OBSERVE).unwrap();
+        assert!(matches!(kind.invoke(&client, at), Err(Refusal::Broken(_))));
+
+        let why = Refusal::Broken("owned typed bootstrap refusal".into());
+        let (client, _) = bootstrap_probe(Some(Answer::Refused(why.clone())));
+        let at = Instant::now().checked_add(OBSERVE).unwrap();
+        assert_eq!(kind.invoke(&client, at), Err(why));
+    }
+}
+
+/// AC-T7.4.1: even an unarmed answer kind and absent relative transport budget
+/// cannot extend the original bootstrap authority. Cleanup/join precedes assertions.
+#[test]
+fn absolute_bootstrap_caps_unarmed_answer_waits() {
+    for kind in [
+        BootstrapCall::Capacity,
+        BootstrapCall::PhysicalReport,
+        BootstrapCall::Create,
+    ] {
+        let (client, sent) = bootstrap_probe(None);
+        let client = Arc::new(client);
+        let control = Arc::clone(&client);
+        let at = Instant::now().checked_add(CAP).unwrap();
+        let (finished, answer) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let result = kind.invoke(&control, at);
+            let _ = finished.send(result);
+        });
+        let observed_send = sent.recv_timeout(OBSERVE);
+        let observed = answer.recv_timeout(OBSERVE);
+        client.conn.shared.end(Refusal::Broken(
+            "owned bootstrap observation cleanup".into(),
+        ));
+        let joined = worker.join();
+        let outbound = client.conn.shared.transport.io.outbound.lock().unwrap();
+        let clean = client.conn.shared.state().map(|state| {
+            state.calls.is_empty() && state.programs.is_empty() && state.given.is_empty()
+        });
+        eprintln!(
+            "client_bootstrap_absolute kind={kind:?} at={at:?} send={observed_send:?} observed={observed:?} joined={} clean={clean:?}",
+            joined.is_ok()
+        );
+        joined.unwrap();
+        observed_send.unwrap();
+        assert_eq!(outbound.len(), 1);
+        assert!(kind.matches_request(&outbound[0].1));
+        assert!(clean.unwrap());
+        assert!(matches!(
+            observed.unwrap(),
+            Err(Refusal::Os { why, .. }) if why.contains("absolute") && !why.contains("twice")
+        ));
+    }
+}
