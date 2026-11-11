@@ -9,8 +9,6 @@
 //! file CLAUDE.md §12 names. The helper daemon's own privileged calls (setuid-spawn, the ledger limit, the
 //! exception server) are the §12 file's.
 
-use std::io::{IoSlice, IoSliceMut};
-use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -19,13 +17,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use hex_api::{BoxId, Exit, Program, Refusal};
 use hex_core::helper::{self, Answer, MAX_MESSAGE, Refused, Request, START_FDS, State, VERSION};
 use rustix::io::Errno;
-use rustix::net::{
-    AddressFamily, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
-    SendAncillaryMessage, SendFlags, SocketAddrUnix, SocketType,
-};
+use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
 
-/// The four bytes of a message's length prefix on the stream.
-const LEN_BYTES: usize = 4;
+pub(crate) mod frame;
 
 /// A connection to the box helper. Dropping it closes the socket; the helper ends the boxes it was
 /// managing for this node on its own (its own disconnect rule), as the Linux node's socket does.
@@ -310,89 +304,12 @@ pub(crate) fn send_framed(
     msg: &[u8],
     fds: &[BorrowedFd<'_>],
 ) -> Result<(), Refusal> {
-    let len = u32::try_from(msg.len()).map_err(|_| Refusal::Invalid {
-        what: "helper request",
-        why: format!("{} bytes is past a u32 length", msg.len()),
-    })?;
-    let mut framed = Vec::with_capacity(LEN_BYTES.saturating_add(msg.len()));
-    framed.extend_from_slice(&len.to_le_bytes());
-    framed.extend_from_slice(msg);
-    let mut sent = 0usize;
-    let mut first = true;
-    while sent < framed.len() {
-        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(START_FDS))];
-        let mut control = SendAncillaryBuffer::new(&mut space);
-        if first && !fds.is_empty() && !control.push(SendAncillaryMessage::ScmRights(fds)) {
-            return Err(Refusal::Invalid {
-                what: "helper request",
-                why: format!("{} descriptors is past what one message carries", fds.len()),
-            });
-        }
-        let chunk = framed.get(sent..).unwrap_or_default();
-        // macOS has no MSG_NOSIGNAL; the socket carries SO_NOSIGPIPE instead ([`Helper::connect`]).
-        match rustix::net::sendmsg(fd, &[IoSlice::new(chunk)], &mut control, SendFlags::empty()) {
-            Ok(n) if n > 0 => {
-                sent = sent.saturating_add(n);
-                first = false;
-            }
-            Ok(_) => return Err(Refusal::Broken("the helper took none of a send".to_owned())),
-            Err(Errno::INTR) => {}
-            Err(e) => return Err(Refusal::os("sending to the helper", e)),
-        }
-    }
-    Ok(())
+    frame::send(fd, msg, fds, MAX_MESSAGE, None).map_err(frame::Failure::refusal)
 }
 
-/// Reads one framed message: its `u32` length, then that many bytes, returning the bytes and any
-/// descriptors that rode with them. Refuses a length past [`MAX_MESSAGE`] before reading the body.
+/// Reads the same legacy frame through the common bounded stream implementation.
 pub(crate) fn recv_framed(fd: BorrowedFd<'_>) -> Result<(Vec<u8>, Vec<OwnedFd>), Refusal> {
-    let mut len_buf = [0u8; LEN_BYTES];
-    let mut fds = recv_exact(fd, &mut len_buf)?;
-    let len = usize::try_from(u32::from_le_bytes(len_buf)).unwrap_or(usize::MAX);
-    if len > MAX_MESSAGE {
-        return Err(Refusal::Broken(format!(
-            "the helper framed a {len}-byte message, past the {MAX_MESSAGE}-byte bound"
-        )));
-    }
-    let mut body = vec![0u8; len];
-    fds.extend(recv_exact(fd, &mut body)?);
-    Ok((body, fds))
-}
-
-/// Fills `buf` from the socket, returning any descriptors that arrived with those bytes. A read of
-/// nothing before `buf` is full is the helper gone.
-fn recv_exact(fd: BorrowedFd<'_>, buf: &mut [u8]) -> Result<Vec<OwnedFd>, Refusal> {
-    let mut got = 0usize;
-    let mut fds: Vec<OwnedFd> = Vec::new();
-    while got < buf.len() {
-        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(START_FDS))];
-        let mut control = RecvAncillaryBuffer::new(&mut space);
-        let rest = buf.get_mut(got..).unwrap_or_default();
-        // macOS has no MSG_CMSG_CLOEXEC; a received descriptor is set close-on-exec by the daemon that
-        // consumes it (the node side here receives none, on answers).
-        let msg = match rustix::net::recvmsg(
-            fd,
-            &mut [IoSliceMut::new(rest)],
-            &mut control,
-            RecvFlags::empty(),
-        ) {
-            Ok(msg) => msg,
-            Err(Errno::INTR) => continue,
-            Err(e) => return Err(Refusal::os("reading from the helper", e)),
-        };
-        for m in control.drain() {
-            if let RecvAncillaryMessage::ScmRights(rights) = m {
-                fds.extend(rights);
-            }
-        }
-        if msg.bytes == 0 {
-            return Err(Refusal::Broken(
-                "the helper closed before a whole message".to_owned(),
-            ));
-        }
-        got = got.saturating_add(msg.bytes);
-    }
-    Ok(fds)
+    frame::receive(fd, MAX_MESSAGE, None).map_err(frame::Failure::refusal)
 }
 
 #[cfg(test)]
