@@ -121,6 +121,31 @@ impl GuestRuntime {
         Ok(())
     }
 
+    /// Before native launch, join each claim configured by a current-boot LUID
+    /// to the SAME provider's LUID for its stable DeviceId now: Windows assigns
+    /// LUIDs per boot, so a stale one can select another adapter. A stale or
+    /// unknown identity is the caller's typed `uncertain`.
+    pub(super) fn check_current_luids(
+        &self,
+        devices: &[hex_api::DeviceId],
+        physical: &[shards_api::PhysicalGpu],
+        uncertain: Refusal,
+    ) -> Result<(), Refusal> {
+        if devices.len() != physical.len() {
+            return Err(invalid("physical claim count changed"));
+        }
+        for (id, selector) in devices.iter().zip(physical) {
+            let shards_api::PhysicalGpu::Luid(configured) = *selector else {
+                continue;
+            };
+            match self.authority()?.physical_luid(*id) {
+                Ok(current) if current == configured.to_le_bytes() => {}
+                _ => return Err(uncertain),
+            }
+        }
+        Ok(())
+    }
+
     /// A transient sorted view of the one immutable catalog. References provide
     /// lookup only: no copied metadata, inventory cache or selection authority.
     pub(super) fn physical_entries(&self) -> Result<Vec<&crate::devices::Entry>, Refusal> {
