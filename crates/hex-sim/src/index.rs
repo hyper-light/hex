@@ -2347,6 +2347,33 @@ mod tests {
         );
     }
 
+    /// AC-T7.4.1: give a held box back under the wrong kind, expect a typed refusal that publishes
+    /// neither its free room nor its class use (the kind's count fails after both are computed);
+    /// refresh its held pool away, expect a refusal until the box is given back (from d03fb24a).
+    #[test]
+    fn runtime_pool_ledger_stays_atomic_when_kind_charge_fails() {
+        let node = pool_node(Classes::NONE.with(Class::Shards), 64 << 20);
+        let mut index = FitIndex::new(std::slice::from_ref(&node)).unwrap();
+        let demand = pool_demand(Class::Shards, 64 << 20);
+        let held = index.take(NodeId(0), W, &demand).unwrap();
+        let wrong_kind = Demand {
+            kind: Kind::Build,
+            ..demand
+        };
+        assert_eq!(
+            index.give(NodeId(0), W, &wrong_kind),
+            Err(SimError::Resources(NodeId(0)))
+        );
+        assert_eq!(index.key(NodeId(0)).unwrap(), held);
+        assert_eq!(index.verdict(NodeId(0), &demand).unwrap(), Verdict::NoRoom);
+        let mut missing_pool = node.clone();
+        missing_pool.runtime_pools.clear();
+        assert!(index.refresh_node(&missing_pool).is_err());
+        index.give(NodeId(0), W, &demand).unwrap();
+        index.refresh_node(&missing_pool).unwrap();
+        assert_eq!(index.verdict(NodeId(0), &demand).unwrap(), Verdict::Admits);
+    }
+
     /// AC-T7.4.1: a newly declared pool must cover already held amounts of every included class.
     #[test]
     fn runtime_pool_new_pool_checks_preexisting_host_backed_class_holds() {

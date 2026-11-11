@@ -11,7 +11,8 @@ import sys
 import time
 from pathlib import Path
 
-from evidence import InvalidEvidence, artifact, finite_positive, load_json, require, sha256
+from evidence import (InvalidEvidence, artifact, end_group, finite_positive, load_json, require, sha256,
+                      start_group, unwind_on_sigterm)
 
 
 def write(path,value):
@@ -63,13 +64,17 @@ def observe(args):
     write(request,{"Status":{"key":placement["key"]}})
     log=args.output/"reply.json";error=args.output/"stderr.log"
     argv=[str(executable),"schedule","call","--socket",str(args.socket),"--request",str(request)]
+    timed_out=False
     with log.open("xb") as stdout,error.open("xb") as stderr:
-        child=subprocess.Popen(argv,stdin=subprocess.DEVNULL,stdout=stdout,stderr=stderr)
+        child=start_group(argv,stdin=subprocess.DEVNULL,stdout=stdout,stderr=stderr)
         try:
             child.wait(timeout=args.timeout)
         except subprocess.TimeoutExpired:
-            child.kill();child.wait(timeout=args.timeout)
-            raise InvalidEvidence("actual origin Status timed out")
+            timed_out=True
+        finally:
+            ended=end_group(child,args.timeout)
+    require(not timed_out,f"actual origin Status timed out; its process group gone: {ended['group_gone']}")
+    require(ended["group_gone"],"actual origin Status's process group is not gone")
     require(child.returncode==0,"actual origin control call failed")
     reply=load_json(log,args.byte_limit)
     require(reply.get("physical")==placement["physical"] and reply.get("key")==placement["key"] and
@@ -77,7 +82,7 @@ def observe(args):
             reply.get("at")==placement["runner"] and reply.get("refusals")==[],"origin Status mismatch")
     row={"schema":"hex-completion-origin-1","scope":"root-peer-origin","source":placement["source"],
          "target":args.target,"outcome":"verified","physical":reply["physical"],"reply":reply,
-         "command":argv,"pid":child.pid,"exit":child.returncode,"reaped":True,
+         "command":argv,"pid":child.pid,"exit":child.returncode,**ended,
          "host":{"platform":platform.platform(),"machine":platform.machine()},
          "binary":{"path":executable.name,"sha256":sha256(executable),"bytes":executable.stat().st_size},
          "reply_artifact":{"path":log.name,"sha256":sha256(log),"bytes":log.stat().st_size}}
@@ -127,6 +132,7 @@ def main():
 
 
 if __name__=="__main__":
+    unwind_on_sigterm()
     try:
         main()
     except (InvalidEvidence,OSError,ValueError,KeyError,subprocess.SubprocessError) as error:

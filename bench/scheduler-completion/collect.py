@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts/scheduler-completion"))
 from evidence import (InvalidEvidence, finite_positive, hex_digest, load_json,
-                      natural, require, sha256)
+                      natural, require, sha256, unwind_on_sigterm)
 from mutation import command
 from compare import METRICS
 
@@ -105,7 +105,7 @@ def collect(args):
             for name in METRICS:
                 if name in instrument.get("metrics",{}):
                     metrics[name] = instrument["metrics"][name]
-        verified = row["exit"] == 0 and row["reaped"] and not row["timed_out"]
+        verified = row["exit"] == 0 and row["reaped"] and row["group_gone"] and not row["timed_out"]
         # A caller-provided independent oracle in the workload must have passed.
         # Exit alone cannot establish that the workload actually dispatched.
         raw = Path(row["log"]).read_text(errors="replace")
@@ -133,6 +133,7 @@ def main():
 
 
 if __name__=="__main__":
+    unwind_on_sigterm()
     try:
         sys.exit(main())
     except (InvalidEvidence,OSError,subprocess.SubprocessError) as error:
