@@ -543,6 +543,7 @@ impl shards_api::Stream for Looped {
 struct Patient {
     listener: TcpListener,
     given: std::sync::Mutex<Vec<Duration>>,
+    absolute: std::sync::Mutex<Vec<Instant>>,
 }
 
 impl shards_api::Guest for Patient {
@@ -565,6 +566,7 @@ impl shards_api::Guest for Patient {
         port: u32,
         at: std::time::Instant,
     ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        self.absolute.lock().unwrap().push(at);
         let left = at
             .checked_duration_since(std::time::Instant::now())
             .filter(|left| !left.is_zero())
@@ -610,6 +612,7 @@ fn the_first_dial_waits_for_the_guest_and_later_ones_try_once() {
     let guest = Arc::new(Patient {
         listener: TcpListener::bind("127.0.0.1:0").unwrap(),
         given: std::sync::Mutex::new(Vec::new()),
+        absolute: std::sync::Mutex::new(Vec::new()),
     });
     let first = Duration::from_millis(354);
     let link = shards::ShardsLink::new(guest.clone(), first);
@@ -1192,4 +1195,31 @@ fn absolute_connect_completes_and_evented_retains_the_same_link() {
             [(stream::CONTROL_PORT, Some(at))]
         );
     }
+}
+
+/// AC-T7.4.1: the actual Shards adapter rejects before effects, then carries the
+/// identical absolute authority and bytes through the existing unique facade.
+#[test]
+fn shards_link_carries_the_original_absolute_deadline_and_bytes() {
+    let guest = Arc::new(Patient {
+        listener: TcpListener::bind("127.0.0.1:0").unwrap(),
+        given: std::sync::Mutex::new(Vec::new()),
+        absolute: std::sync::Mutex::new(Vec::new()),
+    });
+    let link = shards::ShardsLink::new(guest.clone(), Duration::from_secs(1));
+    assert!(
+        link.dial_before(stream::CONTROL_PORT, Some(Instant::now()))
+            .is_err()
+    );
+    assert!(guest.absolute.lock().unwrap().is_empty());
+    assert!(guest.given.lock().unwrap().is_empty());
+    let at = Instant::now().checked_add(Duration::from_secs(1)).unwrap();
+    let mut stream = link.dial_before(stream::CONTROL_PORT, Some(at)).unwrap();
+    let (mut peer, _) = guest.listener.accept().unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    stream.write_all(b"exact operation authority").unwrap();
+    let mut bytes = [0u8; 25];
+    peer.read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"exact operation authority");
+    assert_eq!(*guest.absolute.lock().unwrap(), [at]);
 }

@@ -1,0 +1,73 @@
+{
+  "status": "SOURCE ONLY; no compile/test/native run",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "8bbf664eb15720d46be194fbc7eb571a3e6416b4",
+  "files": [
+    {
+      "path": "crates/hex-runtime/src/guest/mod.rs",
+      "sha256": "f240bd3a588d9a225739d691ee123e7e4558b50462733e6559933105a0ad0fab"
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/dedicated.rs",
+      "sha256": "1204d9d294152d3e0ba5ac67bd15288c7cb08df54e111a8cd0dfcf925c1fb347"
+    }
+  ],
+  "changes": [
+    "connect_managed passes SAME Budget.deadline into Client::connect_before, so dial/token/Hello do not restart authority",
+    "initial evented join uses SAME deadline through Client::connect_evented_before; later ordinary connection reconnects retain existing per-operation policy",
+    "existing evented Client owner becomes fallible triomphe::Arc<Client> before Pump publication; no second native/Books/Store/turn/holder manager"
+  ],
+  "public_type": "pub type EventedClient = triomphe::Arc<hex_client::guest::Client>",
+  "outside_ports": [
+    "ROOT/L1 explicit Endpoint::Guest / forwarding Arc<guest::Client> types must consume guest::EventedClient; deref/call behavior unchanged",
+    "Node/Recorded Books authority and joins callback Arc remain the SAME existing stdArc owners, not changed",
+    "ROOT owns concrete ShardsLink.dial_before using new SDK method and same ManagedGuest direct enum; no relative fallback",
+    "ShardsLink pre-existing Box::new(ShardsStream) adapter allocation remains an explicit unresolved R01 seam; not a compiled/readiness claim"
+  ],
+  "dependencies": {
+    "sdk": "1b93ea703d02e76b5d5c4c7461547429529a9f56",
+    "client_constructor": "5c10d010c3a60c09015f57162e570f8737075d76",
+    "client_run_drop_cap": "2a1b715497b33898d295ce7d326d3d07936c8e0f",
+    "new_absolute_controls": "b287310aabfc6a05f1104dad7ec1449c070bdf70",
+    "books": "9b8f6043686e9d3b2541a42b5f0643562af5d03d",
+    "recorded_same_prober_delegate": "b1a9a6fb91ff9b1480c9f9458b2e0e9eb6e0d962"
+  },
+  "preserved": [
+    {
+      "path": "crates/hex-runtime/src/guest/route.rs",
+      "sha256": "8f384d46e92559dd0b1cccde9e78a6e0ec395942bb240fbf490a47032184d8c1",
+      "byte_identical_to_parent": true
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/rewrite.rs",
+      "sha256": "e1c8b356559db5881acfa03d7b9c8a85095aa7500e2a04cf8e033eb52fd70cb7",
+      "byte_identical_to_parent": true
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/books.rs",
+      "sha256": "110da50714e8d0b94508ab1ccb4ab497b0abcf97517d355135688ed56e1e322e",
+      "byte_identical_to_parent": true
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/shared.rs",
+      "sha256": "b1f9d4f77afe4ef936d3865ae593a1150a746a706f24d1c5a262dccfd4e6c1f5",
+      "byte_identical_to_parent": true
+    },
+    {
+      "path": "crates/hex-runtime/src/guest/gpu_pool.rs",
+      "sha256": "10803bf979d6c086b5c4bc01e61b196b7a71f85c85477716dd99f532e4cc318a",
+      "byte_identical_to_parent": true
+    }
+  ],
+  "resource_failure": "try_new refusal closes this connection/Pump without pretending native scope absence. Canonical VM record/grant and native owner remain termination authority.",
+  "bounds": "no new wait/tuning/default/worker; same finite absolute create budget, min configured/learned caps in client5c10. Mutex/native callback scheduling is not a hard real-time guarantee.",
+  "reference_count_limits": "same evented owner retained by Booted and bounded in-flight forwarding lifetimes; actual peak counts/retained allocation and TriArc clone abort threshold proof are not measured here; no allocation-free/leak-free claim",
+  "remaining": [
+    "ROOT fixed joined compile and relevant controls/Clippy",
+    "original Intent+canonical init13c021 reproduction before remedy",
+    "typed known guest exit and original/cleanup refusal persistence not yet implemented",
+    "native report/helper/renderer/guest propagation/whole-scope resource proof remains ROOT"
+  ]
+}

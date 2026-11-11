@@ -2187,7 +2187,7 @@ fn forward_guest(
         }
         call => (call, stdio),
     };
-    let started = Arc::clone(&client);
+    let started = triomphe::Arc::clone(&client);
     let then: hex_client::Then = Box::new(move |exec, got| {
         reply(match got {
             Ok(Answer::Started { pid }) => Ok(Forwarded::Started {
@@ -2274,7 +2274,7 @@ impl serve::Source for Pumped {
 
 /// A program in the guest, by its exec's id on the event form's connection.
 struct GuestProgram {
-    client: Arc<hex_client::guest::Client>,
+    client: hex_runtime::guest::EventedClient,
     exec: u64,
 }
 

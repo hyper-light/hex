@@ -1180,7 +1180,7 @@ impl GuestRuntime {
                 .map_err(|why| refusal("retaining managed guest connection", &why))?,
             budget.remaining()?,
         ))?;
-        let client = Client::connect(triomphe::Arc::clone(&link))?;
+        let client = Client::connect_before(triomphe::Arc::clone(&link), budget.deadline())?;
         let booted = booted_owner(Booted {
             guest: GuestHandle::Managed(guest),
             link,
@@ -1190,7 +1190,7 @@ impl GuestRuntime {
             backing,
         })?;
         budget.remaining()?;
-        self.join(&booted)?;
+        self.join_before(&booted, budget)?;
         Ok(booted)
     }
 
@@ -1557,7 +1557,7 @@ impl GuestRuntime {
         selected::remove(&self.selected_path(id)?)
     }
 
-    pub fn evented_for(&self, id: &BoxId) -> Result<Option<Arc<Client>>, Refusal> {
+    pub fn evented_for(&self, id: &BoxId) -> Result<Option<EventedClient>, Refusal> {
         let booted = self.booted_for(id)?;
         let Some(booted) = booted else {
             return Ok(None);
@@ -1570,7 +1570,7 @@ impl GuestRuntime {
         Ok(booted.evented.lock().map_err(poisoned)?.clone())
     }
 
-    pub fn program_client_for(&self, id: &BoxId) -> Result<Option<Arc<Client>>, Refusal> {
+    pub fn program_client_for(&self, id: &BoxId) -> Result<Option<EventedClient>, Refusal> {
         let booted = self.booted_for(id)?;
         let Some(booted) = booted else {
             return Ok(None);
@@ -1583,7 +1583,8 @@ impl GuestRuntime {
             .ok_or_else(|| invalid("guest program has no node event loop"))?;
         let (token, room) = joins.reserve()?;
         let (client, pump) = Client::connect_evented(triomphe::Arc::clone(&booted.link), room)?;
+        let client = evented_owner(client)?;
         joins.join(token, pump)?;
-        Ok(Some(Arc::new(client)))
+        Ok(Some(client))
     }
 }

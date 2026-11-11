@@ -1,0 +1,161 @@
+{
+  "status": "SOURCE CLOSURE ONLY; no native process tree/no-escape or full renderer proof",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "repository": "/Users/adalundhe/.cache/hex-lead/worktrees/shards-physical-gpu",
+  "source": "1e854dab39978702940205d9a29607670432e2c6",
+  "base": "0342b85d9c808e3ced041a6c3ef0e9bf70438272",
+  "files": [
+    {
+      "path": "crates/shards/src/cli/mod.rs",
+      "bytes": 91528,
+      "sha256": "ef47928c9c4e7de15ee0a380d702a2c41166c98a1d8183e01e8af280ac2d14f1",
+      "git_blob": "e0f57101da66f2b7da017288777e1d6c1bd308e0"
+    },
+    {
+      "path": "crates/shards/src/cli/shares.rs",
+      "bytes": 16381,
+      "sha256": "5b12c38f1f837ddcfdaa8acf35b3cd12a04726eeedac56625befbb80fb8d6492",
+      "git_blob": "21622d9cc9a0d34df2e8f8bda3c6cf1a385f6479"
+    },
+    {
+      "path": "crates/shards/src/spec.rs",
+      "bytes": 20136,
+      "sha256": "23d926957bcfafd576995e095139cbd468b631e1a214c7a08db98b51c024c9a4",
+      "git_blob": "2e42353115252d5c74575efb18064fa28a9f5e73"
+    },
+    {
+      "path": "crates/shards/src/vm_run.rs",
+      "bytes": 161285,
+      "sha256": "5094f839581ce2dbea322013b1a8b13d63ecde4c8f98f2638379f30fbf85f04c",
+      "git_blob": "c691ba903853a44765db034aed86f0ef282b53f5"
+    },
+    {
+      "path": "crates/shards/src/main.rs",
+      "bytes": 6928,
+      "sha256": "4d2d104269719c17fc5304388f4e3491e5d1b204f9dff25bc9def4fafecb99df",
+      "git_blob": "f9ef7d4a0095c301d4920b09d58b427ec202d99e"
+    },
+    {
+      "path": "crates/shards/src/grant_answer.rs",
+      "bytes": 61309,
+      "sha256": "0ade38e7dc0e0d398afe7716676219de49504e90b7da1db70513a1e8a120ee93",
+      "git_blob": "f759af30d67e5c997d3791b1a22740d66351cd24"
+    },
+    {
+      "path": "crates/shards/src/grant_ask.rs",
+      "bytes": 20712,
+      "sha256": "2fb69ef3d5818a027add3f96fd5b81980fcc26fa90283f91422c7d31a0e02169",
+      "git_blob": "b5be2f842873d95ef92e4dc14cb806b5fc8a81ce"
+    },
+    {
+      "path": "crates/shards/src/share.rs",
+      "bytes": 25231,
+      "sha256": "1d149f21d07eb82f312026fa7ad4084777bb17c2053656743402d874aec7aee3",
+      "git_blob": "523717722056afceca2e408dc1cc95c6aae19e15"
+    },
+    {
+      "path": "crates/ipc/src/unix.rs",
+      "bytes": 100444,
+      "sha256": "4cc18d1c7197d697e5ce1503dc698807519ddb27be52b914bd08be9e153e8f37",
+      "git_blob": "4caca58036caff24169ba2e7e2224f31abbbaac1"
+    },
+    {
+      "path": "crates/vmm/src/devices/virtio/gpu/virgl.rs",
+      "bytes": 64679,
+      "sha256": "1c5a360e8cac67d55b7307cdeee333eb1716e0499867cb48067b98cabb5d2708",
+      "git_blob": "606f16175a2ce9398df9177d11c05adcce9025dd"
+    },
+    {
+      "path": "crates/vmm/src/devices/virtio/gpu/selection.rs",
+      "bytes": 14592,
+      "sha256": "b86a54ba47b1db94591055ad133f6c5cac873fd7b51051e426abbb8b4a35b754",
+      "git_blob": "0fd717aef61d2b646802f50fecd53782922a237b"
+    },
+    {
+      "path": "resources/gpu/physical-krunkit.patch",
+      "bytes": 17892,
+      "sha256": "03c7cb34a2f39622cd5794f6a867bc5ba387aad82ce04f12a8dbb3374ed283ef",
+      "git_blob": "0f2631911ab89b1099fdfbf30152539df55e1c27"
+    },
+    {
+      "path": "resources/gpu/physical-linux.patch",
+      "bytes": 18055,
+      "sha256": "92163c9882304fa0a446d230fb80b4fb8399aad8c39eb7811e5d3937b9de0512",
+      "git_blob": "5a9d223df79ff637b1759c9820c48e27b19c6499"
+    },
+    {
+      "path": "scripts/gpu-libs",
+      "bytes": 16004,
+      "sha256": "e2332aff497b8998106dbda6f1a47c391fa75055231983a7520af7701e393090",
+      "git_blob": "d5eecc9f7feb3f33bdfe67667de67746bc0967ae"
+    }
+  ],
+  "known_entry_spans": [
+    {
+      "path": "crates/shards/src/cli/mod.rs",
+      "functions": [
+        "vm_binary1008",
+        "instead1027 (Unix same-PID exec)",
+        "said_recorded1102/managed spawn1110",
+        "CarriedVmIo::read1161 and keep_for_exec1226",
+        "macOS vm1315: shares/console then broker spawn1366 with detach=false",
+        "Linux working_set_writer1477 spawn1485"
+      ]
+    },
+    {
+      "path": "crates/shards/src/cli/shares.rs",
+      "functions": [
+        "served125 managed share spawn147 detach=false, same exact allowlisted descriptors"
+      ]
+    },
+    {
+      "path": "crates/shards/src/vm_run.rs",
+      "functions": [
+        "lifeline_fd1255 value-aware pre-- parse",
+        "lifeline_open1288 read-only blocking descriptor/zero-time preflight",
+        "arm_input1317 reused console-in owner and one-byte arming fact",
+        "end_lifeline1350 _exit THIS VMM on EOF/error/data",
+        "run1449 arms input1457 BEFORE parse/device initializer",
+        "forward_stdin1365 ordinary body byte-identical base",
+        "start_reported emitted private scoped report closes writer before guest execution"
+      ]
+    },
+    {
+      "path": "crates/ipc/src/unix.rs",
+      "functions": [
+        "spawn1367 -> spawn_with1378 -> spawn_env1409 -> spawn_here1469",
+        "spawn_here sets SETSID ONLY detach1575; managed callers pass false",
+        "macOS POSIX_SPAWN_CLOEXEC_DEFAULT and exact named descriptor list"
+      ]
+    },
+    {
+      "path": "crates/vmm/src/devices/virtio/gpu/virgl.rs",
+      "functions": [
+        "macOS/Windows in-process krunkit Venus/MoltenVK mode47",
+        "selection_report898 full whitelist ACK/native report",
+        "Linux render_server1190 starts existing renderer thread1212; linked renderer C internals remain part of final source/native proof"
+      ]
+    }
+  ],
+  "native_contract": [
+    "canonical native owner creates/charges original group/cgroup/job before first instruction, not postspawn placement",
+    "final launcher renders report/lifeline from actual transferred endpoint, not parent numeric value",
+    "report/lifeline are CLOEXEC during helper starts, only final VMM exec receives them; helper alone owns lifeline writer",
+    "VMM exit is controller fact only; claim/charge return requires whole native scope witness and helper cleanup/finalize contract"
+  ],
+  "limits": [
+    "known Rust spawn callsites intent is not an exhaustive child identity proof",
+    "NOTE_FORK parent notification and snapshots do not prove unknown fork+setsid child absent",
+    "closed-source Vulkan/Metal drivers/framework helper behavior, sandbox containment and actual built renderer descendant behavior remain unproven",
+    "lifeline _exit terminates THIS VMM only, not a renderer/grants/helper whole-scope proof",
+    "full renderer/CLI/VMM and Windows ARM build uncompiled here; ROOT has accepted only incremental API/ABI vendor source",
+    "full tree carries API394, not later API899/b93/1b93; exact dependency imports must be recorded, never wholesale floating adoption"
+  ],
+  "ordinary_input": {
+    "function": "forward_stdin",
+    "byte_identical_to_base": true,
+    "sha256": "8fb07637bbe9fd97223e56d2e97893715c95186486c0fb4e5f32ec1df1ace46e"
+  }
+}

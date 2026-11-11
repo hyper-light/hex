@@ -1,0 +1,122 @@
+{
+  "status": "SIGNED SOURCE ONLY; no compile/test/native run by L2",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "role": "implementer",
+  "source": {
+    "repository": "/Users/adalundhe/.cache/hex-lead/worktrees/shards-api-managed",
+    "head": "1b93ea703d02e76b5d5c4c7461547429529a9f56",
+    "parent": "b287310aabfc6a05f1104dad7ec1449c070bdf70",
+    "files": [
+      {
+        "path": "crates/api/src/lib.rs",
+        "bytes": 40054,
+        "sha256": "e4545fac0e2ddff597359b8df3c26a624be54b705591d2093d63042f8eca6fef",
+        "git_blob": "c5dd493fd8b19e0a38a7eb806e73baffd6dbb90b"
+      },
+      {
+        "path": "crates/api/src/client.rs",
+        "bytes": 141810,
+        "sha256": "7d840d9645e59bb2ef312df8016e8f989ca8292f0406988e20c5a398da010741",
+        "git_blob": "13e24222e38f12b1fce4d4161aba1023949b0cd7"
+      },
+      {
+        "path": "crates/api/src/sim.rs",
+        "bytes": 24074,
+        "sha256": "b8952ea0f0babc3ea2ce181de857204abdd91a4d4819c732842036cf23d339d1",
+        "git_blob": "f2ae989daed27d6d343f56e67ddd1dc056b3edaf"
+      }
+    ]
+  },
+  "dependency_chain": [
+    {
+      "pin": "89936ab99a313f5aa05724d23d1a6d059f46acb2",
+      "meaning": "ROOT API21 base; model typed refusals, existing light attribution retained"
+    },
+    {
+      "pin": "2ee4410fc5dbf89d168f7387dd1076b4eae55192",
+      "meaning": "test-only original finite retry control; production unchanged"
+    },
+    {
+      "pin": "b93d1d3d101a547872c432bbb634240081d794e6",
+      "meaning": "required absolute Guest connect feature, same owners and common loop; append typed Connect refusal"
+    },
+    {
+      "pin": "b287310aabfc6a05f1104dad7ec1449c070bdf70",
+      "meaning": "two source-only new absolute connection controls"
+    },
+    {
+      "pin": "1b93ea703d02e76b5d5c4c7461547429529a9f56",
+      "meaning": "minimal old positive-finite retry remedy AFTER actual original relevant red"
+    }
+  ],
+  "original_actual_red": {
+    "reporter": "ROOT coordinator",
+    "source": "ROOT e852 API binary with exact2ee test-only overlay",
+    "binary_sha256": "63eeaa5e86d5ff70de2c97036a8514a6badb784e78de68f490a9bcc08a62787d",
+    "log_sha256": "db481f0e866b132e454e9276d4e997ba977dd2b5b02d150d2b68df915ccc13d3",
+    "selected": 1,
+    "passed": 0,
+    "failed": 1,
+    "ignored": 0,
+    "seconds": 0.83,
+    "symptom": "expired finite retry performed a new native dial",
+    "cleanup": "ROOT reports owned worker joined before assertions; Cargo59876 reaped",
+    "earlier_setup_failure": "separate long private TMPDIR exceeded sockaddr_un SUN_LEN; same immutable binary rerun in short owned temp, no production change"
+  },
+  "contract": {
+    "signature": "Guest::connect_before(&self, port:u32, deadline:Instant)->Result<Box<dyn Stream>,Refusal>",
+    "implementations": [
+      "ManagedGuest",
+      "ShardsGuest",
+      "SimGuest"
+    ],
+    "authority": "SAME native/owning guest and exact endpoint; port allowlist still checked; no borrowed lifetime/reaper/process substitution",
+    "algorithm": "one existing owning connect loop selects explicit Standalone or Before. Positive finite Standalone and Before use handshake_until(Until(original_at)); retries, partial I/O and backoff never turn expiry into None. Before additionally refuses late allocation/publication. Standalone zero/MAX retain original no-clock behavior.",
+    "error": "append-only Refusal::Connect{port,failure:HandshakeError}, original phase/I/O cause preserved; old standalone typed Channel/Again contract retained",
+    "allocation": "actual Socket::boxed stays existing fallible allocator. Sim queue reserve/box and diagnostic strings use checked existing helpers; no new owner/cache or arbitrary cap.",
+    "waits": "existing owner changed notification and dial-cost-derived pause; no polling worker/default tuning or periodic observer"
+  },
+  "protected": [
+    {
+      "body": "pub fn connect_borrowed(",
+      "byte_identical_to": "2ee4410fc5dbf89d168f7387dd1076b4eae55192",
+      "sha256": "90ee4212a68eb612d2c55b43c88eac33e58c37b34f336ae504b6c86a05dac146"
+    },
+    {
+      "body": "fn arguments(",
+      "byte_identical_to": "2ee4410fc5dbf89d168f7387dd1076b4eae55192",
+      "sha256": "986ab544ff1cf9ea5afd37f739fc371b1ab0843a12922603c56a647e5b237763"
+    },
+    {
+      "body": "fn finite_owned_retry_expiry_cannot_start_an_unbounded_handshake()",
+      "byte_identical_to": "2ee4410fc5dbf89d168f7387dd1076b4eae55192",
+      "sha256": "0332c9421416fad60027c89e1e7afcc34350222f41e709dcc410787262a116b1"
+    }
+  ],
+  "new_controls": {
+    "run_by_L2": false,
+    "units": [
+      "client::tests::absolute_owned_connect_cannot_dial_after_native_observation_spends_its_deadline",
+      "sim::absolute_tests::absolute_connect_refuses_expired_ready_port_then_carries_bytes_within_authority"
+    ],
+    "effects": "owned local IPC sockets/model only, no VM/process/renderer. First observes actual deadline fact before attempting an already-bound endpoint; second checks no expired enqueue, actual bytes under fresh authority and Stopped refusal."
+  },
+  "integration": {
+    "ROOT_owned": [
+      "vendor incremental source/metadata/dependency overlays",
+      "outside required Guest wrappers delegate connect_before with exact same at, never relative fallback",
+      "ShardsLink dial_before adapter and fallible Duplex allocation seam"
+    ],
+    "client_producer": "5c10d010c3a60c09015f57162e570f8737075d76",
+    "runtime_consumer": "connect_managed passes original Budget.deadline to Client::connect_before and finite join to connect_evented_before; successor pending",
+    "held": "upstream shared Cargo manifests untouched"
+  },
+  "remaining": [
+    "ROOT exact new controls/strict API checks and original finite retry green",
+    "ShardsLink existing Box<dyn Duplex> wrapper allocation and evented Arc<Client> pre-existing R01 seams require explicit owner resolution",
+    "original RemoteProc Drop cleanup cap remedy owned L4/ROOT",
+    "Intent+initSome original13c021 test result and typed observer failure facts",
+    "actual native transport/report/renderer/guest/whole-scope/resource evidence; no readiness from source"
+  ]
+}

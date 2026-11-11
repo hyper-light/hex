@@ -7,7 +7,7 @@ use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
 
@@ -124,6 +124,23 @@ impl Link for ShardsLink {
             .map_err(|why| refusal("connecting to the guest", &why))?;
         self.listened.store(true, Ordering::Release);
         own_duplex(ShardsStream(stream))
+    }
+
+    fn dial_before(&self, port: u32, deadline: Option<Instant>) -> Result<DuplexOwner, Refusal> {
+        let Some(at) = deadline else {
+            return self.dial(port);
+        };
+        let cap = crate::calls::ReplyDeadline::caller_before(at)?;
+        cap.remaining("connecting to the guest within the original operation deadline")?;
+        let stream = self
+            .guest
+            .guest()
+            .connect_before(port, at)
+            .map_err(|why| refusal("connecting to the guest", &why))?;
+        let stream = own_duplex(ShardsStream(stream))?;
+        cap.remaining("retaining the guest connection within the original operation deadline")?;
+        self.listened.store(true, Ordering::Release);
+        Ok(stream)
     }
 }
 

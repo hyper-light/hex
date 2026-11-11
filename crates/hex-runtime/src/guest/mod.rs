@@ -42,6 +42,16 @@ use hex_core::stream::{self, files};
 
 use shares::Share;
 
+/// The existing evented connection owner, shared without an unchecked new Arc.
+pub type EventedClient = triomphe::Arc<Client>;
+
+fn evented_owner(client: Client) -> Result<EventedClient, Refusal> {
+    triomphe::Arc::try_new(client).map_err(|_| Refusal::Exhausted {
+        what: "guest evented client owner",
+        bound: std::mem::size_of::<Client>(),
+    })
+}
+
 pub use cost::{ENV_COST_EVIDENCE, ENV_COST_FILE, ENV_COST_SHA256, load_runtime_cost};
 
 /// The guest a node boots: its kernel and initramfs (whose `/init` is Hex's static `hex`), its vCPUs and
@@ -215,7 +225,7 @@ struct Booted {
     guest: GuestHandle,
     link: LinkOwner,
     client: Client,
-    evented: Mutex<Option<Arc<Client>>>,
+    evented: Mutex<Option<EventedClient>>,
     owner: Option<Owner>,
     backing: Option<shared::Binding>,
 }
@@ -542,19 +552,40 @@ impl GuestRuntime {
 
     /// Opens booted guest `b`'s evented connection and joins it to the loop, where one is given.
     fn join(&self, b: &Booted) -> Result<(), Refusal> {
+        self.join_with_deadline(b, None)
+    }
+
+    fn join_before(&self, b: &Booted, budget: managed::Budget) -> Result<(), Refusal> {
+        budget.remaining()?;
+        self.join_with_deadline(b, Some(budget.deadline()))?;
+        budget.remaining()?;
+        Ok(())
+    }
+
+    fn join_with_deadline(&self, b: &Booted, deadline: Option<Instant>) -> Result<(), Refusal> {
         let joins = self.joins.lock().map_err(poisoned)?.clone();
         let Some(joins) = joins else {
             return Ok(());
         };
         let (token, room) = joins.reserve()?;
-        let (client, pump) = Client::connect_evented(triomphe::Arc::clone(&b.link), room)?;
-        *b.evented.lock().map_err(poisoned)? = Some(Arc::new(client));
+        let (client, pump) = match deadline {
+            Some(at) => Client::connect_evented_before(triomphe::Arc::clone(&b.link), room, at)?,
+            None => Client::connect_evented(triomphe::Arc::clone(&b.link), room)?,
+        };
+        let client = evented_owner(client)?;
+        if deadline.is_some_and(|at| Instant::now() >= at) {
+            return Err(Refusal::os(
+                "joining the guest within its original create budget",
+                std::io::ErrorKind::TimedOut,
+            ));
+        }
+        *b.evented.lock().map_err(poisoned)? = Some(client);
         joins.join(token, pump)
     }
 
     /// The event form's client of the running guest, joined to the loop: one whose connection ended while
     /// its guest runs is joined again first. `None` with no guest running.
-    pub fn evented(&self) -> Result<Option<Arc<Client>>, Refusal> {
+    pub fn evented(&self) -> Result<Option<EventedClient>, Refusal> {
         let Some(b) = self.running()? else {
             return Ok(None);
         };
@@ -569,7 +600,7 @@ impl GuestRuntime {
     /// A program's own evented control connection, held until its start/end or cancellation.
     /// Windows' caller-owned sockets cannot be lent through another process. Keeping their offered exec on
     /// its own control connection makes cancellation close every early stream without affecting other programs.
-    pub fn program_client(&self) -> Result<Option<Arc<Client>>, Refusal> {
+    pub fn program_client(&self) -> Result<Option<EventedClient>, Refusal> {
         let Some(b) = self.running()? else {
             return Ok(None);
         };
@@ -583,8 +614,9 @@ impl GuestRuntime {
             })?;
         let (token, room) = joins.reserve()?;
         let (client, pump) = Client::connect_evented(triomphe::Arc::clone(&b.link), room)?;
+        let client = evented_owner(client)?;
         joins.join(token, pump)?;
-        Ok(Some(Arc::new(client)))
+        Ok(Some(client))
     }
 
     /// Records `guest` as the one this node holds, where a record is kept: one whose identity Shards can't
