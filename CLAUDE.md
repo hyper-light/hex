@@ -248,7 +248,10 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   authentication, call level, impersonate), runs one WQL query semisynchronously and forward-only
   (`IWbemServices::ExecQuery`), reads its instances with `IEnumWbemClassObject::Next` bounded by the time
   left, and each instance's properties with `IWbemClassObject::Get`. The `windows` crate binds these COM
-  methods and functions as `unsafe`, and Rust can express none of them safely.
+  methods and functions as `unsafe`, and Rust can express none of them safely. It reads the two values
+  `Get` fills from the VARIANT's union by its type tag (VT_BSTR's BSTR, VT_I4's i32), there being no safe
+  read: the `windows` crate's safe conversions call propsys.dll, which nanoserver doesn't carry, and
+  hex.exe is an `oci` box's launcher there.
 - `crates/hex-runtime/src/windows/oci/sys.rs`: the Windows `oci` class, a Windows image run process-isolated
   through the Host Compute Service with a job of Hex's nested in its silo (decision "the Windows `oci` class is
   an HCS silo holding a Hex job"). It resolves at run time (`LoadLibraryExW` from System32, `GetProcAddress`)
