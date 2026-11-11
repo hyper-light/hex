@@ -2500,9 +2500,12 @@ fn route_wire_spec_and_info_route_tails_roundtrip() {
                 key: u64::MAX,
             });
         }
-        if let Some(cost) = route.cost {
+        if let Some(mut cost) = route.cost {
+            // Routed specs pass Bounds::check as well as the receipt's numeric codec.
+            cost.floor.mem_bytes = hex_api::MIN_MEMORY;
+            cost.ceiling.mem_bytes = hex_api::MIN_MEMORY;
             spec.bounds.cpu_max_milli = Some(1000);
-            spec.bounds.memory_max = Some(4096);
+            spec.bounds.memory_max = Some(hex_api::MIN_MEMORY);
             spec.allocation = Some(cost.allocate(CapacityResources::default()).unwrap());
         }
         let receipt = RouteReceipt {
@@ -2510,6 +2513,7 @@ fn route_wire_spec_and_info_route_tails_roundtrip() {
             backing: route.backing,
         };
         spec.route = Some(receipt);
+        spec.check().expect("valid routed spec baseline");
         let expected = Request::Call(Call::Create(Box::new(spec.clone())));
         let bytes = request(205, &expected, MAX_MESSAGE).unwrap();
         assert_eq!(
@@ -2862,24 +2866,29 @@ fn route_wire_backing_claims_reject_duplicates_order_bad_ids_and_counts() {
 #[test]
 fn route_wire_spec_and_info_inconsistent_route_receipts_refuse() {
     let route = route_wire_route(Execution::ShardsDedicated);
+    let mut cost = route.cost.unwrap();
+    cost.floor.mem_bytes = hex_api::MIN_MEMORY;
+    cost.ceiling.mem_bytes = hex_api::MIN_MEMORY;
     let mut valid = oci_spec();
     valid.bounds.cpu_max_milli = Some(1000);
-    valid.bounds.memory_max = Some(4096);
-    valid.allocation = Some(route_wire_grant().allocation);
+    valid.bounds.memory_max = Some(hex_api::MIN_MEMORY);
+    valid.allocation = Some(cost.allocate(CapacityResources::default()).unwrap());
     valid.devices = vec![DeviceId {
         kind: DeviceKind::Gpu,
         key: 99,
     }];
     valid.route = Some(RouteReceipt {
         key: route.key,
-        backing: None,
+        backing: route.backing,
     });
+    valid.check().expect("valid dedicated spec baseline");
     let good = request(
         212,
         &Request::Call(Call::Create(Box::new(valid.clone()))),
         MAX_MESSAGE,
     )
     .unwrap();
+    assert!(read_request(&received(&good, 0), MAX_MESSAGE).is_ok());
 
     for change in 0..4 {
         let mut bad = valid.clone();
@@ -2900,7 +2909,11 @@ fn route_wire_spec_and_info_inconsistent_route_receipts_refuse() {
     }
     // Keep a valid encoded body and change only the committed original class.
     let mut bad = good;
-    let route_at = bad.len() - (1 + ROUTE_KEY_BYTES + 1);
+    let route_bytes = 1 + ROUTE_KEY_BYTES + 1 + BACKING_KEY_BYTES;
+    let route_at = bad.len() - route_bytes;
+    assert_eq!(bad[route_at], 1);
+    assert_eq!(bad[route_at + 1], class_tag(Class::Oci));
+    assert_eq!(bad[route_at + 1 + ROUTE_KEY_BYTES], 1);
     bad[route_at + 1] = 3; // Shards/Dedicated is valid alone, but differs from original OCI.
     assert!(matches!(
         read_request(&received(&bad, 0), MAX_MESSAGE)
@@ -2923,7 +2936,14 @@ fn route_wire_spec_and_info_inconsistent_route_receipts_refuse() {
         ..info()
     });
     let mut bad = answer(212, &valid_info, MAX_MESSAGE).unwrap();
-    let route_at = bad.len() - (1 + ROUTE_KEY_BYTES + 1);
+    assert_eq!(
+        read_answer(&received(&bad, 0), MAX_MESSAGE).unwrap().1,
+        valid_info
+    );
+    let route_at = bad.len() - route_bytes;
+    assert_eq!(bad[route_at], 1);
+    assert_eq!(bad[route_at + 1], class_tag(Class::Oci));
+    assert_eq!(bad[route_at + 1 + ROUTE_KEY_BYTES], 1);
     bad[route_at + 1] = 3;
     assert!(matches!(
         read_answer(&received(&bad, 0), MAX_MESSAGE),
