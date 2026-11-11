@@ -172,18 +172,27 @@ pub struct Sizes {
     /// ([`crate::serve::limits`]), each with a worker that can exist. The bound the seeds' line of waiting creates
     /// is set by.
     pub workers: usize,
-    /// The most descriptors the node may hold ([`Host::descriptors`]): the most connections its socket admits, each
-    /// one, the kernel refusing past what remains of them.
+    /// The most connections the node's socket admits, a descriptor each ([`crate::serve::limits`]): the most
+    /// descriptors the node may hold ([`Host::descriptors`]), which a started node lowers to what its programs' and
+    /// calls' budgets admit, counting them among its own as it fits its bounds to its hard limit
+    /// (`netns::hold_descriptors`).
     pub descriptors: usize,
+    /// The most `oci` boxes the node holds at once, each keeping its network namespace from its create to its delete
+    /// (`crate::netns`): the boxes a node holds at most ([`hex_runtime::MAX_BOXES`]), or fewer where its start fits its
+    /// bounds to its hard descriptor limit (`netns::hold_descriptors`), each one more refused as `Refusal::Full`
+    /// (`hex_runtime::linux::cgroup::BoxRoot::at_most`).
+    pub boxes: usize,
     /// The most inits the node watches at once, a pidfd each (the supervisor's budget, and the programs the socket
-    /// watches): one per live `oci` box, so at most the node's boxes ([`hex_runtime::MAX_BOXES`]), and within the
-    /// descriptors it may hold, its hard `RLIMIT_NOFILE` read at run time (getrlimit(2)). It was `INIT_BUDGET`,
-    /// 65,536, systemd's figure copied (Ada's 2026-11-06 constants rule).
+    /// watches): one per live `oci` box, so at most the node's boxes ([`Sizes::boxes`]), and within the descriptors it
+    /// may hold, its hard `RLIMIT_NOFILE` read at run time (getrlimit(2)), to which its start fits it with every other
+    /// bound that holds descriptors (`netns::hold_descriptors`). It was `INIT_BUDGET`, 65,536, systemd's figure copied
+    /// (Ada's 2026-11-06 constants rule).
     pub inits: usize,
     /// The most device programs the node holds loaded, one per device policy a create used, past which the one used
     /// longest ago is closed (`devshare::Programs`; it lives on in the cgroups it's attached to). A memory pool as the
     /// others are: what fits of [`PROGRAM_BYTES`] each in its demand-weighted share ([`weighted`], its takes the
-    /// programs loaded), never under the host's parallelism, and within [`Host::descriptors`], a descriptor each.
+    /// programs loaded), never under the host's parallelism, a descriptor each, which its start fits to its hard
+    /// descriptor limit with every other bound that holds them (`netns::hold_descriptors`).
     /// Grown on a miss, a program loaded per new policy. At most one per box the node holds
     /// ([`hex_runtime::MAX_BOXES`]): no more policies are in use at once, and each held is a descriptor of the
     /// node's, counted among its own (`netns::FilesBound`). No peak is kept for a next start: nothing is made ahead, a
@@ -233,10 +242,9 @@ impl Sizes {
             ipc_uts: fit(5, peaks.ipc_uts).min(seeds.get().max(peaks.ipc_uts)),
             workers: to_usize(host.threads).max(1),
             descriptors: to_usize(host.descriptors),
-            inits: to_usize(host.descriptors).min(hex_runtime::MAX_BOXES),
-            programs: fit(6, 0)
-                .min(to_usize(host.descriptors))
-                .min(hex_runtime::MAX_BOXES),
+            boxes: hex_runtime::MAX_BOXES,
+            inits: hex_runtime::MAX_BOXES,
+            programs: fit(6, 0).min(hex_runtime::MAX_BOXES),
         }
     }
 

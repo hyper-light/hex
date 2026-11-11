@@ -239,9 +239,10 @@ fn the_keeper_keeps_the_larger_of_each_peak_and_sums_the_takes() {
 /// CLAUDE.md §2): a memory pool as the others are, what fits of [`PROGRAM_BYTES`] each in its demand-weighted share,
 /// within the descriptors, never under the host's parallelism; no longer a fixed 64. Do: size a node on fedora's
 /// figures and on a host of 1 GiB and 4 threads, a first start's (an even share of seven pools); then after a start
-/// that loaded programs and took nothing else; on a host whose descriptors are few; and on one with no memory to
-/// spare. Expect: the even share over a program's cost; all the memory's worth after the start that took only
-/// programs; the descriptors where they are fewer; and the parallelism at the least.
+/// that loaded programs and took nothing else; on a host whose descriptors are few, and fit its start to them; and on
+/// one with no memory to spare. Expect: the even share over a program's cost; all the memory's worth after the start
+/// that took only programs; where the descriptors are fewer, the memory's share as sized and fewer as the start fits
+/// every bound to the hard limit (the lead, 2026-11-11), the node's own within it; and the parallelism at the least.
 #[test]
 fn the_programs_held_are_bounded_by_their_memory_share_and_the_descriptors() {
     let share = |memory: u64| usize::try_from(memory / 7 / PROGRAM_BYTES).unwrap();
@@ -264,6 +265,12 @@ fn the_programs_held_are_bounded_by_their_memory_share_and_the_descriptors() {
         descriptors: 1_000,
         ..host(7_500 << 20, 32)
     });
-    assert_eq!(few.programs, 1_000);
+    assert_eq!(few.programs, hex_runtime::MAX_BOXES);
+    let fitted = crate::netns::fit(crate::netns::Pools::rootless(few, 14), 1_000, 0).unwrap();
+    assert!(fitted.sizes.programs < few.programs, "{fitted:?}");
+    assert!(
+        crate::netns::FilesBound::needed(fitted, 0).own <= 1_000,
+        "{fitted:?}"
+    );
     assert_eq!(first(host(0, 4)).programs, 4, "never under the parallelism");
 }
