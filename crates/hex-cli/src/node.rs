@@ -588,10 +588,20 @@ fn initialized_guest(runtime: &dyn hex_api::Runtime) -> Result<(), Refusal> {
         startup_invalid("Shards backend", "initialized capacity and cost are absent")
     })?;
     capacity.check()?;
-    if capacity.cost.is_none() {
+    // AC-T7.4.1: initialized routes carry their own checked costs. A native route
+    // from another backend cannot satisfy the configured Shards capability.
+    let initialized = if capacity.routes.is_empty() {
+        capacity.cost.is_some()
+    } else {
+        capacity
+            .routes
+            .iter()
+            .any(|offer| offer.key.backend_class() == hex_api::Class::Shards)
+    };
+    if !initialized {
         return Err(startup_invalid(
             "Shards backend",
-            "initialized measured cost is absent",
+            "initialized measured route or legacy cost is absent",
         ));
     }
     Ok(())
