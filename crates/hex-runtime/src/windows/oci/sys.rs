@@ -1797,10 +1797,15 @@ mod create_tests {
         .unwrap();
         let rt = win::WinRuntime {
             processors: std::num::NonZeroU32::MIN,
-            catalog: Catalog::parse(
-                b"hex-devices-1\ngpu\t256\tfixture\t4096\thcs\tPCIROOT(0)#PCI(0100)\t\n",
-            )
-            .unwrap(),
+            catalog: win::NativeCatalog::Shared(
+                crate::devices::SharedCatalog::try_new(
+                    Catalog::parse(
+                        b"hex-devices-1\ngpu\t256\tfixture\t4096\thcs\tPCIROOT(0)#PCI(0100)\t\n",
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            ),
             scratch_root: root.path().to_path_buf(),
             launcher: None,
             holding: Arc::new(win::Holding {
@@ -1813,6 +1818,7 @@ mod create_tests {
             reclaim_failures: Vec::new(),
         };
         let spec = BoxSpec {
+            allocation: None,
             route: None,
             id: BoxId::new("pending-runtime").unwrap(),
             bounds: hex_api::Bounds::default(),
@@ -1861,7 +1867,12 @@ mod create_tests {
             devices: bindings,
         };
         rt.holding
-            .reserve(&spec.id, &spec.devices, Some(marker.clone()))
+            .reserve(
+                hex_core::record::OwnerRef::Box(&spec.id),
+                &spec.devices,
+                Some(marker.clone()),
+                None,
+            )
             .unwrap();
         let error = rt
             .finish_make(&spec.id, Ok(win::Held::Oci(Arc::new(boxed))))
@@ -1873,15 +1884,24 @@ mod create_tests {
         ));
         assert_eq!(std::fs::read(&marker).unwrap(), bytes);
         let offer = rt.capacity(Class::Oci).unwrap().unwrap();
-        assert_eq!(offer.devices[0].holder, Some(spec.id.clone()));
+        assert_eq!(
+            offer.devices[0].holder,
+            Some(hex_api::DeviceHolder::Box(spec.id.clone()))
+        );
         assert!(
             rt.holding
-                .reserve(&BoxId::new("contender").unwrap(), &spec.devices, None)
+                .reserve(
+                    hex_core::record::OwnerRef::Box(&BoxId::new("contender").unwrap()),
+                    &spec.devices,
+                    None,
+                    None
+                )
                 .is_err()
         );
         CALLS.with_borrow(|calls| assert_eq!((calls.closed, calls.cancelled), (0, 1)));
 
         let sibling = BoxSpec {
+            allocation: None,
             route: None,
             id: BoxId::new("independent-empty-job").unwrap(),
             bounds: hex_api::Bounds::default(),

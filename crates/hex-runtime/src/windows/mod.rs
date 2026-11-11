@@ -1848,10 +1848,10 @@ fn native_route_offer(
         backing: None,
     });
     // This is the first route in this fresh native snapshot; bit zero has no persisted identity.
-    for device in &report.devices {
-        report
-            .device_routes
-            .push(u64::from(device.classes.contains(&class)));
+    // Only Holding::report's Hcs-route entries enter this native OCI snapshot. The ordinary
+    // Process snapshot supplies no devices; DeviceInfo no longer carries a second class list.
+    for _ in &report.devices {
+        report.device_routes.push(u64::from(class == Class::Oci));
     }
     Ok(())
 }

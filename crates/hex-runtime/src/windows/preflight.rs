@@ -251,7 +251,7 @@ fn check_marker(
         let root = Path::new(folder);
         // These are the only two paths scratch() ever introduces. No canonicalization, links or
         // path prefix grants cleanup authority to another directory.
-        let mut previous = None;
+        let mut previous: Option<bool> = None;
         for made in &record.made {
             let path = Path::new(made);
             let folder = path == root;

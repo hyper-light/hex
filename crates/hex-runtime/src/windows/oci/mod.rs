@@ -10,6 +10,7 @@ pub mod launch;
 pub(crate) mod service;
 pub mod sys;
 
+use std::io::Read;
 use std::os::windows::io::OwnedHandle;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
