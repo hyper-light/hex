@@ -357,12 +357,125 @@ impl Duplex for StagingStream {
     }
 }
 
+/// What a VMM's refusal says of it when it ends before its guest is ready.
+const ENDED: &str = "Firecracker ended before guest readiness";
+const SAID: &str = "; its last output:\n";
+
+/// The end of a VMM's output (stdout and stderr, one pipe), kept while create waits for readiness:
+/// as many bytes as the refusal carrying them can hold in one wire answer, sized by the refused
+/// answer's own codec, so no size is picked here.
+struct Tail {
+    bytes: std::collections::VecDeque<u8>,
+    room: usize,
+}
+
+impl Tail {
+    fn new() -> Result<Self, Refusal> {
+        let mut text = String::new();
+        let bound = ENDED
+            .len()
+            .checked_add(SAID.len())
+            .ok_or_else(|| invalid("readiness refusal text overflows"))?;
+        text.try_reserve_exact(bound)
+            .map_err(|_| exhausted("readiness refusal text", bound))?;
+        text.push_str(ENDED);
+        text.push_str(SAID);
+        let base =
+            hex_core::wire::snapshot_refusal(&Refusal::Broken(text), hex_core::wire::MAX_MESSAGE)
+                .map_err(|_| invalid("readiness refusal exceeds the wire bound"))?
+                .len();
+        let room = hex_core::wire::MAX_MESSAGE
+            .checked_sub(base)
+            .ok_or_else(|| invalid("readiness refusal exceeds the wire bound"))?;
+        let mut bytes = std::collections::VecDeque::new();
+        bytes
+            .try_reserve_exact(room)
+            .map_err(|_| exhausted("VMM output tail", room))?;
+        Ok(Self { bytes, room })
+    }
+
+    fn keep(&mut self, chunk: &[u8]) {
+        let chunk = chunk
+            .get(chunk.len().saturating_sub(self.room)..)
+            .unwrap_or_default();
+        let excess = self
+            .bytes
+            .len()
+            .saturating_add(chunk.len())
+            .saturating_sub(self.room)
+            .min(self.bytes.len());
+        self.bytes.drain(..excess);
+        self.bytes.extend(chunk);
+    }
+
+    /// Reads what the pipe holds now without waiting; true at its end (every writer closed).
+    fn drain(&mut self, output: &mut std::io::PipeReader, until: Instant) -> Result<bool, Refusal> {
+        // One read takes at most a pipe's atomic write unit (pipe(7)); the tail keeps the last
+        // `room` bytes of them all.
+        let mut buffer = [0u8; rustix::pipe::PIPE_BUF];
+        loop {
+            left(until)?;
+            match output.read(&mut buffer) {
+                Ok(0) => return Ok(true),
+                Ok(count) => self.keep(
+                    buffer
+                        .get(..count)
+                        .ok_or_else(|| invalid("VMM output read overflows"))?,
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(Refusal::os("reading VMM output", error)),
+            }
+        }
+    }
+
+    fn refusal(&self) -> Refusal {
+        let (front, back) = self.bytes.as_slices();
+        let mut raw = Vec::new();
+        if self.bytes.is_empty() || raw.try_reserve_exact(self.bytes.len()).is_err() {
+            return Refusal::Broken(ENDED.into());
+        }
+        raw.extend_from_slice(front);
+        raw.extend_from_slice(back);
+        let text = String::from_utf8_lossy(&raw);
+        // A lossy text can outgrow its bytes (U+FFFD for an invalid one): keep its end.
+        let mut start = text.len().saturating_sub(self.room);
+        while start < text.len() && !text.is_char_boundary(start) {
+            start = start.saturating_add(1);
+        }
+        let tail = text.get(start..).unwrap_or_default();
+        let mut why = String::new();
+        let bound = ENDED
+            .len()
+            .saturating_add(SAID.len())
+            .saturating_add(tail.len());
+        if why.try_reserve_exact(bound).is_err() {
+            return Refusal::Broken(ENDED.into());
+        }
+        why.push_str(ENDED);
+        why.push_str(SAID);
+        why.push_str(tail);
+        Refusal::Broken(why)
+    }
+}
+
+/// Waits for the guest's private readiness frame. While it waits it keeps the end of the VMM's
+/// `output`, so a VMM that ends first is refused with what it wrote; the caller drops `output`
+/// once this returns, after which the VMM's writes fail with EPIPE, which it counts and drops
+/// (its logger, serial device and SIGPIPE handler at the pinned commit), so nothing grows.
 pub(super) fn ready(
     listener: &UnixListener,
     proc: &dyn shards_api::ManagedProcess,
+    output: &mut std::io::PipeReader,
     until: Instant,
 ) -> Result<(), Refusal> {
     left(until)?;
+    let flags = rustix::fs::fcntl_getfl(&*output)
+        .map_err(|e| Refusal::os("reading VMM output flags", e))?;
+    rustix::fs::fcntl_setfl(&*output, flags | rustix::fs::OFlags::NONBLOCK)
+        .map_err(|e| Refusal::os("bounding VMM output reads", e))?;
+    let mut tail = Tail::new()?;
+    let mut writing = true;
     let identity = proc
         .identity()
         .map_err(|_| invalid("native readiness receipt has no identity"))?;
@@ -383,14 +496,18 @@ pub(super) fn ready(
         .set_nonblocking(true)
         .map_err(|e| Refusal::os("bounding guest readiness listener", e))?;
     loop {
+        if writing {
+            writing = !tail.drain(output, until)?;
+        }
         if proc
             .terminal()
             .map_err(|_| invalid("native readiness observation failed"))?
             .is_some()
         {
-            return Err(Refusal::Broken(
-                "Firecracker ended before guest readiness".into(),
-            ));
+            if writing {
+                tail.drain(output, until)?;
+            }
+            return Err(tail.refusal());
         }
         match listener.accept() {
             Ok((mut stream, _)) => {
@@ -412,8 +529,13 @@ pub(super) fn ready(
                 let mut descriptors = [
                     PollFd::new(listener, PollFlags::IN),
                     PollFd::new(&observer, PollFlags::IN),
+                    PollFd::new(&*output, PollFlags::IN),
                 ];
-                match rustix::event::poll(&mut descriptors, Some(&timespec)) {
+                // An ended pipe stays readable (POLLHUP): it leaves the set once read to its end.
+                let watched = descriptors
+                    .get_mut(..if writing { 3 } else { 2 })
+                    .ok_or_else(|| invalid("readiness poll set overflows"))?;
+                match rustix::event::poll(watched, Some(&timespec)) {
                     Ok(0) => {
                         return Err(Refusal::os(
                             "waiting for guest readiness",

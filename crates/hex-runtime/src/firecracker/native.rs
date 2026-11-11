@@ -167,19 +167,22 @@ impl FirecrackerRuntime {
         Ok(program)
     }
 
-    fn vm_io() -> Result<shards_api::LaunchIo, Refusal> {
-        let output = std::fs::OpenOptions::new()
-            .write(true)
-            .open("/dev/null")
-            .map_err(|e| Refusal::os("opening VMM output sink", e))?;
-        let error = output
+    /// The VMM's stdout and stderr: one pipe, whose reader `transport::ready` alone drains while
+    /// create waits for readiness, so a refusal can carry the end of what the VMM wrote.
+    fn vm_io() -> Result<(shards_api::LaunchIo, std::io::PipeReader), Refusal> {
+        let (output, writer) =
+            std::io::pipe().map_err(|e| Refusal::os("opening VMM output pipe", e))?;
+        let error = writer
             .try_clone()
-            .map_err(|e| Refusal::os("duplicating VMM output sink", e))?;
-        Ok(shards_api::LaunchIo {
-            stdout: std::io::PipeWriter::from(std::os::fd::OwnedFd::from(output)),
-            stderr: std::io::PipeWriter::from(std::os::fd::OwnedFd::from(error)),
-            gpu_report: None,
-        })
+            .map_err(|e| Refusal::os("duplicating VMM output pipe", e))?;
+        Ok((
+            shards_api::LaunchIo {
+                stdout: writer,
+                stderr: error,
+                gpu_report: None,
+            },
+            output,
+        ))
     }
 
     fn authority(&self) -> Result<Arc<dyn Books>, Refusal> {
@@ -469,7 +472,7 @@ impl FirecrackerRuntime {
         let listener = UnixListener::bind(&paths.ready)
             .map_err(|e| Refusal::os("binding private guest readiness endpoint", e))?;
         let program = self.vm_program(&paths)?;
-        let io = Self::vm_io()?;
+        let (io, mut output) = Self::vm_io()?;
         let native = transaction.launch_managed(
             &ManagedLaunch::Firecracker {
                 program: &program,
@@ -489,7 +492,9 @@ impl FirecrackerRuntime {
             return Err(lifecycle(&id, LifecycleCause::Uncertain)?);
         }
         record = current;
-        transport::ready(&listener, native.as_ref(), until)?;
+        transport::ready(&listener, native.as_ref(), &mut output, until)?;
+        // Undrained, the pipe would stall the VMM once full; dropped, its writes fail and are counted.
+        drop(output);
         let client = Client::connect_before(link.clone(), until)?;
         guest_spec.devices = self.translate(&record, &client, Some(until))?;
         let memory = self
@@ -1285,36 +1290,37 @@ mod io_tests {
     use std::os::fd::AsRawFd;
 
     /// AC-T7.4.1: configured VMM output must accept both streams, and both exact owned
-    /// descriptors close on drop. No Config, guest, process, cgroup, KVM or GPU is created.
+    /// descriptors close on drop: their pipe's reader then reads what they wrote to its end. The
+    /// end is the pipe's own, which no descriptor number can fake (red at 37dc9d9f: another file
+    /// took a closed number). No Config, guest, process, cgroup, KVM or GPU is created.
     #[test]
     fn configured_vmm_output_sinks_accept_bytes_and_close_on_drop() {
-        let shards_api::LaunchIo {
-            mut stdout,
-            mut stderr,
-            gpu_report,
-        } = FirecrackerRuntime::vm_io().unwrap();
+        use std::io::Read;
+        let (
+            shards_api::LaunchIo {
+                mut stdout,
+                mut stderr,
+                gpu_report,
+            },
+            mut reader,
+        ) = FirecrackerRuntime::vm_io().unwrap();
         assert!(gpu_report.is_none());
         let descriptors = [stdout.as_raw_fd(), stderr.as_raw_fd()];
         assert_ne!(descriptors[0], descriptors[1]);
-        let output = stdout.write_all(b"configured-vmm-stdout\n");
-        let error = stderr.write_all(b"configured-vmm-stderr\n");
+        stdout.write_all(b"configured-vmm-stdout\n").unwrap();
+        stderr.write_all(b"configured-vmm-stderr\n").unwrap();
         drop(stdout);
         drop(stderr);
         // Another test's descriptor taking a closed number, as one may at any moment among this
         // binary's parallel tests: dupfd returns the lowest free number from the one given.
         let other = fs::File::open("/dev/null").unwrap();
         let _reuse = rustix::io::fcntl_dupfd_cloexec(&other, descriptors[0]).unwrap();
-        for descriptor in descriptors {
-            let path = Path::new("/proc/self/fd").join(descriptor.to_string());
-            assert!(
-                matches!(fs::read_link(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound),
-                "owned sink descriptor must close before the control returns"
-            );
-        }
-        assert!(
-            output.is_ok() && error.is_ok(),
-            "stdout={output:?}; stderr={error:?}"
-        );
+        // Nonblocking, so a writer still open shows at once as WouldBlock, never as a wait.
+        let flags = rustix::fs::fcntl_getfl(&reader).unwrap();
+        rustix::fs::fcntl_setfl(&reader, flags | rustix::fs::OFlags::NONBLOCK).unwrap();
+        let mut read = Vec::new();
+        reader.read_to_end(&mut read).unwrap();
+        assert_eq!(read, b"configured-vmm-stdout\nconfigured-vmm-stderr\n");
     }
 
     /// A stand-in VMM: a real child process, observed as the native receipt observes one.
@@ -1375,7 +1381,8 @@ mod io_tests {
     /// wait ends on the stand-in's exit; the deadline is only an outer guard.
     #[test]
     fn original_a_vmm_ending_before_readiness_is_refused_with_what_it_wrote() {
-        let shards_api::LaunchIo { stdout, stderr, .. } = FirecrackerRuntime::vm_io().unwrap();
+        let (shards_api::LaunchIo { stdout, stderr, .. }, mut output) =
+            FirecrackerRuntime::vm_io().unwrap();
         let vmm = StandIn::start(
             "echo 'vfio: RLIMIT_MEMLOCK (8388608) exceeded' >&2; exit 1",
             stdout,
@@ -1384,10 +1391,48 @@ mod io_tests {
         let dir = tempfile::tempdir().unwrap();
         let listener = UnixListener::bind(dir.path().join("ready")).unwrap();
         let until = Instant::now() + std::time::Duration::from_secs(60);
-        let refusal = transport::ready(&listener, &vmm, until).unwrap_err();
+        let refusal = transport::ready(&listener, &vmm, &mut output, until).unwrap_err();
         assert!(
             matches!(&refusal, Refusal::Broken(why) if why.contains("vfio: RLIMIT_MEMLOCK (8388608) exceeded")),
             "{refusal:?}"
+        );
+    }
+
+    /// AC-T7.4.1: do have a stand-in VMM write twice what one wire answer holds, as invalid
+    /// UTF-8, then its last words, and end before readiness; expect a refusal that fits one
+    /// refused answer under the wire bound and keeps the end of the output, last words included.
+    #[test]
+    fn a_vmm_refusal_keeps_the_end_of_its_output_within_one_wire_answer() {
+        let (shards_api::LaunchIo { stdout, stderr, .. }, mut output) =
+            FirecrackerRuntime::vm_io().unwrap();
+        let bytes = hex_core::wire::MAX_MESSAGE * 2;
+        let vmm = StandIn::start(
+            &format!(
+                "head -c {bytes} /dev/zero | tr '\\000' '\\377'; echo 'the last words' >&2; exit 1"
+            ),
+            stdout,
+            stderr,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let listener = UnixListener::bind(dir.path().join("ready")).unwrap();
+        let until = Instant::now() + std::time::Duration::from_secs(60);
+        let refusal = transport::ready(&listener, &vmm, &mut output, until).unwrap_err();
+        let Refusal::Broken(why) = &refusal else {
+            panic!("{refusal:?}");
+        };
+        assert!(why.starts_with("Firecracker ended before guest readiness; its last output:\n"));
+        assert!(
+            why.ends_with("\u{fffd}the last words\n"),
+            "{:?}",
+            why.get(why.len() - 64..)
+        );
+        let answer =
+            hex_core::wire::snapshot_refusal(&refusal, hex_core::wire::MAX_MESSAGE).unwrap();
+        assert!(answer.len() <= hex_core::wire::MAX_MESSAGE);
+        assert!(
+            answer.len() > hex_core::wire::MAX_MESSAGE - 4,
+            "{}",
+            answer.len()
         );
     }
 }
