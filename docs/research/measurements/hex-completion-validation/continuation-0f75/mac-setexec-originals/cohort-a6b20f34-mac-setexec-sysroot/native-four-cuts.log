@@ -1,0 +1,8 @@
+OWNED case=0 child_id=98027
+BIRTH case=0 pid=98027 query=0 start=14402359308526 ended=0
+FRAME kind=1 pid=98027 birth=0 failure=0 errno=0
+EVENT case=0 pid=98027 fflags=2248146944 data=32512
+CLEANUP pid=98027 birth=14402359308526 error=0 status=32512 peak=1065200 reaped=1
+FAILED case=0 original_error=100 cleanup_error=0 reaped=1
+RESULT case=0 error=100 relevant=0 main_cleanup=REAPED
+PARENT limits=10666/16000 after=10666/16000 failed=1

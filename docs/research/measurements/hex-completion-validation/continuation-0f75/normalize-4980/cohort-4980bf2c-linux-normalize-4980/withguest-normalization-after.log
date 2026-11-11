@@ -1,0 +1,86 @@
+   Compiling cfg-if v1.0.5
+   Compiling libc v0.2.191
+   Compiling typenum v1.20.1
+   Compiling proc-macro2 v1.0.107
+   Compiling autocfg v1.5.1
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.27
+   Compiling version_check v0.9.5
+   Compiling generic-array v0.14.7
+   Compiling syn v3.0.9
+   Compiling rustix v1.1.5
+   Compiling bitflags v2.13.2
+   Compiling linux-raw-sys v0.12.1
+   Compiling serde_core v1.0.229
+   Compiling rand_core v0.10.1
+   Compiling unsize v1.1.0
+   Compiling hybrid-array v0.4.15
+   Compiling getrandom v0.4.3
+   Compiling thiserror v2.0.21
+   Compiling thiserror-impl v2.0.21
+   Compiling zmij v1.0.23
+   Compiling cpufeatures v0.3.1
+   Compiling serde v1.0.229
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling serde_derive v1.0.229
+   Compiling serde_json v1.0.154
+   Compiling shards-abi v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-4980bf2c-linux-normalize-4980/source/vendor/shards/crates/abi)
+   Compiling const-oid v0.10.2
+   Compiling crc32fast v1.5.4
+   Compiling digest v0.11.3
+   Compiling digest v0.10.7
+   Compiling triomphe v0.1.17
+   Compiling num-traits v0.2.19
+   Compiling simd-adler32 v0.3.10
+   Compiling adler2 v2.0.1
+   Compiling fastrand v2.5.0
+   Compiling memchr v2.8.3
+   Compiling cpufeatures v0.2.17
+   Compiling once_cell v1.21.4
+   Compiling itoa v1.0.18
+   Compiling tempfile v3.27.0
+   Compiling sha2 v0.10.9
+   Compiling miniz_oxide v0.9.1
+   Compiling hex-api v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-4980bf2c-linux-normalize-4980/source/crates/hex-api)
+   Compiling sha2 v0.11.1
+   Compiling xattr v1.6.1
+   Compiling wait-timeout v0.2.1
+   Compiling filetime v0.2.29
+   Compiling quick-error v1.2.3
+   Compiling fnv v1.0.7
+   Compiling bit-vec v0.10.1
+   Compiling bit-set v0.11.1
+   Compiling rusty-fork v0.3.1
+   Compiling tar v0.4.46
+   Compiling flate2 v1.1.11
+   Compiling shards-api v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-4980bf2c-linux-normalize-4980/source/vendor/shards/crates/api)
+   Compiling hex-core v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-4980bf2c-linux-normalize-4980/source/crates/hex-core)
+   Compiling rand v0.10.3
+   Compiling chacha20 v0.10.2
+   Compiling rand_xorshift v0.5.0
+   Compiling regex-syntax v0.8.11
+   Compiling unarray v0.1.4
+   Compiling core_detect v1.0.0
+   Compiling proptest v1.12.0
+   Compiling hex-client v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-4980bf2c-linux-normalize-4980/source/crates/hex-client)
+   Compiling hex-gpu v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-4980bf2c-linux-normalize-4980/source/crates/hex-gpu)
+   Compiling seccompiler v0.5.0 (/home/adalundhe/.cache/hex-lead/cohort-4980bf2c-linux-normalize-4980/source/vendor/seccompiler)
+   Compiling socket2 v0.6.5
+   Compiling hex-runtime v0.1.0 (/home/adalundhe/.cache/hex-lead/cohort-4980bf2c-linux-normalize-4980/source/crates/hex-runtime)
+error[E0433]: cannot find module or crate `devices` in this scope
+    --> crates/hex-runtime/src/guest/mod.rs:1275:29
+     |
+1275 | ...                   devices::normalize_capacity_devices(
+     |                       ^^^^^^^ use of unresolved module or unlinked crate `devices`
+     |
+     = help: if you wanted to use a crate named `devices`, use `cargo add devices` to add it to your `Cargo.toml`
+help: consider importing this module
+     |
+  24 + use crate::devices;
+     |
+
+For more information about this error, try `rustc --explain E0433`.
+error: could not compile `hex-runtime` (lib test) due to 1 previous error

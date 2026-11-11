@@ -1,0 +1,215 @@
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded bit-vec v0.10.1
+  Downloaded block-buffer v0.12.1
+  Downloaded cpufeatures v0.2.17
+  Downloaded cap v0.1.2
+  Downloaded generic-array v0.14.7
+  Downloaded cfg_aliases v0.2.2
+  Downloaded block-buffer v0.10.4
+  Downloaded cpufeatures v0.3.1
+  Downloaded cfg-if v1.0.5
+  Downloaded adler2 v2.0.1
+  Downloaded itoa v1.0.18
+  Downloaded crypto-common v0.2.2
+  Downloaded fnv v1.0.7
+  Downloaded windows-numerics v0.3.1
+  Downloaded xattr v1.6.1
+  Downloaded wait-timeout v0.2.1
+  Downloaded windows-threading v0.2.1
+  Downloaded windows-implement v0.60.2
+  Downloaded windows-result v0.4.1
+  Downloaded windows-link v0.2.1
+  Downloaded windows-interface v0.59.3
+  Downloaded proc-macro-crate v3.5.0
+  Downloaded version_check v0.9.5
+  Downloaded crypto-common v0.1.7
+  Downloaded unsize v1.1.0
+  Downloaded equivalent v1.0.3
+  Downloaded quick-error v1.2.3
+  Downloaded unarray v0.1.4
+  Downloaded rand_xorshift v0.5.0
+  Downloaded errno v0.3.14
+  Downloaded windows-strings v0.5.1
+  Downloaded bit-set v0.11.1
+  Downloaded autocfg v1.5.1
+  Downloaded core_detect v1.0.0
+  Downloaded fastrand v2.5.0
+  Downloaded digest v0.11.3
+  Downloaded filetime v0.2.29
+  Downloaded simd-adler32 v0.3.10
+  Downloaded quote v1.0.47
+  Downloaded sha2 v0.11.1
+  Downloaded windows-collections v0.3.2
+  Downloaded sha2 v0.10.9
+  Downloaded toml_datetime v1.1.2+spec-1.1.0
+  Downloaded digest v0.10.7
+  Downloaded rusty-fork v0.3.1
+  Downloaded rand_core v0.10.1
+  Downloaded thiserror-impl v2.0.21
+  Downloaded thiserror v2.0.21
+  Downloaded borsh-derive v1.8.1
+  Downloaded hybrid-array v0.4.15
+  Downloaded zmij v1.0.23
+  Downloaded tempfile v3.27.0
+  Downloaded windows-future v0.3.2
+  Downloaded windows-core v0.62.2
+  Downloaded bitflags v2.13.2
+  Downloaded const-oid v0.10.2
+  Downloaded getrandom v0.4.3
+  Downloaded chacha20 v0.10.2
+  Downloaded once_cell v1.21.4
+  Downloaded num-traits v0.2.19
+  Downloaded crc32fast v1.5.4
+  Downloaded proc-macro2 v1.0.107
+  Downloaded unicode-ident v1.0.27
+  Downloaded socket2 v0.6.5
+  Downloaded toml_parser v1.1.5+spec-1.1.0
+  Downloaded triomphe v0.1.17
+  Downloaded serde_derive v1.0.229
+  Downloaded miniz_oxide v0.9.1
+  Downloaded serde_core v1.0.229
+  Downloaded tar v0.4.46
+  Downloaded toml_edit v0.25.17+spec-1.1.0
+  Downloaded borsh v1.8.1
+  Downloaded bytes v1.12.1
+  Downloaded flate2 v1.1.11
+  Downloaded indexmap v2.14.2
+  Downloaded serde v1.0.229
+  Downloaded memchr v2.8.3
+  Downloaded typenum v1.20.1
+  Downloaded rand v0.10.3
+  Downloaded hashbrown v0.17.1
+  Downloaded serde_json v1.0.154
+  Downloaded winnow v1.0.4
+  Downloaded zlib-rs v0.6.8
+  Downloaded proptest v1.12.0
+  Downloaded syn v2.0.119
+  Downloaded syn v3.0.9
+  Downloaded regex-syntax v0.8.11
+  Downloaded rustix v1.1.5
+  Downloaded libc v0.2.191
+  Downloaded windows-sys v0.61.2
+  Downloaded windows v0.62.2
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.27
+   Compiling quote v1.0.47
+   Compiling autocfg v1.5.1
+   Compiling syn v3.0.9
+   Compiling thiserror v2.0.21
+   Compiling serde_core v1.0.229
+   Compiling thiserror-impl v2.0.21
+   Compiling unsize v1.1.0
+   Compiling serde v1.0.229
+   Compiling serde_derive v1.0.229
+   Compiling zmij v1.0.23
+   Compiling serde_json v1.0.154
+   Compiling getrandom v0.4.3
+   Compiling version_check v0.9.5
+   Compiling generic-array v0.14.7
+   Compiling syn v2.0.119
+   Compiling shards-abi v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-2d828f39-mac-portability-2d82/source/vendor/shards/crates/abi)
+   Compiling crc32fast v1.5.4
+   Compiling windows-implement v0.60.2
+   Compiling windows-interface v0.59.3
+   Compiling rustix v1.1.5
+    Checking windows-link v0.2.1
+    Checking windows-sys v0.61.2
+    Checking cfg-if v1.0.5
+    Checking hex-afunix v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-2d828f39-mac-portability-2d82/source/crates/hex-afunix)
+    Checking rand_core v0.10.1
+    Checking triomphe v0.1.17
+    Checking itoa v1.0.18
+    Checking memchr v2.8.3
+    Checking cpufeatures v0.3.1
+    Checking hex-api v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-2d828f39-mac-portability-2d82/source/crates/hex-api)
+    Checking bitflags v2.13.2
+    Checking fastrand v2.5.0
+    Checking once_cell v1.21.4
+    Checking tempfile v3.27.0
+    Checking typenum v1.20.1
+    Checking hyper-timing v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-2d828f39-mac-portability-2d82/source/vendor/hyper-raft/crates/hyper-timing)
+    Checking hyper-swim v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-2d828f39-mac-portability-2d82/source/vendor/hyper-raft/crates/hyper-swim)
+    Checking hex-health v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-2d828f39-mac-portability-2d82/source/crates/hex-health)
+    Checking hex-sim v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-2d828f39-mac-portability-2d82/source/crates/hex-sim)
+    Checking crypto-common v0.1.7
+    Checking block-buffer v0.10.4
+    Checking digest v0.10.7
+    Checking cpufeatures v0.2.17
+    Checking sha2 v0.10.9
+    Checking hybrid-array v0.4.15
+    Checking block-buffer v0.12.1
+    Checking crypto-common v0.2.2
+    Checking hex-core v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-2d828f39-mac-portability-2d82/source/crates/hex-core)
+    Checking const-oid v0.10.2
+    Checking digest v0.11.3
+    Checking windows-strings v0.5.1
+    Checking windows-result v0.4.1
+    Checking adler2 v2.0.1
+    Checking simd-adler32 v0.3.10
+    Checking sha2 v0.11.1
+    Checking miniz_oxide v0.9.1
+    Checking windows-core v0.62.2
+    Checking filetime v0.2.29
+    Checking errno v0.3.14
+    Checking shards-afunix v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-2d828f39-mac-portability-2d82/source/vendor/shards/crates/afunix)
+   Compiling num-traits v0.2.19
+    Checking shards-api v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-2d828f39-mac-portability-2d82/source/vendor/shards/crates/api)
+    Checking tar v0.4.46
+    Checking flate2 v1.1.11
+    Checking windows-threading v0.2.1
+    Checking windows-future v0.3.2
+    Checking hex-client v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-2d828f39-mac-portability-2d82/source/crates/hex-client)
+    Checking windows-numerics v0.3.1
+    Checking windows-collections v0.3.2
+    Checking windows v0.62.2
+    Checking hex-gpu v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-2d828f39-mac-portability-2d82/source/crates/hex-gpu)
+    Checking socket2 v0.6.5
+    Checking hex-runtime v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-2d828f39-mac-portability-2d82/source/crates/hex-runtime)
+    Checking hex-node v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-2d828f39-mac-portability-2d82/source/crates/hex-node)
+    Checking hex-cli v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-2d828f39-mac-portability-2d82/source/crates/hex-cli)
+    Checking bit-vec v0.10.1
+    Checking wait-timeout v0.2.1
+    Checking quick-error v1.2.3
+    Checking fnv v1.0.7
+    Checking rusty-fork v0.3.1
+    Checking bit-set v0.11.1
+    Checking rand v0.10.3
+    Checking chacha20 v0.10.2
+    Checking rand_xorshift v0.5.0
+    Checking regex-syntax v0.8.11
+    Checking core_detect v1.0.0
+    Checking unarray v0.1.4
+    Checking proptest v1.12.0
+    Checking cap v0.1.2
+    Checking hex-testkit v0.1.0 (/Users/adalundhe/.cache/hex-lead/cohort-2d828f39-mac-portability-2d82/source/crates/hex-testkit)
+error: very complex type used. Consider factoring parts into `type` definitions
+    --> crates/hex-client/src/calls/budget_tests.rs:1319:16
+     |
+1319 |     deadlines: Arc<Mutex<Vec<(u32, Option<Instant>)>>>,
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#type_complexity
+     = note: `-D clippy::type-complexity` implied by `-D clippy::all`
+     = help: to override `-D clippy::all` add `#[allow(clippy::type_complexity)]`
+
+error: use of a disallowed method `bool::then_some`
+    --> crates/hex-client/src/calls/budget_tests.rs:2054:64
+     |
+2054 |             matches!(request, Request::Call(Call::Run { .. })).then_some(*id)
+     |                                                                ^^^^^^^^^
+     |
+     = note: builds its argument even when false; use `then(|| ..)` or if/else
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#disallowed_methods
+     = note: requested on the command line with `-D clippy::disallowed-methods`
+
+error: use of a disallowed method `bool::then_some`
+    --> crates/hex-client/src/calls/budget_tests.rs:2596:64
+     |
+2596 |             matches!(request, Request::Call(Call::Run { .. })).then_some(*id)
+     |                                                                ^^^^^^^^^
+     |
+     = note: builds its argument even when false; use `then(|| ..)` or if/else
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#disallowed_methods
+
+error: could not compile `hex-client` (lib test) due to 3 previous errors

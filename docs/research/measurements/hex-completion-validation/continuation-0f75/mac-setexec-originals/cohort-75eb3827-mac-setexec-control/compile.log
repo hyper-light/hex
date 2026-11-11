@@ -1,0 +1,4 @@
+/Users/adalundhe/.cache/hex-lead/cohort-75eb3827-mac-setexec-control/source/macos_setexec_preseal_control.c:7:10: fatal error: 'errno.h' file not found
+    7 | #include <errno.h>
+      |          ^~~~~~~~~
+1 error generated.

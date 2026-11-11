@@ -1,0 +1,42 @@
+{
+  "source": "75eb3827d51e6e897a08d307afa8a0816e087848",
+  "archive_sha256": "ea49677ac086248c2fe48b150d7db45f6be5f2ae461613785da3c5722352c452",
+  "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+  "driver_pid": 97849,
+  "clang": "/Library/Developer/CommandLineTools/usr/bin/clang",
+  "clang_sha256": "f30550eab15fdf5ab8c0dc54c52679711241e5d4b636b027e18c09fef531775d",
+  "sdk": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+  "compiler_version": "Apple clang version 21.0.0 (clang-2100.1.1.101)\nTarget: arm64-apple-darwin25.4.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin\n",
+  "sdk_version": "26.5",
+  "memory_mib": 64,
+  "memory_input_basis": "explicit disposable input: existing ARM guest minimum64MiB, within admitted4GiB; no production allowance",
+  "phases": [
+    {
+      "name": "compile",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Library/Developer/CommandLineTools/usr/bin/clang",
+        "-std=c17",
+        "-O0",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "/Users/adalundhe/.cache/hex-lead/cohort-75eb3827-mac-setexec-control/source/macos_setexec_preseal_control.c",
+        "-o",
+        "/Users/adalundhe/.cache/hex-lead/cohort-75eb3827-mac-setexec-control/setexec-control"
+      ],
+      "external_guard_seconds": 90,
+      "pid": 97856,
+      "exit": 1,
+      "reaped": true,
+      "bytes": 225,
+      "sha256": "1fbfa0eb15f4b56855962cc47e92fa8f5c0dcfdeeafbd96674228e776a30b67d"
+    }
+  ],
+  "VM_GPU_invocations": 0,
+  "source_changes": [],
+  "temp_entries": 0,
+  "exit": 1
+}

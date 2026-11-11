@@ -1,0 +1,34 @@
+{
+  "binary": [],
+  "phases": [
+    {
+      "name": "withguest-normalization-after",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::gpu_pool::tests::with_guest_normalizes_native_oci_before_checked_shards_slots",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 485256,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "ef19f4d1cd781fead4a6b44d961869724526a5f56c787c65af2efdcd7eea3f68",
+      "bytes": 3574,
+      "expected_selected": 1,
+      "actual_counts": [],
+      "selection_verified": false,
+      "test_outcomes": []
+    }
+  ],
+  "recorded_children_reaped": true
+}

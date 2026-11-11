@@ -1,0 +1,67 @@
+{
+  "bytes": 335191,
+  "sha256": "f7fd6c734027fd0fe0bfacc75059360dd38225802f86af30bf1c651fecfbfcf5",
+  "members": {
+    "cohort-2d828f39-linux-normalize-2d82/source-before.json": {
+      "bytes": 488523,
+      "sha256": "c9c5fdf40729903779e9cb41cc86d75cb77946b6d9948fea9162de66a2abf71f"
+    },
+    "cohort-2d828f39-linux-normalize-2d82/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-2d828f39-linux-normalize-2d82/owned-scope-limits.json": {
+      "bytes": 254,
+      "sha256": "3c4db0a1d74a420b14fa8a61450f8b935c0880afe77c1760645a0d458cfc2862"
+    },
+    "cohort-2d828f39-linux-normalize-2d82/withguest-normalization-after.log": {
+      "bytes": 3388,
+      "sha256": "4cd40a6789b122718d5daac778a51407414d0a4654f2017a5951eb5baf67dda5"
+    },
+    "cohort-2d828f39-linux-normalize-2d82/running.json": {
+      "bytes": 7148,
+      "sha256": "6647f718cf74ba966531e18f07088e4788eeced598937847b99a24834edfc391"
+    },
+    "cohort-2d828f39-linux-normalize-2d82/empty-native-prefix-new.log": {
+      "bytes": 441,
+      "sha256": "0ac97b4dd026171f4b14990a76faac9477c74fbd10009a17695b8586b8672e6d"
+    },
+    "cohort-2d828f39-linux-normalize-2d82/same-owner-native-metadata-new.log": {
+      "bytes": 461,
+      "sha256": "e9b56100885869bf17bfb98fdeb2e3b171dc2bd7ec715bb475d630def00d33c6"
+    },
+    "cohort-2d828f39-linux-normalize-2d82/invalid-native-metadata-atomic-new.log": {
+      "bytes": 459,
+      "sha256": "707760722d4d36c69f46dd0b903109981b787878d86b1add04bdd523c74ba723"
+    },
+    "cohort-2d828f39-linux-normalize-2d82/recorded-native-metadata-affected.log": {
+      "bytes": 1455,
+      "sha256": "4fc80460029a18cf765d4773901ae2445d2a91617c187d2d08ea68c111da12db"
+    },
+    "cohort-2d828f39-linux-normalize-2d82/runtime-joined-strict.log": {
+      "bytes": 4964,
+      "sha256": "b9e510d20e4fc2135d4f9516d5a6458c517c37670ee3f5edd7d7e658e1370ff3"
+    },
+    "cohort-2d828f39-linux-normalize-2d82/node-production-strict.log": {
+      "bytes": 225,
+      "sha256": "d4459081ca1c37fd5445565546475e1355f63ad8585e7cf12656d8987979537c"
+    },
+    "cohort-2d828f39-linux-normalize-2d82/source-after.json": {
+      "bytes": 488523,
+      "sha256": "c9c5fdf40729903779e9cb41cc86d75cb77946b6d9948fea9162de66a2abf71f"
+    },
+    "cohort-2d828f39-linux-normalize-2d82/result.json": {
+      "bytes": 7403,
+      "sha256": "236d1f9138b85b3a0882ac2e7503f8621706a729e77bd6abe53619a515509a88"
+    },
+    "cohort-2d828f39-linux-normalize-2d82/collected-binaries.json": {
+      "bytes": 7030,
+      "sha256": "940dabf4a6c8f4238f2e914235f4081826dea549b355fc4733991b2aba999fa0"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

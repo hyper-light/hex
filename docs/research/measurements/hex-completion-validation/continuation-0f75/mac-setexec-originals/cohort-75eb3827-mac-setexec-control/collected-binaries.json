@@ -1,0 +1,29 @@
+{
+  "binary": [],
+  "phases": [
+    {
+      "name": "compile",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/Library/Developer/CommandLineTools/usr/bin/clang",
+        "-std=c17",
+        "-O0",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "/Users/adalundhe/.cache/hex-lead/cohort-75eb3827-mac-setexec-control/source/macos_setexec_preseal_control.c",
+        "-o",
+        "/Users/adalundhe/.cache/hex-lead/cohort-75eb3827-mac-setexec-control/setexec-control"
+      ],
+      "external_guard_seconds": 90,
+      "pid": 97856,
+      "exit": 1,
+      "reaped": true,
+      "bytes": 225,
+      "sha256": "1fbfa0eb15f4b56855962cc47e92fa8f5c0dcfdeeafbd96674228e776a30b67d"
+    }
+  ],
+  "recorded_children_reaped": true
+}

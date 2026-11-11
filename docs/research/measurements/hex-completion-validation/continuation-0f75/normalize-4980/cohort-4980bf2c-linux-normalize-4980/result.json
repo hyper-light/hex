@@ -1,0 +1,43 @@
+{
+  "source": "4980bf2c200363a6f7e1bd56da5d16d1426eb2b6",
+  "archive_sha256": "40b04b0e3b2ac1be7cb784a4efa8999083a14f7574fa8ca7c499c7ca9969c671",
+  "scope": "ROOT4980 SAME-owner native normalization AFTER/newhelper2+empty-native1+affectedRecorded1; Runtimejoinedalltarget andNodeproductionstrict; Nodealltargetnativegateknownpollingheld, no old190passes/nativeVMGPU",
+  "target": "linux",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 480623,
+  "phases": [
+    {
+      "name": "withguest-normalization-after",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-runtime",
+        "--lib",
+        "--locked",
+        "guest::gpu_pool::tests::with_guest_normalizes_native_oci_before_checked_shards_slots",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 485256,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "ef19f4d1cd781fead4a6b44d961869724526a5f56c787c65af2efdcd7eea3f68",
+      "bytes": 3574,
+      "expected_selected": 1,
+      "actual_counts": [],
+      "selection_verified": false,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_invocations": 0,
+  "exit": 1
+}
