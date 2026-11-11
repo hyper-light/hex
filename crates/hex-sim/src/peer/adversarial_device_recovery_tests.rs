@@ -945,7 +945,8 @@ fn exact_recovery_reserve_validates_stable_authority_and_is_atomic_on_refusal() 
     for (case, changed, held) in cases {
         let mut index = FitIndex::new(std::slice::from_ref(&spec)).unwrap();
         let before = index.key(NodeId(0)).unwrap();
-        let result = index.take_recovered(NodeId(0), WorkloadId(0), &changed, &held);
+        let result =
+            index.take_recovered_allocated(NodeId(0), WorkloadId(0), &changed, &held, None);
         assert!(
             matches!(
                 result,
@@ -960,18 +961,18 @@ fn exact_recovery_reserve_validates_stable_authority_and_is_atomic_on_refusal() 
     let mut index = FitIndex::new(std::slice::from_ref(&spec)).unwrap();
     let baseline = index.key(NodeId(0)).unwrap();
     index
-        .take_recovered(NodeId(0), WorkloadId(0), &demand, &[0])
+        .take_recovered_allocated(NodeId(0), WorkloadId(0), &demand, &[0], None)
         .unwrap();
     let before = index.key(NodeId(0)).unwrap();
     assert!(matches!(
-        index.take_recovered(NodeId(0), WorkloadId(1), &demand, &[0]),
+        index.take_recovered_allocated(NodeId(0), WorkloadId(1), &demand, &[0], None),
         Err(crate::SimError::Config(_))
     ));
     assert_eq!(index.key(NodeId(0)).unwrap(), before);
     assert_eq!(index.holds(NodeId(0), WorkloadId(0)), [0]);
     assert!(index.holds(NodeId(0), WorkloadId(1)).is_empty());
     index
-        .take_recovered(NodeId(0), WorkloadId(1), &demand, &[1])
+        .take_recovered_allocated(NodeId(0), WorkloadId(1), &demand, &[1], None)
         .unwrap();
     for workload in [WorkloadId(0), WorkloadId(1)] {
         index.give(NodeId(0), workload, &demand).unwrap();
@@ -997,7 +998,7 @@ fn last_legal_device_index_roundtrips_and_releases_without_iterator_overflow() {
     let mut index = FitIndex::new(std::slice::from_ref(&spec)).unwrap();
     let baseline = index.key(NodeId(0)).unwrap();
     index
-        .take_recovered(NodeId(0), WorkloadId(0), &demand, &[last])
+        .take_recovered_allocated(NodeId(0), WorkloadId(0), &demand, &[last], None)
         .unwrap();
     let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         index.holds(NodeId(0), WorkloadId(0))

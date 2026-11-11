@@ -1,0 +1,55 @@
+{
+  "bytes": 190132,
+  "sha256": "48ed4bd33bc9d4ceba8e947b3f62d69eccca911b3b97b63fb6aeac79e219cbec",
+  "members": {
+    "cohort-853dbc3f-light-v2/peer-cost.log": {
+      "bytes": 411,
+      "sha256": "dbf913ff90e6ddab3fed85b901f4fc935921ae15aec244ee45153c202e75823e"
+    },
+    "cohort-853dbc3f-light-v2/running.json": {
+      "bytes": 5106,
+      "sha256": "b725306015c7cd0d8a997bd3f030ea7cb6eba7cafce2da20a5e537b497c86fed"
+    },
+    "cohort-853dbc3f-light-v2/result.json": {
+      "bytes": 5310,
+      "sha256": "7e607d6373bfc904c34d57fe602549202ebbb3fd0a85b45b0a8ced24ff4c50c9"
+    },
+    "cohort-853dbc3f-light-v2/source-before.json": {
+      "bytes": 278107,
+      "sha256": "736df4fde3482427e1dc2d658fb4f2221f795a4f3a63ff052854f30ea3c7f4e3"
+    },
+    "cohort-853dbc3f-light-v2/source-after.json": {
+      "bytes": 278107,
+      "sha256": "736df4fde3482427e1dc2d658fb4f2221f795a4f3a63ff052854f30ea3c7f4e3"
+    },
+    "cohort-853dbc3f-light-v2/clippy.log": {
+      "bytes": 2778,
+      "sha256": "4ccdfc36d1d4455a1337ba4713467d1ae068a0ccf797373b0f90d5f02f6b557d"
+    },
+    "cohort-853dbc3f-light-v2/fit-recovery.log": {
+      "bytes": 415,
+      "sha256": "8132e50f351d91838f59139c4ec061d3715966dd1bf8c7706f761c60b318388d"
+    },
+    "cohort-853dbc3f-light-v2/fit-cost.log": {
+      "bytes": 3607,
+      "sha256": "1b308a0c5602c24080bbf0a7fccdccff1279a1f237aa04af0a3f6d202ffc3b39"
+    },
+    "cohort-853dbc3f-light-v2/peer-codec.log": {
+      "bytes": 407,
+      "sha256": "a0a6b3ea9b819785203d8d71e7d25ae0df9f23c93ac62618b2dd9a62af0d9f2a"
+    },
+    "cohort-853dbc3f-light-v2/client-link.log": {
+      "bytes": 3977,
+      "sha256": "99ed3359d4f39485b1b2872c41c7e1f785917fa3fe1a8c2849c5c167ff1fa0ee"
+    },
+    "cohort-853dbc3f-light-v2/collected-binaries.json": {
+      "bytes": 5153,
+      "sha256": "cf1c1698a560d5dcc1cb94320eb4e2748e26ddf1ae8203fec0842f96f5b26fd5"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

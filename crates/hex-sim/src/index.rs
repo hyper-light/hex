@@ -1212,17 +1212,6 @@ impl FitIndex {
         Ok(())
     }
 
-    /// Reserve the exact surviving devices. No picker or load-based bind runs here.
-    pub(crate) fn take_recovered(
-        &mut self,
-        node: NodeId,
-        workload: WorkloadId,
-        demand: &Demand,
-        held: &[u16],
-    ) -> Result<Key, SimError> {
-        self.take_recovered_allocated(node, workload, demand, held, None)
-    }
-
     /// Restore the old immutable charge, independently of the profile offered for new boxes.
     pub(crate) fn take_recovered_allocated(
         &mut self,

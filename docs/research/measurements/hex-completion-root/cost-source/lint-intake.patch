@@ -1,0 +1,84 @@
+diff --git a/crates/hex-sim/src/index.rs b/crates/hex-sim/src/index.rs
+index 6dc52e92..ad0a2beb 100644
+--- a/crates/hex-sim/src/index.rs
++++ b/crates/hex-sim/src/index.rs
+@@ -1212,17 +1212,6 @@ impl FitIndex {
+         Ok(())
+     }
+ 
+-    /// Reserve the exact surviving devices. No picker or load-based bind runs here.
+-    pub(crate) fn take_recovered(
+-        &mut self,
+-        node: NodeId,
+-        workload: WorkloadId,
+-        demand: &Demand,
+-        held: &[u16],
+-    ) -> Result<Key, SimError> {
+-        self.take_recovered_allocated(node, workload, demand, held, None)
+-    }
+-
+     /// Restore the old immutable charge, independently of the profile offered for new boxes.
+     pub(crate) fn take_recovered_allocated(
+         &mut self,
+diff --git a/crates/hex-sim/src/peer.rs b/crates/hex-sim/src/peer.rs
+index b572381a..85ddf9a6 100644
+--- a/crates/hex-sim/src/peer.rs
++++ b/crates/hex-sim/src/peer.rs
+@@ -444,7 +444,11 @@ fn allocation_of<'a>(
+         return Err(damaged("allocation receipt digest width"));
+     }
+     let mut id = [0; 32];
+-    for (byte, pair) in id.iter_mut().zip(digest.as_bytes().chunks_exact(2)) {
++    let (pairs, remainder) = digest.as_bytes().as_chunks::<2>();
++    if !remainder.is_empty() {
++        return Err(damaged("allocation receipt digest width"));
++    }
++    for (byte, pair) in id.iter_mut().zip(pairs) {
+         let text =
+             std::str::from_utf8(pair).map_err(|_| damaged("allocation receipt digest encoding"))?;
+         if !pair
+diff --git a/crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs b/crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs
+index d12ec857..ac21bbd9 100644
+--- a/crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs
++++ b/crates/hex-sim/src/peer/adversarial_device_recovery_tests.rs
+@@ -945,7 +945,8 @@ fn exact_recovery_reserve_validates_stable_authority_and_is_atomic_on_refusal()
+     for (case, changed, held) in cases {
+         let mut index = FitIndex::new(std::slice::from_ref(&spec)).unwrap();
+         let before = index.key(NodeId(0)).unwrap();
+-        let result = index.take_recovered(NodeId(0), WorkloadId(0), &changed, &held);
++        let result =
++            index.take_recovered_allocated(NodeId(0), WorkloadId(0), &changed, &held, None);
+         assert!(
+             matches!(
+                 result,
+@@ -960,18 +961,18 @@ fn exact_recovery_reserve_validates_stable_authority_and_is_atomic_on_refusal()
+     let mut index = FitIndex::new(std::slice::from_ref(&spec)).unwrap();
+     let baseline = index.key(NodeId(0)).unwrap();
+     index
+-        .take_recovered(NodeId(0), WorkloadId(0), &demand, &[0])
++        .take_recovered_allocated(NodeId(0), WorkloadId(0), &demand, &[0], None)
+         .unwrap();
+     let before = index.key(NodeId(0)).unwrap();
+     assert!(matches!(
+-        index.take_recovered(NodeId(0), WorkloadId(1), &demand, &[0]),
++        index.take_recovered_allocated(NodeId(0), WorkloadId(1), &demand, &[0], None),
+         Err(crate::SimError::Config(_))
+     ));
+     assert_eq!(index.key(NodeId(0)).unwrap(), before);
+     assert_eq!(index.holds(NodeId(0), WorkloadId(0)), [0]);
+     assert!(index.holds(NodeId(0), WorkloadId(1)).is_empty());
+     index
+-        .take_recovered(NodeId(0), WorkloadId(1), &demand, &[1])
++        .take_recovered_allocated(NodeId(0), WorkloadId(1), &demand, &[1], None)
+         .unwrap();
+     for workload in [WorkloadId(0), WorkloadId(1)] {
+         index.give(NodeId(0), workload, &demand).unwrap();
+@@ -997,7 +998,7 @@ fn last_legal_device_index_roundtrips_and_releases_without_iterator_overflow() {
+     let mut index = FitIndex::new(std::slice::from_ref(&spec)).unwrap();
+     let baseline = index.key(NodeId(0)).unwrap();
+     index
+-        .take_recovered(NodeId(0), WorkloadId(0), &demand, &[last])
++        .take_recovered_allocated(NodeId(0), WorkloadId(0), &demand, &[last], None)
+         .unwrap();
+     let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+         index.holds(NodeId(0), WorkloadId(0))

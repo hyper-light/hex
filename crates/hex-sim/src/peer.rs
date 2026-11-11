@@ -444,7 +444,11 @@ fn allocation_of<'a>(
         return Err(damaged("allocation receipt digest width"));
     }
     let mut id = [0; 32];
-    for (byte, pair) in id.iter_mut().zip(digest.as_bytes().chunks_exact(2)) {
+    let (pairs, remainder) = digest.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(damaged("allocation receipt digest width"));
+    }
+    for (byte, pair) in id.iter_mut().zip(pairs) {
         let text =
             std::str::from_utf8(pair).map_err(|_| damaged("allocation receipt digest encoding"))?;
         if !pair

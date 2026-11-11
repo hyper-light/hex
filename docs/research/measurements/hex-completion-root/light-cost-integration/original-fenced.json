@@ -1,0 +1,10 @@
+{
+  "source": "853dbc3fa1902ee5a408c6582985d223a3677784",
+  "original_local_cli_pid": 3698,
+  "original_local_cli_exit": 1,
+  "original_outcome": "no answer in 15s; unknown at the time",
+  "resolution": "admitted read saw root absent; exclusive remote mkdir then succeeded; delayed driver fails exist_ok=False before extraction/checks",
+  "remote_marker": "CANCELLED-before-entrypoint.json",
+  "resolution_exit": 0,
+  "tests_executed": 0
+}
