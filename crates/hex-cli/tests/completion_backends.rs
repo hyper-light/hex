@@ -122,7 +122,7 @@ fn read_output(
     mut reader: std::io::PipeReader,
     mut retained: File,
     limit: usize,
-    until: Instant,
+    until: Option<Instant>,
 ) -> OutputRead {
     let mut bytes = Vec::new();
     let mut buffer = Vec::new();
@@ -142,7 +142,7 @@ fn read_output(
     }
     buffer.resize(limit + 1, 0);
     let mut end = loop {
-        if Instant::now() >= until {
+        if until.is_some_and(|until| Instant::now() >= until) {
             break OutputEnd::Deadline;
         }
         // Read one byte beyond the retained prefix to distinguish a full budget
@@ -1200,7 +1200,7 @@ impl Lab {
             match std::thread::Builder::new()
                 .name(format!("completion-{name}"))
                 .spawn(move || {
-                    let output = read_output(reader, retained, limit, until);
+                    let output = read_output(reader, retained, limit, Some(until));
                     let _ = sent.send((index, output));
                 }) {
                 Ok(worker) => workers[index] = Some(worker),
@@ -1860,6 +1860,28 @@ fn completion_receipt_parser_uses_the_actual_last_json_result() {
     );
 }
 
+/// A pipe's bytes and end that a test writes itself: no recorded operation makes them, so their read
+/// waits measuring, for the fact alone, its answers told to the census (`hex_testkit::waits`).
+static PIPE_READ: hex_core::patience::Patience =
+    hex_core::patience::Patience::measuring("test.completion_backends.pipe_read");
+
+/// Reads `reader` within `PIPE_READ`, telling it the answer where the read ended at its fact.
+fn read_pipe(
+    reader: std::io::PipeReader,
+    retained: File,
+    limit: usize,
+) -> (OutputRead, Option<Instant>) {
+    let began = Instant::now();
+    let until = PIPE_READ
+        .deadline()
+        .and_then(|bound| began.checked_add(bound));
+    let output = read_output(reader, retained, limit, until);
+    if !matches!(output.end, OutputEnd::Deadline) {
+        hex_testkit::waits::answered(&PIPE_READ, output.at.saturating_duration_since(began));
+    }
+    (output, until)
+}
+
 /// AC-T7.4.1: reaching the byte ceiling must still read a real zero from the pipe.
 #[test]
 fn completion_output_exact_limit_needs_real_pipe_eof() {
@@ -1867,13 +1889,10 @@ fn completion_output_exact_limit_needs_real_pipe_eof() {
     writer.write_all(b"x").unwrap();
     drop(writer);
     let retained = tempfile::tempfile().unwrap();
-    let until = Instant::now()
-        .checked_add(hex_api::conformance::PATIENCE)
-        .unwrap();
-    let output = read_output(reader, retained, 1, until);
+    let (output, until) = read_pipe(reader, retained, 1);
     assert!(matches!(output.end, OutputEnd::Eof));
     assert_eq!(output.bytes, b"x");
-    assert!(output.at <= until);
+    assert!(until.is_none_or(|until| output.at <= until));
 }
 
 /// AC-T7.4.1: over-limit data is refused, with only the admitted prefix retained.
@@ -1882,10 +1901,7 @@ fn completion_output_over_limit_retains_bounded_prefix() {
     let (reader, mut writer) = std::io::pipe().unwrap();
     let worker = std::thread::spawn(move || writer.write_all(b"xy"));
     let mut retained = tempfile::tempfile().unwrap();
-    let until = Instant::now()
-        .checked_add(hex_api::conformance::PATIENCE)
-        .unwrap();
-    let output = read_output(reader, retained.try_clone().unwrap(), 1, until);
+    let (output, _) = read_pipe(reader, retained.try_clone().unwrap(), 1);
     let written = worker.join();
     std::io::Seek::rewind(&mut retained).unwrap();
     let mut prefix = Vec::new();
@@ -1902,7 +1918,7 @@ fn completion_output_over_limit_retains_bounded_prefix() {
 fn completion_output_expired_deadline_does_not_wait_for_writer() {
     let (reader, writer) = std::io::pipe().unwrap();
     let retained = tempfile::tempfile().unwrap();
-    let output = read_output(reader, retained, 1, Instant::now());
+    let output = read_output(reader, retained, 1, Some(Instant::now()));
     drop(writer);
     assert!(matches!(output.end, OutputEnd::Deadline));
     assert!(output.bytes.is_empty());
