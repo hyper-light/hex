@@ -660,6 +660,93 @@ mod tests {
         );
     }
 
+    /// AC-T7.4.1: original. One VM given one PCI GPU (host 0000:79:00.0, which its VMM attaches at
+    /// guest 0000:00:03.0). Do: take the boot line this adapter writes, catalog what the guest's
+    /// PID 1 catalogs from it (`guest::gpu::initialize`: nothing without a boot authority), make
+    /// the guest Node's OCI capacity from that catalog as the Node does, and check the binding as
+    /// the observer does. Expect: the adapter accepts the GPU it passed through.
+    #[test]
+    fn original_adapter_accepts_the_pci_gpu_it_passed_to_its_guest() {
+        use crate::devices::{Catalog, Route};
+        use hex_api::{
+            Capacity, CapacityResources, Class, DeviceId, DeviceInfo, DeviceKind, ImageArch,
+            ImageOs, ImagePlatform, PhysicalDevice, PhysicalReport,
+        };
+        let host = DeviceId {
+            kind: DeviceKind::Gpu,
+            key: 0x79 << 8,
+        };
+        let guest = DeviceId {
+            kind: DeviceKind::Gpu,
+            key: 3 << 3,
+        };
+        let mut spec = spec();
+        spec.devices = vec![host];
+        let devices = [Passthrough {
+            id: "pci_7900".into(),
+            sbdf: "0000:79:00.0".into(),
+        }];
+        let vm = serde_json::to_value(
+            config()
+                .machine(&spec, Path::new("/private/owned/vsock"), &devices)
+                .unwrap(),
+        )
+        .unwrap();
+        let boot = vm["boot-source"]["boot_args"].as_str().unwrap();
+        let catalog = match crate::guest::gpu::Authority::parse(boot).unwrap() {
+            None => Catalog::parse(b"hex-devices-1\n").unwrap(),
+            Some(authority) => panic!("a Shards renderer authority on a PCI guest: {authority:?}"),
+        };
+        let total = CapacityResources {
+            cpu_milli: 1_000,
+            mem_bytes: 128 << 20,
+            disk_bytes: 0,
+        };
+        let mut capacity = Capacity {
+            id: "the guest's own node".into(),
+            total,
+            free: total,
+            devices: catalog
+                .entries_for(Route::Cdi)
+                .map(|entry| entry.report(None).unwrap())
+                .collect(),
+            cost: None,
+            routes: Vec::new(),
+            device_routes: Vec::new(),
+            backings: Vec::new(),
+        };
+        crate::devices::native_routes(
+            &mut capacity,
+            Class::Oci,
+            ImagePlatform {
+                os: ImageOs::Linux,
+                arch: ImageArch::Amd64,
+            },
+        )
+        .unwrap();
+        let report = PhysicalReport {
+            unavailable: Vec::new(),
+            authority: "the guest's own node".into(),
+            devices: vec![PhysicalDevice {
+                info: DeviceInfo {
+                    id: guest,
+                    model: "1002:13c0 rev e5".into(),
+                    size: 512 << 20,
+                    holder: None,
+                },
+                busy_per_mille: None,
+                memory_used_bytes: None,
+            }],
+        };
+        super::super::observations::check_bindings(
+            &[super::super::observations::Assignment { host, guest }],
+            &report,
+            &capacity,
+            Some(&spec.id),
+        )
+        .unwrap();
+    }
+
     fn json() -> serde_json::Value {
         serde_json::json!({
             "binary": "/private/firecracker", "binary_sha256": "02".repeat(32),
