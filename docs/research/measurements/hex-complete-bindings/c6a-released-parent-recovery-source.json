@@ -1,0 +1,50 @@
+{
+  "base": "4806111fccc10231365b6e72d8bef1d157010eb7",
+  "source_cohort": "c6a64f4b29606fe65ffc0cf11968178d8350c9f7",
+  "role": "implementer bindings-firecracker",
+  "policy": {
+    "revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+    "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3"
+  },
+  "original": {
+    "test": "index::route_offer_tests::committed_subset_recovery_keeps_released_parent_and_does_not_repick_current_remainder",
+    "path": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/remaining-c6a-results-proof/cohort-c6a64f4b-linux-remaining-c6a/released-parent-recovery-original.log",
+    "bytes": 1915,
+    "sha256": "53410138ac3f59a407af591a7b743761beed2abb474c401005cae73b55238484",
+    "outcome": "ROOT actual 0pass/1fail: restored=Err(Resources(NodeId(0))) after Released-P/current-R and fresh-NoGpu preconditions"
+  },
+  "cause": "take_recovered_routed resolved the exact committed tuple then reused fresh holds_inner, which requires the parent observer Live. A surviving dedicated Box has its own charged native scope after its observer is Released. Current R is not its execution authority.",
+  "change": "Only take_recovered_routed uses holds_recovered_inner. Exact retained ShardsDedicated/Firecracker Released parents can use the same single-consumer/full-P count check as Live; fresh and pending admission remain Live-only. Original immutable allocation, host resource subtraction, workload count, exact held device checks, holder conflict checks, original route usage and refund paths remain unchanged. Shared execution semantics unchanged.",
+  "sources": [
+    {
+      "path": "crates/hex-sim/src/index.rs",
+      "before_sha256": "e4b32dccf5fdbce7e01c4f61afb438f1380f9a343c29b8c60facede3a9b0fb3e",
+      "after_sha256": "92f75399b4cd2119ed7e74a824b62b8717f73943194ed566295367b40515ba9a"
+    },
+    {
+      "path": "crates/hex-sim/src/index/routes.rs",
+      "before_sha256": "59032e3e017d10f31704f9aece0b1270a04a738205557e6ec4e7871c0e8078ab",
+      "after_sha256": "000fabe426f1622d84e51430e50822fc80b9671edf19fcc5ea7128958c379e68"
+    },
+    {
+      "path": "crates/hex-sim/src/index/route_offer_tests.rs",
+      "before_sha256": "94c23ea131c8d07cc6e9328d06d709016c7e6fef00ec5fe05b3138316cf295bc",
+      "after_sha256": "b15c4a83f5394fa38bf0002eafd60db76bac058ebfe5478e4fa56c6d4143cc28"
+    }
+  ],
+  "new_control": "released_source_recovery_preserves_fresh_phase_and_single_consumer_guards: Prepared/Granted/Draining recovery refuses without state change; Released fresh and pending refuse; exact recovery succeeds, second disjoint consumer refuses, exact refund restores resources without fresh admission. Source-only/unrun.",
+  "review": {
+    "waits_caches": "No new wait, cache, telemetry, authority, picker or resource ledger. Same bounded catalog/used vectors, maximum 64 routes; bounded repeated scans O(route count). No performance claim.",
+    "allocations": "No new production allocation. Existing fallible restore/copy and inherited allocation gaps unchanged; ROOT R14 owed.",
+    "portability": "Pure shared implementation, no OS adapter or dependency changes.",
+    "oracle": "Original recovery body byte-identical to fixture-only 4806111f; no semantic expectation change. Original c6a source/raw retained."
+  },
+  "validation": {
+    "rustfmt": "exact three installed-format files exit0",
+    "diff_check": "named source diff --check exit0",
+    "cargo": "not run by lane",
+    "native": "not run",
+    "after": "ROOT-owned original and new control pending; no green claimed"
+  },
+  "remaining": "Other relevant semantics including drain uncertainty remain separate. Native/VM fault/mutation/audit/profiling/full gates/main are ROOT-owned and unverified."
+}

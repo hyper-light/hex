@@ -1831,8 +1831,15 @@ impl FitIndex {
         let charged = crate::model::reserved_resources(demand.need, allocation, route)
             .map_err(|_| SimError::Resources(node))?;
         let slot = self.slot(node)?;
+        let runtime_holds = if let (Some(routes), Some(receipt)) = (&slot.routes, route) {
+            routes
+                .committed(receipt)
+                .is_ok_and(|choice| routes.holds_recovered_inner(choice, demand))
+        } else {
+            slot.runtime_holds_routed(demand, &charged, route)
+        };
         if !slot.free.holds(&charged)
-            || !slot.runtime_holds_routed(demand, &charged, route)
+            || !runtime_holds
             || matches!(demand.kind, Kind::Build) && slot.benchmarks > 0
             || matches!(demand.kind, Kind::Benchmark) && slot.builds > 0
         {

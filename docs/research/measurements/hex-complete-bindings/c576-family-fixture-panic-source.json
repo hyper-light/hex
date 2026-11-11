@@ -1,0 +1,18 @@
+{
+  "role": "implementer bindings-firecracker",
+  "base": "2af2e47774bf949ab074439ae7f86cf36b2490c0",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506 rules df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "actual": {
+    "path": "/Users/adalundhe/.cache/hex-lead/scheduler-completion-20261110/loader-gate-c576-results-proof/cohort-c576d4c2-linux-loader-gate-c576/observer-and-gate-strict.log",
+    "bytes": 4387,
+    "sha256": "d2d7458c72f5a1463587d6fca3a972153158e98b0a6c8cbf663a1075d6ae81a0",
+    "result": "Clippy101 at test-only unreachable macro; separate unused L2 import owned by L2"
+  },
+  "change": "One impossible private fixture variant now panics with the actual unexpected ClassSpec. No production byte, input, oracle or guard changes.",
+  "source": {
+    "path": "crates/hex-runtime/src/firecracker/pool.rs",
+    "before_sha256": "5831dce9d6272a4c0064b018f27170a01354ea43329602d7fb1b401693a32f7c",
+    "after_sha256": "5136864b3751985fa793239b5710fc933518b06c6a8aaa47eb929ff1506a9711"
+  },
+  "validation": "Installed named rustfmt0; named diff check next; no lane build/test/native. ROOT owns later strict check; previous 23/loader3 passes not replayed."
+}

@@ -1,7 +1,6 @@
 use super::super::GpuObserver;
 use super::*;
 use serde_json::{Value, json};
-use sha2::Digest as _;
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()

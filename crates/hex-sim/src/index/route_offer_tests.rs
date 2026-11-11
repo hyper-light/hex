@@ -1198,3 +1198,107 @@ fn committed_subset_recovery_keeps_released_parent_and_does_not_repick_current_r
         before.cpu_milli - grant.allocation.resources.cpu_milli
     );
 }
+
+/// AC-T7.4.1: only committed recovery can retain a Released dedicated source, once per lifetime.
+#[test]
+fn released_source_recovery_preserves_fresh_phase_and_single_consumer_guards() {
+    for phase in [
+        BackingPhase::Prepared,
+        BackingPhase::Granted,
+        BackingPhase::Draining,
+    ] {
+        let (mut node, request, _) = subset_observer_fixture(false);
+        let catalog = triomphe::Arc::get_mut(node.routes.as_mut().unwrap()).unwrap();
+        catalog.backings[0].phase = phase;
+        let route = hex_api::RouteReceipt {
+            key: catalog.offers[0].key,
+            backing: catalog.offers[0].backing,
+        };
+        let allocation = profile()
+            .allocate(crate::model::capacity_resources(request.need))
+            .unwrap();
+        let mut index = FitIndex::new(&[node]).unwrap();
+        let before = index.key(NodeId(0)).unwrap();
+        assert!(
+            index
+                .take_recovered_routed(
+                    NodeId(0),
+                    WorkloadId(91),
+                    &request,
+                    &[0],
+                    Some(allocation),
+                    Some(route)
+                )
+                .is_err(),
+            "{phase:?} is not a completed observer handoff"
+        );
+        assert_eq!(index.key(NodeId(0)).unwrap(), before);
+    }
+    let (mut node, request, _) = subset_observer_fixture(false);
+    let catalog = triomphe::Arc::get_mut(node.routes.as_mut().unwrap()).unwrap();
+    catalog.backings[0].phase = BackingPhase::Released;
+    let route = hex_api::RouteReceipt {
+        key: catalog.offers[0].key,
+        backing: catalog.offers[0].backing,
+    };
+    let allocation = profile()
+        .allocate(crate::model::capacity_resources(request.need))
+        .unwrap();
+    let mut index = FitIndex::new(&[node]).unwrap();
+    let before = index.key(NodeId(0)).unwrap();
+    assert_eq!(index.verdict(NodeId(0), &request).unwrap(), Verdict::NoGpu);
+    assert!(
+        index
+            .take_pending_routed(NodeId(0), &request, Some(allocation), Some(route))
+            .is_err()
+    );
+    assert!(
+        index
+            .take_routed(
+                NodeId(0),
+                WorkloadId(91),
+                &request,
+                Some(allocation),
+                Some(route)
+            )
+            .is_err()
+    );
+    assert_eq!(index.key(NodeId(0)).unwrap(), before);
+    index
+        .take_recovered_routed(
+            NodeId(0),
+            WorkloadId(91),
+            &request,
+            &[0],
+            Some(allocation),
+            Some(route),
+        )
+        .unwrap();
+    let charged = index.key(NodeId(0)).unwrap();
+    assert!(
+        index
+            .take_recovered_routed(
+                NodeId(0),
+                WorkloadId(92),
+                &request,
+                &[1],
+                Some(allocation),
+                Some(route)
+            )
+            .is_err()
+    );
+    assert_eq!(index.key(NodeId(0)).unwrap(), charged);
+    assert_eq!(index.holds(NodeId(0), WorkloadId(91)), &[0]);
+    assert!(index.holds(NodeId(0), WorkloadId(92)).is_empty());
+    index
+        .give_routed(
+            NodeId(0),
+            WorkloadId(91),
+            &request,
+            Some(allocation),
+            Some(route),
+        )
+        .unwrap();
+    assert_eq!(index.key(NodeId(0)).unwrap(), before);
+    assert_eq!(index.verdict(NodeId(0), &request).unwrap(), Verdict::NoGpu);
+}

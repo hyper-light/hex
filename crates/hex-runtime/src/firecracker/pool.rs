@@ -1031,7 +1031,7 @@ pub(super) mod tests {
         claimed.spec.route = None;
         claimed.spec.class = ClassSpec::Oci(match claimed.spec.class {
             ClassSpec::Firecracker(oci) => oci,
-            _ => unreachable!(),
+            other => panic!("expected Firecracker payload in family fixture, got {other:?}"),
         });
         claimed.spec.allocation = None;
         claimed.native_scope = None;

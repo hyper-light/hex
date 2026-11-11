@@ -478,20 +478,7 @@ impl Routes {
             return false;
         };
         if choice.offer.key.execution != Execution::ShardsShared {
-            let consumed = self
-                .catalog
-                .offers
-                .iter()
-                .zip(&self.used)
-                .filter(|(offer, _)| offer.backing == Some(key))
-                .any(|(_, used)| *used != Resources::default());
-            let physical = backing
-                .devices
-                .iter()
-                .filter(|id| id.kind == hex_api::DeviceKind::Gpu)
-                .count();
-            return !consumed
-                && u32::try_from(physical).is_ok_and(|physical| demand.need.gpus <= physical);
+            return self.holds_dedicated_inner(key, backing, demand);
         }
         let used = self
             .catalog
@@ -506,6 +493,41 @@ impl Routes {
             })
             .and_then(|used| used.checked_add(capacity_resources(demand.need)));
         used.is_some_and(|used| backing.check_inner(used).is_ok())
+    }
+
+    /// Released observer history still identifies its one surviving dedicated Box. The caller
+    /// restores that Box's immutable charge and exact devices; it cannot select a fresh route.
+    pub fn holds_recovered_inner(&self, choice: Choice, demand: &Demand) -> bool {
+        if matches!(
+            choice.offer.key.execution,
+            Execution::ShardsDedicated | Execution::Firecracker
+        ) && let Some(key) = choice.offer.backing
+            && let Some((backing, BackingPhase::Released)) = self.backing(key)
+        {
+            return self.holds_dedicated_inner(key, backing, demand);
+        }
+        self.holds_inner(choice, demand)
+    }
+
+    fn holds_dedicated_inner(
+        &self,
+        key: BackingKey,
+        backing: &hex_api::BackingOffer,
+        demand: &Demand,
+    ) -> bool {
+        let consumed = self
+            .catalog
+            .offers
+            .iter()
+            .zip(&self.used)
+            .filter(|(offer, _)| offer.backing == Some(key))
+            .any(|(_, used)| *used != Resources::default());
+        let physical = backing
+            .devices
+            .iter()
+            .filter(|id| id.kind == hex_api::DeviceKind::Gpu)
+            .count();
+        !consumed && u32::try_from(physical).is_ok_and(|physical| demand.need.gpus <= physical)
     }
     pub fn used_next(
         &self,
