@@ -221,6 +221,7 @@ mod tests {
             devices: Vec::new(),
             class: Class::Shards,
             scope: Some(hex_core::record::NativeScope::from_bytes([7; 16])),
+            route: None,
             physical: Vec::new(),
             vcpus: 1,
             memory_mib: 256,
@@ -234,10 +235,10 @@ mod tests {
 
     fn info(id: &BoxId) -> BoxInfo {
         BoxInfo {
-            route: None,
             id: id.clone(),
             class: Class::Oci,
             allocation: None,
+            route: None,
             state: BoxState::Empty,
             bounds: Bounds::default(),
             adopted: false,
@@ -262,6 +263,7 @@ mod tests {
                 id: id.clone(),
                 class: Class::Shards,
                 allocation: None,
+                route: None,
             }),
         });
         let receipt = record(id);
@@ -431,6 +433,18 @@ mod tests {
         );
         assert_eq!(booted.host_info(info(&id)).unwrap().class, Class::Shards);
         let allocation = model_record(&runtime, &id).spec.allocation;
+        let route = Some(hex_api::RouteReceipt {
+            key: hex_api::RouteKey {
+                class: Class::Shards,
+                image: hex_api::ImagePlatform {
+                    os: hex_api::ImageOs::Linux,
+                    arch: super::super::route::host_platform().unwrap().arch,
+                },
+                execution: hex_api::Execution::ShardsDedicated,
+                gpu: hex_api::GpuEligibility::None,
+            },
+            backing: None,
+        });
         let (link, client) = super::super::tests::model_connection();
         let projected = Booted {
             guest: GuestHandle::Shared(Arc::new(Controlled {
@@ -446,17 +460,26 @@ mod tests {
                 id: id.clone(),
                 class: Class::Shards,
                 allocation,
+                route,
             }),
         };
         let mut exited = info(&id);
         exited.state = BoxState::Empty;
         exited.exit = Some(hex_api::Exit::Code(0));
-        assert_eq!(projected.host_info(exited).unwrap().allocation, allocation);
+        let outer = projected.host_info(exited).unwrap();
+        assert_eq!(outer.allocation, allocation);
+        assert_eq!(outer.route, route);
         let mut forged = info(&id);
         forged.allocation = allocation;
         assert!(
             projected.host_info(forged).is_err(),
             "inner OCI cannot mint a host VM allocation"
+        );
+        let mut forged = info(&id);
+        forged.route = route;
+        assert!(
+            projected.host_info(forged).is_err(),
+            "inner OCI cannot mint a host execution route"
         );
         assert!(
             booted
@@ -628,22 +651,77 @@ fn invalid(why: impl Into<String>) -> Refusal {
     }
 }
 
-impl Booted {
-    pub(super) fn host_info(&self, mut info: BoxInfo) -> Result<BoxInfo, Refusal> {
-        if let Some(owner) = &self.owner {
-            if info.id != owner.id || info.class != Class::Oci || info.allocation.is_some() {
-                return Err(invalid(
-                    "dedicated guest returned a foreign box, workload class or native charge",
-                ));
-            }
-            info.class = owner.class;
-            info.allocation = owner.allocation;
-        }
+impl Owner {
+    fn project(&self, mut info: BoxInfo) -> Result<BoxInfo, Refusal> {
+        self.project_in(&mut info)?;
         Ok(info)
+    }
+
+    fn project_in(&self, info: &mut BoxInfo) -> Result<(), Refusal> {
+        if info.id != self.id
+            || info.class != Class::Oci
+            || info.allocation.is_some()
+            || info.route.is_some()
+        {
+            return Err(invalid(
+                "dedicated guest returned a foreign box, workload class or native charge",
+            ));
+        }
+        info.class = self.class;
+        info.allocation = self.allocation;
+        info.route = self.route;
+        Ok(())
+    }
+}
+
+impl Booted {
+    pub(super) fn host_info(&self, info: BoxInfo) -> Result<BoxInfo, Refusal> {
+        match &self.owner {
+            Some(owner) => owner.project(info),
+            None => Ok(info),
+        }
     }
 }
 
 impl GuestRuntime {
+    pub(super) fn project_info(&self, booted: &Booted, info: BoxInfo) -> Result<BoxInfo, Refusal> {
+        if booted.owner.is_some() || !self.uses_books() {
+            return booted.host_info(info);
+        }
+        let mut info = info;
+        self.project_info_in(booted, &mut info)?;
+        Ok(info)
+    }
+
+    pub(super) fn project_info_in(
+        &self,
+        booted: &Booted,
+        info: &mut BoxInfo,
+    ) -> Result<(), Refusal> {
+        if let Some(owner) = &booted.owner {
+            return owner.project_in(info);
+        }
+        if !self.uses_books() {
+            return Ok(());
+        }
+        let Some(record) = self.recorded_box(&info.id)? else {
+            // A shared guest may also list a foreign entry. Its host receipt is
+            // unknown here; never attach another box's class/route/charge to it.
+            return Ok(());
+        };
+        route::guest_spec(&record.spec)?;
+        if self.owns_record(&record.spec) {
+            return Err(super::books::uncertain(&info.id)?);
+        }
+        let owner = Owner {
+            class: record.spec.class.class(),
+            id: record.spec.id,
+            allocation: record.spec.allocation,
+            route: record.spec.route,
+        };
+        owner.project_in(info)
+    }
+
     pub(super) fn booted_for(&self, id: &BoxId) -> Result<Option<Arc<Booted>>, Refusal> {
         let dedicated = if self.uses_books() {
             self.recorded_box(id)?
@@ -916,6 +994,7 @@ impl GuestRuntime {
                 id: receipt.id.try_clone()?,
                 class: receipt.class,
                 allocation: record.spec.allocation,
+                route: record.spec.route,
             }),
         });
         budget.remaining()?;
@@ -975,6 +1054,7 @@ impl GuestRuntime {
             if booted.owner.as_ref().is_none_or(|owner| {
                 owner.allocation != record.spec.allocation
                     || owner.class != record.spec.class.class()
+                    || owner.route != record.spec.route
             }) {
                 return Err(super::books::uncertain(id)?);
             }

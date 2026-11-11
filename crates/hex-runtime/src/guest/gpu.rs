@@ -449,7 +449,6 @@ mod tests {
         append_authority(&mut cmdline, &owner, &devices).unwrap();
         let authority = Authority::parse(&cmdline).unwrap().unwrap();
         let spec = BoxSpec {
-            route: None,
             id: owner,
             bounds: Bounds::default(),
             class: ClassSpec::Oci(Box::new(OciSpec {
@@ -463,6 +462,7 @@ mod tests {
             owner: None,
             devices: devices.clone(),
             allocation: None,
+            route: None,
         };
         authority.check(&spec).unwrap();
         let mut wrong_class = spec.clone();

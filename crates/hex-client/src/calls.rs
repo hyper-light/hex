@@ -64,8 +64,8 @@ impl LegacyKind {
     const COUNT: usize = Self::Run as usize + 1;
 }
 
-/// Legacy, scheduler, capacity, then native physical report: new waits append without moving seeds.
-pub const KINDS: usize = LegacyKind::COUNT + WaitKind::COUNT + 2;
+/// Legacy, scheduler, capacity, native physical report, then backing lifecycle: waits only append.
+pub const KINDS: usize = LegacyKind::COUNT + WaitKind::COUNT + 4;
 
 /// The wait of `request`'s kind in `waits`, a client's table of its call kinds' learned waits (decision 9: a client's
 /// call's wait for its answer and its send is learned per call kind, since a delete waits on its box's emptying and a
@@ -81,6 +81,12 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
             Call::PhysicalReport => LegacyKind::COUNT
                 .checked_add(WaitKind::COUNT)?
                 .checked_add(1)?,
+            Call::InitializeBacking(_) => LegacyKind::COUNT
+                .checked_add(WaitKind::COUNT)?
+                .checked_add(2)?,
+            Call::ReleaseBacking(_) => LegacyKind::COUNT
+                .checked_add(WaitKind::COUNT)?
+                .checked_add(3)?,
             Call::Create(_) => LegacyKind::Create as usize,
             Call::Start(_) => LegacyKind::Start as usize,
             Call::Exec { .. } => LegacyKind::Exec as usize,
@@ -2054,6 +2060,7 @@ pub(crate) fn unexpected(call: &str, answer: &Answer) -> Refusal {
         Answer::Scheduled(_) => "a scheduler reply",
         Answer::Capacity(_) => "a runtime capacity",
         Answer::PhysicalReport(_) => "a native physical report",
+        Answer::BackingOffer(_) => "a native backing receipt",
     };
     Refusal::Broken(format!("the node agent answered a {call} with {kind}"))
 }
@@ -2188,6 +2195,30 @@ fn settle(stdio: Stdio, ends: hex_api::Given) -> Result<hex_api::Given, Refusal>
 }
 
 impl<T: Transport> Runtime for Core<T> {
+    fn initialize_backing(&self, grant: hex_api::BackingGrant) -> Result<hex_api::BackingOffer, Refusal> {
+        grant.check()?;
+        let key = grant.key;
+        match self.plain(Call::InitializeBacking(grant))? {
+            Answer::BackingOffer(offer) if offer.key == key => {
+                offer.allocation()?;
+                Ok(offer)
+            }
+            Answer::Refused(why) => Err(why),
+            _ => Err(Refusal::Backing { key, cause: hex_api::LifecycleCause::Uncertain }),
+        }
+    }
+
+    fn release_backing(&self, key: hex_api::BackingKey) -> Result<hex_api::BackingOffer, Refusal> {
+        match self.plain(Call::ReleaseBacking(key))? {
+            Answer::BackingOffer(offer) if offer.key == key => {
+                offer.allocation()?;
+                Ok(offer)
+            }
+            Answer::Refused(why) => Err(why),
+            _ => Err(Refusal::Backing { key, cause: hex_api::LifecycleCause::Uncertain }),
+        }
+    }
+
     fn physical_report(&self) -> Result<hex_api::PhysicalReport, Refusal> {
         match self.plain(Call::PhysicalReport)? {
             Answer::PhysicalReport(report) => {

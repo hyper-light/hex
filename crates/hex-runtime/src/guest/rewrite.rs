@@ -44,6 +44,7 @@ pub fn rewrite(
         owner,
         devices,
         allocation,
+        route,
     } = spec;
     let mut items = Vec::new();
     let class = match class {
@@ -94,13 +95,13 @@ pub fn rewrite(
     };
     Ok(Rewritten {
         spec: BoxSpec {
-            route: None,
             id,
             bounds,
             class,
             owner,
             devices,
             allocation,
+            route,
         },
         items,
     })

@@ -98,6 +98,8 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.schedule.status"),
     Patience::measuring("client.answer.capacity"),
     Patience::measuring("client.answer.physical_report"),
+    Patience::measuring("client.answer.initialize_backing"),
+    Patience::measuring("client.answer.release_backing"),
 ];
 
 /// A node agent, reached through its socket.

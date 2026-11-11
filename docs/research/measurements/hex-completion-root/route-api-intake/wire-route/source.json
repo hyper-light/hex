@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "role": "implementer",
+  "base": "8ccb2f81b32dabe0427f084a4aeab59bfbfbcc00",
+  "api_pin": "73547edda8a5188b0a40b3c2aa5d7a5da99be163",
+  "policy": "ca3ab10c151aa5539e757f1cc76029746ccbb561",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "api_files": [
+    {
+      "path": "crates/hex-api/src/runtime.rs",
+      "blob": "5dbc26f1f84b7d205e0b4c2fee21490cc901a442",
+      "bytes": 55565,
+      "sha256": "669ff9cc9bdc4598487fd34e88864679da7bfea7315562f31ae2a84dd530c8c5"
+    },
+    {
+      "path": "crates/hex-api/src/spec.rs",
+      "blob": "1e390c62b33b706b4e6fe18410de66b65d5dad63",
+      "bytes": 40451,
+      "sha256": "0b964bbc6ddcac95b06446840ea4f6ccc5e592d296cc27e43f18a67949f87af2"
+    },
+    {
+      "path": "docs/research/measurements/hex-complete-bindings/ROUTE-API.md",
+      "blob": "86c439538f0560b5b44e3242e823fb7763d411b5",
+      "bytes": 6756,
+      "sha256": "264b893a07597ea39bd1f272fe1598b4dbc10edf469b2269b2d2dfc0af663c10"
+    },
+    {
+      "path": "docs/research/measurements/hex-complete-bindings/route-api-source.json",
+      "blob": "53a427135c0f043796b46976f485f1612e2f2510",
+      "bytes": 1736,
+      "sha256": "120f650e7e373061188b93714fbf9977d261d67f470b8cda0ad027d89662dee1"
+    }
+  ],
+  "owned_sources": [
+    {
+      "path": "crates/hex-core/src/wire.rs",
+      "bytes": 86726,
+      "sha256": "f84f739df48951283799a0ec428c67abe69e83dcd79f41fd97f0c28a37c8d66a"
+    },
+    {
+      "path": "crates/hex-core/src/wire/tests.rs",
+      "bytes": 69778,
+      "sha256": "bb78fda35767bb1fb3fe4d17855d65996c7bc42746594c7e4b5593165085de4b"
+    }
+  ],
+  "tests_executed": 0,
+  "native_executed": 0,
+  "status": "source only; joined compile held"
+}

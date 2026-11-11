@@ -13,6 +13,7 @@ pub mod held;
 mod managed;
 mod physical;
 pub mod rewrite;
+mod route;
 pub mod selected;
 pub mod shares;
 
@@ -199,6 +200,7 @@ struct Owner {
     id: BoxId,
     class: Class,
     allocation: Option<hex_api::Allocation>,
+    route: Option<hex_api::RouteReceipt>,
 }
 
 struct Booted {
@@ -820,6 +822,7 @@ impl Runtime for GuestRuntime {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+        route::guest_spec(&spec)?;
         if matches!(spec.class, ClassSpec::Process | ClassSpec::Firecracker(_)) {
             return Err(Refusal::Invalid {
                 what: "class",
@@ -871,7 +874,7 @@ impl Runtime for GuestRuntime {
 
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
         self.call_recorded(id, false, || {
-            self.with(id, |b| b.host_info(b.client.inspect(id)?))
+            self.with(id, |b| self.project_info(b, b.client.inspect(id)?))
         })
     }
 
@@ -884,7 +887,13 @@ impl Runtime for GuestRuntime {
 
     fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
         let mut boxes = match self.running()? {
-            Some(b) => b.client.list()?,
+            Some(b) => {
+                let mut listed = b.client.list()?;
+                for info in &mut listed {
+                    self.project_info_in(&b, info)?;
+                }
+                listed
+            }
             None => Vec::new(),
         };
         // Recovery attaches by each immutable receipt rather than by map/catalog order.
@@ -904,7 +913,7 @@ impl Runtime for GuestRuntime {
                         bound: crate::MAX_BOXES,
                     })?;
                 for info in listed {
-                    boxes.push(b.host_info(info)?);
+                    boxes.push(self.project_info(&b, info)?);
                 }
             }
         }
@@ -952,6 +961,7 @@ impl GuestRuntime {
         // Host allocation/overhead is retained only by the canonical host record;
         // the inner native OCI runtime enforces the unchanged workload bounds.
         spec.allocation = None;
+        spec.route = None;
         spec.class = match spec.class {
             ClassSpec::Shards(oci) => ClassSpec::Oci(oci),
             other => other,
@@ -982,7 +992,7 @@ impl GuestRuntime {
             // next stage of this id, which removes it (above).
             let _ = stage::unstage(b.link.as_ref(), &id);
         })?;
-        b.host_info(info)
+        self.project_info(b, info)
     }
 }
 
@@ -1027,6 +1037,29 @@ impl<P: Runtime> WithGuest<P> {
             return Ok(Side::Guest);
         }
         (self.route)(&self.process, class)
+    }
+
+    /// Makers and recovery resolve the same immutable host receipt before any
+    /// native operation or method turn. A layer path is not image OS evidence.
+    pub fn route_for(&self, spec: &BoxSpec) -> Result<Side, Refusal> {
+        let host = route::host_platform()?;
+        if let Some(side) = route::committed_side(spec, host)? {
+            if side == Side::Host && !self.process.classes().contains(&spec.backend_class()?) {
+                return Err(route::invalid(
+                    "the committed native backend has not been initialized",
+                ));
+            }
+            return Ok(side);
+        }
+        if spec.class.class() == Class::Oci
+            && host.os != hex_api::ImageOs::Macos
+            && self.process.classes().contains(&Class::Oci)
+        {
+            return Err(route::invalid(
+                "legacy OCI is ambiguous between native and Linux guest execution",
+            ));
+        }
+        self.route(&spec.class)
     }
     pub fn bind_books(&self, books: Weak<dyn crate::devices::Books>) -> Result<(), Refusal> {
         self.oci.bind_books(books)
@@ -1078,7 +1111,7 @@ impl<P: Runtime> WithGuest<P> {
     /// The runtime that makes a box of `spec`, as its `route` says. An id is one box's across both classes: the other
     /// side holding it refuses the box as [`Refusal::Exists`].
     fn maker(&self, spec: &BoxSpec) -> Result<&dyn Runtime, Refusal> {
-        let (this, other): (&dyn Runtime, &dyn Runtime) = match self.route(&spec.class)? {
+        let (this, other): (&dyn Runtime, &dyn Runtime) = match self.route_for(spec)? {
             Side::Host => (&self.process, &self.oci),
             Side::Guest => (&self.oci, &self.process),
         };
@@ -1100,7 +1133,7 @@ impl<P: Runtime> WithGuest<P> {
                 .oci
                 .recorded_box(id)?
                 .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
-            return Ok(match self.route(&record.spec.class)? {
+            return Ok(match self.route_for(&record.spec)? {
                 Side::Host => &self.process,
                 Side::Guest => &self.oci,
             });

@@ -24,12 +24,12 @@ fn physical_claims_reach_the_configured_backend_route_for_create_and_run() {
         route: backend,
     };
     let spec = BoxSpec {
-        route: None,
         id: BoxId::new("router-selected-device").unwrap(),
         bounds: hex_api::Bounds::default(),
         class: ClassSpec::Process,
         owner: None,
         allocation: None,
+        route: None,
         devices: vec![hex_api::DeviceId {
             kind: hex_api::DeviceKind::Gpu,
             key: 256,
@@ -63,7 +63,7 @@ impl Runtime for NativeReporting {
         vec![Class::Process, Class::Oci]
     }
     fn capacity(&self, _: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
-        Ok(Some(self.report.clone()))
+        Ok(Some(self.report.try_clone()?))
     }
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         self.inner.create(spec)
@@ -99,10 +99,10 @@ impl Runtime for NativeReporting {
 #[test]
 fn native_oci_device_capacity_remains_visible_with_a_guest_configured() {
     let native = hex_api::Capacity {
+        cost: None,
         routes: Vec::new(),
         device_routes: Vec::new(),
         backings: Vec::new(),
-        cost: None,
         id: "model-native-pool".into(),
         total: hex_api::CapacityResources::default(),
         free: hex_api::CapacityResources::default(),
@@ -123,7 +123,7 @@ fn native_oci_device_capacity_remains_visible_with_a_guest_configured() {
     let node = WithGuest {
         process: NativeReporting {
             inner: hex_api::sim::SimRuntime::new(),
-            report: native.clone(),
+            report: native.try_clone().unwrap(),
         },
         oci: GuestRuntime::new(guest.clone(), config()),
         route: |_runtime, _class| Ok(Side::Host),

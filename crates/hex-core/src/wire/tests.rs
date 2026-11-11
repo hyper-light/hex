@@ -32,6 +32,7 @@ fn device_claims() -> Vec<DeviceId> {
 fn device_spec(devices: Vec<DeviceId>) -> BoxSpec {
     BoxSpec {
         allocation: None,
+        route: None,
         id: id("device-wire"),
         bounds: Bounds::default(),
         class: ClassSpec::Process,
@@ -43,6 +44,9 @@ fn device_spec(devices: Vec<DeviceId>) -> BoxSpec {
 fn device_capacity(devices: Vec<DeviceInfo>) -> Capacity {
     Capacity {
         cost: None,
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
         id: "physical-pool".to_owned(),
         total: CapacityResources::default(),
         free: CapacityResources::default(),
@@ -76,11 +80,12 @@ fn with_device_tail(offer: bool, tail: &[u8]) -> Vec<u8> {
         )
         .unwrap()
     };
-    // The empty old device count and new optional cost/allocation tag are both replaced;
-    // malformed device input still carries a valid absent receipt after its device tail.
-    bytes.truncate(bytes.len() - 5);
+    // Replace the device list while retaining valid absent charge/route receipts. Capacity
+    // additionally ends with three empty u32 lists; a spec ends with one route option.
+    let following = if offer { 1 + 3 * size_of::<u32>() } else { 2 };
+    bytes.truncate(bytes.len() - size_of::<u32>() - following);
     bytes.extend_from_slice(tail);
-    bytes.push(0);
+    bytes.extend(std::iter::repeat_n(0, following));
     bytes
 }
 
@@ -384,6 +389,9 @@ fn runtime_capacity_roundtrip_and_invalid_room_refused() {
     );
     let capacity = hex_api::Capacity {
         cost: None,
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
         devices: Vec::new(),
         id: "guest:123:456".into(),
         total: hex_api::CapacityResources {
@@ -397,7 +405,7 @@ fn runtime_capacity_roundtrip_and_invalid_room_refused() {
             disk_bytes: 7 << 30,
         },
     };
-    for value in [None, Some(capacity.clone())] {
+    for value in [None, Some(capacity.try_clone().unwrap())] {
         let expected = Answer::Capacity(value);
         let bytes = answer(42, &expected, MAX_MESSAGE).unwrap();
         assert_eq!(
@@ -405,8 +413,15 @@ fn runtime_capacity_roundtrip_and_invalid_room_refused() {
             expected
         );
     }
-    let mut malformed = answer(42, &Answer::Capacity(Some(capacity.clone())), MAX_MESSAGE).unwrap();
-    let free_memory = malformed.len() - 20; // The trailing empty device list contributes four bytes.
+    let mut malformed = answer(
+        42,
+        &Answer::Capacity(Some(capacity.try_clone().unwrap())),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    // Header, Some tag, pool string, total resources and free CPU precede free memory.
+    let free_memory =
+        HEADER_BYTES + 1 + size_of::<u32>() + capacity.id.len() + RESOURCE_BYTES + size_of::<u64>();
     malformed[free_memory..free_memory + 8]
         .copy_from_slice(&(capacity.total.mem_bytes + 1).to_le_bytes());
     assert!(read_answer(&received(&malformed, 0), MAX_MESSAGE).is_err());
@@ -510,6 +525,7 @@ fn program() -> Program {
 fn oci_spec() -> BoxSpec {
     BoxSpec {
         allocation: None,
+        route: None,
         devices: Vec::new(),
         id: id("oci-1"),
         bounds: Bounds::default(),
@@ -532,6 +548,7 @@ fn oci_spec() -> BoxSpec {
 fn info() -> BoxInfo {
     BoxInfo {
         allocation: None,
+        route: None,
         membership: None,
         id: id("b-1"),
         class: Class::Oci,
@@ -552,6 +569,7 @@ fn requests() -> Vec<(u64, Request, usize)> {
             2,
             Request::Call(Call::Create(Box::new(BoxSpec {
                 allocation: None,
+                route: None,
                 devices: Vec::new(),
                 id: b.clone(),
                 bounds: bounds(),
@@ -565,6 +583,7 @@ fn requests() -> Vec<(u64, Request, usize)> {
             4,
             Request::Call(Call::Create(Box::new(BoxSpec {
                 allocation: None,
+                route: None,
                 devices: Vec::new(),
                 id: id("p"),
                 bounds: Bounds::default(),
@@ -632,6 +651,7 @@ fn run() -> Request {
     Request::Call(Call::Run {
         spec: Box::new(BoxSpec {
             allocation: None,
+            route: None,
             devices: Vec::new(),
             id: id("r"),
             bounds: bounds(),
@@ -759,6 +779,7 @@ fn answers() -> Vec<(u64, Answer)> {
                     info(),
                     BoxInfo {
                         allocation: None,
+                        route: None,
                         membership: None,
                         id: id("p"),
                         class: Class::Process,
@@ -1008,7 +1029,7 @@ fn runtime_cost_and_admitted_allocation_survive_the_wire() {
     };
     capacity.free = capacity.total;
     capacity.cost = Some(cost);
-    let offered = Answer::Capacity(Some(capacity.clone()));
+    let offered = Answer::Capacity(Some(capacity.try_clone().unwrap()));
     let bytes = answer(55, &offered, MAX_MESSAGE).unwrap();
     assert_eq!(
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
@@ -1027,8 +1048,9 @@ fn runtime_cost_and_admitted_allocation_survive_the_wire() {
             ..cost
         },
     ] {
-        capacity.cost = Some(invalid);
-        assert!(answer(55, &Answer::Capacity(Some(capacity.clone())), MAX_MESSAGE).is_err());
+        let mut malformed = capacity.try_clone().unwrap();
+        malformed.cost = Some(invalid);
+        assert!(answer(55, &Answer::Capacity(Some(malformed)), MAX_MESSAGE).is_err());
     }
     spec.allocation = Some(Allocation {
         resources: CapacityResources::default(),
@@ -1365,6 +1387,7 @@ fn a_long_list_is_split_into_messages_within_the_bound() {
     let infos: Vec<BoxInfo> = (0..5_000)
         .map(|n| BoxInfo {
             allocation: None,
+            route: None,
             membership: None,
             id: id(&format!("box-{n:06}")),
             ..info()
@@ -1496,16 +1519,15 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
     let run = run();
     let bytes = request(15, &run, MAX_MESSAGE).unwrap();
     assert_eq!(&bytes[12..14], &0x000fu16.to_le_bytes());
+    let (header, decoded) = read_request(&received(&bytes, 2), MAX_MESSAGE).unwrap();
     assert_eq!(
-        read_request(&received(&bytes, 2), MAX_MESSAGE).unwrap(),
-        (
-            Header {
-                kind: 0x000f,
-                id: 15
-            },
-            run.clone()
-        )
+        header,
+        Header {
+            kind: 0x000f,
+            id: 15
+        }
     );
+    assert_eq!(decoded, run);
     for fds in [0, 1, 3] {
         assert_eq!(
             read_request(&received(&bytes, fds), MAX_MESSAGE)
@@ -1526,7 +1548,7 @@ fn a_run_is_a_create_and_an_exec_in_one_request() {
 #[test]
 fn unknown_kinds_are_refused() {
     let hello = request(5, &Request::Hello { build: build() }, MAX_MESSAGE).unwrap();
-    for kind in [0u16, 0x0014, 0x7fff, 0x8001, 0x8009, 0xffff] {
+    for kind in [0u16, 0x0016, 0x7fff, 0x8001, 0x8009, 0xffff] {
         let mut bytes = hello.clone();
         bytes[12..14].copy_from_slice(&kind.to_le_bytes());
         let got = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap_err();
@@ -1653,8 +1675,8 @@ fn hostile_values_are_refused_by_name() {
         Fault::Truncated { .. }
     ));
     let mut info = answer(2, &Answer::Info(info()), MAX_MESSAGE).unwrap();
-    // The None allocation tag follows abandoned's eight bytes and the exit's five plus tag.
-    let adopted = info.len() - 1 - 8 - 6 - 1;
+    // None route/allocation tags follow abandoned's eight bytes and the exit's five plus tag.
+    let adopted = info.len() - 2 - 8 - 6 - 1;
     info[adopted] = 2;
     assert!(matches!(
         read_answer(&received(&info, 0), MAX_MESSAGE),
@@ -1817,6 +1839,7 @@ fn any_spec() -> impl Strategy<Value = BoxSpec> {
     let owner = proptest::option::of(("\\PC{0,16}", any::<bool>()));
     (any_id(), any_bounds(), class, owner).prop_map(|(id, bounds, class, owner)| BoxSpec {
         allocation: None,
+        route: None,
         devices: Vec::new(),
         id,
         bounds,
@@ -1846,6 +1869,7 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
         .prop_map(
             |(id, backend, state, bounds, adopted, exit, abandoned)| BoxInfo {
                 allocation: None,
+                route: None,
                 membership: None,
                 id,
                 class: match backend {

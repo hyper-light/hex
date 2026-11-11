@@ -5,12 +5,16 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use hex_api::{BoxId, BoxSpec, CapacityResources, Class, DeviceId, DeviceKind, Refusal};
+use hex_api::{
+    BackingKey, BoxId, BoxSpec, CapacityResources, Class, DeviceId, DeviceKind, Execution,
+    GpuEligibility, ImageArch, ImageOs, ImagePlatform, Refusal, RouteKey, RouteReceipt,
+};
 use hex_core::record::{BoxRecord, NativeScope};
 
 use super::{GuestConfig, held};
 
-const HEADER: &str = "hex-selected-guest 2";
+const HEADER: &str = "hex-selected-guest 3";
+const SCOPE_HEADER: &str = "hex-selected-guest 2";
 const LEGACY_HEADER: &str = "hex-selected-guest 1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,16 +34,22 @@ pub(super) struct Record {
     pub devices: Vec<DeviceId>,
     pub class: Class,
     pub scope: Option<NativeScope>,
+    pub route: Option<RouteReceipt>,
     pub physical: Vec<shards_api::PhysicalGpu>,
     pub vcpus: u32,
     pub memory_mib: u64,
     pub phase: Phase,
 }
 
-fn invalid(why: impl Into<String>) -> Refusal {
+fn invalid(why: &'static str) -> Refusal {
+    let mut text = String::new();
+    if text.try_reserve_exact(why.len()).is_err() {
+        return allocation(why.len());
+    }
+    text.push_str(why);
     Refusal::Invalid {
         what: "selected GPU guest",
-        why: why.into(),
+        why: text,
     }
 }
 
@@ -83,6 +93,14 @@ impl Record {
             .ok_or(super::books::uncertain(&record.spec.id)?)?;
         let spec = &record.spec;
         spec.check()?;
+        if spec
+            .route_execution()
+            .is_some_and(|execution| execution != Execution::ShardsDedicated)
+        {
+            return Err(invalid(
+                "the retained route belongs to another execution backend",
+            ));
+        }
         let reserved = spec
             .allocation
             .ok_or_else(|| invalid("dedicated VM has no original allocation"))?
@@ -133,6 +151,7 @@ impl Record {
             devices,
             class: spec.class.class(),
             scope: Some(scope),
+            route: spec.route,
             physical: Vec::new(),
             vcpus,
             memory_mib,
@@ -155,6 +174,7 @@ impl Record {
             .ok_or_else(|| invalid("receipt memory overflows"))?;
         if self.id != spec.id
             || self.class != spec.class.class()
+            || self.route != spec.route
             || self.devices.len() != spec.devices.len()
             || !self
                 .devices
@@ -220,6 +240,7 @@ impl Record {
             }
             None => writeln!(text, "none")?,
         }
+        render_route(text, self.route)?;
         writeln!(text, "vcpus {}", self.vcpus)?;
         writeln!(text, "memory_mib {}", self.memory_mib)?;
         writeln!(text, "devices {}", self.devices.len())?;
@@ -362,9 +383,10 @@ fn parse(text: &str) -> Result<Record, Refusal> {
         return Err(invalid("oversized or truncated receipt"));
     }
     let mut lines = text.lines();
-    let legacy = match lines.next() {
-        Some(HEADER) => false,
-        Some(LEGACY_HEADER) => true,
+    let version = match lines.next() {
+        Some(HEADER) => 3,
+        Some(SCOPE_HEADER) => 2,
+        Some(LEGACY_HEADER) => 1,
         _ => return Err(invalid("unknown receipt version")),
     };
     let id = BoxId::new(field(lines.next(), "box ")?)?;
@@ -373,10 +395,15 @@ fn parse(text: &str) -> Result<Record, Refusal> {
         "shards" => Class::Shards,
         _ => return Err(invalid("receipt names another backend")),
     };
-    let scope = if legacy {
+    let scope = if version == 1 {
         None
     } else {
         parse_scope(field(lines.next(), "scope ")?)?
+    };
+    let route = if version == 3 {
+        parse_route(field(lines.next(), "route ")?)?
+    } else {
+        None
     };
     let vcpus = field(lines.next(), "vcpus ")?
         .parse::<u32>()
@@ -421,6 +448,14 @@ fn parse(text: &str) -> Result<Record, Refusal> {
     }
     shards_api::physical::check_selection(&physical)
         .map_err(|_| invalid("native selectors repeat or exceed their representation"))?;
+    if let Some(route) = route {
+        route.check(class, count != 0)?;
+        if route.key.execution != Execution::ShardsDedicated {
+            return Err(invalid(
+                "a selected receipt requires dedicated Shards execution",
+            ));
+        }
+    }
     let phase = match lines.next() {
         Some("intent") => Phase::Intent,
         Some("released-unpublished") => Phase::Released {
@@ -473,6 +508,7 @@ fn parse(text: &str) -> Result<Record, Refusal> {
         devices,
         class,
         scope,
+        route,
         physical,
         vcpus,
         memory_mib,
@@ -486,23 +522,125 @@ fn parse_scope(text: &str) -> Result<Option<NativeScope>, Refusal> {
     }
     // NativeScope is the canonical core's fixed 128-bit incarnation, encoded as
     // two ASCII hex digits per byte. Never derive it from a reusable socket/PID.
-    let mut bytes = [0; 16];
+    Ok(Some(NativeScope::from_bytes(parse_hex(text)?)))
+}
+
+fn parse_hex<const N: usize>(text: &str) -> Result<[u8; N], Refusal> {
+    let mut bytes = [0; N];
     let digits = bytes
         .len()
         .checked_mul(2)
-        .ok_or_else(|| invalid("native scope representation overflows"))?;
+        .ok_or_else(|| invalid("receipt identity representation overflows"))?;
     if text.len() != digits || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(invalid("native scope is not exact ASCII hexadecimal"));
+        return Err(invalid("receipt identity is not exact ASCII hexadecimal"));
     }
     let (pairs, _) = text.as_bytes().as_chunks::<2>();
     for (byte, pair) in bytes.iter_mut().zip(pairs) {
         *byte = u8::from_str_radix(
-            std::str::from_utf8(pair).map_err(|_| invalid("native scope is not ASCII"))?,
+            std::str::from_utf8(pair).map_err(|_| invalid("receipt identity is not ASCII"))?,
             16,
         )
-        .map_err(|_| invalid("native scope byte is invalid"))?;
+        .map_err(|_| invalid("receipt identity byte is invalid"))?;
     }
-    Ok(Some(NativeScope::from_bytes(bytes)))
+    Ok(bytes)
+}
+
+fn render_route(out: &mut impl std::fmt::Write, receipt: Option<RouteReceipt>) -> std::fmt::Result {
+    let Some(receipt) = receipt else {
+        return writeln!(out, "route none");
+    };
+    let key = receipt.key;
+    let os = match key.image.os {
+        ImageOs::Linux => "linux",
+        ImageOs::Windows => "windows",
+        ImageOs::Macos => "macos",
+    };
+    let arch = match key.image.arch {
+        ImageArch::Amd64 => "amd64",
+        ImageArch::Arm64 => "arm64",
+    };
+    let execution = match key.execution {
+        Execution::Native => "native",
+        Execution::ShardsShared => "shards-shared",
+        Execution::ShardsDedicated => "shards-dedicated",
+        Execution::Firecracker => "firecracker",
+    };
+    let gpu = match key.gpu {
+        GpuEligibility::Any => "any",
+        GpuEligibility::None => "none",
+        GpuEligibility::Required => "required",
+    };
+    write!(
+        out,
+        "route {} {os} {arch} {execution} {gpu} ",
+        key.class.name()
+    )?;
+    match receipt.backing {
+        Some(backing) => {
+            for byte in backing.pool {
+                write!(out, "{byte:02x}")?;
+            }
+            write!(out, " ")?;
+            for byte in backing.generation {
+                write!(out, "{byte:02x}")?;
+            }
+            writeln!(out)
+        }
+        None => writeln!(out, "none none"),
+    }
+}
+
+fn parse_route(text: &str) -> Result<Option<RouteReceipt>, Refusal> {
+    if text == "none" {
+        return Ok(None);
+    }
+    let mut fields = text.split(' ');
+    let class = match fields.next() {
+        Some("oci") => Class::Oci,
+        Some("shards") => Class::Shards,
+        _ => return Err(invalid("route names another workload class")),
+    };
+    let os = match fields.next() {
+        Some("linux") => ImageOs::Linux,
+        Some("windows") => ImageOs::Windows,
+        Some("macos") => ImageOs::Macos,
+        _ => return Err(invalid("route has an unknown image OS")),
+    };
+    let arch = match fields.next() {
+        Some("amd64") => ImageArch::Amd64,
+        Some("arm64") => ImageArch::Arm64,
+        _ => return Err(invalid("route has an unknown image architecture")),
+    };
+    let execution = match fields.next() {
+        Some("shards-dedicated") => Execution::ShardsDedicated,
+        _ => return Err(invalid("route is not dedicated Shards execution")),
+    };
+    let gpu = match fields.next() {
+        Some("any") => GpuEligibility::Any,
+        Some("none") => GpuEligibility::None,
+        Some("required") => GpuEligibility::Required,
+        _ => return Err(invalid("route has an unknown GPU mode")),
+    };
+    let backing = match (fields.next(), fields.next()) {
+        (Some("none"), Some("none")) => None,
+        (Some(pool), Some(generation)) => Some(BackingKey {
+            pool: parse_hex(pool)?,
+            generation: parse_hex(generation)?,
+        }),
+        _ => return Err(invalid("route has an incomplete backing identity")),
+    };
+    if fields.next().is_some() {
+        return Err(invalid("route has trailing fields"));
+    }
+    Ok(Some(RouteReceipt {
+        key: RouteKey {
+            class,
+            image: ImagePlatform { os, arch },
+            execution,
+            gpu,
+        },
+        backing,
+    }))
 }
 
 fn field<'a>(line: Option<&'a str>, name: &str) -> Result<&'a str, Refusal> {
@@ -523,6 +661,7 @@ mod tests {
             }],
             class: Class::Shards,
             scope: Some(NativeScope::from_bytes([7; 16])),
+            route: None,
             physical: vec![shards_api::PhysicalGpu::Pci {
                 domain: 0,
                 bus: 1,
@@ -591,8 +730,13 @@ mod tests {
         let text = record().encode().unwrap();
         let legacy = text
             .replace(HEADER, LEGACY_HEADER)
-            .replace("scope 07070707070707070707070707070707\n", "");
+            .replace("scope 07070707070707070707070707070707\n", "")
+            .replace("route none\n", "");
         assert_eq!(parse(&legacy).unwrap().scope, None);
+        let previous = text
+            .replace(HEADER, SCOPE_HEADER)
+            .replace("route none\n", "");
+        assert_eq!(parse(&previous).unwrap().route, None);
         for scope in [
             "0707070707070707070707070707070+07",
             "070707070707070707070707070707070",
@@ -604,5 +748,41 @@ mod tests {
         let mut receipt = record();
         receipt.scope = None;
         assert_eq!(parse(&receipt.encode().unwrap()).unwrap().scope, None);
+    }
+
+    /// AC-T7.4.1: the host route and backing incarnation survive transport
+    /// recovery exactly; legacy receipts cannot silently inherit today's route.
+    #[test]
+    fn selected_route_and_backing_are_durable_and_not_upgraded_from_legacy() {
+        let mut receipt = record();
+        receipt.route = Some(RouteReceipt {
+            key: RouteKey {
+                class: Class::Shards,
+                image: ImagePlatform {
+                    os: ImageOs::Linux,
+                    arch: ImageArch::Arm64,
+                },
+                execution: Execution::ShardsDedicated,
+                gpu: GpuEligibility::Required,
+            },
+            backing: Some(BackingKey {
+                pool: [3; 32],
+                generation: [4; 16],
+            }),
+        });
+        let encoded = receipt.encode().unwrap();
+        assert_eq!(parse(&encoded).unwrap(), receipt);
+        for bad in [
+            encoded.replace("shards-dedicated", "shards-shared"),
+            encoded.replace("linux arm64", "windows arm64"),
+            encoded.replace("required", "none"),
+            encoded.replace(&"03".repeat(32), &format!("+{}", "3".repeat(63))),
+            encoded.replace(&"04".repeat(16), &"04".repeat(15)),
+        ] {
+            assert!(parse(&bad).is_err());
+        }
+        let mut legacy = receipt.clone();
+        legacy.route = None;
+        assert_ne!(legacy, receipt, "legacy has no host execution provenance");
     }
 }

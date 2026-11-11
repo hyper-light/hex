@@ -177,6 +177,8 @@ static ANSWERS: [Patience; KINDS] = [
     #[cfg(not(target_os = "macos"))]
     Patience::measuring("client.guest.answer.capacity"),
     Patience::measuring("client.guest.answer.physical_report"),
+    Patience::measuring("client.guest.answer.initialize_backing"),
+    Patience::measuring("client.guest.answer.release_backing"),
 ];
 
 /// A node agent in a guest, reached through a [`Link`].

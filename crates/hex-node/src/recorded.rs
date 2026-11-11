@@ -1349,13 +1349,13 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
 
     fn owns_records(&self, spec: &BoxSpec) -> Result<bool, Refusal> {
         Ok(
-            self.route(&spec.class)? == hex_runtime::guest::Side::Guest
+            self.route_for(spec)? == hex_runtime::guest::Side::Guest
                 && self.guest().uses_books(),
         )
     }
 
     fn runtime_for(&self, spec: &BoxSpec) -> Result<&dyn Runtime, Refusal> {
-        match self.route(&spec.class)? {
+        match self.route_for(spec)? {
             hex_runtime::guest::Side::Guest => Ok(self.guest()),
             hex_runtime::guest::Side::Host => Ok(self.host()),
         }
@@ -1370,7 +1370,7 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
     }
 
     fn adopt(&self, spec: &BoxSpec, trace: Option<ProcId>) -> Result<(), Refusal> {
-        match self.route(&spec.class)? {
+        match self.route_for(spec)? {
             // Its guest holds it already.
             hex_runtime::guest::Side::Guest => self.guest().validate_binding(spec),
             hex_runtime::guest::Side::Host => self.host().adopt(spec, trace),
@@ -1382,14 +1382,14 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
     }
 
     fn end_for(&self, spec: &BoxSpec, trace: Option<ProcId>) -> Result<(), Refusal> {
-        match self.route(&spec.class)? {
+        match self.route_for(spec)? {
             hex_runtime::guest::Side::Guest => Ok(()),
             hex_runtime::guest::Side::Host => self.host().end_for(spec, trace),
         }
     }
 
     fn alive(&self, spec: &BoxSpec) -> Result<Option<bool>, Refusal> {
-        match self.route(&spec.class)? {
+        match self.route_for(spec)? {
             hex_runtime::guest::Side::Guest => {
                 self.guest().validate_binding(spec)?;
                 match self.guest().inspect(&spec.id) {
@@ -1403,7 +1403,7 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
     }
 
     fn discard(&self, spec: &BoxSpec) -> Result<(), Refusal> {
-        match self.route(&spec.class)? {
+        match self.route_for(spec)? {
             hex_runtime::guest::Side::Guest => match self.guest().delete(&spec.id) {
                 Ok(()) | Err(Refusal::NoSuchBox(_)) => Ok(()),
                 Err(why) => Err(why),
@@ -1448,7 +1448,7 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
         reply: Reply,
         ended: serve::Ended,
     ) -> Forward {
-        match self.route(&spec.class) {
+        match self.route_for(spec) {
             Ok(hex_runtime::guest::Side::Guest) => {
                 forward_guest(self.guest(), call, stdio, reply, ended)
             }

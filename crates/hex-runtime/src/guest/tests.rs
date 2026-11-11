@@ -107,9 +107,9 @@ fn a_source_maps_under_the_deepest_share_that_holds_it() {
 
 pub(super) fn oci(rootfs: Rootfs, mounts: Vec<Mount>) -> BoxSpec {
     BoxSpec {
-        route: None,
         devices: Vec::new(),
         allocation: None,
+        route: None,
         id: BoxId::new("box-1").unwrap(),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(OciSpec {
@@ -336,9 +336,9 @@ fn a_bundles_config_is_rewritten_to_the_guests_paths() {
     std::fs::write(bundle.join("config.json"), config.to_string()).unwrap();
     let shared = [share(0, "/etc", false), share(1, &base, false)];
     let spec = BoxSpec {
-        route: None,
         devices: Vec::new(),
         allocation: None,
+        route: None,
         id: BoxId::new("box-1").unwrap(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle.clone()),
@@ -450,9 +450,9 @@ fn where_shards_has_no_backend_the_class_is_refused_before_anything_boots() {
     assert!(why.contains("x86_64") && why.contains("Shards"), "{why}");
     assert_eq!(guests.boots.load(Ordering::SeqCst), 0);
     let process = BoxSpec {
-        route: None,
         devices: Vec::new(),
         allocation: None,
+        route: None,
         id: BoxId::new("p").unwrap(),
         bounds: Bounds::default(),
         class: ClassSpec::Process,
@@ -1353,7 +1353,12 @@ impl Link for CapacityLink {
     fn dial(&self, port: u32) -> Result<Box<dyn hex_client::guest::Duplex>, Refusal> {
         assert_eq!(port, stream::CONTROL_PORT);
         Ok(Box::new(ready_relay_with_answer(Some(
-            hex_core::wire::Answer::Capacity(self.0.clone()),
+            hex_core::wire::Answer::Capacity(
+                self.0
+                    .as_ref()
+                    .map(hex_api::Capacity::try_clone)
+                    .transpose()?,
+            ),
         ))))
     }
 }
@@ -1389,11 +1394,11 @@ fn runtime_capacity_forwards_guest_room_clamps_config_and_preserves_guest_disk()
     config.vcpus = 2;
     config.memory_mib = 632;
     let reported = hex_api::Capacity {
+        devices: Vec::new(),
+        cost: None,
         routes: Vec::new(),
         device_routes: Vec::new(),
         backings: Vec::new(),
-        devices: Vec::new(),
-        cost: None,
         id: "inner-node".into(),
         total: hex_api::CapacityResources {
             cpu_milli: 4_000,
@@ -1406,7 +1411,7 @@ fn runtime_capacity_forwards_guest_room_clamps_config_and_preserves_guest_disk()
             disk_bytes: 7 << 30,
         },
     };
-    let runtime = capacity_runtime(Some(reported.clone()), config);
+    let runtime = capacity_runtime(Some(reported.try_clone().unwrap()), config);
     let actual = runtime.capacity(Class::Oci).unwrap().unwrap();
     assert_eq!(actual.id, "guest:123:1230");
     assert_eq!(
@@ -1454,11 +1459,11 @@ fn runtime_capacity_keeps_smaller_actual_guest_room() {
     };
     let actual = guest_capacity(
         hex_api::Capacity {
+            devices: Vec::new(),
+            cost: None,
             routes: Vec::new(),
             device_routes: Vec::new(),
             backings: Vec::new(),
-            devices: Vec::new(),
-            cost: None,
             id: "inner".into(),
             total: room,
             free,

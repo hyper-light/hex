@@ -54,7 +54,11 @@ impl GuestRuntime {
     /// including CPU-only boxes, and selected guest OCI use this same Books owner.
     pub fn owns_record(&self, spec: &BoxSpec) -> bool {
         self.uses_books()
-            && (matches!(spec.class, ClassSpec::Shards(_)) || !spec.devices.is_empty())
+            && match spec.route_execution() {
+                Some(hex_api::Execution::ShardsDedicated) => true,
+                Some(_) => false,
+                None => matches!(spec.class, ClassSpec::Shards(_)) || !spec.devices.is_empty(),
+            }
     }
 
     pub fn with_runtime_cost(mut self, cost: hex_api::RuntimeCost) -> Result<Self, Refusal> {
@@ -75,6 +79,18 @@ impl GuestRuntime {
         cost.allocate(hex_api::CapacityResources::default())?;
         self.runtime_cost = Some(cost);
         Ok(self)
+    }
+
+    /// Factual fixed-VM allocation from the validated configured profile. An
+    /// initialized offer may describe it; only the canonical Index grant permits
+    /// boot. Aggregate shared payload must pass this allocation's check(sumU).
+    pub fn configured_allocation(&self) -> Result<hex_api::Allocation, Refusal> {
+        self.runtime_cost
+            .ok_or_else(|| Refusal::Invalid {
+                what: "Shards runtime cost",
+                why: "measured backend cost has not been initialized".into(),
+            })?
+            .allocate(hex_api::CapacityResources::default())
     }
 
     pub(super) fn check_allocation(&self, spec: &BoxSpec) -> Result<(), Refusal> {
@@ -173,6 +189,7 @@ impl GuestRuntime {
                 || info.id != id
                 || info.class != record.spec.class.class()
                 || info.allocation != record.spec.allocation
+                || info.route != record.spec.route
                 || record.init.is_none()
                 || record.native_scope.is_none()
             {
@@ -360,9 +377,6 @@ mod tests {
         }
         fn capacity(&self) -> Result<Capacity, Refusal> {
             Ok(Capacity {
-                routes: Vec::new(),
-                device_routes: Vec::new(),
-                backings: Vec::new(),
                 id: "model-host".into(),
                 total: CapacityResources {
                     cpu_milli: 8000,
@@ -376,6 +390,9 @@ mod tests {
                 },
                 devices: Vec::new(),
                 cost: None,
+                routes: Vec::new(),
+                device_routes: Vec::new(),
+                backings: Vec::new(),
             })
         }
         fn with_transaction(
@@ -477,6 +494,123 @@ mod tests {
         assert!(
             runtime.check_allocation(&spec).is_err(),
             "guest overhead cannot shrink the original cap"
+        );
+    }
+
+    /// AC-T7.4.1: host admission/execution provenance never enters the guest's
+    /// native OCI namespace. The canonical original and selected receipt retain it.
+    #[test]
+    fn inner_oci_clears_host_allocation_and_route_without_changing_original() {
+        let runtime = runtime();
+        let profile = cost(&runtime);
+        let mut spec = super::super::tests::oci(
+            hex_api::Rootfs::Dir(std::env::current_dir().unwrap().join("rootfs.tar")),
+            Vec::new(),
+        );
+        let ClassSpec::Oci(payload) = spec.class else {
+            panic!("OCI fixture")
+        };
+        spec.class = ClassSpec::Shards(payload);
+        spec.bounds.cpu_max_milli = Some(1);
+        spec.bounds.memory_max = Some(1);
+        spec.devices.push(hex_api::DeviceId {
+            kind: hex_api::DeviceKind::Gpu,
+            key: 256,
+        });
+        spec.allocation = Some(
+            profile
+                .allocate(CapacityResources {
+                    cpu_milli: 1,
+                    mem_bytes: 1,
+                    disk_bytes: 0,
+                })
+                .unwrap(),
+        );
+        spec.route = Some(hex_api::RouteReceipt {
+            key: hex_api::RouteKey {
+                class: Class::Shards,
+                image: hex_api::ImagePlatform {
+                    os: hex_api::ImageOs::Linux,
+                    arch: route::host_platform().unwrap().arch,
+                },
+                execution: hex_api::Execution::ShardsDedicated,
+                gpu: hex_api::GpuEligibility::Required,
+            },
+            backing: Some(hex_api::BackingKey {
+                pool: [3; 32],
+                generation: [4; 16],
+            }),
+        });
+        let original = spec.clone();
+        let mut record = BoxRecord::new(spec.clone(), Phase::Creating, Vec::new());
+        record.native_scope = Some(hex_core::record::NativeScope::from_bytes([7; 16]));
+        let retained = selected::Record::retained(&record).unwrap();
+        let rewritten = runtime.rewrite_spec(spec.clone()).unwrap();
+        assert!(matches!(rewritten.spec.class, ClassSpec::Oci(_)));
+        assert_eq!(rewritten.spec.allocation, None);
+        assert_eq!(rewritten.spec.route, None);
+        assert_eq!(rewritten.spec.bounds, original.bounds);
+        assert_eq!(rewritten.spec.devices, original.devices);
+        assert_eq!(spec, original);
+        assert_eq!(record.spec, original);
+        assert_eq!(retained.route, original.route);
+        let mut transplanted = original.clone();
+        transplanted
+            .route
+            .as_mut()
+            .unwrap()
+            .backing
+            .as_mut()
+            .unwrap()
+            .generation = [8; 16];
+        assert!(retained.matches(&transplanted).is_err());
+    }
+
+    /// AC-T7.4.1: a fixed VM's aggregate inner payload spends the original
+    /// backing once. The boundary includes both allowances and quantization.
+    #[test]
+    fn fixed_backing_accepts_below_exact_and_refuses_over_aggregate_payload_room() {
+        let runtime = runtime();
+        let profile = cost(&runtime);
+        let backing = profile.allocate(CapacityResources::default()).unwrap();
+        assert_eq!(
+            backing.guest().unwrap(),
+            runtime.dedicated_resources().unwrap()
+        );
+        let room = backing
+            .guest()
+            .unwrap()
+            .checked_sub(profile.guest_overhead)
+            .unwrap();
+        let below = CapacityResources {
+            mem_bytes: room.mem_bytes - 1,
+            ..room
+        };
+        for aggregate in [below, room] {
+            backing.check(aggregate).unwrap();
+            assert_eq!(profile.allocate(aggregate).unwrap(), backing);
+        }
+        for aggregate in [
+            CapacityResources {
+                cpu_milli: room.cpu_milli + 1,
+                ..room
+            },
+            CapacityResources {
+                mem_bytes: room.mem_bytes + 1,
+                ..room
+            },
+            CapacityResources {
+                disk_bytes: room.disk_bytes + 1,
+                ..room
+            },
+        ] {
+            assert!(backing.check(aggregate).is_err());
+        }
+        let mut dynamic = profile;
+        dynamic.ceiling.mem_bytes += dynamic.quantum.mem_bytes;
+        assert!(
+            runtime.with_runtime_cost(dynamic).is_err(),
+            "a larger possible VM is not this configured VM"
         );
     }
 

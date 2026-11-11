@@ -103,6 +103,8 @@ static ANSWERS: [Patience; KINDS] = [
         Some(Duration::from_nanos(14_254_417)),
     ),
     Patience::measuring("client.answer.physical_report"),
+    Patience::measuring("client.answer.initialize_backing"),
+    Patience::measuring("client.answer.release_backing"),
 ];
 
 /// A node agent, reached through its socket.

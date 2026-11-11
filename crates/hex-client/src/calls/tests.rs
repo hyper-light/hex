@@ -667,7 +667,7 @@ fn a_failed_offer_open_releases_the_remote_preparation_and_local_reservation() {
 #[test]
 fn runtime_capacity_wait_appends_without_moving_existing_indexes() {
     let waits = <Memory as Transport>::answers();
-    assert_eq!(KINDS, 25);
+    assert_eq!(KINDS, 27);
     for (request, index) in [
         (
             Request::Hello {
@@ -705,6 +705,18 @@ fn runtime_capacity_wait_appends_without_moving_existing_indexes() {
             "{request:?}"
         );
     }
+}
+
+/// AC-T7.4.1: pool lifecycle waits append after all existing transport operation seeds.
+#[test]
+fn backing_lifecycle_waits_append_without_reordering_old_operations() {
+    let key = hex_api::BackingKey { pool: [1; 32], generation: [2; 16] };
+    let fixed = hex_api::CapacityResources { cpu_milli: hex_api::MIN_CPU_MILLI.into(), mem_bytes: hex_api::MIN_MEMORY, disk_bytes: 0 };
+    let cost = hex_api::RuntimeCost { id: [3; 32], floor: fixed, ceiling: fixed, quantum: hex_api::CapacityResources { cpu_milli: 1, mem_bytes: 1, disk_bytes: 1 }, guest_overhead: hex_api::CapacityResources::default(), overhead: hex_api::CapacityResources::default() };
+    let grant = hex_api::BackingGrant { key, allocation: cost.allocate(hex_api::CapacityResources::default()).unwrap(), devices: Vec::new() };
+    let waits = <Memory as Transport>::answers();
+    assert!(std::ptr::eq(kind_of(waits, &Request::Call(Call::InitializeBacking(grant))).unwrap(), &waits[25]));
+    assert!(std::ptr::eq(kind_of(waits, &Request::Call(Call::ReleaseBacking(key))).unwrap(), &waits[26]));
 }
 
 /// AC-T7.4.1: the common synchronous timing point distinguishes an actual typed wire refusal.
