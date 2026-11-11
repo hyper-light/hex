@@ -100,7 +100,8 @@ pub struct MacRuntime {
     exec_limit: ExecLimit,
 }
 
-type NativeBoxes = Mutex<Vec<(OwnerKey, NativeArc<ProcessBox>)>>;
+type NativeBoxEntries = Vec<(OwnerKey, NativeArc<ProcessBox>)>;
+type NativeBoxes = Mutex<NativeBoxEntries>;
 
 fn native_owner_index(
     boxes: &[(OwnerKey, NativeArc<ProcessBox>)],
@@ -269,9 +270,7 @@ impl MacRuntime {
         )
     }
 
-    fn boxes(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, Vec<(OwnerKey, NativeArc<ProcessBox>)>>, Refusal> {
+    fn boxes(&self) -> Result<std::sync::MutexGuard<'_, NativeBoxEntries>, Refusal> {
         self.boxes
             .lock()
             .map_err(|_| Refusal::Broken("the node's box map lock is poisoned".to_owned()))

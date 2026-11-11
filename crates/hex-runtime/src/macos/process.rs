@@ -1885,27 +1885,6 @@ fn runnable(pid: i32) -> bool {
     sys::task(pid).map_or(true, |t| t.is_none_or(|t| t.runnable))
 }
 
-#[cfg(test)]
-mod storage_tests {
-    use super::*;
-
-    /// AC-T7.4.1/R01: a native member-storage refusal precedes mutation of existing membership.
-    #[test]
-    fn bounded_member_storage_preserves_the_existing_snapshot() {
-        let mut pids = Pids::new(2).unwrap();
-        pids.insert(9).unwrap();
-        pids.insert(3).unwrap();
-        pids.insert(3).unwrap();
-        assert_eq!(pids.values, [3, 9]);
-        assert!(pids.reserve(1).is_err());
-        assert_eq!(pids.values, [3, 9]);
-        assert!(pids.remove(&3));
-        pids.insert(4).unwrap();
-        assert_eq!(pids.values, [4, 9]);
-        assert!(Pids::new(usize::MAX).is_err());
-    }
-}
-
 /// Signals process `pid`; false when it is gone (ESRCH).
 fn signal_one(pid: i32, signal: rustix::process::Signal) -> Result<bool, Refusal> {
     let p = rustix::process::Pid::from_raw(pid).ok_or(Refusal::Invalid {
@@ -1933,5 +1912,26 @@ fn killpg(pgid: i32, signal: i32) -> Result<bool, Refusal> {
         Ok(()) => Ok(true),
         Err(rustix::io::Errno::SRCH) => Ok(false),
         Err(e) => Err(Refusal::os("killpg", e)),
+    }
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+
+    /// AC-T7.4.1/R01: a native member-storage refusal precedes mutation of existing membership.
+    #[test]
+    fn bounded_member_storage_preserves_the_existing_snapshot() {
+        let mut pids = Pids::new(2).unwrap();
+        pids.insert(9).unwrap();
+        pids.insert(3).unwrap();
+        pids.insert(3).unwrap();
+        assert_eq!(pids.values, [3, 9]);
+        assert!(pids.reserve(1).is_err());
+        assert_eq!(pids.values, [3, 9]);
+        assert!(pids.remove(&3));
+        pids.insert(4).unwrap();
+        assert_eq!(pids.values, [4, 9]);
+        assert!(Pids::new(usize::MAX).is_err());
     }
 }
