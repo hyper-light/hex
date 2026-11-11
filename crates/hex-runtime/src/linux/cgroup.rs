@@ -772,7 +772,13 @@ impl BoxCgroup {
     /// stay relative to this cgroup's pinned directory, so a new box at the same path cannot stand in for it.
     /// Other open/read failures, invalid text and oversized files remain refusals.
     pub fn populated_if_present(&self) -> Result<Option<bool>, Refusal> {
-        let fd = match self.open_file("cgroup.events", OFlags::RDONLY) {
+        self.populated_from(self.open_file("cgroup.events", OFlags::RDONLY))
+    }
+
+    /// [`BoxCgroup::populated_if_present`] from its events file's open, which a deterministic test stands
+    /// in for one a removal raced.
+    fn populated_from(&self, opened: rustix::io::Result<OwnedFd>) -> Result<Option<bool>, Refusal> {
+        let fd = match opened {
             Ok(fd) => fd,
             Err(rustix::io::Errno::NOENT) => return Ok(None),
             Err(e) => {
@@ -2069,6 +2075,31 @@ mod tests {
                     ..
                 })
             ));
+        }
+    }
+
+    /// HEX-RT-15: a run's cgroup removed between its listing and its events file's open. Kernfs refuses
+    /// the open of a node its removal deactivated with ENODEV (`kernfs_fop_open`), and a lookup in the
+    /// removed directory finds nothing (ENOENT). Do open as each; expect both absence, never a refusal of
+    /// the inspect, and permission, device I/O and descriptor exhaustion still refusals.
+    #[test]
+    fn population_opens_treat_only_removed_kernfs_errors_as_absence() {
+        use rustix::io::Errno;
+        let cg = BoxCgroup::at(p("box"));
+        for removed in [Errno::NODEV, Errno::NOENT] {
+            assert_eq!(cg.populated_from(Err(removed)), Ok(None), "{removed:?}");
+        }
+        for failed in [Errno::ACCESS, Errno::IO, Errno::MFILE] {
+            assert!(
+                matches!(
+                    cg.populated_from(Err(failed)),
+                    Err(Refusal::Os {
+                        op: "reading a cgroup file",
+                        ..
+                    })
+                ),
+                "{failed:?}"
+            );
         }
     }
 
