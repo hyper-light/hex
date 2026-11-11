@@ -884,3 +884,310 @@ fn physical_gpu_refusals_preserve_retry_category() {
         Refusal::Exhausted { what: "physical GPU selection storage", bound } if bound == shards_api::physical::MAX_PHYSICAL_GPUS)
     );
 }
+
+// Caller policies for these stand-ins, not production waits or calibration inputs.
+const CONNECT_CAP: Duration = Duration::from_millis(25);
+const CONNECT_OBSERVE: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Copy, Debug)]
+enum ConnectForm {
+    Ordinary,
+    Evented,
+}
+
+fn connect_form(
+    form: ConnectForm,
+    link: LinkOwner,
+    at: Instant,
+) -> Result<(Client, Option<Pump>), Refusal> {
+    match form {
+        ConnectForm::Ordinary => Client::connect_before(link, at).map(|client| (client, None)),
+        ConnectForm::Evented => Client::connect_evented_before(link, Arc::new(|| {}), at)
+            .map(|(client, pump)| (client, Some(pump))),
+    }
+}
+
+#[derive(Default)]
+struct ConnectTrace {
+    dials: Mutex<Vec<(u32, Option<Instant>)>>,
+    read: std::sync::atomic::AtomicUsize,
+    written: Mutex<Vec<u8>>,
+}
+
+struct ConnectLink {
+    socket: Mutex<Option<TcpStream>>,
+    budget: Option<Duration>,
+    trace: Arc<ConnectTrace>,
+}
+
+impl Link for ConnectLink {
+    fn reply_budget(&self) -> Option<Duration> {
+        self.budget
+    }
+
+    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+        self.dial_before(port, None)
+    }
+
+    fn dial_before(&self, port: u32, at: Option<Instant>) -> Result<Box<dyn Duplex>, Refusal> {
+        self.trace.dials.lock().unwrap().push((port, at));
+        let socket = self
+            .socket
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| Refusal::Broken("constructor probe has no connection".into()))?;
+        Ok(Box::new(ConnectSocket {
+            socket,
+            trace: Arc::clone(&self.trace),
+        }))
+    }
+}
+
+struct ConnectSocket {
+    socket: TcpStream,
+    trace: Arc<ConnectTrace>,
+}
+
+impl Read for ConnectSocket {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        let n = self.socket.read(bytes)?;
+        self.trace
+            .read
+            .fetch_add(n, std::sync::atomic::Ordering::SeqCst);
+        Ok(n)
+    }
+}
+
+impl Write for ConnectSocket {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let n = self.socket.write(bytes)?;
+        self.trace
+            .written
+            .lock()
+            .unwrap()
+            .extend_from_slice(&bytes[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.socket.flush()
+    }
+}
+
+impl Duplex for ConnectSocket {
+    fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
+        Ok(Box::new(Self {
+            socket: self.socket.try_clone()?,
+            trace: Arc::clone(&self.trace),
+        }))
+    }
+
+    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        self.socket.shutdown(how)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.socket.set_write_timeout(timeout)
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.socket.set_read_timeout(timeout)
+    }
+
+    fn handle(&self) -> Handle<'_> {
+        Duplex::handle(&self.socket)
+    }
+
+    fn set_nonblocking(&self, on: bool) -> io::Result<()> {
+        self.socket.set_nonblocking(on)
+    }
+}
+
+fn connect_link(
+    socket: Option<TcpStream>,
+    budget: Option<Duration>,
+) -> (LinkOwner, Arc<ConnectTrace>) {
+    let trace = Arc::new(ConnectTrace::default());
+    let link = own_link(ConnectLink {
+        socket: Mutex::new(socket),
+        budget,
+        trace: Arc::clone(&trace),
+    })
+    .unwrap();
+    (link, trace)
+}
+
+fn connect_pair() -> (TcpStream, TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client =
+        TcpStream::connect_timeout(&listener.local_addr().unwrap(), CONNECT_OBSERVE).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (peer, _) = listener.accept().unwrap();
+    (client, peer)
+}
+
+fn constructor_hello(trace: &ConnectTrace) -> Header {
+    let written = trace.written.lock().unwrap();
+    let mut decoder = Deframer::new(wire::MAX_MESSAGE);
+    let (took, message) = decoder.take(&written).unwrap();
+    assert_eq!(took, written.len());
+    let (header, request) = wire::read_request_apart(&message.unwrap(), wire::MAX_MESSAGE).unwrap();
+    assert!(matches!(request, Request::Hello { build } if build == wire::build()));
+    header
+}
+
+/// AC-T7.4.1: both public constructors reject expired/invalid authority before dial,
+/// preserve an exact absolute instant with no Link budget, and honor a smaller configured cap.
+#[test]
+fn absolute_connect_rejects_before_dial_and_preserves_smaller_caps() {
+    for form in [ConnectForm::Ordinary, ConnectForm::Evented] {
+        let (link, trace) = connect_link(None, None);
+        let expired = connect_form(form, link, Instant::now()).map(drop);
+        assert!(matches!(expired, Err(Refusal::Os { .. })), "{expired:?}");
+        assert!(trace.dials.lock().unwrap().is_empty());
+
+        for invalid in [Duration::ZERO, Duration::MAX] {
+            let (link, trace) = connect_link(None, Some(invalid));
+            let at = Instant::now().checked_add(CONNECT_OBSERVE).unwrap();
+            let refused = connect_form(form, link, at).map(drop);
+            assert!(
+                matches!(
+                    refused,
+                    Err(Refusal::Invalid {
+                        what: "client reply budget",
+                        ..
+                    })
+                ),
+                "{refused:?}"
+            );
+            assert!(trace.dials.lock().unwrap().is_empty());
+        }
+
+        let (link, trace) = connect_link(None, None);
+        let at = Instant::now().checked_add(CONNECT_OBSERVE).unwrap();
+        let refused = connect_form(form, link, at).map(drop);
+        assert!(matches!(refused, Err(Refusal::Broken(_))));
+        assert_eq!(
+            *trace.dials.lock().unwrap(),
+            [(stream::CONTROL_PORT, Some(at))]
+        );
+
+        let (link, trace) = connect_link(None, Some(CONNECT_CAP));
+        let at = Instant::now().checked_add(CONNECT_OBSERVE).unwrap();
+        let before = Instant::now();
+        let refused = connect_form(form, link, at).map(drop);
+        let after = Instant::now();
+        assert!(matches!(refused, Err(Refusal::Broken(_))));
+        let dials = trace.dials.lock().unwrap();
+        assert_eq!(dials.len(), 1);
+        let (port, selected) = dials[0];
+        let selected = selected.unwrap();
+        assert_eq!(port, stream::CONTROL_PORT);
+        assert!(before.checked_add(CONNECT_CAP).unwrap() <= selected);
+        assert!(selected <= after.checked_add(CONNECT_CAP).unwrap());
+        assert!(selected < at);
+    }
+}
+
+/// AC-T7.4.1: actual partial token reads and the hello send/wait consume the same
+/// original cap even when Link has no default budget. Both constructor forms are covered.
+#[test]
+fn absolute_connect_caps_partial_token_and_unanswered_hello() {
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+
+    for form in [ConnectForm::Ordinary, ConnectForm::Evented] {
+        for whole_token in [false, true] {
+            let (socket, mut peer) = connect_pair();
+            let token = TOKEN.to_le_bytes();
+            let prefix = if whole_token { &token[..] } else { &token[..1] };
+            peer.write_all(prefix).unwrap();
+            let (link, trace) = connect_link(Some(socket), None);
+            let at = Instant::now().checked_add(CONNECT_CAP).unwrap();
+            let (finished, answer) = mpsc::sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                let result = connect_form(form, link, at).map(drop);
+                let _ = finished.send((Instant::now(), result));
+            });
+            // No assertion may bypass this owned socket close and actor join.
+            let observed = answer.recv_timeout(CONNECT_OBSERVE);
+            let stopped = peer.shutdown(Shutdown::Both);
+            drop(peer);
+            let joined = worker.join();
+            let read = trace.read.load(Ordering::SeqCst);
+            eprintln!(
+                "client_connect_absolute form={form:?} whole_token={whole_token} at={at:?} observed={observed:?} read={read} stopped={stopped:?} joined={}",
+                joined.is_ok()
+            );
+            joined.unwrap();
+            let (_, result) = observed.expect("constructor did not return before owned cleanup");
+            assert_eq!(
+                read,
+                prefix.len(),
+                "missing actual read progress is a harness miss"
+            );
+            assert!(matches!(result, Err(Refusal::Os { .. })), "{result:?}");
+            assert_eq!(
+                *trace.dials.lock().unwrap(),
+                [(stream::CONTROL_PORT, Some(at))]
+            );
+            if whole_token {
+                constructor_hello(&trace);
+            } else {
+                assert!(trace.written.lock().unwrap().is_empty());
+            }
+        }
+    }
+}
+
+/// AC-T7.4.1: a complete real hello reaches both constructors; the event form keeps
+/// the same Link owner in its existing Pump and stores no caller deadline as a lifetime cap.
+#[test]
+fn absolute_connect_completes_and_evented_retains_the_same_link() {
+    use std::sync::mpsc;
+
+    for form in [ConnectForm::Ordinary, ConnectForm::Evented] {
+        let (socket, mut peer) = connect_pair();
+        peer.write_all(&TOKEN.to_le_bytes()).unwrap();
+        // The fresh Shared's first request is 1; independently decode its actual Hello below.
+        send_answer(&mut peer, 1, &Answer::Hello(agents_hello()));
+        let (link, trace) = connect_link(Some(socket), None);
+        let same_link = triomphe::Arc::clone(&link);
+        let at = Instant::now().checked_add(CONNECT_OBSERVE).unwrap();
+        let (finished, answer) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let result = connect_form(form, link, at).map(|(client, pump)| {
+                let evented = pump.as_ref().map(|pump| {
+                    (
+                        triomphe::Arc::ptr_eq(&pump.shared.transport.link, &same_link),
+                        pump.shared.transport.reply_budget,
+                        pump.shared.transport.token,
+                    )
+                });
+                (client.classes(), evented)
+            });
+            let _ = finished.send(result);
+        });
+        let observed = answer.recv_timeout(CONNECT_OBSERVE);
+        let stopped = peer.shutdown(Shutdown::Both);
+        drop(peer);
+        let joined = worker.join();
+        eprintln!(
+            "client_connect_positive form={form:?} at={at:?} observed={observed:?} stopped={stopped:?} joined={}",
+            joined.is_ok()
+        );
+        joined.unwrap();
+        let (classes, evented) = observed.unwrap().unwrap();
+        assert_eq!(classes, vec![Class::Oci]);
+        match form {
+            ConnectForm::Ordinary => assert_eq!(evented, None),
+            ConnectForm::Evented => assert_eq!(evented, Some((true, None, TOKEN))),
+        }
+        assert_eq!(constructor_hello(&trace).id, 1);
+        assert_eq!(
+            *trace.dials.lock().unwrap(),
+            [(stream::CONTROL_PORT, Some(at))]
+        );
+    }
+}

@@ -1807,26 +1807,28 @@ mod tests {
     #[test]
     fn managed_metadata_keeps_pinned_identity_and_required_read_failures() {
         fn files(dir: &Path) {
+            let memory = format!("{}\n", hex_api::MIN_MEMORY);
             for (file, text) in [
                 ("cgroup.procs", "11\n5\n"),
                 ("cpu.max", "100000 100000\n"),
-                ("memory.max", "8192\n"),
+                ("memory.max", memory.as_str()),
                 ("memory.swap.max", "0\n"),
                 ("pids.max", "4\n"),
             ] {
                 fs::write(dir.join(file), text).unwrap();
             }
         }
+        let bounds = Bounds {
+            cpu_max_milli: Some(1000),
+            memory_max: Some(hex_api::MIN_MEMORY),
+            pids_max: Some(4),
+            ..Bounds::default()
+        };
+        bounds.check().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("managed");
         fs::create_dir(&dir).unwrap();
         files(&dir);
-        let bounds = Bounds {
-            cpu_max_milli: Some(1000),
-            memory_max: Some(8192),
-            pids_max: Some(4),
-            ..Bounds::default()
-        };
         let cg = pinned_managed_cgroup(&dir);
         assert_eq!(cg.managed_procs().unwrap(), [5, 11]);
         cg.check_managed_bounds(&bounds).unwrap();

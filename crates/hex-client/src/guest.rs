@@ -758,6 +758,19 @@ impl Client {
         )
     }
 
+    /// Dials, reads the relay token and says hello within the caller's original absolute
+    /// deadline. A smaller configured or learned wait still wins. The resulting connection
+    /// has no lifetime deadline; later bounded operations take their own original deadline.
+    pub fn connect_before(link: LinkOwner, deadline: Instant) -> Result<Self, Refusal> {
+        let budget = link.reply_budget();
+        let deadline =
+            ReplyDeadline::caller_before(deadline)?.limited_by(ReplyDeadline::caller(budget)?);
+        Core::hello_before(
+            Shared::try_new(Stream::dial_before(link, budget, Some(deadline))?)?,
+            Some(deadline),
+        )
+    }
+
     /// The event form ([`Pump`]): dials the guest's node agent through `link` and says hello, its answer read by
     /// the hello itself, then hands back the client and its reading side, which no thread reads: the caller's loop
     /// waits on [`Pump::handle`] and calls [`Pump::ready`]. Calls made with [`Core::begin`] are answered from there.
@@ -769,6 +782,28 @@ impl Client {
     ) -> Result<(Self, Pump), Refusal> {
         let budget = link.reply_budget();
         let deadline = ReplyDeadline::caller(budget)?;
+        Self::evented(link, wants_room, budget, deadline)
+    }
+
+    /// The same event form and pump, with one original absolute deadline for dial, relay
+    /// token and hello. The deadline does not remain on the connection or its event loop.
+    pub fn connect_evented_before(
+        link: LinkOwner,
+        wants_room: Arc<dyn Fn() + Send + Sync>,
+        deadline: Instant,
+    ) -> Result<(Self, Pump), Refusal> {
+        let budget = link.reply_budget();
+        let deadline =
+            ReplyDeadline::caller_before(deadline)?.limited_by(ReplyDeadline::caller(budget)?);
+        Self::evented(link, wants_room, budget, Some(deadline))
+    }
+
+    fn evented(
+        link: LinkOwner,
+        wants_room: Arc<dyn Fn() + Send + Sync>,
+        budget: Option<Duration>,
+        deadline: Option<ReplyDeadline>,
+    ) -> Result<(Self, Pump), Refusal> {
         let shared = Shared::try_new(Stream::dial_before(link, budget, deadline)?)?;
         let client = Core::hello_before(triomphe::Arc::clone(&shared), deadline)?;
         let limits = client.limits();

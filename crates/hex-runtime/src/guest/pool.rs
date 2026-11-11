@@ -109,13 +109,12 @@ impl Receipt {
             }
             readiness.check(self.original.scope(), self.physical.len())?;
         }
-        if let Some(attempt) = &self.attempt {
-            if self.physical.is_empty()
+        if let Some(attempt) = &self.attempt
+            && (self.physical.is_empty()
                 || attempt.configuration == [0; 32]
-                || attempt.max_queues == 0
-            {
-                return Err(bad());
-            }
+                || attempt.max_queues == 0)
+        {
+            return Err(bad());
         }
         Ok(())
     }

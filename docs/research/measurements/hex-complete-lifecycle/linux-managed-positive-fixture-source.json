@@ -1,0 +1,8 @@
+{
+  "status": "SOURCE ONLY correction to ACTUAL807 positive-fixture construction failure",
+  "base": "c6e7821baf3604664b9ec86c35dbb53f256a245c",
+  "original": "807Linux actual original-sink-after1PASS and new creation/population/observation/membership/ratio5PASS; strict managed_metadata1 failed before behavior because memory_max8192 <existing1048576. Log989a189c12da6acf2cc3edbfcd08dbcec5c70f6376ffbb2fd019f9a62b8903e2. Nodecold5 UNEXEC on separate ROOT ignored-gate reportNone fixture compile causes.",
+  "change": "ONLY managed_metadata positive native memory.max fixture and Bounds.memory_max now same existing hex_api::MIN_MEMORY; bounds.check before any directory/file mutation. Passed ratio fixture8192 byte-identical; production unchanged.",
+  "checks": "No L3 check/native; ROOT changed1 successor required, no unchanged6 rerun.",
+  "policy": "7d7e0855/rulesdf2 implementer; explicit narrow fixture ACK"
+}

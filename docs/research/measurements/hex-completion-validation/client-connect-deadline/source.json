@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "role": "implementer",
+  "parent": "e852c1b5ba9e1e2c8eb122dfb5817cd4dc339748",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": [
+    {
+      "path": "crates/hex-client/src/calls.rs",
+      "bytes": 105809,
+      "sha256": "c8be19d3ccc38bcdd0dd3803a01ed02b0ab2ca343c5de19e50368f5a61a21d07",
+      "parent_sha256": "a4b1f9fcfe8fc0dff0a2bb6036f7ef589a9ef7365306674e2dc159a485a10ed6",
+      "unchanged": false
+    },
+    {
+      "path": "crates/hex-client/src/guest.rs",
+      "bytes": 34556,
+      "sha256": "2ef517db4289f03b13536860fa8ede1a606b9017b2edbcb623975710978f1aad",
+      "parent_sha256": "6a9410629157e85ec4ddc507a09e34ac82e275c6ca9f28323e5145cb50a16c7c",
+      "unchanged": false
+    }
+  ],
+  "protected": [
+    {
+      "path": "crates/hex-client/src/calls/budget_tests.rs",
+      "bytes": 62114,
+      "sha256": "9e49002f5ae2866ac9f523a231cf2abc4ffc365c5309a5cefeccb0854a848461",
+      "parent_sha256": "9e49002f5ae2866ac9f523a231cf2abc4ffc365c5309a5cefeccb0854a848461",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/linux.rs",
+      "bytes": 10253,
+      "sha256": "173f09b21390698ba1d50641e289a017af14226bd6962b5e2e05ffd8cb9a124d",
+      "parent_sha256": "173f09b21390698ba1d50641e289a017af14226bd6962b5e2e05ffd8cb9a124d",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/macos.rs",
+      "bytes": 12224,
+      "sha256": "54283c653f14360c0c2397c8862ad1d820da03053f79d0effde1b49f35a93c23",
+      "parent_sha256": "54283c653f14360c0c2397c8862ad1d820da03053f79d0effde1b49f35a93c23",
+      "unchanged": true
+    },
+    {
+      "path": "crates/hex-client/src/windows.rs",
+      "bytes": 9319,
+      "sha256": "1d5a98755b0439d38844c8a36a730dfc98c4fb01e626d87202e0900be421ee23",
+      "parent_sha256": "1d5a98755b0439d38844c8a36a730dfc98c4fb01e626d87202e0900be421ee23",
+      "unchanged": true
+    }
+  ],
+  "builds_executed": 0,
+  "tests_executed": 0,
+  "native_executed": 0,
+  "checks_owner": "ROOT",
+  "status": "source-only; three appended constructor controls defined, zero executed",
+  "owned_control_source": {
+    "path": "crates/hex-client/src/guest/tests.rs",
+    "bytes": 42096,
+    "sha256": "d07624dab713e61c5b239fa8a9226dfbe5b39f023d13de46aa7e3f23cc9f570d",
+    "original_prefix_bytes": 30997,
+    "original_prefix_sha256": "8a6a0350d0139227686838ab31af5fdc902b1ddb564accfc00e22c1b76aaf70e",
+    "append_only": true
+  }
+}

@@ -547,9 +547,10 @@ pub(super) fn parse_report(
     let bound = shards_api::physical::report_bytes(physical.len())
         .map_err(|_| invalid("GPU report count exceeds its checked bound"))?;
     let maximum = bound.checked_mul(2).ok_or_else(|| allocation(bound))?;
+    let (pairs, tail) = text.as_bytes().as_chunks::<2>();
     if text.is_empty()
         || text.len() > maximum
-        || text.len().checked_rem(2) != Some(0)
+        || !tail.is_empty()
         || !text.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
         return Err(invalid("GPU report has malformed or excessive bytes"));
@@ -558,7 +559,7 @@ pub(super) fn parse_report(
     bytes
         .try_reserve_exact(text.len().checked_div(2).ok_or_else(|| allocation(bound))?)
         .map_err(|_| allocation(bound))?;
-    for pair in text.as_bytes().chunks_exact(2) {
+    for pair in pairs {
         let pair = std::str::from_utf8(pair).map_err(|_| invalid("GPU report is not ASCII hex"))?;
         bytes
             .push(u8::from_str_radix(pair, 16).map_err(|_| invalid("GPU report has invalid hex"))?);

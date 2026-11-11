@@ -153,7 +153,7 @@ impl ReplyDeadline {
         }))
     }
 
-    fn caller_before(at: Instant) -> Result<Self, Refusal> {
+    pub(crate) fn caller_before(at: Instant) -> Result<Self, Refusal> {
         let deadline = Self {
             at,
             source: ReplyBound::CallerAbsolute,
@@ -162,7 +162,7 @@ impl ReplyDeadline {
         Ok(deadline)
     }
 
-    fn limited_by(self, configured: Option<Self>) -> Self {
+    pub(crate) fn limited_by(self, configured: Option<Self>) -> Self {
         match configured {
             Some(configured) if configured.at < self.at => configured,
             _ => self,
