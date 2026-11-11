@@ -857,6 +857,155 @@ fn a_dial_the_guest_takes_and_never_answers_is_refused_at_its_deadline() {
     );
 }
 
+/// HEX-RT-17, AC-T7.4.1 (CLAUDE.md §2): open an offered guest exec's stdin and stdout as a Windows caller does,
+/// through Shards' borrowed connector, against a stand-in VM process and its vsock muxer. One muxer answers each
+/// CONNECT with OK a moment after reading it, under a deadline the test never reaches; another never answers, under
+/// a near one. Expect the first opened, each stream named for the exec and the caller's ends blocking; the second
+/// refused by type in its CONNECT's read phase, never left waiting.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_offered_streams_connect_waits_for_its_ok_within_the_calls_deadline() {
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::process::{Command, Stdio};
+
+    // Each connection's CONNECT line and, once it is answered, its name; the answered ones, held open.
+    fn muxer(
+        listener: UnixListener,
+        answer: Option<Duration>,
+    ) -> std::thread::JoinHandle<(Vec<Vec<u8>>, Vec<UnixStream>)> {
+        std::thread::spawn(move || {
+            let (mut heard, mut held) = (Vec::new(), Vec::new());
+            for _ in 0..2 {
+                let (mut conn, _) = listener.accept().unwrap();
+                let mut line = Vec::new();
+                while line.last() != Some(&b'\n') {
+                    let mut byte = [0u8; 1];
+                    conn.read_exact(&mut byte).unwrap();
+                    line.push(byte[0]);
+                }
+                let Some(after) = answer else {
+                    // Silent: held until the client gives up and closes.
+                    let _ = conn.read(&mut [0u8; 1]);
+                    heard.push(line);
+                    return (heard, held);
+                };
+                // The OK only once `after` has passed, unless the client gives up and closes first.
+                let at = Instant::now().checked_add(after).unwrap();
+                loop {
+                    let left = at.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        break;
+                    }
+                    conn.set_read_timeout(Some(left)).unwrap();
+                    match rustix::net::recv(&conn, &mut [0u8; 1], rustix::net::RecvFlags::PEEK) {
+                        Ok((0, _)) => {
+                            heard.push(line);
+                            return (heard, held);
+                        }
+                        Ok(_) => panic!("the client wrote before its CONNECT's OK"),
+                        Err(e) => assert!(
+                            e == rustix::io::Errno::AGAIN || e == rustix::io::Errno::INTR,
+                            "{e}"
+                        ),
+                    }
+                }
+                conn.set_read_timeout(None).unwrap();
+                conn.write_all(b"OK 1\n").unwrap();
+                let mut name = [0u8; stream::NAME_BYTES];
+                conn.read_exact(&mut name).unwrap();
+                line.extend_from_slice(&name);
+                heard.push(line);
+                held.push(conn);
+            }
+            (heard, held)
+        })
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut vm = Command::new("cat")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    // proc(5): starttime is field 22, the 20th after the command's closing parenthesis.
+    let stat = std::fs::read(format!("/proc/{}/stat", vm.id())).unwrap();
+    let after = stat.iter().rposition(|b| *b == b')').unwrap() + 1;
+    let started: u64 = std::str::from_utf8(&stat[after..])
+        .unwrap()
+        .split_ascii_whitespace()
+        .nth(19)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let offer = |vsock: std::path::PathBuf| wire::StreamOffer {
+        pid: vm.id(),
+        started,
+        vsock,
+        token: TOKEN,
+        exec: 9,
+        streams: wire::Streams {
+            stdin: true,
+            stdout: true,
+            stderr: false,
+        },
+    };
+    let answering = dir.path().join("a");
+    let answered = muxer(UnixListener::bind(&answering).unwrap(), Some(CONNECT_CAP));
+    let far = ReplyDeadline::caller_before(Instant::now() + Duration::from_secs(30)).unwrap();
+    let opened = open_offered(&offer(answering), Some(far));
+    let (heard, held) = answered.join().unwrap();
+    let silent_path = dir.path().join("s");
+    let silent = muxer(UnixListener::bind(&silent_path).unwrap(), None);
+    let near = ReplyDeadline::caller_before(Instant::now() + CONNECT_CAP).unwrap();
+    let refused = open_offered(&offer(silent_path), Some(near));
+    let (unanswered, _) = silent.join().unwrap();
+    drop(vm.stdin.take());
+    let reaped = vm.wait();
+    let named = |stream| {
+        let mut line = format!("CONNECT {}\n", stream::STDIO_PORT).into_bytes();
+        line.extend_from_slice(&stream::name(Named {
+            exec: Exec { conn: TOKEN, id: 9 },
+            stream,
+        }));
+        line
+    };
+    let blocking = |end: &Option<hex_api::End>| {
+        end.as_ref().is_some_and(|end| {
+            !rustix::fs::fcntl_getfl(end)
+                .unwrap()
+                .contains(rustix::fs::OFlags::NONBLOCK)
+        })
+    };
+    eprintln!(
+        "hex_rt_17_offered opened={opened:?} heard={} refused={refused:?} unanswered={} reaped={reaped:?}",
+        heard.len(),
+        unanswered.len()
+    );
+    let given = opened.expect("an answered offer's streams, opened");
+    assert!(blocking(&given.stdin) && blocking(&given.stdout) && given.stderr.is_none());
+    assert_eq!(heard, [named(stream::Stdio::In), named(stream::Stdio::Out)]);
+    assert!(
+        matches!(
+            refused,
+            Err(Refusal::Connect {
+                port: stream::STDIO_PORT,
+                failure: hex_api::ConnectFailure::Expired {
+                    phase: hex_api::ConnectPhase::Read
+                } | hex_api::ConnectFailure::Io {
+                    phase: hex_api::ConnectPhase::Read,
+                    ..
+                },
+            })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        unanswered,
+        [format!("CONNECT {}\n", stream::STDIO_PORT).into_bytes()]
+    );
+    drop(held);
+}
+
 /// HEX-RT-17, HEX-GUEST-41: ask an actual Shards simulator for stdin and stdout, then use their raw descriptors as
 /// the caller's files. Expect blocking ends that echo to EOF, while the control connection remains non-blocking.
 /// Shards waits around its non-blocking kernel sockets in its Stream wrapper; that wrapper is gone at handoff.
@@ -1124,8 +1273,10 @@ fn physical_gpu_refusals_preserve_retry_category() {
 }
 
 /// AC-T7.4.1 (Shards R04): pass Shards' CONNECT failure in every phase and cause through the
-/// adapter: expect Hex's typed refusal with the same port, phase, cause and raw code, a kind Hex has
-/// no tag for unnamed (never `Other`), and Shards' text-only channel refusal still an OS refusal.
+/// adapter, an owned guest's (`Connect`) and a borrowed one's (`Borrowed`'s channel, as a Windows
+/// caller opens an offered stream): expect Hex's typed refusal with the same port, phase, cause and
+/// raw code, a kind Hex has no tag for unnamed (never `Other`), and Shards' text-only channel
+/// refusal still an OS refusal.
 #[test]
 fn shards_connect_failures_keep_port_phase_cause_and_code() {
     use hex_api::{ConnectFailure, ConnectPhase, ConnectReply, IoKind};
@@ -1181,6 +1332,10 @@ fn shards_connect_failures_keep_port_phase_cause_and_code() {
         ));
     }
     for (failure, expected) in cases {
+        let borrowed = shards_api::Refusal::Borrowed {
+            port: 78,
+            failure: shards_api::BorrowFailure::Channel(failure.clone()),
+        };
         let connect = shards_api::Refusal::Connect { port: 77, failure };
         assert_eq!(
             shards::refusal("connecting to the guest", &connect),
@@ -1189,6 +1344,14 @@ fn shards_connect_failures_keep_port_phase_cause_and_code() {
                 failure: expected,
             },
             "{connect:?}"
+        );
+        assert_eq!(
+            shards::refusal("opening an offered guest stream", &borrowed),
+            Refusal::Connect {
+                port: 78,
+                failure: expected,
+            },
+            "{borrowed:?}"
         );
     }
     assert_ne!(IoKind::new(untagged), IoKind::new(io::ErrorKind::Other));
