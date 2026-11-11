@@ -15,6 +15,7 @@ hex-health.workspace = true
 hyper-swim.workspace = true
 hyper-timing.workspace = true
 thiserror.workspace = true
+triomphe.workspace = true
 
 [dev-dependencies]
 # AC-T7.11.4's counting allocator (tests/memory.rs): a safe count of live heap bytes over System.

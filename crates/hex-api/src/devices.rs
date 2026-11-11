@@ -145,6 +145,23 @@ impl PhysicalReport {
 }
 
 impl DeviceInfo {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        let mut model = String::new();
+        model
+            .try_reserve_exact(self.model.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "device model",
+                bound: self.model.len(),
+            })?;
+        model.push_str(&self.model);
+        Ok(Self {
+            id: self.id,
+            model,
+            size: self.size,
+            holder: self.holder.as_ref().map(BoxId::try_clone).transpose()?,
+        })
+    }
+
     pub fn check(&self) -> Result<(), Refusal> {
         self.id.check()
     }
@@ -241,11 +258,15 @@ mod tests {
             owner: None,
             devices,
             allocation: None,
+            route: None,
         }
     }
 
     fn capacity(devices: Vec<DeviceInfo>) -> Capacity {
         Capacity {
+            routes: Vec::new(),
+            device_routes: Vec::new(),
+            backings: Vec::new(),
             id: "device-pool".to_owned(),
             total: CapacityResources::default(),
             free: CapacityResources::default(),

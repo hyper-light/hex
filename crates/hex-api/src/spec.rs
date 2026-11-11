@@ -8,7 +8,7 @@ use crate::runtime::{Allocation, CapacityResources};
 use crate::{Bounds, BoxId, DeviceId, Refusal};
 
 /// What a box holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Class {
     /// Host processes in a resource bound: a cgroup on Linux, QoS and limits on macOS, a job object
@@ -50,14 +50,55 @@ pub struct BoxSpec {
     /// per-box runtime costs in the existing resource ledger until physical termination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allocation: Option<Allocation>,
+    /// Actual initialized execution selected before admission, beside the original workload form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<crate::runtime::RouteReceipt>,
 }
 
 impl BoxSpec {
+    pub fn route_execution(&self) -> Option<crate::runtime::Execution> {
+        self.route.map(|receipt| receipt.key.execution)
+    }
+
+    /// Resolve only the original form or its validated immutable execution receipt.
+    pub fn backend_class(&self) -> Result<Class, Refusal> {
+        self.check()?;
+        Ok(match self.route_execution() {
+            None | Some(crate::runtime::Execution::Native) => self.class.class(),
+            Some(
+                crate::runtime::Execution::ShardsShared
+                | crate::runtime::Execution::ShardsDedicated,
+            ) => Class::Shards,
+            Some(crate::runtime::Execution::Firecracker) => Class::Firecracker,
+        })
+    }
+
     /// Whether every value it names is well formed, before anything is made: its bounds, its owner and
     /// a structured container's spec, each refused by its field's name (CLAUDE.md §3).
     pub fn check(&self) -> Result<(), Refusal> {
         self.bounds.check()?;
         self.check_devices()?;
+        if let Some(route) = self.route {
+            route.check(
+                self.class.class(),
+                self.devices
+                    .iter()
+                    .any(|device| device.kind == crate::DeviceKind::Gpu),
+            )?;
+            if matches!(
+                route.key.execution,
+                crate::runtime::Execution::ShardsDedicated | crate::runtime::Execution::Firecracker
+            ) && (self.allocation.is_none()
+                || self.bounds.cpu_max_milli.is_none()
+                || self.bounds.memory_max.is_none())
+            {
+                return Err(Refusal::Invalid {
+                    what: "runtime route allocation",
+                    why: "dedicated execution requires finite original CPU/memory caps and its admitted allocation".into(),
+                });
+            }
+        }
+
         if let Some(allocation) = self.allocation {
             allocation.covers(CapacityResources {
                 cpu_milli: self.bounds.cpu_max_milli.map_or(0, u64::from),
@@ -967,6 +1008,7 @@ mod tests {
                 class: make(Box::new(spec())),
                 owner: None,
                 allocation: None,
+                route: None,
                 devices: vec![DeviceId {
                     kind: crate::DeviceKind::Gpu,
                     key: u64::MAX,

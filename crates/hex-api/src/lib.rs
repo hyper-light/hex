@@ -34,8 +34,10 @@ pub use bounds::{Bounds, IoRates, MIN_CPU_MILLI, MIN_MEMORY};
 pub use devices::{DeviceId, DeviceInfo, DeviceKind, MAX_DEVICES, PhysicalDevice, PhysicalReport};
 pub use id::BoxId;
 pub use runtime::{
-    Allocation, Asked, BoxInfo, BoxState, Capacity, CapacityResources, Exit, LifecycleCause,
-    Membership, Proc, Refusal, Runtime, RuntimeCost, Signal, Usage,
+    Allocation, Asked, BackingGrant, BackingKey, BackingOffer, BackingPhase, BoxInfo, BoxState,
+    Capacity, CapacityResources, Execution, Exit, GpuEligibility, ImageArch, ImageOs,
+    ImagePlatform, LifecycleCause, MAX_RUNTIME_ROUTES, Membership, Proc, Refusal, RouteKey,
+    RouteOffer, RouteReceipt, Runtime, RuntimeCost, Signal, Usage,
 };
 pub use spec::{
     Ask, BlockCount, BoxOwner, BoxSpec, Class, ClassSpec, End, ExecLimit, Given, Mount, Network,

@@ -173,6 +173,7 @@ impl SimRuntime {
             },
             bounds: b.spec.bounds.clone(),
             allocation: b.spec.allocation,
+            route: b.spec.route,
             adopted: false,
             exit,
             // A simulated program has no caller to lose: only the node agent's socket abandons one.
@@ -574,6 +575,7 @@ impl Fixture for SimFixture {
         BoxSpec {
             devices: Vec::new(),
             allocation: None,
+            route: None,
             id,
             bounds,
             class: match self {
@@ -588,6 +590,7 @@ impl Fixture for SimFixture {
         BoxSpec {
             devices: Vec::new(),
             allocation: None,
+            route: None,
             id,
             bounds: Bounds::default(),
             class: match self {

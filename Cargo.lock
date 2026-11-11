@@ -436,6 +436,7 @@ dependencies = [
  "proptest",
  "serde",
  "thiserror",
+ "triomphe",
 ]
 
 [[package]]
