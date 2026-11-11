@@ -1,0 +1,79 @@
+{
+  "bytes": 618539,
+  "sha256": "df368c506a25ca66d1b5abe73d79b4cde2e15382d00ef5b950f4f45836de4f9f",
+  "members": {
+    "cohort-9b44967e-linux-settle-original-9b44/source-before.json": {
+      "bytes": 452354,
+      "sha256": "beaf568fec87aa66088ffc277ceff93de30f7980bd4d6686daa6a272cc9f7cb4"
+    },
+    "cohort-9b44967e-linux-settle-original-9b44/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-9b44967e-linux-settle-original-9b44/owned-scope-limits.json": {
+      "bytes": 260,
+      "sha256": "2904440849bda5e5a28cf98ee3a8ae4c1b695769a62d531056f9267c33ec5005"
+    },
+    "cohort-9b44967e-linux-settle-original-9b44/settle-error-original.log": {
+      "bytes": 2456,
+      "sha256": "c7e268fcce9d18a7a2bd6e8f15343c17f80b5466da81eb24860e4c19ae7176ef"
+    },
+    "cohort-9b44967e-linux-settle-original-9b44/running.json": {
+      "bytes": 1171,
+      "sha256": "096b29944d7f5857e5fec9474b770e68512a9ec47e31180c28fc6999e28bb528"
+    },
+    "cohort-9b44967e-linux-settle-original-9b44/source-after.json": {
+      "bytes": 452354,
+      "sha256": "beaf568fec87aa66088ffc277ceff93de30f7980bd4d6686daa6a272cc9f7cb4"
+    },
+    "cohort-9b44967e-linux-settle-original-9b44/result.json": {
+      "bytes": 1546,
+      "sha256": "a8a5d49359343a82a420ddfcfb3ac75c9c7bec77a9520bc3bf6305c8d93d0d95"
+    },
+    "cohort-9b44967e-linux-settle-original-9b44/owned-test-cleanup.json": {
+      "bytes": 1077,
+      "sha256": "f57e028234495e85f84b337cda314c2a8d9750380f2d5fe140dfad9eda68e108"
+    },
+    "cohort-9b44967e-linux-settle-original-9b44/collected-binaries.json": {
+      "bytes": 1052,
+      "sha256": "987fc6b91c462f26018bf83add4f30bec5b879750c1cd51bce15fbb05b683117"
+    },
+    "cohort-7197ed5e-linux-backing-reference-7197/source-before.json": {
+      "bytes": 452680,
+      "sha256": "89955b1804496481af976c2db3433f83761237622de92c2e2071b9ac69f5e213"
+    },
+    "cohort-7197ed5e-linux-backing-reference-7197/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-7197ed5e-linux-backing-reference-7197/owned-scope-limits.json": {
+      "bytes": 262,
+      "sha256": "6d3af670d36590fa4f380583fc87250e33fdd2df4b59be2ce48061238573d589"
+    },
+    "cohort-7197ed5e-linux-backing-reference-7197/backing-reference-original.log": {
+      "bytes": 4427,
+      "sha256": "1d8c31d5601950941f24f1ecc15a72b5a188f6041b9b903787239d7ee9c1b8e5"
+    },
+    "cohort-7197ed5e-linux-backing-reference-7197/running.json": {
+      "bytes": 1187,
+      "sha256": "2b583f57e8e3d211ccfc4993395708bb4456d1cf49f6852aa25f8bcce072d1e7"
+    },
+    "cohort-7197ed5e-linux-backing-reference-7197/source-after.json": {
+      "bytes": 452680,
+      "sha256": "89955b1804496481af976c2db3433f83761237622de92c2e2071b9ac69f5e213"
+    },
+    "cohort-7197ed5e-linux-backing-reference-7197/result.json": {
+      "bytes": 1632,
+      "sha256": "0243119d067d08cb45edb482f867b6ecc39c35517da83521baebe9cc7c373287"
+    },
+    "cohort-7197ed5e-linux-backing-reference-7197/collected-binaries.json": {
+      "bytes": 1137,
+      "sha256": "18c752cb296d71c7c00cba9a2a581aff983b8fdf77edccbc8a8298e7a8567f6e"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}
