@@ -1072,7 +1072,7 @@ fn a_second_hang_is_refused_by_type() {
 #[cfg(target_os = "linux")]
 #[test]
 fn an_unrecorded_class_seeds_from_twice_the_slowest_of_any_class_and_rises() {
-    let slowest_any = RECORDS
+    let slowest_any = hex_client::guest::shards::RECORDS
         .lines()
         .filter(|l| !l.starts_with('#'))
         .filter_map(|l| {
