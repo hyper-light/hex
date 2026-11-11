@@ -1924,7 +1924,7 @@ fn completion_creating_capture_retains_only_the_original_unpublished_scoped_row(
     let mut missing_scope = creating_capture_record("unscoped");
     missing_scope.native_scope = None;
     let mut published = creating_capture_record("published");
-    published.init = Some(hex_api::ProcId {
+    published.init = Some(hex_core::record::ProcId {
         pid: 1,
         start_ticks: 1,
     });
