@@ -322,8 +322,22 @@ impl Slot {
     }
 
     fn runtime_holds(&self, demand: &Demand, need: &Resources) -> bool {
+        self.runtime_holds_routed(demand, need, None)
+    }
+
+    fn runtime_holds_routed(
+        &self,
+        demand: &Demand,
+        need: &Resources,
+        receipt: Option<hex_api::RouteReceipt>,
+    ) -> bool {
         let class = demand.class;
         if let Some(routes) = &self.routes {
+            if let Some(receipt) = receipt {
+                return routes
+                    .committed(receipt)
+                    .is_ok_and(|choice| routes.holds_inner(choice, demand));
+            }
             return routes
                 .chosen(demand)
                 .is_ok_and(|choice| routes.holds_inner(choice, demand));
@@ -1672,7 +1686,7 @@ impl FitIndex {
         let charged = crate::model::reserved_resources(demand.need, allocation, route)
             .map_err(|_| SimError::Resources(node))?;
         let slot = self.slot(node)?;
-        if !slot.free.holds(&charged) || !slot.runtime_holds(demand, &charged) {
+        if !slot.free.holds(&charged) || !slot.runtime_holds_routed(demand, &charged, route) {
             return Err(SimError::Resources(node));
         }
         self.change(
@@ -1834,7 +1848,7 @@ impl FitIndex {
             .map_err(|_| SimError::Resources(node))?;
         let slot = self.slot(node)?;
         if !slot.free.holds(&charged)
-            || !slot.runtime_holds(demand, &charged)
+            || !slot.runtime_holds_routed(demand, &charged, route)
             || matches!(demand.kind, Kind::Build) && slot.benchmarks > 0
             || matches!(demand.kind, Kind::Benchmark) && slot.builds > 0
         {

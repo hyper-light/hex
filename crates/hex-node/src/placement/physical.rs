@@ -1,13 +1,45 @@
 //! One factual native owner across overlapping runtime routes; never a holder or inventory cache.
 
-use hex_api::{PhysicalDevice, PhysicalReport, Refusal};
+use hex_api::{BackendUnavailable, PhysicalDevice, PhysicalReport, Refusal};
 use hex_sim::model::Class;
 
 fn invalid(why: &'static str) -> Refusal {
+    let mut text = String::new();
+    if text.try_reserve_exact(why.len()).is_err() {
+        return full(why.len());
+    }
+    text.push_str(why);
     Refusal::Invalid {
         what: "native physical reports",
-        why: why.into(),
+        why: text,
     }
+}
+
+pub(super) fn add_unavailable(
+    values: &mut Vec<BackendUnavailable>,
+    observation: BackendUnavailable,
+) -> Result<(), Refusal> {
+    observation.check()?;
+    if let Some(previous) = values
+        .iter()
+        .find(|value| value.backend == observation.backend)
+    {
+        return if previous == &observation {
+            Ok(())
+        } else {
+            Err(invalid(
+                "one observer backend has contradictory unavailable receipts",
+            ))
+        };
+    }
+    if values.len() >= BackendUnavailable::MAX_COUNT {
+        return Err(full(BackendUnavailable::MAX_COUNT));
+    }
+    values
+        .try_reserve_exact(1)
+        .map_err(|_| full(BackendUnavailable::MAX_COUNT))?;
+    values.push(observation);
+    Ok(())
 }
 
 fn full(bound: usize) -> Refusal {
@@ -23,6 +55,7 @@ pub(super) fn coalesce(reports: Vec<PhysicalReport>) -> Result<Option<PhysicalRe
     }
     let mut authority = None;
     let mut devices: Vec<PhysicalDevice> = Vec::new();
+    let mut unavailable = Vec::new();
     for report in reports {
         report.check()?;
         if report.authority.len() > hex_core::wire::MAX_MESSAGE {
@@ -43,6 +76,9 @@ pub(super) fn coalesce(reports: Vec<PhysicalReport>) -> Result<Option<PhysicalRe
             .try_reserve_exact(report.devices.len())
             .map_err(|_| full(hex_api::MAX_DEVICES))?;
         devices.extend(report.devices);
+        for observation in report.unavailable {
+            add_unavailable(&mut unavailable, observation)?;
+        }
     }
     let Some(authority) = authority else {
         return Ok(None);
@@ -78,8 +114,10 @@ pub(super) fn coalesce(reports: Vec<PhysicalReport>) -> Result<Option<PhysicalRe
         }
     }
     let report = PhysicalReport {
+        unavailable: Vec::new(),
         authority,
         devices: unique,
+        unavailable,
     };
     report.check()?;
     Ok(Some(report))
@@ -93,6 +131,7 @@ mod tests {
     fn report(authority: &str, busy: Option<u16>, used: Option<u64>) -> PhysicalReport {
         PhysicalReport {
             authority: authority.into(),
+            unavailable: Vec::new(),
             devices: vec![PhysicalDevice {
                 info: DeviceInfo {
                     id: DeviceId {
@@ -139,6 +178,7 @@ mod tests {
     fn empty_native_inventory_preserves_its_authority() {
         let got = coalesce(vec![PhysicalReport {
             authority: "cpu-owner".into(),
+            unavailable: Vec::new(),
             devices: Vec::new(),
         }])
         .unwrap()

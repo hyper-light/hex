@@ -1,0 +1,26 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "cfb1adf5780b669542eb26648ff6085b4606a8e6",
+  "owned_path": "crates/hex-node/src/facts.rs",
+  "source_sha256": "b6a2cd98c4adc6ae7a77a58ac30b8cdf2b2eba21d26c42097725e8e26e8977fa",
+  "signature": "pub(crate) facts::merge_physical_observations(&mut PhysicalReport, Class, Result<Vec<PhysicalDevice>,Refusal>)->Result<(),Refusal>",
+  "semantics": [
+    "One implementation for Node/Recorded, called only AFTER provider lock released; no RPC/provider/capacity call within helper.",
+    "Requires valid actual native authority/data first. Only qualified actual VM Backing Pending/Busy/Uncertain becomes bounded typed diagnostic; invalid metadata/non-VM/generic error stays fatal.",
+    "Actual mapped backend observations may overlay a stale host observation; unknown independent counters preserved, used>total remains observed pressure.",
+    "Bound before reserve, sorted fallibly collected temporary index, unique observed IDs, same native first-report order. No persistent inventory/cache/manager/holder exists.",
+    "No empty-success fallback replaces native provider; ordinary Recover default-empty overlay means no configured VM data, never a replacement native report."
+  ],
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "new_pure_control": "facts::physical_merge_tests::observer_merge_preserves_native_uncertainty_and_typed_failure UNRUN",
+    "compilation": "UNRUN",
+    "native_effects": 0,
+    "dispatches": 0
+  },
+  "integration": "L3 thin Recover/WithGuest/Recorded consumers and Node inline-factor consumer pending next owned checkpoint; no duplicate merge algorithm. c772 exports/literals/wire remain ROOT/L4. Subset dirty source not included.",
+  "limits": "Source-only. ROOT owns actual original CPU green/mutation, platforms, native/hardware/resource measurements, profiling/full gates/main."
+}

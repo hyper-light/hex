@@ -95,6 +95,29 @@ pub struct Runtimes {
     by_class: BTreeMap<Class, Arc<dyn Runtime>>,
 }
 
+/// One completed query, not an inventory cache. Unavailable VM observations never provide room.
+pub(super) struct CapacitySnapshot {
+    pub reports: Vec<(Class, Option<hex_api::Capacity>)>,
+    pub unavailable: Vec<hex_api::BackendUnavailable>,
+}
+
+impl CapacitySnapshot {
+    pub(super) fn add_unavailable(
+        &mut self,
+        observation: hex_api::BackendUnavailable,
+    ) -> Result<(), Refusal> {
+        physical::add_unavailable(&mut self.unavailable, observation)
+    }
+}
+
+fn backend_class(class: Class) -> hex_api::Class {
+    match class {
+        Class::Oci => hex_api::Class::Oci,
+        Class::Firecracker => hex_api::Class::Firecracker,
+        Class::Shards => hex_api::Class::Shards,
+    }
+}
+
 impl Runtimes {
     pub fn new(
         entries: impl IntoIterator<Item = (Class, Arc<dyn Runtime>)>,
@@ -132,7 +155,44 @@ impl Runtimes {
 
     /// Query each configured backend without holding any placement or record lock.
     pub fn capacities(&self) -> Result<Vec<(Class, Option<hex_api::Capacity>)>, Error> {
+        let snapshot = self.capacity_snapshot()?;
+        if let Some(unavailable) = snapshot.unavailable.into_iter().next() {
+            return Err(unavailable.cause.into());
+        }
+        Ok(snapshot.reports)
+    }
+
+    fn native_cpu_capacity(&self) -> Result<hex_api::Capacity, Error> {
+        let native = self.get(Class::Oci)?;
+        if !native.classes().contains(&hex_api::Class::Process) {
+            return Err(invalid_static(
+                "unavailable VM observer has no initialized native CPU owner",
+            )
+            .into());
+        }
+        let capacity = native
+            .capacity(hex_api::Class::Process)?
+            .ok_or_else(|| invalid_static("native CPU owner supplied no resource plane"))?;
+        capacity.check()?;
+        if capacity.cost.is_some()
+            || (!capacity.routes.is_empty()
+                && !capacity.routes.iter().any(|route| {
+                    route.key.class == hex_api::Class::Process
+                        && route.key.execution == hex_api::Execution::Native
+                        && route.cost.is_none()
+                        && route.backing.is_none()
+                }))
+        {
+            return Err(
+                invalid_static("native CPU resource plane is not actual native execution").into(),
+            );
+        }
+        Ok(capacity)
+    }
+
+    pub(super) fn capacity_snapshot(&self) -> Result<CapacitySnapshot, Error> {
         let mut reports = Vec::new();
+        let mut unavailable = Vec::new();
         reports
             .try_reserve_exact(self.by_class.len())
             .map_err(|_| Refusal::Exhausted {
@@ -153,7 +213,17 @@ impl Runtimes {
                 )
                 .into());
             }
-            let report = runtime.capacity(form)?;
+            let report = match runtime.capacity(form) {
+                Ok(report) => report,
+                Err(cause) => {
+                    // A composite OCI endpoint cannot identify a failed VM from the payload
+                    // class. Its composition owner must return the native plane separately.
+                    let observation =
+                        hex_api::BackendUnavailable::from_refusal(backend_class(class), cause)?;
+                    physical::add_unavailable(&mut unavailable, observation)?;
+                    continue;
+                }
+            };
             if let Some(report) = &report {
                 report.check()?;
                 if report
@@ -169,7 +239,29 @@ impl Runtimes {
             }
             reports.push((class, report));
         }
-        Ok(reports)
+        if !unavailable.is_empty() {
+            let native = self.native_cpu_capacity()?;
+            let current = reports
+                .iter_mut()
+                .find(|(class, _)| *class == Class::Oci)
+                .and_then(|(_, report)| report.as_mut())
+                .ok_or_else(|| {
+                    invalid_static("unavailable observer has no successful native CPU report")
+                })?;
+            if current.id != native.id || current.total != native.total {
+                return Err(invalid_static(
+                    "native CPU query changed its resource-plane authority",
+                )
+                .into());
+            }
+            current.free.cpu_milli = current.free.cpu_milli.min(native.free.cpu_milli);
+            current.free.mem_bytes = current.free.mem_bytes.min(native.free.mem_bytes);
+            current.free.disk_bytes = current.free.disk_bytes.min(native.free.disk_bytes);
+        }
+        Ok(CapacitySnapshot {
+            reports,
+            unavailable,
+        })
     }
 
     /// Keep the originating endpoint: a composite native owner routes its canonical PoolRecord,
@@ -250,19 +342,53 @@ impl Runtimes {
     /// has no mutable query lock, and no provider is opened in the scheduling process.
     pub fn physical_report(&self) -> Result<Option<hex_api::PhysicalReport>, Error> {
         let mut reports = Vec::new();
+        let mut unavailable = Vec::new();
+        let mut native_succeeded = false;
         reports
             .try_reserve_exact(self.by_class.len())
             .map_err(|_| Refusal::Exhausted {
                 what: "native runtime report count",
                 bound: Class::COUNT,
             })?;
-        for runtime in self.by_class.values() {
-            let report = runtime.physical_report()?;
+        for (&class, runtime) in &self.by_class {
+            let report = match runtime.physical_report() {
+                Ok(report) => report,
+                Err(cause) => {
+                    let observation =
+                        hex_api::BackendUnavailable::from_refusal(backend_class(class), cause)?;
+                    physical::add_unavailable(&mut unavailable, observation)?;
+                    continue;
+                }
+            };
+            report.check()?;
+            native_succeeded |=
+                class == Class::Oci && runtime.classes().contains(&hex_api::Class::Process);
             // A resource pool may be a guest's narrower envelope; its id is not the physical
             // Store/turn authority. Coalesce validates actual report authorities independently.
             reports.push(report);
         }
-        physical::coalesce(reports).map_err(Into::into)
+        let mut report = physical::coalesce(reports)?;
+        if !unavailable.is_empty()
+            || report
+                .as_ref()
+                .is_some_and(|report| !report.unavailable.is_empty())
+        {
+            if !native_succeeded {
+                return Err(invalid_static(
+                    "unavailable observer has no successful native physical report",
+                )
+                .into());
+            }
+            self.native_cpu_capacity()?;
+            let actual = report
+                .as_mut()
+                .ok_or_else(|| invalid_static("native physical owner supplied no report"))?;
+            for observation in unavailable {
+                physical::add_unavailable(&mut actual.unavailable, observation)?;
+            }
+            actual.check()?;
+        }
+        Ok(report)
     }
 
     /// Read the one native scope per live backing outside all placement/model locks. A shared
@@ -270,6 +396,21 @@ impl Runtimes {
     pub fn measured_backing_use(
         &self,
         reports: &[(Class, Option<hex_api::Capacity>)],
+    ) -> Result<Resources, Error> {
+        self.measure_backing_use(reports, None)
+    }
+
+    pub(super) fn measured_available_backing_use(
+        &self,
+        snapshot: &mut CapacitySnapshot,
+    ) -> Result<Resources, Error> {
+        self.measure_backing_use(&snapshot.reports, Some(&mut snapshot.unavailable))
+    }
+
+    fn measure_backing_use(
+        &self,
+        reports: &[(Class, Option<hex_api::Capacity>)],
+        mut unavailable: Option<&mut Vec<hex_api::BackendUnavailable>>,
     ) -> Result<Resources, Error> {
         let mut seen = Vec::new();
         seen.try_reserve_exact(hex_api::MAX_RUNTIME_ROUTES)
@@ -296,13 +437,41 @@ impl Runtimes {
                     }
                     .into());
                 }
-                let usage = self.get(*class)?.backing_usage(&backing.key)?;
+                let usage = match self.get(*class)?.backing_usage(&backing.key) {
+                    Ok(usage) => usage,
+                    Err(cause) => {
+                        let Some(observations) = unavailable.as_deref_mut() else {
+                            return Err(cause.into());
+                        };
+                        let backend = report
+                            .routes
+                            .iter()
+                            .find(|route| route.backing == Some(backing.key))
+                            .map(|route| route.key.backend_class())
+                            .ok_or_else(|| {
+                                invalid_static("measured backing has no initialized route")
+                            })?;
+                        physical::add_unavailable(
+                            observations,
+                            hex_api::BackendUnavailable::from_refusal(backend, cause)?,
+                        )?;
+                        // An unread scope receives no measured-usage credit. Its canonical full
+                        // allocation/claims remain in the retained route catalog and Index.
+                        continue;
+                    }
+                };
                 owned.mem_bytes = owned
                     .mem_bytes
                     .checked_add(usage.memory_bytes)
                     .ok_or_else(|| invalid_static("native backing memory sum overflows"))?;
                 seen.push(backing.key);
             }
+        }
+        if unavailable
+            .as_ref()
+            .is_some_and(|values| !values.is_empty())
+        {
+            self.native_cpu_capacity()?;
         }
         Ok(owned)
     }

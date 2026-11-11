@@ -1,0 +1,62 @@
+{
+  "role": "implementer L1 bindings-firecracker",
+  "policy": {
+    "revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+    "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3"
+  },
+  "fixed_root": "25d98e88be3b8173605ed7e8e1d109d309a278b6",
+  "parent_api": "c772f964f683880142eeed1c6d904c3938a09f03",
+  "source": {
+    "crates/hex-node/src/facts.rs": "64e7a5f08244a24a82129b9f03a717c28782fac75750812286a410a11400ba60",
+    "crates/hex-node/src/node/backends.rs": "2a60d43b77f85860e5236897414776c13641a51cd42ac307272b0cd7993a53a8",
+    "crates/hex-node/src/placement.rs": "ced38a91d0786b4d192b2f9ded41620953f5cad14ce74e2f2a62a61f4304c45e",
+    "crates/hex-node/src/placement/physical.rs": "3dcc75891a8ce3b710bb489d57291fbe9e1d7642638318af048bc7ce26ffbfb4",
+    "crates/hex-node/src/scheduler.rs": "bb4f9437686b642424cd9264c3f2f81223f13488f7a863216c07b023153cb9b7",
+    "crates/hex-node/src/scheduler/capacity.rs": "9f5e578b9089d05e2073218035502f9cc35a96f1cdf2d7d5cdb978f47271a01e",
+    "crates/hex-node/src/scheduler/capacity/initialized.rs": "2ca1b3eb485e6e96b943b6290101888e6a6f5d78ca89c8baf878037978fa867d",
+    "crates/hex-sim/src/index.rs": "46a151c01f08d5e2f2f55a69490555f74ca3e1a109e80a09beab430b1bf09b60",
+    "crates/hex-sim/src/index/routes.rs": "2f6482412ecd1033b29e049fa525007266369157d9daf9bdb6ca3bd786425852",
+    "crates/hex-sim/src/index/route_offer_tests.rs": "1692f0266f819217e931361e4c67be1f9190ad4ca362fd6ba5ad390e6d7e6ce6",
+    "crates/hex-sim/src/model.rs": "75095c4de66da818d5207d4185a01fb967086d0a8fa9271b073887d710195fa7"
+  },
+  "reproduction": {
+    "original": "scheduler::observer_cpu_tests::failed_firecracker_observation_keeps_real_service_cpu_progress_without_gpu_facts",
+    "root_source": "25d98e88be3b8173605ed7e8e1d109d309a278b6",
+    "result": "actual relevant red; healthy first refresh succeeded, configured FC observer failure aborted refresh and facts",
+    "log_sha256": "58a60692d499dfbd42b9d960accc6f4954714d15661cd74e9a833fbd167451e7",
+    "original_body": "unchanged"
+  },
+  "behavior": [
+    "Only VM Backing Pending/Busy/Uncertain becomes a bounded qualified diagnostic; generic errors, missing native owner and conflicting authorities remain fatal.",
+    "A successful actual native Process capacity and physical owner report are required beside unavailable VM data. No new Prober/provider exists.",
+    "Fresh current host room is authoritative; unread native backing usage receives no measured credit. Existing full backing/workload allocations and physical claims remain reserved by the SAME Index.",
+    "Prior failed-backend immutable offers/profile/phase/full claims survive in the SAME immutable model catalog with fresh admit bits clear. Retained metadata is unavailable, never current telemetry.",
+    "Fresh route choice and Prepared backing grants obey admit bits. Explicit committed recovery/refund resolve the original receipt independently of fresh permission.",
+    "Current capacity phase observations may advance; changed key/profile/full claims refuse and Index retains its lifecycle rollback guard.",
+    "No native calls occur under cluster/model locks. Identity retention uses a fallibly collected sorted temporary index, no cache."
+  ],
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compilation": "UNRUN",
+    "tests": "UNRUN",
+    "new_control": "index::route_offer_tests::unavailable_route_keeps_committed_recovery_refund_and_backing_charge; UNRUN",
+    "native_effects": 0,
+    "dispatches": 0
+  },
+  "integration": [
+    "ROOT must reexport c772 BackendUnavailable and add default unavailable/admit literals outside owned sources.",
+    "Join L4 physical-report tail codec and L3 Recorded physical-report/default glue.",
+    "a56 required Books handoff method is a pending separate Node/L3 producer; do not compile an unmatched cohort or use a stub.",
+    "L2 owns composite WithGuest/GuestRuntime OCI/native HCS failure composition; this source does not claim that seam complete."
+  ],
+  "r01_r16": {
+    "R01": "fallible bounded new vectors/strings; checked masks/indices/arithmetic; source reviewed, strict compilation owed",
+    "R02_R03_R05_R12_R13": "ACKed smallest existing Runtime/report/Index seams; actual original red; bounded by existing two VM classes/64 offers/device index space, no new cache/manager/provider",
+    "R04_R06_R07": "typed qualified unavailable distinct from invalid; unchanged canonical backing phases/claim owner; comments explain retained accounting",
+    "R08_R14": "no performance claim; allocation/wait/native profiling and competitor gates ROOT-owned, unrun",
+    "R09_R10": "exact actual original red retained; remedy source-first; unchanged original green/mutation pending ROOT",
+    "R11": "shared portable model/provider composition plus Linux Node leaf; actual native/platform acceptance unrun",
+    "R15_R16": "signed named source only; no laptop builds/tests, runner/driver/service changes, foreign jobs/data actions or new agents; full gates/main ROOT-owned"
+  }
+}

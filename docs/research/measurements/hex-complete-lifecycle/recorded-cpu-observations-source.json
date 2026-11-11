@@ -1,0 +1,30 @@
+{
+  "role": "implementer",
+  "base": "e4e1df2e1b6f35b91fde97b03d45e4f2ae0bfd57",
+  "source": [
+    {
+      "path": "crates/hex-node/src/recorded.rs",
+      "sha256": "d11b03ce26f379db4c7627eda1ea44c6c3b863bd82933be060b237e230621b40",
+      "bytes": 101040,
+      "base_sha256": "c3b21bcd720c9f06f562a7c1ee1624fa6ea5a741ecf8698d0b3c461bd3ae4707"
+    }
+  ],
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "dependencies": {
+    "api": "c772f964f683880142eeed1c6d904c3938a09f03",
+    "merge": "944c065def8715b3912c3c8138e4c7ac1f3a60bb",
+    "guest": "L2 exact public GuestRuntime::physical_observations()->Result<Vec<PhysicalDevice>,Refusal> accepted; complete guest source pin pending",
+    "root_exports": "BackendUnavailable exported and PhysicalReport.unavailable wire/literal ports owned by ROOT"
+  },
+  "contract": "Recorded obtains actual SAME Prober PhysicalReport/Store authority in a short explicit lock scope, releases lock, calls Recover::physical_observations, merges through SAME facts helper. No capacity/report recursion/provider reopening or fake counters. WithGuest delegates to initialized charged Guest observation; ordinary hosts add no VM observations.",
+  "validation": {
+    "scoped_rustfmt": 0,
+    "git_diff_check": 0,
+    "compiler": "UNRUN",
+    "clippy": "UNRUN",
+    "controls": "L1 shared merge pure control UNRUN; no duplicate thin-wrapper unit",
+    "native": "UNRUN"
+  },
+  "remaining": "Matched L1/L2/API/Root integration +light/native/route freshness proof; not completion"
+}

@@ -3173,6 +3173,7 @@ mod tests {
         spec.classes = Classes::NONE.with(Class::Oci);
         spec.routes = Some(
             RuntimeRoutes {
+                admit: None,
                 offers: vec![native, shared],
                 device_routes: Vec::new(),
                 backings: vec![BackingOffer {
@@ -3271,6 +3272,7 @@ mod tests {
         };
         spec.routes = Some(
             RuntimeRoutes {
+                admit: None,
                 offers: vec![
                     native,
                     RouteOffer {

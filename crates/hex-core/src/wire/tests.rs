@@ -921,6 +921,7 @@ fn example_runtime_cost() -> RuntimeCost {
 fn example_physical_report() -> PhysicalReport {
     PhysicalReport {
         authority: "native-store-owner".into(),
+        unavailable: Vec::new(),
         devices: vec![
             PhysicalDevice {
                 info: DeviceInfo {
@@ -3318,5 +3319,247 @@ fn snapshot_fixed_writer_never_grows_after_reservation() {
     assert!(matches!(
         Writer::fixed(usize::MAX),
         Err(Fault::Storage { .. })
+    ));
+}
+
+fn physical_unavailable(backend: Class, cause: LifecycleCause) -> BackendUnavailable {
+    BackendUnavailable::from_refusal(
+        backend,
+        Refusal::Backing {
+            key: route_wire_key(),
+            cause,
+        },
+    )
+    .unwrap()
+}
+
+/// Qualified observer failures append to, rather than replace, actual native identity and load.
+#[test]
+fn physical_report_unavailable_roundtrips_qualified_backing_causes() {
+    assert_eq!(PHYSICAL_UNAVAILABLE_BYTES, 51);
+    for cause in [
+        LifecycleCause::Pending,
+        LifecycleCause::Busy,
+        LifecycleCause::Uncertain,
+    ] {
+        let mut report = example_physical_report();
+        let legacy = answer(
+            220,
+            &Answer::PhysicalReport(report.try_clone().unwrap()),
+            MAX_MESSAGE,
+        )
+        .unwrap();
+        report.unavailable = vec![
+            physical_unavailable(Class::Firecracker, cause),
+            physical_unavailable(Class::Shards, cause),
+        ];
+        let expected = Answer::PhysicalReport(report);
+        let bytes = answer(220, &expected, MAX_MESSAGE).unwrap();
+        assert_eq!(&bytes[..legacy.len()], legacy);
+        assert_eq!(&bytes[legacy.len()..legacy.len() + 4], &2u32.to_le_bytes());
+        assert_eq!(
+            bytes.len(),
+            legacy.len() + 4 + 2 * PHYSICAL_UNAVAILABLE_BYTES
+        );
+        let Answer::PhysicalReport(report) = &expected else {
+            panic!("owned physical report changed its variant");
+        };
+        for (at, observation) in report.unavailable.iter().enumerate() {
+            let start = legacy.len() + 4 + at * PHYSICAL_UNAVAILABLE_BYTES;
+            assert_eq!(bytes[start], class_tag(observation.backend));
+            let canonical = snapshot_refusal(&observation.cause, MAX_MESSAGE).unwrap();
+            assert_eq!(
+                &bytes[start + 1..start + PHYSICAL_UNAVAILABLE_BYTES],
+                &canonical[HEADER_BYTES..]
+            );
+        }
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            expected
+        );
+        assert_eq!(answer(220, &expected, bytes.len()).unwrap(), bytes);
+        assert!(matches!(
+            answer(220, &expected, bytes.len() - 1),
+            Err(Fault::Oversized { .. })
+        ));
+        // Whole-body preflight includes the new count and every scalar trailer.
+        let mut short = Writer::new(bytes.len() - HEADER_BYTES - 1);
+        assert!(matches!(
+            put_physical_report(&mut short, report),
+            Err(Fault::Oversized { .. })
+        ));
+        assert_eq!((short.out.len(), short.out.capacity()), (0, 0));
+        assert!(matches!(
+            read_answer(&received(&bytes, 1), MAX_MESSAGE),
+            Err(Fault::Descriptors { .. })
+        ));
+    }
+}
+
+/// Counts and qualified fixed-size entries are checked before list reservation or refusal names.
+#[test]
+fn physical_report_unavailable_rejects_hostile_counts_and_entries() {
+    let mut report = example_physical_report();
+    let legacy = answer(
+        221,
+        &Answer::PhysicalReport(report.try_clone().unwrap()),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    report.unavailable = vec![
+        physical_unavailable(Class::Firecracker, LifecycleCause::Pending),
+        physical_unavailable(Class::Shards, LifecycleCause::Uncertain),
+    ];
+    let bytes = answer(221, &Answer::PhysicalReport(report), MAX_MESSAGE).unwrap();
+    let entry = legacy.len() + size_of::<u32>();
+    let refused = |bytes: &[u8]| {
+        let fault = read_answer(&received(bytes, 0), MAX_MESSAGE).unwrap_err();
+        route_wire_assert_redacted(&fault);
+        assert!(!format!("{fault:?}").contains("private-unavailable"));
+        fault
+    };
+    for count in [3u32, u32::MAX] {
+        let mut raw = legacy.clone();
+        raw.extend_from_slice(&count.to_le_bytes());
+        assert!(matches!(
+            refused(&raw),
+            Fault::Value {
+                what: "physical report.unavailable",
+                ..
+            }
+        ));
+    }
+    for count in [1usize, 2] {
+        let mut raw = legacy.clone();
+        raw.extend_from_slice(&u32::try_from(count).unwrap().to_le_bytes());
+        raw.resize(entry + count * PHYSICAL_UNAVAILABLE_BYTES - 1, 0);
+        assert!(matches!(refused(&raw), Fault::Truncated { need, .. }
+            if need == entry + count * PHYSICAL_UNAVAILABLE_BYTES));
+    }
+    for tag in [0, 1, 4, u8::MAX] {
+        let mut raw = bytes.clone();
+        raw[entry] = tag;
+        assert!(matches!(refused(&raw), Fault::Value { .. }));
+    }
+    // A well-formed variable refusal body would intern this name if the tag guard were absent.
+    const PRIVATE_NAME: &str = "private-unavailable-name";
+    assert!(!KEPT.lock().unwrap().contains(PRIVATE_NAME));
+    for tag in (0..=9).chain([11, u8::MAX]) {
+        let mut body = Writer::new(MAX_MESSAGE);
+        body.u8(class_tag(Class::Firecracker));
+        body.u8(tag);
+        body.string(PRIVATE_NAME).unwrap();
+        body.string("private-unavailable-reason").unwrap();
+        let mut raw = legacy.clone();
+        raw.extend_from_slice(&1u32.to_le_bytes());
+        raw.extend_from_slice(&body.done().unwrap());
+        assert!(matches!(
+            refused(&raw),
+            Fault::Value {
+                what: "physical report.unavailable",
+                ..
+            }
+        ));
+    }
+    assert!(!KEPT.lock().unwrap().contains(PRIVATE_NAME));
+    for cause in [3, u8::MAX] {
+        let mut raw = bytes.clone();
+        raw[entry + PHYSICAL_UNAVAILABLE_BYTES - 1] = cause;
+        assert!(matches!(
+            refused(&raw),
+            Fault::Value {
+                what: "backing.cause",
+                ..
+            }
+        ));
+    }
+    let mut duplicate = bytes.clone();
+    duplicate[entry + PHYSICAL_UNAVAILABLE_BYTES] = duplicate[entry];
+    assert!(matches!(
+        refused(&duplicate),
+        Fault::Value {
+            what: "physical report",
+            ..
+        }
+    ));
+    for observation in [
+        BackendUnavailable {
+            backend: Class::Oci,
+            cause: Refusal::Backing {
+                key: route_wire_key(),
+                cause: LifecycleCause::Pending,
+            },
+        },
+        BackendUnavailable {
+            backend: Class::Shards,
+            cause: Refusal::Broken("private-unavailable-reason".into()),
+        },
+    ] {
+        let mut invalid = example_physical_report();
+        invalid.unavailable.push(observation);
+        let mut output = Writer::new(MAX_MESSAGE);
+        assert!(matches!(
+            put_physical_report(&mut output, &invalid),
+            Err(Fault::Value {
+                what: "physical report",
+                ..
+            })
+        ));
+        assert!(output.out.is_empty());
+    }
+}
+
+/// Missing and explicit-empty tails retain legacy meaning; partial/new trailing data is refused.
+#[test]
+fn physical_report_unavailable_preserves_legacy_bytes_and_message_bounds() {
+    let mut report = PhysicalReport {
+        authority: "native".into(),
+        devices: Vec::new(),
+        unavailable: Vec::new(),
+    };
+    let legacy = answer(
+        222,
+        &Answer::PhysicalReport(report.try_clone().unwrap()),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    assert_eq!(&legacy[12..14], &0x800eu16.to_le_bytes());
+    assert_eq!(
+        &legacy[HEADER_BYTES..],
+        b"\x06\x00\x00\x00native\x00\x00\x00\x00"
+    );
+    let mut explicit_empty = legacy.clone();
+    explicit_empty.extend_from_slice(&0u32.to_le_bytes());
+    for raw in [&legacy, &explicit_empty] {
+        assert_eq!(
+            read_answer(&received(raw, 0), MAX_MESSAGE).unwrap().1,
+            Answer::PhysicalReport(report.try_clone().unwrap())
+        );
+    }
+    report
+        .unavailable
+        .push(physical_unavailable(Class::Shards, LifecycleCause::Busy));
+    let bytes = answer(222, &Answer::PhysicalReport(report), MAX_MESSAGE).unwrap();
+    // The exact old boundary is intentionally valid. Every nonempty proper prefix of the new
+    // count/body is incomplete; it must not silently downgrade a diagnostic to legacy-empty.
+    for end in legacy.len() + 1..bytes.len() {
+        assert!(matches!(
+            read_answer(&received(&bytes[..end], 0), MAX_MESSAGE),
+            Err(Fault::Truncated { .. })
+        ));
+    }
+    explicit_empty.push(0);
+    assert!(matches!(
+        read_answer(&received(&explicit_empty, 0), MAX_MESSAGE),
+        Err(Fault::Leftover { bytes: 1, .. })
+    ));
+    let mut bad_authority = bytes;
+    bad_authority[HEADER_BYTES + size_of::<u32>()] = 0;
+    assert!(matches!(
+        read_answer(&received(&bad_authority, 0), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "physical report",
+            ..
+        })
     ));
 }

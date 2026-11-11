@@ -97,6 +97,7 @@ fn fixture() -> (Capacity, NodeSpec, BackingKey) {
     node.classes = Classes::NONE.with(Class::Oci).with(Class::Firecracker);
     node.routes = Some(
         RuntimeRoutes {
+            admit: None,
             offers: routes,
             device_routes: Vec::new(),
             backings: vec![report.backings[0].try_clone().unwrap()],
@@ -290,6 +291,7 @@ fn native_rearm_waits_for_the_original_released_snapshot() {
     let catalog = node.routes.as_ref().unwrap();
     node.routes = Some(
         RuntimeRoutes {
+            admit: None,
             offers: catalog.offers.clone(),
             device_routes: catalog.device_routes.clone(),
             backings: vec![report.backings[0].try_clone().unwrap()],
@@ -334,6 +336,7 @@ fn native_rearm_waits_for_the_original_released_snapshot() {
     let catalog = node.routes.as_ref().unwrap();
     node.routes = Some(
         RuntimeRoutes {
+            admit: None,
             offers: catalog.offers.clone(),
             device_routes: catalog.device_routes.clone(),
             backings: vec![released.try_clone().unwrap()],
@@ -354,6 +357,7 @@ fn native_rearm_waits_for_the_original_released_snapshot() {
     offers[1].backing = Some(prepared.key);
     node.routes = Some(
         RuntimeRoutes {
+            admit: None,
             offers,
             device_routes: catalog.device_routes.clone(),
             backings: vec![prepared],

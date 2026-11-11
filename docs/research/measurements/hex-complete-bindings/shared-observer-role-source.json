@@ -1,0 +1,25 @@
+{
+  "role": "L1 implementer",
+  "policy": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "parent": "944c065def8715b3912c3c8138e4c7ac1f3a60bb",
+  "source_sha256": "6a4600eb6b2a056e9b1418ac975603f59767380892f1494329c78e78a94c7591",
+  "authority": "Explicit ROOT ACK of source composition semantics; not a reproduced production bug",
+  "primary_source": "L2 5c33713d79f9a3cbbf69ebce1eedb8c8386dacf2 guest physical.rs physical_observations uses checked_physical SAME Books::physical_devices metadata and no pressure counters; L2 readback confirms native exact metadata origin",
+  "contract": [
+    "Shards hook proves current selected renderer readiness only. Same ID AND identical full native metadata retains the already-collected SAME Prober counters, independently known or None.",
+    "A missing native ID may carry actual witnessed metadata but no known counters; missing counter never becomes zero. Contradictory native metadata, duplicates or claimed pressure from a readiness-only hook refuse.",
+    "FC actual mapped guest-driver counters retain observation authority where VFIO hides host telemetry; unavailable diagnostics/admit mask unchanged."
+  ],
+  "test": "facts::physical_merge_tests::shards_readiness_preserves_known_and_unknown_native_counters_and_refuses_foreign_metadata UNRUN",
+  "fixture_note": "Earlier new UNRUN merge fixture now passes actual readiness input with None pressure, assertions unchanged; original CPU/subset oracles untouched.",
+  "checks": {
+    "rustfmt_parser": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "tests": "UNRUN",
+    "native": 0,
+    "dispatches": 0
+  },
+  "remaining": "ROOT actual native/driver/hotplug/compute acceptance, focused controls/strict gates and full validation remain owed. No simultaneous snapshot claim, new provider/cache/manager or new dependency."
+}

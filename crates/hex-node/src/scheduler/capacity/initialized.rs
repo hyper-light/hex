@@ -176,6 +176,7 @@ pub(super) fn apply(
         }
     }
     let routes = RuntimeRoutes {
+        admit: None,
         offers,
         device_routes: masks,
         backings,
@@ -218,6 +219,202 @@ pub(super) fn apply(
         .map_err(|_| invalid("normalized initialized route topology is invalid"))?;
     node.routes = Some(routes);
     Ok(())
+}
+
+/// Keep a failed observer's immutable receipts in the same catalog for accounting/recovery.
+/// No retained metadata is a fresh reading, and only successful current offers keep admit bits.
+pub(super) fn retain_unavailable(
+    node: &mut NodeSpec,
+    previous: Option<&NodeSpec>,
+    unavailable: &[hex_api::BackendUnavailable],
+) -> Result<(), Refusal> {
+    if unavailable.is_empty() {
+        return Ok(());
+    }
+    for observation in unavailable {
+        observation.check()?;
+    }
+    let failed = |offer: &hex_api::RouteOffer| {
+        unavailable
+            .iter()
+            .any(|value| value.backend == offer.key.backend_class())
+    };
+    let prior = previous.and_then(|node| node.routes.as_deref());
+    let Some(shared) = node.routes.as_mut() else {
+        if prior.is_some_and(|prior| prior.offers.iter().any(failed)) {
+            return Err(invalid(
+                "retained initialized routes require the actual native route plane",
+            ));
+        }
+        node.classes = Class::ALL
+            .into_iter()
+            .filter(|&payload| {
+                node.classes.has(payload)
+                    && !unavailable
+                        .iter()
+                        .any(|value| class(value.backend) == payload)
+            })
+            .fold(Classes::NONE, Classes::with);
+        return Ok(());
+    };
+    let current = triomphe::Arc::get_mut(shared)
+        .ok_or_else(|| invalid("fresh normalized route view was already published"))?;
+    let mut admit = 0u64;
+    for (at, offer) in current.offers.iter().enumerate() {
+        if current.admits(at) && !failed(offer) {
+            admit |= bit(at)?;
+        }
+    }
+    if let (Some(previous), Some(prior)) = (previous, prior) {
+        for offer in prior.offers.iter().filter(|offer| failed(offer)) {
+            if let Some(existing) = current
+                .offers
+                .iter()
+                .find(|existing| existing.key == offer.key)
+            {
+                if existing != offer {
+                    return Err(invalid(
+                        "unavailable route changed its immutable cost/backing receipt",
+                    ));
+                }
+            } else {
+                if current.offers.len() >= hex_api::MAX_RUNTIME_ROUTES {
+                    return Err(invalid("retained routes exceed their mask address space"));
+                }
+                reserve(&mut current.offers, 1, "retained unavailable routes")?;
+                current.offers.push(*offer);
+            }
+            node.classes = node.classes.with(class(offer.key.class));
+            if let Some(key) = offer.backing {
+                let backing = prior
+                    .backings
+                    .iter()
+                    .find(|backing| backing.key == key)
+                    .ok_or_else(|| invalid("retained route has no canonical backing"))?;
+                if let Some(existing) = current
+                    .backings
+                    .iter()
+                    .find(|existing| existing.key.pool == key.pool)
+                {
+                    if existing.cost != backing.cost
+                        || existing.devices != backing.devices
+                        || existing.key != backing.key
+                    {
+                        return Err(invalid(
+                            "unavailable backing changed generation/profile/full claims",
+                        ));
+                    }
+                } else {
+                    if current.backings.len() >= hex_api::MAX_RUNTIME_ROUTES {
+                        return Err(invalid("retained backings exceed their route bound"));
+                    }
+                    reserve(&mut current.backings, 1, "retained unavailable backings")?;
+                    current.backings.push(backing.try_clone()?);
+                }
+            }
+        }
+        let mut by_id = Vec::new();
+        reserve(
+            &mut by_id,
+            node.devices.len(),
+            "current physical identity index",
+        )?;
+        for (at, device) in node.devices.iter().enumerate() {
+            by_id.push((
+                device
+                    .native_id()
+                    .ok_or_else(|| invalid("current device has no stable identity"))?,
+                at,
+            ));
+        }
+        by_id.sort_unstable_by_key(|(id, _)| *id);
+        for (old_device, old_mask) in previous.devices.iter().zip(&prior.device_routes) {
+            let mut mask = 0u64;
+            for (at, offer) in prior.offers.iter().enumerate() {
+                if old_mask & bit(at)? != 0 && failed(offer) {
+                    let at = current
+                        .offers
+                        .iter()
+                        .position(|current| current == offer)
+                        .ok_or_else(|| invalid("retained device route lost its canonical offer"))?;
+                    mask |= bit(at)?;
+                }
+            }
+            if mask == 0 {
+                continue;
+            }
+            let id = old_device
+                .native_id()
+                .ok_or_else(|| invalid("retained device has no stable identity"))?;
+            // Prior catalog identities are unique. Newly appended retained entries cannot alias
+            // another prior entry, so only the immutable fresh prefix needs this sorted lookup.
+            let at = if let Some(at) = by_id
+                .binary_search_by_key(&id, |(id, _)| *id)
+                .ok()
+                .and_then(|at| by_id.get(at))
+                .map(|(_, at)| *at)
+            {
+                let actual = node
+                    .devices
+                    .get_mut(at)
+                    .ok_or_else(|| invalid("retained device index is absent"))?;
+                if actual.kind != old_device.kind
+                    || actual.model != old_device.model
+                    || actual.size != old_device.size
+                {
+                    return Err(invalid("retained physical identity changed metadata"));
+                }
+                for class in Class::ALL {
+                    if old_device.classes.has(class) {
+                        actual.classes = actual.classes.with(class);
+                    }
+                }
+                at
+            } else {
+                if node.devices.len() >= hex_api::MAX_DEVICES {
+                    return Err(invalid(
+                        "retained devices exceed the physical address space",
+                    ));
+                }
+                reserve(&mut node.devices, 1, "retained unavailable physical slots")?;
+                reserve(
+                    &mut current.device_routes,
+                    1,
+                    "retained unavailable device masks",
+                )?;
+                let mut retained = *old_device;
+                retained.available = false;
+                retained.load = hex_sim::model::GpuLoad::default();
+                let at = node.devices.len();
+                node.devices.push(retained);
+                current.device_routes.push(0);
+                at
+            };
+            *current
+                .device_routes
+                .get_mut(at)
+                .ok_or_else(|| invalid("retained physical route mask is absent"))? |= mask;
+        }
+    }
+    current.admit = Some(admit);
+    let unknown = current
+        .unobserved_claims(&node.devices, node.id)
+        .map_err(|_| invalid("retained physical claim union is invalid"))?;
+    node.capacity.gpus = node
+        .devices
+        .iter()
+        .filter(|device| device.kind == hex_sim::model::DeviceKind::Gpu)
+        .count()
+        .checked_add(
+            unknown
+                .iter()
+                .filter(|id| id.kind == hex_api::DeviceKind::Gpu)
+                .count(),
+        )
+        .and_then(|count| u32::try_from(count).ok())
+        .ok_or_else(|| invalid("retained physical GPU count overflows"))?;
+    node.check_runtime_pools()
+        .map_err(|_| invalid("retained initialized route topology is invalid"))
 }
 
 #[cfg(test)]

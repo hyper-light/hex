@@ -346,7 +346,7 @@ fn deserialize_provisioning<'de, D: serde::Deserializer<'de>>(
 /// Count before decoding another value; an excessive next element is never materialized. These
 /// vectors have protocol/address-space bounds, not input-selected allocation hints. Doubling a
 /// checked capacity up to that exact bound gives amortized growth; an empty sequence allocates none.
-fn bounded_values<'de, D, T>(
+pub(crate) fn bounded_values<'de, D, T>(
     deserializer: D,
     bound: usize,
     refused: &'static str,

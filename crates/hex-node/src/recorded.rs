@@ -74,6 +74,12 @@ pub trait Recover: Runtime {
         Ok(None)
     }
 
+    /// Actual initialized VM observations. Ordinary native hosts add none; the direct SAME Prober
+    /// report remains required. This never calls capacity/physical_report or opens another provider.
+    fn physical_observations(&self) -> Result<Vec<hex_api::PhysicalDevice>, Refusal> {
+        Ok(Vec::new())
+    }
+
     /// Read-only initialized configuration and retained metadata validation, before ANY owner is
     /// recovered. No capacity sample, GPU probe, native mutation, publication or cleanup belongs here.
     fn preflight_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
@@ -1744,10 +1750,18 @@ impl<R: Recover> Runtime for Recorded<R> {
             .as_ref()
             .ok_or_else(|| broken("the recorded owner has no initialized native provider"))?;
         let authority = self.books.authority_id()?;
-        prober
-            .lock()
-            .map_err(|_| broken("the shared native provider lock was poisoned"))?
-            .physical_report(authority)
+        let mut report = {
+            prober
+                .lock()
+                .map_err(|_| broken("the shared native provider lock was poisoned"))?
+                .physical_report(authority)?
+        }; // Native pool/query lock is released before any VM/Books/remote observation.
+        crate::facts::merge_physical_observations(
+            &mut report,
+            Class::Shards,
+            self.runtime.physical_observations(),
+        )?;
+        Ok(report)
     }
 
     fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
@@ -2154,6 +2168,10 @@ impl Recover for hex_runtime::windows::WinRuntime {
 /// ended). Neither has host processes to end; a box recovery removes that the guest still holds is deleted
 /// there.
 impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
+    fn physical_observations(&self) -> Result<Vec<hex_api::PhysicalDevice>, Refusal> {
+        self.guest().physical_observations()
+    }
+
     fn preflight_record(&self, record: &BoxRecord) -> Result<(), Refusal> {
         match self.route_for(&record.spec)? {
             hex_runtime::guest::Side::Host => self.host().preflight_record(record),

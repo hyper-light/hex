@@ -94,6 +94,7 @@ fn node(os: Os) -> NodeSpec {
     }
     node.routes = Some(
         RuntimeRoutes {
+            admit: None,
             offers,
             device_routes: Vec::new(),
             backings: vec![backing],
@@ -185,6 +186,7 @@ fn two_cpu_shared_oci_and_one_gpu_dedicated_oci_pay_two_vm_envelopes() {
     let shared = backing();
     node.routes = Some(
         RuntimeRoutes {
+            admit: None,
             offers: vec![
                 RouteOffer {
                     key: RouteKey {
@@ -268,6 +270,7 @@ fn shared_backing_checks_below_exact_and_over_aggregate_payload_in_the_actual_in
     };
     node.routes = Some(
         RuntimeRoutes {
+            admit: None,
             offers: vec![RouteOffer {
                 key: RouteKey {
                     class: hex_api::Class::Oci,
@@ -358,6 +361,7 @@ fn cold_claims_reserve_unobserved_ids_before_boot_without_fabricating_devices() 
     node.capacity.gpus = 1;
     node.routes = Some(
         RuntimeRoutes {
+            admit: None,
             offers: vec![
                 RouteOffer {
                     key: RouteKey {
@@ -497,6 +501,7 @@ fn pending_gpu_reservations_keep_original_shape_across_refresh_and_backing_hando
     node.devices[0].classes = Classes::ALL;
     node.routes = Some(
         RuntimeRoutes {
+            admit: None,
             offers: vec![RouteOffer {
                 key: RouteKey {
                     class: hex_api::Class::Firecracker,
@@ -575,6 +580,7 @@ fn a_prepared_gpu_backing_does_not_hide_an_eligible_native_oci_route() {
     };
     node.routes = Some(
         RuntimeRoutes {
+            admit: None,
             offers: vec![
                 RouteOffer {
                     key: RouteKey {
@@ -662,6 +668,7 @@ fn a_prepared_snapshot_cannot_roll_back_a_granted_backing_or_its_claims() {
     let key = observer.key;
     node.routes = Some(
         RuntimeRoutes {
+            admit: None,
             offers: vec![RouteOffer {
                 key: RouteKey {
                     class: hex_api::Class::Shards,
@@ -725,6 +732,7 @@ fn one_gpu_demand_can_select_an_exact_subset_of_a_two_gpu_observer() {
     }
     node.routes = Some(
         RuntimeRoutes {
+            admit: None,
             offers: vec![RouteOffer {
                 key: RouteKey {
                     class: hex_api::Class::Firecracker,
@@ -777,4 +785,71 @@ fn one_gpu_demand_can_select_an_exact_subset_of_a_two_gpu_observer() {
     let route = index.route(NodeId(0), &request).unwrap().unwrap();
     assert_eq!(route.backing, Some(key));
     assert_eq!(request.need.gpus, 1);
+}
+
+/// AC-T7.4.1: transient observer failure blocks fresh work/grants, not exact durable accounting.
+#[test]
+fn unavailable_route_keeps_committed_recovery_refund_and_backing_charge() {
+    let mut offered = node(Os::Macos);
+    let request = demand(Some(Os::Linux), 0);
+    let mut original = FitIndex::new(std::slice::from_ref(&offered)).unwrap();
+    let route = original.route(NodeId(0), &request).unwrap();
+    let allocation = original.allocation(NodeId(0), &request).unwrap();
+    let charged = original.key(NodeId(0)).unwrap();
+    original
+        .take_routed(NodeId(0), WorkloadId(90), &request, allocation, route)
+        .unwrap();
+    let prior = offered.routes.as_ref().unwrap();
+    offered.routes = Some(
+        RuntimeRoutes {
+            admit: Some(0),
+            offers: prior.offers.clone(),
+            device_routes: prior.device_routes.clone(),
+            backings: prior
+                .backings
+                .iter()
+                .map(|backing| backing.try_clone().unwrap())
+                .collect(),
+        }
+        .share()
+        .unwrap(),
+    );
+    original.refresh_node(&offered).unwrap();
+    assert_eq!(original.key(NodeId(0)).unwrap(), charged);
+    assert_ne!(
+        original.verdict(NodeId(0), &request).unwrap(),
+        Verdict::Admits
+    );
+    let mut recovered = FitIndex::new(std::slice::from_ref(&offered)).unwrap();
+    recovered
+        .take_recovered_routed(NodeId(0), WorkloadId(90), &request, &[], allocation, route)
+        .unwrap();
+    recovered
+        .give_routed(NodeId(0), WorkloadId(90), &request, allocation, route)
+        .unwrap();
+    assert_eq!(
+        recovered.key(NodeId(0)).unwrap(),
+        charged,
+        "inner refund must keep the still-live VM's full charge"
+    );
+    let prior = offered.routes.as_ref().unwrap();
+    let mut prepared: Vec<_> = prior
+        .backings
+        .iter()
+        .map(|backing| backing.try_clone().unwrap())
+        .collect();
+    prepared[0].phase = BackingPhase::Prepared;
+    let key = prepared[0].key;
+    offered.routes = Some(
+        RuntimeRoutes {
+            admit: Some(0),
+            offers: prior.offers.clone(),
+            device_routes: prior.device_routes.clone(),
+            backings: prepared,
+        }
+        .share()
+        .unwrap(),
+    );
+    let mut unavailable = FitIndex::new(&[offered]).unwrap();
+    assert!(unavailable.grant_backing(NodeId(0), key).is_err());
 }

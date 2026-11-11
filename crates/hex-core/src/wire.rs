@@ -42,12 +42,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use hex_api::{
-    Allocation, BackingGrant, BackingKey, BackingOffer, BackingPhase, Bounds, BoxId, BoxInfo,
-    BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec, DeviceHolder,
-    DeviceId, DeviceInfo, DeviceKind, Execution, Exit, GpuEligibility, ImageArch, ImageOs,
-    ImagePlatform, IoRates, LifecycleCause, MAX_DEVICES, MAX_RUNTIME_ROUTES, Mount, Network,
-    OciSpec, PhysicalDevice, PhysicalReport, Program, Refusal, Rootfs, RouteKey, RouteOffer,
-    RouteReceipt, RuntimeCost, Signal, Usage, User,
+    Allocation, BackendUnavailable, BackingGrant, BackingKey, BackingOffer, BackingPhase, Bounds,
+    BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
+    DeviceHolder, DeviceId, DeviceInfo, DeviceKind, Execution, Exit, GpuEligibility, ImageArch,
+    ImageOs, ImagePlatform, IoRates, LifecycleCause, MAX_DEVICES, MAX_RUNTIME_ROUTES, Mount,
+    Network, OciSpec, PhysicalDevice, PhysicalReport, Program, Refusal, Rootfs, RouteKey,
+    RouteOffer, RouteReceipt, RuntimeCost, Signal, Usage, User,
 };
 
 use crate::netns;
@@ -1606,6 +1606,8 @@ fn put_capacity_routes(w: &mut Writer, capacity: &Capacity) -> Result<(), Fault>
 const PHYSICAL_MIN_BYTES: usize =
     size_of::<u8>() + size_of::<u64>() + size_of::<u32>() + size_of::<u64>() + 2 * size_of::<u8>();
 const PHYSICAL_PREFIX_BYTES: usize = 2 * size_of::<u32>();
+// Existing class, Refusal::Backing, fixed key and lifecycle-cause tags; no variable refusal data.
+const PHYSICAL_UNAVAILABLE_BYTES: usize = 3 * size_of::<u8>() + BACKING_KEY_BYTES;
 
 fn put_physical_report(w: &mut Writer, report: &PhysicalReport) -> Result<(), Fault> {
     report
@@ -1635,6 +1637,15 @@ fn put_physical_report(w: &mut Writer, report: &PhysicalReport) -> Result<(), Fa
             })
             .ok_or_else(overflow)?;
     }
+    if !report.unavailable.is_empty() {
+        bytes = report
+            .unavailable
+            .len()
+            .checked_mul(PHYSICAL_UNAVAILABLE_BYTES)
+            .and_then(|tail| tail.checked_add(size_of::<u32>()))
+            .and_then(|tail| bytes.checked_add(tail))
+            .ok_or_else(overflow)?;
+    }
     w.reserve_fixed(bytes)?;
     w.string(&report.authority)?;
     w.device_count(report.devices.len(), PHYSICAL_MIN_BYTES)?;
@@ -1644,6 +1655,14 @@ fn put_physical_report(w: &mut Writer, report: &PhysicalReport) -> Result<(), Fa
         w.u64(device.info.size);
         w.option(device.busy_per_mille, |w, value| w.u16(value));
         w.option(device.memory_used_bytes, |w, value| w.u64(value));
+    }
+    // Omit the empty tail so a report without diagnostics retains its previous body bytes.
+    if !report.unavailable.is_empty() {
+        w.device_count(report.unavailable.len(), PHYSICAL_UNAVAILABLE_BYTES)?;
+        for observation in &report.unavailable {
+            w.u8(class_tag(observation.backend));
+            put_refusal(w, &observation.cause)?;
+        }
     }
     Ok(())
 }
@@ -1662,7 +1681,49 @@ fn physical_report(r: &mut Reader<'_>) -> Result<PhysicalReport, Fault> {
             memory_used_bytes: r.option(|r| r.u64())?,
         })
     })?;
-    let report = PhysicalReport { authority, devices };
+    let unavailable = if r.rest.is_empty() {
+        Vec::new()
+    } else {
+        r.bounded_list(
+            PHYSICAL_UNAVAILABLE_BYTES,
+            BackendUnavailable::MAX_COUNT,
+            "physical report.unavailable",
+            |r| {
+                let backend = class(r)?;
+                if !matches!(backend, Class::Firecracker | Class::Shards) {
+                    return Err(Fault::value(
+                        "physical report.unavailable",
+                        "only VM backend classes may be unavailable",
+                    ));
+                }
+                // Refuse every other refusal tag before its strings or static-name interner.
+                // The accepted body is decoded by the same canonical refusal codec as answers.
+                if r.rest.first() != Some(&10) {
+                    return Err(Fault::value(
+                        "physical report.unavailable",
+                        "only qualified backing refusals may be unavailable",
+                    ));
+                }
+                let observation = BackendUnavailable {
+                    backend,
+                    cause: refusal(r)?,
+                };
+                observation.check().map_err(|_| {
+                    Fault::value(
+                        "physical report.unavailable",
+                        "invalid qualified backing observation",
+                    )
+                })?;
+                Ok(observation)
+            },
+        )?
+    };
+    let report = PhysicalReport {
+        unavailable: Vec::new(),
+        authority,
+        devices,
+        unavailable,
+    };
     report
         .check()
         .map_err(|e| Fault::value("physical report", e.to_string()))?;
@@ -2661,6 +2722,8 @@ impl<'a> Reader<'a> {
                 what,
                 if what == "devices" {
                     "count exceeds the u16 device index address space"
+                } else if what == "physical report.unavailable" {
+                    "count exceeds the supported VM backend classes"
                 } else {
                     "count exceeds the route eligibility word"
                 },

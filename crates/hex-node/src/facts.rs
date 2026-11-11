@@ -237,7 +237,11 @@ fn observed_report(
             ));
         }
     };
-    let report = hex_api::PhysicalReport { authority, devices };
+    let report = hex_api::PhysicalReport {
+        authority,
+        devices,
+        unavailable: Vec::new(),
+    };
     report.check()?;
     Ok(report)
 }
@@ -247,6 +251,148 @@ fn physical_full() -> Refusal {
         what: "native physical device observations",
         bound: hex_api::MAX_DEVICES,
     }
+}
+
+fn physical_invalid(why: &'static str) -> Refusal {
+    let mut text = String::new();
+    if text.try_reserve_exact(why.len()).is_err() {
+        return physical_full();
+    }
+    text.push_str(why);
+    Refusal::Invalid {
+        what: "native observer report",
+        why: text,
+    }
+}
+
+/// Overlay only the initialized backend's actual witnessed observations on the SAME native
+/// provider report. Qualified VM failures remain typed beside that successful report. Callers
+/// must drop their Prober lock before invoking the backend; no query/capacity recursion occurs here.
+pub(crate) fn merge_physical_observations(
+    report: &mut hex_api::PhysicalReport,
+    backend: hex_api::Class,
+    observations: Result<Vec<hex_api::PhysicalDevice>, Refusal>,
+) -> Result<(), Refusal> {
+    report.check()?;
+    if !matches!(
+        backend,
+        hex_api::Class::Firecracker | hex_api::Class::Shards
+    ) {
+        return Err(physical_invalid("observer is not an actual VM backend"));
+    }
+    let mut observations = match observations {
+        Ok(observations) => observations,
+        Err(cause) => {
+            let observation = hex_api::BackendUnavailable::from_refusal(backend, cause)?;
+            if let Some(previous) = report
+                .unavailable
+                .iter()
+                .find(|value| value.backend == backend)
+            {
+                return if previous == &observation {
+                    Ok(())
+                } else {
+                    Err(physical_invalid(
+                        "observer returned contradictory unavailable receipts",
+                    ))
+                };
+            }
+            if report.unavailable.len() >= hex_api::BackendUnavailable::MAX_COUNT {
+                return Err(physical_full());
+            }
+            report
+                .unavailable
+                .try_reserve_exact(1)
+                .map_err(|_| physical_full())?;
+            report.unavailable.push(observation);
+            return report.check();
+        }
+    };
+    if observations.len() > hex_api::MAX_DEVICES {
+        return Err(physical_full());
+    }
+    observations.sort_unstable_by_key(|device| device.info.id);
+    if observations
+        .windows(2)
+        .any(|pair| matches!(pair, [a,b] if a.info.id == b.info.id))
+    {
+        return Err(physical_invalid("observer repeats a physical identity"));
+    }
+    let mut by_id = Vec::new();
+    by_id
+        .try_reserve_exact(report.devices.len())
+        .map_err(|_| physical_full())?;
+    by_id.extend(
+        report
+            .devices
+            .iter()
+            .enumerate()
+            .map(|(at, device)| (device.info.id, at)),
+    );
+    by_id.sort_unstable_by_key(|(id, _)| *id);
+    if backend == hex_api::Class::Shards {
+        for observed in &observations {
+            if observed.busy_per_mille.is_some() || observed.memory_used_bytes.is_some() {
+                return Err(physical_invalid(
+                    "Shards readiness hook does not measure pressure",
+                ));
+            }
+            if let Some(native) = by_id
+                .binary_search_by_key(&observed.info.id, |(id, _)| *id)
+                .ok()
+                .and_then(|at| by_id.get(at))
+                .and_then(|(_, at)| report.devices.get(*at))
+                && native.info != observed.info
+            {
+                return Err(physical_invalid(
+                    "Shards readiness disagrees with actual native metadata",
+                ));
+            }
+        }
+    }
+    let added = observations
+        .iter()
+        .filter(|device| {
+            by_id
+                .binary_search_by_key(&device.info.id, |(id, _)| *id)
+                .is_err()
+        })
+        .count();
+    if report
+        .devices
+        .len()
+        .checked_add(added)
+        .is_none_or(|count| count > hex_api::MAX_DEVICES)
+    {
+        return Err(physical_full());
+    }
+    report
+        .devices
+        .try_reserve_exact(added)
+        .map_err(|_| physical_full())?;
+    for observed in observations {
+        if let Some(at) = by_id
+            .binary_search_by_key(&observed.info.id, |(id, _)| *id)
+            .ok()
+            .and_then(|at| by_id.get(at))
+            .map(|(_, at)| *at)
+        {
+            if backend == hex_api::Class::Shards {
+                // This hook proves selected renderer readiness, not pressure. The SAME current
+                // native sample retains its independent known/unknown counters after exact join.
+                continue;
+            }
+            // A witnessed VFIO guest driver can be current while native host-driver inventory
+            // is stale. The backend already joined this actual guest observation to its scope.
+            *report
+                .devices
+                .get_mut(at)
+                .ok_or_else(|| physical_invalid("native observation index is absent"))? = observed;
+        } else {
+            report.devices.push(observed);
+        }
+    }
+    report.check()
 }
 
 fn luid_unavailable() -> Refusal {
@@ -1309,6 +1455,7 @@ mod gpu_identity_tests {
         assert_eq!(devices[1].memory_used_bytes, None);
         hex_api::PhysicalReport {
             authority: "same-store-owner".into(),
+            unavailable: Vec::new(),
             devices,
         }
         .check()
@@ -1359,5 +1506,171 @@ mod gpu_identity_tests {
         demand.need.gpus = 1;
         assert_eq!(index.verdict(NodeId(0), &demand).unwrap(), Verdict::NoGpu);
         assert!(super::observed_report(String::new(), Err(&why), &[]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod physical_merge_tests {
+    use super::*;
+    use hex_api::{
+        BackingKey, Class, DeviceId, DeviceInfo, DeviceKind, LifecycleCause, PhysicalDevice,
+        PhysicalReport,
+    };
+
+    fn reading() -> PhysicalDevice {
+        PhysicalDevice {
+            info: DeviceInfo {
+                id: DeviceId {
+                    kind: DeviceKind::Gpu,
+                    key: 7,
+                },
+                model: "actual fixture".into(),
+                size: 10,
+                holder: None,
+            },
+            busy_per_mille: None,
+            memory_used_bytes: Some(11),
+        }
+    }
+
+    /// AC-T7.4.1: an unavailable observer cannot erase native facts or turn unknown into idle.
+    #[test]
+    fn observer_merge_preserves_native_uncertainty_and_typed_failure() {
+        let mut report = PhysicalReport {
+            authority: "one native owner".into(),
+            devices: vec![reading()],
+            unavailable: Vec::new(),
+        };
+        let before = report.try_clone().unwrap();
+        let key = BackingKey {
+            pool: [1; 32],
+            generation: [2; 16],
+        };
+        merge_physical_observations(
+            &mut report,
+            Class::Firecracker,
+            Err(Refusal::Backing {
+                key,
+                cause: LifecycleCause::Uncertain,
+            }),
+        )
+        .unwrap();
+        assert_eq!(report.authority, before.authority);
+        assert_eq!(report.devices, before.devices);
+        assert_eq!(report.unavailable[0].backend, Class::Firecracker);
+        assert_eq!(
+            report.unavailable[0].cause,
+            Refusal::Backing {
+                key,
+                cause: LifecycleCause::Uncertain
+            }
+        );
+        let mut readiness = reading();
+        readiness.memory_used_bytes = None;
+        merge_physical_observations(&mut report, Class::Shards, Ok(vec![readiness])).unwrap();
+        assert_eq!(report.devices.len(), 1);
+        assert_eq!(report.devices[0].busy_per_mille, None);
+        assert_eq!(report.devices[0].memory_used_bytes, Some(11));
+        assert!(
+            merge_physical_observations(&mut report, Class::Shards, Ok(vec![reading(), reading()]))
+                .is_err()
+        );
+        let prior = report.try_clone().unwrap();
+        assert!(
+            merge_physical_observations(
+                &mut report,
+                Class::Shards,
+                Err(physical_invalid("invalid observer metadata"))
+            )
+            .is_err()
+        );
+        assert_eq!(report, prior);
+        report.authority.clear();
+        assert!(
+            merge_physical_observations(
+                &mut report,
+                Class::Firecracker,
+                Err(Refusal::Backing {
+                    key,
+                    cause: LifecycleCause::Pending
+                })
+            )
+            .is_err()
+        );
+    }
+    /// AC-T7.4.1: renderer readiness joins metadata; actual native counters retain their quality.
+    #[test]
+    fn shards_readiness_preserves_known_and_unknown_native_counters_and_refuses_foreign_metadata() {
+        let mut known = reading();
+        known.busy_per_mille = Some(300);
+        let mut unknown = reading();
+        unknown.info.id.key = 8;
+        unknown.memory_used_bytes = Some(19);
+        let mut report = PhysicalReport {
+            authority: "same native owner".into(),
+            devices: vec![known, unknown],
+            unavailable: Vec::new(),
+        };
+        let key = BackingKey {
+            pool: [4; 32],
+            generation: [5; 16],
+        };
+        merge_physical_observations(
+            &mut report,
+            Class::Firecracker,
+            Err(Refusal::Backing {
+                key,
+                cause: LifecycleCause::Pending,
+            }),
+        )
+        .unwrap();
+        let readiness = |id| {
+            let mut observed = reading();
+            observed.info.id.key = id;
+            observed.memory_used_bytes = None;
+            observed
+        };
+        merge_physical_observations(
+            &mut report,
+            Class::Shards,
+            Ok(vec![readiness(7), readiness(8), readiness(9)]),
+        )
+        .unwrap();
+        assert_eq!(report.devices[0].busy_per_mille, Some(300));
+        assert_eq!(report.devices[0].memory_used_bytes, Some(11));
+        assert_eq!(report.devices[1].busy_per_mille, None);
+        assert_eq!(report.devices[1].memory_used_bytes, Some(19));
+        assert_eq!(report.devices[2].busy_per_mille, None);
+        assert_eq!(report.devices[2].memory_used_bytes, None);
+        assert_eq!(report.unavailable[0].backend, Class::Firecracker);
+        let before = report.try_clone().unwrap();
+        let mut foreign = readiness(7);
+        foreign.info.size = 20;
+        assert!(
+            merge_physical_observations(&mut report, Class::Shards, Ok(vec![foreign])).is_err()
+        );
+        assert_eq!(report, before);
+        assert!(
+            merge_physical_observations(
+                &mut report,
+                Class::Shards,
+                Ok(vec![readiness(7), readiness(7)])
+            )
+            .is_err()
+        );
+        assert_eq!(report, before);
+        assert!(
+            merge_physical_observations(&mut report, Class::Shards, Ok(vec![reading()])).is_err(),
+            "readiness must not acquire measurement authority"
+        );
+        assert_eq!(report, before);
+        let mut measured = reading();
+        measured.busy_per_mille = Some(700);
+        merge_physical_observations(&mut report, Class::Firecracker, Ok(vec![measured])).unwrap();
+        assert_eq!(
+            report.devices[0].busy_per_mille,
+            Some(700),
+            "FC actual guest pressure remains its authority"
+        );
     }
 }

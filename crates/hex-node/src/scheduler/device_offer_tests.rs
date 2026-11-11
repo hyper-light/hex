@@ -162,6 +162,7 @@ fn unread_native_counters_never_become_a_fresh_idle_free_offer() {
 fn physical_rpc_facts_keep_unknowns_and_empty_native_inventory_cannot_grant() {
     let (mut facts, reports) = inputs();
     let native = hex_api::PhysicalReport {
+        unavailable: Vec::new(),
         authority: "native-store-owner".into(),
         devices: reports[0]
             .1
@@ -195,6 +196,7 @@ fn physical_rpc_facts_keep_unknowns_and_empty_native_inventory_cannot_grant() {
     );
     assert!(bind(&actual, |i| actual[i].available, 1, &Ask::default()).is_none());
     let empty = hex_api::PhysicalReport {
+        unavailable: Vec::new(),
         authority: native.authority,
         devices: Vec::new(),
     };

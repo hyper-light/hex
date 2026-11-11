@@ -1373,6 +1373,48 @@ impl GuestRuntime {
         Ok(())
     }
 
+    /// Read-only proof for the canonical handoff guard's unsubmitted
+    /// Creating/Deleting reservation. This is neither native absence nor launch
+    /// permission. Once the source reaches Released, a missing Intent alone
+    /// cannot exclude a submitted Box scope and this proof always refuses.
+    pub fn handoff_unsubmitted(
+        &self,
+        record: &BoxRecord,
+        source: &hex_core::record::PoolRecord,
+    ) -> Result<(), Refusal> {
+        use hex_api::{BackingOffer, BackingPhase, Execution};
+        let id = &record.spec.id;
+        if !matches!(
+            record.phase,
+            hex_core::record::Phase::Creating | hex_core::record::Phase::Deleting
+        ) || record.init.is_some()
+            || record.run.is_some()
+            || record.exit.is_some()
+            || record.native_scope.is_none()
+            || record.spec.route_execution() != Some(Execution::ShardsDedicated)
+            || record.spec.route.and_then(|route| route.backing) != Some(source.key)
+            || source.execution != Execution::ShardsDedicated
+            || !matches!(source.phase, BackingPhase::Live | BackingPhase::Draining)
+        {
+            return Err(super::books::uncertain(id)?);
+        }
+        self.check_allocation(&record.spec)?;
+        self.preflight_backing(source)?;
+        BackingOffer::check_selection_parts(&source.devices, &record.spec.devices)?;
+        route::guest_spec(&record.spec)?;
+        record.native_commitment()?;
+        self.catalog_physical(&record.spec.devices)?;
+        if self.has_selected_route(id)? {
+            return Err(super::books::uncertain(id)?);
+        }
+        // The caller retains the canonical Box/full-source guard across both
+        // reads; no native/Store callback, route allocation or table mutation.
+        if selected::read(&self.selected_path(id)?)?.is_some() {
+            return Err(super::books::uncertain(id)?);
+        }
+        Ok(())
+    }
+
     pub(super) fn create_selected(
         &self,
         spec: BoxSpec,

@@ -226,6 +226,7 @@ impl Runtime for SimRuntime {
             })?;
         authority.push_str(name);
         Ok(crate::PhysicalReport {
+            unavailable: Vec::new(),
             authority,
             devices: Vec::new(),
         })

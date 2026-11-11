@@ -484,27 +484,22 @@ impl Node {
             .get()
             .and_then(|backends| backends.firecracker.as_ref())
         {
-            let observations = backend.physical_observations()?;
-            report
-                .devices
-                .try_reserve_exact(observations.len())
-                .map_err(|_| Refusal::Exhausted {
-                    what: "current native observer facts",
-                    bound: hex_api::MAX_DEVICES,
-                })?;
-            for observed in observations {
-                if let Some(native) = report
-                    .devices
-                    .iter_mut()
-                    .find(|native| native.info.id == observed.info.id)
-                {
-                    // A real VFIO assignment/guest driver is the current provider for this exact
-                    // host ID. Stale host-driver inventory cannot replace its independent counters.
-                    *native = observed;
-                } else {
-                    report.devices.push(observed);
-                }
-            }
+            crate::facts::merge_physical_observations(
+                &mut report,
+                Class::Firecracker,
+                backend.physical_observations(),
+            )?;
+        }
+        if let Some(backend) = self
+            .backends
+            .get()
+            .and_then(|backends| backends.shards.as_ref())
+        {
+            crate::facts::merge_physical_observations(
+                &mut report,
+                Class::Shards,
+                backend.physical_observations(),
+            )?;
         }
         report.check()?;
         Ok(report)

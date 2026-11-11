@@ -1730,6 +1730,7 @@ impl BootstrapCall {
         match self {
             Self::Capacity => Answer::Capacity(None),
             Self::PhysicalReport => Answer::PhysicalReport(hex_api::PhysicalReport {
+                unavailable: Vec::new(),
                 authority: "owned-bootstrap-stand-in".into(),
                 devices: Vec::new(),
             }),

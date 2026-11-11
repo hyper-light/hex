@@ -182,6 +182,7 @@ mod tests {
     }
     fn report(devices: Vec<PhysicalDevice>) -> PhysicalReport {
         PhysicalReport {
+            unavailable: Vec::new(),
             authority: "initialized-private-guest-node".into(),
             devices,
         }
@@ -271,6 +272,7 @@ mod tests {
             join(
                 &[],
                 &PhysicalReport {
+                    unavailable: Vec::new(),
                     authority: String::new(),
                     devices: Vec::new()
                 }

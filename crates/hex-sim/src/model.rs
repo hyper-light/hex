@@ -408,6 +408,10 @@ pub struct RuntimePool {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeRoutes {
+    /// Fresh-admission permission only. Retained committed receipts/charges survive a missing
+    /// observation; None is the existing all-offers behavior, never an invented current reading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admit: Option<u64>,
     #[serde(deserialize_with = "hex_api::Capacity::deserialize_routes")]
     pub offers: Vec<hex_api::RouteOffer>,
     #[serde(deserialize_with = "hex_api::Capacity::deserialize_device_routes")]
@@ -419,6 +423,36 @@ pub struct RuntimeRoutes {
 pub type SharedRoutes = triomphe::Arc<RuntimeRoutes>;
 
 impl RuntimeRoutes {
+    fn check_admit(&self) -> Result<(), crate::SimError> {
+        let bits = if self.offers.len() == hex_api::MAX_RUNTIME_ROUTES {
+            u64::MAX
+        } else {
+            u32::try_from(self.offers.len())
+                .ok()
+                .and_then(|count| 1u64.checked_shl(count))
+                .and_then(|value| value.checked_sub(1))
+                .ok_or(crate::SimError::Config(
+                    "runtime offer admission mask exceeds its word",
+                ))?
+        };
+        if self.admit.is_some_and(|mask| mask & !bits != 0) {
+            return Err(crate::SimError::Config(
+                "runtime admission mask references an absent offer",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn admits(&self, at: usize) -> bool {
+        at < self.offers.len()
+            && self.admit.is_none_or(|mask| {
+                u32::try_from(at)
+                    .ok()
+                    .and_then(|at| 1u64.checked_shl(at))
+                    .is_some_and(|bit| mask & bit != 0)
+            })
+    }
+
     /// Provisioning authority contributes identities only, after the observed catalog's slots.
     /// This is the SAME union consumed by Index; it supplies no model, size, load or fresh offer.
     pub fn unobserved_claims(
@@ -482,6 +516,7 @@ impl RuntimeRoutes {
                 "initialized routes exceed their address space",
             ));
         }
+        self.check_admit()?;
         triomphe::Arc::try_new(self).map_err(|_| crate::SimError::Full {
             what: "immutable initialized runtime routes",
             bound: 1,
@@ -489,7 +524,8 @@ impl RuntimeRoutes {
     }
 
     pub fn check(&self, node: &NodeSpec) -> Result<(), crate::SimError> {
-        for offer in &self.offers {
+        self.check_admit()?;
+        for (at, offer) in self.offers.iter().enumerate() {
             let arch = match offer.key.image.arch {
                 hex_api::ImageArch::Amd64 => Arch::X86_64,
                 hex_api::ImageArch::Arm64 => Arch::Aarch64,
@@ -500,10 +536,14 @@ impl RuntimeRoutes {
                 hex_api::ImageOs::Macos => Os::Macos,
             };
             let supported = match offer.key.backend_class() {
-                hex_api::Class::Firecracker => node.platform.os == Os::Linux && node.virt.kvm,
+                hex_api::Class::Firecracker => {
+                    node.platform.os == Os::Linux && (!self.admits(at) || node.virt.kvm)
+                }
                 hex_api::Class::Shards => match node.platform.os {
-                    Os::Linux => node.virt.kvm,
-                    Os::Macos => node.virt.hvf && node.platform.arch == Arch::Aarch64,
+                    Os::Linux => !self.admits(at) || node.virt.kvm,
+                    Os::Macos => {
+                        (!self.admits(at) || node.virt.hvf) && node.platform.arch == Arch::Aarch64
+                    }
                     Os::Windows => true, // The initialized native endpoint supplies WHP authority.
                     Os::Freebsd => false,
                 },

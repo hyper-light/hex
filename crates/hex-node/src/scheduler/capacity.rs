@@ -11,6 +11,14 @@ pub(super) mod devices;
 #[path = "capacity/initialized.rs"]
 mod initialized;
 
+pub(super) fn retain_unavailable(
+    node: &mut hex_sim::model::NodeSpec,
+    previous: Option<&hex_sim::model::NodeSpec>,
+    unavailable: &[hex_api::BackendUnavailable],
+) -> Result<(), Refusal> {
+    initialized::retain_unavailable(node, previous, unavailable)
+}
+
 /// An initialized route report replaces class-wide VM profiles/pools. Only an all-legacy cohort
 /// retains that older representation; a missing route never silently gains modern capability.
 pub(super) fn apply(

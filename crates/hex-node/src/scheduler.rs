@@ -92,6 +92,28 @@ impl BackingActions {
             released: Runtimes::released_backings(reports).map_err(failed)?,
         })
     }
+
+    fn only_available(
+        &mut self,
+        reports: &[(hex_sim::model::Class, Option<hex_api::Capacity>)],
+        unavailable: &[hex_api::BackendUnavailable],
+    ) {
+        let failed = |key| {
+            reports
+                .iter()
+                .filter_map(|(_, report)| report.as_ref())
+                .any(|report| {
+                    report.routes.iter().any(|offer| {
+                        offer.backing == Some(key)
+                            && unavailable
+                                .iter()
+                                .any(|value| value.backend == offer.key.backend_class())
+                    })
+                })
+        };
+        self.prepared.retain(|(_, key)| !failed(*key));
+        self.released.retain(|(_, backing)| !failed(backing.key));
+    }
 }
 
 fn key(k: dto::Key) -> Key {
@@ -572,14 +594,19 @@ impl Service {
             backends.push((class, runtime));
         }
         let runtimes = Runtimes::new(backends).map_err(failed)?;
-        let runtime_capacity = runtimes.capacities().map_err(failed)?;
-        let backing_actions = BackingActions::from_reports(&runtime_capacity)?;
+        let mut snapshot = runtimes.capacity_snapshot().map_err(failed)?;
         let backing_owned = runtimes
-            .measured_backing_use(&runtime_capacity)
+            .measured_available_backing_use(&mut snapshot)
             .map_err(failed)?;
         std::fs::create_dir_all(&config.state)
             .map_err(|e| Refusal::os("creating scheduler state", e))?;
-        let (facts, physical_authority) = runtime_facts(&config.state, classes, &runtimes)?;
+        let (facts, physical_authority, unavailable) =
+            runtime_observations(&config.state, classes, &runtimes)?;
+        for observation in unavailable {
+            snapshot.add_unavailable(observation)?;
+        }
+        let mut backing_actions = BackingActions::from_reports(&snapshot.reports)?;
+        backing_actions.only_available(&snapshot.reports, &snapshot.unavailable);
         let mut facts_dir = std::path::PathBuf::new();
         facts_dir
             .try_reserve_exact(config.state.as_os_str().len())
@@ -593,7 +620,7 @@ impl Service {
             .map_err(|e| Refusal::Broken(e.to_string()))?;
         let mut local = local;
         capacity::apply(
-            runtime_capacity,
+            snapshot.reports,
             &facts,
             &mut cluster,
             &namespace,
@@ -601,6 +628,7 @@ impl Service {
             &BTreeMap::new(),
             backing_owned,
         )?;
+        capacity::retain_unavailable(&mut local, None, &snapshot.unavailable)?;
         if let Some(slot) = cluster.nodes.iter_mut().find(|node| node.id == id) {
             *slot = local;
         }
@@ -938,11 +966,10 @@ impl Service {
 
     fn refresh_snapshot(&self) -> Result<BackingActions, Refusal> {
         let owned_by_class = self.driver.measured_owned_use_by_class().map_err(failed)?;
-        let runtime_capacity = self.runtimes.capacities().map_err(failed)?;
-        let actions = BackingActions::from_reports(&runtime_capacity)?;
+        let mut snapshot = self.runtimes.capacity_snapshot().map_err(failed)?;
         let backing_owned = self
             .runtimes
-            .measured_backing_use(&runtime_capacity)
+            .measured_available_backing_use(&mut snapshot)
             .map_err(failed)?;
         let owned = owned_by_class
             .values()
@@ -954,8 +981,13 @@ impl Service {
             .ok_or_else(|| capacity::invalid("measured native resource sum overflows"))?;
         // All native RPCs finish before acquiring the cluster/model lock. The scheduling process
         // owns no GPU provider, and a changed Store/turn owner cannot inherit retained claims.
-        let (facts, physical_authority) =
-            runtime_facts(&self.facts_dir, self.initialized, &self.runtimes)?;
+        let (facts, physical_authority, unavailable) =
+            runtime_observations(&self.facts_dir, self.initialized, &self.runtimes)?;
+        for observation in unavailable {
+            snapshot.add_unavailable(observation)?;
+        }
+        let mut actions = BackingActions::from_reports(&snapshot.reports)?;
+        actions.only_available(&snapshot.reports, &snapshot.unavailable);
         if physical_authority != self.physical_authority {
             return Err(Refusal::Invalid {
                 what: "native physical report authority",
@@ -966,11 +998,21 @@ impl Service {
             .cluster
             .lock()
             .map_err(|_| Refusal::Broken("scheduler model lock poisoned".into()))?;
+        let previous = cluster
+            .nodes
+            .iter()
+            .find(|node| node.id == self.id)
+            .map(NodeSpec::try_clone)
+            .transpose()
+            .map_err(|_| Refusal::Exhausted {
+                what: "retained local node view",
+                bound: 1,
+            })?;
         let mut local = facts
             .node_with_owned(self.id, &mut cluster, owned)
             .map_err(|e| Refusal::Broken(e.to_string()))?;
         capacity::apply(
-            runtime_capacity,
+            snapshot.reports,
             &facts,
             &mut cluster,
             self.driver.namespace(),
@@ -978,6 +1020,7 @@ impl Service {
             &owned_by_class,
             backing_owned,
         )?;
+        capacity::retain_unavailable(&mut local, previous.as_ref(), &snapshot.unavailable)?;
         self.driver
             .refresh_node(local.try_clone().map_err(|_| Refusal::Exhausted {
                 what: "local node snapshot",
@@ -1258,22 +1301,43 @@ impl Service {
 
 /// Machine resources are local facts; GPU observations come only from the initialized native
 /// Store/turn owner over Runtime. No Prober/Gpus is opened or cached in this process.
+#[cfg(test)]
 fn runtime_facts(
     state: &Path,
     initialized: Classes,
     runtimes: &Runtimes,
 ) -> Result<(hex_sim::facts::Facts, Option<String>), Refusal> {
+    let (facts, authority, _) = runtime_observations(state, initialized, runtimes)?;
+    Ok((facts, authority))
+}
+
+fn runtime_observations(
+    state: &Path,
+    initialized: Classes,
+    runtimes: &Runtimes,
+) -> Result<
+    (
+        hex_sim::facts::Facts,
+        Option<String>,
+        Vec<hex_api::BackendUnavailable>,
+    ),
+    Refusal,
+> {
     let report = runtimes.physical_report().map_err(failed)?;
     let mut facts = crate::facts::machine(state, &crate::facts::Declared::default(), initialized)?;
+    let mut unavailable = Vec::new();
     let authority = match report {
         Some(report) => {
             facts.gpus = crate::facts::reported_gpus(&report)?;
+            unavailable = report.unavailable;
             Some(report.authority)
         }
         None => None,
     };
-    if facts.gpus.is_empty() {
-        let message = if authority.is_some() {
+    if facts.gpus.is_empty() || !unavailable.is_empty() {
+        let message = if !unavailable.is_empty() {
+            "initialized VM backend observation is unavailable; native facts remain authoritative"
+        } else if authority.is_some() {
             "initialized native provider reports no verified GPUs"
         } else {
             "no configured native physical report owner"
@@ -1287,7 +1351,7 @@ fn runtime_facts(
         why.push_str(message);
         facts.no_gpus = Some(why);
     }
-    Ok((facts, authority))
+    Ok((facts, authority, unavailable))
 }
 
 impl Drop for Service {

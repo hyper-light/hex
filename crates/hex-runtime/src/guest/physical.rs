@@ -347,6 +347,53 @@ impl GuestRuntime {
         Ok(offers)
     }
 
+    /// The existing native owner calls this after releasing its provider lock,
+    /// then joins these observations into that SAME authority's physical report.
+    /// A cold key supplies only a qualified refusal, never invented metadata.
+    pub fn physical_observations(&self) -> Result<Vec<hex_api::PhysicalDevice>, Refusal> {
+        use hex_api::{BackingPhase, LifecycleCause};
+        let Some(definition) = self.gpu_backing_definition()? else {
+            return Ok(Vec::new());
+        };
+        let records = self.authority()?.pool_records()?;
+        let record = records
+            .iter()
+            .find(|record| record.key.pool == definition.pool)
+            .ok_or_else(|| invalid("prepare the configured GPU backing before observation"))?;
+        self.preflight_backing(record)?;
+        match record.phase {
+            BackingPhase::Prepared | BackingPhase::Granted => {
+                return Err(super::pool::refused(record.key, LifecycleCause::Pending));
+            }
+            BackingPhase::Draining | BackingPhase::Released => {
+                return Err(super::pool::refused(record.key, LifecycleCause::Busy));
+            }
+            BackingPhase::Live => {}
+        }
+        let actual = self.checked_physical(&definition.devices, &definition.physical)?;
+        if actual.len() != definition.devices.len() {
+            return Err(super::pool::refused(record.key, LifecycleCause::Uncertain));
+        }
+        let mut observations = Vec::new();
+        observations
+            .try_reserve_exact(actual.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "same-scope Shards physical observations",
+                bound: hex_api::MAX_DEVICES,
+            })?;
+        for mut info in actual {
+            // Telemetry never grants holders. Only the canonical Store supplies
+            // those; no unobserved pressure or memory-used value becomes zero.
+            info.holder = None;
+            observations.push(hex_api::PhysicalDevice {
+                info,
+                busy_per_mille: None,
+                memory_used_bytes: None,
+            });
+        }
+        Ok(observations)
+    }
+
     pub fn attachment_offers(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
         if self.gpu_catalog.is_none() {
             return Ok(Vec::new());

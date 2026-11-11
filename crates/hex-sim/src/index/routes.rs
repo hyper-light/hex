@@ -365,6 +365,9 @@ impl Routes {
         let mut found = None;
         let mut inactive = None;
         for (at, offer) in self.catalog.offers.iter().enumerate() {
+            if !self.catalog.admits(at) {
+                continue;
+            }
             let form_matches = demand.ask.runtime_class.map_or_else(
                 || match demand.class {
                     Class::Oci => matches!(
@@ -557,6 +560,17 @@ impl FitIndex {
         if phase != BackingPhase::Prepared {
             return Err(SimError::Config(
                 "backing lifecycle cannot accept a new grant",
+            ));
+        }
+        if !routes
+            .catalog
+            .offers
+            .iter()
+            .enumerate()
+            .any(|(at, offer)| offer.backing == Some(key) && routes.catalog.admits(at))
+        {
+            return Err(SimError::Config(
+                "unavailable backing cannot receive a fresh native grant",
             ));
         }
         let physical = self.devices.get(at).ok_or(SimError::UnknownNode(node))?;

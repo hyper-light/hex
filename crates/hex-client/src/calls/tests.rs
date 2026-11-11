@@ -214,6 +214,7 @@ fn exec() -> Call {
 fn physical_report_uses_one_factual_rpc_and_preserves_typed_refusal() {
     let client = client();
     let report = hex_api::PhysicalReport {
+        unavailable: Vec::new(),
         authority: "native-store".into(),
         devices: vec![hex_api::PhysicalDevice {
             info: hex_api::DeviceInfo {

@@ -32,7 +32,8 @@ mod spec;
 
 pub use bounds::{Bounds, IoRates, MIN_CPU_MILLI, MIN_MEMORY};
 pub use devices::{
-    DeviceHolder, DeviceId, DeviceInfo, DeviceKind, MAX_DEVICES, PhysicalDevice, PhysicalReport,
+    BackendUnavailable, DeviceHolder, DeviceId, DeviceInfo, DeviceKind, MAX_DEVICES,
+    PhysicalDevice, PhysicalReport,
 };
 pub use id::BoxId;
 pub use runtime::{

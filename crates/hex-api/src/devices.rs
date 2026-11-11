@@ -139,6 +139,79 @@ pub struct PhysicalDevice {
     pub memory_used_bytes: Option<u64>,
 }
 
+/// A qualified unavailable VM observation; it neither replaces native facts nor grants holders.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackendUnavailable {
+    pub backend: crate::Class,
+    pub cause: Refusal,
+}
+
+impl BackendUnavailable {
+    /// There are exactly two VM observer classes in the existing public Class enum.
+    pub const MAX_COUNT: usize = [crate::Class::Firecracker, crate::Class::Shards].len();
+
+    pub fn from_refusal(backend: crate::Class, cause: Refusal) -> Result<Self, Refusal> {
+        if !Self::qualified(backend, &cause) {
+            return Err(cause);
+        }
+        Ok(Self { backend, cause })
+    }
+
+    fn qualified(backend: crate::Class, cause: &Refusal) -> bool {
+        matches!(backend, crate::Class::Firecracker | crate::Class::Shards)
+            && matches!(
+                cause,
+                Refusal::Backing {
+                    cause: crate::LifecycleCause::Pending
+                        | crate::LifecycleCause::Busy
+                        | crate::LifecycleCause::Uncertain,
+                    ..
+                }
+            )
+    }
+
+    pub fn check(&self) -> Result<(), Refusal> {
+        if !Self::qualified(self.backend, &self.cause) {
+            return Err(invalid_report(
+                "only qualified VM backing observations may be unavailable",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        self.check()?;
+        let Refusal::Backing { key, cause } = &self.cause else {
+            return Err(invalid_report(
+                "unavailable observation has no backing identity",
+            ));
+        };
+        Ok(Self {
+            backend: self.backend,
+            cause: Refusal::Backing {
+                key: *key,
+                cause: *cause,
+            },
+        })
+    }
+}
+
+fn invalid_report(why: &'static str) -> Refusal {
+    let mut text = String::new();
+    if text.try_reserve_exact(why.len()).is_err() {
+        return Refusal::Exhausted {
+            what: "native physical report refusal bytes",
+            bound: why.len(),
+        };
+    }
+    text.push_str(why);
+    Refusal::Invalid {
+        what: "native physical report",
+        why: text,
+    }
+}
+
 /// A flat snapshot from the native Store/turn owner's one provider. Overlapping backend routes
 /// must name this same stable authority; telemetry does not report or grant a holder.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,10 +219,29 @@ pub struct PhysicalDevice {
 pub struct PhysicalReport {
     pub authority: String,
     pub devices: Vec<PhysicalDevice>,
+    /// Explicit qualified observer failures beside actual successful native data, never an
+    /// empty-success replacement for that provider or a physical termination receipt.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "PhysicalReport::deserialize_unavailable"
+    )]
+    pub unavailable: Vec<BackendUnavailable>,
 }
 
 impl PhysicalReport {
+    fn deserialize_unavailable<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<BackendUnavailable>, D::Error> {
+        crate::runtime::bounded_values(
+            deserializer,
+            BackendUnavailable::MAX_COUNT,
+            "unavailable observer count exceeds VM classes",
+        )
+    }
+
     pub fn try_clone(&self) -> Result<Self, Refusal> {
+        self.check()?;
         let mut authority = String::new();
         authority
             .try_reserve_exact(self.authority.len())
@@ -168,16 +260,44 @@ impl PhysicalReport {
         for device in &self.devices {
             devices.push(device.try_clone()?);
         }
-        Ok(Self { authority, devices })
+        let mut unavailable = Vec::new();
+        unavailable
+            .try_reserve_exact(self.unavailable.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "unavailable VM observations",
+                bound: BackendUnavailable::MAX_COUNT,
+            })?;
+        for observation in &self.unavailable {
+            unavailable.push(observation.try_clone()?);
+        }
+        Ok(Self {
+            authority,
+            devices,
+            unavailable,
+        })
     }
 
     pub fn check(&self) -> Result<(), Refusal> {
-        let invalid = |why: &'static str| Refusal::Invalid {
-            what: "native physical report",
-            why: why.into(),
-        };
+        let invalid = invalid_report;
         if self.authority.is_empty() || self.authority.contains('\0') {
             return Err(invalid("native Store/turn authority is empty or invalid"));
+        }
+        if self.unavailable.len() > BackendUnavailable::MAX_COUNT {
+            return Err(Refusal::Exhausted {
+                what: "unavailable VM observations",
+                bound: BackendUnavailable::MAX_COUNT,
+            });
+        }
+        for (at, observation) in self.unavailable.iter().enumerate() {
+            observation.check()?;
+            if self
+                .unavailable
+                .iter()
+                .take(at)
+                .any(|earlier| earlier.backend == observation.backend)
+            {
+                return Err(invalid("unavailable VM observation backend is duplicated"));
+            }
         }
         check_ids(self.devices.iter().map(|device| device.info.id))?;
         for device in &self.devices {
@@ -296,6 +416,7 @@ mod tests {
         assert!(serde_json::from_str::<DeviceHolder>("{\"pool\":[],\"generation\":[]}").is_err());
         let mut report = PhysicalReport {
             authority: "one-native-owner".into(),
+            unavailable: Vec::new(),
             devices: vec![PhysicalDevice {
                 info: DeviceInfo {
                     id: id(DeviceKind::Gpu, 7),
@@ -326,6 +447,7 @@ mod tests {
         };
         let report = PhysicalReport {
             authority: "one-store-owner".into(),
+            unavailable: Vec::new(),
             devices: vec![PhysicalDevice {
                 info,
                 busy_per_mille: None,
@@ -571,5 +693,61 @@ mod tests {
         assert_eq!(runtime.list().unwrap().len(), 1);
         runtime.delete(&legitimate.id).unwrap();
         assert!(runtime.list().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod unavailable_tests {
+    use super::*;
+
+    /// AC-T7.4.1: explicit VM uncertainty cannot fabricate GPUs or hide invalid native authority.
+    #[test]
+    fn qualified_vm_unavailable_is_bounded_unique_and_preserves_actual_report() {
+        let refused = || Refusal::Backing {
+            key: crate::BackingKey {
+                pool: [1; 32],
+                generation: [2; 16],
+            },
+            cause: crate::LifecycleCause::Uncertain,
+        };
+        let mut report = PhysicalReport {
+            authority: "actual-native-owner".into(),
+            devices: Vec::new(),
+            unavailable: vec![
+                BackendUnavailable::from_refusal(crate::Class::Firecracker, refused()).unwrap(),
+            ],
+        };
+        report.check().unwrap();
+        assert_eq!(report.try_clone().unwrap(), report);
+        assert!(report.devices.is_empty());
+        let legacy: PhysicalReport =
+            serde_json::from_str(r#"{"authority":"actual-native-owner","devices":[]}"#).unwrap();
+        assert!(legacy.unavailable.is_empty());
+        report
+            .unavailable
+            .push(BackendUnavailable::from_refusal(crate::Class::Firecracker, refused()).unwrap());
+        assert!(report.check().is_err());
+        report.unavailable.pop();
+        report.authority.clear();
+        assert!(report.check().is_err());
+        assert!(BackendUnavailable::from_refusal(crate::Class::Oci, refused()).is_err());
+        let invalid = Refusal::Invalid {
+            what: "native physical report authority",
+            why: "mismatch".into(),
+        };
+        assert_eq!(
+            BackendUnavailable::from_refusal(crate::Class::Firecracker, invalid.clone())
+                .unwrap_err(),
+            invalid
+        );
+        let oversized = serde_json::json!({"authority":"actual-native-owner","devices":[],"unavailable":[
+            {"backend":"firecracker","cause":refused()}, {"backend":"shards","cause":refused()}, {"bad":"third must not decode"}
+        ]});
+        assert!(
+            serde_json::from_value::<PhysicalReport>(oversized)
+                .unwrap_err()
+                .to_string()
+                .contains("count exceeds")
+        );
     }
 }
