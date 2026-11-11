@@ -243,8 +243,8 @@ fn prepared_devs_match_ordinary_setup_and_isolate_containers() {
 
 /// AC-T7.1.4 (runtime-tools' rootless subset, goal 17's rootless variant): a rootless `hex oci create` of a spec that
 /// names no cgroupsPath makes the container's cgroup beside the command line's own, as crun's does. Do: run the case
-/// alone through the lab's fixture, rootless. Expect it to pass, or to say why it was skipped. As root it is no case:
-/// a root runtime writes the hierarchy's root, as before.
+/// alone through the lab's fixture, rootless. Expect it to pass, or, unless HEX_DELEGATED gave this binary a delegated
+/// cgroup of its own, to say why it was skipped. As root it is no case: a root runtime writes the hierarchy's root.
 #[test]
 fn a_rootless_command_line_create_makes_its_cgroup_beside_its_own() {
     if host_id("-u") == 0 {
@@ -270,6 +270,11 @@ fn a_rootless_command_line_create_makes_its_cgroup_beside_its_own() {
         "the rootless command line's cgroup case failed"
     );
     if !log.lines().any(|line| line == ROOTLESS_CLI_CGROUP_PASS) {
+        // Under HEX_DELEGATED the runner gave this binary a delegated cgroup of its own, so the case runs there.
+        assert!(
+            std::env::var_os("HEX_DELEGATED").is_none(),
+            "the rootless command line's cgroup case was skipped though this binary's cgroup is delegated to it"
+        );
         // The fixture says why where it can't run a rootless container here (no delegation, no user namespaces).
         assert!(
             log.lines().any(|line| line.starts_with("SKIP")),
