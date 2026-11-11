@@ -887,7 +887,9 @@ impl Node {
             .map_err(|_| backends::uncertain(id))?
         {
             let mut info = backend.inspect(id)?;
-            if info.class != record.spec.class.class() || info.allocation != record.spec.allocation
+            if info.class != record.spec.class.class()
+                || info.allocation != record.spec.allocation
+                || info.route != record.spec.route
             {
                 return Err(backends::uncertain(id));
             }
@@ -934,7 +936,6 @@ impl Node {
             }
         };
         Ok(BoxInfo {
-            route: record.spec.route,
             membership: None,
             id: id.clone(),
             class: record.spec.class.class(),
@@ -946,6 +947,7 @@ impl Node {
             },
             bounds: record.spec.bounds.clone(),
             allocation: record.spec.allocation,
+            route: record.spec.route,
             adopted,
             exit,
             abandoned: record
@@ -1425,13 +1427,13 @@ impl Node {
         // The box as create made it: its container created, its init at the exec FIFO, nothing exec'd
         // in it yet, as the state create wrote says without reading it back.
         Ok(BoxInfo {
-            route: record.spec.route,
             membership: None,
             id,
-            class: Class::Oci,
+            class: record.spec.class.class(),
             state: BoxState::Created,
             bounds: record.spec.bounds,
             allocation: record.spec.allocation,
+            route: record.spec.route,
             adopted: false,
             exit: None,
             abandoned: 0,
@@ -1929,13 +1931,13 @@ impl Runtime for Node {
                 // A box whose record can't be read is reported as its id with an empty state rather
                 // than hidden; recovery is what cleans it up.
                 out.push(BoxInfo {
-                    route: None,
                     membership: None,
                     id,
                     class: Class::Process,
                     state: BoxState::Empty,
                     bounds: hex_api::Bounds::default(),
                     allocation: None,
+                    route: None,
                     adopted: false,
                     exit: None,
                     abandoned: 0,
@@ -2518,7 +2520,6 @@ mod tests {
     fn ac_t7_1_3_a_reaped_init_keeps_its_identity_until_its_cgroup_drains() {
         let mut record = BoxRecord::new(
             BoxSpec {
-                route: None,
                 devices: Vec::new(),
                 id: BoxId::new("ended").unwrap(),
                 bounds: hex_api::Bounds::default(),

@@ -201,6 +201,14 @@ pub struct RouteKey {
     pub gpu: GpuEligibility,
 }
 impl RouteKey {
+    pub fn backend_class(self) -> crate::Class {
+        match self.execution {
+            Execution::Native => self.class,
+            Execution::ShardsShared | Execution::ShardsDedicated => crate::Class::Shards,
+            Execution::Firecracker => crate::Class::Firecracker,
+        }
+    }
+
     pub fn check(self) -> Result<(), Refusal> {
         let valid = match (self.class, self.execution) {
             (crate::Class::Process, Execution::Native) => self.gpu == GpuEligibility::None,
@@ -347,6 +355,33 @@ pub struct RouteOffer {
     pub backing: Option<BackingKey>,
 }
 impl RouteOffer {
+    /// A dedicated route may hand off its observer's exact physical grant. Its dynamic envelope
+    /// extends the SAME evidence-pinned profile; a different pool/profile is not a substitute.
+    pub fn check_backing(self, backing: &BackingOffer) -> Result<(), Refusal> {
+        if self.backing != Some(backing.key) {
+            return Err(invalid_route("route references another backing generation"));
+        }
+        backing.allocation()?;
+        match (self.key.execution, self.cost) {
+            (Execution::ShardsShared, None) if backing.devices.is_empty() => Ok(()),
+            (Execution::ShardsDedicated | Execution::Firecracker, Some(cost))
+                if self.key.gpu == GpuEligibility::Required
+                    && !backing.devices.is_empty()
+                    && cost.id == backing.cost.id
+                    && cost.floor == backing.cost.floor
+                    && cost.quantum == backing.cost.quantum
+                    && cost.overhead == backing.cost.overhead
+                    && cost.guest_overhead == backing.cost.guest_overhead
+                    && cost.ceiling.holds(backing.cost.ceiling) =>
+            {
+                Ok(())
+            }
+            _ => Err(invalid_route(
+                "route and backing disagree about topology, profile or physical grant",
+            )),
+        }
+    }
+
     pub fn check(self) -> Result<(), Refusal> {
         self.key.check()?;
         match (self.key.execution, self.cost, self.backing) {
@@ -384,7 +419,7 @@ impl RouteReceipt {
     }
 }
 
-fn invalid_route(why: &'static str) -> Refusal {
+pub(crate) fn invalid_route(why: &'static str) -> Refusal {
     let mut owned = String::new();
     if owned.try_reserve_exact(why.len()).is_err() {
         return Refusal::Exhausted {
@@ -658,6 +693,17 @@ impl Capacity {
                 .iter()
                 .find(|backing| backing.key == key)
                 .ok_or_else(|| invalid_route("committed backing is absent"))?;
+            offer.check_backing(backing)?;
+            if spec.devices.len() != backing.devices.len()
+                || spec
+                    .devices
+                    .iter()
+                    .any(|id| backing.devices.binary_search(id).is_err())
+            {
+                return Err(invalid_route(
+                    "selected physical set differs from the complete backing grant",
+                ));
+            }
             if backing.phase != BackingPhase::Live {
                 return Err(Refusal::Backing {
                     key,
@@ -715,46 +761,59 @@ impl Capacity {
     }
 
     pub fn check_routes(&self) -> Result<(), Refusal> {
-        if self.routes.len() > MAX_RUNTIME_ROUTES || self.backings.len() > MAX_RUNTIME_ROUTES {
+        Self::check_route_parts(
+            self.total,
+            self.devices.len(),
+            &self.routes,
+            &self.device_routes,
+            &self.backings,
+        )
+    }
+
+    /// The scheduler's normalized offer view uses this same validation without another catalog.
+    pub fn check_route_parts(
+        total: CapacityResources,
+        device_count: usize,
+        routes: &[RouteOffer],
+        device_routes: &[u64],
+        backings: &[BackingOffer],
+    ) -> Result<(), Refusal> {
+        if routes.len() > MAX_RUNTIME_ROUTES || backings.len() > MAX_RUNTIME_ROUTES {
             return Err(Refusal::Exhausted {
                 what: "initialized runtime routes/backings",
                 bound: MAX_RUNTIME_ROUTES,
             });
         }
-        if self.routes.is_empty() {
-            if !self.device_routes.is_empty() || !self.backings.is_empty() {
+        if routes.is_empty() {
+            if !device_routes.is_empty() || !backings.is_empty() {
                 return Err(invalid_route(
                     "legacy capacity cannot imply route or backing eligibility",
                 ));
             }
             return Ok(());
         }
-        if self.device_routes.len() != self.devices.len() {
+        if device_routes.len() != device_count {
             return Err(invalid_route(
                 "route masks must pair with the canonical physical device list",
             ));
         }
-        let valid_bits = if self.routes.len() == MAX_RUNTIME_ROUTES {
+        let valid_bits = if routes.len() == MAX_RUNTIME_ROUTES {
             u64::MAX
         } else {
-            let count = u32::try_from(self.routes.len())
+            let count = u32::try_from(routes.len())
                 .map_err(|_| invalid_route("route word width overflows"))?;
             1u64.checked_shl(count)
                 .and_then(|value| value.checked_sub(1))
                 .ok_or_else(|| invalid_route("route word width overflows"))?
         };
-        if self
-            .device_routes
-            .iter()
-            .any(|mask| mask & !valid_bits != 0)
-        {
+        if device_routes.iter().any(|mask| mask & !valid_bits != 0) {
             return Err(invalid_route(
                 "device eligibility references an absent initialized route",
             ));
         }
-        for (at, route) in self.routes.iter().enumerate() {
+        for (at, route) in routes.iter().enumerate() {
             route.check()?;
-            if self.routes.iter().take(at).any(|previous| {
+            if routes.iter().take(at).any(|previous| {
                 previous.key.class == route.key.class
                     && previous.key.image == route.key.image
                     && previous.key.gpu.overlaps(route.key.gpu)
@@ -764,32 +823,28 @@ impl Capacity {
                 ));
             }
             if let Some(key) = route.backing {
-                if !self.backings.iter().any(|backing| backing.key == key) {
-                    return Err(invalid_route(
-                        "route references an absent canonical backing",
-                    ));
-                }
+                let backing = backings
+                    .iter()
+                    .find(|backing| backing.key == key)
+                    .ok_or_else(|| invalid_route("route references an absent canonical backing"))?;
+                route.check_backing(backing)?;
             }
             if let Some(cost) = route.cost {
-                if !self
-                    .total
-                    .holds(cost.allocate(CapacityResources::default())?.resources)
-                {
+                if !total.holds(cost.allocate(CapacityResources::default())?.resources) {
                     return Err(invalid_route(
                         "route minimum charge exceeds its physical resource pool",
                     ));
                 }
             }
         }
-        for (at, backing) in self.backings.iter().enumerate() {
+        for (at, backing) in backings.iter().enumerate() {
             let allocation = backing.allocation()?;
-            if !self.total.holds(allocation.resources) {
+            if !total.holds(allocation.resources) {
                 return Err(invalid_route(
                     "backing charge exceeds its physical resource pool",
                 ));
             }
-            if self
-                .backings
+            if backings
                 .iter()
                 .take(at)
                 .any(|previous| previous.key.pool == backing.key.pool)
@@ -797,6 +852,22 @@ impl Capacity {
                 return Err(invalid_route(
                     "one pool has multiple competing backing generations",
                 ));
+            }
+            let mut backend = None;
+            for route in routes
+                .iter()
+                .filter(|route| route.backing == Some(backing.key))
+            {
+                let actual = route.key.backend_class();
+                if backend.is_some_and(|previous| previous != actual) {
+                    return Err(invalid_route(
+                        "backing aliases disagree about the actual backend",
+                    ));
+                }
+                backend = Some(actual);
+            }
+            if backend.is_none() {
+                return Err(invalid_route("backing has no initialized backend route"));
             }
         }
         Ok(())
@@ -1447,7 +1518,7 @@ mod route_tests {
             },
             cost: cost(),
             phase: BackingPhase::Granted,
-            devices: Vec::new(),
+            devices: vec![id],
         };
         c.backings.push(backing.try_clone().unwrap());
         c.routes[0].backing = Some(backing.key);
@@ -1457,6 +1528,22 @@ mod route_tests {
         );
         c.backings[0].phase = BackingPhase::Live;
         c.validate_route(&spec).unwrap();
+        c.backings[0].cost.id = [8; 32];
+        assert!(
+            c.check_routes().is_err(),
+            "live unrelated cost cannot grant an observer route"
+        );
+        c.backings[0].cost = cost();
+        c.backings[0].devices[0].key = 8;
+        assert!(
+            c.validate_route(&spec).is_err(),
+            "free metadata cannot replace the physical grant"
+        );
+        c.backings[0].devices = vec![id, crate::DeviceId { key: 8, ..id }];
+        assert!(
+            c.validate_route(&spec).is_err(),
+            "an exact request cannot inherit extra granted GPUs"
+        );
     }
     /// AC-T7.4.1: cold provisioning reserves identity refs without inventing native metadata.
     #[test]
@@ -1471,10 +1558,13 @@ mod route_tests {
                 class: crate::Class::Firecracker,
                 image: platform(ImageOs::Linux),
                 execution: Execution::Firecracker,
-                gpu: GpuEligibility::None,
+                gpu: GpuEligibility::Required,
             },
             cost: Some(cost()),
-            backing: None,
+            backing: Some(BackingKey {
+                pool: [2; 32],
+                generation: [3; 16],
+            }),
         });
         let mut backing = BackingOffer {
             key: BackingKey {

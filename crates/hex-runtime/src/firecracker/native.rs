@@ -451,9 +451,10 @@ impl FirecrackerRuntime {
         let mut info = client.create(rewritten.spec)?;
         record.phase = Phase::Ready;
         transaction.put(&record)?;
-        info.class = Class::Firecracker;
+        info.class = record.spec.class.class();
         info.bounds = record.spec.bounds;
         info.allocation = record.spec.allocation;
+        info.route = record.spec.route;
         Ok(info)
     }
 
@@ -686,12 +687,12 @@ impl Runtime for FirecrackerRuntime {
                     .map_err(|_| uncertain(id))?
             {
                 return Ok(BoxInfo {
-                    route: None,
                     id: id.try_clone()?,
-                    class: Class::Firecracker,
+                    class: record.spec.class.class(),
                     state: hex_api::BoxState::Empty,
                     bounds: record.spec.bounds.clone(),
                     allocation: record.spec.allocation,
+                    route: record.spec.route,
                     adopted: false,
                     membership: None,
                     exit: Some(exit(end.status)),
@@ -699,9 +700,10 @@ impl Runtime for FirecrackerRuntime {
                 });
             }
             let mut info = self.client(record, transaction)?.inspect(id)?;
-            info.class = Class::Firecracker;
+            info.class = record.spec.class.class();
             info.bounds = record.spec.bounds.clone();
             info.allocation = record.spec.allocation;
+            info.route = record.spec.route;
             Ok(info)
         })
     }

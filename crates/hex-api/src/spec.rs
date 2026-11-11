@@ -92,10 +92,9 @@ impl BoxSpec {
                 || self.bounds.cpu_max_milli.is_none()
                 || self.bounds.memory_max.is_none())
             {
-                return Err(Refusal::Invalid {
-                    what: "runtime route allocation",
-                    why: "dedicated execution requires finite original CPU/memory caps and its admitted allocation".into(),
-                });
+                return Err(crate::runtime::invalid_route(
+                    "dedicated execution requires finite original CPU/memory caps and its admitted allocation",
+                ));
             }
         }
 
