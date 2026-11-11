@@ -132,26 +132,118 @@ impl Runtimes {
 
     /// Query each configured backend without holding any placement or record lock.
     pub fn capacities(&self) -> Result<Vec<(Class, Option<hex_api::Capacity>)>, Error> {
-        self.by_class
-            .iter()
-            .map(|(&class, runtime)| {
-                let form = match class {
-                    Class::Oci if runtime.classes().contains(&hex_api::Class::Oci) => {
-                        hex_api::Class::Oci
-                    }
-                    Class::Oci => hex_api::Class::Process,
-                    Class::Firecracker => hex_api::Class::Firecracker,
-                    Class::Shards => hex_api::Class::Shards,
-                };
-                if !runtime.classes().contains(&form) {
-                    return Err(invalid(
-                        "registered endpoint is not initialized for its placement backend",
+        let mut reports = Vec::new();
+        reports
+            .try_reserve_exact(self.by_class.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "initialized runtime snapshots",
+                bound: Class::COUNT,
+            })?;
+        for (&class, runtime) in &self.by_class {
+            let initialized = runtime.classes();
+            let form = match class {
+                Class::Oci if initialized.contains(&hex_api::Class::Oci) => hex_api::Class::Oci,
+                Class::Oci => hex_api::Class::Process,
+                Class::Firecracker => hex_api::Class::Firecracker,
+                Class::Shards => hex_api::Class::Shards,
+            };
+            if !initialized.contains(&form) {
+                return Err(invalid_static(
+                    "registered endpoint is not initialized for its placement backend",
+                )
+                .into());
+            }
+            let report = runtime.capacity(form)?;
+            if let Some(report) = &report {
+                report.check()?;
+                if report
+                    .routes
+                    .iter()
+                    .any(|route| !initialized.contains(&route.key.backend_class()))
+                {
+                    return Err(invalid_static(
+                        "route demands a backend absent from this initialized endpoint",
                     )
                     .into());
                 }
-                Ok((class, runtime.capacity(form)?))
-            })
-            .collect()
+            }
+            reports.push((class, report));
+        }
+        Ok(reports)
+    }
+
+    /// Keep the originating endpoint: a composite native owner routes its canonical PoolRecord,
+    /// while a generic Shards/native endpoint cannot initialize a Firecracker route.
+    pub fn prepared_backings(
+        reports: &[(Class, Option<hex_api::Capacity>)],
+    ) -> Result<Vec<(Class, hex_api::BackingKey)>, Error> {
+        let mut pending = Vec::new();
+        pending
+            .try_reserve_exact(hex_api::MAX_RUNTIME_ROUTES)
+            .map_err(|_| Refusal::Exhausted {
+                what: "prepared native backing count",
+                bound: hex_api::MAX_RUNTIME_ROUTES,
+            })?;
+        for (class, report) in reports {
+            let Some(report) = report else { continue };
+            report.check()?;
+            for backing in &report.backings {
+                if backing.phase != hex_api::BackingPhase::Prepared
+                    || !report
+                        .routes
+                        .iter()
+                        .any(|route| route.backing == Some(backing.key))
+                    || pending.iter().any(|(_, key)| *key == backing.key)
+                {
+                    continue;
+                }
+                if pending.len() == hex_api::MAX_RUNTIME_ROUTES {
+                    return Err(Refusal::Exhausted {
+                        what: "prepared native backing count",
+                        bound: hex_api::MAX_RUNTIME_ROUTES,
+                    }
+                    .into());
+                }
+                pending.push((*class, backing.key));
+            }
+        }
+        Ok(pending)
+    }
+
+    pub fn released_backings(
+        reports: &[(Class, Option<hex_api::Capacity>)],
+    ) -> Result<Vec<(Class, hex_api::BackingOffer)>, Error> {
+        let mut released: Vec<(Class, hex_api::BackingOffer)> = Vec::new();
+        released
+            .try_reserve_exact(hex_api::MAX_RUNTIME_ROUTES)
+            .map_err(|_| Refusal::Exhausted {
+                what: "released native backing count",
+                bound: hex_api::MAX_RUNTIME_ROUTES,
+            })?;
+        for (class, report) in reports {
+            let Some(report) = report else { continue };
+            report.check()?;
+            for backing in &report.backings {
+                if backing.phase != hex_api::BackingPhase::Released
+                    || released.iter().any(|(_, prior)| prior.key == backing.key)
+                    || report.devices.iter().any(|device| {
+                        matches!(device.holder.as_ref(), Some(hex_api::DeviceHolder::Box(_)))
+                            && backing.devices.binary_search(&device.id).is_ok()
+                    })
+                {
+                    continue;
+                }
+                if released.len() == hex_api::MAX_RUNTIME_ROUTES {
+                    return Err(Refusal::Exhausted {
+                        what: "released native backing count",
+                        bound: hex_api::MAX_RUNTIME_ROUTES,
+                    }
+                    .into());
+                }
+                released.push((*class, backing.try_clone()?));
+            }
+        }
+        Ok(released)
     }
 
     /// The native Store/turn owner supplies facts over the existing Runtime seam. This registry
@@ -656,6 +748,92 @@ impl Driver {
             state.admission = result.as_ref().err().map(admission_refusal);
         }
         result.map_err(Error::Core)
+    }
+
+    /// The existing operation receipt spans the pure grant, unlocked native call and exact
+    /// result. No runtime RPC or Store effect occurs under the core/model mutex. False means
+    /// current room cannot initialize this backing; unrelated eligible CPU routes remain usable.
+    pub fn initialize_backing(
+        &self,
+        endpoint: Class,
+        key: hex_api::BackingKey,
+    ) -> Result<bool, Error> {
+        let _operation = self.operation()?;
+        let runtime = self.runtimes.get(endpoint)?;
+        let grant = match self.lock()?.node.grant_backing(key) {
+            Ok(grant) => grant,
+            Err(hex_sim::SimError::Resources(_)) => return Ok(false),
+            Err(_) => {
+                return Err(Refusal::Backing {
+                    key,
+                    cause: hex_api::LifecycleCause::Pending,
+                }
+                .into());
+            }
+        };
+        let expected = grant.try_clone()?;
+        let observed = match runtime.initialize_backing(grant) {
+            Ok(observed) => observed,
+            Err(refusal) => {
+                self.lock()?.admission = Some(Refusal::Backing {
+                    key,
+                    cause: hex_api::LifecycleCause::Uncertain,
+                });
+                return Err(refusal.into());
+            }
+        };
+        let accepted = observed.key == expected.key
+            && observed.devices == expected.devices
+            && observed.allocation().ok() == Some(expected.allocation)
+            && observed.phase == hex_api::BackingPhase::Live;
+        let mut state = self.lock()?;
+        if !accepted || state.node.observe_backing(&observed).is_err() {
+            state.admission = Some(Refusal::Backing {
+                key,
+                cause: hex_api::LifecycleCause::Uncertain,
+            });
+            return Err(Refusal::Backing {
+                key,
+                cause: hex_api::LifecycleCause::Uncertain,
+            }
+            .into());
+        }
+        Ok(true)
+    }
+
+    /// Acknowledges an already consumed native terminal receipt, before that owner may remove
+    /// the old generation. The callback remains outside the core mutex, under the same operation.
+    pub fn release_backing(
+        &self,
+        endpoint: Class,
+        expected: &hex_api::BackingOffer,
+    ) -> Result<(), Error> {
+        expected.allocation()?;
+        let _operation = self.operation()?;
+        let key = expected.key;
+        let refused = || Refusal::Backing {
+            key,
+            cause: hex_api::LifecycleCause::Uncertain,
+        };
+        if expected.phase != hex_api::BackingPhase::Released
+            || !self
+                .lock()?
+                .node
+                .backing_released(key)
+                .map_err(|_| refused())?
+        {
+            return Err(refused().into());
+        }
+        let observed = self.runtimes.get(endpoint)?.release_backing(key)?;
+        if observed.key != key
+            || observed.cost != expected.cost
+            || observed.devices != expected.devices
+            || observed.phase != expected.phase
+        {
+            self.lock()?.admission = Some(refused());
+            return Err(refused().into());
+        }
+        Ok(())
     }
 
     /// Admission changes never erase retained rows. A larger persisted read ceiling

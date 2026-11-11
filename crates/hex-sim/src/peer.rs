@@ -1498,6 +1498,49 @@ impl Node {
         Ok(())
     }
 
+    /// A real backing occupies both existing views before native initialization. Fallible
+    /// snapshots make the two-view change atomic; no additional owner/catalog survives this call.
+    pub fn grant_backing(
+        &mut self,
+        key: hex_api::BackingKey,
+    ) -> Result<hex_api::BackingGrant, crate::SimError> {
+        let mut admission = self.admission.try_clone()?;
+        let mut view = self.view.try_clone()?;
+        let granted = admission.grant_backing(self.id, key)?;
+        if view.grant_backing(self.id, key)? != granted {
+            return Err(crate::SimError::Config(
+                "backing receiver and owner views disagree",
+            ));
+        }
+        self.admission = admission;
+        self.view = view;
+        Ok(granted)
+    }
+
+    /// Native results advance the exact held generation; a failed observation retains both
+    /// views unchanged. A subsequent factual refresh is still needed to expose fresh devices.
+    pub fn observe_backing(
+        &mut self,
+        observed: &hex_api::BackingOffer,
+    ) -> Result<(), crate::SimError> {
+        let mut admission = self.admission.try_clone()?;
+        let mut view = self.view.try_clone()?;
+        admission.observe_backing(self.id, observed)?;
+        view.observe_backing(self.id, observed)?;
+        self.admission = admission;
+        self.view = view;
+        Ok(())
+    }
+
+    /// A native rearm acknowledgement is allowed only after BOTH existing views consumed the
+    /// original positive Released receipt. Absence is never a substitute for that observation.
+    pub fn backing_released(&self, key: hex_api::BackingKey) -> Result<bool, crate::SimError> {
+        Ok(
+            self.admission.backing_phase(self.id, key)? == hex_api::BackingPhase::Released
+                && self.view.backing_phase(self.id, key)? == hex_api::BackingPhase::Released,
+        )
+    }
+
     /// The full durable request, for recovery of the shell's enveloped runtime payload.
     pub fn demand(&self, key: Key) -> Option<Demand> {
         self.owned

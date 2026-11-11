@@ -1422,3 +1422,6 @@ mod recovery_payload_guard_tests;
 
 #[path = "device_binding_tests.rs"]
 mod device_binding_tests;
+
+#[path = "backing_bootstrap_tests.rs"]
+mod backing_bootstrap_tests;

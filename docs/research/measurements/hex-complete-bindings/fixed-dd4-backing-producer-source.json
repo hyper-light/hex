@@ -1,0 +1,63 @@
+{
+  "base": "dd4f01ccf33b6e58180576e041c59ddbd6b0120f",
+  "parent": "dd4f01ccf33b6e58180576e041c59ddbd6b0120f",
+  "role": "implementer",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "branch": "cp/t7-bindings-dd4-producer",
+  "worktree": "/Users/adalundhe/.cache/hex-complete-bindings/fc-dd4-scheduler-producer-20261111-v1",
+  "origin_sources": [
+    "e6f6caf9a031fa064772ddfa3472c7de2767d4d0",
+    "e5b524e3b06bc37d8129795500d0045a6b5de170"
+  ],
+  "source_sha256": {
+    "crates/hex-node/src/placement.rs": "981da425bae5ba71026d55f2d82c504b65564a0da94a21dfa3ecde541a770b1b",
+    "crates/hex-node/src/scheduler.rs": "8fab688c6fa4f09c16d17809ca45e2addd1b5acecc413713272b167fe892ffff",
+    "crates/hex-sim/src/peer.rs": "95be79fff4a802f4756b4206755ce0bf8b0094a57c0540eea551db0487f3cc2d",
+    "crates/hex-sim/src/index/routes.rs": "51da36e1348299665d2a059a400fa388c85e15c832bcdd2da30a2674725cc8b2",
+    "crates/hex-node/src/placement/tests.rs": "03592e493319cfa1cd04609a105b0784b0efadd9d9f979c99c076c3df8a87386",
+    "crates/hex-node/src/placement/backing_bootstrap_tests.rs": "23c5111dfe76f06af43a8e94f31aef76af1c8d41e39305f36a4bd16cf04eda0e"
+  },
+  "scope": "Small fixed-dd4 Node/simulator closure for missing existing scheduler grant->native-effect segment, plus e5 Released acknowledgement. No whole-lane/Runtime/CLI/Store/wire import.",
+  "behavior": [
+    "Runtimes fallibly validates initialized snapshots and route backend identity, finds bounded/deduplicated Prepared/Released canonical offers preserving origin endpoint.",
+    "Peer Node atomically stages SAME admission/view grants and native observations with fallible existing index copies. No new inventory/ledger or picker.",
+    "Driver holds existing operation receipt, grants through SAME Index before native initialize RPC outside core mutex, checks exact key/profile/charge/full physical IDs and Live receipt; mismatch/failure retains reservation+typed uncertainty.",
+    "Both existing views must have consumed exact positive Released phase before Driver calls native release acknowledgement outside core mutex; mismatches retain uncertainty.",
+    "Service boot and ordinary refresh normalize actual capacity, consume Released ACK then Prepared grant/native callbacks in one bounded pass; a new actual snapshot publishes facts, never a callback reply alone. Existing normalization/projections/5f schema/typed results remain intact."
+  ],
+  "registration": "ROOT canonical placement/tests.rs appends ONLY path+module backing_bootstrap_tests; no standalone duplicate registration in placement.rs.",
+  "original_controls": {
+    "source": "e5b524e3b06bc37d8129795500d0045a6b5de170",
+    "original_path": "crates/hex-node/src/placement/backing_tests.rs",
+    "new_path": "crates/hex-node/src/placement/backing_bootstrap_tests.rs",
+    "bytes_identical": true,
+    "tests": [
+      "placement::tests::backing_bootstrap_tests::driver_reserves_the_exact_backing_before_unlocked_native_callback",
+      "placement::tests::backing_bootstrap_tests::route_snapshot_requires_the_real_backend_in_the_originating_endpoint",
+      "placement::tests::backing_bootstrap_tests::native_rearm_waits_for_the_original_released_snapshot"
+    ],
+    "status": "3 SOURCE ONLY/UNRUN, no oracle/body changes"
+  },
+  "preserved_ROOT_blobs_sha256": {
+    "crates/hex-node/src/node.rs": "d6dd295701e2c80bb1ebd2f07f4523c0d35a97dd41af60d5d46ffe457c7e509a",
+    "crates/hex-node/src/node/backends.rs": "c0af938997116f4aea87b5dc5c0dc615b1bddba15bf56cf71deac848c8fd2f06",
+    "crates/hex-node/src/placement/physical.rs": "8e8c5a7f8966b8d2d3017e6fe61552899f09221056e444910e5b60177b67e1bc",
+    "crates/hex-node/src/placement/devices.rs": "581cfa7c9904c1aa912eb0b6fa025a214e7059661b5bf56476c9ce15326ad6ae",
+    "crates/hex-node/src/placement/rows.rs": "72c113b9f160efc8d82d0c3dd4aa5b74dc9c81e0aebd58deee7d8f9fb5531160",
+    "crates/hex-node/src/scheduler/capacity.rs": "c889c0ec85d92ce8f18881f19cb372e17f12ac4581609a47b3b5d10694899977",
+    "crates/hex-core/src/record.rs": "bcad9bf9492cd184fe78aa68c0ca47a549d1f74cc2e38e68ca58eadea2b9d6db",
+    "crates/hex-runtime/src/devices.rs": "d02e66d1aa2920d85d2d69f35092112dab5d304b22884f0b699735deb5627aca"
+  },
+  "original_test_prefix_sha256": "90b6b83c0fb26986cb75a96c896364674ffb38dc2bd82c77eb5e6483b6e178fc",
+  "Runtime_dependency": "ROOT independently integrated reviewed FC e5+76 at2a80ea3707532bcf9119e2e9551ddebb64719a7f; apply ONLY named delta over fixed dd4 to that exact coherent ROOT successor. No Runtime source copied here.",
+  "checks": {
+    "scoped_rustfmt_parser": 0,
+    "compile": "UNRUN",
+    "tests": "UNRUN",
+    "native_effects": 0,
+    "test_dispatches": 0
+  },
+  "limits": "Required feature source closure only. No CPU-observer isolation/subset remedy; those originals remain UNRUN. Real VM/GPU effects, fault/absence/recovery proof, cost measurements, allocation/performance profiles and full gates remain ROOT/native owners. No new budget, wait, cache, refcount or native manager.",
+  "R01_R16": "Fallible bounded new snapshots/copies; exact existing lifecycle/authority/API. Existing source/evidence decisions referenced, no speculative bug/performance claim. Test-only synthetic resources are not measurements. Scope/readback/signer/native/check restrictions retained; raw originals untouched."
+}

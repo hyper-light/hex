@@ -78,6 +78,22 @@ fn failed(error: Error) -> Refusal {
     }
 }
 
+struct BackingActions {
+    prepared: Vec<(hex_sim::model::Class, hex_api::BackingKey)>,
+    released: Vec<(hex_sim::model::Class, hex_api::BackingOffer)>,
+}
+
+impl BackingActions {
+    fn from_reports(
+        reports: &[(hex_sim::model::Class, Option<hex_api::Capacity>)],
+    ) -> Result<Self, Refusal> {
+        Ok(Self {
+            prepared: Runtimes::prepared_backings(reports).map_err(failed)?,
+            released: Runtimes::released_backings(reports).map_err(failed)?,
+        })
+    }
+}
+
 fn key(k: dto::Key) -> Key {
     Key {
         owner: k.owner,
@@ -557,6 +573,7 @@ impl Service {
         }
         let runtimes = Runtimes::new(backends).map_err(failed)?;
         let runtime_capacity = runtimes.capacities().map_err(failed)?;
+        let backing_actions = BackingActions::from_reports(&runtime_capacity)?;
         let backing_owned = runtimes
             .measured_backing_use(&runtime_capacity)
             .map_err(failed)?;
@@ -679,6 +696,7 @@ impl Service {
                 .command
                 .lock()
                 .map_err(|_| Refusal::Broken("scheduler command lock poisoned".into()))?;
+            service.initialize_backings(backing_actions)?;
             service.refresh_peers()?;
             let recovered = service.driver.take_recovered().map_err(failed)?;
             service.dispatch(recovered)?;
@@ -887,8 +905,43 @@ impl Service {
     }
 
     fn refresh(&self) -> Result<(), Refusal> {
+        let prepared = self.refresh_snapshot()?;
+        self.initialize_backings(prepared)
+    }
+
+    /// One bounded pass over actual Prepared offers. The native effect consumes the same Index
+    /// grant; a fresh snapshot, never the initialization reply alone, publishes factual admission.
+    fn initialize_backings(&self, actions: BackingActions) -> Result<(), Refusal> {
+        let mut initialized = false;
+        for (endpoint, released) in actions.released {
+            self.driver
+                .release_backing(endpoint, &released)
+                .map_err(failed)?;
+            initialized = true;
+        }
+        for (endpoint, key) in actions.prepared {
+            if self
+                .driver
+                .initialize_backing(endpoint, key)
+                .map_err(failed)?
+            {
+                initialized = true;
+            } else {
+                tracing::warn!(target: "hex.node", event = "backing.initialization.pending", ?key);
+            }
+        }
+        if initialized {
+            // Do not recursively initialize any new generation discovered in the result. Its
+            // next ordinary refresh takes a new bounded pass after the current operation ends.
+            self.refresh_snapshot()?;
+        }
+        Ok(())
+    }
+
+    fn refresh_snapshot(&self) -> Result<BackingActions, Refusal> {
         let owned_by_class = self.driver.measured_owned_use_by_class().map_err(failed)?;
         let runtime_capacity = self.runtimes.capacities().map_err(failed)?;
+        let actions = BackingActions::from_reports(&runtime_capacity)?;
         let backing_owned = self
             .runtimes
             .measured_backing_use(&runtime_capacity)
@@ -936,7 +989,8 @@ impl Service {
         if let Some(node) = cluster.nodes.iter_mut().find(|n| n.id == self.id) {
             *node = local;
         }
-        self.rebudget(&cluster)
+        self.rebudget(&cluster)?;
+        Ok(actions)
     }
 
     fn rebudget(&self, cluster: &Cluster) -> Result<(), Refusal> {

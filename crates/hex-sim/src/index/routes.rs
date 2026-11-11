@@ -515,6 +515,21 @@ impl Routes {
 }
 
 impl FitIndex {
+    pub(crate) fn backing_phase(
+        &self,
+        node: NodeId,
+        key: BackingKey,
+    ) -> Result<BackingPhase, SimError> {
+        self.slot(node)?
+            .routes
+            .as_ref()
+            .and_then(|routes| routes.backing(key))
+            .map(|(_, phase)| phase)
+            .ok_or(SimError::Config(
+                "backing phase has no canonical initialized owner",
+            ))
+    }
+
     /// The one index grants a prepared canonical incarnation BEFORE the native owner may boot it.
     pub fn grant_backing(
         &mut self,
