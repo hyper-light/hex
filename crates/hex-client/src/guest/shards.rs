@@ -190,3 +190,6 @@ pub fn refusal(op: &'static str, why: &shards_api::Refusal) -> Refusal {
         other => Refusal::os(op, other),
     }
 }
+
+#[cfg(test)]
+mod connect_original_tests;
