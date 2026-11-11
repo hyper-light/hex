@@ -1005,10 +1005,71 @@ fn voluntary_switches() -> u64 {
         .unwrap()
 }
 
-/// Goal 16's per-call cost on the one core (decision 3's client): an uncontended call blocks at most once, in its own
-/// wait for its answer, which it reads itself, and no other thread of the client's wakes for it. Do: one inspect to
-/// warm the connection, then 200 in a row on this thread, each answered by a stand-in agent; count this thread's
-/// voluntary context switches across them. Expect: at most one a call, and no thread of the client's reading.
+/// The node agent's socket, each wait the core makes on it and each read counted by the thread that made it. The
+/// core waits on a connection only by polling the handle its transport lends it, and reads it only through `recv`
+/// (`crate::calls`), so these count its waits and reads exactly, and nothing else's.
+struct Watched {
+    socket: Socket,
+    caller: std::thread::ThreadId,
+    waits: std::sync::atomic::AtomicU64,
+    reads: std::sync::atomic::AtomicU64,
+    elsewhere: std::sync::atomic::AtomicU64,
+}
+
+impl Watched {
+    fn count(&self, mine: &std::sync::atomic::AtomicU64) {
+        let counter = if std::thread::current().id() == self.caller {
+            mine
+        } else {
+            &self.elsewhere
+        };
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn counts(&self) -> (u64, u64, u64) {
+        let load = |n: &std::sync::atomic::AtomicU64| n.load(std::sync::atomic::Ordering::Relaxed);
+        (load(&self.waits), load(&self.reads), load(&self.elsewhere))
+    }
+}
+
+impl Transport for Watched {
+    type Reading = Reading;
+
+    fn answers() -> &'static [Patience; KINDS] {
+        Socket::answers()
+    }
+
+    fn reading(&self) -> Reading {
+        self.socket.reading()
+    }
+
+    fn handle(&self) -> Handle<'_> {
+        self.count(&self.waits);
+        self.socket.handle()
+    }
+
+    fn recv(&self, reading: &mut Reading, take: &mut Take<'_>) -> Result<bool, Refusal> {
+        self.count(&self.reads);
+        self.socket.recv(reading, take)
+    }
+
+    fn try_send(&self, bytes: &[u8], at: &mut usize, lent: &[Lent<'_>]) -> Result<bool, Sent> {
+        self.socket.try_send(bytes, at, lent)
+    }
+
+    fn shutdown(&self) {
+        self.socket.shutdown();
+    }
+}
+
+/// Goal 16's per-call cost on the one core (decision 3's client): an uncontended call waits at most once, on its
+/// connection for its answer, which it reads itself, and no other thread waits on or reads the connection for it.
+/// Do: one inspect to warm the connection, then 200 in a row on this thread through the node agent's socket, each
+/// answered by a stand-in agent, every wait the core makes on the socket and every read counted by thread
+/// ([`Watched`]). Expect: at most one wait a call and one read each, all this thread's, and no reading thread. The
+/// thread's voluntary context switches are printed, not held to that bound: they count every sleep of the thread,
+/// the client's one wait a call and sleeps it never made (an allocator lock another thread holds, a fault behind
+/// another thread's mapping, reclaim in a send), so at one a call (200 of 200 alone, 00aad) any such sleep failed it.
 #[test]
 fn an_uncontended_call_blocks_at_most_once_and_wakes_no_other_thread() {
     let calls = 200u64;
@@ -1025,22 +1086,49 @@ fn an_uncontended_call_blocks_at_most_once_and_wakes_no_other_thread() {
         }
         conn
     });
-    let client = Client::connect(&path).unwrap();
+    let fd = rustix::net::socket_with(
+        AddressFamily::UNIX,
+        SocketType::SEQPACKET,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    rustix::net::connect(&fd, &SocketAddrUnix::new(&path).unwrap()).unwrap();
+    let client = Core::hello(
+        Shared::try_new(Watched {
+            socket: Socket { fd },
+            caller: std::thread::current().id(),
+            waits: std::sync::atomic::AtomicU64::new(0),
+            reads: std::sync::atomic::AtomicU64::new(0),
+            elsewhere: std::sync::atomic::AtomicU64::new(0),
+        })
+        .unwrap(),
+    )
+    .unwrap();
     let b = BoxId::new("b").unwrap();
     assert_eq!(client.inspect(&b), Err(Refusal::NoSuchBox(b.clone())));
+    let watched = &client.shared().transport;
+    let (waits, reads, elsewhere) = watched.counts();
     let before = voluntary_switches();
     for _ in 0..calls {
         assert_eq!(client.inspect(&b), Err(Refusal::NoSuchBox(b.clone())));
     }
     let switches = voluntary_switches() - before;
+    let (waited, read, other) = watched.counts();
+    let (waits, reads, elsewhere) = (waited - waits, read - reads, other - elsewhere);
     eprintln!(
-        "{calls} calls: {switches} voluntary context switches of the calling thread ({:.2} a call)",
-        switches as f64 / calls as f64
+        "{calls} calls: {waits} waits and {reads} reads on the connection, {elsewhere} by other threads; \
+         {switches} voluntary context switches of the calling thread"
+    );
+    assert_eq!(
+        elsewhere, 0,
+        "another thread waited on or read the client's connection"
     );
     assert!(
-        switches <= calls,
-        "{switches} voluntary switches in {calls} calls"
+        waits <= calls,
+        "{waits} waits on the connection in {calls} calls"
     );
+    assert_eq!(reads, calls, "each answer read once, by its own caller");
     // The reading thread the turn replaced was named `hex-client`; the stdio copies of tests beside this one,
     // `hex-client-stdio`, read no connection.
     let readers = std::fs::read_dir("/proc/self/task")

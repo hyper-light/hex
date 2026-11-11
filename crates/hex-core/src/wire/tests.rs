@@ -3457,7 +3457,10 @@ fn physical_report_unavailable_roundtrips_qualified_backing_causes() {
             put_physical_report(&mut short, report),
             Err(Fault::Oversized { .. })
         ));
-        assert_eq!((short.out.len(), short.out.capacity()), (0, initial_capacity));
+        assert_eq!(
+            (short.out.len(), short.out.capacity()),
+            (0, initial_capacity)
+        );
         assert!(matches!(
             read_answer(&received(&bytes, 1), MAX_MESSAGE),
             Err(Fault::Descriptors { .. })
@@ -3694,6 +3697,44 @@ fn connect_refusal_hostile_tags_cuts_and_trailing_bytes_are_refused() {
             kind: kind::REFUSED,
         }
     );
+}
+
+/// AC-T7.4.1 (CLAUDE.md §2): write every Connect refusal, and a Backing one beside them, into a
+/// writer one byte short of its body: expect each refused as oversized before a byte of it is
+/// written or any room taken, as a Backing refusal's is; and into a writer of exactly its body:
+/// expect all of it there, in no more room than that.
+#[test]
+fn connect_refusal_reserves_its_whole_body_before_writing() {
+    let mut refusals = connect_refusals();
+    refusals.push(Refusal::Backing {
+        key: route_wire_key(),
+        cause: LifecycleCause::Busy,
+    });
+    for refusal in &refusals {
+        let mut sized = Writer::new(MAX_MESSAGE);
+        put_refusal(&mut sized, refusal).unwrap();
+        let body = sized.out.len();
+        let mut short = Writer::new(body - 1);
+        let room = short.out.capacity();
+        let refused = put_refusal(&mut short, refusal);
+        assert!(
+            matches!(refused, Err(Fault::Oversized { .. })),
+            "{refusal:?} in {} bytes: {refused:?}",
+            body - 1
+        );
+        assert_eq!(
+            (short.out.len(), short.out.capacity()),
+            (0, room),
+            "{refusal:?}"
+        );
+        let mut exact = Writer::new(body);
+        put_refusal(&mut exact, refusal).unwrap();
+        assert_eq!(
+            (exact.out.len(), exact.out.capacity()),
+            (body, body),
+            "{refusal:?}"
+        );
+    }
 }
 
 /// AC-T7.4.1 (Shards R04): take each kind std's own errno mapping gives that Hex has no tag for (on
