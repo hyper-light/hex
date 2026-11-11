@@ -2756,31 +2756,24 @@ impl serve::Remote for GuestProgram {
 }
 
 #[cfg(test)]
-#[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_lifecycle_tests.rs"]
 mod lifecycle_tests;
 
 #[cfg(test)]
-#[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_pool_tests.rs"]
 mod pool_tests;
 
 #[cfg(test)]
-#[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_report_tests.rs"]
 mod report_tests;
 
 #[cfg(test)]
-#[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_handoff_tests.rs"]
 mod handoff_tests;
 
 #[cfg(test)]
-#[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_unsubmitted_pool_tests.rs"]
 mod unsubmitted_pool_tests;
 
 #[cfg(test)]
-#[path = "../../../docs/research/measurements/hex-complete-lifecycle/recorded_route_projection_tests.rs"]
 mod route_projection_tests;
 
 #[cfg(test)]
-#[path = "../../../docs/research/measurements/hex-completion-validation/shared-record-ownership-original/recorded_shared_outer_tests.rs"]
 mod shared_outer_original_tests;
 
 #[cfg(all(test, target_os = "macos"))]

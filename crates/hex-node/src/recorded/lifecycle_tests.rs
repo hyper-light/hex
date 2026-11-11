@@ -1,5 +1,4 @@
 //! AC-T7.4.1 / T-T7.1.2: the public Recorded API against actual SimRuntime effects and durable files.
-//! Identical fixture is overlaid test-only onto b06 for the original-production behavioral red.
 use super::*;
 use hex_api::sim::SimRuntime;
 use hex_api::{Bounds, ClassSpec};
@@ -13,6 +12,7 @@ struct Gate {
     fail: AtomicBool,
     sim: SimRuntime,
     forwarded: Mutex<Option<Reply>>,
+    catalog: std::sync::OnceLock<hex_runtime::devices::SharedCatalog>,
 }
 
 #[derive(Clone)]
@@ -81,6 +81,10 @@ impl Recover for Backend {
             call => Forward::Back(Box::new((call, stdio))),
         }
     }
+    // A test that claims devices sets the canonical catalog, the one physical identity authority.
+    fn device_catalog(&self) -> Result<Option<hex_runtime::devices::SharedCatalog>, Refusal> {
+        Ok(self.0.catalog.get().cloned())
+    }
     // SimRuntime keeps no native metadata: it has no names to join to the retained cohort.
     fn preflight_retained(
         &self,
@@ -112,7 +116,6 @@ impl Recover for Backend {
     }
 }
 
-#[path = "recorded_authority_tests.rs"]
 mod authority;
 fn spec() -> BoxSpec {
     BoxSpec {
@@ -141,6 +144,7 @@ fn fixture(pauses: usize) -> (Arc<Gate>, Receiver<usize>, Vec<SyncSender<()>>) {
             fail: AtomicBool::new(false),
             sim: SimRuntime::new(),
             forwarded: Mutex::new(None),
+            catalog: std::sync::OnceLock::new(),
         }),
         rx,
         senders,
@@ -296,5 +300,4 @@ fn lifecycle_recovery_reaches_cleanup_for_incomplete_create_without_ready_probe(
     assert!(physically_gone && record_gone);
 }
 
-#[path = "recorded_preflight_tests.rs"]
 mod preflight;
