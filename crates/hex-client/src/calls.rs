@@ -2615,9 +2615,6 @@ impl<T: Transport> RemoteProc<T> {
         }
         let shared = triomphe::Arc::clone(&self.conn.shared);
         let deadline = timeout.map(|t| Instant::now().checked_add(t));
-        // AC-T7.4.1: a poll (no time asked, no cap) is bounded by its work, one turn's read, so messages
-        // for others that keep coming can't hold it.
-        let poll = cap.is_none() && timeout.is_none_or(|t| t.is_zero());
         shared.state()?.waiting.insert(self.exec);
         let mut mine = false;
         // Every way out of the loop goes through its end, so the wait is never left registered.
@@ -2664,9 +2661,10 @@ impl<T: Transport> RemoteProc<T> {
             };
             if mine {
                 match shared.turn(Some(left)) {
-                    Ok(true) if !poll => continue,
-                    Ok(false) if !left.is_zero() => continue,
-                    // Waited out, or polled: what came is its end, or none.
+                    // AC-T7.4.1: time left, it waits on. None (a poll, a spent deadline or cap):
+                    // what this one turn read is its end, or none, however many messages for
+                    // others keep coming, so they can't hold it past its time.
+                    Ok(_) if !left.is_zero() => continue,
                     Ok(_) => {
                         let ended = match self.ending.state.lock() {
                             Ok(ended) => ended,
