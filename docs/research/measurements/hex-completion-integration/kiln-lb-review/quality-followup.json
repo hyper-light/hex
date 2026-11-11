@@ -9,7 +9,28 @@
     "failed": 1,
     "assertion": "unread card matched: used=None, compute=None"
   },
-  "owner_validation": "r30 pending; no independent ROOT test/native/benchmark",
+  "owner_validation": {
+    "run": "r30",
+    "source": "2a49894ae4e0666092a6ddfe34e152e6bcad824c",
+    "exit": 0,
+    "core_provider_all_target_clippy": "pass",
+    "gpu_core_tests": 22,
+    "provider_unit_tests": 42,
+    "linux_hardware_tests": 1,
+    "sample_count_per_card": 2,
+    "cards": [
+      "NVIDIA RTX5060Ti0000:01:00.0",
+      "AMD1002:13c00000:79:00.0"
+    ],
+    "raw_log_directory": "~/.cache/kiln-lb/int/hex-fixes-validation",
+    "attribution": "Reported by Kiln Load Balancing agent; ROOT has not independently executed or collected these logs.",
+    "unproven": [
+      "Mac native acceptance",
+      "full workspace/platform gate",
+      "attachment/isolation/recovery/cleanup",
+      "performance"
+    ]
+  },
   "provider_port": {
     "kiln_source": "6d8e7d1d9bf2c014131b0f6b3b0e72d99982d29b",
     "hex_source": "c2da38cc363e7d53f6df8fb82ab7bbda5e2f1efe",
