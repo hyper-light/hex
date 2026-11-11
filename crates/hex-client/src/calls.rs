@@ -43,72 +43,291 @@ pub type Then = Box<dyn FnOnce(u64, Result<Answer, Refusal>) + Send>;
 /// What takes an exec'd program's end in the event form: run once, as [`Then`] is.
 pub type Ended = Box<dyn FnOnce(Result<Exit, Refusal>) + Send>;
 
-/// Historical answer-table order, retained exactly for the existing per-operation census seeds.
+/// The kinds whose answer no box's class times, in their table's order ([`Transport::answers`]): a hello, a list, the
+/// network namespaces' counts; then the scheduler's operations in [`WaitKind`] order; then a native physical report
+/// and the backing lifecycle's three. Waits only append.
 #[repr(usize)]
-enum LegacyKind {
+enum PlainKind {
     Hello,
+    List,
+    Netns,
+}
+impl PlainKind {
+    const COUNT: usize = Self::Netns as usize + 1;
+}
+
+/// The plain kinds' waits, scheduler's among them ([`PlainKind`]).
+pub const KINDS: usize = PlainKind::COUNT + WaitKind::COUNT + 4;
+
+/// AC-T7.4.1: the kinds whose answer a box's class times, in their tables' order ([`Transport::class_answers`]): its
+/// class's runtime does their work, a microVM's boot, its guest's relay, its teardown, orders of magnitude from a
+/// process's or a container's, so each is learned per (kind, class), and a class with no record yet measures rather
+/// than borrow another's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum BoxKind {
     Create,
     Start,
     Exec,
     Signal,
     Inspect,
     Usage,
-    List,
     Delete,
-    Netns,
     Kill,
     ExecStreams,
     Run,
-}
-impl LegacyKind {
-    const COUNT: usize = Self::Run as usize + 1;
+    Capacity,
 }
 
-/// Legacy, scheduler, capacity, native physical report, then backing lifecycle: waits only append.
-pub const KINDS: usize = LegacyKind::COUNT + WaitKind::COUNT + 5;
+/// The box kinds' waits for one class ([`BoxKind`]).
+pub const BOX_KINDS: usize = BoxKind::Capacity as usize + 1;
 
-/// The wait of `request`'s kind in `waits`, a client's table of its call kinds' learned waits (decision 9: a client's
-/// call's wait for its answer and its send is learned per call kind, since a delete waits on its box's emptying and a
-/// list on its parts, so a fast inspect's answer says nothing of theirs); `None` for one that has no answer (a
-/// release). A table's order: hello, create, start, exec, signal, inspect, usage, list, delete, netns, then wire
-/// a program's kill, an exec asking for streams and a run, followed by scheduler operations in
-/// [`WaitKind`] order.
+/// The classes a box is of ([`Class`]), a table of box kinds' waits for each, in [`by_class`]'s order.
+pub const CLASSES: usize = 4;
+
+/// `tables`' entry for `class`: process, oci, firecracker, shards, in that order.
+pub(crate) fn by_class<W>(tables: &[W; CLASSES], class: Class) -> &W {
+    let [process, oci, firecracker, shards] = tables;
+    match class {
+        Class::Process => process,
+        Class::Oci => oci,
+        Class::Firecracker => firecracker,
+        Class::Shards => shards,
+    }
+}
+
+/// One wait of a class's table ([`class_waits`]): `measuring`, or `(release, debug)`'s records as
+/// [`Patience::by_profile`] takes them.
+macro_rules! class_wait {
+    ($name:expr, measuring) => {
+        hex_core::patience::Patience::measuring($name)
+    };
+    ($name:expr, ($release:expr, $debug:expr)) => {
+        hex_core::patience::Patience::by_profile($name, $release, $debug)
+    };
+}
+
+/// One class's box-kind waits, in [`BoxKind`]'s order, each named `<prefix>.<kind>.<class>` (AC-T7.4.1: one census
+/// name per (kind, class)); `measuring` makes every one of them so.
+macro_rules! class_waits {
+    ($prefix:literal, $class:literal, measuring) => {
+        $crate::calls::class_waits!(
+            $prefix,
+            $class,
+            [
+                measuring, measuring, measuring, measuring, measuring, measuring, measuring,
+                measuring, measuring, measuring, measuring
+            ]
+        )
+    };
+    (
+        $prefix:literal,
+        $class:literal,
+        [$create:tt, $start:tt, $exec:tt, $signal:tt, $inspect:tt, $usage:tt, $delete:tt, $kill:tt,
+            $exec_streams:tt, $run:tt, $capacity:tt $(,)?]
+    ) => {
+        [
+            $crate::calls::class_wait!(concat!($prefix, ".create.", $class), $create),
+            $crate::calls::class_wait!(concat!($prefix, ".start.", $class), $start),
+            $crate::calls::class_wait!(concat!($prefix, ".exec.", $class), $exec),
+            $crate::calls::class_wait!(concat!($prefix, ".signal.", $class), $signal),
+            $crate::calls::class_wait!(concat!($prefix, ".inspect.", $class), $inspect),
+            $crate::calls::class_wait!(concat!($prefix, ".usage.", $class), $usage),
+            $crate::calls::class_wait!(concat!($prefix, ".delete.", $class), $delete),
+            $crate::calls::class_wait!(concat!($prefix, ".kill.", $class), $kill),
+            $crate::calls::class_wait!(concat!($prefix, ".exec_streams.", $class), $exec_streams),
+            $crate::calls::class_wait!(concat!($prefix, ".run.", $class), $run),
+            $crate::calls::class_wait!(concat!($prefix, ".capacity.", $class), $capacity),
+        ]
+    };
+}
+pub(crate) use {class_wait, class_waits};
+
+/// The box kinds' waits of a transport with none recorded for any class (a test's): every one measuring.
+static UNRECORDED: [[Patience; BOX_KINDS]; CLASSES] = [
+    class_waits!("client.unrecorded", "process", measuring),
+    class_waits!("client.unrecorded", "oci", measuring),
+    class_waits!("client.unrecorded", "firecracker", measuring),
+    class_waits!("client.unrecorded", "shards", measuring),
+];
+
+/// The wait of `request`'s plain kind in `waits`, a client's table of its plain kinds' learned waits (decision 9: a
+/// client's call's wait for its answer and its send is learned per call kind, since a list waits on its parts, so a
+/// fast hello's answer says nothing of its); `None` for a box kind ([`box_kind_of`]) and for one that has no answer
+/// (a release).
 pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Option<&'a Patience> {
     let n = match request {
-        Request::Hello { .. } => LegacyKind::Hello as usize,
+        Request::Hello { .. } => PlainKind::Hello as usize,
         Request::Call(call) => match call {
-            Call::Capacity(_) => LegacyKind::COUNT.checked_add(WaitKind::COUNT)?,
-            Call::PhysicalReport => LegacyKind::COUNT
+            Call::List => PlainKind::List as usize,
+            Call::Netns => PlainKind::Netns as usize,
+            Call::Schedule(command) => {
+                PlainKind::COUNT.checked_add(WaitKind::classify(command).index())?
+            }
+            Call::PhysicalReport => PlainKind::COUNT.checked_add(WaitKind::COUNT)?,
+            Call::InitializeBacking(_) => PlainKind::COUNT
                 .checked_add(WaitKind::COUNT)?
                 .checked_add(1)?,
-            Call::InitializeBacking(_) => LegacyKind::COUNT
+            Call::ReleaseBacking(_) => PlainKind::COUNT
                 .checked_add(WaitKind::COUNT)?
                 .checked_add(2)?,
-            Call::ReleaseBacking(_) => LegacyKind::COUNT
+            Call::BackingUsage(_) => PlainKind::COUNT
                 .checked_add(WaitKind::COUNT)?
                 .checked_add(3)?,
-            Call::BackingUsage(_) => LegacyKind::COUNT
-                .checked_add(WaitKind::COUNT)?
-                .checked_add(4)?,
-            Call::Create(_) => LegacyKind::Create as usize,
-            Call::Start(_) => LegacyKind::Start as usize,
-            Call::Exec { .. } => LegacyKind::Exec as usize,
-            Call::Signal { .. } => LegacyKind::Signal as usize,
-            Call::Inspect(_) => LegacyKind::Inspect as usize,
-            Call::Usage(_) => LegacyKind::Usage as usize,
-            Call::List => LegacyKind::List as usize,
-            Call::Delete(_) => LegacyKind::Delete as usize,
-            Call::Netns => LegacyKind::Netns as usize,
-            Call::Kill { .. } => LegacyKind::Kill as usize,
-            Call::ExecStreams { .. } => LegacyKind::ExecStreams as usize,
-            Call::Run { .. } => LegacyKind::Run as usize,
-            Call::Schedule(command) => {
-                LegacyKind::COUNT.checked_add(WaitKind::classify(command).index())?
-            }
+            Call::Create(_)
+            | Call::Start(_)
+            | Call::Exec { .. }
+            | Call::Signal { .. }
+            | Call::Inspect(_)
+            | Call::Usage(_)
+            | Call::Delete(_)
+            | Call::Kill { .. }
+            | Call::ExecStreams { .. }
+            | Call::Run { .. }
+            | Call::Capacity(_) => return None,
         },
         Request::Release | Request::Taken | Request::StreamsReady => return None,
     };
     waits.get(n)
+}
+
+/// What names the class that times a box kind's answer: the class itself (a create's or run's spec's, a capacity's),
+/// or the box or program the call is for, whose class the connection may know ([`Known`]).
+enum Timed<'a> {
+    Class(Class),
+    Box(&'a BoxId),
+    Program(u64),
+}
+
+/// `request`'s box kind ([`BoxKind`]) and what names its class; `None` for a plain kind's request.
+fn box_kind_of(request: &Request) -> Option<(BoxKind, Timed<'_>)> {
+    let Request::Call(call) = request else {
+        return None;
+    };
+    Some(match call {
+        Call::Create(spec) => (BoxKind::Create, Timed::Class(spec.class.class())),
+        Call::Start(id) => (BoxKind::Start, Timed::Box(id)),
+        Call::Exec { id, .. } => (BoxKind::Exec, Timed::Box(id)),
+        Call::Signal { id, .. } => (BoxKind::Signal, Timed::Box(id)),
+        Call::Inspect(id) => (BoxKind::Inspect, Timed::Box(id)),
+        Call::Usage(id) => (BoxKind::Usage, Timed::Box(id)),
+        Call::Delete(id) => (BoxKind::Delete, Timed::Box(id)),
+        Call::Kill { exec } => (BoxKind::Kill, Timed::Program(*exec)),
+        Call::ExecStreams { id, .. } => (BoxKind::ExecStreams, Timed::Box(id)),
+        Call::Run { spec, .. } => (BoxKind::Run, Timed::Class(spec.class.class())),
+        Call::Capacity(class) => (BoxKind::Capacity, Timed::Class(*class)),
+        Call::List
+        | Call::Netns
+        | Call::Schedule(_)
+        | Call::PhysicalReport
+        | Call::InitializeBacking(_)
+        | Call::ReleaseBacking(_)
+        | Call::BackingUsage(_) => return None,
+    })
+}
+
+/// What a call's answer waits by (decision 9; AC-T7.4.1).
+#[derive(Clone, Copy)]
+enum AnswerWait {
+    /// A release, a taken word: no answer comes.
+    Unanswered,
+    /// Its kind's learned wait, its class's where its box's class times it: learned from its answers.
+    Learned(&'static Patience),
+    /// A box or program of a class this connection doesn't know: the slowest its agent's classes allow, unarmed where
+    /// any of them still measures; no class's, so learned by none.
+    Unattributed(Option<Duration>),
+}
+
+impl AnswerWait {
+    fn deadline(self) -> Option<Duration> {
+        match self {
+            Self::Unanswered => None,
+            Self::Learned(waits) => waits.deadline(),
+            Self::Unattributed(slowest) => slowest,
+        }
+    }
+
+    fn learned(self) -> Option<&'static Patience> {
+        match self {
+            Self::Learned(waits) => Some(waits),
+            Self::Unanswered | Self::Unattributed(_) => None,
+        }
+    }
+}
+
+/// The slowest wait `kind` has among `classes`, in transport `T`: unarmed where any of them still measures, or none
+/// is named.
+fn slowest<T: Transport>(kind: BoxKind, classes: &[Class]) -> Option<Duration> {
+    let mut slowest: Option<Duration> = None;
+    for class in classes {
+        let wait = T::class_answers(*class).get(kind as usize)?.deadline()?;
+        slowest = Some(slowest.map_or(wait, |s| s.max(wait)));
+    }
+    slowest
+}
+
+/// What a connection knows of its boxes' and programs' classes (AC-T7.4.1), so a call naming one waits as that class's
+/// calls do: each box it created, ran, inspected or listed until its delete, at most [`MAX_LIST`] (a list's most), and
+/// each program it started until let go, at most the agent's budget of programs; one past either goes unknown.
+#[derive(Default)]
+struct Known {
+    /// The agent's classes, as its hello said: what a box or program the connection doesn't know could be of.
+    agent: Vec<Class>,
+    boxes: BTreeMap<BoxId, Class>,
+    programs: BTreeMap<u64, Class>,
+    /// The agent's budget of programs, as its hello said.
+    programs_bound: usize,
+}
+
+impl Known {
+    /// What `answer` to `request` (request id `id`) says of its box's or program's class.
+    fn learn(&mut self, request: &Request, id: u64, answer: &Answer) {
+        let Request::Call(call) = request else {
+            return;
+        };
+        match (call, answer) {
+            (Call::Create(_) | Call::Inspect(_), Answer::Info(info)) => {
+                self.boxed(&info.id, info.class);
+            }
+            (Call::List, Answer::Boxes { infos, .. }) => {
+                for info in infos {
+                    self.boxed(&info.id, info.class);
+                }
+            }
+            (Call::Run { spec, .. }, Answer::Started { .. } | Answer::Given { .. }) => {
+                let class = spec.class.class();
+                self.boxed(&spec.id, class);
+                self.started(id, class);
+            }
+            (
+                Call::Exec { id: of, .. } | Call::ExecStreams { id: of, .. },
+                Answer::Started { .. } | Answer::Given { .. },
+            ) => {
+                if let Some(class) = self.boxes.get(of).copied() {
+                    self.started(id, class);
+                }
+            }
+            (Call::Delete(of), Answer::Done | Answer::Refused(Refusal::NoSuchBox(_))) => {
+                self.boxes.remove(of);
+            }
+            _ => {}
+        }
+    }
+
+    fn boxed(&mut self, id: &BoxId, class: Class) {
+        if self.boxes.len() >= MAX_LIST && !self.boxes.contains_key(id) {
+            return;
+        }
+        if let Ok(id) = id.try_clone() {
+            self.boxes.insert(id, class);
+        }
+    }
+
+    fn started(&mut self, exec: u64, class: Class) {
+        if self.programs.len() < self.programs_bound || self.programs.contains_key(&exec) {
+            self.programs.insert(exec, class);
+        }
+    }
 }
 
 /// Why a send didn't go.
@@ -386,9 +605,15 @@ pub trait Transport: Send + Sync + 'static {
     /// What the turn's holder reads into, and what of a message has come so far: kept across reads and across
     /// holders, so a frame cut across reads is whole when its last bytes come.
     type Reading: Send;
-    /// Its call kinds' learned waits for an answer, by [`kind_of`]'s order: each its own record's, as its
+    /// Its plain kinds' learned waits for an answer, by [`kind_of`]'s order: each its own record's, as its
     /// transport and its agent answer it, measuring where none is recorded yet (decision 9).
     fn answers() -> &'static [Patience; KINDS];
+    /// AC-T7.4.1: the learned waits of the kinds a box's class times ([`BoxKind`]) for boxes of `class`, each (kind,
+    /// class) its own record and census name, a class with none yet measuring, never another class's. A transport
+    /// with no class's record (a test's) leaves every class measuring.
+    fn class_answers(class: Class) -> &'static [Patience; BOX_KINDS] {
+        by_class(&UNRECORDED, class)
+    }
     /// Optional caller policy for one synchronous reply, separate from learned calibration.
     /// None preserves the transport's existing wait behavior.
     fn reply_budget(&self) -> Option<Duration> {
@@ -527,6 +752,8 @@ pub struct Shared<T: Transport> {
     sending: SendLock,
     /// What the client owes the agent ahead of any request it sends from now.
     owed: Mutex<Owed>,
+    /// The classes of the boxes and programs it knows, so a call naming one waits by its class ([`Known`]).
+    known: Mutex<Known>,
 }
 
 /// One connection state allocation, shared by its Core, Pump and remote programs.
@@ -713,6 +940,7 @@ impl<T: Transport> Shared<T> {
             reading: Mutex::new(reading),
             sending: SendLock::default(),
             owed: Mutex::new(Owed::default()),
+            known: Mutex::new(Known::default()),
         })
         .map_err(|_| Refusal::Exhausted {
             what: "client shared state owner",
@@ -856,6 +1084,28 @@ impl<T: Transport> Shared<T> {
             run();
         }
         Ok(())
+    }
+
+    /// The wait `request`'s answer has (AC-T7.4.1): its plain kind's, or its box kind's for the class that times it,
+    /// the class the request names or the one this connection knows its box or program is of; for one it doesn't
+    /// know, the slowest of the agent's classes' waits, learned by none.
+    fn answer_wait(&self, request: &Request) -> AnswerWait {
+        let Some((kind, timed)) = box_kind_of(request) else {
+            return kind_of(T::answers(), request)
+                .map_or(AnswerWait::Unanswered, AnswerWait::Learned);
+        };
+        let known = self.known.lock().ok();
+        let class = match timed {
+            Timed::Class(class) => Some(class),
+            Timed::Box(id) => known.as_ref().and_then(|k| k.boxes.get(id).copied()),
+            Timed::Program(exec) => known.as_ref().and_then(|k| k.programs.get(&exec).copied()),
+        };
+        match class {
+            Some(class) => T::class_answers(class)
+                .get(kind as usize)
+                .map_or(AnswerWait::Unanswered, AnswerWait::Learned),
+            None => AnswerWait::Unattributed(known.and_then(|k| slowest::<T>(kind, &k.agent))),
+        }
     }
 
     /// Owes the agent the word that exec `exec`'s given ends were taken, ahead of every later request ([`Owed`]). Past
@@ -1383,8 +1633,9 @@ impl<T: Transport> Conn<T> {
         if let Some(cap) = cap {
             cap.remaining("starting a client operation")?;
         }
-        let waits = kind_of(T::answers(), request);
-        let patience = waits.and_then(Patience::deadline);
+        let wait = shared.answer_wait(request);
+        let waits = wait.learned();
+        let patience = wait.deadline();
         let asked = Instant::now();
         let budget = ReplyDeadline::combine(cap, asked, patience);
         let deadline = budget.map(ReplyDeadline::at);
@@ -1483,6 +1734,9 @@ impl<T: Transport> Conn<T> {
                         } else {
                             waits.answered(took);
                         }
+                    }
+                    if let Ok(mut known) = shared.known.lock() {
+                        known.learn(request, caller.id, &answer);
                     }
                     return Ok((caller.id, answer));
                 }
@@ -1732,6 +1986,10 @@ impl<T: Transport> Core<T> {
                     ..hello.limits
                 };
                 self.conn.shared.owed.lock().map_err(poisoned)?.bound = hello.budgets.programs;
+                let mut known = self.conn.shared.known.lock().map_err(poisoned)?;
+                known.agent.clone_from(&self.classes);
+                known.programs_bound = hello.budgets.programs;
+                drop(known);
                 self.budgets = hello.budgets;
                 Ok(self)
             }
@@ -2795,6 +3053,9 @@ impl<T: Transport> Drop for RemoteProc<T> {
                 .unwrap_or(true);
         if let Ok(mut state) = shared.state() {
             state.programs.remove(&self.exec);
+        }
+        if let Ok(mut known) = shared.known.lock() {
+            known.programs.remove(&self.exec);
         }
         if !ended
             && !self.kill_asked

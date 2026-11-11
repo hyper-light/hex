@@ -21,8 +21,8 @@ use hex_core::stream::{self, Deframer, Exec, Named};
 use hex_core::wire::{self, Received};
 
 use crate::calls::{
-    Core, KINDS, Lent, ReplyDeadline, Sent, Shared, SharedOwner, Take, Transport, poisoned,
-    protocol_ready,
+    BOX_KINDS, CLASSES, Core, KINDS, Lent, ReplyDeadline, Sent, Shared, SharedOwner, Take,
+    Transport, by_class, class_waits, poisoned, protocol_ready,
 };
 use crate::copy::{DuplexIo, copy, copy_in};
 
@@ -166,7 +166,8 @@ pub fn own_link<L: Link>(link: L) -> Result<LinkOwner, Refusal> {
 
 /// How long a call waits for the guest's node agent's answer, one wait a kind of call (`crate::calls::kind_of`'s
 /// order), as the socket's client waits (decision 9): twice the slowest answer this process has had to a call of
-/// that kind, through the guest. On macOS, Hello and capacity use exact per-profile maxima from
+/// that kind, through the guest. On macOS, Hello and capacity ([`CLASS_ANSWERS`]'s, the oci class's) use exact
+/// per-profile maxima from
 /// `bench/sched/runtime-pools/calibration-macos-cold-extension-1bb73f74.json` (AC-T7.4.1). Hello begins after dial/token setup;
 /// fresh-backend, subsequent and warm borrower cohorts are retained separately in the record, not per-row VM proof.
 /// Neither row measures VM boot or workload completion. A debug build's seed is never under the release record
@@ -182,18 +183,8 @@ static ANSWERS: [Patience; KINDS] = [
     ),
     #[cfg(not(target_os = "macos"))]
     Patience::measuring("client.guest.answer.hello"),
-    Patience::measuring("client.guest.answer.create"),
-    Patience::measuring("client.guest.answer.start"),
-    Patience::measuring("client.guest.answer.exec"),
-    Patience::measuring("client.guest.answer.signal"),
-    Patience::measuring("client.guest.answer.inspect"),
-    Patience::measuring("client.guest.answer.usage"),
     Patience::measuring("client.guest.answer.list"),
-    Patience::measuring("client.guest.answer.delete"),
     Patience::measuring("client.guest.answer.netns"),
-    Patience::measuring("client.guest.answer.kill"),
-    Patience::measuring("client.guest.answer.exec_streams"),
-    Patience::measuring("client.guest.answer.run"),
     Patience::measuring("client.guest.answer.schedule.describe"),
     Patience::measuring("client.guest.answer.schedule.advertise"),
     Patience::measuring("client.guest.answer.schedule.submit"),
@@ -204,18 +195,48 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.guest.answer.schedule.retry"),
     Patience::measuring("client.guest.answer.schedule.delete"),
     Patience::measuring("client.guest.answer.schedule.status"),
-    #[cfg(target_os = "macos")]
-    Patience::by_profile(
-        "client.guest.answer.capacity",
-        Duration::from_nanos(6_849_583),
-        Some(Duration::from_nanos(6_826_667)),
-    ),
-    #[cfg(not(target_os = "macos"))]
-    Patience::measuring("client.guest.answer.capacity"),
     Patience::measuring("client.guest.answer.physical_report"),
     Patience::measuring("client.guest.answer.initialize_backing"),
     Patience::measuring("client.guest.answer.release_backing"),
     Patience::measuring("client.guest.answer.backing_usage"),
+];
+
+/// AC-T7.4.1: the kinds a box's class times, a wait for each (kind, class), named
+/// `client.guest.answer.<kind>.<class>`. On macOS the guest's capacity row above is an `oci` box's (every guest
+/// capacity call asks `oci`): release 6.849583 ms, debug 6.826667 ms. No census has timed another kind or class
+/// through a guest: MEASURING, each, never another class's record, until a census records it.
+#[cfg(target_os = "macos")]
+static CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
+    class_waits!("client.guest.answer", "process", measuring),
+    class_waits!(
+        "client.guest.answer",
+        "oci",
+        [
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            (
+                Duration::from_nanos(6_849_583),
+                Some(Duration::from_nanos(6_826_667))
+            ),
+        ]
+    ),
+    class_waits!("client.guest.answer", "firecracker", measuring),
+    class_waits!("client.guest.answer", "shards", measuring),
+];
+#[cfg(not(target_os = "macos"))]
+static CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
+    class_waits!("client.guest.answer", "process", measuring),
+    class_waits!("client.guest.answer", "oci", measuring),
+    class_waits!("client.guest.answer", "firecracker", measuring),
+    class_waits!("client.guest.answer", "shards", measuring),
 ];
 
 /// A node agent in a guest, reached through a [`Link`].
@@ -492,6 +513,10 @@ impl Transport for Stream {
 
     fn answers() -> &'static [Patience; KINDS] {
         &ANSWERS
+    }
+
+    fn class_answers(class: hex_api::Class) -> &'static [Patience; BOX_KINDS] {
+        by_class(&CLASS_ANSWERS, class)
     }
 
     fn reply_budget(&self) -> Option<Duration> {

@@ -1039,6 +1039,10 @@ impl Transport for Watched {
         Socket::answers()
     }
 
+    fn class_answers(class: Class) -> &'static [Patience; BOX_KINDS] {
+        Socket::class_answers(class)
+    }
+
     fn reading(&self) -> Reading {
         self.socket.reading()
     }

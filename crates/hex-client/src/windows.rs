@@ -6,31 +6,25 @@ use std::os::windows::io::AsSocket;
 use std::path::Path;
 
 use hex_afunix::{self as socket, Socket as Raw};
-use hex_api::Refusal;
+use hex_api::{Class, Refusal};
 use hex_core::patience::Patience;
 use hex_core::stream::{self, Deframer};
 use hex_core::wire::{self, Received};
 
-use crate::calls::{Core, Handle, KINDS, Lent, ReplyDeadline, Sent, Shared, Take, Transport};
+use crate::calls::{
+    BOX_KINDS, CLASSES, Core, Handle, KINDS, Lent, ReplyDeadline, Sent, Shared, Take, Transport,
+    by_class, class_waits,
+};
 
 /// The largest wire message plus its envelope's three stream handles and their count.
 const FRAME_BOUND: usize = wire::MAX_MESSAGE + socket::ENVELOPE_MAX;
 
-/// Each call kind learns its wait on this Windows node, as on the other native transports (decision 9).
+/// Each call kind learns its wait on this Windows node, as on the other native transports (decision 9); the kinds a
+/// box's class times are [`CLASS_ANSWERS`].
 static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.hello"),
-    Patience::measuring("client.answer.create"),
-    Patience::measuring("client.answer.start"),
-    Patience::measuring("client.answer.exec"),
-    Patience::measuring("client.answer.signal"),
-    Patience::measuring("client.answer.inspect"),
-    Patience::measuring("client.answer.usage"),
     Patience::measuring("client.answer.list"),
-    Patience::measuring("client.answer.delete"),
     Patience::measuring("client.answer.netns"),
-    Patience::measuring("client.answer.kill"),
-    Patience::measuring("client.answer.exec_streams"),
-    Patience::measuring("client.answer.run"),
     Patience::measuring("client.answer.schedule.describe"),
     Patience::measuring("client.answer.schedule.advertise"),
     Patience::measuring("client.answer.schedule.submit"),
@@ -41,11 +35,19 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.schedule.retry"),
     Patience::measuring("client.answer.schedule.delete"),
     Patience::measuring("client.answer.schedule.status"),
-    Patience::measuring("client.answer.capacity"),
     Patience::measuring("client.answer.physical_report"),
     Patience::measuring("client.answer.initialize_backing"),
     Patience::measuring("client.answer.release_backing"),
     Patience::measuring("client.answer.backing_usage"),
+];
+
+/// AC-T7.4.1: the kinds a box's class times, a wait for each (kind, class), named `client.answer.<kind>.<class>`; no
+/// census has timed any here: MEASURING, each, until one records it.
+static CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
+    class_waits!("client.answer", "process", measuring),
+    class_waits!("client.answer", "oci", measuring),
+    class_waits!("client.answer", "firecracker", measuring),
+    class_waits!("client.answer", "shards", measuring),
 ];
 
 pub type Client = Core<Socket>;
@@ -66,6 +68,10 @@ impl Transport for Socket {
 
     fn answers() -> &'static [Patience; KINDS] {
         &ANSWERS
+    }
+
+    fn class_answers(class: Class) -> &'static [Patience; BOX_KINDS] {
+        by_class(&CLASS_ANSWERS, class)
     }
 
     fn reading(&self) -> Reading {

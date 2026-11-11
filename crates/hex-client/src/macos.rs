@@ -10,7 +10,7 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
 use std::time::Duration;
 
-use hex_api::Refusal;
+use hex_api::{Class, Refusal};
 use hex_core::patience::Patience;
 use hex_core::stream::{self, Deframer};
 use hex_core::wire::{self, Received};
@@ -20,7 +20,10 @@ use rustix::net::{
     SendAncillaryMessage, SendFlags, Shutdown, SocketAddrUnix, SocketType,
 };
 
-use crate::calls::{Core, Handle, KINDS, Lent, Sent, Shared, Take, Transport};
+use crate::calls::{
+    BOX_KINDS, CLASSES, Core, Handle, KINDS, Lent, Sent, Shared, Take, Transport, by_class,
+    class_waits,
+};
 
 /// How long a call waits for the macOS node agent's answer, and its send for room in the agent's socket, one wait a
 /// kind of call (`crate::calls::kind_of`'s order), as Linux's client waits (decision 9): twice the slowest answer this
@@ -28,25 +31,16 @@ use crate::calls::{Core, Handle, KINDS, Lent, Sent, Shared, Take, Transport};
 /// response maxima and censored run-out lower bounds of the root-verified macOS/SSH guest census (AC-T7.4.1):
 /// `bench/sched/runtime-pools/calibration-macos-cold-extension-1bb73f74.json`. These time wire replies, not workload success.
 /// A debug build's seed is never under the release record (`Patience::by_profile`), which six scheduler rows'
-/// debug campaigns fall under. Other operations remain measuring until their own actual macOS rows are recorded.
+/// debug campaigns fall under. Other operations remain measuring until their own actual macOS rows are recorded. The
+/// kinds a box's class times are [`CLASS_ANSWERS`].
 static ANSWERS: [Patience; KINDS] = [
     Patience::by_profile(
         "client.answer.hello",
         Duration::from_nanos(829_500),
         Some(Duration::from_nanos(2_607_584)),
     ),
-    Patience::measuring("client.answer.create"),
-    Patience::measuring("client.answer.start"),
-    Patience::measuring("client.answer.exec"),
-    Patience::measuring("client.answer.signal"),
-    Patience::measuring("client.answer.inspect"),
-    Patience::measuring("client.answer.usage"),
     Patience::measuring("client.answer.list"),
-    Patience::measuring("client.answer.delete"),
     Patience::measuring("client.answer.netns"),
-    Patience::measuring("client.answer.kill"),
-    Patience::measuring("client.answer.exec_streams"),
-    Patience::measuring("client.answer.run"),
     Patience::by_profile(
         "client.answer.schedule.describe",
         Duration::from_nanos(23_338_333),
@@ -97,15 +91,40 @@ static ANSWERS: [Patience; KINDS] = [
         Duration::from_nanos(7_577_917),
         Some(Duration::from_nanos(7_264_708)),
     ),
-    Patience::by_profile(
-        "client.answer.capacity",
-        Duration::from_nanos(13_172_125),
-        Some(Duration::from_nanos(14_254_417)),
-    ),
     Patience::measuring("client.answer.physical_report"),
     Patience::measuring("client.answer.initialize_backing"),
     Patience::measuring("client.answer.release_backing"),
     Patience::measuring("client.answer.backing_usage"),
+];
+
+/// AC-T7.4.1: the kinds a box's class times, a wait for each (kind, class), named `client.answer.<kind>.<class>`. The
+/// census above ran in its guest mode, its scheduler's backend of the `shards` class, so its capacity row is a `shards`
+/// box's: release 13.172125 ms, debug 14.254417 ms. No census has timed another kind or class here: MEASURING, each,
+/// never another class's record, until a census records it.
+static CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
+    class_waits!("client.answer", "process", measuring),
+    class_waits!("client.answer", "oci", measuring),
+    class_waits!("client.answer", "firecracker", measuring),
+    class_waits!(
+        "client.answer",
+        "shards",
+        [
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            (
+                Duration::from_nanos(13_172_125),
+                Some(Duration::from_nanos(14_254_417))
+            ),
+        ]
+    ),
 ];
 
 /// A node agent, reached through its socket.
@@ -134,6 +153,10 @@ impl Transport for Socket {
 
     fn answers() -> &'static [Patience; KINDS] {
         &ANSWERS
+    }
+
+    fn class_answers(class: Class) -> &'static [Patience; BOX_KINDS] {
+        by_class(&CLASS_ANSWERS, class)
     }
 
     fn reading(&self) -> Reading {
