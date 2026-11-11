@@ -1863,6 +1863,11 @@ struct SettleOriginal {
     started: mpsc::SyncSender<(u64, Instant)>,
     kill: mpsc::SyncSender<(u64, u64, Instant)>,
     exits: AtomicUsize,
+    /// The agent's answer to the Kill, given as it comes; none withholds it.
+    kill_answer: Mutex<Option<Answer>>,
+    /// None leaves run_before's explicit cap alone; run and exec, which have no cap of their
+    /// own, need one for the deadline-aware stream setup.
+    budget: Option<Duration>,
 }
 
 impl Transport for SettleOriginal {
@@ -1873,6 +1878,10 @@ impl Transport for SettleOriginal {
         static WAITS: [Patience; KINDS] =
             [const { Patience::measuring("test.client_settle_original.unarmed") }; KINDS];
         &WAITS
+    }
+
+    fn reply_budget(&self) -> Option<Duration> {
+        self.budget
     }
 
     fn reading(&self) {}
@@ -1915,11 +1924,17 @@ impl Transport for SettleOriginal {
             header.kind, header.id
         );
         match &request {
-            Request::Call(Call::Run { .. }) => self.io.queue(header.id, Answer::Started { pid: 7 }),
+            Request::Call(Call::Run { .. } | Call::Exec { .. }) => {
+                self.io.queue(header.id, Answer::Started { pid: 7 })
+            }
             Request::Call(Call::Kill { exec }) => {
                 eprintln!("client_settle_phase phase=kill_request exec={exec}");
-                // The real Kill reached the sender after wait(None). Withhold only its answer.
+                // The real Kill reached the sender after wait(None). Answer it as the test
+                // says, or withhold only its answer.
                 let _ = self.kill.try_send((header.id, *exec, Instant::now()));
+                if let Some(answer) = self.kill_answer.lock().unwrap().take() {
+                    self.io.queue(header.id, answer);
+                }
             }
             Request::Release => {}
             _ => {
@@ -1993,6 +2008,8 @@ fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
         started: starting,
         kill: killing,
         exits: AtomicUsize::new(0),
+        kill_answer: Mutex::new(None),
+        budget: None,
     }));
     let control = Arc::clone(&client);
     let original = Instant::now().checked_add(CAP).unwrap();
@@ -2104,8 +2121,8 @@ fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
         .ok()
         .or_else(|| after_cleanup.as_ref().ok());
     assert!(
-        matches!(returned_error, Some((_, Err(Refusal::Broken(why)))) if why.contains("stdout") && why.contains("neither carried nor asked")),
-        "the original bounded setup refusal must survive cleanup"
+        matches!(returned_error, Some((_, Err(Refusal::Lifecycle { id, cause: hex_api::LifecycleCause::Uncertain }))) if *id == absolute_spec().id),
+        "a Kill unanswered within the original authority leaves the run's end uncertain"
     );
     assert!(
         before_cleanup.is_ok(),
@@ -2113,6 +2130,184 @@ fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
     );
     let (returned, _) = before_cleanup.unwrap();
     assert!(returned <= cleanup_at);
+}
+
+/// How a settle test starts its program: under run_before's explicit cap, whose failed setup
+/// kills through kill_before, or by run or exec, which have none and kill through Proc::kill.
+#[derive(Clone, Copy, Debug)]
+enum SettleStart {
+    RunBefore,
+    Run,
+    Exec,
+}
+
+/// What a settle test saw.
+#[derive(Debug)]
+struct Settled {
+    start: SettleStart,
+    result: Result<(), Refusal>,
+    /// The box the start named.
+    id: BoxId,
+    /// The start's request id, which names its exec.
+    starts: Vec<u64>,
+    /// The execs the Kills named.
+    kills: Vec<u64>,
+    releases: usize,
+    /// No call, program, given end or wait left registered.
+    clean: bool,
+}
+
+/// Do start a program by `start` whose stream settlement fails after its actual Started (the
+/// fixture gives an end its exec never asked for), the agent answering its Kill with `kill`.
+fn settle_failure(start: SettleStart, kill: Answer) -> Settled {
+    let (io, _) = stalled(None);
+    let (entered, _) = mpsc::sync_channel(1);
+    let (starting, _) = mpsc::sync_channel(1);
+    let (killing, _) = mpsc::sync_channel(1);
+    let client = configured(SettleOriginal {
+        io: Offers {
+            io,
+            inbound: Mutex::new(VecDeque::new()),
+            outbound: Mutex::new(Vec::new()),
+            entered,
+            program: Mutex::new(None),
+        },
+        setup: Mutex::new(None),
+        started: starting,
+        kill: killing,
+        exits: AtomicUsize::new(0),
+        kill_answer: Mutex::new(Some(kill)),
+        budget: match start {
+            SettleStart::RunBefore => None,
+            SettleStart::Run | SettleStart::Exec => Some(OBSERVE),
+        },
+    });
+    let stdio = Stdio {
+        ask: hex_api::Ask {
+            stdin: true,
+            ..hex_api::Ask::default()
+        },
+        ..Stdio::null()
+    };
+    let program = Program::of(&["owned-settle-kill"]);
+    let spec = absolute_spec();
+    let (id, result) = match start {
+        SettleStart::RunBefore => {
+            let at = Instant::now().checked_add(OBSERVE).unwrap();
+            (spec.id.clone(), client.run_before(spec, program, stdio, at))
+        }
+        SettleStart::Run => (spec.id.clone(), client.run(spec, program, stdio)),
+        SettleStart::Exec => {
+            let id = BoxId::new("owned-settle-exec").unwrap();
+            let result = client.exec(&id, program, stdio);
+            (id, result)
+        }
+    };
+    let result = result.map(drop);
+    let shared = &client.conn.shared;
+    let clean = shared
+        .state()
+        .map(|state| {
+            state.calls.is_empty()
+                && state.programs.is_empty()
+                && state.given.is_empty()
+                && state.waiting.is_empty()
+        })
+        .unwrap();
+    let sent = shared.transport.io.outbound.lock().unwrap();
+    Settled {
+        start,
+        result,
+        id,
+        starts: sent
+            .iter()
+            .filter(|(_, request)| {
+                matches!(request, Request::Call(Call::Run { .. } | Call::Exec { .. }))
+            })
+            .map(|(id, _)| *id)
+            .collect(),
+        kills: sent
+            .iter()
+            .filter_map(|(_, request)| match request {
+                Request::Call(Call::Kill { exec }) => Some(*exec),
+                _ => None,
+            })
+            .collect(),
+        releases: sent
+            .iter()
+            .filter(|(_, request)| matches!(request, Request::Release))
+            .count(),
+        clean,
+    }
+}
+
+/// AC-T7.4.1: Do start a program by run_before, run and exec whose stream settlement fails after
+/// its Started, the agent refusing each Kill; expect each start refused as its box's uncertain
+/// lifecycle and no Release sent: the program may still run, and a Release lets it run on.
+#[test]
+fn a_settle_failure_whose_kill_is_refused_is_uncertain_and_never_released() {
+    let seen: Vec<Settled> = [SettleStart::RunBefore, SettleStart::Run, SettleStart::Exec]
+        .into_iter()
+        .map(|start| {
+            let refused = Refusal::os("killing the program", "the model agent refuses");
+            settle_failure(start, Answer::Refused(refused))
+        })
+        .collect();
+    for settled in &seen {
+        eprintln!("client_settle_kill kill=refused {settled:?}");
+    }
+    for settled in seen {
+        let start = settled.start;
+        assert_eq!(settled.starts.len(), 1, "{start:?}");
+        assert_eq!(
+            settled.kills, settled.starts,
+            "{start:?}: one Kill, of its exec"
+        );
+        assert_eq!(
+            settled.result,
+            Err(Refusal::Lifecycle {
+                id: settled.id,
+                cause: hex_api::LifecycleCause::Uncertain,
+            }),
+            "{start:?}: a refused kill leaves the program's end unproved"
+        );
+        assert_eq!(
+            settled.releases, 0,
+            "{start:?}: a program asked to end was released to run on"
+        );
+        assert!(settled.clean, "{start:?}");
+    }
+}
+
+/// AC-T7.4.1: Do the same with the agent confirming each Kill; expect the settlement's own
+/// refusal, and still no Release for a program asked to end.
+#[test]
+fn a_settle_failure_whose_kill_is_confirmed_keeps_its_refusal_and_never_releases() {
+    let seen: Vec<Settled> = [SettleStart::RunBefore, SettleStart::Run, SettleStart::Exec]
+        .into_iter()
+        .map(|start| settle_failure(start, Answer::Done))
+        .collect();
+    for settled in &seen {
+        eprintln!("client_settle_kill kill=done {settled:?}");
+    }
+    for settled in seen {
+        let start = settled.start;
+        assert_eq!(settled.starts.len(), 1, "{start:?}");
+        assert_eq!(
+            settled.kills, settled.starts,
+            "{start:?}: one Kill, of its exec"
+        );
+        assert!(
+            matches!(&settled.result, Err(Refusal::Broken(why)) if why.contains("stdout") && why.contains("neither carried nor asked")),
+            "{start:?}: a confirmed kill keeps the settlement's refusal: {:?}",
+            settled.result
+        );
+        assert_eq!(
+            settled.releases, 0,
+            "{start:?}: a program asked to end was released to run on"
+        );
+        assert!(settled.clean, "{start:?}");
+    }
 }
 
 /// AC-T7.4.1 control A: actual selection chooses the existing private smaller
@@ -2660,8 +2855,8 @@ fn prepared_actor_settle_error_retains_original_kill_answer_authority() {
         .ok()
         .or_else(|| after_cleanup.as_ref().ok());
     assert!(
-        matches!(returned_error, Some((_, Err(Refusal::Broken(why)))) if why.contains("stdout") && why.contains("neither carried nor asked")),
-        "the exact original stream-settlement refusal must survive cleanup"
+        matches!(returned_error, Some((_, Err(Refusal::Lifecycle { id, cause: hex_api::LifecycleCause::Uncertain }))) if *id == absolute_spec().id),
+        "a Kill unanswered within the original authority leaves the run's end uncertain"
     );
     assert!(
         before_cleanup.is_ok(),
