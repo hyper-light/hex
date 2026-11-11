@@ -1,0 +1,41 @@
+{
+  "l4": {
+    "revision": "f48f4f7fc87cc1898a14bd037951dc9f5b9ff0bc",
+    "closure_git_inputs_verified": 47,
+    "compiled_post_equal": true,
+    "source_delta": [
+      "Cargo.lock"
+    ],
+    "registry_tuples": 15,
+    "strict_clippy": 0,
+    "tests_executed": 0,
+    "native_executed": 0
+  },
+  "l2": {
+    "revision": "a5e3952e3981df7e74b6ef66b1005e4374aa1c6a",
+    "git_inputs_verified": 46,
+    "models": {
+      "inline-stop": [
+        1,
+        0,
+        0
+      ],
+      "scope-clone": [
+        1,
+        0,
+        0
+      ]
+    },
+    "strict_api_clippy": 0,
+    "registry_tuples": 15,
+    "native_executed": 0
+  },
+  "both": {
+    "generated_lock_sha256": "682818b7666624a04fd15ea10cc25a86c104cdd6e55a483c8f2ada7896b888e0",
+    "seed_registry_subset_verified": true,
+    "log_hashes_verified": true,
+    "children_reaped": true,
+    "temp_entries": 0
+  },
+  "limits": "L4 four earlier model passes remain attributed to98b original result, not this clippy-only followup. Neither isolated API closure establishes joined native/VM/GPU/recovery/fullgate readiness."
+}
