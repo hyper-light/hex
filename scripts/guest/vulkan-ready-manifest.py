@@ -91,8 +91,9 @@ MIN_MEMORY = constant("crates/hex-api/src/bounds.rs", "MIN_MEMORY")
 
 
 def first_dial_ns() -> int:
-    """hex_runtime::guest::first_dial_bound before a node has seen a boot: twice its seed, which seed_in
-    gives as its class's recorded boot to ready, or with none, twice the slowest of any class."""
+    """hex_runtime::guest::recorded_dial_bound, a node's first dial bound before it has seen a boot: twice
+    its seed (dial_bound), which hex_client::guest::shards::seed_in gives as its class's recorded boot to
+    ready, or with none, twice the slowest of any class."""
     rows = [line.split("\t") for line in (HEX / "bench/native/guest/records.tsv").read_text().splitlines()
             if line and not line.startswith("#")]
     boots = [(row[1], int(row[2])) for row in rows if len(row) >= 3 and row[0] == "boot_ready"]

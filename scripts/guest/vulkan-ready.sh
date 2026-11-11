@@ -49,7 +49,7 @@ fi
 # shellcheck source=vulkan-ready.env
 . "$here/vulkan-ready.env"
 # The self-test's Program deadline: what a Linux node's GPU pool start gives its Program at most, its first
-# dial's bound (hex_runtime::guest::first_dial_bound over bench/native/guest/records.tsv).
+# dial's bound (hex_runtime::guest::recorded_dial_bound over bench/native/guest/records.tsv).
 wait_ns=$(python3 -I "$here/vulkan-ready-manifest.py" first-dial-ns)
 
 docker run --rm --platform "$platform" --memory "${VULKAN_READY_MEMORY:-4g}" --cpus "${VULKAN_READY_CPUS:-2}" \
