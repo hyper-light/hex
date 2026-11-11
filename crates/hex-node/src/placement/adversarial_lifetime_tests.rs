@@ -122,11 +122,19 @@ fn replayed_cancel_after_reboot_and_sequence_reuse_cannot_touch_sibling_namespac
 
     let deleting = first.delete(old).unwrap();
     let (_, stale_cancel) = deleting.send.first().unwrap().clone();
+    // Driver::submit records the payload's runtime form in the durable demand it sends.
+    let durable = Demand {
+        ask: Ask {
+            runtime_class: Some(hex_api::Class::Process),
+            ..d.ask
+        },
+        ..d
+    };
     assert_eq!(
         stale_cancel.msg,
         Msg::Delete {
             key: old,
-            demand: d
+            demand: durable
         }
     );
     local(&first, deleting);

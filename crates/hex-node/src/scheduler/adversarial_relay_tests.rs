@@ -448,6 +448,7 @@ fn cancellation_reconciles_lost_start_reply_without_losing_either_queued_lane() 
     let peer::Msg::Start { demand, .. } = template.msg else {
         panic!("fixture constructed a non-Start message")
     };
+    let runtime_class = template.payload.as_ref().map(|p| p.spec.class.class());
     let mut local = NodeSpec::new(NodeId(0), Resources::default());
     local.classes = Classes::NONE;
     let cluster = Cluster::single_owner(
@@ -657,9 +658,20 @@ fn cancellation_reconciles_lost_start_reply_without_losing_either_queued_lane() 
     assert_eq!(second_before.node, Some(NodeId(2)));
     assert_eq!(recovered_second, second_before);
     assert!(matches!(ended.msg, peer::Msg::Ended { key } if key == first));
+    // Driver::submit records the payload's runtime form in the durable demand the owner sends.
+    let durable = Demand {
+        ask: Ask {
+            runtime_class,
+            ..demand.ask
+        },
+        ..demand
+    };
     assert_eq!(
         replayed_delete.msg,
-        peer::Msg::Delete { key: first, demand }
+        peer::Msg::Delete {
+            key: first,
+            demand: durable
+        }
     );
     assert_eq!(
         trace,
@@ -670,10 +682,16 @@ fn cancellation_reconciles_lost_start_reply_without_losing_either_queued_lane() 
                     route: None,
                     allocation: None,
                     key: first,
-                    demand
+                    demand: durable
                 }
             ),
-            (2, peer::Msg::Delete { key: first, demand })
+            (
+                2,
+                peer::Msg::Delete {
+                    key: first,
+                    demand: durable
+                }
+            )
         ]
     );
     assert_eq!(
