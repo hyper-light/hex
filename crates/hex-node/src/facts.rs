@@ -57,6 +57,13 @@ pub fn physical_devices(provider: &SharedProber) -> Result<Vec<hex_api::DeviceIn
         .physical_devices()
 }
 
+pub fn physical_luid(provider: &SharedProber, id: hex_api::DeviceId) -> Result<[u8; 8], Refusal> {
+    provider
+        .lock()
+        .map_err(|_| physical_full())?
+        .physical_luid(id)
+}
+
 /// What an administrator gives Hex beside what the probe finds (kiln's `Declared`, W13-R02): block
 /// devices and network interfaces boxes may be given whole, by their kernel names (`nvme1n1`,
 /// `enp5s0f1v0`). A node's own disk and its uplink are never found for boxes: only what is declared is
@@ -163,6 +170,31 @@ impl Prober {
         observed_report(authority, Ok(inventory), &loads)
     }
 
+    /// Resolve the caller's exact stable physical identity using this provider's current native
+    /// receipt. No capacity/physical-report callback, second Gpus, inventory cache or integer cast.
+    pub fn physical_luid(&mut self, id: hex_api::DeviceId) -> Result<[u8; 8], Refusal> {
+        id.check()?;
+        #[cfg(windows)]
+        {
+            let provider = self.provider()?;
+            provider.sample().map_err(|_| luid_unavailable())?;
+            let inventory = provider.inventory().map_err(|_| luid_unavailable())?;
+            let identity = physical_pci(inventory, id)?;
+            let aliases = provider
+                .windows_aliases(identity)
+                .map_err(|_| luid_unavailable())?;
+            hex_gpu::windows_identity::same_luid(aliases, |instance| {
+                hex_runtime::windows::oci::sys::adapter_luid_for_instance(instance)
+                    .map_err(|_| hex_gpu::Unread::Ambiguous)
+            })
+            .map_err(|_| luid_unavailable())
+        }
+        #[cfg(not(windows))]
+        {
+            Err(luid_unavailable())
+        }
+    }
+
     /// Open-time absence remains inspectable even though a CPU-only factual report is successful.
     /// This reads retained provider state; it neither opens nor samples a second provider.
     pub fn gpu_diagnostic(&self) -> Option<&hex_gpu::NoGpus> {
@@ -215,6 +247,36 @@ fn physical_full() -> Refusal {
         what: "native physical device observations",
         bound: hex_api::MAX_DEVICES,
     }
+}
+
+fn luid_unavailable() -> Refusal {
+    let text = "the exact physical device has no verified current native LUID correspondence";
+    let mut why = String::new();
+    if why.try_reserve_exact(text.len()).is_err() {
+        return physical_full();
+    }
+    why.push_str(text);
+    Refusal::Broken(why)
+}
+
+#[cfg(any(windows, test))]
+fn physical_pci(
+    inventory: &[hex_gpu::Gpu],
+    id: hex_api::DeviceId,
+) -> Result<hex_gpu::Identity, Refusal> {
+    if id.kind != hex_api::DeviceKind::Gpu || inventory.len() > hex_api::MAX_DEVICES {
+        return Err(luid_unavailable());
+    }
+    let mut found = None;
+    for gpu in inventory {
+        if gpu.key() == id.key {
+            if found.is_some() || gpu.pci().is_none() {
+                return Err(luid_unavailable());
+            }
+            found = Some(gpu.identity);
+        }
+    }
+    found.ok_or_else(luid_unavailable)
 }
 
 #[cfg(windows)]
@@ -1113,6 +1175,47 @@ mod gpu_identity_tests {
             ..known
         };
         assert!(physical_snapshot(&[gpu(1)], &[malformed]).is_err());
+    }
+
+    /// AC-T7.4.1: a current native LUID lookup starts with an exact existing stable PCI identity.
+    #[test]
+    fn native_luid_lookup_never_reinterprets_a_stable_key_or_chooses_an_ordinal() {
+        let gpu = |domain, bus| hex_gpu::Gpu {
+            vendor: hex_gpu::Vendor::Amd,
+            model: "actual native receipt fixture".into(),
+            memory_total_bytes: hex_api::MIN_MEMORY,
+            identity: hex_gpu::Identity::Pci(hex_gpu::PciAddress {
+                domain,
+                bus,
+                device: 0,
+                function: 0,
+            }),
+            driver_version: "fixture".into(),
+        };
+        let inventory = [gpu(41, 196), gpu(42, 196)];
+        let id = hex_api::DeviceId {
+            kind: hex_api::DeviceKind::Gpu,
+            key: inventory[1].key(),
+        };
+        assert_eq!(
+            super::physical_pci(&inventory, id).unwrap(),
+            inventory[1].identity
+        );
+        assert!(super::physical_pci(&inventory, hex_api::DeviceId { key: 0, ..id }).is_err());
+        assert!(
+            super::physical_pci(
+                &inventory,
+                hex_api::DeviceId {
+                    kind: hex_api::DeviceKind::Block,
+                    ..id
+                }
+            )
+            .is_err()
+        );
+        assert!(super::physical_pci(&[gpu(42, 196), gpu(42, 196)], id).is_err());
+        let mut metal = gpu(1, 0);
+        metal.identity = hex_gpu::Identity::Metal(id.key);
+        assert!(super::physical_pci(&[metal], id).is_err());
     }
 
     /// AC-T7.3.1: per-device native identity uncertainty retains factual IDs and unrelated progress.

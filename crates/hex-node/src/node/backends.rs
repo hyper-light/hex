@@ -706,6 +706,10 @@ impl Books for Node {
         })?;
         crate::facts::physical_devices(provider)
     }
+    fn physical_luid(&self, id: DeviceId) -> Result<[u8; 8], Refusal> {
+        let provider = self.prober.get().ok_or_else(|| missing(Class::Shards))?;
+        crate::facts::physical_luid(provider, id)
+    }
     fn with_transaction(
         &self,
         id: &BoxId,

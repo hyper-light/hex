@@ -1,0 +1,25 @@
+{
+  "parent": "204c22181f92e20c316e307c19fcdf9fb5f8dee8",
+  "role": "implementer",
+  "policy_revision": "0a6d91b3de0f10a8397868aa3794adab1e09afdc",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "sources": {
+    "crates/hex-runtime/src/devices.rs": "d02e66d1aa2920d85d2d69f35092112dab5d304b22884f0b699735deb5627aca",
+    "crates/hex-node/src/facts.rs": "39077ed4ff8c70a498a8ecb8fe1f25371bc2c682c8ca1fda8827d84d135e80c3",
+    "crates/hex-node/src/node/backends.rs": "24259f76c171969a0b7d675908c14cc1e1f2b9d86f6b727ca0eac97d6ca517ce"
+  },
+  "checks": {
+    "rustfmt": 0,
+    "diff_check": 0,
+    "compile": "UNRUN",
+    "new_pure_control": "UNRUN",
+    "native_effects": 0,
+    "jobs_started": 0
+  },
+  "dependencies": [
+    "signed204c native Windows provider, Root5de metadata",
+    "L3 existing public exact-instance KMT mapper",
+    "L3 Recover/Recorded/nativehost delegation pending"
+  ],
+  "preserved_cold_WIP": "/Users/adalundhe/.cache/hex-complete-bindings/cold-preflight-before-luid-hook-v1/manifest.json"
+}

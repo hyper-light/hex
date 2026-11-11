@@ -365,6 +365,14 @@ pub trait Books: Send + Sync {
     /// Direct current native observations from this Node's SAME facts provider. Never reenter
     /// capacity/attachment_offers here: those consumers validate routes against this view.
     fn physical_devices(&self) -> Result<Vec<DeviceInfo>, Refusal>;
+    /// In-process native correspondence from the SAME initialized provider. The eight LUID bytes
+    /// are current-boot evidence, never a stable DeviceId, holder grant or wire inventory.
+    fn physical_luid(&self, id: DeviceId) -> Result<[u8; 8], Refusal> {
+        id.check()?;
+        Err(broken(
+            "the native owner has no verified current LUID mapping for this physical identity",
+        ))
+    }
     fn with_transaction(
         &self,
         id: &BoxId,
