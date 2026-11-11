@@ -2125,6 +2125,8 @@ impl<T: Transport> Core<T> {
         program.fits(&WIRE_EXEC_LIMIT)?;
         stdio.check()?;
         let name = launch.name();
+        // What a failed setup names when its kill can't confirm the program's end; the call takes `launch`.
+        let id = launch.id().try_clone()?;
         let (carried, asked) = (carried(&stdio), streams(stdio.ask));
         let ending = Arc::new(Ending::default());
         let shared = &*self.conn.shared;
@@ -2205,6 +2207,7 @@ impl<T: Transport> Core<T> {
                     release_before: caller,
                     exit: None,
                     given: None,
+                    kill_asked: false,
                 };
                 match settle(kept, ends) {
                     Ok(given) => {
@@ -2212,11 +2215,20 @@ impl<T: Transport> Core<T> {
                         Ok(Box::new(proc))
                     }
                     Err(why) => {
-                        let _ = match caller {
+                        // No caller will hold it, and unless its kill confirms its end it may still run:
+                        // the refusal is then its box's uncertain lifecycle, not the setup's or the kill's.
+                        proc.kill_asked = true;
+                        let killed = match caller {
                             Some(cap) => proc.kill_before(cap),
                             None => proc.kill(),
                         };
-                        Err(why)
+                        Err(match killed {
+                            Ok(()) => why,
+                            Err(_) => Refusal::Lifecycle {
+                                id,
+                                cause: hex_api::LifecycleCause::Uncertain,
+                            },
+                        })
                     }
                 }
             }
@@ -2270,6 +2282,14 @@ impl Launch {
         match self {
             Self::Exec(_) => "exec",
             Self::Run(_) => "run",
+        }
+    }
+
+    /// The box it starts its program in.
+    fn id(&self) -> &BoxId {
+        match self {
+            Self::Exec(id) => id,
+            Self::Run(spec) => &spec.id,
         }
     }
 }
@@ -2571,12 +2591,14 @@ struct RemoteProc<T: Transport> {
     exit: Option<Exit>,
     /// The caller's ends of the streams its exec asked for, until taken.
     given: Option<hex_api::Given>,
+    /// Asked to end because its setup failed: never released, which tells the agent to let it run on.
+    kill_asked: bool,
 }
 
 impl<T: Transport> RemoteProc<T> {
-    /// Its end if it has come, waiting for it at most `timeout` (none: not at all, but what has come read now): read by
-    /// this wait itself while it holds the reader's turn, taken when free or handed to it, else handed to it by the
-    /// thread that reads; the turn handed on as it goes.
+    /// Its end if it has come, waiting for it at most `timeout` (none or zero: not at all, but what has come read
+    /// once): read by this wait itself while it holds the reader's turn, taken when free or handed to it, else
+    /// handed to it by the thread that reads; the turn handed on as it goes.
     fn wait(&mut self, timeout: Option<Duration>) -> Result<Option<Exit>, Refusal> {
         self.wait_before(timeout, None)
     }
@@ -2591,6 +2613,9 @@ impl<T: Transport> RemoteProc<T> {
         }
         let shared = triomphe::Arc::clone(&self.conn.shared);
         let deadline = timeout.map(|t| Instant::now().checked_add(t));
+        // AC-T7.4.1: a poll (no time asked, no cap) is bounded by its work, one turn's read, so messages
+        // for others that keep coming can't hold it.
+        let poll = cap.is_none() && timeout.is_none_or(|t| t.is_zero());
         shared.state()?.waiting.insert(self.exec);
         let mut mine = false;
         // Every way out of the loop goes through its end, so the wait is never left registered.
@@ -2637,10 +2662,10 @@ impl<T: Transport> RemoteProc<T> {
             };
             if mine {
                 match shared.turn(Some(left)) {
-                    Ok(true) => continue,
+                    Ok(true) if !poll => continue,
                     Ok(false) if !left.is_zero() => continue,
-                    // Waited out: what came is its end, or none.
-                    Ok(false) => {
+                    // Waited out, or polled: what came is its end, or none.
+                    Ok(_) => {
                         let ended = match self.ending.state.lock() {
                             Ok(ended) => ended,
                             Err(e) => break Err(poisoned(e)),
@@ -2741,7 +2766,8 @@ impl<T: Transport> Proc for RemoteProc<T> {
 impl<T: Transport> Drop for RemoteProc<T> {
     /// Let go before its end came: the agent is told, and lets the program run on as dropping an
     /// in-process `Proc` does. A release that can't be sent now (no room, or the connection gone) needs none: the
-    /// agent's disconnect rule has the program.
+    /// agent's disconnect rule has the program. One asked to end is never released: its end is its kill's, else
+    /// that rule's.
     fn drop(&mut self) {
         let shared = &self.conn.shared;
         let ended = self.exit.is_some()
@@ -2754,7 +2780,9 @@ impl<T: Transport> Drop for RemoteProc<T> {
         if let Ok(mut state) = shared.state() {
             state.programs.remove(&self.exec);
         }
-        if !ended && let Ok(bytes) = wire::request(self.exec, &Request::Release, wire::MAX_MESSAGE)
+        if !ended
+            && !self.kill_asked
+            && let Ok(bytes) = wire::request(self.exec, &Request::Release, wire::MAX_MESSAGE)
         {
             self.conn.send_now_before(&bytes, self.release_before);
         }
