@@ -1,0 +1,9 @@
+{
+  "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-remote-pending-after-v1.scope",
+  "limits": {
+    "cpu.max": "100000 100000",
+    "memory.max": "4294967296",
+    "memory.swap.max": "0",
+    "pids.max": "256"
+  }
+}

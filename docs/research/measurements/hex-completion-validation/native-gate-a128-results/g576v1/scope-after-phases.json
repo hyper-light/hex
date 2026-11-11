@@ -1,0 +1,51 @@
+{
+  "cgroups": {
+    "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-native-gate-a128-v1.scope": {
+      "cgroup.controllers": "cpuset cpu io memory pids\n",
+      "cgroup.events": "populated 1\nfrozen 0\n",
+      "cgroup.procs": "",
+      "cgroup.stat": "nr_descendants 1\nnr_subsys_cpuset 1\nnr_subsys_cpu 2\nnr_subsys_io 2\nnr_subsys_memory 2\nnr_subsys_perf_event 2\nnr_subsys_hugetlb 0\nnr_subsys_pids 2\nnr_subsys_rdma 0\nnr_subsys_misc 0\nnr_subsys_dmem 0\nnr_dying_descendants 10\nnr_dying_subsys_cpuset 0\nnr_dying_subsys_cpu 0\nnr_dying_subsys_io 10\nnr_dying_subsys_memory 10\nnr_dying_subsys_perf_event 0\nnr_dying_subsys_hugetlb 0\nnr_dying_subsys_pids 0\nnr_dying_subsys_rdma 0\nnr_dying_subsys_misc 0\nnr_dying_subsys_dmem 0\n",
+      "cgroup.subtree_control": "cpu io memory pids\n",
+      "cgroup.type": "domain\n",
+      "cpu.max": "100000 100000\n",
+      "cpu.stat": "usage_usec 10391710\nuser_usec 10186374\nsystem_usec 205335\nnice_usec 10146433\ncore_sched.force_idle_usec 0\nnr_periods 106\nnr_throttled 5\nthrottled_usec 3138\nnr_bursts 0\nburst_usec 0\n",
+      "identities": [],
+      "io.stat": "259:3 rbytes=50053120 wbytes=2850816 rios=1455 wios=282 dbytes=0 dios=0\n",
+      "memory.current": "202579968\n",
+      "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+      "memory.max": "4294967296\n",
+      "memory.peak": "214466560\n",
+      "memory.swap.max": "0\n",
+      "pids.current": "1\n",
+      "pids.events": "max 0\n",
+      "pids.max": "256\n"
+    },
+    "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-native-gate-a128-v1.scope/control": {
+      "cgroup.controllers": "cpu io memory pids\n",
+      "cgroup.events": "populated 1\nfrozen 0\n",
+      "cgroup.procs": "2237638\n",
+      "cgroup.stat": "nr_descendants 0\nnr_subsys_cpuset 0\nnr_subsys_cpu 1\nnr_subsys_io 1\nnr_subsys_memory 1\nnr_subsys_perf_event 1\nnr_subsys_hugetlb 0\nnr_subsys_pids 1\nnr_subsys_rdma 0\nnr_subsys_misc 0\nnr_subsys_dmem 0\nnr_dying_descendants 0\nnr_dying_subsys_cpuset 0\nnr_dying_subsys_cpu 0\nnr_dying_subsys_io 0\nnr_dying_subsys_memory 0\nnr_dying_subsys_perf_event 0\nnr_dying_subsys_hugetlb 0\nnr_dying_subsys_pids 0\nnr_dying_subsys_rdma 0\nnr_dying_subsys_misc 0\nnr_dying_subsys_dmem 0\n",
+      "cgroup.subtree_control": "",
+      "cgroup.type": "domain\n",
+      "cpu.max": "max 100000\n",
+      "cpu.stat": "usage_usec 399911\nuser_usec 337928\nsystem_usec 61983\nnice_usec 331770\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+      "identities": [
+        {
+          "pid": 2237638,
+          "ppid": 2237637,
+          "start_ticks": 32240165
+        }
+      ],
+      "io.stat": "259:3 rbytes=0 wbytes=1466368 rios=0 wios=142 dbytes=0 dios=0\n",
+      "memory.current": "2363392\n",
+      "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+      "memory.max": "max\n",
+      "memory.peak": "11821056\n",
+      "memory.swap.max": "max\n",
+      "pids.current": "1\n",
+      "pids.events": "max 0\n",
+      "pids.max": "max\n"
+    }
+  },
+  "disk_available_bytes": 721105752064
+}

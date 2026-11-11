@@ -1,0 +1,31 @@
+{
+  "status": "ONE-HUNK SOURCEONLY MUTANT PROPOSAL / NOT APPLIED OR EXECUTED",
+  "fixed_source": "8d5bb0b4eb6a175532d73d889dc472b721660b41",
+  "role": "implementer bindings-firecracker; ROOT owns all execution",
+  "policy_revision": "7d7e0855a5073ed5163b4fe7ed3355c9ed7c2506",
+  "rules_sha256": "df2acf47cf92996e9435f9a4988f10e9e7aaa21ca952a00069c044c7ed4f13d3",
+  "source_path": "crates/hex-sim/src/index/routes.rs",
+  "hunks": 1,
+  "restore_sha256": "cda46b5fee827aaab61a9e2fcf7f1e9b7085c596017cbd7de3d3d2ebabb399fc",
+  "mutant_sha256": "e9fbf5d8aafdf9b12755a1d07f91ce21842a61a4beb53a9cd098ba267033b1c6",
+  "restore_git_blob": "5c159cb1c23c15086e8bf04971e8762d0afeaf3f",
+  "mutant_git_blob": "95582f8b04aba2067c84b9337fe2d5c584e8aba3",
+  "unit": "index::route_offer_tests::committed_pending_recovery_keeps_receipt_charge_and_claim_bounds",
+  "unchanged_test_path": "crates/hex-sim/src/index/route_offer_tests.rs",
+  "unchanged_test_sha256": "795f0d8ee79eaa8226905c5dc22bdc142942be1f8f1ab03cbfb3a48142a9a614",
+  "expected_mutant": "1selected0PASS1semanticFAIL0ignored at foreign profile acceptance; compiler/precondition/selection failure is unverified",
+  "expected_restored": "same unchanged unit, fresh different private target,1selected1PASS0FAIL0ignored",
+  "guard_omission": "Check evaluation remains, resulting Boolean is intentionally unused with underscore binding; enforcement alone removed. One source hunk, no old test/input/oracle or production worktree mutation.",
+  "execution": "ROOT-only admitted1CPU4GiB12GiB nice10/jobs1/threads1 with original finite process/operation guards. Lane runs0/builds0/mutation executions0/native0/newagents0. Proposed variant exists only as text/in-memory hash calculation.",
+  "limitations": "Pure authority-acceptance guard falsifier, not native effect/physical identity/scope termination or R14 proof. Actual compiler behavior and mutation result remain unrun.",
+  "files": {
+    "docs/research/measurements/hex-complete-bindings/remote-pending-profile-mutation-8d5/profile-enforcement.patch": {
+      "bytes": 641,
+      "sha256": "af92e293ddf6b7434c3a4b9e1cbc775586f09c1d8277438c1ec7a55266b7798d"
+    },
+    "docs/research/measurements/hex-complete-bindings/remote-pending-profile-mutation-8d5/PROPOSAL.md": {
+      "bytes": 6614,
+      "sha256": "68883a8326630dfa2562753c8f1e2f1b2a541dda5dedaed9a5ec32b16ca6deda"
+    }
+  }
+}

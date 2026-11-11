@@ -1,0 +1,40 @@
+{
+  "cleanup": {
+    "empty": true,
+    "error": null,
+    "kill_needed": false,
+    "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-native-gate-a128-v1.scope/native-0",
+    "reaped": true
+  },
+  "completed_harness_counts": [
+    1,
+    0,
+    0
+  ],
+  "harness_status": "ok",
+  "observation": {
+    "argv": [
+      "/usr/bin/python3",
+      "/home/adalundhe/.cache/hex-lead/root-native-gate-baseline-a128-v1.py",
+      "--exec-phase",
+      "hex-root-native-gate-a128-v1.scope",
+      "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-native-gate-a128-v1.scope/native-0/actor",
+      "completion_publication_refusal_never_executes_marker",
+      "2237638",
+      "32240165",
+      "211185.42076102"
+    ],
+    "both_eof": true,
+    "created_pid": 2238106,
+    "error": null,
+    "identity": {
+      "pid": 2238106,
+      "ppid": 2237638,
+      "start_ticks": 32240194
+    },
+    "reaped": true,
+    "returncode": 0
+  },
+  "passed": true,
+  "selector": "completion_publication_refusal_never_executes_marker"
+}

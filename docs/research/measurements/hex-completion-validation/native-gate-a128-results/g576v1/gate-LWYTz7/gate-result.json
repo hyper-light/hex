@@ -1,0 +1,10 @@
+{
+  "case": "durable-publication",
+  "cleanup_uncertainty": [],
+  "observation": {
+    "Ok": null
+  },
+  "schema": "hex-completion-native-gate-1",
+  "scope": "root-native-standin",
+  "vm_gpu_claim": false
+}

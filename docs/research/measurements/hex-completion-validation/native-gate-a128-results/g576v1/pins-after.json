@@ -1,0 +1,22 @@
+{
+  "binary": "/home/adalundhe/.cache/hex-lead/cohort-c576d4c2-linux-loader-gate-c576/target/debug/deps/hex_node-d6283f30893b31f3",
+  "binary_inode": [
+    59,
+    27247364
+  ],
+  "binary_sha256": "f8b10118b68414c0d9dc3faed95664bc8b248f7b27bd76e285dd0fbd2b8372d9",
+  "bytes": 185675000,
+  "driver_sha256": "d1b42b03247b336c47a6724d6640c114c89c9ceca81d521db637220585759531",
+  "pin": "c576d4c2a0a37d7722a81174b9ab1d7ff1434ad5",
+  "shell_inode": [
+    38,
+    8089
+  ],
+  "shell_sha256": "c157074818b094c84aaf31b8c80a1e149f234bb1c8c84a25e9a53e96afa30a29",
+  "sources": {
+    "crates/hex-api/src/bounds.rs": "54876217b8f7494f7f23cedc2b4060dd14d884424a1d8192cd30f71dc0f030e8",
+    "crates/hex-api/src/spec.rs": "6c209d5880bf1003f33c2aee26da0929e3b48dbc7b2ce299c1578c69e65f67ad",
+    "crates/hex-node/src/supervise/completion_native_gate_tests.rs": "da4ba641b6122a402007aa8939cddb6154dbe114ac437ce47073afdae7431241",
+    "crates/hex-runtime/src/linux/sys.rs": "f90284ac37e877201342f3c170f4ae091a82269f460fbc47815706dd73f055e4"
+  }
+}

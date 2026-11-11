@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running unittests src/lib.rs (/home/adalundhe/.cache/hex-lead/cohort-8d5bb0b4-linux-remote-pending-after/target/debug/deps/hex_sim-1a26fbe8e182b00f)
+
+running 1 test
+test index::route_offer_tests::released_source_recovery_preserves_fresh_phase_and_single_consumer_guards ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 197 filtered out; finished in 0.00s
+

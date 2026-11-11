@@ -1,0 +1,6 @@
+
+running 1 test
+test supervise::completion_native_gate_tests::completion_durable_publication_releases_and_reaps ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 377 filtered out; finished in 2.38s
+

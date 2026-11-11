@@ -1,0 +1,14 @@
+diff --git a/crates/hex-sim/src/index/routes.rs b/crates/hex-sim/src/index/routes.rs
+--- a/crates/hex-sim/src/index/routes.rs
++++ b/crates/hex-sim/src/index/routes.rs
+@@ -515,8 +515,8 @@
+                 cost: allocation.map(|allocation| allocation.cost),
+                 ..choice.offer
+             };
+-            return original.check_backing(backing).is_ok()
+-                && self.holds_dedicated_inner(key, backing, demand);
++            let _profile_checked = original.check_backing(backing).is_ok();
++            return self.holds_dedicated_inner(key, backing, demand);
+         }
+         self.holds_inner(choice, demand)
+     }

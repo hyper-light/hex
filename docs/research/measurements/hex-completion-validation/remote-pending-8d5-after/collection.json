@@ -1,0 +1,55 @@
+{
+  "bytes": 354690,
+  "sha256": "c03b7879f0af87188137c0ab531805d6d16482f06a17e9b876150572e0e512b5",
+  "members": {
+    "cohort-8d5bb0b4-linux-remote-pending-after/source-before.json": {
+      "bytes": 527920,
+      "sha256": "ef5708c33d12fbee161eb74aab51e6a3ce6195e956a6304c1b49855d8d2f1cdf"
+    },
+    "cohort-8d5bb0b4-linux-remote-pending-after/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-8d5bb0b4-linux-remote-pending-after/owned-scope-limits.json": {
+      "bytes": 260,
+      "sha256": "fa2683fa2f5c5debad9988c798512fecfb80db953dec3367da19dfd1472c5d87"
+    },
+    "cohort-8d5bb0b4-linux-remote-pending-after/remote-pending-original-after.log": {
+      "bytes": 3047,
+      "sha256": "ef4b773d327f6d891eaab2dfbbd53af30679a89e32ca68e402e2897fe5bfaf87"
+    },
+    "cohort-8d5bb0b4-linux-remote-pending-after/running.json": {
+      "bytes": 4002,
+      "sha256": "56064ca59ed9332410a4dd990865fef4b8ae67ca4c4e12dafd89279b0626b420"
+    },
+    "cohort-8d5bb0b4-linux-remote-pending-after/new-committed-pending-guard.log": {
+      "bytes": 444,
+      "sha256": "784e6cdaca3bcccb3c7f1e0da9be4eca26e74b31af742f29b7dac04121e9e1c1"
+    },
+    "cohort-8d5bb0b4-linux-remote-pending-after/changed-recovery-phase-guard.log": {
+      "bytes": 453,
+      "sha256": "bdcdff8ab837784d7d57ac5f8df5ec043fc292e663534446a6f662bc3ecae7d4"
+    },
+    "cohort-8d5bb0b4-linux-remote-pending-after/sim-current-strict.log": {
+      "bytes": 1776,
+      "sha256": "0a2e847ecdef4edc0d34aa16eb56e58128248c9216bd98db6583a164726eb1d7"
+    },
+    "cohort-8d5bb0b4-linux-remote-pending-after/source-after.json": {
+      "bytes": 527920,
+      "sha256": "ef5708c33d12fbee161eb74aab51e6a3ce6195e956a6304c1b49855d8d2f1cdf"
+    },
+    "cohort-8d5bb0b4-linux-remote-pending-after/result.json": {
+      "bytes": 4258,
+      "sha256": "0137e7eb136ad2d7c9110352e5a9ff2bb77a956ac1da0f16cf9209878d836438"
+    },
+    "cohort-8d5bb0b4-linux-remote-pending-after/collected-binaries.json": {
+      "bytes": 3744,
+      "sha256": "baaead7bf32946e989356fbb11231fa7f65e79c7a2d994dcb2a55d2c379768ef"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

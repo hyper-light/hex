@@ -1,0 +1,11 @@
+{
+  "scope": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-root-native-gate-a128-v1.scope",
+  "scope_absent": true,
+  "driver_owned_birth_absent": true,
+  "driver": {
+    "pid": 2237638,
+    "original_birth": "32240165",
+    "path_absent": true
+  },
+  "native3_driver_status": "PASS"
+}
