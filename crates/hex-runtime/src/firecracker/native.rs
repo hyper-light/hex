@@ -442,12 +442,8 @@ impl FirecrackerRuntime {
                 ));
             }
         }
-        record
-            .dirs
-            .try_reserve_exact(1)
-            .map_err(|_| exhausted("VM owned directories", 1))?;
-        record.dirs.push(copy_path(&paths.dir)?);
-        transaction.put(&record)?;
+        // The VM's directory is its native scope's (paths), which remove and recovery derive again;
+        // the record's directories stay as created: the Store keeps them immutable.
         let vm = self.config.machine(&record.spec, &paths.vsock, &plan)?;
         // Prepare the original inner workload and endpoint before creating a native process.
         let mut guest_spec = transaction
