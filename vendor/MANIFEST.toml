@@ -92,8 +92,9 @@ own = ["Cargo.toml", "UPSTREAM.md"]
 # PREBOOT_REVISION is this commit). Upstream's VFIO development chain (feature/vfio, in no release yet)
 # assigns PCI devices before boot here. Hex's recorded changes route a passthrough device's MSI/MSI-X
 # through KVM irqfds, serve GET /device-passthrough/{id} (the host/guest PCI witness the adapter reads,
-# transport.rs `attachment`), and complete Cargo.lock for a --locked build. Hex compiles none of it: only
-# the files those changes touch are taken, so `check` proves each change applies to this commit, and
+# transport.rs `attachment`), allow that MSI/MSI-X programming in the vCPU seccomp filters, and complete
+# Cargo.lock for a --locked build. Hex compiles none of it: only the files those changes touch are
+# taken, so `check` proves each change applies to this commit, and
 # scripts/firecracker/build.sh rebuilds the VMM from this commit plus vendor/patches/firecracker.
 # Apache-2.0, as are its LICENSE and NOTICE taken beside it.
 [projects.firecracker]
@@ -105,6 +106,8 @@ take = [
     "LICENSE",
     "NOTICE",
     "Cargo.lock",
+    "resources/seccomp/aarch64-unknown-linux-musl.json",
+    "resources/seccomp/x86_64-unknown-linux-musl.json",
     "src/firecracker/src/api_server/parsed_request.rs",
     "src/firecracker/src/api_server/request/device_passthrough.rs",
     "src/vmm/src/device_manager/pci_mngr.rs",
