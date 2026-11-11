@@ -228,7 +228,7 @@ fn physical_report_uses_one_factual_rpc_and_preserves_typed_refusal() {
         }],
     };
     let transport = &client.conn.shared.transport;
-    *transport.reply.lock().unwrap() = Some(Answer::PhysicalReport(report.clone()));
+    *transport.reply.lock().unwrap() = Some(Answer::PhysicalReport(report.try_clone().unwrap()));
     assert_eq!(client.physical_report().unwrap(), report);
     assert_eq!(
         sent_request(&transport.outbound.lock().unwrap()[0]).1,

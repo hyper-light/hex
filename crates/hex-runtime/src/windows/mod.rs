@@ -1061,6 +1061,9 @@ impl Holding {
                     .ok()
                     .and_then(|at| holders.get(at))
                     .map(|(_, id)| *id);
+                let holder = holder
+                    .map(|id| id.try_clone().map(hex_api::DeviceHolder::Box))
+                    .transpose()?;
                 report.push(entry.report(holder)?);
             }
         }
@@ -2124,7 +2127,7 @@ mod tests {
             folder: volume.to_owned(),
             made: Vec::new(),
             outlives: true,
-            system: Some(spec.id.clone()),
+            system: Some(hex_api::DeviceHolder::Box(spec.id.clone())),
             started: false,
             init: None,
             devices: rt.bindings(&spec).unwrap(),
@@ -2209,8 +2212,14 @@ mod tests {
         rt.holding.uncertain(&first.id).unwrap();
         assert!(rt.delete(&first.id).is_err()); // No marker/absence witness: cannot release it.
         let report = rt.holding.report(&rt.catalog).unwrap();
-        assert_eq!(report[0].holder, Some(first.id.clone()));
-        assert_eq!(report[1].holder, Some(sibling.id));
+        assert_eq!(
+            report[0].holder,
+            Some(hex_api::DeviceHolder::Box(first.id.clone()))
+        );
+        assert_eq!(
+            report[1].holder,
+            Some(hex_api::DeviceHolder::Box(sibling.id))
+        );
         assert_eq!(rt.boxes().unwrap().len(), 2);
         assert!(
             rt.holding
@@ -2232,7 +2241,7 @@ mod tests {
             folder: scratch.path().to_str().unwrap().to_owned(),
             made: Vec::new(),
             outlives: true,
-            system: Some(spec.id.clone()),
+            system: Some(hex_api::DeviceHolder::Box(spec.id.clone())),
             started: false,
             init: None,
             devices: rt.bindings(&spec).unwrap(),
@@ -2254,7 +2263,7 @@ mod tests {
         assert_eq!(std::fs::read(&marker).unwrap(), bytes);
         assert_eq!(
             rt.holding.report(&rt.catalog).unwrap()[0].holder,
-            Some(spec.id.clone())
+            Some(hex_api::DeviceHolder::Box(spec.id.clone()))
         );
         assert!(!matches!(rt.inspect(&spec.id), Err(Refusal::NoSuchBox(_))));
         let mut missing = device_spec("missing", 1024);
@@ -2276,7 +2285,7 @@ mod tests {
                 .report(&missing_metadata.catalog)
                 .unwrap()[0]
                 .holder,
-            Some(spec.id)
+            Some(hex_api::DeviceHolder::Box(spec.id))
         );
         assert_eq!(std::fs::read(old_marker).unwrap(), old_bytes);
         assert_eq!(rt.feature_reads.load(Ordering::SeqCst), 0);
@@ -2295,7 +2304,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             rt.holding.report(&rt.catalog).unwrap()[0].holder,
-            Some(spec.id.clone())
+            Some(hex_api::DeviceHolder::Box(spec.id.clone()))
         );
         assert!(!matches!(rt.inspect(&spec.id), Err(Refusal::NoSuchBox(_))));
         assert!(
@@ -2350,7 +2359,7 @@ mod tests {
         assert_eq!(std::fs::read(sibling).unwrap(), b"unaffected");
         assert_eq!(
             rt.holding.report(&rt.catalog).unwrap()[0].holder,
-            Some(spec.id.clone())
+            Some(hex_api::DeviceHolder::Box(spec.id.clone()))
         );
         assert!(!matches!(rt.inspect(&spec.id), Err(Refusal::NoSuchBox(_))));
     }

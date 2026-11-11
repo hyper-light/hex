@@ -294,7 +294,7 @@ impl FirecrackerRuntime {
                 if found
                     .holder
                     .as_ref()
-                    .is_some_and(|holder| holder != &spec.id)
+                    .is_some_and(|holder| holder.box_id() != Some(&spec.id))
                 {
                     return Err(lifecycle(&spec.id, LifecycleCause::Uncertain)?);
                 }

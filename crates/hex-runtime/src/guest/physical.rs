@@ -154,10 +154,7 @@ impl GuestRuntime {
                     holder: None,
                 },
             );
-            info.holder = catalog
-                .holder(*id, &records)?
-                .map(BoxId::try_clone)
-                .transpose()?;
+            info.holder = catalog.holder(*id, &records)?;
             offers.push(info);
         }
         Ok(offers)

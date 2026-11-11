@@ -511,11 +511,11 @@ fn recorded_holders(
         }
         if let Some(holder) = found {
             if let Some(native) = &offer.holder
-                && native != holder
+                && native.box_id() != Some(holder)
             {
                 return Err(uncertain(holder));
             }
-            offer.holder = Some(holder.try_clone()?);
+            offer.holder = Some(hex_api::DeviceHolder::Box(holder.try_clone()?));
         }
     }
     report.check()?;
