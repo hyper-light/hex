@@ -1,0 +1,67 @@
+{
+  "bytes": 314745,
+  "sha256": "40fbca74e57ad871223e2c7688eaed08b70e4dcd0368600ef9cf037c2dd6a18c",
+  "members": {
+    "cohort-df290d2d-linux-handoff-observer-df29/source-before.json": {
+      "bytes": 455347,
+      "sha256": "e2bf188e1a50424ad7e876195e2e8e26245cfea3f850b803a40bd2f8bf986be5"
+    },
+    "cohort-df290d2d-linux-handoff-observer-df29/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-df290d2d-linux-handoff-observer-df29/owned-scope-limits.json": {
+      "bytes": 261,
+      "sha256": "6637ad3409a13ce45e2cd8e3cbb7c47352ace2633a22267b59dc7a7b420e92cc"
+    },
+    "cohort-df290d2d-linux-handoff-observer-df29/known-failure-facts-original-after.log": {
+      "bytes": 3469,
+      "sha256": "8292a073da421e81457f43c5ab44328b2cad8695805049c2079301fd680006ba"
+    },
+    "cohort-df290d2d-linux-handoff-observer-df29/running.json": {
+      "bytes": 7106,
+      "sha256": "b463260af4d1f445139144311ac69fef72526629d973db8754bba011c0412821"
+    },
+    "cohort-df290d2d-linux-handoff-observer-df29/observer-facts-new-two.log": {
+      "bytes": 562,
+      "sha256": "e66cb79f3c342333e1055d84ec082237d8fcaebf915c92b42cfdc6124f291059"
+    },
+    "cohort-df290d2d-linux-handoff-observer-df29/observer-v5-codec-new.log": {
+      "bytes": 444,
+      "sha256": "50f94980affe437013f0deccc5505ed10d9f5c6cb7f4fe28dfb1839228abd083"
+    },
+    "cohort-df290d2d-linux-handoff-observer-df29/subset-membership-new.log": {
+      "bytes": 581,
+      "sha256": "cfafa4b0b7399f1b07c298352e8ec48974cf0e75e21e43d243f11a683a2d398c"
+    },
+    "cohort-df290d2d-linux-handoff-observer-df29/store-reference-original-after.log": {
+      "bytes": 2164,
+      "sha256": "fd8e2ba8ebd31e160e2e5175686bf4db40059679de2b2fbedaba1d5c736e10b5"
+    },
+    "cohort-df290d2d-linux-handoff-observer-df29/handoff-recorded-new-seven.log": {
+      "bytes": 6078,
+      "sha256": "86550d954f2ddec24789970bf4d5f6d1b3acded88ca7139f3109ece8e3ec912c"
+    },
+    "cohort-df290d2d-linux-handoff-observer-df29/handoff-turn-new.log": {
+      "bytes": 454,
+      "sha256": "77ceeed67a6790843f55f91bab96890432d1c2e75bfd237744419ee5f6080a4a"
+    },
+    "cohort-df290d2d-linux-handoff-observer-df29/source-after.json": {
+      "bytes": 455347,
+      "sha256": "e2bf188e1a50424ad7e876195e2e8e26245cfea3f850b803a40bd2f8bf986be5"
+    },
+    "cohort-df290d2d-linux-handoff-observer-df29/result.json": {
+      "bytes": 7721,
+      "sha256": "da1b4dbf29a4f63c4b188c455f92e2431829404b0253048c18136377e7374491"
+    },
+    "cohort-df290d2d-linux-handoff-observer-df29/collected-binaries.json": {
+      "bytes": 7391,
+      "sha256": "3a291dade4364397d2892c384342f2ac2e7a22f31cebdfee9aad155a0effe03d"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

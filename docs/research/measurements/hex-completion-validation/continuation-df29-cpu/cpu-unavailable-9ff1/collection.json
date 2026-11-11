@@ -1,0 +1,43 @@
+{
+  "bytes": 315819,
+  "sha256": "25ec70f63e521a104bd077cdb5990f3c0d3f61ef72fc47c5c4556cdf5a653f4d",
+  "members": {
+    "cohort-9ff17858-linux-cpu-unavailable-9ff1/source-before.json": {
+      "bytes": 461893,
+      "sha256": "c09b5335618c07a6a5bc5763d1510b9404d12379be7c2c0b3575c29fe05fba6b"
+    },
+    "cohort-9ff17858-linux-cpu-unavailable-9ff1/public-registry-seed.json": {
+      "bytes": 29305,
+      "sha256": "d587a900e076fffb314019892a08885e332b29ea130ad382b436ecbcccbb1165"
+    },
+    "cohort-9ff17858-linux-cpu-unavailable-9ff1/owned-scope-limits.json": {
+      "bytes": 260,
+      "sha256": "d05f7e41c2d4f882c268b02b58031cc6fa55f111588bf8b7b27e0f88378748ad"
+    },
+    "cohort-9ff17858-linux-cpu-unavailable-9ff1/cpu-observer-original-after.log": {
+      "bytes": 8101,
+      "sha256": "1ee26dca6d7744cc1629c7fb99325d12b9b9e727371d821d691493167afc44b9"
+    },
+    "cohort-9ff17858-linux-cpu-unavailable-9ff1/running.json": {
+      "bytes": 1222,
+      "sha256": "1bf75adac222abbf16afe346a7e2d456a814ae3ac52445ac8472335947e483b9"
+    },
+    "cohort-9ff17858-linux-cpu-unavailable-9ff1/source-after.json": {
+      "bytes": 461893,
+      "sha256": "c09b5335618c07a6a5bc5763d1510b9404d12379be7c2c0b3575c29fe05fba6b"
+    },
+    "cohort-9ff17858-linux-cpu-unavailable-9ff1/result.json": {
+      "bytes": 1572,
+      "sha256": "7f8d8fd85156586b35efa035b59b1c42701d1f83048a97f0abe3b8e032f57c09"
+    },
+    "cohort-9ff17858-linux-cpu-unavailable-9ff1/collected-binaries.json": {
+      "bytes": 870,
+      "sha256": "9b734b22604d0ee0c13de947a6ec79ebe2546c3785f91dde2ab2736e9ec1e1b2"
+    }
+  },
+  "local_cli_exit": 0,
+  "local_cli_reaped": true,
+  "all_members_verified": true,
+  "archive_source_before_verified": true,
+  "post_source_only_vendor_lock": true
+}

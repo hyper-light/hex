@@ -1,0 +1,43 @@
+{
+  "source": "9e1972b72cbf223f53475c46c3b8d7bb818fb206",
+  "archive_sha256": "3ba67194ce45933a3f72d023b086b466b26eb1de4a58c13d228d5c5256cbf063",
+  "scope": "ROOT exactly two original GPU Intent/alias controls after narrow remedies, then current all-target strict lint; no replay of prior Driver3 or oldpasses, no VM/GPU/native backend effects",
+  "target": "linux",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 1321689,
+  "phases": [
+    {
+      "name": "selected-learned-setup-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-client",
+        "--lib",
+        "--locked",
+        "calls::budget_tests::selected_smaller_learned_setup_expiry_prevents_send",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 1325659,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "e565f3c04d197e68a5a15708f93b520e38ac2e4d8683c349fad5b86ccf0ebe39",
+      "bytes": 3739,
+      "expected_selected": 1,
+      "actual_counts": [],
+      "selection_verified": false,
+      "test_outcomes": []
+    }
+  ],
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_invocations": 0,
+  "exit": 1
+}

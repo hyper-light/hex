@@ -1,0 +1,143 @@
+{
+  "source": "fb2fef5a3e0ad0085a9be24d57e17257db10e022",
+  "archive_sha256": "130f29c9a868050cdcb83c44438e9c80fe6d66a8514d0b3320a61ff67eeecd4c",
+  "scope": "ROOT exactly two original GPU Intent/alias controls after narrow remedies, then current all-target strict lint; no replay of prior Driver3 or oldpasses, no VM/GPU/native backend effects",
+  "target": "linux",
+  "platform": "Linux-7.3.3-1-cachyos-x86_64-with-glibc2.44",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "driver_pid": 1396478,
+  "phases": [
+    {
+      "name": "factual-receipt-new",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-api",
+        "--lib",
+        "--locked",
+        "runtime::factual_backing_receipt_tests::factual_any_receipt_keeps_profile_subset_and_fresh_offer_rules_distinct",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 1398959,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "627c03d14472a03ffb6efbad7922ef246f20ddbba3bb44c910b3265af7bcfd62",
+      "bytes": 982,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "runtime::factual_backing_receipt_tests::factual_any_receipt_keeps_profile_subset_and_fresh_offer_rules_distinct",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "store-reference-original-after",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "store::pool::retained_reference::a_referenced_backing_generation_cannot_be_removed_or_rearmed",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 1411579,
+      "exit": 0,
+      "reaped": true,
+      "sha256": "388ba5be21386315d82ecaecc3c109126142105cdf5965f6cee37857261b9bd4",
+      "bytes": 3398,
+      "expected_selected": 1,
+      "actual_counts": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "store::pool::retained_reference::a_referenced_backing_generation_cannot_be_removed_or_rearmed",
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "name": "handoff-recorded-corrected-fixtures",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "/home/adalundhe/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/cargo",
+        "test",
+        "-p",
+        "hex-node",
+        "--lib",
+        "--locked",
+        "recorded::handoff_tests::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "pid": 1527874,
+      "exit": 101,
+      "reaped": true,
+      "sha256": "73d89799d6eedaa40c89f6cc5a8ba04de1e77cf17d8a3edcc653dd169b33be28",
+      "bytes": 2930,
+      "expected_selected": 7,
+      "actual_counts": [
+        {
+          "passed": 4,
+          "failed": 3,
+          "ignored": 0
+        }
+      ],
+      "selection_verified": true,
+      "test_outcomes": [
+        {
+          "name": "recorded::handoff_tests::concurrent_source_removal_and_reference_publication_keep_a_canonical_join",
+          "outcome": "ok"
+        },
+        {
+          "name": "recorded::handoff_tests::malformed_retained_owner_never_frees_a_released_backing_reference",
+          "outcome": "ok"
+        },
+        {
+          "name": "recorded::handoff_tests::missing_source_rearm_refuses_a_retained_immutable_reference",
+          "outcome": "ok"
+        },
+        {
+          "name": "recorded::handoff_tests::ordinary_accounting_update_cannot_add_or_erase_a_backing_reference",
+          "outcome": "ok"
+        }
+      ]
+    }
+  ],
+  "source_changes": [],
+  "temp_entries": 0,
+  "native_invocations": 0,
+  "exit": 1
+}
