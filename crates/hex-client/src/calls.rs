@@ -713,9 +713,9 @@ impl<T: Transport> Shared<T> {
     }
 
     /// Hands one message to whoever waits for it: an answer to its call, a program's end to its `Proc` or completion;
-    /// a given answer's descriptors, one for each stream it names, in order, kept for its exec. One nobody waits for (a
-    /// call that gave up waiting, a program released) has no taker. Completions run after the lock is let go, so one
-    /// may call the client again.
+    /// a given answer's descriptors, one for each stream it names, in order, kept for its exec while its call waits. One
+    /// nobody waits for (a call that gave up waiting, a program released) has no taker, and a given one's ends close.
+    /// Completions run after the lock is let go, so one may call the client again.
     fn deliver(
         &self,
         header: Header,
@@ -737,7 +737,11 @@ impl<T: Transport> Shared<T> {
                     stdout: take(given.stdout),
                     stderr: take(given.stderr),
                 };
-                state.given.insert(header.id, ends);
+                // AC-T7.4.1: kept only while its call waits. One that gave up never takes them, so
+                // they close here, and the Taken word owed above lets the agent's copies go too.
+                if state.calls.contains_key(&header.id) {
+                    state.given.insert(header.id, ends);
+                }
             }
             match answer {
                 Answer::Offered(offer) => {
