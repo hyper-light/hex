@@ -219,6 +219,19 @@ pub fn refusal(op: &'static str, code: u32, host: Host, message: Option<&str>) -
     }
 }
 
+/// What a failed HCS call's result document states: a ResultError's `ErrorMessage`
+/// (`SchemaReference.md:3073-3076`), else the document whole.
+pub fn result_message(document: &str) -> String {
+    serde_json::from_str::<Value>(document)
+        .ok()
+        .and_then(|v| {
+            v.get("ErrorMessage")
+                .and_then(|m| m.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| document.to_owned())
+}
+
 /// The class refused because the Containers feature is off, saying how it comes on (Ada's call,
 /// 2026-10-31: the installer turns it on).
 pub fn containers_off(what_is_missing: &str) -> Refusal {
@@ -1905,6 +1918,37 @@ mod tests {
                 why: "HCS 0x80370105: bad state".to_owned()
             }
         );
+    }
+
+    /// AC-T7.4.1: do: state HCS's actual ResultError for a full-image Start failure (jupiter,
+    /// 2026-11-11, fullimagecpu1: an empty ErrorMessage, attributed to an OperationFailure at Start),
+    /// one that words its message too, and one whose event says why. Expect each refusal to keep what
+    /// HCS attributed and reported, never `HCS 0x80070287: ` with nothing after it.
+    #[test]
+    fn a_result_error_keeps_what_it_attributes_the_failure_to() {
+        let start = r#"{"Error":-2147024249,"ErrorMessage":"","Attribution":[{"OperationFailure":{"Detail":"Start"}}]}"#;
+        assert_eq!(
+            refusal(
+                "starting a container",
+                0x8007_0287,
+                client(26_200),
+                Some(&result_message(start))
+            ),
+            Refusal::Os {
+                op: "starting a container",
+                why: r#"HCS 0x80070287: attributed to OperationFailure {"Detail":"Start"}"#
+                    .to_owned()
+            }
+        );
+        let worded = r#"{"ErrorMessage":"The parameter is incorrect.","Attribution":[{"OperationFailure":{"Detail":"Construct"}}]}"#;
+        assert_eq!(
+            result_message(worded),
+            r#"The parameter is incorrect.; attributed to OperationFailure {"Detail":"Construct"}"#
+        );
+        let evented = r#"{"ErrorMessage":"","ErrorEvents":[{"Message":"A driver failed to load.","EventId":7}]}"#;
+        assert_eq!(result_message(evented), "event: A driver failed to load.");
+        assert_eq!(result_message("{}"), "{}");
+        assert_eq!(result_message("not a document"), "not a document");
     }
 
     fn bundle() -> Value {
