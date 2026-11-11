@@ -55,3 +55,5 @@ Five exact upstream Rust fixture sources referenced by API include!/path attribu
 | crates/api/src/client.rs | Preserve test-model timeout/identity conditions as typed Observer refusals. | AC-T7.4.1: exact89936ab9 fixes two actual panic_in_result_fn diagnostics atROOT5de strict API test Clippy; production code and the original-window ordered native control remain unchanged. | 0021-return-typed-test-model-refusals-for-inline-wait-and-identity.patch |
 
 | crates/api/src/client.rs | Retain the original finite owned-retry expiry regression before any remedy. | AC-T7.4.1: signed2ee4410f adds only a controlled socket/expiry test; production prefix stays byte-identical and actual result remains pending. | 0022-retain-finite-owned-retry-deadline-regression.patch |
+
+| crates/api/src/{lib,client,sim}.rs | Add absolute owning connections and preserve the original finite retry deadline. | AC-T7.4.1: reviewed b93/b287/1b93 uses the existing native owner and fixes actual db481f0e late dial; borrowed and owning zero/MAX compatibility remain separate. | 0023-carry-absolute-owning-guest-connections-and-preserve-finite.patch |

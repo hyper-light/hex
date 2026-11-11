@@ -818,6 +818,32 @@ impl shards_api::Guest for PlannedGuest {
         }
     }
 
+    fn connect_before(
+        &self,
+        port: u32,
+        at: std::time::Instant,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        let left = at
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or(shards_api::Refusal::Connect {
+                port,
+                failure: shards_api::HandshakeError::Expired {
+                    phase: shards_api::HandshakePhase::Dial,
+                },
+            })?;
+        let stream = self.connect(port, left)?;
+        if std::time::Instant::now() >= at {
+            return Err(shards_api::Refusal::Connect {
+                port,
+                failure: shards_api::HandshakeError::Expired {
+                    phase: shards_api::HandshakePhase::ClearTimeouts,
+                },
+            });
+        }
+        Ok(stream)
+    }
+
     fn stop(&self) -> Result<(), shards_api::Refusal> {
         self.stops.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -1187,6 +1213,32 @@ impl shards_api::Guest for KeptGuest {
                 why: "a stand-in that won't answer".to_owned(),
             })
         }
+    }
+
+    fn connect_before(
+        &self,
+        port: u32,
+        at: std::time::Instant,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        let left = at
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or(shards_api::Refusal::Connect {
+                port,
+                failure: shards_api::HandshakeError::Expired {
+                    phase: shards_api::HandshakePhase::Dial,
+                },
+            })?;
+        let stream = self.connect(port, left)?;
+        if std::time::Instant::now() >= at {
+            return Err(shards_api::Refusal::Connect {
+                port,
+                failure: shards_api::HandshakeError::Expired {
+                    phase: shards_api::HandshakePhase::ClearTimeouts,
+                },
+            });
+        }
+        Ok(stream)
     }
 
     fn stop(&self) -> Result<(), shards_api::Refusal> {
