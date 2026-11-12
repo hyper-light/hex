@@ -60,7 +60,26 @@ pub(crate) struct DuplexIo(pub(crate) crate::guest::DuplexOwner);
 
 impl Read for DuplexIo {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        #[cfg(target_os = "macos")]
+        wait_readable(self.0.handle())?;
         self.0.read(bytes)
+    }
+}
+
+/// Waits in poll(2) until `conn` has bytes or its end to read. On macOS a read waiting in recv(2) on a Unix stream
+/// socket can sleep through its peer's half-close: XNU's `uipc_rcvd` lets go of the reader's socket to take its
+/// peer's lock first, and a shutdown landing then wakes no one (Shards M236: 360 of 50,000 readers asleep), where
+/// poll(2) sees it (0 of 50,000). So no read of one waits in the read (Shards D175).
+#[cfg(target_os = "macos")]
+pub fn wait_readable(conn: crate::guest::Handle<'_>) -> io::Result<()> {
+    use rustix::event::{PollFd, PollFlags};
+    loop {
+        let mut ready = [PollFd::from_borrowed_fd(conn, PollFlags::IN)];
+        match rustix::event::poll(&mut ready, None) {
+            Ok(_) => return Ok(()),
+            Err(rustix::io::Errno::INTR) => {}
+            Err(e) => return Err(e.into()),
+        }
     }
 }
 
