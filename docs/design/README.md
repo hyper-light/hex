@@ -59,6 +59,7 @@ and `Placement`.
 | GPU telemetry for the balancing: NVIDIA through NVML loaded at run time, two calls a GPU a sample; AMD through amdgpu's sysfs counters kept open on Linux, one read a counter, and through ADL on Windows, two calls a GPU; macOS refused by type (`gpu-telemetry.md`, G1-G4) | CP-T7.3 (Ada, 2026-11-09) | decided 2026-11-09; built in `hex-gpu` |
 | Quotas, fair share, preemption and gangs | CP-T7.5 | decided (`scheduler-architecture.md`, S5) |
 | Networking: namespaces, CNI-compatible plugins, policies from Agentfile grants | CP-T7.7 | open |
+| Network grants for a microVM's members: who, to whom, which ports, which way, default deny; Hex decides each VM's policy and Shards' per-VM network process enforces it; what Shards `482c5d78` can express is programmed and the rest refused typed until Shards' step 9 (`network-grants.md`) | joint plan step 15, CP-T7.7 | decided 2026-11-12; programming waits on goal 12's image class |
 | Storage: a CSI-like interface; images from Reliquary, lazily | CP-T7.8 | open |
 | The Kubernetes API subset | CP-T7.13 | open |
 
