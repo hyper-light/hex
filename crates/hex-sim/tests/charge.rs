@@ -52,6 +52,21 @@ fn node(seed: u64) -> Scenario {
     }
 }
 
+/// The riser's node: the same, but each VM may grow to 48 GiB, so a VM that grows to its whole envelope passes the
+/// memory its neighbours leave it (about ten agents at their peaks beside it on 64 GiB).
+fn riser(seed: u64, rooms: bool) -> Scenario {
+    let base = node(seed);
+    Scenario {
+        envelope: CapacityResources {
+            mem_bytes: 48 * GIB,
+            ..base.envelope
+        },
+        rooms,
+        riser: Some((6_000, 0)),
+        ..base
+    }
+}
+
 fn said(name: &str, seed: u64, r: &Report) {
     println!(
         "{name} seed {seed}: admitted {}, refused {}, peak {} VMs at once (envelope charge: {}), mean {:.2}; \
@@ -96,17 +111,13 @@ fn w14_density_and_fairness_under_the_rule() {
 }
 
 /// Joint plan step 14 (AC-T7.4.1): a VM whose use rises past its charge, its memory held at its budget as Linux's
-/// `memory.high` holds it. Do let the first VM to start ask for its whole ceiling from minute 10; expect its charge
+/// `memory.high` holds it. Do let the first VM to start, of 48 GiB, ask for its whole envelope from minute 10; expect its charge
 /// past its booking, the node refusing starts while it rises (backing off), it held at its budget, its neighbours
 /// never given less CPU than `min(ask, booking)`, contention to have happened, and nothing ended.
 #[test]
 fn w14_a_riser_is_held_without_starving_its_neighbours() {
     for seed in SEEDS {
-        let s = Scenario {
-            riser: Some((6_000, 0)),
-            ..node(seed)
-        };
-        let r = run(&s).unwrap();
+        let r = run(&riser(seed, true)).unwrap();
         said("riser, rooms held", seed, &r);
         assert!(r.riser_over > 0, "seed {seed}: {r:?}");
         assert!(r.refused_while_rising > 0, "seed {seed}: {r:?}");
@@ -124,12 +135,7 @@ fn w14_a_riser_is_held_without_starving_its_neighbours() {
 #[test]
 fn w14_a_riser_with_no_room_held_is_ended_last_and_alone() {
     for seed in SEEDS {
-        let s = Scenario {
-            riser: Some((6_000, 0)),
-            rooms: false,
-            ..node(seed)
-        };
-        let r = run(&s).unwrap();
+        let r = run(&riser(seed, false)).unwrap();
         said("riser, no room held", seed, &r);
         assert!(r.riser_ended, "seed {seed}: {r:?}");
         assert_eq!(r.ended_within, 0, "seed {seed}: {r:?}");
