@@ -960,6 +960,7 @@ impl Node {
                 return Err(backends::uncertain(id));
             }
             info.adopted = adopted;
+            charges::with_last_resort(&mut info, record)?;
             return Ok(info);
         }
         let state = match record.spec.class {
@@ -1021,6 +1022,7 @@ impl Node {
             abandoned: record
                 .abandoned
                 .saturating_add(self.abandoned.unrecorded(id)?),
+            last_resort: None,
         })
     }
 
@@ -1519,6 +1521,7 @@ impl Node {
             adopted: false,
             exit: None,
             abandoned: 0,
+            last_resort: None,
         })
     }
 
@@ -2076,6 +2079,7 @@ impl Runtime for Node {
                         adopted: false,
                         exit: None,
                         abandoned: 0,
+                        last_resort: None,
                     }),
                     Err(why) => return Err(why),
                 }
@@ -2095,6 +2099,7 @@ impl Runtime for Node {
                     adopted: false,
                     exit: None,
                     abandoned: 0,
+                    last_resort: None,
                 });
             }
         }

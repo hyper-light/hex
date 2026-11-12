@@ -301,6 +301,7 @@ mod tests {
             membership: None,
             exit: None,
             abandoned: 0,
+            last_resort: None,
         }
     }
 

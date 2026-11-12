@@ -159,10 +159,15 @@ on hardware (ROOT's fairness run).
   fleet's held, growth and budget), and ends no other while that VM's VMM still runs, so one end is never two. Its
   state is explicit (`Resort`: `Held`, `Ending`, `Refused`). Where the fleet passes its budget with every VM within its
   own, the node can't act and says so, typed (`Refusal::Exhausted`); a refused kill is kept typed too, and the next
-  window asks the rule again. Each class's capacity answer carries the VMs of the class it ended, latest first
-  (`Learned::ended`, fitted after the holdings), of the at most the machine's VM population it keeps, the oldest
-  forgotten first. A node's VMs carry no band yet (neither a box's spec nor the live demand names one), so on a node
-  every VM is band 0 and the one holding most past its budget goes first.
+  window asks the rule again. The why is on the box itself, where the person looks (ROOT, 2026-11-12): the node
+  writes it into the VM's record after the window (`BoxRecord::last_resort`, through the box's record turn and only
+  into the record of that VM's lifetime, a write that fails kept for the next window), and the VM's inspect and list
+  carry it (`BoxInfo::last_resort`, last on the node's wire), across the node's restarts. A node that crashes between the
+  kill and that write loses the why, not the end: the VM's exit still says `SIGKILL`. Each class's capacity answer carries
+  the VMs of the class it ended too, latest first (`Learned::ended`, fitted after the holdings), of the at most the
+  machine's VM population it keeps, the oldest forgotten first. A node's VMs carry no band yet (neither a box's spec
+  nor the live demand names one), so on a node every VM is band 0 and the one holding most past its budget goes
+  first.
 
 **Sources.** Admit within room, take back cold pages first, then end or move the lowest-priority VM past its
 charge, never one within it (f84 B: Kubernetes' order f45 A, ESX f47 A, far memory f49 A); D188's give-back is

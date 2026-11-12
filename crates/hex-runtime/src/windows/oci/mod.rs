@@ -1249,6 +1249,7 @@ pub fn info(b: &OciBox) -> Result<hex_api::BoxInfo, Refusal> {
         exit: b.exit()?,
         abandoned: 0,
         allocation: None,
+        last_resort: None,
     })
 }
 

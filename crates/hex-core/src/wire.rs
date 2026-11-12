@@ -1719,16 +1719,35 @@ fn put_learned(w: &mut Writer, learned: &Learned) -> Result<(), Fault> {
     w.reserve_fixed(size_of::<u32>())?;
     w.device_count(learned.ended.len(), LEARNED_END_MIN_BYTES)?;
     for end in &learned.ended {
-        w.string(end.id.as_str())?;
-        w.reserve_fixed(LEARNED_END_BYTES)?;
-        w.u64(end.held);
-        w.u64(end.budget);
-        w.u8(end.band);
-        w.u64(end.fleet_held);
-        w.u64(end.fleet_growth);
-        w.u64(end.fleet_budget);
+        put_learned_end(w, end)?;
     }
     Ok(())
+}
+
+/// One learned end (C5): its box id, then what the VM held and its budget, its band, and its fleet's held, growth and
+/// budget.
+fn put_learned_end(w: &mut Writer, end: &LearnedEnd) -> Result<(), Fault> {
+    w.string(end.id.as_str())?;
+    w.reserve_fixed(LEARNED_END_BYTES)?;
+    w.u64(end.held);
+    w.u64(end.budget);
+    w.u8(end.band);
+    w.u64(end.fleet_held);
+    w.u64(end.fleet_growth);
+    w.u64(end.fleet_budget);
+    Ok(())
+}
+
+fn learned_end(r: &mut Reader<'_>) -> Result<LearnedEnd, Fault> {
+    Ok(LearnedEnd {
+        id: box_id(r)?,
+        held: r.u64()?,
+        budget: r.u64()?,
+        band: r.u8()?,
+        fleet_held: r.u64()?,
+        fleet_growth: r.u64()?,
+        fleet_budget: r.u64()?,
+    })
 }
 
 fn learned(r: &mut Reader<'_>) -> Result<Learned, Fault> {
@@ -1763,17 +1782,7 @@ fn learned(r: &mut Reader<'_>) -> Result<Learned, Fault> {
         LEARNED_END_MIN_BYTES,
         MAX_LEARNED_HOLDINGS,
         "learned ends",
-        |r| {
-            Ok(LearnedEnd {
-                id: box_id(r)?,
-                held: r.u64()?,
-                budget: r.u64()?,
-                band: r.u8()?,
-                fleet_held: r.u64()?,
-                fleet_growth: r.u64()?,
-                fleet_budget: r.u64()?,
-            })
-        },
+        learned_end,
     )?;
     Ok(Learned {
         priors,
@@ -2477,7 +2486,9 @@ fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
             Receiver::Declared => 0,
         });
         Ok(())
-    })
+    })?;
+    // Joint plan step 14 (C5): why its node's last resort ended it, after every older field.
+    w.option_with(info.last_resort.as_ref(), put_learned_end)
 }
 
 fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
@@ -2518,6 +2529,7 @@ fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
                 },
             })
         })?,
+        last_resort: r.option(learned_end)?,
     };
     check_info_route(&info)?;
     check_published(&info.grants, &info.published)

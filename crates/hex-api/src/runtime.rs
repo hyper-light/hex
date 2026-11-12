@@ -926,6 +926,15 @@ pub struct LearnedEnd {
     pub fleet_budget: u64,
 }
 
+impl LearnedEnd {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        Ok(Self {
+            id: self.id.try_clone()?,
+            ..*self
+        })
+    }
+}
+
 /// Joint plan step 14 (C2, C8): what a node learned of one class's microVMs, carried on its capacity answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1058,10 +1067,7 @@ impl Learned {
                 bound: self.ended.len(),
             })?;
         for end in &self.ended {
-            ended.push(LearnedEnd {
-                id: end.id.try_clone()?,
-                ..*end
-            });
+            ended.push(end.try_clone()?);
         }
         Ok(Self {
             priors: copy_capacity_values(&self.priors, "learned priors")?,
@@ -1697,6 +1703,11 @@ pub struct BoxInfo {
     /// After `grants` (append-only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub published: Vec<crate::Published>,
+    /// Why its node's last resort ended it, where it did (joint plan step 14, C5): what it held past its own memory
+    /// budget while its fleet's VMs held more than the fleet's budget. Kept in its record, so a restarted node's
+    /// inspect says it too. After `published`, so absent means none (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_resort: Option<LearnedEnd>,
 }
 
 fn is_zero(n: &u64) -> bool {

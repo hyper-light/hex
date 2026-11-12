@@ -1951,6 +1951,7 @@ impl BootstrapCall {
                     exit: None,
                     abandoned: 0,
                     route: None,
+                    last_resort: None,
                 })
             }
         }

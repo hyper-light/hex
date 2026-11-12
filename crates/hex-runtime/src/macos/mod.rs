@@ -440,6 +440,7 @@ impl MacRuntime {
             exit: None,
             abandoned: 0,
             allocation: None,
+            last_resort: None,
         })
     }
 }
@@ -571,6 +572,7 @@ fn info(id: BoxId, bounds: Bounds, state: BoxState) -> BoxInfo {
         exit: None,
         abandoned: 0,
         allocation: None,
+        last_resort: None,
     }
 }
 

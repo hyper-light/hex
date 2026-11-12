@@ -1577,6 +1577,7 @@ mod projection_tests {
             abandoned: 0,
             allocation: None,
             route: None,
+            last_resort: None,
         }
     }
 
