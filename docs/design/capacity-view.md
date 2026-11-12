@@ -199,7 +199,10 @@ reservations for ever: under-use, never double-booking. The person releases them
 (`Keeper::forget`): refused, typed, while the holder has a session (`NotForgotten::Connected`: its own
 sync says what it holds) and for a name never seen (`Unknown`); otherwise every reservation of it is
 removed from the records, the other holders are hinted, and what was released (its epoch, count and
-sum) is returned for the shell to log on the node's capacity event target. Its epoch stays, so a process
+sum) is returned for the shell to log on the node's capacity event target: the person says
+`hex schedule forget --socket <path> --holder <name>` (`schedule::Command::Forget`, its own wait, a typed
+`Reply::forget`), and the scheduler logs `hex.capacity event=forgotten holder="<name>" epoch= count= cpu_milli=
+mem_bytes= disk_bytes= gpus=`. Its epoch stays, so a process
 of it from before is still fenced; and if the person was wrong and some of its work still runs, the
 holder's own next sync adopts it (CV5), so the release never hides running work from the view for
 longer than the holder is away.
@@ -244,9 +247,17 @@ messages, each answered), so a holder that speaks only this protocol needs none 
 - **A sync fits one message**: the keeper holds each holder to the most reservations one sync lists at
   their widest (`hex_core::capacity::most_held`), beside the node's own record bound (CV8).
 - **The shells**: `hex_quic::capacity::Server` serves any `CapacityView` on the port's acceptor, a thread
-  a link within the endpoint's connection bound, and delivers each hint to the link it is owed to after
-  each message and when its host calls `Server::hint`; `hex_quic::capacity::Link` is a holder's end.
-  The node's keeper is served as `placement::DriverView`.
+  a link within the endpoint's connection bound, to the holders its host authorizes alone, each by the name its
+  certificate carries (CV8: any other word is closed `NotAuthorized` and logged); it delivers each hint to the
+  link it is owed to after each message and when its host calls `Server::hint`; `hex_quic::capacity::Link` is a
+  holder's end.
+- **In production**: `hex schedule serve` serves the node's keeper as `placement::DriverView` where its
+  configuration names a lane (`capacity`: `bind`, `credentials`, the enrollment folder `hex node enroll` began and
+  kiln's CA's answer completed, read whole before anything binds, and `holders`, each `name` and `user`). The view
+  opens before any admission the scheduler makes, its endpoint serves `CAPACITY_PORT` alone, two connections a
+  holder (one, and the one replacing it: `hex-quic.md` Q8), and every command it takes ends with the hints owed.
+  It says `capacity <address>` before `ready`. Without a lane it keeps no view and binds nothing for one, and a
+  release is refused, typed.
 
 ### CV10. Where a keeper is, and where there is none
 
@@ -334,8 +345,9 @@ its use and its reservation, or a sample's credit exceeding the use read on eith
 **Keeper to holder** (`ToHolder`): `Welcome { fence, view }`; `Synced { fence, view, count, sum,
 released, adopted, disagreed }`; `Granted { fence, id, amount, view }`; `Refused { fence, id, why,
 view }` (`why`: `Room`, `Full`, `Empty`, `Devices`, `Disagrees`); `Released { fence, id, view }`;
-`Hint { fence, view }`; `Closed { epoch, why }` (`why`: `OlderEpoch`, `Session`, `NotSynced`,
-`HoldersFull`, `Invalid`, `Scope`: CV12).
+`Hint { fence, view }`; `Closed { rejected, why }` (`rejected`: the fence of the message closed, none for a
+hello; `why`: `OlderEpoch`, `Session`, `NotSynced`, `HoldersFull`, `Invalid`, `Scope` (CV12), `NotAuthorized`
+(CV8, CV9)).
 
 **The keeper, per holder** (R04): `Away` (no session; its reservations kept) → hello → `Joined
 { session }` (a sync is owed) → sync → `Synced { session }` (reserves and releases served) → link down →
@@ -358,6 +370,52 @@ run out.
 
 **What the keeper owes** (Hex's node agent): grant only what fits (CV3), write before it answers (CV2),
 fence (CV4), release only on its holder's word (CV5), and tell each holder the view (CV7).
+
+## What kiln's runner implements as a holder on `CAPACITY_PORT`
+
+kiln's runner holds room on a machine whose Hex scheduler keeps the view (CV1). This is the whole of its side: the
+wire, the order of words and what each answer asks of it. The order itself is `hex_api::capacity::Holder`'s, a pure
+core kiln drives through hex-api (Shards R12: one implementation), feeding it what comes and saying what it sends.
+
+1. **Identity.** Enroll with kiln's CA by CSR (`hex_quic::enroll`: its key made where it runs and never sent). Its
+   certificate's DNS name is its holder name: the keeper hears only the names its configuration lists
+   (`capacity.holders[].name` in `hex schedule serve`'s configuration), each only as itself; any other word is
+   answered `Closed { NotAuthorized }` and logged (`hex.capacity event=refused`).
+2. **The link.** Dial the keeper's endpoint (the configured `capacity.bind`, which `hex schedule serve` prints as
+   `capacity <address>` before `ready`), checking the certificate for the scheduler's name, and assert
+   `TLS13_AES_256_GCM_SHA384` negotiated. Open one connection to `CAPACITY_PORT` (`0x4845_5805`): a connection is
+   a link (CV9); its fences are good on it alone (`Close::Session` on another), and a hello on a new connection
+   supersedes the old session.
+3. **Framing.** Each message is a 4-byte big-endian length, then the JSON of one `hex_api::capacity::ToKeeper`
+   (holder to keeper) or `ToHolder` (keeper to holder) in its serde form, at most `hex_core::wire::MAX_MESSAGE`
+   (128 KiB): `hex_core::capacity::{encode, decode}`. Bytes that aren't one reset the connection (`Why::Protocol`).
+   The protocol only appends: a variant or optional field it doesn't know is a newer keeper's.
+4. **The order of words** (CV4, CV5):
+   - `Hello { holder, epoch, scope? }`: its certificate's name, and an epoch one more at every start of its process,
+     kept durably;
+   - on `Welcome`, `Sync { fence, held }` listing every reservation whose work may still run, of any of its epochs;
+     on `Synced`, its own count and sum must be the keeper's (`Event::Synced { agree }`), and where they aren't, the
+     keeper's books are the machine's and it reports the difference;
+   - only then `Reserve { fence, id, amount }`, `id` its epoch and a count never reused, and the work starts on
+     `Granted` for that id alone; a reserve with no answer within its learned wait (hex-core's Patience, CV6) is
+     abandoned: never started, and released at once where the link is up;
+   - `Release { fence, id }` once that work can no longer run.
+5. **What each answer asks.** `Refused { why }`: `Room` (decide again on the view it carries), `Full` (it holds the
+   keeper's bound), `Empty`, `Devices` (a GPU by count, refused until device grants by identity), `Disagrees`.
+   `Released`: its release is done (said for an id never held too: releasing is idempotent, CV5). `Hint { view }`:
+   the machine changed (CV7): fold it into kiln's own ledger (its budget and `outside`). `Closed`:
+   `OlderEpoch` (a newer process of it is there: this one admits nothing more here), `Session` or `NotSynced` (say
+   hello again), `HoldersFull` or `NotAuthorized` (this keeper doesn't serve it: admit nothing here and tell the
+   person), `Scope(_)` (say hello again without the scope; the core drops it), `Invalid(_)` (its own defect).
+6. **Down.** With no synced session to a keeper it knows of (CV10), it admits nothing new on that machine (CV11);
+   work already started runs on, held in the keeper's ledger, and its next sync says what still runs.
+7. **Its scope** (CV12, optional): where its reserved work runs and nothing else of it, its own process not
+   included: Linux, a cgroup v2 path relative to `/sys/fs/cgroup` under a tree its user owns or was delegated
+   (`kiln-jobs-<pid>`, the parent of its jobs' cgroups); macOS, one process group whose members all run as its
+   user; Windows, a job object it names, owned by its account (an elevated runner's jobs are BUILTIN\Administrators'
+   and earn nothing). The person declares that user beside its name (`capacity.holders[].user`: a uid, or a SID).
+8. **Gone for good.** The person releases what it held with `hex schedule forget --socket <scheduler socket>
+   --holder <name>` (CV6), refused while it is connected, logged as `hex.capacity event=forgotten`.
 
 ## The interface with goal 14 (learned charge)
 
@@ -400,24 +458,31 @@ window, which would under-count Hex here.
 - hex-sim (`hex_sim::capacity`): one machine of sixteen CPUs and 64 GiB, Hex's own boxes and kiln's
   runners on its keeper, under a nemesis that crashes the keeper between messages and at its writes
   (before and after a write lands), crashes runners (their runs outliving them or not), drops links with
-  what was on them, partitions and heals them, lets a runner's wait run out, and retires a runner whose
-  reservations the person then releases. After every step: the work actually running fits the room, and
-  every running run is in the keeper's books while it is up. After settling (every link healed, every
-  message delivered, every hint drained): the keeper's books of each runner, the runner's own, and what it
-  runs are the same, and no sync said the counts disagree. Planted shell mistakes, each caught on some of
-  64 seeds: release on silence, a run started before its grant, a restart forgetting its survivors, a
-  keeper answering before its write lands, Hex admitting against its own boxes alone. Bounded seeds here
-  (64 of 2,000 steps with two runners, 32 each with one and with three); ROOT runs the sweeps:
-  `hex_sim::capacity::run(seed, runners, steps, None)` over its seeds, which must each return `Ok`.
+  what was on them, partitions and heals them, lets a runner's wait run out, retires a runner whose
+  reservations the person then releases, and has the person release a runner wrongly: one away (its link
+  down, or its process crashed with its runs outliving it) with work still running (CV6). After every step:
+  every running run is in the keeper's books while it is up, but one so released, until its runner's next
+  sync adopts it (CV5); the work running fits the room but for what such a release hid and its sync then
+  adopted; and what the keeper books past the room (only an adoption's), its view says it is over by. After
+  settling (every link healed, every message delivered, every hint drained): the keeper's books of each
+  runner, the runner's own, and what it runs are the same, and no sync said the counts disagree. Planted
+  shell mistakes, each caught on some of 64 seeds: release on silence, a run started before its grant, a
+  restart forgetting its survivors, a keeper answering before its write lands, Hex admitting against its own
+  boxes alone, a sync that drops what the keeper lacks instead of adopting it. Bounded seeds here (64 of
+  2,000 steps with two runners, 32 each with one and with three); ROOT's sweeps take
+  `capacity::tests::the_record_sweep` (ignored; `HEX_CAPACITY_SEEDS`, `HEX_CAPACITY_STEPS`), every seed
+  of which must hold, and each mistake caught on some.
 - ROOT: kiln-ci's simulator with kiln's binding of the holder (`hex_api::capacity::Holder` against
   `capacity::sim::SimView`, and the conformance suite for a keeper kiln hosts), then two real machines,
   once the transport binding lands.
 
 ## Open items
 
-- The person's release (CV6) is in the core (`Keeper::forget`); its command on the node, and the log
-  event's name (agreed with kiln's Observe owner, CLAUDE.md §10), come with the node's shell.
 - A holder's GPU reservations need device grants by identity (CV3).
-- The scheduler process (`hex schedule serve`, which holds the Driver) opens no QUIC endpoint yet: wiring
-  it (its bind address, its enrollment with kiln's CA, the holders it authorizes, `Driver::open_view`, and
-  `Server::hint` after its own placements) is the step that puts the lane in production.
+- The lane's log events (`hex.capacity event=refused`, `forgotten`, `lane_ended`, `hint_failed`) are to be agreed
+  with kiln's Observe owner (CLAUDE.md §10).
+- The transport admits any peer kiln's CA enrolled: one the lane doesn't name is refused there (CV8) but holds one
+  of the lane's connections while it stays. Admitting by name at the endpoint is hex-quic's (`Directory`).
+- A scheduler with no runtime class keeps no holder reservation: CV8 bounds a holder's by the node's own record
+  bound, which such a node derives as none.
+- kiln's runner implements its side (the section above); until it does, the lane serves no holder in production.

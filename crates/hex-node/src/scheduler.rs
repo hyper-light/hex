@@ -69,6 +69,144 @@ pub struct Config {
     pub backends: Vec<Backend>,
     #[serde(default)]
     pub peers: Vec<Peer>,
+    /// The machine's capacity view on a QUIC lane of its own (joint plan step 13): without it no view is kept and
+    /// nothing is bound for one.
+    #[serde(default)]
+    pub capacity: Option<CapacityLane>,
+}
+
+/// The machine's capacity view served on a QUIC lane of its own (joint plan step 13, `docs/design/capacity-view.md`
+/// CV9 and CV12): where it binds, the enrollment it presents, and the holders it serves.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityLane {
+    pub bind: std::net::SocketAddr,
+    /// This scheduler's enrollment with kiln's CA: the folder `hex node enroll` began and the CA's answer completed
+    /// (`hex_quic::enroll::store`).
+    pub credentials: PathBuf,
+    /// The holders it serves: no other peer is heard.
+    pub holders: Vec<CapacityHolder>,
+}
+
+/// A holder the person authorizes on this machine: the name kiln's CA enrolled it as, and the user its work runs as
+/// (a uid, or a SID on Windows), by which a scope it names is proved its own (CV12). Without one, no scope it names
+/// earns credit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityHolder {
+    pub name: String,
+    #[serde(default)]
+    pub user: Option<crate::scopes::User>,
+}
+
+/// The capacity view's lane, where the configuration asks for one: its server, the endpoint it is served on, each
+/// holder's declared user, and the log its events go to.
+struct Lane {
+    server: Arc<hex_quic::capacity::Server<crate::placement::DriverView>>,
+    endpoint: hex_quic::Endpoint,
+    users: BTreeMap<String, Option<crate::scopes::User>>,
+    log: hex_quic::capacity::Log,
+}
+
+impl Lane {
+    /// `config`'s enrollment and holders, read and checked whole before anything opens or binds
+    /// (`docs/design/hex-quic.md` Q9): an enrollment it can't serve with, or a holder list it can't serve, is refused.
+    fn credentials(config: &CapacityLane) -> Result<hex_quic::tls::Credentials, Refusal> {
+        let lane = |why: String| Refusal::Invalid {
+            what: "capacity lane",
+            why,
+        };
+        if config.holders.is_empty() {
+            return Err(lane("it names no holder to serve".into()));
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for holder in &config.holders {
+            if holder.name.is_empty() || !names.insert(holder.name.as_str()) {
+                return Err(lane(format!(
+                    "holder {:?} is empty or named twice",
+                    holder.name
+                )));
+            }
+            if let Some(user) = &holder.user {
+                user.check()?;
+            }
+        }
+        hex_quic::enroll::store::load(&config.credentials).map_err(|e| {
+            lane(format!(
+                "{e} (enroll with `hex node enroll`, and keep kiln's CA's answer there)"
+            ))
+        })
+    }
+
+    /// Opens the view in `state` for `config`'s holders, binds its endpoint with `credentials`, and serves it there.
+    fn serve(
+        driver: &Arc<Driver>,
+        state: &Path,
+        config: &CapacityLane,
+        credentials: hex_quic::tls::Credentials,
+        log: hex_quic::capacity::Log,
+    ) -> Result<Self, Refusal> {
+        driver
+            .open_view(&state.join("capacity"), config.holders.len())
+            .map_err(failed)?;
+        // Each holder holds a connection and the one replacing it after its path changed, and its link one connection
+        // on the port and the one replacing it as it says hello again (docs/design/hex-quic.md Q8).
+        let connections = config
+            .holders
+            .len()
+            .checked_mul(2)
+            .ok_or(Refusal::Exhausted {
+                what: "capacity lane connections",
+                bound: usize::MAX,
+            })?;
+        let endpoint = hex_quic::Endpoint::start(hex_quic::Config {
+            credentials,
+            bind: config.bind,
+            listen: true,
+            serves: vec![hex_quic::capacity::CAPACITY_PORT],
+            shape: hex_quic::Shape {
+                connections,
+                lanes: 2,
+            },
+        })
+        .map_err(|e| Refusal::Invalid {
+            what: "capacity lane",
+            why: e.to_string(),
+        })?;
+        let names: Vec<String> = config.holders.iter().map(|h| h.name.clone()).collect();
+        let server = hex_quic::capacity::Server::new(
+            crate::placement::DriverView(Arc::clone(driver)),
+            &names,
+            Arc::clone(&log),
+        );
+        let acceptor = endpoint.acceptor(hex_quic::capacity::CAPACITY_PORT);
+        let serving = Arc::clone(&server);
+        let ended = Arc::clone(&log);
+        std::thread::Builder::new()
+            .name("hex-capacity".into())
+            .spawn(move || match serving.serve(acceptor) {
+                hex_quic::Refused::Ended => {}
+                why => ended(&format!("hex.capacity event=lane_ended why={why:?}")),
+            })
+            .map_err(|e| Refusal::os("starting the capacity lane", e))?;
+        Ok(Self {
+            server,
+            endpoint,
+            users: config
+                .holders
+                .iter()
+                .map(|h| (h.name.clone(), h.user.clone()))
+                .collect(),
+            log,
+        })
+    }
+
+    /// Says every hint owed to the holders; a failure is logged, the holders' next hello telling them the view.
+    fn hint(&self) {
+        if let Err(why) = self.server.hint() {
+            (self.log)(&format!("hex.capacity event=hint_failed why={why:?}"));
+        }
+    }
 }
 
 fn failed(error: Error) -> Refusal {
@@ -594,7 +732,9 @@ pub struct Service {
     cache: Mutex<cache::Cache>,
     _lease: std::fs::File,
     order: Mutex<order::Order>,
-    driver: Driver,
+    driver: Arc<Driver>,
+    /// The capacity view's lane, where the configuration asks for one (joint plan step 13).
+    lane: Option<Lane>,
     runtimes: Runtimes,
     cluster: Mutex<Cluster>,
     facts_dir: std::path::PathBuf,
@@ -609,6 +749,12 @@ pub struct Service {
 
 impl Service {
     pub fn open(config: &Config, report: Report) -> Result<Arc<Self>, Refusal> {
+        // The capacity lane's enrollment and holders are read whole before anything opens or binds.
+        let capacity = config
+            .capacity
+            .as_ref()
+            .map(|lane| Lane::credentials(lane).map(|credentials| (lane, credentials)))
+            .transpose()?;
         if config.cluster.trim().is_empty() || config.cluster.trim() != config.cluster {
             return Err(Refusal::Invalid {
                 what: "scheduler cluster",
@@ -748,19 +894,30 @@ impl Service {
         if let Some(slot) = cluster.nodes.iter_mut().find(|node| node.id == id) {
             *slot = local;
         }
-        let driver = Driver::boot_in(
-            crate::placement::Identity {
-                namespace: &namespace,
-                node: id,
-            },
-            &cluster.nodes,
-            &cluster.models,
-            crate::placement::budget::runtime_budget(id, &cluster.nodes)?,
-            Pick::default(),
-            &config.state.join("placements"),
-            runtimes.clone(),
-        )
-        .map_err(failed)?;
+        let driver = Arc::new(
+            Driver::boot_in(
+                crate::placement::Identity {
+                    namespace: &namespace,
+                    node: id,
+                },
+                &cluster.nodes,
+                &cluster.models,
+                crate::placement::budget::runtime_budget(id, &cluster.nodes)?,
+                Pick::default(),
+                &config.state.join("placements"),
+                runtimes.clone(),
+            )
+            .map_err(failed)?,
+        );
+        // The view opens before any admission this process makes, so none is made without it (CV1).
+        let lane = match capacity {
+            Some((lane, credentials)) => {
+                let report = Arc::clone(&report);
+                let log: hex_quic::capacity::Log = Arc::new(move |line: &str| report(id, line));
+                Some(Lane::serve(&driver, &config.state, lane, credentials, log)?)
+            }
+            None => None,
+        };
         let control_limit =
             control_bound(driver.control_bound().map_err(failed)?, config.peers.len())?;
         let mut senders = BTreeMap::new();
@@ -818,6 +975,7 @@ impl Service {
             _lease: lease,
             order: Mutex::new(order),
             driver,
+            lane,
             runtimes,
             cluster: Mutex::new(cluster),
             facts_dir,
@@ -848,6 +1006,11 @@ impl Service {
             service.dispatch(recovered)?;
         }
         Ok(service)
+    }
+
+    /// Where the capacity view's lane is bound, where the configuration asks for one.
+    pub fn capacity_address(&self) -> Option<std::net::SocketAddr> {
+        self.lane.as_ref().map(|lane| lane.endpoint.local_addr())
     }
 
     /// Cancels and reaps only this service's authenticated peer children.
@@ -1126,8 +1289,12 @@ impl Service {
             .ok_or_else(|| capacity::invalid("measured native resource sum overflows"))?;
         // All native RPCs finish before acquiring the cluster/model lock. The scheduling process
         // owns no GPU provider, and a changed Store/turn owner cannot inherit retained claims.
-        let (facts, physical_authority, unavailable) =
-            runtime_observations(&self.facts_dir, self.initialized, &self.runtimes)?;
+        // Each synced holder's scope is read on either side of the free memory's read (joint plan step 13, CV12).
+        let holders = self.scoped_holders()?;
+        let (observed, sample) = crate::scopes::around(&holders, || {
+            runtime_observations(&self.facts_dir, self.initialized, &self.runtimes)
+        });
+        let (facts, physical_authority, unavailable) = observed?;
         for observation in unavailable {
             snapshot.add_unavailable(observation)?;
         }
@@ -1170,10 +1337,13 @@ impl Service {
         capacity::retain_unavailable(&mut local, previous.as_ref(), &snapshot.unavailable)?;
         charges::apply(&mut local, &learned)?;
         self.driver
-            .refresh_node(local.try_clone().map_err(|_| Refusal::Exhausted {
-                what: "local node snapshot",
-                bound: 1,
-            })?)
+            .refresh_node_sampled(
+                local.try_clone().map_err(|_| Refusal::Exhausted {
+                    what: "local node snapshot",
+                    bound: 1,
+                })?,
+                &sample,
+            )
             .map_err(failed)?;
         // Joint plan step 14 (C8): each VM at the holding its node's learner carried, booked against its key.
         let ids = self.driver.running_ids().map_err(failed)?;
@@ -1185,6 +1355,64 @@ impl Service {
         }
         self.rebudget(&cluster)?;
         Ok(actions)
+    }
+
+    /// The synced holders whose hellos named a scope, by link, each with the user the configuration declares for it
+    /// (joint plan step 13, CV12): none without a lane.
+    fn scoped_holders(
+        &self,
+    ) -> Result<Vec<(u64, hex_api::capacity::Scope, Option<crate::scopes::User>)>, Refusal> {
+        let Some(lane) = &self.lane else {
+            return Ok(Vec::new());
+        };
+        Ok(self
+            .driver
+            .view_scopes()
+            .map_err(failed)?
+            .into_iter()
+            .map(|(link, name, scope)| {
+                let user = lane.users.get(&name).cloned().flatten();
+                (link, scope, user)
+            })
+            .collect())
+    }
+
+    /// The person's release of `holder`'s reservations (joint plan step 13, CV6), logged as `hex.capacity
+    /// event=forgotten`; refused, typed, while it is connected, for a name never seen, and without a lane.
+    fn forget(&self, holder: &str) -> Result<dto::Reply, Refusal> {
+        let Some(lane) = &self.lane else {
+            return Err(Refusal::Invalid {
+                what: "capacity view",
+                why: "this scheduler's configuration declares no capacity lane".into(),
+            });
+        };
+        let forget = match self.driver.view_forget(holder).map_err(failed)? {
+            Ok(released) => {
+                let sum = released.sum;
+                (lane.log)(&format!(
+                    "hex.capacity event=forgotten holder={holder:?} epoch={} count={} cpu_milli={} mem_bytes={} \
+                     disk_bytes={} gpus={}",
+                    released.epoch,
+                    released.count,
+                    sum.cpu_milli,
+                    sum.mem_bytes,
+                    sum.disk_bytes,
+                    sum.gpus
+                ));
+                dto::Forget::Released {
+                    holder: holder.to_owned(),
+                    epoch: released.epoch,
+                    count: released.count,
+                    sum,
+                }
+            }
+            Err(hex_api::capacity::NotForgotten::Connected) => dto::Forget::Connected,
+            Err(hex_api::capacity::NotForgotten::Unknown) => dto::Forget::Unknown,
+        };
+        Ok(dto::Reply {
+            forget: Some(forget),
+            ..dto::Reply::default()
+        })
     }
 
     fn rebudget(&self, cluster: &Cluster) -> Result<(), Refusal> {
@@ -1207,7 +1435,17 @@ impl Service {
         Ok(())
     }
 
+    /// One control command; then every hint the capacity view owes its holders, for a placement it made, a box that
+    /// ended or a room measured anew (joint plan step 13, CV7).
     pub fn command(&self, command: dto::Command) -> Result<dto::Reply, Refusal> {
+        let reply = self.commanded(command);
+        if let Some(lane) = &self.lane {
+            lane.hint();
+        }
+        reply
+    }
+
+    fn commanded(&self, command: dto::Command) -> Result<dto::Reply, Refusal> {
         // LB03: commit order must remain publication order through local effects and enqueue.
         // A delete cannot overtake a committed Start whose caller has not published it yet.
         let _command = self.command.try_lock().map_err(|why| match why {
@@ -1429,6 +1667,7 @@ impl Service {
                 requested = Some(key(k));
                 self.driver.poll_status().map_err(failed)?
             }
+            dto::Command::Forget { holder } => return self.forget(&holder),
         };
         let dispatch = self.dispatch(step)?;
         let refusals = if cleanup_failures.is_empty() {
@@ -1616,6 +1855,9 @@ pub fn read_config(path: &Path) -> Result<Config, Refusal> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod capacity_lane_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 mod observer_cpu_tests;

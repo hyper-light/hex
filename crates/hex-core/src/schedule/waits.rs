@@ -17,10 +17,12 @@ pub enum WaitKind {
     Retry,
     Delete,
     Status,
+    /// The person's release of a capacity holder (joint plan step 13, CV6): its records' removal.
+    Forget,
 }
 
 impl WaitKind {
-    pub const COUNT: usize = Self::Status as usize + 1;
+    pub const COUNT: usize = Self::Forget as usize + 1;
 
     pub fn index(self) -> usize {
         self as usize
@@ -36,6 +38,7 @@ impl WaitKind {
             Command::Retry => Self::Retry,
             Command::Delete { .. } => Self::Delete,
             Command::Status { .. } => Self::Status,
+            Command::Forget { .. } => Self::Forget,
         }
     }
 
