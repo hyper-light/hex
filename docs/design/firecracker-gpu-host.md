@@ -79,8 +79,57 @@ It would prove the same path with a function-level reset between owners. It need
 not yet built: NVIDIA's open kernel modules for the guest kernel, its GSP firmware, the matching
 userspace driver, and NVML in the guest for Hex's facts.
 
+## One VM per boot for a function no reset clears
+
+Decided by the native Firecracker lane with Hex's lead, 2026-11-11, after GPU run r940: the VM given
+79:00.0 after r862's failed at its guest's PSP ring ("PSP create ring failed"). Nothing had reset the
+GPU between the two VMs, so the second VM booted into the first one's state. That state, and the first
+VM's VRAM, also reached the next tenant.
+
+**The rule.** vfio-pci clears a function when its VM releases it in only two cases:
+- A reset method of the function's own, in its `reset_method` list, resets it alone: `flr`, `af_flr`,
+  `pm`, `device_specific` or `acpi`. The kernel tries the methods in that list
+  ([pci.c at v7.3](https://github.com/torvalds/linux/blob/v7.3/drivers/pci/pci.c#L5197),
+  `__pci_reset_function_locked`).
+- The function's bus is reset whole, and every other device on that bus goes to the same VM.
+
+**Why a listed `bus` method isn't enough.** The kernel probes the list once, at enumeration
+([`pci_init_reset_methods`](https://github.com/torvalds/linux/blob/v7.3/drivers/pci/pci.c#L5245)). A
+bus's first function is probed before its siblings are added, so it lists `bus`; 79:00.0 does. At reset
+time, a bus reset refuses whenever another device is on the bus
+([`pci_parent_bus_reset`](https://github.com/torvalds/linux/blob/v7.3/drivers/pci/pci.c#L4934)).
+vfio-pci learns this at open from an actual attempt
+([vfio_pci_core.c](https://github.com/torvalds/linux/blob/v7.3/drivers/vfio/pci/vfio_pci_core.c#L611)).
+At the last release it resets the bus whole only where every device on the bus is vfio-pci's and unused
+([`vfio_pci_dev_set_resettable`](https://github.com/torvalds/linux/blob/v7.3/drivers/vfio/pci/vfio_pci_core.c#L2459)).
+
+**The evidence.** On adacachy2 (7.3.3-1-cachyos) the functions on bus 0x79 list these reset methods:
+
+| Function | Driver | `reset_method` |
+| --- | --- | --- |
+| 79:00.0 | vfio-pci | `bus` |
+| 79:00.1 | snd_hda_intel | `pm` |
+| 79:00.2 | ccp | none (no file) |
+| 79:00.3 | xhci_hcd | `pm` |
+| 79:00.4 | xhci_hcd | `pm` |
+
+So 79:00.0's bus reset is always refused.
+
+**What Hex does** (`firecracker/vfio.rs` `once_per_boot`, `firecracker/single_use.rs`):
+- Any other function goes to one VM per host boot.
+- Its mark in the adapter's state, `single-use/<sbdf>`, names the boot session the node stamps its
+  records with. It is written durably before the VMM that opens the function starts.
+- A later VM on that boot is refused by type before anything starts: "no reset method ... the host
+  must reboot". This includes a pool's observer, and a box after that observer.
+- A later boot's session admits the function again. A boot session that can't be read refuses it.
+- A function a reset clears keeps vfio-pci's reset at release, as before. That reset's outcome is
+  invisible to Hex: the kernel reports it only at debug level, and to no process.
+
+**What would falsify this:**
+- a second VM on one boot running a function this rule marks single-use with no trace of the first;
+- a VM failing on a function this rule clears.
+
 ## What would change this
 
 A guest amdgpu "Unable to locate a BIOS ROM" makes option A need a VMM change (a ROM BAR served from
-a file, or a VFCT table). A run that finds the GPU unusable after its first VM ends, with no reset,
-makes option A one VM per host boot.
+a file, or a VFCT table).

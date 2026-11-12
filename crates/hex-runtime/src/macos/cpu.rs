@@ -96,6 +96,28 @@ impl Control {
     }
 }
 
+/// AC-T7.4.1: the cycle this control holds a scope that would use every core to, at `rate` milli-CPU of
+/// `maximum` with `response`: how long it runs from full credit, then how long its hold lasts until it may
+/// run again (burst/(maximum−rate), then 2·burst/rate, burst = maximum×response), taken from the budget's
+/// own decisions. A scope at the maximum is never held: no cycle.
+pub(super) fn cycle(
+    rate: u64,
+    maximum: u64,
+    response: Duration,
+) -> Result<(Duration, Duration), Failure> {
+    let mut budget = Budget::new(rate, maximum, response)?;
+    budget.start()?;
+    let Decision::Run(Some(run)) = budget.decision()? else {
+        return Err(Failure::Envelope);
+    };
+    budget.observe(run, Duration::ZERO)?;
+    budget.held()?;
+    let Decision::Hold(hold) = budget.decision()? else {
+        return Err(Failure::Transition);
+    };
+    Ok((run, hold))
+}
+
 fn nanos(duration: Duration) -> Result<i128, Failure> {
     i128::try_from(duration.as_nanos()).map_err(|_| Failure::Arithmetic)
 }
@@ -329,6 +351,32 @@ mod tests {
             budget.decision().unwrap(),
             Decision::Run(Some(Duration::from_nanos(14)))
         );
+    }
+
+    /// AC-T7.4.1 (guest_cost's macOS window): the cycle of a scope that would use every core, taken from the
+    /// budget's own decisions: expect it to run burst/(maximum−rate) from full credit, rounded up, and its
+    /// hold to pay that run's overshoot and refill a whole burst at the rate (2·burst/rate and the
+    /// overshoot's), after which it may run again; a scope at the maximum is never held, so has none.
+    #[test]
+    fn the_cycle_is_the_budgets_run_then_its_hold() {
+        let (run, hold) = cycle(1000, 4000, Duration::from_nanos(10)).unwrap();
+        assert_eq!(
+            (run, hold),
+            (Duration::from_nanos(14), Duration::from_nanos(82))
+        );
+        let mut budget = Budget::new(1000, 4000, Duration::from_nanos(10)).unwrap();
+        budget.start().unwrap();
+        budget.observe(run, Duration::ZERO).unwrap();
+        budget.held().unwrap();
+        budget
+            .observe(hold - Duration::from_nanos(1), Duration::ZERO)
+            .unwrap();
+        assert!(budget.resume().is_err());
+        budget
+            .observe(Duration::from_nanos(1), Duration::ZERO)
+            .unwrap();
+        budget.resume().unwrap();
+        assert!(cycle(4000, 4000, Duration::from_nanos(10)).is_err());
     }
 
     /// AC-T7.4.1: two long-lived members plus a short helper consume one aggregate allocation.

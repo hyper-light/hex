@@ -98,6 +98,29 @@ pub fn machine_model() -> Result<String, Refusal> {
         .map_err(|e| Refusal::os("reading the machine's model", std::io::Error::other(e)))
 }
 
+/// The managed CPU control's maximum, in milli-CPU: every logical processor of the hardware. XNU exports
+/// the maximum logical processors in the hardware; active/available thread counts could understate the
+/// CPU that a whole native scope can consume during a pulse.
+pub fn cpu_ceiling() -> Result<u64, Refusal> {
+    sys::sysctl_number(c"hw.logicalcpu_max")
+        .map_err(|error| Refusal::os("reading the native hardware CPU ceiling", error))?
+        .checked_mul(1000)
+        .filter(|ceiling| *ceiling != 0)
+        .ok_or_else(|| managed::configuration("hardware CPU ceiling is not representable"))
+}
+
+/// AC-T7.4.1: the managed CPU control's cycle for a scope at `rate` milli-CPU of this host's
+/// [`cpu_ceiling`] with the measured `response`: how long it runs from full credit, then how long it is
+/// held (the control's own budget, `cpu::cycle`). The window that control enforces a scope's rate over.
+pub fn cpu_control_cycle(
+    rate: u64,
+    response: std::time::Duration,
+) -> Result<(std::time::Duration, std::time::Duration), Refusal> {
+    cpu::cycle(rate, cpu_ceiling()?, response).map_err(|_| {
+        managed::configuration("the CPU control has no cycle for this rate and response")
+    })
+}
+
 pub struct MacRuntime {
     shared: NativeArc<Shared>,
     /// Shared with a run's thread, which removes its box through [`remove_process_box`] as `delete` does.
@@ -225,14 +248,7 @@ impl MacRuntime {
                 "CPU control is immutable after native registration",
             ));
         }
-        // XNU exports the maximum logical processors in the hardware; active/available thread
-        // counts could understate the CPU that a whole native scope can consume during a pulse.
-        let ceiling = sys::sysctl_number(c"hw.logicalcpu_max")
-            .map_err(|error| Refusal::os("reading the native hardware CPU ceiling", error))?
-            .checked_mul(1000)
-            .filter(|ceiling| *ceiling != 0)
-            .ok_or_else(|| managed::configuration("hardware CPU ceiling is not representable"))?;
-        self.cpu_control = Some((control, ceiling));
+        self.cpu_control = Some((control, cpu_ceiling()?));
         Ok(self)
     }
 

@@ -780,6 +780,12 @@ impl Store {
         host_boot().as_ref().err().map(String::as_str)
     }
 
+    /// The host's boot session this store stamps every record it writes with ([`host_boot`]); `None` where it can't
+    /// be read.
+    pub(crate) fn boot(&self) -> Option<&BootSession> {
+        self.boot.as_ref()
+    }
+
     /// The boot session the runtime place's records were written in before this node, as the marker says
     /// that its node keeps beside them: then this boot's, written durably before this node writes any record
     /// (T-T7.1.2). A torn record's own session can't be read, so a node over a place whose writes a host

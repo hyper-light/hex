@@ -584,7 +584,19 @@ impl FirecrackerRuntime {
             let record = transaction.grant_pool(&grant)?;
             self.preflight_backing(&record)?;
             self.config.verify_inputs()?;
-            let plan = vfio::plan(&self.catalog, &grant.devices)?;
+            let plan = vfio::plan(&self.host, &self.catalog, &grant.devices, &[])?;
+            // A function no reset clears goes to one VM per host boot, an observer as much as a box: the pool says so.
+            let once = vfio::once_per_boot(&self.host, &plan)?;
+            let marks = single_use::Marks::of(&self.config.state_dir, self.boot.as_ref())?;
+            if let Some((function, spent)) = marks.check(&once)? {
+                return Err(single_use::pool_refused(
+                    "a GPU pool's observer (VFIO)",
+                    &grant.key,
+                    function,
+                    spent,
+                    self.boot.as_ref(),
+                ));
+            }
             let paths = self.pool_paths(&record)?;
             match fs::symlink_metadata(&paths.dir) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -607,6 +619,8 @@ impl FirecrackerRuntime {
             write_config(&paths.config, &vm)?;
             let ready = UnixListener::bind(&paths.ready)
                 .map_err(|error| Refusal::os("binding observer readiness", error))?;
+            // Given on this boot before the VMM that opens them starts, so no crash past here forgets it.
+            marks.spend(&once)?;
             let native = transaction.launch_managed(
                 &ManagedLaunch::Firecracker {
                     program: &program,
@@ -885,6 +899,8 @@ pub(super) mod tests {
             catalog: triomphe::Arc::try_new(catalog).unwrap(),
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
+            host: vfio::Host::system().unwrap(),
+            boot: None,
         };
         (runtime, owner)
     }
