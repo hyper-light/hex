@@ -1,0 +1,3 @@
+#!/bin/sh
+# zig's archiver beside scripts/zig-cc, for the same checks.
+exec zig ar "$@"
