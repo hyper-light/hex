@@ -586,8 +586,9 @@ impl FirecrackerRuntime {
             self.config.verify_inputs()?;
             let plan = vfio::plan(&self.host, &self.catalog, &grant.devices, &[])?;
             // A function no reset clears goes to one VM per host boot, an observer as much as a box: the pool says so.
-            let once = vfio::once_per_boot(&self.host, &plan)?;
-            let marks = single_use::Marks::of(&self.config.state_dir, self.boot.as_ref())?;
+            let functions = vfio::functions(&plan)?;
+            let once = vfio::once_per_boot(&self.host, &functions)?;
+            let marks = single_use::Marks::of(&self.runtime, self.boot.as_ref())?;
             if let Some((function, spent)) = marks.check(&once)? {
                 return Err(single_use::pool_refused(
                     "a GPU pool's observer (VFIO)",
@@ -900,6 +901,7 @@ pub(super) mod tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
+            runtime: PathBuf::from("/nonexistent/runtime"),
             boot: None,
         };
         (runtime, owner)

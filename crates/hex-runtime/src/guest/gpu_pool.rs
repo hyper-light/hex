@@ -1346,6 +1346,7 @@ mod tests {
                 device_routes: Vec::new(),
                 backings: Vec::new(),
                 cost: None,
+                unavailable: Vec::new(),
             }),
             physical: Some(vec![factual]),
             effects: AtomicUsize::new(0),
@@ -1483,6 +1484,7 @@ mod tests {
             device_routes: vec![2],
             backings: Vec::new(),
             cost: None,
+            unavailable: Vec::new(),
         };
         prefix.check().unwrap();
         assert_ne!(
@@ -2074,6 +2076,7 @@ mod tests {
                 device_routes: Vec::new(),
                 backings: Vec::new(),
                 cost: None,
+                unavailable: Vec::new(),
             })
         }
         fn physical_devices(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {

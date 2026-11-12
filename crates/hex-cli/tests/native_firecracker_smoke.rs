@@ -376,16 +376,13 @@ fn records(state: &Path, id: &BoxId) -> Vec<PathBuf> {
     found
 }
 
-/// The backend's marks of the functions no reset clears, in its state beside its VMs' directories.
-const MARKS: &str = "single-use";
-
 /// The one VM directory a single box leaves in the backend's state while it runs.
 fn vm_dir(config: &Path) -> PathBuf {
     let config = hex_runtime::firecracker::Config::from_file(config).unwrap();
     let mut dirs: Vec<_> = fs::read_dir(&config.state_dir)
         .unwrap()
         .map(|e| e.unwrap().path())
-        .filter(|p| p.is_dir() && !p.ends_with(MARKS))
+        .filter(|p| p.is_dir())
         .collect();
     assert_eq!(dirs.len(), 1, "one VM directory: {dirs:?}");
     dirs.pop().unwrap()
@@ -723,6 +720,29 @@ fn single_use(sbdf: &str, group: u64) -> bool {
     !listed(&["bus", "cxl_bus"]) || foreign
 }
 
+/// The mark of `sbdf`, a function no reset clears, that the backend leaves once a VM was given it: in the runtime
+/// directory every node on the host shares (hex-node's `oci_root`: `/run/hex-node` for root, else
+/// `$XDG_RUNTIME_DIR/hex-node`, else the node's state's `oci`).
+fn mark(state: &Path, sbdf: &str) -> PathBuf {
+    let runtime = if rustix::process::geteuid().is_root() {
+        PathBuf::from("/run/hex-node")
+    } else {
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_absolute())
+            .map_or_else(|| state.join("oci"), |dir| dir.join("hex-node"))
+    };
+    runtime.join("vfio-single-use").join(sbdf)
+}
+
+/// This boot of the host, as the kernel names it.
+fn this_boot() -> String {
+    fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
 fn driver(sbdf: &str) -> String {
     fs::read_link(format!("/sys/bus/pci/devices/{sbdf}/driver"))
         .unwrap()
@@ -841,6 +861,13 @@ fn native_firecracker_gpu_box_computes_recovers_and_returns_its_gpu() {
     let catalog = gpu(&inputs, "catalog").as_str().unwrap();
     let _reaper = Reaper::of(&config, inputs.wait);
     let node = Node::start_with(&inputs, &own, "gpu", &config, Some(catalog));
+    let single = single_use(host_sbdf, group);
+    let spent = fs::read_to_string(mark(&node.state, host_sbdf))
+        .is_ok_and(|boot| boot.trim() == this_boot());
+    assert!(
+        !(single && spent),
+        "{host_sbdf} has no reset that clears it, and a VM had it on this boot already: reboot the host first"
+    );
     let client = node.client();
     let id = BoxId::new("fc-gpu").unwrap();
     let spec = gpu_spec(&inputs, &config, &id);
@@ -989,10 +1016,19 @@ fn native_firecracker_gpu_box_computes_recovers_and_returns_its_gpu() {
     let state_dir = hex_runtime::firecracker::Config::from_file(&config)
         .unwrap()
         .state_dir;
-    if single_use(host_sbdf, group) {
-        // Its one VM of this boot has ended: marked so, and the next on this boot refused before its VMM.
-        assert_eq!(state_dir_entries(&config), vec![state_dir.join(MARKS)]);
-        assert!(state_dir.join(MARKS).join(host_sbdf).is_file());
+    assert!(
+        state_dir_entries(&config).is_empty(),
+        "{:?}",
+        state_dir_entries(&config)
+    );
+    if single {
+        // Its one VM of this boot has ended: marked so, and the next on this boot, any node's, refused before its VMM.
+        assert_eq!(
+            fs::read_to_string(mark(&node.state, host_sbdf))
+                .unwrap()
+                .trim(),
+            this_boot()
+        );
         let second = BoxId::new("fc-gpu-second").unwrap();
         let begun = Instant::now();
         let refused = client
@@ -1013,13 +1049,7 @@ fn native_firecracker_gpu_box_computes_recovers_and_returns_its_gpu() {
         assert!(client.list().unwrap().is_empty(), "the node lists no box");
         assert!(vmm(&binary, &state_dir).is_empty(), "no VMM was started");
         assert!(vfio_holders(group).is_empty(), "no process holds the GPU");
-        assert_eq!(state_dir_entries(&config), vec![state_dir.join(MARKS)]);
-    } else {
-        assert!(
-            state_dir_entries(&config).is_empty(),
-            "{:?}",
-            state_dir_entries(&config)
-        );
+        assert!(state_dir_entries(&config).is_empty());
     }
     drop(client);
     let state = node.state.clone();

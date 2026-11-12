@@ -87,6 +87,7 @@ impl Runtime for RelayRuntime {
             routes: Vec::new(),
             device_routes: Vec::new(),
             backings: Vec::new(),
+            unavailable: Vec::new(),
         }))
     }
     fn classes(&self) -> Vec<hex_api::Class> {

@@ -408,6 +408,28 @@ impl PhysicalDevice {
     }
 }
 
+/// A device a runtime lists among its capacity's devices but won't offer now, and why (AC-T7.4.1): a VFIO function no
+/// reset clears, which a VM had on this boot. Never free while so listed; its holder, if any, stays what it is.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceUnavailable {
+    pub id: DeviceId,
+    pub why: String,
+}
+
+impl DeviceUnavailable {
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        let mut why = String::new();
+        why.try_reserve_exact(self.why.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "unavailable device reason",
+                bound: self.why.len(),
+            })?;
+        why.push_str(&self.why);
+        Ok(Self { id: self.id, why })
+    }
+}
+
 impl DeviceInfo {
     pub fn try_clone(&self) -> Result<Self, Refusal> {
         let mut model = String::new();
@@ -586,6 +608,7 @@ mod tests {
             free: CapacityResources::default(),
             devices,
             cost: None,
+            unavailable: Vec::new(),
         }
     }
 
