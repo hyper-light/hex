@@ -138,7 +138,10 @@ D231's own boot and stop wait without a bound of their own (D231 owes "a boot pa
 thread of its own and bounds its caller's wait; past the bound the call is refused `Lifecycle { Pending }` and the
 answer, when it comes, is recorded. No record exists yet for any of them, and a measure no class records is refused
 (`hex_client::guest::shards::recorded`): **a create is refused until all three are recorded**, so no box exists
-that a wait of its own could not bound.
+that a wait of its own could not bound. The one exception is the waits census (`hex_node::census`), which arms no
+wait: there each of the three measures (`ImageWaits::recorded`, `hex_core::patience::measures_all`), and the census
+takes its first record. `crates/hex-cli/tests/image_real.rs` is that run: the class's cases (`IMAGE_CASES`) through a real `hex node`
+in the census, with each wait's answers printed for the record.
 
 ## 7. What step 39 removes
 
@@ -159,10 +162,10 @@ This class stays: it is how every Shards VM boots, once Hex's own node boots the
 - **Records** for `image_boot`, `image_stats` and `image_stop` on Linux-KVM, and on macOS-HVF once its run host is
   given (ROOT's measurement): `Images::boot` of a harness image to its return, `stats(Run)` to its answer, `stop` to
   its return, each `n` with its slowest, added to `bench/native/guest/records.tsv` with their RECORD.md. Until then
-  a create is refused.
-- **Real-VM runs** (ROOT): the image class's conformance cases (HEX-IMG-1..6) on a node with Shards configured, on
-  Linux KVM, and on macOS HVF once its run host is given; HEX-IMG-4 fails until Shards gives guest time per vCPU,
-  naming it.
+  a create is refused outside the waits census (§6). `image_real` prints each wait's answers (`IMAGE-RECORD`).
+- **Real-VM runs** (ROOT): the image class's conformance cases (`IMAGE_CASES`) on a node with Shards configured, on
+  Linux KVM (`crates/hex-cli/tests/image_real.rs`), and on macOS HVF once its run host is given; HEX-IMG-4 fails
+  until Shards gives guest time per vCPU, naming it.
 - **From Shards:** the run host started holding only its stdio on macOS (`RunHostStdioOnly`;
   `POSIX_SPAWN_CLOEXEC_DEFAULT` in D231's spawn, or the run host's launch through the client's native owner, as
   D233's guests have), the Windows run host (`WindowsRunHost`), `attach` or the run's identity after an owner's

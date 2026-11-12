@@ -3,9 +3,12 @@
 //! running VM's cgroup and learns its charge and booking (`hex_sim::charge`). It then writes the placement that holds
 //! the rule (C4, C5): each VM's `cpu.weight` by its booking and `memory.high` at its budget, its fleet's parent
 //! (`<node root>/.vm/<node key>`) capped at the fleet's CPU budget and weighed by it on the machine's scale, and `.vm`
-//! weighed by the budgets of every fleet under it. A capacity answer for a VM class carries what it learned (C2, C8:
-//! `hex_api::Learned`). A Shards guest can't yet be told its room: shards-api has no call that sends init's `ROOM`
-//! (D188), so that is refused `Awaits(GuestRoom)` while its VMM's `memory.high` holds it at its budget (C7).
+//! weighed by the budgets of every fleet under it. Every other child of the node's cgroup is on the same scale: each
+//! process and OCI box weighs its booking and `.oci` its boxes' weights together, and the fleet's budget is what they
+//! leave, so each child under contention gets at least min(its need, its booking or budget) (`Scale`). A capacity
+//! answer for a VM class carries what it learned (C2, C8: `hex_api::Learned`). A Shards guest can't yet be told its
+//! room: shards-api has no call that sends init's `ROOM` (D188), so that is refused `Awaits(GuestRoom)` while its
+//! VMM's `memory.high` holds it at its budget (C7).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -190,6 +193,62 @@ struct Native {
     booked: CapacityResources,
     /// Whether it is under `.oci`.
     oci: bool,
+    /// A reuse slot no box holds: it runs nothing, so it books nothing and takes none of the scale.
+    idle: bool,
+}
+
+/// Every child of the node's cgroup on the machine's scale (C4): each box weighs its booking rounded up
+/// (`charge::fleet_weight`), an idle slot the least, `.oci` its boxes' weights together, and the fleets under `.vm`
+/// the units those leave, whose CPU, rounded down, bounds the fleet's budget. The weights of every child that may run
+/// so sum to at most the scale's top, and each child's weight carries its booking.
+struct Scale {
+    /// Each native's weight, in the order of the natives it was made from.
+    weights: Vec<u16>,
+    oci: u16,
+    /// The units the boxes leave `.vm`, and the CPU they carry.
+    rest: u16,
+    carried: u64,
+}
+
+impl Scale {
+    fn of(natives: &[Native], machine: u64) -> Result<Self, Refusal> {
+        let mut weights = Vec::new();
+        weights
+            .try_reserve_exact(natives.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "the node's boxes' weights",
+                bound: natives.len(),
+            })?;
+        let (mut root, mut oci) = (0u64, 0u64);
+        for native in natives {
+            let weight = if native.idle {
+                charge::WEIGHT_MIN
+            } else {
+                charge::fleet_weight(native.booked.cpu_milli, machine).map_err(refused)?
+            };
+            if !native.idle {
+                let sum = if native.oci { &mut oci } else { &mut root };
+                *sum = sum.saturating_add(u64::from(weight));
+            }
+            weights.push(weight);
+        }
+        let weight = u16::try_from(oci.min(u64::from(charge::WEIGHT_MAX)))
+            .unwrap_or(charge::WEIGHT_MAX)
+            .max(charge::WEIGHT_MIN);
+        // `.oci` with no box in it runs nothing, so takes none of the scale.
+        let taken = if oci == 0 {
+            root
+        } else {
+            root.saturating_add(u64::from(weight))
+        };
+        let (rest, carried) = charge::fleet_room(taken, machine).map_err(refused)?;
+        Ok(Self {
+            weights,
+            oci: weight,
+            rest,
+            carried,
+        })
+    }
 }
 
 fn unreadable(file: &'static str, text: &str) -> Refusal {
@@ -277,17 +336,18 @@ impl Learner {
     }
 
     /// One window (C1 to C5, C7), read at `now`: the VMs `running`, each new one found by `record` (its class and
-    /// receipt; none for a box that isn't a VM with a receipt), within the fleet's `budget`. A failure is kept until a
-    /// window passes.
+    /// receipt; none for a box that isn't a VM with a receipt), the reuse slots live boxes hold (`held`, in order),
+    /// within the fleet's `budget`. A failure is kept until a window passes.
     pub(super) fn window(
         &mut self,
         io: &impl Cgroups,
         running: Vec<(BoxId, Scope, BoxCgroup)>,
         record: impl Fn(&BoxId) -> Result<Option<(Class, Allocation)>, Refusal>,
+        held: &[u64],
         budget: CapacityResources,
         now: Instant,
     ) -> Result<(), Refusal> {
-        let outcome = self.learn(io, running, record, budget, now);
+        let outcome = self.learn(io, running, record, held, budget, now);
         self.fault = outcome.as_ref().err().cloned();
         outcome
     }
@@ -297,6 +357,7 @@ impl Learner {
         io: &impl Cgroups,
         running: Vec<(BoxId, Scope, BoxCgroup)>,
         record: impl Fn(&BoxId) -> Result<Option<(Class, Allocation)>, Refusal>,
+        held: &[u64],
         budget: CapacityResources,
         now: Instant,
     ) -> Result<(), Refusal> {
@@ -371,8 +432,10 @@ impl Learner {
                 },
             );
         }
-        // Every child of the node's root on one scale (C4): the boxes' bookings come off the fleet's budget.
-        let natives = self.natives(io)?;
+        // Every child of the node's root on one scale (C4): the boxes' bookings come off the fleet's budget, and its CPU
+        // is at most what the units the boxes leave carry.
+        let natives = self.natives(io, held)?;
+        let scale = Scale::of(&natives, self.machine)?;
         let booked = natives
             .iter()
             .try_fold(CapacityResources::default(), |sum, native| {
@@ -383,12 +446,15 @@ impl Learner {
                 why: "they overflow".into(),
             })?;
         self.node.set_budget(CapacityResources {
-            cpu_milli: budget.cpu_milli.saturating_sub(booked.cpu_milli),
+            cpu_milli: budget
+                .cpu_milli
+                .saturating_sub(booked.cpu_milli)
+                .min(scale.carried),
             mem_bytes: budget.mem_bytes.saturating_sub(booked.mem_bytes),
             disk_bytes: budget.disk_bytes.saturating_sub(booked.disk_bytes),
         });
         self.node.settle().map_err(refused)?;
-        self.place(io, &natives)?;
+        self.place(io, &natives, &scale)?;
         for (scope, vm) in &self.vms {
             match tell_room(vm.class) {
                 Ok(()) => {}
@@ -400,9 +466,14 @@ impl Learner {
         Ok(())
     }
 
-    /// Writes the placement (C4, C5): each VM, the fleet's parent, `.vm` by the sum of its fleets' budgets, each
-    /// process and OCI box by its booking, and `.oci` by its boxes'.
-    fn place(&mut self, io: &impl Cgroups, natives: &[Native]) -> Result<(), Refusal> {
+    /// Writes the placement (C4, C5): each VM, the fleet's parent, `.vm` by the sum of its fleets' budgets within the
+    /// units the boxes leave, and each process and OCI box and `.oci` by the `scale`.
+    fn place(
+        &mut self,
+        io: &impl Cgroups,
+        natives: &[Native],
+        scale: &Scale,
+    ) -> Result<(), Refusal> {
         let placed = self.node.placement(self.machine).map_err(refused)?;
         for (scope, bounds) in &placed.vms {
             if let Some(vm) = self.vms.get_mut(scope) {
@@ -419,28 +490,25 @@ impl Learner {
             };
             fleets = fleets.saturating_add(budget);
         }
-        let weight = charge::fleet_weight(fleets, self.machine).map_err(refused)?;
+        let weight = charge::fleet_weight(fleets, self.machine)
+            .map_err(refused)?
+            .min(scale.rest);
         let parent = Bounds {
             cpu_weight: Some(weight),
             ..Bounds::default()
         };
         rewrite(io, &self.parent.0, &parent, &mut self.parent.1)?;
-        let mut oci = 0u64;
-        for native in natives {
-            if native.oci {
-                oci = oci.saturating_add(native.booked.cpu_milli);
-            }
-            let weight =
-                charge::fleet_weight(native.booked.cpu_milli, self.machine).map_err(refused)?;
-            weigh(io, &native.dir, weight)?;
+        for (native, weight) in natives.iter().zip(&scale.weights) {
+            weigh(io, &native.dir, *weight)?;
         }
-        let weight = charge::fleet_weight(oci, self.machine).map_err(refused)?;
-        weigh(io, &self.oci, weight)
+        weigh(io, &self.oci, scale.oci)
     }
 
-    /// The node's process and OCI boxes (C4), each booked at its caps, its cgroup's `cpu.max` and `memory.max`: a
-    /// native box's receipt books its workload's caps until it is learned.
-    fn natives(&self, io: &impl Cgroups) -> Result<Vec<Native>, Refusal> {
+    /// The node's process and OCI boxes (C4), each booked at its caps, its cgroup's `cpu.max` and `memory.max`: the
+    /// native classes offer no runtime cost (`facts::capacity`), so a native box's receipt books its caps, which its
+    /// cgroup holds, a reused slot's as its box's create wrote them, until it is learned. A slot under `.oci` that no
+    /// box holds (`held`, in order) is idle: it keeps its last box's caps and books nothing.
+    fn natives(&self, io: &impl Cgroups, held: &[u64]) -> Result<Vec<Native>, Refusal> {
         let vm = self.parent.0.dir();
         let mut out = Vec::new();
         for (dir, oci) in [(self.root.as_path(), false), (self.oci.as_path(), true)] {
@@ -448,16 +516,26 @@ impl Learner {
                 if child == vm || child == self.oci {
                     continue;
                 }
-                let cpu = booked_cpu(io.read(&child, "cpu.max")?.as_deref())?;
-                let mem = booked_bytes(io.read(&child, "memory.max")?.as_deref())?;
+                let idle = oci
+                    && child
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .and_then(hex_core::reuse::slot_of)
+                        .is_some_and(|slot| held.binary_search(&slot).is_err());
+                let booked = if idle {
+                    CapacityResources::default()
+                } else {
+                    CapacityResources {
+                        cpu_milli: booked_cpu(io.read(&child, "cpu.max")?.as_deref())?,
+                        mem_bytes: booked_bytes(io.read(&child, "memory.max")?.as_deref())?,
+                        disk_bytes: 0,
+                    }
+                };
                 out.push(Native {
                     dir: child,
-                    booked: CapacityResources {
-                        cpu_milli: cpu,
-                        mem_bytes: mem,
-                        disk_bytes: 0,
-                    },
+                    booked,
                     oci,
+                    idle,
                 });
             }
         }
@@ -554,11 +632,14 @@ impl Node {
         let Ok(mut learner) = learner.lock() else {
             return;
         };
-        let read = self
-            .supervisor
-            .running_vms()
-            .and_then(|running| Ok((running, self.native_capacity()?.total)));
-        let (running, budget) = match read {
+        let read = self.supervisor.running_vms().and_then(|running| {
+            Ok((
+                running,
+                self.cgroups.held_slots()?,
+                self.native_capacity()?.total,
+            ))
+        });
+        let (running, held, budget) = match read {
             Ok(read) => read,
             Err(why) => return learner.failed(why),
         };
@@ -574,7 +655,7 @@ impl Node {
             Ok(record.spec.allocation.map(|allocation| (class, allocation)))
         };
         // Its outcome is kept as the learner's fault, which the capacity answers read.
-        let _ = learner.window(&Kernel, running, record, budget, Instant::now());
+        let _ = learner.window(&Kernel, running, record, &held, budget, Instant::now());
     }
 
     /// What `class`'s capacity answer carries of the learner (C8), fitted to one message.

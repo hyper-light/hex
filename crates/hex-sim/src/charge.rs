@@ -966,6 +966,29 @@ pub fn fleet_weight(budget_milli: u64, machine_milli: u64) -> Result<u16, Charge
     Ok(weight.max(WEIGHT_MIN))
 }
 
+/// What the fleet may take of the machine's scale (C4) once every other child of the node's cgroup has its weight,
+/// `taken` their sum: the units left, at least [`WEIGHT_MIN`], and the CPU those units carry, in milli-CPU rounded
+/// down. Each other child weighs its booking rounded up ([`fleet_weight`]), so a fleet budgeted within that CPU and
+/// weighed by [`fleet_weight`] keeps the children's weights within the scale's top: under contention each child,
+/// given at least its weight's share of the machine, receives at least min(its need, its booking or budget).
+pub fn fleet_room(taken: u64, machine_milli: u64) -> Result<(u16, u64), ChargeError> {
+    if machine_milli == 0 {
+        return Err(ChargeError::Invalid {
+            what: "a machine's CPU",
+            why: "a machine with no CPU",
+        });
+    }
+    let left = u64::from(WEIGHT_MAX).saturating_sub(taken);
+    let carried = u128::from(machine_milli)
+        .checked_mul(u128::from(left))
+        .and_then(|n| n.checked_div(u128::from(WEIGHT_MAX)))
+        .and_then(|n| u64::try_from(n).ok())
+        .ok_or(ChargeError::Overflow("the CPU a fleet's units carry"))?;
+    let units = u16::try_from(left.max(u64::from(WEIGHT_MIN)))
+        .map_err(|_| ChargeError::Overflow("a fleet's units"))?;
+    Ok((units, carried))
+}
+
 /// Weighted water-filling (C4): `capacity` shared among `entries`, each `(weight, need)` with a weight of at least
 /// 1, as the kernel shares CPU among groups by weight, work-conserving (cgroup-v2.rst, "Weights"). Taken in order
 /// of need over weight, each is given its need while its weighted share of what is left covers it; from the first

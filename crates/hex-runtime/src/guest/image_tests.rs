@@ -893,3 +893,51 @@ fn a_publish_to_a_member_the_image_doesnt_run_stops_the_vm() {
         assert_eq!(record(&owner, &id).unwrap().exit, Some(Exit::Signal(9)));
     }
 }
+
+/// Decision 9, joint plan step 12: do make the image waits from records of all three measures, from none
+/// outside the waits census, and from none while it runs. Expect: each armed at twice its record; refused
+/// naming the first record to take; and each measuring, armed at nothing, under its own name, so the census
+/// takes its first record.
+#[test]
+fn the_image_waits_take_their_records_or_measure_only_while_the_census_runs() {
+    let ms = Duration::from_millis;
+    let recorded = |measure: &str| match measure {
+        "image_boot" => Ok(ms(3)),
+        "image_stats" => Ok(ms(5)),
+        "image_stop" => Ok(ms(7)),
+        other => panic!("no such measure {other}"),
+    };
+    let armed = ImageWaits::from_records(recorded, false).unwrap();
+    assert_eq!(
+        (
+            armed.boot.deadline(),
+            armed.stats.deadline(),
+            armed.stop.deadline()
+        ),
+        (Some(ms(6)), Some(ms(10)), Some(ms(14)))
+    );
+    let none = |measure: &str| {
+        Err(Refusal::Platform {
+            what: "the oci class's guest",
+            platform: "test",
+            why: format!("no {measure} record for any host class yet"),
+        })
+    };
+    assert!(matches!(
+        ImageWaits::from_records(none, false),
+        Err(Refusal::Platform { why, .. }) if why.contains("image_boot")
+    ));
+    let census = ImageWaits::from_records(none, true).unwrap();
+    assert_eq!(
+        (
+            census.boot.deadline(),
+            census.stats.deadline(),
+            census.stop.deadline()
+        ),
+        (None, None, None)
+    );
+    assert_eq!(
+        (census.boot.name(), census.stats.name(), census.stop.name()),
+        ("hex.image.boot", "hex.image.stats", "hex.image.stop")
+    );
+}
