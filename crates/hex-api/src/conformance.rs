@@ -962,6 +962,7 @@ fn unrenderable(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
             bounds: Bounds::default(),
             class: make(Box::new(spec)),
             owner: None,
+            band: 0,
         });
         ensure(
             matches!(&got, Err(Refusal::Invalid { what: "oci spec", why }) if why.contains(field)),
@@ -1482,6 +1483,7 @@ mod tests {
                         hosts: Vec::new(),
                     })),
                     owner: None,
+                    band: 0,
                 })
                 .unwrap();
             late.sim.start(id).unwrap();

@@ -175,9 +175,14 @@ on hardware (ROOT's fairness run).
   carry it (`BoxInfo::last_resort`, last on the node's wire), across the node's restarts. A node that crashes between the
   kill and that write loses the why, not the end: the VM's exit still says `SIGKILL`. Each class's capacity answer carries
   the VMs of the class it ended too, latest first (`Learned::ended`, fitted after the holdings), of the at most the
-  machine's VM population it keeps, the oldest forgotten first. A node's VMs carry no band yet (neither a box's spec
-  nor the live demand names one), so on a node every VM is band 0 and the one holding most past its budget goes
-  first.
+  machine's VM population it keeps, the oldest forgotten first.
+- **Bands.** A VM's band is its spec's (`BoxSpec::band`, as its submitter gives it, 0 the lowest; a spec without one
+  is band 0, its record and native commitment unchanged), carried whole from the submission to the node's record:
+  the scheduler's payload holds the spec, the node's wire carries the band last on a spec, and the learner tracks each
+  VM in the band its record names. So the room goes to the highest band first (C3), and the last resort ends the
+  lowest band first, of a band the VM most past its budget. The placement's demand doesn't carry it: the spec rides
+  every hop whole with it, and placement neither orders nor preempts by band on a live node, so a band there would
+  change nothing (R13).
 
 **Sources.** Admit within room, take back cold pages first, then end or move the lowest-priority VM past its
 charge, never one within it (f84 B: Kubernetes' order f45 A, ESX f47 A, far memory f49 A); D188's give-back is

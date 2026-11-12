@@ -66,6 +66,7 @@ fn payload(id: &str, root: &Path) -> BoxSpec {
         allocation: None,
         route: None,
         devices: Vec::new(),
+        band: 0,
     }
 }
 

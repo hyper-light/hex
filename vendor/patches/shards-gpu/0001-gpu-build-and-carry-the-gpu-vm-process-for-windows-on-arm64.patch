@@ -32,7 +32,7 @@ index 7f3f1c049a92e26dc89ec01f6d4167299768a901..28e4a22b06f154419f02c600626034d0
  }
  
 diff --git a/scripts/gpu-libs b/scripts/gpu-libs
-index 652b9cea966d0c90bbfbce06b17e1370837a516b..6a176f2ebdc233a5f0556f816506585bb9983330 100755
+index 23d4b8d951bf39ce562d9c8076c0a3a8f684f750..b5174c43e95e51508ea07e24903c0a4049bf8a64 100755
 --- a/scripts/gpu-libs
 +++ b/scripts/gpu-libs
 @@ -12,7 +12,7 @@
@@ -164,12 +164,19 @@ index 652b9cea966d0c90bbfbce06b17e1370837a516b..6a176f2ebdc233a5f0556f816506585b
      # clang-cl's warnings of MSVC's headers and of the fork's C, which it takes for errors
      # where the fork asks (-Werror=pedantic); the CRT's own names (_CRT_SECURE_NO_WARNINGS
      # keeps its standard C functions from its deprecations of them).
-@@ -263,7 +290,7 @@ static_library('shards_gpu_selection', 'native-identity.c', c_args: ['-I$vkh'],
- EOF
- setup selection "$(native "$work/selection")" "$(native "$work/selection-src")" ${win[@]+"${win[@]}"}
+@@ -265,13 +292,13 @@ EOF
+ # for it: this project names no buildtype, and meson's default (debug) would compile the bridge
+ # for the debug runtime (/MDd), where every object of a link must use the same one (MSVC's /MD).
+ selection_args=()
+-if [ "$host" = Windows-x86_64 ]; then
++if [[ $host == Windows-* ]]; then
+     selection_args=(-Db_vscrt=md)
+ fi
+ setup selection "$(native "$work/selection")" "$(native "$work/selection-src")" ${win[@]+"${win[@]}"} \
+     ${selection_args[@]+"${selection_args[@]}"}
  ninja --quiet -C "$(native "$work/selection")"
 -if [ "$host" = Windows-x86_64 ]; then
 +if [[ $host == Windows-* ]]; then
-     cp "$work/selection/shards_gpu_selection.lib" "$out/"
-     libs+=(shards_gpu_selection.lib)
- elif [[ $host == Linux-* ]]; then
+     # meson names a static library lib*.a on Windows too: kept as Windows names one, which
+     # rustc links by that name, as the renderer's and libepoxy's above.
+     cp "$work/selection/libshards_gpu_selection.a" "$out/shards_gpu_selection.lib"

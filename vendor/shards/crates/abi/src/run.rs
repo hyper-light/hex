@@ -10,6 +10,8 @@ use alloc::vec::Vec;
 
 pub mod managed;
 pub mod members;
+pub mod nesting;
+pub mod plug;
 pub mod quiesce;
 
 /// The host port the guest dials for its workload.
@@ -181,6 +183,10 @@ pub mod kind {
     /// (D231): its member index and its status, as
     /// [`members::Ended`](super::members::Ended) encodes them; once a member.
     pub const MEMBER_ENDED: u8 = 48;
+    /// Guest to host, on the workload's connection of a run given the nesting grant (D234):
+    /// its readiness moved, as [`nesting::Ready`](super::nesting::Ready) encodes it: ready,
+    /// on time or late, or its ready-by passed.
+    pub const READY: u8 = 49;
 }
 
 /// The file at the root of a writable layer kept in its own file (D190), beside its
@@ -570,6 +576,15 @@ pub mod beside {
         )
     }
 
+    /// Refusing the nesting grant (D234) beside an image's agent or harness, `kind` and
+    /// `name`: the build's words for the directive beside them, the daemon's for the run,
+    /// and shards-init's for the command.
+    pub fn nesting(kind: &str, name: &str) -> String {
+        format!(
+            "cannot give the command the nesting grant: the grant makes the command its microVM's only principal, and the image's Agentfile declares {kind} {name}"
+        )
+    }
+
     /// Refusing `--pid host`: the microVM's PID namespace, the parent of theirs.
     pub fn pid_host() -> String {
         format!(
@@ -677,6 +692,10 @@ pub mod builtin {
     /// shards-init hotplug.rs): `disk ADDR DST [ro]`, `share ADDR TAG DST [ro]`, `unmount
     /// ADDR DST`, `grow ADDR DST SECTORS`, ADDR the function's PCI address.
     pub const DEVICE: u8 = 17;
+    /// [`DEVICE`]'s exit status where what it would let go of is in use, EBUSY's number
+    /// (include/uapi/asm-generic/errno-base.h), so that its host says why by its kind
+    /// (D235); 1 for any other failure.
+    pub const DEVICE_BUSY: u8 = 16;
     /// On-demand OTLP JSON cgroup metrics: the supervisor's canonical run and
     /// physical provider IDs; no actor-supplied labels or collection authority.
     pub const METRICS: u8 = 18;
@@ -1043,6 +1062,12 @@ mod tests {
         assert_eq!(
             beside::id("uid", 200_001, 2),
             "cannot run as uid 200001: the image's Agentfile runs its agents and harnesses as 200000 to 200001, and their in-VM servers as 4394304 to 4394305, which no other process of the microVM takes"
+        );
+        // The nesting grant beside a domain (D234), in the words the build, the daemon and
+        // init share.
+        assert_eq!(
+            beside::nesting("agent", "a"),
+            "cannot give the command the nesting grant: the grant makes the command its microVM's only principal, and the image's Agentfile declares agent a"
         );
     }
 
