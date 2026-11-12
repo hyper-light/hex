@@ -1,0 +1,3 @@
+# Recorded traces, whose exact bytes hex-sim's census counts (crates/hex-sim/tests/census.rs): never converted at
+# checkout, so git's core.autocrlf (on by default on Windows) can't add a carriage return to each line.
+bench/sched/*.trace -text
