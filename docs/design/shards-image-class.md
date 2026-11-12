@@ -171,6 +171,10 @@ This class stays: it is how every Shards VM boots, once Hex's own node boots the
   hosts are given, a create on each is refused naming its own. The native-owner launch would also give Linux what
   it lacks: the run host runs in the node's own process tree today, so Hex charges the VM's envelope by admission
   but cannot contain the run host per box, nor read its use on the host (§4).
+- **Hex, once the macOS or Windows host is given:** the node there forwards a call on a box its host runtime
+  doesn't hold to the guest's node (`hex-node` `recorded::forward_guest`), and an image VM's guest runs none, so
+  that node must pass an image VM's calls back to the guest runtime, as the Linux node passes its exec back
+  (`node/backends.rs` `guest_node_class`). No image VM exists on either host until then.
 
 ## 9. What would falsify it
 
