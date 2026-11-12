@@ -633,6 +633,20 @@ impl Log {
         }
     }
 
+    /// How many connections read the log now.
+    pub fn readers(&self) -> usize {
+        self.readers.lock().map_or(0, |readers| readers.len())
+    }
+
+    /// Lines its readers missed and haven't been told of yet.
+    pub fn missed(&self) -> u64 {
+        self.readers.lock().map_or(0, |readers| {
+            readers
+                .iter()
+                .fold(0u64, |sum, reader| sum.saturating_add(reader.missed))
+        })
+    }
+
     /// Sends `line` to every reader with room for it, at most one frame of it (a longer one is cut at the frame's
     /// bound, and says so).
     pub fn say(&self, line: &str) {
@@ -897,3 +911,6 @@ impl<N: Os> Os for Quic<N> {
         self.native.unwatch_source(handle, token);
     }
 }
+
+#[cfg(test)]
+mod tests;
