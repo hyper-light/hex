@@ -872,33 +872,11 @@ impl Driver {
             {
                 return Err(invalid("start changed its owner's durable payload").into());
             }
-            // Runtime::classes is a backend call too: validate after dropping the core lock.
             let prior = state.node.ran_keys().any(|(k, _, _)| k == key);
-            // The room this admission is decided in, given the ledger now: a box whose holding was less
-            // than its receipt may have ended since, its credit gone with it (joint plan step 13).
-            if !prior {
-                readmit(&mut state)?;
-            }
-            if !prior && let Some(why) = state.admission.as_ref().or(state.over.as_ref()) {
-                return Ok(Step {
-                    send: vec![(
-                        from,
-                        Envelope {
-                            msg: Msg::Refused { key },
-                            payload: None,
-                            refusal: Some(why.clone()),
-                        },
-                    )],
-                    notices: vec![Notice::Refused {
-                        key,
-                        node: state.node.id(),
-                        refusal: why.clone(),
-                    }],
-                });
-            }
             if prior && state.rows.payload("ran", key)? != payload {
                 return Err(invalid("repeated start changed its payload").into());
             }
+            // Runtime::classes is a backend call too: validate after dropping the core lock.
             drop(state);
             let checked = validate(&demand, &payload).and_then(|()| {
                 if let Msg::Start {
@@ -917,6 +895,29 @@ impl Driver {
                 validate_backend(&payload, &runtime)
             });
             state = self.lock()?;
+            // The room this admission commits in, given the ledger and checked under the lock its commit holds (CV3):
+            // a holder's word or a rebook may have moved it while the lock was let go, and a box whose holding was
+            // less than its receipt may have ended since, its credit gone with it (joint plan step 13).
+            if !prior {
+                readmit(&mut state)?;
+                if let Some(why) = state.admission.as_ref().or(state.over.as_ref()) {
+                    return Ok(Step {
+                        send: vec![(
+                            from,
+                            Envelope {
+                                msg: Msg::Refused { key },
+                                payload: None,
+                                refusal: Some(why.clone()),
+                            },
+                        )],
+                        notices: vec![Notice::Refused {
+                            key,
+                            node: state.node.id(),
+                            refusal: why.clone(),
+                        }],
+                    });
+                }
+            }
             match checked {
                 Ok(()) => {}
                 Err(Error::Runtime(why)) if !prior => {

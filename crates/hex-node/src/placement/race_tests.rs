@@ -138,10 +138,7 @@ fn raced(driver: &Arc<Driver>, gate: &Gate, start: Envelope, word: impl FnOnce()
     .unwrap();
     word();
     gate.open.store(true, Ordering::SeqCst);
-    hex_testkit::waits::until(&ENDED, "the admission's end", || {
-        admission.is_finished()
-    })
-    .unwrap();
+    hex_testkit::waits::until(&ENDED, "the admission's end", || admission.is_finished()).unwrap();
     let step = admission.join().unwrap().unwrap();
     quiesce(driver, step)
 }
