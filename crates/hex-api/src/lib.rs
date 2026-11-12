@@ -20,6 +20,7 @@
 )]
 
 mod bounds;
+pub mod capacity;
 pub mod conformance;
 mod devices;
 pub mod differential;
