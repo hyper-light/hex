@@ -31,8 +31,9 @@ counts the two sides keep agree after a partition heals.
   `Driver`, under the lock its own admissions take. Its records are a folder of their own in the
   node's record files; its room is the node's facts' capacity (`Driver::refresh_node`); the node
   admits its own boxes against that room less every holder's reservations, given to its admission at
-  once whenever they change; and `local` is what the node holds itself (`peer::Node::held`: the larger,
-  per dimension, of its ledger's admissions and its admission index's, which charges backings too).
+  once whenever they change; and `local` is what the node holds itself (`peer::Node::held`: what its
+  ledger and admission index book, the larger per dimension, which charges backings too, each box the
+  learner rebooked counted at its holding instead of its receipt).
 - hex-sim scenarios: crashes on either side, dropped links, partitions and heals.
 - The shell over hyper-transport, once Hex step 4's transport is on main: the scheduler opens the
   view (`Driver::open_view`) with the holders its configuration authorizes, and carries the messages.
@@ -255,6 +256,10 @@ person removing it from the holder's configuration returns the holder to admitti
   earlier fence closed (CV4). Each holder says hello again and syncs (CV5): the keeper releases what the
   holder no longer lists and adopts what it lacks, and the counts agree again before the holder reserves.
 
+- **Lag**: the view counts a VM's growth past its holding from the next refresh that rebooks it, so it
+  lags that growth by up to one refresh; goal 14's contention rule holds the growth physically meanwhile
+  (the VM is held at its budget), so the lag is never a double booking of room the view granted.
+
 ## The protocol
 
 **Holder to keeper** (`ToKeeper`): `Hello { holder, epoch }`; `Sync { fence, held: [(id, amount)] }`;
@@ -292,21 +297,30 @@ fence (CV4), release only on its holder's word (CV5), and tell each holder the v
 
 Goal 14 owns what a VM is charged, its booking and the contention rule (`learned-charge.md`); this step
 owns the room and the combined view. Agreed through ROOT (2026-11-12, `learned-charge.md` C6-C8):
-- **What Hex publishes** is the keeper's `local`: per dimension the sum of its VMs' bookings (a booking
-  is the learned charge), and for memory and disk what VMs hold past their bookings too
-  (`hex_sim::charge::Node::reservation`). It rises without an admission (a booking rising into free
-  room, a VM holding memory past its booking): the host calls `Keeper::local_changed`, and every synced
-  holder (kiln's balancer) is owed the view (CV7), so both sides back off.
-- **Hex's admission**: a new VM is admitted only if its booking fits the combined view's free room for
-  Hex, `Keeper::view(local).free()` (`Node::admit(.., free)`); refused, typed, with that room (B3).
-  Bookings follow charges: down at once, up only into that free room.
+- **The room is physical.** The keeper's room is the machine's capacity as the node's facts measure it;
+  no learned amount moves it.
+- **What Hex holds is per box.** The keeper's `local` is `peer::Node::held`: each box the node runs at
+  its holding where the learner said one, else at its receipt (`Allocation::booking`, the whole allocation
+  where it books none). A holding is the VM's learned booking plus the memory and disk it holds past it.
+  The node agent reports each running VM's holding by box id in its capacity answers; on each refresh the
+  scheduler maps box ids to keys and calls `Driver::rebook(&[(Key, CapacityResources)])` right after
+  applying the answers, replacing what was said before. A box that ends leaves `held` at the moment its
+  room is released, so the view never counts an ended VM's learned share, nor misses its receipt's.
+- **Hex's own admission** is its ledger's, which books each box at its receipt: the Driver gives it the
+  room `physical - foreign + (receipts - holdings)` (`admission_spec`), so its free room is the view's free
+  room for Hex, and recomputes it before each admission it hears, so a box that ended between refreshes
+  takes its credit with it. Where holdings pass the room (a VM holding memory past its booking), the
+  ledger can't be given less than it books: the node admits nothing of its own until they fit, refused
+  typed (`local admission`), and every holder is owed the view (CV7), so both sides back off.
 - **Hex's budget** on a machine (goal 14's fleet budget, each guest's D188 room) is the view's room for
   Hex, `Keeper::room_for_local()`: the machine's room less every holder's reservations.
 - **A holder's reservation** keeps its amount for its life; a holder releases it and reserves anew to
   change it.
 
 Goal 14 adds an optional `Allocation.booked` to Hex's runtime wire (append-only, absent meaning the whole
-allocation); the capacity protocol carries amounts only and is unchanged by it.
+allocation); the capacity protocol carries amounts only and is unchanged by it. Aggregates of learned use
+on the capacity wire serve the scheduler's placement across nodes only: summed, they lag a VM's end by a
+window, which would under-count Hex here.
 
 ## Tests
 
