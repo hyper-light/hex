@@ -2,9 +2,10 @@
 //! holds execs between the hold's token capture and a later signal of that hold. XNU gives a process a new
 //! audit-token pid version at exec, so the token names an image the member no longer runs. Each case drives
 //! the watcher's own steps in their order (`apply`'s hold, `run_one`'s continue for a read, `stop_again`) on
-//! a real member, the scope's group leader, and expects the same process (pid and birth) signalled, held as
-//! before, and its scope still Running. And one that ends while held (its zombie unreaped, as a scope's
-//! controller's stays until finalize) is let go of, never taken for a process outside the scope.
+//! a real member in the scope's group, beside its leader (the controller, as the fixture's), and expects
+//! the same process (pid and birth) signalled, held as before, and its scope still Running. And one that
+//! ends while held, or before the scope's end reaches it, is let go of, never taken for a process outside
+//! the scope.
 use super::scope_completion_tests::{Birth, unobserved_box};
 use super::*;
 use std::io::{BufRead as _, Write as _};
@@ -16,8 +17,9 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 const PATIENCE: Duration = Duration::from_secs(30);
 
 /// A held member: a shell that says it runs, and given a line execs a shell that says so and then waits on
-/// its own stdin.
+/// its own stdin; in the group of its scope's leader, a shell waiting on its own.
 struct Held {
+    leader: Child,
     child: Child,
     stdin: ChildStdin,
     said: std::sync::mpsc::Receiver<String>,
@@ -27,16 +29,26 @@ struct Held {
 }
 
 impl Held {
-    /// The member started in a process group of its own, its scope's box built over it, and, once its
-    /// first shell says it runs (past its own start's exec), the watcher's hold applied: stopped, its token
-    /// captured from that shell.
+    /// The leader started in a process group of its own and the scope's box built over it; the member
+    /// started in its group and, once its first shell says it runs (past its own start's exec), the
+    /// watcher's hold applied: stopped, its token captured from that shell.
     fn new() -> Self {
+        let leader = Command::new("/bin/sh")
+            .args(["-c", "read line"])
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let group = i32::try_from(leader.id()).unwrap();
+        let led = sys::rusage(group).unwrap().unwrap().started;
         let mut child = Command::new("/bin/sh")
             .args([
                 "-c",
                 "echo ready; read line; exec /bin/sh -c 'echo execd; read more'",
             ])
-            .process_group(0)
+            .process_group(group)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -57,8 +69,8 @@ impl Held {
         let pid = i32::try_from(child.id()).unwrap();
         let started = sys::rusage(pid).unwrap().unwrap().started;
         let boxed = unobserved_box(&Birth {
-            pid,
-            started,
+            pid: group,
+            started: led,
             session: 0,
         });
         let member = Member {
@@ -70,6 +82,7 @@ impl Held {
         };
         assert_eq!(boxed.state.apply(&[child.id()], &[], &[member]).unwrap(), 1);
         let held = Self {
+            leader,
             child,
             stdin,
             said,
@@ -79,6 +92,10 @@ impl Held {
         };
         held.wait_until(sys::Run::Stopped);
         held
+    }
+
+    fn group(&self) -> i32 {
+        i32::try_from(self.leader.id()).unwrap()
     }
 
     #[track_caller]
@@ -109,7 +126,7 @@ impl Held {
         let run = self
             .boxed
             .state
-            .run_one(self.pid, &mut pids, 0)
+            .run_one(self.group(), &mut pids, 0)
             .unwrap()
             .expect("the held member runs for the read");
         assert_eq!(run.pid, self.pid);
@@ -134,8 +151,10 @@ impl Held {
 
 impl Drop for Held {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        for child in [&mut self.child, &mut self.leader] {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -165,7 +184,7 @@ fn a_held_member_stopped_after_its_exec_is_continued_again() {
     .unwrap();
     held.wait_until(sys::Run::Stopped);
     let mut pids = Held::listing();
-    let run = held.boxed.state.run_one(held.pid, &mut pids, 0);
+    let run = held.boxed.state.run_one(held.group(), &mut pids, 0);
     assert!(run.is_ok(), "{:?}", run.map(|ran| ran.map(|ran| ran.pid)));
     held.wait_until(sys::Run::Live);
     held.still_held();
@@ -193,7 +212,7 @@ fn a_held_member_that_ended_is_no_longer_held() {
         std::thread::park_timeout(Duration::from_millis(1));
     }
     let mut pids = Held::listing();
-    let run = held.boxed.state.run_one(held.pid, &mut pids, 0);
+    let run = held.boxed.state.run_one(held.group(), &mut pids, 0);
     assert!(
         matches!(run, Ok(None)),
         "{:?}",
