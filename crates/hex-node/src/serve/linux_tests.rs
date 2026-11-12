@@ -62,13 +62,16 @@ impl Gate {
     }
 }
 
+/// Whether a guest's stand-in program has ended, and the condition its waiters wait on: it ends once the test says.
+type GuestEnd = Arc<(Mutex<bool>, Condvar)>;
+
 /// A stand-in for a program in a VM's guest as its backend's client hands it over: its pid the guest's, which names no
 /// process of this host or an unrelated one, and its end the guest's message, which comes once the test lets it.
 struct GuestProgram {
     pid: u32,
     /// Whether it says it is a process of this host: a backend's that is, as a misbehaving one would.
     on_this_host: bool,
-    ended: Arc<(Mutex<bool>, Condvar)>,
+    ended: GuestEnd,
 }
 
 impl Proc for GuestProgram {
@@ -116,7 +119,7 @@ struct TestHost {
     gate: Gate,
     /// The pid an exec's program has, whether it says it is this host's, and its end: an exec then hands over a guest's
     /// program ([`GuestProgram`]) rather than start a process.
-    guest: Mutex<Option<(u32, bool, Arc<(Mutex<bool>, Condvar)>)>>,
+    guest: Mutex<Option<(u32, bool, GuestEnd)>>,
     abandoned: Mutex<Vec<BoxId>>,
     /// Each descriptor an exec's streams came to the host as, or that it made for those asked for, by what it is, and
     /// whether it was close-on-exec as the host started the program.
