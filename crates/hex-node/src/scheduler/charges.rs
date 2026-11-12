@@ -29,6 +29,7 @@ pub(super) struct Charges {
 fn refused(why: ChargeError) -> Refusal {
     match why {
         ChargeError::Full { what, bound } => Refusal::Exhausted { what, bound },
+        ChargeError::Awaits(needs) => Refusal::Awaits { needs },
         other => Refusal::Invalid {
             what: "a microVM's learned charge",
             why: other.to_string(),
