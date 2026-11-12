@@ -197,6 +197,45 @@ pub fn run_state(pid: i32) -> io::Result<Option<Run>> {
     }))
 }
 
+/// The descriptors process `pid` holds, as `proc_pidinfo(PROC_PIDLISTFDS)` lists them: the read opens
+/// none itself. XNU sizes the list from a call with no buffer (its open slots and 20 more) and then
+/// writes at most the slots the buffer holds (`bsd/kern/proc_info.c` `proc_pidfdlist`).
+#[cfg(test)]
+pub(crate) fn descriptors(pid: i32) -> io::Result<Vec<i32>> {
+    // SAFETY: with a null buffer and a size of 0, proc_pidinfo writes nothing and returns the bytes it needs.
+    let needed =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    if needed <= 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let each = size_of::<libc::proc_fdinfo>();
+    let slots = usize::try_from(needed).map_err(io::Error::other)? / each;
+    let mut list = vec![
+        libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0,
+        };
+        slots
+    ];
+    let size = c_int::try_from(slots * each).map_err(io::Error::other)?;
+    // SAFETY: proc_pidinfo writes at most `size` bytes, whole proc_fdinfo entries, into `list`, which
+    // holds `slots` of them and outlives the call.
+    let wrote = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            list.as_mut_ptr().cast::<c_void>(),
+            size,
+        )
+    };
+    if wrote <= 0 {
+        return Err(io::Error::last_os_error());
+    }
+    list.truncate(usize::try_from(wrote).map_err(io::Error::other)? / each);
+    Ok(list.iter().map(|info| info.proc_fd).collect())
+}
+
 /// What a process's threads are doing, as `proc_pidinfo(PROC_PIDTASKINFO)` reads them: XNU counts each
 /// thread whose state has `TH_RUN`, on a core or waiting for one (`fill_taskprocinfo`,
 /// `osfmk/kern/bsd_kern.c`).
@@ -682,6 +721,49 @@ fn sysctl_count(name: &std::ffi::CStr) -> io::Result<usize> {
     }
     usize::try_from(v)
         .map_err(|_| io::Error::other(format!("{} reads {v}", name.to_string_lossy())))
+}
+
+/// A string sysctl (`hw.model`, `kern.bootsessionuuid`), read from the kernel itself, so no program runs
+/// to print it: sized by a call with no buffer, then read whole, its terminating NUL dropped.
+pub fn sysctl_string(name: &std::ffi::CStr) -> io::Result<String> {
+    let mut len = 0usize;
+    // SAFETY: with a null buffer sysctlbyname writes only the bytes it needs into `len`; it reads the
+    // NUL-terminated name; both outlive the call, and nothing is set (newp null).
+    let r = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if r != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(len).map_err(io::Error::other)?;
+    bytes.resize(len, 0u8);
+    let mut wrote = len;
+    // SAFETY: sysctlbyname writes at most `wrote` bytes, the buffer's length, into `bytes`, and the length
+    // it wrote into `wrote`; all three outlive the call, and nothing is set (newp null).
+    let r = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            bytes.as_mut_ptr().cast::<c_void>(),
+            &raw mut wrote,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if r != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    bytes.truncate(wrote);
+    if bytes.last() == Some(&0) {
+        bytes.pop();
+    }
+    String::from_utf8(bytes).map_err(io::Error::other)
 }
 
 /// A numeric sysctl (`hw.memsize`, `hw.physicalcpu`, `kern.hv_support`, `vm.page_free_count`), whether
