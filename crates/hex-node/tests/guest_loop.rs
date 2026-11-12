@@ -1575,9 +1575,16 @@ fn t_t7_1_2_a_torn_record_no_guest_box_carries_is_kept_and_its_name_never_reused
     let (dir, node) = recorded(&guests);
     let torn = BoxId::new("torn").unwrap();
     let path = tear(&dir.path().join("state"), &torn);
-    node.recover()
+    let recovered = node
+        .recover()
         .expect("the node starts beside a torn record");
     assert!(path.exists(), "a record nothing proved ended was removed");
+    assert!(recovered.removed.is_empty(), "{:?}", recovered.removed);
+    assert_eq!(recovered.held.len(), 1, "{:?}", recovered.held);
+    assert_eq!(recovered.held[0].0, torn);
+    let said = &recovered.held[0].1;
+    assert!(said.contains(&path.display().to_string()), "{said}");
+    assert!(said.contains("move the file aside"), "{said}");
     assert_eq!(
         node.create(process(&torn)),
         Err(Refusal::Exists(torn.clone()))
@@ -1607,8 +1614,17 @@ fn t_t7_1_2_a_guest_that_cant_answer_keeps_the_torn_record_and_the_node_starts()
     let (dir, node) = recorded(&guests);
     let path = tear(&dir.path().join("state"), &torn);
     guests.end_all();
-    node.recover()
+    let recovered = node
+        .recover()
         .expect("the node starts beside a torn record its guest can't answer for");
     assert!(path.exists(), "a record nothing proved ended was removed");
+    assert_eq!(recovered.held.len(), 1, "{:?}", recovered.held);
+    assert_eq!(recovered.held[0].0, torn);
+    assert!(
+        recovered.held[0].1.contains("couldn't say"),
+        "{:?}",
+        recovered.held
+    );
+    assert!(recovered.orphans_unknown.is_some());
     assert_eq!(*gate.boxes.lock().unwrap(), BTreeSet::from([torn]));
 }

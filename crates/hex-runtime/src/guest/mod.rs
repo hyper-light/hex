@@ -1120,6 +1120,47 @@ impl GuestRuntime {
         }
     }
 
+    /// The boxes the node's running guest holds under names no readable record of `records` carries: orphans
+    /// only a create whose record was torn can have left (T-T7.1.2). None while no guest runs here. A guest
+    /// that can't answer is its refusal, and proves no box gone.
+    pub fn orphans(&self, records: &crate::devices::Records) -> Result<Vec<BoxId>, Refusal> {
+        let Some(b) = self.running()? else {
+            return Ok(Vec::new());
+        };
+        let listed = b.client.list()?;
+        let mut orphans = Vec::new();
+        orphans
+            .try_reserve_exact(listed.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "orphaned guest boxes",
+                bound: listed.len(),
+            })?;
+        orphans.extend(
+            listed
+                .into_iter()
+                .map(|info| info.id)
+                .filter(|id| !matches!(records.get(id), Some(Ok(_)))),
+        );
+        Ok(orphans)
+    }
+
+    /// Deletes orphan `id` ([`GuestRuntime::orphans`]) through the running guest, then its staged copy: a box
+    /// the guest still holds keeps its root. One gone already is deleted, and so is any with no guest running
+    /// here to hold it.
+    pub fn delete_orphan(&self, id: &BoxId) -> Result<(), Refusal> {
+        let Some(b) = self.running()? else {
+            return Ok(());
+        };
+        match b.client.delete(id) {
+            Ok(()) | Err(Refusal::NoSuchBox(_)) => {}
+            Err(why) => return Err(why),
+        }
+        match stage::unstage(b.link.as_ref(), id) {
+            Ok(()) | Err(Refusal::NoSuchBox(_)) => Ok(()),
+            Err(why) => Err(why),
+        }
+    }
+
     fn rewrite_spec(&self, mut spec: BoxSpec) -> Result<rewrite::Rewritten, Refusal> {
         // The guest's native runtime executes the same OCI payload. The backend-explicit
         // class belongs to the host endpoint and is retained by its durable BoxRecord.

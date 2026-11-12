@@ -280,6 +280,8 @@ fn t_t7_1_2_a_torn_record_beside_no_guest_is_kept_and_the_node_starts() {
         .expect("the node starts beside a torn record");
     assert_eq!(recovered.adopted, [sibling]);
     assert!(path.exists(), "a record nothing proved ended was removed");
+    assert_eq!(recovered.held.len(), 1, "{:?}", recovered.held);
+    assert_eq!(recovered.held[0].0, torn);
     let mut again = spec();
     again.id = torn.clone();
     assert_eq!(node.create(again), Err(Refusal::Exists(torn)));
