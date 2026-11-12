@@ -1983,6 +1983,7 @@ mod io_tests {
                 },
                 backing: None,
             }),
+            band: 0,
         };
         let launcher = Launcher::default();
         // The create's deadline, as `create` takes it from its config.
@@ -2156,6 +2157,7 @@ mod handoff_tests {
                 },
                 backing: Some(source.key),
             }),
+            band: 0,
         };
         let mut record = BoxRecord::new(spec, Phase::Creating, Vec::new());
         record.native_scope = Some(hex_core::record::NativeScope::from_bytes([6; 16]));
@@ -2440,6 +2442,7 @@ mod cleanup_tests {
                 },
                 backing: None,
             }),
+            band: 0,
         };
         let records = Unattachable(RefCell::new(None));
         let until = Instant::now() + std::time::Duration::from_secs(30);
@@ -2675,6 +2678,7 @@ mod memlock_tests {
                 },
                 backing: None,
             }),
+            band: 0,
         };
         let vm_ram = runtime.config.machine_memory(&spec).unwrap() * (1 << 20);
         let records = Unlaunched(RefCell::new(None));
@@ -2925,6 +2929,7 @@ mod single_use_tests {
                 },
                 backing: None,
             }),
+            band: 0,
         }
     }
 

@@ -204,7 +204,7 @@ impl Learner {
                 .track(
                     scope,
                     ClassKey::new(class, allocation.cost.id, allocation.resources),
-                    0,
+                    record.spec.band,
                     vcpus(allocation)?,
                     receipt,
                 )

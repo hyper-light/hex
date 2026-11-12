@@ -2610,6 +2610,7 @@ mod route_tests {
                 key: offered.key,
                 backing: None,
             }),
+            band: 0,
         };
         c.validate_route(&spec).unwrap();
         let mut forged = cost();
@@ -2736,6 +2737,7 @@ mod route_tests {
                 key: fresh.key,
                 backing: fresh.backing,
             }),
+            band: 0,
         };
         assert_eq!(c.validate_route(&spec).unwrap(), fresh);
         spec.route.as_mut().unwrap().backing = Some(parent);
