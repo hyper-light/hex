@@ -656,7 +656,8 @@ fn prepare_native(
     deadline: Instant,
 ) -> Result<Arc<ProcessBox>, Refusal> {
     let bounds = host_bounds(record)?;
-    let (lifeline_reader, lifeline_writer) = rustix::pipe::pipe()
+    let (lifeline_reader, lifeline_writer) = std::io::pipe()
+        .map(|(reader, writer)| (OwnedFd::from(reader), OwnedFd::from(writer)))
         .map_err(|error| Refusal::os("preparing the native managed lifeline", error))?;
     for end in [&lifeline_reader, &lifeline_writer] {
         super::private_descriptor(end, false)
@@ -1037,8 +1038,8 @@ mod tests {
     #[test]
     fn a_notification_whose_reader_ended_lets_the_channel_go() {
         let scope = scope();
-        let (reader, writer) = rustix::pipe::pipe().unwrap();
-        *scope.notification.lock().unwrap() = Some(writer);
+        let (reader, writer) = std::io::pipe().unwrap();
+        *scope.notification.lock().unwrap() = Some(OwnedFd::from(writer));
         drop(reader);
         scope.notify().unwrap();
         assert!(scope.notification.lock().unwrap().is_none());
