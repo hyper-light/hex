@@ -687,12 +687,24 @@ impl GuestRuntime {
     }
 
     /// Recovery consumes the original already-admitted grant. It never invents
-    /// a new generation or restarts an interrupted native launch.
+    /// a new generation or restarts an interrupted native launch. A node whose
+    /// guest serves its dedicated GPU pools alone (a Linux node's, whose OCI
+    /// boxes run natively) prepares no shared backing and has no shared scope
+    /// to recover; a retained shared record without its prepared binding is
+    /// still refused.
     pub fn recover_backing(&self) -> Result<(), Refusal> {
         self.recover_gpu_backing()?;
-        let key = self
-            .shared_key()?
-            .ok_or_else(|| route::invalid("prepare the shared backing before recovery"))?;
+        let Some(key) = self.shared_key()? else {
+            if self
+                .authority()?
+                .pool_records()?
+                .iter()
+                .any(|record| record.execution == Execution::ShardsShared)
+            {
+                return Err(route::invalid("prepare the shared backing before recovery"));
+            }
+            return Ok(());
+        };
         let mut record = self.pool_record(key)?;
         self.preflight_backing(&record)?;
         if matches!(
