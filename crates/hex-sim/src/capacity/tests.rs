@@ -142,3 +142,45 @@ fn hex_ignoring_the_holders_is_caught() {
 fn a_seed_names_one_run() {
     assert_eq!(run(7, 2, 2_000, None), run(7, 2, 2_000, None));
 }
+
+/// A sweep's size from the environment, for the lead's record runs: `name`'s count, else the bounded suite's.
+fn sized(name: &str, bounded: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(bounded)
+}
+
+/// AC-T7.4.1, joint plan step 13: the record sweep, the lead's, in release: `HEX_CAPACITY_SEEDS` seeds (the bounded
+/// suite's 64 unless set) of `HEX_CAPACITY_STEPS` steps (2,000) with one, two and three runners, then each planted
+/// mistake over the same seeds with two. Expect every seed to hold, and each mistake caught, with how many seeds of
+/// how many caught it and the first.
+#[test]
+#[ignore = "the record sweep, sized by HEX_CAPACITY_SEEDS and HEX_CAPACITY_STEPS, in release (the lead's)"]
+fn the_record_sweep() {
+    let (n, steps) = (
+        sized("HEX_CAPACITY_SEEDS", 64),
+        sized("HEX_CAPACITY_STEPS", 2_000),
+    );
+    for runners in [1, 2, 3] {
+        let all = seeds(runners, n, steps);
+        eprintln!("{runners} runners, {n} seeds of {steps} steps: {all:?}");
+    }
+    for mutant in [
+        Mutant::ReleaseOnSilence,
+        Mutant::StartBeforeGrant,
+        Mutant::ForgetSurvivors,
+        Mutant::AnswerBeforeWrite,
+        Mutant::LocalIgnoresForeign,
+    ] {
+        let caught: Vec<u64> = (0..n)
+            .filter(|seed| run(*seed, 2, steps, Some(mutant)).is_err())
+            .collect();
+        eprintln!(
+            "{mutant:?}: caught on {} of {n} seeds, first {:?}",
+            caught.len(),
+            caught.first()
+        );
+        assert!(!caught.is_empty(), "{mutant:?} caught on no seed of {n}");
+    }
+}
