@@ -1016,6 +1016,98 @@ fn programs_watched_are_bounded_for_the_node_and_each_connection_keeps_its_one()
     }
 }
 
+/// The lead's ruling of 2026-11-11 (AC-T7.1.1; original): the streams an exec carries are held only within a program
+/// place, so what the node holds of them is bounded by its programs' budget, which its start fits to its descriptor
+/// limit, never by its calls in flight. Do: a server of one worker under a programs budget of one; an exec of `sleep`
+/// taking the connection's kept place; the host's gate shut and an inspect sent, which holds the worker; then an exec
+/// of `true` carrying three pipes' write ends, this test closing its own copies as it sends them. Expect: the exec
+/// refused naming the programs' budget while the inspect is still held, and each pipe's read end then at end of file,
+/// no copy of its write end left in the node; the inspect answered once the gate opens.
+#[test]
+fn an_exec_past_the_programs_budget_holds_none_of_its_streams() {
+    let lab = Lab::with(
+        Limits {
+            programs: 1,
+            ..limits()
+        },
+        1,
+    );
+    let fd = lab.raw();
+    send_raw(
+        &fd,
+        &request(
+            1,
+            Call::Exec {
+                id: b(),
+                program: Program::of(&["sleep", "1000"]),
+                streams: wire::Streams::default(),
+            },
+        ),
+        &[],
+    );
+    let pid = match answer_of(&fd) {
+        (Header { id: 1, .. }, Answer::Started { pid }) => pid,
+        other => panic!("{other:?}"),
+    };
+    lab.host.gate.set(true);
+    send_raw(&fd, &request(2, Call::Inspect(b())), &[]);
+    let pipes: Vec<(std::io::PipeReader, std::io::PipeWriter)> =
+        (0..3).map(|_| std::io::pipe().unwrap()).collect();
+    let ends: Vec<BorrowedFd<'_>> = pipes.iter().map(|(_, w)| w.as_fd()).collect();
+    send_raw(
+        &fd,
+        &request(
+            3,
+            Call::Exec {
+                id: b(),
+                program: Program::of(&["true"]),
+                streams: wire::Streams {
+                    stdin: true,
+                    stdout: true,
+                    stderr: true,
+                },
+            },
+        ),
+        &ends,
+    );
+    drop(ends);
+    let readers: Vec<std::io::PipeReader> = pipes.into_iter().map(|(r, _)| r).collect();
+    match answer_of(&fd) {
+        (
+            Header { id: 3, .. },
+            Answer::Refused(Refusal::Exhausted {
+                what: PROGRAMS,
+                bound: 1,
+            }),
+        ) => {}
+        other => panic!("refused while the inspect still holds the worker: {other:?}"),
+    }
+    for (n, r) in readers.iter().enumerate() {
+        let mut ready = [PollFd::new(r, PollFlags::IN)];
+        let none = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        assert_eq!(
+            rustix::event::poll(&mut ready, Some(&none)).unwrap(),
+            1,
+            "stream {n}"
+        );
+        assert!(
+            ready[0].revents().contains(PollFlags::HUP),
+            "stream {n}: a copy of its write end is still held"
+        );
+    }
+    lab.host.gate.set(false);
+    assert!(matches!(
+        answer_of(&fd),
+        (Header { id: 2, .. }, Answer::Info(_))
+    ));
+    let pid = Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+    rustix::process::kill_process(pid, Signal::KILL).unwrap();
+    rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty()).unwrap();
+}
+
 /// HEX-SOCK-5, the lead's ruling of 2026-11-06: a client is told what the node keeps for each connection, beside the
 /// node's budgets, and is never refused within what it keeps, however much of the budgets other connections hold. Do:
 /// a hello; then, under a node-wide budget of 3 calls held at the gate, one connection taking all it can before

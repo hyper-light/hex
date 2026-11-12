@@ -2216,6 +2216,69 @@ mod tests {
         );
     }
 
+    /// The lead's ruling of 2026-11-11 (AC-T7.1.1; original): the exec'd programs' pidfds the supervisor keeps to reap
+    /// are bounded for the node, at its budget, not only for each box, so the node's own count of them holds whoever
+    /// execs: its socket's clients or a process it is embedded in. Do: start a supervisor whose budget is two; keep an
+    /// exec'd program of each of three boxes; reap the first's; keep the third's again. Expect: the first two kept; the
+    /// third refused by type, naming the budget; kept once the first's is reaped.
+    #[test]
+    fn the_exec_d_programs_kept_are_bounded_for_the_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("disk"), &dir.path().join("run")).unwrap();
+        // A box root no process of this test is in, so the sweep reaps none of them.
+        let supervisor = Supervisor::start(
+            Path::new(hex_runtime::linux::cgroup::CGROUP_ROOT)
+                .join("hex-supervise-test-none")
+                .as_path(),
+            store,
+            2,
+        )
+        .unwrap();
+        let keep = |id: &str| {
+            #[expect(
+                clippy::zombie_processes,
+                reason = "reaped through its Proc or killed and reaped by this test's end"
+            )]
+            let child = std::process::Command::new("sleep")
+                .arg("600")
+                .spawn()
+                .unwrap();
+            let pid = Pid::from_child(&child);
+            let proc = hex_runtime::linux::proc::PidfdProc::of_child(child.id()).unwrap();
+            let pidfd = rustix::process::pidfd_open(pid, PidfdFlags::empty()).unwrap();
+            (
+                pid,
+                supervisor.own_program(&BoxId::new(id).unwrap(), Box::new(proc), pidfd),
+            )
+        };
+        let (first, kept) = keep("a");
+        let mut first_proc = kept.unwrap();
+        let (second, kept) = keep("b");
+        let second_proc = kept.unwrap();
+        let (third, refused) = keep("c");
+        assert!(
+            matches!(&refused, Err(Refusal::Exhausted { bound: 2, .. })),
+            "the third box's program past the node's budget of two: {:?}",
+            refused.as_ref().err()
+        );
+        rustix::process::kill_process(third, rustix::process::Signal::KILL).unwrap();
+        rustix::process::waitpid(Some(third), rustix::process::WaitOptions::empty()).unwrap();
+        rustix::process::kill_process(first, rustix::process::Signal::KILL).unwrap();
+        assert_eq!(
+            first_proc.wait_for(hex_testkit::waits::EMPTYING).unwrap(),
+            Some(Exit::Signal(9))
+        );
+        let (again, kept) = keep("c");
+        let again_proc = kept.expect("kept once the first's is reaped");
+        for (pid, mut proc) in [(second, second_proc), (again, again_proc)] {
+            rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+            assert_eq!(
+                proc.wait_for(hex_testkit::waits::EMPTYING).unwrap(),
+                Some(Exit::Signal(9))
+            );
+        }
+    }
+
     /// Decision 2: the supervisor reads a process's state, parent and start time from its stat line,
     /// a command name with spaces and parentheses included; a truncated or malformed line is no stat.
     #[test]
