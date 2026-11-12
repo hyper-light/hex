@@ -16,6 +16,8 @@ use shards_api::image::{Bound, Channel, Keep, MemberEnd, MemberInfo, MemberName}
 #[derive(Default)]
 struct Owner {
     records: Mutex<Records>,
+    /// Its scans of every record ([`Books::records`]), each a read of the node's whole Store.
+    scans: AtomicUsize,
 }
 
 fn broken(why: &str) -> Refusal {
@@ -114,6 +116,7 @@ impl Transaction for Owner {
 
 impl Books for Owner {
     fn records(&self) -> Result<Records, Refusal> {
+        self.scans.fetch_add(1, Ordering::SeqCst);
         Transaction::records(self)
     }
     fn pool_records(&self) -> Result<crate::devices::PoolRecords, Refusal> {
@@ -939,5 +942,45 @@ fn the_image_waits_take_their_records_or_measure_only_while_the_census_runs() {
     assert_eq!(
         (census.boot.name(), census.stats.name(), census.stop.name()),
         ("hex.image.boot", "hex.image.stats", "hex.image.stop")
+    );
+}
+
+/// AC-T7.4.1, joint plan step 12: a call on the guest's path reads the node's records once, the image class's routing
+/// taking the one read the call carries on (ROOT, 2026-11-12: it had made every such call read them twice, and usage
+/// three times). Do: record an ordinary oci box, as a macOS or Windows node records one in its guest, then, with no
+/// guest running, start, exec, signal, inspect, read the usage of, and delete it. Expect: each refused, its box in no
+/// guest, and each one scan of the records.
+#[test]
+fn a_guest_path_call_scans_the_records_once() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let oci = super::super::tests::oci(hex_api::Rootfs::Dir("/rootfs".into()), Vec::new());
+    let id = oci.id.clone();
+    Transaction::put(
+        owner.as_ref(),
+        &BoxRecord::new(oci, Phase::Creating, Vec::new()),
+    )
+    .unwrap();
+    let scans = || owner.scans.swap(0, Ordering::SeqCst);
+    scans();
+    let calls: [(&str, &dyn Fn() -> bool); 6] = [
+        ("start", &|| runtime.start(&id).is_err()),
+        ("exec", &|| {
+            runtime
+                .exec(&id, hex_api::Program::of(&["true"]), hex_api::Stdio::null())
+                .is_err()
+        }),
+        ("signal", &|| runtime.signal(&id, Signal::TERM).is_err()),
+        ("inspect", &|| runtime.inspect(&id).is_err()),
+        ("usage", &|| runtime.usage(&id).is_err()),
+        ("delete", &|| runtime.delete(&id).is_err()),
+    ];
+    let counted: Vec<(&str, bool, usize)> = calls
+        .iter()
+        .map(|(call, refused)| (*call, refused(), scans()))
+        .collect();
+    assert!(
+        counted.iter().all(|(_, refused, n)| *refused && *n == 1),
+        "each call: refused, and its scans of the records: {counted:?}"
     );
 }

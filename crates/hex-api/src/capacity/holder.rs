@@ -10,7 +10,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    Amounts, Close, Fence, Held, Invalid, ReservationId, ToHolder, ToKeeper, View, Why, count,
+    Amounts, Close, Fence, Held, Invalid, ReservationId, Scope, ToHolder, ToKeeper, View, Why,
+    count,
 };
 
 /// The holder's link (R04).
@@ -98,6 +99,8 @@ pub struct Holder {
     entries: BTreeMap<ReservationId, Entry>,
     view: Option<View>,
     stale: u64,
+    /// Where its reserved work runs, said in each hello (CV12): given up once the keeper refuses it.
+    scope: Option<Scope>,
 }
 
 impl Holder {
@@ -137,7 +140,15 @@ impl Holder {
             entries,
             view: None,
             stale: 0,
+            scope: None,
         })
+    }
+
+    /// Says in each hello that its reserved work runs in `scope`, so its host credits the room what that work uses
+    /// (CV12).
+    pub fn with_scope(mut self, scope: Scope) -> Self {
+        self.scope = Some(scope);
+        self
     }
 
     pub fn epoch(&self) -> u64 {
@@ -185,6 +196,7 @@ impl Holder {
             ToKeeper::Hello {
                 holder: self.name.clone(),
                 epoch: self.epoch,
+                scope: self.scope.clone(),
             }
         })
     }
@@ -397,6 +409,10 @@ impl Holder {
                 };
                 if !ours {
                     return self.count_stale();
+                }
+                // A refused scope isn't said again: the next hello earns no credit rather than the same close.
+                if matches!(why, Close::Scope(_)) {
+                    self.scope = None;
                 }
                 self.link_down(out);
                 out.events.push(Event::Closed(why));

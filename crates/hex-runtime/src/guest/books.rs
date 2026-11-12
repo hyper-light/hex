@@ -8,6 +8,13 @@ use hex_core::record::{BoxRecord, Phase};
 use super::*;
 use crate::devices::{self, Books};
 
+/// A call's one read of its box's record ([`GuestRuntime::routed`]): a Shards image VM's, which its own class
+/// answers, or any other's, or none, which the call carries on to its record gate.
+pub(super) enum Routed {
+    Image(BoxRecord),
+    Other(Option<BoxRecord>),
+}
+
 pub(super) fn uncertain(id: &BoxId) -> Result<Refusal, Refusal> {
     Ok(Refusal::Lifecycle {
         id: id.try_clone()?,
@@ -166,6 +173,17 @@ impl GuestRuntime {
             .transpose()
     }
 
+    /// Box `id`'s record, read once for the call that asks ([`GuestRuntime::recorded_box`], one scan of the node's
+    /// records), and routed by its class, so no call scans them twice: each operation still rereads it under its turn.
+    pub(super) fn routed(&self, id: &BoxId) -> Result<Routed, Refusal> {
+        Ok(match self.recorded_box(id)? {
+            Some(record) if matches!(record.spec.class, ClassSpec::ShardsImage(_)) => {
+                Routed::Image(record)
+            }
+            snapshot => Routed::Other(snapshot),
+        })
+    }
+
     pub(super) fn turn_keys(
         &self,
         devices: &[hex_api::DeviceId],
@@ -320,8 +338,10 @@ impl GuestRuntime {
         }
     }
 
+    /// `call` on box `id` through its record's gate, `snapshot` the call's one read of the record ([`Routed::Other`]).
     pub(super) fn call_recorded<T>(
         &self,
+        snapshot: Option<&BoxRecord>,
         id: &BoxId,
         ready: bool,
         call: impl FnOnce() -> Result<T, Refusal>,
@@ -329,9 +349,7 @@ impl GuestRuntime {
         let Some(books) = self.books.get() else {
             return call();
         };
-        let snapshot = self
-            .recorded_box(id)?
-            .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+        let snapshot = snapshot.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
         if !self.owns_record(&snapshot.spec) {
             return call();
         }
@@ -356,14 +374,12 @@ impl GuestRuntime {
         })
     }
 
-    pub(super) fn delete_recorded(&self, id: &BoxId) -> Result<(), Refusal> {
+    /// Deletes box `id`, which the books own, `snapshot` the call's one read of its record ([`Routed::Other`]).
+    pub(super) fn delete_recorded(&self, snapshot: &BoxRecord, id: &BoxId) -> Result<(), Refusal> {
         let books = self
             .books
             .get()
             .ok_or_else(|| Refusal::Broken("guest has no initialized record authority".into()))?;
-        let snapshot = self
-            .recorded_box(id)?
-            .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
         let source = snapshot
             .spec
             .route
@@ -439,13 +455,15 @@ impl GuestRuntime {
 
     /// Dedicated VM statistics come from the same native scope, including its
     /// helpers. No relay/guest must be usable to observe those retained resources.
-    pub(super) fn native_usage(&self, id: &BoxId) -> Result<Option<Usage>, Refusal> {
+    pub(super) fn native_usage(
+        &self,
+        snapshot: Option<&BoxRecord>,
+        id: &BoxId,
+    ) -> Result<Option<Usage>, Refusal> {
         let Some(books) = self.books.get() else {
             return Ok(None);
         };
-        let snapshot = self
-            .recorded_box(id)?
-            .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+        let snapshot = snapshot.ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
         if !self.owns_record(&snapshot.spec) {
             return Ok(None);
         }
@@ -848,7 +866,11 @@ mod tests {
             .put(&BoxRecord::new(spec.clone(), Phase::Ready, Vec::new()))
             .unwrap();
         assert!(!runtime.owns_record(&spec));
-        assert_eq!(runtime.call_recorded(&id, true, || Ok(7)), Ok(7));
+        let snapshot = || runtime.recorded_box(&id).unwrap();
+        assert_eq!(
+            runtime.call_recorded(snapshot().as_ref(), &id, true, || Ok(7)),
+            Ok(7)
+        );
         assert_eq!(owner.calls.load(Ordering::SeqCst), 0);
         let ClassSpec::Oci(payload) = spec.class else {
             panic!("fixture OCI")
@@ -859,7 +881,7 @@ mod tests {
             .unwrap();
         assert!(runtime.owns_record(&spec));
         assert!(matches!(
-            runtime.call_recorded(&id, true, || -> Result<(), Refusal> {
+            runtime.call_recorded(snapshot().as_ref(), &id, true, || -> Result<(), Refusal> {
                 panic!("non-ready effect")
             }),
             Err(Refusal::Lifecycle { .. })

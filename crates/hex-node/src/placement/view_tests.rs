@@ -5,7 +5,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use hex_api::capacity::{
-    Amounts, CapacityView, Event, Holder, Host, Out, ToHolder, ToKeeper, Why, conformance,
+    Amounts, CapacityView, Event, Holder, Host, Out, Read, Scope, ToHolder, ToKeeper, Why,
+    conformance,
 };
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Refusal, Runtime};
 use hex_sim::index::Pick;
@@ -71,10 +72,19 @@ impl CapacityView for NodeHost {
 }
 
 impl Host for NodeHost {
-    fn set_room(&mut self, room: Amounts) -> Result<(), Refusal> {
+    fn sample(&mut self, room: Amounts, used: &[(u64, Read)]) -> Result<(), Refusal> {
         self.room = room;
-        self.view.set_room(room);
+        self.view.sample(room, used);
         Ok(())
+    }
+
+    fn scopes(&mut self) -> Result<Vec<(u64, Scope)>, Refusal> {
+        Ok(self
+            .view
+            .scopes()
+            .into_iter()
+            .map(|(link, _, scope)| (link, scope))
+            .collect())
     }
 
     fn set_local(&mut self, local: Amounts) -> Result<(), Refusal> {
