@@ -7,9 +7,9 @@
 //! process and OCI box weighs its booking and `.oci` its boxes' weights together, and the fleet's budget is what they
 //! leave, so each child under contention gets at least min(its need, its booking or budget) (`Scale`). A capacity
 //! answer for a VM class carries what it learned (C2, C8: `hex_api::Learned`). A Shards guest can't yet be held within
-//! its room: shards-api has no call that sends init's `ROOM` (D188), and no Shards revision keeps its ring pins within
-//! it, so that is refused `Awaits(GuestRoom)` and `Awaits(RingPinsWithinRoom)` while its VMM's `memory.high` holds it
-//! at its budget (C7). The last resort ends a VM where it would move it, its move refused `Awaits(LiveMove)` (C5).
+//! its room: shards-api has no call that sends init's `ROOM` (D188), so that is refused `Awaits(GuestRoom)` while its
+//! VMM's `memory.high` holds it at its budget; its ring pins keep within any room it is told (Shards' ring-pins-v1,
+//! D230) (C7). The last resort ends a VM where it would move it, its move refused `Awaits(LiveMove)` (C5).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -186,12 +186,13 @@ fn budget_of(max: Option<&str>, machine: u64) -> u64 {
 }
 
 /// What holding a VM's guest within its room awaits (C7): a Shards guest needs shards-api to send init's `ROOM`
-/// (D188), which it can't yet, and its ring pins (D230's long-term pinned slots, which its init makes on its own) kept
-/// within that room, which p/ring-pins-v1's room-bounded pins don't do yet; a Firecracker guest has no room to be told
-/// and no ring, its VMM's cgroup alone holding it.
+/// (D188), which it can't yet. Its ring pins (D230's long-term pinned slots, which its init makes on its own) come out of
+/// whatever room init is told, or of the guest's available memory where it is told none: Shards' ring-pins-v1, which
+/// Hex vendors at 66113379, so they await nothing more. A Firecracker guest has no room to be told and no ring, its
+/// VMM's cgroup alone holding it.
 fn room_awaits(class: Class) -> &'static [Upstream] {
     match class {
-        Class::Shards => &[Upstream::GuestRoom, Upstream::RingPinsWithinRoom],
+        Class::Shards => &[Upstream::GuestRoom],
         _ => &[],
     }
 }
