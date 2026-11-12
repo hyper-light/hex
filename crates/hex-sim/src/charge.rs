@@ -297,7 +297,11 @@ impl Vm {
         let cold = !self.tail.full();
         let observed = self.tail.p999().unwrap_or([0; 3]);
         let floor = if cold { self.booking } else { [0; 3] };
-        each(each(observed, floor, u64::max), self.class.ceiling, u64::min)
+        each(
+            each(observed, floor, u64::max),
+            self.class.ceiling,
+            u64::min,
+        )
     }
 }
 
@@ -596,7 +600,11 @@ impl<K: Ord + Copy> Node<K> {
                 each(vm.booking, [b0, b1, b2], u64::saturating_sub),
                 u64::saturating_sub,
             );
-            free = each(free, each(after, before, u64::saturating_sub), u64::saturating_sub);
+            free = each(
+                free,
+                each(after, before, u64::saturating_sub),
+                u64::saturating_sub,
+            );
         }
         Ok(())
     }
@@ -871,7 +879,8 @@ pub fn shares(capacity: u64, entries: &[(u64, u64)]) -> Result<Vec<u64>, ChargeE
                 .checked_mul(u128::from(wj))
                 .and_then(|n| n.checked_div(weight))
                 .ok_or(ChargeError::Overflow("a weighted share"))?;
-            let part = u64::try_from(part).map_err(|_| ChargeError::Overflow("a weighted share"))?;
+            let part =
+                u64::try_from(part).map_err(|_| ChargeError::Overflow("a weighted share"))?;
             if let Some(slot) = given.get_mut(*j) {
                 *slot = part;
             }
