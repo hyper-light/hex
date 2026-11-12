@@ -63,10 +63,11 @@ impl ImageWaits {
     }
 }
 
-/// Shards' image boot as the guest runtime holds it: the booter, its waits or why it has none, this
-/// process's runs, and the host's boot session, which proves a run of an earlier boot ended.
+/// Shards' image boot as the guest runtime holds it: the booter or why this host has none, its waits or
+/// why it has none, this process's runs, and the host's boot session, which proves a run of an earlier
+/// boot ended.
 pub(super) struct ImageBoot {
-    images: Arc<dyn Images>,
+    images: Result<Arc<dyn Images>, Refusal>,
     waits: Result<ImageWaits, Refusal>,
     /// One for each box with a boot, run or stop of this process; at most a box's every own, so bounded
     /// by the node's boxes ([`crate::MAX_BOXES`]).
@@ -273,6 +274,10 @@ fn held() -> Refusal {
 }
 
 impl ImageBoot {
+    fn images(&self) -> Result<&Arc<dyn Images>, Refusal> {
+        self.images.as_ref().map_err(Clone::clone)
+    }
+
     fn waits(&self) -> Result<&ImageWaits, Refusal> {
         self.waits.as_ref().map_err(Clone::clone)
     }
@@ -332,12 +337,32 @@ impl ImageBoot {
     }
 }
 
+/// Shards' image boot (D231) as this host can run it, or why it can't (docs/design/shards-image-class.md
+/// §1): Shards' Windows run host is owed, and on macOS D231 starts its run host through std's `Command`,
+/// whose spawn passes no `POSIX_SPAWN_CLOEXEC_DEFAULT` while macOS's pipe, socket, socketpair and accept
+/// take no close-on-exec flag, so the run host would hold whatever another thread had just made, where
+/// every program Hex starts on macOS holds only its stdio (`crate::macos::command`).
+pub fn host_images() -> Result<Arc<dyn Images>, Refusal> {
+    if cfg!(windows) {
+        return Err(Refusal::Awaits {
+            needs: Upstream::WindowsRunHost,
+        });
+    }
+    if cfg!(target_os = "macos") {
+        return Err(Refusal::Awaits {
+            needs: Upstream::RunHostStdioOnly,
+        });
+    }
+    Ok(Arc::new(shards_api::image::ImageShards::new()))
+}
+
 impl GuestRuntime {
-    /// Shards' image boot (D231) and the waits its calls make, or why there are none: a create is refused
-    /// with it until every wait is recorded (docs/design/shards-image-class.md §6).
+    /// Shards' image boot (D231) or why this host has none ([`host_images`]), and the waits its calls
+    /// make or why there are none: a create is refused with either refusal, so no box exists that this
+    /// host couldn't boot or a wait of its own couldn't bound (docs/design/shards-image-class.md §6).
     pub fn with_images(
         mut self,
-        images: Arc<dyn Images>,
+        images: Result<Arc<dyn Images>, Refusal>,
         waits: Result<ImageWaits, Refusal>,
     ) -> Self {
         self.image = Some(ImageBoot {
@@ -532,12 +557,9 @@ impl GuestRuntime {
 
     pub(super) fn create_image(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         spec.check()?;
-        if cfg!(windows) {
-            return Err(Refusal::Awaits {
-                needs: Upstream::WindowsRunHost,
-            });
-        }
-        self.image()?.waits()?;
+        let image = self.image()?;
+        image.images()?;
+        image.waits()?;
         vm_size(&spec)?;
         let books = self.image_books()?;
         let id = spec.id.try_clone()?;
@@ -557,6 +579,7 @@ impl GuestRuntime {
     pub(super) fn start_image(&self, record: BoxRecord) -> Result<(), Refusal> {
         let id = record.spec.id.try_clone()?;
         let image = self.image()?;
+        let images = Arc::clone(image.images()?);
         let waits = image.waits()?;
         match self.settle(&record)? {
             State::Created => {}
@@ -592,7 +615,6 @@ impl GuestRuntime {
         let slot = Arc::new(Slot::new());
         image.insert(&id, Run::Booting(Arc::clone(&slot)))?;
         let answer = Arc::clone(&slot);
-        let images = Arc::clone(&image.images);
         let asked = Instant::now();
         let spawned = std::thread::Builder::new()
             .name("hex-image-boot".to_owned())
