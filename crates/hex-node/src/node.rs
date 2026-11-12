@@ -2027,6 +2027,23 @@ impl Runtime for Node {
                     Ok(info) => out.push(info),
                     // HEX-RT-15: the list's record snapshot can outlive a run's cgroup.
                     Err(Refusal::NoSuchBox(gone)) if gone == id => {}
+                    // A held Shards image box, an earlier node process's run that Shards can neither take
+                    // back nor prove gone (docs/design/shards-image-class.md §5): listed running, as Hex
+                    // can't prove it isn't; its inspect says why.
+                    Err(Refusal::Awaits {
+                        needs: hex_api::Upstream::AttachAfterCrash,
+                    }) => out.push(BoxInfo {
+                        membership: None,
+                        id,
+                        class: record.spec.class.class(),
+                        state: BoxState::Running,
+                        bounds: record.spec.bounds.clone(),
+                        allocation: record.spec.allocation,
+                        route: record.spec.route,
+                        adopted: false,
+                        exit: None,
+                        abandoned: 0,
+                    }),
                     Err(why) => return Err(why),
                 }
             } else {
