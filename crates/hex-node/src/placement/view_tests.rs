@@ -466,7 +466,11 @@ fn a_holder_reaches_the_nodes_keeper_over_quic() {
         },
     })
     .unwrap();
-    let server = Server::new(super::super::DriverView(Arc::clone(&driver)));
+    let server = Server::new(
+        super::super::DriverView(Arc::clone(&driver)),
+        &["kiln.capacity.test".to_owned()],
+        Arc::new(|_: &str| {}),
+    );
     {
         let server = Arc::clone(&server);
         let acceptor = node.acceptor(CAPACITY_PORT);
@@ -488,7 +492,7 @@ fn a_holder_reaches_the_nodes_keeper_over_quic() {
     })
     .unwrap();
     let mut link = Link::open(&kiln_end, peer).unwrap();
-    let mut kiln = Holder::start("kiln-runner".into(), 1, 4, &[]).unwrap();
+    let mut kiln = Holder::start("kiln.capacity.test".into(), 1, 4, &[]).unwrap();
     let mut said = VecDeque::from(vec![kiln.connect().unwrap()]);
     let mut events = Vec::new();
     let mut converse = |link: &mut Link, kiln: &mut Holder, said: &mut VecDeque<ToKeeper>| {
