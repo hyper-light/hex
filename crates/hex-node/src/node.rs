@@ -964,17 +964,7 @@ impl Node {
             return Ok(info);
         }
         let state = match record.spec.class {
-            // A process box runs when its cgroup holds a process; it has no `created` state.
-            ClassSpec::Process => match self.root.get(id) {
-                Some(cg) => match cg.populated_if_present()? {
-                    Some(true) => BoxState::Running,
-                    Some(false) => BoxState::Empty,
-                    // HEX-RT-15: a run can remove its cgroup after this inspect opened it.
-                    // Its pinned directory names the removed box, even if the id is used again.
-                    None => return Err(Refusal::NoSuchBox(id.clone())),
-                },
-                None => BoxState::Empty,
-            },
+            ClassSpec::Process => process_state(id, self.root.get(id).as_ref())?,
             // An oci box follows the container's lifecycle: `created` until `start`, then `running`,
             // then `empty` once its init no longer runs (the oci state's `stopped`).
             ClassSpec::Oci(_) | ClassSpec::Bundle(_) => {
@@ -2375,6 +2365,21 @@ fn pid_max() -> Option<usize> {
     })
 }
 
+/// A `process` box's state from its cgroup `cg` (`None` when it's gone): a process box runs when its cgroup holds a
+/// process; it has no `created` state.
+fn process_state(id: &BoxId, cg: Option<&BoxCgroup>) -> Result<BoxState, Refusal> {
+    Ok(match cg {
+        Some(cg) => match cg.populated_if_present()? {
+            Some(true) => BoxState::Running,
+            Some(false) => BoxState::Empty,
+            // HEX-RT-15: a run can remove its cgroup after this inspect opened it.
+            // Its pinned directory names the removed box, even if the id is used again.
+            None => return Err(Refusal::NoSuchBox(id.clone())),
+        },
+        None => BoxState::Empty,
+    })
+}
+
 /// Whether `cg`'s subtree holds a thread of a live process other than `init`, whose own threads may
 /// stay listed until each is gone: once a pid namespace's init has ended, the namespace's processes
 /// have all been released (Linux v6.19, kernel/pid_namespace.c:263-265), so such a thread is outside it
@@ -2750,6 +2755,52 @@ mod tests {
         assert!(outsiders(&cg, me, Some(0)));
         fs::write(dir.path().join("cgroup.threads"), "").unwrap();
         assert!(!outsiders(&cg, me, Some(ticks.wrapping_add(1))));
+    }
+
+    /// HEX-RT-15, T-T7.1.2 (the root lab's process_box at cfc3e6ae: "the taken-back run's cgroup leaked"): a box is
+    /// there until its record goes, the last of it a removal takes (a run's, by its supervisor, and a delete's). The
+    /// kernel's rmdir clears a cgroup's files before it unlinks its directory (`cgroup_destroy_locked`: `css_clear_dir`,
+    /// then `kernfs_remove`): on adacachy2 (7.3.3), 426 of 20,000 opens of a pinned cgroup's `cgroup.events`, raced
+    /// against its rmdir, failed while its directory was still there. Do: read a process box's state through its
+    /// root's pinned directory, as inspect does, while its cgroup holds a process, then none, then with its files gone
+    /// and its directory there, then with its directory gone, then with a new box's cgroup at its path. Plain files
+    /// stand in for the cgroup's. Expect: running, then empty each time after, never a box that isn't there, and
+    /// never the new box's state.
+    #[test]
+    fn hex_rt_15_a_process_box_whose_cgroup_is_being_removed_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("parent");
+        let dir = parent.join("root").join("ran-live");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(parent.join("cgroup.controllers"), "cpu io memory pids\n").unwrap();
+        fs::write(parent.join("cgroup.subtree_control"), "").unwrap();
+        fs::write(parent.join("root/cgroup.subtree_control"), "").unwrap();
+        fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+        let root = BoxRoot::open(&parent.join("root"), Vec::new()).unwrap();
+        let id = BoxId::new("ran-live").unwrap();
+        let cg = root.get(&id);
+        assert_eq!(process_state(&id, cg.as_ref()), Ok(BoxState::Running));
+        fs::write(dir.join("cgroup.events"), "populated 0\nfrozen 0\n").unwrap();
+        assert_eq!(process_state(&id, cg.as_ref()), Ok(BoxState::Empty));
+        fs::remove_file(dir.join("cgroup.events")).unwrap();
+        assert_eq!(
+            process_state(&id, cg.as_ref()),
+            Ok(BoxState::Empty),
+            "its files gone, its directory there"
+        );
+        fs::remove_dir(&dir).unwrap();
+        assert_eq!(
+            process_state(&id, cg.as_ref()),
+            Ok(BoxState::Empty),
+            "its directory gone since it was opened"
+        );
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+        assert_eq!(
+            process_state(&id, cg.as_ref()),
+            Ok(BoxState::Empty),
+            "a new box's cgroup at its path"
+        );
     }
 
     /// Goal 17's baseline arm (the lead's ruling of 2026-11-09): where a node's create seeds work. Do: ask for a root
