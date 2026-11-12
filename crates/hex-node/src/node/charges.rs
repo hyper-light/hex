@@ -584,6 +584,7 @@ impl Learner {
             fleet_held: why.fleet.held,
             fleet_growth: why.fleet.growth,
             fleet_budget: why.fleet.budget,
+            unmoved: None,
         };
         let bound = self.ends;
         let full = |what| Refusal::Exhausted { what, bound };
