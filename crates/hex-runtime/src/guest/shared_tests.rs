@@ -320,6 +320,12 @@ impl Books for Owner {
 }
 
 fn configured(path: &Path) -> (GuestRuntime, Arc<Owner>) {
+    let owner = Arc::new(Owner::new());
+    (configured_for(path, &owner), owner)
+}
+
+/// A runtime of the same configuration bound to `owner`'s books: a restarted node's.
+fn configured_for(path: &Path, owner: &Arc<Owner>) -> GuestRuntime {
     let mut config = super::super::tests::config();
     config.binary = path.join("shards");
     config.kernel = path.join("kernel");
@@ -358,10 +364,9 @@ fn configured(path: &Path) -> (GuestRuntime, Arc<Owner>) {
     )
     .with_runtime_cost(cost)
     .unwrap();
-    let owner = Arc::new(Owner::new());
     let books: Arc<dyn Books> = owner.clone();
     runtime.bind_books(Arc::downgrade(&books)).unwrap();
-    (runtime, owner)
+    runtime
 }
 
 fn grant(offer: &BackingOffer) -> BackingGrant {
@@ -370,6 +375,28 @@ fn grant(offer: &BackingOffer) -> BackingGrant {
         allocation: offer.allocation().unwrap(),
         devices: Vec::new(),
     }
+}
+
+/// AC-T7.4.1: restart a node whose shared backing its last start prepared, and recover it without
+/// preparing it again; expect recovery refused by name: a retained shared scope is never passed over
+/// as one with nothing to recover (a dedicated-only node's, gpu_pool's
+/// a_fresh_dedicated_gpu_node_recovers_with_no_shared_backing_to_recover).
+#[test]
+fn a_retained_shared_backing_is_refused_recovery_until_prepared() {
+    let dir = tempfile::tempdir().unwrap();
+    let (first, owner) = configured(dir.path());
+    let offer = first.prepare_backing().unwrap();
+    let restarted = configured_for(dir.path(), &owner);
+    assert_eq!(
+        restarted.recover_backing(),
+        Err(Refusal::Invalid {
+            what: "guest execution route",
+            why: "prepare the shared backing before recovery".into(),
+        })
+    );
+    assert_eq!(restarted.prepare_backing().unwrap().key, offer.key);
+    restarted.recover_backing().unwrap();
+    assert_eq!(owner.launches.load(Ordering::SeqCst), 0);
 }
 
 #[test]

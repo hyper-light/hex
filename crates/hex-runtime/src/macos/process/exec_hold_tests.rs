@@ -2,9 +2,10 @@
 //! holds execs between the hold's token capture and a later signal of that hold. XNU gives a process a new
 //! audit-token pid version at exec, so the token names an image the member no longer runs. Each case drives
 //! the watcher's own steps in their order (`apply`'s hold, `run_one`'s continue for a read, `stop_again`) on
-//! a real member, the scope's group leader, and expects the same process (pid and birth) signalled, held as
-//! before, and its scope still Running. And one that ends while held (its zombie unreaped, as a scope's
-//! controller's stays until finalize) is let go of, never taken for a process outside the scope.
+//! a real member in the scope's group, beside its leader (the controller, as the fixture's), and expects
+//! the same process (pid and birth) signalled, held as before, and its scope still Running. And one that
+//! ends while held, or before the scope's end reaches it, is let go of, never taken for a process outside
+//! the scope.
 use super::scope_completion_tests::{Birth, unobserved_box};
 use super::*;
 use std::io::{BufRead as _, Write as _};
@@ -16,8 +17,9 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 const PATIENCE: Duration = Duration::from_secs(30);
 
 /// A held member: a shell that says it runs, and given a line execs a shell that says so and then waits on
-/// its own stdin.
+/// its own stdin; in the group of its scope's leader, a shell waiting on its own.
 struct Held {
+    leader: Child,
     child: Child,
     stdin: ChildStdin,
     said: std::sync::mpsc::Receiver<String>,
@@ -27,16 +29,26 @@ struct Held {
 }
 
 impl Held {
-    /// The member started in a process group of its own, its scope's box built over it, and, once its
-    /// first shell says it runs (past its own start's exec), the watcher's hold applied: stopped, its token
-    /// captured from that shell.
+    /// The leader started in a process group of its own and the scope's box built over it; the member
+    /// started in its group and, once its first shell says it runs (past its own start's exec), the
+    /// watcher's hold applied: stopped, its token captured from that shell.
     fn new() -> Self {
+        let leader = Command::new("/bin/sh")
+            .args(["-c", "read line"])
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let group = i32::try_from(leader.id()).unwrap();
+        let led = sys::rusage(group).unwrap().unwrap().started;
         let mut child = Command::new("/bin/sh")
             .args([
                 "-c",
                 "echo ready; read line; exec /bin/sh -c 'echo execd; read more'",
             ])
-            .process_group(0)
+            .process_group(group)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -57,8 +69,8 @@ impl Held {
         let pid = i32::try_from(child.id()).unwrap();
         let started = sys::rusage(pid).unwrap().unwrap().started;
         let boxed = unobserved_box(&Birth {
-            pid,
-            started,
+            pid: group,
+            started: led,
             session: 0,
         });
         let member = Member {
@@ -70,6 +82,7 @@ impl Held {
         };
         assert_eq!(boxed.state.apply(&[child.id()], &[], &[member]).unwrap(), 1);
         let held = Self {
+            leader,
             child,
             stdin,
             said,
@@ -79,6 +92,10 @@ impl Held {
         };
         held.wait_until(sys::Run::Stopped);
         held
+    }
+
+    fn group(&self) -> i32 {
+        i32::try_from(self.leader.id()).unwrap()
     }
 
     #[track_caller]
@@ -109,7 +126,7 @@ impl Held {
         let run = self
             .boxed
             .state
-            .run_one(self.pid, &mut pids, 0)
+            .run_one(self.group(), &mut pids, 0)
             .unwrap()
             .expect("the held member runs for the read");
         assert_eq!(run.pid, self.pid);
@@ -134,8 +151,10 @@ impl Held {
 
 impl Drop for Held {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        for child in [&mut self.child, &mut self.leader] {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -165,7 +184,7 @@ fn a_held_member_stopped_after_its_exec_is_continued_again() {
     .unwrap();
     held.wait_until(sys::Run::Stopped);
     let mut pids = Held::listing();
-    let run = held.boxed.state.run_one(held.pid, &mut pids, 0);
+    let run = held.boxed.state.run_one(held.group(), &mut pids, 0);
     assert!(run.is_ok(), "{:?}", run.map(|ran| ran.map(|ran| ran.pid)));
     held.wait_until(sys::Run::Live);
     held.still_held();
@@ -193,13 +212,75 @@ fn a_held_member_that_ended_is_no_longer_held() {
         std::thread::park_timeout(Duration::from_millis(1));
     }
     let mut pids = Held::listing();
-    let run = held.boxed.state.run_one(held.pid, &mut pids, 0);
+    let run = held.boxed.state.run_one(held.group(), &mut pids, 0);
     assert!(
         matches!(run, Ok(None)),
         "{:?}",
         run.map(|ran| ran.map(|ran| ran.pid))
     );
     assert!(!held.boxed.state.held().unwrap().stopped.contains(&held.pid));
+    let scope = held.boxed.state.vm.as_ref().unwrap();
+    assert!(scope.watchable(held.boxed.state.id.as_ref()).unwrap());
+}
+
+/// The scope's end reaches a member that ended on its own after its token was read, and was reaped (as a
+/// controller's child is when the controller ends first, its foreground child killed: run 11 of the
+/// helper-flake sweep). The kill finds no process at its pid: expect it gone, nothing signalled, and the
+/// scope still Running, never Uncertain (a member that has ended needs no end).
+#[test]
+fn a_member_reaped_before_its_kill_is_gone_and_the_scope_stays_certain() {
+    let mut held = Held::new();
+    let member = held
+        .boxed
+        .state
+        .held()
+        .unwrap()
+        .stopped
+        .get(&held.pid)
+        .unwrap();
+    held.child.kill().unwrap();
+    held.child.wait().unwrap();
+    let killed = held
+        .boxed
+        .state
+        .signal_stopped(member, sys::MemberSignal::Kill);
+    assert!(
+        matches!(killed, Ok(None)),
+        "{:?}",
+        killed.map(|signalled| signalled.map(|member| member.pid))
+    );
+    let scope = held.boxed.state.vm.as_ref().unwrap();
+    assert!(scope.watchable(held.boxed.state.id.as_ref()).unwrap());
+}
+
+/// A member listed by the watcher's read ends before its hold reaches it (its zombie unreaped): expect
+/// no member to stop, and the scope still Running. The hold's capture of an exiting member is the same
+/// race (task_name_for_pid finds its process but no task: NoRight), which a test can't stop inside.
+#[test]
+fn a_member_that_ended_before_its_hold_is_not_held_and_the_scope_stays_certain() {
+    let mut held = Held::new();
+    let member = Member {
+        pid: u32::try_from(held.pid).unwrap(),
+        started: held.started,
+        footprint: 0,
+        life: Life::Running,
+        armed: false,
+    };
+    held.child.kill().unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    while !sys::rusage(held.pid)
+        .unwrap()
+        .is_some_and(|usage| usage.ended)
+    {
+        assert!(Instant::now() < deadline, "the member never ended");
+        std::thread::park_timeout(Duration::from_millis(1));
+    }
+    let stopped = held.boxed.state.stopped_member(held.pid, &[member]);
+    assert!(
+        matches!(stopped, Ok(None)),
+        "{:?}",
+        stopped.map(|member| member.map(|member| member.pid))
+    );
     let scope = held.boxed.state.vm.as_ref().unwrap();
     assert!(scope.watchable(held.boxed.state.id.as_ref()).unwrap());
 }

@@ -2287,6 +2287,61 @@ mod tests {
         }
     }
 
+    /// AC-T7.4.1: start a node whose guest serves its dedicated GPU pool alone, as a Linux node's does
+    /// (its OCI boxes run natively, so its start prepares no shared backing): prepare the GPU family as
+    /// its start does, then recover as its start does (recover_backing, for each retained pool).
+    /// Expect Ok, the pool still Prepared, and nothing launched, attached, probed or booted.
+    #[test]
+    fn a_fresh_dedicated_gpu_node_recovers_with_no_shared_backing_to_recover() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, input, allocation) = observer::config::tests::fixture(dir.path());
+        let standalone = Arc::new(NoEffects(AtomicUsize::new(0)));
+        let catalog = devices::Catalog::parse(
+            b"hex-devices-1\ngpu\t256\tunmeasured\t777\tshards-gpu\tpci:0000:01:00.0\t\n",
+        )
+        .unwrap();
+        let runtime = GuestRuntime::new(standalone.clone(), config)
+            .recorded_at(dir.path().join("guest"))
+            .with_runtime_paths(
+                shards_api::RuntimePaths::new(dir.path().join("cache"), dir.path().join("home"))
+                    .unwrap(),
+            )
+            .with_runtime_cost(allocation.cost)
+            .unwrap()
+            .with_gpu_catalog(triomphe::Arc::try_new(catalog).unwrap())
+            .with_gpu_observer(input)
+            .unwrap();
+        let owner = Arc::new(Cold {
+            row: Mutex::new(None),
+            shared: Mutex::new(None),
+            native_report: None,
+            physical: None,
+            effects: AtomicUsize::new(0),
+            queries: AtomicUsize::new(0),
+            native: None,
+            finalized: AtomicUsize::new(0),
+            luid: None,
+            launches: AtomicUsize::new(0),
+        });
+        let books: Arc<dyn Books> = owner.clone();
+        runtime.bind_books(Arc::downgrade(&books)).unwrap();
+        let prepared = runtime.prepare_gpu_backing().unwrap().unwrap();
+        let recovered = runtime.recover_backing();
+        assert!(recovered.is_ok(), "{recovered:?}");
+        let row = Books::pool_records(owner.as_ref()).unwrap().pop().unwrap();
+        assert_eq!(row.key, prepared.key);
+        assert_eq!(row.execution, hex_api::Execution::ShardsDedicated);
+        assert_eq!(row.phase, BackingPhase::Prepared);
+        assert_eq!(owner.launches.load(Ordering::SeqCst), 0);
+        assert_eq!(owner.finalized.load(Ordering::SeqCst), 0);
+        assert_eq!(owner.queries.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            standalone.0.load(Ordering::SeqCst),
+            0,
+            "recovery boots, attaches or probes nothing"
+        );
+    }
+
     /// AC-T7.4.1: crash after the SAME native owner publishes its controller,
     /// before local report/Running, still cleans that admitted scope. Controller
     /// exit alone retains the grant; only a whole-scope witness releases it.
