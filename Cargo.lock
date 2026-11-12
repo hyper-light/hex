@@ -665,6 +665,7 @@ dependencies = [
  "hex-client",
  "hex-core",
  "hex-gpu",
+ "hex-testkit",
  "libc",
  "proptest",
  "rustix",
