@@ -20,7 +20,6 @@
 //! request, never sent from inside a read, so the reader never waits on itself, and never lost ([`Owed`]).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -33,6 +32,7 @@ use hex_core::netns;
 use hex_core::patience::Patience;
 use hex_core::schedule::waits::WaitKind;
 use hex_core::wire::{self, Answer, Call, Header, Limits, Received, Request, Streams};
+use hex_wait::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 
 use crate::MAX_LIST;
 use crate::copy::{copy, copy_in};
@@ -1349,7 +1349,7 @@ impl<'a, T: Transport> Caller<'a, T> {
     /// before the exec goes, so the end can't come first.
     fn new(shared: &'a Shared<T>, program: Option<Arc<Ending>>) -> Result<Self, Refusal> {
         // An answer, and the reader's turn handed to it before that: never more at once.
-        let (tx, mail) = sync_channel(2);
+        let (tx, mail) = sync_channel(2).map_err(wait_refused)?;
         let mut state = shared.state()?;
         if let Some(why) = &state.closed {
             return Err(why.clone());
@@ -1600,6 +1600,7 @@ impl<'a, T: Transport> Caller<'a, T> {
                             "the node agent's answer was lost".to_owned(),
                         )));
                     }
+                    Err(RecvTimeoutError::Failed(why)) => return Some(Err(wait_refused(why))),
                 }
             }
         }

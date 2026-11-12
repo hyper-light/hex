@@ -8,7 +8,9 @@
 //! deadline a one-shot timer marked `NOTE_CRITICAL`, which XNU fires without leeway.
 //!
 //! The API is std's but for a wait's failure, [`Failed`]: std's has only poison, and macOS's waiter needs a kqueue
-//! the OS may refuse.
+//! the OS may refuse. Beside them, a channel whose timed receive waits on that condition variable ([`mpsc`]), and a
+//! timer to a deadline ([`rest_until`]): on macOS std's own (`mpsc`'s receive and `park_timeout`, dispatch semaphores;
+//! `sleep`, a Mach semaphore) take the same leeway.
 
 #![cfg_attr(
     test,
@@ -25,13 +27,14 @@
 use std::fmt;
 use std::io;
 #[cfg(not(target_os = "macos"))]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
 mod macos;
+pub mod mpsc;
 
 #[cfg(target_os = "macos")]
-pub use macos::{Condvar, Mutex, MutexGuard};
+pub use macos::{Condvar, Mutex, MutexGuard, rest_until};
 #[cfg(not(target_os = "macos"))]
 pub use std::sync::{Mutex, MutexGuard};
 
@@ -151,6 +154,19 @@ impl Condvar {
 
     pub fn notify_all(&self) {
         self.0.notify_all();
+    }
+}
+
+/// Waits until `deadline`: std's `park_timeout`, its wake by another thread's unpark taken as early, so the wait goes
+/// on until the deadline. Never refused here.
+#[cfg(not(target_os = "macos"))]
+pub fn rest_until(deadline: Instant) -> Result<(), Failed> {
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(());
+        }
+        std::thread::park_timeout(left);
     }
 }
 

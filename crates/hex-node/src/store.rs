@@ -1441,11 +1441,14 @@ mod tests {
         let store = store_in(dir.path());
         let held = record("held");
         let turn = store.claim(&held.spec.id).unwrap();
-        let (done, written) = std::sync::mpsc::channel();
+        // Hex's channel: std's receive comes late on macOS by the thread's QoS leeway (docs/design/deadline-waits.md).
+        let (done, written) = hex_wait::mpsc::sync_channel(31).unwrap();
         std::thread::scope(|s| {
             for n in 0..31 {
                 let (store, done) = (&store, done.clone());
-                s.spawn(move || done.send(store.put(&record(&format!("b{n}")))).unwrap());
+                s.spawn(move || {
+                    done.try_send(store.put(&record(&format!("b{n}")))).unwrap();
+                });
             }
             for _ in 0..31 {
                 let put = written
