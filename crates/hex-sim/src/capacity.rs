@@ -13,13 +13,22 @@
 //! ([`World::settle`]), the books each side keeps agree: the keeper's of each runner, the runner's own,
 //! and the runs it actually runs (CV5's "the counts agree after a partition heals").
 //!
+//! The room is measured, as the node measures it (CV12): every CPU, and the memory that is free or Hex's own
+//! boxes', which lacks what each runner's process and its runs use. Some runners name where their reserved work
+//! runs (a scope); the host's sample reads each synced runner's scope on either side of its read of free memory,
+//! keeps the smaller, and gives the keeper the room and the reads together, so the keeper credits the room each
+//! runner's use up to its reservations. The nemesis moves runs' use between samples, and once in a sample's window,
+//! before the free memory's read or after it (CV12's "a use that moved while free memory was read"); and the OS now
+//! and then won't read a scope, which closes its runner's session. After every step the keeper's credit is at most
+//! what each scoped runner's reserved work used when free memory was last read, up to its reservations.
+//!
 //! Pure, as the rest of hex-sim: one seed decides every step.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use hex_api::capacity::{
-    self, Amounts, Budget, Event, Held, Holder, Keeper, Out, ReservationId, Stop, ToHolder,
-    ToKeeper,
+    self, Amounts, Budget, Event, Held, Holder, Keeper, Out, Read, ReservationId, Scope,
+    ScopeRefused, Stop, ToHolder, ToKeeper,
 };
 
 use crate::rng::Rng;
@@ -39,6 +48,14 @@ pub enum Mutant {
     LocalIgnoresForeign,
     /// The keeper's shell drops from a sync what the keeper doesn't hold, so nothing is adopted (CV5).
     DropUnknownAtSync,
+    /// The host keeps the larger of a scope's two reads around its read of free memory, not the smaller (CV12).
+    CreditLargerRead,
+    /// The host credits a scoped runner its whole reservations, not what its work uses (CV12's rejected
+    /// alternative: room promised and not yet used becomes others').
+    CreditWholeReservation,
+    /// A runner's scope holds its own process beside its reserved work, so memory no reservation holds is credited
+    /// (CV12's other rejected alternative; the holder contract's item 7).
+    ScopeHoldsRunner,
 }
 
 /// What a scenario found wrong.
@@ -64,6 +81,13 @@ pub enum Violation {
     },
     /// A runner was told after a sync that the counts don't agree.
     SyncDisagreed { step: u64, runner: usize },
+    /// The keeper credits the room more than the scoped runners' reserved work used when free memory was last read,
+    /// each up to its reservations (CV12): memory others may take while it is used.
+    Overcredited {
+        step: u64,
+        credit: Amounts,
+        bound: Amounts,
+    },
     /// Once settled, the books disagree: the keeper's of the runner, the runner's own, what it runs.
     Disagree {
         runner: usize,
@@ -95,6 +119,17 @@ pub struct Report {
     pub forgotten: u64,
     /// Releases the person made of a runner away with work still running (CV6's mistake).
     pub wrongly_forgotten: u64,
+    /// The host's samples of its room and its runners' scopes (CV12).
+    pub samples: u64,
+    /// Synced runners' scopes the samples read.
+    pub scopes_read: u64,
+    /// Samples after which the keeper credited some runner's use.
+    pub credited: u64,
+    /// Samples in whose window a run of a runner whose scope they read moved its use, before the free memory's read
+    /// or after it.
+    pub moved_in_window: u64,
+    /// Scopes a sample couldn't read, each closing its runner's session.
+    pub scopes_refused: u64,
 }
 
 /// The machine's disk: the keeper's records, which outlive its process, and the crash armed at one of
@@ -195,11 +230,42 @@ struct Runner {
     hidden: BTreeMap<ReservationId, Amounts>,
     /// Its runs a sync adopted after such a release, still running: what the keeper may book past the room.
     adopted: BTreeMap<ReservationId, Amounts>,
+    /// Whether its processes name where its reserved work runs in their hellos (CV12).
+    scoped: bool,
+    /// Its process's own memory: outside its scope, and in no reservation. None while its process is down.
+    own: u64,
+    /// Each running run's memory use, at most its reservation's (CV12's premise); a run not here uses none.
+    uses: BTreeMap<ReservationId, u64>,
 }
 
-/// The nemesis's mix: each event and its weight, in thousandths of the steps. A test generator's
-/// parameters, not a tuning of the system under test: delivery dominates so links drain between faults.
-const MIX: [(Kind, u64); 18] = [
+impl Runner {
+    /// What its running work uses of memory now.
+    fn work(&self) -> Option<u64> {
+        self.running.keys().try_fold(0u64, |sum, id| {
+            sum.checked_add(self.uses.get(id).copied().unwrap_or(0))
+        })
+    }
+
+    /// A run of its no longer runs: its use goes with it.
+    fn ended(&mut self, id: &ReservationId) {
+        self.running.remove(id);
+        self.hidden.remove(id);
+        self.adopted.remove(id);
+        self.uses.remove(id);
+    }
+
+    /// Every run of its ended with its process.
+    fn all_ended(&mut self) {
+        self.running.clear();
+        self.hidden.clear();
+        self.adopted.clear();
+        self.uses.clear();
+    }
+}
+
+/// The nemesis's mix: each event and its weight among them all. A test generator's parameters, not a tuning
+/// of the system under test: delivery dominates so links drain between faults.
+const MIX: [(Kind, u64); 20] = [
     (Kind::Deliver, 420),
     (Kind::HexAdmit, 70),
     (Kind::HexEnd, 50),
@@ -218,7 +284,18 @@ const MIX: [(Kind, u64); 18] = [
     (Kind::RanOut, 15),
     (Kind::Retire, 1),
     (Kind::ForgetAway, 15),
+    (Kind::Use, 40),
+    (Kind::Sample, 30),
 ];
+
+/// How often the OS won't read a scope the host samples, in thousandths of the reads: about one read in thirty, so the
+/// bounded suite's few hundred reads close a dozen sessions for it. A test generator's parameter.
+const SCOPE_UNREADABLE: u64 = 32;
+
+/// How often a run's use moves in a sample's window, before the free memory's read, and failing that after it, in
+/// thousandths of the samples each: at most one move a window (CV12's claim is for a use that moved while free memory
+/// was read). A test generator's parameter.
+const MOVES_IN_WINDOW: u64 = 250;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -240,6 +317,10 @@ enum Kind {
     RanOut,
     Retire,
     ForgetAway,
+    /// A run's use moves.
+    Use,
+    /// The host measures its room and reads its runners' scopes.
+    Sample,
 }
 
 /// The machine's room: sixteen CPUs and 64 GiB, the shape of the recorded day's larger hosts (H10).
@@ -267,8 +348,22 @@ pub struct World {
     boxes: BTreeMap<u64, Amounts>,
     next_box: u64,
     runners: Vec<Runner>,
+    /// What each runner's reserved work used when the host last read its free memory (CV12): the most its scope's
+    /// credit may be until the next sample.
+    at_free: Vec<u64>,
     mutant: Option<Mutant>,
     report: Report,
+}
+
+/// A runner process's own memory: a CI runner agent's resident set, 64 MiB to 1 GiB. A test generator's
+/// parameter, as the charges are.
+fn own(rng: &mut Rng) -> u64 {
+    rng.range(1, 16).saturating_mul(64 << 20)
+}
+
+/// Where runner `n`'s reserved work runs: its jobs' cgroup, the parent of each job's (the holder contract's item 7).
+fn scope_of(n: usize) -> Scope {
+    Scope::Cgroup(format!("kiln-jobs-{n}"))
 }
 
 /// Runs `steps` steps of seed `seed` with `runners` runners, then settles.
@@ -311,27 +406,35 @@ impl World {
             name_bytes: NAME_BYTES,
         };
         let mut disk = Disk::default();
-        let mut keeper = Keeper::boot(budget, &mut disk).map_err(stopped)?;
-        keeper.set_room(ROOM);
+        let keeper = Keeper::boot(budget, &mut disk).map_err(stopped)?;
         let mut all = Vec::new();
         for n in 0..runners {
             let name = format!("kiln-runner-{n}");
+            let survive = rng.chance(500);
+            let scoped = rng.chance(500);
             let holder = Holder::start(name.clone(), 1, RESERVATIONS, &[]).map_err(stopped)?;
             all.push(Runner {
                 name,
                 epoch: 1,
-                holder: Some(holder),
+                holder: Some(if scoped {
+                    holder.with_scope(scope_of(n))
+                } else {
+                    holder
+                }),
                 asked: BTreeMap::new(),
                 running: BTreeMap::new(),
                 link: Link::default(),
-                survive: rng.chance(500),
+                survive,
                 retired: false,
                 unforgotten: false,
                 hidden: BTreeMap::new(),
                 adopted: BTreeMap::new(),
+                scoped,
+                own: own(&mut rng),
+                uses: BTreeMap::new(),
             });
         }
-        Ok(Self {
+        let mut world = Self {
             rng,
             budget,
             disk,
@@ -339,9 +442,15 @@ impl World {
             boxes: BTreeMap::new(),
             next_box: 0,
             runners: all,
+            at_free: vec![0; runners],
             mutant,
             report: Report::default(),
-        })
+        };
+        let room = world.measured()?;
+        if let Some(keeper) = world.keeper.as_mut() {
+            keeper.set_room(room);
+        }
+        Ok(world)
     }
 
     pub fn report(&self) -> Report {
@@ -420,9 +529,160 @@ impl World {
             Kind::RanOut => self.ran_out(runner)?,
             Kind::Retire => self.retire(runner)?,
             Kind::ForgetAway => self.forget_away(runner)?,
+            Kind::Use => {
+                self.move_use(runner);
+            }
+            Kind::Sample => self.sample()?,
         }
         self.forget_retired()?;
         self.check()
+    }
+
+    /// What each runner's reserved work uses of memory now.
+    fn works(&self) -> Result<Vec<u64>, Violation> {
+        self.runners
+            .iter()
+            .map(|r| {
+                r.work()
+                    .ok_or_else(|| stopped("a runner's work overflows a sum"))
+            })
+            .collect()
+    }
+
+    /// The machine's room as its host measures it (`Facts::node_with_owned`, CV12): every CPU, and the memory that
+    /// is free or Hex's own boxes', so it lacks what the runners' processes and their work use. None is left in a
+    /// dimension they use whole.
+    fn measured(&self) -> Result<Amounts, Violation> {
+        let mut taken = 0u64;
+        for (r, work) in self.runners.iter().zip(self.works()?) {
+            taken = taken
+                .checked_add(r.own)
+                .and_then(|t| t.checked_add(work))
+                .ok_or_else(|| stopped("the runners' memory overflows a sum"))?;
+        }
+        Ok(Amounts {
+            mem_bytes: ROOM.mem_bytes.saturating_sub(taken),
+            ..ROOM
+        })
+    }
+
+    /// One of runner `runner`'s running runs moves its use: anywhere from none to its reservation's memory (CV12's
+    /// premise: a holder's work within what it reserved). Whether one moved.
+    fn move_use(&mut self, runner: Option<usize>) -> bool {
+        let Some(n) = runner else {
+            return false;
+        };
+        let len = self.runners.get(n).map_or(0, |r| r.running.len());
+        let Some(at) = self.pick(len) else {
+            return false;
+        };
+        let Some((id, most)) = self
+            .runners
+            .get(n)
+            .and_then(|r| r.running.iter().nth(at))
+            .map(|(id, amount)| (*id, amount.mem_bytes))
+        else {
+            return false;
+        };
+        let to = self.rng.range(0, most);
+        match self.runners.get_mut(n) {
+            Some(r) => {
+                r.uses.insert(id, to);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// What runner `n`'s scope holds now as the host reads it (`hex_node::scopes::used`): its reserved work's
+    /// memory, and, planted, its own process's beside it.
+    fn read_scope(&self, n: usize) -> Read {
+        let r = self.runners.get(n).ok_or(ScopeRefused::Unreadable)?;
+        let work = r.work().ok_or(ScopeRefused::Unreadable)?;
+        let mem_bytes = if self.planted(Mutant::ScopeHoldsRunner) {
+            work.checked_add(r.own).ok_or(ScopeRefused::Unreadable)?
+        } else {
+            work
+        };
+        Ok(Amounts {
+            mem_bytes,
+            ..Amounts::ZERO
+        })
+    }
+
+    /// The host's sample (CV12): each synced runner's scope read on either side of its read of free memory, the
+    /// smaller kept (`hex_node::scopes::around`), then the room and the reads given the keeper together. One run's
+    /// use may move once in the window, before the free memory's read or after it. A scope the OS won't read is
+    /// refused, and the keeper closes its runner's session with its hints.
+    fn sample(&mut self) -> Result<(), Violation> {
+        let Some(keeper) = self.keeper.as_ref() else {
+            return Ok(());
+        };
+        let listed: Vec<(u64, usize)> = keeper
+            .scopes()
+            .into_iter()
+            .filter_map(|(session, name, _)| {
+                self.runners
+                    .iter()
+                    .position(|r| r.name == name)
+                    .map(|n| (session, n))
+            })
+            .collect();
+        let unreadable: Vec<bool> = listed
+            .iter()
+            .map(|_| self.rng.chance(SCOPE_UNREADABLE))
+            .collect();
+        let before: Vec<Read> = listed.iter().map(|(_, n)| self.read_scope(*n)).collect();
+        // The move, where one comes, is of a run of a runner whose scope is read.
+        let mover = self
+            .pick(listed.len())
+            .and_then(|at| listed.get(at))
+            .map(|(_, n)| *n);
+        let early = self.rng.chance(MOVES_IN_WINDOW);
+        let mut moved = early && self.move_use(mover);
+        let room = self.measured()?;
+        let at_free = self.works()?;
+        if !early && self.rng.chance(MOVES_IN_WINDOW) {
+            moved = self.move_use(mover);
+        }
+        let larger = self.planted(Mutant::CreditLargerRead);
+        let whole = self.planted(Mutant::CreditWholeReservation);
+        let mut used = Vec::new();
+        for (((session, n), before), unreadable) in listed.iter().zip(before).zip(&unreadable) {
+            let after = self.read_scope(*n);
+            let read = if *unreadable {
+                Err(ScopeRefused::Unreadable)
+            } else if whole {
+                // The planted host's mistake: the scope's whole reservations, whatever its work uses.
+                before.and(after).map(|_| Amounts {
+                    mem_bytes: u64::MAX,
+                    ..Amounts::ZERO
+                })
+            } else {
+                before.and_then(|b| after.map(|a| if larger { b.max(a) } else { b.min(a) }))
+            };
+            used.push((*session, read));
+        }
+        let Some(keeper) = self.keeper.as_mut() else {
+            return Ok(());
+        };
+        keeper.set_room(room);
+        keeper.sampled(&used);
+        let credited = !keeper.credit().is_zero();
+        self.at_free = at_free;
+        let report = &mut self.report;
+        report.samples = report.samples.saturating_add(1);
+        if credited {
+            report.credited = report.credited.saturating_add(1);
+        }
+        if moved {
+            report.moved_in_window = report.moved_in_window.saturating_add(1);
+        }
+        let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+        report.scopes_read = report.scopes_read.saturating_add(count(listed.len()));
+        let refused = unreadable.iter().filter(|u| **u).count();
+        report.scopes_refused = report.scopes_refused.saturating_add(count(refused));
+        Ok(())
     }
 
     fn hex_admit(&mut self) -> Result<(), Violation> {
@@ -495,9 +755,7 @@ impl World {
         let Some(id) = runner.running.keys().nth(at).copied() else {
             return;
         };
-        runner.running.remove(&id);
-        runner.hidden.remove(&id);
-        runner.adopted.remove(&id);
+        runner.ended(&id);
         if let Some(holder) = runner.holder.as_mut() {
             let mut out = Out::default();
             holder.release(id, &mut out);
@@ -603,6 +861,8 @@ impl World {
                 Event::Granted(id) => {
                     if let Some(amount) = r.asked.remove(&id) {
                         r.running.insert(id, amount);
+                        // Its work takes memory as it starts, within what it reserved.
+                        r.uses.insert(id, self.rng.range(0, amount.mem_bytes));
                     }
                     report.runs_granted = report.runs_granted.saturating_add(1);
                 }
@@ -738,7 +998,9 @@ impl World {
         }
         match Keeper::boot(self.budget, &mut self.disk) {
             Ok(mut keeper) => {
-                keeper.set_room(ROOM);
+                // The room measured anew as it starts; no runner is synced, so no scope is read.
+                keeper.set_room(self.measured()?);
+                self.at_free = self.works()?;
                 self.keeper = Some(keeper);
                 Ok(())
             }
@@ -762,11 +1024,10 @@ impl World {
         self.drop_link(Some(n))?;
         if let Some(r) = self.runners.get_mut(n) {
             r.holder = None;
+            r.own = 0;
             r.asked.clear();
             if !r.survive {
-                r.running.clear();
-                r.hidden.clear();
-                r.adopted.clear();
+                r.all_ended();
             }
             self.report.runner_crashes = self.report.runner_crashes.saturating_add(1);
         }
@@ -775,17 +1036,30 @@ impl World {
 
     fn restart_runner(&mut self, runner: Option<usize>) -> Result<(), Violation> {
         let forget = self.planted(Mutant::ForgetSurvivors);
-        let Some(r) = runner.and_then(|r| self.runners.get_mut(r)) else {
+        let Some(n) = runner else {
             return Ok(());
         };
-        if r.holder.is_some() || r.retired {
+        if self
+            .runners
+            .get(n)
+            .is_none_or(|r| r.holder.is_some() || r.retired)
+        {
             return Ok(());
         }
+        let own = own(&mut self.rng);
+        let Some(r) = self.runners.get_mut(n) else {
+            return Ok(());
+        };
         r.epoch = r.epoch.saturating_add(1);
         let survivors = if forget { Vec::new() } else { held(&r.running) };
         let holder =
             Holder::start(r.name.clone(), r.epoch, RESERVATIONS, &survivors).map_err(stopped)?;
-        r.holder = Some(holder);
+        r.holder = Some(if r.scoped {
+            holder.with_scope(scope_of(n))
+        } else {
+            holder
+        });
+        r.own = own;
         Ok(())
     }
 
@@ -818,10 +1092,9 @@ impl World {
         self.drop_link(Some(n))?;
         if let Some(r) = self.runners.get_mut(n) {
             r.holder = None;
+            r.own = 0;
             r.asked.clear();
-            r.running.clear();
-            r.hidden.clear();
-            r.adopted.clear();
+            r.all_ended();
             r.retired = true;
             r.unforgotten = true;
         }
@@ -907,7 +1180,8 @@ impl World {
     /// The work running fits the room but for what a wrong release hid from the keeper (CV6) and a sync then
     /// adopted (CV5), which is the only work the keeper may book past the room, and then its view says by how
     /// much it is over; every running run is in the keeper's books while it is up, but one the person released
-    /// while its runner was away, until that runner's next sync.
+    /// while its runner was away, until that runner's next sync; and the keeper credits the room at most what each
+    /// scoped runner's work used when free memory was last read, up to its reservations (CV12).
     fn check(&self) -> Result<(), Violation> {
         let step = self.report.steps;
         let overflow = || Violation::Oversubscribed {
@@ -966,6 +1240,33 @@ impl World {
                     held: view.held,
                 });
             }
+        }
+        // CV12: the keeper credits each synced scoped runner at most what its reserved work used when the host last
+        // read free memory, which that read lacked, and at most what it reserves.
+        let mut bound = Amounts::ZERO;
+        for (_, name, _) in keeper.scopes() {
+            let Some(n) = self.runners.iter().position(|r| r.name == name) else {
+                continue;
+            };
+            let books = keeper
+                .held_by(&name)
+                .try_fold(Amounts::ZERO, |sum, h| sum.checked_add(h.amount))
+                .ok_or_else(|| stopped("a runner's books overflow a sum"))?;
+            let used = Amounts {
+                mem_bytes: self.at_free.get(n).copied().unwrap_or(0),
+                ..Amounts::ZERO
+            };
+            bound = bound
+                .checked_add(used.min(books))
+                .ok_or_else(|| stopped("the credit's bound overflows a sum"))?;
+        }
+        let credit = keeper.credit();
+        if !credit.fits(bound) {
+            return Err(Violation::Overcredited {
+                step,
+                credit,
+                bound,
+            });
         }
         Ok(())
     }
