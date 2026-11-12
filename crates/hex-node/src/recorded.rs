@@ -1945,6 +1945,21 @@ fn poisoned() -> Refusal {
 }
 
 impl<R: Recover> Runtime for Recorded<R> {
+    /// AC-T7.4.1: the Index's grant reaches the backing's owner, whose pool transactions are this
+    /// node's Books (bound before it serves). Without it the trait's default refused every grant
+    /// Pending, so no pool of a node served this way (macOS, Windows) could go Live.
+    fn initialize_backing(
+        &self,
+        grant: hex_api::BackingGrant,
+    ) -> Result<hex_api::BackingOffer, Refusal> {
+        grant.check()?;
+        self.runtime.initialize_backing(grant)
+    }
+
+    fn release_backing(&self, key: hex_api::BackingKey) -> Result<hex_api::BackingOffer, Refusal> {
+        self.runtime.release_backing(key)
+    }
+
     fn backing_usage(&self, key: &hex_api::BackingKey) -> Result<Usage, Refusal> {
         let record = self
             .books

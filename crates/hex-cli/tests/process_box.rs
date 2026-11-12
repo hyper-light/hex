@@ -239,6 +239,43 @@ fn exercise_clone_into_cgroup(own: &Path) {
                 cg.procs().unwrap().is_empty(),
                 "the failed clone's child was reaped"
             );
+            // The lead's ruling of 2026-11-11 (AC-T7.4.1): the locked-memory limit given a spawn is the one its program
+            // starts under, as a VMM that pins its guest's RAM for DMA has its soft limit raised to its hard one
+            // (hex-runtime's firecracker vfio): here half this process's soft limit, in whole KiB, so it can't be the
+            // one the program would inherit.
+            let memlock = rustix::process::getrlimit(rustix::process::Resource::Memlock);
+            let soft = memlock.current.unwrap_or(64 << 20) / 2 / 1024 * 1024;
+            let (mut out, w) = std::io::pipe().unwrap();
+            let limited = Spawn::new(
+                vec![c("/bin/sh")],
+                vec![c("sh"), c("-c"), c("ulimit -Sl")],
+                vec![],
+                None,
+                [null_in(), OwnedFd::from(w), null_out()],
+                nofile(),
+            )
+            .unwrap()
+            .with_memlock(Some(rustix::process::Rlimit {
+                current: Some(soft),
+                maximum: memlock.maximum,
+            }));
+            let Cloned::Started { pid, pidfd } =
+                clone_into_cgroup(dir.as_fd(), limited).expect("clone3 into the box")
+            else {
+                panic!("clone3 served the first program, so it serves this one")
+            };
+            let mut p = hex_runtime::linux::proc::PidfdProc::of_clone(pid, pidfd);
+            assert_eq!(
+                p.wait_for(Duration::from_secs(10)).unwrap(),
+                Some(Exit::Code(0))
+            );
+            let mut seen = String::new();
+            out.read_to_string(&mut seen).unwrap();
+            assert_eq!(
+                seen.trim(),
+                (soft / 1024).to_string(),
+                "the program's soft locked-memory limit, in KiB"
+            );
         }
         Cloned::Unsupported(_) => eprintln!(
             "NOTE: clone3 into a cgroup refused here (a seccomp profile or a kernel before 5.7); the fork path served the conformance run"

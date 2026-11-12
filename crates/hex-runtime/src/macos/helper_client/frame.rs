@@ -299,7 +299,8 @@ mod controls {
     use std::os::fd::AsRawFd;
 
     fn private_pipe() -> (OwnedFd, OwnedFd) {
-        let (reader, writer) = rustix::pipe::pipe().unwrap();
+        let (reader, writer) = std::io::pipe().unwrap();
+        let (reader, writer) = (OwnedFd::from(reader), OwnedFd::from(writer));
         for end in [&reader, &writer] {
             crate::macos::private_descriptor(end, false).unwrap();
         }

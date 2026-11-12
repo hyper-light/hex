@@ -307,7 +307,7 @@ fn init() -> Result<(), (u8, String)> {
     // guest catalog; do this before the node reads its configured attachment routes.
     let _ = hex_runtime::guest::gpu::initialize(state)
         .map_err(|why| fail(format!("initializing guest GPU authority: {why}")))?;
-    give_descriptors()
+    give_descriptors(state)
         .map_err(|why| fail(format!("giving the node its descriptor limit: {why}")))?;
     let node = start(
         &exe,
@@ -384,9 +384,10 @@ fn read_nr_open() -> Result<u64, Refusal> {
     })
 }
 
-/// The node's descriptor limit, from its `need` ([`crate::node::descriptors_needed`]'s total, which the node's own
-/// refusal names), what init was `given` and the kernel's `nr_open` now: soft and hard alike the need, or a hard
-/// limit init was given past it, kept; `fs.nr_open` raised to it first where lower, as no hard limit passes it.
+/// The node's descriptor limit, from its `need` (`hex_node::netns::needed_on_this_host`'s total, the one count, which
+/// `hex node --descriptors` says), what init was `given` and the kernel's `nr_open` now: soft and hard alike the need,
+/// or a hard limit init was given past it, kept; `fs.nr_open` raised to it first where lower, as no hard limit passes
+/// it.
 fn node_descriptors(need: u64, given: &rustix::process::Rlimit, nr_open: u64) -> NodeDescriptors {
     let limit = given.maximum.filter(|hard| *hard > need).unwrap_or(need);
     NodeDescriptors {
@@ -395,12 +396,14 @@ fn node_descriptors(need: u64, given: &rustix::process::Rlimit, nr_open: u64) ->
     }
 }
 
-/// Gives the node its descriptor limit before init starts it, as a service manager gives one (`LimitNOFILE=`): init's
-/// own, which the node inherits, as [`node_descriptors`] says (AC-T7.4.1). Refused by type, with the numbers, where
-/// `fs.nr_open` or the limit can't be set, so init says why and starts no node rather than one that refuses silently.
-fn give_descriptors() -> Result<NodeDescriptors, Refusal> {
+/// Gives the node, its state under `state`, its descriptor limit before init starts it, as a service manager gives one
+/// (`LimitNOFILE=`): init's own, which the node inherits, as [`node_descriptors`] says (AC-T7.4.1). Refused by type,
+/// with the numbers, where `fs.nr_open` or the limit can't be set, so init says why and starts no node rather than one
+/// that refuses silently.
+fn give_descriptors(state: &Path) -> Result<NodeDescriptors, Refusal> {
     use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
-    let need = crate::node::descriptors_needed()?.total();
+    // The guest's node runs containers alone, no VM boxes of its own.
+    let need = hex_node::netns::needed_on_this_host(state, hex_node::Runs::default())?.total();
     let nr_open = read_nr_open()?;
     let given = node_descriptors(need, &getrlimit(Resource::Nofile), nr_open);
     let refused = |why: String| Refusal::Platform {
@@ -824,7 +827,9 @@ mod tests {
     /// `fs.nr_open` raised to it first only where it was lower.
     #[test]
     fn original_the_limit_init_gives_the_node_holds_its_need() {
-        let need = crate::node::descriptors_needed().unwrap().total();
+        let need = hex_node::netns::needed_on_this_host(Path::new("/"), hex_node::Runs::default())
+            .unwrap()
+            .total();
         let guest = rustix::process::Rlimit {
             current: Some(1024),
             maximum: Some(4096),

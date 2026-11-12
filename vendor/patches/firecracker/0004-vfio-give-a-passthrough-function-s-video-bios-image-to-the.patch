@@ -1,0 +1,470 @@
+Subject: vfio give a passthrough function's video BIOS image to the guest in a VFCT ACPI table
+Why: AC-T7.4.1: an integrated GPU has no ROM of its own; its platform firmware publishes its video BIOS in the ACPI VFCT table. A guest given such a function found none: r690's guest amdgpu (AMD Radeon 610M, 1002:13c0, host 0000:79:00.0) said "Unable to locate a BIOS ROM" and "Fatal error during GPU init" while this VMM logged "PciDevice::read_config_register ignoring read to the ROM BAR". amdgpu reads VFCT before any ROM BAR (amdgpu_get_bios_apu: VFCT, VRAM BAR, ROM BAR, platform; Linux v6.18 drivers/gpu/drm/amd/amdgpu/amdgpu_bios.c). A passthrough device's configuration gains an optional vbios_path. Given one, the VMM reads the image, bounded by the ACPI tables' room, while it builds the VM, and publishes it in a VFCT table named in the XSDT, keyed to the function's guest PCI address and the IDs its configuration space shows the guest. One static table: no ROM BAR emulation, BAR sizing, relocation or read-only mapping on vCPU threads, and no seccomp change.
+
+diff --git a/src/firecracker/src/api_server/request/device_passthrough.rs b/src/firecracker/src/api_server/request/device_passthrough.rs
+index 04a7a69306fbdd39ab43a55def14be3ab3b880a5..050cfcad58d142b97c364883996afe979444889a 100644
+--- a/src/firecracker/src/api_server/request/device_passthrough.rs
++++ b/src/firecracker/src/api_server/request/device_passthrough.rs
+@@ -115,6 +115,7 @@ mod tests {
+         let expected_config = DevicePassthroughConfig {
+             id: "dev0".to_string(),
+             sbdf: PciSBDF::new(0x0, 0x0, 0x1f, 0x0),
++            vbios_path: None,
+         };
+         assert_eq!(r, VmmAction::InsertPassthroughDevice(expected_config));
+     }
+diff --git a/src/vmm/src/acpi/mod.rs b/src/vmm/src/acpi/mod.rs
+index 19849934f9f2c2f6ebd762627f629f54b5a53145..5a2739efd291e0f50258a1ce655f755c53ae50bb 100644
+--- a/src/vmm/src/acpi/mod.rs
++++ b/src/vmm/src/acpi/mod.rs
+@@ -1,9 +1,15 @@
+ // Copyright 2024 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ // SPDX-License-Identifier: Apache-2.0
+ 
++use std::io::Read;
++use std::path::Path;
++
+ use acpi_tables::fadt::{FADT_F_HW_REDUCED_ACPI, FADT_F_PWR_BUTTON, FADT_F_SLP_BUTTON};
+-use acpi_tables::{Dsdt, Fadt, Madt, Mcfg, Rsdp, Sdt, Xsdt, aml};
++use acpi_tables::{Dsdt, Fadt, Madt, Mcfg, Rsdp, Sdt, SdtHeader, Xsdt, aml};
+ use vm_allocator::AllocPolicy;
++use vm_memory::Bytes;
++use zerocopy::IntoBytes;
++use zerocopy::little_endian::U32;
+ 
+ use crate::Vcpu;
+ use crate::acpi::x86_64::{
+@@ -12,6 +18,7 @@ use crate::acpi::x86_64::{
+ use crate::arch::x86_64::layout;
+ use crate::device_manager::DeviceManager;
+ use crate::logger::{debug, error};
++use crate::pci::PciDevice;
+ use crate::vstate::memory::{GuestAddress, GuestMemoryMmap};
+ use crate::vstate::resources::ResourceAllocator;
+ 
+@@ -39,6 +46,163 @@ pub enum AcpiError {
+     AcpiTables(#[from] acpi_tables::AcpiError),
+     /// Error creating AML bytecode: {0}
+     AmlError(#[from] aml::AmlError),
++    /// Could not read the video BIOS image of passthrough device {0}: {1}
++    VbiosImage(String, std::io::Error),
++    /// The video BIOS image of passthrough device {0} exceeds the ACPI tables' room of {1} bytes
++    VbiosSize(String, u64),
++}
++
++/// One passthrough function's video BIOS image, keyed as the guest finds that function: its guest
++/// PCI address and the IDs its configuration space shows (Hex).
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct VfctImage {
++    bus: u32,
++    device: u32,
++    function: u32,
++    vendor_id: u16,
++    device_id: u16,
++    subsystem_vendor_id: u16,
++    subsystem_id: u16,
++    revision: u32,
++    image: Vec<u8>,
++}
++
++/// The VFCT table: how platform firmware publishes the video BIOS image of a GPU that has no ROM
++/// of its own, an integrated one's (AMD's UEFI_ACPI_VFCT), which a guest's driver reads before any
++/// ROM BAR (Linux's amdgpu_acpi_vfct_bios in drivers/gpu/drm/amd/amdgpu/amdgpu_bios.c, and
++/// radeon's). Its fixed part follows the header: a 16-byte table UUID, the first image's offset
++/// from the table's start, a GOP library's offset (none) and 16 reserved bytes; each image is then
++/// a VFCT_IMAGE_HEADER (bus, device, function as u32; vendor, device, subsystem vendor and
++/// subsystem IDs as u16; revision and image length as u32) and the image's bytes (Hex).
++struct Vfct(Vec<u8>);
++
++impl Vfct {
++    /// The fixed part's end, where the first image starts: the 36-byte header, 16, 4, 4 and 16.
++    const FIRST_IMAGE: u32 = 76;
++
++    fn new(images: &[VfctImage], room: u64) -> Result<Self, AcpiError> {
++        let header = SdtHeader {
++            signature: *b"VFCT",
++            length: U32::new(0),
++            revision: 1,
++            checksum: 0,
++            oem_id: OEM_ID,
++            oem_table_id: *b"FCVMVFCT",
++            oem_revision: U32::new(OEM_REVISION),
++            // The creator acpi_tables names in the tables it builds.
++            creator_id: *b"FCAT",
++            creator_revision: U32::new(0x2024_0119),
++        };
++        let mut bytes = Vec::new();
++        bytes.extend_from_slice(header.as_bytes());
++        bytes.extend_from_slice(&[0; 16]);
++        bytes.extend_from_slice(&Self::FIRST_IMAGE.to_le_bytes());
++        bytes.extend_from_slice(&0u32.to_le_bytes());
++        bytes.extend_from_slice(&[0; 16]);
++        for image in images {
++            let size = |bytes: usize| {
++                u32::try_from(bytes)
++                    .ok()
++                    .filter(|_| u64::try_from(bytes).is_ok_and(|bytes| bytes <= room))
++                    .ok_or_else(|| AcpiError::VbiosSize(image_name(image), room))
++            };
++            let length = size(image.image.len())?;
++            for word in [image.bus, image.device, image.function] {
++                bytes.extend_from_slice(&word.to_le_bytes());
++            }
++            for half in [
++                image.vendor_id,
++                image.device_id,
++                image.subsystem_vendor_id,
++                image.subsystem_id,
++            ] {
++                bytes.extend_from_slice(&half.to_le_bytes());
++            }
++            bytes.extend_from_slice(&image.revision.to_le_bytes());
++            bytes.extend_from_slice(&length.to_le_bytes());
++            bytes.extend_from_slice(&image.image);
++            size(bytes.len())?;
++        }
++        let length = u32::try_from(bytes.len())
++            .map_err(|_| AcpiError::VbiosSize(String::from("VFCT"), room))?;
++        bytes[4..8].copy_from_slice(&length.to_le_bytes());
++        let sum = bytes.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte));
++        bytes[9] = 0u8.wrapping_sub(sum);
++        Ok(Self(bytes))
++    }
++}
++
++/// An image's guest PCI address, as errors name it.
++fn image_name(image: &VfctImage) -> String {
++    format!(
++        "{:02x}:{:02x}.{:x}",
++        image.bus, image.device, image.function
++    )
++}
++
++impl Sdt for Vfct {
++    fn len(&self) -> usize {
++        self.0.len()
++    }
++
++    fn write_to_guest<M: vm_memory::GuestMemory>(
++        &mut self,
++        mem: &M,
++        address: GuestAddress,
++    ) -> acpi_tables::Result<()> {
++        mem.write_slice(&self.0, address)?;
++        Ok(())
++    }
++}
++
++/// A passthrough device's video BIOS image, read whole, no larger than `room`.
++fn read_vbios(id: &str, path: &Path, room: u64) -> Result<Vec<u8>, AcpiError> {
++    let fail = |error| AcpiError::VbiosImage(id.to_string(), error);
++    let file = std::fs::File::open(path).map_err(fail)?;
++    let mut image = Vec::new();
++    // One byte past the room tells an image that is too large from one that fills it.
++    file.take(room.saturating_add(1))
++        .read_to_end(&mut image)
++        .map_err(fail)?;
++    if !u64::try_from(image.len()).is_ok_and(|size| size <= room) {
++        return Err(AcpiError::VbiosSize(id.to_string(), room));
++    }
++    Ok(image)
++}
++
++/// The VFCT images of the passthrough devices configured with one, each keyed to the device's
++/// guest PCI address and the IDs the guest reads from its configuration space.
++fn vfct_images(device_manager: &DeviceManager, room: u64) -> Result<Vec<VfctImage>, AcpiError> {
++    let Some(pci_devices) = device_manager.pci_devices() else {
++        return Ok(Vec::new());
++    };
++    let mut images = Vec::new();
++    for device in pci_devices.vfio_devices.iter() {
++        let mut device = device.lock().expect("Poisoned lock");
++        let Some(path) = device.config.vbios_path.clone() else {
++            continue;
++        };
++        let image = read_vbios(&device.config.id, &path, room)?;
++        // Registers 0, 2 and 11: vendor and device IDs; revision (with the class); subsystem
++        // vendor and subsystem IDs (PCI Local Bus Specification, the type 0 header).
++        let ids = device.read_config_register(0);
++        let class = device.read_config_register(2);
++        let subsystem = device.read_config_register(11);
++        let [vendor_low, vendor_high, device_low, device_high] = ids.to_le_bytes();
++        let [svid_low, svid_high, ssid_low, ssid_high] = subsystem.to_le_bytes();
++        images.push(VfctImage {
++            bus: u32::from(device.sbdf.bus()),
++            device: u32::from(device.sbdf.device()),
++            function: u32::from(device.sbdf.function()),
++            vendor_id: u16::from_le_bytes([vendor_low, vendor_high]),
++            device_id: u16::from_le_bytes([device_low, device_high]),
++            subsystem_vendor_id: u16::from_le_bytes([svid_low, svid_high]),
++            subsystem_id: u16::from_le_bytes([ssid_low, ssid_high]),
++            revision: class & 0xff,
++            image,
++        });
++    }
++    Ok(images)
+ }
+ 
+ /// Helper type that holds the guest memory in which we write the tables in and a resource
+@@ -134,23 +298,27 @@ impl AcpiTableWriter<'_> {
+ 
+     /// Build the XSDT table for the guest
+     ///
+-    /// Currently, we pass to the guest just FADT and MADT tables.
++    /// It points the guest to the FADT, MADT and MCFG tables, and to a VFCT table where one was
++    /// built.
+     fn build_xsdt(
+         &mut self,
+         resource_allocator: &mut ResourceAllocator,
+-        fadt_addr: u64,
+-        madt_addr: u64,
+-        mcfg_addr: u64,
++        tables: Vec<u64>,
+     ) -> Result<u64, AcpiError> {
+-        let mut xsdt = Xsdt::new(
+-            OEM_ID,
+-            *b"FCMVXSDT",
+-            OEM_REVISION,
+-            vec![fadt_addr, madt_addr, mcfg_addr],
+-        );
++        let mut xsdt = Xsdt::new(OEM_ID, *b"FCMVXSDT", OEM_REVISION, tables);
+         self.write_acpi_table(resource_allocator, &mut xsdt)
+     }
+ 
++    /// Build the VFCT table for the guest's passthrough devices with a video BIOS image.
++    fn build_vfct(
++        &mut self,
++        resource_allocator: &mut ResourceAllocator,
++        images: &[VfctImage],
++    ) -> Result<u64, AcpiError> {
++        let mut vfct = Vfct::new(images, layout::SYSTEM_MEM_SIZE)?;
++        self.write_acpi_table(resource_allocator, &mut vfct)
++    }
++
+     /// Build the MCFG table for the guest.
+     fn build_mcfg(
+         &mut self,
+@@ -207,7 +375,12 @@ pub(crate) fn create_acpi_tables(
+     let fadt_addr = writer.build_fadt(resource_allocator, dsdt_addr)?;
+     let madt_addr = writer.build_madt(resource_allocator, vcpus.len().try_into().unwrap())?;
+     let mcfg_addr = writer.build_mcfg(resource_allocator, layout::PCI_MMCONFIG_START, last_bus)?;
+-    let xsdt_addr = writer.build_xsdt(resource_allocator, fadt_addr, madt_addr, mcfg_addr)?;
++    let mut tables = vec![fadt_addr, madt_addr, mcfg_addr];
++    let images = vfct_images(device_manager, layout::SYSTEM_MEM_SIZE)?;
++    if !images.is_empty() {
++        tables.push(writer.build_vfct(resource_allocator, &images)?);
++    }
++    let xsdt_addr = writer.build_xsdt(resource_allocator, tables)?;
+     writer.build_rsdp(xsdt_addr)
+ }
+ 
+@@ -216,7 +389,7 @@ mod tests {
+     use acpi_tables::Sdt;
+     use vm_memory::Bytes;
+ 
+-    use crate::acpi::{AcpiError, AcpiTableWriter};
++    use crate::acpi::{AcpiError, AcpiTableWriter, Vfct, VfctImage, read_vbios};
+     use crate::arch::x86_64::layout::{SYSTEM_MEM_SIZE, SYSTEM_MEM_START};
+     use crate::builder::tests::default_vmm;
+     use crate::utils::u64_to_usize;
+@@ -334,4 +507,96 @@ mod tests {
+             err
+         );
+     }
++
++    fn image(device: u32, vendor_id: u16, device_id: u16, image: &[u8]) -> VfctImage {
++        VfctImage {
++            bus: 0,
++            device,
++            function: 0,
++            vendor_id,
++            device_id,
++            subsystem_vendor_id: 0x1043,
++            subsystem_id: 0x8877,
++            revision: 0xe5,
++            image: image.to_vec(),
++        }
++    }
++
++    fn u32_at(bytes: &[u8], at: usize) -> u32 {
++        u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
++    }
++
++    fn u16_at(bytes: &[u8], at: usize) -> u16 {
++        u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap())
++    }
++
++    // Hex: a passthrough GPU's video BIOS image is where the guest's amdgpu looks for it. Build a
++    // VFCT of two functions' images; read it as amdgpu_acpi_vfct_bios does (Linux v6.18,
++    // drivers/gpu/drm/amd/amdgpu/amdgpu_bios.c): from the first image's offset, each image header
++    // then its bytes, to the table's length, matching bus, device, function, vendor and device IDs.
++    // Expect each function's own image, the header's length and a checksum that sums to zero.
++    #[test]
++    fn test_vfct_publishes_each_image_where_the_guest_driver_reads_it() {
++        let images = [
++            image(2, 0x1002, 0x13c0, &[0x55, 0xaa, 1, 2, 3]),
++            image(3, 0x10de, 0x2684, &[0x55, 0xaa, 9]),
++        ];
++        let vfct = Vfct::new(&images, 1 << 20).unwrap();
++        let bytes = vfct.0.clone();
++        assert_eq!(&bytes[0..4], b"VFCT");
++        assert_eq!(u32_at(&bytes, 4) as usize, bytes.len());
++        assert_eq!(vfct.len(), bytes.len());
++        assert_eq!(bytes.iter().fold(0u8, |sum, b| sum.wrapping_add(*b)), 0);
++        assert_eq!(u32_at(&bytes, 52), 76);
++        assert_eq!(u32_at(&bytes, 56), 0);
++        for want in &images {
++            let mut offset = u32_at(&bytes, 52) as usize;
++            let mut found = None;
++            while offset < bytes.len() {
++                let header = offset;
++                offset += 28;
++                assert!(offset <= bytes.len(), "image header truncated");
++                let length = u32_at(&bytes, header + 24) as usize;
++                offset += length;
++                assert!(offset <= bytes.len(), "image truncated");
++                if length != 0
++                    && u32_at(&bytes, header) == want.bus
++                    && u32_at(&bytes, header + 4) == want.device
++                    && u32_at(&bytes, header + 8) == want.function
++                    && u16_at(&bytes, header + 12) == want.vendor_id
++                    && u16_at(&bytes, header + 14) == want.device_id
++                {
++                    assert_eq!(u16_at(&bytes, header + 16), want.subsystem_vendor_id);
++                    assert_eq!(u16_at(&bytes, header + 18), want.subsystem_id);
++                    assert_eq!(u32_at(&bytes, header + 20), want.revision);
++                    found = Some(bytes[header + 28..offset].to_vec());
++                    break;
++                }
++            }
++            assert_eq!(found.as_deref(), Some(want.image.as_slice()));
++        }
++    }
++
++    // Hex: an image larger than the ACPI tables' room is refused by size, and read whole up to it.
++    #[test]
++    fn test_vbios_images_are_bounded_by_the_acpi_tables_room() {
++        assert!(matches!(
++            Vfct::new(&[image(2, 0x1002, 0x13c0, &[0; 9])], 8),
++            Err(AcpiError::VbiosSize(name, 8)) if name == "00:02.0"
++        ));
++        let file = vmm_sys_util::tempfile::TempFile::new().unwrap();
++        std::fs::write(file.as_path(), [0x55, 0xaa, 7, 7]).unwrap();
++        assert_eq!(
++            read_vbios("gpu0", file.as_path(), 4).unwrap(),
++            vec![0x55, 0xaa, 7, 7]
++        );
++        assert!(matches!(
++            read_vbios("gpu0", file.as_path(), 3),
++            Err(AcpiError::VbiosSize(id, 3)) if id == "gpu0"
++        ));
++        assert!(matches!(
++            read_vbios("gpu0", std::path::Path::new("/nonexistent/vbios.rom"), 4),
++            Err(AcpiError::VbiosImage(id, _)) if id == "gpu0"
++        ));
++    }
+ }
+diff --git a/src/vmm/src/rpc_interface.rs b/src/vmm/src/rpc_interface.rs
+index 2f0bc350649f79373407e535ed91166f9da7facd..922299705ff5f1d8ca8fc9803e16f3d66e2ad68e 100644
+--- a/src/vmm/src/rpc_interface.rs
++++ b/src/vmm/src/rpc_interface.rs
+@@ -1449,6 +1449,7 @@ mod tests {
+             DevicePassthroughConfig {
+                 id: String::new(),
+                 sbdf: PciSBDF::new(0x0, 0x0, 0x0, 0x0),
++                vbios_path: None,
+             },
+         )));
+     }
+diff --git a/src/vmm/src/vmm_config/device_passthrough.rs b/src/vmm/src/vmm_config/device_passthrough.rs
+index ac47aa416be4eb2bb9a50bda2a1c560c3431dc55..ff05e36345358988b08f1921ae35533ec481bd1b 100644
+--- a/src/vmm/src/vmm_config/device_passthrough.rs
++++ b/src/vmm/src/vmm_config/device_passthrough.rs
+@@ -1,6 +1,8 @@
+ // Copyright 2026 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ // SPDX-License-Identifier: Apache-2.0
+ 
++use std::path::PathBuf;
++
+ use serde::{Deserialize, Deserializer, Serialize, Serializer};
+ 
+ use crate::pci::PciSBDF;
+@@ -40,6 +42,11 @@ pub struct DevicePassthroughConfig {
+         deserialize_with = "deserialize_sbdf_from_str"
+     )]
+     pub sbdf: PciSBDF,
++    /// A video BIOS image for a device without a ROM of its own (an integrated GPU, whose platform
++    /// firmware publishes it): the file's bytes go to the guest's VFCT ACPI table, keyed to the
++    /// device's guest PCI address and IDs, where the guest's driver reads it (Hex).
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub vbios_path: Option<PathBuf>,
+ }
+ 
+ /// Configs for device passthrough
+@@ -65,6 +72,7 @@ impl DevicePassthroughConfigs {
+         }
+         if let Some(old_config) = self.configs.iter_mut().find(|b| b.id == config.id) {
+             old_config.sbdf = config.sbdf;
++            old_config.vbios_path = config.vbios_path;
+         } else {
+             self.configs.push(config);
+         }
+@@ -87,6 +95,7 @@ mod tests {
+             .add(DevicePassthroughConfig {
+                 id: "dev0".to_string(),
+                 sbdf: id1,
++                vbios_path: None,
+             })
+             .unwrap();
+         assert_eq!(configs.configs.len(), 1);
+@@ -96,6 +105,7 @@ mod tests {
+             .add(DevicePassthroughConfig {
+                 id: "dev0".to_string(),
+                 sbdf: id2,
++                vbios_path: None,
+             })
+             .unwrap();
+         assert_eq!(configs.configs.len(), 1);
+@@ -105,6 +115,7 @@ mod tests {
+             .add(DevicePassthroughConfig {
+                 id: "dev1".to_string(),
+                 sbdf: id1,
++                vbios_path: None,
+             })
+             .unwrap();
+         assert_eq!(configs.configs.len(), 2);
+@@ -115,10 +126,34 @@ mod tests {
+             .add(DevicePassthroughConfig {
+                 id: "dev1".to_string(),
+                 sbdf: id2,
++                vbios_path: None,
+             })
+             .unwrap_err();
+         assert_eq!(configs.configs.len(), 2);
+         assert_eq!(configs.configs[0].sbdf, id2);
+         assert_eq!(configs.configs[1].sbdf, id1);
+     }
++
++    // Hex: a passthrough function's video BIOS image is named in its configuration, optional,
++    // and carried by an overwrite; without one the form is upstream's.
++    #[test]
++    fn test_device_passthrough_config_names_its_vbios_image() {
++        let config: DevicePassthroughConfig = serde_json::from_str(
++            r#"{"id": "gpu0", "sbdf": "0000:79:00.0", "vbios_path": "/run/vbios.rom"}"#,
++        )
++        .unwrap();
++        assert_eq!(config.vbios_path, Some(PathBuf::from("/run/vbios.rom")));
++        let plain: DevicePassthroughConfig =
++            serde_json::from_str(r#"{"id": "gpu0", "sbdf": "0000:79:00.0"}"#).unwrap();
++        assert_eq!(plain.vbios_path, None);
++        assert_eq!(
++            serde_json::to_string(&plain).unwrap(),
++            r#"{"id":"gpu0","sbdf":"0000:79:00.0"}"#
++        );
++
++        let mut configs = DevicePassthroughConfigs::default();
++        configs.add(plain).unwrap();
++        configs.add(config.clone()).unwrap();
++        assert_eq!(configs.configs, vec![config]);
++    }
+ }

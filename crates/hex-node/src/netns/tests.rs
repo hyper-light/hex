@@ -45,13 +45,19 @@ fn bench() -> Sizes {
     )
 }
 
-/// Ada's rule and the lead's calls, 2026-11-06 (CLAUDE.md §2; goal 6 step 6's installer reads it): the descriptors a
-/// root node holds at its learned pools' bounds on fedora's figures, a first start's. Do: bound the files under no
-/// limit at the bench host's sizes, nothing held beside its bounds. Expect: the node's own 406,027 (342,634 with six
-/// memory pools and the device programs uncounted; 331,086 at the old constants, the socket's connections then among
-/// them): the pools' shares a seventh each with the device programs among them (440 seeds, 1,439 idle namespaces),
-/// and the programs held, 65,536 at their bound, now counted; and every kept namespace there may be holding its files
-/// four each past that, and the create seeds' one pruned mount namespace (`goal6-mntns.md` §12), 679,683 in all.
+/// Ada's rule and the lead's calls, 2026-11-06 and 2026-11-11 (CLAUDE.md §2; goal 6 step 6's installer reads it): the
+/// descriptors a root node holds at its learned pools' bounds on fedora's figures, a first start's, its state on one
+/// disk. Do: bound the files under no limit at the bench host's sizes, nothing held beside its bounds. Expect: the
+/// node's own 941,655. Of it 406,027 as counted before the lead's rulings of 2026-11-11 (the pools' shares a seventh
+/// each with the device programs among them, 440 seeds and 1,439 idle namespaces; the programs held, 65,536 at their
+/// bound; the create seeds' one pruned mount namespace, `goal6-mntns.md` §12); and now the 633 idle cgroups' parked
+/// inits, four each (an init's pidfd and its socket's end, its proc's pid namespace and tree), 2,532; the 440 cgroups
+/// made ahead, twenty each (those four, the cgroup's directory, its `memory.peak` and the fourteen files it opens ahead
+/// over one disk), 8,800; the socket's connections, 65,536 (the inits' budget, under its 524,288 descriptors and
+/// 500,000 threads) with the one it refuses past them and its own three, 65,540; the 65,536 program places' streams,
+/// six each (a pipe of two for each of three), and the message read past them, three, 393,219; the exec'd programs'
+/// pidfds the supervisor keeps, one a place, 65,536; and the supervisor's epoll set, one. Every kept namespace there
+/// may be holding its files four each past that, 1,215,311 in all.
 #[test]
 fn the_nodes_own_descriptors_on_fedoras_figures() {
     let unlimited = rustix::process::Rlimit {
@@ -59,14 +65,18 @@ fn the_nodes_own_descriptors_on_fedoras_figures() {
         maximum: None,
     };
     let b = FilesBound::of(&unlimited, root_pools(), 0);
-    assert_eq!(b.own, 406_027, "{:?}", bench());
-    assert_eq!(b.own + b.namespaces * FILES_A_KEPT, 679_683);
+    assert_eq!(b.own, 941_655, "{:?}", bench());
+    assert_eq!(
+        b.own - 406_027,
+        633 * 4 + 440 * 20 + 65_540 + (65_536 * 6 + 3) + 65_536 + 1
+    );
+    assert_eq!(b.own + b.namespaces * FILES_A_KEPT, 1_215_311);
 }
 
 /// Goal 6 step 6's HEX-INST-5 (Ada's 2026-11-06 constants rule): what a node needs of its soft descriptor limit is the
 /// node's to say, from its own bounds. Do: ask what a root node and a rootless one need on fedora's figures, nothing
 /// held beside. Expect: the root node the bound's own figures under no limit, its own and four files for each of its
-/// kept namespaces, 679,683 in all; the rootless node its own alone, keeping no namespaces.
+/// kept namespaces, 1,215,311 in all; the rootless node its own alone, keeping no namespaces.
 #[test]
 fn a_node_says_the_descriptors_it_needs() {
     let unlimited = rustix::process::Rlimit {
@@ -82,15 +92,216 @@ fn a_node_says_the_descriptors_it_needs() {
             files: bound.namespaces * FILES_A_KEPT
         }
     );
-    assert_eq!(root.total(), 679_683);
-    let rootless = FilesBound::needed(Pools::rootless(bench()), 0);
+    assert_eq!(root.total(), 1_215_311);
+    let rootless = FilesBound::needed(Pools::rootless(bench(), files_ahead()), 0);
     assert_eq!(rootless.files, 0, "a rootless node keeps no namespaces");
     assert_eq!(rootless.total(), rootless.own);
 }
 
+/// The lead's ruling of 2026-11-11 (AC-T7.1.1): a node's own fit its hard descriptor limit by construction. Do: fit a
+/// root node's pools on fedora's figures to a hard limit holding its own at those bounds, and to one past it. Expect:
+/// its bounds as given, its socket's bound on connections lowered to what its programs' and calls' budgets admit (the
+/// inits', 65,536, under its 524,288 descriptors and 500,000 threads), and its own and every namespace's files within
+/// the limit.
+#[test]
+fn a_node_whose_own_fit_its_hard_limit_keeps_its_bounds() {
+    use rustix::process::Rlimit;
+
+    let pools = root_pools();
+    let whole = descriptors_of_the_node(pools, 3);
+    for hard in [whole, whole + 1_000] {
+        let fitted = fit(pools, hard, 3).unwrap();
+        assert_eq!(fitted.sizes.descriptors, 65_536, "at {hard}");
+        assert_eq!(
+            fitted,
+            Pools {
+                sizes: Sizes {
+                    descriptors: 65_536,
+                    ..pools.sizes
+                },
+                ..pools
+            },
+            "at {hard}"
+        );
+        let files = FilesBound::of(
+            &Rlimit {
+                current: Some(hard),
+                maximum: Some(hard),
+            },
+            fitted,
+            3,
+        );
+        assert!(
+            files.own + files.namespaces * FILES_A_KEPT <= hard,
+            "{files:?} at {hard}"
+        );
+    }
+}
+
+/// The lead's ruling of 2026-11-11 (AC-T7.1.1; the FC lane's guests, whose init started `hex node` under the kernel's
+/// 1,024 and 4,096): a node under a hard limit short of its own at its host's bounds starts with every bound that
+/// holds descriptors fitted to it. Do: fit a root node's pools and a rootless one's on fedora's figures, 40 held
+/// beside, to the least node's descriptors and one past, to 1,024, to a guest's 4,096 and to 65,536. Expect: the node's
+/// own, and its namespaces' files beside, within each limit; the share the largest that fits; at least one box, init
+/// and connection; no bound past its host's or an init past the boxes; and no bound lower under a longer limit.
+#[test]
+fn a_node_under_a_short_hard_limit_fits_every_bound_that_holds_descriptors_to_it() {
+    use rustix::process::Rlimit;
+
+    let beside = 40;
+    for pools in [root_pools(), Pools::rootless(bench(), files_ahead())] {
+        let whole = descriptors_of_the_node(pools, beside);
+        let least = descriptors_of_the_node(shrunk(pools, 0, 1), beside);
+        let mut shorter: Option<Sizes> = None;
+        for hard in [least, least + 1, 1_024, 4_096, 65_536] {
+            assert!(hard < whole, "{hard} is short of the node's own, {whole}");
+            let fitted = fit(pools, hard, beside).unwrap();
+            let own = descriptors_of_the_node(fitted, beside);
+            assert!(own <= hard, "its own {own} within {hard}");
+            let at = share(pools, hard, beside);
+            assert_eq!(
+                Pools {
+                    sizes: Sizes {
+                        descriptors: fitted.sizes.descriptors,
+                        ..shrunk(pools, at, whole).sizes
+                    },
+                    ..shrunk(pools, at, whole)
+                },
+                fitted
+            );
+            assert!(
+                descriptors_of_the_node(shrunk(pools, at + 1, whole), beside) > hard,
+                "the share past {at} doesn't fit {hard}"
+            );
+            let files = FilesBound::of(
+                &Rlimit {
+                    current: Some(hard),
+                    maximum: Some(hard),
+                },
+                fitted,
+                beside,
+            );
+            assert!(
+                files.own + files.namespaces * FILES_A_KEPT <= hard,
+                "{files:?} at {hard}"
+            );
+            let s = fitted.sizes;
+            let given = pools.sizes;
+            assert!(s.boxes >= 1 && s.inits >= 1 && s.descriptors >= 1, "{s:?}");
+            assert!(s.inits <= s.boxes && s.programs <= s.boxes, "{s:?}");
+            assert_eq!(s.descriptors, connections(&s), "{s:?}");
+            let bounds = |s: Sizes| {
+                [
+                    s.boxes,
+                    s.inits,
+                    s.programs,
+                    s.seeds.get(),
+                    s.idle_cgroups,
+                    s.ahead,
+                    s.idle_netns,
+                    s.netns,
+                    s.ipc_uts,
+                    s.descriptors,
+                ]
+            };
+            for (fitted, given) in bounds(s).into_iter().zip(bounds(given)) {
+                assert!(fitted <= given, "{s:?} within {given:?}");
+            }
+            if let Some(shorter) = shorter {
+                for (longer, shorter) in bounds(s).into_iter().zip(bounds(shorter)) {
+                    assert!(longer >= shorter, "{s:?} at {hard} under {shorter:?}");
+                }
+            }
+            shorter = Some(s);
+        }
+    }
+}
+
+/// The lead's ruling of 2026-11-11 (AC-T7.1.1): a node's start is refused only where its hard limit can't hold the
+/// least node, one box and one connection, and what refuses it carries that node's descriptors. Do: fit a root node's
+/// pools and a rootless one's on fedora's figures, 40 held beside, to the least node's descriptors and to one fewer.
+/// Expect: at them, one box, init, device program, seed and connection, and nothing made ahead; one fewer, refused
+/// with the least node's count.
+#[test]
+fn a_node_under_a_hard_limit_short_of_the_least_node_is_refused_with_its_count() {
+    let beside = 40;
+    for pools in [root_pools(), Pools::rootless(bench(), files_ahead())] {
+        let least = descriptors_of_the_node(shrunk(pools, 0, 1), beside);
+        assert_eq!(fit(pools, least - 1, beside), Err(least));
+        let fitted = fit(pools, least, beside).unwrap();
+        let s = fitted.sizes;
+        assert_eq!(
+            (s.boxes, s.inits, s.programs, s.seeds.get(), s.descriptors),
+            (1, 1, 1, 1, 1),
+            "{s:?}"
+        );
+        assert_eq!(
+            (
+                s.idle_cgroups,
+                s.ahead,
+                s.idle_netns,
+                s.netns,
+                s.ipc_uts,
+                fitted.netns,
+                fitted.ipc_uts
+            ),
+            (0, 0, 0, 0, 0, 0, 0),
+            "{fitted:?}"
+        );
+    }
+}
+
+/// The lead's ruling of 2026-11-11 (AC-T7.1.1): a node at the bounds its start fitted holds, with every admission at its
+/// most, no more than its hard limit, so its own count holds every program place's streams, the message read past the
+/// places, and every exec'd program's pidfd the supervisor keeps; and where it runs VM boxes, each one's past a box's
+/// and their root's. Do: fit a root node's pools and a rootless one's on fedora's figures, 40 held beside, to a guest's
+/// 4,096 and to 65,536, running VM boxes and not; count those at the fitted admission bounds (`serve::limits`, the
+/// wire's three descriptors a message). Expect: the node's own at least those, and within the limit; running VM boxes,
+/// its own counts seven more a box (each an init's row) and two for their root, at the same bounds.
+#[test]
+fn a_node_at_its_fitted_bounds_counts_every_program_place_within_its_hard_limit() {
+    let beside = 40;
+    let streams = u64::try_from(hex_core::wire::MAX_FDS).unwrap();
+    let n = |count: usize| u64::try_from(count).unwrap();
+    for pools in [root_pools(), Pools::rootless(bench(), files_ahead())] {
+        for hard in [4_096, 65_536] {
+            let fitted = fit(pools, hard, beside).unwrap();
+            let places = n(crate::serve::limits(&fitted.sizes.platform()).programs);
+            let own = descriptors_of_the_node(fitted, beside);
+            let socket_and_supervisor = places * (1 + 2 * streams + 1) + streams;
+            assert!(
+                own >= socket_and_supervisor && own <= hard,
+                "{own} counts {socket_and_supervisor} for {places} places within {hard}"
+            );
+            let vms = fitted.running_vms(true);
+            assert_eq!(
+                descriptors_of_the_node(vms, beside) - own,
+                n(fitted.sizes.inits) * 7 + 2,
+                "at {hard}"
+            );
+            let with_vms = fit(pools.running_vms(true), hard, beside).unwrap();
+            assert!(
+                descriptors_of_the_node(with_vms, beside) <= hard,
+                "running VM boxes, fitted within {hard}: {with_vms:?}"
+            );
+            assert!(with_vms.sizes.inits <= fitted.sizes.inits, "at {hard}");
+        }
+    }
+}
+
 /// A root node's pools on the bench host.
 fn root_pools() -> Pools {
-    Pools::root(bench())
+    Pools::root(bench(), files_ahead())
+}
+
+/// The files each cgroup made ahead opens on the bench host, its state on one disk (its `io.latency` and `io.max`
+/// among them; `hex_runtime::linux::cgroup::ahead_files`).
+fn files_ahead() -> usize {
+    hex_runtime::linux::cgroup::ahead_files(&[hex_core::cgroup::Dev {
+        major: 259,
+        minor: 0,
+    }])
+    .len()
 }
 
 /// Waits for `fact`, giving the CPU up between looks rather than sleeping a picked period, for at most
@@ -418,6 +629,8 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
                 ipc_uts,
                 devfs: true,
                 sizes: bench(),
+                files_ahead: files_ahead(),
+                vms: false,
             },
             beside,
         )
@@ -472,6 +685,8 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
             ipc_uts: 4_096,
             devfs: true,
             sizes: bench(),
+            files_ahead: files_ahead(),
+            vms: false,
         }),
         10,
         "what the limit leaves past the pools, four a namespace"
@@ -487,7 +702,8 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
 /// with their mask sources. Do: bound the files under one soft limit with the namespace pools at a root node's
 /// bounds, with and without the mounts made ahead. Expect: the node's own grows by both pools held at their bounds
 /// (the seeds' bound each, one descriptor a `/dev`, two a proc: its pid namespace and its tree), the one maker's peak
-/// while it makes a proc (six), the two mask sources, and each call's takes of a `/dev` and a proc beside; a
+/// while it makes a proc (six), the two mask sources, each call's takes of a `/dev` and a proc beside, and the proc of
+/// every init parked in an idle cgroup or one made ahead, two each (decision 8, parked procs, which the pool makes); a
 /// rootless node keeps none.
 #[test]
 fn the_files_bound_counts_the_mounts_made_ahead() {
@@ -515,7 +731,7 @@ fn the_files_bound_counts_the_mounts_made_ahead() {
     let held = n(bench().seeds.get());
     assert_eq!(
         at(true).own - at(false).own,
-        held + 2 * held + 6 + 2 + 3 * n(bench().seeds.get())
+        held + 2 * held + 6 + 2 + 3 * n(bench().seeds.get()) + 2 * n(bench().procs_alive())
     );
     assert!(
         root_pools().devfs,

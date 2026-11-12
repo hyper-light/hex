@@ -144,6 +144,17 @@ impl FirecrackerRuntime {
         })
     }
 
+    /// The RLIMIT_MEMLOCK the VMM of a VM given a device whole, its guest's RAM `ram` bytes, runs under, under this
+    /// process's own limit and capabilities ([`vfio::dma_memlock`]). A VM given none maps no RAM for DMA, and its VMM
+    /// runs under the node's own.
+    fn dma_memlock(ram: u64) -> Result<Option<rustix::process::Rlimit>, Refusal> {
+        vfio::dma_memlock(
+            ram,
+            rustix::process::getrlimit(rustix::process::Resource::Memlock),
+            vfio::vmm_holds_ipc_lock()?,
+        )
+    }
+
     fn vm_program(&self, paths: &Paths) -> Result<Program, Refusal> {
         let mut program = Program::default();
         program
@@ -416,6 +427,18 @@ impl FirecrackerRuntime {
         }
         let pools = transaction.pool_records()?;
         let _selection = self.catalog.prepare(&spec, &records, &pools)?;
+        // A VM given devices whole has its VMM pin all its RAM for DMA: refused here, before anything is written or
+        // launched, where its memlock can't hold that; else its VMM's soft limit raised to its hard one if need be.
+        let memlock = if spec.devices.is_empty() {
+            None
+        } else {
+            let ram = self
+                .config
+                .machine_memory(&spec)?
+                .checked_mul(1 << 20)
+                .ok_or_else(|| invalid("guest memory overflow"))?;
+            Self::dma_memlock(ram)?
+        };
         let id = spec.id.try_clone()?;
         // The optional handoff already persisted this SAME scope before stopping its observer.
         if let Some(scope) = expected_scope {
@@ -473,6 +496,7 @@ impl FirecrackerRuntime {
             &ManagedLaunch::Firecracker {
                 program: &program,
                 vsock: &paths.vsock,
+                memlock,
             },
             io,
             remaining(until)?,
@@ -737,15 +761,23 @@ impl FirecrackerRuntime {
         transaction: &dyn Transaction,
         until: Instant,
     ) -> Result<BoxInfo, Refusal> {
-        match self.create_inner(spec, scope, transaction, until) {
-            Ok(info) => Ok(info),
-            Err(error) => match transaction.read(id)? {
-                Some(_) => match self.remove(id, transaction) {
-                    Ok(()) => Err(error),
-                    Err(_) => Err(uncertain(id)),
-                },
-                None => Err(error),
-            },
+        let refusal = match self.create_inner(spec, scope, transaction, until) {
+            Ok(info) => return Ok(info),
+            Err(refusal) => refusal,
+        };
+        // The create's refusal is kept whatever its cleanup meets: a cleanup that fails leaves the box uncertain, and
+        // its refusal carries both causes, the create's first (AC-T7.4.1).
+        let cleanup = transaction.read(id).and_then(|record| match record {
+            Some(_) => self.remove(id, transaction),
+            None => Ok(()),
+        });
+        match cleanup {
+            Ok(()) => Err(refusal),
+            Err(cleanup) => Err(transport::uncertain_after(
+                id.try_clone()?,
+                refusal,
+                cleanup,
+            )),
         }
     }
 
@@ -1285,10 +1317,43 @@ mod io_tests {
     use super::*;
     use std::os::fd::AsRawFd;
 
+    /// The descriptors this process holds on `pipe`'s write end now: its `/proc/self/fd` entries naming the same pipe
+    /// (`pipe:[<inode>]`) open for writing (their fdinfo's `flags`, O_ACCMODE; proc(5)). By the pipe, not by number,
+    /// so another file under a closed number is no write end; by this process's own table, so a child another test
+    /// forks, holding a copy until its exec, is never counted.
+    fn write_ends(pipe: &impl std::os::fd::AsFd) -> Vec<String> {
+        let target = format!("pipe:[{}]", rustix::fs::fstat(pipe).unwrap().st_ino);
+        let mut ends = Vec::new();
+        for entry in fs::read_dir("/proc/self/fd").unwrap() {
+            let entry = entry.unwrap();
+            // A descriptor another test closed since the listing names nothing now.
+            let Ok(link) = fs::read_link(entry.path()) else {
+                continue;
+            };
+            let fd = entry.file_name().into_string().unwrap();
+            let Ok(info) = fs::read_to_string(format!("/proc/self/fdinfo/{fd}")) else {
+                continue;
+            };
+            let flags = info
+                .lines()
+                .find_map(|line| line.strip_prefix("flags:"))
+                .map(|flags| u32::from_str_radix(flags.trim(), 8).unwrap())
+                .unwrap();
+            if link.as_os_str() == target.as_str() && flags & 0o3 == 0o1 {
+                ends.push(fd);
+            }
+        }
+        ends.sort();
+        ends
+    }
+
     /// AC-T7.4.1: configured VMM output must accept both streams, and both exact owned
-    /// descriptors close on drop: their pipe's reader then reads what they wrote to its end. The
-    /// end is the pipe's own, which no descriptor number can fake (red at 37dc9d9f: another file
-    /// took a closed number). No Config, guest, process, cgroup, KVM or GPU is created.
+    /// descriptors close on drop: no descriptor of this process holds their pipe's write end
+    /// after, and its reader reads what they wrote. The end is told by the pipe, which no
+    /// descriptor number can fake (red at 37dc9d9f: another file took a closed number), in this
+    /// process's own table: a read to the pipe's end also waited for a child another test had
+    /// forked, holding the write end until its exec (WouldBlock under this binary's parallel
+    /// tests). No Config, guest, process, cgroup, KVM or GPU is created.
     #[test]
     fn configured_vmm_output_sinks_accept_bytes_and_close_on_drop() {
         use std::io::Read;
@@ -1303,6 +1368,13 @@ mod io_tests {
         assert!(gpu_report.is_none());
         let descriptors = [stdout.as_raw_fd(), stderr.as_raw_fd()];
         assert_ne!(descriptors[0], descriptors[1]);
+        let mut sinks = descriptors.map(|fd| fd.to_string());
+        sinks.sort();
+        assert_eq!(
+            write_ends(&reader),
+            sinks,
+            "the sinks are the pipe's two write ends"
+        );
         stdout.write_all(b"configured-vmm-stdout\n").unwrap();
         stderr.write_all(b"configured-vmm-stderr\n").unwrap();
         drop(stdout);
@@ -1311,12 +1383,11 @@ mod io_tests {
         // binary's parallel tests: dupfd returns the lowest free number from the one given.
         let other = fs::File::open("/dev/null").unwrap();
         let _reuse = rustix::io::fcntl_dupfd_cloexec(&other, descriptors[0]).unwrap();
-        // Nonblocking, so a writer still open shows at once as WouldBlock, never as a wait.
-        let flags = rustix::fs::fcntl_getfl(&reader).unwrap();
-        rustix::fs::fcntl_setfl(&reader, flags | rustix::fs::OFlags::NONBLOCK).unwrap();
-        let mut read = Vec::new();
-        reader.read_to_end(&mut read).unwrap();
-        assert_eq!(read, b"configured-vmm-stdout\nconfigured-vmm-stderr\n");
+        assert_eq!(write_ends(&reader), Vec::<String>::new(), "closed on drop");
+        let wrote = b"configured-vmm-stdout\nconfigured-vmm-stderr\n";
+        let mut read = [0u8; 44];
+        reader.read_exact(&mut read).unwrap();
+        assert_eq!(&read, wrote);
     }
 
     /// A stand-in VMM: a real child process, observed as the native receipt observes one.
@@ -1702,5 +1773,397 @@ mod handoff_tests {
                 .project_routes(&[wrong], None, &mut crate::devices::RouteProjection::new())
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::devices::{Catalog, PoolRecords, Records};
+    use hex_api::{
+        CapacityResources, Execution, GpuEligibility, ImageArch, ImageOs, ImagePlatform, RouteKey,
+        RouteReceipt,
+    };
+    use sha2::{Digest, Sha256};
+    use std::cell::RefCell;
+
+    /// One box's record as a Store keeps it, its fresh write given a native scope, whose native scope a cleanup can't
+    /// attach: as one that can't reach its VMM meets it.
+    struct Unattachable(RefCell<Option<BoxRecord>>);
+
+    impl Transaction for Unattachable {
+        fn records(&self) -> Result<Records, Refusal> {
+            Ok(Records::new())
+        }
+        fn pool_records(&self) -> Result<PoolRecords, Refusal> {
+            Ok(PoolRecords::new())
+        }
+        fn read_pool(&self, _: &hex_api::BackingKey) -> Result<Option<PoolRecord>, Refusal> {
+            panic!("a CPU box reads no pool")
+        }
+        fn put_pool(&self, _: &PoolRecord) -> Result<(), Refusal> {
+            panic!("a CPU box writes no pool")
+        }
+        fn grant_pool(&self, _: &hex_api::BackingGrant) -> Result<PoolRecord, Refusal> {
+            panic!("a CPU box is granted no pool")
+        }
+        fn remove_pool(&self, _: &hex_api::BackingKey) -> Result<(), Refusal> {
+            panic!("a CPU box removes no pool")
+        }
+        fn check_unsubmitted_pool(&self) -> Result<(), Refusal> {
+            panic!("a CPU box checks no pool")
+        }
+        fn read(&self, _: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
+            Ok(self.0.borrow().clone())
+        }
+        fn put(&self, record: &BoxRecord) -> Result<(), Refusal> {
+            let mut kept = record.clone();
+            kept.native_scope
+                .get_or_insert(hex_core::record::NativeScope::from_bytes([7; 16]));
+            *self.0.borrow_mut() = Some(kept);
+            Ok(())
+        }
+        fn remove(&self, _: &BoxId) -> Result<(), Refusal> {
+            *self.0.borrow_mut() = None;
+            Ok(())
+        }
+        fn launch_managed(
+            &self,
+            _: &ManagedLaunch<'_>,
+            _: shards_api::LaunchIo,
+            _: std::time::Duration,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            panic!("this create is refused before its VMM")
+        }
+        fn attach_managed(
+            &self,
+            _: Option<&shards_api::Identity>,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            Err(Refusal::Os {
+                op: "attaching the box's native scope",
+                why: "the test refuses it".to_owned(),
+            })
+        }
+        fn finalize_managed(&self, _: Option<&shards_api::Identity>) -> Result<(), Refusal> {
+            panic!("an unattached scope is never finalized")
+        }
+        fn managed_usage(&self) -> Result<hex_api::Usage, Refusal> {
+            panic!("a refused create reads no usage")
+        }
+    }
+
+    /// AC-T7.4.1 (original): a create refused whose cleanup fails too keeps both causes, typed, its own first. Do:
+    /// create a CPU box whose VM folder can't be made (its state folder is absent), on records whose native scope its
+    /// cleanup can't attach. Expect `Uncertain` carrying the create's refusal, then the cleanup's: the cleanup's
+    /// failure had replaced both with a bare `Lifecycle` `Uncertain`.
+    #[test]
+    fn original_a_create_whose_cleanup_fails_keeps_both_causes_its_own_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let pinned = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            fs::write(&path, bytes).unwrap();
+            (path, <[u8; 32]>::from(Sha256::digest(bytes)))
+        };
+        let mut config = pool::tests::config();
+        (config.binary, config.binary_sha256) = pinned("firecracker", b"a stand-in VMM, never run");
+        (config.cost_evidence, config.cost.id) = pinned("evidence", b"a stand-in cost's evidence");
+        config.state_dir = dir.path().join("absent");
+        let catalog =
+            Catalog::parse(b"hex-devices-1\ngpu\t256\ta\t1\tvfio\t0000:01:00.0\t7\n").unwrap();
+        let owner: Arc<dyn Books> = Arc::new(super::handoff_tests::NoOwnerCalls);
+        let allocation = config
+            .cost
+            .allocate(CapacityResources {
+                cpu_milli: 1000,
+                mem_bytes: hex_api::MIN_MEMORY,
+                disk_bytes: 0,
+            })
+            .unwrap();
+        let runtime = FirecrackerRuntime {
+            config,
+            catalog: triomphe::Arc::try_new(catalog).unwrap(),
+            books: Arc::downgrade(&owner),
+            initialized: std::sync::OnceLock::new(),
+        };
+        let id = BoxId::new("cleanup-refused").unwrap();
+        let spec = BoxSpec {
+            id: id.clone(),
+            bounds: hex_api::Bounds {
+                cpu_max_milli: Some(1000),
+                memory_max: Some(hex_api::MIN_MEMORY),
+                ..hex_api::Bounds::default()
+            },
+            class: ClassSpec::Firecracker(Box::new(hex_api::OciSpec {
+                rootfs: hex_api::Rootfs::Dir("/fixture/root".into()),
+                init: Program::of(&["true"]),
+                mounts: Vec::new(),
+                hostname: None,
+                network: hex_api::Network::Private,
+                hosts: Vec::new(),
+            })),
+            owner: None,
+            devices: Vec::new(),
+            allocation: Some(allocation),
+            route: Some(RouteReceipt {
+                key: RouteKey {
+                    class: Class::Firecracker,
+                    image: ImagePlatform {
+                        os: ImageOs::Linux,
+                        arch: ImageArch::Amd64,
+                    },
+                    execution: Execution::Firecracker,
+                    gpu: GpuEligibility::None,
+                },
+                backing: None,
+            }),
+        };
+        let records = Unattachable(RefCell::new(None));
+        let until = Instant::now() + std::time::Duration::from_secs(30);
+        let refused = runtime
+            .create_or_cleanup(&id, spec, None, &records, until)
+            .unwrap_err();
+        let Refusal::Uncertain {
+            id: named,
+            refusal,
+            cleanup,
+        } = &refused
+        else {
+            panic!("both causes kept: {refused:?}");
+        };
+        assert_eq!(named, &id);
+        assert!(
+            matches!(
+                &**refusal,
+                Refusal::Os {
+                    op: "creating private VM directory",
+                    ..
+                }
+            ),
+            "{refusal:?}"
+        );
+        assert_eq!(
+            **cleanup,
+            Refusal::Os {
+                op: "attaching the box's native scope",
+                why: "the test refuses it".to_owned(),
+            }
+        );
+    }
+}
+
+#[cfg(test)]
+mod memlock_tests {
+    use super::*;
+    use crate::devices::{Catalog, PoolRecords, Records};
+    use hex_api::{
+        CapacityResources, Execution, GpuEligibility, ImageArch, ImagePlatform, RouteKey,
+        RouteReceipt,
+    };
+    use sha2::{Digest, Sha256};
+    use std::cell::RefCell;
+
+    /// Set in the copy of this binary that runs [`original_a_vfio_vm_past_its_memlock_is_refused_before_launch`]'s
+    /// case under a lowered RLIMIT_MEMLOCK, which no process raises back without CAP_SYS_RESOURCE.
+    const CASE_ENV: &str = "HEX_FC_MEMLOCK_CASE";
+    const PASS: &str = "memlock: the VFIO VM was refused before its VMM";
+    const TEST: &str = "firecracker::native::memlock_tests::original_a_vfio_vm_past_its_memlock_is_refused_before_launch";
+
+    /// A Store's records for one box, its fresh write given a native scope; its VMM's launch is the one call that
+    /// mustn't come.
+    struct Unlaunched(RefCell<Option<BoxRecord>>);
+
+    impl Transaction for Unlaunched {
+        fn records(&self) -> Result<Records, Refusal> {
+            Ok(Records::new())
+        }
+        fn pool_records(&self) -> Result<PoolRecords, Refusal> {
+            Ok(PoolRecords::new())
+        }
+        fn read_pool(&self, _: &hex_api::BackingKey) -> Result<Option<PoolRecord>, Refusal> {
+            Ok(None)
+        }
+        fn put_pool(&self, _: &PoolRecord) -> Result<(), Refusal> {
+            panic!("a dedicated GPU box writes no pool")
+        }
+        fn grant_pool(&self, _: &hex_api::BackingGrant) -> Result<PoolRecord, Refusal> {
+            panic!("a dedicated GPU box is granted no pool")
+        }
+        fn remove_pool(&self, _: &hex_api::BackingKey) -> Result<(), Refusal> {
+            panic!("a dedicated GPU box removes no pool")
+        }
+        fn check_unsubmitted_pool(&self) -> Result<(), Refusal> {
+            Ok(())
+        }
+        fn read(&self, _: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
+            Ok(self.0.borrow().clone())
+        }
+        fn put(&self, record: &BoxRecord) -> Result<(), Refusal> {
+            let mut kept = record.clone();
+            kept.native_scope
+                .get_or_insert(hex_core::record::NativeScope::from_bytes([7; 16]));
+            *self.0.borrow_mut() = Some(kept);
+            Ok(())
+        }
+        fn remove(&self, _: &BoxId) -> Result<(), Refusal> {
+            *self.0.borrow_mut() = None;
+            Ok(())
+        }
+        fn launch_managed(
+            &self,
+            _: &ManagedLaunch<'_>,
+            _: shards_api::LaunchIo,
+            _: std::time::Duration,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            Err(Refusal::Broken(
+                "the VMM was launched past its memlock".to_owned(),
+            ))
+        }
+        fn attach_managed(
+            &self,
+            _: Option<&shards_api::Identity>,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            panic!("a create refused before its VMM attaches nothing")
+        }
+        fn finalize_managed(&self, _: Option<&shards_api::Identity>) -> Result<(), Refusal> {
+            panic!("a create refused before its VMM finalizes nothing")
+        }
+        fn managed_usage(&self) -> Result<hex_api::Usage, Refusal> {
+            panic!("a refused create reads no usage")
+        }
+    }
+
+    /// The lead's ruling of 2026-11-11 (AC-T7.4.1; original; the GPU run r690's step a on 00aad8da): a VFIO VM's VMM
+    /// maps all its guest's RAM for DMA, which vfio's type1 IOMMU charges to the VMM's RLIMIT_MEMLOCK unless the VMM
+    /// holds CAP_IPC_LOCK; Firecracker then ended with `IommuDmaMap(Error(12))`, ENOMEM, after its launch. Do, in a copy
+    /// of this binary whose RLIMIT_MEMLOCK, soft and hard, is one MiB, below its VM's RAM, and which holds no
+    /// CAP_IPC_LOCK to give its VMM (a root copy drops it from its bounding and ambient sets): create a VM given a
+    /// GPU whole (VFIO) through the adapter, its records' VMM launch refused if it comes. Expect the create refused before
+    /// anything is written or launched (no record, no VFIO plan read from the host, no VMM), by type, naming the VM's RAM
+    /// in bytes, the soft and the hard limit, and CAP_IPC_LOCK.
+    #[test]
+    fn original_a_vfio_vm_past_its_memlock_is_refused_before_launch() {
+        if std::env::var_os(CASE_ENV).is_some() {
+            refused_before_launch_under_a_low_memlock();
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
+            .env(CASE_ENV, "1")
+            .output()
+            .unwrap();
+        let log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        eprint!("{log}");
+        assert!(output.status.success(), "the copy failed");
+        assert!(log.lines().any(|line| line == PASS), "the copy ran no case");
+    }
+
+    fn refused_before_launch_under_a_low_memlock() {
+        use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+        use rustix::thread::CapabilitySet;
+        if rustix::process::geteuid().is_root() {
+            rustix::thread::remove_capability_from_bounding_set(CapabilitySet::IPC_LOCK).unwrap();
+            rustix::thread::configure_capability_in_ambient_set(CapabilitySet::IPC_LOCK, false)
+                .unwrap();
+        }
+        let low = 1 << 20;
+        setrlimit(
+            Resource::Memlock,
+            Rlimit {
+                current: Some(low),
+                maximum: Some(low),
+            },
+        )
+        .unwrap();
+        assert_eq!(getrlimit(Resource::Memlock).maximum, Some(low));
+        let dir = tempfile::tempdir().unwrap();
+        let pinned = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            fs::write(&path, bytes).unwrap();
+            (path, <[u8; 32]>::from(Sha256::digest(bytes)))
+        };
+        let mut config = pool::tests::config();
+        (config.binary, config.binary_sha256) = pinned("firecracker", b"a stand-in VMM, never run");
+        (config.cost_evidence, config.cost.id) = pinned("evidence", b"a stand-in cost's evidence");
+        config.state_dir = dir.path().join("state");
+        fs::create_dir(&config.state_dir).unwrap();
+        let catalog =
+            Catalog::parse(b"hex-devices-1\ngpu\t256\ta\t1\tvfio\t0000:01:00.0\t7\n").unwrap();
+        let owner: Arc<dyn Books> = Arc::new(super::handoff_tests::NoOwnerCalls);
+        let ram = 64 << 20;
+        let allocation = config
+            .cost
+            .allocate(CapacityResources {
+                cpu_milli: 1000,
+                mem_bytes: ram,
+                disk_bytes: 0,
+            })
+            .unwrap();
+        let runtime = FirecrackerRuntime {
+            config,
+            catalog: triomphe::Arc::try_new(catalog).unwrap(),
+            books: Arc::downgrade(&owner),
+            initialized: std::sync::OnceLock::new(),
+        };
+        let id = BoxId::new("gpu-memlock").unwrap();
+        let spec = BoxSpec {
+            id: id.clone(),
+            bounds: hex_api::Bounds {
+                cpu_max_milli: Some(1000),
+                memory_max: Some(ram),
+                ..hex_api::Bounds::default()
+            },
+            class: ClassSpec::Firecracker(Box::new(hex_api::OciSpec {
+                rootfs: hex_api::Rootfs::Dir("/fixture/root".into()),
+                init: Program::of(&["true"]),
+                mounts: Vec::new(),
+                hostname: None,
+                network: hex_api::Network::Private,
+                hosts: Vec::new(),
+            })),
+            owner: None,
+            devices: vec![DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 256,
+            }],
+            allocation: Some(allocation),
+            route: Some(RouteReceipt {
+                key: RouteKey {
+                    class: Class::Firecracker,
+                    image: ImagePlatform {
+                        os: hex_api::ImageOs::Linux,
+                        arch: ImageArch::Amd64,
+                    },
+                    execution: Execution::Firecracker,
+                    gpu: GpuEligibility::Required,
+                },
+                backing: None,
+            }),
+        };
+        let vm_ram = runtime.config.machine_memory(&spec).unwrap() * (1 << 20);
+        let records = Unlaunched(RefCell::new(None));
+        let until = Instant::now() + std::time::Duration::from_secs(30);
+        let refused = runtime
+            .create_inner(spec, None, &records, until)
+            .unwrap_err();
+        let Refusal::Platform { why, .. } = &refused else {
+            panic!("refused before its VMM, by its memlock: {refused:?}");
+        };
+        assert!(
+            records.0.borrow().is_none(),
+            "refused before anything is written"
+        );
+        for named in [
+            vm_ram.to_string(),
+            format!("soft {low}"),
+            format!("hard {low}"),
+            "CAP_IPC_LOCK".to_owned(),
+        ] {
+            assert!(why.contains(&named), "{named} named: {why}");
+        }
+        eprintln!("{PASS}");
     }
 }

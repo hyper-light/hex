@@ -126,6 +126,14 @@ pub fn limits(platform: &Platform) -> Limits {
 /// the supervisor's 65,536 pidfds). Past it, a connection's calls and programs share what the budgets leave.
 pub const KEPT: usize = 1;
 
+/// Whether `call` starts a program, which takes a place among the programs as it is read ([`Limits::programs`]).
+fn starts_program(call: &Call) -> bool {
+    matches!(
+        call,
+        Call::Exec { .. } | Call::ExecStreams { .. } | Call::Run { .. }
+    )
+}
+
 /// What [`Refusal::Exhausted`] names for each bound.
 pub const CONNECTIONS: &str = "connections to the node agent's socket";
 pub const IN_FLIGHT: &str = "requests in flight on the node agent's connections together";
@@ -1236,14 +1244,8 @@ impl<O: Os> Shared<O> {
                     }
                     admitted
                 };
-                if admitted {
-                    self.enqueue(Job::Call {
-                        conn: Arc::clone(conn),
-                        header,
-                        call: Box::new(call),
-                        passed,
-                    })
-                } else {
+                if !admitted {
+                    drop(passed);
                     self.answer(
                         conn,
                         header.id,
@@ -1252,6 +1254,27 @@ impl<O: Os> Shared<O> {
                             bound: self.limits.in_flight,
                         }),
                     )
+                } else if starts_program(&call) && !self.reserve(conn)? {
+                    // A call that starts a program takes its place among the programs as it is read, so the streams
+                    // riding it are held only within a place, which the node counts among its own (the lead,
+                    // 2026-11-11): past the budget it is refused here, its streams closed before the answer goes.
+                    drop(passed);
+                    self.done(conn)?;
+                    self.answer(
+                        conn,
+                        header.id,
+                        &Answer::Refused(Refusal::Exhausted {
+                            what: PROGRAMS,
+                            bound: self.limits.programs,
+                        }),
+                    )
+                } else {
+                    self.enqueue(Job::Call {
+                        conn: Arc::clone(conn),
+                        header,
+                        call: Box::new(call),
+                        passed,
+                    })
                 }
             }
         };
@@ -1771,7 +1794,12 @@ impl<O: Os> Shared<O> {
                     let job = jobs.queue.pop_back();
                     drop(jobs);
                     return match job {
-                        Some(Job::Call { conn, header, .. }) => {
+                        Some(Job::Call {
+                            conn, header, call, ..
+                        }) => {
+                            if starts_program(&call) {
+                                self.unreserve(&conn)?;
+                            }
                             self.done(&conn)?;
                             self.answer(
                                 &conn,
@@ -1875,8 +1903,8 @@ impl<O: Os> Shared<O> {
 
     /// Runs one call and answers it, or hands it to the host to answer later ([`Host::forward`]); its place
     /// in flight is given back before the answer goes, so a client that sends its next call on reading
-    /// the answer never meets the bound. An exec takes its place among the connection's programs, its stdio
-    /// and its token first, so a forwarded one is held to the same bound.
+    /// the answer never meets the bound. An exec took its place among the connection's programs as it was read
+    /// ([`starts_program`]), and takes its stdio and its token first, so a forwarded one is held to the same bound.
     fn call(
         self: &Arc<Self>,
         conn: &Arc<Conn<O>>,
@@ -1895,14 +1923,9 @@ impl<O: Os> Shared<O> {
             Call::Run { spec, streams, .. } => Some((&spec.id, *streams)),
             _ => None,
         };
+        // A call that starts a program took its place among the programs as it was read.
         let (stdio, program) = match starts {
             Some((id, streams)) => {
-                if !self.reserve(conn)? {
-                    return reply(Answer::Refused(Refusal::Exhausted {
-                        what: PROGRAMS,
-                        bound: self.limits.programs,
-                    }));
-                }
                 let mut stdio = match self.os.stdio(streams, passed) {
                     Ok(stdio) => stdio,
                     Err(r) => {

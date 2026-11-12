@@ -76,6 +76,11 @@ use rustix::fs::inotify;
 use rustix::process::{Pid, PidfdFlags};
 
 const TEST: &str = "a_boxs_cgroup_is_ended_without_the_lock_and_reused_within_its_owner";
+/// Set in the copy of this binary that runs [`a_node_past_its_files_bound_checks_by_entering_counted`] alone: it lowers
+/// its hard descriptor limit, which no process raises back without CAP_SYS_RESOURCE, so no later case runs under it.
+const FILES_BOUND_ENV: &str = "HEX_OCI_REUSE_FILES_BOUND";
+/// What the copy says once the case has passed.
+const FILES_BOUND_PASS: &str = "netns: past the files' bound, checks entered, counted";
 
 /// Docker's default capability set (moby's `oci/caps/defaults.go`, as crates/hex-core/src/bundle.rs
 /// renders it): no CAP_SYS_ADMIN, so a box holding these can't change its cgroup.
@@ -85,6 +90,11 @@ const DOCKER_CAPS: &str = r#"["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_F
 fn a_boxs_cgroup_is_ended_without_the_lock_and_reused_within_its_owner() {
     let exe = env!("CARGO_BIN_EXE_hex").to_owned();
     let cache = cache_dir();
+    if std::env::var_os(FILES_BOUND_ENV).is_some() {
+        let own = prepare_cgroup(&cache).expect("this copy's own delegated cgroup");
+        a_node_past_its_files_bound_checks_by_entering_counted(&Lab::new(&cache, &exe), &own);
+        return;
+    }
     match prepare_cgroup(&cache) {
         Ok(own) => exercise(&own, &cache, &exe),
         Err(direct) if std::env::var_os("HEX_DELEGATED").is_none() => {
@@ -346,7 +356,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     a_boxs_network_namespace_is_reused_within_its_owner_when_clean(&lab, own);
     a_box_can_not_send_to_the_socket_the_check_keeps_in_its_namespace(&lab, own);
     a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(&lab, own);
-    a_node_past_its_files_bound_checks_by_entering_counted(&lab, own);
+    the_files_bound_case_in_a_copy(&lab, own);
     // Last: the node it abandons leaves its seeds running in this process.
     recovery_removes_an_init_parked_by_a_node_that_crashed(&lab, own);
 }
@@ -1909,22 +1919,6 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
         eprintln!("SKIP held files: a rootless node keeps no network namespaces");
         return;
     }
-    // The node holds files within the soft limit it is given, never raising it; a lab's container starts at
-    // dockerd's 1024, which holds none, so this test gives it room for the namespaces it keeps, as an installer would.
-    let per_owner = hex_node::sizes::Sizes::now().unwrap().start;
-    let room = u64::try_from(4 * (2 * per_owner + 8)).unwrap();
-    let Some(_limit) = soft_limit(
-        hex_node::netns::FilesBound::now(hex_node::netns::Pools::root(
-            hex_node::sizes::Sizes::now().unwrap(),
-        ))
-        .unwrap()
-        .own + room,
-    ) else {
-        eprintln!(
-            "SKIP held files: the hard descriptor limit leaves no room for them past the node's own"
-        );
-        return;
-    };
     // Its sockstat and dev, and each iptables file its host's modules make.
     let files = 2 + ["ip_tables_names", "ip6_tables_names"]
         .iter()
@@ -1936,6 +1930,25 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
     drop(first_node);
     let before_all = open_fds();
     let (node, state) = lab.node(&box_root);
+    // The node's start raises its soft descriptor limit to its hard one and fits its bounds to it, its kept namespaces'
+    // files taking what its own leave (hex_node::netns::hold_descriptors): read from the node, as it started, whether
+    // that holds the files of the namespaces this case keeps, two owners' idle ones and a few more.
+    let per_owner = node.sizes().start;
+    let room = u64::try_from(2 * per_owner + 8).unwrap();
+    let bound = node
+        .netns_reuse()
+        .unwrap()
+        .expect("a root node keeps namespaces")
+        .files_bound
+        .expect("a root node's bound");
+    if bound.namespaces < room {
+        eprintln!(
+            "SKIP held files: the hard descriptor limit leaves room for {} namespaces' files past the node's own {}, \
+             short of the {room} this case keeps",
+            bound.namespaces, bound.own
+        );
+        return;
+    }
     let o = BoxOwner::named("owner-files").unwrap();
     let wait = ["/hex", "selftest-box", "wait"];
     let make = |id: &str| BoxSpec {
@@ -2153,17 +2166,58 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
     );
 }
 
-/// Goal 5 extended step 6, the held files' bound (the lead, 2026-11-03T23:07Z and 2026-11-04T09:15Z; CLAUDE.md §2,
-/// §3): a node holds kept namespaces' files for at most what the soft descriptor limit it was given leaves past its
-/// own descriptors at its bounds, four a namespace, and never raises the limit. Do: lower this process's soft limit to
-/// the node's own and room for two namespaces' files, open a node, give back four boxes' namespaces of one owner,
-/// take and give back all four again, release them, and let the node go; then put the limit back. Expect: the node's
-/// bound two, the limit as it was set; two namespaces hold their files and two don't, whose checks entered, counted;
-/// in the second round two checks through files and two more entered, counted; none failed; after the release no
-/// file held; and every descriptor back to the count before the node.
+/// Runs [`a_node_past_its_files_bound_checks_by_entering_counted`] in a copy of this binary alone in a fresh cgroup
+/// beside this process's leaf, as its own delegated cgroup, since the case lowers its hard descriptor limit. Expect
+/// the copy to pass, or to say why it skipped.
+fn the_files_bound_case_in_a_copy(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        eprintln!("SKIP held files' bound: a rootless node keeps no network namespaces");
+        return;
+    }
+    let copy = own.join(format!("hex-files-bound-{}", std::process::id()));
+    std::fs::create_dir(&copy).expect("a fresh cgroup for the copy");
+    let output = Command::new("/bin/sh")
+        .args([
+            "-e",
+            "-c",
+            r#"printf '%s' "$$" > "$1/cgroup.procs"; shift; exec "$@""#,
+            "hex-files-bound",
+        ])
+        .arg(&copy)
+        .arg(std::env::current_exe().expect("test binary path"))
+        .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
+        .env(FILES_BOUND_ENV, "1")
+        .output()
+        .expect("run the files' bound case in a copy");
+    let log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    eprint!("{log}");
+    assert!(
+        output.status.success(),
+        "the files' bound case failed in its copy"
+    );
+    assert!(
+        log.lines()
+            .any(|line| line == FILES_BOUND_PASS || line.starts_with("SKIP held files' bound")),
+        "the files' bound case neither passed nor said why it skipped"
+    );
+}
+
+/// Goal 5 extended step 6, the held files' bound (the lead, 2026-11-03T23:07Z, 2026-11-04T09:15Z and 2026-11-11;
+/// CLAUDE.md §2, §3): a node holds kept namespaces' files for at most what its hard descriptor limit, to which its start
+/// raises its soft one, leaves past its own descriptors at the bounds its start fitted, four a namespace. Run alone in
+/// a copy of this binary ([`the_files_bound_case_in_a_copy`]). Do: open a node and read its bound and its pools; lower
+/// this process's hard limit to that node's own and two namespaces' files; open a node again, give back four boxes'
+/// namespaces of one owner, take and give back all four again, release them, and let the node go. Expect: the second
+/// node's pools the first's and its bound two, the limit as it was set; two namespaces hold their files and two don't,
+/// whose checks entered, counted; in the second round two checks through files and two more entered, counted; none
+/// failed; after the release no file held; and every descriptor back to the count before the node.
 fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path) {
-    use hex_node::netns::{FilesBound, Pools};
-    use rustix::process::{Resource, Rlimit, getrlimit};
+    use hex_node::netns::FilesBound;
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 
     if lab.rootless {
         eprintln!("SKIP held files' bound: a rootless node keeps no network namespaces");
@@ -2190,14 +2244,17 @@ fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path)
     let box_root = own.join("hex-reuse-files-bound");
     let before_warm = open_fds();
     let (first_node, _first_state) = lab.node(&box_root);
-    // Take the bound from the live startup path, which has opened the keeper and supervisor already.
+    // The bound and the pools as the node's start derived them, beside what it held as it took them.
     let warm = first_node
         .netns_reuse()
         .unwrap()
         .expect("a root node keeps namespaces")
         .files_bound
         .expect("a root node's bound");
-    let pools = Pools::root(first_node.sizes());
+    let pools = first_node.pools();
+    // Its start fits its bounds down only under a hard limit short of its own at its host's bounds, where none holds
+    // those bounds and exactly two namespaces' files.
+    let fitted_down = first_node.sizes().boxes < hex_runtime::MAX_BOXES;
     let unlimited = FilesBound::of(
         &Rlimit {
             current: None,
@@ -2211,7 +2268,7 @@ fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path)
         .files
         .checked_div(unlimited.namespaces)
         .expect("a root node has kept namespace capacity");
-    let soft = warm.own + 2 * files_a_kept;
+    let limit = warm.own + 2 * files_a_kept;
     drop(first_node);
     // The supervisor's weak watching thread releases its epoll after it observes the node's drop.
     // Wait for that descriptor too, so the next startup is measured beside the same live descriptors.
@@ -2220,10 +2277,25 @@ fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path)
         || open_fds() <= before_warm,
         "the warm node's descriptors closing",
     );
-    let Some(_limit) = soft_limit(soft) else {
-        eprintln!("SKIP held files' bound: the hard descriptor limit is under the node's own");
+    let given = getrlimit(Resource::Nofile);
+    if fitted_down || given.maximum.is_some_and(|hard| hard < limit) {
+        eprintln!(
+            "SKIP held files' bound: the hard descriptor limit {:?} is short of the node's own at its host's bounds \
+             and two namespaces' files, {limit}",
+            given.maximum
+        );
         return;
-    };
+    }
+    // The node's start raises its soft limit to this hard one and keeps its bounds, which fit it, so its files take
+    // what its own leave: two namespaces'. This copy runs no case after it.
+    setrlimit(
+        Resource::Nofile,
+        Rlimit {
+            current: Some(limit),
+            maximum: Some(limit),
+        },
+    )
+    .expect("lowering the hard descriptor limit");
     let before_all = open_fds();
     let (node, _state) = lab.node(&box_root);
     let o = BoxOwner::named("owner-files-bound").unwrap();
@@ -2255,13 +2327,18 @@ fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path)
     };
     let start = counts();
     let bound = start.files_bound.expect("a root node's bound");
+    assert_eq!(
+        node.pools(),
+        pools,
+        "the node's start kept its bounds under the limit"
+    );
     assert_eq!(bound.namespaces, 2, "{bound:?}");
     assert_eq!(
         bound.soft,
-        Some(soft),
-        "the limit as it was set, never raised"
+        Some(limit),
+        "the limit as it was set, the hard one its soft one was raised to"
     );
-    assert_eq!(getrlimit(Resource::Nofile).current, Some(soft));
+    assert_eq!(getrlimit(Resource::Nofile).current, Some(limit));
     let ids: Vec<String> = (0..4).map(|n| format!("files-bound-{n}")).collect();
     for round in 0..2 {
         // Each namespace's count settled before its check: a fresh one's (round 0) at none once its loopback
@@ -2330,6 +2407,7 @@ fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path)
         || open_fds() <= before_all,
         "every descriptor the node held let go",
     );
+    eprintln!("{FILES_BOUND_PASS}");
 }
 
 /// Goal 5 extended, step 6 (the check's own socket, kept in each namespace it checks; the lead's conditions,
@@ -2582,36 +2660,6 @@ fn new_route() -> Vec<u8> {
     body.extend(nl_attr(1, &[10, 20, 0, 0]));
     body.extend(nl_attr(4, &1u32.to_ne_bytes()));
     nl_request(24, &body)
-}
-
-/// This process's descriptor limit as it was, put back as this drops.
-struct LimitPutBack(rustix::process::Rlimit);
-
-impl Drop for LimitPutBack {
-    fn drop(&mut self) {
-        let _ = rustix::process::setrlimit(rustix::process::Resource::Nofile, self.0);
-    }
-}
-
-/// Sets this process's soft descriptor limit to `soft` for a node a test opens after, as an installer sets the one a
-/// node is given (the node never changes it), and puts it back as the guard drops; `None` where the hard limit is
-/// under `soft`.
-fn soft_limit(soft: u64) -> Option<LimitPutBack> {
-    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
-
-    let given = getrlimit(Resource::Nofile);
-    if given.maximum.is_some_and(|hard| hard < soft) {
-        return None;
-    }
-    setrlimit(
-        Resource::Nofile,
-        Rlimit {
-            current: Some(soft),
-            maximum: given.maximum,
-        },
-    )
-    .ok()?;
-    Some(LimitPutBack(given))
 }
 
 /// Waits for `cond` on `wait`, its own fact's record or measuring (hex_testkit::waits): says how many looks it took.

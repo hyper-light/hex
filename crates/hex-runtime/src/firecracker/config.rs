@@ -34,6 +34,28 @@ pub struct Config {
     pub cost_evidence: PathBuf,
     pub cost: RuntimeCost,
     pub stage_limits: Limits,
+    /// Video BIOS images, by host PCI function, for passthrough GPUs that have no ROM of their own
+    /// (an integrated GPU, whose platform firmware publishes its image): the VMM gives each to its
+    /// guest in a VFCT ACPI table (vendor patch 0004). An operator's input named by path and pinned by
+    /// SHA-256, verified at launch as the VMM binary is; none where absent (AC-T7.4.1).
+    pub vbios: Vec<Vbios>,
+}
+
+/// One host PCI function's video BIOS image, an operator's input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Vbios {
+    /// The function, as the device catalog names it (canonical `dddd:bb:dd.f`).
+    pub sbdf: String,
+    pub path: PathBuf,
+    pub sha256: [u8; 32],
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VbiosFile {
+    sbdf: Text,
+    path: Text,
+    sha256: Text,
 }
 
 #[derive(Deserialize)]
@@ -51,6 +73,8 @@ struct FileConfig {
     cost_evidence: Text,
     cost: RuntimeCost,
     staging: Staging,
+    #[serde(default)]
+    vbios: Vec<VbiosFile>,
 }
 
 #[derive(Deserialize)]
@@ -139,7 +163,18 @@ pub(super) struct VmConfig<'a> {
     drives: [(); 0],
     machine_config: MachineConfig,
     vsock: Vsock<'a>,
-    device_passthrough: &'a [Passthrough],
+    device_passthrough: Vec<DevicePassthrough<'a>>,
+}
+
+/// One passthrough function as the VMM's configuration names it, with its video BIOS image where
+/// one is configured (vendor patch 0004's `vbios_path`).
+#[derive(Serialize)]
+#[cfg(any(target_os = "linux", test))]
+struct DevicePassthrough<'a> {
+    id: &'a str,
+    sbdf: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vbios_path: Option<&'a Path>,
 }
 
 #[derive(Serialize)]
@@ -228,6 +263,7 @@ impl Config {
                 bytes: input.staging.bytes,
                 path: input.staging.path,
             },
+            vbios: vbios(input.vbios)?,
         };
         config.check()?;
         Ok(config)
@@ -240,7 +276,10 @@ impl Config {
             &self.initrd,
             &self.state_dir,
             &self.cost_evidence,
-        ] {
+        ]
+        .into_iter()
+        .chain(self.vbios.iter().map(|image| &image.path))
+        {
             if !path.is_absolute() || path.to_str().is_none_or(|p| p.contains('\0')) {
                 return Err(invalid(
                     "administrator paths must be absolute UTF-8 without NUL",
@@ -301,6 +340,14 @@ impl Config {
             return Err(invalid(
                 "Firecracker executable differs from its required SHA256 pin",
             ));
+        }
+        for image in &self.vbios {
+            if hash_file(&image.path, Some(hex_core::bundle::MAX_CONFIG_BYTES))? != image.sha256 {
+                return Err(invalid(format!(
+                    "the video BIOS image for {} differs from its required SHA256 pin",
+                    image.sbdf
+                )));
+            }
         }
         Ok(())
     }
@@ -399,6 +446,21 @@ impl Config {
         if gpus != 0 {
             crate::guest::gpu::append_pci_authority(&mut boot_args, owner, gpus)?;
         }
+        let mut device_passthrough = Vec::new();
+        device_passthrough
+            .try_reserve_exact(devices.len())
+            .map_err(|_| invalid("passthrough configuration allocation refused"))?;
+        device_passthrough.extend(devices.iter().map(|device| {
+            DevicePassthrough {
+                id: &device.id,
+                sbdf: &device.sbdf,
+                vbios_path: self
+                    .vbios
+                    .iter()
+                    .find(|image| image.sbdf == device.sbdf)
+                    .map(|image| image.path.as_path()),
+            }
+        }));
         Ok(VmConfig {
             boot_source: BootSource {
                 kernel_image_path: &self.kernel,
@@ -421,9 +483,50 @@ impl Config {
                 guest_cid: 3,
                 uds_path: vsock,
             },
-            device_passthrough: devices,
+            device_passthrough,
         })
     }
+}
+
+/// Whether `sbdf` names a PCI function as the device catalog does: Linux's `dddd:bb:dd.f`.
+fn canonical_function(sbdf: &str) -> Result<(), Refusal> {
+    let pci = hex_gpu::PciAddress::parse(sbdf)
+        .filter(|pci| pci.domain <= u32::from(u16::MAX))
+        .ok_or_else(|| invalid("a video BIOS image names no PCI function"))?;
+    let mut canonical = String::new();
+    canonical
+        .try_reserve_exact("ffff:ff:1f.7".len())
+        .map_err(|_| invalid("PCI function allocation refused"))?;
+    use std::fmt::Write as _;
+    write!(&mut canonical, "{pci}").map_err(|_| invalid("PCI function cannot be encoded"))?;
+    if canonical != sbdf {
+        return Err(invalid(
+            "a video BIOS image must name its PCI function as dddd:bb:dd.f",
+        ));
+    }
+    Ok(())
+}
+
+/// The configured video BIOS images: each a canonical function's, at most one a function.
+fn vbios(files: Vec<VbiosFile>) -> Result<Vec<Vbios>, Refusal> {
+    let mut images: Vec<Vbios> = Vec::new();
+    images
+        .try_reserve_exact(files.len())
+        .map_err(|_| invalid("video BIOS configuration allocation refused"))?;
+    for file in files {
+        canonical_function(&file.sbdf.0)?;
+        if images.iter().any(|image| image.sbdf == file.sbdf.0) {
+            return Err(invalid(
+                "a PCI function names more than one video BIOS image",
+            ));
+        }
+        images.push(Vbios {
+            sha256: digest(&file.sha256.0)?,
+            path: path(file.path)?,
+            sbdf: file.sbdf.0,
+        });
+    }
+    Ok(images)
 }
 
 fn millis(duration: Duration) -> Result<u32, Refusal> {
@@ -548,6 +651,7 @@ mod tests {
                 bytes: 1 << 20,
                 path: 100,
             },
+            vbios: Vec::new(),
         }
     }
 
@@ -1001,5 +1105,102 @@ mod tests {
         assert!(config.verify_inputs().is_err());
         std::fs::write(&path, vec![b' '; hex_core::bundle::MAX_CONFIG_BYTES + 1]).unwrap();
         assert!(Config::from_file(&path).is_err());
+    }
+
+    /// AC-T7.4.1 (original: r690's guest amdgpu said "Unable to locate a BIOS ROM" for 79:00.0, an
+    /// integrated GPU whose image only its platform's VFCT carries). Do: configure a video BIOS image
+    /// for one of two passthrough functions and write the VM's configuration. Expect that function's
+    /// entry to name the image for its VMM (vendor patch 0004's VFCT), the other's to name none.
+    #[test]
+    fn original_a_configured_vbios_image_goes_to_its_functions_vmm_entry_alone() {
+        let mut value = json();
+        value["vbios"] = serde_json::json!([{
+            "sbdf": "0000:79:00.0", "path": "/private/vbios-1002-13c0.rom", "sha256": "03".repeat(32)
+        }]);
+        let config = Config::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            config.vbios,
+            vec![Vbios {
+                sbdf: "0000:79:00.0".into(),
+                path: "/private/vbios-1002-13c0.rom".into(),
+                sha256: [3; 32],
+            }]
+        );
+        let devices = [
+            passthrough("pci_7900", "0000:79:00.0", true),
+            passthrough("pci_8100", "0000:81:00.0", true),
+        ];
+        let vm = serde_json::to_value(
+            config
+                .machine(&spec(), Path::new("/private/owned/vsock"), &devices)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            vm["device-passthrough"],
+            serde_json::json!([
+                {"id": "pci_7900", "sbdf": "0000:79:00.0", "vbios_path": "/private/vbios-1002-13c0.rom"},
+                {"id": "pci_8100", "sbdf": "0000:81:00.0"},
+            ])
+        );
+    }
+
+    /// AC-T7.4.1: an image is named canonically, once a function, by an absolute path and an exact
+    /// pin; at launch it must be there and be that pin's bytes. Do: parse malformed entries; then
+    /// verify a well-formed one whose file is absent, then holds other bytes, then its own. Expect each
+    /// malformed entry refused; the absent file refused as the OS's, the other bytes refused as a pin
+    /// mismatch naming the function, and its own bytes verified.
+    #[test]
+    fn a_vbios_image_malformed_absent_or_off_its_pin_is_refused_by_type() {
+        let entry = |sbdf: &str, path: &str, sha256: &str| serde_json::json!({"sbdf": sbdf, "path": path, "sha256": sha256});
+        let pin = "03".repeat(32);
+        for images in [
+            serde_json::json!([entry("79:00.0", "/private/rom", &pin)]),
+            serde_json::json!([entry("0000:79:0.0", "/private/rom", &pin)]),
+            serde_json::json!([entry("0000:79:00.0", "relative/rom", &pin)]),
+            serde_json::json!([entry("0000:79:00.0", "/private/rom", "not-a-pin")]),
+            serde_json::json!([
+                entry("0000:79:00.0", "/private/rom", &pin),
+                entry("0000:79:00.0", "/private/other", &pin)
+            ]),
+            serde_json::json!([{"sbdf": "0000:79:00.0", "path": "/private/rom"}]),
+            serde_json::json!([{"sbdf": "0000:79:00.0", "path": "/private/rom", "sha256": pin, "x": 1}]),
+        ] {
+            let mut value = json();
+            value["vbios"] = images.clone();
+            assert!(
+                Config::parse(&serde_json::to_vec(&value).unwrap()).is_err(),
+                "{images}"
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config();
+        config.binary = dir.path().join("binary");
+        config.cost_evidence = dir.path().join("cost");
+        std::fs::write(&config.binary, b"fixture-executable-bytes").unwrap();
+        std::fs::write(&config.cost_evidence, b"fixture-evidence-bytes-unmeasured").unwrap();
+        config.binary_sha256 = Sha256::digest(b"fixture-executable-bytes").into();
+        config.cost.id = Sha256::digest(b"fixture-evidence-bytes-unmeasured").into();
+        let rom = dir.path().join("vbios.rom");
+        config.vbios = vec![Vbios {
+            sbdf: "0000:79:00.0".into(),
+            path: rom.clone(),
+            sha256: Sha256::digest(b"\x55\xaa image").into(),
+        }];
+        assert!(matches!(
+            config.verify_inputs(),
+            Err(Refusal::Os {
+                op: "opening pinned Firecracker input",
+                ..
+            })
+        ));
+        std::fs::write(&rom, b"\x55\xaa other").unwrap();
+        assert!(matches!(
+            config.verify_inputs(),
+            Err(Refusal::Invalid { why, .. }) if why.contains("video BIOS image for 0000:79:00.0")
+        ));
+        std::fs::write(&rom, b"\x55\xaa image").unwrap();
+        config.verify_inputs().unwrap();
     }
 }

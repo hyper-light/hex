@@ -258,8 +258,9 @@ impl State {
         let mut held = self.held()?;
         let additional = usize::from(!held.stopped.contains(&pid));
         held.stopped.reserve(additional)?;
-        let member = self.stopped_member(pid, &[])?;
-        if self.signal_stopped(member, sys::MemberSignal::Stop)? {
+        if let Some(member) = self.stopped_member(pid, &[])?
+            && let Some(member) = self.signal_stopped(member, sys::MemberSignal::Stop)?
+        {
             held.stopped.insert(member)?;
         }
         Ok(())
@@ -288,16 +289,11 @@ impl State {
             return Ok(None);
         };
         let pid = member.pid;
-        // Gone since the listing (a pid no longer a process): not held, and nothing to run.
+        // Gone since the listing (a pid no longer a process, or a managed member's pid another birth's): not
+        // held, and nothing to run. A managed member's token never reaches another process.
         let Some(before) =
             sys::rusage(pid).map_err(|e| Refusal::os("reading a member's rusage", e))?
         else {
-            if let Some(scope) = &self.vm {
-                return Err(scope.control_failed(
-                    sys::TokenFailure::Changed { observed: None },
-                    self.id.as_ref(),
-                ));
-            }
             held.stopped.remove(&pid);
             return Ok(None);
         };
@@ -305,21 +301,14 @@ impl State {
             .native
             .is_some_and(|token| token.birth() != before.started)
         {
-            return Err(self
-                .vm
-                .as_ref()
-                .ok_or_else(|| self.uncertain())?
-                .control_failed(
-                    sys::TokenFailure::Changed {
-                        observed: Some(before.started),
-                    },
-                    self.id.as_ref(),
-                ));
-        }
-        if !self.signal_stopped(member, sys::MemberSignal::Continue)? {
             held.stopped.remove(&pid);
             return Ok(None);
         }
+        let Some(continued) = self.signal_stopped(member, sys::MemberSignal::Continue)? else {
+            held.stopped.remove(&pid);
+            return Ok(None);
+        };
+        held.stopped.refresh(continued)?;
         Ok(Some(ReadRun {
             pid,
             user: before.user,
@@ -331,10 +320,13 @@ impl State {
     /// let go of since ([`ProcessBox::signal`]) is the box's own, left as it is.
     fn stop_again(&self, pid: i32) -> Result<(), Refusal> {
         let mut held = self.held()?;
-        if let Some(member) = held.stopped.get(&pid)
-            && !self.signal_stopped(member, sys::MemberSignal::Stop)?
-        {
-            held.stopped.remove(&pid);
+        if let Some(member) = held.stopped.get(&pid) {
+            match self.signal_stopped(member, sys::MemberSignal::Stop)? {
+                Some(stopped) => held.stopped.refresh(stopped)?,
+                None => {
+                    held.stopped.remove(&pid);
+                }
+            }
         }
         Ok(())
     }
@@ -367,11 +359,10 @@ impl State {
                     && sys::run_state(pid)
                         .map_err(|error| Refusal::os("reading a member's run state", error))?
                         == Some(sys::Run::Live)
+                    && let Some(member) = self.stopped_member(pid, members)?
+                    && let Some(member) = self.signal_stopped(member, sys::MemberSignal::Stop)?
                 {
-                    let member = self.stopped_member(pid, members)?;
-                    if self.signal_stopped(member, sys::MemberSignal::Stop)? {
-                        held.added.push_reserved(member)?;
-                    }
+                    held.added.push_reserved(member)?;
                 }
             }
             Ok::<(), Refusal>(())
@@ -404,9 +395,10 @@ impl State {
         Ok(())
     }
 
-    fn stopped_member(&self, pid: i32, members: &[Member]) -> Result<Stopped, Refusal> {
+    /// Member `pid` with its token, to be stopped; `None` for one gone since the read that listed it.
+    fn stopped_member(&self, pid: i32, members: &[Member]) -> Result<Option<Stopped>, Refusal> {
         let Some(scope) = &self.vm else {
-            return Ok(Stopped { pid, native: None });
+            return Ok(Some(Stopped { pid, native: None }));
         };
         self.validate_vm_scope()?;
         let birth = members
@@ -419,29 +411,58 @@ impl State {
             .lock()
             .map_err(|_| self.uncertain())?
             .ok_or_else(|| self.uncertain())?;
-        if sys::group_of(pid)
-            .map_err(|error| Refusal::os("checking native stop membership", error))?
-            != Some(group)
-        {
-            scope.failed(shards_api::ProcessFailure::DifferentScope);
-            return Err(self.uncertain());
+        if !self.in_scope(scope, pid, birth, group)? {
+            return Ok(None);
         }
-        let token = sys::capture_member(pid, birth)
-            .map_err(|failure| scope.control_failed(failure, self.id.as_ref()))?;
-        if sys::group_of(pid)
-            .map_err(|error| Refusal::os("rechecking native stop membership", error))?
-            != Some(group)
-        {
-            scope.failed(shards_api::ProcessFailure::DifferentScope);
-            return Err(self.uncertain());
+        let Some(token) = self.capture(scope, pid, birth)? else {
+            return Ok(None);
+        };
+        if !self.in_scope(scope, pid, birth, group)? {
+            return Ok(None);
         }
-        Ok(Stopped {
+        Ok(Some(Stopped {
             pid,
             native: Some(token),
-        })
+        }))
     }
 
-    fn signal_stopped(&self, member: Stopped, signal: sys::MemberSignal) -> Result<bool, Refusal> {
+    /// Member `pid`'s token, or `None` once it has gone: capture's own birth checks (Changed), no task
+    /// (NoRight: XNU's task_name_for_pid finds the process but no task once it is exiting), or any other
+    /// failure after which it is gone. A member alive with its birth that can't be captured is the scope's
+    /// control failure.
+    fn capture(
+        &self,
+        scope: &super::managed::Scope,
+        pid: i32,
+        birth: u64,
+    ) -> Result<Option<sys::MemberToken>, Refusal> {
+        match sys::capture_member(pid, birth) {
+            Ok(token) => Ok(Some(token)),
+            Err(sys::TokenFailure::Changed { .. } | sys::TokenFailure::NoRight) => Ok(None),
+            Err(failure) => {
+                if gone(pid, birth)? {
+                    Ok(None)
+                } else {
+                    Err(scope.control_failed(failure, self.id.as_ref()))
+                }
+            }
+        }
+    }
+
+    /// Signals `member`: in a managed scope by its audit token, else by pid. Returns the member as signalled,
+    /// with the token that reached it, or `None` for one gone ([`gone`]: ended, reaped, or its pid another
+    /// process's; an ordinary box's pid gone), which no signal is owed and no failure of the scope: members
+    /// end on their own, and a scope's end races them (a controller exits once its foreground child is
+    /// killed). A zombie or a reaped member is in no process group (`getpgid` finds no process), so the group
+    /// check alone would take it for a process outside the scope. XNU gives a process a new audit-token pid
+    /// version at exec, so a member that exec'd since its hold captured its token is refused by that token
+    /// (ESRCH) though it is the same process: its pid and birth (its start, which exec keeps) are joined again
+    /// in the scope's group, its token captured afresh, and the signal sent once with it.
+    fn signal_stopped(
+        &self,
+        member: Stopped,
+        signal: sys::MemberSignal,
+    ) -> Result<Option<Stopped>, Refusal> {
         if let Some(scope) = &self.vm {
             self.validate_vm_scope()?;
             let token = member.native.ok_or_else(|| self.uncertain())?;
@@ -450,24 +471,68 @@ impl State {
                 .lock()
                 .map_err(|_| self.uncertain())?
                 .ok_or_else(|| self.uncertain())?;
-            if token.pid() != member.pid
-                || sys::group_of(member.pid)
-                    .map_err(|error| Refusal::os("checking owned member signal scope", error))?
-                    != Some(group)
-            {
+            if token.pid() != member.pid {
                 scope.failed(shards_api::ProcessFailure::DifferentScope);
                 return Err(self.uncertain());
             }
-            sys::signal_member(&token, signal)
+            if !self.in_scope(scope, member.pid, token.birth(), group)? {
+                return Ok(None);
+            }
+            match sys::signal_member(&token, signal) {
+                Ok(()) => return Ok(Some(member)),
+                Err(failure) if !failure.unresolved() => {
+                    return Err(scope.control_failed(failure, self.id.as_ref()));
+                }
+                Err(_) => {}
+            }
+            // Refused by its token: it ended since the check above, or it exec'd.
+            let Some(fresh) = self.capture(scope, member.pid, token.birth())? else {
+                return Ok(None);
+            };
+            if !self.in_scope(scope, member.pid, token.birth(), group)? {
+                return Ok(None);
+            }
+            sys::signal_member(&fresh, signal)
                 .map_err(|failure| scope.control_failed(failure, self.id.as_ref()))?;
-            return Ok(true);
+            return Ok(Some(Stopped {
+                pid: member.pid,
+                native: Some(fresh),
+            }));
         }
         let signal = match signal {
             sys::MemberSignal::Stop => rustix::process::Signal::STOP,
             sys::MemberSignal::Continue => rustix::process::Signal::CONT,
             sys::MemberSignal::Kill => rustix::process::Signal::KILL,
         };
-        signal_one(member.pid, signal)
+        signal_one(member.pid, signal).map(|sent| if sent { Some(member) } else { None })
+    }
+
+    /// Whether member `pid`, born at `birth`, is still in the scope: `false` once it has gone ([`gone`]) or
+    /// getpgid finds no process (it is exiting: XNU's proc_find leaves out an exiting process before its
+    /// rusage says it ended); the scope's failure (DifferentScope) for one alive in another group, which
+    /// has left the scope.
+    fn in_scope(
+        &self,
+        scope: &super::managed::Scope,
+        pid: i32,
+        birth: u64,
+        group: i32,
+    ) -> Result<bool, Refusal> {
+        if gone(pid, birth)? {
+            return Ok(false);
+        }
+        match sys::group_of(pid)
+            .map_err(|error| Refusal::os("checking owned member signal scope", error))?
+        {
+            Some(found) if found == group => Ok(true),
+            None => Ok(false),
+            // A pid reused since the read above is another process's: the member is gone.
+            Some(_) if gone(pid, birth)? => Ok(false),
+            Some(_) => {
+                scope.failed(shards_api::ProcessFailure::DifferentScope);
+                Err(self.uncertain())
+            }
+        }
     }
 
     /// Counts member `pid`'s death as a memory end — once — if the box armed it with the fatal cap, isn't
@@ -622,6 +687,25 @@ impl Stops {
             }
             _ => {}
         }
+        Ok(())
+    }
+    /// The same held member with the token its signal last reached it by ([`State::signal_stopped`], after an
+    /// exec): only for the pid and birth held; [`Stops::insert`] never replaces one.
+    fn refresh(&mut self, member: Stopped) -> Result<(), Refusal> {
+        let StopStorage::Native(values) = &mut self.values else {
+            return Ok(());
+        };
+        let held = values
+            .binary_search_by_key(&member.pid, |held| held.pid)
+            .ok()
+            .and_then(|at| values.get_mut(at))
+            .filter(|held| {
+                held.native.map(|token| token.birth()) == member.native.map(|token| token.birth())
+            })
+            .ok_or_else(|| {
+                super::managed::configuration("held native incarnation cannot be replaced")
+            })?;
+        *held = member;
         Ok(())
     }
     fn push_reserved(&mut self, member: Stopped) -> Result<(), Refusal> {
@@ -1047,9 +1131,10 @@ impl ProcessBox {
             .stopped
             .get(&pid)
             .ok_or_else(|| self.state.uncertain())?;
-        if !self
+        if self
             .state
             .signal_stopped(member, sys::MemberSignal::Continue)?
+            .is_none()
         {
             return Err(self.state.uncertain());
         }
@@ -2395,19 +2480,19 @@ impl Watcher {
             return Err(self.state.uncertain());
         }
         for &pid in &self.pids {
+            // A member gone since the listing (ended or reaped: one the scope's own end let finish, as a
+            // controller whose child was killed) needs no end.
             let Some(actual) = sys::rusage(pid)
                 .map_err(|error| Refusal::os("reading owned scope to stop", error))?
             else {
-                return Err(scope.control_failed(
-                    sys::TokenFailure::Changed { observed: None },
-                    self.state.id.as_ref(),
-                ));
+                continue;
             };
             if actual.ended {
                 continue;
             }
-            let token = sys::capture_member(pid, actual.started)
-                .map_err(|failure| scope.control_failed(failure, self.state.id.as_ref()))?;
+            let Some(token) = self.state.capture(scope, pid, actual.started)? else {
+                continue;
+            };
             self.state.signal_stopped(
                 Stopped {
                     pid,
@@ -2477,6 +2562,14 @@ fn runnable(pid: i32) -> bool {
 }
 
 /// Signals process `pid`; false when it is gone (ESRCH).
+/// Whether the managed member born at `birth` with `pid` is gone: no process has its pid (reaped), its
+/// zombie has it (ended), or another process does (another birth).
+fn gone(pid: i32, birth: u64) -> Result<bool, Refusal> {
+    Ok(sys::rusage(pid)
+        .map_err(|error| Refusal::os("reading a held member's end", error))?
+        .is_none_or(|usage| usage.ended || usage.started != birth))
+}
+
 fn signal_one(pid: i32, signal: rustix::process::Signal) -> Result<bool, Refusal> {
     let p = rustix::process::Pid::from_raw(pid).ok_or(Refusal::Invalid {
         what: "pid",
@@ -2508,6 +2601,9 @@ fn killpg(pgid: i32, signal: i32) -> Result<bool, Refusal> {
 
 #[cfg(test)]
 mod scope_completion_tests;
+
+#[cfg(test)]
+mod exec_hold_tests;
 
 #[cfg(test)]
 mod storage_tests {
@@ -2581,8 +2677,10 @@ mod storage_tests {
         assert!(Pids::new(usize::MAX).is_err());
     }
 
-    /// AC-T7.4.1: a same-PID replacement or later exec-token cannot acquire another incarnation's
-    /// continue authority. The original token/birth and the bounded Hold entries remain unchanged.
+    /// AC-T7.4.1: inserting a same-PID replacement (another birth) or a later exec-token never replaces a
+    /// held entry. The original token/birth and the bounded Hold entries remain unchanged. A held token
+    /// changes only by refresh, for the same pid and birth, after the kernel refused the old one
+    /// (`State::signal_stopped`; exec_hold_tests); a refresh of another birth is refused.
     #[test]
     fn native_hold_retains_exact_incarnation_across_replacement_and_exhaustion() {
         let mut held = Stops::new(1, true).unwrap();
@@ -2607,6 +2705,22 @@ mod storage_tests {
         }
         assert!(held.reserve(1).is_err());
         assert_eq!(held.get(&89).unwrap().native, Some(original));
+        assert_eq!(held.len(), 1);
+        assert!(
+            held.refresh(Stopped {
+                pid: 89,
+                native: Some(sys::simulated_member(89, 103, 107)),
+            })
+            .is_err()
+        );
+        assert_eq!(held.get(&89).unwrap().native, Some(original));
+        let execd = sys::simulated_member(89, 97, 109);
+        held.refresh(Stopped {
+            pid: 89,
+            native: Some(execd),
+        })
+        .unwrap();
+        assert_eq!(held.get(&89).unwrap().native, Some(execd));
         assert_eq!(held.len(), 1);
     }
 

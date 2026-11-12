@@ -132,6 +132,14 @@ impl CrashPoint {
 /// box id starts with `.`, so it can't be a box's.
 pub const OCI_BOXES: &str = ".oci";
 
+/// What a node runs past its own `process` and `oci` boxes, which its start counts the descriptors of among its own
+/// (`netns::hold_descriptors`), so they fit its descriptor limit by construction (the lead, 2026-11-11).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Runs {
+    /// VM boxes, a Firecracker VM's or a Shards guest's, whose backends [`Node::install_backends`] installs.
+    pub vms: bool,
+}
+
 /// A node agent over the `process` and `oci` classes.
 pub struct Node {
     attachments: hex_runtime::devices::SharedCatalog,
@@ -263,21 +271,41 @@ impl Node {
     /// Opens a node agent whose boxes live under cgroup `box_root` with their records in `state_dir`,
     /// the `io` bounds applying to the disks under `disk_path`. Does not recover; call [`Node::recover`].
     pub fn open(box_root: &Path, state_dir: &Path, disk_path: &Path) -> Result<Self, Refusal> {
+        Self::open_running(box_root, state_dir, disk_path, Runs::default())
+    }
+
+    /// [`Node::open`] for a node that runs what `runs` says past its own boxes, its start counting their descriptors
+    /// among its own: VM boxes, whose backends [`Node::install_backends`] installs only on a node opened to run them.
+    pub fn open_running(
+        box_root: &Path,
+        state_dir: &Path,
+        disk_path: &Path,
+        runs: Runs,
+    ) -> Result<Self, Refusal> {
         let disks = disks::under(disk_path)?;
-        Self::with_root(BoxRoot::open(box_root, disks)?, state_dir)
+        Self::with_root(BoxRoot::open(box_root, disks)?, state_dir, runs)
     }
 
     /// Opens a node agent in a cgroup subtree beside this process's own cgroup (the usual case: the
     /// node agent runs in a delegated leaf and its boxes in a sibling), records under `state_dir`.
     pub fn beside_self(state_dir: &Path, disk_path: &Path) -> Result<Self, Refusal> {
+        Self::beside_self_running(state_dir, disk_path, Runs::default())
+    }
+
+    /// [`Node::beside_self`] for a node that runs what `runs` says past its own boxes ([`Node::open_running`]).
+    pub fn beside_self_running(
+        state_dir: &Path,
+        disk_path: &Path,
+        runs: Runs,
+    ) -> Result<Self, Refusal> {
         let disks = disks::under(disk_path)?;
-        Self::with_root(BoxRoot::beside_self(disks)?, state_dir)
+        Self::with_root(BoxRoot::beside_self(disks)?, state_dir, runs)
     }
 
     /// The node over `root`, records under `state_dir` and its runtime directory ([`crate::store`]);
     /// this process becomes a child subreaper, so each `oci` box's init is its child once the shim
     /// exits.
-    fn with_root(root: BoxRoot, state_dir: &Path) -> Result<Self, Refusal> {
+    fn with_root(root: BoxRoot, state_dir: &Path, runs: Runs) -> Result<Self, Refusal> {
         let owner = match (
             rustix::process::geteuid().as_raw(),
             rustix::process::getegid().as_raw(),
@@ -302,17 +330,30 @@ impl Node {
         // takes no cold miss the last start had learned past (Ada's rule and the lead's calls, 2026-11-06;
         // crate::sizes).
         let keeper = Keeper::open(state_dir)?;
-        let sizes = Sizes::learned(&keeper.base())?;
-        let pools = match owner {
-            Owner::Root => Pools::root(sizes),
-            Owner::Rootless { .. } => Pools::rootless(sizes),
-        };
-        // Before any thread or pool holds a descriptor: the sizes count on the hard limit (crate::sizes::Host).
-        crate::netns::hold_descriptors(pools)?;
-        let supervisor = Supervisor::start(root.dir(), store.clone(), sizes.inits)?;
-        let netns = pool(owner, lacks()?, pools, sizes)?;
-        let ipc_uts = IpcUtsPool::learning(sizes.starts.ipc_uts, pools.ipc_uts)?;
         let oci_boxes = BoxRoot::open(&root.dir().join(OCI_BOXES), root.disks().to_vec())?;
+        let null = rustix::fs::open(
+            "/dev/null",
+            rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|e| Refusal::os("opening /dev/null", e))?;
+        let sizes = Sizes::learned(&keeper.base())?;
+        let files_ahead = oci_boxes.ahead_files().len();
+        let pools = match owner {
+            Owner::Root => Pools::root(sizes, files_ahead),
+            Owner::Rootless { .. } => Pools::rootless(sizes, files_ahead),
+        }
+        .running_vms(runs.vms);
+        // Once every descriptor the node holds for its life beside its bounds is open (its store, keeper, roots and
+        // /dev/null), and before any thread or pool holds one: every bound that holds them fitted to the hard limit,
+        // past which the node's own budgets refuse by type (crate::netns::hold_descriptors).
+        let (pools, files) = crate::netns::hold_descriptors(pools)?;
+        let sizes = pools.sizes;
+        // Its `oci` boxes, each keeping its namespace, no more than the start counted.
+        let oci_boxes = oci_boxes.at_most(sizes.boxes);
+        let supervisor = Supervisor::start(root.dir(), store.clone(), sizes.inits)?;
+        let netns = pool(owner, lacks()?, pools, files, sizes)?;
+        let ipc_uts = IpcUtsPool::learning(sizes.starts.ipc_uts, pools.ipc_uts)?;
         let devices = device_programs(owner, &oci_boxes, sizes.programs)?;
         // Fresh slots are numbered past every slot already under the root, so none is made twice.
         let first = slots_in(&oci_boxes)?
@@ -373,12 +414,7 @@ impl Node {
                 },
             )?,
             keeper,
-            null: rustix::fs::open(
-                "/dev/null",
-                rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC,
-                rustix::fs::Mode::empty(),
-            )
-            .map_err(|e| Refusal::os("opening /dev/null", e))?,
+            null,
             turns: Turns::new(
                 "making or removing a box",
                 "creates and deletes under way",
@@ -668,6 +704,12 @@ impl Node {
     /// The node's pools' bounds on its host, and where their learned sizes start (Ada's rule, 2026-11-06).
     pub fn sizes(&self) -> Sizes {
         self.pools.sizes
+    }
+
+    /// The node's pools as its start fitted them to its descriptor limit (`netns::hold_descriptors`): what its own
+    /// descriptors are counted at ([`crate::netns::FilesBound`]).
+    pub fn pools(&self) -> Pools {
+        self.pools
     }
 
     /// Why the node's last peaks couldn't be read, where they couldn't: its start was a first start (the lead,
@@ -2453,16 +2495,18 @@ fn init_proc_id(pid: i32, start_time: Option<u64>) -> Option<ProcId> {
 /// (`lacks`, as a Kubernetes pod's root does) starts no pool whose every make would fail: its pool is
 /// refused, naming what it lacks, and its creates make their namespaces on the path, counted so.
 /// Every other node's pool is learned from its draws within `pools`' bound (a rootless node's is 0, so it makes
-/// none), its kept namespaces' files within the descriptor limit the node was given ([`crate::netns::FilesBound`]).
+/// none), its kept namespaces' files within `files`, what the node's descriptor limit leaves past its own as its start
+/// fitted its bounds ([`crate::netns::hold_descriptors`]).
 fn pool(
     owner: Owner,
     lacks: Option<netns::Missing>,
     pools: Pools,
+    files: crate::netns::FilesBound,
     sizes: Sizes,
 ) -> Result<Netns, Refusal> {
     match (owner, lacks) {
         (Owner::Root, Some(missing)) => Ok(Netns::refused(missing)),
-        _ => Netns::learning(pools.netns, crate::netns::FilesBound::now(pools)?, sizes),
+        _ => Netns::learning(pools.netns, files, sizes),
     }
 }
 
@@ -2736,17 +2780,28 @@ mod tests {
         use hex_runtime::linux::oci::run::Networks;
         let missing = netns::Missing::of(true, false).unwrap();
         let sizes = Sizes::now().unwrap();
-        let refused = pool(Owner::Root, Some(missing), Pools::root(sizes), sizes).unwrap();
+        let files_ahead = hex_runtime::linux::cgroup::ahead_files(&[]).len();
+        let root = Pools::root(sizes, files_ahead);
+        let refused = pool(
+            Owner::Root,
+            Some(missing),
+            root,
+            crate::netns::FilesBound::now(root).unwrap(),
+            sizes,
+        )
+        .unwrap();
         assert!(refused.take().unwrap().is_none(), "a take made on the path");
         let c = refused.counts().unwrap();
         assert_eq!(c.refused, Some(missing));
         assert_eq!((c.made_on_path, c.refused_on_path), (1, 1), "{c:?}");
         assert_eq!((c.made_ahead, c.failed), (0, 0), "{c:?}");
 
+        let rootless_pools = Pools::rootless(sizes, files_ahead);
         let rootless = pool(
             Owner::Rootless { uid: 1, gid: 1 },
             Some(missing),
-            Pools::rootless(sizes),
+            rootless_pools,
+            crate::netns::FilesBound::now(rootless_pools).unwrap(),
             sizes,
         )
         .unwrap();

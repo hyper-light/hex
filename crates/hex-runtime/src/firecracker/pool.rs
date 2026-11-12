@@ -81,6 +81,12 @@ pub(super) fn observer_configuration(
         }
         part(&id.key.to_be_bytes())?;
     }
+    // A video BIOS image is part of what the observer VM boots with; none adds nothing, so a
+    // configuration without one keeps its identity.
+    for image in &config.vbios {
+        part(image.sbdf.as_bytes())?;
+        part(&image.sha256)?;
+    }
     Ok(hash.finalize().into())
 }
 
@@ -568,6 +574,13 @@ impl FirecrackerRuntime {
                 accepted.phase = BackingPhase::Live;
                 return Ok(accepted);
             }
+            // Its VMM pins all its RAM for DMA, the observer VM given its GPUs whole: refused before anything is
+            // granted or launched where its memlock can't hold that (FirecrackerRuntime::dma_memlock).
+            let memlock = if grant.devices.is_empty() {
+                None
+            } else {
+                Self::dma_memlock(grant.allocation.guest()?.mem_bytes)?
+            };
             let record = transaction.grant_pool(&grant)?;
             self.preflight_backing(&record)?;
             self.config.verify_inputs()?;
@@ -598,6 +611,7 @@ impl FirecrackerRuntime {
                 &ManagedLaunch::Firecracker {
                     program: &program,
                     vsock: &paths.vsock,
+                    memlock,
                 },
                 io,
                 remaining(until)?,
@@ -859,6 +873,7 @@ pub(super) mod tests {
                 bytes: 1 << 20,
                 path: 100,
             },
+            vbios: Vec::new(),
         }
     }
 
