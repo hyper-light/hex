@@ -160,6 +160,17 @@ impl View {
         msg: ToKeeper,
         local: Amounts,
     ) -> Result<(ToHolder, bool), Stop> {
+        // A link speaks for its own session alone: a fence of another's is no session of this link's (CV4).
+        if let Some(fence) = msg.fence()
+            && self.links.is_empty()
+            && fence.session == u64::MAX
+        {
+            let closed = ToHolder::Closed {
+                rejected: Some(fence),
+                why: capacity::Close::Session,
+            };
+            return Ok((closed, false));
+        }
         let before = (self.keeper.foreign(), self.keeper.credit());
         let answer = self
             .keeper

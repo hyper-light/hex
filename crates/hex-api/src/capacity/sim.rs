@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use super::{
-    Amounts, Budget, CapacityView, Held, Host, Keeper, Read, Records, Scope, Stop, ToHolder,
+    Amounts, Budget, CapacityView, Close, Held, Host, Keeper, Read, Records, Scope, Stop, ToHolder,
     ToKeeper, View,
 };
 use crate::Refusal;
@@ -104,6 +104,16 @@ fn stopped() -> Refusal {
 impl CapacityView for SimView {
     fn hear(&mut self, link: u64, msg: ToKeeper) -> Result<ToHolder, Refusal> {
         let keeper = self.keeper.as_mut().ok_or_else(stopped)?;
+        // A link speaks for its own session alone: a fence of another's is no session of this link's (CV4).
+        if let Some(fence) = msg.fence()
+            && self.links.is_empty()
+            && fence.session == u64::MAX
+        {
+            return Ok(ToHolder::Closed {
+                rejected: Some(fence),
+                why: Close::Session,
+            });
+        }
         let answer = match keeper.hear(msg, self.local, &mut self.records) {
             Ok(answer) => answer,
             Err(stop) => {
