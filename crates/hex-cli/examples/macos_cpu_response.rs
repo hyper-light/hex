@@ -2,10 +2,15 @@
 //! the native watcher's stop costs: a one-shot `NOTE_CRITICAL` kqueue timer (the watcher's own,
 //! `Kqueue::wait`) is armed, and when it fires a running member is stopped and read until the kernel
 //! reports it stopped. One sample is the time from the timer's due instant to that observed stop: the
-//! wake's lateness plus the stop's delivery. It writes the distribution as this host class's row at the
-//! head of the cost evidence (the producer's own section, replacing an older row of the same host), the
-//! samples beside it, and the cost re-keyed to the new evidence's SHA-256.
+//! wake's lateness plus the stop's delivery. It writes the distribution as this host class's row, the
+//! samples beside it, and either
+//! - given `--out` alone, the row as a file of its own (the CPU-response section with that one row), whose
+//!   SHA-256 it prints: `guest_cost` takes it, as its window and its evidence's head, so a Mac class's
+//!   first pair is this row file and then `guest_cost`; or
+//! - given a cost pair, the row at the head of its evidence (the producer's own section, replacing an older
+//!   row of the same host) and the cost re-keyed to the new evidence's SHA-256.
 //!
+//! cargo run --release -p hex-cli --example macos_cpu_response -- --out <dir>
 //! cargo run --release -p hex-cli --example macos_cpu_response -- --cost-file <cost.json>
 //!   --cost-sha256 <hex> --evidence <evidence> --out <dir>
 //!
@@ -46,7 +51,7 @@ mod producer {
     use std::process::ExitCode;
     use std::time::Duration;
 
-    const USAGE: &str = "usage: macos_cpu_response --cost-file <cost.json> --cost-sha256 <hex> --evidence <evidence> --out <dir>";
+    const USAGE: &str = "usage: macos_cpu_response --out <dir>, or macos_cpu_response --cost-file <cost.json> --cost-sha256 <hex> --evidence <evidence> --out <dir>";
 
     /// The census whose rule names the fewest samples a row seeds from (decision 9).
     const CENSUS: &str = include_str!("../../../bench/competitive/probes/waits_census.py");
@@ -125,15 +130,20 @@ mod producer {
         }
     }
 
-    struct Args {
+    /// A cost pair the row joins: the cost, its SHA-256 and the evidence its id hashes.
+    struct Pair {
         cost_file: PathBuf,
         cost_sha256: [u8; 32],
         evidence: PathBuf,
+    }
+
+    struct Args {
+        pair: Option<Pair>,
         out: PathBuf,
     }
 
     impl Args {
-        /// Exactly the four options, each once.
+        /// `--out` alone, or with the pair's three options; each once.
         fn parse(words: &[String]) -> Result<Self, String> {
             let (mut cost_file, mut digits, mut evidence, mut out) = (None, None, None, None);
             let mut words = words.iter();
@@ -153,21 +163,31 @@ mod producer {
                 }
             }
             let missing = |name: &str| format!("{name} is required\n{USAGE}");
-            let digits = digits.ok_or_else(|| missing("--cost-sha256"))?;
-            let mut cost_sha256 = [0u8; 32];
-            if digits.len() != 64 {
-                return Err("--cost-sha256 must be 64 hex digits".to_owned());
-            }
-            for (byte, at) in cost_sha256.iter_mut().zip((0..64).step_by(2)) {
-                *byte = u8::from_str_radix(digits.get(at..at + 2).unwrap_or("zz"), 16)
-                    .map_err(|_| "--cost-sha256 must be 64 hex digits".to_owned())?;
-            }
-            Ok(Self {
-                cost_file: PathBuf::from(cost_file.ok_or_else(|| missing("--cost-file"))?),
-                cost_sha256,
-                evidence: PathBuf::from(evidence.ok_or_else(|| missing("--evidence"))?),
-                out: PathBuf::from(out.ok_or_else(|| missing("--out"))?),
-            })
+            let out = PathBuf::from(out.ok_or_else(|| missing("--out"))?);
+            let pair = match (cost_file, digits, evidence) {
+                (None, None, None) => None,
+                (Some(cost_file), Some(digits), Some(evidence)) => {
+                    let mut cost_sha256 = [0u8; 32];
+                    if digits.len() != 64 {
+                        return Err("--cost-sha256 must be 64 hex digits".to_owned());
+                    }
+                    for (byte, at) in cost_sha256.iter_mut().zip((0..64).step_by(2)) {
+                        *byte = u8::from_str_radix(digits.get(at..at + 2).unwrap_or("zz"), 16)
+                            .map_err(|_| "--cost-sha256 must be 64 hex digits".to_owned())?;
+                    }
+                    Some(Pair {
+                        cost_file: PathBuf::from(cost_file),
+                        cost_sha256,
+                        evidence: PathBuf::from(evidence),
+                    })
+                }
+                _ => {
+                    return Err(format!(
+                        "--cost-file, --cost-sha256 and --evidence go together\n{USAGE}"
+                    ));
+                }
+            };
+            Ok(Self { pair, out })
         }
     }
 
@@ -209,16 +229,32 @@ mod producer {
                     made.samples_file.display(),
                     hex(&row.raw)
                 );
-                println!(
-                    "evidence {} (cost id {})",
-                    made.evidence_file.display(),
-                    hex(&made.cost_id)
-                );
-                println!(
-                    "cost {} HEX_GUEST_COST_SHA256={}",
-                    made.cost_file.display(),
-                    hex(&made.cost_sha256)
-                );
+                match &made.wrote {
+                    Wrote::Row { file, sha256 } => println!(
+                        "row file {} sha256 {}: guest_cost --cpu-response {} --cpu-response-sha256 {}",
+                        file.display(),
+                        hex(sha256),
+                        file.display(),
+                        hex(sha256)
+                    ),
+                    Wrote::Pair {
+                        evidence_file,
+                        cost_file,
+                        cost_id,
+                        cost_sha256,
+                    } => {
+                        println!(
+                            "evidence {} (cost id {})",
+                            evidence_file.display(),
+                            hex(cost_id)
+                        );
+                        println!(
+                            "cost {} HEX_GUEST_COST_SHA256={}",
+                            cost_file.display(),
+                            hex(cost_sha256)
+                        );
+                    }
+                }
                 ExitCode::SUCCESS
             }
             Err(why) => {
@@ -228,29 +264,46 @@ mod producer {
         }
     }
 
+    /// What a run wrote beside its samples: the row file, or the pair with the row at its evidence's head.
+    enum Wrote {
+        Row {
+            file: PathBuf,
+            sha256: [u8; 32],
+        },
+        Pair {
+            evidence_file: PathBuf,
+            cost_file: PathBuf,
+            cost_id: [u8; 32],
+            cost_sha256: [u8; 32],
+        },
+    }
+
     /// What a run wrote.
     struct Made {
         row: hex_runtime::guest::CpuResponse,
         samples_file: PathBuf,
-        evidence_file: PathBuf,
-        cost_file: PathBuf,
-        cost_id: [u8; 32],
-        cost_sha256: [u8; 32],
+        wrote: Wrote,
     }
 
     fn produce(args: &Args, plan: &Plan) -> Result<Made, String> {
         use sha2::{Digest, Sha256};
 
-        // The inputs as the node reads them: the cost, its SHA-256 and the evidence its id hashes.
-        let (cost, _, _) = hex_runtime::guest::load_runtime_evidence(
-            &args.cost_file,
-            args.cost_sha256,
-            &args.evidence,
-        )
-        .map_err(|e| e.to_string())?;
-        let evidence = std::fs::read(&args.evidence).map_err(|e| e.to_string())?;
-        let (mut rows, original) =
-            hex_runtime::guest::cpu_response_split(&evidence).map_err(|e| e.to_string())?;
+        // The pair's inputs as the node reads them, before any sample: the cost, its SHA-256 and the
+        // evidence its id hashes.
+        let pair = args
+            .pair
+            .as_ref()
+            .map(|pair| -> Result<_, String> {
+                let (cost, _, _) = hex_runtime::guest::load_runtime_evidence(
+                    &pair.cost_file,
+                    pair.cost_sha256,
+                    &pair.evidence,
+                )
+                .map_err(|e| e.to_string())?;
+                let evidence = std::fs::read(&pair.evidence).map_err(|e| e.to_string())?;
+                Ok((cost, evidence))
+            })
+            .transpose()?;
         let host = hex_runtime::macos::machine_model().map_err(|e| e.to_string())?;
         let mut raw = plan.head(&host)?;
 
@@ -274,28 +327,49 @@ mod producer {
             max: sorted.last().copied().unwrap_or_default(),
             raw: Sha256::digest(raw.as_bytes()).into(),
         };
-        rows.retain(|known| known.host != host);
-        rows.push(row.clone());
-        rows.sort_by(|a, b| a.host.cmp(&b.host));
-        let mut written =
-            hex_runtime::guest::cpu_response_section(&rows).map_err(|e| e.to_string())?;
-        written.extend_from_slice(original);
-        let mut rekeyed = cost;
-        rekeyed.id = Sha256::digest(&written).into();
-        let cost_bytes = serde_json::to_vec(&rekeyed).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(&args.out).map_err(|e| e.to_string())?;
-        let made = Made {
-            row,
-            samples_file: args.out.join(format!("cpu-response-{host}.samples")),
-            evidence_file: args.out.join("evidence"),
-            cost_file: args.out.join("cost.json"),
-            cost_id: rekeyed.id,
-            cost_sha256: Sha256::digest(&cost_bytes).into(),
+        let samples_file = args.out.join(format!("cpu-response-{host}.samples"));
+        std::fs::write(&samples_file, raw.as_bytes()).map_err(|e| e.to_string())?;
+        let wrote = match pair {
+            None => {
+                let section = hex_runtime::guest::cpu_response_section(std::slice::from_ref(&row))
+                    .map_err(|e| e.to_string())?;
+                let file = args.out.join(format!("cpu-response-{host}.row"));
+                std::fs::write(&file, &section).map_err(|e| e.to_string())?;
+                Wrote::Row {
+                    file,
+                    sha256: Sha256::digest(&section).into(),
+                }
+            }
+            Some((cost, evidence)) => {
+                let (mut rows, original) =
+                    hex_runtime::guest::cpu_response_split(&evidence).map_err(|e| e.to_string())?;
+                rows.retain(|known| known.host != host);
+                rows.push(row.clone());
+                rows.sort_by(|a, b| a.host.cmp(&b.host));
+                let mut written =
+                    hex_runtime::guest::cpu_response_section(&rows).map_err(|e| e.to_string())?;
+                written.extend_from_slice(original);
+                let mut rekeyed = cost;
+                rekeyed.id = Sha256::digest(&written).into();
+                let cost_bytes = serde_json::to_vec(&rekeyed).map_err(|e| e.to_string())?;
+                let (evidence_file, cost_file) =
+                    (args.out.join("evidence"), args.out.join("cost.json"));
+                std::fs::write(&evidence_file, &written).map_err(|e| e.to_string())?;
+                std::fs::write(&cost_file, &cost_bytes).map_err(|e| e.to_string())?;
+                Wrote::Pair {
+                    evidence_file,
+                    cost_file,
+                    cost_id: rekeyed.id,
+                    cost_sha256: Sha256::digest(&cost_bytes).into(),
+                }
+            }
         };
-        std::fs::write(&made.samples_file, raw.as_bytes()).map_err(|e| e.to_string())?;
-        std::fs::write(&made.evidence_file, &written).map_err(|e| e.to_string())?;
-        std::fs::write(&made.cost_file, &cost_bytes).map_err(|e| e.to_string())?;
-        Ok(made)
+        Ok(Made {
+            row,
+            samples_file,
+            wrote,
+        })
     }
 
     /// Each arm `plan.per_arm` times, round-robin, on a busy member: its wait and the time from the timer's
@@ -441,18 +515,62 @@ mod producer {
             assert_eq!(made.row.samples, u64::try_from(plan.arms.len()).unwrap());
             assert_eq!(made.row.host, hex_runtime::macos::machine_model().unwrap());
 
-            let written = std::fs::read(&made.evidence_file).unwrap();
+            let Wrote::Pair {
+                evidence_file,
+                cost_file,
+                cost_id,
+                cost_sha256,
+            } = &made.wrote
+            else {
+                panic!("a pair's run wrote no pair");
+            };
+            let written = std::fs::read(evidence_file).unwrap();
             let (rows, rest) = hex_runtime::guest::cpu_response_split(&written).unwrap();
             assert_eq!(rest, original);
             assert_eq!(rows, vec![made.row.clone()]);
-            let (loaded, _, responses) = hex_runtime::guest::load_runtime_evidence(
-                &made.cost_file,
-                made.cost_sha256,
-                &made.evidence_file,
-            )
-            .unwrap();
-            assert_eq!(loaded.id, made.cost_id);
+            let (loaded, _, responses) =
+                hex_runtime::guest::load_runtime_evidence(cost_file, *cost_sha256, evidence_file)
+                    .unwrap();
+            assert_eq!(&loaded.id, cost_id);
             assert_eq!(responses, vec![made.row]);
+        }
+
+        /// AC-T7.4.1 (ROOT's Mac order: the row, then guest_cost): run the producer with `--out` alone, once
+        /// over every arm: expect a row file of its own, the CPU-response section holding this host's one row
+        /// and nothing after it, its SHA-256 the one reported, the row hashing its samples; and the pair's
+        /// options given in part refused.
+        #[test]
+        fn out_alone_writes_the_row_as_a_file_of_its_own() {
+            use sha2::{Digest, Sha256};
+            let dir = tempfile::tempdir().unwrap();
+            let out = dir.path().join("out");
+            let args = Args::parse(&["--out".to_owned(), out.display().to_string()]).unwrap();
+            assert!(args.pair.is_none());
+            let plan = Plan::new(1, Plan::derived().unwrap().bound).unwrap();
+            let made = produce(&args, &plan).unwrap();
+            let Wrote::Row { file, sha256 } = &made.wrote else {
+                panic!("--out alone wrote a pair");
+            };
+            let bytes = std::fs::read(file).unwrap();
+            let digest: [u8; 32] = Sha256::digest(&bytes).into();
+            assert_eq!(&digest, sha256);
+            let (rows, rest) = hex_runtime::guest::cpu_response_split(&bytes).unwrap();
+            assert!(rest.is_empty());
+            assert_eq!(rows, vec![made.row.clone()]);
+            assert_eq!(made.row.host, hex_runtime::macos::machine_model().unwrap());
+            let samples: [u8; 32] =
+                Sha256::digest(std::fs::read(&made.samples_file).unwrap()).into();
+            assert_eq!(made.row.raw, samples);
+            assert!(!out.join("evidence").exists() && !out.join("cost.json").exists());
+            assert!(
+                Args::parse(&[
+                    "--out".to_owned(),
+                    "o".to_owned(),
+                    "--evidence".to_owned(),
+                    "e".to_owned()
+                ])
+                .is_err()
+            );
         }
     }
 }

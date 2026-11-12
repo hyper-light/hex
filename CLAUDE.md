@@ -137,7 +137,10 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   membership, step 2) and `proc_pid_rusage` reads each member's footprint, start time and exit, and
   `proc_pidinfo(PROC_PIDTBSDINFO)` its run state, so a box's hold continues only the members it stopped,
   and `proc_pidinfo(PROC_PIDTASKINFO)` whether a member has a thread running or waiting for a core, so a run
-  that gave it none shows nothing of its rate;
+  that gave it none shows nothing of its rate; `proc_pidinfo(PROC_PIDLISTTHREADS, PROC_PIDTHREADINFO)` read
+  a VM process's threads by name and CPU, and `PROC_PIDREGIONINFO`/`PROC_PIDREGIONPATHINFO` its memory map
+  entry by entry (`struct proc_regioninfo`, which libc doesn't bind, Hex declares), so the guest-cost
+  producer tells the VMM's own CPU and memory from its guest's (AC-T7.4.1);
   `kqueue`/`kevent` carry its one-shot `NOTE_CRITICAL` timer, a user event to wake
   it, and `EVFILT_PROC` (`NOTE_FORK`/`NOTE_EXIT`/`NOTE_EXITSTATUS`, the dead member's wait status in the
   event, so a cap kill is told from an ordinary SIGKILL without racing its reaper) on members, and, for the
