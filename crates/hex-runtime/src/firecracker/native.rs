@@ -1926,3 +1926,220 @@ mod cleanup_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod memlock_tests {
+    use super::*;
+    use crate::devices::{Catalog, PoolRecords, Records};
+    use hex_api::{
+        CapacityResources, Execution, GpuEligibility, ImageArch, ImagePlatform, RouteKey,
+        RouteReceipt,
+    };
+    use sha2::{Digest, Sha256};
+    use std::cell::RefCell;
+
+    /// Set in the copy of this binary that runs [`original_a_vfio_vm_past_its_memlock_is_refused_before_launch`]'s
+    /// case under a lowered RLIMIT_MEMLOCK, which no process raises back without CAP_SYS_RESOURCE.
+    const CASE_ENV: &str = "HEX_FC_MEMLOCK_CASE";
+    const PASS: &str = "memlock: the VFIO VM was refused before its VMM";
+    const TEST: &str = "firecracker::native::memlock_tests::original_a_vfio_vm_past_its_memlock_is_refused_before_launch";
+
+    /// A Store's records for one box, its fresh write given a native scope; its VMM's launch is the one call that
+    /// mustn't come.
+    struct Unlaunched(RefCell<Option<BoxRecord>>);
+
+    impl Transaction for Unlaunched {
+        fn records(&self) -> Result<Records, Refusal> {
+            Ok(Records::new())
+        }
+        fn pool_records(&self) -> Result<PoolRecords, Refusal> {
+            Ok(PoolRecords::new())
+        }
+        fn read_pool(&self, _: &hex_api::BackingKey) -> Result<Option<PoolRecord>, Refusal> {
+            Ok(None)
+        }
+        fn put_pool(&self, _: &PoolRecord) -> Result<(), Refusal> {
+            panic!("a dedicated GPU box writes no pool")
+        }
+        fn grant_pool(&self, _: &hex_api::BackingGrant) -> Result<PoolRecord, Refusal> {
+            panic!("a dedicated GPU box is granted no pool")
+        }
+        fn remove_pool(&self, _: &hex_api::BackingKey) -> Result<(), Refusal> {
+            panic!("a dedicated GPU box removes no pool")
+        }
+        fn check_unsubmitted_pool(&self) -> Result<(), Refusal> {
+            Ok(())
+        }
+        fn read(&self, _: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
+            Ok(self.0.borrow().clone())
+        }
+        fn put(&self, record: &BoxRecord) -> Result<(), Refusal> {
+            let mut kept = record.clone();
+            kept.native_scope
+                .get_or_insert(hex_core::record::NativeScope::from_bytes([7; 16]));
+            *self.0.borrow_mut() = Some(kept);
+            Ok(())
+        }
+        fn remove(&self, _: &BoxId) -> Result<(), Refusal> {
+            *self.0.borrow_mut() = None;
+            Ok(())
+        }
+        fn launch_managed(
+            &self,
+            _: &ManagedLaunch<'_>,
+            _: shards_api::LaunchIo,
+            _: std::time::Duration,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            Err(Refusal::Broken(
+                "the VMM was launched past its memlock".to_owned(),
+            ))
+        }
+        fn attach_managed(
+            &self,
+            _: Option<&shards_api::Identity>,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            panic!("a create refused before its VMM attaches nothing")
+        }
+        fn finalize_managed(&self, _: Option<&shards_api::Identity>) -> Result<(), Refusal> {
+            panic!("a create refused before its VMM finalizes nothing")
+        }
+        fn managed_usage(&self) -> Result<hex_api::Usage, Refusal> {
+            panic!("a refused create reads no usage")
+        }
+    }
+
+    /// The lead's ruling of 2026-11-11 (AC-T7.4.1; original; the GPU run r690's step a on 00aad8da): a VFIO VM's VMM
+    /// maps all its guest's RAM for DMA, which vfio's type1 IOMMU charges to the VMM's RLIMIT_MEMLOCK unless the VMM
+    /// holds CAP_IPC_LOCK; Firecracker then ended with `IommuDmaMap(Error(12))`, ENOMEM, after its launch. Do, in a copy
+    /// of this binary whose RLIMIT_MEMLOCK, soft and hard, is one MiB, below its VM's RAM, and which holds no
+    /// CAP_IPC_LOCK to give its VMM (a root copy drops it from its bounding and ambient sets): create a VM given a
+    /// GPU whole (VFIO) through the adapter, its records' VMM launch refused if it comes. Expect the create refused before
+    /// anything is written or launched (no record, no VFIO plan read from the host, no VMM), by type, naming the VM's RAM
+    /// in bytes, the soft and the hard limit, and CAP_IPC_LOCK.
+    #[test]
+    fn original_a_vfio_vm_past_its_memlock_is_refused_before_launch() {
+        if std::env::var_os(CASE_ENV).is_some() {
+            refused_before_launch_under_a_low_memlock();
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
+            .env(CASE_ENV, "1")
+            .output()
+            .unwrap();
+        let log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        eprint!("{log}");
+        assert!(output.status.success(), "the copy failed");
+        assert!(log.lines().any(|line| line == PASS), "the copy ran no case");
+    }
+
+    fn refused_before_launch_under_a_low_memlock() {
+        use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+        use rustix::thread::CapabilitySet;
+        if rustix::process::geteuid().is_root() {
+            rustix::thread::remove_capability_from_bounding_set(CapabilitySet::IPC_LOCK).unwrap();
+            rustix::thread::configure_capability_in_ambient_set(CapabilitySet::IPC_LOCK, false)
+                .unwrap();
+        }
+        let low = 1 << 20;
+        setrlimit(
+            Resource::Memlock,
+            Rlimit {
+                current: Some(low),
+                maximum: Some(low),
+            },
+        )
+        .unwrap();
+        assert_eq!(getrlimit(Resource::Memlock).maximum, Some(low));
+        let dir = tempfile::tempdir().unwrap();
+        let pinned = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            fs::write(&path, bytes).unwrap();
+            (path, <[u8; 32]>::from(Sha256::digest(bytes)))
+        };
+        let mut config = pool::tests::config();
+        (config.binary, config.binary_sha256) = pinned("firecracker", b"a stand-in VMM, never run");
+        (config.cost_evidence, config.cost.id) = pinned("evidence", b"a stand-in cost's evidence");
+        config.state_dir = dir.path().join("state");
+        fs::create_dir(&config.state_dir).unwrap();
+        let catalog =
+            Catalog::parse(b"hex-devices-1\ngpu\t256\ta\t1\tvfio\t0000:01:00.0\t7\n").unwrap();
+        let owner: Arc<dyn Books> = Arc::new(super::handoff_tests::NoOwnerCalls);
+        let ram = 64 << 20;
+        let allocation = config
+            .cost
+            .allocate(CapacityResources {
+                cpu_milli: 1000,
+                mem_bytes: ram,
+                disk_bytes: 0,
+            })
+            .unwrap();
+        let runtime = FirecrackerRuntime {
+            config,
+            catalog: triomphe::Arc::try_new(catalog).unwrap(),
+            books: Arc::downgrade(&owner),
+            initialized: std::sync::OnceLock::new(),
+        };
+        let id = BoxId::new("gpu-memlock").unwrap();
+        let spec = BoxSpec {
+            id: id.clone(),
+            bounds: hex_api::Bounds {
+                cpu_max_milli: Some(1000),
+                memory_max: Some(ram),
+                ..hex_api::Bounds::default()
+            },
+            class: ClassSpec::Firecracker(Box::new(hex_api::OciSpec {
+                rootfs: hex_api::Rootfs::Dir("/fixture/root".into()),
+                init: Program::of(&["true"]),
+                mounts: Vec::new(),
+                hostname: None,
+                network: hex_api::Network::Private,
+                hosts: Vec::new(),
+            })),
+            owner: None,
+            devices: vec![DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 256,
+            }],
+            allocation: Some(allocation),
+            route: Some(RouteReceipt {
+                key: RouteKey {
+                    class: Class::Firecracker,
+                    image: ImagePlatform {
+                        os: hex_api::ImageOs::Linux,
+                        arch: ImageArch::Amd64,
+                    },
+                    execution: Execution::Firecracker,
+                    gpu: GpuEligibility::Required,
+                },
+                backing: None,
+            }),
+        };
+        let vm_ram = runtime.config.machine_memory(&spec).unwrap() * (1 << 20);
+        let records = Unlaunched(RefCell::new(None));
+        let until = Instant::now() + std::time::Duration::from_secs(30);
+        let refused = runtime
+            .create_inner(spec, None, &records, until)
+            .unwrap_err();
+        let Refusal::Platform { why, .. } = &refused else {
+            panic!("refused before its VMM, by its memlock: {refused:?}");
+        };
+        assert!(
+            records.0.borrow().is_none(),
+            "refused before anything is written"
+        );
+        for named in [
+            vm_ram.to_string(),
+            format!("soft {low}"),
+            format!("hard {low}"),
+            "CAP_IPC_LOCK".to_owned(),
+        ] {
+            assert!(why.contains(&named), "{named} named: {why}");
+        }
+        eprintln!("{PASS}");
+    }
+}
