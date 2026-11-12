@@ -781,7 +781,8 @@ impl Store {
     }
 
     /// The host's boot session this store stamps every record it writes with ([`host_boot`]); `None` where it can't
-    /// be read.
+    /// be read. Read for the Linux node's Firecracker backend alone (`Node::boot_session`).
+    #[cfg(target_os = "linux")]
     pub(crate) fn boot(&self) -> Option<&BootSession> {
         self.boot.as_ref()
     }
