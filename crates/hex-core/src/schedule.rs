@@ -82,6 +82,28 @@ pub enum Command {
     Status {
         key: Key,
     },
+    /// The person's release of every reservation of a capacity holder gone for good (joint plan step 13, CV6),
+    /// refused while it is connected.
+    Forget {
+        holder: String,
+    },
+}
+
+/// What the person's release of a capacity holder did (CV6): what it released, or why it released nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum Forget {
+    /// Every reservation of `holder` removed: its epoch then, and their count and sum.
+    Released {
+        holder: String,
+        epoch: u64,
+        count: u64,
+        sum: hex_api::capacity::Amounts,
+    },
+    /// The holder has a session: its own sync says what it holds.
+    Connected,
+    /// No holder of that name was ever here.
+    Unknown,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,4 +119,7 @@ pub struct Reply {
     pub observations: Vec<LaunchObservation>,
     /// Typed failures from actual runtime operations, encoded by the existing refusal codec.
     pub refusals: Vec<Vec<u8>>,
+    /// A [`Command::Forget`]'s outcome.
+    #[serde(default)]
+    pub forget: Option<Forget>,
 }
