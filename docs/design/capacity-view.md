@@ -458,15 +458,20 @@ window, which would under-count Hex here.
 - hex-sim (`hex_sim::capacity`): one machine of sixteen CPUs and 64 GiB, Hex's own boxes and kiln's
   runners on its keeper, under a nemesis that crashes the keeper between messages and at its writes
   (before and after a write lands), crashes runners (their runs outliving them or not), drops links with
-  what was on them, partitions and heals them, lets a runner's wait run out, and retires a runner whose
-  reservations the person then releases. After every step: the work actually running fits the room, and
-  every running run is in the keeper's books while it is up. After settling (every link healed, every
-  message delivered, every hint drained): the keeper's books of each runner, the runner's own, and what it
-  runs are the same, and no sync said the counts disagree. Planted shell mistakes, each caught on some of
-  64 seeds: release on silence, a run started before its grant, a restart forgetting its survivors, a
-  keeper answering before its write lands, Hex admitting against its own boxes alone. Bounded seeds here
-  (64 of 2,000 steps with two runners, 32 each with one and with three); ROOT runs the sweeps:
-  `hex_sim::capacity::run(seed, runners, steps, None)` over its seeds, which must each return `Ok`.
+  what was on them, partitions and heals them, lets a runner's wait run out, retires a runner whose
+  reservations the person then releases, and has the person release a runner wrongly: one away (its link
+  down, or its process crashed with its runs outliving it) with work still running (CV6). After every step:
+  every running run is in the keeper's books while it is up, but one so released, until its runner's next
+  sync adopts it (CV5); the work running fits the room but for what such a release hid and its sync then
+  adopted; and what the keeper books past the room (only an adoption's), its view says it is over by. After
+  settling (every link healed, every message delivered, every hint drained): the keeper's books of each
+  runner, the runner's own, and what it runs are the same, and no sync said the counts disagree. Planted
+  shell mistakes, each caught on some of 64 seeds: release on silence, a run started before its grant, a
+  restart forgetting its survivors, a keeper answering before its write lands, Hex admitting against its own
+  boxes alone, a sync that drops what the keeper lacks instead of adopting it. Bounded seeds here (64 of
+  2,000 steps with two runners, 32 each with one and with three); ROOT's sweeps take
+  `capacity::tests::the_record_sweep` (ignored; `HEX_CAPACITY_SEEDS`, `HEX_CAPACITY_STEPS`), every seed
+  of which must hold, and each mistake caught on some.
 - ROOT: kiln-ci's simulator with kiln's binding of the holder (`hex_api::capacity::Holder` against
   `capacity::sim::SimView`, and the conformance suite for a keeper kiln hosts), then two real machines,
   once the transport binding lands.

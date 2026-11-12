@@ -18,6 +18,7 @@ fn total(all: Report, r: Report) -> Report {
         released_at_sync: all.released_at_sync + r.released_at_sync,
         adopted_at_sync: all.adopted_at_sync + r.adopted_at_sync,
         forgotten: all.forgotten + r.forgotten,
+        wrongly_forgotten: all.wrongly_forgotten + r.wrongly_forgotten,
     }
 }
 
@@ -35,7 +36,8 @@ fn seeds(runners: usize, seeds: u64, steps: u64) -> Report {
 /// dropped with what was on them, partitioned and healed; waits run out; a runner retired and released
 /// by the person); expect the work running never past the room and every running run in the keeper's
 /// books at every step, and once settled the keeper's books, each runner's and what it runs the same;
-/// and (non-vacuity) each fault struck, both sides refused for room, and syncs released what ended.
+/// and (non-vacuity) each fault struck, both sides refused for room, syncs released what ended, and a sync
+/// adopted work the person had released while its runner was away (CV6).
 #[test]
 fn no_oversubscription_and_the_books_agree_across_crash_seeds() {
     let all = seeds(2, 64, 2_000);
@@ -51,7 +53,9 @@ fn no_oversubscription_and_the_books_agree_across_crash_seeds() {
             && all.crashes_at_write > 0
             && all.runner_crashes > 0
             && all.released_at_sync > 0
-            && all.forgotten > 0,
+            && all.forgotten > 0
+            && all.wrongly_forgotten > 0
+            && all.adopted_at_sync > 0,
         "{all:?}"
     );
 }
@@ -137,6 +141,21 @@ fn hex_ignoring_the_holders_is_caught() {
     );
 }
 
+/// Non-vacuity, CV5: do plant a keeper's shell that drops from a sync what the keeper doesn't hold, which
+/// its sync would adopt after the person's wrong release; expect some seed to run a run the keeper's books
+/// lack once its runner has synced, or that runner told the counts disagree.
+#[test]
+fn dropping_what_the_keeper_lacks_at_a_sync_is_caught() {
+    let found = caught(Mutant::DropUnknownAtSync);
+    assert!(
+        matches!(
+            found,
+            Some(Violation::Unbooked { .. } | Violation::SyncDisagreed { .. })
+        ),
+        "{found:?}"
+    );
+}
+
 /// T-T7.4.1's determinism: one seed, one run.
 #[test]
 fn a_seed_names_one_run() {
@@ -172,6 +191,7 @@ fn the_record_sweep() {
         Mutant::ForgetSurvivors,
         Mutant::AnswerBeforeWrite,
         Mutant::LocalIgnoresForeign,
+        Mutant::DropUnknownAtSync,
     ] {
         let caught: Vec<u64> = (0..n)
             .filter(|seed| run(*seed, 2, steps, Some(mutant)).is_err())
