@@ -12,21 +12,24 @@
 //! as the guest has no disk: docs/design/shards-guest.md §4), mounts the Shards shares the kernel's
 //! command line names (`hex.shares=rw,ro,…`, §4a) at `/run/hex/shares/<i>`, gives the node the descriptor
 //! limit `hex node --descriptors` counts (soft and hard, `fs.nr_open` raised to it where lower), starts `hex node`
-//! and then `hex guest relay --vsock`, says `hex guest ready` on the console, and reaps every process that ends,
+//! and then `hex guest relay --vsock`, handing it the boot's deadline where its host gave one (`BOOT_READY_BY`),
+//! says `hex guest ready` on the console, and reaps every process that ends,
 //! as PID 1 must. When the node or the relay ends, it says why and powers the guest off, so the host sees
 //! the guest end.
 //!
 //! With `--vsock` it listens on the guest's vsock ports ([`hex_core::stream::CONTROL_PORT`],
 //! [`hex_core::stream::STDIO_PORT`] and [`hex_core::stream::files::FILES_PORT`], any CID); with `--unix` on
 //! `control.sock`, `stdio.sock` and `files.sock` in `<dir>`, which tests dial as the host would. It stages
-//! boxes' roots under `--staged` (default `/run/hex/staged`, made if absent; §4a). Once all listen it says
-//! `ready` on stdout, and it serves until a listener fails, when it says why on stderr and exits 1.
+//! boxes' roots under `--staged` (default `/run/hex/staged`, made if absent; §4a). Once all listen and its node
+//! has told it its bounds, within the boot's deadline where init handed one, it says `ready` on stdout, and it
+//! serves until a listener fails, when it says why on stderr and exits 1.
 
+use std::ffi::OsStr;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
 use hex_client::guest::Duplex;
@@ -121,9 +124,18 @@ fn relay(args: &[String]) -> Result<(), (u8, String)> {
         .name("hex-relay-stamps".to_owned())
         .spawn(move || serve_stamps(stamps, line))
         .map_err(|e| (1, format!("starting the stamps thread: {e}")))?;
-    // Its bounds are its node's, which the guest's init started and saw ready before it: asked before it says ready.
-    let limits =
-        Limits::asked(&node).map_err(|why| (1, format!("asking the node its bounds: {why}")))?;
+    // Its bounds are its node's, which the guest's init started and saw ready before it: asked before it says ready,
+    // within the boot's deadline where init handed one, so a node busy past its hello's learned wait (initializing
+    // the guest's GPU) ends no boot that has time left (AC-T7.4.1).
+    let now = Instant::now();
+    let ready_by = boot_deadline(
+        std::env::var_os(BOOT_READY_BY).as_deref(),
+        now,
+        boottime_ns(),
+    )
+    .map_err(|why| (1, why))?;
+    let limits = Limits::asked(&node, ready_by)
+        .map_err(|why| (1, format!("asking the node its bounds: {why}")))?;
     let mut out = std::io::stdout().lock();
     out.write_all(b"ready\n")
         .and_then(|()| out.flush())
@@ -216,6 +228,35 @@ impl Duplex for Vsock {
 /// and all three to the relay (its first entry, its mounts done, its node ready).
 const BOOT_T0: &str = "HEX_BOOT_T0";
 const BOOT_STAMPS: &str = "HEX_BOOT_STAMPS";
+/// The variable that carries the boot's deadline from init to the relay (AC-T7.4.1): the instant on the guest's own
+/// clock, `CLOCK_BOOTTIME` nanoseconds, by which its host waits for it to be ready, its readiness bound counted from
+/// the kernel's start, so the time the boot has spent is what the clock reads.
+const BOOT_READY_BY: &str = "HEX_BOOT_READY_BY";
+
+/// The boot's deadline init handed the relay (`given`, [`BOOT_READY_BY`]) as a monotonic instant: `now`, and as much
+/// after it as the guest's clock, at `boot_ns` (read after `now`, so the conversion never lends time), has left to it;
+/// none where init handed none, as outside a guest.
+fn boot_deadline(
+    given: Option<&OsStr>,
+    now: Instant,
+    boot_ns: u128,
+) -> Result<Option<Instant>, String> {
+    let Some(given) = given else {
+        return Ok(None);
+    };
+    let bad =
+        || format!("{BOOT_READY_BY} is {given:?}, not a CLOCK_BOOTTIME instant in nanoseconds");
+    let at = given
+        .to_str()
+        .filter(|text| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|text| text.parse::<u128>().ok())
+        .ok_or_else(bad)?;
+    // Nothing left once the guest's clock has passed it: the boot's deadline has gone by.
+    let left = u64::try_from(at.saturating_sub(boot_ns)).map_err(|_| bad())?;
+    now.checked_add(Duration::from_nanos(left))
+        .map(Some)
+        .ok_or_else(bad)
+}
 
 /// Nanoseconds since the kernel began keeping time: `CLOCK_BOOTTIME` (clock_gettime(2)), the guest's own
 /// clock from its boot, which the boot split reads phases by.
@@ -322,9 +363,12 @@ fn init() -> Result<(), (u8, String)> {
         ],
         &format!("ready {}\n", socket.display()),
         None,
+        None,
     )
     .map_err(fail)?;
     let node_ready = boottime_ns();
+    // AC-T7.4.1: the host's readiness bound, from the kernel's start, is the boot's deadline on the guest's clock;
+    // the relay's calls to its node before it says ready take it as their caller's.
     let relay = start(
         &exe,
         &[
@@ -336,6 +380,7 @@ fn init() -> Result<(), (u8, String)> {
         ],
         "ready\n",
         Some(format!("{t0} {mounted} {node_ready}")),
+        ready_budget.map(|budget| budget.as_nanos()),
     )
     .map_err(fail)?;
     if let Some(budget) = ready_budget {
@@ -750,12 +795,14 @@ fn mount_all() -> Result<(), String> {
 
 /// Starts `/init` with `args` and waits for its first line, `ready`: read as far as its length and no
 /// further, as nothing else is that line.
-/// `stamps`, where given, goes to the child as init's boot stamps ([`BOOT_STAMPS`]).
+/// `stamps`, where given, goes to the child as init's boot stamps ([`BOOT_STAMPS`]), and `ready_by` as the boot's
+/// deadline ([`BOOT_READY_BY`]), which no child takes from init's own environment.
 fn start(
     exe: &Path,
     args: &[&std::ffi::OsStr],
     ready: &str,
     stamps: Option<String>,
+    ready_by: Option<u128>,
 ) -> Result<u32, String> {
     let what = args
         .iter()
@@ -766,6 +813,10 @@ fn start(
     let mut command = std::process::Command::new(exe);
     if let Some(stamps) = stamps {
         command.env(BOOT_STAMPS, stamps);
+    }
+    command.env_remove(BOOT_READY_BY);
+    if let Some(at) = ready_by {
+        command.env(BOOT_READY_BY, at.to_string());
     }
     let mut child = command
         .args(args)
@@ -885,6 +936,29 @@ mod tests {
         ] {
             assert!(firecracker_ready_budget(text).is_err(), "{text}");
         }
+    }
+
+    /// AC-T7.4.1: the boot's deadline init hands the relay is its host's readiness bound on the guest's clock, and the
+    /// relay's calls to its node take what is left of it. Do: read the variable as the relay does with the clock
+    /// before, at and past it, with none, and with hostile values. Expect: what is left from now, nothing once passed
+    /// (a caller's deadline its call refuses at once), none where init handed none, and a refusal for the rest.
+    #[test]
+    fn the_relay_takes_what_is_left_of_the_boots_deadline() {
+        use std::os::unix::ffi::OsStrExt;
+        let now = Instant::now();
+        let ready_by = |text: &str, boot_ns| boot_deadline(Some(OsStr::new(text)), now, boot_ns);
+        assert_eq!(boot_deadline(None, now, 5), Ok(None));
+        assert_eq!(
+            ready_by("60000000000", 1_500_000_000),
+            Ok(Some(now + Duration::from_nanos(58_500_000_000)))
+        );
+        assert_eq!(ready_by("60000000000", 60_000_000_000), Ok(Some(now)));
+        assert_eq!(ready_by("60000000000", 61_000_000_000), Ok(Some(now)));
+        let past = (u128::from(u64::MAX) + 1).to_string();
+        for bad in ["", "x", "-1", "+1", "1.5", " 1", "1 ", past.as_str()] {
+            assert!(ready_by(bad, 0).is_err(), "{bad:?}");
+        }
+        assert!(boot_deadline(Some(OsStr::from_bytes(b"\xff1")), now, 0).is_err());
     }
 
     /// HEX-GUEST-9 (docs/design/shards-guest.md §4, amended 2026-11-06): `init` mounts `/proc`, `/sys`,
