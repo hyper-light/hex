@@ -1,5 +1,11 @@
 //! ROOT-owned public borrowed-connector contract. No real VM is booted here.
 //! Run only selected ignored cases with the coordinator's external process guard.
+//!
+//! Hex's own campaign over shards-api's public borrowed connector (`connect_borrowed`), the native Windows
+//! steps among them (cold handles, WIN-NATIVE-STEPS): first carried as vendored Shards patches 0004, 0005, 0007
+//! and 0029 (crates/api/tests/hex_borrowed_contract.rs), which Shards classed as Hex-only when it upstreamed the
+//! rest (hex-upstream-v1's README at Shards 482c5d78), so it is a test of Hex's on its dependency. Its body is
+//! unchanged (AC-T7.4.1).
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
