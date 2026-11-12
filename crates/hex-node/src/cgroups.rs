@@ -754,6 +754,22 @@ impl Cgroups {
         Ok(self.held()?.get(id).map(|h| h.slot))
     }
 
+    /// The slots live boxes hold, in order (joint plan step 14): a slot none holds is idle, and keeps the caps its
+    /// last box left, as [`Cgroups::give_back`] writes no bound, so the charge learner books it at nothing.
+    pub fn held_slots(&self) -> Result<Vec<u64>, Refusal> {
+        let held = self.held()?;
+        let mut slots = Vec::new();
+        slots
+            .try_reserve_exact(held.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "the node's held slots",
+                bound: held.len(),
+            })?;
+        slots.extend(held.values().map(|h| h.slot));
+        slots.sort_unstable();
+        Ok(slots)
+    }
+
     /// Box `id`'s usage from its slot's cgroup `cg`, reported since it was given the slot; `None` for a
     /// box holding no slot.
     pub fn usage(&self, id: &BoxId, cg: &BoxCgroup) -> Result<Option<Usage>, Refusal> {

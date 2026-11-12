@@ -118,14 +118,18 @@ guarantee needs a VM's siblings to be VMs booked by this rule, and their parent 
 `memory.max` its ceiling, `memory.high` its budget at most its ceiling.
 
 **One scale for every child of the node's cgroup** (ROOT, 2026-11-12). A process or OCI box is booked at its
-allocation until it is learned (its receipt's booking, else its workload's caps: `cpu_max_milli`), and weighs
-`ceil(10,000 × booking / machine CPU)` like a fleet. A fleet's budget is the room its machine leaves after those
-bookings, so the weights of every child sum to the scale's top and each child, box or fleet, receives at least
-`min(its need, its booking or budget)` under contention (`charge::tests`: a process box under contention, and the
-property over boxes in whole units of the scale). A box booked nothing weighs 1: it takes what booked work leaves
-idle. Its owner's own `cpu_weight` is not the node's scale. The node writing the boxes' weights, and `.oci`'s by
-its boxes' bookings, is checkpoint 4's remaining work; until then a box's cgroup keeps its owner's weight, and
-against it the fleet receives its weight's share, not its budget.
+allocation until it is learned: the native classes offer no runtime cost (`facts::capacity`), so a native box's
+receipt books its caps, which its cgroup holds as `cpu.max` and `memory.max` (a reused slot's as its box's create
+wrote them). It weighs `ceil(10,000 × booking / machine CPU)` like a fleet, and `.oci` its boxes' weights together.
+A box booked nothing weighs 1: it takes what booked work leaves idle. A reuse slot no box holds runs nothing and
+keeps the caps its last box left (`Cgroups::give_back` writes no bound): it books nothing and weighs 1, apart from
+the scale. The fleets take the units the boxes leave, and a fleet's CPU budget is at most the CPU those units carry,
+rounded down (`charge::fleet_room`), besides the room its machine leaves after the boxes' bookings: each box's weight
+rounded up comes off the fleet's, never past the scale's top, so the weights of every child that may run sum to at
+most 10,000 and each child, box or fleet, receives at least `min(its need, its booking or budget)` under contention
+(`charge::tests`: a process box under contention, and the property over any bookings; `node::charges::tests`: the
+weights the node writes, shared as the kernel shares them). Its owner's own `cpu_weight` is not the node's scale. The
+node writes the boxes' weights each window, so a box made between two windows keeps its owner's weight until the next.
 
 **Sources.** Kubernetes makes a request a CPU weight and the limit a throttle (f35 A, f45 A); Borg gives batch
 work tiny shares beside latency-sensitive work (f44 A); weight by charge, the envelope the cap (f83 B). On macOS a box's CPU follows its weight only as QoS tiers, and the
@@ -216,7 +220,8 @@ reaches the view settled with goal 13 the same day:
   cgroups. A monotonic timer wakes it once a window, `cpu.max`'s period. It reads each running VM's cgroup (the
   supervisor's `running_vms`), learns, and writes the placement (C4, C5), each file only when its value changes
   (`BoxCgroup::set`; a VM's create already wrote its ceiling): each VM's `cpu.weight` and `memory.high`, the fleet's
-  parent's `cpu.max` and `cpu.weight`, and `.vm`'s `cpu.weight`. Each Shards guest's room is refused
+  parent's `cpu.max` and `cpu.weight`, `.vm`'s `cpu.weight`, and each process and OCI box's and `.oci`'s `cpu.weight`
+  on the same scale (C4). Each Shards guest's room is refused
   `Awaits(GuestRoom)` (C7). A failed window is kept, and the capacity answers then carry nothing learned, so the
   class's VMs are booked whole until a window passes.
 - `hex_api::Capacity::learned` crosses the node socket's wire last on a VM class's capacity answer (append-only).
@@ -240,6 +245,8 @@ reaches the view settled with goal 13 the same day:
 | `cpu.weight`'s range | 1 to 10,000 | (c) | cgroup-v2.rst | `charge::tests` |
 | The fleet's weight | `ceil(10,000 × budget / machine CPU)`, at least 1 | derived | its budget's share of the machine on the kernel's range | `charge::tests` (exact and property) |
 | The fleet's CPU cap | its CPU budget, at least 10 milli-CPU | (c) | the kernel's least quota, 1 ms a 100 ms period (`hex_api::MIN_CPU_MILLI`) | `charge::tests` |
+| A box's weight | `ceil(10,000 × booking / machine CPU)`, its booking its caps; an idle slot 1 | derived | its booking's share of the machine on the kernel's range | `node::charges::tests` |
+| The fleet's CPU budget | at most the CPU the units the boxes leave carry, rounded down | derived | each box's weight rounded up comes off the fleet's, so the children's weights stay within the top | `charge::tests` (exact and property), `node::charges::tests` |
 | The slack's split | in proportion to bookings | derived | budgets sum to the budget, no race in a window | `charge::tests` |
 | The fastest growth | learned per window | (a) | the node's own windows, only rising | `charge::tests` |
 | The eviction order | band, then excess | rule, cited | Kubernetes' documented order (f45 A) | `charge::tests` |
