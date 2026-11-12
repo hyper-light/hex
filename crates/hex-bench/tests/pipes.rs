@@ -145,6 +145,8 @@ fn a_crlf_checkout_is_read_at_each_calls_own_offset() {
     let lines = CALLS.lines().count();
     let text = CALLS.replace('\n', "\r\n").repeat(10);
     let found: Vec<usize> = inheritable_in(&text).into_iter().map(|(n, _)| n).collect();
-    let want: Vec<usize> = (0..10).flat_map(|copy| [copy * lines + 1, copy * lines + 2]).collect();
+    let want: Vec<usize> = (0..10)
+        .flat_map(|copy| [copy * lines + 1, copy * lines + 2])
+        .collect();
     assert_eq!(found, want);
 }
