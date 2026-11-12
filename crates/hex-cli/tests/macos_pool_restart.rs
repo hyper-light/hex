@@ -5,8 +5,10 @@
 //! joins the connection to a node served in this process over the simulator, whose capacity is the pool's
 //! room. The pool is made Live through the node's socket (its offer granted), the node is SIGKILLed, and a
 //! node started on the same state takes the pool back: with its controller still running, the same
-//! process, re-attached; with its controller ended while no node ran, by type. Each test waits on the fact
-//! it needs, within PATIENCE, and checks what is left by pid and birth.
+//! process, re-attached and Live; with its controller ended while no node ran (its vsock gone with it),
+//! Draining with its end recorded. Either is then released through the restarted node and nothing of it
+//! is left. Each test waits on the fact it needs, within PATIENCE, and checks what is left by pid and
+//! birth.
 #![cfg(target_os = "macos")]
 #![allow(
     clippy::unwrap_used,
@@ -38,18 +40,18 @@ use sha2::{Digest, Sha256};
 const PATIENCE: Duration = Duration::from_secs(60);
 
 /// The controller: argv as the SDK prepares it, plus the helper's `--host-lifeline FD`. It records itself
-/// and its descendant under `SHARDS_HOME` (the only environment a launch carries); the descendant ignores
-/// SIGHUP and never reads the lifeline. The controller then reads its lifeline until the helper's end
-/// closes it.
+/// and its descendant in the lab's `records` folder (`RECORDS`, written in when the lab writes the script);
+/// the descendant ignores SIGHUP and never reads the lifeline. The controller then reads its lifeline until
+/// the helper's end closes it.
 const CONTROLLER: &str = r#"#!/bin/sh
-echo $$ > "$SHARDS_HOME/controller.$$"
+echo $$ > "RECORDS/controller.$$"
 lifeline=""
 while [ $# -gt 0 ]; do
   if [ "$1" = "--host-lifeline" ]; then lifeline="$2"; shift; fi
   shift
 done
 /bin/sh -c 'trap "" HUP; exec /bin/sleep 100000' &
-echo $! > "$SHARDS_HOME/descendant.$$"
+echo $! > "RECORDS/descendant.$$"
 eval "/bin/cat <&$lifeline" > /dev/null
 "#;
 
@@ -161,13 +163,16 @@ impl Guest {
 fn relay(mut host: UnixStream, node: &Path, token: u64, dials: &AtomicU64) {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
-    // "CONNECT " and a u32's digits: the request the muxer reads, never more.
-    while line.len() < "CONNECT 4294967295".len() {
+    // "CONNECT ", a u32's digits and its newline: the request the muxer reads, never more.
+    loop {
         if host.read(&mut byte).unwrap_or(0) == 0 {
             return;
         }
         if byte[0] == b'\n' {
             break;
+        }
+        if line.len() == "CONNECT 4294967295".len() {
+            return;
         }
         line.push(byte[0]);
     }
@@ -210,6 +215,10 @@ struct Lab {
 
 impl Lab {
     fn new() -> Self {
+        // A grant boots the pool's controller and dials its guest, which the client's learned bound on
+        // an answer doesn't cover: every client wait here measures, and each call carries this test's
+        // own bound instead (`capacity_before`, [`within`]).
+        hex_core::patience::measure_all();
         let cache = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache");
         std::fs::create_dir_all(&cache).unwrap();
         let dir = tempfile::Builder::new()
@@ -217,8 +226,11 @@ impl Lab {
             .tempdir_in(&cache)
             .unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let records = dir.path().join("records");
+        std::fs::create_dir(&records).unwrap();
         let controller = dir.path().join("controller");
-        std::fs::write(&controller, CONTROLLER).unwrap();
+        let script = CONTROLLER.replace("RECORDS", records.to_str().unwrap());
+        std::fs::write(&controller, script).unwrap();
         std::fs::set_permissions(&controller, std::fs::Permissions::from_mode(0o700)).unwrap();
         // The cost evidence carries this host class's CPU-response row, as the node requires of a
         // managed VM: a fixture row, never a measured profile; no enforcement conclusion is drawn here.
@@ -320,7 +332,13 @@ impl Lab {
             .stdout(std::process::Stdio::piped())
             // A file, not a pipe: what the node said before it ended is all there once it has ended,
             // whoever else (its helper) holds the descriptor.
-            .stderr(std::fs::File::create(self.path("node.err")).unwrap());
+            .stderr(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(self.path("node.err"))
+                    .unwrap(),
+            );
         for (name, value) in &self.env {
             command.env(name, value);
         }
@@ -352,8 +370,7 @@ impl Lab {
 
     /// Every controller the helper ever started here, as each recorded itself.
     fn controllers(&self) -> Vec<i32> {
-        let home = self.path("state/shards-native-home");
-        let Ok(entries) = std::fs::read_dir(home) else {
+        let Ok(entries) = std::fs::read_dir(self.path("records")) else {
             return Vec::new();
         };
         entries
@@ -367,7 +384,7 @@ impl Lab {
 
     /// The controller's descendant, as the controller recorded it.
     fn descendant(&self, controller: i32) -> i32 {
-        let path = self.path(&format!("state/shards-native-home/descendant.{controller}"));
+        let path = self.path(&format!("records/descendant.{controller}"));
         wait_for("the controller to record its descendant", || {
             std::fs::read_to_string(&path).is_ok_and(|text| text.ends_with('\n'))
         });
@@ -392,15 +409,23 @@ impl Lab {
         assert_eq!(offer.phase, BackingPhase::Prepared, "{offer:?}");
         assert_eq!(offer.cost, self.cost);
         self.guest.front(&self.vsock(offer.key));
-        let live = client
-            .initialize_backing(BackingGrant {
-                key: offer.key,
-                allocation: offer.cost.allocate(CapacityResources::default()).unwrap(),
-                devices: Vec::new(),
-            })
-            .expect("the shared pool initialized");
+        let grant = BackingGrant {
+            key: offer.key,
+            allocation: offer.cost.allocate(CapacityResources::default()).unwrap(),
+            devices: Vec::new(),
+        };
+        let socket = node.socket.clone();
+        let live = within("the grant", move || {
+            hex_client::Client::connect(&socket)
+                .unwrap()
+                .initialize_backing(grant)
+        })
+        .expect("the shared pool initialized");
         assert_eq!(live.phase, BackingPhase::Live, "{live:?}");
         assert_eq!(live.key, offer.key);
+        wait_for("the controller to record itself", || {
+            !self.controllers().is_empty()
+        });
         let controllers = self.controllers();
         assert_eq!(controllers.len(), 1, "{controllers:?}");
         (offer.key, controllers[0])
@@ -457,13 +482,56 @@ impl Drop for Node {
 
 /// The node's one shared CPU pool, as its `oci` capacity offers it.
 fn shared_offer(client: &hex_client::Client) -> BackingOffer {
+    let began = Instant::now();
     let capacity = client
-        .capacity(Class::Oci)
+        .capacity_before(Class::Oci, began + PATIENCE)
         .unwrap()
         .expect("the node's oci capacity");
+    eprintln!("the node's oci capacity answered in {:?}", began.elapsed());
     let mut backings = capacity.backings;
     assert_eq!(backings.len(), 1, "{backings:?}");
     backings.remove(0)
+}
+
+/// The node's release of pool `key`, within PATIENCE.
+fn release(node: &Node, key: BackingKey) -> Result<BackingOffer, Refusal> {
+    let socket = node.socket.clone();
+    within("the release", move || {
+        hex_client::Client::connect(&socket)
+            .unwrap()
+            .release_backing(key)
+    })
+}
+
+/// Pool `key` released through a node restarted on the helper's state. That node isn't the helper's
+/// parent (launchd is, since the first node ended): the helper's exit after its last scope's finalize is
+/// seen, its reap isn't, and its absence is what finalize proves (remote's `finish_helper`), so the
+/// release may be refused by type for the Index's next try. This is that next try, once the helper is
+/// gone.
+fn released_by(node: &Node, key: BackingKey, helper: i32) -> BackingOffer {
+    match release(node, key) {
+        Err(Refusal::Invalid { what, why })
+            if what == "managed native configuration"
+                && why == "helper exit observed but native absence/reap is not yet proven" =>
+        {
+            wait_for("the helper to be reaped", || absent(helper));
+            release(node, key)
+        }
+        other => other,
+    }
+    .expect("the pool released")
+}
+
+/// One call to the node on a thread of its own, answered within PATIENCE: a node that never answers
+/// fails the test instead of hanging it (the client's own waits measure here, [`Lab::new`]).
+fn within<T: Send + 'static>(what: &str, call: impl FnOnce() -> T + Send + 'static) -> T {
+    let (sender, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(call());
+    });
+    answer
+        .recv_timeout(PATIENCE)
+        .unwrap_or_else(|_| panic!("{what}: no answer within {PATIENCE:?}"))
 }
 
 fn birth(pid: i32) -> Option<u64> {
@@ -537,7 +605,7 @@ fn a_restarted_node_takes_back_a_live_pool_whose_controller_runs() {
         "the restarted node never dialed its guest"
     );
 
-    let released = client.release_backing(key).expect("the pool released");
+    let released = released_by(&node, key, helper);
     assert_eq!(released.phase, BackingPhase::Released, "{released:?}");
     wait_for("the controller to be gone", || absent(controller));
     wait_for("the descendant to be gone", || !alive(descendant));
@@ -565,9 +633,10 @@ fn a_restarted_node_releases_a_live_pool_whose_controller_ended() {
         rustix::process::Signal::KILL,
     )
     .unwrap();
-    wait_for("the helper to reap its ended controller", || {
-        absent(controller)
-    });
+    // Its vsock goes with it, as a VMM's does.
+    std::fs::remove_file(lab.vsock(key)).unwrap();
+    // The helper, its parent, keeps it unreaped until a node finalizes its scope.
+    wait_for("the controller to end", || !alive(controller));
 
     let node = match lab.node() {
         Ok(node) => node,
@@ -584,8 +653,10 @@ fn a_restarted_node_releases_a_live_pool_whose_controller_ended() {
         vec![controller],
         "a second controller ran"
     );
-    let released = client.release_backing(key).expect("the pool released");
+    assert_eq!(lab.helper_pid(), helper, "a second helper ran");
+    let released = released_by(&node, key, helper);
     assert_eq!(released.phase, BackingPhase::Released, "{released:?}");
+    wait_for("the controller to be reaped", || absent(controller));
     wait_for("the descendant to be gone", || !alive(descendant));
     wait_for("the helper to end with its last scope", || absent(helper));
     lab.end(Some(node), &descendants);
