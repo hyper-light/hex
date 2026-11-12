@@ -48,7 +48,7 @@ use hex_api::{
     DeviceUnavailable, Execution, Exit, GpuEligibility, ImageArch, ImageOs, ImagePlatform, IoKind,
     IoRates, LifecycleCause, MAX_DEVICES, MAX_RUNTIME_ROUTES, Mount, Network, OciSpec,
     PhysicalDevice, PhysicalReport, Program, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt,
-    RuntimeCost, Signal, Usage, User,
+    RuntimeCost, Signal, Upstream, Usage, User,
 };
 
 use crate::netns;
@@ -2228,7 +2228,32 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             "uncertain refusal",
             "a cause is itself uncertain",
         )),
+        Refusal::Awaits { needs } => {
+            // Its tag and the capability's, reserved whole as a Backing refusal's are.
+            w.reserve_fixed(2)?;
+            w.u8(13);
+            put_upstream(w, *needs)
+        }
     }
+}
+
+/// A capability by its place in [`Upstream::ALL`] (append-only).
+fn put_upstream(w: &mut Writer, needs: Upstream) -> Result<(), Fault> {
+    let tag = Upstream::ALL
+        .iter()
+        .position(|known| *known == needs)
+        .and_then(|at| u8::try_from(at).ok())
+        .ok_or_else(|| Fault::value("upstream", format!("{needs:?} has no tag")))?;
+    w.u8(tag);
+    Ok(())
+}
+
+fn upstream(r: &mut Reader<'_>) -> Result<Upstream, Fault> {
+    let tag = r.u8()?;
+    Upstream::ALL
+        .get(usize::from(tag))
+        .copied()
+        .ok_or_else(|| Fault::value("upstream", format!("variant {tag}")))
 }
 
 /// A Connect refusal's body, exactly, reserved whole before any of it is written as a Backing
@@ -2324,6 +2349,9 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
                 "a cause is itself uncertain",
             ));
         }
+        13 => Refusal::Awaits {
+            needs: upstream(r)?,
+        },
         t => return Err(Fault::value("refusal", format!("variant {t}"))),
     })
 }
