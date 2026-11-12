@@ -6,13 +6,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import signal
 import subprocess
 import sys
 
 from build import source_state
 from combined_oracle import mutation
-from evidence import BACKENDS, InvalidEvidence, artifact, finite_positive, hex_digest, load_json, require, sha256
+from evidence import (BACKENDS, InvalidEvidence, artifact, finite_positive, hex_digest, load_json, require, sha256,
+                      unwind_on_sigterm)
 from mutation import command, replacement
 from run import file_receipt, write_json
 
@@ -96,8 +96,8 @@ def execute(args):
         finally:
             journal()
         require(sha256(Path(argv[0])) == step["executable_sha256"], "step executable changed during invocation")
-        require(row["reaped"] and not row["timed_out"] and type(row["exit"]) is int,
-                "campaign phase timed out/unreaped; native cleanup remains uncertain")
+        require(row["reaped"] and row["group_gone"] and not row["timed_out"] and type(row["exit"]) is int,
+                "campaign phase timed out/unreaped/left its process group; native cleanup remains uncertain")
         require((row["exit"] == 0) if expected_green else (row["exit"] != 0),
                 "campaign phase did not produce its required actual exit")
 
@@ -150,7 +150,7 @@ def execute(args):
     mutant_path = named_output("mutant")
     mutant = load_json(mutant_path, args.byte_limit)
     mutant_build = named_output("mutant_build")
-    receipt["mutant"] = {name: mutant.get(name) for name in ("exit", "reaped", "timed_out")}
+    receipt["mutant"] = {name: mutant.get(name) for name in ("exit", "reaped", "timed_out", "group_gone")}
     for name in ("binary", "log"):
         receipt["mutant"][name] = file_receipt(root, artifact(mutant_path.parent, mutant.get(name)))
     receipt["mutant"]["build"] = file_receipt(root, mutant_build)
@@ -179,7 +179,8 @@ def main():
 
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(InterruptedError("ROOT cancellation")))
+    # SIGTERM becomes one unwind, so the restoration in execute's finally runs and each phase's group ends.
+    unwind_on_sigterm()
     for name in ("CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "RAYON_NUM_THREADS"):
         os.environ[name] = "1"
     try:

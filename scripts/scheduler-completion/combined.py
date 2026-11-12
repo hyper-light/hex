@@ -13,7 +13,8 @@ import run as single
 from combined_oracle import (BACKEND_CAPABILITIES, COMMON_CAPABILITIES, capabilities,
                              mutation, restoration, scope_records)
 from evidence import (BACKENDS, POLICY, RULES, TARGETS, InvalidEvidence, artifact,
-                      check_run, finite_positive, hex_digest, load_json, natural, require, sha256)
+                      check_run, finite_positive, hex_digest, load_json, natural, require, sha256,
+                      unwind_on_sigterm)
 
 
 def write(path, value):
@@ -137,8 +138,9 @@ def check_origin(root, row, plan, case, run_row, workload, byte_limit):
     require(value.get("schema") == "hex-completion-origin-1" and value.get("scope") == "root-peer-origin"
             and value.get("source") == plan["source"] and value.get("target") == plan["target"]
             and value.get("outcome") == "verified" and type(value.get("exit")) is int
-            and value["exit"] == 0 and value.get("reaped") is True and natural(value.get("pid"), positive=True),
-            "actual source-pinned peer origin control required")
+            and value["exit"] == 0 and value.get("reaped") is True and natural(value.get("pid"), positive=True)
+            and value.get("group_gone") is True and value.get("group_signaled") is False,
+            "actual source-pinned peer origin control required, its process group gone with nothing left running")
     binary = artifact(path.parent, value.get("binary"))
     require(sha256(binary) == case["origin_binary_sha256"], "origin used another Hex executable")
     reply = load_json(artifact(path.parent, value.get("reply_artifact")), byte_limit)
@@ -377,6 +379,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # SIGTERM becomes an unwind, so a native run's finally ends its child's process group (evidence.start_group).
+    unwind_on_sigterm()
     try:
         sys.exit(main())
     except (InvalidEvidence, OSError, subprocess.SubprocessError, UnicodeError) as error:

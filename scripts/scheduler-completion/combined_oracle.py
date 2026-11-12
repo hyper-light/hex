@@ -295,8 +295,8 @@ def mutation(root, receipt, source, backend, byte_limit):
         require(phases["outcome"] == "verified", "mutation control lacks independently observed Creating scope")
     mutant = receipt.get("mutant")
     require(isinstance(mutant, dict) and type(mutant.get("exit")) is int and mutant["exit"] != 0
-            and mutant.get("timed_out") is False and mutant.get("reaped") is True,
-            "mutant has no bounded actual red execution")
+            and mutant.get("timed_out") is False and mutant.get("reaped") is True and mutant.get("group_gone") is True,
+            "mutant has no bounded actual red execution, its process group gone")
     log = artifact(root, mutant.get("log"))
     require(log.stat().st_size <= byte_limit, "mutation log exceeds caller byte budget")
     negative_libtest(log.read_text())
@@ -304,8 +304,9 @@ def mutation(root, receipt, source, backend, byte_limit):
     build_path = artifact(root, mutant.get("build"))
     build = load_json(build_path, byte_limit)
     require(build.get("source") == source and build.get("exit") == 0 and build.get("reaped") is True
+            and build.get("group_gone") is True and build.get("group_signaled") is False
             and build.get("timed_out") is False and build.get("source_unchanged") is True,
-            "mutant has no successful checked-source build")
+            "mutant has no successful checked-source build, its process group gone with nothing left running")
     require(build.get("binary", {}).get("sha256") == sha256(binary)
             and build.get("overlay", {}).get("file") == receipt.get("file")
             and build["overlay"].get("sha256") == receipt.get("mutated_sha256")
