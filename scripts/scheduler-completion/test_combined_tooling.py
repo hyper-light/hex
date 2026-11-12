@@ -14,7 +14,8 @@ from types import SimpleNamespace
 
 from build import source_state
 from combined import capability_bundle, check_origin, execute, plan_cases, retain_origin, retain_run
-from combined_oracle import forbidden_effect, negative_libtest, restoration, source_restoration, scope_records
+from combined_oracle import (forbidden_effect, mutation, negative_libtest, restoration, source_restoration,
+                             scope_records)
 from evidence import BACKENDS, POLICY, RULES, InvalidEvidence, check_run, sha256, artifact
 from run import file_receipt
 from mutation_campaign import output_path
@@ -46,6 +47,7 @@ def origin_control(root):
     reply = {"physical": "owned", "key": 7, "at": 2, "tracked": True, "created": True, "refusals": []}
     row = {"schema": "hex-completion-origin-1", "scope": "root-peer-origin", "source": SOURCE,
            "target": MAC, "outcome": "verified", "exit": 0, "reaped": True, "pid": 8,
+           "group_signaled": False, "group_gone": True,
            "binary": binary, "physical": "owned", "reply": reply,
            "reply_artifact": save(root, "reply.json", reply), "runner_receipt_sha256": "a" * 64}
     case = {"execution_target": LINUX, "origin_binary_sha256": binary["sha256"]}
@@ -113,7 +115,8 @@ class ToolingControls(unittest.TestCase):
             checked = check_origin(root, row, plan(), case, {"sha256": "a" * 64}, workload, LIMIT)
             self.assertTrue(checked["routed_to_capable_peer"])
             for field, changed in (("source", "b" * 40), ("physical", "foreign"),
-                                   ("runner_receipt_sha256", "b" * 64), ("exit", False)):
+                                   ("runner_receipt_sha256", "b" * 64), ("exit", False),
+                                   ("group_gone", False), ("group_signaled", True)):
                 candidate = dict(origin, **{field: changed})
                 with self.subTest(field=field), self.assertRaises(InvalidEvidence):
                     check_origin(root, save(root, "origin.json", candidate), plan(), case,
@@ -206,6 +209,44 @@ class ToolingControls(unittest.TestCase):
         for name in ("combined.py", "combined_oracle.py", "build.py", "run.py", "mutation.py", "mutation_campaign.py"):
             with self.subTest(file=name):
                 ast.parse((root / name).read_bytes(), filename=name)
+
+
+class MutationProcessGroupControls(unittest.TestCase):
+    """AC-T7.4.1: the mutant's run and its build are group-owned children (evidence.start_group): their receipts
+    count only with the process group gone, the build's with nothing left running past its exit, as check_run
+    requires of a run and its build. What comes before them in the oracle is stubbed; what follows is reached."""
+
+    def receipt(self, root, mutant_run, mutant_build):
+        controls = {name: save(root, f"{name}/run.json", {"source": SOURCE, "backend": "oci",
+                                                            "scope_history": save(root / name, "history.json", [])})
+                    for name in ("baseline", "restored")}
+        log = b"test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
+        mutant = dict(mutant_run, log=save(root, "mutant.log", log), binary=save(root, "mutant-binary", b"mutant"),
+                      build=save(root, "mutant-build.json", dict(mutant_build, source=SOURCE)))
+        return {"schema": "hex-completion-mutation-2", "source": SOURCE, "backend": "oci", "guard": "a guard",
+                "before_manifest": save(root, "before.json", {}), "mutated_manifest": save(root, "mutated.json", {}),
+                "restored_manifest": save(root, "restored.json", {}), **controls, "mutant": mutant}
+
+    def refusal(self, mutant_run, mutant_build):
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch("combined_oracle.source_restoration"), \
+                patch("combined_oracle.check_run", return_value={"proof": "full", "physical": "owned"}), \
+                patch("combined_oracle.scope_records", return_value={"outcome": "verified"}):
+            root = Path(temporary).resolve()
+            with self.assertRaises(InvalidEvidence) as refused:
+                mutation(root, self.receipt(root, mutant_run, mutant_build), SOURCE, "oci", LIMIT)
+            return str(refused.exception)
+
+    def test_mutant_run_and_build_count_only_with_their_process_groups_gone(self):
+        run = {"exit": 101, "timed_out": False, "reaped": True, "group_gone": True}
+        build = {"exit": 0, "timed_out": False, "reaped": True, "group_gone": True, "group_signaled": False,
+                 "source_unchanged": True}
+        # Both whole: the oracle goes past them, to the build's overlay this fixture doesn't have.
+        self.assertIn("exact guard overlay", self.refusal(run, build))
+        self.assertIn("red execution", self.refusal(dict(run, group_gone=False), build))
+        for field, changed in (("group_gone", False), ("group_signaled", True)):
+            with self.subTest(field=field):
+                self.assertIn("checked-source build", self.refusal(run, dict(build, **{field: changed})))
 
 
 class CaseInputControls(unittest.TestCase):
