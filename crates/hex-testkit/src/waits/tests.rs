@@ -14,7 +14,9 @@ fn a_fact_already_true_takes_one_look_and_is_recorded() {
 }
 
 /// Do: wait for a fact that never comes, with a patience seeded from a record of a nanosecond. Expect: refused once
-/// its deadline, twice the record, has passed, naming the fact and that patience; no answer recorded (Karn's point).
+/// its deadline, twice the record, has passed, naming the fact and that patience; no answer recorded (Karn's point),
+/// but the fact is slower than that patience, so the wait's slowest is the patience and its next deadline twice it
+/// (AC-T7.4.1: `Patience::ran_out` backs off in process, RFC 6298 §5.5).
 #[test]
 fn a_fact_that_never_comes_is_refused_at_twice_its_record() {
     let wait = Patience::seeded("test.testkit.never", Duration::from_nanos(1));
@@ -28,9 +30,10 @@ fn a_fact_that_never_comes_is_refused_at_twice_its_record() {
     );
     assert_eq!(
         wait.slowest(),
-        Some(Duration::from_nanos(1)),
-        "no answer recorded"
+        Some(patience),
+        "no answer recorded, only the least the run-out proved"
     );
+    assert_eq!(wait.deadline(), patience.checked_mul(2), "backed off");
 }
 
 /// Do: wait with a measuring patience for a fact that comes at the hundredth look. Expect: the hundred looks, never

@@ -272,6 +272,8 @@ def check_run(root, receipt, byte_limit):
             "light/model/compile receipt is not native proof")
     require(receipt.get("exit") == 0 and receipt.get("timed_out") is False and receipt.get("reaped") is True and
             receipt.get("group_gone") is True, "failed/unreaped native invocation, or its process group not gone")
+    # A child that exits leaving processes in its group leaked them, though the driver then ended them.
+    require(receipt.get("group_signaled") is False, "the native invocation left processes running past its exit")
     binary = artifact(root, receipt.get("binary"))
     require(binary.stat().st_size > 0, "empty binary")
     build_path=artifact(root,receipt.get("build"))
@@ -282,6 +284,7 @@ def check_run(root, receipt, byte_limit):
             build.get("group_gone") is True and build.get("source_unchanged") is True and
             build.get("binary",{}).get("sha256")==receipt["binary"]["sha256"],
             "run is not tied to its actual successful pinned-source build")
+    require(build.get("group_signaled") is False, "the fixture build left processes running past its exit")
     log = artifact(root, receipt.get("log"))
     libtest_result(log.read_text(encoding="utf-8"), 1)
     event_file = artifact(root, receipt.get("events"))

@@ -3383,6 +3383,41 @@ fn a_failed_setups_kill_goes_out_while_answers_for_others_keep_coming() {
     assert_eq!(kills, run.into_iter().collect::<Vec<_>>());
 }
 
+/// Whether the pipe `program` writes has no reader left, waited for as a fact, at most 30 s (as the Linux
+/// tests' `readerless`): another test's child holds a copy of every descriptor from its fork to its exec,
+/// which closes it (CLOEXEC), so a write in between would still find a reader. The pipe is filled first and
+/// nothing reads it, so a poll for room returns only once its last reader has gone: `POLLERR` on Linux
+/// (fs/pipe.c's `pipe_poll`), `POLLHUP` on macOS, whose poll reports nothing for an end asking for no event.
+#[cfg(unix)]
+fn readerless(program: &std::io::PipeWriter) -> bool {
+    use rustix::event::{PollFd, PollFlags, Timespec};
+    use rustix::io::Errno;
+    rustix::io::ioctl_fionbio(program, true).unwrap();
+    loop {
+        match rustix::io::write(program, &[0; 4096]) {
+            Ok(_) => {}
+            Err(Errno::AGAIN) => break,
+            Err(Errno::PIPE) => return true,
+            Err(e) => panic!("filling the late end's pipe: {e}"),
+        }
+    }
+    let mut room = [PollFd::new(program, PollFlags::OUT)];
+    let within = Timespec {
+        tv_sec: 30,
+        tv_nsec: 0,
+    };
+    rustix::event::poll(&mut room, Some(&within)).unwrap() == 1
+        && room[0]
+            .revents()
+            .intersects(PollFlags::ERR | PollFlags::HUP)
+}
+
+/// Windows lends a child only the handles named for it, so a write finds the pipe's last reader gone at once.
+#[cfg(windows)]
+fn readerless(program: &std::io::PipeWriter) -> bool {
+    matches!((&*program).write(&[1]), Err(e) if e.kind() == io::ErrorKind::BrokenPipe)
+}
+
 /// An agent whose answers come only as the test queues them, each with the ends it gives (a given
 /// answer's descriptors), but for a list's, which comes at once.
 struct Late {
@@ -3445,8 +3480,8 @@ impl Transport for Late {
 
 /// AC-T7.4.1: do give up on a run asking for its stdout at its deadline, the agent answering only
 /// after, with stdout's end, then make a list that reads that late answer before its own; expect
-/// the run's caller expiry, the list answered, the late end closed at once (its pipe has no reader
-/// left), nothing kept for the run, and the Taken word for it sent, so the agent lets its copy go.
+/// the run's caller expiry, the list answered, nothing kept for the run, the late end closed (its
+/// pipe has no reader left), and the Taken word for it sent, so the agent lets its copy go.
 #[test]
 fn a_given_answer_after_its_caller_gave_up_closes_its_ends() {
     let client = configured(Late {
@@ -3470,7 +3505,7 @@ fn a_given_answer_after_its_caller_gave_up_closes_its_ends() {
         )
         .map(drop);
     let run = late.sent.lock().unwrap()[0].0;
-    let (output, mut program) = std::io::pipe().unwrap();
+    let (output, program) = std::io::pipe().unwrap();
     let given = Answer::Given {
         pid: 9,
         given: Streams {
@@ -3481,7 +3516,8 @@ fn a_given_answer_after_its_caller_gave_up_closes_its_ends() {
     late.queue(run, &given, vec![output.into()]);
     let listed = client.list();
     let kept = client.conn.shared.state().unwrap().given.contains_key(&run);
-    let written = program.write(&[1]).map_err(|e| e.kind());
+    // Kept, it would never close: only a dropped end can be waited out.
+    let closed = !kept && readerless(&program);
     let taken = late
         .sent
         .lock()
@@ -3489,7 +3525,7 @@ fn a_given_answer_after_its_caller_gave_up_closes_its_ends() {
         .iter()
         .any(|(id, request)| *id == run && *request == Request::Taken);
     eprintln!(
-        "client_late_given gave_up={gave_up:?} listed={listed:?} kept={kept} written={written:?} taken={taken}"
+        "client_late_given gave_up={gave_up:?} listed={listed:?} kept={kept} closed={closed} taken={taken}"
     );
     assert!(
         matches!(&gave_up, Err(Refusal::Os { why, .. }) if why.contains("absolute")),
@@ -3500,10 +3536,6 @@ fn a_given_answer_after_its_caller_gave_up_closes_its_ends() {
         !kept,
         "the late answer's ends were kept for a run no one waits on"
     );
-    assert_eq!(
-        written,
-        Err(io::ErrorKind::BrokenPipe),
-        "the late stdout end is still open"
-    );
+    assert!(closed, "the late stdout end is still open");
     assert!(taken, "no Taken word for the late answer");
 }
