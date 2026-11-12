@@ -2,17 +2,20 @@
 //! one machine whose room Hex's node keeps, Hex placing boxes of its own against the view and kiln's
 //! runners reserving runs through the keeper ([`hex_api::capacity`]), while the nemesis crashes either
 //! side (the keeper also at one of its writes, before or after the write lands), drops links with what
-//! was on them, partitions and heals them, lets a runner's wait for an answer run out, and retires a
-//! runner for good, whose reservations the person then releases.
+//! was on them, partitions and heals them, lets a runner's wait for an answer run out, retires a
+//! runner for good, whose reservations the person then releases, and has the person release a runner
+//! wrongly: one that is away with work still running (CV6), which its next sync adopts (CV5).
 //!
-//! After every step the work actually running fits the room, and every running run is in the keeper's
-//! books whenever the keeper is up. Once the nemesis stops and every link is healed and quiet
+//! After every step the work actually running fits the room but for what such a wrong release hid from the
+//! keeper and its sync then adopted, past the room, which the keeper's view then says; and every running run
+//! is in the keeper's books whenever the keeper is up, but one wrongly released, until its runner's next
+//! sync. Once the nemesis stops and every link is healed and quiet
 //! ([`World::settle`]), the books each side keeps agree: the keeper's of each runner, the runner's own,
 //! and the runs it actually runs (CV5's "the counts agree after a partition heals").
 //!
 //! Pure, as the rest of hex-sim: one seed decides every step.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use hex_api::capacity::{
     self, Amounts, Budget, Event, Held, Holder, Keeper, Out, ReservationId, Stop, ToHolder,
@@ -34,6 +37,8 @@ pub enum Mutant {
     AnswerBeforeWrite,
     /// Hex admits its own boxes against the room less its own alone, not less the holders' (CV3).
     LocalIgnoresForeign,
+    /// The keeper's shell drops from a sync what the keeper doesn't hold, so nothing is adopted (CV5).
+    DropUnknownAtSync,
 }
 
 /// What a scenario found wrong.
@@ -44,6 +49,12 @@ pub enum Violation {
         step: u64,
         running: Amounts,
         room: Amounts,
+    },
+    /// The keeper books work past the room (a wrong release's adoption), and its view doesn't say so.
+    Unreported {
+        step: u64,
+        booked: Amounts,
+        held: Amounts,
     },
     /// A runner runs a run the keeper's books don't hold.
     Unbooked {
@@ -82,6 +93,8 @@ pub struct Report {
     pub released_at_sync: u64,
     pub adopted_at_sync: u64,
     pub forgotten: u64,
+    /// Releases the person made of a runner away with work still running (CV6's mistake).
+    pub wrongly_forgotten: u64,
 }
 
 /// The machine's disk: the keeper's records, which outlive its process, and the crash armed at one of
@@ -177,11 +190,16 @@ struct Runner {
     retired: bool,
     /// Gone for good, and the person hasn't released its reservations yet.
     unforgotten: bool,
+    /// Its runs the person released while it was away, still running, which its next sync adopts (CV6):
+    /// missing from the keeper's books until then.
+    hidden: BTreeMap<ReservationId, Amounts>,
+    /// Its runs a sync adopted after such a release, still running: what the keeper may book past the room.
+    adopted: BTreeMap<ReservationId, Amounts>,
 }
 
 /// The nemesis's mix: each event and its weight, in thousandths of the steps. A test generator's
 /// parameters, not a tuning of the system under test: delivery dominates so links drain between faults.
-const MIX: [(Kind, u64); 17] = [
+const MIX: [(Kind, u64); 18] = [
     (Kind::Deliver, 420),
     (Kind::HexAdmit, 70),
     (Kind::HexEnd, 50),
@@ -199,6 +217,7 @@ const MIX: [(Kind, u64); 17] = [
     (Kind::RestartRunner, 40),
     (Kind::RanOut, 15),
     (Kind::Retire, 1),
+    (Kind::ForgetAway, 15),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +239,7 @@ enum Kind {
     RestartRunner,
     RanOut,
     Retire,
+    ForgetAway,
 }
 
 /// The machine's room: sixteen CPUs and 64 GiB, the shape of the recorded day's larger hosts (H10).
@@ -307,6 +327,8 @@ impl World {
                 survive: rng.chance(500),
                 retired: false,
                 unforgotten: false,
+                hidden: BTreeMap::new(),
+                adopted: BTreeMap::new(),
             });
         }
         Ok(Self {
@@ -397,6 +419,7 @@ impl World {
             Kind::RestartRunner => self.restart_runner(runner)?,
             Kind::RanOut => self.ran_out(runner)?,
             Kind::Retire => self.retire(runner)?,
+            Kind::ForgetAway => self.forget_away(runner)?,
         }
         self.forget_retired()?;
         self.check()
@@ -473,6 +496,8 @@ impl World {
             return;
         };
         runner.running.remove(&id);
+        runner.hidden.remove(&id);
+        runner.adopted.remove(&id);
         if let Some(holder) = runner.holder.as_mut() {
             let mut out = Out::default();
             holder.release(id, &mut out);
@@ -507,21 +532,40 @@ impl World {
 
     fn deliver_to_keeper(&mut self, n: usize) -> Result<(), Violation> {
         let local = self.local()?;
-        let Some(msg) = self
+        let drops = self.planted(Mutant::DropUnknownAtSync);
+        let Some((msg, name)) = self
             .runners
             .get_mut(n)
-            .and_then(|r| r.link.to_keeper.pop_front())
+            .and_then(|r| r.link.to_keeper.pop_front().map(|m| (m, r.name.clone())))
         else {
             return Ok(());
         };
         let Some(keeper) = self.keeper.as_mut() else {
             return Ok(());
         };
+        let msg = match msg {
+            // The planted shell's mistake: a sync loses what the keeper doesn't hold, which it would adopt.
+            ToKeeper::Sync { fence, held } if drops => {
+                let books: BTreeSet<ReservationId> = keeper.held_by(&name).map(|h| h.id).collect();
+                ToKeeper::Sync {
+                    fence,
+                    held: held.into_iter().filter(|h| books.contains(&h.id)).collect(),
+                }
+            }
+            msg => msg,
+        };
         match keeper.hear(msg, local, &mut self.disk) {
             Ok(answer) => {
                 if let Some(r) = self.runners.get_mut(n) {
-                    if let ToHolder::Welcome { fence, .. } = &answer {
-                        r.link.session = Some(fence.session);
+                    match &answer {
+                        ToHolder::Welcome { fence, .. } => r.link.session = Some(fence.session),
+                        // Its sync is heard: what it listed the keeper holds now, adopting what the person's release
+                        // had dropped (CV5), so none of its runs is hidden any more.
+                        ToHolder::Synced { .. } => {
+                            let hidden = std::mem::take(&mut r.hidden);
+                            r.adopted.extend(hidden);
+                        }
+                        _ => {}
                     }
                     r.link.to_holder.push_back(answer);
                 }
@@ -721,6 +765,8 @@ impl World {
             r.asked.clear();
             if !r.survive {
                 r.running.clear();
+                r.hidden.clear();
+                r.adopted.clear();
             }
             self.report.runner_crashes = self.report.runner_crashes.saturating_add(1);
         }
@@ -774,10 +820,55 @@ impl World {
             r.holder = None;
             r.asked.clear();
             r.running.clear();
+            r.hidden.clear();
+            r.adopted.clear();
             r.retired = true;
             r.unforgotten = true;
         }
         Ok(())
+    }
+
+    /// The person releases a runner it takes for gone, wrongly (CV6): one away from the keeper, its link down
+    /// (partitioned, dropped, or its process crashed with its runs outliving it), not retired, with work still
+    /// running. That work is missing from the keeper's books until the runner's next sync adopts it (CV5). A
+    /// release the keeper refuses (the runner connected, or never seen) changes nothing.
+    fn forget_away(&mut self, runner: Option<usize>) -> Result<(), Violation> {
+        let Some(n) = runner else {
+            return Ok(());
+        };
+        let Some(name) = self
+            .runners
+            .get(n)
+            .filter(|r| !r.retired && !r.link.up && !r.running.is_empty())
+            .map(|r| r.name.clone())
+        else {
+            return Ok(());
+        };
+        let Some(keeper) = self.keeper.as_mut() else {
+            return Ok(());
+        };
+        let released = keeper.forget(&name, &mut self.disk);
+        if matches!(released, Ok(Err(_))) {
+            return Ok(());
+        }
+        // Released, or the keeper crashed at one of its removals: what still runs may be missing either way.
+        if let Some(r) = self.runners.get_mut(n) {
+            r.hidden
+                .extend(r.running.iter().map(|(id, amount)| (*id, *amount)));
+            r.adopted.clear();
+        }
+        match released {
+            Ok(_) => {
+                self.report.wrongly_forgotten = self.report.wrongly_forgotten.saturating_add(1);
+                Ok(())
+            }
+            Err(Stop::Crashed) => {
+                self.report.crashes_at_write = self.report.crashes_at_write.saturating_add(1);
+                self.crash_keeper(true);
+                Ok(())
+            }
+            Err(why) => Err(stopped(why)),
+        }
     }
 
     fn forget_retired(&mut self) -> Result<(), Violation> {
@@ -813,30 +904,40 @@ impl World {
         Ok(())
     }
 
-    /// The work running fits the room; every running run is in the keeper's books while it is up.
+    /// The work running fits the room but for what a wrong release hid from the keeper (CV6) and a sync then
+    /// adopted (CV5), which is the only work the keeper may book past the room, and then its view says by how
+    /// much it is over; every running run is in the keeper's books while it is up, but one the person released
+    /// while its runner was away, until that runner's next sync.
     fn check(&self) -> Result<(), Violation> {
         let step = self.report.steps;
-        let running = self
+        let overflow = || Violation::Oversubscribed {
+            step,
+            running: Amounts::from_array([u64::MAX; 4]),
+            room: ROOM,
+        };
+        let running = sum(self
             .runners
             .iter()
             .flat_map(|r| r.running.values())
-            .chain(self.boxes.values());
-        match sum(running) {
-            Some(running) if running.fits(ROOM) => {}
-            Some(running) => {
-                return Err(Violation::Oversubscribed {
-                    step,
-                    running,
-                    room: ROOM,
-                });
-            }
-            None => {
-                return Err(Violation::Oversubscribed {
-                    step,
-                    running: Amounts::from_array([u64::MAX; 4]),
-                    room: ROOM,
-                });
-            }
+            .chain(self.boxes.values()))
+        .ok_or_else(overflow)?;
+        let hidden =
+            sum(self.runners.iter().flat_map(|r| r.hidden.values())).ok_or_else(overflow)?;
+        let adopted =
+            sum(self.runners.iter().flat_map(|r| r.adopted.values())).ok_or_else(overflow)?;
+        // What the keeper books of what runs, and of that what it granted or admitted within the room itself.
+        let booked = running
+            .checked_sub(hidden)
+            .ok_or_else(|| stopped("hidden work not running"))?;
+        let granted = booked
+            .checked_sub(adopted)
+            .ok_or_else(|| stopped("adopted work not running"))?;
+        if !granted.fits(ROOM) {
+            return Err(Violation::Oversubscribed {
+                step,
+                running,
+                room: ROOM,
+            });
         }
         let Some(keeper) = self.keeper.as_ref() else {
             return Ok(());
@@ -845,13 +946,25 @@ impl World {
             let books: BTreeMap<ReservationId, Amounts> =
                 keeper.held_by(&r.name).map(|h| (h.id, h.amount)).collect();
             for (id, amount) in &r.running {
-                if !books.get(id).is_some_and(|booked| amount.fits(*booked)) {
+                if !r.hidden.contains_key(id)
+                    && !books.get(id).is_some_and(|booked| amount.fits(*booked))
+                {
                     return Err(Violation::Unbooked {
                         step,
                         runner: n,
                         id: *id,
                     });
                 }
+            }
+        }
+        if !booked.fits(ROOM) {
+            let view = keeper.view(self.local()?);
+            if !booked.less(ROOM).fits(view.over()) {
+                return Err(Violation::Unreported {
+                    step,
+                    booked,
+                    held: view.held,
+                });
             }
         }
         Ok(())
