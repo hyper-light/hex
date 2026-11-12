@@ -21,8 +21,8 @@ use hex_core::stream::{self, Deframer, Exec, Named};
 use hex_core::wire::{self, Received};
 
 use crate::calls::{
-    Core, KINDS, Lent, ReplyDeadline, Sent, Shared, SharedOwner, Take, Transport, poisoned,
-    protocol_ready,
+    BOX_KINDS, CLASSES, Core, KINDS, Lent, ReplyDeadline, Sent, Shared, SharedOwner, Take,
+    Transport, by_class, class_waits, poisoned, protocol_ready,
 };
 use crate::copy::{DuplexIo, copy, copy_in};
 
@@ -166,11 +166,14 @@ pub fn own_link<L: Link>(link: L) -> Result<LinkOwner, Refusal> {
 
 /// How long a call waits for the guest's node agent's answer, one wait a kind of call (`crate::calls::kind_of`'s
 /// order), as the socket's client waits (decision 9): twice the slowest answer this process has had to a call of
-/// that kind, through the guest. On macOS, Hello and capacity use exact per-profile maxima from
+/// that kind, through the guest. On macOS, Hello and capacity ([`CLASS_ANSWERS`]'s, the oci class's) use exact
+/// per-profile maxima from
 /// `bench/sched/runtime-pools/calibration-macos-cold-extension-1bb73f74.json` (AC-T7.4.1). Hello begins after dial/token setup;
 /// fresh-backend, subsequent and warm borrower cohorts are retained separately in the record, not per-row VM proof.
-/// Neither row measures VM boot or workload completion. Other host platforms and operations remain measuring
-/// until their own actual rows are recorded; macOS evidence is not extrapolated across OS transports.
+/// Neither row measures VM boot or workload completion. A debug build's seed is never under the release record
+/// (`Patience::by_profile`): Hello's debug campaign met no cold first hello, so its debug seed is the release one.
+/// Other host platforms and operations remain measuring until their own actual rows are recorded; macOS evidence
+/// is not extrapolated across OS transports.
 static ANSWERS: [Patience; KINDS] = [
     #[cfg(target_os = "macos")]
     Patience::by_profile(
@@ -180,18 +183,8 @@ static ANSWERS: [Patience; KINDS] = [
     ),
     #[cfg(not(target_os = "macos"))]
     Patience::measuring("client.guest.answer.hello"),
-    Patience::measuring("client.guest.answer.create"),
-    Patience::measuring("client.guest.answer.start"),
-    Patience::measuring("client.guest.answer.exec"),
-    Patience::measuring("client.guest.answer.signal"),
-    Patience::measuring("client.guest.answer.inspect"),
-    Patience::measuring("client.guest.answer.usage"),
     Patience::measuring("client.guest.answer.list"),
-    Patience::measuring("client.guest.answer.delete"),
     Patience::measuring("client.guest.answer.netns"),
-    Patience::measuring("client.guest.answer.kill"),
-    Patience::measuring("client.guest.answer.exec_streams"),
-    Patience::measuring("client.guest.answer.run"),
     Patience::measuring("client.guest.answer.schedule.describe"),
     Patience::measuring("client.guest.answer.schedule.advertise"),
     Patience::measuring("client.guest.answer.schedule.submit"),
@@ -202,18 +195,48 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.guest.answer.schedule.retry"),
     Patience::measuring("client.guest.answer.schedule.delete"),
     Patience::measuring("client.guest.answer.schedule.status"),
-    #[cfg(target_os = "macos")]
-    Patience::by_profile(
-        "client.guest.answer.capacity",
-        Duration::from_nanos(6_849_583),
-        Some(Duration::from_nanos(6_826_667)),
-    ),
-    #[cfg(not(target_os = "macos"))]
-    Patience::measuring("client.guest.answer.capacity"),
     Patience::measuring("client.guest.answer.physical_report"),
     Patience::measuring("client.guest.answer.initialize_backing"),
     Patience::measuring("client.guest.answer.release_backing"),
     Patience::measuring("client.guest.answer.backing_usage"),
+];
+
+/// AC-T7.4.1: the kinds a box's class times, a wait for each (kind, class), named
+/// `client.guest.answer.<kind>.<class>`. On macOS the guest's capacity row above is an `oci` box's (every guest
+/// capacity call asks `oci`): release 6.849583 ms, debug 6.826667 ms. No census has timed another kind or class
+/// through a guest: MEASURING, each, never another class's record, until a census records it.
+#[cfg(target_os = "macos")]
+static CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
+    class_waits!("client.guest.answer", "process", measuring),
+    class_waits!(
+        "client.guest.answer",
+        "oci",
+        [
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+            (
+                Duration::from_nanos(6_849_583),
+                Some(Duration::from_nanos(6_826_667))
+            ),
+        ]
+    ),
+    class_waits!("client.guest.answer", "firecracker", measuring),
+    class_waits!("client.guest.answer", "shards", measuring),
+];
+#[cfg(not(target_os = "macos"))]
+static CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
+    class_waits!("client.guest.answer", "process", measuring),
+    class_waits!("client.guest.answer", "oci", measuring),
+    class_waits!("client.guest.answer", "firecracker", measuring),
+    class_waits!("client.guest.answer", "shards", measuring),
 ];
 
 /// A node agent in a guest, reached through a [`Link`].
@@ -332,25 +355,32 @@ impl Stream {
             .link
             .dial_before(stream::STDIO_PORT, deadline.map(ReplyDeadline::at))?;
         match deadline {
-            Some(deadline) => {
-                conn.set_nonblocking(true)
-                    .map_err(os("naming a stdio connection without waiting"))?;
-                protocol_write(
-                    &mut *conn,
-                    &stream::name(named),
-                    deadline,
-                    "naming a stdio connection",
-                )?;
-                // The deadline ends with setup. Copies and caller-owned descriptors are workload I/O.
-                conn.set_nonblocking(false)
-                    .map_err(os("handing off a named stdio connection"))?;
-            }
+            Some(deadline) => name_before(&mut *conn, named, deadline)?,
             None => conn
                 .write_all(&stream::name(named))
                 .map_err(os("naming a stdio connection"))?,
         }
         Ok(conn)
     }
+}
+
+/// Writes a stdio connection's name within `deadline`, by readiness, so no timeout is left on the stream.
+fn name_before(
+    conn: &mut dyn Duplex,
+    named: Named,
+    deadline: ReplyDeadline,
+) -> Result<(), Refusal> {
+    conn.set_nonblocking(true)
+        .map_err(os("naming a stdio connection without waiting"))?;
+    protocol_write(
+        conn,
+        &stream::name(named),
+        deadline,
+        "naming a stdio connection",
+    )?;
+    // The deadline ends with setup. Copies and caller-owned descriptors are workload I/O.
+    conn.set_nonblocking(false)
+        .map_err(os("handing off a named stdio connection"))
 }
 
 impl Stream {
@@ -373,28 +403,7 @@ impl Stream {
                 return Ok(None);
             }
             let conn = self.dial_named_before(Named { exec, stream }, deadline)?;
-            // The caller's own descriptor of the connection; this side's closes as `conn` drops.
-            let end = conn
-                .handle()
-                .try_clone_to_owned()
-                .map_err(os("handing a stdio connection to its caller"))?;
-            // HEX-RT-17: Shards waits around a non-blocking socket in its Stream wrapper. Only the raw descriptor
-            // outlives this handoff, so its caller's OwnedStream must block itself; the control connection stays evented.
-            #[cfg(unix)]
-            {
-                let flags = rustix::fs::fcntl_getfl(&end)
-                    .map_err(|e| Refusal::os("reading a stdio connection's mode", e))?;
-                rustix::fs::fcntl_setfl(&end, flags & !rustix::fs::OFlags::NONBLOCK)
-                    .map_err(|e| Refusal::os("making a caller's stdio connection wait", e))?;
-                Ok(Some(end))
-            }
-            #[cfg(windows)]
-            {
-                use std::os::windows::io::AsSocket;
-                hex_afunix::set_nonblocking(end.as_socket(), false)
-                    .map_err(os("making a caller's stdio connection wait"))?;
-                Ok(Some(end.into()))
-            }
+            caller_end(&*conn).map(Some)
         };
         Ok(hex_api::Given {
             stdin: dial(ask.stdin, stream::Stdio::In)?,
@@ -402,6 +411,84 @@ impl Stream {
             stderr: dial(ask.stderr, stream::Stdio::Err)?,
         })
     }
+}
+
+/// The caller's own end of a guest stdio connection: its descriptor, duplicated; this side's closes as the
+/// connection drops. HEX-RT-17: Shards waits around a non-blocking socket in its Stream wrapper. Only the raw
+/// descriptor outlives this handoff, so its caller's OwnedStream must block itself; the control connection
+/// stays evented.
+#[cfg(any(unix, windows))]
+fn caller_end(conn: &dyn Duplex) -> Result<hex_api::End, Refusal> {
+    let end = conn
+        .handle()
+        .try_clone_to_owned()
+        .map_err(os("handing a stdio connection to its caller"))?;
+    #[cfg(unix)]
+    {
+        let flags = rustix::fs::fcntl_getfl(&end)
+            .map_err(|e| Refusal::os("reading a stdio connection's mode", e))?;
+        rustix::fs::fcntl_setfl(&end, flags & !rustix::fs::OFlags::NONBLOCK)
+            .map_err(|e| Refusal::os("making a caller's stdio connection wait", e))?;
+        Ok(end)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsSocket;
+        hex_afunix::set_nonblocking(end.as_socket(), false)
+            .map_err(os("making a caller's stdio connection wait"))?;
+        Ok(end.into())
+    }
+}
+
+/// HEX-RT-17: an offered guest exec's streams, opened in this caller (a Windows node's, which can't lend its
+/// own across processes): each a borrowed CONNECT to the guest the offer names, taking no VM lifetime, named
+/// for the exec as the guest's own stdio dial names it, the caller's end handed off as its own.
+///
+/// AC-T7.4.1: Shards' borrowed CONNECT waits for its OK only within a finite deadline (zero patience reads it
+/// without waiting, so a guest that hasn't answered yet is refused), so the call's deadline bounds every
+/// stream's CONNECT and name, and a call with none is refused by type before any is made.
+// Windows calls it; elsewhere only its test does, which needs Linux's /proc for a stand-in VM's identity.
+#[cfg(any(windows, all(test, target_os = "linux")))]
+pub(crate) fn open_offered(
+    offer: &wire::StreamOffer,
+    deadline: Option<ReplyDeadline>,
+) -> Result<hex_api::Given, Refusal> {
+    let deadline = deadline.ok_or_else(|| Refusal::Invalid {
+        what: "offered guest streams",
+        why:
+            "a borrowed guest's CONNECT waits for its OK only within a deadline, and this call has \
+              none: give the client a reply budget or call with a deadline"
+                .to_owned(),
+    })?;
+    let identity = shards_api::Identity {
+        pid: offer.pid,
+        started: offer.started,
+        vsock: offer.vsock.clone(),
+    };
+    let exec = Exec {
+        conn: offer.token,
+        id: offer.exec,
+    };
+    let open = |on: bool, stream| -> Result<Option<hex_api::End>, Refusal> {
+        if !on {
+            return Ok(None);
+        }
+        const OP: &str = "opening an offered guest stream";
+        // One CONNECT to the already-listening guest, waiting for its OK within what is left of the
+        // call's deadline; one that completes past it is refused.
+        let conn =
+            shards_api::connect_borrowed(&identity, stream::STDIO_PORT, deadline.remaining(OP)?)
+                .map_err(|why| shards::refusal(OP, &why))?;
+        deadline.remaining(OP)?;
+        let mut conn = shards::ShardsStream(conn);
+        name_before(&mut conn, Named { exec, stream }, deadline)?;
+        caller_end(&conn).map(Some)
+    };
+    Ok(hex_api::Given {
+        stdin: open(offer.streams.stdin, stream::Stdio::In)?,
+        stdout: open(offer.streams.stdout, stream::Stdio::Out)?,
+        stderr: open(offer.streams.stderr, stream::Stdio::Err)?,
+    })
 }
 
 impl Transport for Stream {
@@ -426,6 +513,10 @@ impl Transport for Stream {
 
     fn answers() -> &'static [Patience; KINDS] {
         &ANSWERS
+    }
+
+    fn class_answers(class: hex_api::Class) -> &'static [Patience; BOX_KINDS] {
+        by_class(&CLASS_ANSWERS, class)
     }
 
     fn reply_budget(&self) -> Option<Duration> {

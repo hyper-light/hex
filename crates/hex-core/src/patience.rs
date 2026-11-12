@@ -9,15 +9,20 @@
 //!   wait is made ([`Patience::seeded`]). No calibration read, no unbounded first wait.
 //! - **Learned**: the bound is [`TIMES_SLOWEST`] times the larger of the record's slowest and this node's slowest
 //!   answer, a running maximum, so it only rises. A wait runs out only for an answer more than twice slower than any
-//!   recorded or seen.
+//!   recorded or seen, or than the least a run-out proved one.
 //! - **Measuring**: a wait whose distribution has no record yet says so ([`Patience::measuring`], with the record to
 //!   come named at the wait). It is never armed: its answers are only recorded, for the census that seeds it, so no
 //!   value is picked for it and no first answer becomes its bound. A tree with a measuring wait doesn't land.
 //! - **By build profile**: a wait's record is of the build it runs in ([`Patience::by_profile`]): a release build
 //!   is seeded from the release census, a debug build (the suites') from the debug one, measuring until it has
-//!   one, since a debug build's answers are slower and the release record isn't theirs (the lead, 2026-11-08).
+//!   one, since a debug build's answers are slower and the release record isn't theirs (the lead, 2026-11-08). Being
+//!   no faster, a debug build's slowest is at least the release record's, whose cohorts (a cold start the debug
+//!   campaign never met) bound it from below: its seed is the larger of the two records.
 //! - **Karn's point**: a wait that ran out is no sample, nor is an answer from a server taken for dead or hung; the
-//!   shell reports only answers it waited for and got.
+//!   shell reports only answers it waited for and got. A run-out for a slow answer still proves that answer slower
+//!   than the bound it ran out at, so this node's slowest is at least that bound from then, and its next wait twice
+//!   it: the timer backs off in process (RFC 6298 §5.5), rather than every slow call failing at one bound until a new
+//!   record lands ([`Patience::ran_out`]).
 //! - **The census**: each wait is named, and every answer it records goes to the census sink as well, where a shell
 //!   installs one ([`census`]): the waits census probe's record of each wait's distribution
 //!   (`bench/competitive/probes/waits_census.md`), from the code's own timing points. A wait that ran out for a slow
@@ -88,7 +93,7 @@ pub struct Patience {
     name: &'static str,
     /// The record's slowest answer, in nanoseconds and one; 0 while measuring.
     recorded: u64,
-    /// This node's slowest answer, in nanoseconds and one; 0 before any.
+    /// This node's slowest answer, or the least a run-out proved one, in nanoseconds and one; 0 before any.
     seen: AtomicU64,
 }
 
@@ -104,8 +109,11 @@ impl Patience {
     }
 
     /// The wait `name` seeded from its record for this build's profile: `release`'s slowest answer in a release build,
-    /// `debug`'s in a debug one (`None`: measuring, until the census's debug arm records it), each cited at the caller.
-    /// The choice is made as the wait is built, so a release build holds only its release seed.
+    /// `debug`'s in a debug one, never under `release`'s (`None`: measuring, until the census's debug arm records it),
+    /// each cited at the caller. A debug build's answers are no faster than a release build's under the same
+    /// conditions, so the release record's cohorts bound its slowest from below (AC-T7.4.1: macOS's guest hello, whose
+    /// debug campaign met no cold first hello, ran out at a tenth of the release record). The choice is made as the
+    /// wait is built, so a release build holds only its release seed.
     pub const fn by_profile(
         name: &'static str,
         release: Duration,
@@ -113,6 +121,7 @@ impl Patience {
     ) -> Self {
         if cfg!(debug_assertions) {
             match debug {
+                Some(slowest) if stored(slowest) < stored(release) => Self::seeded(name, release),
                 Some(slowest) => Self::seeded(name, slowest),
                 None => Self::measuring(name),
             }
@@ -149,11 +158,13 @@ impl Patience {
         }
     }
 
-    /// The wait ran out, `after` passing with no answer: no sample (Karn's point), so its slowest is as it was, but told
-    /// to the census where one is installed, whose seed rule takes `after` as the least the wait's slowest is. Said where
-    /// the answer is slow, never where its server is taken for dead or hung (a seed's hang bound): that says nothing of
-    /// how long an answer takes.
+    /// The wait ran out, `after` passing with no answer: no sample (Karn's point), but the answer is slower than
+    /// `after`, so this node's slowest is at least that from now and its next wait twice it (RFC 6298 §5.5's back-off);
+    /// told to the census too where one is installed, whose seed rule takes the same least. Said where the answer is
+    /// slow, never where its server is taken for dead or hung (a seed's hang bound): that says nothing of how long an
+    /// answer takes.
     pub fn ran_out(&self, after: Duration) {
+        self.seen.fetch_max(stored(after), Ordering::Relaxed);
         if let Some(sink) = CENSUS.get() {
             sink(self.name, Sample::RanOut(after));
         }
@@ -164,7 +175,8 @@ impl Patience {
         self.name
     }
 
-    /// The slowest answer, the record's or this node's, whichever is slower: `None` while measuring with none seen.
+    /// The slowest answer, the record's or this node's (or the least a run-out proved), whichever is slower: `None`
+    /// while measuring with none seen.
     pub fn slowest(&self) -> Option<Duration> {
         let slowest = self.recorded.max(self.seen.load(Ordering::Relaxed));
         slowest.checked_sub(1).map(Duration::from_nanos)

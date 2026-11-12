@@ -103,9 +103,10 @@ fn answers_from_many_threads_keep_the_slowest() {
 
 /// The census (the waits census probe, `bench/competitive/probes/waits_census.md`): every answer a wait records, and
 /// every time it runs out, reaches the installed sink by the wait's name, from the wait's own timing point; a run-out
-/// is no sample (Karn's point), so the wait's slowest stays its answers' (decision 9; the lead, 2026-11-09). Do:
-/// install a sink, answer a wait named `census.test` in 7 ms and 9 ms, and say it ran out at 20 ms. Expect: the sink
-/// told the two answers and the run-out, by that name, and the wait's slowest 9 ms.
+/// is no sample (Karn's point), told apart from the answers, but the least the slow answer took, which the wait takes
+/// as its slowest from then (decision 9; the lead, 2026-11-09; RFC 6298 §5.5). Do: install a sink, answer a wait named
+/// `census.test` in 7 ms and 9 ms, and say it ran out at 20 ms. Expect: the sink told the two answers and the
+/// run-out, by that name, and the wait's slowest 20 ms.
 #[test]
 fn every_answer_and_run_out_reaches_the_census_by_its_waits_name() {
     static TOLD: std::sync::Mutex<Vec<(&'static str, Sample)>> = std::sync::Mutex::new(Vec::new());
@@ -132,7 +133,11 @@ fn every_answer_and_run_out_reaches_the_census_by_its_waits_name() {
             Sample::RanOut(ms(20))
         ]
     );
-    assert_eq!(p.slowest(), Some(ms(9)), "a run-out is no sample");
+    assert_eq!(
+        p.slowest(),
+        Some(ms(20)),
+        "a run-out is no sample, but its answer is slower than its bound"
+    );
 }
 
 /// The census's file form, which `waits_census.py` reads: an answer `name nanos`, a run-out `name >nanos`.
@@ -150,13 +155,13 @@ fn an_answer_and_a_run_out_are_census_lines_of_their_own() {
 
 /// Seeds by build profile (the lead, 2026-11-08: a debug build reads the debug record; production builds carry only
 /// release seeds). Do: in this build, a debug one, make a wait whose release record is 5 ms and whose debug record
-/// is 3 ms, and one with no debug record. Expect: the first armed at twice the debug record, 6 ms; the second
+/// is 8 ms, and one with no debug record. Expect: the first armed at twice the debug record, 16 ms; the second
 /// measuring, never armed.
 #[cfg(debug_assertions)]
 #[test]
 fn a_debug_build_reads_the_debug_record() {
-    let p = Patience::by_profile("test", ms(5), Some(ms(3)));
-    assert_eq!(p.deadline(), Some(ms(6)));
+    let p = Patience::by_profile("test", ms(5), Some(ms(8)));
+    assert_eq!(p.deadline(), Some(ms(16)));
     let q = Patience::by_profile("test", ms(5), None);
     q.answered(ms(1));
     assert_eq!(q.deadline(), None);
@@ -191,4 +196,46 @@ fn refusal_census_preserves_learning_and_marks_only_the_optional_record() {
         census_line("a.wait", Sample::RanOut(Duration::from_nanos(41))),
         "a.wait >41\n"
     );
+}
+
+/// AC-T7.4.1 (RFC 6298 §5.5, Karn's algorithm: a run-out is no sample, and the timer backs off): a wait that ran
+/// out at its bound proves its answer slower than that bound, so this process's next wait is longer, not the same
+/// bound failing every slow call until a new record lands. Do: seed a wait at 5 ms, so bounded at 10 ms, and say
+/// it ran out at that bound; then again at the next. Expect: each next bound past the one that ran out, twice it
+/// (20 ms, then 40 ms); a measuring wait's run-out arms nothing.
+#[test]
+fn a_wait_that_ran_out_waits_longer_next() {
+    let p = Patience::seeded("test", ms(5));
+    let bound = p.deadline().unwrap();
+    p.ran_out(bound);
+    let next = p.deadline().unwrap();
+    p.ran_out(next);
+    let after = p.deadline().unwrap();
+    assert!(
+        next > bound,
+        "the next wait {next:?} after one ran out at {bound:?}"
+    );
+    assert_eq!((bound, next, after), (ms(10), ms(20), ms(40)));
+    let measuring = Patience::measuring("test");
+    measuring.ran_out(ms(7));
+    assert_eq!(measuring.deadline(), None);
+}
+
+/// AC-T7.4.1 (decision 9, by build profile): a debug build's answers are no faster than a release build's under the
+/// same conditions, so the release record's cohorts bound a debug build's slowest from below, and a debug seed is never
+/// under its release one. Do: in this build, a debug one, make a wait whose release record is 3.022291 ms and whose
+/// debug record is 295.291 us (macOS's `client.guest.answer.hello`: the release campaign met cold first hellos the debug
+/// one never did, and a suite's hello ran out at the debug seed's 590.582 us bound), and one whose debug record is the
+/// larger. Expect: the first armed at twice the release record, 6.044582 ms; the second at twice its debug record.
+#[cfg(debug_assertions)]
+#[test]
+fn a_debug_seed_is_never_under_its_release_record() {
+    let hello = Patience::by_profile(
+        "test",
+        Duration::from_nanos(3_022_291),
+        Some(Duration::from_nanos(295_291)),
+    );
+    assert_eq!(hello.deadline(), Some(Duration::from_nanos(6_044_582)));
+    let slower = Patience::by_profile("test", ms(5), Some(ms(7)));
+    assert_eq!(slower.deadline(), Some(ms(14)));
 }

@@ -9,7 +9,7 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use hex_api::Refusal;
+use hex_api::{Class, Refusal};
 use hex_core::patience::Patience;
 use hex_core::wire::{self, Received};
 use rustix::io::Errno;
@@ -19,19 +19,21 @@ use rustix::net::{
     SocketType,
 };
 
-use crate::calls::{Core, Handle, KINDS, Lent, ReplyDeadline, Sent, Shared, Take, Transport};
+use crate::calls::{
+    BOX_KINDS, CLASSES, Core, Handle, KINDS, Lent, ReplyDeadline, Sent, Shared, Take, Transport,
+    by_class, class_waits,
+};
 
 /// How long a call waits for the node agent's answer, and its send for room in the agent's socket, one wait a kind
-/// of call (`crate::calls::kind_of`'s order), since a delete waits on its box's emptying and a list on its parts,
-/// so a fast inspect's answer says nothing of theirs: twice the slowest answer this process has had to a call of that
-/// kind (decision 9; the lead's failure-bound rule of 2026-11-06), past which a call with no caller's deadline is
-/// refused by type, the only way left to it (under one, a run-out recorded). Each kind is seeded by build profile
-/// from its `client.answer.<kind>` rows of
+/// of call (`crate::calls::kind_of`'s order), since a list waits on its parts, so a fast hello's answer says nothing of
+/// its: twice the slowest answer this process has had to a call of that kind (decision 9; the lead's failure-bound rule
+/// of 2026-11-06), past which a call with no caller's deadline is refused by type, the only way left to it (under one,
+/// a run-out recorded). Each kind is seeded by build profile from its `client.answer.<kind>` rows of
 /// `bench/competitive/probes/waits_census.md`, in nanoseconds as the census keeps them: a release build from run 4's
 /// largest max of the release arms with a row's 1,000 samples (adacachy2), a debug build from run 5's largest answer
-/// of the debug-build arms, the debug arm and the suites' (adacachy2), for the kind and the tests' waits seeded from
-/// it, never under a bound one ran out at (decision 9). A kill, an exec asking for streams and a run have no rows
-/// yet, nor do the scheduler operations: MEASURING until a census with them in records them.
+/// of the debug-build arms, the debug arm and the suites' (adacachy2), never under a bound one ran out at (decision 9),
+/// nor under the release seed (`Patience::by_profile`). The scheduler operations have no rows yet: MEASURING until a
+/// census with them in records them. The kinds a box's class times are [`CLASS_ANSWERS`].
 static ANSWERS: [Patience; KINDS] = [
     Patience::by_profile(
         "client.answer.hello",
@@ -39,53 +41,15 @@ static ANSWERS: [Patience; KINDS] = [
         Some(Duration::from_nanos(17_232_102)),
     ),
     Patience::by_profile(
-        "client.answer.create",
-        Duration::from_nanos(43_655_221),
-        Some(Duration::from_nanos(49_798_121)),
-    ),
-    Patience::by_profile(
-        "client.answer.start",
-        Duration::from_nanos(11_263_989),
-        Some(Duration::from_nanos(16_120_605)),
-    ),
-    Patience::by_profile(
-        "client.answer.exec",
-        Duration::from_nanos(17_330_544),
-        Some(Duration::from_nanos(100_780_659)),
-    ),
-    Patience::by_profile(
-        "client.answer.signal",
-        Duration::from_nanos(583_198),
-        Some(Duration::from_nanos(3_952_426)),
-    ),
-    Patience::by_profile(
-        "client.answer.inspect",
-        Duration::from_nanos(10_914_126),
-        Some(Duration::from_nanos(12_007_514)),
-    ),
-    Patience::by_profile(
-        "client.answer.usage",
-        Duration::from_nanos(757_183),
-        Some(Duration::from_nanos(386_833)),
-    ),
-    Patience::by_profile(
         "client.answer.list",
         Duration::from_nanos(386_711_080),
         Some(Duration::from_nanos(868_709_473)),
-    ),
-    Patience::by_profile(
-        "client.answer.delete",
-        Duration::from_nanos(35_715_197),
-        Some(Duration::from_nanos(706_090_511)),
     ),
     Patience::by_profile(
         "client.answer.netns",
         Duration::from_nanos(715_105),
         Some(Duration::from_nanos(2_733_541)),
     ),
-    Patience::measuring("client.answer.kill"),
-    Patience::measuring("client.answer.exec_streams"),
-    Patience::measuring("client.answer.run"),
     Patience::measuring("client.answer.schedule.describe"),
     Patience::measuring("client.answer.schedule.advertise"),
     Patience::measuring("client.answer.schedule.submit"),
@@ -96,11 +60,96 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.schedule.retry"),
     Patience::measuring("client.answer.schedule.delete"),
     Patience::measuring("client.answer.schedule.status"),
-    Patience::measuring("client.answer.capacity"),
     Patience::measuring("client.answer.physical_report"),
     Patience::measuring("client.answer.initialize_backing"),
     Patience::measuring("client.answer.release_backing"),
     Patience::measuring("client.answer.backing_usage"),
+];
+
+/// AC-T7.4.1: the kinds a box's class times, a wait for each (kind, class), named `client.answer.<kind>.<class>`. The
+/// census's `client.answer.<kind>` rows (above) time `process` and `oci` boxes: run 4's release arms seam_oci's OCI
+/// boxes, run 5's debug arms the suites' process and OCI boxes too, a process box doing a subset of an OCI box's work;
+/// they seed both. A kill, an exec asking for streams, a run and a capacity have no rows yet, and no census has timed
+/// a `firecracker` or `shards` box here: MEASURING, each, never another class's record, until a census records it.
+static CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
+    class_waits!(
+        "client.answer",
+        "process",
+        [
+            (
+                Duration::from_nanos(43_655_221),
+                Some(Duration::from_nanos(49_798_121))
+            ),
+            (
+                Duration::from_nanos(11_263_989),
+                Some(Duration::from_nanos(16_120_605))
+            ),
+            (
+                Duration::from_nanos(17_330_544),
+                Some(Duration::from_nanos(100_780_659))
+            ),
+            (
+                Duration::from_nanos(583_198),
+                Some(Duration::from_nanos(3_952_426))
+            ),
+            (
+                Duration::from_nanos(10_914_126),
+                Some(Duration::from_nanos(12_007_514))
+            ),
+            (
+                Duration::from_nanos(757_183),
+                Some(Duration::from_nanos(386_833))
+            ),
+            (
+                Duration::from_nanos(35_715_197),
+                Some(Duration::from_nanos(706_090_511))
+            ),
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+        ]
+    ),
+    class_waits!(
+        "client.answer",
+        "oci",
+        [
+            (
+                Duration::from_nanos(43_655_221),
+                Some(Duration::from_nanos(49_798_121))
+            ),
+            (
+                Duration::from_nanos(11_263_989),
+                Some(Duration::from_nanos(16_120_605))
+            ),
+            (
+                Duration::from_nanos(17_330_544),
+                Some(Duration::from_nanos(100_780_659))
+            ),
+            (
+                Duration::from_nanos(583_198),
+                Some(Duration::from_nanos(3_952_426))
+            ),
+            (
+                Duration::from_nanos(10_914_126),
+                Some(Duration::from_nanos(12_007_514))
+            ),
+            (
+                Duration::from_nanos(757_183),
+                Some(Duration::from_nanos(386_833))
+            ),
+            (
+                Duration::from_nanos(35_715_197),
+                Some(Duration::from_nanos(706_090_511))
+            ),
+            measuring,
+            measuring,
+            measuring,
+            measuring,
+        ]
+    ),
+    class_waits!("client.answer", "firecracker", measuring),
+    class_waits!("client.answer", "shards", measuring),
 ];
 
 /// A node agent, reached through its socket.
@@ -125,6 +174,10 @@ impl Transport for Socket {
 
     fn answers() -> &'static [Patience; KINDS] {
         &ANSWERS
+    }
+
+    fn class_answers(class: Class) -> &'static [Patience; BOX_KINDS] {
+        by_class(&CLASS_ANSWERS, class)
     }
 
     fn reading(&self) -> Reading {

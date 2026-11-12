@@ -132,7 +132,7 @@ struct Oracle {
     handed: Vec<u64>,
     /// The line's wait and the hang bound, each twice the slowest answer recorded (`crate::patience`, tested on its
     /// own): from each wait that ends in a seed and each create a seed is done with; no sample from a wait that ran
-    /// out or a seed that died or hung.
+    /// out or a seed that died or hung, though a line's wait that ran out backs off past its bound (Karn's point).
     wait: Patience,
     hang: Patience,
 }
@@ -225,6 +225,7 @@ impl Oracle {
             self.counts.refused_waited += 1;
             seen.refused_in_line += 1;
             let wait = until.unwrap() - since;
+            self.wait.ran_out(wait);
             self.answered.push((ticket, Err(Refused::Waited { wait })));
         }
         self.set(seed, Some(Phase::Idle { served }));
@@ -505,6 +506,7 @@ fn play(setup: Setup, events: &[Event], paths: &Cell<Paths>) -> Result<(), TestC
                         oracle.counts.refused_waited += 1;
                         seen.refused_at_claim += 1;
                         let wait = until.unwrap() - since;
+                        oracle.wait.ran_out(wait);
                         prop_assert_eq!(got, Ok(Claim::Refused(Refused::Waited { wait })));
                     }
                 } else {
@@ -1048,7 +1050,8 @@ fn a_growing_pool_adds_a_slot_for_each_create_that_finds_none_free_up_to_its_bou
 /// seed whose record's slowest is 2 ms, serve a create for 4 ms while another waits 3 ms in line; let the second's
 /// seed pass its bound; then let a create's wait in line end. Expect: the first waits within the record's 4 ms, then
 /// the hang bound 8 ms and the line's wait 6 ms; the seed taken for hung at 8 ms and not before; the create refused
-/// after 6 ms; neither wait moved by the hang or the refusal, which are no samples.
+/// after 6 ms; the hang bound unmoved by the hang, which is no sample; the line's wait backed off past the 6 ms it ran
+/// out at, to 12 ms (Karn's point: no sample, but its answer is slower than that bound).
 #[test]
 fn the_wait_and_the_hang_bound_are_twice_the_slowest_answer() {
     let mut pool = seeds(1, 4, 4, 4);
@@ -1084,7 +1087,7 @@ fn the_wait_and_the_hang_bound_are_twice_the_slowest_answer() {
         pool.claim(ticket, ms(18)),
         Ok(Claim::Refused(Refused::Waited { wait: ms(6) }))
     );
-    assert_eq!(pool.deadlines(), (Some(ms(6)), Some(ms(8))));
+    assert_eq!(pool.deadlines(), (Some(ms(12)), Some(ms(8))));
 }
 
 /// A failed start with no seed up or starting refuses the line at once, since no seed can come for it. Do: on a new
@@ -1107,6 +1110,30 @@ fn a_failed_start_with_no_seed_left_refuses_the_line() {
         Ok(Claim::Refused(Refused::Waited { wait: ms(3) }))
     );
     assert_eq!(pool.waiting(), 0);
+}
+
+/// AC-T7.4.1 (Karn's point; the audit of `Patience::ran_out`'s sites, 2026-11-11): a line refused because its only
+/// seed failed to start is no answer and no run-out: no seed was slow, none came. Do: on an armed pool of one slot
+/// (the line's wait 4 ms, the hang bound 8 ms), let a create wait in line, then fail the seed's start at 3 ms. Expect:
+/// the create refused, its wait the 3 ms it waited; both waits as they were, the line's not backed off.
+#[test]
+fn a_failed_start_refusing_the_line_moves_no_wait() {
+    let mut pool = seeds(1, 4, 4, 8);
+    let Ok(Admit::Wait {
+        ticket,
+        until: Some(until),
+    }) = pool.create(ms(0))
+    else {
+        panic!("a create with no seed up didn't wait armed");
+    };
+    assert_eq!(until, ms(4));
+    let failed = pool.start().unwrap();
+    assert_eq!(pool.start_failed(failed, ms(3)), Ok(true));
+    assert_eq!(
+        pool.claim(ticket, ms(3)),
+        Ok(Claim::Refused(Refused::Waited { wait: ms(3) }))
+    );
+    assert_eq!(pool.deadlines(), (Some(ms(4)), Some(ms(8))));
 }
 
 /// Decision 9 (the lead's failure-bound rule, by build profile; AC-T7.1.3): before any answer of its own, a node's pool

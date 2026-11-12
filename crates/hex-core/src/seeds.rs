@@ -372,7 +372,8 @@ impl Seeds {
             return Ok(false);
         }
         while let Some((ticket, (since, _))) = self.line.pop_first() {
-            let refused = self.waited_out(since, now);
+            // No seed was slow: none came, and none will. The line's wait learns nothing from it.
+            let refused = self.refused_waiting(since, now);
             self.answered.insert(ticket, Err(refused));
         }
         Ok(true)
@@ -641,14 +642,21 @@ impl Seeds {
         self.counts.most_busy = self.counts.most_busy.max(busy);
     }
 
-    /// A create in line since `since` whose wait ended at `until` with no seed: counted, and no sample (Karn's point),
-    /// but the census is told the line's wait ran out at its bound (busy seeds, not hung ones: a seed past its hang bound
-    /// is [`Seeds::hung`]'s, which tells the census nothing, a hung seed's run-out saying nothing of an answer's time).
+    /// A create in line since `since` whose wait ran out at its bound, `until`, with no seed: refused, and no sample
+    /// (Karn's point), but the line's wait backs off past that bound and the census is told (busy seeds, not hung or
+    /// failed ones: a seed past its hang bound is [`Seeds::hung`]'s and one that failed to start
+    /// [`Seeds::start_failed`]'s, neither of which says anything of an answer's time).
     fn waited_out(&mut self, since: Duration, until: Duration) -> Refused {
+        self.wait.ran_out(until.saturating_sub(since));
+        self.refused_waiting(since, until)
+    }
+
+    /// A create in line since `since`, refused at `until` with no seed: counted, its wait the time it waited.
+    fn refused_waiting(&mut self, since: Duration, until: Duration) -> Refused {
         bump(&mut self.counts.refused_waited);
-        let wait = until.saturating_sub(since);
-        self.wait.ran_out(wait);
-        Refused::Waited { wait }
+        Refused::Waited {
+            wait: until.saturating_sub(since),
+        }
     }
 
     fn count(&self, holds: impl Fn(Holds) -> bool) -> usize {
