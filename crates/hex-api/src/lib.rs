@@ -39,7 +39,7 @@ pub use devices::{
 };
 pub use grants::{
     Destination, Grant, Member, MemberKind, Ports, Proto, Published, Receiver, check_grants,
-    check_published,
+    check_published, unheld,
 };
 pub use id::BoxId;
 pub use runtime::{

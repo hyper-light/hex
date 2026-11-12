@@ -1,12 +1,12 @@
 //! A box's network grants as Shards' image boot (D231) takes them (joint plan step 15; docs/design/network-grants.md
-//! N4): exactly what Shards `482c5d78` can hold, or a typed refusal naming the capability Hex awaits. Pure: the Shards
-//! image class hands [`ImageNetwork`] to `shards_api::image::ImageSpec` as it boots, and records what the boot bound.
+//! N4 and N6): exactly what Shards `66113379` can hold, or a typed refusal naming the capability Hex awaits. Pure: the
+//! Shards image class hands [`ImageNetwork`] to `shards_api::image::ImageSpec` as it boots, and holds the run to its
+//! grants as the boot returns ([`bound`]).
 
 use hex_api::{
-    Destination, Grant, MemberKind, Proto, Published, Receiver, Refusal, ShardsImage, Upstream,
-    check_grants,
+    Grant, MemberKind, Proto, Published, Receiver, Refusal, ShardsImage, check_grants, unheld,
 };
-use shards_api::image::{Bound, Keep, MemberInfo, Narrowing, Publish};
+use shards_api::image::{Bound, Keep, MemberInfo, Narrowing, Publish, Receiving};
 
 /// What an image boot is told of a box's grants: the ports it publishes, and how the image's own grants past the
 /// microVM are narrowed.
@@ -16,19 +16,20 @@ pub struct ImageNetwork {
     pub egress: Narrowing,
 }
 
-/// `image`'s grants as its boot takes them, or the refusal of the first one 482c5d78 can't hold exactly:
-/// - a name, for any member: a harness's egress is ports to every address and its DNS any name (Shards'
-///   harness-bringup-v1, H2), and an agent's remote MCP grant is kept image-wide, its member's scope out of sight;
-/// - an address, and the VM's own host: no grant of either form exists;
-/// - a publish, on a run with a command of its own: that command takes every port its Agentfile gives no member
-///   (D122), and Shards names no port's receiver, so the grant's member can't be held (N6).
+/// `image`'s grants as its boot takes them, or the refusal of what Shards can't hold exactly ([`hex_api::unheld`],
+/// N4): any destination, which Shards' D236 keeps image-wide where Hex can't name the image's members before its boot,
+/// and what D236's destinations can't express at all. A publish is programmed on any run: Shards names whom each
+/// reaches as the boot returns, and [`bound`] holds the run to them there (N6).
 ///
-/// The image's own grants are never kept, where `Narrowing::default()` would keep them whole. So with no grant the
-/// run has no network at all (`shards api-run`'s `network none`), and every published port is a grant's, at the host
-/// address it names.
+/// The image's own grants are never kept, where `Narrowing::default()` would keep them whole, its destinations among
+/// them. So with no grant the run has no network at all (`shards api-run`'s `network none`), and every published port
+/// is a grant's, at the host address it names.
 pub fn program(image: &ShardsImage) -> Result<ImageNetwork, Refusal> {
     let grants = image.grants.as_slice();
     check_grants(grants)?;
+    if let Some(needs) = unheld(grants) {
+        return Err(Refusal::Awaits { needs });
+    }
     let mut publish = Vec::new();
     publish
         .try_reserve_exact(grants.len())
@@ -37,38 +38,22 @@ pub fn program(image: &ShardsImage) -> Result<ImageNetwork, Refusal> {
             bound: grants.len(),
         })?;
     for grant in grants {
-        let needs = match grant {
-            Grant::Egress {
-                to: Destination::Name(_),
-                ..
-            } => Upstream::MemberGrantsByName,
-            Grant::Egress {
-                to: Destination::Address(_),
-                ..
-            } => Upstream::MemberGrantsByAddress,
-            Grant::Host { .. } => Upstream::MemberHostService,
-            Grant::Publish { .. } if image.command.is_some() => Upstream::PublishReceiver,
-            Grant::Publish {
-                proto,
-                port,
-                host,
-                host_port,
-                ..
-            } => {
-                publish.push(Publish {
-                    guest_port: *port,
-                    proto: match proto {
-                        Proto::Tcp => shards_api::image::Proto::Tcp,
-                        Proto::Udp => shards_api::image::Proto::Udp,
-                    },
-                    host: Some(*host),
-                    // shards-api's word for a port the host's OS picks.
-                    host_port: host_port.unwrap_or(0),
-                });
-                continue;
-            }
-        };
-        return Err(Refusal::Awaits { needs });
+        if let Grant::Publish {
+            proto,
+            port,
+            host,
+            host_port,
+            ..
+        } = grant
+        {
+            publish.push(Publish {
+                guest_port: *port,
+                proto: shards_proto(*proto),
+                host: Some(*host),
+                // shards-api's word for a port the host's OS picks.
+                host_port: host_port.unwrap_or(0),
+            });
+        }
     }
     Ok(ImageNetwork {
         publish,
@@ -82,10 +67,11 @@ pub fn program(image: &ShardsImage) -> Result<ImageNetwork, Refusal> {
 }
 
 /// A booted VM's publishes as its run reports them, held to its grants (N6): each publish grant's member is one its
-/// image runs, and the host bound each publish grant's port once, where the grant names it, and nothing else. Returns
-/// each as bound, its receiver the image's declaration, which Shards names no further yet. A grant naming a member
-/// the image doesn't run is the spec's fault (`Invalid`); a socket bound past or short of the grants, Shards'
-/// (`Broken`).
+/// image runs; the host bound each publish grant's port once, where the grant names it, and nothing else; and each
+/// such port reaches the grant's member alone, as Shards names its receivers (D231's `Bound::to`). Returns each as
+/// bound, its receiver that member at its own port. A grant naming a member the image doesn't run, or a port the image
+/// gives anyone else (another member, or none, so the run's own command), is the spec's fault (`Invalid`); a socket
+/// bound past or short of the grants, or a receiver its image doesn't declare, Shards' (`Broken`).
 pub fn bound(
     grants: &[Grant],
     members: &[MemberInfo],
@@ -114,19 +100,16 @@ pub fn bound(
             MemberKind::Agent => shards_api::image::MemberKind::Agent,
             MemberKind::Harness => shards_api::image::MemberKind::Harness,
         };
-        if !members
+        let Some(runs) = members
             .iter()
-            .any(|m| m.kind == kind && m.name == member.name && m.runs)
-        {
+            .find(|m| m.kind == kind && m.name == member.name && m.runs)
+        else {
             return Err(Refusal::Invalid {
                 what: "grants",
                 why: format!("grants[{at}].member {member} isn't a member its image runs"),
             });
-        }
-        let proto = match proto {
-            Proto::Tcp => shards_api::image::Proto::Tcp,
-            Proto::Udp => shards_api::image::Proto::Udp,
         };
+        let proto = shards_proto(*proto);
         let found = published.iter().zip(used.iter_mut()).find(|(b, used)| {
             !**used
                 && b.guest_port == *port
@@ -140,10 +123,22 @@ pub fn bound(
             )));
         };
         *taken = true;
+        let receiver = match socket.to.as_slice() {
+            [only] if only.member == runs.index => Receiver::Named { port: only.port },
+            to => {
+                return Err(Refusal::Invalid {
+                    what: "grants",
+                    why: format!(
+                        "grants[{at}] publishes {member}'s port {port}, which its image gives {}",
+                        whom(to, members)?
+                    ),
+                });
+            }
+        };
         made.push(Published {
             grant: u32::try_from(at).map_err(|_| room("grants", at))?,
             at: socket.host,
-            receiver: Receiver::Declared,
+            receiver,
         });
     }
     if let Some((extra, _)) = published.iter().zip(&used).find(|(_, used)| !**used) {
@@ -153,6 +148,45 @@ pub fn bound(
         )));
     }
     Ok(made)
+}
+
+/// Whom a published port reaches, as Shards names its receivers (`to`), in a refusal's words: its members by kind and
+/// name, or the run's own command where it names none (D122). A receiver no member of the image is is Shards' fault.
+fn whom(to: &[Receiving], members: &[MemberInfo]) -> Result<String, Refusal> {
+    if to.is_empty() {
+        return Ok("no member: it reaches the run's own command".to_owned());
+    }
+    let mut named = Vec::new();
+    named
+        .try_reserve_exact(to.len())
+        .map_err(|_| Refusal::Exhausted {
+            what: "published port receivers",
+            bound: to.len(),
+        })?;
+    for receiving in to {
+        let Some(member) = members.iter().find(|m| m.index == receiving.member) else {
+            return Err(Refusal::Broken(format!(
+                "Shards named member {} as a published port's receiver, which its image doesn't declare",
+                receiving.member
+            )));
+        };
+        let kind = match member.kind {
+            shards_api::image::MemberKind::Agent => "agent",
+            shards_api::image::MemberKind::Harness => "harness",
+        };
+        named.push(format!(
+            "{kind} {} at its port {}",
+            member.name, receiving.port
+        ));
+    }
+    Ok(named.join(" and "))
+}
+
+fn shards_proto(proto: Proto) -> shards_api::image::Proto {
+    match proto {
+        Proto::Tcp => shards_api::image::Proto::Tcp,
+        Proto::Udp => shards_api::image::Proto::Udp,
+    }
 }
 
 #[cfg(test)]
