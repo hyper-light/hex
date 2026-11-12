@@ -1868,7 +1868,7 @@ fn hostile_values_are_refused_by_name() {
     ));
     let mut info = answer(2, &Answer::Info(info()), MAX_MESSAGE).unwrap();
     // None route/allocation tags follow abandoned's eight bytes and the exit's five plus tag, and the
-    // empty grant list's count ends the info.
+    // empty grant and published lists' counts end the info.
     let adopted = info.len() - NO_GRANTS - 2 - 8 - 6 - 1;
     info[adopted] = 2;
     assert!(matches!(
@@ -3167,7 +3167,7 @@ fn route_wire_spec_and_info_inconsistent_route_receipts_refuse() {
         read_answer(&received(&bad, 0), MAX_MESSAGE).unwrap().1,
         valid_info
     );
-    // The info's route comes before its empty grant list's count.
+    // The info's route comes before its empty grant and published lists' counts.
     let route_at = bad.len() - NO_GRANTS - route_bytes;
     assert_eq!(bad[route_at], 1);
     assert_eq!(bad[route_at + 1], class_tag(Class::Oci));
@@ -4132,8 +4132,9 @@ fn guest_time_follows_the_usage_counters_by_vcpu_or_what_it_awaits() {
     ));
 }
 
-/// An empty grant list's bytes on the wire: its u32 count alone (joint plan step 15), the last field of an info.
-const NO_GRANTS: usize = size_of::<u32>();
+/// What ends an info without grants on the wire (joint plan step 15): its empty grant list's u32 count, then its
+/// empty list of published ports'.
+const NO_GRANTS: usize = 2 * size_of::<u32>();
 
 fn harness() -> Member {
     Member {
