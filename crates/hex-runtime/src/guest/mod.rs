@@ -909,12 +909,14 @@ impl GuestRuntime {
         Ok(self.lock()?.clone())
     }
 
+    /// `call` on the guest that holds box `id`, `snapshot` the call's one read of its record (`books::Routed::Other`).
     fn with<T>(
         &self,
+        snapshot: Option<&hex_core::record::BoxRecord>,
         id: &BoxId,
         call: impl FnOnce(&Booted) -> Result<T, Refusal>,
     ) -> Result<T, Refusal> {
-        let running = self.booted_for(id)?;
+        let running = self.booted_for_record(snapshot, id)?;
         match running {
             Some(b) => call(&b),
             None => Err(Refusal::NoSuchBox(id.clone())),
@@ -1065,21 +1067,30 @@ impl Runtime for GuestRuntime {
     }
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
-        if let Some(record) = self.image_record(id)? {
-            return self.start_image(record);
+        match self.routed(id)? {
+            books::Routed::Image(record) => self.start_image(record),
+            books::Routed::Other(snapshot) => {
+                let snapshot = snapshot.as_ref();
+                self.call_recorded(snapshot, id, true, || {
+                    self.with(snapshot, id, |b| b.client.start(id))
+                })
+            }
         }
-        self.call_recorded(id, true, || self.with(id, |b| b.client.start(id)))
     }
 
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
-        // A member's program is the agent-control endpoint's (joint plan step 11).
-        if self.image_record(id)?.is_some() {
-            return Err(Refusal::Awaits {
-                needs: hex_api::Upstream::MemberExec,
-            });
-        }
-        self.call_recorded(id, true, || {
-            self.with(id, |b| b.client.exec(id, program, stdio))
+        let snapshot = match self.routed(id)? {
+            // A member's program is the agent-control endpoint's (joint plan step 11).
+            books::Routed::Image(_) => {
+                return Err(Refusal::Awaits {
+                    needs: hex_api::Upstream::MemberExec,
+                });
+            }
+            books::Routed::Other(snapshot) => snapshot,
+        };
+        let snapshot = snapshot.as_ref();
+        self.call_recorded(snapshot, id, true, || {
+            self.with(snapshot, id, |b| b.client.exec(id, program, stdio))
         })
     }
 
@@ -1098,29 +1109,43 @@ impl Runtime for GuestRuntime {
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
-        if let Some(record) = self.image_record(id)? {
-            return self.signal_image(record, signal);
+        match self.routed(id)? {
+            books::Routed::Image(record) => self.signal_image(record, signal),
+            books::Routed::Other(snapshot) => {
+                let snapshot = snapshot.as_ref();
+                self.call_recorded(snapshot, id, true, || {
+                    self.with(snapshot, id, |b| b.client.signal(id, signal))
+                })
+            }
         }
-        self.call_recorded(id, true, || self.with(id, |b| b.client.signal(id, signal)))
     }
 
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
-        if let Some(record) = self.image_record(id)? {
-            return self.inspect_image(record);
+        match self.routed(id)? {
+            books::Routed::Image(record) => self.inspect_image(record),
+            books::Routed::Other(snapshot) => {
+                let snapshot = snapshot.as_ref();
+                self.call_recorded(snapshot, id, false, || {
+                    self.with(snapshot, id, |b| {
+                        self.project_info(b, b.client.inspect(id)?)
+                    })
+                })
+            }
         }
-        self.call_recorded(id, false, || {
-            self.with(id, |b| self.project_info(b, b.client.inspect(id)?))
-        })
     }
 
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
-        if let Some(record) = self.image_record(id)? {
-            return self.usage_image(record);
-        }
-        if let Some(usage) = self.native_usage(id)? {
+        let snapshot = match self.routed(id)? {
+            books::Routed::Image(record) => return self.usage_image(record),
+            books::Routed::Other(snapshot) => snapshot,
+        };
+        let snapshot = snapshot.as_ref();
+        if let Some(usage) = self.native_usage(snapshot, id)? {
             return Ok(usage);
         }
-        self.call_recorded(id, false, || self.with(id, |b| b.client.usage(id)))
+        self.call_recorded(snapshot, id, false, || {
+            self.with(snapshot, id, |b| b.client.usage(id))
+        })
     }
 
     fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
@@ -1167,16 +1192,13 @@ impl Runtime for GuestRuntime {
     }
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
-        if let Some(record) = self.image_record(id)? {
-            return self.delete_image(record);
+        match self.routed(id)? {
+            books::Routed::Image(record) => self.delete_image(record),
+            books::Routed::Other(Some(record)) if self.owns_record(&record.spec) => {
+                self.delete_recorded(&record, id)
+            }
+            books::Routed::Other(snapshot) => self.delete_payload(snapshot.as_ref(), id),
         }
-        if self.uses_books()
-            && let Some(record) = self.recorded_box(id)?
-            && self.owns_record(&record.spec)
-        {
-            return self.delete_recorded(id);
-        }
-        self.delete_payload(id)
     }
 }
 
@@ -1196,8 +1218,13 @@ impl GuestRuntime {
         self.create_in(&b, rewritten)
     }
 
-    fn delete_payload(&self, id: &BoxId) -> Result<(), Refusal> {
-        let Some(b) = self.booted_for(id)? else {
+    /// Deletes box `id` from the guest that holds it, `snapshot` the call's one read of its record.
+    fn delete_payload(
+        &self,
+        snapshot: Option<&hex_core::record::BoxRecord>,
+        id: &BoxId,
+    ) -> Result<(), Refusal> {
+        let Some(b) = self.booted_for_record(snapshot, id)? else {
             return if self.managed_shared() {
                 Ok(())
             } else {

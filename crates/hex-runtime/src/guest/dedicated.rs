@@ -394,7 +394,8 @@ mod tests {
             .join()
             .is_err()
         );
-        assert_eq!(runtime.with(&id, |_| Ok(17)), Ok(17));
+        let snapshot = runtime.recorded_box(&id).unwrap();
+        assert_eq!(runtime.with(snapshot.as_ref(), &id, |_| Ok(17)), Ok(17));
     }
 
     /// AC-T7.4.1: stop accepted with no terminal witness keeps the exact receipt;
@@ -1142,9 +1143,17 @@ impl GuestRuntime {
     }
 
     pub(super) fn booted_for(&self, id: &BoxId) -> Result<Option<triomphe::Arc<Booted>>, Refusal> {
+        self.booted_for_record(self.recorded_box(id)?.as_ref(), id)
+    }
+
+    /// [`GuestRuntime::booted_for`], `snapshot` the call's one read of `id`'s record (`books::Routed::Other`).
+    pub(super) fn booted_for_record(
+        &self,
+        snapshot: Option<&hex_core::record::BoxRecord>,
+        id: &BoxId,
+    ) -> Result<Option<triomphe::Arc<Booted>>, Refusal> {
         let dedicated = if self.uses_books() {
-            self.recorded_box(id)?
-                .is_some_and(|record| self.owns_record(&record.spec))
+            snapshot.is_some_and(|record| self.owns_record(&record.spec))
         } else if self.record.is_some() {
             selected::read(&self.selected_path(id)?)?.is_some()
         } else {
@@ -1155,8 +1164,8 @@ impl GuestRuntime {
             // recovery/create installs the native route before accepting forwards.
             self.cached_selected(id)
         } else if self.managed_shared() {
-            let record = self.recorded_box(id)?.ok_or(super::books::uncertain(id)?)?;
-            self.shared_for_record(&record)
+            let record = snapshot.ok_or(super::books::uncertain(id)?)?;
+            self.shared_for_record(record)
         } else {
             self.running()
         }
