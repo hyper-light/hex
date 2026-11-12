@@ -1919,9 +1919,9 @@ fn admission_spec(state: &State) -> Result<Option<NodeSpec>, Stop> {
     let held = hex_api::capacity::Amounts::from_array(state.node.held()?);
     let (unused, debit) = (booked.less(held), held.less(booked));
     let credit = hex_api::capacity::Amounts {
-        cpu_milli: unused.cpu_milli,
-        mem_bytes: unused.mem_bytes,
-        disk_bytes: unused.disk_bytes,
+        cpu_milli: unused.cpu_milli.saturating_add(credited.cpu_milli),
+        mem_bytes: unused.mem_bytes.saturating_add(credited.mem_bytes),
+        disk_bytes: unused.disk_bytes.saturating_add(credited.disk_bytes),
         gpus: 0,
     };
     let room = |physical: u64, credit: u64, foreign: u64, debit: u64| {

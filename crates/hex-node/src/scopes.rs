@@ -79,6 +79,9 @@ pub(crate) fn cgroup(root: &std::path::Path, path: &str, uid: u32) -> Result<u64
             break false;
         }
     };
+    if !owned {
+        return Err(ScopeRefused::NotOwned);
+    }
     // A u64 in decimal and its newline: the longest `memory.current` the kernel writes.
     let most = u64::from(u64::MAX.ilog10()).saturating_add(2);
     let mut text = String::new();
@@ -172,7 +175,7 @@ mod here {
         for pid in pids {
             match sys::user_of(pid) {
                 Ok(Some(runs_as)) if runs_as == uid => {}
-                Ok(Some(_)) => {}
+                Ok(Some(_)) => return Err(ScopeRefused::NotOwned),
                 Ok(None) => continue,
                 Err(_) => return Err(ScopeRefused::Unreadable),
             }
@@ -215,6 +218,9 @@ mod here {
             Err(_) => return Err(ScopeRefused::Unreadable),
         };
         let owner = job.owner().map_err(|_| ScopeRefused::Unreadable)?;
+        if !super::sid_is(&owner, &user.0) {
+            return Err(ScopeRefused::NotOwned);
+        }
         job.private_resident().map_err(|_| ScopeRefused::Unreadable)
     }
 }

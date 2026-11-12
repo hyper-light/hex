@@ -336,7 +336,7 @@ impl Keeper {
     /// The room every admission is decided in: the measured room and the holders' credit (CV3, CV12). Past what a
     /// u64 counts, the measured room alone.
     fn admitting(&self) -> Amounts {
-        self.room
+        self.room.checked_add(self.credit()).unwrap_or(self.room)
     }
 
     /// The sessions of every synced holder whose hello named a scope, its name, and the scope: what the host
