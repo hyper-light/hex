@@ -27,6 +27,7 @@ pub struct FirecrackerRuntime {
     catalog: SharedCatalog,
     books: Weak<dyn Books>,
     initialized: std::sync::OnceLock<()>,
+    host: vfio::Host,
 }
 
 struct Paths {
@@ -51,6 +52,7 @@ impl FirecrackerRuntime {
             catalog,
             books,
             initialized: std::sync::OnceLock::new(),
+            host: vfio::Host::system()?,
         })
     }
 
@@ -454,7 +456,7 @@ impl FirecrackerRuntime {
             transaction.put(&BoxRecord::new(spec, Phase::Creating, Vec::new()))?;
         }
         let mut record = transaction.read(&id)?.ok_or_else(|| uncertain(&id))?;
-        let plan = vfio::plan(&self.catalog, &record.spec.devices)?;
+        let plan = vfio::plan(&self.host, &self.catalog, &record.spec.devices, &[])?;
         let paths = self.paths(&record)?;
         match fs::symlink_metadata(&paths.dir) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -694,7 +696,7 @@ impl FirecrackerRuntime {
         self.preflight_backing(&source)?;
         // This is an exact isolation/identity check, not another picker. Refuse an inseparable
         // unselected GPU before draining the observer; companion metadata cannot enlarge S.
-        drop(vfio::plan(&self.catalog, &spec.devices)?);
+        drop(vfio::plan(&self.host, &self.catalog, &spec.devices, &[])?);
         let keys = self.catalog.conflict_ids(&source.devices)?;
         let id = spec.id.try_clone()?;
         let (pending, commitment, init) = crate::devices::with_handoff_transaction(
@@ -901,13 +903,13 @@ impl FirecrackerRuntime {
                 else {
                     continue;
                 };
-                vfio::validate(entry)?;
+                vfio::validate(&self.host, entry, &[])?;
                 let mut actual = actual.try_clone()?;
                 actual.holder = self.catalog.holder(entry.info.id, &records, &pools)?;
                 capacity.devices.push(actual);
                 continue;
             }
-            vfio::validate(entry)?;
+            vfio::validate(&self.host, entry, &[])?;
             capacity.devices.push(entry.report(self.catalog.holder(
                 entry.info.id,
                 &records,
@@ -1579,6 +1581,7 @@ mod handoff_tests {
             catalog: triomphe::Arc::try_new(catalog).unwrap(),
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
+            host: vfio::Host::system().unwrap(),
         };
         let devices = [256, 512]
             .map(|key| DeviceId {
@@ -1682,6 +1685,7 @@ mod handoff_tests {
             catalog: triomphe::Arc::try_new(catalog).unwrap(),
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
+            host: vfio::Host::system().unwrap(),
         };
         let full = [256, 512].map(|key| DeviceId {
             kind: DeviceKind::Gpu,
@@ -1884,6 +1888,7 @@ mod cleanup_tests {
             catalog: triomphe::Arc::try_new(catalog).unwrap(),
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
+            host: vfio::Host::system().unwrap(),
         };
         let id = BoxId::new("cleanup-refused").unwrap();
         let spec = BoxSpec {
@@ -2107,6 +2112,7 @@ mod memlock_tests {
             catalog: triomphe::Arc::try_new(catalog).unwrap(),
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
+            host: vfio::Host::system().unwrap(),
         };
         let id = BoxId::new("gpu-memlock").unwrap();
         let spec = BoxSpec {

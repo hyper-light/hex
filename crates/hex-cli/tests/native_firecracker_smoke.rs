@@ -945,10 +945,12 @@ fn native_firecracker_gpu_box_computes_recovers_and_returns_its_gpu() {
     );
 }
 
-/// AC-T7.4.1: a failed test leaves no VMM (r761 left one holding the GPU's group after a panic). Do: start a
-/// stand-in VMM, a copy of `/bin/sh` at a run's binary path whose command names the run's state, and drop a
-/// reaper for that binary and state. Expect the stand-in ended, by its own PID and start time, and nothing
-/// else touched: a second stand-in naming another state still runs.
+/// AC-T7.4.1: a failed test leaves no VMM (r761 left one holding the GPU's group after a panic), nor its VM's
+/// directory (r985's reaper ended the VMM and left it in the backend's state). Do: start a stand-in VMM, a copy of
+/// `/bin/sh` at a run's binary path whose command names its VM's config file in the run's state, as a VMM's does,
+/// and drop a reaper for that binary and state. Expect the stand-in ended, by its own PID and start time, and its
+/// VM's directory removed, and nothing else touched: a second stand-in naming another state still runs, its VM's
+/// directory kept.
 #[test]
 fn a_reaper_ends_the_vmm_its_failed_test_left() {
     use std::os::unix::process::ExitStatusExt;
@@ -957,12 +959,14 @@ fn a_reaper_ends_the_vmm_its_failed_test_left() {
     fs::copy("/bin/sh", &binary).unwrap();
     let state = dir.path().join("fc-state");
     let other = dir.path().join("other-state");
-    let start = |names: &Path| {
+    let start = |vm: &Path| {
+        fs::create_dir_all(vm).unwrap();
         Command::new(&binary)
             .args([
                 "-c",
                 "while :; do read -r _ || exit 0; done",
-                &names.display().to_string(),
+                "--config-file",
+                &vm.join("config.json").display().to_string(),
             ])
             .stdin(HostStdio::piped())
             .spawn()
@@ -984,10 +988,12 @@ fn a_reaper_ends_the_vmm_its_failed_test_left() {
         wait: Duration::from_secs(30),
     });
     assert!(!running(pid, began), "the left VMM {pid} ended");
+    assert!(!state.join("vm").exists(), "its VM's directory removed");
     assert!(
         running(kept_pid, kept_began),
         "another run's VMM {kept_pid} still runs"
     );
+    assert!(other.join("vm").is_dir(), "another run's VM directory kept");
     assert!(left.wait().unwrap().signal().is_some());
     drop(kept.stdin.take());
     assert!(kept.wait().unwrap().success());
