@@ -635,6 +635,7 @@ fn native_case(vendor: Vendor) {
             socket: lab.dir.path().join("n.sock"),
         }],
         peers: Vec::new(),
+        capacity: None,
     };
     let mut fixture = Fixture {
         lab: &lab,

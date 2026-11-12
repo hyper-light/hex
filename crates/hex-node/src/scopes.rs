@@ -12,6 +12,29 @@ use hex_api::capacity::{Amounts, Read, Scope, ScopeRefused};
 #[serde(transparent)]
 pub struct User(pub String);
 
+impl User {
+    /// Whether this OS can take it as a user, refused, typed, if not: a uid on Linux and macOS, a SID on Windows.
+    pub fn check(&self) -> Result<(), hex_api::Refusal> {
+        #[cfg(unix)]
+        let ok = self.0.parse::<u32>().is_ok();
+        #[cfg(windows)]
+        let ok = sid_bytes(&self.0).is_some();
+        #[cfg(not(any(unix, windows)))]
+        let ok = false;
+        if ok {
+            Ok(())
+        } else {
+            Err(hex_api::Refusal::Invalid {
+                what: "capacity holder's user",
+                why: format!(
+                    "{:?} is no uid (Linux, macOS) or SID (Windows) of this OS",
+                    self.0
+                ),
+            })
+        }
+    }
+}
+
 /// What the work in `scope` holds now, once the scope is proved `user`'s: none declared, no credit.
 pub fn used(scope: &Scope, user: Option<&User>) -> Result<Amounts, ScopeRefused> {
     let user = user.ok_or(ScopeRefused::NoUser)?;

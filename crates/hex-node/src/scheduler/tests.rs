@@ -87,7 +87,8 @@ fn replayed_deletion_does_not_interrupt_the_reconnected_peer() {
             )
             .unwrap(),
         ),
-        driver,
+        driver: Arc::new(driver),
+        lane: None,
         runtimes: Runtimes::default(),
         cluster: Mutex::new(cluster),
         facts_dir: dir.path().to_path_buf(),
@@ -164,7 +165,8 @@ fn laptop_dispatch_and_common_wire_keep_the_box_until_explicit_delete() {
             )
             .unwrap(),
         ),
-        driver,
+        driver: Arc::new(driver),
+        lane: None,
         runtimes: Runtimes::default(),
         cluster: Mutex::new(cluster),
         facts_dir: dir.path().to_path_buf(),
@@ -350,7 +352,8 @@ fn cold_remote_creation_feedback_survives_owner_publication_busy() {
             )
             .unwrap(),
         ),
-        driver: owner_driver,
+        driver: Arc::new(owner_driver),
+        lane: None,
         runtimes: Runtimes::default(),
         cluster: Mutex::new(cluster),
         facts_dir: dir.path().to_path_buf(),
@@ -566,7 +569,8 @@ pub(super) fn advertise_service_with_budget(
             )
             .unwrap(),
         ),
-        driver,
+        driver: Arc::new(driver),
+        lane: None,
         runtimes,
         cluster: Mutex::new(cluster),
         facts_dir: dir.to_path_buf(),
@@ -1146,6 +1150,7 @@ fn a_cached_offer_todays_rules_refuse_is_set_aside_and_the_scheduler_starts() {
                 command: String::new(),
             })
             .into(),
+        capacity: None,
     };
     let reports = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&reports);
