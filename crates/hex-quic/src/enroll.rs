@@ -137,6 +137,8 @@ pub fn enroll(ca: &dyn Ca, name: &str, grant: Vec<u8>) -> Result<Credentials, Re
     credentials(key, &request, issued)
 }
 
+pub mod store;
+
 pub mod sim {
     //! A CA in this process, as kiln's CA behaves at the seam: it admits a name with a grant, takes each grant
     //! once, checks the request's signature, and issues for the admitted name alone, under one root.

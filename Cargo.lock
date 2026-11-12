@@ -647,10 +647,12 @@ dependencies = [
  "hex-core",
  "hyper-quic",
  "hyper-transport",
+ "pem",
  "rcgen",
  "rustix",
  "rustls-webpki",
  "sha2 0.10.9",
+ "tempfile",
  "thiserror",
 ]
 
