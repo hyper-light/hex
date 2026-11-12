@@ -12,6 +12,8 @@ mod native;
 #[cfg(target_os = "linux")]
 mod single_use;
 #[cfg(target_os = "linux")]
+pub use single_use::MarksAt;
+#[cfg(target_os = "linux")]
 mod transport;
 #[cfg(target_os = "linux")]
 mod vfio;

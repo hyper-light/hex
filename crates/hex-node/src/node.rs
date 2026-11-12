@@ -160,6 +160,9 @@ pub struct Node {
     /// The state root the `oci` class keeps each container's `state.json` and exec FIFO under
     /// ([`oci_root`]), shared with the other nodes on the host that run as this one's user.
     oci_root: PathBuf,
+    /// Whether [`Node::oci_root`] is the one every node of this one's user on the host shares: not a rootless node's
+    /// with no `$XDG_RUNTIME_DIR`, which keeps it in its own state ([`oci_root`]).
+    oci_root_shared: bool,
     /// The node's own key among them, which names its containers ([`Node::container`]).
     key: String,
     /// The `hex` binary the `oci` class re-execs for a container's init and `exec` helper; `None`
@@ -313,7 +316,7 @@ impl Node {
             (0, _) => Owner::Root,
             (uid, gid) => Owner::Rootless { uid, gid },
         };
-        let oci_root = oci_root(owner, state_dir)?;
+        let (oci_root, oci_root_shared) = oci_root(owner, state_dir)?;
         let key = node_key(state_dir)?;
         let store = Store::open(state_dir, &records_dir(&oci_root, state_dir)?)?;
         // Readable by the node alone: a bundle's config.json holds its init's environment.
@@ -384,6 +387,7 @@ impl Node {
             cgroups,
             store,
             oci_root,
+            oci_root_shared,
             key,
             oci_helper: None,
             supervisor,
@@ -880,6 +884,23 @@ impl Node {
     /// The runtime directory the node keeps its containers' state in ([`oci_root`]).
     pub fn oci_root(&self) -> &Path {
         &self.oci_root
+    }
+
+    /// Where its Firecracker backend marks a function no reset clears as given on this boot: its runtime directory, and
+    /// why that isn't read by the host's other nodes of its user, where it isn't ([`oci_root`]).
+    pub fn single_use_marks(&self) -> hex_runtime::firecracker::MarksAt {
+        hex_runtime::firecracker::MarksAt {
+            dir: self.oci_root.clone(),
+            unshared: if self.oci_root_shared {
+                None
+            } else {
+                Some(
+                    "a rootless node with no absolute $XDG_RUNTIME_DIR keeps its runtime directory in its own state, \
+                     which no other node on the host reads"
+                        .to_owned(),
+                )
+            },
+        }
     }
 
     /// What the node's record store has fsynced since it opened ([`crate::store::Syncs`]).
@@ -2554,18 +2575,22 @@ fn device_programs(owner: Owner, oci_boxes: &BoxRoot, bound: usize) -> Result<Pr
 /// for its node ([`Node::container_dir`]). A rootless node with no `$XDG_RUNTIME_DIR` keeps it in its
 /// state directory instead, where it outlives the host and its boxes' records are fsynced for it (the
 /// store judges by filesystem). Readable by its owner alone.
-fn oci_root(owner: Owner, state_dir: &Path) -> Result<PathBuf, Refusal> {
-    let root = match owner {
-        Owner::Root => PathBuf::from("/run/hex-node"),
+/// Returned with whether the directory is the one shared by every node of the owner on the host.
+fn oci_root(owner: Owner, state_dir: &Path) -> Result<(PathBuf, bool), Refusal> {
+    let (root, shared) = match owner {
+        Owner::Root => (PathBuf::from("/run/hex-node"), true),
         Owner::Rootless { .. } => std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .filter(|dir| dir.is_absolute())
-            .map_or_else(|| state_dir.join("oci"), |dir| dir.join("hex-node")),
+            .map_or_else(
+                || (state_dir.join("oci"), false),
+                |dir| (dir.join("hex-node"), true),
+            ),
     };
     fs::create_dir_all(&root)
         .and_then(|()| fs::set_permissions(&root, fs::Permissions::from_mode(0o700)))
         .map_err(|e| Refusal::os("making the containers' state directory", e))?;
-    Ok(root)
+    Ok((root, shared))
 }
 
 /// Where the node whose state directory is `state_dir`, and whose runtime directory is `oci_root`, keeps

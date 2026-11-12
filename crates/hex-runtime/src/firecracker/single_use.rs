@@ -19,6 +19,15 @@ use std::path::{Path, PathBuf};
 /// are `<key>-<id>` and `<key>.records`).
 pub(super) const MARKS: &str = "vfio-single-use";
 
+/// Where a node keeps its single-use marks ([`Marks`]): its runtime directory, `dir`, and, where the other nodes on the
+/// host don't read that directory, why (`unshared`): a rootless node with no `$XDG_RUNTIME_DIR` keeps it in its own
+/// state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarksAt {
+    pub dir: PathBuf,
+    pub unshared: Option<String>,
+}
+
 /// Why a function that no reset clears can't go to a VM now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Spent {

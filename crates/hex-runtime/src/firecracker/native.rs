@@ -30,9 +30,10 @@ pub struct FirecrackerRuntime {
     books: Weak<dyn Books>,
     initialized: std::sync::OnceLock<()>,
     host: vfio::Host,
-    /// The node's runtime directory (`Node::oci_root`): on tmpfs and shared by every node on the host, where a
-    /// function no reset clears is marked given on this boot.
-    runtime: PathBuf,
+    /// Where a function no reset clears is marked given on this boot: the node's runtime directory (`Node::oci_root`).
+    marks: single_use::MarksAt,
+    /// This node's effective user.
+    uid: u32,
     /// The host's boot session, the node's (`Node::boot_session`): a function no reset clears goes to one VM per boot.
     boot: Option<BootSession>,
 }
@@ -52,7 +53,7 @@ impl FirecrackerRuntime {
         config: Config,
         catalog: SharedCatalog,
         books: Weak<dyn Books>,
-        runtime: PathBuf,
+        marks: single_use::MarksAt,
         boot: Option<BootSession>,
     ) -> Result<Self, Refusal> {
         config.verify_inputs()?;
@@ -62,7 +63,8 @@ impl FirecrackerRuntime {
             books,
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system()?,
-            runtime,
+            marks,
+            uid: rustix::process::geteuid().as_raw(),
             boot,
         })
     }
@@ -471,7 +473,7 @@ impl FirecrackerRuntime {
         // A function no reset clears goes to one VM per host boot: refused where any node's VM had it on this one.
         let functions = vfio::functions(&plan)?;
         let once = vfio::once_per_boot(&self.host, &functions)?;
-        let marks = single_use::Marks::of(&self.runtime, self.boot.as_ref())?;
+        let marks = single_use::Marks::of(&self.marks.dir, self.boot.as_ref())?;
         if let Some((function, spent)) = marks.check(&once)? {
             return Err(single_use::refused(function, spent, self.boot.as_ref()));
         }
@@ -728,7 +730,7 @@ impl FirecrackerRuntime {
         let functions = vfio::functions(&plan)?;
         let once = vfio::once_per_boot(&self.host, &functions)?;
         if let Some((function, spent)) =
-            single_use::Marks::of(&self.runtime, self.boot.as_ref())?.check(&once)?
+            single_use::Marks::of(&self.marks.dir, self.boot.as_ref())?.check(&once)?
         {
             return Err(single_use::pool_refused(
                 "a GPU pool's handoff to a box (VFIO)",
@@ -931,7 +933,7 @@ impl FirecrackerRuntime {
             .try_reserve_exact(self.catalog.entries().len())
             .map_err(|_| exhausted("VFIO capacity", self.catalog.entries().len()))?;
         // A function no reset clears that a VM had on this boot is listed, never offered: unavailable, with why.
-        let marks = single_use::Marks::of(&self.runtime, self.boot.as_ref())?;
+        let marks = single_use::Marks::of(&self.marks.dir, self.boot.as_ref())?;
         let mut unavailable = Vec::new();
         unavailable
             .try_reserve_exact(self.catalog.entries().len())
@@ -1673,7 +1675,11 @@ mod handoff_tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
-            runtime: PathBuf::from("/nonexistent/runtime"),
+            marks: single_use::MarksAt {
+                dir: PathBuf::from("/nonexistent/runtime"),
+                unshared: None,
+            },
+            uid: 0,
             boot: None,
         };
         let devices = [256, 512]
@@ -1779,7 +1785,11 @@ mod handoff_tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
-            runtime: PathBuf::from("/nonexistent/runtime"),
+            marks: single_use::MarksAt {
+                dir: PathBuf::from("/nonexistent/runtime"),
+                unshared: None,
+            },
+            uid: 0,
             boot: None,
         };
         let full = [256, 512].map(|key| DeviceId {
@@ -1984,7 +1994,11 @@ mod cleanup_tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
-            runtime: PathBuf::from("/nonexistent/runtime"),
+            marks: single_use::MarksAt {
+                dir: PathBuf::from("/nonexistent/runtime"),
+                unshared: None,
+            },
+            uid: 0,
             boot: None,
         };
         let id = BoxId::new("cleanup-refused").unwrap();
@@ -2210,7 +2224,11 @@ mod memlock_tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
-            runtime: PathBuf::from("/nonexistent/runtime"),
+            marks: single_use::MarksAt {
+                dir: PathBuf::from("/nonexistent/runtime"),
+                unshared: None,
+            },
+            uid: 0,
             boot: None,
         };
         let id = BoxId::new("gpu-memlock").unwrap();
@@ -2440,7 +2458,11 @@ mod single_use_tests {
                 dev: host.join("dev"),
                 open: vfio::stand_in::opened,
             },
-            runtime: runtime.to_path_buf(),
+            marks: single_use::MarksAt {
+                dir: runtime.to_path_buf(),
+                unshared: None,
+            },
+            uid: rustix::process::geteuid().as_raw(),
             boot: boot(THIS_BOOT),
         }
     }
@@ -2581,6 +2603,78 @@ mod single_use_tests {
             "another node on the same boot is refused it before its VMM: {refused:?}"
         );
         refused_for_its_boot(&refused);
+    }
+
+    /// The lead's review of 3cea2fcf (AC-T7.4.1; original): a rootless node with no absolute `$XDG_RUNTIME_DIR` keeps its
+    /// runtime directory in its own state, which no other node on the host reads, so another node on the same boot handed
+    /// out a function one node had spent (r940's failure). Do: on one stand-in host and boot, create a VM given a function
+    /// no reset clears on two nodes whose runtime directories are each their own. Expect each refused by type before its
+    /// VMM, saying the directory is the node's own and why.
+    #[test]
+    fn original_a_node_whose_runtime_directory_is_its_own_gives_out_no_single_use_function() {
+        let dir = tempfile::tempdir().unwrap();
+        stand_in(&dir.path().join("host"));
+        let owner: Arc<dyn Books> = Arc::new(super::handoff_tests::NoOwnerCalls);
+        let why = "a rootless node with no absolute $XDG_RUNTIME_DIR keeps it in its own state";
+        for name in ["first-node", "second-node"] {
+            let mut node = node(
+                &dir.path().join(name),
+                &dir.path().join("host"),
+                &dir.path().join(name).join("oci"),
+                GPU,
+                &owner,
+            );
+            node.marks.unshared = Some(why.to_owned());
+            let books = Handed::default();
+            let refused = create(&node, &books, "vm");
+            assert_eq!(
+                books.launched.get(),
+                0,
+                "{name}: refused before its VMM: {refused:?}"
+            );
+            let Err(Refusal::Platform { why: said, .. }) = &refused else {
+                panic!("{name}: refused by type: {refused:?}");
+            };
+            for named in ["0000:01:00.0", "its own", why] {
+                assert!(said.contains(named), "{named}: {said}");
+            }
+        }
+    }
+
+    /// The lead's review of 3cea2fcf (AC-T7.4.1; original): a root node opens any VFIO group, and marked a function in
+    /// `/run/hex-node`, where a rootless node of the group's owner, marking in its own runtime directory, never looked.
+    /// Do: create a VM given a function no reset clears on a node whose user isn't its group's owner. Expect it refused
+    /// by type before its VMM, naming the group's owner.
+    #[test]
+    fn original_a_node_is_refused_a_single_use_function_another_users_group_holds() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        stand_in(&dir.path().join("host"));
+        let owner: Arc<dyn Books> = Arc::new(super::handoff_tests::NoOwnerCalls);
+        let mut node = node(
+            &dir.path().join("node"),
+            &dir.path().join("host"),
+            &dir.path().join("runtime"),
+            GPU,
+            &owner,
+        );
+        let group = fs::metadata(dir.path().join("host/dev/vfio/7"))
+            .unwrap()
+            .uid();
+        node.uid = if group == 0 { 1 } else { 0 };
+        let books = Handed::default();
+        let refused = create(&node, &books, "vm");
+        assert_eq!(
+            books.launched.get(),
+            0,
+            "refused before its VMM: {refused:?}"
+        );
+        let Err(Refusal::Platform { why, .. }) = &refused else {
+            panic!("refused by type: {refused:?}");
+        };
+        for named in ["0000:01:00.0".to_owned(), format!("user {group}")] {
+            assert!(why.contains(&named), "{named}: {why}");
+        }
     }
 
     /// One node's records, empty, over a host of ample room: what a backend's capacity reads.
