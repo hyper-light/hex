@@ -248,6 +248,45 @@ fn uppercase_retained_pool_body_cannot_be_ignored_before_cpu_adoption() {
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
 
+/// T-T7.1.2: a record in the state directory that can't be read is damage, never a crash's, as every write
+/// there is whole and synced. Do: recover beside one. Expect: refused before any backend effect, the refusal
+/// naming the file and what to do about it, and the file kept.
+#[test]
+fn t_t7_1_2_a_damaged_state_record_refuses_naming_its_file_and_the_remedy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node, effects, _) = retained(dir.path());
+    let path = dir.path().join("zz-damaged.json");
+    let bytes = b"{damaged durable record\n";
+    std::fs::write(&path, bytes).unwrap();
+    let refused = node.recover().unwrap_err().to_string();
+    assert!(refused.contains(&path.display().to_string()), "{refused}");
+    assert!(refused.contains("move the file aside"), "{refused}");
+    assert_eq!(effects.load(Ordering::SeqCst), 0);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+/// T-T7.1.2: a record torn in the runtime record directory beside no guest. Only the host can hold its box,
+/// and no name of a host box outlives the node to prove it ended. Do: recover. Expect: the node starts, its
+/// readable sibling taken back, and the torn record kept, its name refused as `Exists`.
+#[test]
+fn t_t7_1_2_a_torn_record_beside_no_guest_is_kept_and_the_node_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node, _, sibling) = retained(dir.path());
+    let torn = BoxId::new("ab-torn").unwrap();
+    let path = crate::store::runtime_record(&dir.path().join("@records"), &torn);
+    std::fs::write(&path, b"{\"version\":").unwrap();
+    let recovered = node
+        .recover()
+        .expect("the node starts beside a torn record");
+    assert_eq!(recovered.adopted, [sibling]);
+    assert!(path.exists(), "a record nothing proved ended was removed");
+    assert_eq!(recovered.held.len(), 1, "{:?}", recovered.held);
+    assert_eq!(recovered.held[0].0, torn);
+    let mut again = spec();
+    again.id = torn.clone();
+    assert_eq!(node.create(again), Err(Refusal::Exists(torn)));
+}
+
 /// Leaves the retained native-metadata cross-check to `Recover`'s default; its native
 /// initialization counts as an effect.
 struct Unchecked(CountedRecovery);

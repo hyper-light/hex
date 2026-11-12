@@ -22,6 +22,13 @@
 //! always written whole — points at anything a host crash leaves behind to remove
 //! (docs/design/runtime-architecture.md, decision 1).
 //!
+//! On macOS and Windows the node has no tmpfs runtime directory: those records go to `@records` under its
+//! state directory, unsynced, every write of them to a temp file renamed into place. A crash of the node
+//! leaves the old record or the new one there too; a crash of the host can leave one torn, its rename on
+//! disk before its bytes. Whose box it named, and whether that box ended, recovery proves where it can and
+//! holds the record where it can't (`crate::recorded`). Only a record in the state directory that can't be
+//! read is never a crash's (every write there is whole and synced): damage the node won't start over.
+//!
 //! Changes of one box's record are made one at a time; changes of different boxes never wait on each
 //! other, so one box's fsync never holds up another box's create (goal 5 plan step 2). Nor do they wait on
 //! one directory's lock: the runtime directory's records are spread over [`SHARDS`] subdirectories by
@@ -67,6 +74,9 @@ const SHARD_MASK: u64 = 0x3f;
 /// budget ([`hex_runtime::MAX_BOXES`]), so the changes of the boxes a node holds never reach it. Past it
 /// a change is refused by type ([`Refusal::Exhausted`]), never kept waiting (CLAUDE.md §2).
 pub const TURNS: usize = hex_runtime::MAX_BOXES;
+
+/// The records torn in the runtime place, each with why it couldn't be read ([`Store::take_torn`]).
+pub(crate) type Torn = Vec<(BoxId, String)>;
 
 /// Box records, one file each, named `<id>.json`, in the place each belongs ([`Store`]).
 #[derive(Debug, Clone)]
@@ -617,14 +627,13 @@ impl Store {
     }
 
     /// Takes the torn records out of `records`, a [`Store::retained_records`]: each unreadable one the
-    /// runtime directory holds, its first write cut short (above). Every other write is whole, and only an
-    /// unscoped record is kept there; whose box that makes it, the caller says. Each comes with why it
-    /// couldn't be read. The Linux node's recovery is its caller.
-    #[cfg(target_os = "linux")]
+    /// runtime place holds, a crash's (above): on Linux a first write cut short, elsewhere an unsynced write a
+    /// host crash cut. Only an unscoped record is kept there; whose box that makes it, the caller says. Each
+    /// comes with why it couldn't be read.
     pub(crate) fn take_torn(
         &self,
         records: &mut BTreeMap<BoxId, Result<BoxRecord, String>>,
-    ) -> Result<Vec<(BoxId, String)>, Refusal> {
+    ) -> Result<Torn, Refusal> {
         let mut torn = Vec::new();
         torn.try_reserve_exact(records.len())
             .map_err(|_| Refusal::Exhausted {
@@ -645,6 +654,39 @@ impl Store {
             records.remove(id);
         }
         Ok(torn)
+    }
+
+    /// Where box `id`'s record is kept in the runtime place, where [`Store::take_torn`] finds a torn one.
+    pub(crate) fn runtime_place(&self, id: &BoxId) -> PathBuf {
+        runtime_record(&self.run, id)
+    }
+
+    /// Refuses the node's start over a record in the state directory that can't be read, naming its file and
+    /// what to do (T-T7.1.2). Every write there is whole and synced, so no crash tore it: it is damage, and what
+    /// its box holds can't be known from it. `records` is past [`Store::take_torn`], so every unreadable one
+    /// left is the state directory's.
+    pub(crate) fn refuse_unreadable(
+        &self,
+        records: &BTreeMap<BoxId, Result<BoxRecord, String>>,
+    ) -> Result<(), Refusal> {
+        let mut unreadable = records
+            .iter()
+            .filter_map(|(id, record)| record.as_ref().err().map(|why| (id, why)));
+        let Some((id, why)) = unreadable.next() else {
+            return Ok(());
+        };
+        let mut said = format!(
+            "box {id}'s record {} can't be read ({why}). The state directory's records are written whole \
+             and synced, so this is damage, not a crash, and what the box holds can't be known from it: \
+             restore the file, or end what remains of box {id} and move the file aside; the node starts \
+             once every record reads",
+            record_file(&self.disk, id).display()
+        );
+        let more = unreadable.count();
+        if more > 0 {
+            said.push_str(&format!(" ({more} more can't be read)"));
+        }
+        Err(Refusal::Broken(said))
     }
 
     fn scan_records(
@@ -1514,8 +1556,8 @@ mod tests {
 
     /// T-T7.1.2/AC-T7.4.1: do keep a record torn at its first write in the runtime directory, one
     /// unreadable in the state directory, which no write tears, and a whole one; expect only the torn one
-    /// taken, with why it couldn't be read, and the other two left for the whole-owner barrier.
-    #[cfg(target_os = "linux")]
+    /// taken, with why it couldn't be read, and the other two left for the whole-owner barrier, which refuses
+    /// the unreadable one naming its file.
     #[test]
     fn only_a_record_torn_in_the_runtime_directory_is_taken_as_torn() {
         let dir = tempfile::tempdir().unwrap();
@@ -1541,5 +1583,10 @@ mod tests {
         assert!(!records.contains_key(&torn));
         assert!(records.get(&unread).is_some_and(Result::is_err));
         assert!(records.get(&whole.spec.id).is_some_and(Result::is_ok));
+        let Err(Refusal::Broken(said)) = store.refuse_unreadable(&records) else {
+            panic!("the unreadable state record was let through");
+        };
+        let file = record_file(&dir.path().join("state"), &unread);
+        assert!(said.contains(&file.display().to_string()), "{said}");
     }
 }
