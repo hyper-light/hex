@@ -865,7 +865,7 @@ const READS_PER_READY: usize = 64;
 /// The event form's reading side ([`Client::connect_evented`]): no thread, but the loop that waits on
 /// [`Pump::handle`] calls [`Pump::ready`] when it is ready, which reads what has come and hands each
 /// message to its call's completion, and writes what waits. It holds the connection's reader's turn for good.
-pub struct Pump<W = Guest> {
+pub struct Pump<W: Waits = Guest> {
     shared: SharedOwner<Stream<W>>,
     ended: bool,
 }

@@ -752,7 +752,9 @@ impl Mux {
             }
         };
         match self.there.remove(&lane) {
-            Some(Lane::Discard) => Ok(()),
+            // A Reset that crossed this side's close (both halves had ended here) or its own reset: what it ends is
+            // gone already. The sender's later frames on the lane follow it, so none of them is taken for another.
+            None | Some(Lane::Discard) => Ok(()),
             Some(Lane::Bound(conn)) => {
                 if let Some(state) = self.conns.remove(&conn) {
                     // This side's half ends too: the peer lets go its frames until this End.
@@ -768,9 +770,6 @@ impl Mux {
                 out.push(Out::Reset { conn, why });
                 Ok(())
             }
-            None => Err(Broken(format!(
-                "a Reset on lane {lane}, which carries nothing"
-            ))),
         }
     }
 
@@ -823,7 +822,8 @@ impl Mux {
             .map(u64::from_be_bytes)
             .map_err(|_| Broken(format!("a Credit of {} bytes, not 8", payload.len())))?;
         match self.there.get(&lane).copied() {
-            Some(Lane::Discard) => Ok(()),
+            // A Credit sent after its sender's End can cross this side's close: the connection it grants is gone.
+            None | Some(Lane::Discard) => Ok(()),
             Some(Lane::Bound(conn)) => {
                 let Some(state) = self.conns.get_mut(&conn) else {
                     return Ok(());
@@ -837,9 +837,6 @@ impl Mux {
                 out.push(Out::Credit { conn });
                 Ok(())
             }
-            None => Err(Broken(format!(
-                "a Credit on lane {lane}, which carries nothing"
-            ))),
         }
     }
 }

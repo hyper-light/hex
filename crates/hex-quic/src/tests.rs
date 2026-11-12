@@ -120,7 +120,7 @@ fn hex_quic_11_a_reader_that_stops_holds_its_own_connection_alone() {
     // The node writes far past the connection's credit (two frames) to the connection the client doesn't read, on a
     // thread of its own, which waits for the client's grants.
     let total = 64 * lanes::DATA_BOUND;
-    let pattern: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+    let pattern: Vec<u8> = (0..total).map(|i| u8::try_from(i % 251).unwrap()).collect();
     let writer = {
         let expected = pattern.clone();
         std::thread::spawn(move || {
@@ -214,9 +214,9 @@ fn hex_quic_13_a_peer_limited_to_another_suite_is_refused_either_way() {
     let ca = SimCa::new().unwrap();
     for (i, other) in [&*CHACHA20, &*AES_128].into_iter().enumerate() {
         let theirs = format!("their-node-{i}.test");
-        let node = under(other, &enrolled(&ca, &theirs), true, vec![CONTROL_PORT]);
+        let limited = under(other, &enrolled(&ca, &theirs), true, vec![CONTROL_PORT]);
         let ours = client(enrolled(&ca, &format!("our-client-{i}.test")));
-        let dialed = ours.dial(&theirs, node.local_addr(), patience());
+        let dialed = ours.dial(&theirs, limited.local_addr(), patience());
         assert!(
             dialed.is_err(),
             "a node limited to {:?} took us",

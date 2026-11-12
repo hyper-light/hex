@@ -19,7 +19,7 @@ const MAX_ACK_DELAY: Duration = Duration::from_millis(25);
 /// max_ack_delay`, with `smoothed_rtt` the initial RTT and `rttvar` half of it (§5.3): 1,024 milliseconds. QUIC
 /// raises what is derived from it with the path's own PTO once it has one (RFC 9000 §10.1).
 pub fn initial_pto() -> Duration {
-    let rttvar = INITIAL_RTT / 2;
+    let rttvar = INITIAL_RTT.checked_div(2).unwrap_or(INITIAL_RTT);
     INITIAL_RTT
         .saturating_add(rttvar.saturating_mul(4).max(hyper_transport::K_GRANULARITY))
         .saturating_add(MAX_ACK_DELAY)

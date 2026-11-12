@@ -207,7 +207,7 @@ fn hex_quic_5_a_frame_that_breaks_the_protocol_is_broken() {
             .is_err()
     );
     assert!(a.frame(2, Kind::Refuse, vec![0; 9]).is_err());
-    let (conn, open) = a.connect(stream::STDIO_PORT).unwrap();
+    let (_, open) = a.connect(stream::STDIO_PORT).unwrap();
     let Out::Send { lane, .. } = &open else {
         panic!("{open:?}");
     };
@@ -215,7 +215,6 @@ fn hex_quic_5_a_frame_that_breaks_the_protocol_is_broken() {
     settle(&mut a, &mut b, vec![open]);
     let why = b.frame(lane, Kind::ControlData, b"jump the queue".to_vec());
     assert!(why.is_err(), "stdio bytes as control bytes: {why:?}");
-    drop(conn);
 }
 
 /// HEX-QUIC-6: when the connection to the peer closes, every connection on it is reset Closed, and the lanes
@@ -322,4 +321,34 @@ fn hex_quic_18_bytes_go_within_the_credit_the_peer_grants() {
     let past = vec![2u8; DATA_BOUND];
     assert!(b.frame(lane, Kind::StreamData, past.clone()).is_ok());
     assert!(b.frame(lane, Kind::StreamData, vec![3u8]).is_err());
+}
+
+/// HEX-QUIC-19 (Q3): a Reset that crosses the other side's close is let go, as is a Credit sent after its sender's
+/// End: the side whose two halves ended frees both lanes, and the frame that comes after names nothing it holds.
+#[test]
+fn hex_quic_19_a_reset_or_credit_that_crosses_a_close_is_let_go() {
+    let (mut a, mut b) = pair();
+    let (conn, open) = a.connect(stream::STDIO_PORT).unwrap();
+    settle(&mut a, &mut b, vec![open]);
+    let there = Conn {
+        here: false,
+        id: conn.id,
+    };
+    // b ends its half; a hears it, then ends its own and closes: b's later frames cross that close.
+    let (b_end, _) = split(b.end(there));
+    let mut seen = Vec::new();
+    assert_eq!(deliver(b_end, &mut a, &mut seen), vec![Out::Ended { conn }]);
+    let (a_end, closed) = split(a.end(conn));
+    assert_eq!(closed, vec![Out::Closed { conn }]);
+    // b, not yet hearing a's End, grants a frame after its own End, then resets.
+    let credit = b.grant(there, 7).unwrap();
+    let reset = b.reset(there, Why::Gone);
+    let mut stray = Vec::new();
+    assert!(deliver(vec![credit], &mut a, &mut stray).is_empty());
+    assert!(deliver(reset, &mut a, &mut stray).is_empty());
+    assert!(stray.is_empty());
+    // a's End reaches b, whose reset let a's half go: it is let go too, and both sides hold nothing.
+    let mut stray_b = Vec::new();
+    assert!(deliver(a_end, &mut b, &mut stray_b).is_empty());
+    assert_eq!((a.connections(), b.connections()), (0, 0));
 }

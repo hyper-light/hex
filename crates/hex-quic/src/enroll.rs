@@ -307,7 +307,7 @@ pub mod conformance {
             webpki::KeyUsage::client_auth(),
         ] {
             cert.verify_for_usage(
-                webpki::aws_lc_rs::ALL_VERIFICATION_ALGS,
+                webpki::ALL_VERIFICATION_ALGS,
                 &anchors,
                 intermediates,
                 now,

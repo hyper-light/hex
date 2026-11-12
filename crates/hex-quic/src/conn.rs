@@ -63,7 +63,7 @@ fn gone_error(why: Why) -> io::Error {
     let kind = match why {
         Why::Closed => io::ErrorKind::ConnectionAborted,
         Why::NoPort | Why::Lanes | Why::Conns => io::ErrorKind::ConnectionRefused,
-        Why::Gone | Why::Protocol | Why::Other(_) => io::ErrorKind::ConnectionReset,
+        Why::Gone | Why::Protocol | Why::Credit | Why::Other(_) => io::ErrorKind::ConnectionReset,
     };
     io::Error::new(kind, why)
 }
@@ -80,7 +80,11 @@ fn take(state: &mut MutexGuard<'_, State>, buf: &mut [u8]) -> io::Result<Option<
     }
     let at = state.read;
     let Some(front) = state.inbound.front() else {
-        return Ok((state.there == There::Ended).then(|| (0, 0)));
+        return Ok(if state.there == There::Ended {
+            Some((0, 0))
+        } else {
+            None
+        });
     };
     let rest = front.get(at..).unwrap_or_default();
     let n = rest.len().min(buf.len());

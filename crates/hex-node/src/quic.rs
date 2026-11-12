@@ -648,31 +648,30 @@ impl Log {
     }
 
     /// Sends `line` to every reader with room for it, at most one frame of it (a longer one is cut at the frame's
-    /// bound, and says so).
+    /// bound), the count of the lines a reader missed before it in the same frame, since a connection takes one
+    /// frame at a time.
     pub fn say(&self, line: &str) {
         let Ok(mut readers) = self.readers.lock() else {
             return;
         };
         let bound = hex_core::lanes::DATA_BOUND;
-        let mut bytes = line.as_bytes().to_vec();
-        if bytes.len() > bound {
-            bytes.truncate(bound.saturating_sub(1));
-            bytes.push(b'\n');
-        }
         readers.retain_mut(|reader| {
+            let mut frame = Vec::new();
             if reader.missed > 0 {
-                let said = format!("hex.log event=missed lines={}\n", reader.missed);
-                match reader.conn.try_write(said.as_bytes()) {
-                    Ok(true) => reader.missed = 0,
-                    Ok(false) => {
-                        reader.missed = reader.missed.saturating_add(1);
-                        return true;
-                    }
-                    Err(_) => return false,
-                }
+                frame.extend_from_slice(
+                    format!("hex.log event=missed lines={}\n", reader.missed).as_bytes(),
+                );
             }
-            match reader.conn.try_write(&bytes) {
-                Ok(true) => true,
+            frame.extend_from_slice(line.as_bytes());
+            if frame.len() > bound {
+                frame.truncate(bound.saturating_sub(1));
+                frame.push(b'\n');
+            }
+            match reader.conn.try_write(&frame) {
+                Ok(true) => {
+                    reader.missed = 0;
+                    true
+                }
                 Ok(false) => {
                     reader.missed = reader.missed.saturating_add(1);
                     true
