@@ -1,0 +1,9 @@
+#!/bin/sh
+# zig's archivers beside scripts/zig-cc, for the same checks. cc-rs archives for an MSVC target in lib.exe's
+# dialect (-out:FILE, -nologo), which zig speaks as `zig lib` (LLVM's lib); for every other target, in ar's.
+for arg do
+	case $arg in
+	-out:*) exec zig lib "$@" ;;
+	esac
+done
+exec zig ar "$@"
