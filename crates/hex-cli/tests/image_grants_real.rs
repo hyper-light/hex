@@ -424,9 +424,10 @@ fn one_publish_published_alone(client: &Client, node: u32, allocation: Allocatio
     let [published] = shown.published.as_slice() else {
         panic!("published ports: {:?}", shown.published);
     };
+    // Its receiver as Shards names it (D231's `Bound::to`): the probe member, at its own port.
     assert_eq!(
         (published.grant, published.at.ip(), published.receiver),
-        (0, IpAddr::V4(Ipv4Addr::LOCALHOST), Receiver::Declared)
+        (0, IpAddr::V4(Ipv4Addr::LOCALHOST), Receiver::Named { port })
     );
     let at = published.at;
     let run = run_of(node);

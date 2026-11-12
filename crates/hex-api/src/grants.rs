@@ -8,7 +8,7 @@ use std::net::{IpAddr, SocketAddr};
 
 use serde::{Deserialize, Serialize};
 
-use crate::Refusal;
+use crate::{Refusal, Upstream};
 
 /// Which of its image's Agentfile declarations a member is: an `AGENT` or a `HARNESS`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -127,6 +127,9 @@ impl Destination {
     pub const MAX_NAME: usize = 253;
     /// Longest label: RFC 1035 §2.3.4.
     pub const MAX_LABEL: usize = 63;
+    /// The name Shards' destinations give the VM's own host (D236, Docker Desktop's name for it), which its network
+    /// process takes to the host's loopback: the host is a [`Grant::Host`]'s alone, so no egress names it.
+    pub const SHARDS_HOST: &str = "host.docker.internal";
 
     fn check(&self, at: usize) -> Result<(), Refusal> {
         match self {
@@ -400,7 +403,49 @@ fn check_name(at: usize, name: &str) -> Result<(), Refusal> {
                 .to_owned(),
         );
     }
+    if name == Destination::SHARDS_HOST {
+        return refused(
+            "is the VM's own host, as Shards names it (D236): the VM's host is a host grant"
+                .to_owned(),
+        );
+    }
     Ok(())
+}
+
+/// What Shards owes Hex before an image's boot can hold `grants` exactly (N4), if anything; none for publishes alone,
+/// on any run. The first grant Shards' destinations (D236: TCP to a host's name, an IPv4 address or the host itself)
+/// can't express at all awaits its own capability: UDP to a name ([`Upstream::MemberGrantsByName`]), to an address,
+/// or to an IPv6 address by TCP ([`Upstream::MemberGrantsByAddress`]), and the host's service by UDP
+/// ([`Upstream::MemberHostService`]). Past those, any destination awaits [`Upstream::MemberDestinations`]: D236
+/// keeps one image-wide, so Hex keeps none it can't show only its grants' members reach (ROOT's ruling, 2026-11-12).
+pub fn unheld(grants: &[Grant]) -> Option<Upstream> {
+    let mut destination = false;
+    for grant in grants {
+        let beyond = match grant {
+            Grant::Publish { .. } => continue,
+            Grant::Egress {
+                to: Destination::Name(_),
+                ports,
+                ..
+            } if ports.proto == Proto::Udp => Upstream::MemberGrantsByName,
+            Grant::Egress {
+                to: Destination::Address(address),
+                ports,
+                ..
+            } if address.is_ipv6() || ports.proto == Proto::Udp => Upstream::MemberGrantsByAddress,
+            Grant::Host { ports, .. } if ports.proto == Proto::Udp => Upstream::MemberHostService,
+            Grant::Egress { .. } | Grant::Host { .. } => {
+                destination = true;
+                continue;
+            }
+        };
+        return Some(beyond);
+    }
+    if destination {
+        Some(Upstream::MemberDestinations)
+    } else {
+        None
+    }
 }
 
 /// One member's egress to one destination, or its reach to the host, of one protocol: grants of one key whose ports
