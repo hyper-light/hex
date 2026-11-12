@@ -52,12 +52,13 @@ pub struct Use {
 /// One reading of what a guest's VMM holds, as its OS keeps it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Holding {
-    /// The VMM's footprint: the memory its OS charges it (Linux: its cgroup's `memory.current`; macOS: its
-    /// `ri_phys_footprint`), the guest RAM it has touched included.
+    /// The VMM's footprint: the memory its OS charges it for its own, the guest RAM it has touched included
+    /// (Linux: its cgroup's non-file memory, `memory.stat`'s `anon` and `kernel`, KVM's page tables among the
+    /// kernel's; macOS: its `ri_phys_footprint`).
     pub footprint: u64,
-    /// The most the node's enforcement has charged it over its life, where the enforcement keeps one (Linux:
-    /// its cgroup's `memory.peak`, kernel memory included).
-    pub charged_peak: Option<u64>,
+    /// The page cache its OS charges it apart (Linux: its cgroup's `memory.stat` `file`): the images it read,
+    /// shared by every VM that reads them and reclaimable, so recorded and not charged.
+    pub file_pages: Option<u64>,
     /// The highest footprint it has reached, for the record (macOS: `ri_lifetime_max_phys_footprint`).
     pub peak_footprint: Option<u64>,
     /// The part of `footprint` that is the guest's RAM: `None` while the VMM maps none it can tell apart.

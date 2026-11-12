@@ -332,10 +332,11 @@ pub struct Sample {
     pub total_milli: u64,
     /// Its readings of what it held.
     pub holdings: usize,
-    /// Its VMM's own memory: where the node's enforcement keeps a peak (Linux's cgroup), that peak less its
-    /// guest's touched pages at their most, or any reading's charge less its guest's pages if more; else
-    /// (macOS) its footprint less its guest's pages at a reading from its readiness on.
+    /// Its VMM's own memory: its footprint less its guest's touched pages, at its most over the readings from
+    /// its readiness on (production's state: the guest ready, its node agent running).
     pub mem_bytes: u64,
+    /// The page cache its OS charged it apart, at its most over its readings: recorded, not charged.
+    pub file_bytes: u64,
     /// Its readings whose footprint was below their guest RAM's pages (macOS's ledger charges the pages a
     /// guest touches after the region holds them, in its boot): each counted none of the VMM's own.
     pub behind: usize,
@@ -426,7 +427,7 @@ fn own_disk(files: &Files, before: &Files, after: &Files) -> u64 {
 /// is its boot's; one that began at or after it, its steady state's, of which there must be one. Its vCPU
 /// threads at its last CPU reading are the envelope's where its OS names them. Its memory is as
 /// [`Sample::mem_bytes`] says, its guest's RAM told apart by its last reading of what it held (a reading
-/// whose footprint is below its guest's RAM counts none, and is counted).
+/// whose footprint is below its guest's RAM counts none, and is counted); its page cache is recorded apart.
 pub fn measured(
     ready: Duration,
     readings: &Readings,
@@ -463,6 +464,7 @@ pub fn measured(
         total_milli: 0,
         holdings: readings.holdings.len(),
         mem_bytes: 0,
+        file_bytes: 0,
         behind: 0,
         disk_bytes: 0,
         free,
@@ -491,17 +493,6 @@ pub fn measured(
     if steady == 0 {
         return Err("no window began after its readiness".to_owned());
     }
-    let enforced = readings
-        .holdings
-        .iter()
-        .filter_map(|tick| tick.reading.charged_peak)
-        .max();
-    let most_guest = readings
-        .holdings
-        .iter()
-        .filter_map(|tick| tick.reading.guest_memory)
-        .max()
-        .unwrap_or(0);
     let mut settled = 0usize;
     for tick in &readings.holdings {
         let reading = &tick.reading;
@@ -509,19 +500,16 @@ pub fn measured(
         if guest > reading.footprint {
             sample.behind = sample.behind.saturating_add(1);
         }
-        // With an enforced peak every reading counts, as the peak does; without one, production's state alone.
-        if enforced.is_some() || tick.at >= ready {
+        if tick.at >= ready {
             settled = settled.saturating_add(1);
             sample.mem_bytes = sample
                 .mem_bytes
                 .max(reading.footprint.saturating_sub(guest));
         }
+        sample.file_bytes = sample.file_bytes.max(reading.file_pages.unwrap_or(0));
         sample.disk_bytes = sample
             .disk_bytes
             .max(own_disk(&reading.files, before, after));
-    }
-    if let Some(peak) = enforced {
-        sample.mem_bytes = sample.mem_bytes.max(peak.saturating_sub(most_guest));
     }
     if settled == 0 {
         return Err("no reading of what it held after its readiness".to_owned());
@@ -549,7 +537,7 @@ impl Record {
         record.line("# a census at a window: \"census <k> window_ns <ns> rate_cpu_milli <r>\", then its guests")?;
         record.line("# a ready guest: \"guest <n> ready_ns <ns>\", then its readings, each stamped from its VMM's launch:")?;
         record.line("#   cpu at_ns cpu_ns guest_cpu_ns guest_threads|-")?;
-        record.line("#   held at_ns footprint_bytes charged_peak_bytes|- peak_footprint_bytes|- guest_memory_bytes|- own_disk_bytes held_disk_bytes")?;
+        record.line("#   held at_ns footprint_bytes file_pages_bytes|- peak_footprint_bytes|- guest_memory_bytes|- own_disk_bytes held_disk_bytes")?;
         record.line("# a guest that ran out: \"ran_out <n> bound_ns <ns>\"")?;
         Ok(record)
     }
@@ -591,7 +579,7 @@ impl Record {
                 "held {} {} {} {} {} {} {held}",
                 tick.at.as_nanos(),
                 r.footprint,
-                dash(r.charged_peak),
+                dash(r.file_pages),
                 dash(r.peak_footprint),
                 dash(r.guest_memory),
                 own_disk(&r.files, before, after),
@@ -898,6 +886,15 @@ pub fn produce<D: Driver>(
     line(format!(
         "boot_burst cpu_milli={boot} (the census maximum of its VMM's own CPU in one window that began before its guest was ready: not charged; for concurrent-boot admission)"
     ));
+    line(format!(
+        "file_pages bytes={} (the census maximum of the page cache its OS charged its VMM apart: the images it read, shared by every VM that reads them and reclaimable: not charged)",
+        census
+            .samples
+            .iter()
+            .map(|sample| sample.file_bytes)
+            .max()
+            .unwrap_or(0)
+    ));
     for (name, value) in driver.sources() {
         line(format!("source {name} {value}"));
     }
@@ -920,10 +917,10 @@ pub fn produce<D: Driver>(
         samples_file.display(),
         hex(&samples_sha256)
     ));
-    line("guests ready_ns windows longest_ns cpu_milli boot_milli total_milli holdings mem_bytes behind disk_bytes free_cpu_milli free_mem_bytes free_disk_bytes (the charged census's; holdings: readings of what it held; behind: those whose footprint was below their guest RAM's pages)".to_owned());
+    line("guests ready_ns windows longest_ns cpu_milli boot_milli total_milli holdings mem_bytes file_bytes behind disk_bytes free_cpu_milli free_mem_bytes free_disk_bytes (the charged census's; holdings: readings of what it held; behind: those whose footprint was below their guest RAM's pages)".to_owned());
     for (n, s) in census.samples.iter().enumerate() {
         line(format!(
-            "guest {n} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+            "guest {n} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
             s.ready.as_nanos(),
             s.windows,
             s.longest.as_nanos(),
@@ -932,6 +929,7 @@ pub fn produce<D: Driver>(
             s.total_milli,
             s.holdings,
             s.mem_bytes,
+            s.file_bytes,
             s.behind,
             s.disk_bytes,
             s.free.cpu_milli,
@@ -1139,7 +1137,7 @@ mod tests {
             },
             Holding {
                 footprint: own + guest,
-                charged_peak: None,
+                file_pages: None,
                 peak_footprint: None,
                 guest_memory: Some(guest),
                 files,
@@ -1250,49 +1248,27 @@ mod tests {
         assert_eq!((sample.windows, sample.holdings), (5, 5));
     }
 
-    /// AC-T7.4.1 (ROOT, Linux memory: the VMM cgroup's memory.peak): readings that carry the enforcement's
-    /// peak: expect the VMM's own memory that peak less the guest's touched pages at their most, or a
-    /// reading's charge less its guest's pages where more, its boot's readings counted as the peak counts
-    /// them.
+    /// AC-T7.4.1 (ROOT: the page cache is no one VM's cost): readings whose OS charges the VMM page cache apart,
+    /// 20 MiB of it at the first: expect the VMM's own memory its footprint less its guest's pages, the page
+    /// cache recorded at its most and not charged.
     #[test]
-    fn an_enforced_peak_less_the_guests_pages_is_the_vmms_memory() {
-        let charged = |footprint: u64, guest: u64, peak: u64| {
-            let (used, mut held) = reading(1, 0, 0, guest, Vec::new());
-            held.footprint = footprint;
-            held.charged_peak = Some(peak);
+    fn page_cache_is_recorded_and_not_charged() {
+        let cached = |file: u64| {
+            let (used, mut held) = reading(1, 0, 8 << 20, 160 << 20, Vec::new());
+            held.file_pages = Some(file);
             (used, held)
         };
-        let measure = |ticks| {
-            measured(
-                Duration::from_millis(150),
-                &readings(ticks),
-                free(0),
-                Duration::from_millis(100),
-                2,
-                &Vec::new(),
-                &Vec::new(),
-            )
-            .unwrap()
-            .mem_bytes
-        };
-        // The peak, 90 MiB, less the guest's 40 MiB at their most: 50 MiB.
-        assert_eq!(
-            measure(vec![
-                (100, charged(50 << 20, 10 << 20, 80 << 20)),
-                (200, charged(60 << 20, 40 << 20, 90 << 20)),
-                (300, charged(60 << 20, 40 << 20, 90 << 20)),
-            ]),
-            50 << 20
-        );
-        // A boot reading charging 70 MiB with 5 MiB of the guest's: 65 MiB, more than the peak less 40.
-        assert_eq!(
-            measure(vec![
-                (100, charged(70 << 20, 5 << 20, 80 << 20)),
-                (200, charged(60 << 20, 40 << 20, 90 << 20)),
-                (300, charged(60 << 20, 40 << 20, 90 << 20)),
-            ]),
-            65 << 20
-        );
+        let sample = measured(
+            Duration::ZERO,
+            &readings(vec![(100, cached(20 << 20)), (200, cached(0))]),
+            free(0),
+            Duration::from_millis(100),
+            2,
+            &Vec::new(),
+            &Vec::new(),
+        )
+        .unwrap();
+        assert_eq!((sample.mem_bytes, sample.file_bytes), (8 << 20, 20 << 20));
     }
 
     /// AC-T7.4.1: a guest whose last reading never told its RAM apart, or whose VMM names other than its
