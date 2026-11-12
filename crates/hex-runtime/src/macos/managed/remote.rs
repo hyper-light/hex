@@ -1036,7 +1036,7 @@ fn check_process(expected: ProcId) -> Result<(), Refusal> {
 /// gone then is the one checked before the request, not another: its process must still be the
 /// same live incarnation. Every other failure still refuses.
 fn peer_after_reply(fd: impl AsFd, expected: ProcId) -> Result<(), Refusal> {
-    match sys::peer_pid(fd.as_fd()) {
+    match peer_pid(fd.as_fd()) {
         Err(sys::PeerPidFailure::Native(error)) if error.raw_os_error() == Some(libc::ENOTCONN) => {
             check_process(expected)
         }
@@ -1054,7 +1054,7 @@ fn peer(fd: impl AsFd, expected: ProcId) -> Result<(), Refusal> {
             "the native helper belongs to another user",
         ));
     }
-    let pid = match sys::peer_pid(fd.as_fd()) {
+    let pid = match peer_pid(fd.as_fd()) {
         Ok(pid) => pid,
         Err(failure) => {
             return Err(Refusal::Os {
@@ -1069,6 +1069,17 @@ fn peer(fd: impl AsFd, expected: ProcId) -> Result<(), Refusal> {
         ));
     }
     check_process(expected)
+}
+
+/// The node's read of a helper connection's peer PID (LOCAL_PEERPID). The controls' nemesis runs
+/// around each read on the reading thread, to land the helper's close before or after it.
+fn peer_pid(fd: BorrowedFd<'_>) -> Result<libc::pid_t, sys::PeerPidFailure> {
+    #[cfg(test)]
+    controls::around_peer_read(fd, controls::Read::Before);
+    let read = sys::peer_pid(fd);
+    #[cfg(test)]
+    controls::around_peer_read(fd, controls::Read::After);
+    read
 }
 
 // Native raw uptime is the SAME clock used by pinned Rust1.99.1 Instant on Apple.
