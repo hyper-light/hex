@@ -287,6 +287,8 @@ impl Drop for Reaper {
             if !running(pid, start) {
                 continue;
             }
+            // Its VM's directory in the backend's state, read from its command before it ends.
+            let vm = vm_of(pid, &self.dir);
             let Some(target) = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()) else {
                 continue;
             };
@@ -298,12 +300,34 @@ impl Drop for Reaper {
                 let _ = running(pid, start);
                 std::thread::park_timeout(read.elapsed());
             }
+            let ended = !running(pid, start);
+            // A VMM that ended leaves its VM's directory to whoever removes the VM: here, no node will.
+            if let Some(vm) = vm.filter(|_| ended) {
+                let _ = fs::remove_dir_all(&vm);
+                eprintln!(
+                    "SMOKE reaper: VM directory {} removed: {}",
+                    vm.display(),
+                    !vm.exists()
+                );
+            }
             eprintln!(
                 "SMOKE reaper: VMM {pid} (start {start}) ended by the test's cleanup; running: {}",
-                running(pid, start)
+                !ended
             );
         }
     }
+}
+
+/// The VM directory in `state` that VMM `pid`'s command names: its `--config-file`'s directory, where that lies
+/// directly in `state`.
+fn vm_of(pid: u32, state: &Path) -> Option<PathBuf> {
+    let cmdline = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let mut words = cmdline
+        .split(|b| *b == 0)
+        .map(|word| std::str::from_utf8(word).unwrap_or(""));
+    words.by_ref().find(|word| *word == "--config-file")?;
+    let vm = Path::new(words.next()?).parent()?;
+    (vm.parent() == Some(state)).then(|| vm.to_path_buf())
 }
 
 impl Reaper {
@@ -945,10 +969,12 @@ fn native_firecracker_gpu_box_computes_recovers_and_returns_its_gpu() {
     );
 }
 
-/// AC-T7.4.1: a failed test leaves no VMM (r761 left one holding the GPU's group after a panic). Do: start a
-/// stand-in VMM, a copy of `/bin/sh` at a run's binary path whose command names the run's state, and drop a
-/// reaper for that binary and state. Expect the stand-in ended, by its own PID and start time, and nothing
-/// else touched: a second stand-in naming another state still runs.
+/// AC-T7.4.1: a failed test leaves no VMM (r761 left one holding the GPU's group after a panic), nor its VM's
+/// directory (r985's reaper ended the VMM and left it in the backend's state). Do: start a stand-in VMM, a copy of
+/// `/bin/sh` at a run's binary path whose command names its VM's config file in the run's state, as a VMM's does,
+/// and drop a reaper for that binary and state. Expect the stand-in ended, by its own PID and start time, and its
+/// VM's directory removed, and nothing else touched: a second stand-in naming another state still runs, its VM's
+/// directory kept.
 #[test]
 fn a_reaper_ends_the_vmm_its_failed_test_left() {
     use std::os::unix::process::ExitStatusExt;
@@ -957,12 +983,14 @@ fn a_reaper_ends_the_vmm_its_failed_test_left() {
     fs::copy("/bin/sh", &binary).unwrap();
     let state = dir.path().join("fc-state");
     let other = dir.path().join("other-state");
-    let start = |names: &Path| {
+    let start = |vm: &Path| {
+        fs::create_dir_all(vm).unwrap();
         Command::new(&binary)
             .args([
                 "-c",
                 "while :; do read -r _ || exit 0; done",
-                &names.display().to_string(),
+                "--config-file",
+                &vm.join("config.json").display().to_string(),
             ])
             .stdin(HostStdio::piped())
             .spawn()
@@ -984,10 +1012,12 @@ fn a_reaper_ends_the_vmm_its_failed_test_left() {
         wait: Duration::from_secs(30),
     });
     assert!(!running(pid, began), "the left VMM {pid} ended");
+    assert!(!state.join("vm").exists(), "its VM's directory removed");
     assert!(
         running(kept_pid, kept_began),
         "another run's VMM {kept_pid} still runs"
     );
+    assert!(other.join("vm").is_dir(), "another run's VM directory kept");
     assert!(left.wait().unwrap().signal().is_some());
     drop(kept.stdin.take());
     assert!(kept.wait().unwrap().success());
