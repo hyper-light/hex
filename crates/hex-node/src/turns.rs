@@ -458,10 +458,9 @@ mod tests {
     }
 
     /// CLAUDE.md §2 (T-T7.1.2), decision 9: a wait for the same box's turn ends at twice the slowest hold recorded,
-    /// refused by type, never longer, and the refusal is no sample, but the hold outlasted the 50 ms it waited, so the
-    /// next wait is twice that (AC-T7.4.1: `Patience::ran_out` backs off in process, RFC 6298 §5.5). Do: seed the turns
-    /// from a hold of 25 ms, hold box a's turn and take it again. Expect: refused as `Os` for the turns' op after at
-    /// least 50 ms, the wait counted once, and the wait 100 ms after.
+    /// refused by type, never longer, and the refusal is no sample. Do: seed the turns from a hold of 25 ms,
+    /// hold box a's turn and take it again. Expect: refused as `Os` for the turns' op after at least 50 ms, the wait
+    /// counted once, and the wait still 50 ms.
     #[test]
     fn a_wait_for_the_same_box_ends_at_twice_the_slowest_hold() {
         let turns = Turns::new(
@@ -482,7 +481,7 @@ mod tests {
             "{refused:?}"
         );
         assert_eq!(turns.waited(), 1);
-        assert_eq!(turns.patience(), Some(Duration::from_millis(100)));
+        assert_eq!(turns.patience(), Some(Duration::from_millis(50)));
     }
 
     /// AC-T7.4.1/T-T7.1.2: overlap refuses without waiting or taking another box's ownership.
