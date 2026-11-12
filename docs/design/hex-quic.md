@@ -115,13 +115,23 @@ readers and for the connection, which writes to a pipe of the copier's own as it
 waited on, so there the copy ends at the next write the pipe refuses, as the client's own stdin copy does. The log
 port carries the node's log lines, each counted where a slow reader makes it let one go.
 
-Staging is a Linux node's alone, as on every transport Hex has. Its server is the guest relay's (`hex-node`
-`relay/files.rs`, under `#[cfg(target_os = "linux")] pub mod relay`), and a Linux node given a folder to stage into
-(`hex node --staged`, Q9) serves it on the files port. A macOS or Windows node stages no file tree on any transport:
-its local socket's wire has no staging call (`hex_core::wire::Call`), and its runtime stages each `oci` box's root as a
-client, into its own Shards guest over the guest link (`hex_runtime::guest`, `WithGuest`'s `stage`). So its endpoint
-serves no files port, a peer's staging connection is refused by type (`Why::NoPort`), and a folder given it is
-refused as its platform's (`Refusal::Platform`).
+Staging is a Linux node's alone, as on every transport Hex has: a macOS or Windows node stages no file tree on any
+transport. At this tree:
+- The one staging server is the guest relay's (`hex-node` `relay/files.rs`), built on Linux alone (`hex-node`
+  `lib.rs`: `#[cfg(target_os = "linux")] pub mod relay`). `hex guest relay` runs it inside a Linux guest, on the
+  guest's vsock files port (`hex_core::stream::files::FILES_PORT`), or on `files.sock` with `--unix` for the tests.
+  `hex-cli`'s `guest` module, which holds `hex guest relay`, is built on Linux alone too. A Linux node given a folder
+  to stage into (`hex node --staged`, Q9) serves the same server on its endpoint's files port.
+- A macOS or Windows node's local socket (`hex-node` `serve/macos.rs`, `serve/windows.rs`) carries the node's calls,
+  framed, and an exec's stdio as descriptors or handles. Its wire has no staging call (`hex_core::wire::Call`), and it
+  serves no files port.
+- Such a node stages only as a client. Its `oci` class sends each box's root into its own Shards guest over the guest
+  link (`hex_runtime::guest::GuestRuntime`'s `stage`, through `hex_client::guest::stage::stage`), and the guest's
+  relay, a Linux node, receives it.
+
+So its endpoint serves no files port. A peer's staging connection is refused by type (`Why::NoPort`), and a folder
+given it is refused as its platform's (`Refusal::Platform`). A peer over QUIC names the host paths such a node holds,
+as the node's local clients do.
 
 **Falsified by** the hex-api conformance suite failing through the listener (HEX-QUIC-20, and through `hex node`
 itself, HEX-QUIC-23), a stdin connection that outlives its program's stdin or its peer's End (HEX-QUIC-21), or a node
@@ -151,23 +161,40 @@ keeps its enrollment in a folder of its own (`hex_quic::enroll::store`, Q9): `ke
 on Unix, never sent), `request.pem` (the PKCS #10), and the CA's answer beside them, `chain.pem` (its own certificate
 first) and `roots.pem`, all PEM (RFC 7468).
 
-**What kiln implements against the seam** (kiln's CA is kiln's work; nothing here stands in for it):
-1. `hex_quic::enroll::Ca` over kiln's CA (`pki.rs`): `fn enroll(&self, request: &Request) -> Result<Issued,
-   CaRefused>`, where `Request { name, csr, grant }` carries the name the peer enrolls as, its PKCS #10 (DER) and
-   kiln's enrollment token. It verifies the request's signature (else `CaRefused::Malformed`); admits `name` only
-   with the grant kiln issued for it, once (else `CaRefused::NotAdmitted`); issues a certificate for the request's
-   public key whose only subject alternative name is DNS `name`, forced whatever the request asked, with extended key
-   usages serverAuth and clientAuth (a peer both listens and dials), signed under kiln's CA; and answers `Issued {
-   chain, roots }`, the chain its certificate first, the roots every peer verifies under. A CA it can't reach is
-   `CaRefused::Unreachable`.
-2. It passes `hex_quic::enroll::conformance::run` (HEX-ENROLL-1 to -5), with a `Fixture` whose `admit(name)` returns
-   a grant kiln's CA takes once for `name` and whose `roots()` are the CA's.
+**What kiln implements against the seam.** kiln's CA is kiln's work; nothing here stands in for it.
+1. `impl hex_quic::enroll::Ca` over kiln's CA (`crates/kiln/src/pki.rs`), `Send + Sync`:
+   `fn enroll(&self, request: &Request) -> Result<Issued, CaRefused>`. `Request { name, csr, grant }` carries the
+   name the peer enrolls as, its PKCS #10 request in DER (kiln's `sign_csr` takes PEM), and kiln's enrollment token
+   for that name. The implementation:
+   - admits `name` only with the grant kiln issued for it, and that grant once, else `CaRefused::NotAdmitted { name,
+     why }` (HEX-ENROLL-3, -5);
+   - takes a request whose own signature verifies, else `CaRefused::Malformed { why }` (HEX-ENROLL-4). The signature is
+     ECDSA P-384 with SHA-384 (`hex_quic::enroll::request`, rcgen's `PKCS_ECDSA_P384_SHA384`); rcgen's
+     `CertificateSigningRequestParams::from_der` verifies it as it reads;
+   - issues a certificate for the request's public key whose first DNS subject alternative name is `name`, byte for
+     byte, whatever the request asked (HEX-ENROLL-2). Hex names a peer by its certificate's first valid DNS name
+     (`webpki`'s `valid_dns_names`) and refuses an answer naming another peer (`Refused::Issued`, HEX-ENROLL-7). So a
+     name kiln's `sanitize_name` would change is refused `NotAdmitted`, never issued changed;
+   - gives it extended key usages serverAuth and clientAuth both, because a node listens and dials (HEX-ENROLL-1
+     verifies the certificate for each). kiln's `machine_params` gives clientAuth alone; its `leaf_params` gives
+     both;
+   - makes it valid now, signed under kiln's CA with an algorithm aws-lc-rs's WebPKI set verifies: ECDSA P-256, P-384
+     or P-521, Ed25519, or RSA PKCS #1 or PSS. hyper-quic's node provider narrows suites and groups, not signatures;
+   - answers `Issued { chain, roots }`: `chain` is the certificate first, then any intermediates; `roots` are exactly
+     the roots every peer verifies under (HEX-ENROLL-1 compares them with the fixture's);
+   - refuses `CaRefused::Unreachable { why }` when the CA can't be reached or answers nothing usable.
+2. It passes `hex_quic::enroll::conformance::run` (`CASES`: HEX-ENROLL-1 to -5) with a `conformance::Fixture`. The
+   fixture's `admit(name)` returns a grant kiln's CA takes once for `name`, and its `roots()` returns the CA's roots.
 3. For a `hex node` it starts with `--quic`: it runs `hex node enroll --name <name> --credentials <dir>` on the
    node's machine, takes `<dir>/request.pem` (read with `hex_quic::enroll::store::request(dir, grant)`) to its CA
    with the node's grant, and keeps the answer in the folder with `hex_quic::enroll::store::finish(dir, &issued)`,
    which takes it only once it proves to be for that key and name; then it starts `hex node ... --quic <address>
    --credentials <dir>` and reads `quic <address>` and `ready <path>` from its stdout. Its peers dial the node by
    the name its certificate carries.
+
+Nothing else crosses the seam. No private key travels (HEX-ENROLL-6). A folder holds one enrollment: `store::begin`
+refuses a folder that holds a key or request already, and `store::load` refuses a certificate that isn't valid now.
+So re-enrolling uses a new folder, with a new key and request under a new grant.
 
 ## Q7. Waits
 
