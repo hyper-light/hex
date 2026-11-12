@@ -540,7 +540,47 @@ fn w14_a_fleet_weighs_its_cpu_budget_on_the_machines_scale() {
     ));
 }
 
+/// Joint plan step 14 (AC-T7.4.1), C4 across the node's cgroup: the fleet takes the units the other children leave.
+/// Do take units from 32-CPU machines; expect the units left and the CPU they carry rounded down, the least weight and
+/// no CPU once the others take the whole scale or more, and a machine with no CPU refused.
+#[test]
+fn w14_the_fleet_takes_the_units_the_boxes_leave() {
+    assert_eq!(fleet_room(0, 32_000), Ok((WEIGHT_MAX, 32_000)));
+    // A 4-CPU box (1,250), one booked nothing (1) and a 2-CPU OCI box (625): 8,124 units, 25,996.8 milli-CPU.
+    assert_eq!(fleet_room(1_876, 32_000), Ok((8_124, 25_996)));
+    assert_eq!(fleet_room(10_000, 32_000), Ok((WEIGHT_MIN, 0)));
+    assert_eq!(fleet_room(12_000, 32_000), Ok((WEIGHT_MIN, 0)));
+    assert!(matches!(fleet_room(0, 0), Err(ChargeError::Invalid { .. })));
+}
+
 proptest! {
+    /// Joint plan step 14 (AC-T7.4.1), C4 across the node's cgroup: do weigh up to eight boxes by any bookings, some
+    /// booked nothing, the fleet budgeted the CPU the units they leave carry (`fleet_room`), within the machine less
+    /// their bookings, give each any need and share the machine as the kernel does; expect the weights within the
+    /// scale's top and every box and the fleet given at least min(its need, its booking or budget).
+    #[test]
+    fn w14_the_fleet_in_the_units_left_keeps_every_childs_booking(
+        machine in 1_000u64..=1_024_000,
+        parts in proptest::collection::vec(0u64..=1_000, 1..=8),
+        needs in proptest::collection::vec(0u64..=1_024_000, 9),
+    ) {
+        // Each box books up to a sixteenth of the machine, so together they leave the fleet some of the scale.
+        let bookings: Vec<u64> = parts.iter().map(|p| machine / 16 * p / 1_000).collect();
+        let weights: Vec<u64> = bookings.iter().map(|b| u64::from(fleet_weight(*b, machine).unwrap())).collect();
+        let (rest, carried) = fleet_room(weights.iter().sum(), machine).unwrap();
+        let budget = (machine - bookings.iter().sum::<u64>()).min(carried);
+        let fleet = u64::from(fleet_weight(budget, machine).unwrap());
+        prop_assert!(fleet <= u64::from(rest));
+        prop_assert!(weights.iter().sum::<u64>() + fleet <= u64::from(WEIGHT_MAX));
+        let mut entries = vec![(fleet, needs[0].min(budget))];
+        entries.extend(weights.iter().zip(&needs[1..]).map(|(w, n)| (*w, *n)));
+        let given = shares(machine, &entries).unwrap();
+        prop_assert!(given[0] >= budget.min(needs[0]));
+        for ((booking, need), got) in bookings.iter().zip(&needs[1..]).zip(&given[1..]) {
+            prop_assert!(*got >= (*booking).min(*need), "{} for booking {}, need {}", got, booking, need);
+        }
+    }
+
     /// Joint plan step 14 (AC-T7.4.1), C4: do weigh two budgets against one machine; expect each weight never under
     /// its budget's share of the kernel's range and over it by less than one unit (or the least weight), and the
     /// larger budget never weighing less.
