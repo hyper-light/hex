@@ -1,6 +1,7 @@
 //! AC-T7.4.1: initialized backend routing on the existing Node/Store/Turns owner.
 
 use super::*;
+use crate::store::Torn;
 use hex_api::{BackingKey, Capacity, DeviceId, Execution, LifecycleCause, RuntimeCost};
 use hex_core::record::{NativeRecord, PoolRecord};
 use hex_runtime::devices::{
@@ -10,9 +11,6 @@ use hex_runtime::devices::{
 use hex_runtime::firecracker::FirecrackerRuntime;
 use hex_runtime::guest::GuestRuntime;
 use std::sync::Weak;
-
-/// Torn records, each with why it couldn't be read ([`Node::preflight_configured`]).
-pub(super) type Torn = Vec<(BoxId, String)>;
 
 pub(super) struct Backends {
     firecracker: Option<Arc<FirecrackerRuntime>>,
@@ -239,8 +237,20 @@ impl Node {
         if left.is_zero() {
             return Err(record.refusal(LifecycleCause::Uncertain));
         }
-        self.supervisor
-            .bind_managed(&native, program, stdio, report, left, publish)
+        // A Firecracker VM given a device whole has its VMM's soft RLIMIT_MEMLOCK raised to its hard one, which its
+        // create found holds the RAM its VMM pins for DMA.
+        let memlock = match plan {
+            ManagedLaunch::Firecracker { memlock, .. } => *memlock,
+            ManagedLaunch::Shards(_) => None,
+        };
+        self.supervisor.bind_managed(
+            &native,
+            program,
+            stdio,
+            process::HeldLaunch { report, memlock },
+            left,
+            publish,
+        )
     }
 
     fn attach_managed(
@@ -338,6 +348,15 @@ impl Node {
                 "node backends are already initialized".into(),
             ));
         }
+        // Each VM box holds descriptors of the node's past a box's, which only a start that ran VM boxes counted.
+        if (firecracker.is_some() || shards.is_some()) && !self.pools.vms {
+            return Err(Refusal::Invalid {
+                what: "VM backends",
+                why: "this node's start counted no VM boxes' descriptors among its own: open it running them \
+                      (Node::open_running, Runs { vms: true })"
+                    .to_owned(),
+            });
+        }
         if let Some(guest) = &shards {
             guest.bind_books(self.backend_books())?;
         }
@@ -430,21 +449,20 @@ impl Node {
     }
 
     /// The retained records and pools, each past the whole-owner barrier, and apart from them the torn
-    /// records ([`crate::store::Store::take_torn`]). A torn record lies in the runtime directory, where
-    /// only an unscoped record is kept: Firecracker's are scoped, and a shared Shards box's needs that
-    /// backend, so with none configured it is a native box's. No scope or backend owns one; recovery
-    /// proves its box's end by the box's own cgroup and removes it as unreadable (T-T7.1.2). With
-    /// Shards configured it may be a guest's, so it stays and the barrier refuses it.
+    /// records ([`crate::store::Store::take_torn`]). A torn record lies in the runtime directory, where this
+    /// node keeps only a native box's: its VM backends' records are scoped, so durable
+    /// ([`crate::store::Store::put_lifecycle`]), and it writes none for a shared guest's box (the Shards
+    /// backend makes one unrecorded, and is offered only for dedicated VMs here). So whatever is configured,
+    /// recovery proves a torn record's box ended by the box's own cgroup and removes it as unreadable
+    /// (T-T7.1.2). One in the state directory that can't be read is damage: refused, naming its file.
     fn preflight_configured(
         &self,
         firecracker: Option<&FirecrackerRuntime>,
         shards: Option<&GuestRuntime>,
     ) -> Result<(Records, PoolRecords, Torn), Refusal> {
         let mut records = self.store.retained_records()?;
-        let torn = match shards {
-            None => self.store.take_torn(&mut records)?,
-            Some(_) => Vec::new(),
-        };
+        let torn = self.store.take_torn(&mut records)?;
+        self.store.refuse_unreadable(&records)?;
         let pools = self.store.all_pools()?;
         crate::recorded::preflight_records(&records, &pools, Some(self.attachments.as_ref()))?;
         for (id, record) in &records {

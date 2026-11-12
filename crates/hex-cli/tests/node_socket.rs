@@ -33,7 +33,8 @@
 //!   (in a debug build, at its cgroup made and at its bundle rendered, where the agent armed by
 //!   `hex node --crash-at` kills itself; its cgroup and its container's state directory made; its
 //!   init cloned; inside its one record write; after it), its boxes' records durable and not, and
-//!   restart it: the box killed mid-create is cleaned up by what it left, the one made is taken back
+//!   restart it (a torn record's agent beside a configured Shards backend too): the box killed
+//!   mid-create is cleaned up by what it left, the one made is taken back
 //!   and deletes, and nothing of either is left; and a box whose own spec names the crash point, on an
 //!   agent that armed none, is made whole, the agent living on. A case made to fail on purpose after the kill,
 //!   its box's init alive at the exec FIFO: expect every process that was in its cgroups ended, the cgroups and
@@ -327,16 +328,18 @@ impl Agent {
     /// A `hex node` whose records are in `dir`'s `state` and whose socket is `dir`'s `node.sock`, its
     /// boxes under `box_root`, with `runtime` its `XDG_RUNTIME_DIR` when given; `dir` is the caller's.
     fn over(exe: &str, dir: &Path, box_root: PathBuf, runtime: Option<&Path>) -> Self {
-        Self::armed(exe, dir, box_root, runtime, None)
+        Self::armed(exe, dir, box_root, runtime, None, &[])
     }
 
-    /// As [`Agent::over`], armed at a debug build's crash point (`hex node --crash-at`) when one's given.
+    /// As [`Agent::over`], armed at a debug build's crash point (`hex node --crash-at`) when one's given, with
+    /// `env` set for it too.
     fn armed(
         exe: &str,
         dir: &Path,
         box_root: PathBuf,
         runtime: Option<&Path>,
         crash_at: Option<&str>,
+        env: &[(&str, std::ffi::OsString)],
     ) -> Self {
         let socket = dir.join("node.sock");
         let mut command = Command::new(exe);
@@ -356,13 +359,14 @@ impl Agent {
         if let Some(runtime) = runtime {
             command.env("XDG_RUNTIME_DIR", runtime);
         }
+        command.envs(env.iter().map(|(name, value)| (name, value)));
         let mut child = command.spawn().expect("start hex node");
         // Drain stderr as it comes so the pipe never fills and blocks the agent, and keep what it says
         // for a crash case to read (the boxes it recovered, and why each was removed).
         let errors = Arc::new(Mutex::new(String::new()));
         let stderr = child.stderr.take().unwrap();
         let sink = Arc::clone(&errors);
-        std::thread::spawn(move || {
+        let drain = std::thread::spawn(move || {
             let mut reader = BufReader::new(stderr);
             let mut line = String::new();
             while reader.read_line(&mut line).unwrap_or(0) > 0 {
@@ -375,11 +379,15 @@ impl Agent {
         BufReader::new(child.stdout.take().unwrap())
             .read_line(&mut line)
             .unwrap();
-        assert_eq!(
-            line.trim(),
-            format!("ready {}", socket.display()),
-            "hex node said {line:?}"
-        );
+        if line.trim() != format!("ready {}", socket.display()) {
+            // An agent that won't start says why on stderr, read whole once it has ended.
+            let ended = child.wait().unwrap();
+            drain.join().unwrap();
+            panic!(
+                "hex node said {line:?} and ended {ended}: {}",
+                errors.lock().unwrap()
+            );
+        }
         Self {
             child,
             socket,
@@ -1323,6 +1331,10 @@ enum At {
     /// FIFO can hold it there; a release build can't arm the point, so it has no such case.
     #[cfg(debug_assertions)]
     TornRecord,
+    /// As [`At::TornRecord`], the agent restarted beside a configured Shards backend (model cost inputs: no
+    /// VM boots): a record its runtime directory holds is a native box's all the same.
+    #[cfg(debug_assertions)]
+    TornRecordBesideShards,
     /// After it: the create done.
     Made,
     /// The box made, and its start under way in its startContainer hook, the start waiting on the exec
@@ -1341,7 +1353,7 @@ impl At {
             #[cfg(debug_assertions)]
             Self::BundleRendered => Some("bundle-rendered"),
             #[cfg(debug_assertions)]
-            Self::TornRecord => Some("record-first-write"),
+            Self::TornRecord | Self::TornRecordBesideShards => Some("record-first-write"),
             Self::StateDir
             | Self::Init
             | Self::CreateContainer
@@ -1363,9 +1375,10 @@ impl At {
 /// hook; inside a durable record's write, opening the temp
 /// file it renames; after the create; and, the box made, with its start in its startContainer hook.
 /// Restarted, the agent removes the box killed mid-create by what it finds of it — a torn record it
-/// reads as unreadable, and says so — and the one whose start it cut, saying the start was interrupted in
-/// its startContainer hooks; and takes back the one made, which then deletes, so at every point nothing of
-/// the box is left: no record in either place, no temp file, no cgroup, no container state, no bundle.
+/// reads as unreadable, and says so, a configured Shards backend beside it or not — and the one whose start
+/// it cut, saying the start was interrupted in its startContainer hooks; and takes back the one made, which
+/// then deletes, so at every point nothing of the box is left: no record in either place, no temp file, no
+/// cgroup, no container state, no bundle.
 fn crash_at_each_point_of_a_create(lab: &Lab, own: &Path, exe: &str) {
     for kept in [Kept::Tmpfs, Kept::Disk] {
         let mut points = Vec::new();
@@ -1379,7 +1392,7 @@ fn crash_at_each_point_of_a_create(lab: &Lab, own: &Path, exe: &str) {
         match kept {
             Kept::Tmpfs => {
                 #[cfg(debug_assertions)]
-                points.push(At::TornRecord);
+                points.extend([At::TornRecord, At::TornRecordBesideShards]);
             }
             Kept::Disk => points.push(At::Ready),
         }
@@ -1533,7 +1546,9 @@ fn crash_case(
         // Armed to crash at the record write, so it creates fully, like a box made; a bundle box's
         // record names only its container's state (on tmpfs here), so it is non-durable.
         #[cfg(debug_assertions)]
-        At::TornRecord => ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait))),
+        At::TornRecord | At::TornRecordBesideShards => {
+            ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait)))
+        }
         At::Made => ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait))),
         At::StartContainer => {
             mkfifo(&go);
@@ -1579,6 +1594,7 @@ fn crash_case(
         own.join(&name),
         runtime.as_deref(),
         at.armed(),
+        &[],
     );
     if on_tmpfs(&oci_root) != matches!(kept, Kept::Tmpfs) {
         eprintln!("SKIP {name}: {} isn't where it's kept", oci_root.display());
@@ -1606,7 +1622,7 @@ fn crash_case(
     let mut start = None;
     match at {
         #[cfg(debug_assertions)]
-        At::CgroupMade | At::BundleRendered | At::TornRecord => {
+        At::CgroupMade | At::BundleRendered | At::TornRecord | At::TornRecordBesideShards => {
             use std::os::unix::process::ExitStatusExt;
             let ended = agent.ended();
             assert_eq!(
@@ -1741,7 +1757,22 @@ fn crash_case(
         );
     }
 
-    let agent = Agent::over(exe, dir.path(), own.join(&name), runtime.as_deref());
+    #[cfg(debug_assertions)]
+    let env = if at == At::TornRecordBesideShards {
+        shards_configured(dir.path())
+    } else {
+        Vec::new()
+    };
+    #[cfg(not(debug_assertions))]
+    let env = Vec::new();
+    let agent = Agent::armed(
+        exe,
+        dir.path(),
+        own.join(&name),
+        runtime.as_deref(),
+        None,
+        &env,
+    );
     let client = agent.client();
     if at == At::Made {
         let info = client.inspect(&id).expect("the box made is taken back");
@@ -1771,7 +1802,7 @@ fn crash_case(
         );
     }
     #[cfg(debug_assertions)]
-    if at == At::TornRecord {
+    if matches!(at, At::TornRecord | At::TornRecordBesideShards) {
         wait_for(
             &SAID,
             "recovery to report the box removed as unreadable",
@@ -1791,6 +1822,7 @@ fn crash_case(
             place.display()
         );
     }
+    assert!(!record.exists(), "{name}: its record is left");
     assert!(!temp.exists(), "{name}: its record's temp file is left");
     assert!(
         containers().is_empty(),
@@ -1808,6 +1840,60 @@ fn crash_case(
             "cleaned up"
         }
     );
+}
+
+/// The environment that configures `hex node`'s Shards backend (AC-T7.4.1), from model inputs written in `dir`: its
+/// guest named (nothing boots it here, so no file need exist) at Shards' least envelope, one vCPU and its least
+/// memory, and its runtime cost, whose id is its evidence's SHA-256 and whose file its own digest pins.
+#[cfg(debug_assertions)]
+fn shards_configured(dir: &Path) -> Vec<(&'static str, std::ffi::OsString)> {
+    use hex_runtime::guest::{
+        ENV_COST_EVIDENCE, ENV_COST_FILE, ENV_COST_SHA256, ENV_CPUS, ENV_INITRD, ENV_KERNEL,
+        ENV_MEMORY_MIB, ENV_SHARDS_BIN,
+    };
+    use sha2::{Digest, Sha256};
+    let memory_mib = shards_api::min_memory_mib(std::env::consts::ARCH);
+    let evidence = dir.join("cost-evidence");
+    std::fs::write(&evidence, b"T-T7.1.2 model evidence: no native measurement").unwrap();
+    let envelope = hex_api::CapacityResources {
+        cpu_milli: 1000,
+        mem_bytes: memory_mib << 20,
+        disk_bytes: 0,
+    };
+    let least = hex_api::CapacityResources {
+        cpu_milli: 1,
+        mem_bytes: 1,
+        disk_bytes: 0,
+    };
+    let cost = hex_api::RuntimeCost {
+        id: Sha256::digest(std::fs::read(&evidence).unwrap()).into(),
+        floor: envelope,
+        ceiling: envelope,
+        quantum: hex_api::CapacityResources {
+            cpu_milli: 1000,
+            mem_bytes: 1 << 20,
+            disk_bytes: 1,
+        },
+        guest_overhead: least,
+        overhead: least,
+    };
+    let file = dir.join("cost.json");
+    let bytes = serde_json::to_vec(&cost).unwrap();
+    std::fs::write(&file, &bytes).unwrap();
+    let digest: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    vec![
+        (ENV_SHARDS_BIN, "/nonexistent/shards".into()),
+        (ENV_KERNEL, "/nonexistent/kernel".into()),
+        (ENV_INITRD, "/nonexistent/initrd".into()),
+        (ENV_CPUS, "1".into()),
+        (ENV_MEMORY_MIB, memory_mib.to_string().into()),
+        (ENV_COST_FILE, file.into_os_string()),
+        (ENV_COST_SHA256, digest.into()),
+        (ENV_COST_EVIDENCE, evidence.into_os_string()),
+    ]
 }
 
 /// What a crash case makes outside its temporary directory: its boxes' cgroups under `boxes` and its container's

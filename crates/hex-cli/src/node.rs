@@ -74,13 +74,16 @@ const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--box-root <
 const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--box-root <cgroup dir>]";
 
 /// `hex node --descriptors [--state <dir>]`: what a node of this process's owner, its state under `state` (`/` where
-/// none is named), needs of its soft descriptor limit on this host, at a first start's bounds, its own and every kept
-/// namespace's files (`hex_node::netns::needed_on_this_host`, the one formula), said as `own N files M need T`: what an
-/// installer gives the node's service and the install lab checks, never a figure copied from one host's (goal 6 step
-/// 6's HEX-INST-5).
+/// none is named), running VM boxes where a backend is configured as `hex node` reads it, needs of its soft
+/// descriptor limit on this host, at a first start's bounds, its own and every kept namespace's files
+/// (`hex_node::netns::needed_on_this_host`, the one formula), said as `own N files M need T`: what an installer gives
+/// the node's service and the install lab checks, never a figure copied from one host's (goal 6 step 6's HEX-INST-5).
 #[cfg(target_os = "linux")]
 fn descriptors(state: &Path) -> u8 {
-    let needed = hex_node::netns::needed_on_this_host(state);
+    let runs = hex_node::Runs {
+        vms: guest_requested() || std::env::var_os("HEX_FIRECRACKER_CONFIG").is_some(),
+    };
+    let needed = hex_node::netns::needed_on_this_host(state, runs);
     match needed {
         Ok(n) => {
             let line = format!("own {} files {} need {}\n", n.own, n.files, n.total());
@@ -232,8 +235,9 @@ fn tell_the_service_manager() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Says on stderr each box a recovery removed and why, and each idle cgroup it removed that no box's record named,
-/// so nothing is dropped unseen (CLAUDE.md §3), before the socket opens.
+/// Says on stderr each box a recovery removed and why, each idle cgroup it removed that no box's record named, each
+/// torn record it held, why and what to do, and why its guest couldn't say which boxes it holds, so nothing is
+/// dropped unseen (CLAUDE.md §3), before the socket opens.
 fn say_recovered(recovered: &RecoverySummary) {
     let mut err = std::io::stderr().lock();
     // Slots are Linux's node's alone: no other OS's hands a box's cgroup on.
@@ -247,6 +251,16 @@ fn say_recovered(recovered: &RecoverySummary) {
     }
     for (id, why) in &recovered.removed {
         let _ = writeln!(err, "hex node: recovered: removed {id}: {why}");
+    }
+    for (id, why) in &recovered.held {
+        let _ = writeln!(err, "hex node: recovered: held {id}: {why}");
+    }
+    if let Some(why) = &recovered.orphans_unknown {
+        let _ = writeln!(
+            err,
+            "hex node: recovered: the guest couldn't say which boxes it holds ({why}): none was deleted, \
+             and a box no record names waits for the next start"
+        );
     }
 }
 
@@ -269,9 +283,16 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
             Some(hex_runtime::firecracker::Config::from_file(&path).map_err(failed)?)
         }
     };
+    // Its start counts what it runs past its own boxes among its own descriptors: VM boxes where a backend is configured.
+    let runs = hex_node::Runs {
+        vms: guest_config.is_some() || firecracker_config.is_some(),
+    };
+    // Made before the node's start, so the GPU handles it holds are among what the start counts as held.
+    let prober = hex_node::facts::shared_prober(&args.state, hex_node::facts::Declared::default())
+        .map_err(failed)?;
     let node = match &args.box_root {
-        Some(root) => Node::open(root, &args.state, &args.state),
-        None => Node::beside_self(&args.state, &args.state),
+        Some(root) => Node::open_running(root, &args.state, &args.state, runs),
+        None => Node::beside_self_running(&args.state, &args.state, runs),
     }
     .map_err(failed)?;
     // What a label whose module the host's kernel doesn't run does: its owner's word, else skipped with a
@@ -287,11 +308,7 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
         let _ = std::io::stderr().lock().write_all(line.as_bytes());
     }
     let node = Arc::new(node);
-    node.bind_prober(
-        hex_node::facts::shared_prober(&args.state, hex_node::facts::Declared::default())
-            .map_err(failed)?,
-    )
-    .map_err(failed)?;
+    node.bind_prober(prober).map_err(failed)?;
     let shards = configured_guest(
         guest_config,
         &args.state,
@@ -561,7 +578,15 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
 /// AC-T7.4.1: configure the actual renderer and its verified cost before recovery.
 /// The existing native owner supplies both catalog and Books; this constructor boots nothing.
 fn guest_configuration() -> Result<Option<hex_runtime::guest::GuestInputs>, Refusal> {
-    let requested = [
+    if !guest_requested() {
+        return Ok(None);
+    }
+    hex_runtime::guest::GuestConfig::from_env_with_native_inputs().map(Some)
+}
+
+/// Whether any of a Shards guest's configuration is given, which `hex node` then reads whole or refuses.
+fn guest_requested() -> bool {
+    [
         hex_runtime::guest::ENV_SHARDS_BIN,
         hex_runtime::guest::ENV_KERNEL,
         hex_runtime::guest::ENV_INITRD,
@@ -575,11 +600,7 @@ fn guest_configuration() -> Result<Option<hex_runtime::guest::GuestInputs>, Refu
         hex_runtime::guest::ENV_GPU_OBSERVER_SHA256,
     ]
     .iter()
-    .any(|name| std::env::var_os(name).is_some());
-    if !requested {
-        return Ok(None);
-    }
-    hex_runtime::guest::GuestConfig::from_env_with_native_inputs().map(Some)
+    .any(|name| std::env::var_os(name).is_some())
 }
 
 fn configured_guest(

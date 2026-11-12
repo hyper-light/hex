@@ -462,7 +462,8 @@ fn attached(
     boxed: &Arc<ProcessBox>,
     key: protocol::Key,
 ) -> Result<(protocol::Answer, Option<OwnedFd>), Refusal> {
-    let (reader, writer) = rustix::pipe::pipe()
+    let (reader, writer) = std::io::pipe()
+        .map(|(reader, writer)| (OwnedFd::from(reader), OwnedFd::from(writer)))
         .map_err(|error| Refusal::os("preparing a private native scope notification", error))?;
     for end in [&reader, &writer] {
         super::super::super::private_descriptor(end, true)
