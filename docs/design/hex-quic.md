@@ -79,9 +79,13 @@ outlast the program.
 on it (`hex_client::guest`: its client over a link, one code path with the guest, CLAUDE.md §8). A connection holds
 one lane of each side's while it is open: Open (port, id) binds the opener's, Accept (id) the acceptor's, data frames
 of its port's class carry its bytes, End ends a half and frees its lane from the next frame on, Reset ends both;
-lane 0 carries refusals alone, so a peer is always answered. One lane per stdio stream, as the plan asks; a slow
-reader holds its own lane (`Endpoint::hold_lane`), and QUIC's stream flow control holds its sender, never another
-stream's.
+lane 0 carries refusals and the accepting side's Welcome (a TLS 1.3 client's handshake completes before the server
+has verified its certificate, RFC 8446 §4.4.4, so a dialer counts itself connected once it hears it). One lane per
+stdio stream, as the plan asks. Each side may send a connection's first `INITIAL_CREDIT` (two whole frames) and then
+what its peer grants as its owner reads (Credit frames): a reader that stops holds its own peer's writer alone.
+Holding a slow reader's lane instead (`Endpoint::hold_lane`) would leave its unread bytes in QUIC, whose connection
+window every stream shares and only bytes read give back (RFC 9000 §4.1, quinn's MAX_DATA), so one stopped reader
+would stall every connection of the peer; with credit the driver reads every lane as frames come.
 
 Classes, most urgent first: control (every connection's own frames and the control port's bytes), stream (stdio),
 bulk (staging, the log). Every class is lossless (hyper-transport `Classes::lossless`): a frame is its sender's only
@@ -93,8 +97,9 @@ exec's answer; a list answers in parts; `Taken` and `Release` have no answer). A
 multiplexed inside: one slow program's stdout would hold every other program's. A new lane per connection: lanes
 never close, and QUIC's stream credit (RFC 9000 §4.6) is spent by every one ever opened.
 
-**Falsified by** a test where one connection's held lane stalls another (HEX-QUIC-11, checkpoint 2), or a lane
-reused before its last connection's End reached the peer (HEX-QUIC-1, -4).
+**Falsified by** a test where one connection whose reader stopped stalls another (HEX-QUIC-11), a lane reused
+before its last connection's End reached the peer (HEX-QUIC-1, -4), or bytes past a connection's credit taken
+(HEX-QUIC-18).
 
 ## Q4. The node's listener
 
@@ -142,6 +147,7 @@ Each count is derived where the endpoint is made; none is picked.
 | --- | --- | --- |
 | data frame bound | `stream::MAX_FRAME` (128 KiB + 4) | the longest unit any port's stream carries whole: one framed wire message (`wire::MAX_MESSAGE`, from the SEQPACKET record bound) |
 | lane window | 1 | a lossless lane holds one frame past what QUIC took (hyper-transport `send_frame`), and the driver polls each frame as it comes; QUIC's stream window holds the rest |
+| a connection's initial credit | 2 data frames | one frame its peer's owner reads while the next waits: a reader that keeps up never waits on credit, and one that stops holds at most these |
 | connections, identities, pending handshakes (node) | the node's connections bound | each connection holds one of the node's descriptors (`serve::limits`) |
 | connections (client) | 1 | a client's endpoint dials its one node |
 | connections an identity holds | 2 | a connection and the one replacing it after its path changed |

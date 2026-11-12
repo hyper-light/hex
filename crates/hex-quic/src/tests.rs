@@ -117,8 +117,8 @@ fn hex_quic_11_a_reader_that_stops_holds_its_own_connection_alone() {
     fast.write_all(b"f", Some(patience())).unwrap();
     let (_, fast_there) = node.accept(STDIO_PORT, Some(patience())).unwrap();
     assert_eq!(read_exactly(&fast_there, 1), b"f");
-    // The node writes far past what one held lane takes (two frames and QUIC's stream window) to the connection
-    // the client doesn't read, on a thread of its own, which waits for room.
+    // The node writes far past the connection's credit (two frames) to the connection the client doesn't read, on a
+    // thread of its own, which waits for the client's grants.
     let total = 64 * lanes::DATA_BOUND;
     let pattern: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
     let writer = {
