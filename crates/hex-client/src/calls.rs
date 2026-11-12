@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use rustix::event::{PollFd, PollFlags};
@@ -744,6 +744,19 @@ pub(crate) fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
     Refusal::Broken("a lock of the node agent's client was poisoned".to_owned())
 }
 
+/// A wait on one of the client's locks that couldn't wait: the lock poisoned, or the OS refused it (macOS's kqueue).
+fn wait_refused(why: hex_wait::Failed) -> Refusal {
+    match why {
+        hex_wait::Failed::Poisoned => {
+            Refusal::Broken("a lock of the node agent's client was poisoned".to_owned())
+        }
+        hex_wait::Failed::Os(why) => Refusal::Os {
+            op: "waiting on a lock of the node agent's client",
+            why: why.to_string(),
+        },
+    }
+}
+
 /// The longest one wait on a connection can be: `i32::MAX` milliseconds, the most poll(2) takes where it has no
 /// `ppoll` (macOS; Windows' `WSAPoll`), its timeout a C `int` of milliseconds. A longer wait waits this long at a
 /// time, its caller waiting again until its own deadline.
@@ -784,8 +797,8 @@ pub(crate) type SharedOwner<T> = triomphe::Arc<Shared<T>>;
 /// wait on the current sender's release with its own deadline instead of blocking inside Mutex::lock.
 #[derive(Default)]
 struct SendLock {
-    busy: Mutex<bool>,
-    released: Condvar,
+    busy: hex_wait::Mutex<bool>,
+    released: hex_wait::Condvar,
 }
 
 struct Whole<'a>(&'a SendLock);
@@ -800,9 +813,12 @@ impl SendLock {
                     if left.is_zero() {
                         return Ok(None);
                     }
-                    self.released.wait_timeout(busy, left).map_err(poisoned)?.0
+                    self.released
+                        .wait_timeout(busy, left)
+                        .map_err(wait_refused)?
+                        .0
                 }
-                None => self.released.wait(busy).map_err(poisoned)?,
+                None => self.released.wait(busy).map_err(wait_refused)?,
             };
         }
         *busy = true;
@@ -942,8 +958,8 @@ impl Taker {
 /// A program's end, once it has come, and its `Proc`'s waking: by its end, or by the reader's turn handed to its wait.
 #[derive(Default)]
 struct Ending {
-    state: Mutex<EndState>,
-    came: Condvar,
+    state: hex_wait::Mutex<EndState>,
+    came: hex_wait::Condvar,
 }
 
 #[derive(Default)]
@@ -3016,7 +3032,7 @@ impl<T: Transport> RemoteProc<T> {
                     && !ended.turn
                     && let Err(e) = self.ending.came.wait_timeout(ended, left)
                 {
-                    break Err(poisoned(e));
+                    break Err(wait_refused(e));
                 }
             }
         };

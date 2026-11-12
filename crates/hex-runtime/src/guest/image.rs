@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use hex_api::{
@@ -96,15 +96,15 @@ enum Run {
 
 /// One answer a thread of its own gives: a boot's or a stop's.
 struct Slot<T> {
-    answer: Mutex<Option<T>>,
-    came: Condvar,
+    answer: hex_wait::Mutex<Option<T>>,
+    came: hex_wait::Condvar,
 }
 
 impl<T> Slot<T> {
     fn new() -> Self {
         Self {
-            answer: Mutex::new(None),
-            came: Condvar::new(),
+            answer: hex_wait::Mutex::new(None),
+            came: hex_wait::Condvar::new(),
         }
     }
 
@@ -123,19 +123,32 @@ impl<T> Slot<T> {
             Some(wait) => {
                 self.came
                     .wait_timeout_while(answer, wait, |a| a.is_none())
-                    .map_err(poisoned)?
+                    .map_err(wait_refused)?
                     .0
             }
             None => self
                 .came
                 .wait_while(answer, |a| a.is_none())
-                .map_err(poisoned)?,
+                .map_err(wait_refused)?,
         };
         Ok(answer.is_some())
     }
 
     fn take(&self) -> Result<Option<T>, Refusal> {
         Ok(self.answer.lock().map_err(poisoned)?.take())
+    }
+}
+
+/// A wait for a slot's answer that couldn't wait: its lock poisoned, or the OS refused it (macOS's kqueue).
+fn wait_refused(why: hex_wait::Failed) -> Refusal {
+    match why {
+        hex_wait::Failed::Poisoned => {
+            Refusal::Broken("the guest runtime's lock is poisoned".to_owned())
+        }
+        hex_wait::Failed::Os(why) => Refusal::Os {
+            op: "waiting for a Shards image's answer",
+            why: why.to_string(),
+        },
     }
 }
 

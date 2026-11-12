@@ -344,6 +344,14 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   functions, but for the ntdll calls,
   which Hex declares itself; std has no AF_UNIX socket or completion port on Windows, and a buffer the kernel
   writes after the call returns is beyond Rust's borrow rules. Rust can express none of them safely.
+- `crates/hex-wait/src/macos/sys.rs`: the kqueue a thread waits on in Hex's condition variable on macOS
+  (`hex_wait::Condvar`, docs/design/deadline-waits.md). XNU times std's condition variable waits, and its
+  semaphores' and `nanosleep`'s, with the leeway of the waiting thread's latency QoS tier (at utility QoS up to
+  four times the wait and 75 ms, doubled while the user is idle), and a timer marked `NOTE_CRITICAL` alone with
+  none. rustix makes the kqueue (kqueue(2)); `libc::kevent` adds its user event (`EVFILT_USER`, `EV_CLEAR`),
+  triggers it (`NOTE_TRIGGER`) and, as the thread waits, arms a one-shot timer to its deadline (`EVFILT_TIMER`,
+  `EV_ONESHOT`, `NOTE_NSECONDS | NOTE_CRITICAL`), which rustix's own `kevent`, itself `unsafe`, can't mark
+  critical. No event names a descriptor or carries a pointer. Rust can express none of these foreign calls safely.
 
 Vendored Shards (`vendor/shards`, `vendor/shards-gpu`) is Shards' own code at one upstream revision, with
 no Hex change but shards-gpu's Windows arm64 packaging patch (`vendor/MANIFEST.toml`): its `unsafe` follows

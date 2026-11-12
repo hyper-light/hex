@@ -3,6 +3,7 @@
 //! does a call and expects the record, the run and the refusal the design names
 //! (docs/design/shards-image-class.md; joint plan step 12, AC-T7.4.1).
 
+use std::sync::Condvar;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;

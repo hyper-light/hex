@@ -1575,6 +1575,45 @@ fn absolute_delete_cap_covers_queued_sender() {
     );
 }
 
+/// AC-T7.4.1: do queue an actual delete behind the held sender with an absolute deadline; expect its refusal no later
+/// than that deadline and twice the platform's slowest recorded timer overshoot (`waits::OVERSHOOT`). The deadline is
+/// the claim under test. macOS times std's condition variable waits by the waiting thread's QoS: at utility QoS a
+/// queued sender capped at 25 ms was refused at 95.1 and 98.6 ms (the waits census on 75694786, at cb166de1).
+#[cfg(target_os = "macos")]
+#[test]
+fn ac_t7_4_1_a_queued_sender_is_refused_by_its_deadline() {
+    use hex_testkit::waits::OVERSHOOT;
+    /// The queued delete's refusal at its absolute deadline, the sender held.
+    static CAPPED: Patience = Patience::measuring("test.hex_client.budget.queued_delete_deadline");
+    let (transport, request) = stalled(None);
+    let client = Arc::new(configured(AbsoluteStalled(transport)));
+    let whole = client.conn.shared.sending.lock(None).unwrap().unwrap();
+    let control = Arc::clone(&client);
+    let (finished, answer) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let deadline = Instant::now().checked_add(CAP).unwrap();
+        let refused = control.delete_before(&BoxId::new("deadline-control").unwrap(), deadline);
+        let late = Instant::now().saturating_duration_since(deadline);
+        let _ = finished.send((refused, late));
+    });
+    let result = recv_on(&CAPPED, &answer);
+    drop(whole);
+    if result.is_err() {
+        client
+            .conn
+            .shared
+            .end(Refusal::Broken("deadline queued-send cleanup".into()));
+    }
+    worker.join().unwrap();
+    let (refused, late) = result.unwrap();
+    assert!(matches!(refused, Err(Refusal::Os { why, .. }) if why.contains("absolute")));
+    assert!(
+        late <= OVERSHOOT * 2,
+        "refused {late:?} past its deadline, more than twice the slowest recorded overshoot, {OVERSHOOT:?}"
+    );
+    assert!(matches!(request.try_recv(), Err(mpsc::TryRecvError::Empty)));
+}
+
 /// AC-T7.4.1: supplied instants survive unchanged; an earlier transport bound may shorten
 /// authority, no later/default bound can enlarge it, and a learned wait never replaces it:
 /// ending first it is a run-out to record, a tie the caller's; with no caller it is the bound.

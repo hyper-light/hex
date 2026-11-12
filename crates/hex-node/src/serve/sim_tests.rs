@@ -8,6 +8,7 @@
 use super::*;
 
 use std::collections::BTreeSet;
+use std::sync::MutexGuard;
 use std::sync::atomic::AtomicUsize;
 
 use hex_api::sim::SimRuntime;

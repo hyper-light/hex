@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::conformance::{Act, Fixture};
@@ -80,8 +80,8 @@ struct SimVm {
 
 #[derive(Default)]
 struct SimProc {
-    exit: Mutex<Option<Exit>>,
-    ended: Condvar,
+    exit: hex_wait::Mutex<Option<Exit>>,
+    ended: hex_wait::Condvar,
     /// A run's program: the other programs of its box, which its end ends, as the node agent's removal
     /// of the run's box does.
     left: Mutex<Vec<Arc<SimProc>>>,
@@ -115,6 +115,17 @@ impl SimProc {
 
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
     Refusal::Broken("a simulator lock was poisoned".to_owned())
+}
+
+/// A wait on a simulator lock that couldn't wait: its lock poisoned, or the OS refused it (macOS's kqueue).
+fn wait_refused(why: hex_wait::Failed) -> Refusal {
+    match why {
+        hex_wait::Failed::Poisoned => Refusal::Broken("a simulator lock was poisoned".to_owned()),
+        hex_wait::Failed::Os(why) => Refusal::Os {
+            op: "waiting on a simulator lock",
+            why: why.to_string(),
+        },
+    }
 }
 
 impl SimRuntime {
@@ -664,7 +675,12 @@ impl Proc for SimHandle {
             if left.is_zero() {
                 return Ok(None);
             }
-            exit = self.0.ended.wait_timeout(exit, left).map_err(poisoned)?.0;
+            exit = self
+                .0
+                .ended
+                .wait_timeout(exit, left)
+                .map_err(wait_refused)?
+                .0;
         }
     }
     fn kill(&mut self) -> Result<(), Refusal> {

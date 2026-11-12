@@ -21,6 +21,8 @@ rustix.workspace = true
 sha2.workspace = true
 triomphe = { workspace = true, features = ["unsize"] }
 unsize.workspace = true
+# Condition variables whose timed waits end at their deadlines on macOS too (docs/design/deadline-waits.md).
+hex-wait.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 hex-afunix.workspace = true
