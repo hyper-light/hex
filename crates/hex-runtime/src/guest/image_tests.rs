@@ -728,11 +728,13 @@ fn kill_before_start_ends_the_vm_without_a_boot() {
 }
 
 /// Joint plan step 15 (AC-T7.7.2): do create image VMs granted, in turn, a provider by name, kiln by address
-/// and kiln on the VM's host. Expect: each refused Awaits naming the capability it waits on, with no record made
-/// and no boot asked. Do: create one granted a publish of its harness's port on the host's loopback, and start
-/// it, the image running that harness. Expect: its boot asks for exactly that publish and none of its image's
-/// grants past the VM, and its inspect shows its every grant, as its record holds them, and the publish as the
-/// host bound it, its receiver the image's declaration.
+/// and kiln on the VM's host, and one whose run has a command of its own granted a publish of its harness's
+/// port. Expect: each refused Awaits naming the capability it waits on (the publish, PublishReceiver: such a
+/// run's command takes every port no member is given, D122), with no record made and no boot asked. Do: create
+/// one of the members alone granted that publish on the host's loopback, and start it, the image running that
+/// harness. Expect: its boot asks for exactly that publish and none of its image's grants past the VM, and its
+/// inspect shows its every grant, as its record holds them, and the publish as the host bound it, its receiver
+/// the image's declaration.
 #[test]
 fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
     use hex_api::{Destination, Grant, Member, MemberKind, Ports, Proto};
@@ -792,6 +794,18 @@ fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
         host: "127.0.0.1".parse().unwrap(),
         host_port: None,
     };
+    let mut commanded = granted("image-commanded", vec![publish.clone()]);
+    if let ClassSpec::ShardsImage(image) = &mut commanded.class {
+        image.command = Some(vec!["serve".to_owned()]);
+    }
+    assert_eq!(
+        runtime.create(commanded),
+        Err(Refusal::Awaits {
+            needs: Upstream::PublishReceiver
+        })
+    );
+    assert!(Transaction::records(owner.as_ref()).unwrap().is_empty());
+    assert!(images.asked.lock().unwrap().is_empty());
     let id = runtime
         .create(granted("image-published", vec![publish.clone()]))
         .unwrap()
@@ -878,4 +892,52 @@ fn a_publish_to_a_member_the_image_doesnt_run_stops_the_vm() {
         assert!(shown.published.is_empty());
         assert_eq!(record(&owner, &id).unwrap().exit, Some(Exit::Signal(9)));
     }
+}
+
+/// Decision 9, joint plan step 12: do make the image waits from records of all three measures, from none
+/// outside the waits census, and from none while it runs. Expect: each armed at twice its record; refused
+/// naming the first record to take; and each measuring, armed at nothing, under its own name, so the census
+/// takes its first record.
+#[test]
+fn the_image_waits_take_their_records_or_measure_only_while_the_census_runs() {
+    let ms = Duration::from_millis;
+    let recorded = |measure: &str| match measure {
+        "image_boot" => Ok(ms(3)),
+        "image_stats" => Ok(ms(5)),
+        "image_stop" => Ok(ms(7)),
+        other => panic!("no such measure {other}"),
+    };
+    let armed = ImageWaits::from_records(recorded, false).unwrap();
+    assert_eq!(
+        (
+            armed.boot.deadline(),
+            armed.stats.deadline(),
+            armed.stop.deadline()
+        ),
+        (Some(ms(6)), Some(ms(10)), Some(ms(14)))
+    );
+    let none = |measure: &str| {
+        Err(Refusal::Platform {
+            what: "the oci class's guest",
+            platform: "test",
+            why: format!("no {measure} record for any host class yet"),
+        })
+    };
+    assert!(matches!(
+        ImageWaits::from_records(none, false),
+        Err(Refusal::Platform { why, .. }) if why.contains("image_boot")
+    ));
+    let census = ImageWaits::from_records(none, true).unwrap();
+    assert_eq!(
+        (
+            census.boot.deadline(),
+            census.stats.deadline(),
+            census.stop.deadline()
+        ),
+        (None, None, None)
+    );
+    assert_eq!(
+        (census.boot.name(), census.stats.name(), census.stop.name()),
+        ("hex.image.boot", "hex.image.stats", "hex.image.stop")
+    );
 }
