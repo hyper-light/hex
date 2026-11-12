@@ -2297,6 +2297,22 @@ impl Node {
         sum
     }
 
+    /// What this node's own admissions hold of its room, for the machine's capacity view (joint plan
+    /// step 13, `docs/design/capacity-view.md` CV2): in each dimension the larger of what its ledger
+    /// admitted and what its admission index holds, which charges backings too.
+    pub fn held(&self) -> Result<lb::Amounts, Stop> {
+        let index = self
+            .admission
+            .held(self.id)
+            .map_err(|e| Stop::Damaged(e.to_string()))?;
+        let index = amounts(&index);
+        let mut held = self.admitted();
+        for (h, i) in held.iter_mut().zip(index) {
+            *h = (*h).max(i);
+        }
+        Ok(held)
+    }
+
     /// The boxes this node owns that wait for room, run, or have ended unforgotten.
     pub fn owned(&self) -> usize {
         self.owned.len()
