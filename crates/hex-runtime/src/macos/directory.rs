@@ -166,15 +166,33 @@ impl Directory {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// The argument that turns `descriptor_probe` on: a filter no test is named, so the probe's run
     /// runs it alone.
     const PROBE: &str = "hex-descriptor-probe";
 
-    /// Not a test of its own: the tool `a_tool_the_directory_runs_holds_only_its_stdio` starts (this
-    /// binary, named so), which prints the descriptors it holds.
+    /// The arguments that run this binary as the descriptor probe, alone.
+    pub(crate) fn probe_args() -> [&'static str; 5] {
+        let probe = concat!(module_path!(), "::descriptor_probe");
+        let probe = probe.split_once("::").map_or(probe, |(_, test)| test);
+        ["--exact", probe, "--nocapture", "--test-threads=1", PROBE]
+    }
+
+    /// The descriptors the probe printed it holds (on libtest's line for it, after the test's name).
+    pub(crate) fn held(printed: &str) -> Vec<i32> {
+        printed
+            .lines()
+            .find_map(|line| line.split_once("HEX_FDS ").map(|(_, held)| held))
+            .unwrap_or_else(|| panic!("the probe printed no descriptors: {printed}"))
+            .split_whitespace()
+            .map(|fd| fd.parse().unwrap())
+            .collect()
+    }
+
+    /// Not a test of its own: the tool the descriptor tests start (this binary, named so), which
+    /// prints the descriptors it holds.
     #[test]
     fn descriptor_probe() {
         if !std::env::args_os().any(|arg| arg == PROBE) {
@@ -202,22 +220,9 @@ mod tests {
                 .contains(rustix::io::FdFlags::CLOEXEC)
         );
         let exe = std::env::current_exe().unwrap();
-        let probe = concat!(module_path!(), "::descriptor_probe");
-        let probe = probe.split_once("::").map_or(probe, |(_, test)| test);
-        let printed = run(
-            exe.to_str().unwrap(),
-            &["--exact", probe, "--nocapture", "--test-threads=1", PROBE],
-        )
-        .unwrap();
-        let held: Vec<i32> = printed
-            .lines()
-            .find_map(|line| line.strip_prefix("HEX_FDS "))
-            .unwrap_or_else(|| panic!("the probe printed no descriptors: {printed}"))
-            .split_whitespace()
-            .map(|fd| fd.parse().unwrap())
-            .collect();
+        let printed = run(exe.to_str().unwrap(), &probe_args()).unwrap();
         assert_eq!(
-            held,
+            held(&printed),
             [0, 1, 2],
             "the tool held descriptors it wasn't given (this process's {} without close-on-exec among them)",
             std::os::fd::AsRawFd::as_raw_fd(&open)
