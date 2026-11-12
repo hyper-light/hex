@@ -213,11 +213,12 @@ fn w14_the_learner_places_each_vm_its_fleet_and_vm_by_path_and_weight() {
     assert_eq!(io.take(), Vec::new(), "nothing changed, nothing written");
 }
 
-/// Joint plan step 14 (AC-T7.4.1), C7: a Shards guest can't yet be held within its room. Do run a window of a Shards
-/// VM and a Firecracker VM; expect the Shards guest's room refused as awaiting `GuestRoom`, its being told it, and
-/// `RingPinsWithinRoom`, its ring pins kept within it, the Firecracker one's neither.
+/// Joint plan step 14 (AC-T7.4.1), C7: a Shards guest can't yet be told its room, though its ring pins keep within any
+/// room it is told (Shards' ring-pins-v1, D230, vendored at 66113379). Do run a window of a Shards VM and a Firecracker
+/// VM; expect the Shards guest's room refused as awaiting `GuestRoom` alone, its being told it, the Firecracker one's
+/// nothing.
 #[test]
-fn w14_a_shards_guests_room_awaits_guest_room_and_its_ring_pins_within_it() {
+fn w14_a_shards_guests_room_awaits_guest_room_alone() {
     let io = Record::default();
     let vms = running(&[("vm-1", 1), ("vm-2", 2)]);
     for (_, _, cgroup) in &vms {
@@ -236,13 +237,7 @@ fn w14_a_shards_guests_room_awaits_guest_room_and_its_ring_pins_within_it() {
         .window(&io, vms, record, &[], machine(), Instant::now())
         .unwrap();
     let vm1 = BoxId::new("vm-1").unwrap();
-    assert_eq!(
-        learner.awaits(),
-        vec![
-            (&vm1, Upstream::GuestRoom),
-            (&vm1, Upstream::RingPinsWithinRoom)
-        ]
-    );
+    assert_eq!(learner.awaits(), vec![(&vm1, Upstream::GuestRoom)]);
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C2 and C8 in the node: what a capacity answer carries. Do warm one VM, booked at
