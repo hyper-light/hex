@@ -253,3 +253,48 @@ environment, and the rule is that keys never travel.
 
 **Falsified by** a configured `hex node` failing the suite over QUIC (HEX-QUIC-23), or one without `--quic` holding
 a UDP socket, or one asked for QUIC without an enrollment it can serve with binding anything (HEX-QUIC-24).
+
+## Q10. Admission by name
+
+hyper-transport admits a connection twice (its `admission.rs`): a pending place while it handshakes, then, once its
+certificate names a peer (`Directory::identify`), an entry for that peer's events and a charge to its identity, under
+the endpoint's bounds. A connection `identify` names no peer for is refused `Refusal::Identity`, with no entry and
+charged to no identity (its `Directory`; `endpoint.rs` `connected`). The capacity lane's keeper heard only the holders
+its host names, but refused the others at the lane (capacity-view.md CV8): their connections were admitted first,
+held as long as their peers stayed (QUIC's keep-alive, Q8), and counted against the lane's bounds, sized for its
+holders (two connections each). Two peers kiln's CA enrolled but the lane doesn't name filled a one-holder lane: each
+held one of its two peer entries (bounded by the larger of the identity and connection bounds, and kept while their
+peers are connected), so the holder it names was refused `Refusal::Events` (red at 036bbabf); past that table, the
+identity bound and then max-min's share (⌊2/3⌋ = 0; Bertsekas and Gallager, *Data Networks*, §6.5.2) refuse it alike.
+
+**Chosen** (`hex_quic::Admits`, `Endpoint::start_admitting`). An endpoint that names its peers admits theirs alone: a
+connection a peer opens is identified only where the name its certificate carries is listed (`Admits::Named`), and any
+other is refused at its handshake as a peer kiln's CA didn't enroll is, so it holds a pending place for its handshake's
+length, as every handshake does, and none of the endpoint's connections. The rule is the endpoint's from its first
+datagram, set before its driver starts. A dial isn't filtered: this side names the peer it dials, and the handshake
+checks the certificate for that name (Q5). `hex schedule serve`'s lane admits the holders its configuration names;
+`hex node --quic` admits every peer kiln's CA enrolled (`Admits::Enrolled`): its peers, kiln's balancer and the
+fleet's nodes, are named by no configuration. The lane keeps CV8 for a named holder that speaks as another (closed
+`NotAuthorized`, logged). No number is added, and a peer's lanes are unchanged.
+
+What each side sees. A TLS client's handshake completes before its server verifies its certificate (RFC 8446 §4.4.4,
+RFC 9001 §4.1.2), so the refused peer is closed after its own handshake, with the refusal's code in the application
+close (RFC 9000 §10.2): its dial ends `Refused::Identity`. The endpoint counts each refusal (hyper-transport's
+`AdmissionStats::refused_identity`) and logs none: a line a handshake would let any enrolled peer write the host's log
+at its handshake rate. Exporting the count is a metric, to agree with kiln's Observe owner (CLAUDE.md §10).
+
+**Alternatives.**
+- Refusing at the lane alone, as built before: the finding above.
+- Closing an unnamed peer's connection once the lane hears it (`Endpoint::refuse`): it holds its place until its first
+  word, and one that opens no connection to the port is never heard.
+- A client-certificate verifier that checks the name in TLS (rustls' `ClientCertVerifier` over its
+  `WebPkiClientVerifier`): refused with an alert, which hyper-transport reports as `Refusal::Identity` too, but the
+  certificate's name would be read in a second place, and the Directory is where hyper-transport asks which peer a
+  connection is.
+- A larger connection bound for the lane: enough enrolled peers fill any finite bound.
+- A refusal of its own for "enrolled, not admitted": a change to hyper-transport's wire refusals, which kiln and Hex
+  hold at one revision (Q1). The peer's remedy is the same as an unenrolled certificate's (the person's
+  configuration), so the existing typed refusal says what it can act on.
+
+**Falsified by** a peer the endpoint doesn't name holding one of its connections, or a named holder refused for room
+an unnamed peer took (`hex-node` `scheduler::capacity_lane_tests::a_peer_the_lane_doesnt_name_holds_none_of_its_connections`).

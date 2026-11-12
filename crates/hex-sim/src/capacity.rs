@@ -1273,7 +1273,9 @@ impl World {
 
     /// The nemesis stops; the keeper and every runner start again where down; every partition heals and
     /// every link connects; everything said is delivered and every hint drained until nothing more is
-    /// said. Then the books each side keeps must agree.
+    /// said. A runner whose session the keeper closes meanwhile says hello again, as its shell does on that
+    /// close (the holder contract's item 5): the hints may close one for a scope a sample refused before the
+    /// nemesis stopped. Then the books each side keeps must agree.
     pub fn settle(&mut self) -> Result<Report, Violation> {
         self.disk.crash = None;
         self.restart_keeper()?;
@@ -1288,8 +1290,9 @@ impl World {
             self.connect(Some(n));
         }
         self.forget_retired()?;
-        // Each runner says hello, syncs, and answers at most one message a reservation, each hint at
-        // most once a change: (reservations + its hello, sync and the replies) per runner, twice over.
+        // Each runner says hello, syncs, and answers at most one message a reservation, each hint at most once a
+        // change: (reservations + its hello, sync and the replies) per runner, twice over, as it says hello at most
+        // twice: here, and once more after a close for its scope, its hellos naming none from then.
         let bound = self
             .runners
             .len()
@@ -1305,6 +1308,9 @@ impl World {
                 self.deliver_any()?;
             } else {
                 self.hints()?;
+                for n in 0..self.runners.len() {
+                    self.connect(Some(n));
+                }
                 if self
                     .runners
                     .iter()
