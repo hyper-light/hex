@@ -83,7 +83,7 @@ pub fn run(s: &Subject<'_>) -> Result<(), Failure> {
     a_guest_its_client_lost_is_taken_back_by_attach(s)
 }
 
-/// `backend()` is this host's; Intel Mac is excluded from the supported target set.
+/// `backend()` is this host's, and macOS x86_64, outside shards' scope, has none, by name.
 pub fn hosts_without_a_backend_are_named(s: &Subject<'_>) -> Result<(), Failure> {
     const CASE: &str = "hosts without a backend are named";
     let (os, arch) = ("macos", "x86_64");

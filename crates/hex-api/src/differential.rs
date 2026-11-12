@@ -570,6 +570,8 @@ fn kind(r: &Refusal) -> &'static str {
             crate::Upstream::WindowsRunHost => "Awaits(WindowsRunHost)",
             crate::Upstream::AttachAfterCrash => "Awaits(AttachAfterCrash)",
             crate::Upstream::MemberSignal => "Awaits(MemberSignal)",
+            crate::Upstream::MemberGrantsByAddress => "Awaits(MemberGrantsByAddress)",
+            crate::Upstream::MemberHostService => "Awaits(MemberHostService)",
         },
     }
 }
