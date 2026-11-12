@@ -964,7 +964,7 @@ impl Node {
             return Ok(info);
         }
         let state = match record.spec.class {
-            ClassSpec::Process => process_state(id, self.root.get(id).as_ref())?,
+            ClassSpec::Process => process_state(self.root.get(id).as_ref())?,
             // An oci box follows the container's lifecycle: `created` until `start`, then `running`,
             // then `empty` once its init no longer runs (the oci state's `stopped`).
             ClassSpec::Oci(_) | ClassSpec::Bundle(_) => {
@@ -2049,7 +2049,8 @@ impl Runtime for Node {
             if let Ok(record) = record {
                 match self.info(&record, false) {
                     Ok(info) => out.push(info),
-                    // HEX-RT-15: the list's record snapshot can outlive a run's cgroup.
+                    // The list's record snapshot can outlive a VM box its backend has removed since (a process
+                    // box whose cgroup goes is empty until its record does).
                     Err(Refusal::NoSuchBox(gone)) if gone == id => {}
                     // A held Shards image box, an earlier node process's run that Shards can neither take
                     // back nor prove gone (docs/design/shards-image-class.md §5): listed running, as Hex
@@ -2366,17 +2367,19 @@ fn pid_max() -> Option<usize> {
 }
 
 /// A `process` box's state from its cgroup `cg` (`None` when it's gone): a process box runs when its cgroup holds a
-/// process; it has no `created` state.
-fn process_state(id: &BoxId, cg: Option<&BoxCgroup>) -> Result<BoxState, Refusal> {
-    Ok(match cg {
-        Some(cg) => match cg.populated_if_present()? {
-            Some(true) => BoxState::Running,
-            Some(false) => BoxState::Empty,
-            // HEX-RT-15: a run can remove its cgroup after this inspect opened it.
-            // Its pinned directory names the removed box, even if the id is used again.
-            None => return Err(Refusal::NoSuchBox(id.clone())),
-        },
-        None => BoxState::Empty,
+/// process; it has no `created` state. A box is there until its record goes, the last of it a removal takes (a run's,
+/// by its supervisor, and a delete's), so a cgroup removed or being removed is an empty box: the kernel's rmdir clears
+/// a cgroup's files before it unlinks its directory. Read through its pinned directory (HEX-RT-15), a removed cgroup
+/// is never a later box's at its path.
+fn process_state(cg: Option<&BoxCgroup>) -> Result<BoxState, Refusal> {
+    let running = match cg {
+        Some(cg) => cg.populated_if_present()? == Some(true),
+        None => false,
+    };
+    Ok(if running {
+        BoxState::Running
+    } else {
+        BoxState::Empty
     })
 }
 
@@ -2779,25 +2782,25 @@ mod tests {
         let root = BoxRoot::open(&parent.join("root"), Vec::new()).unwrap();
         let id = BoxId::new("ran-live").unwrap();
         let cg = root.get(&id);
-        assert_eq!(process_state(&id, cg.as_ref()), Ok(BoxState::Running));
+        assert_eq!(process_state(cg.as_ref()), Ok(BoxState::Running));
         fs::write(dir.join("cgroup.events"), "populated 0\nfrozen 0\n").unwrap();
-        assert_eq!(process_state(&id, cg.as_ref()), Ok(BoxState::Empty));
+        assert_eq!(process_state(cg.as_ref()), Ok(BoxState::Empty));
         fs::remove_file(dir.join("cgroup.events")).unwrap();
         assert_eq!(
-            process_state(&id, cg.as_ref()),
+            process_state(cg.as_ref()),
             Ok(BoxState::Empty),
             "its files gone, its directory there"
         );
         fs::remove_dir(&dir).unwrap();
         assert_eq!(
-            process_state(&id, cg.as_ref()),
+            process_state(cg.as_ref()),
             Ok(BoxState::Empty),
             "its directory gone since it was opened"
         );
         fs::create_dir(&dir).unwrap();
         fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
         assert_eq!(
-            process_state(&id, cg.as_ref()),
+            process_state(cg.as_ref()),
             Ok(BoxState::Empty),
             "a new box's cgroup at its path"
         );
