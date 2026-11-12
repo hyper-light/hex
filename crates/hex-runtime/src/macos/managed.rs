@@ -414,10 +414,12 @@ impl Scope {
                 observed: actual.started,
             });
         }
+        // getpgid finds no process once the controller is exiting, before its rusage says it ended: that
+        // has left no group. Only a live controller in another group has left its scope.
         if !actual.ended
             && sys::group_of(pid)
                 .map_err(|error| process_failure(ProcessOperation::QueryScope, error))?
-                != Some(pid)
+                .is_some_and(|group| group != pid)
         {
             return Err(ProcessFailure::DifferentScope);
         }
