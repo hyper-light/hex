@@ -309,7 +309,7 @@ fn model_runtime(
         })),
         super::super::tests::config(),
     )
-    .with_images(Arc::clone(images) as Arc<dyn Images>, waits);
+    .with_images(Ok(Arc::clone(images) as Arc<dyn Images>), waits);
     let books: Arc<dyn Books> = owner.clone();
     runtime.bind_books(Arc::downgrade(&books)).unwrap();
     (runtime, owner)
@@ -655,6 +655,51 @@ fn a_create_is_refused_before_any_record_without_its_waits_or_a_bootable_size() 
     ));
     assert!(Transaction::records(owner.as_ref()).unwrap().is_empty());
     assert!(images.asked.lock().unwrap().is_empty());
+}
+
+/// Joint plan step 12: do create where the host has no image boot, as macOS's is until D231's run host
+/// is started holding only its stdio. Expect: refused naming that, before any record.
+#[test]
+fn a_create_is_refused_before_any_record_on_a_host_without_an_image_boot() {
+    let owner = Arc::new(Owner::default());
+    let refused = Refusal::Awaits {
+        needs: Upstream::RunHostStdioOnly,
+    };
+    let runtime = GuestRuntime::new(
+        Arc::new(shards_api::sim::SimGuests::new(|_| {
+            shards_api::End::PowerOff
+        })),
+        super::super::tests::config(),
+    )
+    .with_images(Err(refused.clone()), waits());
+    let books: Arc<dyn Books> = owner.clone();
+    runtime.bind_books(Arc::downgrade(&books)).unwrap();
+    assert_eq!(
+        runtime.create(spec("image-no-host", None)).map(|_| ()),
+        Err(refused)
+    );
+    assert!(Transaction::records(owner.as_ref()).unwrap().is_empty());
+}
+
+/// Joint plan step 12, CLAUDE.md §12: do ask for this host's image boot. Expect: Shards' on Linux; on
+/// Windows the refusal naming Shards' owed Windows run host; on macOS the one naming a run host started
+/// holding only its stdio, since D231 starts it through std's spawn, which hands it every descriptor
+/// another thread holds without close-on-exec.
+#[test]
+fn this_hosts_image_boot_is_shards_on_linux_and_names_what_d231_owes_elsewhere() {
+    let host = host_images().map(|_| ());
+    let expected = if cfg!(windows) {
+        Err(Refusal::Awaits {
+            needs: Upstream::WindowsRunHost,
+        })
+    } else if cfg!(target_os = "macos") {
+        Err(Refusal::Awaits {
+            needs: Upstream::RunHostStdioOnly,
+        })
+    } else {
+        Ok(())
+    };
+    assert_eq!(host, expected);
 }
 
 /// Joint plan step 12: do signal KILL to a VM never started. Expect: no boot, its end recorded

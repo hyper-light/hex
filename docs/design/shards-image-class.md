@@ -2,7 +2,7 @@
 
 Joint plan step 12 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d`, "Every kiln harness in Shards microVMs, Hex as
 runtime"), AC-T7.4.1. Status: **built to Shards' D231 at `482c5d78`**; its real-VM runs, the records its waits seed
-from and its Windows host are owed (§8).
+from and its macOS and Windows hosts are owed (§8).
 
 Sources, read at the revisions named:
 - Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `482c5d78`) and its research
@@ -36,6 +36,14 @@ Sources, read at the revisions named:
 - **Command.** `None` runs the image's members alone (D231's `ATTEND`: the standby holds, the members start), the
   usual harness VM. `Some(args)` is the run's own command, as `shards run IMAGE COMMAND` takes one; its exit is the
   box's.
+- **Hosts** (`hex_runtime::guest::host_images`). Linux boots image VMs. On Windows a create is refused
+  `Awaits(WindowsRunHost)`: D231's Windows run host is owed. On macOS it is refused `Awaits(RunHostStdioOnly)`:
+  D231 starts its run host (`shards api-run`, `image/session.rs`) through std's `Command`, whose macOS spawn passes
+  no `POSIX_SPAWN_CLOEXEC_DEFAULT`, and macOS's pipe, socket, socketpair and accept take no close-on-exec flag, so
+  the run host would hold every descriptor another node thread had made and not yet marked (a box's pipe, a
+  client's connection, the box helper's socket) for as long as its VM runs. Every program Hex starts on macOS holds
+  only its stdio (`crates/hex-runtime/src/macos/command.rs`; CVE-2024-21626's class), and Hex's other Shards form
+  launches its VM through the client's native owner (D233), so this class waits for the same of D231.
 
 ## 2. Mapping onto D231
 
@@ -87,9 +95,15 @@ call, recovery's adoption among them, and is listed running: Hex can't prove it 
 `pids`, `read_bytes` and `write_bytes` their counters. **Guest time per vCPU** is `GuestTime::Awaits
 (GuestCpuTimePerVcpu)`: Shards' guest CPU time work has no commits, and a number Hex made up would be worse than
 none. When it lands, `GuestTime::PerVcpuNs` carries it: nanoseconds each vCPU ran the guest since the VM booted,
-by vCPU index, one for each vCPU of the VM's size, each only growing, none past the wall time the VM ran. This is
-the field goal 14's learned charge reads. Its wire bound, `GuestTime::MAX_VCPUS`, is every 8-bit vCPU index: a
-Shards VM numbers its x86_64 vCPUs by 8-bit APIC id (at most 255) and has fewer on arm64 (123).
+by vCPU index, one for each vCPU of the VM's size, each only growing, none past the wall time the VM ran. Its wire
+bound, `GuestTime::MAX_VCPUS`, is every 8-bit vCPU index: a Shards VM numbers its x86_64 vCPUs by 8-bit APIC id (at
+most 255) and has fewer on arm64 (123).
+
+Goal 14's learned charge (`hex-node` `scheduler/charges.rs`) reads `cpu_usec` and `memory_bytes` as a microVM's
+use on the host: its VMM's, as the dedicated Shards guest's native scope gives them. An image VM's are its run's in
+the guest, short of the guest kernel's and the run host's own, so the charge it learns for an image VM is low by
+those until the run host is launched through the client's native owner, where its scope gives the host's (§8), or
+the learner reads guest time per vCPU.
 
 D231's STATS has no memory peak, OOM kill count or refused fork count. The image class reports none of these
 (0, as the Windows process class reports no refused forks), and says so here; Shards owes them for a full Usage.
@@ -142,17 +156,21 @@ This class stays: it is how every Shards VM boots, once Hex's own node boots the
 
 ## 8. Owed
 
-- **Records** for `image_boot`, `image_stats` and `image_stop` on Linux-KVM and macOS-HVF (ROOT's measurement):
-  `Images::boot` of a harness image to its return, `stats(Run)` to its answer, `stop` to its return, each `n` with
-  its slowest, added to `bench/native/guest/records.tsv` with their RECORD.md. Until then a create is refused.
+- **Records** for `image_boot`, `image_stats` and `image_stop` on Linux-KVM, and on macOS-HVF once its run host is
+  given (ROOT's measurement): `Images::boot` of a harness image to its return, `stats(Run)` to its answer, `stop` to
+  its return, each `n` with its slowest, added to `bench/native/guest/records.tsv` with their RECORD.md. Until then
+  a create is refused.
 - **Real-VM runs** (ROOT): the image class's conformance cases (HEX-IMG-1..6) on a node with Shards configured, on
-  Linux KVM and macOS HVF; HEX-IMG-4 fails until Shards gives guest time per vCPU, naming it.
-- **From Shards:** the Windows run host (`WindowsRunHost`; until then a create on Windows is refused naming it),
-  `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), guest time per vCPU
-  (`GuestCpuTimePerVcpu`), member exec and signals (`MemberExec`, `MemberSignal`; step 11), a boot patience, a
-  launch through the client's native owner for the run host (it runs in the node's own process tree today, so Hex
-  charges the VM's envelope by admission but cannot contain the run host per box), and STATS' memory peak, OOM kills
-  and refused forks.
+  Linux KVM, and on macOS HVF once its run host is given; HEX-IMG-4 fails until Shards gives guest time per vCPU,
+  naming it.
+- **From Shards:** the run host started holding only its stdio on macOS (`RunHostStdioOnly`;
+  `POSIX_SPAWN_CLOEXEC_DEFAULT` in D231's spawn, or the run host's launch through the client's native owner, as
+  D233's guests have), the Windows run host (`WindowsRunHost`), `attach` or the run's identity after an owner's
+  crash (`AttachAfterCrash`), guest time per vCPU (`GuestCpuTimePerVcpu`), member exec and signals (`MemberExec`,
+  `MemberSignal`; step 11), a boot patience, and STATS' memory peak, OOM kills and refused forks. Until those two
+  hosts are given, a create on each is refused naming its own. The native-owner launch would also give Linux what
+  it lacks: the run host runs in the node's own process tree today, so Hex charges the VM's envelope by admission
+  but cannot contain the run host per box, nor read its use on the host (§4).
 
 ## 9. What would falsify it
 

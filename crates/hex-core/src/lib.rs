@@ -37,6 +37,7 @@ pub mod drain;
 pub mod hcs;
 pub mod helper;
 pub mod job;
+pub mod lanes;
 pub mod ledger;
 pub mod limits;
 #[cfg(test)]

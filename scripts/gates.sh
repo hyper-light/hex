@@ -7,14 +7,25 @@ gate() { printf '::: %s\n' "$*" >&2; "$@"; }
 # The targets a gate lints, installed into the pinned toolchain right before it: only a machine that runs
 # the gates installs them, and no one else's toolchain is touched (rust-toolchain.toml names none). A
 # target already there is a no-op.
-targets() { rustup target add "$@" >&2; }
+targets() { rustup target add "$@" >&2; cross "$@"; }
+# hyper-quic's TLS brings aws-lc-sys, whose build compiles AWS-LC's C for each target: a target other than this host's
+# gets zig as its C compiler and archiver (scripts/zig-cc, docs/design/hex-quic.md Q1). A check links nothing.
+host=$(rustc -vV | sed -n 's/^host: //p')
+cross() {
+  for t in "$@"; do
+    [ "$t" = "$host" ] && continue
+    command -v zig >/dev/null || { printf '::: zig is needed to compile C for %s (scripts/zig-cc)\n' "$t" >&2; exit 1; }
+    v=$(printf %s "$t" | tr - _)
+    export "CC_$v=$PWD/scripts/zig-cc" "AR_$v=$PWD/scripts/zig-ar"
+  done
+}
 gate cargo fmt --all --check
 # Linux on both arches, glibc and musl (the Shards guest's hex is musl aarch64): named, so the host's
 # own target is named too.
 targets x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 gate cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu \
   --target aarch64-unknown-linux-gnu --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl -- -D warnings
-# The same lints for macOS and Windows (checking needs no linker or SDK while the code is pure Rust).
+# The same lints for macOS and Windows (a check links nothing, and aws-lc-sys's C compiles with zig for each).
 # macOS on aarch64 alone; Windows on both arches (Ada, 2026-11-09: "AMD 64 and ARM64 excepting MacOS x86_64").
 targets aarch64-apple-darwin
 gate cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin -- -D warnings

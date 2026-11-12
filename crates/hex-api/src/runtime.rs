@@ -1604,11 +1604,16 @@ pub enum Upstream {
     /// A microVM member's reach to a service its own host serves on its loopback (kiln beside the
     /// VM): Shards' explicit host-service grants.
     MemberHostService,
+    /// The host of an image's run started holding only its stdio, as every program Hex starts on
+    /// macOS is: D231 starts `shards api-run` through std's `Command`, whose macOS spawn passes no
+    /// `POSIX_SPAWN_CLOEXEC_DEFAULT`, so it would inherit every descriptor another thread holds
+    /// without close-on-exec at that moment (CVE-2024-21626's class).
+    RunHostStdioOnly,
 }
 
 impl Upstream {
     /// Every capability, in the order the node's wire tags them.
-    pub const ALL: [Upstream; 9] = [
+    pub const ALL: [Upstream; 10] = [
         Upstream::GuestCpuTimePerVcpu,
         Upstream::MemberExec,
         Upstream::MemberGrantsByName,
@@ -1618,6 +1623,7 @@ impl Upstream {
         Upstream::MemberSignal,
         Upstream::MemberGrantsByAddress,
         Upstream::MemberHostService,
+        Upstream::RunHostStdioOnly,
     ];
 }
 
@@ -1637,6 +1643,9 @@ impl std::fmt::Display for Upstream {
             Self::MemberSignal => "a signal to Shards members (its agent-control endpoint)",
             Self::MemberGrantsByAddress => "a Shards member's grants by address",
             Self::MemberHostService => "a Shards member's reach to its host's own service",
+            Self::RunHostStdioOnly => {
+                "Shards' host of an image's run started holding only its stdio (owed by D231)"
+            }
         })
     }
 }
