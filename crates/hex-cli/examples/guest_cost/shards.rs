@@ -938,6 +938,89 @@ impl Probe for VmmHolds {
 mod tests {
     use super::*;
 
+    /// A stand-in VMM's start into its place, a child of the test's own: `lifecycle.exec`, a program's run to its end
+    /// (hex_testkit::waits::PROGRAM), which bounds what it does on its way.
+    #[cfg(target_os = "linux")]
+    static STARTED: hex_core::patience::Patience =
+        hex_core::patience::Patience::seeded("lifecycle.exec", hex_testkit::waits::PROGRAM);
+
+    /// A place for a stand-in VMM under a cgroup of the test's own, as a launch makes one (`Places::place`), and the
+    /// stand-in in it: a shell that joins the place's cgroup as a launch's wrapper does, then holds on its stdin, so it
+    /// outlives its guest's stop until the test closes it. None where the test's cgroup takes no child or no process
+    /// moves into one (a cgroup not delegated to it), said as a skip.
+    #[cfg(target_os = "linux")]
+    fn a_place_held(test: &str, dir: &Path) -> Option<(PathBuf, Place, std::process::Child)> {
+        let own = hex_runtime::linux::cgroup::own_cgroup().unwrap();
+        let parent = own.join(format!("hex-guest-cost-test-{}", std::process::id()));
+        if let Err(e) = std::fs::create_dir(&parent) {
+            let why = format!("{} takes no child: {e}", own.display());
+            hex_testkit::skip(test, "a cgroup delegated to the test", &why).unwrap();
+            return None;
+        }
+        let place = Place {
+            cgroup: parent.join("vm-0"),
+            wrapper: dir.join("vm-0"),
+        };
+        std::fs::create_dir(&place.cgroup).unwrap();
+        std::fs::write(&place.wrapper, "#!/bin/sh\n").unwrap();
+        let mut vmm = std::process::Command::new("/bin/sh")
+            .args(["-c", "echo $$ > \"$1/cgroup.procs\" && exec cat", "sh"])
+            .arg(&place.cgroup)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let cgroup = hex_runtime::linux::cgroup::BoxCgroup::at(place.cgroup.clone());
+        let mut ended = None;
+        hex_testkit::waits::until(&STARTED, "the stand-in VMM in its place or ended", || {
+            ended = vmm.try_wait().unwrap();
+            ended.is_some() || cgroup.populated().unwrap()
+        })
+        .unwrap();
+        if let Some(status) = ended {
+            let _ = std::fs::remove_dir(&place.cgroup);
+            let _ = std::fs::remove_dir(&parent);
+            let why = format!(
+                "no process moves into {} ({status})",
+                place.cgroup.display()
+            );
+            hex_testkit::skip(test, "a cgroup delegated to the test", &why).unwrap();
+            return None;
+        }
+        Some((parent, place, vmm))
+    }
+
+    /// AC-T7.4.1 (ROOT, 2026-11-12, at Shards 66113379): a VMM that outlives its guest's stop and its teardown is ended
+    /// before its place goes. At 66113379 a guest's stop answers at its run's end and its VMM's host exits on its own
+    /// after, so a census that removed the VMM's cgroup at once met it still populated: `Device or resource busy`. Do
+    /// give a stand-in VMM a place as a launch does, its process in the place's cgroup, its guest's stop come and gone
+    /// while it holds on, and remove the place with its teardown's time spent. Expect the place gone, its cgroup and its
+    /// wrapper, and the stand-in ended by its cgroup's kill.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_vmm_that_outlives_its_teardown_is_ended_before_its_place_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let test = "a_vmm_that_outlives_its_teardown_is_ended_before_its_place_goes";
+        let Some((parent, place, mut vmm)) = a_place_held(test, dir.path()) else {
+            return;
+        };
+        let got = place.remove();
+        let (cgroup_left, wrapper_left) = (place.cgroup.exists(), place.wrapper.exists());
+        let killed = vmm.try_wait().unwrap();
+        let _ = vmm.kill();
+        let _ = vmm.wait();
+        let _ = std::fs::remove_dir(&place.cgroup);
+        let _ = std::fs::remove_dir(&parent);
+        assert_eq!(got, Ok(()));
+        assert!(!cgroup_left && !wrapper_left, "the place is left");
+        use std::os::unix::process::ExitStatusExt as _;
+        assert_eq!(
+            killed.and_then(|status| status.signal()),
+            Some(9),
+            "{killed:?}"
+        );
+    }
+
     fn config(dir: &Path) -> GuestConfig {
         for (name, bytes) in [
             ("shards", b"vmm".as_slice()),
