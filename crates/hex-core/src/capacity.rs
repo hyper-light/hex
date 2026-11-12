@@ -189,3 +189,172 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod contract_tests {
+    use hex_api::capacity::{Close, Fence, Invalid, ReservationId, ScopeRefused, ToHolder, ToKeeper, View, Why};
+
+    use crate::lanes::CAPACITY_PORT;
+
+    /// The section of capacity-view.md that says what kiln's runner implements as a holder.
+    fn contract() -> String {
+        let doc = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/design/capacity-view.md"
+        ))
+        .unwrap();
+        let (_, rest) = doc
+            .split_once("## What kiln's runner implements as a holder on `CAPACITY_PORT`")
+            .expect("capacity-view.md has no holder contract");
+        rest.split("\n## ").next().unwrap_or_default().to_owned()
+    }
+
+    /// Each word's name, by a match the compiler holds to every variant: one more is a doc to write.
+    fn keeper_words() -> Vec<&'static str> {
+        let fence = Fence {
+            keeper: 0,
+            session: 0,
+            holder: 0,
+        };
+        let id = ReservationId { epoch: 0, seq: 0 };
+        [
+            ToKeeper::Hello {
+                holder: String::new(),
+                epoch: 0,
+                scope: None,
+            },
+            ToKeeper::Sync {
+                fence,
+                held: Vec::new(),
+            },
+            ToKeeper::Reserve {
+                fence,
+                id,
+                amount: hex_api::capacity::Amounts::ZERO,
+            },
+            ToKeeper::Release { fence, id },
+        ]
+        .iter()
+        .map(|word| match word {
+            ToKeeper::Hello { .. } => "Hello",
+            ToKeeper::Sync { .. } => "Sync",
+            ToKeeper::Reserve { .. } => "Reserve",
+            ToKeeper::Release { .. } => "Release",
+        })
+        .collect()
+    }
+
+    fn holder_words() -> Vec<&'static str> {
+        let fence = Fence {
+            keeper: 0,
+            session: 0,
+            holder: 0,
+        };
+        let id = ReservationId { epoch: 0, seq: 0 };
+        let view = View::default();
+        let zero = hex_api::capacity::Amounts::ZERO;
+        [
+            ToHolder::Welcome { fence, view },
+            ToHolder::Synced {
+                fence,
+                view,
+                count: 0,
+                sum: zero,
+                released: 0,
+                adopted: 0,
+                disagreed: 0,
+            },
+            ToHolder::Granted {
+                fence,
+                id,
+                amount: zero,
+                view,
+            },
+            ToHolder::Refused {
+                fence,
+                id,
+                why: Why::Room,
+                view,
+            },
+            ToHolder::Released { fence, id, view },
+            ToHolder::Hint { fence, view },
+            ToHolder::Closed {
+                rejected: None,
+                why: Close::Session,
+            },
+        ]
+        .iter()
+        .map(|word| match word {
+            ToHolder::Welcome { .. } => "Welcome",
+            ToHolder::Synced { .. } => "Synced",
+            ToHolder::Granted { .. } => "Granted",
+            ToHolder::Refused { .. } => "Refused",
+            ToHolder::Released { .. } => "Released",
+            ToHolder::Hint { .. } => "Hint",
+            ToHolder::Closed { .. } => "Closed",
+        })
+        .collect()
+    }
+
+    fn closes() -> Vec<&'static str> {
+        [
+            Close::OlderEpoch { current: 0 },
+            Close::Session,
+            Close::NotSynced,
+            Close::HoldersFull { bound: 0 },
+            Close::Invalid(Invalid::Name),
+            Close::Scope(ScopeRefused::NotOwned),
+            Close::NotAuthorized,
+        ]
+        .iter()
+        .map(|why| match why {
+            Close::OlderEpoch { .. } => "OlderEpoch",
+            Close::Session => "Session",
+            Close::NotSynced => "NotSynced",
+            Close::HoldersFull { .. } => "HoldersFull",
+            Close::Invalid(_) => "Invalid",
+            Close::Scope(_) => "Scope",
+            Close::NotAuthorized => "NotAuthorized",
+        })
+        .collect()
+    }
+
+    fn refusals() -> Vec<&'static str> {
+        [
+            Why::Room,
+            Why::Full { bound: 0 },
+            Why::Empty,
+            Why::Devices,
+            Why::Disagrees,
+        ]
+        .iter()
+        .map(|why| match why {
+            Why::Room => "Room",
+            Why::Full { .. } => "Full",
+            Why::Empty => "Empty",
+            Why::Devices => "Devices",
+            Why::Disagrees => "Disagrees",
+        })
+        .collect()
+    }
+
+    /// AC-T7.4.1, CV9 (doc truth): read capacity-view.md's holder contract; expect it to number the port as the code
+    /// does and to name every word a holder says, every answer it hears, and every close and refusal it is told.
+    #[test]
+    fn the_holder_contract_names_the_port_and_every_word() {
+        let contract = contract();
+        let port = format!("0x{:04x}_{:04x}", CAPACITY_PORT >> 16, CAPACITY_PORT & 0xffff);
+        assert!(contract.contains(&port), "the contract numbers no {port}");
+        for name in keeper_words()
+            .into_iter()
+            .chain(holder_words())
+            .chain(closes())
+            .chain(refusals())
+        {
+            assert!(
+                contract.contains(&format!("`{name}")) || contract.contains(&format!("{name} {{")),
+                "the holder contract doesn't name {name}"
+            );
+        }
+    }
+}
