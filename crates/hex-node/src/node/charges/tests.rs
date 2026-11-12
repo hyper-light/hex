@@ -674,7 +674,9 @@ fn w14_the_last_resorts_ends_are_kept_to_the_machines_population() {
         (3, Class::Firecracker),
     ] {
         let id = BoxId::new(&format!("vm-{n}")).unwrap();
-        learner.record_end(class, &id, why(n * GIB)).unwrap();
+        learner
+            .record_end(class, &id, [u8::try_from(n).unwrap(); 16], why(n * GIB))
+            .unwrap();
     }
     let ids = |class| -> Vec<String> {
         learner
@@ -716,11 +718,11 @@ fn shards_spec(id: &BoxId) -> hex_api::BoxSpec {
 
 /// Joint plan step 14 (AC-T7.4.1), C5 on the box itself (ROOT, 2026-11-12): a last-resort end shows in inspect and
 /// survives a restart. Do record three Shards VMs in a node's store as its create does, run the learner's windows past
-/// their fleet's 16 GiB memory budget until it ends vm-2, write the ends it hasn't recorded into their records as the
-/// node does after each window, reopen the store as a restarted node would, build vm-2's inspect from its backend's
-/// info and its record, and read that through the node's wire; then write the end against a lifetime vm-2's record
-/// isn't. Expect vm-2's record to say why after the reopen, its inspect and the wire's to say the same, vm-1's and
-/// vm-3's none, no end left unrecorded, and the end for another lifetime not written.
+/// their fleet's 16 GiB memory budget, vm-2 holding 12 GiB, until it ends vm-2, write the ends it hasn't recorded into
+/// their records as the node does after each window, reopen the store as a restarted node would, build vm-2's inspect
+/// from its backend's info and its record, and read that through the node's wire; then write the end against a
+/// lifetime vm-2's record isn't. Expect vm-2's record to say why after the reopen, its inspect and the wire's to say
+/// the same, vm-1's and vm-3's none, no end left unrecorded, and the end for another lifetime not written.
 #[test]
 fn w14_a_last_resort_end_shows_in_inspect_and_survives_a_restart() {
     use crate::store::Store;
@@ -748,7 +750,9 @@ fn w14_a_last_resort_end_shows_in_inspect_and_survives_a_restart() {
     learner
         .window(&io, vms.clone(), booked_at_four, &[], fleet_budget, start)
         .unwrap();
-    for (name, held) in [("vm-1", 6 * GIB), ("vm-2", 7 * GIB), ("vm-3", 2 * GIB)] {
+    // vm-2 alone passes its budget whatever order the VMs' scopes put them in: its charge is its 8 GiB ceiling, which
+    // the 4 GiB of room raise its booking to, and it holds 12.
+    for (name, held) in [("vm-1", 2 * GIB), ("vm-2", 12 * GIB), ("vm-3", 2 * GIB)] {
         io.set(&fleet().join(name), 0, held);
     }
     learner
@@ -773,10 +777,10 @@ fn w14_a_last_resort_end_shows_in_inspect_and_survives_a_restart() {
     let ended = store.get(&vms[1].0).unwrap().unwrap().unwrap();
     let end = ended.last_resort.clone().unwrap();
     assert_eq!(end.id.as_str(), "vm-2");
-    assert_eq!(end.held, 7 * GIB);
+    assert_eq!((end.held, end.budget), (12 * GIB, 8 * GIB));
     assert_eq!(
         (end.fleet_held, end.fleet_growth, end.fleet_budget),
-        (15 * GIB, 15 * GIB, 16 * GIB)
+        (16 * GIB, 16 * GIB, 16 * GIB)
     );
     for other in [&vms[0].0, &vms[2].0] {
         assert_eq!(

@@ -573,7 +573,7 @@ impl Learner {
         &mut self,
         class: Class,
         id: &BoxId,
-        _scope: Scope,
+        scope: Scope,
         why: Excess,
     ) -> Result<(), Refusal> {
         let end = LearnedEnd {
@@ -590,9 +590,17 @@ impl Learner {
         if self.ended.len() >= bound {
             self.ended.pop_front();
         }
+        if self.unrecorded.len() >= bound {
+            self.unrecorded.pop_front();
+        }
         self.ended
             .try_reserve(1)
             .map_err(|_| full("the last resort's ends"))?;
+        self.unrecorded
+            .try_reserve(1)
+            .map_err(|_| full("the last resort's unrecorded ends"))?;
+        self.unrecorded
+            .push_back((id.try_clone()?, scope, end.try_clone()?));
         self.ended.push_back((class, end));
         Ok(())
     }

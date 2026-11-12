@@ -4617,7 +4617,8 @@ fn a_shards_image_vm_carries_its_grants_on_the_wire() {
 }
 
 /// Joint plan step 15 (N6): do answer an inspect of a running Shards image VM with its grants and its publish as
-/// the host bound it. Expect: read back whole, the bound port's grant, socket and receiver last. Do: answer one
+/// the host bound it. Expect: read back whole, the bound port's grant, socket and receiver last but for the last
+/// resort's none tag (joint plan step 14). Do: answer one
 /// whose report names an egress grant, and read one whose receiver tag no receiver has. Expect: refused as
 /// "published" written, and by the receiver's name read.
 #[test]
@@ -4643,6 +4644,7 @@ fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
     tail.extend([4, 127, 0, 0, 1]);
     tail.extend(49152u16.to_le_bytes());
     tail.push(0);
+    tail.extend([0; NO_END]);
     assert!(bytes.ends_with(&tail));
     let wrong = Answer::Info(BoxInfo {
         class: Class::Shards,
@@ -4661,8 +4663,8 @@ fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
         })
     ));
     let mut hostile = bytes.clone();
-    let last = hostile.len() - 1;
-    hostile[last] = 1;
+    let receiver = hostile.len() - 1 - NO_END;
+    hostile[receiver] = 1;
     assert!(matches!(
         read_answer(&received(&hostile, 0), MAX_MESSAGE),
         Err(Fault::Value {
