@@ -789,8 +789,8 @@ fn a_create_is_refused_before_any_record_without_its_waits_or_a_bootable_size() 
     assert!(images.asked.lock().unwrap().is_empty());
 }
 
-/// Joint plan step 12: do create where the host has no image boot, as macOS's is until D231's run host
-/// is started holding only its stdio. Expect: refused naming that, before any record.
+/// Joint plan step 12: do create where the host has no image boot, as macOS's and Windows' are until D231's run
+/// host is started holding only its stdio. Expect: refused naming that, before any record.
 #[test]
 fn a_create_is_refused_before_any_record_on_a_host_without_an_image_boot() {
     let owner = Arc::new(Owner::default());
@@ -813,18 +813,13 @@ fn a_create_is_refused_before_any_record_on_a_host_without_an_image_boot() {
     assert!(Transaction::records(owner.as_ref()).unwrap().is_empty());
 }
 
-/// Joint plan step 12, CLAUDE.md §12: do ask for this host's image boot. Expect: Shards' on Linux; on
-/// Windows the refusal naming Shards' owed Windows run host; on macOS the one naming a run host started
-/// holding only its stdio, since D231 starts it through std's spawn, which hands it every descriptor
-/// another thread holds without close-on-exec.
+/// Joint plan step 12, CLAUDE.md §12: do ask for this host's image boot. Expect: Shards' on Linux; on macOS and
+/// Windows the refusal naming a run host started holding only its stdio, since D231 starts it through std's spawn,
+/// which hands it what another thread holds inheritable then.
 #[test]
 fn this_hosts_image_boot_is_shards_on_linux_and_names_what_d231_owes_elsewhere() {
     let host = host_images().map(|_| ());
-    let expected = if cfg!(windows) {
-        Err(Refusal::Awaits {
-            needs: Upstream::WindowsRunHost,
-        })
-    } else if cfg!(target_os = "macos") {
+    let expected = if cfg!(any(windows, target_os = "macos")) {
         Err(Refusal::Awaits {
             needs: Upstream::RunHostStdioOnly,
         })

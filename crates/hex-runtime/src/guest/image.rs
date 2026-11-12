@@ -9,10 +9,11 @@
 //! neither take back nor prove gone, so its claim is kept and every call refused
 //! `Awaits(AttachAfterCrash)` until a reboot of the host proves it ended).
 //!
-//! D231's own boot and stop wait without a bound of their own, so each runs on a thread of its own and
-//! answers in a [`Slot`]; a caller waits at most its learned patience ([`ImageWaits`]) and is refused
-//! `Lifecycle { Pending }` past it, the answer recorded when it comes. No lock is held over a Shards call,
-//! and a run is let go of only once its stop has returned, since D231 stops a run it drops.
+//! D231's boot waits at most the patience it is given, and its stop for its run's end: each runs on a thread
+//! of its own and answers in a [`Slot`]. A caller waits at most its learned patience ([`ImageWaits`]), which
+//! a boot is given as its own, and is refused `Lifecycle { Pending }` past it, the answer recorded when it
+//! comes. No lock is held over a Shards call, and a run is let go of only once its stop has returned, since
+//! D231 stops a run it drops.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -32,7 +33,7 @@ use crate::devices;
 
 /// The waits an image box's calls make, each learned (decision 9) and seeded from this host class's
 /// slowest recorded answer (bench/native/guest/records.tsv): Shards' boot of an image to its members'
-/// start, a stats answer, and a stop to its run host's exit.
+/// start, a stats answer, and a stop to its run's end.
 pub struct ImageWaits {
     boot: Patience,
     stats: Patience,
@@ -88,7 +89,7 @@ enum Run {
     Booting(Arc<Slot<Result<Box<dyn ImageGuest>, ImageRefusal>>>),
     /// Its run, held. D231 stops a run it drops, so it leaves only through its stop.
     Running(Arc<dyn ImageGuest>),
-    /// Its stop, on a thread of its own, answers here: the run's end, once its host has exited.
+    /// Its stop, on a thread of its own, answers here: the run's end, once its VM is gone.
     Stopping(Arc<Slot<RunEnd>>),
     /// Its end, known, until its record says it.
     Ended(Exit),
@@ -345,8 +346,8 @@ impl ImageBoot {
         )
     }
 
-    /// Stops `guest` on a thread of its own: D231's stop returns once the run host has said its run's
-    /// end and exited, and the guest goes with the thread, its host gone.
+    /// Stops `guest` on a thread of its own: D231's stop returns once its run's end is told, its VM gone;
+    /// the guest goes with the thread, and its run host then exits on its own.
     fn stop(&self, guest: Arc<dyn ImageGuest>) -> Result<Arc<Slot<RunEnd>>, Refusal> {
         let slot = Arc::new(Slot::new());
         let answer = Arc::clone(&slot);
@@ -368,11 +369,8 @@ impl ImageBoot {
     }
 }
 
-/// Shards' image boot (D231) as this host can run it, or why it can't (docs/design/shards-image-class.md
-/// §1): Shards' Windows run host is owed, and on macOS D231 starts its run host through std's `Command`,
-/// whose spawn passes no `POSIX_SPAWN_CLOEXEC_DEFAULT` while macOS's pipe, socket, socketpair and accept
-/// take no close-on-exec flag, so the run host would hold whatever another thread had just made, where
-/// every program Hex starts on macOS holds only its stdio (`crate::macos::command`).
+/// Shards' image boot (D231) as this host can run it, or why it can't (`run_host_awaits`;
+/// docs/design/shards-image-class.md §1).
 pub fn host_images() -> Result<Arc<dyn Images>, Refusal> {
     match run_host_awaits(std::env::consts::OS) {
         Some(needs) => Err(Refusal::Awaits { needs }),
@@ -381,11 +379,15 @@ pub fn host_images() -> Result<Arc<dyn Images>, Refusal> {
 }
 
 /// What D231's run host awaits on the OS `os` (as `std::env::consts::OS` names it) before this class boots
-/// image VMs there, or nothing.
+/// image VMs there, or nothing. D231 starts it through std's `Command`, which hands it what another thread
+/// holds inheritable at that moment, where every program Hex starts holds only its stdio: on macOS std's
+/// spawn passes no `POSIX_SPAWN_CLOEXEC_DEFAULT` while macOS's pipe, socket, socketpair and accept take no
+/// close-on-exec flag (`crate::macos::command` passes it); on Windows its `CreateProcessW` inherits with no
+/// handle list, so every handle then inheritable goes too, a member's stdio among them, which
+/// `crate::windows::sys::create` marks inheritable for that member's own handle list.
 fn run_host_awaits(os: &str) -> Option<Upstream> {
     match os {
-        "windows" => Some(Upstream::WindowsRunHost),
-        "macos" => Some(Upstream::RunHostStdioOnly),
+        "macos" | "windows" => Some(Upstream::RunHostStdioOnly),
         _ => None,
     }
 }
@@ -653,11 +655,15 @@ impl GuestRuntime {
         let slot = Arc::new(Slot::new());
         image.insert(&id, Run::Booting(Arc::clone(&slot)))?;
         let answer = Arc::clone(&slot);
+        // The boot's learned bound, Shards' patience too: past it D231 kills its run host and refuses the
+        // boot, so no box stays Booting. None while it measures, as the census's waits do: Shards waits for
+        // the run's start or its host's end alone, as the caller does.
+        let bound = waits.boot.deadline();
+        let patience = bound.unwrap_or(Duration::MAX);
         let asked = Instant::now();
-        // Shards' own patience unbounded, as before D231 gave one: the caller's wait is bounded below.
         let spawned = std::thread::Builder::new()
             .name("hex-image-boot".to_owned())
-            .spawn(move || answer.put(images.boot(&spec, Duration::MAX)));
+            .spawn(move || answer.put(images.boot(&spec, patience)));
         if let Err(why) = spawned {
             // No boot began: the box ends, its intent's record kept with its end.
             image.insert(&id, Run::Ended(Exit::Unknown))?;
@@ -665,7 +671,6 @@ impl GuestRuntime {
             image.forget(&id)?;
             return Err(Refusal::os("starting a Shards image VM's boot", why));
         }
-        let bound = waits.boot.deadline();
         if !slot.came_within(bound)? {
             if let Some(bound) = bound {
                 waits.boot.ran_out(bound);
