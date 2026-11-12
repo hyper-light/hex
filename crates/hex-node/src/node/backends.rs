@@ -239,8 +239,20 @@ impl Node {
         if left.is_zero() {
             return Err(record.refusal(LifecycleCause::Uncertain));
         }
-        self.supervisor
-            .bind_managed(&native, program, stdio, report, left, publish)
+        // A Firecracker VM given a device whole has its VMM's soft RLIMIT_MEMLOCK raised to its hard one, which its
+        // create found holds the RAM its VMM pins for DMA.
+        let memlock = match plan {
+            ManagedLaunch::Firecracker { memlock, .. } => *memlock,
+            ManagedLaunch::Shards(_) => None,
+        };
+        self.supervisor.bind_managed(
+            &native,
+            program,
+            stdio,
+            process::HeldLaunch { report, memlock },
+            left,
+            publish,
+        )
     }
 
     fn attach_managed(
@@ -337,6 +349,15 @@ impl Node {
             return Err(Refusal::Broken(
                 "node backends are already initialized".into(),
             ));
+        }
+        // Each VM box holds descriptors of the node's past a box's, which only a start that ran VM boxes counted.
+        if (firecracker.is_some() || shards.is_some()) && !self.pools.vms {
+            return Err(Refusal::Invalid {
+                what: "VM backends",
+                why: "this node's start counted no VM boxes' descriptors among its own: open it running them \
+                      (Node::open_running, Runs { vms: true })"
+                    .to_owned(),
+            });
         }
         if let Some(guest) = &shards {
             guest.bind_books(self.backend_books())?;

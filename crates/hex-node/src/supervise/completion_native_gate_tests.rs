@@ -481,7 +481,7 @@ fn completion_publication_refusal_never_executes_marker() {
                 &native,
                 &program,
                 Stdio::null(),
-                None,
+                hex_runtime::linux::process::HeldLaunch::default(),
                 lab.config.gate(),
                 &mut |_| {
                     published = true;
@@ -532,7 +532,7 @@ fn completion_durable_publication_releases_and_reaps() {
                 &native,
                 &program,
                 Stdio::null(),
-                None,
+                hex_runtime::linux::process::HeldLaunch::default(),
                 lab.config.gate(),
                 &mut |identity| {
                     let result = (|| -> Check<()> {
@@ -662,7 +662,7 @@ fn parent_body(config: Config, scope: PathBuf) -> Check<()> {
                                 &native,
                                 &program,
                                 Stdio::null(),
-                                None,
+                                hex_runtime::linux::process::HeldLaunch::default(),
                                 gate,
                                 &mut |identity| {
                                     let (lock, changed) = &*stop;

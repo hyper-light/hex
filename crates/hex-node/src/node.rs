@@ -132,6 +132,14 @@ impl CrashPoint {
 /// box id starts with `.`, so it can't be a box's.
 pub const OCI_BOXES: &str = ".oci";
 
+/// What a node runs past its own `process` and `oci` boxes, which its start counts the descriptors of among its own
+/// (`netns::hold_descriptors`), so they fit its descriptor limit by construction (the lead, 2026-11-11).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Runs {
+    /// VM boxes, a Firecracker VM's or a Shards guest's, whose backends [`Node::install_backends`] installs.
+    pub vms: bool,
+}
+
 /// A node agent over the `process` and `oci` classes.
 pub struct Node {
     attachments: hex_runtime::devices::SharedCatalog,
@@ -263,21 +271,41 @@ impl Node {
     /// Opens a node agent whose boxes live under cgroup `box_root` with their records in `state_dir`,
     /// the `io` bounds applying to the disks under `disk_path`. Does not recover; call [`Node::recover`].
     pub fn open(box_root: &Path, state_dir: &Path, disk_path: &Path) -> Result<Self, Refusal> {
+        Self::open_running(box_root, state_dir, disk_path, Runs::default())
+    }
+
+    /// [`Node::open`] for a node that runs what `runs` says past its own boxes, its start counting their descriptors
+    /// among its own: VM boxes, whose backends [`Node::install_backends`] installs only on a node opened to run them.
+    pub fn open_running(
+        box_root: &Path,
+        state_dir: &Path,
+        disk_path: &Path,
+        runs: Runs,
+    ) -> Result<Self, Refusal> {
         let disks = disks::under(disk_path)?;
-        Self::with_root(BoxRoot::open(box_root, disks)?, state_dir)
+        Self::with_root(BoxRoot::open(box_root, disks)?, state_dir, runs)
     }
 
     /// Opens a node agent in a cgroup subtree beside this process's own cgroup (the usual case: the
     /// node agent runs in a delegated leaf and its boxes in a sibling), records under `state_dir`.
     pub fn beside_self(state_dir: &Path, disk_path: &Path) -> Result<Self, Refusal> {
+        Self::beside_self_running(state_dir, disk_path, Runs::default())
+    }
+
+    /// [`Node::beside_self`] for a node that runs what `runs` says past its own boxes ([`Node::open_running`]).
+    pub fn beside_self_running(
+        state_dir: &Path,
+        disk_path: &Path,
+        runs: Runs,
+    ) -> Result<Self, Refusal> {
         let disks = disks::under(disk_path)?;
-        Self::with_root(BoxRoot::beside_self(disks)?, state_dir)
+        Self::with_root(BoxRoot::beside_self(disks)?, state_dir, runs)
     }
 
     /// The node over `root`, records under `state_dir` and its runtime directory ([`crate::store`]);
     /// this process becomes a child subreaper, so each `oci` box's init is its child once the shim
     /// exits.
-    fn with_root(root: BoxRoot, state_dir: &Path) -> Result<Self, Refusal> {
+    fn with_root(root: BoxRoot, state_dir: &Path, runs: Runs) -> Result<Self, Refusal> {
         let owner = match (
             rustix::process::geteuid().as_raw(),
             rustix::process::getegid().as_raw(),
@@ -314,7 +342,8 @@ impl Node {
         let pools = match owner {
             Owner::Root => Pools::root(sizes, files_ahead),
             Owner::Rootless { .. } => Pools::rootless(sizes, files_ahead),
-        };
+        }
+        .running_vms(runs.vms);
         // Once every descriptor the node holds for its life beside its bounds is open (its store, keeper, roots and
         // /dev/null), and before any thread or pool holds one: every bound that holds them fitted to the hard limit,
         // past which the node's own budgets refuse by type (crate::netns::hold_descriptors).
