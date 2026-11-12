@@ -239,11 +239,76 @@ static CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
     class_waits!("client.guest.answer", "shards", measuring),
 ];
 
-/// A node agent in a guest, reached through a [`Link`].
-pub type Client = Core<Stream>;
+/// The learned waits a guest's protocol carries a client's calls under (decision 9; AC-T7.4.1): each transport that
+/// carries it learns its own, never another's record, so the type names whose tables a [`Stream`] times by.
+pub trait Waits: Send + Sync + 'static {
+    /// The plain kinds' waits ([`Transport::answers`]).
+    fn answers() -> &'static [Patience; KINDS];
+    /// A class's box kinds' waits ([`Transport::class_answers`]).
+    fn class_answers(class: hex_api::Class) -> &'static [Patience; BOX_KINDS];
+}
+
+/// A guest's node, over vsock or its stand-in: the tables above.
+pub struct Guest;
+
+impl Waits for Guest {
+    fn answers() -> &'static [Patience; KINDS] {
+        &ANSWERS
+    }
+
+    fn class_answers(class: hex_api::Class) -> &'static [Patience; BOX_KINDS] {
+        by_class(&CLASS_ANSWERS, class)
+    }
+}
+
+/// A node over QUIC (`hex-quic`'s link; docs/design/hex-quic.md Q7): the guest's protocol on hyper-transport's lanes,
+/// its waits its own, `client.quic.answer.<kind>` and `client.quic.answer.<kind>.<class>`, each MEASURING until a
+/// census over QUIC records it, never the guest's record.
+pub struct Quic;
+
+static QUIC_ANSWERS: [Patience; KINDS] = [
+    Patience::measuring("client.quic.answer.hello"),
+    Patience::measuring("client.quic.answer.list"),
+    Patience::measuring("client.quic.answer.netns"),
+    Patience::measuring("client.quic.answer.schedule.describe"),
+    Patience::measuring("client.quic.answer.schedule.advertise"),
+    Patience::measuring("client.quic.answer.schedule.submit"),
+    Patience::measuring("client.quic.answer.schedule.hear_create"),
+    Patience::measuring("client.quic.answer.schedule.hear_delete"),
+    Patience::measuring("client.quic.answer.schedule.hear_control"),
+    Patience::measuring("client.quic.answer.schedule.link_up"),
+    Patience::measuring("client.quic.answer.schedule.retry"),
+    Patience::measuring("client.quic.answer.schedule.delete"),
+    Patience::measuring("client.quic.answer.schedule.status"),
+    Patience::measuring("client.quic.answer.physical_report"),
+    Patience::measuring("client.quic.answer.initialize_backing"),
+    Patience::measuring("client.quic.answer.release_backing"),
+    Patience::measuring("client.quic.answer.backing_usage"),
+];
+
+static QUIC_CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
+    class_waits!("client.quic.answer", "process", measuring),
+    class_waits!("client.quic.answer", "oci", measuring),
+    class_waits!("client.quic.answer", "firecracker", measuring),
+    class_waits!("client.quic.answer", "shards", measuring),
+];
+
+impl Waits for Quic {
+    fn answers() -> &'static [Patience; KINDS] {
+        &QUIC_ANSWERS
+    }
+
+    fn class_answers(class: hex_api::Class) -> &'static [Patience; BOX_KINDS] {
+        by_class(&QUIC_CLASS_ANSWERS, class)
+    }
+}
+
+/// A node agent reached through a [`Link`]: in a guest by default, its calls timed by `W`'s waits.
+pub type Client<W = Guest> = Core<Stream<W>>;
 
 /// The control connection, as a client's transport: read and written without waiting, waited on by the core.
-pub struct Stream {
+pub struct Stream<W = Guest> {
+    waits: std::marker::PhantomData<fn() -> W>,
     link: LinkOwner,
     /// Configuration, not a connection-lifetime deadline: each operation starts its own cap.
     reply_budget: Option<Duration>,
@@ -336,7 +401,7 @@ fn protocol_write(
     Ok(())
 }
 
-impl Stream {
+impl<W: Waits> Stream<W> {
     /// A stdio connection of its own to the guest, named for `named`, so the guest's relay hands it to that exec's
     /// program as its stream.
     fn dial_named(&self, named: Named) -> Result<DuplexOwner, Refusal> {
@@ -383,7 +448,7 @@ fn name_before(
         .map_err(os("handing off a named stdio connection"))
 }
 
-impl Stream {
+impl<W: Waits> Stream<W> {
     /// Each stream asked for is a stdio connection of its own to the guest, named for the exec, and the
     /// caller holds that connection's socket: the guest's relay splices it to the program, so no byte is
     /// copied on the host (native plan step 8).
@@ -491,7 +556,7 @@ pub(crate) fn open_offered(
     })
 }
 
-impl Transport for Stream {
+impl<W: Waits> Transport for Stream<W> {
     type Reading = Reading;
     const MAKES_ASKED: bool = true;
 
@@ -512,11 +577,11 @@ impl Transport for Stream {
     }
 
     fn answers() -> &'static [Patience; KINDS] {
-        &ANSWERS
+        W::answers()
     }
 
     fn class_answers(class: hex_api::Class) -> &'static [Patience; BOX_KINDS] {
-        by_class(&CLASS_ANSWERS, class)
+        W::class_answers(class)
     }
 
     fn reply_budget(&self) -> Option<Duration> {
@@ -800,8 +865,8 @@ const READS_PER_READY: usize = 64;
 /// The event form's reading side ([`Client::connect_evented`]): no thread, but the loop that waits on
 /// [`Pump::handle`] calls [`Pump::ready`] when it is ready, which reads what has come and hands each
 /// message to its call's completion, and writes what waits. It holds the connection's reader's turn for good.
-pub struct Pump {
-    shared: SharedOwner<Stream>,
+pub struct Pump<W: Waits = Guest> {
+    shared: SharedOwner<Stream<W>>,
     ended: bool,
 }
 
@@ -816,7 +881,7 @@ pub enum Pumped {
     Ended,
 }
 
-impl Pump {
+impl<W: Waits> Pump<W> {
     /// The connection's OS handle, borrowed, for the loop to wait on; out of the loop's set before the
     /// pump drops.
     pub fn handle(&self) -> Handle<'_> {
@@ -865,6 +930,19 @@ impl Pump {
     }
 }
 
+impl<W: Waits> Core<Stream<W>> {
+    /// [`Client::connect_before`] over a link whose transport learns its own waits, `W`'s (a node over QUIC).
+    pub fn connect_timed_before(link: LinkOwner, deadline: Instant) -> Result<Self, Refusal> {
+        let budget = link.reply_budget();
+        let deadline =
+            ReplyDeadline::caller_before(deadline)?.limited_by(ReplyDeadline::caller(budget)?);
+        Core::hello_before(
+            Shared::try_new(Stream::dial_before(link, budget, Some(deadline))?)?,
+            Some(deadline),
+        )
+    }
+}
+
 impl Client {
     /// Dials the guest's node agent through `link` and learns what it runs and its bounds.
     pub fn connect(link: LinkOwner) -> Result<Self, Refusal> {
@@ -881,13 +959,7 @@ impl Client {
     /// The resulting connection has no lifetime deadline; later bounded operations take their
     /// own original deadline.
     pub fn connect_before(link: LinkOwner, deadline: Instant) -> Result<Self, Refusal> {
-        let budget = link.reply_budget();
-        let deadline =
-            ReplyDeadline::caller_before(deadline)?.limited_by(ReplyDeadline::caller(budget)?);
-        Core::hello_before(
-            Shared::try_new(Stream::dial_before(link, budget, Some(deadline))?)?,
-            Some(deadline),
-        )
+        Self::connect_timed_before(link, deadline)
     }
 
     /// The event form ([`Pump`]): dials the guest's node agent through `link` and says hello, its answer read by
@@ -942,16 +1014,18 @@ impl Client {
     }
 }
 
-impl Stream {
+#[cfg(test)]
+impl Stream<Guest> {
     /// The guest's control port dialed through `link`, its relay's token read, and the connection made to read and
     /// write without waiting, as the core waits on it.
-    #[cfg(test)]
     pub(crate) fn dial(link: LinkOwner) -> Result<Self, Refusal> {
         let budget = link.reply_budget();
         let deadline = ReplyDeadline::caller(budget)?;
         Self::dial_before(link, budget, deadline)
     }
+}
 
+impl<W: Waits> Stream<W> {
     fn dial_before(
         link: LinkOwner,
         budget: Option<Duration>,
@@ -993,6 +1067,7 @@ impl Stream {
         conn.set_nonblocking(true)
             .map_err(os("reading the node agent's connection without waiting"))?;
         Ok(Self {
+            waits: std::marker::PhantomData,
             link,
             reply_budget: budget,
             token,

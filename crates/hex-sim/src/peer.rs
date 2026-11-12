@@ -1044,6 +1044,9 @@ pub struct Node {
     pick: Pick,
     owned: BTreeMap<Key, Owned>,
     ran: BTreeMap<Key, Ran>,
+    /// What each box it runs holds now, where its shell said so ([`Node::rebook`]): its learned booking and
+    /// the memory and disk it holds past it (joint plan steps 13 and 14). A box not said holds its receipt.
+    holds: BTreeMap<Key, Resources>,
     /// For the shell: what the node told its clients and its runtime.
     pub told: Vec<Told>,
 }
@@ -1352,6 +1355,7 @@ impl Node {
             pick,
             owned,
             ran: recovered,
+            holds: BTreeMap::new(),
             told: Vec::new(),
         })
     }
@@ -2323,20 +2327,54 @@ impl Node {
         sum
     }
 
-    /// What this node's own admissions hold of its room, for the machine's capacity view (joint plan
-    /// step 13, `docs/design/capacity-view.md` CV2): in each dimension the larger of what its ledger
-    /// admitted and what its admission index holds, which charges backings too.
-    pub fn held(&self) -> Result<lb::Amounts, Stop> {
+    /// What this node's own admissions book of its room, each box at its receipt: in each dimension the
+    /// larger of what its ledger admitted and what its admission index holds, which charges backings too.
+    pub fn booked(&self) -> Result<lb::Amounts, Stop> {
         let index = self
             .admission
             .held(self.id)
             .map_err(|e| Stop::Damaged(e.to_string()))?;
         let index = amounts(&index);
-        let mut held = self.admitted();
-        for (h, i) in held.iter_mut().zip(index) {
-            *h = (*h).max(i);
+        let mut booked = self.admitted();
+        for (b, i) in booked.iter_mut().zip(index) {
+            *b = (*b).max(i);
+        }
+        Ok(booked)
+    }
+
+    /// What this node's own admissions hold of its room now, for the machine's capacity view (joint plan
+    /// step 13, `docs/design/capacity-view.md` CV2; step 14's C8): what they book ([`Node::booked`]), each
+    /// box its shell rebooked held at what it said instead of its receipt. GPUs stay their receipts'.
+    pub fn held(&self) -> Result<lb::Amounts, Stop> {
+        let mut held = self.booked()?;
+        for (key, holds) in &self.holds {
+            let Some(r) = self.ran.get(key).filter(|r| !r.ended) else {
+                continue;
+            };
+            let receipt = amounts(&assignment(&r.demand, r.allocation, r.route)?);
+            let holds = amounts(&Resources { gpus: 0, ..*holds });
+            for ((h, receipt), holds) in held.iter_mut().zip(receipt).zip(holds).take(3) {
+                *h = h
+                    .checked_sub(receipt)
+                    .and_then(|rest| rest.checked_add(holds))
+                    .ok_or_else(|| damaged("a rebooked box's holding against what is booked"))?;
+            }
         }
         Ok(held)
+    }
+
+    /// What each box this node runs holds now, as its shell learned it (joint plan step 14, C8): its learned
+    /// booking, and the memory and disk it holds past it. Replaces what was said before; a box not named
+    /// holds its receipt again, and one that no longer runs here holds nothing, so it is not kept. Returns
+    /// how many it kept.
+    pub fn rebook(&mut self, holds: impl IntoIterator<Item = (Key, Resources)>) -> usize {
+        self.holds.clear();
+        for (key, holding) in holds {
+            if self.ran.get(&key).is_some_and(|r| !r.ended) {
+                self.holds.insert(key, holding);
+            }
+        }
+        self.holds.len()
     }
 
     /// The boxes this node owns that wait for room, run, or have ended unforgotten.
