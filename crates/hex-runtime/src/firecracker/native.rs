@@ -30,7 +30,11 @@ pub struct FirecrackerRuntime {
     books: Weak<dyn Books>,
     initialized: std::sync::OnceLock<()>,
     host: vfio::Host,
-    /// Where a function no reset clears is marked given on this boot: the node's runtime directory (`Node::oci_root`).
+    /// Where a function no reset clears is marked given on this boot: the node's runtime directory (`Node::oci_root`),
+    /// the one every node of its user on the host shares (`/run/hex-node` for root, `$XDG_RUNTIME_DIR/hex-node` for
+    /// another user), or, where it is the node's own (a rootless node with no `$XDG_RUNTIME_DIR` keeps it in its own
+    /// state), why; such a node gives no such function to a VM, and no node gives one whose VFIO group another user
+    /// owns ([`FirecrackerRuntime::unavailable_once`]).
     marks: single_use::MarksAt,
     /// This node's effective user.
     uid: u32,
@@ -470,13 +474,14 @@ impl FirecrackerRuntime {
         }
         let mut record = transaction.read(&id)?.ok_or_else(|| uncertain(&id))?;
         let plan = vfio::plan(&self.host, &self.catalog, &record.spec.devices, &[])?;
-        // A function no reset clears goes to one VM per host boot: refused where any node's VM had it on this one.
+        // A function no reset clears goes to one VM per host boot: refused where any node's VM had it on this one, or
+        // where this node can't tell (unavailable_once).
         let functions = vfio::functions(&plan)?;
         let once = vfio::once_per_boot(&self.host, &functions)?;
-        let marks = single_use::Marks::of(&self.marks.dir, self.boot.as_ref())?;
-        if let Some((function, spent)) = marks.check(&once)? {
-            return Err(single_use::refused(function, spent, self.boot.as_ref()));
+        if let Some((function, spent)) = self.unavailable_once(&once)? {
+            return Err(single_use::refused(function, &spent, self.boot.as_ref()));
         }
+        let marks = single_use::Marks::of(&self.marks.dir, self.boot.as_ref())?;
         let paths = self.paths(&record)?;
         match fs::symlink_metadata(&paths.dir) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -593,6 +598,41 @@ impl FirecrackerRuntime {
             .and_then(|file| file.sync_all())
             .map_err(|e| Refusal::os("syncing VM state removal", e))?;
         transaction.remove(id)
+    }
+
+    /// The first of `once`, functions no reset clears (by SBDF), that can't go to a VM now, and why. Only a node whose
+    /// marks every node of its user on the host reads gives one out: one whose runtime directory is its own doesn't,
+    /// and none takes a function whose VFIO group another user owns, whose nodes mark it in their own runtime
+    /// directory. Then the marks say whether a VM had it on this boot ([`single_use::Marks`]).
+    fn unavailable_once<'f>(
+        &self,
+        once: &[&'f str],
+    ) -> Result<Option<(&'f str, single_use::Spent)>, Refusal> {
+        let Some(&first) = once.first() else {
+            return Ok(None);
+        };
+        if let Some(why) = &self.marks.unshared {
+            return Ok(Some((
+                first,
+                single_use::Spent::Unshared {
+                    dir: copy_path(&self.marks.dir)?,
+                    why: text(why)?,
+                },
+            )));
+        }
+        for &function in once {
+            let owner = vfio::group_owner(&self.host, function)?;
+            if owner != self.uid {
+                return Ok(Some((
+                    function,
+                    single_use::Spent::Foreign {
+                        owner,
+                        uid: self.uid,
+                    },
+                )));
+            }
+        }
+        single_use::Marks::of(&self.marks.dir, self.boot.as_ref())?.check(once)
     }
 
     /// Recovery uses the canonical native scope and VMM witnesses, never another backend or pick.
@@ -729,14 +769,12 @@ impl FirecrackerRuntime {
         // the pool says so before its observer is drained.
         let functions = vfio::functions(&plan)?;
         let once = vfio::once_per_boot(&self.host, &functions)?;
-        if let Some((function, spent)) =
-            single_use::Marks::of(&self.marks.dir, self.boot.as_ref())?.check(&once)?
-        {
+        if let Some((function, spent)) = self.unavailable_once(&once)? {
             return Err(single_use::pool_refused(
                 "a GPU pool's handoff to a box (VFIO)",
                 &key,
                 function,
-                spent,
+                &spent,
                 self.boot.as_ref(),
             ));
         }
@@ -932,8 +970,8 @@ impl FirecrackerRuntime {
             .devices
             .try_reserve_exact(self.catalog.entries().len())
             .map_err(|_| exhausted("VFIO capacity", self.catalog.entries().len()))?;
-        // A function no reset clears that a VM had on this boot is listed, never offered: unavailable, with why.
-        let marks = single_use::Marks::of(&self.marks.dir, self.boot.as_ref())?;
+        // A function no reset clears that can't go to a VM now (unavailable_once) is listed, never offered:
+        // unavailable, with why.
         let mut unavailable = Vec::new();
         unavailable
             .try_reserve_exact(self.catalog.entries().len())
@@ -967,10 +1005,10 @@ impl FirecrackerRuntime {
             if !matches!(device.holder, Some(hex_api::DeviceHolder::Box(_))) {
                 let declared = vfio::declared(entry)?;
                 let once = vfio::once_per_boot(&self.host, &declared)?;
-                if let Some((function, spent)) = marks.check(&once)? {
+                if let Some((function, spent)) = self.unavailable_once(&once)? {
                     unavailable.push(hex_api::DeviceUnavailable {
                         id: device.id,
-                        why: single_use::reason(function, spent, self.boot.as_ref()),
+                        why: single_use::reason(function, &spent, self.boot.as_ref()),
                     });
                 }
             }

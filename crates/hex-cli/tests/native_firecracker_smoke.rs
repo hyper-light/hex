@@ -720,9 +720,10 @@ fn single_use(sbdf: &str, group: u64) -> bool {
     !listed(&["bus", "cxl_bus"]) || foreign
 }
 
-/// The mark of `sbdf`, a function no reset clears, that the backend leaves once a VM was given it: in the runtime
-/// directory every node on the host shares (hex-node's `oci_root`: `/run/hex-node` for root, else
-/// `$XDG_RUNTIME_DIR/hex-node`, else the node's state's `oci`).
+/// The mark of `sbdf`, a function no reset clears, that the backend leaves once a VM was given it: in the node's
+/// runtime directory (hex-node's `oci_root`), the one every node of its user on the host shares, `/run/hex-node` for
+/// root, else `$XDG_RUNTIME_DIR/hex-node`. A rootless node with no `$XDG_RUNTIME_DIR` keeps it in its state's `oci`,
+/// read by no other node, and gives no such function to a VM.
 fn mark(state: &Path, sbdf: &str) -> PathBuf {
     let runtime = if rustix::process::geteuid().is_root() {
         PathBuf::from("/run/hex-node")

@@ -1,10 +1,12 @@
 //! A passthrough function that no reset clears between VMs ([`super::vfio::once_per_boot`]) goes to one VM per host
 //! boot (AC-T7.4.1; docs/design/firecracker-gpu-host.md): the next VM given it would boot into the last one's state, as
 //! GPU run r940's did ("PSP create ring failed"). Its mark names the boot session a VM was given it on, in the node's
-//! runtime directory, which every node on the host shares and a reboot clears: written durably before that VM's VMM
-//! opens it, it refuses the function to every later VM of that boot, any node's, and a later boot's session admits it
-//! again. What clears a function at a VM's end, vfio-pci's reset or
-//! nothing, is the kernel's alone to know: it tells no process (pci.c logs a reset's outcome at debug level only).
+//! runtime directory, the one every node of its user on the host shares ([`MarksAt`]): written durably before that
+//! VM's VMM opens it, it refuses the function to every later VM of that boot, any node's, and a later boot's session
+//! admits it again. Only a node whose runtime directory is that shared one, and whose user owns the function's VFIO
+//! group, gives it out ([`Spent::Unshared`], [`Spent::Foreign`]): so every node that can give it out reads one
+//! directory. What clears a function at a VM's end, vfio-pci's reset or nothing, is the kernel's alone to know: it
+//! tells no process (pci.c logs a reset's outcome at debug level only).
 
 use super::native::path;
 use super::{exhausted, invalid};
@@ -29,12 +31,16 @@ pub struct MarksAt {
 }
 
 /// Why a function that no reset clears can't go to a VM now.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Spent {
     /// A VM was given it on this boot.
     ThisBoot,
     /// This boot's session can't be read, so no mark can be told from this boot's.
     BootUnknown,
+    /// The node's mark would lie where the host's other nodes don't read it: its runtime directory and why.
+    Unshared { dir: PathBuf, why: String },
+    /// Its VFIO group's interface belongs to another user, whose nodes mark it in their own runtime directory.
+    Foreign { owner: u32, uid: u32 },
 }
 
 /// The core: whether a function no reset clears, last given to a VM on boot `mark` (`None`: never, as its marks
@@ -168,14 +174,23 @@ fn sync(dir: &Path) -> Result<(), Refusal> {
 }
 
 /// Why `function`, which no reset clears, can't go to a VM now.
-pub(super) fn reason(function: &str, spent: Spent, now: Option<&BootSession>) -> String {
+pub(super) fn reason(function: &str, spent: &Spent, now: Option<&BootSession>) -> String {
     match (spent, now) {
         (Spent::ThisBoot, Some(now)) => format!(
             "{function} has no reset method that clears it between VMs, and a VM had it on this boot ({}); the host \
              must reboot before another VM may have it",
             now.as_str()
         ),
-        _ => format!(
+        (Spent::Unshared { dir, why }, _) => format!(
+            "{function} has no reset method that clears it between VMs, and this node's runtime directory ({}), where \
+             it marks one given out, is its own: {why}; it gives such a function to no VM",
+            dir.display()
+        ),
+        (Spent::Foreign { owner, uid }, _) => format!(
+            "{function} has no reset method that clears it between VMs, and its VFIO group belongs to user {owner}, \
+             not this node's ({uid}): that user's nodes mark it given out where this one doesn't read"
+        ),
+        (Spent::ThisBoot | Spent::BootUnknown, _) => format!(
             "{function} has no reset method that clears it between VMs, and the host's boot session can't be read to \
              show that no VM had it on this boot"
         ),
@@ -183,7 +198,7 @@ pub(super) fn reason(function: &str, spent: Spent, now: Option<&BootSession>) ->
 }
 
 /// A VM's refusal of `function`, which no reset clears, for `spent`.
-pub(super) fn refused(function: &str, spent: Spent, now: Option<&BootSession>) -> Refusal {
+pub(super) fn refused(function: &str, spent: &Spent, now: Option<&BootSession>) -> Refusal {
     Refusal::Platform {
         what: "a VM given a device whole (VFIO)",
         platform: "linux",
@@ -197,7 +212,7 @@ pub(super) fn pool_refused(
     what: &'static str,
     key: &BackingKey,
     function: &str,
-    spent: Spent,
+    spent: &Spent,
     now: Option<&BootSession>,
 ) -> Refusal {
     let pool: String = key.pool.iter().map(|byte| format!("{byte:02x}")).collect();
