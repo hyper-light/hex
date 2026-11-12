@@ -39,7 +39,7 @@ pub fn own_cgroup(leaf: &str) -> PathBuf {
 
 /// The node's Shards home and cache (`hex-node`'s `shards_native_paths`: beside its state's records), whose store
 /// its image VMs boot from.
-fn shards_dirs(state: &Path) -> (PathBuf, PathBuf) {
+pub fn shards_dirs(state: &Path) -> (PathBuf, PathBuf) {
     (
         state.join("shards-native-home"),
         state.join("shards-native-cache"),
