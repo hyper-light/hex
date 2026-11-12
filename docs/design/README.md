@@ -61,6 +61,7 @@ and `Placement`.
 | A microVM charged its learned use, its envelope the ceiling; CPU shared by booking, memory held to a budget, the over VM ended last; budgets per fleet as each guest's D188 room (`learned-charge.md`) | joint plan step 14 | charge decided by Ada 2026-11-11; rule proposed 2026-11-12 |
 | One capacity view per machine: Hex's node agent keeps the machine's one ledger of room and kiln's runner reserves through it; one rule for full on both sides, fences by epochs and sessions, never a release on silence, the person's release of a holder gone for good, no leases (`capacity-view.md`, CV1-CV11) | joint plan step 13 | proposed 2026-11-12; protocol sent to kiln's Load Balancing agent; cores and seam built, the node's shell next |
 | Networking: namespaces, CNI-compatible plugins, policies from Agentfile grants | CP-T7.7 | open |
+| Network grants for a microVM's members: who, to whom, which ports, which way, default deny; Hex decides each VM's policy and Shards' per-VM network process enforces it; what Shards `482c5d78` can express is programmed and the rest refused typed until Shards' step 9 (`network-grants.md`) | joint plan step 15, CP-T7.7 | decided 2026-11-12; programming waits on goal 12's image class |
 | Storage: a CSI-like interface; images from Reliquary, lazily | CP-T7.8 | open |
 | The Kubernetes API subset | CP-T7.13 | open |
 
