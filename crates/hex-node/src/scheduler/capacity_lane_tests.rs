@@ -131,10 +131,7 @@ fn the_scheduler_serves_its_capacity_view_to_the_holders_it_names_alone() {
         credentials,
         holders: [KILN, KILN_B]
             .into_iter()
-            .map(|name| CapacityHolder {
-                name: name.into(),
-                user: None,
-            })
+            .map(|name| CapacityHolder { name: name.into() })
             .collect(),
     };
     let (report, lines) = kept();
@@ -215,10 +212,7 @@ fn a_peer_the_lane_doesnt_name_holds_none_of_its_connections() {
     let lane = CapacityLane {
         bind: loopback(),
         credentials,
-        holders: vec![CapacityHolder {
-            name: KILN.into(),
-            user: None,
-        }],
+        holders: vec![CapacityHolder { name: KILN.into() }],
     };
     let (report, _) = kept();
     let service = Service::open(&config(dir.path(), Some(lane)), report).unwrap();
@@ -277,10 +271,7 @@ fn without_a_lane_nothing_is_bound_and_a_release_is_refused() {
     let lane = CapacityLane {
         bind: loopback(),
         credentials: begun,
-        holders: vec![CapacityHolder {
-            name: KILN.into(),
-            user: None,
-        }],
+        holders: vec![CapacityHolder { name: KILN.into() }],
     };
     let (report, _) = kept();
     let opened = Service::open(&config(&dir.path().join("some"), Some(lane)), report);

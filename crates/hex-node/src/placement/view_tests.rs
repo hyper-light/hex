@@ -5,8 +5,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use hex_api::capacity::{
-    Amounts, CapacityView, Event, Holder, Host, Out, Read, Scope, ToHolder, ToKeeper, Why,
-    conformance,
+    Amounts, CapacityView, Event, Holder, Host, Out, Scope, ToHolder, ToKeeper, Why, conformance,
 };
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Refusal, Runtime};
 use hex_sim::index::Pick;
@@ -72,19 +71,10 @@ impl CapacityView for NodeHost {
 }
 
 impl Host for NodeHost {
-    fn sample(&mut self, room: Amounts, used: &[(u64, Read)]) -> Result<(), Refusal> {
+    fn set_room(&mut self, room: Amounts) -> Result<(), Refusal> {
         self.room = room;
-        self.view.sample(room, used);
+        self.view.set_room(room);
         Ok(())
-    }
-
-    fn scopes(&mut self) -> Result<Vec<(u64, Scope)>, Refusal> {
-        Ok(self
-            .view
-            .scopes()
-            .into_iter()
-            .map(|(link, _, scope)| (link, scope))
-            .collect())
     }
 
     fn set_local(&mut self, local: Amounts) -> Result<(), Refusal> {
@@ -524,4 +514,76 @@ fn a_holder_reaches_the_nodes_keeper_over_quic() {
         panic!("no hint");
     };
     assert_eq!((view.room.cpu_milli, view.held.cpu_milli), (4000, 4000));
+}
+
+/// AC-T7.4.1, CV12 (withdrawn): on a machine of 8 GiB a holder whose hello names its work's cgroup reserves 4 GiB, and its
+/// work uses 3, so the node's facts measure 5; the node places a box of 4 GiB, then one of 1. Expect the box of 4 refused
+/// and the box of 1 started: the holder's 3 GiB counted twice, missing from the measured room and held besides, which
+/// admits less and never more than the machine holds, and nothing the hello named credited.
+#[test]
+fn cv12_withdrawn_a_holders_used_memory_is_counted_twice_never_credited() {
+    const GIB: u64 = 1 << 30;
+    let machine = |mem_bytes| Resources {
+        cpu_milli: 4000,
+        mem_bytes,
+        ..Resources::default()
+    };
+    let demand_mem = |bytes| {
+        let (mut demand, mut payload) = demand_of(1000);
+        demand.need.mem_bytes = bytes;
+        payload.spec.bounds.memory_max = Some(bytes);
+        (demand, payload)
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let runtime: Arc<dyn Runtime> = Arc::new(hex_api::sim::SimRuntime::default());
+    let driver = Driver::boot(
+        NodeId(0),
+        &[NodeSpec::new(NodeId(0), machine(8 * GIB))],
+        &[],
+        Budget { owned: 4, ran: 4 },
+        Pick::default(),
+        dir.path(),
+        Runtimes::new([(Class::Oci, runtime)]).unwrap(),
+    )
+    .unwrap();
+    driver
+        .refresh_node(NodeSpec::new(NodeId(0), machine(8 * GIB)))
+        .unwrap();
+    driver.open_view(&dir.path().join("capacity"), 1).unwrap();
+    let hello = ToKeeper::Hello {
+        holder: "kiln-runner".into(),
+        epoch: 1,
+        scope: Some(Scope::Cgroup("kiln.slice/jobs".into())),
+    };
+    let mut kiln = Holder::start("kiln-runner".into(), 1, 4, &[]).unwrap();
+    kiln.connect().unwrap();
+    let joined = talk(&driver, &mut kiln, vec![hello]);
+    assert!(
+        matches!(joined.as_slice(), [Event::Synced { agree: true, .. }]),
+        "{joined:?}"
+    );
+    let (run, msg) = kiln
+        .reserve(Amounts {
+            mem_bytes: 4 * GIB,
+            ..Amounts::ZERO
+        })
+        .unwrap();
+    assert_eq!(
+        talk(&driver, &mut kiln, vec![msg]),
+        vec![Event::Granted(run)]
+    );
+    driver
+        .refresh_node(NodeSpec::new(NodeId(0), machine(5 * GIB)))
+        .unwrap();
+    let (d, p) = demand_mem(4 * GIB);
+    let (_, step) = driver.submit(d, p).unwrap();
+    assert!(
+        !started(&quiesce(&driver, step)),
+        "the holder's use was credited"
+    );
+    let view = driver.view().unwrap();
+    assert_eq!((view.room.mem_bytes, view.free().mem_bytes), (5 * GIB, GIB));
+    let (d, p) = demand_mem(GIB);
+    let (_, step) = driver.submit(d, p).unwrap();
+    assert!(started(&quiesce(&driver, step)));
 }
