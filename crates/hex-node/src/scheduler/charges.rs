@@ -1,9 +1,8 @@
 //! Joint plan step 14 (AC-T7.4.1; `docs/design/learned-charge.md`): the node's shell around `hex_sim::charge`. Once
 //! a window it reads every microVM the node runs on its own allocation ([`crate::placement::Driver::measured_vms`])
 //! and learns their charges and bookings (C1 to C3). On each refresh it gives the node's facts the priors it learned,
-//! which the placement index books a new VM's receipt at (C2), and moves the node's capacity by what the ledger's
-//! receipts book past the learned bookings, so the ledger's free room is the budget less what the VMs are learned to
-//! take (C3, C6).
+//! which the placement index books a new VM's receipt at (C2). The node's capacity stays the machine's: what VMs
+//! hold past their receipts reaches the machine's view as each VM's holding (C8), never as a shifted room.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -22,8 +21,6 @@ pub(super) struct Charges {
     node: charge::Node<Key>,
     /// Each VM's last reading: its VMM's CPU so far, in microseconds, and when.
     last: BTreeMap<Key, (u64, Instant)>,
-    /// What each VM's receipt booked: what the ledger holds of it.
-    receipts: BTreeMap<Key, CapacityResources>,
 }
 
 fn refused(why: ChargeError) -> Refusal {
@@ -62,13 +59,6 @@ fn vcpus(allocation: hex_api::Allocation) -> Result<u32, Refusal> {
     })
 }
 
-fn sum(a: CapacityResources, b: CapacityResources) -> Result<CapacityResources, Refusal> {
-    a.checked_add(b).ok_or_else(|| Refusal::Invalid {
-        what: "a microVM's learned charge",
-        why: "the receipts' bookings overflow".into(),
-    })
-}
-
 impl Charges {
     /// A node enforcing CPU over `window`, holding at most `bound` VMs and as many classes.
     pub(super) fn new(window: Duration, bound: usize) -> Result<Self, Refusal> {
@@ -83,7 +73,6 @@ impl Charges {
             )
             .map_err(refused)?,
             last: BTreeMap::new(),
-            receipts: BTreeMap::new(),
         })
     }
 
@@ -100,7 +89,6 @@ impl Charges {
         for key in gone {
             self.node.end(&key).map_err(refused)?;
             self.last.remove(&key);
-            self.receipts.remove(&key);
         }
         for vm in vms {
             if !self.node.holds(&vm.key) {
@@ -114,7 +102,6 @@ impl Charges {
                         vm.allocation.booking(),
                     )
                     .map_err(refused)?;
-                self.receipts.insert(vm.key, vm.allocation.booking());
                 self.last.insert(vm.key, (vm.usage.cpu_usec, now));
                 continue;
             }
@@ -141,10 +128,8 @@ impl Charges {
         self.node.settle().map_err(refused)
     }
 
-    /// Gives `local` what the node learned (C2, C3, C6): its budget is `local`'s capacity, each VM class's prior is
-    /// set where its class has warmed evidence, and its capacity is moved by what the receipts book past the learned
-    /// bookings and what VMs hold past those, so the ledger, booking the receipts, leaves the budget less what the VMs
-    /// are learned to take.
+    /// Gives `local` what the node learned (C2): its budget is `local`'s capacity, and each VM class's prior is set
+    /// where its class has warmed evidence. Its capacity is left as it is: the machine's.
     pub(super) fn apply(&mut self, local: &mut NodeSpec) -> Result<(), Refusal> {
         let budget = CapacityResources {
             cpu_milli: local.capacity.cpu_milli,
@@ -185,31 +170,6 @@ impl Charges {
                 });
             }
         }
-        let receipts = self
-            .receipts
-            .values()
-            .try_fold(CapacityResources::default(), |total, more| {
-                sum(total, *more)
-            })?;
-        let learned = self.node.reservation().map_err(refused)?;
-        let moved = |capacity: u64, receipt: u64, taken: u64| {
-            capacity.saturating_add(receipt).saturating_sub(taken)
-        };
-        local.capacity.cpu_milli = moved(
-            local.capacity.cpu_milli,
-            receipts.cpu_milli,
-            learned.cpu_milli,
-        );
-        local.capacity.mem_bytes = moved(
-            local.capacity.mem_bytes,
-            receipts.mem_bytes,
-            learned.mem_bytes,
-        );
-        local.capacity.disk_bytes = moved(
-            local.capacity.disk_bytes,
-            receipts.disk_bytes,
-            learned.disk_bytes,
-        );
         Ok(())
     }
 }

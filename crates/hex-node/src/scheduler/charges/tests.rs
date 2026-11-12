@@ -63,12 +63,11 @@ fn node() -> NodeSpec {
     node
 }
 
-/// Joint plan step 14 (AC-T7.4.1), C2 and C3 through the node's shell: do read a VM booked at its whole receipt at a
-/// tenth of a core and 1 GiB for SEEDABLE windows; expect no prior while it is cold and the node's capacity as it
-/// was, then the class's prior its learned tail and the capacity moved by what its receipt books past what it is
-/// learned to take, so the ledger's free room is the budget less the learned booking.
+/// Joint plan step 14 (AC-T7.4.1), C2 through the node's shell: do read a VM booked at its whole receipt at a tenth
+/// of a core and 1 GiB for SEEDABLE windows; expect no prior while it is cold, then the class's prior its learned
+/// tail, a new receipt booked at it, and the node's capacity the machine's throughout: the room is never shifted (C8).
 #[test]
-fn w14_the_shell_learns_a_prior_and_moves_the_capacity_by_the_receipts() {
+fn w14_the_shell_learns_a_prior_and_leaves_the_capacity_the_machines() {
     let allocation = cost().allocate(CapacityResources::default()).unwrap();
     let mut charges = Charges::new(WINDOW, 8).unwrap();
     let start = Instant::now();
@@ -102,15 +101,13 @@ fn w14_the_shell_learns_a_prior_and_moves_the_capacity_by_the_receipts() {
             booking: learned,
         })
     );
-    assert_eq!(warm.capacity.cpu_milli, 16_000 + 16_000 - 100);
-    assert_eq!(warm.capacity.mem_bytes, 64 * GIB + 8 * GIB - GIB);
-    // A new VM's receipt is booked at the prior, and the ledger's room after both is the budget less the bookings.
+    assert_eq!(warm.capacity, node().capacity);
+    // A new VM's receipt is booked at the prior.
     let booked = hex_sim::model::booked_at(Some(allocation), warm.priors[Class::Shards.index()]);
     assert_eq!(booked.unwrap().booking(), learned);
 }
 
-/// Joint plan step 14 (AC-T7.4.1), C3: do stop reading a VM; expect it ended in the shell, its receipt no longer
-/// moving the capacity.
+/// Joint plan step 14 (AC-T7.4.1), C3: do stop reading a VM; expect it ended in the shell.
 #[test]
 fn w14_a_vm_no_longer_read_has_ended() {
     let allocation = cost().allocate(CapacityResources::default()).unwrap();
@@ -127,5 +124,12 @@ fn w14_a_vm_no_longer_read_has_ended() {
         .unwrap();
     assert!(charges.node.holds(&key(1)));
     assert!(!charges.node.holds(&key(2)));
-    assert_eq!(charges.receipts.len(), 1);
+    assert_eq!(charges.last.len(), 1);
+}
+
+/// Joint plan step 14 (AC-T7.4.1, C8): a capacity answer's learned holdings are bounded by a node's most boxes, so a
+/// node never has more running VMs to report than its answer may carry.
+#[test]
+fn w14_learned_holdings_are_bounded_by_a_nodes_boxes() {
+    assert_eq!(hex_api::MAX_LEARNED_HOLDINGS, hex_runtime::MAX_BOXES);
 }

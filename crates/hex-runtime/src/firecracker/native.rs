@@ -2620,6 +2620,7 @@ mod single_use_tests {
                 device_routes: Vec::new(),
                 backings: Vec::new(),
                 unavailable: Vec::new(),
+                learned: None,
             })
         }
         fn physical_devices(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
