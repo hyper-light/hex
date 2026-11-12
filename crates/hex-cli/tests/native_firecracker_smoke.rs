@@ -376,13 +376,16 @@ fn records(state: &Path, id: &BoxId) -> Vec<PathBuf> {
     found
 }
 
+/// The backend's marks of the functions no reset clears, in its state beside its VMs' directories.
+const MARKS: &str = "single-use";
+
 /// The one VM directory a single box leaves in the backend's state while it runs.
 fn vm_dir(config: &Path) -> PathBuf {
     let config = hex_runtime::firecracker::Config::from_file(config).unwrap();
     let mut dirs: Vec<_> = fs::read_dir(&config.state_dir)
         .unwrap()
         .map(|e| e.unwrap().path())
-        .filter(|p| p.is_dir())
+        .filter(|p| p.is_dir() && !p.ends_with(MARKS))
         .collect();
     assert_eq!(dirs.len(), 1, "one VM directory: {dirs:?}");
     dirs.pop().unwrap()
@@ -692,6 +695,34 @@ fn vfio_group_opens(group: u64) -> std::io::Result<()> {
 }
 
 /// The host driver of PCI function `sbdf`.
+/// Whether the host's kernel lists no reset that clears PCI function `sbdf`, alone in IOMMU group `group`, at its
+/// VM's end (docs/design/firecracker-gpu-host.md): no method of its own, and a bus reset, if listed, beside a device
+/// on its bus that its VM isn't given. 0000:79:00.0 on 00aad8da lists `bus` beside its audio, crypto and USB functions.
+fn single_use(sbdf: &str, group: u64) -> bool {
+    let methods = fs::read_to_string(
+        Path::new("/sys/bus/pci/devices")
+            .join(sbdf)
+            .join("reset_method"),
+    )
+    .unwrap_or_default();
+    let listed = |names: &[&str]| methods.split_whitespace().any(|m| names.contains(&m));
+    if listed(&["device_specific", "acpi", "flr", "af_flr", "pm"]) {
+        return false;
+    }
+    let names = |dir: &str| -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect()
+    };
+    let given = names(&format!("/sys/kernel/iommu_groups/{group}/devices"));
+    let bus = sbdf.rsplit_once(':').unwrap().0;
+    let foreign = names("/sys/bus/pci/devices").iter().any(|name| {
+        name.rsplit_once(':').is_some_and(|(on, _)| on == bus) && !given.contains(name)
+    });
+    !listed(&["bus", "cxl_bus"]) || foreign
+}
+
 fn driver(sbdf: &str) -> String {
     fs::read_link(format!("/sys/bus/pci/devices/{sbdf}/driver"))
         .unwrap()
@@ -952,14 +983,44 @@ fn native_firecracker_gpu_box_computes_recovers_and_returns_its_gpu() {
         "no VMM names the VM's directory"
     );
     assert!(!dir.exists(), "the VM's state is gone");
-    assert!(
-        state_dir_entries(&config).is_empty(),
-        "{:?}",
-        state_dir_entries(&config)
-    );
     assert!(vfio_holders(group).is_empty(), "no process holds the GPU");
     vfio_group_opens(group).unwrap();
     assert_eq!(driver(host_sbdf), "vfio-pci");
+    let state_dir = hex_runtime::firecracker::Config::from_file(&config)
+        .unwrap()
+        .state_dir;
+    if single_use(host_sbdf, group) {
+        // Its one VM of this boot has ended: marked so, and the next on this boot refused before its VMM.
+        assert_eq!(state_dir_entries(&config), vec![state_dir.join(MARKS)]);
+        assert!(state_dir.join(MARKS).join(host_sbdf).is_file());
+        let second = BoxId::new("fc-gpu-second").unwrap();
+        let begun = Instant::now();
+        let refused = client
+            .create_before(
+                gpu_spec(&inputs, &config, &second),
+                Instant::now() + inputs.wait,
+            )
+            .unwrap_err();
+        eprintln!(
+            "GPU second create on this boot refused after {:?}: {refused:?}",
+            begun.elapsed()
+        );
+        assert!(
+            matches!(&refused, Refusal::Platform { why, .. }
+                if ["no reset method", "the host must reboot", host_sbdf].iter().all(|named| why.contains(named))),
+            "{refused:?}"
+        );
+        assert!(client.list().unwrap().is_empty(), "the node lists no box");
+        assert!(vmm(&binary, &state_dir).is_empty(), "no VMM was started");
+        assert!(vfio_holders(group).is_empty(), "no process holds the GPU");
+        assert_eq!(state_dir_entries(&config), vec![state_dir.join(MARKS)]);
+    } else {
+        assert!(
+            state_dir_entries(&config).is_empty(),
+            "{:?}",
+            state_dir_entries(&config)
+        );
+    }
     drop(client);
     let state = node.state.clone();
     drop(node);

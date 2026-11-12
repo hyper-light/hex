@@ -329,6 +329,7 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
                 config,
                 node.device_catalog(),
                 node.backend_books(),
+                node.boot_session(),
             )
             .map(Arc::new)
             .map_err(failed)

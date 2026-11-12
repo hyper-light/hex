@@ -10,6 +10,8 @@ mod observations;
 #[cfg(target_os = "linux")]
 mod native;
 #[cfg(target_os = "linux")]
+mod single_use;
+#[cfg(target_os = "linux")]
 mod transport;
 #[cfg(target_os = "linux")]
 mod vfio;
