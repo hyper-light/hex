@@ -109,7 +109,7 @@ mod hosted {
         fn classes(&self) -> Vec<Class> {
             self.0.classes()
         }
-        fn physical_report(&self) -> Result<hex_api::devices::PhysicalReport, Refusal> {
+        fn physical_report(&self) -> Result<hex_api::PhysicalReport, Refusal> {
             self.0.physical_report()
         }
         fn capacity(&self, class: Class) -> Result<Option<Capacity>, Refusal> {
