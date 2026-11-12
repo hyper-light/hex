@@ -847,7 +847,9 @@ impl Supervisor {
     /// reaps it for the caller, and `pidfd` (the agent's own duplicate) lets the agent reap it instead
     /// if a delete beats the caller. The container's init blocks in the kernel until the programs in its
     /// pid namespace are reaped, so a delete that didn't reap them would never empty the box (decision
-    /// 3). Refused past [`PROGRAM_BUDGET`] watched for the box at once.
+    /// 3). Refused past [`PROGRAM_BUDGET`] watched for the box at once, and past the node's budget kept for every box
+    /// together, the inits', which is the programs its socket watches and which its start fits to its descriptor limit
+    /// with every pidfd counted (the lead, 2026-11-11; `netns::hold_descriptors`).
     pub fn own_program(
         self: &Arc<Self>,
         id: &BoxId,
@@ -856,6 +858,7 @@ impl Supervisor {
     ) -> Result<Box<dyn Proc>, Refusal> {
         let pid = proc.pid();
         let exit = Arc::new(Mutex::new(None));
+        let budget = self.inits()?.budget;
         {
             let mut programs = self.programs.lock().map_err(poisoned)?;
             let watched = programs.entry(id.clone()).or_default();
@@ -867,7 +870,25 @@ impl Supervisor {
                     bound: PROGRAM_BUDGET,
                 });
             }
-            watched.push(Program {
+            let kept = |programs: &BTreeMap<BoxId, Vec<Program>>| {
+                programs
+                    .values()
+                    .map(Vec::len)
+                    .fold(0, usize::saturating_add)
+            };
+            if kept(&programs) >= budget {
+                // Every box's programs let go that have ended no longer count, as each box's next exec finds.
+                for watched in programs.values_mut() {
+                    watched.retain(|p| !p.released || !ended_and_reaped(p.pidfd.as_fd()));
+                }
+                if kept(&programs) >= budget {
+                    return Err(Refusal::Exhausted {
+                        what: "exec'd programs the node keeps to reap",
+                        bound: budget,
+                    });
+                }
+            }
+            programs.entry(id.clone()).or_default().push(Program {
                 pid,
                 pidfd,
                 exit: Arc::clone(&exit),
