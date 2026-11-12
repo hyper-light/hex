@@ -277,17 +277,18 @@ impl Learner {
     }
 
     /// One window (C1 to C5, C7), read at `now`: the VMs `running`, each new one found by `record` (its class and
-    /// receipt; none for a box that isn't a VM with a receipt), within the fleet's `budget`. A failure is kept until a
-    /// window passes.
+    /// receipt; none for a box that isn't a VM with a receipt), the reuse slots live boxes hold (`held`, in order),
+    /// within the fleet's `budget`. A failure is kept until a window passes.
     pub(super) fn window(
         &mut self,
         io: &impl Cgroups,
         running: Vec<(BoxId, Scope, BoxCgroup)>,
         record: impl Fn(&BoxId) -> Result<Option<(Class, Allocation)>, Refusal>,
+        held: &[u64],
         budget: CapacityResources,
         now: Instant,
     ) -> Result<(), Refusal> {
-        let outcome = self.learn(io, running, record, budget, now);
+        let outcome = self.learn(io, running, record, held, budget, now);
         self.fault = outcome.as_ref().err().cloned();
         outcome
     }
@@ -297,6 +298,7 @@ impl Learner {
         io: &impl Cgroups,
         running: Vec<(BoxId, Scope, BoxCgroup)>,
         record: impl Fn(&BoxId) -> Result<Option<(Class, Allocation)>, Refusal>,
+        _held: &[u64],
         budget: CapacityResources,
         now: Instant,
     ) -> Result<(), Refusal> {
@@ -554,11 +556,14 @@ impl Node {
         let Ok(mut learner) = learner.lock() else {
             return;
         };
-        let read = self
-            .supervisor
-            .running_vms()
-            .and_then(|running| Ok((running, self.native_capacity()?.total)));
-        let (running, budget) = match read {
+        let read = self.supervisor.running_vms().and_then(|running| {
+            Ok((
+                running,
+                self.cgroups.held_slots()?,
+                self.native_capacity()?.total,
+            ))
+        });
+        let (running, held, budget) = match read {
             Ok(read) => read,
             Err(why) => return learner.failed(why),
         };
@@ -574,7 +579,7 @@ impl Node {
             Ok(record.spec.allocation.map(|allocation| (class, allocation)))
         };
         // Its outcome is kept as the learner's fault, which the capacity answers read.
-        let _ = learner.window(&Kernel, running, record, budget, Instant::now());
+        let _ = learner.window(&Kernel, running, record, &held, budget, Instant::now());
     }
 
     /// What `class`'s capacity answer carries of the learner (C8), fitted to one message.
