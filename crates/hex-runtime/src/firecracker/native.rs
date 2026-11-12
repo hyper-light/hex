@@ -144,6 +144,17 @@ impl FirecrackerRuntime {
         })
     }
 
+    /// The RLIMIT_MEMLOCK the VMM of a VM given a device whole, its guest's RAM `ram` bytes, runs under, under this
+    /// process's own limit and capabilities ([`vfio::dma_memlock`]). A VM given none maps no RAM for DMA, and its VMM
+    /// runs under the node's own.
+    fn dma_memlock(ram: u64) -> Result<Option<rustix::process::Rlimit>, Refusal> {
+        vfio::dma_memlock(
+            ram,
+            rustix::process::getrlimit(rustix::process::Resource::Memlock),
+            vfio::vmm_holds_ipc_lock()?,
+        )
+    }
+
     fn vm_program(&self, paths: &Paths) -> Result<Program, Refusal> {
         let mut program = Program::default();
         program
@@ -416,6 +427,18 @@ impl FirecrackerRuntime {
         }
         let pools = transaction.pool_records()?;
         let _selection = self.catalog.prepare(&spec, &records, &pools)?;
+        // A VM given devices whole has its VMM pin all its RAM for DMA: refused here, before anything is written or
+        // launched, where its memlock can't hold that; else its VMM's soft limit raised to its hard one if need be.
+        let memlock = if spec.devices.is_empty() {
+            None
+        } else {
+            let ram = self
+                .config
+                .machine_memory(&spec)?
+                .checked_mul(1 << 20)
+                .ok_or_else(|| invalid("guest memory overflow"))?;
+            Self::dma_memlock(ram)?
+        };
         let id = spec.id.try_clone()?;
         // The optional handoff already persisted this SAME scope before stopping its observer.
         if let Some(scope) = expected_scope {
@@ -473,6 +496,7 @@ impl FirecrackerRuntime {
             &ManagedLaunch::Firecracker {
                 program: &program,
                 vsock: &paths.vsock,
+                memlock,
             },
             io,
             remaining(until)?,

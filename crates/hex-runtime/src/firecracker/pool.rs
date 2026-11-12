@@ -568,6 +568,13 @@ impl FirecrackerRuntime {
                 accepted.phase = BackingPhase::Live;
                 return Ok(accepted);
             }
+            // Its VMM pins all its RAM for DMA, the observer VM given its GPUs whole: refused before anything is
+            // granted or launched where its memlock can't hold that (FirecrackerRuntime::dma_memlock).
+            let memlock = if grant.devices.is_empty() {
+                None
+            } else {
+                Self::dma_memlock(grant.allocation.guest()?.mem_bytes)?
+            };
             let record = transaction.grant_pool(&grant)?;
             self.preflight_backing(&record)?;
             self.config.verify_inputs()?;
@@ -598,6 +605,7 @@ impl FirecrackerRuntime {
                 &ManagedLaunch::Firecracker {
                     program: &program,
                     vsock: &paths.vsock,
+                    memlock,
                 },
                 io,
                 remaining(until)?,

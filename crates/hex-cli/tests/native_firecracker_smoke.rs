@@ -627,20 +627,23 @@ fn gpu_ram(inputs: &Inputs) -> u64 {
     gpu(inputs, "memory_bytes").as_u64().unwrap()
 }
 
-/// AC-T7.4.1 (L1's memlock repro): a VFIO VM's VMM maps all its guest's RAM for DMA, pinning it against its
-/// RLIMIT_MEMLOCK. Do: under a RLIMIT_MEMLOCK below the GPU VM's RAM, which this test reads and requires (the run
-/// lowers it with `ulimit -l` in its own shell; the node and its VMM inherit it), create the GPU box. Expect its create
-/// refused Broken before readiness, the VMM's last output naming the DMA map's ENOMEM, and the GPU returned: no box,
-/// no VM state, no VMM, no holder of its VFIO group, which opens.
+/// AC-T7.4.1 (L1's memlock repro; the lead's ruling of 2026-11-11): a VFIO VM's VMM maps all its guest's RAM for DMA,
+/// pinning it against its RLIMIT_MEMLOCK, and the GPU run r690's step a, under a hard limit below the VM's RAM, ended
+/// in the VMM's `IommuDmaMap(Error(12))`, ENOMEM. Do: under a hard RLIMIT_MEMLOCK below the GPU VM's RAM, which this
+/// test reads and requires (the run lowers it with `ulimit -l` in its own shell; the node inherits it), with no
+/// CAP_IPC_LOCK for its VMM, create the GPU box. Expect its create refused by type before its VMM is launched, naming
+/// the bytes of its guest's RAM, the soft and the hard limit and CAP_IPC_LOCK, and the GPU untouched: no box, no VM
+/// state, no VMM, no holder of its VFIO group, which opens.
 #[test]
 #[ignore = "native GPU: KVM, a VFIO-bound GPU, a delegated cgroup and pinned inputs (HEX_NATIVE_FC_SMOKE gpu)"]
 fn native_firecracker_gpu_vm_under_a_memlock_below_its_ram_is_refused_with_its_dma_error() {
     let inputs = Inputs::load();
-    let memlock = rustix::process::getrlimit(rustix::process::Resource::Memlock).current;
+    let limit = rustix::process::getrlimit(rustix::process::Resource::Memlock);
+    let memlock = limit.maximum;
     let ram = gpu_ram(&inputs);
     assert!(
         memlock.is_some_and(|locked| locked < ram),
-        "RLIMIT_MEMLOCK {memlock:?} must be below the VM's RAM ({ram} bytes): lower it with `ulimit -l`"
+        "the hard RLIMIT_MEMLOCK {memlock:?} must be below the VM's RAM ({ram} bytes): lower it with `ulimit -l`"
     );
     let own = own_cgroup();
     let config = gpu_path(&inputs, "config");
@@ -664,17 +667,19 @@ fn native_firecracker_gpu_vm_under_a_memlock_below_its_ram_is_refused_with_its_d
         "GPU memlock {memlock:?} below RAM {ram}: refused after {:?}: {refusal:?}",
         begun.elapsed()
     );
-    let Refusal::Broken(why) = &refusal else {
-        panic!("{refusal:?}")
+    let Refusal::Platform { why, .. } = &refusal else {
+        panic!("refused before its VMM, by its memlock: {refusal:?}")
     };
-    assert!(
-        why.starts_with("Firecracker ended before guest readiness; its last output:\n"),
-        "{why:?}"
-    );
-    assert!(
-        why.contains("os error 12") || why.contains("Cannot allocate memory"),
-        "the VMM's DMA map ENOMEM: {why:?}"
-    );
+    let shown =
+        |bound: Option<u64>| bound.map_or_else(|| "unlimited".to_owned(), |b| b.to_string());
+    for named in [
+        "bytes of its guest's RAM".to_owned(),
+        format!("soft {}", shown(limit.current)),
+        format!("hard {}", shown(limit.maximum)),
+        "CAP_IPC_LOCK".to_owned(),
+    ] {
+        assert!(why.contains(&named), "{named}: {why}");
+    }
     assert!(client.list().unwrap().is_empty(), "the node lists no box");
     assert!(
         state_dir_entries(&config).is_empty(),

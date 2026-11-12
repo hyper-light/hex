@@ -167,6 +167,8 @@ pub struct Spawn {
     stdio: [OwnedFd; 3],
     /// The descriptor limit the program starts under.
     nofile: Rlimit,
+    /// The locked-memory limit the program starts under where it isn't the one it inherits ([`Spawn::with_memlock`]).
+    memlock: Option<Rlimit>,
 }
 
 impl Spawn {
@@ -199,7 +201,14 @@ impl Spawn {
             cwd,
             stdio: [above(a)?, above(b)?, above(c)?],
             nofile,
+            memlock: None,
         })
+    }
+
+    /// The program started under `memlock` as its RLIMIT_MEMLOCK, where one is given, else the one it inherits: a VMM
+    /// that pins its guest's RAM for DMA, its soft limit raised to its hard one (`firecracker::vfio`).
+    pub fn with_memlock(self, memlock: Option<Rlimit>) -> Self {
+        Self { memlock, ..self }
     }
 
     /// Its stdio back, for a caller that starts the program another way.
@@ -793,6 +802,11 @@ unsafe fn child_with_fd(
     }
     // The child is a process of its own (no CLONE_THREAD), so the limit is its own, never the agent's.
     if let Err(e) = rustix::process::setrlimit(Resource::Nofile, spawn.nofile) {
+        return e.raw_os_error();
+    }
+    if let Some(limit) = spawn.memlock
+        && let Err(e) = rustix::process::setrlimit(Resource::Memlock, limit)
+    {
         return e.raw_os_error();
     }
     if let Some(cwd) = &spawn.cwd {
