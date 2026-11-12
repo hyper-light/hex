@@ -228,6 +228,16 @@ fn cv12_the_nemesis_credits_scoped_runners_their_measured_use() {
     );
 }
 
+/// AC-T7.4.1, joint plan step 13 (CV12): seed 1613 with one runner, which ROOT's record sweep at 8d1593f9 failed on. Just
+/// before the nemesis stops a sample finds the runner's scope unreadable, the keeper's hints close its session, and its
+/// releases of two reservations are answered on the closed session. Do run it 2,000 steps and settle; expect the runner
+/// to say hello again without its scope, its sync to release both, and the books to agree.
+#[test]
+fn seed_1613_a_session_closed_while_settling_says_hello_again() {
+    let settled = run(1613, 1, 2_000, None);
+    assert!(settled.is_ok(), "{settled:?}");
+}
+
 /// T-T7.4.1's determinism: one seed, one run.
 #[test]
 fn a_seed_names_one_run() {
