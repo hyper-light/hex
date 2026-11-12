@@ -3,6 +3,10 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
+// On macOS std's spawn passes no POSIX_SPAWN_CLOEXEC_DEFAULT: ssh starts through Hex's, holding only its stdio.
+#[cfg(target_os = "macos")]
+use hex_runtime::macos::command::{ChildStdin, ChildStdout, Command, Stdio};
+#[cfg(not(target_os = "macos"))]
 use std::process::{ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
