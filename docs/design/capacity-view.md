@@ -310,17 +310,28 @@ allocation); the capacity protocol carries amounts only and is unchanged by it.
 
 ## Tests
 
-- Unit tests of both cores (checkpoint 1): each transition, each refusal, each fence, sync's three
-  outcomes (released, adopted, disagreed), idempotent release, keeper crash at every write with the
-  holder's view after recovery, hostile record text.
-- The seam's conformance suite against its simulator, and against Hex's node shell (checkpoint 2).
-- hex-sim (checkpoint 3): one machine with Hex's admissions and kiln's runs on the keeper, the nemesis
-  crashing either side at any write, dropping links and partitioning and healing; at every step the work
-  actually running fits the room, and at every quiescent step after a heal the counts agree. Planted
-  mistakes in the shells (release on silence, start before grant, sync that forgets an earlier epoch's
-  work, a keeper that answers before it writes) must each be caught. A bounded set of seeds here; ROOT
-  runs the sweeps.
-- ROOT: kiln-ci's simulator with kiln's binding, then two real machines.
+- Unit tests of both cores (`hex-api`, `capacity::tests`): each transition, each refusal, each fence,
+  sync's three outcomes (released, adopted, disagreed), idempotent release, the person's release, the
+  keeper crashed at every write of a conversation before and after the write lands, hostile record text.
+- The conformance suite (`capacity::conformance::view`, HEX-CV-1 to 8) against the simulator, and
+  against the node's view over its record files, restarted from them (`hex-node`,
+  `placement::view::tests`); and the node's own admission and a holder's reserve checking one view
+  through the placement `Driver`.
+- hex-sim (`hex_sim::capacity`): one machine of sixteen CPUs and 64 GiB, Hex's own boxes and kiln's
+  runners on its keeper, under a nemesis that crashes the keeper between messages and at its writes
+  (before and after a write lands), crashes runners (their runs outliving them or not), drops links with
+  what was on them, partitions and heals them, lets a runner's wait run out, and retires a runner whose
+  reservations the person then releases. After every step: the work actually running fits the room, and
+  every running run is in the keeper's books while it is up. After settling (every link healed, every
+  message delivered, every hint drained): the keeper's books of each runner, the runner's own, and what it
+  runs are the same, and no sync said the counts disagree. Planted shell mistakes, each caught on some of
+  64 seeds: release on silence, a run started before its grant, a restart forgetting its survivors, a
+  keeper answering before its write lands, Hex admitting against its own boxes alone. Bounded seeds here
+  (64 of 2,000 steps with two runners, 32 each with one and with three); ROOT runs the sweeps:
+  `hex_sim::capacity::run(seed, runners, steps, None)` over its seeds, which must each return `Ok`.
+- ROOT: kiln-ci's simulator with kiln's binding of the holder (`hex_api::capacity::Holder` against
+  `capacity::sim::SimView`, and the conformance suite for a keeper kiln hosts), then two real machines,
+  once the transport binding lands.
 
 ## Open items
 
