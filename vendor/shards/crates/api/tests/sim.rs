@@ -99,8 +99,7 @@ fn the_simulator_conforms() {
     .unwrap();
 }
 
-/// The simulator retains the whole requested spec for either shared-GPU enable state.
-/// This is a model receipt, not a GPU attachment or a rendered-frame claim.
+/// The simulator's PID 1 sees the spec it was booted with, a GPU or none (D215).
 #[test]
 fn the_simulator_retains_shared_gpu_enable() {
     for gpu in [false, true] {

@@ -37,8 +37,8 @@ impl Shards {
         Shards
     }
 
-    /// A node's explicit runtime roots, also supplied to its native managed
-    /// launcher. This provider never inherits ambient/workload environment.
+    /// A client's explicit runtime directories (`SHARDS_CACHE`, `SHARDS_HOME`), also given its
+    /// managed launcher's VM processes (D233). This provider never inherits the environment.
     pub fn configured(cache: PathBuf, home: PathBuf) -> Result<ConfiguredShards, Refusal> {
         Ok(ConfiguredShards {
             paths: RuntimePaths::new(cache, home)?,
@@ -51,7 +51,7 @@ impl RuntimePaths {
         for path in [&cache, &home] {
             if !path.is_absolute() || path.as_os_str().as_encoded_bytes().contains(&0) {
                 return Err(Refusal::Bounds {
-                    what: "node runtime directories",
+                    what: "runtime directories",
                     why: "SHARDS_CACHE and SHARDS_HOME require explicit absolute paths without NUL".into(),
                 });
             }
@@ -72,8 +72,8 @@ impl RuntimePaths {
     }
 }
 
-/// The same client/drain/watch protocol, with exactly the initialized node's
-/// explicit helper cache and runtime home. This stores no inventory or holders.
+/// The same client/drain/watch protocol, with exactly its client's explicit helper cache and
+/// runtime home (D233). This stores no inventory or holders.
 #[derive(Debug)]
 pub struct ConfiguredShards {
     paths: RuntimePaths,
@@ -108,7 +108,7 @@ const ESCAPED: usize = "\\u{7f}".len();
 /// writes as it ends, a reset's, with `--no-console` its guest's last console bytes escaped
 /// and their first said lost (`crates/shards/src/vm_run.rs` `supervise`, `last_said`), so a
 /// refusal quotes it whole. Its other reports are one error each.
-fn tail(said: usize) -> usize {
+pub(crate) fn tail(said: usize) -> usize {
     "shards: guest requested a reset, its console's last lines, those before them lost past the "
         .len()
         .saturating_add(usize::MAX.ilog10() as usize + 1)
@@ -544,7 +544,7 @@ pub fn recorded_console_bytes(kernel: &Path) -> usize {
 }
 
 /// The same existing console learning with the initialized native runtime home,
-/// rather than ambient node/workload environment. This does not verify a kernel.
+/// rather than an inherited or a workload's environment. This does not verify a kernel.
 pub fn recorded_console_bytes_at(kernel: &Path, paths: &RuntimePaths) -> usize {
     crate::said::kept_at(paths.home(), kernel)
 }
@@ -2361,7 +2361,7 @@ mod tests {
         (guest, native)
     }
 
-    /// D215/AC-T7.4.1: helper scope and handle ownership remain live after
+    /// D215, D233: helper scope and handle ownership remain live after
     /// controller exit, and dropping a retained protocol handle cannot stop it.
     #[test]
     fn managed_scope_and_checked_clones_retain_native_lifetime() {
@@ -2385,7 +2385,7 @@ mod tests {
         assert_eq!(native.stops.load(Ordering::SeqCst), 0);
     }
 
-    /// D215/AC-T7.4.1: a native stop can publish inline, before stop() returns;
+    /// D215, D233: a native stop can publish inline, before stop() returns;
     /// a concurrent waiter must observe Stopped rather than unsolicited poweroff.
     #[test]
     fn managed_inline_stop_completion_is_already_stopped_to_waiters() {
@@ -2564,7 +2564,7 @@ mod tests {
         io::Write::write_all(&mut stream, b"sentinel\n").unwrap();
     }
 
-    /// D215/AC-T7.4.1: dial once a port the guest no longer listens on; expect one dial,
+    /// D215, D233: dial once a port the guest no longer listens on; expect one dial,
     /// refused at once as closed unanswered, and an absent socket refused in the dial. The
     /// retrying form, against the same muxer, dials again until its deadline: the cost a
     /// later dial to a gone relay must not pay.
@@ -2629,7 +2629,7 @@ mod tests {
         assert!(!lock(&shared.state).ready);
     }
 
-    /// D215/AC-T7.4.1: dial once a muxer that accepts and never answers; expect the CONNECT
+    /// D215, D233: dial once a muxer that accepts and never answers; expect the CONNECT
     /// refused by its deadline, in the read, and no second dial.
     #[cfg(unix)]
     #[test]
@@ -2804,7 +2804,7 @@ mod tests {
         assert!(joined.is_ok());
     }
 
-    /// D215/AC-T7.4.1: pure preparation launches nothing and preserves the exact
+    /// D215, D233: pure preparation launches nothing and preserves the exact
     /// native command/ports; wrong endpoint/port fail before borrowed observation.
     #[test]
     fn prepared_boot_is_pure_and_connections_stay_in_its_exact_grant() {
@@ -2860,7 +2860,7 @@ mod tests {
         ));
     }
 
-    /// AC-T7.4.1: native containment is explicit only for managed plans. The
+    /// D233: native containment is explicit only for managed plans. The
     /// standalone CPU/GPU argument bytes stay exact, even for flag-like values.
     #[test]
     fn prepared_marker_preserves_standalone_arguments_and_flag_values() {
@@ -2885,7 +2885,7 @@ mod tests {
         assert_eq!(std::fs::read_dir(&*dir).unwrap().count(), 0);
     }
 
-    /// AC-T7.4.1: renderer initialization cannot carry an inner workload or start
+    /// D232: renderer initialization cannot carry an inner workload or start
     /// its file/console helpers while resolving the exact selected identities.
     #[test]
     fn gpu_probe_arguments_carry_only_the_exact_native_query() {
@@ -2913,7 +2913,7 @@ mod tests {
         );
     }
 
-    /// AC-T7.4.1: the configured probe uses the node's explicit pair, without a
+    /// D232, D233: the configured probe uses its client's explicit pair, without a
     /// PATH/binary/environment fallback or additional guest/provider authority.
     #[test]
     fn configured_node_roots_are_explicit_and_the_command_environment_is_closed() {
@@ -2952,7 +2952,7 @@ mod tests {
         assert_eq!(std::fs::read_dir(&*dir).unwrap().count(), 0);
     }
 
-    /// D215/AC-T7.4.1: exercise real bounded pipe/watch/parse wiring with an owned
+    /// D215, D232: exercise real bounded pipe/watch/parse wiring with an owned
     /// protocol fixture process. This is not a renderer/native GPU witness.
     #[cfg(unix)]
     #[test]
@@ -3071,8 +3071,7 @@ mod tests {
         assert_eq!(args.get(3..5).unwrap(), ["--initrd", "/k/initrd"]);
     }
 
-    /// The existing shared Venus enable changes only one CLI flag, for either init form;
-    /// physical GPU selection/exclusive attachment is not represented by this boolean.
+    /// A GPU adds `--gpu` to the flags and nothing else, whichever the init (D215).
     #[test]
     fn shared_venus_is_enabled_only_when_requested() {
         for init in [
@@ -3644,9 +3643,11 @@ mod tests {
                 operation: crate::ProcessOperation::PidfdOpen | crate::ProcessOperation::RegisterExit | crate::ProcessOperation::ReadStat,
                 code: libc::ESRCH,
             } | crate::ProcessFailure::Os {
-                // Reaped between its pidfd's open and its stat's: its /proc entry is gone.
+                // Reaped between its pidfd's open and its stat's: procfs's lookup finds no
+                // entry (ENOENT), or its permission check of one still cached no task (ESRCH,
+                // fs/proc/base.c proc_pid_permission).
                 operation: crate::ProcessOperation::OpenStat,
-                code: libc::ENOENT,
+                code: libc::ENOENT | libc::ESRCH,
             }
         }) if pid == identity.pid && expected_started == identity.started),
             "{:?}",
@@ -3789,9 +3790,11 @@ mod tests {
                 operation: crate::ProcessOperation::PidfdOpen | crate::ProcessOperation::RegisterExit | crate::ProcessOperation::ReadStat,
                 code: libc::ESRCH,
             } | crate::ProcessFailure::Os {
-                // Reaped between its pidfd's open and its stat's: its /proc entry is gone.
+                // Reaped between its pidfd's open and its stat's: procfs's lookup finds no
+                // entry (ENOENT), or its permission check of one still cached no task (ESRCH,
+                // fs/proc/base.c proc_pid_permission).
                 operation: crate::ProcessOperation::OpenStat,
-                code: libc::ENOENT,
+                code: libc::ENOENT | libc::ESRCH,
             }
         }) if pid == identity.pid && expected_started == identity.started),
             "{:?}",

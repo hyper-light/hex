@@ -881,6 +881,15 @@ impl FitIndex {
             .ok_or(SimError::UnknownNode(node))
     }
 
+    /// What `node`'s admissions hold of its capacity, workloads and backings alike: its capacity less
+    /// its free room (joint plan step 13: the host's own held in the capacity view).
+    pub fn held(&self, node: NodeId) -> Result<Resources, SimError> {
+        let slot = self.slot(node)?;
+        slot.capacity
+            .checked_sub(&slot.free)
+            .ok_or(SimError::Resources(node))
+    }
+
     pub fn key(&self, node: NodeId) -> Result<Key, SimError> {
         Ok(Key::of(node, &self.slot(node)?.free))
     }

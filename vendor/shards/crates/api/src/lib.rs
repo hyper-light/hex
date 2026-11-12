@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 
 mod client;
 pub mod conformance;
+pub mod image;
 mod native;
 pub mod physical;
 mod said;
@@ -63,10 +64,12 @@ pub struct GuestSpec {
     pub vcpus: u32,
     /// Its memory, in MiB: even, at least [`min_memory_mib`].
     pub memory_mib: u64,
-    /// Enable the shared Venus renderer. Exact selection below implies this.
+    /// A GPU (`--gpu`): Venus over the host's own Vulkan driver, rendered by the GPU's VM
+    /// process (D144, D201, D202, D208); a selection below implies it.
     pub gpu: bool,
-    /// Immutable native physical selection; an empty set with gpu preserves the
-    /// explicitly requested shared renderer. Scheduler callers supply exact identities.
+    /// The host GPUs its Venus contexts render on, each named by its exact native identity
+    /// (`--gpu-device`, D232), never a model name or an ordinal; none, those the renderer
+    /// finds, as `gpu` alone gives.
     pub gpu_devices: Vec<PhysicalGpu>,
     /// Its disks, `/dev/vda` on, in order.
     pub disks: Vec<Disk>,
@@ -138,7 +141,7 @@ impl PreparedBoot {
     pub fn runtime_paths(&self) -> Option<&RuntimePaths> {
         self.runtime_paths.as_ref()
     }
-    /// Copies only the initialized node's explicit pair, before native effects.
+    /// Copies only its client's explicit pair, before native effects.
     pub fn with_runtime_paths(mut self, paths: &RuntimePaths) -> Result<Self, Refusal> {
         if self.startup.is_bound() && self.runtime_paths.as_ref().is_some_and(|known| known != paths) {
             return Err(Refusal::Launch(LaunchError::NativeInputs));
@@ -176,7 +179,7 @@ impl PreparedBoot {
     }
 }
 
-/// The configured node's two runtime directories, shared as values by its probe
+/// A configured client's two runtime directories, shared as values by its probe
 /// provider and prepared native launch. No ambient or workload environment input.
 #[derive(Debug, PartialEq, Eq)]
 pub struct RuntimePaths {
@@ -566,7 +569,8 @@ impl std::fmt::Display for BorrowFailure {
 impl std::error::Error for BorrowFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Channel(error) => Some(error),
+            // Its Display is the handshake error's own: the cause after it is that error's.
+            Self::Channel(error) => std::error::Error::source(error),
             _ => None,
         }
     }
@@ -679,11 +683,10 @@ impl std::fmt::Display for Refusal {
 impl std::error::Error for Refusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            // Its Display already ends with the failure, which has no source of its own.
-            Self::Process { failure, .. } => std::error::Error::source(failure),
-            Self::Scope(failure) => Some(failure),
-            Self::Borrowed { failure, .. } => Some(failure),
-            Self::Connect { failure, .. } => Some(failure),
+            // Each Display already ends with its failure: the cause after it is the failure's.
+            Self::Process { failure, .. } | Self::Scope(failure) => std::error::Error::source(failure),
+            Self::Borrowed { failure, .. } => std::error::Error::source(failure),
+            Self::Connect { failure, .. } => std::error::Error::source(failure),
             _ => None,
         }
     }
@@ -810,9 +813,9 @@ pub trait Guest: Send + Sync {
 }
 
 /// The backend shards boots Linux guests with on `os` and `arch` (`std::env::consts`'):
-/// KVM on Linux, Hypervisor.framework on arm64 macOS, and WHP on x86_64/arm64 Windows.
-/// The existing WHP ARM64 adapter is hv/whp_arm64; real host capability remains checked by it.
-/// macOS on x86_64 is out of shards' scope.
+/// KVM on Linux, Hypervisor.framework on arm64 macOS, WHP on Windows (arm64's `hv::whp_arm64`,
+/// D209), each the VMM's `hv::BACKEND` there; whether a host's hypervisor runs guests is its
+/// VM process's `check_host`, as the guest boots. macOS on x86_64 is out of shards' scope.
 pub fn backend_of(os: &'static str, arch: &'static str) -> Result<Backend, Refusal> {
     match (os, arch) {
         ("linux", "x86_64" | "aarch64") => Ok(Backend::Kvm),
@@ -977,7 +980,69 @@ mod tests {
         assert_eq!(UNRECORDED.get(), ms(80));
     }
 
-    /// D215: name every supported backend, including existing WHP ARM64, with Intel Mac excluded.
+    /// A refusal printed with its chain of causes (each `source()` after its Display, as error
+    /// reporters print them) says each cause once: a refusal or failure whose Display already
+    /// says its failure gives that failure's own source, not the failure again (D215).
+    #[test]
+    fn a_refusals_chain_says_each_cause_once() {
+        let handshake = HandshakeError::Io {
+            phase: HandshakePhase::Read,
+            kind: io::ErrorKind::WouldBlock,
+            code: Some(11),
+        };
+        let said = handshake.to_string();
+        let refusals = [
+            (
+                Refusal::Borrowed {
+                    port: 7,
+                    failure: BorrowFailure::Channel(handshake),
+                },
+                said,
+            ),
+            (
+                Refusal::Borrowed {
+                    port: 7,
+                    failure: BorrowFailure::Expired,
+                },
+                BorrowFailure::Expired.to_string(),
+            ),
+            (
+                Refusal::Process {
+                    pid: 1,
+                    expected_started: 2,
+                    failure: ProcessFailure::Exited,
+                },
+                ProcessFailure::Exited.to_string(),
+            ),
+            (
+                Refusal::Scope(ProcessFailure::Exited),
+                ProcessFailure::Exited.to_string(),
+            ),
+            (
+                Refusal::Connect {
+                    port: 7,
+                    failure: HandshakeError::Closed,
+                },
+                HandshakeError::Closed.to_string(),
+            ),
+        ];
+        for (refusal, failure) in refusals {
+            let mut printed = refusal.to_string();
+            let mut cause = std::error::Error::source(&refusal);
+            while let Some(c) = cause {
+                printed = format!("{printed}: {c}");
+                cause = c.source();
+            }
+            assert_eq!(
+                printed.matches(failure.as_str()).count(),
+                1,
+                "{refusal:?}: {printed}"
+            );
+        }
+    }
+
+    /// The backend each host boots with, the VMM's on each (WHP's arm64 one too, D209), and
+    /// the host without one refused naming it (D215).
     #[test]
     fn backends_are_named_per_host() {
         assert_eq!(backend_of("linux", "x86_64"), Ok(Backend::Kvm));

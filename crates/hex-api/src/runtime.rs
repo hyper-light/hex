@@ -1461,6 +1461,80 @@ pub enum Refusal {
         refusal: Box<Refusal>,
         cleanup: Box<Refusal>,
     },
+    /// The call needs what another product doesn't give in the revision Hex builds against yet
+    /// ([`Upstream`]): refused, never stubbed (the joint plan's rule for a missing dependency). It
+    /// says nothing of any box's state.
+    #[error("this needs {needs}, which the revision Hex builds against doesn't give yet")]
+    Awaits { needs: Upstream },
+}
+
+/// A capability another product owes Hex, named by what it does, never by a plan step (a plan's
+/// step numbers change between its versions). A call that needs one is refused
+/// [`Refusal::Awaits`] until Hex builds against a revision that gives it. The node's wire tags each
+/// by its place in [`Upstream::ALL`], so append only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Upstream {
+    /// A Shards microVM's guest time per vCPU, with a monotone total, on HVF, KVM and WHP: Shards'
+    /// guest CPU time work, in no Shards revision yet.
+    GuestCpuTimePerVcpu,
+    /// A program started in a member of a Shards microVM: the exec of Shards' agent-control
+    /// endpoint.
+    MemberExec,
+    /// A microVM member's grants to reach a provider or kiln by name: Shards' explicit grants by
+    /// name.
+    MemberGrantsByName,
+    /// What a runtime nested under shards-init needs: a delegated cgroup subtree, CAP_SYS_ADMIN for
+    /// its boxes' namespaces and DRM render nodes, granted by name.
+    NestedRuntime,
+    /// The Windows host of an image's run: `shards api-run` on Windows, whose AppContainer launch
+    /// Shards' D231 owes.
+    WindowsRunHost,
+    /// Taking back an image's run after its owner's crash: a run ends with its owner in D231's
+    /// first version, which owes `attach`.
+    AttachAfterCrash,
+    /// A signal to the members of a Shards microVM: the signal of Shards' agent-control endpoint.
+    MemberSignal,
+    /// A microVM member's grants to reach a peer at one address (kiln's endpoint by its address):
+    /// Shards' explicit grants naming the member, the address, the port and the direction.
+    MemberGrantsByAddress,
+    /// A microVM member's reach to a service its own host serves on its loopback (kiln beside the
+    /// VM): Shards' explicit host-service grants.
+    MemberHostService,
+}
+
+impl Upstream {
+    /// Every capability, in the order the node's wire tags them.
+    pub const ALL: [Upstream; 9] = [
+        Upstream::GuestCpuTimePerVcpu,
+        Upstream::MemberExec,
+        Upstream::MemberGrantsByName,
+        Upstream::NestedRuntime,
+        Upstream::WindowsRunHost,
+        Upstream::AttachAfterCrash,
+        Upstream::MemberSignal,
+        Upstream::MemberGrantsByAddress,
+        Upstream::MemberHostService,
+    ];
+}
+
+impl std::fmt::Display for Upstream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::GuestCpuTimePerVcpu => {
+                "a Shards microVM's guest time per vCPU (Shards' guest CPU time work)"
+            }
+            Self::MemberExec => "a program run in a Shards member (its agent-control endpoint)",
+            Self::MemberGrantsByName => "a Shards member's grants by name",
+            Self::NestedRuntime => "a runtime nested under shards-init, with its grants",
+            Self::WindowsRunHost => "Shards' Windows host of an image's run (owed by D231)",
+            Self::AttachAfterCrash => {
+                "taking back an image's run after its owner's crash (owed by D231)"
+            }
+            Self::MemberSignal => "a signal to Shards members (its agent-control endpoint)",
+            Self::MemberGrantsByAddress => "a Shards member's grants by address",
+            Self::MemberHostService => "a Shards member's reach to its host's own service",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -1691,6 +1765,18 @@ mod tests {
         changed.guest_overhead.disk_bytes = 0;
         changed.quantum.disk_bytes = 2;
         assert!(changed.allocate(resources(1, 1, u64::MAX)).is_err());
+    }
+
+    /// AC-T7.4.1 (joint plan step 12): the wire tags a capability by its place in `Upstream::ALL`.
+    /// Do: look each one up there, and say its `Awaits` refusal. Expect: each in one place only, and
+    /// the refusal naming it in its words.
+    #[test]
+    fn each_upstream_capability_has_one_place_and_its_refusal_names_it() {
+        for needs in Upstream::ALL {
+            assert_eq!(Upstream::ALL.iter().filter(|u| **u == needs).count(), 1);
+            let said = Refusal::Awaits { needs }.to_string();
+            assert!(said.contains(&needs.to_string()), "{said}");
+        }
     }
 
     #[test]

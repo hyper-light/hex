@@ -79,49 +79,33 @@ take = [
 ]
 own = ["UPSTREAM.md"]
 
-# The public Shards API and ABI now landed on main; replace the provisional copy.
+# Shards' public API (shards-api: the direct boot D215, launches through a client's native owner D233, GPU
+# selection by exact identity D232, and images booted under shards-init for an orchestrator D231), its ABI,
+# AF_UNIX transport and test-directory crates, at a Shards main with none of Hex's changes: every patch Hex
+# carried is upstream (vendor/shards/UPSTREAM.md), and the take list holds the fixtures the API's tests include.
 [projects.shards]
 kind = "git"
 repository = "https://github.com/hyper-light/shards"
-commit = "33df95b08ad8f95bddeaa1c48acf0c64386e0eac"
+commit = "482c5d7856dfea06d167202876ecd430a680eada"
 path = "vendor/shards"
 take = ["LICENSE", "AGENTS.md", "CLAUDE.md", "clippy.toml", "rustfmt.toml", "docs/development-rules.md", "docs/development-evidence.md", "crates/api", "crates/abi", "crates/afunix", "crates/testdir", "docs/research/measurements/managed-borrowed-nowait/focused.rs", "docs/research/measurements/managed-borrowed-nowait/contract.rs", "docs/research/measurements/managed-proc-main/allocation.rs", "docs/research/measurements/managed-proc-main/repro.rs", "docs/research/measurements/managed-proc-main/reader-tests.rs"]
 own = ["Cargo.toml", "UPSTREAM.md"]
 
 # Shards' renderer build (hyper-light): the `shards` binary whose GPU VM process renders a Shards GPU
-# guest's Venus on the host's driver (crates/hex-runtime/src/guest, SHARDS_BIN; AC-T7.4.1). At upstream's
-# 0342b85d, Hex's recorded changes are the hex/physical-gpu-0342 chain the node's vendored API speaks to:
-# exact GPU selectors through the no_std ABI, each selected Venus context bound to exact native GPU UUIDs
-# (virglrenderer's physical-GPU filter and selector transport, resources/gpu, and the native identity
-# bridge), managed launch receipts and bounded renderer probing, native names and checked heap sizes, the
-# scoped private GPU report, lifeline and connections, and the regression test of a reused context id; and
-# gpu-libs' identity bridge archived whole on Linux. Not the chain's carried-image check (f7f8b03b): it calls
-# shards-api, which `shards` has only as a dev-dependency, so a release build fails, and nothing outside its
-# own test calls it. Hex compiles none of it: only the files those changes touch are taken, so `check`
-# proves each change applies to this commit, and scripts/shards-gpu/build.sh rebuilds `shards` from this
-# commit plus vendor/patches/shards-gpu. The API changes of the same chain are vendor/shards' own.
-# MIT, its LICENSE taken beside it.
+# guest's Venus on the host's driver (crates/hex-runtime/src/guest, SHARDS_BIN; AC-T7.4.1), at the same Shards
+# main as vendor/shards. Every change Hex carried at 0342b85d is upstream there (vendor/shards-gpu/UPSTREAM.md)
+# but one, kept as the recorded change: the GPU VM process built and carried for Windows on arm64, which
+# Shards' GPU lane holds (D232, "Held"). Hex compiles none of it: only the files that change touches are taken,
+# so `check` proves it applies to this commit, and scripts/shards-gpu/build.sh rebuilds `shards` from this
+# commit plus vendor/patches/shards-gpu. MIT, its LICENSE taken beside it.
 [projects.shards-gpu]
 kind = "git"
 repository = "https://github.com/hyper-light/shards"
-commit = "0342b85d9c808e3ced041a6c3ef0e9bf70438272"
+commit = "482c5d7856dfea06d167202876ecd430a680eada"
 path = "vendor/shards-gpu"
 take = [
     "LICENSE",
-    "crates/abi/src/lib.rs",
     "crates/shards/build.rs",
-    "crates/shards/src/cli/mod.rs",
-    "crates/shards/src/cli/shares.rs",
-    "crates/shards/src/spec.rs",
-    "crates/shards/src/vm_run.rs",
-    "crates/vmm/build.rs",
-    "crates/vmm/src/devices/virtio/gpu/mod.rs",
-    "crates/vmm/src/devices/virtio/gpu/virgl.rs",
-    "crates/vmm/src/snapshot/mod.rs",
-    "crates/vmm/src/vm/aarch64.rs",
-    "crates/vmm/src/vm/mod.rs",
-    "crates/vmm/src/vm/runtime.rs",
-    "crates/vmm/src/vm/x86_64.rs",
     "scripts/gpu-libs",
 ]
 own = ["UPSTREAM.md"]
