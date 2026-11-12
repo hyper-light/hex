@@ -354,7 +354,7 @@ pub const IMAGE_CASES: &[Case] = &[
     },
     Case {
         id: "HEX-IMG-7",
-        says: "create of a VM granted egress to a name, to an address, or a service on its host is refused Awaits(MemberGrantsByName, MemberGrantsByAddress, MemberHostService), one whose run has a command of its own granted a publish Awaits(PublishReceiver), and one with a malformed grant Invalid naming grants, each making nothing; a VM of its members alone granted a publish of its member's port at the host's loopback is made, and inspect shows its every grant",
+        says: "create of a VM granted egress by TCP to a name or an IPv4 address, or its host's service, is refused Awaits(MemberDestinations); by UDP to a name Awaits(MemberGrantsByName), to an IPv6 address Awaits(MemberGrantsByAddress), its host's service by UDP Awaits(MemberHostService); egress to host.docker.internal, its host's Shards name, or a malformed grant Invalid naming grants; each making nothing. A VM granted a publish of its member's port at the host's loopback is made, of its members alone and with a command of its own, and inspect shows its every grant",
         run: image_grants,
     },
 ];
@@ -1342,18 +1342,21 @@ fn image_unbootable(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     Ok(())
 }
 
-/// HEX-IMG-7 (joint plan step 15, AC-T7.7.2): what Shards can't yet hold exactly is refused typed, naming what it
-/// awaits, before anything is made (a publish on a run with a command of its own among them, its receiver unnamed);
-/// a publish on a run of the members alone is kept, and inspect shows every grant as the record holds it.
+/// HEX-IMG-7 (joint plan step 15, AC-T7.7.2; docs/design/network-grants.md N4): what Shards can't yet hold exactly is
+/// refused typed, naming what it awaits, before anything is made: every destination (Shards keeps one image-wide), and
+/// what Shards' destinations (D236) can't express at all; the VM's host named as an egress destination is invalid, as
+/// is a malformed grant. A publish is kept on a run of the members alone and on one with a command of its own, each
+/// held to the receiver Shards names as it boots (N6), and inspect shows every grant as the record holds it.
 fn image_grants(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let id = id("image-grants")?;
     let _ = rt.delete(&id);
-    let granted = |grants: Vec<Grant>| -> Result<BoxSpec, String> {
+    let granted = |grants: Vec<Grant>, command: Option<Vec<String>>| -> Result<BoxSpec, String> {
         let mut spec = fx.spec(id.clone(), Bounds::default());
         let ClassSpec::ShardsImage(image) = &mut spec.class else {
             return Err("the fixture's spec isn't a Shards image VM".to_owned());
         };
         image.grants = grants;
+        image.command = command;
         Ok(spec)
     };
     let codex = Member {
@@ -1365,33 +1368,53 @@ fn image_grants(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         first: port,
         last: port,
     };
+    let udp = |port| Ports {
+        proto: Proto::Udp,
+        first: port,
+        last: port,
+    };
+    let egress = |to: Destination, ports| Grant::Egress {
+        member: codex.clone(),
+        to,
+        ports,
+    };
     let unheld = [
         (
-            Grant::Egress {
-                member: codex.clone(),
-                to: Destination::Name("api.openai.com".to_owned()),
-                ports: tcp(443),
-            },
-            Upstream::MemberGrantsByName,
+            egress(Destination::Name("api.openai.com".to_owned()), tcp(443)),
+            Upstream::MemberDestinations,
         ),
         (
-            Grant::Egress {
-                member: codex.clone(),
-                to: Destination::Address(IpAddr::from([10, 0, 0, 5])),
-                ports: tcp(7070),
-            },
-            Upstream::MemberGrantsByAddress,
+            egress(Destination::Address(IpAddr::from([10, 0, 0, 5])), tcp(7070)),
+            Upstream::MemberDestinations,
         ),
         (
             Grant::Host {
                 member: codex.clone(),
                 ports: tcp(7070),
             },
+            Upstream::MemberDestinations,
+        ),
+        (
+            egress(Destination::Name("api.openai.com".to_owned()), udp(443)),
+            Upstream::MemberGrantsByName,
+        ),
+        (
+            egress(
+                Destination::Address(IpAddr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, 5])),
+                tcp(7070),
+            ),
+            Upstream::MemberGrantsByAddress,
+        ),
+        (
+            Grant::Host {
+                member: codex.clone(),
+                ports: udp(7070),
+            },
             Upstream::MemberHostService,
         ),
     ];
     for (grant, needs) in unheld {
-        let got = rt.create(granted(vec![grant])?);
+        let got = rt.create(granted(vec![grant], None)?);
         ensure(got == Err(Refusal::Awaits { needs }), || {
             format!("create granted what awaits {needs:?}: {got:?}")
         })?;
@@ -1400,18 +1423,27 @@ fn image_grants(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
             format!("a refused create ({needs:?}) made {left:?}")
         })?;
     }
-    let got = rt.create(granted(vec![Grant::Host {
-        member: codex.clone(),
-        ports: tcp(0),
-    }])?);
-    ensure(
-        matches!(&got, Err(Refusal::Invalid { what: "grants", .. })),
-        || format!("create with a malformed grant: {got:?}"),
-    )?;
-    let left = rt.inspect(&id);
-    ensure(left == Err(Refusal::NoSuchBox(id.clone())), || {
-        format!("a refused create (a malformed grant) made {left:?}")
-    })?;
+    let invalid = [
+        egress(
+            Destination::Name("host.docker.internal".to_owned()),
+            tcp(7070),
+        ),
+        Grant::Host {
+            member: codex.clone(),
+            ports: tcp(0),
+        },
+    ];
+    for grant in invalid {
+        let got = rt.create(granted(vec![grant.clone()], None)?);
+        ensure(
+            matches!(&got, Err(Refusal::Invalid { what: "grants", .. })),
+            || format!("create granted {grant:?}: {got:?}"),
+        )?;
+        let left = rt.inspect(&id);
+        ensure(left == Err(Refusal::NoSuchBox(id.clone())), || {
+            format!("a refused create ({grant:?}) made {left:?}")
+        })?;
+    }
     let publish = Grant::Publish {
         member: codex,
         proto: Proto::Tcp,
@@ -1419,27 +1451,20 @@ fn image_grants(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         host: IpAddr::from([127, 0, 0, 1]),
         host_port: None,
     };
-    let mut commanded = granted(vec![publish.clone()])?;
-    if let ClassSpec::ShardsImage(image) = &mut commanded.class {
-        image.command = Some(vec!["serve".to_owned()]);
+    for command in [None, Some(vec!["serve".to_owned()])] {
+        let commanded = command.is_some();
+        rt.create(granted(vec![publish.clone()], command)?)
+            .map_err(|e| {
+                format!("create granted a publish (a command of its own: {commanded}): {e}")
+            })?;
+        let shown = rt.inspect(&id).map_err(|e| format!("inspect: {e}"));
+        rt.delete(&id).map_err(|e| format!("delete: {e}"))?;
+        let shown = shown?.grants;
+        ensure(shown == vec![publish.clone()], || {
+            format!("inspect showed the grants {shown:?} (a command of its own: {commanded})")
+        })?;
     }
-    let got = rt.create(commanded);
-    let needs = Upstream::PublishReceiver;
-    ensure(got == Err(Refusal::Awaits { needs }), || {
-        format!("create of a commanded VM granted a publish: {got:?}")
-    })?;
-    let left = rt.inspect(&id);
-    ensure(left == Err(Refusal::NoSuchBox(id.clone())), || {
-        format!("a refused create ({needs:?}) made {left:?}")
-    })?;
-    rt.create(granted(vec![publish.clone()])?)
-        .map_err(|e| format!("create granted a publish: {e}"))?;
-    let shown = rt.inspect(&id).map_err(|e| format!("inspect: {e}"));
-    rt.delete(&id).map_err(|e| format!("delete: {e}"))?;
-    let shown = shown?.grants;
-    ensure(shown == vec![publish], || {
-        format!("inspect showed the grants {shown:?}")
-    })
+    Ok(())
 }
 
 #[cfg(test)]

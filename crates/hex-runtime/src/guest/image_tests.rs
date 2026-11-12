@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use crate::devices::{Books, Records, Transaction};
 use hex_api::{Allocation, Bounds, Capacity, CapacityResources, DeviceInfo, Runtime};
-use shards_api::image::{Bound, Channel, Keep, MemberEnd, MemberInfo, MemberName};
+use shards_api::image::{Bound, Channel, Keep, MemberEnd, MemberInfo, MemberName, Receiving};
 
 /// A record owner keeping the node Store's rules (hex-node's `Store::update_lifecycle`): a first record
 /// is Creating; Creating becomes anything, Ready Ready or Deleting, Deleting Deleting alone; an exit, once
@@ -265,6 +265,9 @@ struct ModelImages {
     run: Arc<ModelRun>,
     /// The members the image runs, as the test sets them: none unless it does.
     members: Mutex<Vec<MemberInfo>>,
+    /// Whom each guest port its image gives coming in reaches (D231's `Bound::to`), as the test sets them: a port
+    /// not named here reaches no member, so the run's own command, or is refused on a run of the members alone.
+    receivers: Mutex<Vec<(u16, Vec<Receiving>)>>,
 }
 
 impl ModelImages {
@@ -276,7 +279,17 @@ impl ModelImages {
             opened: Condvar::new(),
             run: Arc::new(ModelRun::default()),
             members: Mutex::new(Vec::new()),
+            receivers: Mutex::new(Vec::new()),
         })
+    }
+
+    /// The image gives guest port `port` coming in to each `(declared index, member's own port)` of `to`.
+    fn receive(&self, port: u16, to: &[(u32, u16)]) {
+        let to = to
+            .iter()
+            .map(|&(member, port)| Receiving { member, port })
+            .collect();
+        self.receivers.lock().unwrap().push((port, to));
     }
 
     fn gate(&self, open: bool) {
@@ -296,12 +309,23 @@ impl Images for ModelImages {
         if let Some(why) = self.refuse.lock().unwrap().take() {
             return Err(why);
         }
-        // Each port bound as asked, one the OS picks from IANA's dynamic range (RFC 6335 §6) where asked.
-        let published = spec
-            .publish
-            .iter()
-            .zip(49152u16..)
-            .map(|(publish, picked)| Bound {
+        // Each port bound as asked, one the OS picks from IANA's dynamic range (RFC 6335 §6) where asked, naming whom
+        // it reaches; one no member is given refused on a run of the members alone, as Shards' run host refuses it.
+        let receivers = self.receivers.lock().unwrap().clone();
+        let mut published = Vec::new();
+        for (publish, picked) in spec.publish.iter().zip(49152u16..) {
+            let to = receivers
+                .iter()
+                .find(|(port, _)| *port == publish.guest_port)
+                .map(|(_, to)| to.clone())
+                .unwrap_or_default();
+            if to.is_empty() && spec.command.is_none() {
+                return Err(ImageRefusal::Widening(format!(
+                    "port {}: the image gives no member this port coming in, and the run has no command of its own",
+                    publish.guest_port
+                )));
+            }
+            published.push(Bound {
                 guest_port: publish.guest_port,
                 proto: publish.proto,
                 host: std::net::SocketAddr::new(
@@ -312,9 +336,9 @@ impl Images for ModelImages {
                         publish.host_port
                     },
                 ),
-                to: Vec::new(),
-            })
-            .collect();
+                to,
+            });
+        }
         Ok(Box::new(ModelGuest {
             run: Arc::clone(&self.run),
             members: self.members.lock().unwrap().clone(),
@@ -765,14 +789,14 @@ fn kill_before_start_ends_the_vm_without_a_boot() {
     assert!(images.asked.lock().unwrap().is_empty());
 }
 
-/// Joint plan step 15 (AC-T7.7.2): do create image VMs granted, in turn, a provider by name, kiln by address
-/// and kiln on the VM's host, and one whose run has a command of its own granted a publish of its harness's
-/// port. Expect: each refused Awaits naming the capability it waits on (the publish, PublishReceiver: such a
-/// run's command takes every port no member is given, D122), with no record made and no boot asked. Do: create
-/// one of the members alone granted that publish on the host's loopback, and start it, the image running that
-/// harness. Expect: its boot asks for exactly that publish and none of its image's grants past the VM, and its
-/// inspect shows its every grant, as its record holds them, and the publish as the host bound it, its receiver
-/// the image's declaration.
+/// Joint plan step 15 (AC-T7.7.2; N4): do create image VMs granted, in turn, a provider by name, kiln by its IPv4
+/// address and kiln on the VM's host, each by TCP, then a provider by name by UDP and kiln by an IPv6 address. Expect:
+/// the destinations refused `Awaits(MemberDestinations)` (Shards keeps one image-wide, and Hex can't name an image's
+/// members before its boot), the rest naming what Shards' destinations (D236) lack, with no record made and no
+/// boot asked. Do: create one of the members alone granted a publish on the host's loopback, and start it, its image
+/// giving that port to the harness it runs. Expect: its boot asks for exactly that publish and none of its image's
+/// grants past the VM, and its inspect shows its every grant, as its record holds them, and the publish as the host
+/// bound it, its receiver the harness Shards names, at its own port.
 #[test]
 fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
     use hex_api::{Destination, Grant, Member, MemberKind, Ports, Proto};
@@ -801,7 +825,7 @@ fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
                 to: Destination::Name("api.openai.com".to_owned()),
                 ports: tcp(443),
             },
-            Upstream::MemberGrantsByName,
+            Upstream::MemberDestinations,
         ),
         (
             Grant::Egress {
@@ -809,14 +833,33 @@ fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
                 to: Destination::Address("10.0.0.5".parse().unwrap()),
                 ports: tcp(7070),
             },
-            Upstream::MemberGrantsByAddress,
+            Upstream::MemberDestinations,
         ),
         (
             Grant::Host {
                 member: codex.clone(),
                 ports: tcp(7070),
             },
-            Upstream::MemberHostService,
+            Upstream::MemberDestinations,
+        ),
+        (
+            Grant::Egress {
+                member: codex.clone(),
+                to: Destination::Name("api.openai.com".to_owned()),
+                ports: Ports {
+                    proto: Proto::Udp,
+                    ..tcp(443)
+                },
+            },
+            Upstream::MemberGrantsByName,
+        ),
+        (
+            Grant::Egress {
+                member: codex.clone(),
+                to: Destination::Address("2001:db8::5".parse().unwrap()),
+                ports: tcp(7070),
+            },
+            Upstream::MemberGrantsByAddress,
         ),
     ] {
         assert_eq!(
@@ -825,6 +868,7 @@ fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
         );
         assert!(Transaction::records(owner.as_ref()).unwrap().is_empty());
     }
+    assert!(images.asked.lock().unwrap().is_empty());
     let publish = Grant::Publish {
         member: codex,
         proto: Proto::Tcp,
@@ -832,18 +876,6 @@ fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
         host: "127.0.0.1".parse().unwrap(),
         host_port: None,
     };
-    let mut commanded = granted("image-commanded", vec![publish.clone()]);
-    if let ClassSpec::ShardsImage(image) = &mut commanded.class {
-        image.command = Some(vec!["serve".to_owned()]);
-    }
-    assert_eq!(
-        runtime.create(commanded),
-        Err(Refusal::Awaits {
-            needs: Upstream::PublishReceiver
-        })
-    );
-    assert!(Transaction::records(owner.as_ref()).unwrap().is_empty());
-    assert!(images.asked.lock().unwrap().is_empty());
     let id = runtime
         .create(granted("image-published", vec![publish.clone()]))
         .unwrap()
@@ -854,6 +886,7 @@ fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
         name: "codex".to_owned(),
         runs: true,
     }];
+    images.receive(1455, &[(0, 1455)]);
     runtime.start(&id).unwrap();
     let asked = images.asked.lock().unwrap().clone();
     assert_eq!(asked.len(), 1);
@@ -878,9 +911,79 @@ fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
         vec![hex_api::Published {
             grant: 0,
             at: "127.0.0.1:49152".parse().unwrap(),
-            receiver: hex_api::Receiver::Declared,
+            receiver: hex_api::Receiver::Named { port: 1455 },
         }]
     );
+}
+
+/// Joint plan step 15 (N6): do create, then start, an image VM whose run has a command of its own, granted a publish
+/// of its harness's port, first where its image gives that port to the harness (at the harness's own port 8443),
+/// then where it gives it no member, so it reaches the run's own command (D122). Expect: each created, its boot
+/// asked for exactly that publish; the first runs, its inspect showing the harness Shards names as the port's
+/// receiver at 8443; the second's start refused Invalid naming the grant and the run's own command, its run stopped
+/// and the box ended with KILL's signal, so no port stays published for anyone its grant doesn't name.
+#[test]
+fn a_publish_on_a_run_with_its_own_command_is_held_to_its_receiver() {
+    use hex_api::{Grant, Member, MemberKind, Proto};
+    let publish = Grant::Publish {
+        member: Member {
+            kind: MemberKind::Harness,
+            name: "codex".to_owned(),
+        },
+        proto: Proto::Tcp,
+        port: 1455,
+        host: "127.0.0.1".parse().unwrap(),
+        host_port: None,
+    };
+    let commanded = |name: &str| {
+        let mut spec = spec(name, Some(vec!["serve".to_owned()]));
+        if let ClassSpec::ShardsImage(image) = &mut spec.class {
+            image.grants = vec![publish.clone()];
+        }
+        spec
+    };
+    let codex = MemberInfo {
+        index: 0,
+        kind: shards_api::image::MemberKind::Harness,
+        name: "codex".to_owned(),
+        runs: true,
+    };
+    let images = ModelImages::new();
+    *images.members.lock().unwrap() = vec![codex.clone()];
+    images.receive(1455, &[(0, 8443)]);
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime.create(commanded("image-cmd-member")).unwrap().id;
+    runtime.start(&id).unwrap();
+    assert_eq!(images.asked.lock().unwrap()[0].publish.len(), 1);
+    let shown = runtime.inspect(&id).unwrap();
+    assert_eq!(shown.state, BoxState::Running);
+    assert_eq!(
+        shown.published,
+        vec![hex_api::Published {
+            grant: 0,
+            at: "127.0.0.1:49152".parse().unwrap(),
+            receiver: hex_api::Receiver::Named { port: 8443 },
+        }]
+    );
+
+    let images = ModelImages::new();
+    *images.members.lock().unwrap() = vec![codex];
+    let (runtime, owner) = model_runtime(&images, waits());
+    let id = runtime.create(commanded("image-cmd-command")).unwrap().id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Invalid { what: "grants", why })
+            if why.starts_with("grants[0]") && why.contains("the run's own command")
+    ));
+    assert_eq!(images.asked.lock().unwrap().len(), 1);
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+    let shown = runtime.inspect(&id).unwrap();
+    assert_eq!(
+        (shown.state, shown.exit),
+        (BoxState::Empty, Some(Exit::Signal(9)))
+    );
+    assert!(shown.published.is_empty());
+    assert_eq!(record(&owner, &id).unwrap().exit, Some(Exit::Signal(9)));
 }
 
 /// Joint plan step 15 (N6): do start an image VM granted a publish to a harness its image doesn't run, then one
@@ -903,6 +1006,7 @@ fn a_publish_to_a_member_the_image_doesnt_run_stops_the_vm() {
     ] {
         let images = ModelImages::new();
         *images.members.lock().unwrap() = members;
+        images.receive(1455, &[(0, 1455)]);
         let (runtime, owner) = model_runtime(&images, waits());
         let mut spec = spec(name, None);
         if let ClassSpec::ShardsImage(image) = &mut spec.class {

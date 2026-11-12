@@ -53,56 +53,86 @@ fn no_grant_is_programmed_as_no_network() {
     assert_ne!(made.egress, Narrowing::default());
 }
 
-/// Joint plan step 15: do program a harness's grants as kiln would give them (a provider by name, kiln by address,
-/// kiln on the VM's host, a publish); expect each one Shards 482c5d78 can't hold exactly refused, typed, naming the
-/// capability it awaits, and a list of publishes alone programmed at the host address and port each names.
+/// Joint plan step 15 (N4; ROOT's ruling of 2026-11-12): do program each destination a harness's grants name by TCP
+/// (a provider by name, for a harness and an agent; kiln by its IPv4 address; kiln on the VM's host). Expect each
+/// refused `Awaits(MemberDestinations)`: Shards keeps a destination image-wide (D236), and Hex can't name an image's
+/// members before its boot. Do program what D236 can't express at all (a name by UDP; an IPv6 address; an IPv4
+/// address by UDP; the host's service by UDP). Expect each refused naming its own capability, and before any
+/// destination of the list. Do program publishes alone; expect them programmed at the host address and port each
+/// names, and nothing kept past the VM.
 #[test]
-fn each_grant_482c5d78_cant_hold_is_refused_naming_what_it_awaits() {
+fn each_destination_awaits_its_members_and_what_d236_lacks_awaits_its_own() {
     let tcp = |port| Ports {
         proto: Proto::Tcp,
         first: port,
         last: port,
     };
-    for (grant, needs) in [
+    let udp = |port| Ports {
+        proto: Proto::Udp,
+        ..tcp(port)
+    };
+    let agent = Member {
+        kind: MemberKind::Agent,
+        name: "x".to_owned(),
+    };
+    let egress = |member: &Member, to: Destination, ports| Grant::Egress {
+        member: member.clone(),
+        to,
+        ports,
+    };
+    let name = |text: &str| Destination::Name(text.to_owned());
+    let address = |text: &str| Destination::Address(text.parse().unwrap());
+    let kept_by_d236 = [
+        egress(&codex(), name("api.openai.com"), tcp(443)),
+        egress(&agent, name("mcp.example.com"), tcp(443)),
+        egress(&codex(), address("10.0.0.5"), tcp(7070)),
+        Grant::Host {
+            member: codex(),
+            ports: tcp(7070),
+        },
+    ];
+    for grant in &kept_by_d236 {
+        assert_eq!(
+            program(&members_alone(std::slice::from_ref(grant))),
+            Err(Refusal::Awaits {
+                needs: Upstream::MemberDestinations
+            }),
+            "{grant:?}"
+        );
+    }
+    let beyond_d236 = [
         (
-            Grant::Egress {
-                member: codex(),
-                to: Destination::Name("api.openai.com".to_owned()),
-                ports: tcp(443),
-            },
+            egress(&codex(), name("api.openai.com"), udp(443)),
             Upstream::MemberGrantsByName,
         ),
         (
-            Grant::Egress {
-                member: Member {
-                    kind: MemberKind::Agent,
-                    name: "x".to_owned(),
-                },
-                to: Destination::Name("mcp.example.com".to_owned()),
-                ports: tcp(443),
-            },
-            Upstream::MemberGrantsByName,
+            egress(&codex(), address("2001:db8::5"), tcp(7070)),
+            Upstream::MemberGrantsByAddress,
         ),
         (
-            Grant::Egress {
-                member: codex(),
-                to: Destination::Address("10.0.0.5".parse().unwrap()),
-                ports: tcp(7070),
-            },
+            egress(&codex(), address("10.0.0.5"), udp(7070)),
             Upstream::MemberGrantsByAddress,
         ),
         (
             Grant::Host {
                 member: codex(),
-                ports: tcp(7070),
+                ports: udp(7070),
             },
             Upstream::MemberHostService,
         ),
-    ] {
+    ];
+    for (grant, needs) in &beyond_d236 {
         assert_eq!(
-            program(&members_alone(std::slice::from_ref(&grant))),
-            Err(Refusal::Awaits { needs }),
+            program(&members_alone(std::slice::from_ref(grant))),
+            Err(Refusal::Awaits { needs: *needs }),
             "{grant:?}"
+        );
+        // After a destination D236 keeps, it is still what the list awaits first.
+        let list = [kept_by_d236[0].clone(), grant.clone()];
+        assert_eq!(
+            program(&members_alone(&list)),
+            Err(Refusal::Awaits { needs: *needs }),
+            "{list:?}"
         );
     }
     let publishes = [
@@ -150,14 +180,13 @@ fn each_grant_482c5d78_cant_hold_is_refused_naming_what_it_awaits() {
     ));
 }
 
-/// Joint plan step 15 (N6's receiver gap): do program a publish of a harness's port for a run with a command of its
-/// own, alone and after an egress by name, and that run with no grant at all. Expect: the publish refused
-/// `Awaits(PublishReceiver)`, since Shards' run host gives such a run's command every port its Agentfile gives no
-/// member (D122) and names no port's receiver, so the grant's member can't be held; the first unheld grant of the
-/// list refused first; and no grant still no network. Do program the same publish for a run of the members alone;
-/// expect it programmed.
+/// Joint plan step 15 (N6): do program a publish of a harness's port for a run with a command of its own, and for a
+/// run of the members alone. Expect it programmed alike for both, nothing kept past the VM: Shards names each
+/// published port's receivers as the boot returns (D231's `Bound::to`), and the run is held to them there
+/// ([`bound`]). Do program it beside a provider by name, and no grant at all; expect the destination refused
+/// `Awaits(MemberDestinations)`, and no grant still no network.
 #[test]
-fn a_publish_on_a_run_with_its_own_command_awaits_its_receivers_name() {
+fn a_publish_on_a_run_with_its_own_command_is_programmed() {
     let publish = Grant::Publish {
         member: codex(),
         proto: Proto::Tcp,
@@ -165,12 +194,11 @@ fn a_publish_on_a_run_with_its_own_command_awaits_its_receivers_name() {
         host: "127.0.0.1".parse().unwrap(),
         host_port: None,
     };
-    assert_eq!(
-        program(&commanded(std::slice::from_ref(&publish))),
-        Err(Refusal::Awaits {
-            needs: Upstream::PublishReceiver
-        })
-    );
+    let commanded_run = program(&commanded(std::slice::from_ref(&publish))).unwrap();
+    let members_run = program(&members_alone(std::slice::from_ref(&publish))).unwrap();
+    assert_eq!(commanded_run, members_run);
+    assert_eq!(commanded_run.publish.len(), 1);
+    assert_eq!(commanded_run.egress, nothing_kept());
     let by_name = Grant::Egress {
         member: codex(),
         to: Destination::Name("api.openai.com".to_owned()),
@@ -181,35 +209,42 @@ fn a_publish_on_a_run_with_its_own_command_awaits_its_receivers_name() {
         },
     };
     assert_eq!(
-        program(&commanded(&[by_name, publish.clone()])),
+        program(&commanded(&[publish, by_name])),
         Err(Refusal::Awaits {
-            needs: Upstream::MemberGrantsByName
+            needs: Upstream::MemberDestinations
         })
     );
     let none = program(&commanded(&[])).unwrap();
     assert!(none.publish.is_empty());
     assert_eq!(none.egress, nothing_kept());
-    let made = program(&members_alone(std::slice::from_ref(&publish))).unwrap();
-    assert_eq!(made.publish.len(), 1);
-    assert_eq!(made.egress, nothing_kept());
 }
 
-/// The capability a grant 482c5d78 can't hold awaits, on a run with a command of its own or not; none for one it
-/// holds.
-fn awaited(grant: &Grant, commanded: bool) -> Option<Upstream> {
-    match grant {
+/// What a list of grants awaits, by a model of N4 apart from the program's: the first grant D236's destinations can't
+/// express at all (UDP; an IPv6 address) awaits its own capability; else any destination awaits its members
+/// (`MemberDestinations`); publishes await nothing, on any run.
+fn awaited(list: &[Grant]) -> Option<Upstream> {
+    let beyond = list.iter().find_map(|grant| match grant {
         Grant::Egress {
             to: Destination::Name(_),
+            ports,
             ..
-        } => Some(Upstream::MemberGrantsByName),
+        } if ports.proto == Proto::Udp => Some(Upstream::MemberGrantsByName),
         Grant::Egress {
-            to: Destination::Address(_),
+            to: Destination::Address(IpAddr::V6(_)),
             ..
         } => Some(Upstream::MemberGrantsByAddress),
-        Grant::Host { .. } => Some(Upstream::MemberHostService),
-        Grant::Publish { .. } if commanded => Some(Upstream::PublishReceiver),
-        Grant::Publish { .. } => None,
-    }
+        Grant::Egress { ports, .. } if ports.proto == Proto::Udp => {
+            Some(Upstream::MemberGrantsByAddress)
+        }
+        Grant::Host { ports, .. } if ports.proto == Proto::Udp => Some(Upstream::MemberHostService),
+        _ => None,
+    });
+    let destination = list.iter().any(|g| !matches!(g, Grant::Publish { .. }));
+    beyond.or(if destination {
+        Some(Upstream::MemberDestinations)
+    } else {
+        None
+    })
 }
 
 fn any_publish() -> impl Strategy<Value = Grant> {
@@ -268,10 +303,10 @@ fn any_grant() -> impl Strategy<Value = Grant> {
 
 proptest! {
     /// AC-T7.7.2 (joint plan step 15): do program any well-formed list of grants of every way, for a run of the
-    /// members alone and for one with a command of its own; expect either a typed `Awaits` naming the capability of
-    /// its first grant 482c5d78 can't hold exactly (any publish, on a run with its own command), or a program that
-    /// keeps none of the image's grants past the microVM and publishes exactly the list's publish grants, in order,
-    /// each at the host address and port it names. So the flows a program allows that no grant names are exactly 0.
+    /// members alone and for one with a command of its own; expect either a typed `Awaits` naming what the list
+    /// awaits (`awaited`, N4), or a program that keeps none of the image's grants past the microVM and publishes
+    /// exactly the list's publish grants, in order, each at the host address and port it names. So the flows a
+    /// program allows that no grant names are exactly 0.
     #[test]
     fn a_program_allows_no_flow_its_grants_do_not_name(
         list in proptest::collection::vec(any_grant(), 0..6)
@@ -281,7 +316,7 @@ proptest! {
         let image = if with_command { commanded(&list) } else { members_alone(&list) };
         match program(&image) {
             Ok(made) => {
-                prop_assert!(list.iter().all(|g| awaited(g, with_command).is_none()));
+                prop_assert_eq!(awaited(&list), None);
                 prop_assert_eq!(&made.egress, &nothing_kept());
                 prop_assert_eq!(made.publish.len(), list.len());
                 for (published, grant) in made.publish.iter().zip(&list) {
@@ -301,7 +336,7 @@ proptest! {
                 }
             }
             Err(Refusal::Awaits { needs }) => {
-                prop_assert_eq!(Some(needs), list.iter().find_map(|g| awaited(g, with_command)));
+                prop_assert_eq!(Some(needs), awaited(&list));
             }
             Err(other) => return Err(TestCaseError::fail(format!("{other:?}"))),
         }
@@ -321,18 +356,24 @@ fn running(
     }
 }
 
-fn bound_at(guest_port: u16, at: &str) -> shards_api::image::Bound {
+/// A TCP port Shards bound at `at` for guest port `guest_port`, reaching each `(member index, member's port)` of `to`
+/// (D231's `Bound::to`; none: the run's own command).
+fn bound_at(guest_port: u16, at: &str, to: &[(u32, u16)]) -> shards_api::image::Bound {
     shards_api::image::Bound {
         guest_port,
         proto: shards_api::image::Proto::Tcp,
         host: at.parse().unwrap(),
-        to: Vec::new(),
+        to: to
+            .iter()
+            .map(|&(member, port)| shards_api::image::Receiving { member, port })
+            .collect(),
     }
 }
 
 /// Joint plan step 15 (N6): do hold a run's report to its grants: two publishes of a running harness (one on a port
-/// the OS picked, one on the port its grant names) beside an egress grant. Expect: each publish reported once, by
-/// its grant's place, at the socket the host bound, its receiver the image's declaration.
+/// the OS picked, one on the port its grant names and that its image maps to the harness's own port 8443) beside an
+/// egress grant, each reaching that harness alone. Expect: each publish reported once, by its grant's place, at the
+/// socket the host bound, its receiver the member Shards names, at the member's own port.
 #[test]
 fn a_runs_publishes_are_reported_by_their_grants() {
     let grants = vec![
@@ -366,8 +407,8 @@ fn a_runs_publishes_are_reported_by_their_grants() {
         true,
     )];
     let published = [
-        bound_at(8080, "[::1]:18080"),
-        bound_at(1455, "127.0.0.1:49200"),
+        bound_at(8080, "[::1]:18080", &[(0, 8443)]),
+        bound_at(1455, "127.0.0.1:49200", &[(0, 1455)]),
     ];
     assert_eq!(
         bound(&grants, &members, &published).unwrap(),
@@ -375,12 +416,12 @@ fn a_runs_publishes_are_reported_by_their_grants() {
             hex_api::Published {
                 grant: 1,
                 at: "127.0.0.1:49200".parse().unwrap(),
-                receiver: hex_api::Receiver::Declared,
+                receiver: hex_api::Receiver::Named { port: 1455 },
             },
             hex_api::Published {
                 grant: 2,
                 at: "[::1]:18080".parse().unwrap(),
-                receiver: hex_api::Receiver::Declared,
+                receiver: hex_api::Receiver::Named { port: 8443 },
             },
         ]
     );
@@ -401,7 +442,7 @@ fn a_runs_report_that_breaks_its_grants_is_refused() {
     }];
     let harness = shards_api::image::MemberKind::Harness;
     let agent = shards_api::image::MemberKind::Agent;
-    let at_grant = [bound_at(1455, "127.0.0.1:18080")];
+    let at_grant = [bound_at(1455, "127.0.0.1:18080", &[(0, 1455)])];
     for members in [
         vec![],
         vec![running(harness, "codex", false)],
@@ -416,9 +457,9 @@ fn a_runs_report_that_breaks_its_grants_is_refused() {
     let members = [running(harness, "codex", true)];
     for published in [
         vec![],
-        vec![bound_at(1455, "10.0.0.2:18080")],
-        vec![bound_at(1455, "127.0.0.1:18081")],
-        vec![bound_at(1456, "127.0.0.1:18080")],
+        vec![bound_at(1455, "10.0.0.2:18080", &[(0, 1455)])],
+        vec![bound_at(1455, "127.0.0.1:18081", &[(0, 1455)])],
+        vec![bound_at(1456, "127.0.0.1:18080", &[(0, 1456)])],
     ] {
         assert!(matches!(
             bound(&grants, &members, &published),
@@ -426,12 +467,69 @@ fn a_runs_report_that_breaks_its_grants_is_refused() {
         ));
     }
     let extra = [
-        bound_at(1455, "127.0.0.1:18080"),
-        bound_at(22, "0.0.0.0:2222"),
+        bound_at(1455, "127.0.0.1:18080", &[(0, 1455)]),
+        bound_at(22, "0.0.0.0:2222", &[]),
     ];
     assert!(matches!(
         bound(&grants, &members, &extra),
         Err(Refusal::Broken(why)) if why.contains("guest port 22") && why.contains("no grant names")
     ));
     assert_eq!(bound(&grants, &members, &at_grant).unwrap().len(), 1);
+}
+
+/// Joint plan step 15 (N6): do hold a run's report to a publish grant of harness codex (declared index 0) when the
+/// port Shards bound for it reaches the run's own command (no member), another member alone, codex and another
+/// member alike (the one listening takes each connection), or a member index the image doesn't declare. Expect the
+/// first three refused Invalid naming the grant and whom the port reaches, the last Broken (Shards named no member of
+/// its own image), never a report of a flow to anyone the grant doesn't name. Do bound it reaching codex alone at the
+/// port its image maps it to; expect it reported, its receiver codex at that port.
+#[test]
+fn a_publish_reaching_anyone_but_its_member_is_refused() {
+    let grants = vec![Grant::Publish {
+        member: codex(),
+        proto: Proto::Tcp,
+        port: 1455,
+        host: "127.0.0.1".parse().unwrap(),
+        host_port: None,
+    }];
+    let harness = shards_api::image::MemberKind::Harness;
+    let agent = shards_api::image::MemberKind::Agent;
+    let mut helper = running(agent, "helper", true);
+    helper.index = 1;
+    let members = [running(harness, "codex", true), helper];
+    for (to, says) in [
+        (vec![], "the run's own command"),
+        (vec![(1, 1455)], "agent helper"),
+        (vec![(0, 1455), (1, 1455)], "agent helper"),
+        (vec![(1, 1455), (0, 1455)], "agent helper"),
+    ] {
+        let published = [bound_at(1455, "127.0.0.1:49200", &to)];
+        assert!(
+            matches!(
+                bound(&grants, &members, &published),
+                Err(Refusal::Invalid { what: "grants", ref why })
+                    if why.starts_with("grants[0]") && why.contains(says)
+            ),
+            "{to:?}: {:?}",
+            bound(&grants, &members, &published)
+        );
+    }
+    let unknown = [bound_at(1455, "127.0.0.1:49200", &[(7, 1455)])];
+    assert!(
+        matches!(
+            bound(&grants, &members, &unknown),
+            Err(Refusal::Broken(ref why)) if why.contains("member 7")
+        ),
+        "{:?}",
+        bound(&grants, &members, &unknown)
+    );
+    let mapped = [bound_at(1455, "127.0.0.1:49200", &[(0, 8080)])];
+    assert_eq!(
+        bound(&grants, &members, &mapped).unwrap(),
+        vec![hex_api::Published {
+            grant: 0,
+            at: "127.0.0.1:49200".parse().unwrap(),
+            receiver: hex_api::Receiver::Named { port: 8080 },
+        }]
+    );
 }

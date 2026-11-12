@@ -247,11 +247,14 @@ pub struct Published {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Receiver {
-    /// The member the image's Agentfile gives the port coming in (Shards D122). A publish is granted only on a run of
-    /// the members alone, which Shards' run host refuses a port no member is given; on a run with a command of its
-    /// own, which takes every such port, it is refused `Awaits(PublishReceiver)`. Shards 482c5d78's image boot names
-    /// no receiver, so Hex can't verify it is the grant's member: N6's gap, recorded here until Shards names it.
+    /// The member the image's Agentfile gives the port coming in (Shards D122), unverified: Shards 482c5d78's image
+    /// boot named no receiver. No run reports it since Shards names one ([`Receiver::Named`]); its tag stays, the
+    /// wire being append-only.
     Declared,
+    /// The grant's member, which Shards' image boot names as the port's one receiver (D231's `Bound::to`), at the
+    /// member's own port there: the published port, or the one an `EXPOSE` maps it to (D122). A run whose port
+    /// reaches another member too, or none (its own command), is stopped as its boot returns (N6).
+    Named { port: u16 },
 }
 
 /// Whether every grant is well formed and no flow is named twice, refused by the field that fails, never dropped or

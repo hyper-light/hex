@@ -1840,8 +1840,8 @@ pub enum Upstream {
     /// A program started in a member of a Shards microVM: the exec of Shards' agent-control
     /// endpoint.
     MemberExec,
-    /// A microVM member's grants to reach a provider or kiln by name: Shards' explicit grants by
-    /// name.
+    /// A microVM member's UDP flows to a host's name: Shards' destinations (D236) reach a name by TCP
+    /// alone.
     MemberGrantsByName,
     /// What a runtime nested under shards-init needs: a delegated cgroup subtree, CAP_SYS_ADMIN for
     /// its boxes' namespaces and DRM render nodes, granted by name.
@@ -1854,11 +1854,11 @@ pub enum Upstream {
     AttachAfterCrash,
     /// A signal to the members of a Shards microVM: the signal of Shards' agent-control endpoint.
     MemberSignal,
-    /// A microVM member's grants to reach a peer at one address (kiln's endpoint by its address):
-    /// Shards' explicit grants naming the member, the address, the port and the direction.
+    /// A microVM member's flows to an IPv6 address, or by UDP to any address: Shards' destinations
+    /// (D236) reach an IPv4 address by TCP alone.
     MemberGrantsByAddress,
-    /// A microVM member's reach to a service its own host serves on its loopback (kiln beside the
-    /// VM): Shards' explicit host-service grants.
+    /// A microVM member's UDP reach to a service its own host serves on its loopback: Shards' destinations
+    /// (D236) reach the host itself (`host.docker.internal`) by TCP alone.
     MemberHostService,
     /// A Shards guest told the room its host's budget leaves it (D188): init's `ROOM`, which
     /// shards-api's image boot (D231) has no call to send (joint plan step 14).
@@ -1868,9 +1868,9 @@ pub enum Upstream {
     /// `POSIX_SPAWN_CLOEXEC_DEFAULT`, so it would inherit every descriptor another thread holds
     /// without close-on-exec at that moment (CVE-2024-21626's class).
     RunHostStdioOnly,
-    /// The member a published port reaches, named by Shards' image boot (D231): its `Bound` names none, and a run
-    /// with a command of its own gives that command every port its Agentfile gives no member (D122), so a publish
-    /// grant on such a run can't be held to the member it names (joint plan step 15).
+    /// The member a published port reaches, named by Shards' image boot (D231). Given since Shards 66113379
+    /// (`Bound::to`), so no call awaits it now: a run is held to it as its boot returns (joint plan step 15,
+    /// docs/design/network-grants.md N6). Its tag stays, the wire being append-only.
     PublishReceiver,
     /// A Shards guest's engine-ring pins (D230's long-term pinned slots) kept within the room its budget leaves it:
     /// Shards' p/ring-pins-v1, whose room-bounded pins no Shards revision holds yet (joint plan step 14, C7).
@@ -1878,11 +1878,17 @@ pub enum Upstream {
     /// A running Shards microVM saved whole and resumed on another machine (D176), so the last resort moves a VM
     /// past its budget rather than ending it; D176 is in progress (joint plan step 14, C5).
     LiveMove,
+    /// A destination (D236: a host's name, an IPv4 address or the host itself, by TCP) kept for the members an
+    /// orchestrator grants it alone: per-member destinations in D231's `Narrowing`, or an image's members and the
+    /// ports each may open named before its boot. `Narrowing.destinations` keeps one image-wide, and every member
+    /// the image lets out on its port reaches it (D236's `held`), so until then Hex can't show that only the
+    /// members its grants name reach a destination it keeps (joint plan step 15, docs/design/network-grants.md N4).
+    MemberDestinations,
 }
 
 impl Upstream {
     /// Every capability, in the order the node's wire tags them.
-    pub const ALL: [Upstream; 14] = [
+    pub const ALL: [Upstream; 15] = [
         Upstream::GuestCpuTimePerVcpu,
         Upstream::MemberExec,
         Upstream::MemberGrantsByName,
@@ -1897,6 +1903,7 @@ impl Upstream {
         Upstream::PublishReceiver,
         Upstream::RingPinsWithinRoom,
         Upstream::LiveMove,
+        Upstream::MemberDestinations,
     ];
 }
 
@@ -1907,26 +1914,36 @@ impl std::fmt::Display for Upstream {
                 "a Shards microVM's guest time per vCPU (Shards' guest CPU time work)"
             }
             Self::MemberExec => "a program run in a Shards member (its agent-control endpoint)",
-            Self::MemberGrantsByName => "a Shards member's grants by name",
+            Self::MemberGrantsByName => {
+                "a Shards member's UDP flows to a name (Shards' destinations, D236, are TCP alone)"
+            }
             Self::NestedRuntime => "a runtime nested under shards-init, with its grants",
             Self::WindowsRunHost => "Shards' Windows host of an image's run (owed by D231)",
             Self::AttachAfterCrash => {
                 "taking back an image's run after its owner's crash (owed by D231)"
             }
             Self::MemberSignal => "a signal to Shards members (its agent-control endpoint)",
-            Self::MemberGrantsByAddress => "a Shards member's grants by address",
-            Self::MemberHostService => "a Shards member's reach to its host's own service",
+            Self::MemberGrantsByAddress => {
+                "a Shards member's flows to an IPv6 address or by UDP (Shards' destinations, D236, are TCP to IPv4)"
+            }
+            Self::MemberHostService => {
+                "a Shards member's UDP reach to its host's own service (Shards' destinations, D236, are TCP alone)"
+            }
             Self::GuestRoom => "a Shards guest told its room (init's ROOM, owed through D231)",
             Self::RunHostStdioOnly => {
                 "Shards' host of an image's run started holding only its stdio (owed by D231)"
             }
             Self::PublishReceiver => {
-                "Shards' image boot naming the member a published port reaches (owed by D231)"
+                "Shards' image boot naming the member a published port reaches (given by D231's Bound::to)"
             }
             Self::RingPinsWithinRoom => {
                 "a Shards guest's ring pins kept within its room (Shards' p/ring-pins-v1)"
             }
             Self::LiveMove => "a running Shards microVM moved to another machine (Shards' D176)",
+            Self::MemberDestinations => {
+                "a Shards destination kept for the members granted it alone (per-member destinations in D231's \
+                 narrowing, or an image's members named before its boot)"
+            }
         })
     }
 }
