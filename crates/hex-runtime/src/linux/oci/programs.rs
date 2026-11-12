@@ -70,6 +70,35 @@ impl DevicePrograms for Kernel {
     }
 }
 
+/// What a kernel shows of a device program it loaded ([`shown`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shown {
+    /// Its translation, the program itself byte for byte ([`devshare::is_policy`]): a loaded program is proven by it
+    /// (fedora's kernel, research f55).
+    Itself,
+    /// No translation: a blinded program, to a caller without raw-dump rights (`kernel.kptr_restrict` 2, f51-f52).
+    Withheld,
+    /// A translation other than the program: a kernel that rewrites it.
+    Rewritten,
+}
+
+/// What `kernel` shows of a device program it loaded: a fresh copy of the default policy's. Only where it shows the
+/// program itself does [`Programs::at_root_on`] keep a root's program and [`program_for_on`] take a hinted one: the
+/// translation is their proof, a tag none (f54). Elsewhere neither proves anything, and a holder loads and attaches a
+/// copy of its own, the root's program replaced by one attach, a hinted one passed over, never the policy (f55).
+pub fn shown<K: DevicePrograms>(kernel: &K) -> Result<Shown, OciError> {
+    let default = resources::default_program()?;
+    let copy = kernel.load(&default)?;
+    let identity = kernel.identity(&copy)?;
+    Ok(match kernel.translation(&copy, identity.xlated_len)? {
+        None => Shown::Withheld,
+        Some(translation) if devshare::is_policy(&identity, Some(&translation), &default) => {
+            Shown::Itself
+        }
+        Some(_) => Shown::Rewritten,
+    })
+}
+
 /// What a node's device programs have done since it opened them: what tests and the bench read.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Counts {
@@ -280,22 +309,9 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::BTreeMap;
 
-    /// What a kernel shows of a loaded program's translation: the program itself (fedora's, research f55), nothing (a
-    /// blinded program to a caller without raw-dump rights: `kernel.kptr_restrict` 2, as on 00aad8da), or a rewrite.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    #[expect(
-        dead_code,
-        reason = "the original asks only a kernel that withholds; the kernels it doesn't come with its fix"
-    )]
-    enum Shows {
-        Itself,
-        Withheld,
-        Rewritten,
-    }
-
     /// A kernel of device programs: programs by id, and the one program a cgroup carries, attached with OVERRIDE.
     struct Sim {
-        shows: Shows,
+        shows: Shown,
         programs: RefCell<BTreeMap<u32, Vec<Insn>>>,
         next: Cell<u32>,
         root: Cell<Option<u32>>,
@@ -303,7 +319,7 @@ mod tests {
     }
 
     impl Sim {
-        fn new(shows: Shows) -> Self {
+        fn new(shows: Shown) -> Self {
             Self {
                 shows,
                 programs: RefCell::new(BTreeMap::new()),
@@ -335,7 +351,7 @@ mod tests {
         }
         fn identity(&self, program: &u32) -> Result<sys::ProgramIdentity, OciError> {
             let len = self.programs.borrow().get(program).map_or(0, Vec::len);
-            let extra = usize::from(self.shows == Shows::Rewritten);
+            let extra = usize::from(self.shows == Shown::Rewritten);
             Ok(sys::ProgramIdentity {
                 prog_type: sys::BPF_PROG_TYPE_CGROUP_DEVICE,
                 id: *program,
@@ -346,9 +362,9 @@ mod tests {
         fn translation(&self, program: &u32, _: u32) -> Result<Option<Vec<u8>>, OciError> {
             let bytes = |insns: &Vec<Insn>| insns.iter().flat_map(Insn::bytes).collect::<Vec<u8>>();
             Ok(match self.shows {
-                Shows::Itself => self.programs.borrow().get(program).map(bytes),
-                Shows::Withheld => None,
-                Shows::Rewritten => self.programs.borrow().get(program).map(|insns| {
+                Shown::Itself => self.programs.borrow().get(program).map(bytes),
+                Shown::Withheld => None,
+                Shown::Rewritten => self.programs.borrow().get(program).map(|insns| {
                     let mut rewritten = bytes(insns);
                     rewritten.extend([0; 8]);
                     rewritten
@@ -369,23 +385,41 @@ mod tests {
     }
 
     /// The lead's root lab of 2026-11-11 (oci_devices.rs:210 at main 2dc8295f on 00aad8da, kernel 7.3.3-1-cachyos,
-    /// `kernel.kptr_restrict` 2; original): oci_devices expects a second holder of the node's kind, opened over the
-    /// oci boxes' root that the node's start gave the default, to find it there and keep it. Do: over a kernel that
-    /// withholds a loaded program's translation, open a holder at an empty root, then a second at the same root.
-    /// Expect, as oci_devices does: the first attached the default; the second kept it.
+    /// `kernel.kptr_restrict` 2): a second holder of the node's kind keeps the oci boxes' root's default exactly where
+    /// the kernel proves a loaded program by its translation ([`shown`]), and elsewhere replaces it by one attach, the
+    /// root's policy the default's either way. The original at d6847be8 expected the keep on every kernel, as
+    /// oci_devices did, and failed over one that withholds. Do: over kernels that show a loaded program as itself,
+    /// withhold it, or rewrite it, open a holder at an empty root, then a second at the same root. Expect: each kernel
+    /// shown as it is; the first attached the default; the second kept it (no attach, the same program) where the
+    /// kernel shows the program itself, and replaced it by one attach elsewhere; the root's program the default's.
     #[test]
-    fn original_a_second_holder_keeps_the_roots_default() {
-        let root = tempfile::tempdir().unwrap();
-        let kernel = Sim::new(Shows::Withheld);
-        let node = Programs::at_root_on(&kernel, root.path(), 1).unwrap();
-        assert!(
-            node.counts().unwrap().root_attached,
-            "the node's start attached the default"
-        );
-        let held = Programs::at_root_on(&kernel, root.path(), 1).unwrap();
-        assert!(
-            !held.counts().unwrap().root_attached,
-            "the holder found the node's default on the root and kept it"
-        );
+    fn a_second_holder_keeps_the_roots_default_where_the_kernel_proves_it() {
+        let default = resources::default_program().unwrap();
+        for shows in [Shown::Itself, Shown::Withheld, Shown::Rewritten] {
+            let root = tempfile::tempdir().unwrap();
+            let kernel = Sim::new(shows);
+            assert_eq!(shown(&kernel).unwrap(), shows);
+            let node = Programs::at_root_on(&kernel, root.path(), 1).unwrap();
+            assert!(
+                node.counts().unwrap().root_attached,
+                "{shows:?}: the node's start attached the default"
+            );
+            let first = kernel.root.get();
+            let held = Programs::at_root_on(&kernel, root.path(), 1).unwrap();
+            let proves = shows == Shown::Itself;
+            assert_eq!(held.counts().unwrap().root_attached, !proves, "{shows:?}");
+            assert_eq!(
+                kernel.attaches.get(),
+                if proves { 1 } else { 2 },
+                "{shows:?}"
+            );
+            assert_eq!(kernel.root.get() == first, proves, "{shows:?}");
+            let carried = kernel.root.get().unwrap();
+            assert_eq!(
+                kernel.programs.borrow().get(&carried),
+                Some(&default),
+                "{shows:?}: the root's policy"
+            );
+        }
     }
 }
