@@ -27,6 +27,8 @@ pub(crate) trait Managed {
     fn usage(&self, record: &BoxRecord) -> Result<Usage, Refusal>;
     /// Caps the VM at `rate` milli-CPU.
     fn set_rate(&self, record: &BoxRecord, rate: u64) -> Result<(), Refusal>;
+    /// Ends the VM through its managed receipt: the last resort (C5).
+    fn stop(&self, record: &BoxRecord) -> Result<(), Refusal>;
 }
 
 fn refused(why: ChargeError) -> Refusal {

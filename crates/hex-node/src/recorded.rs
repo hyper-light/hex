@@ -264,6 +264,17 @@ pub trait Recover: Runtime {
         })
     }
 
+    /// Joint plan step 14 (C5): ends the managed VM through its receipt, the charge learner's last resort, its end then
+    /// observed as any other; refused, typed, by an owner that holds no managed VM.
+    fn stop_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
+        let _ = record;
+        Err(Refusal::Platform {
+            what: "a managed VM's last resort",
+            platform: std::env::consts::OS,
+            why: "this native owner holds no managed VM to end".to_owned(),
+        })
+    }
+
     /// Initialized native routes only; physical claims are overlaid from this owner's Store.
     fn attachment_offers(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
         Ok(self
@@ -1972,6 +1983,10 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
     fn set_rate(&self, record: &BoxRecord, rate: u64) -> Result<(), Refusal> {
         self.0.set_managed_rate(NativeRecord::Box(record), rate)
     }
+
+    fn stop(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        self.0.stop_managed(NativeRecord::Box(record))
+    }
 }
 
 impl<R: Recover + Send + Sync + 'static> Recorded<R> {
@@ -2570,6 +2585,10 @@ impl Recover for hex_runtime::macos::MacRuntime {
         hex_runtime::macos::MacRuntime::set_managed_rate(self, record, rate)
     }
 
+    fn stop_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
+        hex_runtime::macos::MacRuntime::stop_managed(self, record)
+    }
+
     fn charge_window(&self) -> Result<std::time::Duration, Refusal> {
         hex_runtime::macos::MacRuntime::charge_window(self)
     }
@@ -2674,6 +2693,10 @@ impl Recover for hex_runtime::windows::WinRuntime {
 
     fn set_managed_rate(&self, record: NativeRecord<'_>, rate: u64) -> Result<(), Refusal> {
         hex_runtime::windows::WinRuntime::set_managed_rate(self, record, rate)
+    }
+
+    fn stop_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
+        hex_runtime::windows::WinRuntime::stop_managed(self, record)
     }
 
     /// A job's hard cap holds per scheduling interval, whose length Windows doesn't document
@@ -2859,6 +2882,10 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
 
     fn set_managed_rate(&self, record: NativeRecord<'_>, rate: u64) -> Result<(), Refusal> {
         self.host().set_managed_rate(record, rate)
+    }
+
+    fn stop_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
+        self.host().stop_managed(record)
     }
 
     fn charge_window(&self) -> Result<std::time::Duration, Refusal> {

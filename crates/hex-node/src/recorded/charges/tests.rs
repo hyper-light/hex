@@ -69,12 +69,14 @@ fn vm(name: &str, n: u8) -> BoxRecord {
     record
 }
 
-/// The managed VMs as a record: each one's CPU and memory as the test sets them, and every cap set, in order.
+/// The managed VMs as a record: each one's CPU and memory as the test sets them, every cap set and every VM stopped,
+/// in order.
 #[derive(Default)]
 struct Record {
     usage: RefCell<BTreeMap<String, Usage>>,
     rates: RefCell<Vec<(String, u64)>>,
     refuse_rates: std::cell::Cell<bool>,
+    stops: RefCell<Vec<String>>,
 }
 
 impl Managed for Record {
@@ -93,6 +95,13 @@ impl Managed for Record {
         self.rates
             .borrow_mut()
             .push((record.spec.id.as_str().to_owned(), rate));
+        Ok(())
+    }
+
+    fn stop(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        self.stops
+            .borrow_mut()
+            .push(record.spec.id.as_str().to_owned());
         Ok(())
     }
 }
@@ -232,4 +241,135 @@ fn w14_only_a_made_live_managed_vm_is_running() {
     for record in [deleting, ended, uncontrolled, unscoped, process] {
         assert!(!running(&record), "{record:?}");
     }
+}
+
+/// Three running Shards VMs, each booked at 4 GiB (their class's prior), whose fleet's memory budget is 16 GiB.
+fn fleet_of_three() -> Vec<BoxRecord> {
+    vec![vm("vm-1", 1), vm("vm-2", 2), vm("vm-3", 3)]
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C5's last resort on macOS and Windows: a capping node ends a VM through its managed
+/// receipt. Do run a window of three Shards VMs booked at 4 GiB in a 16 GiB fleet, then one where they hold 6, 7 and
+/// 2 GiB, past the fleet's budget with the growth on record; then another with all three still running; then one with
+/// vm-2 gone. Expect vm-2, the VM holding most past its own budget, stopped through its receipt, the class's capacity
+/// answer saying why (its 7 GiB past its budget, the fleet's 15 GiB, 15 GiB of growth, its 16 GiB budget, its move
+/// awaiting D176); no second stop while vm-2 runs; and none once it's gone, every VM then within its budget.
+#[test]
+fn w14_a_capping_node_ends_the_vm_most_past_its_budget_through_its_receipt() {
+    let io = Record::default();
+    let vms = fleet_of_three();
+    for record in &vms {
+        io.set(record.spec.id.as_str(), 0, 0);
+    }
+    let budget = res(24_000, 16 * GIB);
+    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB)).unwrap();
+    let start = Instant::now();
+    learner.window(&io, &vms, budget, start).unwrap();
+    for (name, held) in [("vm-1", 6 * GIB), ("vm-2", 7 * GIB), ("vm-3", 2 * GIB)] {
+        io.set(name, 0, held);
+    }
+    learner.window(&io, &vms, budget, start + WINDOW).unwrap();
+    assert_eq!(*io.stops.borrow(), ["vm-2"]);
+    let learned = learner
+        .learned(Class::Shards, &[cost()], &vms)
+        .unwrap()
+        .unwrap();
+    let ends: Vec<_> = learned
+        .ended
+        .iter()
+        .map(|end| {
+            (
+                end.id.as_str(),
+                end.held,
+                end.budget < end.held,
+                (end.fleet_held, end.fleet_growth, end.fleet_budget),
+                end.unmoved,
+            )
+        })
+        .collect();
+    assert_eq!(
+        ends,
+        [(
+            "vm-2",
+            7 * GIB,
+            true,
+            (15 * GIB, 15 * GIB, 16 * GIB),
+            Some(hex_api::Upstream::LiveMove)
+        )]
+    );
+    learner.window(&io, &vms, budget, start + WINDOW * 2).unwrap();
+    assert_eq!(io.stops.borrow().len(), 1, "one end is never two");
+    let left = vec![vm("vm-1", 1), vm("vm-3", 3)];
+    learner.window(&io, &left, budget, start + WINDOW * 3).unwrap();
+    assert_eq!(io.stops.borrow().len(), 1, "never a VM within its budget");
+}
+
+/// The records a node keeps of its boxes, in `dir`, as `Recorded::open` makes them.
+fn books(dir: &std::path::Path) -> crate::recorded::Books {
+    crate::recorded::Books {
+        store: crate::store::Store::open(&dir.join("state"), &dir.join("run")).unwrap(),
+        prober: None,
+        lifecycle: crate::turns::Turns::new(
+            "changing a recorded box's lifecycle",
+            "recorded lifecycle methods",
+            crate::store::TURNS,
+            hex_core::patience::Patience::seeded("recorded.lifecycle", Duration::ZERO),
+        ),
+        abandoned: crate::abandoned::Abandoned::default(),
+        adopted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+        last_boot: None,
+        charges: std::sync::OnceLock::new(),
+    }
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C5 on the box itself on macOS and Windows (ROOT, 2026-11-12): a capping node's
+/// inspect says why its last resort ended a VM. Do record a Shards VM in a node's store as its create does, write
+/// why the last resort ended it into its record as the node does after the window, and count its inspect from its
+/// backend's info as the node does. Expect the inspect to say why.
+#[test]
+fn w14_a_capping_nodes_inspect_says_why_its_last_resort_ended_a_vm() {
+    let dir = tempfile::tempdir().unwrap();
+    let books = books(dir.path());
+    let spec = vm("vm-2", 2).spec;
+    let made = BoxRecord::new(spec.clone(), Phase::Creating, Vec::new());
+    books.store.begin(&made).unwrap();
+    books.store.made(&made).unwrap();
+    let end = hex_api::LearnedEnd {
+        id: spec.id.clone(),
+        held: 7 * GIB,
+        budget: 6 * GIB,
+        band: 0,
+        fleet_held: 15 * GIB,
+        fleet_growth: 15 * GIB,
+        fleet_budget: 16 * GIB,
+        unmoved: Some(hex_api::Upstream::LiveMove),
+    };
+    let written = end.clone();
+    assert!(
+        books
+            .store
+            .update(&spec.id, move |record| {
+                record.last_resort = Some(written);
+                true
+            })
+            .unwrap()
+    );
+    let info = books
+        .counted(hex_api::BoxInfo {
+            id: spec.id.clone(),
+            class: hex_api::Class::Shards,
+            state: hex_api::BoxState::Empty,
+            bounds: spec.bounds.clone(),
+            allocation: spec.allocation,
+            adopted: false,
+            membership: None,
+            exit: Some(hex_api::Exit::Signal(9)),
+            abandoned: 0,
+            route: None,
+            grants: Vec::new(),
+            published: Vec::new(),
+            last_resort: None,
+        })
+        .unwrap();
+    assert_eq!(info.last_resort, Some(end));
 }
