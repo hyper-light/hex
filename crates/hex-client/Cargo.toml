@@ -26,7 +26,7 @@ unsize.workspace = true
 hex-afunix.workspace = true
 
 [dev-dependencies]
-# The records the tests' waits take, and their census (src/copy/tests.rs).
+# The tests wait on their own facts' patiences (src/calls/budget_tests.rs, src/copy/tests.rs).
 hex-testkit.workspace = true
 tempfile.workspace = true
 # tests/shards_borrowed_contract.rs, Hex's campaign over shards-api's borrowed connector: its directories,
