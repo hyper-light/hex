@@ -288,13 +288,15 @@ impl Images for ModelImages {
     }
 }
 
-/// Waits generous past the model's instant answers.
+/// The runtime's waits for the model's answers, its boot's, a stats ask's and a stop's: facts no
+/// recorded operation makes, so each measures, for its fact alone (hex_testkit::waits; the lead's rule
+/// of 2026-11-08), never the program-end record. The model answers each at once while its gate is open.
 fn waits() -> Result<ImageWaits, Refusal> {
-    Ok(ImageWaits::seeded(
-        hex_api::conformance::PATIENCE,
-        hex_api::conformance::PATIENCE,
-        hex_api::conformance::PATIENCE,
-    ))
+    Ok(ImageWaits {
+        boot: Patience::measuring("test.hex_runtime.image_boot"),
+        stats: Patience::measuring("test.hex_runtime.image_stats"),
+        stop: Patience::measuring("test.hex_runtime.image_stop"),
+    })
 }
 
 /// A guest runtime with the model's image boot and record owner (the owner kept alive by the caller).
@@ -338,21 +340,23 @@ fn record(owner: &Owner, id: &BoxId) -> Option<BoxRecord> {
     Transaction::read(owner, id).unwrap()
 }
 
-/// Waits for box `id` to show `state`, the fact the run's own end or a late boot gives, for at most the
-/// suite's learned patience.
-fn shown(runtime: &GuestRuntime, id: &BoxId, state: BoxState) -> BoxInfo {
-    let asked = Instant::now();
-    loop {
+/// The tests' waits for a box's state, each its own fact's: a held boot answering once the model's gate
+/// opens, shown Running; and a run's own end reaped through its stop, shown Empty. No recorded operation
+/// makes either, so each measures, for its fact alone (hex_testkit::waits).
+static LATE_BOOT_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_late_boot_shown");
+static REAPED_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_reaped_shown");
+
+/// Waits on `wait`, its fact's own patience, for box `id` to show `state`.
+fn shown(runtime: &GuestRuntime, id: &BoxId, state: BoxState, wait: &Patience) -> BoxInfo {
+    let mut last = None;
+    hex_testkit::waits::until(wait, &format!("{id} shown {state:?}"), || {
         let info = runtime.inspect(id).unwrap();
-        if info.state == state {
-            return info;
-        }
-        assert!(
-            asked.elapsed() < hex_api::conformance::patience(),
-            "{id} never showed {state:?}: {info:?}"
-        );
-        std::thread::yield_now();
-    }
+        let reached = info.state == state;
+        last = Some(info);
+        reached
+    })
+    .unwrap();
+    last.unwrap()
 }
 
 /// Joint plan step 12: do create, then start, an image VM of two vCPUs and 256 MiB with no command.
@@ -437,7 +441,7 @@ fn a_run_that_ends_on_its_own_is_reaped_and_its_status_recorded() {
         .id;
     runtime.start(&id).unwrap();
     *images.run.end.lock().unwrap() = Some(RunEnd::Exited(3));
-    let info = shown(&runtime, &id, BoxState::Empty);
+    let info = shown(&runtime, &id, BoxState::Empty, &REAPED_SHOWN);
     assert_eq!(info.exit, Some(Exit::Code(3)));
     assert_eq!(record(&owner, &id).unwrap().exit, Some(Exit::Code(3)));
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
@@ -540,12 +544,13 @@ fn a_refused_boot_ends_the_box_and_says_why() {
 fn a_boot_past_its_patience_is_pending_and_its_answer_lands_after() {
     let images = ModelImages::new();
     images.gate(false);
-    let quick = ImageWaits::seeded(
-        Duration::from_nanos(1),
-        hex_api::conformance::PATIENCE,
-        hex_api::conformance::PATIENCE,
-    );
-    let (runtime, _owner) = model_runtime(&images, Ok(quick));
+    // The model holds the boot at its closed gate, which no bound outlasts, so a 1 ns record runs the
+    // start's wait out at once. The stats and stop waits measure, as waits() says.
+    let held = ImageWaits {
+        boot: Patience::seeded("test.hex_runtime.image_boot_held", Duration::from_nanos(1)),
+        ..waits().unwrap()
+    };
+    let (runtime, _owner) = model_runtime(&images, Ok(held));
     let id = runtime.create(spec("image-late", None)).unwrap().id;
     assert!(matches!(
         runtime.start(&id),
@@ -563,7 +568,7 @@ fn a_boot_past_its_patience_is_pending_and_its_answer_lands_after() {
         })
     ));
     images.gate(true);
-    shown(&runtime, &id, BoxState::Running);
+    shown(&runtime, &id, BoxState::Running, &LATE_BOOT_SHOWN);
     assert_eq!(images.asked.lock().unwrap().len(), 1);
 }
 
@@ -865,7 +870,10 @@ fn a_publish_to_a_member_the_image_doesnt_run_stops_the_vm() {
             Err(Refusal::Invalid { what: "grants", why }) if why.contains("grants[0].member harness codex")
         ));
         assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
-        let shown = shown(&runtime, &id, BoxState::Empty);
+        // The start's own stop waited for the run's end and recorded it before the start returned, so the box
+        // shows it with no wait of the test's.
+        let shown = runtime.inspect(&id).unwrap();
+        assert_eq!(shown.state, BoxState::Empty);
         assert_eq!(shown.exit, Some(Exit::Signal(9)));
         assert!(shown.published.is_empty());
         assert_eq!(record(&owner, &id).unwrap().exit, Some(Exit::Signal(9)));
