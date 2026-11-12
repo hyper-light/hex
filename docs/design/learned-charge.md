@@ -160,7 +160,8 @@ on hardware (ROOT's fairness run).
   budget, the node ends the VM holding most past its own budget, lowest band first; never a VM within its budget,
   so never one within its booking, nor one `memory.high` holds at its budget (growth is no fact yet). The fastest
   growth is learned from the node's own windows, only rising. Moving it instead of ending it waits on Shards' D176
-  (`Awaits(LiveMove)`).
+  (`Awaits(LiveMove)`): its saved and live moves are the `shards` command's, which shards-api's image run (D231)
+  doesn't offer at 66113379, whose D235 plugs a directory into a running member, not the member into a machine.
 - **In the node** (`node::charges`), once a window after the placement: the learner kills the chosen VM's cgroup
   through the descriptor its native owner pinned, so its VMM ends as the kernel's OOM killer would end it and is reaped
   as any other end; it records why (`hex_api::LearnedEnd`: what the VM held against its budget, its band, and its
@@ -211,7 +212,10 @@ own work and kiln's runs leave; a dedicated machine's is the machine's) and hard
 VM's budget (C5) is its share; D188 turns it into its guest's room, and everything the VM holds comes out of it,
 its D230 ring pins included (pinned guest RAM, so in what it holds). Delivering the room to a Hex-booted guest
 waits on Shards: shards-api has no call that sends init's `ROOM` (D231 has `STATS` alone), so Hex refuses it typed
-(`Awaits(GuestRoom)`); the pinned share waits on p/ring-pins-v1 (`Awaits(RingPinsWithinRoom)`).
+(`Awaits(GuestRoom)`). The pinned share is Shards' own since ring-pins-v1 (D230, vendored at 66113379): an engine
+ring's slot is made only where the room init is told covers it past the room the run needs to go on (where it is told
+none, the guest's available memory), idle slots go back as a told room shrinks, and the relay that pins them is in the
+run's cgroup, so once the room is told the pins are within it (`Upstream::RingPinsWithinRoom`, awaited no more).
 
 **Sources.** The plan's architecture ("Hex sets budgets per fleet, and Shards' D188 tells each guest its room.
 Everything a VM holds, ring pins included, comes out of that room"); D188 (f53 B); Borg admits quota by the limit and
@@ -251,9 +255,8 @@ reaches the view settled with goal 13 the same day:
   supervisor's `running_vms`), learns, and writes the placement (C4, C5), each file only when its value changes
   (`BoxCgroup::set`; a VM's create already wrote its ceiling): each VM's `cpu.weight` and `memory.high`, the fleet's
   parent's `cpu.max` and `cpu.weight`, `.vm`'s `cpu.weight`, and each process and OCI box's and `.oci`'s `cpu.weight`
-  on the same scale (C4). Each Shards guest's room is refused `Awaits(GuestRoom)` and its ring pins within it
-  `Awaits(RingPinsWithinRoom)` (C7). A failed window is kept, and the capacity answers then carry nothing learned, so
-  the class's VMs are booked whole until a window passes.
+  on the same scale (C4). Each Shards guest's room is refused `Awaits(GuestRoom)` (C7). A failed window is kept, and the
+  capacity answers then carry nothing learned, so the class's VMs are booked whole until a window passes.
 - `hex_api::Capacity::learned` crosses the node socket's wire last on a VM class's capacity answer (append-only).
   Its priors are bounded by a class's profiles, its holdings by a node's boxes, and the answer is fitted to one
   message. On each refresh the scheduler (`scheduler::charges`) gives its node's facts the priors it carries, then,
@@ -268,8 +271,12 @@ reaches the view settled with goal 13 the same day:
   (`recorded::charges::learned`, shared with Linux's). Neither platform holds a VM's memory at a budget below its
   ceiling (macOS ends past a footprint limit, Windows refuses past a commit limit, neither throttles at a level), so
   each VM's memory budget is refused, typed (`Platform`, `memory_high`), which the node says as it starts. On Windows
-  the learner is refused, typed, until its window is measured (C1). Their last resort, which would stop a VM through
-  its managed receipt, isn't wired yet: Hex's own remaining work.
+  the learner is refused, typed, until its window is measured (C1). Their last resort is Linux's, in the state every
+  learner shares (`recorded::charges::LastResort`: one end at a time, why kept for the class's capacity answers and the
+  box's record), and ends the VM it chooses through its managed receipt (`Recover::stop_managed`): on macOS the native
+  helper's stop of the VM's scope, the stop its receipt sends; on Windows the termination of the job the node holds, as
+  its receipt's stop terminates it. Its end is then observed as any other, why goes into the VM's record after the
+  window, and its inspect says it (`Books::counted`), as Linux's does.
 
 ## Every number
 
@@ -310,9 +317,8 @@ reaches the view settled with goal 13 the same day:
 | What | Waits on | Hex meanwhile |
 |---|---|---|
 | per-vCPU guest time | Shards p/guest-cpu-time-v1, goal 12's `Usage` | charges the VMM's whole CPU; `Awaits(GuestCpuTimePerVcpu)` |
-| the ring pins' share of a room | Shards p/ring-pins-v1's room-bounded pins | counts pins in what the VM holds; `Awaits(RingPinsWithinRoom)` |
 | a Hex-booted guest told its room | a shards-api call for init's `ROOM` | Linux holds the VMM at `memory.high`; `Awaits(GuestRoom)` |
-| moving an over VM instead of ending it | Shards D176 | ends it, last; `Awaits(LiveMove)` |
+| moving an over VM instead of ending it | Shards D176 in shards-api's image run (66113379 has none; D235 plugs directories) | ends it, last; `Awaits(LiveMove)` |
 | class priors across the fleet | step 13's view, hyper-swim's gossip (f67 A) | each node's own record |
 
 ## Measured in hex-sim, and what ROOT measures

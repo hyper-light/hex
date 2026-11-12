@@ -1467,6 +1467,12 @@ impl WinRuntime {
     pub fn set_managed_rate(&self, record: NativeRecord<'_>, rate: u64) -> Result<(), Refusal> {
         managed::set_rate(self, record, rate)
     }
+
+    /// Joint plan step 14 (C5 on Windows): the node's last resort ends the managed VM through its receipt, the job this
+    /// node holds.
+    pub fn stop_managed(&self, record: NativeRecord<'_>) -> Result<(), Refusal> {
+        managed::stop(self, record)
+    }
     pub fn managed_usage(&self, record: NativeRecord<'_>) -> Result<Usage, Refusal> {
         managed::usage(self, record)
     }
