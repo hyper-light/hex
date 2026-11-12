@@ -582,6 +582,23 @@ fn held(interface: &Path, error: &std::io::Error) -> Result<Refusal, Refusal> {
     })
 }
 
+/// The user owning the interface of function `sbdf`'s IOMMU group, `/dev/vfio/<group>`, as `host` lists them: whose
+/// nodes may open it.
+pub(super) fn group_owner(host: &Host, sbdf: &str) -> Result<u32, Refusal> {
+    use std::os::unix::fs::MetadataExt;
+    pci(sbdf)?;
+    let group = fs::canonicalize(path(&path(&host.functions()?, sbdf)?, "iommu_group")?)
+        .map_err(|e| Refusal::os("resolving native IOMMU group", e))?;
+    let name = group
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| name.parse::<u32>().is_ok())
+        .ok_or_else(|| invalid("a native IOMMU group isn't named by its number"))?;
+    fs::metadata(host.interface(name)?)
+        .map(|interface| interface.uid())
+        .map_err(|e| Refusal::os("reading a VFIO group interface's owner", e))
+}
+
 fn validate_function(host: &Host, sbdf: &str, group: u32) -> Result<u32, Refusal> {
     pci(sbdf)?;
     let device_path = path(&host.functions()?, sbdf)?;
