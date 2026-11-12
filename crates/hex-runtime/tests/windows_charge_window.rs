@@ -162,7 +162,10 @@ fn steps(samples: &[(Duration, u64)]) -> Vec<Duration> {
 }
 
 /// A capped run's runs, stops and periods: a stop is a gap between two steps longer than `step`, the accounting's own.
-fn cycles(samples: &[(Duration, u64)], step: Duration) -> (Vec<Duration>, Vec<Duration>, Vec<Duration>) {
+fn cycles(
+    samples: &[(Duration, u64)],
+    step: Duration,
+) -> (Vec<Duration>, Vec<Duration>, Vec<Duration>) {
     let at = steps(samples);
     let (mut runs, mut stops, mut periods) = (Vec::new(), Vec::new(), Vec::new());
     let Some(&first) = at.first() else {
