@@ -130,3 +130,6 @@ fn end(to: &Local) {
     let _ = to.shutdown(Shutdown::Write);
     let _ = to.shutdown(Shutdown::Read);
 }
+
+#[cfg(all(test, unix))]
+mod tests;

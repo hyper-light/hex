@@ -2488,9 +2488,13 @@ fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
         w.u32(published.grant);
         put_address(w, published.at.ip());
         w.u16(published.at.port());
-        w.u8(match published.receiver {
-            Receiver::Declared => 0,
-        });
+        match published.receiver {
+            Receiver::Declared => w.u8(0),
+            Receiver::Named { port } => {
+                w.u8(1);
+                w.u16(port);
+            }
+        }
         Ok(())
     })?;
     // Joint plan step 14 (C5): why its node's last resort ended it, after every older field.
@@ -2531,6 +2535,7 @@ fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
                 at: SocketAddr::new(address(r)?, r.u16()?),
                 receiver: match r.u8()? {
                     0 => Receiver::Declared,
+                    1 => Receiver::Named { port: r.u16()? },
                     t => return Err(Fault::value("published receiver", format!("variant {t}"))),
                 },
             })
