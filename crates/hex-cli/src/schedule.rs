@@ -28,16 +28,24 @@ fn run(args: &[String]) -> Result<(), Refusal> {
     match args {
         [verb, flag, file] if verb == "serve" && flag == "--config" => {
             let config = hex_node::scheduler::read_config(Path::new(file))?;
+            let own = config.node;
             let service = hex_node::scheduler::Service::open(
                 &config,
-                Arc::new(|node, why| {
-                    let _ = writeln!(
-                        std::io::stderr().lock(),
-                        "hex scheduler peer {}: {why}",
-                        node.0
-                    );
+                Arc::new(move |node, why| {
+                    let mut err = std::io::stderr().lock();
+                    let _ = if node.0 == own {
+                        writeln!(err, "hex scheduler: {why}")
+                    } else {
+                        writeln!(err, "hex scheduler peer {}: {why}", node.0)
+                    };
                 }),
             )?;
+            // The capacity view's lane, where the configuration asks for one (joint plan step 13): its address first,
+            // so a port of 0 is told.
+            if let Some(address) = service.capacity_address() {
+                writeln!(std::io::stdout(), "capacity {address}")
+                    .map_err(|e| Refusal::os("reporting the capacity lane", e))?;
+            }
             #[cfg(target_os = "linux")]
             let platform = hex_node::sizes::Sizes::now()?.platform();
             #[cfg(target_os = "macos")]
