@@ -159,21 +159,26 @@ impl Lane {
                 what: "capacity lane connections",
                 bound: usize::MAX,
             })?;
-        let endpoint = hex_quic::Endpoint::start(hex_quic::Config {
-            credentials,
-            bind: config.bind,
-            listen: true,
-            serves: vec![hex_quic::capacity::CAPACITY_PORT],
-            shape: hex_quic::Shape {
-                connections,
-                lanes: 2,
+        let names: Vec<String> = config.holders.iter().map(|h| h.name.clone()).collect();
+        // A peer the lane doesn't name is refused at its handshake, so it holds none of these connections
+        // (docs/design/hex-quic.md Q10).
+        let endpoint = hex_quic::Endpoint::start_admitting(
+            hex_quic::Config {
+                credentials,
+                bind: config.bind,
+                listen: true,
+                serves: vec![hex_quic::capacity::CAPACITY_PORT],
+                shape: hex_quic::Shape {
+                    connections,
+                    lanes: 2,
+                },
             },
-        })
+            hex_quic::Admits::Named(names.iter().cloned().collect()),
+        )
         .map_err(|e| Refusal::Invalid {
             what: "capacity lane",
             why: e.to_string(),
         })?;
-        let names: Vec<String> = config.holders.iter().map(|h| h.name.clone()).collect();
         let server = hex_quic::capacity::Server::new(
             crate::placement::DriverView(Arc::clone(driver)),
             &names,

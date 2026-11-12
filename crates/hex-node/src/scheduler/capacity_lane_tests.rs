@@ -25,6 +25,7 @@ static AWAY: Patience = Patience::measuring("test.hex_node.capacity_lane.away");
 
 const SCHEDULER: &str = "scheduler.capacity.test";
 const KILN: &str = "kiln-a.capacity.test";
+const KILN_B: &str = "kiln-b.capacity.test";
 
 fn loopback() -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
@@ -111,11 +112,12 @@ fn forget(service: &Service, holder: &str) -> Option<dto::Forget> {
 }
 
 /// AC-T7.4.1, CV6, CV8, CV9: a scheduler whose configuration names a capacity lane on loopback, its enrollment, and
-/// kiln-a alone; kiln-a joins and the scheduler refreshes; a peer kiln's CA enrolled but the lane doesn't name says
-/// hello; the person releases kiln-a while it is connected, again once its link has ended, and a name never seen.
-/// Expect the lane bound, kiln-a welcomed and hinted the measured room after the scheduler's own word; the other peer
-/// closed as not authorized and that logged; the release refused as connected, then done and logged as
-/// `hex.capacity event=forgotten`, and the name never seen unknown. (This scheduler has no backend, so its node runs
+/// kiln-a and kiln-b alone; kiln-a joins and the scheduler refreshes; kiln-b says hello as kiln-a; the person releases
+/// kiln-a while it is connected, again once its link has ended, and a name never seen. Expect the lane bound, kiln-a
+/// welcomed and hinted the measured room after the scheduler's own word; kiln-b's hello closed as not authorized and
+/// that logged; the release refused as connected, then done and logged as `hex.capacity event=forgotten`, and the name
+/// never seen unknown. (A peer the lane doesn't name never reaches it: refused at its handshake,
+/// `a_peer_the_lane_doesnt_name_holds_none_of_its_connections`. This scheduler has no backend, so its node runs
 /// nothing and keeps no reservation of a holder's, CV8: the grant through the node's view is
 /// `placement::view::tests::a_holder_reaches_the_nodes_keeper_over_quic`.)
 #[test]
@@ -127,10 +129,13 @@ fn the_scheduler_serves_its_capacity_view_to_the_holders_it_names_alone() {
     let lane = CapacityLane {
         bind: loopback(),
         credentials,
-        holders: vec![CapacityHolder {
-            name: KILN.into(),
-            user: None,
-        }],
+        holders: [KILN, KILN_B]
+            .into_iter()
+            .map(|name| CapacityHolder {
+                name: name.into(),
+                user: None,
+            })
+            .collect(),
     };
     let (report, lines) = kept();
     let service = Service::open(&config(dir.path(), Some(lane)), report).unwrap();
@@ -154,11 +159,11 @@ fn the_scheduler_serves_its_capacity_view_to_the_holders_it_names_alone() {
     kiln.hear(hint, &mut out);
     assert_eq!(kiln.view().map(|v| v.room), Some(view.room));
 
-    let (_other_end, mut other) = linked(&ca, address, "mallory.capacity.test");
-    let mut mallory = Holder::start("mallory.capacity.test".into(), 1, 4, &[]).unwrap();
-    let hello = mallory.connect().unwrap();
+    let (_b_end, mut posing_link) = linked(&ca, address, KILN_B);
+    let mut posing = Holder::start(KILN.into(), 2, 4, &[]).unwrap();
+    let hello = posing.connect().unwrap();
     assert_eq!(
-        talk(&mut other, &mut mallory, vec![hello]),
+        talk(&mut posing_link, &mut posing, vec![hello]),
         vec![Event::Closed(Close::NotAuthorized)]
     );
     assert!(
