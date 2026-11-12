@@ -1389,6 +1389,16 @@ impl Service {
         let forget = match self.driver.view_forget(holder).map_err(failed)? {
             Ok(released) => {
                 let sum = released.sum;
+                (lane.log)(&format!(
+                    "hex.capacity event=forgotten holder={holder:?} epoch={} count={} cpu_milli={} mem_bytes={} \
+                     disk_bytes={} gpus={}",
+                    released.epoch,
+                    released.count,
+                    sum.cpu_milli,
+                    sum.mem_bytes,
+                    sum.disk_bytes,
+                    sum.gpus
+                ));
                 dto::Forget::Released {
                     holder: holder.to_owned(),
                     epoch: released.epoch,
