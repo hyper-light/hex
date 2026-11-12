@@ -36,21 +36,33 @@ pub(crate) enum Command {
         reply: SyncSender<Result<Arc<Shared>, Refused>>,
     },
     /// A connection's outbox holds a frame.
-    Send { peer: PeerId, conn: lanes::Conn },
-    End { peer: PeerId, conn: lanes::Conn },
+    Send {
+        peer: PeerId,
+        conn: lanes::Conn,
+    },
+    End {
+        peer: PeerId,
+        conn: lanes::Conn,
+    },
     Reset {
         peer: PeerId,
         conn: lanes::Conn,
         why: Why,
     },
     /// A connection's owner read all that had come: the peer's lane, if held, is let go.
-    Drained { peer: PeerId, conn: lanes::Conn },
+    Drained {
+        peer: PeerId,
+        conn: lanes::Conn,
+    },
     Negotiated {
         peer: PeerId,
         reply: SyncSender<Option<(CipherSuite, Option<NamedGroup>)>>,
     },
     /// The peer holds at most `lanes` connections at once: this side opens no more.
-    Limit { peer: PeerId, lanes: u32 },
+    Limit {
+        peer: PeerId,
+        lanes: u32,
+    },
     Stop,
 }
 
@@ -252,7 +264,11 @@ impl Accepts {
 
     fn put(&self, port: u32, peer: PeerId, shared: Arc<Shared>) {
         if let Ok(mut queues) = self.queues.lock() {
-            queues.by_port.entry(port).or_default().push_back((peer, shared));
+            queues
+                .by_port
+                .entry(port)
+                .or_default()
+                .push_back((peer, shared));
         }
         self.came.notify_all();
     }
@@ -302,11 +318,18 @@ impl Driver {
         derived: Derived,
         serves: Vec<u32>,
     ) -> Result<Started, Refused> {
-        let os = |op: &'static str| move |e: std::io::Error| Refused::Os { op, why: e.to_string() };
+        let os = |op: &'static str| {
+            move |e: std::io::Error| Refused::Os {
+                op,
+                why: e.to_string(),
+            }
+        };
         let sock = UdpSocket::bind(bind).map_err(os("binding the endpoint's socket"))?;
         sock.set_nonblocking(true)
             .map_err(os("making the endpoint's socket non-blocking"))?;
-        let local = sock.local_addr().map_err(os("reading the endpoint's address"))?;
+        let local = sock
+            .local_addr()
+            .map_err(os("reading the endpoint's address"))?;
         let names = Names {
             dialing: BTreeMap::new(),
         };
@@ -611,7 +634,11 @@ impl Driver {
                 epoch,
                 refusal,
             } => {
-                if self.peers.get(&peer).is_some_and(|state| state.epoch == epoch) {
+                if self
+                    .peers
+                    .get(&peer)
+                    .is_some_and(|state| state.epoch == epoch)
+                {
                     self.peer_gone(peer, Refused::closed(refusal));
                 }
                 self.dial_failed(peer, Refused::closed(refusal));
@@ -633,11 +660,8 @@ impl Driver {
                 match state.mux.frame(lane, kind, bytes) {
                     Ok(outs) => self.apply(peer, outs),
                     Err(_broken) => {
-                        self.ep.refuse(
-                            Instant::now(),
-                            peer,
-                            hyper_transport::Refusal::Corrupt,
-                        );
+                        self.ep
+                            .refuse(Instant::now(), peer, hyper_transport::Refusal::Corrupt);
                         self.peer_gone(peer, Refused::Broken);
                     }
                 }

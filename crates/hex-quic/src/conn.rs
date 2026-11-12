@@ -187,9 +187,7 @@ impl Shared {
 
     /// The driver: whether a frame waits for it.
     pub(crate) fn outbox_waits(&self) -> bool {
-        self.state
-            .lock()
-            .is_ok_and(|state| state.outbox.is_some())
+        self.state.lock().is_ok_and(|state| state.outbox.is_some())
     }
 
     /// The driver: the frame it took went (or the connection is gone): a writer may place the next.
@@ -459,11 +457,9 @@ impl Conn {
 
 impl Drop for Conn {
     fn drop(&mut self) {
-        let open = self
-            .shared
-            .state
-            .lock()
-            .is_ok_and(|state| state.gone.is_none() && !(state.here_ended && state.there == There::Ended));
+        let open = self.shared.state.lock().is_ok_and(|state| {
+            state.gone.is_none() && !(state.here_ended && state.there == There::Ended)
+        });
         if open {
             self.reset(Why::Gone);
         }

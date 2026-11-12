@@ -121,10 +121,20 @@ mod hosted {
         fn start(&self, id: &BoxId) -> Result<(), Refusal> {
             self.0.start(id)
         }
-        fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        fn exec(
+            &self,
+            id: &BoxId,
+            program: Program,
+            stdio: Stdio,
+        ) -> Result<Box<dyn Proc>, Refusal> {
             self.0.exec(id, program, stdio)
         }
-        fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        fn run(
+            &self,
+            spec: BoxSpec,
+            program: Program,
+            stdio: Stdio,
+        ) -> Result<Box<dyn Proc>, Refusal> {
             self.0.run(spec, program, stdio)
         }
         fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
@@ -152,7 +162,6 @@ mod hosted {
             Ok(netns::Counts::default())
         }
     }
-
 }
 
 /// The server's bounds for this test: a node's few connections, and as many calls and programs as the suite runs at
@@ -222,13 +231,9 @@ fn exercise(host: Arc<dyn Host>) {
         .unwrap(),
     );
     let deadline = Instant::now() + hex_api::conformance::PATIENCE;
-    let (client, peer) = hex_quic::link::connect(
-        Arc::clone(&client_end),
-        "node.quic.test",
-        address,
-        deadline,
-    )
-    .unwrap();
+    let (client, peer) =
+        hex_quic::link::connect(Arc::clone(&client_end), "node.quic.test", address, deadline)
+            .unwrap();
     let aes = hex_quic::CipherSuite::TLS13_AES_256_GCM_SHA384;
     assert_eq!(client_end.negotiated(peer).unwrap().unwrap().0, aes);
     assert_eq!(
@@ -261,7 +266,9 @@ fn hex_quic_20_the_conformance_suite_passes_over_quic() {
 #[cfg(windows)]
 #[test]
 fn hex_quic_20_the_conformance_suite_passes_over_quic() {
-    exercise(Arc::new(hosted::Hosted(hex_runtime::windows::WinRuntime::new())));
+    exercise(Arc::new(hosted::Hosted(
+        hex_runtime::windows::WinRuntime::new(),
+    )));
 }
 
 #[cfg(target_os = "linux")]
@@ -308,8 +315,9 @@ mod linux {
                     .prefix("node-")
                     .tempdir_in(&cache)
                     .unwrap();
-                let node = hex_node::Node::open(&own.join("hex-boxes-quic"), state.path(), state.path())
-                    .expect("open a node");
+                let node =
+                    hex_node::Node::open(&own.join("hex-boxes-quic"), state.path(), state.path())
+                        .expect("open a node");
                 super::exercise(Arc::new(node));
             }
             Err(direct) if std::env::var_os("HEX_DELEGATED").is_none() => {
@@ -321,7 +329,9 @@ mod linux {
                     hex_testkit::skip(
                         TEST,
                         "cgroup v2 delegation",
-                        &format!("own cgroup isn't ours to subdivide ({direct}) and no systemd --user"),
+                        &format!(
+                            "own cgroup isn't ours to subdivide ({direct}) and no systemd --user"
+                        ),
                     )
                     .expect("recording the skip");
                     return;
@@ -339,7 +349,9 @@ mod linux {
                 hex_testkit::skip(
                     TEST,
                     "cgroup v2 delegation",
-                    &format!("none in the delegated scope either ({direct}); run on a cgroup-v2 host"),
+                    &format!(
+                        "none in the delegated scope either ({direct}); run on a cgroup-v2 host"
+                    ),
                 )
                 .expect("recording the skip");
             }

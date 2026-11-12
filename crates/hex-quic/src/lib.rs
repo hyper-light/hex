@@ -153,7 +153,12 @@ impl Endpoint {
 
     /// Dials the peer named `name` at `address`, its certificate checked for that name, until `deadline`: the peer's
     /// id once the connection is up, or why it isn't.
-    pub fn dial(&self, name: &str, address: SocketAddr, deadline: Instant) -> Result<PeerId, Refused> {
+    pub fn dial(
+        &self,
+        name: &str,
+        address: SocketAddr,
+        deadline: Instant,
+    ) -> Result<PeerId, Refused> {
         let (reply, answer) = sync_channel(1);
         self.commands.send(Command::Dial {
             name: name.to_owned(),
@@ -188,7 +193,10 @@ impl Endpoint {
     }
 
     /// The suite and group the connection to `peer` negotiated.
-    pub fn negotiated(&self, peer: PeerId) -> Result<Option<(CipherSuite, Option<NamedGroup>)>, Refused> {
+    pub fn negotiated(
+        &self,
+        peer: PeerId,
+    ) -> Result<Option<(CipherSuite, Option<NamedGroup>)>, Refused> {
         let (reply, answer) = sync_channel(1);
         self.commands.send(Command::Negotiated { peer, reply })?;
         answer.recv().map_err(|_| Refused::Ended)

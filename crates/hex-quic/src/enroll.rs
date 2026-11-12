@@ -116,7 +116,9 @@ pub fn credentials(key: Key, request: &Request, issued: Issued) -> Result<Creden
         .map_err(|e| mismatch(&format!("its certificate can't be read: {e}")))?;
     let spki = rcgen::PublicKeyData::subject_public_key_info(&key.0);
     if cert.subject_public_key_info().as_ref() != spki.as_slice() {
-        return Err(mismatch("its certificate carries another key than this peer's"));
+        return Err(mismatch(
+            "its certificate carries another key than this peer's",
+        ));
     }
     if crate::driver::certificate_name(leaf).as_deref() != Some(request.name.as_str()) {
         return Err(mismatch("its certificate names another peer"));
@@ -197,12 +199,9 @@ pub mod sim {
                 why: why.to_owned(),
             };
             {
-                let mut grants = self
-                    .grants
-                    .lock()
-                    .map_err(|_| CaRefused::Unreachable {
-                        why: "the CA's grants are poisoned".to_owned(),
-                    })?;
+                let mut grants = self.grants.lock().map_err(|_| CaRefused::Unreachable {
+                    why: "the CA's grants are poisoned".to_owned(),
+                })?;
                 match grants.get(&request.name) {
                     Some(grant) if *grant == request.grant => {
                         grants.remove(&request.name);
@@ -259,7 +258,10 @@ pub mod conformance {
         pub why: String,
     }
 
-    type Case = (&'static str, fn(&dyn Ca, &dyn Fixture) -> Result<(), String>);
+    type Case = (
+        &'static str,
+        fn(&dyn Ca, &dyn Fixture) -> Result<(), String>,
+    );
 
     pub const CASES: &[Case] = &[
         ("HEX-ENROLL-1", issued_for_the_request),
@@ -273,11 +275,7 @@ pub mod conformance {
     pub fn run(ca: &dyn Ca, fixture: &dyn Fixture) -> Vec<Failure> {
         CASES
             .iter()
-            .filter_map(|(case, run)| {
-                run(ca, fixture)
-                    .err()
-                    .map(|why| Failure { case, why })
-            })
+            .filter_map(|(case, run)| run(ca, fixture).err().map(|why| Failure { case, why }))
             .collect()
     }
 
@@ -416,7 +414,12 @@ mod tests {
             .position(|w| w == [0x02, 0x01, 0x01, 0x04, 0x30])
             .unwrap();
         let scalar = &secret[at + 5..at + 5 + 48];
-        let sent: Vec<u8> = [request.csr.as_slice(), request.name.as_bytes(), &request.grant].concat();
+        let sent: Vec<u8> = [
+            request.csr.as_slice(),
+            request.name.as_bytes(),
+            &request.grant,
+        ]
+        .concat();
         for window in scalar.windows(16) {
             assert!(
                 !sent.windows(16).any(|w| w == window),

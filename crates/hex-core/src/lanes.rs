@@ -503,7 +503,12 @@ impl Mux {
 
     /// A frame of `kind` came on the peer's lane `lane`: what it means. A frame that breaks the protocol is
     /// [`Broken`], and the shell ends the peer's connection.
-    pub fn frame(&mut self, lane: LaneId, kind: Kind, payload: Vec<u8>) -> Result<Vec<Out>, Broken> {
+    pub fn frame(
+        &mut self,
+        lane: LaneId,
+        kind: Kind,
+        payload: Vec<u8>,
+    ) -> Result<Vec<Out>, Broken> {
         let mut out = Vec::new();
         match kind {
             Kind::Open => self.opened(lane, &payload, &mut out)?,
@@ -553,9 +558,7 @@ impl Mux {
         let id = u64::from_be_bytes([i0, i1, i2, i3, i4, i5, i6, i7]);
         let conn = Conn { here: false, id };
         if self.conns.contains_key(&conn) {
-            return Err(Broken(format!(
-                "an Open of connection {id}, which is open"
-            )));
+            return Err(Broken(format!("an Open of connection {id}, which is open")));
         }
         let refuse = |why: Why| {
             let mut payload = Vec::with_capacity(9);
@@ -638,9 +641,7 @@ impl Mux {
             if id < self.next {
                 return Ok(());
             }
-            return Err(Broken(format!(
-                "a Refuse of connection {id}, never opened"
-            )));
+            return Err(Broken(format!("a Refuse of connection {id}, never opened")));
         };
         if state.there != There::Pending {
             return Err(Broken(format!("a Refuse of connection {id}, accepted")));
@@ -688,14 +689,16 @@ impl Mux {
         }
     }
 
-    fn was_reset(&mut self, lane: LaneId, payload: &[u8], out: &mut Vec<Out>) -> Result<(), Broken> {
+    fn was_reset(
+        &mut self,
+        lane: LaneId,
+        payload: &[u8],
+        out: &mut Vec<Out>,
+    ) -> Result<(), Broken> {
         let why = match payload {
             [why] => Why::of(*why),
             _ => {
-                return Err(Broken(format!(
-                    "a Reset of {} bytes, not 1",
-                    payload.len()
-                )));
+                return Err(Broken(format!("a Reset of {} bytes, not 1", payload.len())));
             }
         };
         match self.there.remove(&lane) {
@@ -721,7 +724,13 @@ impl Mux {
         }
     }
 
-    fn data(&mut self, lane: LaneId, kind: Kind, bytes: Vec<u8>, out: &mut Vec<Out>) -> Result<(), Broken> {
+    fn data(
+        &mut self,
+        lane: LaneId,
+        kind: Kind,
+        bytes: Vec<u8>,
+        out: &mut Vec<Out>,
+    ) -> Result<(), Broken> {
         match self.there.get(&lane) {
             Some(Lane::Discard) => Ok(()),
             Some(Lane::Bound(conn)) => {

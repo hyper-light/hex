@@ -47,7 +47,10 @@ const LIMITS: Limits = Limits { lanes: 4 };
 fn pair() -> (Mux, Mux) {
     (
         Mux::new(LIMITS, &[]),
-        Mux::new(LIMITS, &[stream::CONTROL_PORT, stream::STDIO_PORT, LOG_PORT]),
+        Mux::new(
+            LIMITS,
+            &[stream::CONTROL_PORT, stream::STDIO_PORT, LOG_PORT],
+        ),
     )
 }
 
@@ -61,7 +64,10 @@ fn hex_quic_1_a_connection_carries_bytes_both_ways_and_closes_on_both_ends() {
     first.extend(a.send(conn, b"hello").unwrap());
     let (seen_a, seen_b) = settle(&mut a, &mut b, first);
     assert_eq!(seen_a, vec![Out::Opened { conn }]);
-    let there = Conn { here: false, id: conn.id };
+    let there = Conn {
+        here: false,
+        id: conn.id,
+    };
     assert_eq!(
         seen_b,
         vec![
@@ -159,7 +165,10 @@ fn hex_quic_4_a_reset_ends_both_halves_and_frees_every_lane() {
     let (mut a, mut b) = pair();
     let (conn, open) = a.connect(stream::STDIO_PORT).unwrap();
     let (_, seen_b) = settle(&mut a, &mut b, vec![open]);
-    let there = Conn { here: false, id: conn.id };
+    let there = Conn {
+        here: false,
+        id: conn.id,
+    };
     assert!(matches!(seen_b.as_slice(), [Out::Accepted { .. }]));
     // b sends as a resets: b's bytes, which reach a after its reset, are let go.
     let late = b.send(there, b"late").unwrap();
@@ -193,7 +202,10 @@ fn hex_quic_5_a_frame_that_breaks_the_protocol_is_broken() {
     assert!(b.frame(3, Kind::End, Vec::new()).is_err());
     assert!(b.frame(REFUSALS, Kind::Open, vec![0; 12]).is_err());
     assert!(b.frame(2, Kind::Open, vec![0; 11]).is_err());
-    assert!(a.frame(2, Kind::Accept, 9u64.to_be_bytes().to_vec()).is_err());
+    assert!(
+        a.frame(2, Kind::Accept, 9u64.to_be_bytes().to_vec())
+            .is_err()
+    );
     assert!(a.frame(2, Kind::Refuse, vec![0; 9]).is_err());
     let (conn, open) = a.connect(stream::STDIO_PORT).unwrap();
     let Out::Send { lane, .. } = &open else {

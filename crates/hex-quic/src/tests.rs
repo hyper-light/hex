@@ -216,7 +216,11 @@ fn hex_quic_13_a_peer_limited_to_another_suite_is_refused_either_way() {
         let node = under(other, &enrolled(&ca, &theirs), true, vec![CONTROL_PORT]);
         let ours = client(enrolled(&ca, &format!("our-client-{i}.test")));
         let dialed = ours.dial(&theirs, node.local_addr(), patience());
-        assert!(dialed.is_err(), "a node limited to {:?} took us", other.cipher_suites);
+        assert!(
+            dialed.is_err(),
+            "a node limited to {:?} took us",
+            other.cipher_suites
+        );
         let ours = format!("our-node-{i}.test");
         let node = node(&ca, &ours);
         let theirs = under(
@@ -226,7 +230,11 @@ fn hex_quic_13_a_peer_limited_to_another_suite_is_refused_either_way() {
             Vec::new(),
         );
         let dialed = theirs.dial(&ours, node.local_addr(), patience());
-        assert!(dialed.is_err(), "our node took a client limited to {:?}", other.cipher_suites);
+        assert!(
+            dialed.is_err(),
+            "our node took a client limited to {:?}",
+            other.cipher_suites
+        );
     }
 }
 

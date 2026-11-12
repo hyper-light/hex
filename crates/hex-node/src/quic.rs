@@ -200,7 +200,10 @@ impl<N: Os> Quic<N> {
             move || streams(&shared, &acceptor)
         })?;
         spawn("hex-quic-log", {
-            let (log, acceptor) = (Arc::clone(&log), endpoint.acceptor(hex_core::lanes::LOG_PORT));
+            let (log, acceptor) = (
+                Arc::clone(&log),
+                endpoint.acceptor(hex_core::lanes::LOG_PORT),
+            );
             move || log.take(&acceptor)
         })?;
         #[cfg(target_os = "linux")]
@@ -292,7 +295,10 @@ impl<N: Os> Quic<N> {
             let Ok(mut reading) = control.reading.lock() else {
                 return Recv::Gone;
             };
-            let Reading { deframer, buf: chunk } = &mut *reading;
+            let Reading {
+                deframer,
+                buf: chunk,
+            } = &mut *reading;
             let n = match control.conn.try_read(chunk) {
                 Ok(Some(0)) | Err(_) => return Recv::Gone,
                 Ok(Some(n)) => n,
