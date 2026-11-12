@@ -172,7 +172,8 @@ fn root_borrowed_drop_preserves_target_and_socket_and_dead_target_refuses() {
     });
     for _ in 0..2 {
         // Drop, then reconnect to the same still-owned target/socket.
-        let stream = connect_borrowed(&identity, PORT, shards_api::conformance::UNSERVED_PATIENCE).unwrap();
+        let stream =
+            connect_borrowed(&identity, PORT, shards_api::conformance::UNSERVED_PATIENCE).unwrap();
         let clone = stream.try_clone().unwrap();
         drop(stream);
         assert!(target.0.try_wait().unwrap().is_none());
@@ -212,7 +213,10 @@ fn root_borrowed_unrepresentable_patience_refuses_before_dial() {
         for patience in [Duration::MAX, finite_overflow] {
             assert!(matches!(
                 connect_borrowed(id, PORT, patience),
-                Err(Refusal::Bounds { what: "patience", .. })
+                Err(Refusal::Bounds {
+                    what: "patience",
+                    ..
+                })
             ));
             assert_eq!(
                 listener.accept().unwrap_err().kind(),
@@ -317,7 +321,10 @@ fn one_handle_round(dir: &Path, bit: u32, trace: bool) -> Option<HandleStages> {
     };
     assert!(matches!(
         connect_borrowed(&invalid, PORT, Duration::MAX),
-        Err(Refusal::Bounds { what: "patience", .. })
+        Err(Refusal::Bounds {
+            what: "patience",
+            ..
+        })
     ));
     let after_overflow = snapshot();
 
@@ -410,7 +417,10 @@ fn one_handle_round(dir: &Path, bit: u32, trace: bool) -> Option<HandleStages> {
         ("after_zero_call", after_zero_call.unwrap()),
         ("after_zero_report", after_zero_report.unwrap()),
         ("after_zero_peer", after_zero_peer.unwrap()),
-        ("after_zero_listener_drop", after_zero_listener_drop.unwrap()),
+        (
+            "after_zero_listener_drop",
+            after_zero_listener_drop.unwrap(),
+        ),
         ("after_zero_path_remove", after_zero_path_remove.unwrap()),
         ("after_success_bind", after_success_bind.unwrap()),
         ("after_thread_spawn", after_thread_spawn.unwrap()),
@@ -431,7 +441,10 @@ fn root_borrowed_failures_and_drops_return_windows_handles() {
         .expect("ROOT supplies workload rounds")
         .parse()
         .unwrap();
-    assert!(rounds > 0 && rounds <= u64::BITS, "one wrong-start bit per round");
+    assert!(
+        rounds > 0 && rounds <= u64::BITS,
+        "one wrong-start bit per round"
+    );
     let dir = shards_testdir::TempDir::new("hb-handles").unwrap();
     let trace = stage_handles_requested();
     let cold_before = handles();
