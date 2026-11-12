@@ -1452,6 +1452,10 @@ pub struct BoxInfo {
     /// a Shards image VM's, none for any other class. After `route`, so absent means none (append-only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<crate::Grant>,
+    /// Its publish grants' ports as its boot bound them on the host, while it runs (joint plan step 15, N6).
+    /// After `grants` (append-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub published: Vec<crate::Published>,
 }
 
 fn is_zero(n: &u64) -> bool {

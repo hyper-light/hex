@@ -244,6 +244,7 @@ fn usage_of(stats: &Stats) -> Result<Usage, Refusal> {
 
 fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, Refusal> {
     Ok(BoxInfo {
+        published: Vec::new(),
         id: spec.id.try_clone()?,
         class: spec.class.class(),
         state,
@@ -639,7 +640,26 @@ impl GuestRuntime {
             Ok(()) => {
                 waits.boot.answered(took);
                 match self.settle(&record_now(self, &id)?)? {
-                    State::Running(_) | State::Stopping(_) | State::Booting => Ok(()),
+                    // What the run published is held to the box's grants (joint plan step 15, N6): a run
+                    // that breaks them is stopped, and the start says why.
+                    State::Running(guest) => {
+                        match crate::grants::bound(
+                            &shards.grants,
+                            guest.members(),
+                            guest.published(),
+                        ) {
+                            Ok(_) => Ok(()),
+                            Err(why) => match self.stop_image(&id, State::Running(guest)) {
+                                Ok(_) => Err(why),
+                                Err(cleanup) => Err(Refusal::Uncertain {
+                                    id,
+                                    refusal: Box::new(why),
+                                    cleanup: Box::new(cleanup),
+                                }),
+                            },
+                        }
+                    }
+                    State::Stopping(_) | State::Booting => Ok(()),
                     State::Ended(_) => Err(Refusal::NotRunning(id, "start")),
                     State::Created | State::Held => Err(super::books::uncertain(&id)?),
                 }
@@ -714,7 +734,16 @@ impl GuestRuntime {
     pub(super) fn inspect_image(&self, record: BoxRecord) -> Result<BoxInfo, Refusal> {
         match self.settle(&record)? {
             State::Created | State::Booting => info(&record.spec, BoxState::Created, None),
-            State::Running(_) | State::Stopping(_) => info(&record.spec, BoxState::Running, None),
+            State::Running(guest) => {
+                let mut shown = info(&record.spec, BoxState::Running, None)?;
+                // Its publishes as bound (joint plan step 15, N6).
+                if let ClassSpec::ShardsImage(shards) = &record.spec.class {
+                    shown.published =
+                        crate::grants::bound(&shards.grants, guest.members(), guest.published())?;
+                }
+                Ok(shown)
+            }
+            State::Stopping(_) => info(&record.spec, BoxState::Running, None),
             State::Ended(exit) => info(&record.spec, BoxState::Empty, Some(exit)),
             State::Held => Err(held()),
         }

@@ -618,6 +618,7 @@ fn oci_spec() -> BoxSpec {
 
 fn info() -> BoxInfo {
     BoxInfo {
+        published: Vec::new(),
         grants: Vec::new(),
         allocation: None,
         route: None,
@@ -960,6 +961,7 @@ fn answers() -> Vec<(u64, Answer)> {
                 infos: vec![
                     info(),
                     BoxInfo {
+                        published: Vec::new(),
                         grants: Vec::new(),
                         allocation: None,
                         route: None,
@@ -2059,6 +2061,7 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
     )
         .prop_map(
             |(id, backend, state, bounds, adopted, exit, abandoned)| BoxInfo {
+                published: Vec::new(),
                 grants: Vec::new(),
                 allocation: None,
                 route: None,
@@ -4349,6 +4352,62 @@ fn a_shards_image_vm_carries_its_grants_on_the_wire() {
     assert!(matches!(
         read_request(&received(&spliced, 0), MAX_MESSAGE).map_err(|bad| bad.fault),
         Err(Fault::Value { what: "grants", .. })
+    ));
+}
+
+/// Joint plan step 15 (N6): do answer an inspect of a running Shards image VM with its grants and its publish as
+/// the host bound it. Expect: read back whole, the bound port's grant, socket and receiver last. Do: answer one
+/// whose report names an egress grant, and read one whose receiver tag no receiver has. Expect: refused as
+/// "published" written, and by the receiver's name read.
+#[test]
+fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
+    let published = Published {
+        grant: 2,
+        at: "127.0.0.1:49152".parse().unwrap(),
+        receiver: Receiver::Declared,
+    };
+    let shown = Answer::Info(BoxInfo {
+        class: Class::Shards,
+        grants: each_way(),
+        published: vec![published],
+        ..info()
+    });
+    let bytes = answer(94, &shown, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        shown
+    );
+    let mut tail = 1u32.to_le_bytes().to_vec();
+    tail.extend(2u32.to_le_bytes());
+    tail.extend([4, 127, 0, 0, 1]);
+    tail.extend(49152u16.to_le_bytes());
+    tail.push(0);
+    assert!(bytes.ends_with(&tail));
+    let wrong = Answer::Info(BoxInfo {
+        class: Class::Shards,
+        grants: each_way(),
+        published: vec![Published {
+            grant: 0,
+            ..published
+        }],
+        ..info()
+    });
+    assert!(matches!(
+        answer(95, &wrong, MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "published",
+            ..
+        })
+    ));
+    let mut hostile = bytes.clone();
+    let last = hostile.len() - 1;
+    hostile[last] = 1;
+    assert!(matches!(
+        read_answer(&received(&hostile, 0), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "published receiver",
+            ..
+        })
     ));
 }
 

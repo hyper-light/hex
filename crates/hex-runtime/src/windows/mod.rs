@@ -1702,6 +1702,7 @@ impl WinRuntime {
     fn info(&self, b: &Held) -> Result<BoxInfo, Refusal> {
         let mut info = match b {
             Held::Process(b) => Ok(BoxInfo {
+                published: Vec::new(),
                 grants: Vec::new(),
                 route: None,
                 id: b.id()?.try_clone()?,

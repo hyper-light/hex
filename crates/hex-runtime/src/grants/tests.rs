@@ -237,3 +237,130 @@ proptest! {
         }
     }
 }
+
+fn running(
+    kind: shards_api::image::MemberKind,
+    name: &str,
+    runs: bool,
+) -> shards_api::image::MemberInfo {
+    shards_api::image::MemberInfo {
+        index: 0,
+        kind,
+        name: name.to_owned(),
+        runs,
+    }
+}
+
+fn bound_at(guest_port: u16, at: &str) -> shards_api::image::Bound {
+    shards_api::image::Bound {
+        guest_port,
+        proto: shards_api::image::Proto::Tcp,
+        host: at.parse().unwrap(),
+    }
+}
+
+/// Joint plan step 15 (N6): do hold a run's report to its grants: two publishes of a running harness (one on a port
+/// the OS picked, one on the port its grant names) beside an egress grant. Expect: each publish reported once, by
+/// its grant's place, at the socket the host bound, its receiver the image's declaration.
+#[test]
+fn a_runs_publishes_are_reported_by_their_grants() {
+    let grants = vec![
+        Grant::Egress {
+            member: codex(),
+            to: Destination::Name("api.openai.com".to_owned()),
+            ports: Ports {
+                proto: Proto::Tcp,
+                first: 443,
+                last: 443,
+            },
+        },
+        Grant::Publish {
+            member: codex(),
+            proto: Proto::Tcp,
+            port: 1455,
+            host: "127.0.0.1".parse().unwrap(),
+            host_port: None,
+        },
+        Grant::Publish {
+            member: codex(),
+            proto: Proto::Tcp,
+            port: 8080,
+            host: "::1".parse().unwrap(),
+            host_port: Some(18080),
+        },
+    ];
+    let members = [running(
+        shards_api::image::MemberKind::Harness,
+        "codex",
+        true,
+    )];
+    let published = [
+        bound_at(8080, "[::1]:18080"),
+        bound_at(1455, "127.0.0.1:49200"),
+    ];
+    assert_eq!(
+        bound(&grants, &members, &published).unwrap(),
+        vec![
+            hex_api::Published {
+                grant: 1,
+                at: "127.0.0.1:49200".parse().unwrap(),
+                receiver: hex_api::Receiver::Declared,
+            },
+            hex_api::Published {
+                grant: 2,
+                at: "[::1]:18080".parse().unwrap(),
+                receiver: hex_api::Receiver::Declared,
+            },
+        ]
+    );
+}
+
+/// Joint plan step 15 (N6): do hold a run's report to a publish grant when the image lacks the grant's member, has
+/// it as files alone, or as an agent of that name; when the host bound nothing for the grant, bound it at another
+/// address or on another host port; and when it bound one past the grants. Expect: the member refused Invalid
+/// naming the grant's member, the sockets Broken naming what Shards bound, never a report of an ungranted flow.
+#[test]
+fn a_runs_report_that_breaks_its_grants_is_refused() {
+    let grants = vec![Grant::Publish {
+        member: codex(),
+        proto: Proto::Tcp,
+        port: 1455,
+        host: "127.0.0.1".parse().unwrap(),
+        host_port: Some(18080),
+    }];
+    let harness = shards_api::image::MemberKind::Harness;
+    let agent = shards_api::image::MemberKind::Agent;
+    let at_grant = [bound_at(1455, "127.0.0.1:18080")];
+    for members in [
+        vec![],
+        vec![running(harness, "codex", false)],
+        vec![running(agent, "codex", true)],
+        vec![running(harness, "other", true)],
+    ] {
+        assert!(matches!(
+            bound(&grants, &members, &at_grant),
+            Err(Refusal::Invalid { what: "grants", why }) if why.contains("grants[0].member harness codex")
+        ));
+    }
+    let members = [running(harness, "codex", true)];
+    for published in [
+        vec![],
+        vec![bound_at(1455, "10.0.0.2:18080")],
+        vec![bound_at(1455, "127.0.0.1:18081")],
+        vec![bound_at(1456, "127.0.0.1:18080")],
+    ] {
+        assert!(matches!(
+            bound(&grants, &members, &published),
+            Err(Refusal::Broken(why)) if why.contains("no host socket for grants[0]")
+        ));
+    }
+    let extra = [
+        bound_at(1455, "127.0.0.1:18080"),
+        bound_at(22, "0.0.0.0:2222"),
+    ];
+    assert!(matches!(
+        bound(&grants, &members, &extra),
+        Err(Refusal::Broken(why)) if why.contains("guest port 22") && why.contains("no grant names")
+    ));
+    assert_eq!(bound(&grants, &members, &at_grant).unwrap().len(), 1);
+}

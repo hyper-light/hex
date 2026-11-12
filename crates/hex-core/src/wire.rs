@@ -38,7 +38,7 @@
 //! [`Budgets::programs`]).
 
 use std::collections::BTreeSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -49,8 +49,8 @@ use hex_api::{
     DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant, GuestTime, ImageArch,
     ImageOs, ImagePlatform, IoKind, IoRates, LifecycleCause, MAX_DEVICES, MAX_RUNTIME_ROUTES,
     Member, MemberKind, Mount, Network, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program,
-    Proto, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal,
-    Upstream, Usage, User, check_grants,
+    Proto, Published, Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost,
+    ShardsImage, Signal, Upstream, Usage, User, check_grants, check_published,
 };
 
 use crate::netns;
@@ -2302,8 +2302,19 @@ fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
         Ok(())
     })?;
     put_route_option(w, info.route)?;
-    // Joint plan step 15: the record's grants, after every older field.
-    put_grants(w, &info.grants)
+    // Joint plan step 15: the record's grants, after every older field, then their ports as bound.
+    put_grants(w, &info.grants)?;
+    check_published(&info.grants, &info.published)
+        .map_err(|e| Fault::value("published", e.to_string()))?;
+    w.list(&info.published, |w, published| {
+        w.u32(published.grant);
+        put_address(w, published.at.ip());
+        w.u16(published.at.port());
+        w.u8(match published.receiver {
+            Receiver::Declared => 0,
+        });
+        Ok(())
+    })
 }
 
 fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
@@ -2334,8 +2345,20 @@ fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
         })?,
         route: r.option(route_receipt)?,
         grants: grants(r)?,
+        published: r.list(|r| {
+            Ok(Published {
+                grant: r.u32()?,
+                at: SocketAddr::new(address(r)?, r.u16()?),
+                receiver: match r.u8()? {
+                    0 => Receiver::Declared,
+                    t => return Err(Fault::value("published receiver", format!("variant {t}"))),
+                },
+            })
+        })?,
     };
     check_info_route(&info)?;
+    check_published(&info.grants, &info.published)
+        .map_err(|e| Fault::value("published", e.to_string()))?;
     Ok(info)
 }
 

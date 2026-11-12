@@ -175,6 +175,7 @@ impl SimRuntime {
             None => None,
         };
         Ok(BoxInfo {
+            published: Vec::new(),
             grants: match &b.spec.class {
                 ClassSpec::ShardsImage(image) => image.grants.clone(),
                 _ => Vec::new(),
