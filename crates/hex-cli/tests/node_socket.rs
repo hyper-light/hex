@@ -1337,6 +1337,9 @@ enum At {
     TornRecordBesideShards,
     /// After it: the create done.
     Made,
+    /// As [`At::Made`], its record then marked as written in an earlier boot of the host (T-T7.1.2): the
+    /// restarted agent removes it as that boot's, which ended everything of it, never taking it back.
+    MadeInAnEarlierBoot,
     /// The box made, and its start under way in its startContainer hook, the start waiting on the exec
     /// FIFO the init hands its byte to only once its hooks have run. The agent's restart finds the start
     /// begun and never taken, and removes the box by that reason; its init, released, finds the start gone
@@ -1359,6 +1362,7 @@ impl At {
             | Self::CreateContainer
             | Self::Ready
             | Self::Made
+            | Self::MadeInAnEarlierBoot
             | Self::StartContainer => None,
         }
     }
@@ -1376,9 +1380,10 @@ impl At {
 /// file it renames; after the create; and, the box made, with its start in its startContainer hook.
 /// Restarted, the agent removes the box killed mid-create by what it finds of it — a torn record it
 /// reads as unreadable, and says so, a configured Shards backend beside it or not — and the one whose start
-/// it cut, saying the start was interrupted in its startContainer hooks; and takes back the one made, which
-/// then deletes, so at every point nothing of the box is left: no record in either place, no temp file, no
-/// cgroup, no container state, no bundle.
+/// it cut, saying the start was interrupted in its startContainer hooks; takes back the one made, which then
+/// deletes; and removes the one made whose record says an earlier boot of the host wrote it, saying so, so at
+/// every point nothing of the box is left: no record in either place, no temp file, no cgroup, no container
+/// state, no bundle.
 fn crash_at_each_point_of_a_create(lab: &Lab, own: &Path, exe: &str) {
     for kept in [Kept::Tmpfs, Kept::Disk] {
         let mut points = Vec::new();
@@ -1396,7 +1401,7 @@ fn crash_at_each_point_of_a_create(lab: &Lab, own: &Path, exe: &str) {
             }
             Kept::Disk => points.push(At::Ready),
         }
-        points.extend([At::Made, At::StartContainer]);
+        points.extend([At::Made, At::MadeInAnEarlierBoot, At::StartContainer]);
         for at in &points {
             crash_at(lab, own, exe, kept, *at);
         }
@@ -1549,7 +1554,7 @@ fn crash_case(
         At::TornRecord | At::TornRecordBesideShards => {
             ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait)))
         }
-        At::Made => ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait))),
+        At::Made | At::MadeInAnEarlierBoot => ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait))),
         At::StartContainer => {
             mkfifo(&go);
             hook_release = Some(
@@ -1646,7 +1651,7 @@ fn crash_case(
             mkfifo(&temp);
             hook_release.as_mut().unwrap().write_all(b"\n").unwrap();
         }
-        At::Made => {
+        At::Made | At::MadeInAnEarlierBoot => {
             wait_for(&CREATING, "the create", || create.is_finished());
         }
         At::StartContainer => {
@@ -1685,7 +1690,7 @@ fn crash_case(
             .and_then(|bytes| BoxRecord::decode(&bytes).ok())
             .map(|record| record.phase)
     };
-    let made = if matches!(at, At::Made | At::StartContainer) {
+    let made = if matches!(at, At::Made | At::MadeInAnEarlierBoot | At::StartContainer) {
         Some(Phase::Ready)
     } else {
         None
@@ -1746,9 +1751,18 @@ fn crash_case(
     let created = create.join().unwrap();
     assert_eq!(
         created.is_ok(),
-        matches!(at, At::Made | At::StartContainer),
+        matches!(at, At::Made | At::MadeInAnEarlierBoot | At::StartContainer),
         "{name}: the create: {created:?}"
     );
+    if at == At::MadeInAnEarlierBoot {
+        // The record as an earlier boot of the host left it: its session another than this boot's.
+        let mut written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        written["boot"] = serde_json::Value::from(EARLIER_BOOT);
+        let mut bytes = serde_json::to_vec(&written).unwrap();
+        bytes.push(b'\n');
+        std::fs::write(&record, bytes).unwrap();
+    }
     if let Some(start) = start {
         let started = start.join().unwrap();
         assert!(
@@ -1783,6 +1797,20 @@ fn crash_case(
             client.inspect(&id),
             Err(Refusal::NoSuchBox(id.clone())),
             "{name}: the box killed mid-create is cleaned up"
+        );
+    }
+    // A record an earlier boot of the host wrote: recovery removed its box as that boot's, and said so
+    // (hex_core::recovery's Why::EarlierBoot), never taking it back.
+    if at == At::MadeInAnEarlierBoot {
+        wait_for(
+            &SAID,
+            "recovery to report the box removed as an earlier boot's",
+            || {
+                agent
+                    .errors()
+                    .lines()
+                    .any(|l| l.contains(id.as_str()) && l.contains("earlier boot"))
+            },
         );
     }
     // A torn first write leaves a record that can't be read; recovery removed its box and said so
@@ -1841,6 +1869,10 @@ fn crash_case(
         }
     );
 }
+
+/// A boot session no host is in, a UUID's form all zeros, as an earlier boot's: every boot's is random
+/// (`/proc/sys/kernel/random/boot_id`).
+const EARLIER_BOOT: &str = "00000000-0000-0000-0000-000000000000";
 
 /// The environment that configures `hex node`'s Shards backend (AC-T7.4.1), from model inputs written in `dir`: its
 /// guest named (nothing boots it here, so no file need exist) at Shards' least envelope, one vCPU and its least
