@@ -374,17 +374,20 @@ impl ImageBoot {
 /// take no close-on-exec flag, so the run host would hold whatever another thread had just made, where
 /// every program Hex starts on macOS holds only its stdio (`crate::macos::command`).
 pub fn host_images() -> Result<Arc<dyn Images>, Refusal> {
-    if cfg!(windows) {
-        return Err(Refusal::Awaits {
-            needs: Upstream::WindowsRunHost,
-        });
+    match run_host_awaits(std::env::consts::OS) {
+        Some(needs) => Err(Refusal::Awaits { needs }),
+        None => Ok(Arc::new(shards_api::image::ImageShards::new())),
     }
-    if cfg!(target_os = "macos") {
-        return Err(Refusal::Awaits {
-            needs: Upstream::RunHostStdioOnly,
-        });
+}
+
+/// What D231's run host awaits on the OS `os` (as `std::env::consts::OS` names it) before this class boots
+/// image VMs there, or nothing.
+fn run_host_awaits(os: &str) -> Option<Upstream> {
+    match os {
+        "windows" => Some(Upstream::WindowsRunHost),
+        "macos" => Some(Upstream::RunHostStdioOnly),
+        _ => None,
     }
-    Ok(Arc::new(shards_api::image::ImageShards::new()))
 }
 
 impl GuestRuntime {
