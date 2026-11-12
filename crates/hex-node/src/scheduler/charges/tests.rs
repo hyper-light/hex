@@ -114,3 +114,47 @@ fn w14_the_scheduler_takes_the_priors_its_nodes_learner_carries() {
 fn w14_learned_holdings_are_bounded_by_a_nodes_boxes() {
     assert_eq!(hex_api::MAX_LEARNED_HOLDINGS, hex_runtime::MAX_BOXES);
 }
+
+/// Joint plan step 14 (AC-T7.4.1), C8 through the scheduler: do take two classes' answers holding three boxes, two of
+/// which the node runs under its scheduler; expect those two booked at their holdings against their keys, in the
+/// answers' order, and the third passed over.
+#[test]
+fn w14_the_scheduler_books_each_vm_it_runs_at_its_holding() {
+    let key = |seq| hex_sim::peer::Key {
+        owner: 0,
+        epoch: 1,
+        seq,
+    };
+    let holding = |id: &str, gib: u64| hex_api::LearnedHolding {
+        id: BoxId::new(id).unwrap(),
+        holding: CapacityResources {
+            cpu_milli: 100,
+            mem_bytes: gib * GIB,
+            disk_bytes: 0,
+        },
+    };
+    let carrying = |holdings| Learned {
+        priors: Vec::new(),
+        used: LearnedUse::default(),
+        holdings,
+    };
+    let learned = vec![
+        (
+            Class::Shards,
+            carrying(vec![holding("vm-a", 2), holding("vm-stray", 9)]),
+        ),
+        (Class::Firecracker, carrying(vec![holding("vm-b", 1)])),
+    ];
+    let ids = BTreeMap::from([
+        (BoxId::new("vm-a").unwrap(), key(1)),
+        (BoxId::new("vm-b").unwrap(), key(2)),
+    ]);
+    let booked = holds(&learned, &ids).unwrap();
+    assert_eq!(
+        booked,
+        vec![
+            (key(1), holding("vm-a", 2).holding),
+            (key(2), holding("vm-b", 1).holding),
+        ]
+    );
+}

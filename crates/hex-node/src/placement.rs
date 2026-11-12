@@ -1034,6 +1034,20 @@ impl Driver {
         Ok(())
     }
 
+    /// Each box this node runs, by its physical id (joint plan step 14, C8): a capacity answer names a VM's holding
+    /// by its box, which [`Driver::rebook`] books against its key.
+    pub fn running_ids(&self) -> Result<BTreeMap<BoxId, Key>, Error> {
+        let _operation = self.operation()?;
+        let state = self.lock()?;
+        let mut ids = BTreeMap::new();
+        for (key, _, ended) in state.node.ran_keys() {
+            if !ended {
+                ids.insert(physical_id(&self.namespace, key)?, key);
+            }
+        }
+        Ok(ids)
+    }
+
     /// What each microVM this node runs holds now, as the learned charge has it (joint plan step 14, C8):
     /// its learned booking, and the memory and disk it holds past it. The machine's capacity view counts
     /// the node's own held so (step 13, CV2), and the node's ledger, which books each box at its receipt,

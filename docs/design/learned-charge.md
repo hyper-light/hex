@@ -212,8 +212,9 @@ reaches the view settled with goal 13 the same day:
   class's VMs are booked whole until a window passes.
 - `hex_api::Capacity::learned` crosses the node socket's wire last on a VM class's capacity answer (append-only).
   Its priors are bounded by a class's profiles, its holdings by a node's boxes, and the answer is fitted to one
-  message. The scheduler (`scheduler::charges`) gives its node's facts the priors it carries; its capacity stays the
-  machine's (C8). The scheduler calls goal 13's `Driver::rebook` with the holdings once that call is on main.
+  message. On each refresh the scheduler (`scheduler::charges`) gives its node's facts the priors it carries, then,
+  right after applying the answers, maps the holdings' box ids to its keys (`Driver::running_ids`) and books each
+  VM at its holding (goal 13's `Driver::rebook`). Its capacity stays the machine's (C8).
 - It learns on Linux, where the window is `cpu.max`'s period. On macOS and Windows the window their CPU control
   enforces (the managed control's cycle, the job's rate) has no learner yet, so their VMs stay booked whole: Hex's
   own remaining work, not upstream's.

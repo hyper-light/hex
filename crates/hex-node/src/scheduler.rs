@@ -1175,6 +1175,11 @@ impl Service {
                 bound: 1,
             })?)
             .map_err(failed)?;
+        // Joint plan step 14 (C8): each VM at the holding its node's learner carried, booked against its key.
+        let ids = self.driver.running_ids().map_err(failed)?;
+        self.driver
+            .rebook(&charges::holds(&learned, &ids)?)
+            .map_err(failed)?;
         if let Some(node) = cluster.nodes.iter_mut().find(|n| n.id == self.id) {
             *node = local;
         }

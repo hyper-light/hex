@@ -1,11 +1,15 @@
 //! Joint plan step 14 (AC-T7.4.1; `docs/design/learned-charge.md`): what the scheduler takes of its node's charge
 //! learner. The learner lives in the node agent (`crate::node::charges`), the one authority, as the owner of its
 //! microVMs' cgroups, and its capacity answers carry what it learned. Each refresh the scheduler gives its node's
-//! facts the priors those answers carry (C2), which the placement index books a new VM's receipt at. The node's
-//! capacity stays the machine's (C8).
+//! facts the priors those answers carry (C2), which the placement index books a new VM's receipt at, and books each
+//! VM it runs at the holding the answers carry (goal 13's `Driver::rebook`). The node's capacity stays the
+//! machine's (C8).
 
-use hex_api::{CapacityResources, Learned, Refusal};
+use std::collections::BTreeMap;
+
+use hex_api::{BoxId, CapacityResources, Learned, Refusal};
 use hex_sim::model::{Class, NodeSpec, Prior};
+use hex_sim::peer::Key;
 
 /// What each VM class's capacity answer learned, taken before the answers are applied.
 pub(super) fn learned(
@@ -66,6 +70,30 @@ pub(super) fn apply(local: &mut NodeSpec, learned: &[(Class, Learned)]) -> Resul
         }
     }
     Ok(())
+}
+
+/// The holdings `learned` carries, each against the key of the box it names among `ids` (C8): a holding of a box this
+/// node doesn't run under its scheduler is no ledger's, and is passed over.
+pub(super) fn holds(
+    learned: &[(Class, Learned)],
+    ids: &BTreeMap<BoxId, Key>,
+) -> Result<Vec<(Key, CapacityResources)>, Refusal> {
+    let count = learned
+        .iter()
+        .map(|(_, learned)| learned.holdings.len())
+        .fold(0usize, usize::saturating_add);
+    let mut out = Vec::new();
+    out.try_reserve_exact(count)
+        .map_err(|_| Refusal::Exhausted {
+            what: "learned holdings",
+            bound: count,
+        })?;
+    for holding in learned.iter().flat_map(|(_, learned)| &learned.holdings) {
+        if let Some(key) = ids.get(&holding.id) {
+            out.push((*key, holding.holding));
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
