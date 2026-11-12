@@ -21,7 +21,7 @@ fn images(gpu: bool) -> NativeImages {
 }
 
 // Pure preparation creates/dials no socket. Keep only this syntactic locator
-// short even when ROOT's private TMPDIR is longer than sockaddr_un.
+// short even where a test's TMPDIR is longer than sockaddr_un holds.
 fn socket(root: &Path) -> PathBuf {
     root.ancestors().last().unwrap().join("native-model.v")
 }

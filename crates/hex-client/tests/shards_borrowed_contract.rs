@@ -1,11 +1,22 @@
 //! ROOT-owned public borrowed-connector contract. No real VM is booted here.
 //! Run only selected ignored cases with the coordinator's external process guard.
+//!
+//! Hex's own campaign over shards-api's public borrowed connector (`connect_borrowed`), the native Windows
+//! steps among them (cold handles, WIN-NATIVE-STEPS): first carried as vendored Shards patches 0004, 0005, 0007
+//! and 0029 (crates/api/tests/hex_borrowed_contract.rs), which Shards classed as Hex-only when it upstreamed the
+//! rest (hex-upstream-v1's README at Shards 482c5d78), so it is a test of Hex's on its dependency. Its body is
+//! unchanged (AC-T7.4.1).
+// Hex's workspace lints, which Shards' crate didn't hold it to: its assertions and eprintln are Hex's
+// disallowed macros, and its native observations (`started`, the Windows handle counts) are unsafe foreign
+// calls, each with its SAFETY comment, which Hex's workspace denies by default.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::print_stderr
+    clippy::print_stderr,
+    clippy::disallowed_macros,
+    unsafe_code
 )]
 
 use std::io::{Read, Write};
@@ -161,7 +172,8 @@ fn root_borrowed_drop_preserves_target_and_socket_and_dead_target_refuses() {
     });
     for _ in 0..2 {
         // Drop, then reconnect to the same still-owned target/socket.
-        let stream = connect_borrowed(&identity, PORT, shards_api::conformance::UNSERVED_PATIENCE).unwrap();
+        let stream =
+            connect_borrowed(&identity, PORT, shards_api::conformance::UNSERVED_PATIENCE).unwrap();
         let clone = stream.try_clone().unwrap();
         drop(stream);
         assert!(target.0.try_wait().unwrap().is_none());
@@ -201,7 +213,10 @@ fn root_borrowed_unrepresentable_patience_refuses_before_dial() {
         for patience in [Duration::MAX, finite_overflow] {
             assert!(matches!(
                 connect_borrowed(id, PORT, patience),
-                Err(Refusal::Bounds { what: "patience", .. })
+                Err(Refusal::Bounds {
+                    what: "patience",
+                    ..
+                })
             ));
             assert_eq!(
                 listener.accept().unwrap_err().kind(),
@@ -306,7 +321,10 @@ fn one_handle_round(dir: &Path, bit: u32, trace: bool) -> Option<HandleStages> {
     };
     assert!(matches!(
         connect_borrowed(&invalid, PORT, Duration::MAX),
-        Err(Refusal::Bounds { what: "patience", .. })
+        Err(Refusal::Bounds {
+            what: "patience",
+            ..
+        })
     ));
     let after_overflow = snapshot();
 
@@ -399,7 +417,10 @@ fn one_handle_round(dir: &Path, bit: u32, trace: bool) -> Option<HandleStages> {
         ("after_zero_call", after_zero_call.unwrap()),
         ("after_zero_report", after_zero_report.unwrap()),
         ("after_zero_peer", after_zero_peer.unwrap()),
-        ("after_zero_listener_drop", after_zero_listener_drop.unwrap()),
+        (
+            "after_zero_listener_drop",
+            after_zero_listener_drop.unwrap(),
+        ),
         ("after_zero_path_remove", after_zero_path_remove.unwrap()),
         ("after_success_bind", after_success_bind.unwrap()),
         ("after_thread_spawn", after_thread_spawn.unwrap()),
@@ -420,7 +441,10 @@ fn root_borrowed_failures_and_drops_return_windows_handles() {
         .expect("ROOT supplies workload rounds")
         .parse()
         .unwrap();
-    assert!(rounds > 0 && rounds <= u64::BITS, "one wrong-start bit per round");
+    assert!(
+        rounds > 0 && rounds <= u64::BITS,
+        "one wrong-start bit per round"
+    );
     let dir = shards_testdir::TempDir::new("hb-handles").unwrap();
     let trace = stage_handles_requested();
     let cold_before = handles();
