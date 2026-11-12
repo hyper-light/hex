@@ -641,10 +641,16 @@ fn configured_guest(
             &why,
         ))
     })?;
+    // The Shards class on Agentfile images (joint plan step 12): Shards' image boot, its waits seeded
+    // from their records, or the refusal naming the record to take, which a create of the class then says.
     let mut guest = GuestRuntime::new(Arc::new(provider), config)
         .recorded_at(backend_path(state, "@guest").map_err(failed)?)
         .with_runtime_paths(paths)
         .with_gpu_catalog(catalog)
+        .with_images(
+            Arc::new(shards_api::image::ImageShards::new()),
+            hex_runtime::guest::ImageWaits::recorded(),
+        )
         .with_runtime_cost(cost)
         .map_err(failed)?;
     if let Some(images) = native_images {

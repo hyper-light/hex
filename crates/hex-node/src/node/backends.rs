@@ -365,6 +365,7 @@ impl Node {
         }
         if let Some(guest) = &shards {
             guest.bind_books(self.backend_books())?;
+            guest.bind_boot_session(self.boot_session())?;
         }
         let (_, retained_pools, _) =
             self.preflight_configured(firecracker.as_deref(), shards.as_deref())?;
@@ -752,6 +753,10 @@ impl Node {
             .removed
             .try_reserve_exact(records.len())
             .map_err(|_| Refusal::Full(MAX_BOXES))?;
+        summary
+            .held
+            .try_reserve_exact(records.len())
+            .map_err(|_| Refusal::Full(MAX_BOXES))?;
         for (id, record) in records {
             let record = record.as_ref().map_err(|_| uncertain(id))?;
             let Some(backend) = self
@@ -761,28 +766,45 @@ impl Node {
                 continue;
             };
             match record.phase {
-                Phase::Creating | Phase::Deleting => {
-                    backend.delete(id)?;
-                    summary.removed.push((
+                Phase::Creating | Phase::Deleting => match backend.delete(id) {
+                    Ok(()) => summary.removed.push((
                         id.try_clone()?,
                         "actual VM backend completed retained cleanup".into(),
-                    ));
-                }
+                    )),
+                    Err(Refusal::Awaits {
+                        needs: hex_api::Upstream::AttachAfterCrash,
+                    }) => summary
+                        .held
+                        .push((id.try_clone()?, crate::recorded::IMAGE_HELD.into())),
+                    Err(why) => return Err(why),
+                },
                 Phase::Ready => {
-                    match record.spec.backend_class()? {
+                    let recovered = match record.spec.backend_class()? {
                         Class::Firecracker => self
                             .backends
                             .get()
                             .and_then(|backends| backends.firecracker.as_ref())
                             .ok_or_else(|| uncertain(id))?
-                            .validate_binding(&record.spec)?,
+                            .validate_binding(&record.spec),
                         Class::Shards => self
                             .backends
                             .get()
                             .and_then(|backends| backends.shards.as_ref())
                             .ok_or_else(|| uncertain(id))?
-                            .recover_managed(&record.spec)?,
+                            .recover_managed(&record.spec),
                         Class::Process | Class::Oci => return Err(uncertain(id)),
+                    };
+                    match recovered {
+                        Ok(()) => {}
+                        Err(Refusal::Awaits {
+                            needs: hex_api::Upstream::AttachAfterCrash,
+                        }) => {
+                            summary
+                                .held
+                                .push((id.try_clone()?, crate::recorded::IMAGE_HELD.into()));
+                            continue;
+                        }
+                        Err(why) => return Err(why),
                     }
                     let actual = backend.inspect(id)?;
                     if actual.class != record.spec.class.class()

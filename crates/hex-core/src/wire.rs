@@ -45,10 +45,10 @@ use hex_api::{
     Allocation, BackendUnavailable, BackingGrant, BackingKey, BackingOffer, BackingPhase, Bounds,
     BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
     ConnectFailure, ConnectPhase, ConnectReply, DeviceHolder, DeviceId, DeviceInfo, DeviceKind,
-    DeviceUnavailable, Execution, Exit, GpuEligibility, ImageArch, ImageOs, ImagePlatform, IoKind,
-    IoRates, LifecycleCause, MAX_DEVICES, MAX_RUNTIME_ROUTES, Mount, Network, OciSpec,
-    PhysicalDevice, PhysicalReport, Program, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt,
-    RuntimeCost, Signal, Upstream, Usage, User,
+    DeviceUnavailable, Execution, Exit, GpuEligibility, GuestTime, ImageArch, ImageOs,
+    ImagePlatform, IoKind, IoRates, LifecycleCause, MAX_DEVICES, MAX_RUNTIME_ROUTES, Mount,
+    Network, OciSpec, PhysicalDevice, PhysicalReport, Program, Refusal, Rootfs, RouteKey,
+    RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, Upstream, Usage, User,
 };
 
 use crate::netns;
@@ -591,6 +591,8 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
             ] {
                 w.u64(n);
             }
+            // Appended after the counters (joint plan step 12): absent, a byte 0.
+            w.option_with(u.guest.as_ref(), put_guest_time)?;
         }
         Answer::Boxes { infos, more } => {
             w.header(kind::BOXES, id);
@@ -974,6 +976,7 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
             cpu_usec: r.u64()?,
             io_read_bytes: r.u64()?,
             io_write_bytes: r.u64()?,
+            guest: r.option(guest_time)?,
         }),
         kind::BOXES => Answer::Boxes {
             more: r.bool("more")?,
@@ -1242,6 +1245,10 @@ fn put_box_spec(w: &mut Writer, spec: &BoxSpec) -> Result<(), Fault> {
             w.u8(4);
             put_oci(w, oci)?;
         }
+        ClassSpec::ShardsImage(image) => {
+            w.u8(5);
+            put_shards_image(w, image)?;
+        }
     }
     w.option_with(spec.owner.as_ref(), |w, owner| {
         w.string(&owner.name)?;
@@ -1273,6 +1280,7 @@ fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
         2 => ClassSpec::Bundle(r.path()?),
         3 => ClassSpec::Firecracker(Box::new(oci(r)?)),
         4 => ClassSpec::Shards(Box::new(oci(r)?)),
+        5 => ClassSpec::ShardsImage(Box::new(shards_image(r)?)),
         t => return Err(Fault::value("class spec", format!("variant {t}"))),
     };
     let owner = r.option(|r| {
@@ -1983,6 +1991,63 @@ fn oci(r: &mut Reader<'_>) -> Result<OciSpec, Fault> {
         network,
         hosts,
     })
+}
+
+/// A Shards image VM's spec: its pinned image, then its run's command, an option of a list (joint plan
+/// step 12). Fields a later step adds go after the command (append-only).
+fn put_shards_image(w: &mut Writer, image: &ShardsImage) -> Result<(), Fault> {
+    w.string(&image.image)?;
+    w.option_with(image.command.as_deref(), |w, command| {
+        w.list(command, |w, arg| w.string(arg))
+    })
+}
+
+fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
+    Ok(ShardsImage {
+        image: r.string("shards image")?,
+        command: r.option(|r| r.list(|r| r.string("shards image command")))?,
+    })
+}
+
+/// A microVM's guest time per vCPU: tag 0 and a list of nanoseconds, at most
+/// [`GuestTime::MAX_VCPUS`]; or tag 1 and what its backend awaits.
+fn put_guest_time(w: &mut Writer, guest: &GuestTime) -> Result<(), Fault> {
+    match guest {
+        GuestTime::PerVcpuNs(per_vcpu) => {
+            if per_vcpu.len() > GuestTime::MAX_VCPUS {
+                return Err(Fault::value(
+                    "guest time",
+                    "more vCPUs than a VM's vCPU index space",
+                ));
+            }
+            w.u8(0);
+            w.list(per_vcpu, |w, ns| {
+                w.u64(*ns);
+                Ok(())
+            })
+        }
+        GuestTime::Awaits(needs) => {
+            w.u8(1);
+            put_upstream(w, *needs)
+        }
+    }
+}
+
+fn guest_time(r: &mut Reader<'_>) -> Result<GuestTime, Fault> {
+    match r.u8()? {
+        0 => {
+            let per_vcpu = r.list(|r| r.u64())?;
+            if per_vcpu.len() > GuestTime::MAX_VCPUS {
+                return Err(Fault::value(
+                    "guest time",
+                    "more vCPUs than a VM's vCPU index space",
+                ));
+            }
+            Ok(GuestTime::PerVcpuNs(per_vcpu))
+        }
+        1 => Ok(GuestTime::Awaits(upstream(r)?)),
+        t => Err(Fault::value("guest time", format!("variant {t}"))),
+    }
 }
 
 pub(crate) fn put_program(w: &mut Writer, p: &Program) -> Result<(), Fault> {

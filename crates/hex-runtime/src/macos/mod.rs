@@ -521,6 +521,7 @@ impl BoxUser {
             cpu_usec: 0,
             io_read_bytes: 0,
             io_write_bytes: 0,
+            guest: None,
         })
     }
 

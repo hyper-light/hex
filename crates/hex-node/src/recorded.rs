@@ -45,6 +45,12 @@ pub struct RecoverySummary {
     pub boot_unknown: Option<String>,
 }
 
+/// Why recovery keeps a Shards image box's record and claim: its run is an earlier node process's, which
+/// Shards' image boot can neither take back nor prove ended (docs/design/shards-image-class.md §5).
+pub(crate) const IMAGE_HELD: &str = "a Shards image VM's run of an earlier node process: Shards' image \
+    boot can neither take it back nor prove it ended (Awaits AttachAfterCrash), so its record and claim \
+    are kept until a reboot of the host ends it";
+
 /// Why a box was removed, for its summary.
 pub(crate) fn why_text(why: &Why) -> String {
     match why {
@@ -1728,7 +1734,18 @@ impl<R: Recover> Recorded<R> {
             let alive = match record {
                 // Incomplete creates and durable deletes are removed, never adopted. Asking alive
                 // first would require a pending native create to look Ready before cleanup can run.
-                Ok(r) if r.phase == Phase::Ready && !earlier_boot => self.runtime.alive(&r.spec)?,
+                Ok(r) if r.phase == Phase::Ready && !earlier_boot => {
+                    match self.runtime.alive(&r.spec) {
+                        Ok(alive) => alive,
+                        Err(Refusal::Awaits {
+                            needs: hex_api::Upstream::AttachAfterCrash,
+                        }) => {
+                            summary.held.push((id.clone(), IMAGE_HELD.to_owned()));
+                            continue;
+                        }
+                        Err(why) => return Err(why),
+                    }
+                }
                 Ok(_) => None,
                 Err(_) => None,
             };
@@ -1775,7 +1792,16 @@ impl<R: Recover> Recorded<R> {
                 Decision::Remove(why) => {
                     if managed {
                         let r = record.ok_or_else(|| uncertain(&id))?;
-                        self.runtime.runtime_for(&r.spec)?.delete(&id)?;
+                        match self.runtime.runtime_for(&r.spec)?.delete(&id) {
+                            Ok(()) => {}
+                            Err(Refusal::Awaits {
+                                needs: hex_api::Upstream::AttachAfterCrash,
+                            }) => {
+                                summary.held.push((id, IMAGE_HELD.to_owned()));
+                                continue;
+                            }
+                            Err(why) => return Err(why),
+                        }
                     } else if let Some(r) = record {
                         // An earlier boot ended what ran of it: a process named by its record now may be
                         // another's, never ended for it.
@@ -1907,7 +1933,10 @@ impl<P: Recover + 'static> Recorded<hex_runtime::guest::WithGuest<P>> {
         let authority: Arc<dyn hex_runtime::devices::Books> = self.clone();
         let weak = Arc::downgrade(&authority);
         self.runtime.host().bind_native_books(weak.clone())?;
-        self.runtime.guest().bind_books(weak)
+        self.runtime.guest().bind_books(weak)?;
+        self.runtime
+            .guest()
+            .bind_boot_session(self.books.store.boot().cloned())
     }
 
     /// Publish only the configured shared backing after the complete retained-owner preflight.

@@ -703,7 +703,12 @@ fn put_failure(out: &mut dyn Output, failure: Failure) -> Result<(), Fault> {
         _ => Ok(()),
     }
 }
-fn put_usage(out: &mut dyn Output, value: Usage) -> Result<(), Fault> {
+/// A native scope's usage: its counters, read from its native owner. Guest time per vCPU is no native
+/// counter of a scope, so a usage holding one is refused here rather than dropped (CLAUDE.md §3).
+fn put_usage(out: &mut dyn Output, value: &Usage) -> Result<(), Fault> {
+    if value.guest.is_some() {
+        return Err(invalid("native scope usage with guest time"));
+    }
     for field in [
         value.memory_bytes,
         value.memory_peak_bytes,
@@ -758,7 +763,7 @@ pub fn encode_answer(version: u16, id: u64, answer: &Answer) -> Result<Vec<u8>, 
                     put_exit(out, *exit)
                 }
             },
-            Answer::Usage { usage, .. } => put_usage(out, *usage),
+            Answer::Usage { usage, .. } => put_usage(out, usage),
             Answer::Done { .. } => Ok(()),
             Answer::Refused { failure, .. } => put_failure(out, *failure),
         }
@@ -999,6 +1004,7 @@ fn read_usage(input: &mut Reader<'_>) -> Result<Usage, Fault> {
         cpu_usec: input.u64()?,
         io_read_bytes: input.u64()?,
         io_write_bytes: input.u64()?,
+        guest: None,
     })
 }
 pub fn read_answer(bytes: &[u8], fds: usize) -> Result<(u16, u64, Answer), Fault> {

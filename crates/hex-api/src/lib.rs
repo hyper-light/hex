@@ -42,13 +42,13 @@ pub use id::BoxId;
 pub use runtime::{
     Allocation, Asked, BackingGrant, BackingKey, BackingOffer, BackingPhase, BoxInfo, BoxState,
     Capacity, CapacityResources, ConnectFailure, ConnectPhase, ConnectReply, Execution, Exit,
-    GpuEligibility, ImageArch, ImageOs, ImagePlatform, IoKind, LifecycleCause, MAX_RUNTIME_ROUTES,
-    Membership, Proc, Refusal, RouteKey, RouteOffer, RouteReceipt, Runtime, RuntimeCost, Signal,
-    Upstream, Usage,
+    GpuEligibility, GuestTime, ImageArch, ImageOs, ImagePlatform, IoKind, LifecycleCause,
+    MAX_RUNTIME_ROUTES, Membership, Proc, Refusal, RouteKey, RouteOffer, RouteReceipt, Runtime,
+    RuntimeCost, Signal, Upstream, Usage, VmSize,
 };
 pub use spec::{
     Ask, BlockCount, BoxOwner, BoxSpec, Class, ClassSpec, End, ExecLimit, Given, Mount, Network,
-    OciSpec, Program, Rootfs, Stdio, StringUnit, User, drive_absolute,
+    OciSpec, Program, Rootfs, ShardsImage, Stdio, StringUnit, User, drive_absolute,
 };
 
 /// A caller's owned stream: Unix's descriptor becomes a file; Windows keeps the handle's resource kind.

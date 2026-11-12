@@ -12,6 +12,7 @@ mod family;
 pub mod gpu;
 mod gpu_pool;
 pub mod held;
+mod image;
 mod managed;
 #[cfg(any(test, feature = "native-trusted-entry-measurement"))]
 pub(crate) mod native_fixture;
@@ -24,6 +25,7 @@ pub mod selected;
 mod shared;
 pub mod shares;
 
+pub use image::ImageWaits;
 pub use observer::config::{
     ENV_GPU_OBSERVER_FILE, ENV_GPU_OBSERVER_SHA256, GpuArtifact, GpuArtifactRole, GpuObserver,
     GpuObserverInput,
@@ -453,6 +455,8 @@ pub struct GuestRuntime {
     gpu_observer: Option<GpuObserver>,
     /// What joins each guest's evented connection to the node's loop ([`GuestRuntime::join_loop`]).
     joins: Mutex<Option<Arc<dyn Joins>>>,
+    /// Shards' image boot, for the Shards class on Agentfile images ([`GuestRuntime::with_images`]).
+    image: Option<image::ImageBoot>,
 }
 
 /// A throwaway guest booted on a Shards binary that changed while the node's guest ran, so the node's next boot
@@ -561,6 +565,7 @@ impl GuestRuntime {
             shared_pool: Mutex::new(None),
             gpu_observer: None,
             joins: Mutex::new(None),
+            image: None,
         }
     }
 
@@ -1041,6 +1046,9 @@ impl Runtime for GuestRuntime {
                 why: "the node's guest runs the oci class; process boxes are the host's".to_owned(),
             });
         }
+        if let ClassSpec::ShardsImage(_) = &spec.class {
+            return self.create_image(spec);
+        }
         // Refused as on any node, naming the field, before anything is mapped, staged or booted.
         if let ClassSpec::Oci(oci) | ClassSpec::Shards(oci) = &spec.class {
             rewrite::check(oci)?;
@@ -1057,10 +1065,19 @@ impl Runtime for GuestRuntime {
     }
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+        if let Some(record) = self.image_record(id)? {
+            return self.start_image(record);
+        }
         self.call_recorded(id, true, || self.with(id, |b| b.client.start(id)))
     }
 
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        // A member's program is the agent-control endpoint's (joint plan step 11).
+        if self.image_record(id)?.is_some() {
+            return Err(Refusal::Awaits {
+                needs: hex_api::Upstream::MemberExec,
+            });
+        }
         self.call_recorded(id, true, || {
             self.with(id, |b| b.client.exec(id, program, stdio))
         })
@@ -1081,16 +1098,25 @@ impl Runtime for GuestRuntime {
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
+        if let Some(record) = self.image_record(id)? {
+            return self.signal_image(record, signal);
+        }
         self.call_recorded(id, true, || self.with(id, |b| b.client.signal(id, signal)))
     }
 
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        if let Some(record) = self.image_record(id)? {
+            return self.inspect_image(record);
+        }
         self.call_recorded(id, false, || {
             self.with(id, |b| self.project_info(b, b.client.inspect(id)?))
         })
     }
 
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
+        if let Some(record) = self.image_record(id)? {
+            return self.usage_image(record);
+        }
         if let Some(usage) = self.native_usage(id)? {
             return Ok(usage);
         }
@@ -1129,10 +1155,21 @@ impl Runtime for GuestRuntime {
                 }
             }
         }
+        let images = self.image_infos()?;
+        boxes
+            .try_reserve_exact(images.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "guest box listing",
+                bound: crate::MAX_BOXES,
+            })?;
+        boxes.extend(images);
         Ok(boxes)
     }
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        if let Some(record) = self.image_record(id)? {
+            return self.delete_image(record);
+        }
         if self.uses_books()
             && let Some(record) = self.recorded_box(id)?
             && self.owns_record(&record.spec)
@@ -1270,7 +1307,10 @@ pub enum Side {
 pub fn by_class<P>(_host: &P, class: &ClassSpec) -> Result<Side, Refusal> {
     Ok(match class {
         ClassSpec::Process => Side::Host,
-        ClassSpec::Oci(_) | ClassSpec::Bundle(_) | ClassSpec::Shards(_) => Side::Guest,
+        ClassSpec::Oci(_)
+        | ClassSpec::Bundle(_)
+        | ClassSpec::Shards(_)
+        | ClassSpec::ShardsImage(_) => Side::Guest,
         ClassSpec::Firecracker(_) => {
             return Err(Refusal::Invalid {
                 what: "runtime backend",
@@ -1293,7 +1333,7 @@ pub struct WithGuest<P> {
 impl<P: Runtime> WithGuest<P> {
     /// The configured backend route, shared with recovery; it never selects a device.
     pub fn route(&self, class: &ClassSpec) -> Result<Side, Refusal> {
-        if matches!(class, ClassSpec::Shards(_)) {
+        if matches!(class, ClassSpec::Shards(_) | ClassSpec::ShardsImage(_)) {
             return Ok(Side::Guest);
         }
         (self.route)(&self.process, class)
