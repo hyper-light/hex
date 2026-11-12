@@ -63,6 +63,12 @@ pub fn measure_all() {
     MEASURE_ALL.store(true, Ordering::Relaxed);
 }
 
+/// Whether every wait in this process measures ([`measure_all`]): the waits census runs, so a wait whose measure has
+/// no record yet may measure too, its first record taken there (the Shards image class's waits).
+pub fn measures_all() -> bool {
+    MEASURE_ALL.load(Ordering::Relaxed)
+}
+
 /// Installs `sink` to be told every answer every wait records, and every run-out, by the wait's name: the waits census
 /// probe's. Only the first install takes; says whether this one did.
 pub fn census(sink: fn(&'static str, Sample)) -> bool {
