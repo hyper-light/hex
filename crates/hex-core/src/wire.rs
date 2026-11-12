@@ -1281,7 +1281,11 @@ fn put_box_spec(w: &mut Writer, spec: &BoxSpec) -> Result<(), Fault> {
         w.option(allocation.booked, put_resources);
         Ok(())
     })?;
-    put_route_option(w, spec.route)
+    put_route_option(w, spec.route)?;
+    // Joint plan step 14: its priority band follows the route, last (C5).
+    w.reserve_fixed(1)?;
+    w.u8(spec.band);
+    Ok(())
 }
 
 fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
@@ -1315,7 +1319,7 @@ fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
             })
         })?,
         route: r.option(route_receipt)?,
-        band: 0,
+        band: r.u8()?,
     };
     check_spec_route(&spec)?;
     spec.check_devices()

@@ -476,7 +476,7 @@ impl Learner {
                 vm.last = (usage.cpu_usec, now);
                 continue;
             }
-            let Some((class, allocation, _band)) = record(&id)? else {
+            let Some((class, allocation, band)) = record(&id)? else {
                 continue;
             };
             let receipt = allocation.booking();
@@ -484,7 +484,7 @@ impl Learner {
                 .track(
                     scope,
                     ClassKey::new(class, allocation.cost.id, allocation.resources),
-                    0,
+                    band,
                     vcpus(allocation)?,
                     receipt,
                 )

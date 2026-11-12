@@ -85,11 +85,11 @@ fn with_device_tail(offer: bool, tail: &[u8]) -> Vec<u8> {
     };
     // Replace the device list while retaining valid absent charge/route receipts. Capacity
     // additionally ends with four empty u32 lists and no learned use (joint plan step 14); a spec
-    // ends with one route option.
+    // ends with one route option and its band, 0 here (joint plan step 14).
     let following = if offer {
         1 + 4 * size_of::<u32>() + 1
     } else {
-        2
+        3
     };
     bytes.truncate(bytes.len() - size_of::<u32>() - following);
     bytes.extend_from_slice(tail);
@@ -2772,9 +2772,12 @@ fn route_wire_spec_and_info_route_tails_roundtrip() {
             MAX_MESSAGE,
         )
         .unwrap();
+        // The route's option, then the band (0 here), end a spec (joint plan step 14).
         assert_eq!(plain.last(), Some(&0));
-        assert_eq!(&plain[..plain.len() - 1], &bytes[..plain.len() - 1]);
-        assert_eq!(bytes[plain.len() - 1], 1);
+        let route_at = plain.len() - 2;
+        assert_eq!(plain[route_at], 0);
+        assert_eq!(&plain[..route_at], &bytes[..route_at]);
+        assert_eq!(bytes[route_at], 1);
 
         let expected = Answer::Info(BoxInfo {
             class: spec.class.class(),
@@ -3156,8 +3159,9 @@ fn route_wire_spec_and_info_inconsistent_route_receipts_refuse() {
     }
     // Keep a valid encoded body and change only the committed original class.
     let mut bad = good;
+    // The band's byte follows the route (joint plan step 14).
     let route_bytes = 1 + ROUTE_KEY_BYTES + 1 + BACKING_KEY_BYTES;
-    let route_at = bad.len() - route_bytes;
+    let route_at = bad.len() - route_bytes - 1;
     assert_eq!(bad[route_at], 1);
     assert_eq!(bad[route_at + 1], class_tag(Class::Oci));
     assert_eq!(bad[route_at + 1 + ROUTE_KEY_BYTES], 1);
