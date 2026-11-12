@@ -10,6 +10,10 @@
 //! `--quic` it binds no UDP socket, and asked for QUIC without an enrollment it can serve with, it refuses, typed,
 //! with nothing bound.
 //!
+//! HEX-QUIC-25 ([`two_hosts`]): the same across two hosts, in phases the lead runs (every other run ignores them). The
+//! node's host and the client's host share one simulator CA by request and answer alone. The node is killed mid-suite
+//! and restarted, and its UDP port is dropped and let through again.
+//!
 //! Linux needs a delegated cgroup v2 subtree for the class, as `process_box.rs` does, re-running a test once in a
 //! `systemd-run --user --scope -p Delegate=yes` where its own isn't one, and recording the skip where neither is.
 //! macOS and Windows run their `process` class rootless.
@@ -38,6 +42,11 @@ use hex_quic::{Config, Endpoint, Shape, enroll, peer_id};
 
 struct BinFixture {
     exe: String,
+    /// The node's host's bound on a program's arguments and environment: this host's for a node here, the node's host's
+    /// in the two-host run ([`two_hosts`]).
+    limit: hex_api::ExecLimit,
+    /// Whether the node's host counts a box's refused forks.
+    forks_counted: bool,
 }
 
 impl Fixture for BinFixture {
@@ -70,25 +79,33 @@ impl Fixture for BinFixture {
         Program::of(&args.iter().map(String::as_str).collect::<Vec<_>>())
     }
 
-    /// Windows' job object counts no member's own refused fork (windows_process_box.rs, Ada's call 2026-11-03).
     fn refused_forks_counted(&self) -> bool {
-        !cfg!(windows)
+        self.forks_counted
     }
 
     fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
-        #[cfg(target_os = "linux")]
-        return Some(hex_runtime::linux::process::exec_limit());
-        #[cfg(target_os = "macos")]
-        return Some(hex_runtime::macos::exec_limit().expect("kern.argmax"));
-        #[cfg(windows)]
-        return Some(hex_core::hcs::exec_limit());
+        Some(self.limit)
     }
 }
 
+/// The suite's programs as this host runs them.
 fn fixture() -> BinFixture {
     BinFixture {
         exe: env!("CARGO_BIN_EXE_hex").to_owned(),
+        limit: this_hosts_limit(),
+        // Windows' job object counts no member's own refused fork (windows_process_box.rs, Ada's call 2026-11-03).
+        forks_counted: !cfg!(windows),
     }
+}
+
+/// This host's bound on a program's arguments and environment, as its `process` class reads it.
+fn this_hosts_limit() -> hex_api::ExecLimit {
+    #[cfg(target_os = "linux")]
+    return hex_runtime::linux::process::exec_limit();
+    #[cfg(target_os = "macos")]
+    return hex_runtime::macos::exec_limit().expect("kern.argmax");
+    #[cfg(windows)]
+    return hex_core::hcs::exec_limit();
 }
 
 /// A runtime served as a node's host: macOS's and Windows' `process` class, in this process.
@@ -617,6 +634,507 @@ fn hex_quic_24_without_its_enrollment_hex_node_binds_no_quic_and_refuses_typed()
     unconfigured(None);
 }
 
+/// HEX-QUIC-25 (the joint plan's step 4; docs/design/hex-quic.md Q6, Q7, Q9): the two-host run, which is the lead's
+/// to run. A `hex node` on host A serves the suite over QUIC to a client on host B. Both are enrolled under one
+/// simulator CA, which lives only in B's phase B1: A's request goes to B, and the chain and roots come back. Every
+/// private key stays on the host that made it: the node's in A's `hex node enroll`, the client's in B's
+/// `store::begin`, and the CA's in B1's process, which ends. Then A's node is killed mid-suite and restarted, and its
+/// UDP port is dropped and let through again. Each loss is refused by type, and nothing is left behind.
+///
+/// Each phase is a test every other run ignores. It runs by name on its host:
+/// `cargo test --locked -p hex-cli --test quic_conformance -- --ignored --nocapture --test-threads=1 hex_quic_25_<phase>`.
+/// Its inputs come from the environment. Its outputs go to stdout as `HEX_2H_<NAME>=<value>` lines for the next
+/// phase. What travels between the hosts is public and small (a request and certificates, hex DER, under 2 KiB
+/// each), so it goes in the environment. In order:
+/// 1. `a1`, on A: takes `HEX_2H_DIR` (a fresh folder per run) and `HEX_2H_NODE` (the node's name). Says
+///    `HEX_2H_REQUEST`, `HEX_2H_NODE_HEX`, `HEX_2H_NODE_LIMIT` and `HEX_2H_NODE_FORKS`.
+/// 2. `b1`, on B: takes `HEX_2H_DIR`, `HEX_2H_NODE` and `HEX_2H_REQUEST`. Says `HEX_2H_CHAIN` and `HEX_2H_ROOTS`.
+/// 3. `a2`, on A: takes `HEX_2H_DIR`, `HEX_2H_CHAIN` and `HEX_2H_ROOTS`.
+/// 4. `a3`, on A (Linux), in the background: takes `HEX_2H_DIR` and `HEX_2H_BIND` (`<A's address>:<port>`). Says
+///    `HEX_2H_NODE_PID` and `HEX_2H_NODE_QUIC` once a start is ready, and again after a KILL ends it and it starts
+///    over.
+/// 5. `b2`, on B: takes `HEX_2H_DIR`, `HEX_2H_NODE`, `HEX_2H_ADDR` (A's `HEX_2H_BIND`) and A1's three
+///    `HEX_2H_NODE_*` lines.
+/// 6. `b3` with `HEX_2H_LOSS=kill`, on B, in the background: once it says `HEX_2H_READY`, `kill -9` the node's
+///    pid on A. It says `HEX_2H_LOST`, and A3 starts the node again.
+/// 7. `b4` with `HEX_2H_LOSS=kill`, on B.
+/// 8. Phases 6 and 7 with `HEX_2H_LOSS=partition`: drop the node's UDP port on A once B3 says `HEX_2H_READY`,
+///    and let it through again once B3 says `HEX_2H_LOST`, before B4.
+/// 9. `kill -TERM` the node's pid on A: A3 says `HEX_2H_LEFT=none` and passes.
+mod two_hosts {
+    use std::io::{Read, Write};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use hex_api::conformance::{self, Act, Fixture};
+    use hex_api::{BlockCount, Bounds, BoxId, ExecLimit, Refusal, Runtime, Stdio, StringUnit};
+    use hex_quic::enroll::sim::SimCa;
+    use hex_quic::enroll::{Ca, Issued, Request, store};
+    use hex_quic::{CipherSuite, Config, Endpoint, Refused, Shape};
+
+    use super::{BinFixture, hex};
+
+    /// The grants the simulator CA admits the node and the client with, each taken once (HEX-ENROLL-5).
+    const NODE_GRANT: &[u8] = b"hex-quic-25 node";
+    const CLIENT_GRANT: &[u8] = b"hex-quic-25 client";
+    /// The client's name: B's peer.
+    const CLIENT: &str = "client.two-hosts.test";
+    /// The box whose waiting program sees a loss (B3), and which B4 finds afterwards.
+    const LOSS_BOX: &str = "two-hosts-loss";
+
+    /// The run's variable `name`, which the phase needs.
+    fn var(name: &str) -> String {
+        std::env::var(name).unwrap_or_else(|_| panic!("HEX-QUIC-25's phase needs {name}"))
+    }
+
+    /// This host's folder for the run (`HEX_2H_DIR`, a fresh one each run: an enrollment begins once).
+    fn dir() -> PathBuf {
+        let dir = PathBuf::from(var("HEX_2H_DIR"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Says `name=value` for the next phase, at once, on a line of its own: libtest's `test <name> ... ` comes first
+    /// on the line it begins.
+    fn say(name: &str, value: impl std::fmt::Display) {
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "\n{name}={value}").unwrap();
+        out.flush().unwrap();
+    }
+
+    fn to_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn from_hex(text: &str) -> Vec<u8> {
+        let text = text.trim().as_bytes();
+        assert!(text.len().is_multiple_of(2), "hex of an odd length");
+        text.chunks(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    /// Certificates as the run carries them: each one's DER in hex, joined by commas.
+    fn certs_hex<C: AsRef<[u8]>>(certs: &[C]) -> String {
+        certs
+            .iter()
+            .map(|c| to_hex(c.as_ref()))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn certs_der(text: &str) -> Vec<Vec<u8>> {
+        text.split(',')
+            .filter(|c| !c.is_empty())
+            .map(from_hex)
+            .collect()
+    }
+
+    /// The node's exec bound as the run carries it: `block,counts,string,unit`, `string` `none` where it has none.
+    fn limit_line(limit: &ExecLimit) -> String {
+        let string = limit
+            .string
+            .map_or_else(|| "none".to_owned(), |s| s.to_string());
+        format!(
+            "{},{:?},{string},{:?}",
+            limit.block, limit.counts, limit.unit
+        )
+    }
+
+    fn limit_of(line: &str) -> ExecLimit {
+        let parts: Vec<&str> = line.split(',').collect();
+        let [block, counts, string, unit] = parts.as_slice() else {
+            panic!("HEX_2H_NODE_LIMIT {line:?}");
+        };
+        ExecLimit {
+            block: block.parse().unwrap(),
+            counts: match *counts {
+                "Execve" => BlockCount::Execve,
+                "Environment" => BlockCount::Environment,
+                other => panic!("HEX_2H_NODE_LIMIT's counts {other:?}"),
+            },
+            string: match *string {
+                "none" => None,
+                n => Some(n.parse().unwrap()),
+            },
+            unit: match *unit {
+                "Bytes" => StringUnit::Bytes,
+                "Utf16" => StringUnit::Utf16,
+                other => panic!("HEX_2H_NODE_LIMIT's unit {other:?}"),
+            },
+            source: "the node's host's bound, from phase A1 (HEX_2H_NODE_LIMIT)",
+        }
+    }
+
+    /// The suite's programs as the node's host runs them: its `hex`, its exec bound, and whether it counts refused
+    /// forks (A1's lines).
+    fn node_fixture() -> BinFixture {
+        BinFixture {
+            exe: var("HEX_2H_NODE_HEX"),
+            limit: limit_of(&var("HEX_2H_NODE_LIMIT")),
+            forks_counted: var("HEX_2H_NODE_FORKS") == "counted",
+        }
+    }
+
+    fn node_addr() -> SocketAddr {
+        var("HEX_2H_ADDR").parse().unwrap()
+    }
+
+    /// An endpoint of the client B1 enrolled, bound on any address of `to`'s family.
+    fn client_end(to: SocketAddr) -> Arc<Endpoint> {
+        let any: IpAddr = if to.is_ipv4() {
+            Ipv4Addr::UNSPECIFIED.into()
+        } else {
+            Ipv6Addr::UNSPECIFIED.into()
+        };
+        Arc::new(
+            Endpoint::start(Config {
+                credentials: store::load(&dir().join("client")).unwrap(),
+                bind: SocketAddr::new(any, 0),
+                listen: false,
+                serves: Vec::new(),
+                shape: Shape {
+                    connections: 1,
+                    lanes: hex_quic::limits::client_lanes(),
+                },
+            })
+            .unwrap(),
+        )
+    }
+
+    /// The client connected to the node across the hosts, its end of the link at TLS13_AES_256_GCM_SHA384, the dial
+    /// and the hello on their own waits (no deadline of the test's).
+    fn connected() -> hex_quic::link::Client {
+        let to = node_addr();
+        let end = client_end(to);
+        let (client, peer) =
+            hex_quic::link::connect(Arc::clone(&end), &var("HEX_2H_NODE"), to, None).unwrap();
+        assert_eq!(
+            end.negotiated(peer).unwrap().unwrap().0,
+            CipherSuite::TLS13_AES_256_GCM_SHA384
+        );
+        client
+    }
+
+    /// HEX-QUIC-25 A1, on the node's host. Do: `hex node enroll` the node `HEX_2H_NODE` in `$HEX_2H_DIR/credentials`.
+    /// Expect: its request for the CA (`HEX_2H_REQUEST`), the `hex` its programs run as (`HEX_2H_NODE_HEX`), and its
+    /// host's exec bound and fork count (`HEX_2H_NODE_LIMIT`, `HEX_2H_NODE_FORKS`) said, and its key kept here alone.
+    #[test]
+    #[ignore = "HEX-QUIC-25's phase A1, on the node's host: the lead's two-host run"]
+    fn hex_quic_25_a1_the_node_enrolls_here() {
+        let credentials = dir().join("credentials");
+        let name = var("HEX_2H_NODE");
+        let begun = Command::new(hex())
+            .args(["node", "enroll", "--name", &name, "--credentials"])
+            .arg(&credentials)
+            .output()
+            .expect("hex node enroll");
+        assert!(
+            begun.status.success(),
+            "{}",
+            String::from_utf8_lossy(&begun.stderr)
+        );
+        let request = store::request(&credentials, Vec::new()).unwrap();
+        assert_eq!(request.name, name);
+        let here = super::fixture();
+        say("HEX_2H_REQUEST", to_hex(&request.csr));
+        say("HEX_2H_NODE_HEX", hex());
+        say("HEX_2H_NODE_LIMIT", limit_line(&here.limit));
+        say(
+            "HEX_2H_NODE_FORKS",
+            if here.forks_counted {
+                "counted"
+            } else {
+                "uncounted"
+            },
+        );
+    }
+
+    /// HEX-QUIC-25 B1, on the client's host. Do: make the simulator CA here, admit `HEX_2H_NODE` and answer its request
+    /// (`HEX_2H_REQUEST`), then enroll this host's client in `$HEX_2H_DIR/client`, its key made here
+    /// (`store::begin`). Expect: the node's chain and roots said (`HEX_2H_CHAIN`, `HEX_2H_ROOTS`) and the client's
+    /// kept. The CA's key ends with this process.
+    #[test]
+    #[ignore = "HEX-QUIC-25's phase B1, on the client's host: the lead's two-host run"]
+    fn hex_quic_25_b1_the_ca_answers_here_and_the_client_enrolls() {
+        let ca = SimCa::new().unwrap();
+        let node = var("HEX_2H_NODE");
+        ca.admit(&node, NODE_GRANT);
+        let issued = ca
+            .enroll(&Request {
+                name: node,
+                csr: from_hex(&var("HEX_2H_REQUEST")),
+                grant: NODE_GRANT.to_vec(),
+            })
+            .unwrap();
+        let client = dir().join("client");
+        store::begin(&client, CLIENT).unwrap();
+        ca.admit(CLIENT, CLIENT_GRANT);
+        let answer = ca
+            .enroll(&store::request(&client, CLIENT_GRANT.to_vec()).unwrap())
+            .unwrap();
+        store::finish(&client, &answer).unwrap();
+        say("HEX_2H_CHAIN", certs_hex(&issued.chain));
+        say("HEX_2H_ROOTS", certs_hex(&issued.roots));
+    }
+
+    /// HEX-QUIC-25 A2, on the node's host. Do: keep the CA's answer (`HEX_2H_CHAIN`, `HEX_2H_ROOTS`) for the node's
+    /// enrollment. Expect: taken, being for the key made here and the name asked, and the credentials load.
+    #[test]
+    #[ignore = "HEX-QUIC-25's phase A2, on the node's host: the lead's two-host run"]
+    fn hex_quic_25_a2_the_node_keeps_the_cas_answer() {
+        let credentials = dir().join("credentials");
+        let issued = Issued {
+            chain: certs_der(&var("HEX_2H_CHAIN"))
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            roots: certs_der(&var("HEX_2H_ROOTS"))
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        };
+        store::finish(&credentials, &issued).unwrap();
+        store::load(&credentials).unwrap();
+        say("HEX_2H_KEPT", credentials.display());
+    }
+
+    /// HEX-QUIC-25 B2, on the client's host. Do: connect to the node at `HEX_2H_ADDR` across the hosts and run the
+    /// hex-api conformance suite, its programs the node's host's `hex selftest-box`. Expect: every case passes, the
+    /// link at TLS13_AES_256_GCM_SHA384, as HEX-QUIC-23 on one host.
+    #[test]
+    #[ignore = "HEX-QUIC-25's phase B2, on the client's host: the lead's two-host run"]
+    fn hex_quic_25_b2_the_suite_passes_across_hosts() {
+        let client = connected();
+        let failures = conformance::run(&client, &node_fixture());
+        assert!(failures.is_empty(), "across the hosts: {failures:#?}");
+        say("HEX_2H_SUITE", "passed");
+    }
+
+    /// The loss B3 and B4 take (`HEX_2H_LOSS`): the node killed on its host and started again, or its UDP port
+    /// dropped and let through again.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Loss {
+        Kill,
+        Partition,
+    }
+
+    fn loss() -> Loss {
+        match var("HEX_2H_LOSS").as_str() {
+            "kill" => Loss::Kill,
+            "partition" => Loss::Partition,
+            other => panic!("HEX_2H_LOSS is kill or partition, not {other:?}"),
+        }
+    }
+
+    /// HEX-QUIC-25 B3, on the client's host, in the background. Do: connect, start a program that waits in a box of
+    /// its own with its stdout a pipe here, run the suite over and over, and say `HEX_2H_READY`; then the node is lost
+    /// (`HEX_2H_LOSS`: killed on its host, or its UDP port dropped). Expect: the waiting program's stdout ends with the
+    /// link, and the suite's run under way returns. The program's end and the next call are refused by type
+    /// (`Refusal::Broken`). With the port dropped, a new dial is refused by type too, once QUIC's idle timeout passes
+    /// with nothing from the node. It waits for the loss as long as the operator takes; the run's own time limit bounds
+    /// it.
+    #[test]
+    #[ignore = "HEX-QUIC-25's phase B3, on the client's host: the lead's two-host run"]
+    fn hex_quic_25_b3_a_lost_node_is_refused_by_type() {
+        let loss = loss();
+        let fixture = node_fixture();
+        let client = connected();
+        let id = BoxId::new(LOSS_BOX).unwrap();
+        let _ = client.delete(&id);
+        client
+            .create(fixture.spec(id.clone(), Bounds::default()))
+            .unwrap();
+        let (mut out, w) = std::io::pipe().unwrap();
+        let mut watched = client
+            .exec(
+                &id,
+                fixture.program(&Act::Wait),
+                Stdio {
+                    stdout: Some(w),
+                    ..Stdio::null()
+                },
+            )
+            .unwrap();
+        let lost = AtomicBool::new(false);
+        let (read, runs) = std::thread::scope(|s| {
+            let suite = s.spawn(|| {
+                let mut failures = Vec::new();
+                while !lost.load(Ordering::Acquire) {
+                    failures.push(conformance::run(&client, &fixture).len());
+                }
+                failures
+            });
+            say(
+                "HEX_2H_READY",
+                match loss {
+                    Loss::Kill => "kill -9 the node on its host now",
+                    Loss::Partition => "drop the node's UDP port on its host now",
+                },
+            );
+            // The program writes nothing: its stdout ends with the link, never before.
+            let read = out.read(&mut [0u8; 64]);
+            lost.store(true, Ordering::Release);
+            (read, suite.join().unwrap())
+        });
+        assert!(
+            matches!(read, Ok(0) | Err(_)),
+            "the waiting program said something: {read:?}"
+        );
+        // A call first: the suite may have been between runs as the link went, so this may be the client's first word
+        // of its end, which it then tells every program it watches.
+        let listed = client.list();
+        assert!(
+            matches!(listed, Err(Refusal::Broken(_))),
+            "a call after the loss: {listed:?}"
+        );
+        let ended = watched.try_wait();
+        assert!(
+            matches!(ended, Err(Refusal::Broken(_))),
+            "the watched program's end after the loss: {ended:?}"
+        );
+        say(
+            "HEX_2H_SUITE_RUNS",
+            format!("{} (each one's failures: {runs:?})", runs.len()),
+        );
+        if loss == Loss::Partition {
+            let to = node_addr();
+            match hex_quic::link::connect(client_end(to), &var("HEX_2H_NODE"), to, None) {
+                Ok(_) => panic!("a dial while the node's port is dropped connected"),
+                Err(refused) => assert!(
+                    matches!(
+                        refused,
+                        Refused::Unreachable | Refused::Transport { .. } | Refused::Closed { .. }
+                    ),
+                    "a dial while the node's port is dropped: {refused:?}"
+                ),
+            }
+        }
+        say("HEX_2H_LOST", format!("{loss:?}, refused by type"));
+    }
+
+    /// HEX-QUIC-25 B4, on the client's host, once B3's loss is over (the node started again, or its port let through
+    /// again). Do: connect, inspect the loss's box, delete every box listed, list again, and run the suite. Expect:
+    /// after a kill, the box still the restarted node's, its record having outlived the KILL and recovery having kept
+    /// it (`adopted` said as found: a Linux node's inspect never carries it, `Node::recover` reports it). After a
+    /// partition, the waiting program ended by the node as abandoned when the link went. None listed once each is
+    /// deleted, and every case passes.
+    #[test]
+    #[ignore = "HEX-QUIC-25's phase B4, on the client's host: the lead's two-host run"]
+    fn hex_quic_25_b4_nothing_is_left_after_the_loss() {
+        let loss = loss();
+        let client = connected();
+        let watched = client.inspect(&BoxId::new(LOSS_BOX).unwrap()).unwrap();
+        match loss {
+            Loss::Kill => say(
+                "HEX_2H_TAKEN_BACK",
+                format!("{} adopted={}", watched.id, watched.adopted),
+            ),
+            Loss::Partition => assert!(
+                watched.abandoned >= 1,
+                "the node didn't end the program the lost link watched: {watched:?}"
+            ),
+        }
+        for listed in client.list().unwrap() {
+            client.delete(&listed.id).unwrap();
+        }
+        let left = client.list().unwrap();
+        assert!(left.is_empty(), "left behind: {left:?}");
+        let failures = conformance::run(&client, &node_fixture());
+        assert!(failures.is_empty(), "after the loss: {failures:#?}");
+        say("HEX_2H_LEFT", "none");
+    }
+
+    /// Starts `hex node` over `dir` with `more`, its boxes under `box_root`, and says its pid and the address its QUIC
+    /// listener bound (`HEX_2H_NODE_PID`, `HEX_2H_NODE_QUIC`).
+    #[cfg(target_os = "linux")]
+    fn started(
+        dir: &std::path::Path,
+        box_root: &std::path::Path,
+        more: &[&std::ffi::OsStr],
+    ) -> super::NodeProcess {
+        let (node, said) = super::NodeProcess::start(dir, Some(box_root), more);
+        say("HEX_2H_NODE_PID", node.child.id());
+        let quic = said
+            .iter()
+            .find_map(|line| line.strip_prefix("quic "))
+            .unwrap_or_else(|| panic!("hex node said {said:?}"));
+        say("HEX_2H_NODE_QUIC", quic);
+        node
+    }
+
+    /// Every cgroup under `root` that holds a process, with its `cgroup.procs`: the tree walked with a stack of its
+    /// own (CLAUDE.md §11).
+    #[cfg(target_os = "linux")]
+    fn processes_under(root: &std::path::Path) -> Vec<(PathBuf, String)> {
+        let mut held = Vec::new();
+        let mut walk = vec![root.to_owned()];
+        while let Some(cgroup) = walk.pop() {
+            if let Ok(procs) = std::fs::read_to_string(cgroup.join("cgroup.procs"))
+                && !procs.trim().is_empty()
+            {
+                held.push((cgroup.clone(), procs));
+            }
+            for entry in std::fs::read_dir(&cgroup).into_iter().flatten().flatten() {
+                if entry.path().is_dir() {
+                    walk.push(entry.path());
+                }
+            }
+        }
+        held
+    }
+
+    /// HEX-QUIC-25 A3, on the node's host (Linux), in the background. Do: run `hex node --quic $HEX_2H_BIND` with the
+    /// kept enrollment, its boxes in a delegated cgroup subtree. Once a KILL ends it, start it again over the same
+    /// state, box root and address, then wait for its last end (`kill -TERM`). Expect: each start said
+    /// (`HEX_2H_NODE_PID`, `HEX_2H_NODE_QUIC`), and no process left in its box root once it has ended
+    /// (`HEX_2H_LEFT=none`). A host that can't delegate a cgroup records the skip and serves nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "HEX-QUIC-25's phase A3, on the node's host: the lead's two-host run"]
+    fn hex_quic_25_a3_hex_node_serves_through_a_kill_and_leaves_nothing() {
+        use std::os::unix::process::ExitStatusExt;
+        super::linux::delegated(
+            "two_hosts::hex_quic_25_a3_hex_node_serves_through_a_kill_and_leaves_nothing",
+            |own| {
+                let dir = dir();
+                let box_root = own.join("hex-boxes-two-hosts");
+                let credentials = dir.join("credentials");
+                let bind = var("HEX_2H_BIND");
+                let more: [&std::ffi::OsStr; 4] = [
+                    "--quic".as_ref(),
+                    bind.as_ref(),
+                    "--credentials".as_ref(),
+                    credentials.as_os_str(),
+                ];
+                let mut node = started(&dir, &box_root, &more);
+                let first = node.child.wait().unwrap();
+                assert_eq!(
+                    first.signal(),
+                    Some(9),
+                    "the node ended {first}, not by KILL: {}",
+                    node.said()
+                );
+                say("HEX_2H_KILLED", first);
+                drop(node);
+                let mut node = started(&dir, &box_root, &more);
+                let last = node.child.wait().unwrap();
+                say("HEX_2H_ENDED", last);
+                let held = processes_under(&box_root);
+                assert!(
+                    held.is_empty(),
+                    "left behind under {}: {held:?}",
+                    box_root.display()
+                );
+                say("HEX_2H_LEFT", "none");
+            },
+        );
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use std::path::{Path, PathBuf};
@@ -651,8 +1169,9 @@ mod linux {
     }
 
     /// Runs `body` with this process's cgroup, delegated: here where it is, else once more as `test` alone in a
-    /// `systemd-run --user --scope -p Delegate=yes`, else the skip recorded.
-    fn delegated(test: &str, body: impl FnOnce(&Path)) {
+    /// `systemd-run --user --scope -p Delegate=yes` (an ignored test too, as the two-host run's are), else the skip
+    /// recorded.
+    pub(super) fn delegated(test: &str, body: impl FnOnce(&Path)) {
         let disk = super::scratch("disk-");
         match prepare_cgroup(disk.path()) {
             Ok(own) => body(&own),
@@ -675,7 +1194,13 @@ mod linux {
                 let status = Command::new("systemd-run")
                     .args(["--user", "--scope", "--quiet", "-p", "Delegate=yes"])
                     .arg(std::env::current_exe().expect("test binary path"))
-                    .args([test, "--exact", "--nocapture", "--test-threads=1"])
+                    .args([
+                        test,
+                        "--exact",
+                        "--include-ignored",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
                     .env("HEX_DELEGATED", "1")
                     .status()
                     .expect("run the test in a delegated scope");
