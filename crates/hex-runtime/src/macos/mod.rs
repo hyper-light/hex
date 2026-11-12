@@ -6,6 +6,7 @@
 //! recovery and socket that wrap it on Linux (`hex-node`) are not yet cross-OS, so this holds its boxes
 //! in memory and is driven in process.
 
+pub mod command;
 mod cpu;
 pub mod directory;
 pub mod helper_client;
@@ -80,22 +81,12 @@ struct BoxUser {
 /// its own the helper starts and bounds in the kernel (step 2). `new` is rootless; `detect` picks box-user
 /// when the helper's socket answers. Holds its boxes in memory, keyed by id.
 /// This machine's model, `hw.model` (`Mac16,9`): its class, whose recorded growth rates seed its boxes'
-/// pacing (`hex_core::watch::seed`). Read once at node start by `/usr/sbin/sysctl`, by absolute path with
-/// a fixed argv and no shell, as the helper runs its directory tools.
+/// pacing (`hex_core::watch::seed`). Read once at node start by sysctlbyname: no program runs, so none
+/// can inherit a descriptor another thread holds.
 pub fn machine_model() -> Result<String, Refusal> {
-    let out = std::process::Command::new("/usr/sbin/sysctl")
-        .args(["-n", "hw.model"])
-        .output()
-        .map_err(|e| Refusal::os("reading the machine's model", e))?;
-    if !out.status.success() {
-        return Err(Refusal::os(
-            "reading the machine's model",
-            std::io::Error::other(format!("sysctl -n hw.model: {}", out.status)),
-        ));
-    }
-    String::from_utf8(out.stdout)
-        .map(|m| m.trim().to_owned())
-        .map_err(|e| Refusal::os("reading the machine's model", std::io::Error::other(e)))
+    sys::sysctl_string(c"hw.model")
+        .map(|model| model.trim().to_owned())
+        .map_err(|e| Refusal::os("reading the machine's model", e))
 }
 
 /// The managed CPU control's maximum, in milli-CPU: every logical processor of the hardware. XNU exports
@@ -154,8 +145,10 @@ fn native_allocation(bound: usize) -> Refusal {
 }
 
 /// macOS's socket, socketpair, accept and pipe take no CLOEXEC or NONBLOCK flag, so each new
-/// private descriptor gets them here before it is shared. Hex's own spawns also pass
-/// POSIX_SPAWN_CLOEXEC_DEFAULT, so no spawned member inherits one in the gap.
+/// private descriptor gets them here before it is shared. No program Hex starts on macOS inherits
+/// one in the gap: `sys::spawn` passes POSIX_SPAWN_CLOEXEC_DEFAULT (and [`command`] starts std's
+/// `Command` calls through it, as std's spawn passes none), and `helper_sys`'s fork closes every
+/// descriptor past stdio before its exec.
 pub(crate) fn private_descriptor(fd: impl AsFd, nonblocking: bool) -> rustix::io::Result<()> {
     rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)?;
     if nonblocking {
