@@ -832,6 +832,52 @@ impl Helper {
         }
         Ok((answer, descriptors))
     }
+    /// Joint plan step 14 (C4 on macOS): sets `key`'s scope to `rate` milli-CPU, its water-filled share.
+    fn set_rate(&self, key: protocol::Key, rate: u64) -> Result<(), CallFailure> {
+        let until = self.until(None)?;
+        let id = self.next()?;
+        let bytes = protocol::rate::encode(VERSION, id, &key, rate)
+            .map_err(|_| super::configuration("the native rate request is invalid"))?;
+        let fd = self.connect(key.helper, until)?;
+        peer(&fd, key.helper)?;
+        frame::send(
+            fd.as_fd(),
+            &bytes,
+            &[],
+            protocol::rate::MAX_MESSAGE,
+            Some(until),
+        )
+        .map_err(|error| CallFailure::framed(protocol::Operation::Connect, error))?;
+        let (bytes, descriptors) =
+            frame::receive(fd.as_fd(), protocol::MAX_MESSAGE, Some(until))
+                .map_err(|error| CallFailure::framed(protocol::Operation::Connect, error))?;
+        peer_after_reply(&fd, key.helper)?;
+        if let Ok((version, answer_id, rejected)) =
+            protocol::rejected::read(&bytes, descriptors.len())
+        {
+            if version != VERSION || (answer_id != id && answer_id != 0) {
+                return Err(
+                    super::configuration("unmatched native helper diagnostic reply").into(),
+                );
+            }
+            return Err(CallFailure::Rejected(rejected));
+        }
+        let (version, answer_id, answer) = protocol::read_answer(&bytes, descriptors.len())
+            .map_err(|_| super::configuration("the native helper reply is invalid"))?;
+        if version != VERSION || id != answer_id || &key != answer.key() {
+            return Err(super::configuration(
+                "the native helper reply belongs to another request or incarnation",
+            )
+            .into());
+        }
+        match answer {
+            protocol::Answer::Done { .. } => Ok(()),
+            protocol::Answer::Refused { failure, .. } => Err(CallFailure::Native(failure)),
+            _ => Err(
+                super::configuration("the native helper answered a rate with another reply").into(),
+            ),
+        }
+    }
     pub(in crate::macos) fn census(&self) -> Result<protocol::census::Census, Refusal> {
         let until = self.until(None)?;
         let (process, _) = self.identity(false, until, None)?;
@@ -1521,6 +1567,21 @@ pub(super) fn attach(
         return Err(record.refusal(LifecycleCause::Uncertain));
     }
     Ok(proxy)
+}
+
+/// Joint plan step 14 (C4 on macOS): sets the canonical scope's CPU rate in its native helper.
+pub(super) fn set_rate(
+    runtime: &MacRuntime,
+    record: NativeRecord<'_>,
+    rate: u64,
+) -> Result<(), Refusal> {
+    let helper = runtime
+        .managed_helper
+        .as_ref()
+        .ok_or_else(|| record.refusal(LifecycleCause::Uncertain))?;
+    let (process, _) = helper.identity(false, helper.until(None)?, None)?;
+    let key = protocol::Key::from_record(record, process)?;
+    helper.set_rate(key, rate).map_err(CallFailure::refusal)
 }
 
 pub(super) fn usage(runtime: &MacRuntime, record: NativeRecord<'_>) -> Result<Usage, Refusal> {

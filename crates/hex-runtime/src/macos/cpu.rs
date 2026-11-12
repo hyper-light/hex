@@ -94,6 +94,19 @@ impl Control {
             Mode::Running => Ok(()),
         }
     }
+
+    /// Joint plan step 14 (C4 on macOS): the scope's rate becomes `rate`, its water-filled share. What it used up to
+    /// `now` is charged at the rate it had first, so no interval is charged at the other; then the new rate's decision.
+    pub(super) fn set_rate(
+        &mut self,
+        now: Instant,
+        helper_cpu: Duration,
+        rate: u64,
+    ) -> Result<Decision, Failure> {
+        self.observe(now, helper_cpu)?;
+        self.budget.set_rate(rate)?;
+        self.budget.decision()
+    }
 }
 
 /// AC-T7.4.1: the cycle this control holds a scope that would use every core to, at `rate` milli-CPU of
@@ -155,6 +168,18 @@ impl Budget {
             credit: burst,
             mode: Mode::Prepared,
         })
+    }
+
+    /// A new rate for the same scope (joint plan step 14, C4 on macOS): its credit and any debt stay, and its burst,
+    /// which its maximum and response make; only what it earns from now changes. Refused outside 1 to its maximum, as
+    /// [`Budget::new`] refuses.
+    pub(super) fn set_rate(&mut self, rate: u64) -> Result<(), Failure> {
+        let rate = i128::from(rate);
+        if rate == 0 || rate > self.maximum {
+            return Err(Failure::Envelope);
+        }
+        self.rate = rate;
+        Ok(())
     }
 
     /// Called before the first native CONT, not at a later first watcher observation.
@@ -377,6 +402,71 @@ mod tests {
             .unwrap();
         budget.resume().unwrap();
         assert!(cycle(4000, 4000, Duration::from_nanos(10)).is_err());
+    }
+
+    /// Joint plan step 14 (AC-T7.4.1), C4 on macOS: a scope's rate becomes its water-filled share. Do run a scope at 1
+    /// CPU of 4 until it is held, then raise its rate to 2 CPUs, and lower another's to 0.5; then ask for 0 and for more
+    /// than the maximum. Expect the debt kept across the change and its hold the new rate's (the debt refilled twice as
+    /// fast, and half as fast), and the two rates refused, the rate as it was.
+    #[test]
+    fn a_rate_change_keeps_the_debt_and_refills_at_the_new_rate() {
+        let mut budget = Budget::new(1000, 4000, Duration::from_nanos(10)).unwrap();
+        budget.start().unwrap();
+        budget
+            .observe(Duration::from_nanos(14), Duration::ZERO)
+            .unwrap();
+        budget.held().unwrap();
+        let Decision::Hold(at_one) = budget.decision().unwrap() else {
+            panic!("not held")
+        };
+        let owed = budget.credit;
+        budget.set_rate(2000).unwrap();
+        assert_eq!(budget.credit, owed, "no debt forgiven");
+        let Decision::Hold(at_two) = budget.decision().unwrap() else {
+            panic!("not held")
+        };
+        assert_eq!(at_two, at_one.div_f64(2.0).max(Duration::from_nanos(1)));
+        budget.set_rate(500).unwrap();
+        let Decision::Hold(at_half) = budget.decision().unwrap() else {
+            panic!("not held")
+        };
+        assert_eq!(at_half, at_one * 2);
+        assert_eq!(budget.set_rate(0), Err(Failure::Envelope));
+        assert_eq!(budget.set_rate(4001), Err(Failure::Envelope));
+        assert_eq!(budget.decision().unwrap(), Decision::Hold(at_half));
+    }
+
+    /// Joint plan step 14 (AC-T7.4.1), C4 on macOS: a control's rate change charges what came before at the rate it
+    /// had. Do run two controls at 1 CPU of 4 for 4 ns, then change one to 3 CPUs and observe both 4 ns later. Expect
+    /// the changed one's credit the same as the other's up to the change, then its earning at 3 CPUs.
+    #[test]
+    fn a_rate_change_charges_what_came_before_at_the_old_rate() {
+        let at = Instant::now();
+        let mut kept = Control::new(1000, 4000, Duration::from_nanos(10), Duration::ZERO).unwrap();
+        let mut raised =
+            Control::new(1000, 4000, Duration::from_nanos(10), Duration::ZERO).unwrap();
+        for control in [&mut kept, &mut raised] {
+            control.start(at, Duration::ZERO).unwrap();
+            control
+                .observe(at + Duration::from_nanos(4), Duration::ZERO)
+                .unwrap();
+        }
+        let before = raised.budget.credit;
+        raised
+            .set_rate(at + Duration::from_nanos(4), Duration::ZERO, 3000)
+            .unwrap();
+        assert_eq!(
+            raised.budget.credit, before,
+            "nothing charged at the new rate"
+        );
+        kept.observe(at + Duration::from_nanos(8), Duration::ZERO)
+            .unwrap();
+        raised
+            .observe(at + Duration::from_nanos(8), Duration::ZERO)
+            .unwrap();
+        // Running uses all four CPUs: at 1 CPU it loses 3 per ns, at 3 CPUs 1 per ns.
+        assert_eq!(kept.budget.credit, before - 4 * 3000);
+        assert_eq!(raised.budget.credit, before - 4 * 1000);
     }
 
     /// AC-T7.4.1: two long-lived members plus a short helper consume one aggregate allocation.

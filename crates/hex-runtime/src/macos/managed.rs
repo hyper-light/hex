@@ -308,6 +308,18 @@ impl Scope {
             .map(Some)
             .map_err(|_| self.refusal(id))
     }
+    /// Joint plan step 14 (C4 on macOS): the scope's CPU rate becomes `rate`, its share as the node's learner water-fills
+    /// it; what the helper used up to now is charged at the rate it had (`cpu::Control::set_rate`).
+    pub(super) fn set_cpu_rate(&self, id: OwnerRef<'_>, rate: u64) -> Result<(), Refusal> {
+        let cpu = self.cpu.as_ref().ok_or_else(|| self.refusal(id))?;
+        let observed =
+            sys::managed_process_cpu().map_err(|error| Refusal::os("reading helper CPU", error))?;
+        cpu.lock()
+            .map_err(|_| self.refusal(id))?
+            .set_rate(Instant::now(), observed, rate)
+            .map(drop)
+            .map_err(|_| self.refusal(id))
+    }
     pub(super) fn cpu_permit(&self, id: OwnerRef<'_>) -> Result<(), Refusal> {
         self.cpu
             .as_ref()
@@ -794,6 +806,13 @@ pub(super) fn attach(
 }
 pub(super) fn usage(runtime: &MacRuntime, record: NativeRecord<'_>) -> Result<Usage, Refusal> {
     remote::usage(runtime, record)
+}
+pub(super) fn set_rate(
+    runtime: &MacRuntime,
+    record: NativeRecord<'_>,
+    rate: u64,
+) -> Result<(), Refusal> {
+    remote::set_rate(runtime, record, rate)
 }
 pub(super) fn finalize(
     runtime: &MacRuntime,

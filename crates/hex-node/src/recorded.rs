@@ -96,6 +96,8 @@ fn held_text(path: &Path, why: &str, because: &str) -> String {
     )
 }
 
+pub(crate) mod charges;
+
 /// What a node needs of its runtime to take its boxes back after a crash (T-T7.1.2).
 pub trait Recover: Runtime {
     /// Pure initialized encoding forms appended to the SAME transient global tuple union. A native
@@ -240,6 +242,28 @@ pub trait Recover: Runtime {
         Err(record.refusal(hex_api::LifecycleCause::Uncertain))
     }
 
+    /// Joint plan step 14 (C1): the window the charge learner reads and caps this owner's managed VMs over, derived from
+    /// how the platform holds a VM's CPU rate; refused, typed, naming what is missing where nothing derives it.
+    fn charge_window(&self) -> Result<std::time::Duration, Refusal> {
+        Err(Refusal::Platform {
+            what: "the charge learner's window",
+            platform: std::env::consts::OS,
+            why: "this native owner holds no managed VM's CPU rate to learn and cap over a window"
+                .to_owned(),
+        })
+    }
+
+    /// Joint plan step 14 (C4): caps the managed VM's CPU at `rate` milli-CPU, its share as the charge learner
+    /// water-fills it, where this owner caps CPU rather than weighs it; refused, typed, by an owner that holds no rate.
+    fn set_managed_rate(&self, record: NativeRecord<'_>, rate: u64) -> Result<(), Refusal> {
+        let _ = (record, rate);
+        Err(Refusal::Platform {
+            what: "a managed VM's CPU rate",
+            platform: std::env::consts::OS,
+            why: "this native owner holds no managed VM's CPU rate".to_owned(),
+        })
+    }
+
     /// Initialized native routes only; physical claims are overlaid from this owner's Store.
     fn attachment_offers(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
         Ok(self
@@ -338,6 +362,9 @@ struct Books {
     /// The boot session the store's records were written in before this node opened it, as its marker said
     /// ([`Store::take_boot_marker`]): what tells a torn record from an earlier boot (T-T7.1.2).
     last_boot: Option<hex_core::record::BootSession>,
+    /// Joint plan step 14: the charge learner of the managed VMs, where the node's platform caps them, and the end its
+    /// window's thread waits on beside the window: dropped with the node.
+    charges: std::sync::OnceLock<(Mutex<charges::Learner>, Mutex<std::sync::mpsc::Sender<()>>)>,
 }
 
 /// Concrete shared transaction; its caller keeps the same method/device Turn on stack.
@@ -1695,6 +1722,7 @@ impl<R: Recover> Recorded<R> {
                 abandoned: Abandoned::default(),
                 adopted: Mutex::new(BTreeSet::new()),
                 last_boot,
+                charges: std::sync::OnceLock::new(),
             }),
         })
     }
@@ -1929,6 +1957,105 @@ impl<R: Recover> Recorded<R> {
     }
 }
 
+/// The charge learner's reads and writes of the node's managed VMs, through their native owner.
+struct Managed<'a, R>(&'a R);
+
+impl<R: Recover> charges::Managed for Managed<'_, R> {
+    fn usage(&self, record: &BoxRecord) -> Result<Usage, Refusal> {
+        self.0.managed_usage(NativeRecord::Box(record))
+    }
+
+    fn set_rate(&self, record: &BoxRecord, rate: u64) -> Result<(), Refusal> {
+        self.0.set_managed_rate(NativeRecord::Box(record), rate)
+    }
+}
+
+impl<R: Recover + Send + Sync + 'static> Recorded<R> {
+    /// Joint plan step 14 (C1, C4): starts the charge learner of the node's managed VMs, a thread that runs a window
+    /// each time the platform's window passes, until the node is gone. Refused, typed, where the platform derives no
+    /// window (`Recover::charge_window`): the node runs on, its VMs booked whole, as before.
+    pub fn start_charges(self: &Arc<Self>) -> Result<(), Refusal> {
+        let window = self.runtime.charge_window()?;
+        let learner = charges::Learner::new(window, self.machine()?)?;
+        let (end, ended) = std::sync::mpsc::channel();
+        self.books
+            .charges
+            .set((Mutex::new(learner), Mutex::new(end)))
+            .map_err(|_| broken("the charge learner is started already"))?;
+        let node = Arc::downgrade(self);
+        std::thread::Builder::new()
+            .name("hex-charges".to_owned())
+            .spawn(move || {
+                loop {
+                    match ended.recv_timeout(window) {
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                    let Some(node) = node.upgrade() else {
+                        return;
+                    };
+                    node.learn_window();
+                }
+            })
+            .map(drop)
+            .map_err(|e| Refusal::os("starting the charge learner", e))
+    }
+
+    /// The machine's resources, as its facts say them.
+    fn machine(&self) -> Result<hex_api::CapacityResources, Refusal> {
+        Ok(crate::facts::capacity(self.books.store.directory(), self.books.authority_id()?)?.total)
+    }
+
+    /// One window of the charge learner (joint plan step 14): the running managed VMs in the node's records, within the
+    /// machine less what its native boxes are capped at (C4: their bookings off the fleet's budget). Its failure is
+    /// kept for the capacity answers.
+    fn learn_window(&self) {
+        let Some((learner, _)) = self.books.charges.get() else {
+            return;
+        };
+        let read = self
+            .books
+            .store
+            .all()
+            .and_then(|records| Ok((records, self.machine()?)));
+        let Ok(mut learner) = learner.lock() else {
+            return;
+        };
+        let (records, machine) = match read {
+            Ok(read) => read,
+            Err(why) => return learner.failed(why),
+        };
+        let mut running = Vec::new();
+        let mut boxes = hex_api::CapacityResources::default();
+        for record in records.into_values().flatten() {
+            if charges::running(&record) {
+                running.push(record);
+            } else if record.phase == Phase::Ready
+                && matches!(record.spec.class.class(), Class::Process | Class::Oci)
+            {
+                boxes.cpu_milli = boxes
+                    .cpu_milli
+                    .saturating_add(record.spec.bounds.cpu_max_milli.map_or(0, u64::from));
+                boxes.mem_bytes = boxes
+                    .mem_bytes
+                    .saturating_add(record.spec.bounds.memory_max.unwrap_or(0));
+            }
+        }
+        let budget = hex_api::CapacityResources {
+            cpu_milli: machine.cpu_milli.saturating_sub(boxes.cpu_milli),
+            mem_bytes: machine.mem_bytes.saturating_sub(boxes.mem_bytes),
+            disk_bytes: machine.disk_bytes,
+        };
+        // Its outcome is kept as the learner's fault, which the capacity answers read.
+        let _ = learner.window(
+            &Managed(&self.runtime),
+            &running,
+            budget,
+            std::time::Instant::now(),
+        );
+    }
+}
+
 impl<P: Recover + 'static> Recorded<hex_runtime::guest::WithGuest<P>> {
     /// After constructing the CLI's one Arc, register a weak view of that same allocation.
     /// The guest holds no strong back-reference and no second Store/holder owner is created.
@@ -1960,6 +2087,47 @@ impl<P: Recover + 'static> Recorded<hex_runtime::guest::WithGuest<P>> {
 }
 
 impl Books {
+    /// What a VM class's capacity answer carries of the charge learner (joint plan step 14, C8), fitted to one message:
+    /// nothing where no learner runs.
+    fn attach_learned(
+        &self,
+        class: Class,
+        capacity: &mut hex_api::Capacity,
+        records: &std::collections::BTreeMap<BoxId, Result<BoxRecord, String>>,
+    ) -> Result<(), Refusal> {
+        let class = match class {
+            Class::Shards => hex_sim::model::Class::Shards,
+            Class::Firecracker => hex_sim::model::Class::Firecracker,
+            Class::Process | Class::Oci => return Ok(()),
+        };
+        let Some((learner, _)) = self.charges.get() else {
+            return Ok(());
+        };
+        let mut costs = Vec::new();
+        costs
+            .try_reserve_exact(capacity.routes.len().saturating_add(1))
+            .map_err(|_| Refusal::Exhausted {
+                what: "a capacity answer's cost profiles",
+                bound: capacity.routes.len(),
+            })?;
+        costs.extend(capacity.cost);
+        costs.extend(capacity.routes.iter().filter_map(|route| route.cost));
+        let running: Vec<BoxRecord> = records
+            .values()
+            .flatten()
+            .filter(|record| charges::running(record))
+            .cloned()
+            .collect();
+        capacity.learned = learner
+            .lock()
+            .map_err(|_| broken("the charge learner's lock was poisoned"))?
+            .learned(class, &costs, &running)?;
+        hex_core::wire::fit_learned(capacity).map_err(|e| Refusal::Invalid {
+            what: "a capacity answer",
+            why: e.to_string(),
+        })
+    }
+
     /// The same Store identity backs both initialized backend capacities and the native report.
     /// It introduces no device inventory or reservation state.
     fn authority_id(&self) -> Result<String, Refusal> {
@@ -2110,6 +2278,7 @@ impl<R: Recover> Runtime for Recorded<R> {
             &self.books.store.all_pools()?,
             self.runtime.device_catalog()?.as_deref(),
         )?;
+        self.books.attach_learned(class, &mut report, &records)?;
         Ok(Some(report))
     }
 
@@ -2369,6 +2538,14 @@ impl Recover for hex_runtime::macos::MacRuntime {
         hex_runtime::macos::MacRuntime::managed_usage(self, record)
     }
 
+    fn set_managed_rate(&self, record: NativeRecord<'_>, rate: u64) -> Result<(), Refusal> {
+        hex_runtime::macos::MacRuntime::set_managed_rate(self, record, rate)
+    }
+
+    fn charge_window(&self) -> Result<std::time::Duration, Refusal> {
+        hex_runtime::macos::MacRuntime::charge_window(self)
+    }
+
     fn launch_managed(
         &self,
         record: NativeRecord<'_>,
@@ -2465,6 +2642,22 @@ impl Recover for hex_runtime::windows::WinRuntime {
 
     fn managed_usage(&self, record: NativeRecord<'_>) -> Result<Usage, Refusal> {
         hex_runtime::windows::WinRuntime::managed_usage(self, record)
+    }
+
+    fn set_managed_rate(&self, record: NativeRecord<'_>, rate: u64) -> Result<(), Refusal> {
+        hex_runtime::windows::WinRuntime::set_managed_rate(self, record, rate)
+    }
+
+    /// A job's hard cap holds per scheduling interval, whose length Windows doesn't document
+    /// (`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`), so no window derives from it until it is measured.
+    fn charge_window(&self) -> Result<std::time::Duration, Refusal> {
+        Err(Refusal::Platform {
+            what: "the charge learner's window",
+            platform: "windows",
+            why: "a job's CPU hard cap holds per scheduling interval, whose length Windows doesn't document \
+                  (JOBOBJECT_CPU_RATE_CONTROL_INFORMATION): the window waits on its measurement on the host"
+                .to_owned(),
+        })
     }
 
     fn launch_managed(
@@ -2634,6 +2827,14 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
 
     fn managed_usage(&self, record: NativeRecord<'_>) -> Result<Usage, Refusal> {
         self.host().managed_usage(record)
+    }
+
+    fn set_managed_rate(&self, record: NativeRecord<'_>, rate: u64) -> Result<(), Refusal> {
+        self.host().set_managed_rate(record, rate)
+    }
+
+    fn charge_window(&self) -> Result<std::time::Duration, Refusal> {
+        self.host().charge_window()
     }
 
     fn launch_managed(

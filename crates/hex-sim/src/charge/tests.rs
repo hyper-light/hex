@@ -579,6 +579,77 @@ fn w14_a_fleet_weighs_its_cpu_budget_on_the_machines_scale() {
     ));
 }
 
+/// Joint plan step 14 (AC-T7.4.1), C4 where a platform caps CPU rather than weighs it (macOS, Windows). Do track three
+/// VMs of 8-CPU ceilings booked at 4, 2 and 1 CPUs in a 10-CPU fleet budget, the first having used its whole 4-CPU
+/// cap, the second 0.5 CPU of its 3, the third no window yet, and cap them. Expect the second capped at its booking (it
+/// asked less), the first and third sharing the 3 CPUs the bookings leave by their bookings (6.4 and 1.6 CPUs), the
+/// caps summing to the budget; and VMs booked nothing in a budget of one milli-CPU held at the platform's least.
+#[test]
+fn w14_a_capping_platforms_rates_keep_every_booking_and_share_the_rest() {
+    let mut n = node(res(10_000, 64 * GIB, 0));
+    for (id, booking) in [(1, 4_000), (2, 2_000), (3, 1_000)] {
+        n.track(
+            id,
+            class_of(u8::try_from(id).unwrap(), 8_000, 8 * GIB),
+            0,
+            8,
+            res(booking, GIB, 0),
+        )
+        .unwrap();
+    }
+    let used = BTreeMap::from([(1, (4_000, 4_000)), (2, (500, 3_000))]);
+    let rates = n.rates(10_000, &used, 10).unwrap();
+    assert_eq!(rates, vec![(1, 6_400), (2, 2_000), (3, 1_600)]);
+    let mut none = node(res(1, 64 * GIB, 0));
+    for id in 1..=3 {
+        none.track(
+            id,
+            class_of(u8::try_from(id).unwrap(), 8_000, 8 * GIB),
+            0,
+            8,
+            res(0, GIB, 0),
+        )
+        .unwrap();
+    }
+    let idle = BTreeMap::from([(1, (0, 1)), (2, (0, 1)), (3, (0, 1))]);
+    let least = none.rates(1, &idle, 10).unwrap();
+    assert!(least.iter().all(|(_, cap)| *cap == 10), "{least:?}");
+}
+
+proptest! {
+    /// Joint plan step 14 (AC-T7.4.1), C4 where a platform caps CPU: do cap up to eight VMs of any ceilings, booked
+    /// within a fleet budget, each having used any CPU against any cap; expect every cap at least its booking and at
+    /// most its ceiling (or the platform's least), and the caps within the budget but for those lifted to the least.
+    #[test]
+    fn w14_capped_rates_keep_every_booking_within_the_budget(
+        vms in proptest::collection::vec((1u64..=16_000, 0u64..=1_000, 0u64..=32_000, 1u64..=32_000), 1..=8),
+        capacity in 1u64..=128_000,
+    ) {
+        let mut n = node(res(capacity, 64 * GIB, 0));
+        let total: u64 = vms.iter().map(|(ceiling, part, _, _)| ceiling * part / 1_000).sum();
+        let mut used = BTreeMap::new();
+        for (k, (ceiling, part, ran, cap)) in vms.iter().enumerate() {
+            let id = u32::try_from(k).unwrap();
+            // Bookings scaled to fit the budget (C3's invariant), each within its ceiling.
+            let booking = (ceiling * part / 1_000) * capacity.min(total.max(1)) / total.max(1);
+            n.track(id, class_of(u8::try_from(k).unwrap(), *ceiling, GIB), 0, 1, res(booking, GIB, 0)).unwrap();
+            used.insert(id, (*ran, *cap));
+        }
+        let rates = n.rates(capacity, &used, 10).unwrap();
+        let mut lifted = 0;
+        for (id, cap) in &rates {
+            let booking = n.booking(id).unwrap().cpu_milli;
+            let ceiling = vms[usize::try_from(*id).unwrap()].0;
+            prop_assert!(*cap >= booking.min(ceiling), "{} under its booking {}", cap, booking);
+            prop_assert!(*cap <= ceiling.max(10), "{} past its ceiling {}", cap, ceiling);
+            if *cap == 10 {
+                lifted += 10;
+            }
+        }
+        prop_assert!(rates.iter().map(|(_, cap)| cap).sum::<u64>() <= capacity + lifted);
+    }
+}
+
 /// Joint plan step 14 (AC-T7.4.1), C4 across the node's cgroup: the fleet takes the units the other children leave.
 /// Do take units from 32-CPU machines; expect the units left and the CPU they carry rounded down, the least weight and
 /// no CPU once the others take the whole scale or more, and a machine with no CPU refused.

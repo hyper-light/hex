@@ -432,6 +432,30 @@ impl JobBox {
             .map_err(|error| Refusal::os("creating a suspended bound VM controller", error))
     }
 
+    /// Joint plan step 14 (C4 on Windows): the VM job's CPU hard cap becomes `milli` thousandths of a CPU, its
+    /// water-filled share, at least the machine's least cap (one cycle per [`job::RATE_SCALE`] of it).
+    pub(super) fn set_cpu_cap(
+        &self,
+        milli: u64,
+        processors: std::num::NonZeroU32,
+    ) -> Result<(), Refusal> {
+        if !self.is_vm() {
+            return Err(self.uncertain());
+        }
+        let least = u64::from(processors.get())
+            .checked_mul(1000)
+            .map(|n| n.div_ceil(u64::from(job::RATE_SCALE)))
+            .ok_or_else(|| self.uncertain())?;
+        let milli = u32::try_from(milli.max(least)).map_err(|_| Refusal::Invalid {
+            what: "a VM's CPU rate",
+            why: "it passes a u32 of thousandths of a CPU".to_owned(),
+        })?;
+        let cap = job::cap(milli, processors)?;
+        self.native_job()?
+            .set_cpu(job::Cpu::Cap(cap))
+            .map_err(|error| Refusal::os("setting a VM job's CPU rate", error))
+    }
+
     /// Stop can run while the sole process observer waits; it never takes that observer's lock.
     pub(super) fn stop_managed(&self) -> Result<(), super::proc::ObserveError> {
         self.state.stopping.store(true, Ordering::SeqCst);
