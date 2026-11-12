@@ -25,6 +25,7 @@ fn spec(name: &str, key: u64) -> BoxSpec {
             kind: DeviceKind::Gpu,
             key,
         }],
+        band: 0,
     }
 }
 

@@ -19,6 +19,7 @@ fn cpu(id: &str, phase: Phase) -> BoxRecord {
             devices: Vec::new(),
             allocation: None,
             route: None,
+            band: 0,
         },
         phase,
         Vec::new(),

@@ -1191,6 +1191,7 @@ mod tests {
             class: ClassSpec::Process,
             owner: None,
             allocation: None,
+            band: 0,
         };
         BoxRecord::new(spec, Phase::Ready, vec![])
     }

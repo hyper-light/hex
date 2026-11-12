@@ -993,6 +993,7 @@ pub(super) mod tests {
                     .unwrap(),
                 backing: Some(source.key),
             }),
+            band: 0,
         };
         spec.check().unwrap();
         let mut boxed = BoxRecord::new(spec, Phase::Ready, Vec::new());
