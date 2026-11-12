@@ -1034,6 +1034,20 @@ impl Driver {
         Ok(())
     }
 
+    /// Each box this node runs, by its physical id (joint plan step 14, C8): a capacity answer names a VM's holding
+    /// by its box, which [`Driver::rebook`] books against its key. Like rebook, it reads only state under the core
+    /// lock, so it takes no operation's and never waits on a placement.
+    pub fn running_ids(&self) -> Result<BTreeMap<BoxId, Key>, Error> {
+        let state = self.lock()?;
+        let mut ids = BTreeMap::new();
+        for (key, _, ended) in state.node.ran_keys() {
+            if !ended {
+                ids.insert(physical_id(&self.namespace, key)?, key);
+            }
+        }
+        Ok(ids)
+    }
+
     // The view's calls and rebook change only state under the core lock, never a runtime's: they don't take the
     // operation's, which refuses a call while another holds it, so a holder's word never waits on a placement.
 
@@ -1699,65 +1713,6 @@ impl Driver {
         }
         Ok(resources)
     }
-
-    /// Joint plan step 14 (AC-T7.4.1): every microVM box this node runs on its own allocation, read now: its key,
-    /// class, receipt and use. A box gone between the listing and its read is passed over, as above.
-    pub fn measured_vms(&self) -> Result<Vec<MeasuredVm>, Error> {
-        let _operation = self.operation()?;
-        let state = self.lock()?;
-        let count = state.node.ran_keys().count();
-        let mut vms = Vec::new();
-        vms.try_reserve_exact(count)
-            .map_err(|_| Refusal::Exhausted {
-                what: "measured microVM identities",
-                bound: count,
-            })?;
-        for (key, _, ended) in state.node.ran_keys() {
-            if ended {
-                continue;
-            }
-            let demand = state
-                .node
-                .demand(key)
-                .ok_or_else(|| bad("ran demand missing"))?;
-            if !matches!(demand.class, Class::Shards | Class::Firecracker) {
-                continue;
-            }
-            if let Some(allocation) = state.node.assigned_allocation(key)? {
-                vms.push((key, demand.class, allocation));
-            }
-        }
-        drop(state);
-        let mut measured = Vec::new();
-        measured
-            .try_reserve_exact(vms.len())
-            .map_err(|_| Refusal::Exhausted {
-                what: "measured microVMs",
-                bound: vms.len(),
-            })?;
-        for (key, class, allocation) in vms {
-            match self.runtimes.get(class)?.usage(&self.physical_id(key)?) {
-                Ok(usage) => measured.push(MeasuredVm {
-                    key,
-                    class,
-                    allocation,
-                    usage,
-                }),
-                Err(Refusal::NoSuchBox(_)) => {}
-                Err(why) => return Err(why.into()),
-            }
-        }
-        Ok(measured)
-    }
-}
-
-/// A microVM box as [`Driver::measured_vms`] read it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MeasuredVm {
-    pub key: Key,
-    pub class: Class,
-    pub allocation: hex_api::Allocation,
-    pub usage: hex_api::Usage,
 }
 
 fn validate(demand: &Demand, payload: &Payload) -> Result<(), Error> {

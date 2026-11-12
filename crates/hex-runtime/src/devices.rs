@@ -1614,6 +1614,7 @@ mod native_route_tests {
                 device_routes: Vec::new(),
                 backings: Vec::new(),
                 unavailable: Vec::new(),
+                learned: None,
             };
             native_routes(&mut capacity, hex_api::Class::Oci, image).unwrap();
             assert_eq!(capacity.device_routes, vec![2]);

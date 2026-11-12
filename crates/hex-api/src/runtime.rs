@@ -855,6 +855,165 @@ pub struct VmSize {
     pub memory_mib: u64,
 }
 
+/// The most priors one class's capacity answer carries: one for its own cost profile and one for each route's
+/// (joint plan step 14).
+pub const MAX_LEARNED_PRIORS: usize = MAX_RUNTIME_ROUTES.saturating_add(1);
+
+/// Joint plan step 14 (`docs/design/learned-charge.md`, C3 and C8): what microVMs are learned to take, set against
+/// what their receipts booked. The ledger books the receipts and the node learns the rest, so Hex's reservation on
+/// its machine is the ledger's less `booked`, plus `reservation`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearnedUse {
+    /// What the receipts of the VMs the node learns booked.
+    pub booked: CapacityResources,
+    /// What those VMs are learned to take: their bookings, and the memory and disk they hold past them.
+    pub reservation: CapacityResources,
+}
+
+impl LearnedUse {
+    /// Two learned uses together; `None` past what a u64 counts.
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        Some(Self {
+            booked: self.booked.checked_add(other.booked)?,
+            reservation: self.reservation.checked_add(other.reservation)?,
+        })
+    }
+}
+
+/// Joint plan step 14 (C2): what a new microVM of one cost profile and ceiling is booked at, its class's learned
+/// prior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearnedPrior {
+    /// The cost profile's identity ([`RuntimeCost::id`]).
+    pub profile: [u8; 32],
+    /// The allocation its VMs are charged at most.
+    pub ceiling: CapacityResources,
+    /// What a new VM of it is booked at, within the ceiling.
+    pub booking: CapacityResources,
+}
+
+/// The most learned holdings one class's capacity answer carries: a node's most boxes (`hex_runtime::MAX_BOXES`, held
+/// equal by a test in hex-node), so a node never has more running VMs to report than this.
+pub const MAX_LEARNED_HOLDINGS: usize = 1 << u16::BITS;
+
+/// Joint plan step 14 (C3, C8): one running microVM's holding, by its box: its booking and the memory and disk it
+/// holds past it. The scheduler books the VM at it in the machine's capacity view (goal 13's `Driver::rebook`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearnedHolding {
+    pub id: BoxId,
+    pub holding: CapacityResources,
+}
+
+/// Joint plan step 14 (C2, C8): what a node learned of one class's microVMs, carried on its capacity answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Learned {
+    /// The priors of the profiles it offers whose VMs have warmed, at most one per profile and ceiling.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Learned::deserialize_priors"
+    )]
+    pub priors: Vec<LearnedPrior>,
+    /// What its VMs are learned to take against their receipts, for placement across nodes.
+    pub used: LearnedUse,
+    /// Each running VM's holding, those most past their receipts first: as many as the answer has room for, so a VM
+    /// left out is one whose holding past its receipt is least, counted at its receipt.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Learned::deserialize_holdings"
+    )]
+    pub holdings: Vec<LearnedHolding>,
+}
+
+impl Learned {
+    /// At most [`MAX_LEARNED_PRIORS`].
+    pub fn deserialize_priors<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<LearnedPrior>, D::Error> {
+        bounded_values(
+            deserializer,
+            MAX_LEARNED_PRIORS,
+            "learned priors exceed a class's profiles",
+        )
+    }
+
+    /// At most [`MAX_LEARNED_HOLDINGS`].
+    pub fn deserialize_holdings<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<LearnedHolding>, D::Error> {
+        bounded_values(
+            deserializer,
+            MAX_LEARNED_HOLDINGS,
+            "learned holdings exceed a node's boxes",
+        )
+    }
+
+    /// At most [`MAX_LEARNED_PRIORS`] priors, each booking within its ceiling, no profile and ceiling twice; at most
+    /// [`MAX_LEARNED_HOLDINGS`] holdings, no box twice.
+    pub fn check(&self) -> Result<(), Refusal> {
+        if self.holdings.len() > MAX_LEARNED_HOLDINGS {
+            return Err(Refusal::Exhausted {
+                what: "learned holdings",
+                bound: MAX_LEARNED_HOLDINGS,
+            });
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for holding in &self.holdings {
+            if !ids.insert(holding.id.as_str()) {
+                return Err(Refusal::Invalid {
+                    what: "learned holdings",
+                    why: "a box's holding repeats".to_owned(),
+                });
+            }
+        }
+        if self.priors.len() > MAX_LEARNED_PRIORS {
+            return Err(Refusal::Exhausted {
+                what: "learned priors",
+                bound: MAX_LEARNED_PRIORS,
+            });
+        }
+        for (at, prior) in self.priors.iter().enumerate() {
+            let repeated = self.priors.iter().take(at).any(|earlier| {
+                earlier.profile == prior.profile && earlier.ceiling == prior.ceiling
+            });
+            if repeated || !prior.ceiling.holds(prior.booking) {
+                return Err(Refusal::Invalid {
+                    what: "learned priors",
+                    why: "a prior books past its ceiling, or a profile and ceiling repeat"
+                        .to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn try_clone(&self) -> Result<Self, Refusal> {
+        let mut holdings = Vec::new();
+        holdings
+            .try_reserve_exact(self.holdings.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "learned holdings",
+                bound: self.holdings.len(),
+            })?;
+        for holding in &self.holdings {
+            holdings.push(LearnedHolding {
+                id: holding.id.try_clone()?,
+                holding: holding.holding,
+            });
+        }
+        Ok(Self {
+            priors: copy_capacity_values(&self.priors, "learned priors")?,
+            used: self.used,
+            holdings,
+        })
+    }
+}
+
 /// A stable resource-pool identity and its physical ceiling/current room. Reservations remain the
 /// scheduler's authority; these facts do not grant resources or guess unread measurements.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -898,6 +1057,10 @@ pub struct Capacity {
         deserialize_with = "Capacity::deserialize_unavailable"
     )]
     pub unavailable: Vec<crate::DeviceUnavailable>,
+    /// What the node learned of this class's microVMs (joint plan step 14, C2 and C8): its priors and learned use.
+    /// None from a node that learns none: no window on its platform, or an older build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learned: Option<Learned>,
 }
 
 impl Capacity {
@@ -998,10 +1161,14 @@ impl Capacity {
             )?,
             backings,
             unavailable,
+            learned: self.learned.as_ref().map(Learned::try_clone).transpose()?,
         })
     }
 
     pub fn check(&self) -> Result<(), Refusal> {
+        if let Some(learned) = &self.learned {
+            learned.check()?;
+        }
         if self.id.is_empty()
             || self.free.cpu_milli > self.total.cpu_milli
             || self.free.mem_bytes > self.total.mem_bytes
@@ -1612,6 +1779,9 @@ pub enum Upstream {
     /// A microVM member's reach to a service its own host serves on its loopback (kiln beside the
     /// VM): Shards' explicit host-service grants.
     MemberHostService,
+    /// A Shards guest told the room its host's budget leaves it (D188): init's `ROOM`, which
+    /// shards-api's image boot (D231) has no call to send (joint plan step 14).
+    GuestRoom,
     /// The host of an image's run started holding only its stdio, as every program Hex starts on
     /// macOS is: D231 starts `shards api-run` through std's `Command`, whose macOS spawn passes no
     /// `POSIX_SPAWN_CLOEXEC_DEFAULT`, so it would inherit every descriptor another thread holds
@@ -1621,7 +1791,7 @@ pub enum Upstream {
 
 impl Upstream {
     /// Every capability, in the order the node's wire tags them.
-    pub const ALL: [Upstream; 10] = [
+    pub const ALL: [Upstream; 11] = [
         Upstream::GuestCpuTimePerVcpu,
         Upstream::MemberExec,
         Upstream::MemberGrantsByName,
@@ -1631,6 +1801,7 @@ impl Upstream {
         Upstream::MemberSignal,
         Upstream::MemberGrantsByAddress,
         Upstream::MemberHostService,
+        Upstream::GuestRoom,
         Upstream::RunHostStdioOnly,
     ];
 }
@@ -1651,6 +1822,7 @@ impl std::fmt::Display for Upstream {
             Self::MemberSignal => "a signal to Shards members (its agent-control endpoint)",
             Self::MemberGrantsByAddress => "a Shards member's grants by address",
             Self::MemberHostService => "a Shards member's reach to its host's own service",
+            Self::GuestRoom => "a Shards guest told its room (init's ROOM, owed through D231)",
             Self::RunHostStdioOnly => {
                 "Shards' host of an image's run started holding only its stdio (owed by D231)"
             }
@@ -2164,6 +2336,7 @@ mod route_tests {
             device_routes: Vec::new(),
             backings: Vec::new(),
             unavailable: Vec::new(),
+            learned: None,
         }
     }
     /// AC-T7.4.1: original OCI form can identify a real Linux guest on Mac and alongside Windows HCS.

@@ -571,6 +571,45 @@ impl Supervisor {
         Ok(Some(shards_api::managed_receipt(native)))
     }
 
+    /// Joint plan step 14 (AC-T7.4.1): each managed VM box running now, by its box id, its native scope and its
+    /// cgroup, for the node's charge learner to read and bound once a window. A pool's controller is no box's.
+    pub(crate) fn running_vms(
+        &self,
+    ) -> Result<Vec<(BoxId, [u8; 16], hex_runtime::linux::cgroup::BoxCgroup)>, Refusal> {
+        let managed: Vec<(BoxId, triomphe::Arc<ManagedVm>)> = {
+            let inits = self.inits()?;
+            let mut managed = Vec::new();
+            managed
+                .try_reserve_exact(inits.rows.len())
+                .map_err(|_| Refusal::Exhausted {
+                    what: "running microVMs",
+                    bound: inits.rows.len(),
+                })?;
+            for (owner, init) in &inits.rows {
+                if let (OwnerKey::Box(id), Init::Managed(native)) = (owner, init) {
+                    managed.push((id.try_clone()?, triomphe::Arc::clone(native)));
+                }
+            }
+            managed
+        };
+        let mut out = Vec::new();
+        out.try_reserve_exact(managed.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "running microVMs",
+                bound: managed.len(),
+            })?;
+        for (id, native) in managed {
+            let running = matches!(
+                *native.phase.lock().map_err(poisoned)?,
+                ManagedPhase::Running { .. } | ManagedPhase::Observed { .. }
+            );
+            if running {
+                out.push((id, *native.scope.bytes(), native.cgroup.clone()));
+            }
+        }
+        Ok(out)
+    }
+
     pub(crate) fn managed_usage(
         &self,
         record: NativeRecord<'_>,

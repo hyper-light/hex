@@ -671,6 +671,7 @@ pub fn capacity(dir: &Path, id: String) -> Result<hex_api::Capacity, Refusal> {
         total,
         free,
         unavailable: Vec::new(),
+        learned: None,
     };
     capacity.check()?;
     Ok(capacity)

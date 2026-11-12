@@ -149,6 +149,7 @@ impl Runtime for DeviceRuntime {
             free: room,
             devices,
             unavailable: Vec::new(),
+            learned: None,
         };
         report.check()?;
         Ok(Some(report))

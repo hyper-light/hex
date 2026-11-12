@@ -766,6 +766,19 @@ pub fn sysctl_string(name: &std::ffi::CStr) -> io::Result<String> {
     String::from_utf8(bytes).map_err(io::Error::other)
 }
 
+/// The longest login name the system takes, `sysconf(_SC_LOGIN_NAME_MAX)` (XNU's `MAXLOGNAME`): the most
+/// a directory record's name holds.
+pub fn login_name_max() -> io::Result<usize> {
+    // SAFETY: sysconf reads its integer argument alone and writes no caller memory.
+    let longest = unsafe { libc::sysconf(libc::_SC_LOGIN_NAME_MAX) };
+    if longest <= 0 {
+        return Err(io::Error::other(
+            "sysconf(_SC_LOGIN_NAME_MAX) names no longest login name",
+        ));
+    }
+    usize::try_from(longest).map_err(io::Error::other)
+}
+
 /// A numeric sysctl (`hw.memsize`, `hw.physicalcpu`, `kern.hv_support`, `vm.page_free_count`), whether
 /// the kernel keeps it in 4 bytes or 8: the node's facts (`hex-node`'s `facts`).
 pub fn sysctl_number(name: &std::ffi::CStr) -> io::Result<u64> {

@@ -16,6 +16,8 @@ pub(super) struct Backends {
     firecracker: Option<Arc<FirecrackerRuntime>>,
     shards: Option<Arc<GuestRuntime>>,
     vm_root: Option<BoxRoot>,
+    /// Joint plan step 14: the charge learner of the VMs under `vm_root`, where there are any.
+    pub(super) learner: Option<super::charges::Shared>,
 }
 
 /// Only frozen initialized configurations participate. This runs inside the existing metadata
@@ -457,6 +459,13 @@ impl Node {
         if let (Some(root), Some(lease)) = (vm_root.as_ref(), lease) {
             self.supervisor.bind_managed_root(root.dir(), lease)?;
         }
+        let learner = match vm_root.as_ref() {
+            Some(root) => Some(Mutex::new(super::charges::Learner::new(
+                root.dir(),
+                self.native_capacity()?.total,
+            )?)),
+            None => None,
+        };
         // The same initialized owner must exist before guarded metadata preparation projects
         // its real routes. The complete retained-state barrier above precedes this publication;
         // startup still returns only after preparation and capacity validation below succeed.
@@ -465,6 +474,7 @@ impl Node {
                 firecracker,
                 shards,
                 vm_root,
+                learner,
             })
             .map_err(|_| {
                 projection_refused("node backend initialization raced another initializer")
@@ -519,6 +529,9 @@ impl Node {
                 }
                 // Per-route cost/backing validation above replaces the legacy class-wide cost.
             }
+        }
+        if backends.learner.is_some() {
+            super::charges::spawn(Arc::downgrade(self))?;
         }
         Ok(())
     }
@@ -1207,6 +1220,7 @@ mod preflight_dispatch_tests {
             firecracker: None,
             shards: None,
             vm_root: None,
+            learner: None,
         };
         assert_eq!(
             project_initialized_routes(Some(&no_vm), &[], None)
