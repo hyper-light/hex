@@ -37,7 +37,7 @@ fn sample(cpu_milli: u64, mem: u64) -> Sample {
         cpu: Cpu::Whole(Duration::from_nanos(cpu_milli * 100_000)),
         span: WINDOW,
         mem_bytes: mem,
-        disk_bytes: 0,
+        disk_bytes: Some(0),
     }
 }
 
@@ -226,7 +226,7 @@ fn w14_a_reading_is_charged_over_its_span_never_less_than_the_window() {
                 cpu: Cpu::Whole(cpu),
                 span,
                 mem_bytes: 0,
-                disk_bytes: 0,
+                disk_bytes: Some(0),
             },
         )
         .unwrap();
@@ -256,7 +256,7 @@ fn w14_per_vcpu_guest_time_awaits_upstream() {
         },
         span: WINDOW,
         mem_bytes: 0,
-        disk_bytes: 0,
+        disk_bytes: Some(0),
     };
     assert!(matches!(
         n.observe(1, &split(vec![WINDOW])),
@@ -392,6 +392,30 @@ fn w14_the_last_resort_ends_only_a_vm_past_its_budget() {
     assert_eq!(within.last_resort().unwrap(), None);
 }
 
+/// Joint plan step 14 (AC-T7.4.1), C5 as ROOT took it (2026-11-12): a VM `memory.high` holds within its budget is
+/// never ended for growth to come. Do warm two VMs of 4 GiB allocations at 2 GiB each in an 8 GiB budget, so each is
+/// booked at 2 GiB with a 4 GiB budget, and let the first hold 3 GiB, past its booking but within its budget, while the
+/// growth on record (4 GiB, their first window) and what they hold pass the fleet's budget; expect none ended. Let
+/// the first then hold 5 GiB, past its budget; expect it ended.
+#[test]
+fn w14_a_vm_held_within_its_budget_is_never_ended_for_growth_to_come() {
+    let mut n = node(res(16_000, 8 * GIB, 0));
+    n.admit(1, class_of(1, 1_000, 4 * GIB), 0, 1).unwrap();
+    n.admit(2, class_of(2, 1_000, 4 * GIB), 0, 1).unwrap();
+    for _ in 0..SEEDABLE {
+        window(&mut n, &[(1, 0, 2 * GIB), (2, 0, 2 * GIB)]);
+    }
+    assert_eq!(n.booking(&1).unwrap().mem_bytes, 2 * GIB);
+    assert_eq!(n.growth(), 4 * GIB);
+    n.observe(1, &sample(0, 3 * GIB)).unwrap();
+    let budgets = n.budgets().unwrap();
+    assert_eq!(budgets[0].1.bytes, 4 * GIB);
+    assert_eq!(budgets[0].1.room, i64::try_from(GIB).unwrap());
+    assert_eq!(n.last_resort().unwrap(), None);
+    n.observe(1, &sample(0, 5 * GIB)).unwrap();
+    assert_eq!(n.last_resort().unwrap(), Some(1));
+}
+
 /// Joint plan step 14 (AC-T7.4.1), C5's growth: do grow two VMs' memory by 1 and 2 GiB in one window and by 1 GiB
 /// in the next; expect the node's fastest growth on record 3 GiB, and it never falls.
 #[test]
@@ -497,4 +521,119 @@ fn w14_ending_a_vm_within_its_booking_is_caught() {
     assert_eq!(n.last_resort().unwrap(), Some(1));
     let mutated = with_mutant(Some(Mutant::EndLargestHolder), || n.last_resort().unwrap());
     assert_eq!(mutated, Some(2));
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C4: a fleet's weight among its parent's children is its CPU budget on the machine's
+/// scale, the whole machine the kernel's top weight. Do weigh budgets against machines; expect the share rounded up,
+/// never under the kernel's least, a budget past the machine weighing it whole, and a machine with no CPU refused.
+#[test]
+fn w14_a_fleet_weighs_its_cpu_budget_on_the_machines_scale() {
+    assert_eq!(fleet_weight(64_000, 64_000), Ok(WEIGHT_MAX));
+    assert_eq!(fleet_weight(32_000, 64_000), Ok(5_000));
+    assert_eq!(fleet_weight(1_000, 3_000), Ok(3_334));
+    assert_eq!(fleet_weight(1, 64_000), Ok(1));
+    assert_eq!(fleet_weight(0, 64_000), Ok(WEIGHT_MIN));
+    assert_eq!(fleet_weight(128_000, 64_000), Ok(WEIGHT_MAX));
+    assert!(matches!(
+        fleet_weight(1_000, 0),
+        Err(ChargeError::Invalid { .. })
+    ));
+}
+
+proptest! {
+    /// Joint plan step 14 (AC-T7.4.1), C4: do weigh two budgets against one machine; expect each weight never under
+    /// its budget's share of the kernel's range and over it by less than one unit (or the least weight), and the
+    /// larger budget never weighing less.
+    #[test]
+    fn w14_a_fleet_weight_covers_its_budgets_share(machine in 1u64..=1_024_000, a in 0u64..=2_048_000, b in 0u64..=2_048_000) {
+        let (lo, hi) = (a.min(b), a.max(b));
+        let (light, heavy) = (fleet_weight(lo, machine).unwrap(), fleet_weight(hi, machine).unwrap());
+        prop_assert!(light <= heavy);
+        for (budget, weight) in [(lo, light), (hi, heavy)] {
+            prop_assert!((WEIGHT_MIN..=WEIGHT_MAX).contains(&weight));
+            let share = u128::from(budget.min(machine)) * u128::from(WEIGHT_MAX);
+            prop_assert!(u128::from(weight) * u128::from(machine) >= share);
+            prop_assert!(weight == WEIGHT_MIN || (u128::from(weight) - 1) * u128::from(machine) < share);
+        }
+    }
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C4 and C5: the bounds that hold the rule. Do place three cold VMs (booked at their
+/// ceilings) on a machine of twice the fleet's CPU budget; expect the parent capped at the budget and weighing half
+/// the machine, each VM weighed by its booking and capped at its ceiling, its budget past its ceiling held at the
+/// ceiling. Then warm them below their ceilings and narrow the fleet's memory budget; expect each held at its budget,
+/// the budgets summing to the fleet's. A fleet with no CPU budget is capped at the kernel's least quota. Every bound
+/// is one the kernel holds.
+#[test]
+fn w14_the_placement_caps_the_fleet_at_its_budget_and_holds_each_vm_by_its_booking_budget_and_ceiling()
+ {
+    let ceilings = [(1, 1_000, GIB), (2, 2_000, 2 * GIB), (3, 4_000, 3 * GIB)];
+    let mut n = node(res(16_000, 10 * GIB, 0));
+    for (id, cpu, mem) in ceilings {
+        n.admit(id, class_of(u8::try_from(id).unwrap(), cpu, mem), 0, 1)
+            .unwrap();
+    }
+    let vm = |weight: u16, cpu: u64, high: u64, max: u64| hex_api::Bounds {
+        cpu_weight: Some(weight),
+        cpu_max_milli: Some(u32::try_from(cpu).unwrap()),
+        memory_high: Some(high),
+        memory_max: Some(max),
+        ..hex_api::Bounds::default()
+    };
+    let placed = n.placement(32_000).unwrap();
+    assert_eq!(
+        placed.fleet,
+        hex_api::Bounds {
+            cpu_weight: Some(5_000),
+            cpu_max_milli: Some(16_000),
+            ..hex_api::Bounds::default()
+        }
+    );
+    assert_eq!(
+        placed.vms,
+        vec![
+            (1, vm(2_500, 1_000, GIB, GIB)),
+            (2, vm(5_000, 2_000, 2 * GIB, 2 * GIB)),
+            (3, vm(WEIGHT_MAX, 4_000, 3 * GIB, 3 * GIB)),
+        ]
+    );
+    for _ in 0..SEEDABLE {
+        window(
+            &mut n,
+            &[(1, 500, GIB / 2), (2, 1_000, GIB), (3, 2_000, 2 * GIB)],
+        );
+    }
+    n.set_budget(res(16_000, 5 * GIB, 0));
+    let placed = n.placement(32_000).unwrap();
+    let budgets: BTreeMap<u32, Budget> = n.budgets().unwrap().into_iter().collect();
+    let mut held = 0;
+    for ((id, bounds), (_, cpu, mem)) in placed.vms.iter().zip(ceilings) {
+        let budget = budgets[id].bytes;
+        assert!(
+            budget < mem,
+            "VM {id}'s budget {budget} is under its ceiling"
+        );
+        assert!(budget >= n.booking(id).unwrap().mem_bytes);
+        assert_eq!(
+            *bounds,
+            vm(
+                [2_500, 5_000, WEIGHT_MAX][usize::try_from(*id - 1).unwrap()],
+                cpu,
+                budget,
+                mem
+            )
+        );
+        held += budget;
+    }
+    assert_eq!(held, 5 * GIB);
+    n.set_budget(res(0, 5 * GIB, 0));
+    let placed = n.placement(32_000).unwrap();
+    assert_eq!(placed.fleet.cpu_max_milli, Some(hex_api::MIN_CPU_MILLI));
+    assert_eq!(placed.fleet.cpu_weight, Some(WEIGHT_MIN));
+    for bounds in std::iter::once(&placed.fleet).chain(placed.vms.iter().map(|(_, b)| b)) {
+        assert!(
+            bounds.check().is_ok(),
+            "{bounds:?} is no bound the kernel holds"
+        );
+    }
 }

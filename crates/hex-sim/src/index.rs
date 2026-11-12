@@ -218,6 +218,8 @@ struct Slot {
     used_by_class: [Resources; Class::COUNT],
     runtime_pools: [Option<RuntimePool>; Class::COUNT],
     costs: [Option<hex_api::RuntimeCost>; Class::COUNT],
+    /// What a new VM of each class is booked at here (joint plan step 14, C2).
+    priors: [Option<crate::model::Prior>; Class::COUNT],
     routes: Option<Routes>,
 }
 
@@ -283,13 +285,16 @@ impl Slot {
             .transpose()
     }
 
+    /// The receipt a VM placed here would take, booked at this node's prior for its class (C2).
     fn allocation(&self, demand: &Demand) -> Result<Option<hex_api::Allocation>, SimError> {
+        let prior = self.priors.get(demand.class.index()).copied().flatten();
         if let Some(routes) = &self.routes {
             let choice = routes
                 .chosen(demand)
                 .map_err(|_| SimError::Config("no unambiguous initialized route"))?;
             return routes
                 .allocation(choice, demand)
+                .map(|allocation| crate::model::booked_at(allocation, prior))
                 .map_err(|_| SimError::Config("invalid initialized route charge"));
         }
         self.costs
@@ -298,6 +303,7 @@ impl Slot {
             .flatten()
             .map(|cost| cost.allocate(crate::model::capacity_resources(demand.need)))
             .transpose()
+            .map(|allocation| crate::model::booked_at(allocation, prior))
             .map_err(|_| SimError::Config("invalid runtime charge"))
     }
 
@@ -724,6 +730,7 @@ impl FitIndex {
                 used_by_class: slot.used_by_class,
                 runtime_pools: slot.runtime_pools,
                 costs: slot.costs,
+                priors: slot.priors,
                 routes: slot
                     .routes
                     .as_ref()
@@ -829,6 +836,7 @@ impl FitIndex {
                 used_by_class: [Resources::default(); Class::COUNT],
                 runtime_pools: pools,
                 costs: node.costs,
+                priors: node.priors,
                 routes,
             });
             devices.push(physical);
@@ -1256,6 +1264,7 @@ impl FitIndex {
                 used_by_class: old.used_by_class,
                 runtime_pools: pools,
                 costs: node.costs,
+                priors: node.priors,
                 routes,
             },
             devices,
@@ -1595,7 +1604,9 @@ impl FitIndex {
     ) -> Result<Key, SimError> {
         let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
         let slot = self.slot(node)?;
-        if self.route(node, demand)? != route || self.allocation(node, demand)? != allocation {
+        if self.route(node, demand)? != route
+            || !crate::model::same_charge(self.allocation(node, demand)?, allocation)
+        {
             return Err(SimError::Config(
                 "committed route/charge differs from initialized admission",
             ));
@@ -2191,6 +2202,76 @@ mod tests {
             .enumerate()
             .map(|(i, c)| NodeSpec::new(NodeId(u32::try_from(i).unwrap()), *c))
             .collect()
+    }
+
+    /// Joint plan step 14 (AC-T7.4.1), C2 in the placement index: do place one VM's whole charge (1,100 milli-CPU of
+    /// 2,100) on a node with no prior; expect no room for a second. Do give the node a learned prior of 300 milli-CPU
+    /// and 100 bytes for the profile; expect a new VM's receipt booked at it, its charge and configuration unchanged,
+    /// and the node's room less only what was booked. Do admit a receipt a stale view booked whole; expect it admitted
+    /// as booked. Release both; expect the node's room whole again.
+    #[test]
+    fn w14_a_new_vm_is_booked_at_the_nodes_learned_prior() {
+        let mut node = NodeSpec::new(
+            NodeId(0),
+            Resources {
+                cpu_milli: 2_100,
+                mem_bytes: 1_000,
+                ..Resources::default()
+            },
+        );
+        node.costs[Class::Shards.index()] = Some(explicit_fixture_cost(1_000));
+        let demand = Demand {
+            need: Resources {
+                cpu_milli: 100,
+                mem_bytes: 10,
+                ..Resources::default()
+            },
+            class: Class::Shards,
+            kind: Kind::Plain,
+            ask: crate::model::Ask::default(),
+        };
+        let mut whole_only = FitIndex::new(&[node.clone()]).unwrap();
+        let whole = whole_only.allocation(NodeId(0), &demand).unwrap();
+        assert_eq!(whole.unwrap().booked, None);
+        whole_only
+            .take_allocated(NodeId(0), WorkloadId(1), &demand, whole)
+            .unwrap();
+        assert_eq!(
+            whole_only.verdict(NodeId(0), &demand).unwrap(),
+            Verdict::NoRoom
+        );
+        let prior = hex_api::CapacityResources {
+            cpu_milli: 300,
+            mem_bytes: 100,
+            disk_bytes: 0,
+        };
+        node.priors[Class::Shards.index()] = Some(crate::model::Prior {
+            profile: [7; 32],
+            booking: prior,
+        });
+        let mut learned = FitIndex::new(&[node.clone()]).unwrap();
+        let receipt = learned.allocation(NodeId(0), &demand).unwrap().unwrap();
+        assert_eq!(receipt.booking(), prior);
+        assert_eq!(receipt.resources, whole.unwrap().resources);
+        assert_eq!(receipt.guest().unwrap(), whole.unwrap().guest().unwrap());
+        let key = learned
+            .take_allocated(NodeId(0), WorkloadId(1), &demand, Some(receipt))
+            .unwrap();
+        assert_eq!((key.cpu_milli, key.mem_bytes), (1_800, 900));
+        let key = learned
+            .take_allocated(NodeId(0), WorkloadId(2), &demand, whole)
+            .unwrap();
+        assert_eq!((key.cpu_milli, key.mem_bytes), (700, 350));
+        learned
+            .give_allocated(NodeId(0), WorkloadId(2), &demand, whole)
+            .unwrap();
+        learned
+            .give_allocated(NodeId(0), WorkloadId(1), &demand, Some(receipt))
+            .unwrap();
+        assert_eq!(
+            learned.key(NodeId(0)).unwrap(),
+            FitIndex::new(&[node]).unwrap().key(NodeId(0)).unwrap()
+        );
     }
 
     fn pool_node(classes: Classes, mem: u64) -> NodeSpec {
