@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 
 use super::*;
-use hex_sim::charge::SEEDABLE;
+use hex_sim::charge::{SEEDABLE, WEIGHT_MAX};
 
 const GIB: u64 = 1 << 30;
 
@@ -40,11 +40,12 @@ fn machine() -> CapacityResources {
     res(32_000, 64 * GIB)
 }
 
-/// The cgroups as a record: each VM's use as the test sets it, the fleets under `.vm`, and every write by path.
+/// The cgroups as a record: each VM's use as the test sets it, each cgroup's files, which writes change, and every
+/// write by path.
 #[derive(Default)]
 struct Record {
     usage: RefCell<BTreeMap<PathBuf, Usage>>,
-    fleets: RefCell<Vec<(PathBuf, Option<String>)>>,
+    files: RefCell<BTreeMap<PathBuf, BTreeMap<String, String>>>,
     writes: RefCell<Vec<(PathBuf, &'static str, String)>>,
 }
 
@@ -58,6 +59,11 @@ impl Cgroups for Record {
     }
 
     fn write(&self, cgroup: &BoxCgroup, write: &Write) -> Result<(), Refusal> {
+        self.files
+            .borrow_mut()
+            .entry(cgroup.dir().to_path_buf())
+            .or_default()
+            .insert(write.file.to_owned(), write.value.clone());
         self.writes.borrow_mut().push((
             cgroup.dir().to_path_buf(),
             write.file,
@@ -66,12 +72,40 @@ impl Cgroups for Record {
         Ok(())
     }
 
-    fn fleets(&self, _: &Path) -> Result<Vec<(PathBuf, Option<String>)>, Refusal> {
-        Ok(self.fleets.borrow().clone())
+    fn children(&self, dir: &Path) -> Result<Vec<PathBuf>, Refusal> {
+        Ok(self
+            .files
+            .borrow()
+            .keys()
+            .filter(|path| path.parent() == Some(dir))
+            .cloned()
+            .collect())
+    }
+
+    fn read(&self, dir: &Path, file: &str) -> Result<Option<String>, Refusal> {
+        Ok(self
+            .files
+            .borrow()
+            .get(dir)
+            .and_then(|files| files.get(file))
+            .cloned())
     }
 }
 
 impl Record {
+    /// A cgroup at `dir` holding `files`.
+    fn dir(&self, dir: &Path, files: &[(&str, &str)]) {
+        let mut all = self.files.borrow_mut();
+        let entry = all.entry(dir.to_path_buf()).or_default();
+        for (file, value) in files {
+            entry.insert((*file).to_owned(), (*value).to_owned());
+        }
+    }
+
+    fn file(&self, dir: &Path, file: &str) -> Option<String> {
+        self.read(dir, file).unwrap()
+    }
+
     fn set(&self, dir: &Path, cpu_usec: u64, memory_bytes: u64) {
         self.usage.borrow_mut().insert(
             dir.to_path_buf(),
@@ -125,13 +159,11 @@ fn shards(_: &BoxId) -> Result<Option<(Class, Allocation)>, Refusal> {
 #[test]
 fn w14_the_learner_places_each_vm_its_fleet_and_vm_by_path_and_weight() {
     let io = Record::default();
-    io.fleets.borrow_mut().extend([
-        (fleet(), None),
-        (
-            root().join(".vm").join("node-b"),
-            Some("800000 100000".into()),
-        ),
-    ]);
+    io.dir(&fleet(), &[]);
+    io.dir(
+        &root().join(".vm").join("node-b"),
+        &[("cpu.max", "800000 100000")],
+    );
     let vms = running(&[("vm-1", 1), ("vm-2", 2)]);
     for (_, _, cgroup) in &vms {
         io.set(cgroup.dir(), 0, GIB);
@@ -278,4 +310,70 @@ fn w14_a_capacity_answer_carries_priors_use_and_holdings_most_past_first() {
         )
         .unwrap();
     assert!(learner.learned(Class::Shards, &[cost()]).unwrap().is_some());
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C4 in the node: every child of the node's cgroup on one scale (ROOT, 2026-11-12). Do
+/// run a window on a 32-CPU, 64 GiB machine whose node root holds a process box capped at 4 CPUs and 4 GiB, one with
+/// no cap, and under `.oci` a box capped at 2 CPUs, beside a fleet of one VM. Expect each box weighed by its booking
+/// (its caps until learned), the uncapped one booked nothing and so at the least weight, `.oci` by its boxes'
+/// bookings, the fleet's budget the machine less the boxes' bookings with its cap and weight and `.vm`'s following it,
+/// and the node root's children weighing the scale's top, past it by the least weight of the box booked nothing.
+#[test]
+fn w14_every_child_of_the_nodes_cgroup_weighs_on_one_scale() {
+    let io = Record::default();
+    let gib4 = (4 * GIB).to_string();
+    io.dir(
+        &root().join("box-a"),
+        &[
+            ("cpu.max", "400000 100000"),
+            ("memory.max", &gib4),
+            ("cpu.weight", "100"),
+        ],
+    );
+    io.dir(
+        &root().join("box-b"),
+        &[
+            ("cpu.max", "max 100000"),
+            ("memory.max", "max"),
+            ("cpu.weight", "100"),
+        ],
+    );
+    io.dir(&root().join(".oci"), &[("cpu.weight", "100")]);
+    io.dir(
+        &root().join(".oci").join("box-c"),
+        &[
+            ("cpu.max", "200000 100000"),
+            ("memory.max", "max"),
+            ("cpu.weight", "100"),
+        ],
+    );
+    io.dir(&root().join(".vm"), &[("cpu.weight", "100")]);
+    io.dir(&fleet(), &[]);
+    let vms = running(&[("vm-1", 1)]);
+    io.set(vms[0].2.dir(), 0, GIB);
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    learner
+        .window(&io, vms, shards, machine(), Instant::now())
+        .unwrap();
+    let weight = |dir: &Path| io.file(dir, "cpu.weight");
+    assert_eq!(weight(&root().join("box-a")).as_deref(), Some("1250"));
+    assert_eq!(weight(&root().join("box-b")).as_deref(), Some("1"));
+    assert_eq!(
+        weight(&root().join(".oci").join("box-c")).as_deref(),
+        Some("625")
+    );
+    assert_eq!(weight(&root().join(".oci")).as_deref(), Some("625"));
+    assert_eq!(
+        io.file(&fleet(), "cpu.max").as_deref(),
+        Some("2600000 100000")
+    );
+    assert_eq!(weight(&fleet()).as_deref(), Some("8125"));
+    assert_eq!(weight(&root().join(".vm")).as_deref(), Some("8125"));
+    let siblings: u64 = io
+        .children(&root())
+        .unwrap()
+        .iter()
+        .map(|dir| weight(dir).unwrap().parse::<u64>().unwrap())
+        .sum();
+    assert_eq!(siblings, u64::from(WEIGHT_MAX) + 1);
 }

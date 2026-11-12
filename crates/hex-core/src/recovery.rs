@@ -390,7 +390,9 @@ mod tests {
                                 && made(&m.state_dirs)
                                 && made(&m.bundles)
                         }
-                        ClassSpec::Firecracker(_) | ClassSpec::Shards(_) => made(&m.inits),
+                        ClassSpec::Firecracker(_)
+                        | ClassSpec::Shards(_)
+                        | ClassSpec::ShardsImage(_) => made(&m.inits),
                     }
             })
             .map(|(id, _)| id.clone())

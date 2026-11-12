@@ -265,9 +265,9 @@ impl Node {
                 Some(ClassSpec::Oci(_) | ClassSpec::Bundle(_)) => {
                     Err(Refusal::NotRunning(id.clone(), "exec"))
                 }
-                Some(ClassSpec::Firecracker(_) | ClassSpec::Shards(_)) => {
-                    Err(backends::uncertain(id))
-                }
+                Some(
+                    ClassSpec::Firecracker(_) | ClassSpec::Shards(_) | ClassSpec::ShardsImage(_),
+                ) => Err(backends::uncertain(id)),
             },
         }
     }
@@ -989,7 +989,7 @@ impl Node {
                     Some(Err(_)) | None => BoxState::Empty,
                 }
             }
-            ClassSpec::Firecracker(_) | ClassSpec::Shards(_) => {
+            ClassSpec::Firecracker(_) | ClassSpec::Shards(_) | ClassSpec::ShardsImage(_) => {
                 return Err(backends::uncertain(id));
             }
         };
@@ -997,7 +997,7 @@ impl Node {
             ClassSpec::Process => None,
             // Read after the state, so an init that ended since is reaped here and reported.
             ClassSpec::Oci(_) | ClassSpec::Bundle(_) => self.init_exit(record, state)?,
-            ClassSpec::Firecracker(_) | ClassSpec::Shards(_) => {
+            ClassSpec::Firecracker(_) | ClassSpec::Shards(_) | ClassSpec::ShardsImage(_) => {
                 return Err(backends::uncertain(id));
             }
         };
@@ -1861,7 +1861,7 @@ impl Runtime for Node {
             ClassSpec::Process => return self.create_process(spec),
             ClassSpec::Bundle(bundle) => Source::Given(bundle.clone()),
             ClassSpec::Oci(oci) => self.render(&spec, oci)?,
-            ClassSpec::Firecracker(_) | ClassSpec::Shards(_) => {
+            ClassSpec::Firecracker(_) | ClassSpec::Shards(_) | ClassSpec::ShardsImage(_) => {
                 return Err(backends::uncertain(&spec.id));
             }
         };
@@ -1924,9 +1924,9 @@ impl Runtime for Node {
                 Some(ClassSpec::Oci(_) | ClassSpec::Bundle(_)) => {
                     Err(Refusal::NotRunning(id.clone(), "start"))
                 }
-                Some(ClassSpec::Firecracker(_) | ClassSpec::Shards(_)) => {
-                    Err(backends::uncertain(id))
-                }
+                Some(
+                    ClassSpec::Firecracker(_) | ClassSpec::Shards(_) | ClassSpec::ShardsImage(_),
+                ) => Err(backends::uncertain(id)),
             },
             Err(e) => Err(e.into()),
         }
@@ -2054,6 +2054,23 @@ impl Runtime for Node {
                     Ok(info) => out.push(info),
                     // HEX-RT-15: the list's record snapshot can outlive a run's cgroup.
                     Err(Refusal::NoSuchBox(gone)) if gone == id => {}
+                    // A held Shards image box, an earlier node process's run that Shards can neither take
+                    // back nor prove gone (docs/design/shards-image-class.md §5): listed running, as Hex
+                    // can't prove it isn't; its inspect says why.
+                    Err(Refusal::Awaits {
+                        needs: hex_api::Upstream::AttachAfterCrash,
+                    }) => out.push(BoxInfo {
+                        membership: None,
+                        id,
+                        class: record.spec.class.class(),
+                        state: BoxState::Running,
+                        bounds: record.spec.bounds.clone(),
+                        allocation: record.spec.allocation,
+                        route: record.spec.route,
+                        adopted: false,
+                        exit: None,
+                        abandoned: 0,
+                    }),
                     Err(why) => return Err(why),
                 }
             } else {

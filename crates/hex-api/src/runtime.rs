@@ -804,6 +804,35 @@ impl Allocation {
         Ok(guest)
     }
 
+    /// The microVM this charge sizes: its guest envelope ([`Allocation::guest`]) in whole vCPUs and
+    /// MiB, unit conversions (1,000 CPU milli a vCPU, 2^20 bytes a MiB) as the dedicated Shards guest's
+    /// receipt makes them, never an estimate. Refused where the envelope holds no whole vCPU or MiB, or
+    /// a part of one.
+    pub fn vm_size(self) -> Result<VmSize, Refusal> {
+        let guest = self.guest()?;
+        let whole = |value: u64, unit: u64, what: &'static str| match (
+            value.checked_div(unit),
+            value.checked_rem(unit),
+        ) {
+            (Some(units), Some(0)) if units > 0 => Ok(units),
+            _ => Err(invalid_cost(what)),
+        };
+        let vcpus = whole(
+            guest.cpu_milli,
+            1000,
+            "guest CPU is no whole, non-zero number of vCPUs",
+        )?;
+        Ok(VmSize {
+            vcpus: u32::try_from(vcpus)
+                .map_err(|_| invalid_cost("guest vCPUs exceed their native representation"))?,
+            memory_mib: whole(
+                guest.mem_bytes,
+                1 << 20,
+                "guest memory is no whole, non-zero number of MiB",
+            )?,
+        })
+    }
+
     /// BoxSpec has workload caps, while its scheduler row also retains the full original demand.
     /// A reservation may exceed those caps; it may never shrink them to fit the VM.
     pub fn covers(self, workload: CapacityResources) -> Result<(), Refusal> {
@@ -817,6 +846,13 @@ impl Allocation {
         }
         Ok(())
     }
+}
+
+/// A microVM's size ([`Allocation::vm_size`]): its vCPUs and its memory in MiB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmSize {
+    pub vcpus: u32,
+    pub memory_mib: u64,
 }
 
 /// The most priors one class's capacity answer carries: one for its own cost profile and one for each route's
@@ -1602,7 +1638,7 @@ fn is_zero(n: &u64) -> bool {
 }
 
 /// What a box has used, and holds now.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     pub memory_bytes: u64,
     pub memory_peak_bytes: u64,
@@ -1614,6 +1650,40 @@ pub struct Usage {
     pub cpu_usec: u64,
     pub io_read_bytes: u64,
     pub io_write_bytes: u64,
+    /// A microVM box's guest time per vCPU, which the learned charge reads (joint plan steps 12 and
+    /// 14): `None` where this usage's producer reads none, a box with no guest of its own and the
+    /// Firecracker and hex-guest Shards VMs among them. Added after the first release, so absent on
+    /// the wire means `None` (append-only, CLAUDE.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest: Option<GuestTime>,
+}
+
+/// A microVM's guest time per vCPU, or what its backend awaits to read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GuestTime {
+    /// Nanoseconds each vCPU has run the guest since the VM booted, by vCPU index from 0, one for each
+    /// vCPU of the VM's size: each only grows over the VM's life (monotone), so two reads' difference
+    /// is the guest time between them, and none passes the wall time the VM has run.
+    PerVcpuNs(#[serde(deserialize_with = "per_vcpu")] Vec<u64>),
+    /// Its backend reads none yet: what it awaits, never a made-up number.
+    Awaits(Upstream),
+}
+
+impl GuestTime {
+    /// One entry for every 8-bit vCPU index: a Shards VM numbers its vCPUs by 8-bit APIC id on x86_64
+    /// (its MADT, at most 255; crates/vmm/src/arch/x86_64/acpi.rs) and has fewer on arm64 (123, its
+    /// GIC redistributor region; crates/vmm/src/arch/aarch64/mod.rs), at Shards 482c5d78. Bounds a
+    /// report read off the wire, never a VM's admission, which is Shards' to refuse.
+    pub const MAX_VCPUS: usize = 1 << u8::BITS;
+}
+
+fn per_vcpu<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<u64>, D::Error> {
+    bounded_values(
+        deserializer,
+        GuestTime::MAX_VCPUS,
+        "guest time per vCPU past a VM's vCPU index space",
+    )
 }
 
 /// Why a request was refused.
@@ -1680,7 +1750,8 @@ pub enum Refusal {
 /// step numbers change between its versions). A call that needs one is refused
 /// [`Refusal::Awaits`] until Hex builds against a revision that gives it. The node's wire tags each
 /// by its place in [`Upstream::ALL`], so append only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Upstream {
     /// A Shards microVM's guest time per vCPU, with a monotone total, on HVF, KVM and WHP: Shards'
     /// guest CPU time work, in no Shards revision yet.
@@ -1711,11 +1782,16 @@ pub enum Upstream {
     /// A Shards guest told the room its host's budget leaves it (D188): init's `ROOM`, which
     /// shards-api's image boot (D231) has no call to send (joint plan step 14).
     GuestRoom,
+    /// The host of an image's run started holding only its stdio, as every program Hex starts on
+    /// macOS is: D231 starts `shards api-run` through std's `Command`, whose macOS spawn passes no
+    /// `POSIX_SPAWN_CLOEXEC_DEFAULT`, so it would inherit every descriptor another thread holds
+    /// without close-on-exec at that moment (CVE-2024-21626's class).
+    RunHostStdioOnly,
 }
 
 impl Upstream {
     /// Every capability, in the order the node's wire tags them.
-    pub const ALL: [Upstream; 10] = [
+    pub const ALL: [Upstream; 11] = [
         Upstream::GuestCpuTimePerVcpu,
         Upstream::MemberExec,
         Upstream::MemberGrantsByName,
@@ -1726,6 +1802,7 @@ impl Upstream {
         Upstream::MemberGrantsByAddress,
         Upstream::MemberHostService,
         Upstream::GuestRoom,
+        Upstream::RunHostStdioOnly,
     ];
 }
 
@@ -1746,6 +1823,9 @@ impl std::fmt::Display for Upstream {
             Self::MemberGrantsByAddress => "a Shards member's grants by address",
             Self::MemberHostService => "a Shards member's reach to its host's own service",
             Self::GuestRoom => "a Shards guest told its room (init's ROOM, owed through D231)",
+            Self::RunHostStdioOnly => {
+                "Shards' host of an image's run started holding only its stdio (owed by D231)"
+            }
         })
     }
 }
@@ -1978,6 +2058,48 @@ mod tests {
         changed.guest_overhead.disk_bytes = 0;
         changed.quantum.disk_bytes = 2;
         assert!(changed.allocate(resources(1, 1, u64::MAX)).is_err());
+    }
+
+    /// AC-T7.4.1 (joint plan step 12): a microVM's size is its admitted guest envelope in whole units.
+    /// Do: size the simulator's two-vCPU, 256 MiB allocation, and envelopes of a vCPU and a half, of no
+    /// vCPU and of a MiB and a half. Expect: 2 vCPUs and 256 MiB, then each of the others refused.
+    #[test]
+    fn a_vm_is_sized_in_whole_vcpus_and_mib_of_its_allocation() {
+        let sized = crate::sim::sim_vm_allocation().unwrap().vm_size().unwrap();
+        assert_eq!(
+            sized,
+            VmSize {
+                vcpus: 2,
+                memory_mib: 256
+            }
+        );
+        let profile = |cpu_quantum: u64, mem_quantum: u64| RuntimeCost {
+            id: [7; 32],
+            floor: CapacityResources::default(),
+            ceiling: resources(8_000, 8 << 30, 0),
+            quantum: resources(cpu_quantum, mem_quantum, 1),
+            guest_overhead: CapacityResources::default(),
+            overhead: CapacityResources::default(),
+        };
+        for (cpu_quantum, mem_quantum, workload) in [
+            (500, 1 << 20, resources(1_500, 256 << 20, 0)),
+            (500, 1 << 20, resources(0, 256 << 20, 0)),
+            (1_000, 1 << 19, resources(1_000, 3 << 19, 0)),
+        ] {
+            let allocation = profile(cpu_quantum, mem_quantum)
+                .allocate(workload)
+                .unwrap();
+            assert!(
+                matches!(
+                    allocation.vm_size(),
+                    Err(Refusal::Invalid {
+                        what: "runtime allocation",
+                        ..
+                    })
+                ),
+                "{workload:?}"
+            );
+        }
     }
 
     /// AC-T7.4.1 (joint plan step 12): the wire tags a capability by its place in `Upstream::ALL`.
