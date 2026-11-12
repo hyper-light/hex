@@ -36,17 +36,21 @@ mod seam;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod shards;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const USAGE: &str = "usage: guest_cost --class shards --out <dir>";
 
 /// The run's arguments: which class's driver, and where its output goes. Exactly these, each once.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 struct Args {
     class: String,
     out: PathBuf,
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl Args {
     fn parse(words: &[String]) -> Result<Self, String> {
         let (mut class, mut out) = (None, None);
@@ -117,7 +121,7 @@ fn produce(args: &Args) -> Result<run::Made, String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
     use super::*;
 
