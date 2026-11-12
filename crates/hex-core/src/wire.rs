@@ -2180,7 +2180,28 @@ fn put_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             w.u32(*port);
             put_connect_failure(w, *failure)
         }
+        Refusal::Uncertain {
+            id,
+            refusal,
+            cleanup,
+        } => {
+            w.u8(12);
+            w.string(id.as_str())?;
+            put_cause(w, refusal)?;
+            put_cause(w, cleanup)
+        }
     }
+}
+
+/// One of an `Uncertain` refusal's causes: any refusal but another `Uncertain`, so its depth is one.
+fn put_cause(w: &mut Writer, cause: &Refusal) -> Result<(), Fault> {
+    if matches!(cause, Refusal::Uncertain { .. }) {
+        return Err(Fault::value(
+            "uncertain refusal",
+            "a cause is itself uncertain",
+        ));
+    }
+    put_refusal(w, cause)
 }
 
 /// A Connect refusal's body, exactly, reserved whole before any of it is written as a Backing
@@ -2203,6 +2224,12 @@ fn connect_refusal_bytes(failure: ConnectFailure) -> Option<usize> {
 }
 
 fn refusal(r: &mut Reader<'_>) -> Result<Refusal, Fault> {
+    refusal_of(r, false)
+}
+
+/// A refusal, `cause` where it is an `Uncertain` refusal's: then never another `Uncertain`, refused at its tag before
+/// any of it is read, so no message nests them past one.
+fn refusal_of(r: &mut Reader<'_>, cause: bool) -> Result<Refusal, Fault> {
     Ok(match r.u8()? {
         0 => Refusal::Invalid {
             what: name(&r.string("refusal name")?)?,
@@ -2248,6 +2275,17 @@ fn refusal(r: &mut Reader<'_>) -> Result<Refusal, Fault> {
             port: r.u32()?,
             failure: connect_failure(r)?,
         },
+        12 if !cause => Refusal::Uncertain {
+            id: box_id(r)?,
+            refusal: Box::new(refusal_of(r, true)?),
+            cleanup: Box::new(refusal_of(r, true)?),
+        },
+        12 => {
+            return Err(Fault::value(
+                "uncertain refusal",
+                "a cause is itself uncertain",
+            ));
+        }
         t => return Err(Fault::value("refusal", format!("variant {t}"))),
     })
 }

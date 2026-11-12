@@ -40,14 +40,22 @@ use hex_node::CrashPoint;
 use hex_node::Node;
 use hex_node::RecoverySummary;
 use hex_node::serve::{Host, Limits, Server};
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use rustix::process::Resource;
 
 /// Runs `hex node`'s arguments (everything after `node`); returns the exit status.
 pub fn main(args: &[String]) -> u8 {
     #[cfg(target_os = "linux")]
-    if args == ["--descriptors"] {
-        return descriptors();
+    match args {
+        [descriptors_flag] if descriptors_flag == "--descriptors" => {
+            return descriptors(Path::new("/"));
+        }
+        [descriptors_flag, state_flag, state]
+            if descriptors_flag == "--descriptors" && state_flag == "--state" =>
+        {
+            return descriptors(Path::new(state));
+        }
+        _ => {}
     }
     match serve(args) {
         Ok(()) => 0,
@@ -61,15 +69,19 @@ pub fn main(args: &[String]) -> u8 {
 }
 
 #[cfg(target_os = "linux")]
-const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--box-root <cgroup dir>] | hex node --descriptors";
+const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--box-root <cgroup dir>] | hex node --descriptors [--state <dir>]";
 #[cfg(not(target_os = "linux"))]
 const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--box-root <cgroup dir>]";
 
-/// `hex node --descriptors`: [`descriptors_needed`], said as `own N files M need T`: what an installer gives the node's
-/// service and the install lab checks, never a figure copied from one host's (goal 6 step 6's HEX-INST-5).
+/// `hex node --descriptors [--state <dir>]`: what a node of this process's owner, its state under `state` (`/` where
+/// none is named), needs of its soft descriptor limit on this host, at a first start's bounds, its own and every kept
+/// namespace's files (`hex_node::netns::needed_on_this_host`, the one formula), said as `own N files M need T`: what an
+/// installer gives the node's service and the install lab checks, never a figure copied from one host's (goal 6 step
+/// 6's HEX-INST-5).
 #[cfg(target_os = "linux")]
-fn descriptors() -> u8 {
-    match descriptors_needed() {
+fn descriptors(state: &Path) -> u8 {
+    let needed = hex_node::netns::needed_on_this_host(state);
+    match needed {
         Ok(n) => {
             let line = format!("own {} files {} need {}\n", n.own, n.files, n.total());
             match std::io::stdout().lock().write_all(line.as_bytes()) {
@@ -84,23 +96,6 @@ fn descriptors() -> u8 {
             1
         }
     }
-}
-
-/// What a node of this process's owner needs of its soft descriptor limit on this host, at a first start's bounds:
-/// its own and every kept namespace's files (`FilesBound::needed`), what this process holds now standing for what the
-/// node holds beside its bounds. The one count: `hex node --descriptors` says it, and a guest's init gives it to the
-/// node it starts (`crate::guest`, AC-T7.4.1).
-#[cfg(target_os = "linux")]
-pub(crate) fn descriptors_needed() -> Result<hex_node::netns::Needed, Refusal> {
-    use hex_node::netns::{FilesBound, Pools, open_descriptors};
-    let sizes = hex_node::sizes::Sizes::now()?;
-    let pools = if rustix::process::geteuid().is_root() {
-        Pools::root(sizes)
-    } else {
-        Pools::rootless(sizes)
-    };
-    let limit = rustix::process::getrlimit(Resource::Nofile);
-    Ok(FilesBound::needed(pools, open_descriptors(&limit)?))
 }
 
 struct Args {
