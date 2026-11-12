@@ -192,7 +192,9 @@ mod tests {
 
 #[cfg(test)]
 mod contract_tests {
-    use hex_api::capacity::{Close, Fence, Invalid, ReservationId, ScopeRefused, ToHolder, ToKeeper, View, Why};
+    use hex_api::capacity::{
+        Close, Fence, Invalid, ReservationId, ScopeRefused, ToHolder, ToKeeper, View, Why,
+    };
 
     use crate::lanes::CAPACITY_PORT;
 
@@ -343,7 +345,11 @@ mod contract_tests {
     #[test]
     fn the_holder_contract_names_the_port_and_every_word() {
         let contract = contract();
-        let port = format!("0x{:04x}_{:04x}", CAPACITY_PORT >> 16, CAPACITY_PORT & 0xffff);
+        let port = format!(
+            "0x{:04x}_{:04x}",
+            CAPACITY_PORT >> 16,
+            CAPACITY_PORT & 0xffff
+        );
         assert!(contract.contains(&port), "the contract numbers no {port}");
         for name in keeper_words()
             .into_iter()
