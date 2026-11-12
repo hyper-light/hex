@@ -1,8 +1,9 @@
 //! A passthrough function that no reset clears between VMs ([`super::vfio::once_per_boot`]) goes to one VM per host
 //! boot (AC-T7.4.1; docs/design/firecracker-gpu-host.md): the next VM given it would boot into the last one's state, as
-//! GPU run r940's did ("PSP create ring failed"). Its mark in the adapter's private state names the boot session a VM
-//! was given it on: written durably before that VM's VMM opens it, it refuses the function to every later VM of that
-//! boot, and a later boot's session admits it again. What clears a function at a VM's end, vfio-pci's reset or
+//! GPU run r940's did ("PSP create ring failed"). Its mark names the boot session a VM was given it on, in the node's
+//! runtime directory, which every node on the host shares and a reboot clears: written durably before that VM's VMM
+//! opens it, it refuses the function to every later VM of that boot, any node's, and a later boot's session admits it
+//! again. What clears a function at a VM's end, vfio-pci's reset or
 //! nothing, is the kernel's alone to know: it tells no process (pci.c logs a reset's outcome at debug level only).
 
 use super::native::path;
@@ -14,8 +15,9 @@ use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-/// The marks' directory in the adapter's state, where no VM's directory is so named: theirs are native scopes' hex.
-pub(super) const MARKS: &str = "single-use";
+/// The marks' directory in the node's runtime directory, a name no container's or record directory takes there (theirs
+/// are `<key>-<id>` and `<key>.records`).
+pub(super) const MARKS: &str = "vfio-single-use";
 
 /// Why a function that no reset clears can't go to a VM now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,16 +38,16 @@ pub(super) fn admit(mark: Option<&BootSession>, now: Option<&BootSession>) -> Re
     }
 }
 
-/// The marks in one adapter's state on boot `now`: the shell around [`admit`].
+/// The marks in a node's runtime directory on boot `now`: the shell around [`admit`].
 pub(super) struct Marks<'a> {
     dir: PathBuf,
     now: Option<&'a BootSession>,
 }
 
 impl<'a> Marks<'a> {
-    pub(super) fn of(state: &Path, now: Option<&'a BootSession>) -> Result<Self, Refusal> {
+    pub(super) fn of(runtime: &Path, now: Option<&'a BootSession>) -> Result<Self, Refusal> {
         Ok(Self {
-            dir: path(state, MARKS)?,
+            dir: path(runtime, MARKS)?,
             now,
         })
     }
@@ -76,8 +78,8 @@ impl<'a> Marks<'a> {
             Ok(()) => {
                 fs::set_permissions(&self.dir, fs::Permissions::from_mode(0o700))
                     .map_err(|e| Refusal::os("making the single-use marks' directory", e))?;
-                if let Some(state) = self.dir.parent() {
-                    sync(state)?;
+                if let Some(runtime) = self.dir.parent() {
+                    sync(runtime)?;
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -156,7 +158,8 @@ fn sync(dir: &Path) -> Result<(), Refusal> {
         .map_err(|e| Refusal::os("flushing the single-use marks", e))
 }
 
-fn reason(function: &str, spent: Spent, now: Option<&BootSession>) -> String {
+/// Why `function`, which no reset clears, can't go to a VM now.
+pub(super) fn reason(function: &str, spent: Spent, now: Option<&BootSession>) -> String {
     match (spent, now) {
         (Spent::ThisBoot, Some(now)) => format!(
             "{function} has no reset method that clears it between VMs, and a VM had it on this boot ({}); the host \
@@ -218,8 +221,8 @@ mod tests {
         }
     }
 
-    /// AC-T7.4.1: do spend a function in a state directory, read its mark back on the same boot and a later one,
-    /// then garble the mark; expect the mark durable in `single-use` (no temporary left), spent on the same boot,
+    /// AC-T7.4.1: do spend a function in a runtime directory, read its mark back on the same boot and a later one,
+    /// then garble the mark; expect the mark durable in `vfio-single-use` (no temporary left), spent on the same boot,
     /// admitted on the later one, and a garbled mark refused by type, naming its file, never read as none.
     #[test]
     fn a_spent_functions_mark_outlives_its_writer_until_another_boot() {

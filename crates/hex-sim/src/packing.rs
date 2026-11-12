@@ -271,6 +271,7 @@ mod tests {
                 .map(|i| NodeSpec {
                     routes: None,
                     costs: [None; crate::model::Class::COUNT],
+                    priors: Default::default(),
                     runtime_pools: Vec::new(),
                     id: NodeId(i),
                     capacity: node,

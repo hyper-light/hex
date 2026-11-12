@@ -83,6 +83,7 @@ fn four_workload_owners_on_the_largest_quarter_cluster() {
     day.nodes = vec![NodeSpec {
         routes: None,
         costs: [None; hex_sim::model::Class::COUNT],
+        priors: Default::default(),
         runtime_pools: Vec::new(),
         id: NodeId(0),
         capacity: node,

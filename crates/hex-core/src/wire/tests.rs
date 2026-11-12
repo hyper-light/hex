@@ -51,6 +51,7 @@ fn device_capacity(devices: Vec<DeviceInfo>) -> Capacity {
         total: CapacityResources::default(),
         free: CapacityResources::default(),
         devices,
+        unavailable: Vec::new(),
     }
 }
 
@@ -81,8 +82,8 @@ fn with_device_tail(offer: bool, tail: &[u8]) -> Vec<u8> {
         .unwrap()
     };
     // Replace the device list while retaining valid absent charge/route receipts. Capacity
-    // additionally ends with three empty u32 lists; a spec ends with one route option.
-    let following = if offer { 1 + 3 * size_of::<u32>() } else { 2 };
+    // additionally ends with four empty u32 lists; a spec ends with one route option.
+    let following = if offer { 1 + 4 * size_of::<u32>() } else { 2 };
     bytes.truncate(bytes.len() - size_of::<u32>() - following);
     bytes.extend_from_slice(tail);
     bytes.extend(std::iter::repeat_n(0, following));
@@ -144,6 +145,72 @@ fn device_claims_and_offers_roundtrip_with_explicit_tags_and_catalog_order() {
     let decoded = read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1;
     assert_eq!(decoded, offered);
     assert_eq!(answer(91, &decoded, MAX_MESSAGE).unwrap(), bytes);
+}
+
+/// AC-T7.4.1: a capacity's devices it lists but won't offer, each with why, cross the wire last. Do: encode a capacity
+/// listing one of its two devices unavailable; cut the same capacity, listing none, before that list's count; read an
+/// older JSON report, which has no such field; and encode one listing a device it doesn't hold. Expect the first back
+/// exactly, the cut refused as truncated, as every truncation is (only this same wire's builds talk: IDENTITY), the
+/// JSON report listing none, and the last refused by the capacity's own check before any byte is written.
+#[test]
+fn a_capacitys_unavailable_devices_cross_the_wire_last() {
+    let devices = vec![
+        DeviceInfo {
+            id: DeviceId {
+                kind: DeviceKind::Vfio,
+                key: 7,
+            },
+            model: "group-7".into(),
+            size: 0,
+            holder: None,
+        },
+        DeviceInfo {
+            id: DeviceId {
+                kind: DeviceKind::Vfio,
+                key: 8,
+            },
+            model: "group-8".into(),
+            size: 0,
+            holder: None,
+        },
+    ];
+    let mut listed = device_capacity(devices);
+    listed.unavailable = vec![hex_api::DeviceUnavailable {
+        id: listed.devices[0].id,
+        why: "0000:01:00.0 has no reset method that clears it between VMs; the host must reboot"
+            .into(),
+    }];
+    let offered = Answer::Capacity(Some(listed.try_clone().unwrap()));
+    let bytes = answer(91, &offered, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        offered
+    );
+    let mut none = listed.try_clone().unwrap();
+    none.unavailable.clear();
+    let mut cut = answer(
+        91,
+        &Answer::Capacity(Some(none.try_clone().unwrap())),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    assert_eq!(
+        cut[cut.len() - 4..],
+        [0; 4],
+        "the empty list's count ends it"
+    );
+    cut.truncate(cut.len() - 4);
+    assert!(matches!(
+        read_answer(&received(&cut, 0), MAX_MESSAGE),
+        Err(Fault::Truncated { .. })
+    ));
+    let older = serde_json::to_value(&none).unwrap();
+    assert!(older.get("unavailable").is_none(), "skipped when empty");
+    let read: Capacity = serde_json::from_value(older).unwrap();
+    assert_eq!(read, none);
+    let mut stray = listed;
+    stray.unavailable[0].id.key = 9;
+    assert!(answer(91, &Answer::Capacity(Some(stray)), MAX_MESSAGE).is_err());
 }
 
 /// AC-T7.4.1: a native Metal registry identity uses all64 bits; the wire does not reinterpret
@@ -407,6 +474,7 @@ fn runtime_capacity_roundtrip_and_invalid_room_refused() {
             mem_bytes: 600 << 20,
             disk_bytes: 7 << 30,
         },
+        unavailable: Vec::new(),
     };
     for value in [None, Some(capacity.try_clone().unwrap())] {
         let expected = Answer::Capacity(value);
@@ -1172,6 +1240,7 @@ fn runtime_cost_and_admitted_allocation_survive_the_wire() {
     spec.allocation = Some(Allocation {
         resources: CapacityResources::default(),
         cost,
+        booked: None,
     });
     assert!(matches!(
         request(
@@ -2058,6 +2127,8 @@ fn any_cause() -> impl Strategy<Value = Refusal> {
             .prop_map(|(id, cause)| Refusal::Lifecycle { id, cause }),
         (any::<u32>(), any_connect_failure())
             .prop_map(|(port, failure)| Refusal::Connect { port, failure }),
+        proptest::sample::select(Upstream::ALL.to_vec())
+            .prop_map(|needs| Refusal::Awaits { needs }),
     ]
 }
 
@@ -2379,7 +2450,8 @@ fn route_wire_capacity_bytes(
         MAX_MESSAGE,
     )
     .unwrap();
-    prefix.truncate(prefix.len() - 3 * size_of::<u32>());
+    // Its three route lists and its unavailable devices' count, all empty, end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>());
     let mut w = Writer::new(MAX_MESSAGE);
     w.raw(&prefix);
     w.u32(u32::try_from(routes.len()).unwrap());
@@ -2394,6 +2466,7 @@ fn route_wire_capacity_bytes(
     for backing in backings {
         put_backing_offer(&mut w, backing).unwrap();
     }
+    w.u32(0);
     w.done().unwrap()
 }
 
@@ -2840,7 +2913,8 @@ fn route_wire_hostile_counts_and_minimum_bytes_refuse_before_parse() {
         MAX_MESSAGE,
     )
     .unwrap();
-    prefix.truncate(prefix.len() - 3 * size_of::<u32>());
+    // Its three route lists and its unavailable devices' count, all empty, end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>());
     for count in [1u32, 65, u32::MAX] {
         let mut bytes = prefix.clone();
         bytes.extend(count.to_le_bytes());
@@ -3802,6 +3876,83 @@ fn connect_refusal_reserves_its_whole_body_before_writing() {
             "{refusal:?}"
         );
     }
+}
+
+/// AC-T7.4.1 (joint plan step 12, Shards R04): an `Awaits` refusal is tag 13, after every refusal
+/// before it, then the capability's place in `Upstream::ALL`. Do: answer each capability refused, alone
+/// and as an `Uncertain` refusal's cause. Expect: two body bytes, [13, place], each read back as
+/// written. Do: a capability tag past the last, a cut and a trailing byte. Expect: refused as
+/// "upstream", Truncated and Leftover. Do: write it into a writer one byte short. Expect: refused
+/// before a byte is written, as a Backing refusal is.
+#[test]
+fn an_awaits_refusal_is_tagged_after_every_refusal_and_its_capability_by_place() {
+    let body = HEADER_BYTES;
+    for (place, needs) in Upstream::ALL.into_iter().enumerate() {
+        let refusal = Refusal::Awaits { needs };
+        let bytes = answer(5, &Answer::Refused(refusal.clone()), MAX_MESSAGE).unwrap();
+        assert_eq!(&bytes[body..], &[13, u8::try_from(place).unwrap()]);
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap(),
+            (
+                Header {
+                    kind: kind::REFUSED,
+                    id: 5
+                },
+                Answer::Refused(refusal.clone())
+            )
+        );
+        let uncertain = Refusal::Uncertain {
+            id: id("awaits"),
+            refusal: Box::new(refusal.clone()),
+            cleanup: Box::new(refusal.clone()),
+        };
+        let bytes = answer(6, &Answer::Refused(uncertain.clone()), MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            Answer::Refused(uncertain)
+        );
+        let mut short = Writer::new(1);
+        assert!(matches!(
+            put_refusal(&mut short, &refusal),
+            Err(Fault::Oversized { .. })
+        ));
+        assert!(short.out.is_empty());
+    }
+    let bytes = answer(
+        5,
+        &Answer::Refused(Refusal::Awaits {
+            needs: Upstream::MemberExec,
+        }),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    for tag in [u8::try_from(Upstream::ALL.len()).unwrap(), u8::MAX] {
+        let mut hostile = bytes.clone();
+        hostile[body + 1] = tag;
+        assert!(
+            matches!(
+                read_answer(&received(&hostile, 0), MAX_MESSAGE),
+                Err(Fault::Value {
+                    what: "upstream",
+                    ..
+                })
+            ),
+            "capability tag {tag}"
+        );
+    }
+    assert!(matches!(
+        read_answer(&received(&bytes[..body + 1], 0), MAX_MESSAGE),
+        Err(Fault::Truncated { .. })
+    ));
+    let mut long = bytes;
+    long.push(0);
+    assert_eq!(
+        read_answer(&received(&long, 0), MAX_MESSAGE).unwrap_err(),
+        Fault::Leftover {
+            bytes: 1,
+            kind: kind::REFUSED,
+        }
+    );
 }
 
 /// AC-T7.4.1 (Shards R04): take each kind std's own errno mapping gives that Hex has no tag for (on

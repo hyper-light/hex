@@ -145,6 +145,11 @@ pub struct RuntimeCost {
 pub struct Allocation {
     pub resources: CapacityResources,
     pub cost: RuntimeCost,
+    /// What the ledger booked at admission, at most `resources`: the VM's class's learned prior (joint plan step
+    /// 14, `docs/design/learned-charge.md` C2). `resources` stays its configuration and ceiling. None books it
+    /// all, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub booked: Option<CapacityResources>,
 }
 
 /// Snapshot route eligibility is a fixed u64 word, not a tuning or an inventory cache.
@@ -417,7 +422,9 @@ impl BackingGrant {
     pub fn check(&self) -> Result<(), Refusal> {
         check_provisioning(&self.devices)?;
         self.allocation.check(CapacityResources::default())?;
-        if self.allocation.cost.floor != self.allocation.cost.ceiling {
+        if self.allocation.cost.floor != self.allocation.cost.ceiling
+            || self.allocation.booked.is_some()
+        {
             return Err(invalid_route(
                 "a backing grant must name its exact configured native envelope",
             ));
@@ -618,7 +625,7 @@ impl RouteReceipt {
             }
             (Execution::ShardsDedicated | Execution::Firecracker, Some(allocation)) => {
                 allocation.check(workload)?;
-                Ok(allocation.resources)
+                Ok(allocation.booking())
             }
             _ => Err(invalid_route(
                 "committed route and immutable charge disagree",
@@ -728,19 +735,53 @@ impl RuntimeCost {
                 .checked_add(self.overhead)
                 .ok_or_else(|| invalid_cost("host charge overflows"))?,
             cost: self,
+            booked: None,
         })
     }
 }
 
 impl Allocation {
-    /// Recheck the original durable demand rather than recalculating against a newer cost profile.
+    /// Recheck the original durable demand rather than recalculating against a newer cost profile. What was
+    /// booked is no part of the formula, but is never past what it charges.
     pub fn check(self, workload: CapacityResources) -> Result<(), Refusal> {
-        if self.cost.allocate(workload)? != self {
+        let derived = Allocation {
+            booked: self.booked,
+            ..self.cost.allocate(workload)?
+        };
+        if derived != self {
             return Err(invalid_cost(
                 "charge disagrees with its immutable workload and cost profile",
             ));
         }
+        if self
+            .booked
+            .is_some_and(|booked| !self.resources.holds(booked))
+        {
+            return Err(invalid_cost("booked past the admitted charge"));
+        }
         Ok(())
+    }
+
+    /// What the ledger holds of it (joint plan step 14, C2): what was booked, else the whole charge.
+    pub fn booking(self) -> CapacityResources {
+        self.booked.unwrap_or(self.resources)
+    }
+
+    /// The same charge booked at `prior` where that is less, dimension by dimension; none where it books it all.
+    pub fn booked_at(self, prior: CapacityResources) -> Self {
+        let booked = CapacityResources {
+            cpu_milli: self.resources.cpu_milli.min(prior.cpu_milli),
+            mem_bytes: self.resources.mem_bytes.min(prior.mem_bytes),
+            disk_bytes: self.resources.disk_bytes.min(prior.disk_bytes),
+        };
+        Self {
+            booked: if booked == self.resources {
+                None
+            } else {
+                Some(booked)
+            },
+            ..self
+        }
     }
 
     /// Actual VM configuration is derived from the admitted host charge, paying host overhead once.
@@ -813,6 +854,14 @@ pub struct Capacity {
         deserialize_with = "Capacity::deserialize_backings"
     )]
     pub backings: Vec<BackingOffer>,
+    /// Devices listed above that this runtime won't offer now, each with why (AC-T7.4.1): never free while listed
+    /// here. None from an older peer's report.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Capacity::deserialize_unavailable"
+    )]
+    pub unavailable: Vec<crate::DeviceUnavailable>,
 }
 
 impl Capacity {
@@ -849,6 +898,17 @@ impl Capacity {
         )
     }
 
+    /// At most one per device, as each names a device listed in the same report.
+    pub fn deserialize_unavailable<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<crate::DeviceUnavailable>, D::Error> {
+        bounded_values(
+            deserializer,
+            crate::MAX_DEVICES,
+            "unavailable device count exceeds its address space",
+        )
+    }
+
     /// Copy an owned snapshot without unchecked allocation. Validation remains explicit: copying
     /// scalar facts cannot turn a malformed report into an initialized capability.
     pub fn try_clone(&self) -> Result<Self, Refusal> {
@@ -879,6 +939,16 @@ impl Capacity {
         for backing in &self.backings {
             backings.push(backing.try_clone()?);
         }
+        let mut unavailable = Vec::new();
+        unavailable
+            .try_reserve_exact(self.unavailable.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "runtime capacity unavailable devices",
+                bound: self.unavailable.len(),
+            })?;
+        for device in &self.unavailable {
+            unavailable.push(device.try_clone()?);
+        }
         Ok(Self {
             id,
             total: self.total,
@@ -891,6 +961,7 @@ impl Capacity {
                 "runtime capacity eligibility",
             )?,
             backings,
+            unavailable,
         })
     }
 
@@ -917,6 +988,23 @@ impl Capacity {
             }
         }
         crate::devices::check_ids(self.devices.iter().map(|device| device.id))?;
+        // Each unavailable device is one listed above, once, with its reason.
+        for (at, device) in self.unavailable.iter().enumerate() {
+            device.id.check()?;
+            if device.why.is_empty()
+                || !self.devices.iter().any(|listed| listed.id == device.id)
+                || self
+                    .unavailable
+                    .iter()
+                    .take(at)
+                    .any(|earlier| earlier.id == device.id)
+            {
+                return Err(Refusal::Invalid {
+                    what: "runtime capacity",
+                    why: "an unavailable device is unlisted, repeated or has no reason".to_owned(),
+                });
+            }
+        }
         self.check_routes()
     }
 }
@@ -1398,6 +1486,80 @@ pub enum Refusal {
         refusal: Box<Refusal>,
         cleanup: Box<Refusal>,
     },
+    /// The call needs what another product doesn't give in the revision Hex builds against yet
+    /// ([`Upstream`]): refused, never stubbed (the joint plan's rule for a missing dependency). It
+    /// says nothing of any box's state.
+    #[error("this needs {needs}, which the revision Hex builds against doesn't give yet")]
+    Awaits { needs: Upstream },
+}
+
+/// A capability another product owes Hex, named by what it does, never by a plan step (a plan's
+/// step numbers change between its versions). A call that needs one is refused
+/// [`Refusal::Awaits`] until Hex builds against a revision that gives it. The node's wire tags each
+/// by its place in [`Upstream::ALL`], so append only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Upstream {
+    /// A Shards microVM's guest time per vCPU, with a monotone total, on HVF, KVM and WHP: Shards'
+    /// guest CPU time work, in no Shards revision yet.
+    GuestCpuTimePerVcpu,
+    /// A program started in a member of a Shards microVM: the exec of Shards' agent-control
+    /// endpoint.
+    MemberExec,
+    /// A microVM member's grants to reach a provider or kiln by name: Shards' explicit grants by
+    /// name.
+    MemberGrantsByName,
+    /// What a runtime nested under shards-init needs: a delegated cgroup subtree, CAP_SYS_ADMIN for
+    /// its boxes' namespaces and DRM render nodes, granted by name.
+    NestedRuntime,
+    /// The Windows host of an image's run: `shards api-run` on Windows, whose AppContainer launch
+    /// Shards' D231 owes.
+    WindowsRunHost,
+    /// Taking back an image's run after its owner's crash: a run ends with its owner in D231's
+    /// first version, which owes `attach`.
+    AttachAfterCrash,
+    /// A signal to the members of a Shards microVM: the signal of Shards' agent-control endpoint.
+    MemberSignal,
+    /// A microVM member's grants to reach a peer at one address (kiln's endpoint by its address):
+    /// Shards' explicit grants naming the member, the address, the port and the direction.
+    MemberGrantsByAddress,
+    /// A microVM member's reach to a service its own host serves on its loopback (kiln beside the
+    /// VM): Shards' explicit host-service grants.
+    MemberHostService,
+}
+
+impl Upstream {
+    /// Every capability, in the order the node's wire tags them.
+    pub const ALL: [Upstream; 9] = [
+        Upstream::GuestCpuTimePerVcpu,
+        Upstream::MemberExec,
+        Upstream::MemberGrantsByName,
+        Upstream::NestedRuntime,
+        Upstream::WindowsRunHost,
+        Upstream::AttachAfterCrash,
+        Upstream::MemberSignal,
+        Upstream::MemberGrantsByAddress,
+        Upstream::MemberHostService,
+    ];
+}
+
+impl std::fmt::Display for Upstream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::GuestCpuTimePerVcpu => {
+                "a Shards microVM's guest time per vCPU (Shards' guest CPU time work)"
+            }
+            Self::MemberExec => "a program run in a Shards member (its agent-control endpoint)",
+            Self::MemberGrantsByName => "a Shards member's grants by name",
+            Self::NestedRuntime => "a runtime nested under shards-init, with its grants",
+            Self::WindowsRunHost => "Shards' Windows host of an image's run (owed by D231)",
+            Self::AttachAfterCrash => {
+                "taking back an image's run after its owner's crash (owed by D231)"
+            }
+            Self::MemberSignal => "a signal to Shards members (its agent-control endpoint)",
+            Self::MemberGrantsByAddress => "a Shards member's grants by address",
+            Self::MemberHostService => "a Shards member's reach to its host's own service",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -1630,6 +1792,18 @@ mod tests {
         assert!(changed.allocate(resources(1, 1, u64::MAX)).is_err());
     }
 
+    /// AC-T7.4.1 (joint plan step 12): the wire tags a capability by its place in `Upstream::ALL`.
+    /// Do: look each one up there, and say its `Awaits` refusal. Expect: each in one place only, and
+    /// the refusal naming it in its words.
+    #[test]
+    fn each_upstream_capability_has_one_place_and_its_refusal_names_it() {
+        for needs in Upstream::ALL {
+            assert_eq!(Upstream::ALL.iter().filter(|u| **u == needs).count(), 1);
+            let said = Refusal::Awaits { needs }.to_string();
+            assert!(said.contains(&needs.to_string()), "{said}");
+        }
+    }
+
     #[test]
     fn a_signal_number_outside_the_kernels_range_is_refused() {
         assert!(Signal::new(0).is_err());
@@ -1851,6 +2025,7 @@ mod route_tests {
             routes: Vec::new(),
             device_routes: Vec::new(),
             backings: Vec::new(),
+            unavailable: Vec::new(),
         }
     }
     /// AC-T7.4.1: original OCI form can identify a real Linux guest on Mac and alongside Windows HCS.

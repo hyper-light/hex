@@ -20,11 +20,13 @@
 )]
 
 mod bounds;
+pub mod capacity;
 pub mod conformance;
 mod devices;
 pub mod differential;
 #[cfg(windows)]
 mod end;
+mod grants;
 mod id;
 mod runtime;
 pub mod sim;
@@ -32,16 +34,17 @@ mod spec;
 
 pub use bounds::{Bounds, IoRates, MIN_CPU_MILLI, MIN_MEMORY};
 pub use devices::{
-    BackendUnavailable, DeviceHolder, DeviceId, DeviceInfo, DeviceKind, MAX_DEVICES,
-    PhysicalDevice, PhysicalReport,
+    BackendUnavailable, DeviceHolder, DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable,
+    MAX_DEVICES, PhysicalDevice, PhysicalReport,
 };
+pub use grants::{Destination, Grant, Member, MemberKind, Ports, Proto, check_grants};
 pub use id::BoxId;
 pub use runtime::{
     Allocation, Asked, BackingGrant, BackingKey, BackingOffer, BackingPhase, BoxInfo, BoxState,
     Capacity, CapacityResources, ConnectFailure, ConnectPhase, ConnectReply, Execution, Exit,
     GpuEligibility, ImageArch, ImageOs, ImagePlatform, IoKind, LifecycleCause, MAX_RUNTIME_ROUTES,
     Membership, Proc, Refusal, RouteKey, RouteOffer, RouteReceipt, Runtime, RuntimeCost, Signal,
-    Usage,
+    Upstream, Usage,
 };
 pub use spec::{
     Ask, BlockCount, BoxOwner, BoxSpec, Class, ClassSpec, End, ExecLimit, Given, Mount, Network,

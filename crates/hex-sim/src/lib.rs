@@ -4,6 +4,8 @@
 //! and a regression is a changed number, not noise.
 //!
 //! - [`census`]: the most the recorded inputs hold, and the input-bound rule that bounds inputs by it.
+//! - [`charge`]: a microVM's charge learned from its measured use, its bookings within its node's fleet budget,
+//!   and the contention rule's decisions (joint plan step 14, `docs/design/learned-charge.md`).
 //! - [`model`]: nodes, workloads and their resources; nodes' platforms and devices, workloads' asks.
 //! - [`needs`]: what a box needs of a node, in kiln's needs grammar adapted to boxes.
 //! - [`facts`]: what a node reports about itself, read from its OS's text, and the node it makes.
@@ -45,6 +47,7 @@
 
 pub mod baseline;
 pub mod census;
+pub mod charge;
 pub mod danger;
 pub mod error;
 pub mod facts;

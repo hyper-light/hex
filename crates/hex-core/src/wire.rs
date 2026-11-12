@@ -45,10 +45,10 @@ use hex_api::{
     Allocation, BackendUnavailable, BackingGrant, BackingKey, BackingOffer, BackingPhase, Bounds,
     BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
     ConnectFailure, ConnectPhase, ConnectReply, DeviceHolder, DeviceId, DeviceInfo, DeviceKind,
-    Execution, Exit, GpuEligibility, ImageArch, ImageOs, ImagePlatform, IoKind, IoRates,
-    LifecycleCause, MAX_DEVICES, MAX_RUNTIME_ROUTES, Mount, Network, OciSpec, PhysicalDevice,
-    PhysicalReport, Program, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost,
-    Signal, Usage, User,
+    DeviceUnavailable, Execution, Exit, GpuEligibility, ImageArch, ImageOs, ImagePlatform, IoKind,
+    IoRates, LifecycleCause, MAX_DEVICES, MAX_RUNTIME_ROUTES, Mount, Network, OciSpec,
+    PhysicalDevice, PhysicalReport, Program, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt,
+    RuntimeCost, Signal, Upstream, Usage, User,
 };
 
 use crate::netns;
@@ -542,7 +542,8 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
                     put_device_holder(w, device.holder.as_ref())?;
                 }
                 put_cost_option(w, capacity.cost)?;
-                put_capacity_routes(w, capacity)
+                put_capacity_routes(w, capacity)?;
+                put_unavailable_devices(w, &capacity.unavailable)
             })?;
         }
         Answer::PhysicalReport(report) => {
@@ -941,6 +942,14 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                     "backings",
                     backing_offer,
                 )?,
+                // Last. Only a build of this same wire reaches here (IDENTITY), so it is always present, and a capacity
+                // cut before it is refused as any truncation is; an older JSON report reads as none (serde default).
+                unavailable: r.device_list(UNAVAILABLE_MIN_BYTES, |r| {
+                    Ok(DeviceUnavailable {
+                        id: device_id(r)?,
+                        why: r.device_string("unavailable.why")?,
+                    })
+                })?,
             };
             check_capacity(&capacity)?;
             Ok(capacity)
@@ -1250,7 +1259,9 @@ fn put_box_spec(w: &mut Writer, spec: &BoxSpec) -> Result<(), Fault> {
     })?;
     w.option_with(spec.allocation, |w, allocation| {
         put_resources(w, allocation.resources);
-        put_cost(w, allocation.cost)
+        put_cost(w, allocation.cost)?;
+        w.option(allocation.booked, put_resources);
+        Ok(())
     })?;
     put_route_option(w, spec.route)
 }
@@ -1281,6 +1292,7 @@ fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
             Ok(Allocation {
                 resources: resources(r)?,
                 cost: runtime_cost(r)?,
+                booked: r.option(resources)?,
             })
         })?,
         route: r.option(route_receipt)?,
@@ -1300,7 +1312,8 @@ fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
 const RESOURCE_BYTES: usize = 3 * size_of::<u64>();
 const COST_BYTES: usize = 32 + 5 * RESOURCE_BYTES;
 const OPTIONAL_COST_BYTES: usize = 1 + COST_BYTES;
-const OPTIONAL_ALLOCATION_BYTES: usize = 1 + RESOURCE_BYTES + COST_BYTES;
+// Joint plan step 14: what was booked follows the cost, an option of its own.
+const OPTIONAL_ALLOCATION_BYTES: usize = 1 + RESOURCE_BYTES + COST_BYTES + 1 + RESOURCE_BYTES;
 
 // Append-only route/backing widths: five enum bytes per key; opaque pool/generation bytes;
 // optional tags; and a u32 device count followed by the existing nine-byte DeviceId codec.
@@ -1572,6 +1585,7 @@ fn backing_grant(r: &mut Reader<'_>) -> Result<BackingGrant, Fault> {
         allocation: Allocation {
             resources: resources(r)?,
             cost: runtime_cost(r)?,
+            booked: None,
         },
         devices: r.device_list(9, device_id)?,
     };
@@ -1579,6 +1593,20 @@ fn backing_grant(r: &mut Reader<'_>) -> Result<BackingGrant, Fault> {
         .check()
         .map_err(|_| Fault::value("backing", "invalid fixed grant or physical claims"))?;
     Ok(grant)
+}
+
+/// A device a capacity won't offer: its kind and key, then its reason's length.
+const UNAVAILABLE_MIN_BYTES: usize = size_of::<u8>() + size_of::<u64>() + size_of::<u32>();
+
+/// The devices a capacity lists but won't offer, each with why: after every other field of it (AC-T7.4.1).
+fn put_unavailable_devices(w: &mut Writer, unavailable: &[DeviceUnavailable]) -> Result<(), Fault> {
+    w.reserve_fixed(size_of::<u32>())?;
+    w.device_count(unavailable.len(), UNAVAILABLE_MIN_BYTES)?;
+    for device in unavailable {
+        put_device_id(w, &device.id);
+        w.string(&device.why)?;
+    }
+    Ok(())
 }
 
 fn put_capacity_routes(w: &mut Writer, capacity: &Capacity) -> Result<(), Fault> {
@@ -2043,7 +2071,9 @@ fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
             .guest()
             .map_err(|e| Fault::value("allocation", e.to_string()))?;
         put_resources(w, allocation.resources);
-        put_cost(w, allocation.cost)
+        put_cost(w, allocation.cost)?;
+        w.option(allocation.booked, put_resources);
+        Ok(())
     })?;
     put_route_option(w, info.route)
 }
@@ -2067,6 +2097,7 @@ fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
             let allocation = Allocation {
                 resources: resources(r)?,
                 cost: runtime_cost(r)?,
+                booked: r.option(resources)?,
             };
             allocation
                 .guest()
@@ -2205,7 +2236,32 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             "uncertain refusal",
             "a cause is itself uncertain",
         )),
+        Refusal::Awaits { needs } => {
+            // Its tag and the capability's, reserved whole as a Backing refusal's are.
+            w.reserve_fixed(2)?;
+            w.u8(13);
+            put_upstream(w, *needs)
+        }
     }
+}
+
+/// A capability by its place in [`Upstream::ALL`] (append-only).
+fn put_upstream(w: &mut Writer, needs: Upstream) -> Result<(), Fault> {
+    let tag = Upstream::ALL
+        .iter()
+        .position(|known| *known == needs)
+        .and_then(|at| u8::try_from(at).ok())
+        .ok_or_else(|| Fault::value("upstream", format!("{needs:?} has no tag")))?;
+    w.u8(tag);
+    Ok(())
+}
+
+fn upstream(r: &mut Reader<'_>) -> Result<Upstream, Fault> {
+    let tag = r.u8()?;
+    Upstream::ALL
+        .get(usize::from(tag))
+        .copied()
+        .ok_or_else(|| Fault::value("upstream", format!("variant {tag}")))
 }
 
 /// A Connect refusal's body, exactly, reserved whole before any of it is written as a Backing
@@ -2301,6 +2357,9 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
                 "a cause is itself uncertain",
             ));
         }
+        13 => Refusal::Awaits {
+            needs: upstream(r)?,
+        },
         t => return Err(Fault::value("refusal", format!("variant {t}"))),
     })
 }
