@@ -406,9 +406,20 @@ fn a_holding_past_the_room_blocks_the_nodes_admission_typed() {
 /// node's 2 CPUs refused and its 1 started, and the holder told over QUIC the view with all 4 CPUs held.
 #[test]
 fn a_holder_reaches_the_nodes_keeper_over_quic() {
+    use hex_core::patience::Patience;
     use hex_quic::capacity::{CAPACITY_PORT, Link, Server};
     use hex_quic::enroll::{self, sim::SimCa};
     use hex_quic::{Config, Endpoint, Shape};
+    use hex_testkit::waits::within;
+
+    // Each wait over loopback is for its own fact, named for it. No census over QUIC has recorded one yet, so each
+    // measures, for the fact alone, its answers recorded for the census that will seed it (hex-testkit's rule).
+    /// A dial's answer: its handshake and the node's Welcome.
+    static DIAL: Patience = Patience::measuring("test.hex_node.capacity.dial");
+    /// Room on the keeper's port for what the holder says: the keeper's grants.
+    static SAY: Patience = Patience::measuring("test.hex_node.capacity.say");
+    /// The keeper's next word to the holder: its answer to what it said, or a hint.
+    static HEAR: Patience = Patience::measuring("test.hex_node.capacity.hear");
 
     let dir = tempfile::tempdir().unwrap();
     let runtime: Arc<dyn Runtime> = Arc::new(hex_api::sim::SimRuntime::default());
@@ -462,19 +473,19 @@ fn a_holder_reaches_the_nodes_keeper_over_quic() {
         },
     })
     .unwrap();
-    let patience = || std::time::Instant::now() + hex_api::conformance::PATIENCE;
-    let peer = kiln_end
-        .dial("node.capacity.test", node.local_addr(), patience())
-        .unwrap();
+    let peer = within(&DIAL, |by| {
+        kiln_end.dial("node.capacity.test", node.local_addr(), by)
+    })
+    .unwrap();
     let mut link = Link::open(&kiln_end, peer).unwrap();
     let mut kiln = Holder::start("kiln-runner".into(), 1, 4, &[]).unwrap();
     let mut said = VecDeque::from(vec![kiln.connect().unwrap()]);
     let mut events = Vec::new();
     let mut converse = |link: &mut Link, kiln: &mut Holder, said: &mut VecDeque<ToKeeper>| {
         while let Some(msg) = said.pop_front() {
-            link.say(&msg, Some(patience())).unwrap();
+            within(&SAY, |by| link.say(&msg, by)).unwrap();
             let mut out = Out::default();
-            kiln.hear(link.hear(Some(patience())).unwrap(), &mut out);
+            kiln.hear(within(&HEAR, |by| link.hear(by)).unwrap(), &mut out);
             said.extend(out.send);
             events.extend(out.events);
         }
@@ -494,7 +505,7 @@ fn a_holder_reaches_the_nodes_keeper_over_quic() {
     let (_, step) = driver.submit(d, p).unwrap();
     assert!(started(&quiesce(&driver, step)));
     server.hint().unwrap();
-    let ToHolder::Hint { view, .. } = link.hear(Some(patience())).unwrap() else {
+    let ToHolder::Hint { view, .. } = within(&HEAR, |by| link.hear(by)).unwrap() else {
         panic!("no hint");
     };
     assert_eq!((view.room.cpu_milli, view.held.cpu_milli), (4000, 4000));
