@@ -159,7 +159,9 @@ on hardware (ROOT's fairness run).
   fleet's held, growth and budget), and ends no other while that VM's VMM still runs, so one end is never two. Its
   state is explicit (`Resort`: `Held`, `Ending`, `Refused`). Where the fleet passes its budget with every VM within its
   own, the node can't act and says so, typed (`Refusal::Exhausted`); a refused kill is kept typed too, and the next
-  window asks the rule again. The why is on the box itself, where the person looks (ROOT, 2026-11-12): the node
+  window asks the rule again. Where it would move the VM rather than end it, the move is refused typed: a Shards VM's
+  awaits D176 (`Awaits(LiveMove)`, the end's `unmoved`), a Firecracker VM's would be Hex's own, through Firecracker's
+  snapshot, which Hex doesn't drive yet. The why is on the box itself, where the person looks (ROOT, 2026-11-12): the node
   writes it into the VM's record after the window (`BoxRecord::last_resort`, through the box's record turn and only
   into the record of that VM's lifetime, a write that fails kept for the next window), and the VM's inspect and list
   carry it (`BoxInfo::last_resort`, last on the node's wire), across the node's restarts. A node that crashes between the
@@ -236,9 +238,9 @@ reaches the view settled with goal 13 the same day:
   supervisor's `running_vms`), learns, and writes the placement (C4, C5), each file only when its value changes
   (`BoxCgroup::set`; a VM's create already wrote its ceiling): each VM's `cpu.weight` and `memory.high`, the fleet's
   parent's `cpu.max` and `cpu.weight`, `.vm`'s `cpu.weight`, and each process and OCI box's and `.oci`'s `cpu.weight`
-  on the same scale (C4). Each Shards guest's room is refused
-  `Awaits(GuestRoom)` (C7). A failed window is kept, and the capacity answers then carry nothing learned, so the
-  class's VMs are booked whole until a window passes.
+  on the same scale (C4). Each Shards guest's room is refused `Awaits(GuestRoom)` and its ring pins within it
+  `Awaits(RingPinsWithinRoom)` (C7). A failed window is kept, and the capacity answers then carry nothing learned, so
+  the class's VMs are booked whole until a window passes.
 - `hex_api::Capacity::learned` crosses the node socket's wire last on a VM class's capacity answer (append-only).
   Its priors are bounded by a class's profiles, its holdings by a node's boxes, and the answer is fitted to one
   message. On each refresh the scheduler (`scheduler::charges`) gives its node's facts the priors it carries, then,

@@ -6,9 +6,10 @@
 //! weighed by the budgets of every fleet under it. Every other child of the node's cgroup is on the same scale: each
 //! process and OCI box weighs its booking and `.oci` its boxes' weights together, and the fleet's budget is what they
 //! leave, so each child under contention gets at least min(its need, its booking or budget) (`Scale`). A capacity
-//! answer for a VM class carries what it learned (C2, C8: `hex_api::Learned`). A Shards guest can't yet be told its
-//! room: shards-api has no call that sends init's `ROOM` (D188), so that is refused `Awaits(GuestRoom)` while its
-//! VMM's `memory.high` holds it at its budget (C7).
+//! answer for a VM class carries what it learned (C2, C8: `hex_api::Learned`). A Shards guest can't yet be held within
+//! its room: shards-api has no call that sends init's `ROOM` (D188), and no Shards revision keeps its ring pins within
+//! it, so that is refused `Awaits(GuestRoom)` and `Awaits(RingPinsWithinRoom)` while its VMM's `memory.high` holds it
+//! at its budget (C7). The last resort ends a VM where it would move it, its move refused `Awaits(LiveMove)` (C5).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -124,8 +125,8 @@ pub(super) struct Learner {
     root: PathBuf,
     /// `.oci`, the parent of the node's OCI boxes.
     oci: PathBuf,
-    /// The capability each Shards guest's room awaits, by its VM (C7).
-    rooms: BTreeMap<Scope, Upstream>,
+    /// The capabilities each Shards guest's room awaits, by its VM (C7).
+    rooms: BTreeMap<Scope, &'static [Upstream]>,
     /// Why the last window failed: until one passes, the capacity answers carry nothing learned.
     fault: Option<Refusal>,
     /// The last resort's state (C5).
@@ -213,12 +214,24 @@ fn budget_of(max: Option<&str>, machine: u64) -> u64 {
     }
 }
 
-/// What telling a VM's guest its room takes (C7): a Shards guest needs shards-api to send init's `ROOM` (D188), which
-/// it can't yet; a Firecracker guest has no room to be told, its VMM's cgroup alone holding it.
-fn tell_room(class: Class) -> Result<(), Upstream> {
+/// What holding a VM's guest within its room awaits (C7): a Shards guest needs shards-api to send init's `ROOM`
+/// (D188), which it can't yet, and its ring pins (D230's long-term pinned slots, which its init makes on its own) kept
+/// within that room, which p/ring-pins-v1's room-bounded pins don't do yet; a Firecracker guest has no room to be told
+/// and no ring, its VMM's cgroup alone holding it.
+fn room_awaits(class: Class) -> &'static [Upstream] {
     match class {
-        Class::Shards => Err(Upstream::GuestRoom),
-        _ => Ok(()),
+        Class::Shards => &[Upstream::GuestRoom, Upstream::RingPinsWithinRoom],
+        _ => &[],
+    }
+}
+
+/// What moving a VM of `class` to another machine instead of ending it awaits, where that move is another product's
+/// (C5): a Shards VM saved whole and resumed elsewhere is Shards' D176, in progress. A Firecracker VM's move would be
+/// Hex's own, through Firecracker's snapshot, which Hex doesn't drive yet: none to await.
+fn move_awaits(class: Class) -> Option<Upstream> {
+    match class {
+        Class::Shards => Some(Upstream::LiveMove),
+        _ => None,
     }
 }
 
@@ -525,11 +538,9 @@ impl Learner {
         self.place(io, &natives, &scale)?;
         self.last_resort(io)?;
         for (scope, vm) in &self.vms {
-            match tell_room(vm.class) {
-                Ok(()) => {}
-                Err(needs) => {
-                    self.rooms.insert(*scope, needs);
-                }
+            let awaited = room_awaits(vm.class);
+            if !awaited.is_empty() {
+                self.rooms.insert(*scope, awaited);
             }
         }
         Ok(())
@@ -584,6 +595,7 @@ impl Learner {
             fleet_held: why.fleet.held,
             fleet_growth: why.fleet.growth,
             fleet_budget: why.fleet.budget,
+            unmoved: move_awaits(class),
         };
         let bound = self.ends;
         let full = |what| Refusal::Exhausted { what, bound };
@@ -792,7 +804,8 @@ impl Learner {
     fn awaits(&self) -> Vec<(&BoxId, Upstream)> {
         self.rooms
             .iter()
-            .filter_map(|(scope, needs)| self.vms.get(scope).map(|vm| (&vm.id, *needs)))
+            .filter_map(|(scope, needs)| self.vms.get(scope).map(|vm| (vm, *needs)))
+            .flat_map(|(vm, needs)| needs.iter().map(move |need| (&vm.id, *need)))
             .collect()
     }
 }

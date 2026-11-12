@@ -924,6 +924,10 @@ pub struct LearnedEnd {
     pub fleet_held: u64,
     pub fleet_growth: u64,
     pub fleet_budget: u64,
+    /// What moving it to another machine instead of ending it awaits, where that move is another product's: a Shards
+    /// VM's is Shards' D176 ([`Upstream::LiveMove`]). After the fleet's, so absent means none (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unmoved: Option<Upstream>,
 }
 
 impl LearnedEnd {
@@ -1868,11 +1872,17 @@ pub enum Upstream {
     /// with a command of its own gives that command every port its Agentfile gives no member (D122), so a publish
     /// grant on such a run can't be held to the member it names (joint plan step 15).
     PublishReceiver,
+    /// A Shards guest's engine-ring pins (D230's long-term pinned slots) kept within the room its budget leaves it:
+    /// Shards' p/ring-pins-v1, whose room-bounded pins no Shards revision holds yet (joint plan step 14, C7).
+    RingPinsWithinRoom,
+    /// A running Shards microVM saved whole and resumed on another machine (D176), so the last resort moves a VM
+    /// past its budget rather than ending it; D176 is in progress (joint plan step 14, C5).
+    LiveMove,
 }
 
 impl Upstream {
     /// Every capability, in the order the node's wire tags them.
-    pub const ALL: [Upstream; 12] = [
+    pub const ALL: [Upstream; 14] = [
         Upstream::GuestCpuTimePerVcpu,
         Upstream::MemberExec,
         Upstream::MemberGrantsByName,
@@ -1885,6 +1895,8 @@ impl Upstream {
         Upstream::GuestRoom,
         Upstream::RunHostStdioOnly,
         Upstream::PublishReceiver,
+        Upstream::RingPinsWithinRoom,
+        Upstream::LiveMove,
     ];
 }
 
@@ -1911,6 +1923,10 @@ impl std::fmt::Display for Upstream {
             Self::PublishReceiver => {
                 "Shards' image boot naming the member a published port reaches (owed by D231)"
             }
+            Self::RingPinsWithinRoom => {
+                "a Shards guest's ring pins kept within its room (Shards' p/ring-pins-v1)"
+            }
+            Self::LiveMove => "a running Shards microVM moved to another machine (Shards' D176)",
         })
     }
 }
