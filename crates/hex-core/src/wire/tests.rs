@@ -2458,8 +2458,9 @@ fn route_wire_capacity_bytes(
         MAX_MESSAGE,
     )
     .unwrap();
-    // Its three route lists and its unavailable devices' count, all empty, end it.
-    prefix.truncate(prefix.len() - 4 * size_of::<u32>());
+    // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14),
+    // end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1);
     let mut w = Writer::new(MAX_MESSAGE);
     w.raw(&prefix);
     w.u32(u32::try_from(routes.len()).unwrap());
@@ -2475,6 +2476,7 @@ fn route_wire_capacity_bytes(
         put_backing_offer(&mut w, backing).unwrap();
     }
     w.u32(0);
+    w.u8(0);
     w.done().unwrap()
 }
 
@@ -2921,8 +2923,9 @@ fn route_wire_hostile_counts_and_minimum_bytes_refuse_before_parse() {
         MAX_MESSAGE,
     )
     .unwrap();
-    // Its three route lists and its unavailable devices' count, all empty, end it.
-    prefix.truncate(prefix.len() - 4 * size_of::<u32>());
+    // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14),
+    // end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1);
     for count in [1u32, 65, u32::MAX] {
         let mut bytes = prefix.clone();
         bytes.extend(count.to_le_bytes());

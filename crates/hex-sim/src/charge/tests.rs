@@ -637,3 +637,60 @@ fn w14_the_placement_caps_the_fleet_at_its_budget_and_holds_each_vm_by_its_booki
         );
     }
 }
+
+/// Joint plan step 14 (AC-T7.4.1), C4 across the node's cgroup: every child on one scale. Do weigh the VM fleet by its
+/// budget (the machine less the boxes' bookings) and each process box by its booking, all with `fleet_weight`, and
+/// share a 32-CPU machine among them as the kernel does (`shares`) while all but one box ask for the whole machine;
+/// expect each box given at least min(its need, its booking), and the fleet at least its budget.
+#[test]
+fn w14_a_process_box_under_contention_gets_at_least_its_booking() {
+    let machine = 32_000;
+    let boxes = [(4_000, 32_000), (2_000, 1_000), (6_000, 32_000)];
+    let budget = machine - boxes.iter().map(|(booking, _)| booking).sum::<u64>();
+    let mut entries = vec![(u64::from(fleet_weight(budget, machine).unwrap()), machine)];
+    for (booking, need) in boxes {
+        entries.push((u64::from(fleet_weight(booking, machine).unwrap()), need));
+    }
+    assert_eq!(
+        entries.iter().map(|(weight, _)| weight).sum::<u64>(),
+        u64::from(WEIGHT_MAX)
+    );
+    let given = shares(machine, &entries).unwrap();
+    assert!(
+        given[0] >= budget,
+        "the fleet given {} of {budget}",
+        given[0]
+    );
+    for ((booking, need), got) in boxes.iter().zip(&given[1..]) {
+        assert!(
+            *got >= (*booking).min(*need),
+            "{got} for booking {booking}, need {need}"
+        );
+    }
+}
+
+proptest! {
+    /// Joint plan step 14 (AC-T7.4.1), C4 across the node's cgroup: do weigh up to eight boxes by bookings in whole
+    /// units of the scale and the fleet by what they leave, give each any need, and share the machine as the kernel
+    /// does; expect every box and the fleet given at least min(its need, its booking or budget).
+    #[test]
+    fn w14_every_child_on_one_scale_gets_its_booking(
+        units in proptest::collection::vec(1u64..=1_249, 1..=8),
+        needs in proptest::collection::vec(0u64..=40_000, 9),
+    ) {
+        // A machine of 40 CPUs: one unit of the scale is 4 milli-CPU, so each booking's weight is exact, and the boxes
+        // leave the fleet at least a unit, so the weights sum to the scale's top.
+        let machine = 40_000;
+        let unit = machine / u64::from(WEIGHT_MAX);
+        let budget = machine - units.iter().sum::<u64>() * unit;
+        let mut entries = vec![(u64::from(fleet_weight(budget, machine).unwrap()), needs[0])];
+        for (k, need) in units.iter().zip(&needs[1..]) {
+            entries.push((u64::from(fleet_weight(k * unit, machine).unwrap()), *need));
+        }
+        let given = shares(machine, &entries).unwrap();
+        prop_assert!(given[0] >= budget.min(needs[0]));
+        for ((k, need), got) in units.iter().zip(&needs[1..]).zip(&given[1..]) {
+            prop_assert!(*got >= (k * unit).min(*need), "{} for booking {}, need {}", got, k * unit, need);
+        }
+    }
+}

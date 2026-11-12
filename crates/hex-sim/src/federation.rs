@@ -298,7 +298,6 @@ pub fn run(cluster: &Cluster, config: &FedConfig) -> Result<FedRun, SimError> {
         topo: topo.try_clone()?,
         free,
         pick: config.cell.pick,
-        learned: None,
     };
     let mut moved = Vec::with_capacity(moving.len());
     for w in &moving {
