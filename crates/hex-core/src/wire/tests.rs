@@ -2127,6 +2127,8 @@ fn any_cause() -> impl Strategy<Value = Refusal> {
             .prop_map(|(id, cause)| Refusal::Lifecycle { id, cause }),
         (any::<u32>(), any_connect_failure())
             .prop_map(|(port, failure)| Refusal::Connect { port, failure }),
+        proptest::sample::select(Upstream::ALL.to_vec())
+            .prop_map(|needs| Refusal::Awaits { needs }),
     ]
 }
 
@@ -3874,6 +3876,80 @@ fn connect_refusal_reserves_its_whole_body_before_writing() {
             "{refusal:?}"
         );
     }
+}
+
+/// AC-T7.4.1 (joint plan step 12, Shards R04): an `Awaits` refusal is tag 13, after every refusal
+/// before it, then the capability's place in `Upstream::ALL`. Do: answer each capability refused, alone
+/// and as an `Uncertain` refusal's cause. Expect: two body bytes, [13, place], each read back as
+/// written. Do: a capability tag past the last, a cut and a trailing byte. Expect: refused as
+/// "upstream", Truncated and Leftover. Do: write it into a writer one byte short. Expect: refused
+/// before a byte is written, as a Backing refusal is.
+#[test]
+fn an_awaits_refusal_is_tagged_after_every_refusal_and_its_capability_by_place() {
+    let body = HEADER_BYTES;
+    for (place, needs) in Upstream::ALL.into_iter().enumerate() {
+        let refusal = Refusal::Awaits { needs };
+        let bytes = answer(5, &Answer::Refused(refusal.clone()), MAX_MESSAGE).unwrap();
+        assert_eq!(&bytes[body..], &[13, u8::try_from(place).unwrap()]);
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap(),
+            (
+                Header {
+                    kind: kind::REFUSED,
+                    id: 5
+                },
+                Answer::Refused(refusal.clone())
+            )
+        );
+        let uncertain = Refusal::Uncertain {
+            id: id("awaits"),
+            refusal: Box::new(refusal.clone()),
+            cleanup: Box::new(refusal.clone()),
+        };
+        let bytes = answer(6, &Answer::Refused(uncertain.clone()), MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            Answer::Refused(uncertain)
+        );
+        let mut short = Writer::new(1);
+        assert!(matches!(
+            put_refusal(&mut short, &refusal),
+            Err(Fault::Oversized { .. })
+        ));
+        assert!(short.out.is_empty());
+    }
+    let bytes = answer(
+        5,
+        &Answer::Refused(Refusal::Awaits {
+            needs: Upstream::MemberExec,
+        }),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    for tag in [u8::try_from(Upstream::ALL.len()).unwrap(), u8::MAX] {
+        let mut hostile = bytes.clone();
+        hostile[body + 1] = tag;
+        assert!(
+            matches!(
+                read_answer(&received(&hostile, 0), MAX_MESSAGE),
+                Err(Fault::Value { what: "upstream", .. })
+            ),
+            "capability tag {tag}"
+        );
+    }
+    assert!(matches!(
+        read_answer(&received(&bytes[..body + 1], 0), MAX_MESSAGE),
+        Err(Fault::Truncated { .. })
+    ));
+    let mut long = bytes;
+    long.push(0);
+    assert_eq!(
+        read_answer(&received(&long, 0), MAX_MESSAGE).unwrap_err(),
+        Fault::Leftover {
+            bytes: 1,
+            kind: kind::REFUSED,
+        }
+    );
 }
 
 /// AC-T7.4.1 (Shards R04): take each kind std's own errno mapping gives that Hex has no tag for (on
