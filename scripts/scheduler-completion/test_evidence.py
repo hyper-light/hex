@@ -378,7 +378,9 @@ class ProcessGroupEnding(unittest.TestCase):
             "target": target, "test": "completion_backends", "exit": 0, "timed_out": False, "reaped": True,
             "group_gone": True, "source_unchanged": True, "binary": binary}))
         (self.root / "fixture.json").write_text(json.dumps({"proof": "selected", "source": source,
-                                                            "backend": "oci", "topology": "laptop"}))
+                                                            "backend": "oci", "topology": "laptop",
+                                                            "execution_target": target, "origin_target": target,
+                                                            "factory_contract_sha256": "c" * 64}))
         args = argparse.Namespace(root_authorized=True, source=source, binary=program, binary_sha256=binary["sha256"],
             build_receipt=built / "build.json", config=self.root / "fixture.json", backend="oci", topology="laptop",
             proof="selected", target=target, timeout=self.TIMEOUT, cleanup_timeout=self.CLEANUP,

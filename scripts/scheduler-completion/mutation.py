@@ -19,7 +19,7 @@ def replacement(original, old, new):
     return original.replace(old, new, 1)
 
 
-def command(argv, root, name, timeout, cleanup_timeout):
+def command(argv, root, name, timeout, cleanup_timeout, on_start=None):
     require(isinstance(argv, list) and argv and all(isinstance(part, str) and part for part in argv),
             "exact argv array required, never a shell command")
     path = root / f"{name}.log"
@@ -27,6 +27,8 @@ def command(argv, root, name, timeout, cleanup_timeout):
         child = start_group(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         row = {"argv": argv, "pid": child.pid, "timed_out": False}
         try:
+            if on_start is not None:
+                on_start(row)
             child.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             row["timed_out"] = True
@@ -93,9 +95,10 @@ def execute(args):
     require(restored_build["exit"] == 0, "restored source did not build")
     restored = invoke("restored", spec["verify"])
     require(restored["exit"] == 0, "restored guard did not return green")
-    receipt["outcome"] = "verified"
+    receipt["outcome"] = "unverified"
+    receipt["text_control"] = "red-and-restored; no typed forbidden-effect or native resource proof"
     persist()
-    return 0
+    return 1
 
 
 def main():
