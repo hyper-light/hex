@@ -942,17 +942,14 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                     "backings",
                     backing_offer,
                 )?,
-                // Last, so an older peer's report, which ends before it, reads as none.
-                unavailable: if r.at_end() {
-                    Vec::new()
-                } else {
-                    r.device_list(UNAVAILABLE_MIN_BYTES, |r| {
-                        Ok(DeviceUnavailable {
-                            id: device_id(r)?,
-                            why: r.device_string("unavailable.why")?,
-                        })
-                    })?
-                },
+                // Last. Only a build of this same wire reaches here (IDENTITY), so it is always present, and a capacity
+                // cut before it is refused as any truncation is; an older JSON report reads as none (serde default).
+                unavailable: r.device_list(UNAVAILABLE_MIN_BYTES, |r| {
+                    Ok(DeviceUnavailable {
+                        id: device_id(r)?,
+                        why: r.device_string("unavailable.why")?,
+                    })
+                })?,
             };
             check_capacity(&capacity)?;
             Ok(capacity)
@@ -2786,11 +2783,6 @@ impl<'a> Reader<'a> {
                 kind,
             })
         }
-    }
-
-    /// Whether nothing of the message is left to read.
-    pub(crate) fn at_end(&self) -> bool {
-        self.rest.is_empty()
     }
 
     /// That nothing follows what the message's version defines, in the other protocols this codec carries.

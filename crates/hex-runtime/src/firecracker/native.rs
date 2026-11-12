@@ -468,9 +468,10 @@ impl FirecrackerRuntime {
         }
         let mut record = transaction.read(&id)?.ok_or_else(|| uncertain(&id))?;
         let plan = vfio::plan(&self.host, &self.catalog, &record.spec.devices, &[])?;
-        // A function no reset clears goes to one VM per host boot: refused where a VM had it on this one.
-        let once = vfio::once_per_boot(&self.host, &plan)?;
-        let marks = single_use::Marks::of(&self.config.state_dir, self.boot.as_ref())?;
+        // A function no reset clears goes to one VM per host boot: refused where any node's VM had it on this one.
+        let functions = vfio::functions(&plan)?;
+        let once = vfio::once_per_boot(&self.host, &functions)?;
+        let marks = single_use::Marks::of(&self.runtime, self.boot.as_ref())?;
         if let Some((function, spent)) = marks.check(&once)? {
             return Err(single_use::refused(function, spent, self.boot.as_ref()));
         }
@@ -724,9 +725,10 @@ impl FirecrackerRuntime {
         )?;
         // A function no reset clears that the observer had on this boot can't go to a box before the host reboots:
         // the pool says so before its observer is drained.
-        let once = vfio::once_per_boot(&self.host, &plan)?;
+        let functions = vfio::functions(&plan)?;
+        let once = vfio::once_per_boot(&self.host, &functions)?;
         if let Some((function, spent)) =
-            single_use::Marks::of(&self.config.state_dir, self.boot.as_ref())?.check(&once)?
+            single_use::Marks::of(&self.runtime, self.boot.as_ref())?.check(&once)?
         {
             return Err(single_use::pool_refused(
                 "a GPU pool's handoff to a box (VFIO)",
@@ -928,13 +930,19 @@ impl FirecrackerRuntime {
             .devices
             .try_reserve_exact(self.catalog.entries().len())
             .map_err(|_| exhausted("VFIO capacity", self.catalog.entries().len()))?;
+        // A function no reset clears that a VM had on this boot is listed, never offered: unavailable, with why.
+        let marks = single_use::Marks::of(&self.runtime, self.boot.as_ref())?;
+        let mut unavailable = Vec::new();
+        unavailable
+            .try_reserve_exact(self.catalog.entries().len())
+            .map_err(|_| exhausted("unavailable VFIO capacity", self.catalog.entries().len()))?;
         for entry in self
             .catalog
             .entries()
             .iter()
             .filter(|entry| entry.binding(Route::Vfio).is_some())
         {
-            if entry.info.id.kind == DeviceKind::Gpu {
+            let device = if entry.info.id.kind == DeviceKind::Gpu {
                 // An administrator's catalog is not current VRAM/load evidence. Prebound VFIO
                 // may hide host NVML: only the same initialized facts provider may supply this
                 // actual identity/metadata observation (including a witnessed live guest).
@@ -948,15 +956,23 @@ impl FirecrackerRuntime {
                 vfio::validate(&self.host, entry, &vmms)?;
                 let mut actual = actual.try_clone()?;
                 actual.holder = self.catalog.holder(entry.info.id, &records, &pools)?;
-                capacity.devices.push(actual);
-                continue;
+                actual
+            } else {
+                vfio::validate(&self.host, entry, &vmms)?;
+                entry.report(self.catalog.holder(entry.info.id, &records, &pools)?)?
+            };
+            // A box holding it keeps it as its own; anything else, a pool's observer included, may not offer it on.
+            if !matches!(device.holder, Some(hex_api::DeviceHolder::Box(_))) {
+                let declared = vfio::declared(entry)?;
+                let once = vfio::once_per_boot(&self.host, &declared)?;
+                if let Some((function, spent)) = marks.check(&once)? {
+                    unavailable.push(hex_api::DeviceUnavailable {
+                        id: device.id,
+                        why: single_use::reason(function, spent, self.boot.as_ref()),
+                    });
+                }
             }
-            vfio::validate(&self.host, entry, &vmms)?;
-            capacity.devices.push(entry.report(self.catalog.holder(
-                entry.info.id,
-                &records,
-                &pools,
-            )?)?);
+            capacity.devices.push(device);
         }
         let count = pools
             .iter()
@@ -1029,11 +1045,13 @@ impl FirecrackerRuntime {
             if let Some((source, bit)) = fresh
                 && (device.id.kind != DeviceKind::Gpu
                     || source.devices.binary_search(&device.id).is_ok())
+                && !unavailable.iter().any(|spent| spent.id == device.id)
             {
                 word |= bit;
             }
             capacity.device_routes.push(word);
         }
+        capacity.unavailable = unavailable;
         capacity.check()?;
         Ok(Some(capacity))
     }
