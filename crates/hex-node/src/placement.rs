@@ -576,6 +576,14 @@ struct State {
     admission: Option<Refusal>,
     /// The machine's capacity view, once opened (joint plan step 13).
     view: Option<view::View>,
+    /// This node's facts as last refreshed: the machine's physical room, before every holder's reservations
+    /// and the node's own rebooked holdings move the room its ledger admits against (`admission_spec`).
+    facts: Option<NodeSpec>,
+    /// The room last given the node's ledger from its facts (`readmit`), so an unchanged one isn't given again.
+    admitted: Option<Resources>,
+    /// What the node holds passes the room left it (a holding risen past it): it admits nothing of its own
+    /// until it fits, typed.
+    over: Option<Refusal>,
 }
 
 enum Effect {
@@ -779,6 +787,9 @@ impl Driver {
                 rows,
                 stopped: None,
                 view: None,
+                facts: None,
+                admitted: None,
+                over: None,
                 admission: raised.then(||Refusal::Invalid {
                     what:"local admission",
                     why:format!("current host or runtime pool room cannot cover recovered physical reservations {retained:?}; a successful live-room refresh is required before new local admission"),
@@ -863,7 +874,12 @@ impl Driver {
             }
             // Runtime::classes is a backend call too: validate after dropping the core lock.
             let prior = state.node.ran_keys().any(|(k, _, _)| k == key);
-            if !prior && let Some(why) = &state.admission {
+            // The room this admission is decided in, given the ledger now: a box whose holding was less
+            // than its receipt may have ended since, its credit gone with it (joint plan step 13).
+            if !prior {
+                readmit(&mut state)?;
+            }
+            if !prior && let Some(why) = state.admission.as_ref().or(state.over.as_ref()) {
                 return Ok(Step {
                     send: vec![(
                         from,
@@ -958,17 +974,28 @@ impl Driver {
         let _operation = self.operation()?;
         let mut state = self.lock()?;
         let local = spec.id == state.node.id();
-        // The node admits its own boxes against its room less every holder's reservations (CV3).
-        let spec = match state.view.as_mut().filter(|_| local) {
-            Some(view) => {
-                let refreshed = view.refresh(&spec);
-                finish(&mut state, refreshed, false)?
+        let spec = if local {
+            let kept = spec.try_clone().map_err(|_| Refusal::Exhausted {
+                what: "local node facts",
+                bound: 1,
+            })?;
+            if let Some(view) = state.view.as_mut() {
+                view.set_room(view::amounts(&spec.capacity));
             }
-            None => spec,
+            state.facts = Some(kept);
+            let admits = admission_spec(&state);
+            finish(&mut state, admits, false)?.unwrap_or(spec)
+        } else {
+            spec
         };
+        let capacity = spec.capacity;
         let result = state.node.refresh_node(spec);
         if local {
             state.admission = result.as_ref().err().map(admission_refusal);
+            if result.is_ok() {
+                state.admitted = Some(capacity);
+                state.over = None;
+            }
         }
         result.map_err(Error::Core)
     }
@@ -988,13 +1015,46 @@ impl Driver {
             .into());
         }
         let opened = view::View::open(dir, holders, state.node.budget().ran);
-        state.view = Some(finish(&mut state, opened, false)?);
-        state.admission = Some(Refusal::Invalid {
-            what: "local admission",
-            why: "the capacity view opened; a live-room refresh is required before new local admission"
-                .into(),
-        });
+        let mut opened = finish(&mut state, opened, false)?;
+        match state.facts.as_ref() {
+            Some(facts) => {
+                opened.set_room(view::amounts(&facts.capacity));
+                state.view = Some(opened);
+                readmit(&mut state)?;
+            }
+            None => {
+                state.view = Some(opened);
+                state.admission = Some(Refusal::Invalid {
+                    what: "local admission",
+                    why: "the capacity view opened; a live-room refresh is required before new local admission"
+                        .into(),
+                });
+            }
+        }
         Ok(())
+    }
+
+    /// What each microVM this node runs holds now, as the learned charge has it (joint plan step 14, C8):
+    /// its learned booking, and the memory and disk it holds past it. The machine's capacity view counts
+    /// the node's own held so (step 13, CV2), and the node's ledger, which books each box at its receipt,
+    /// is given the room those holdings leave, its room the machine's physical room still. Replaces what
+    /// was said before; returns how many boxes it holds so.
+    pub fn rebook(&self, holds: &[(Key, hex_api::CapacityResources)]) -> Result<usize, Error> {
+        let _operation = self.operation()?;
+        let mut state = self.lock()?;
+        let kept = state.node.rebook(holds.iter().map(|(key, holding)| {
+            (
+                *key,
+                Resources {
+                    cpu_milli: holding.cpu_milli,
+                    mem_bytes: holding.mem_bytes,
+                    disk_bytes: holding.disk_bytes,
+                    gpus: 0,
+                },
+            )
+        }));
+        readmit(&mut state)?;
+        Ok(kept)
     }
 
     /// A holder's word on `link`, decided beside what this node holds itself. A change to the holders'
@@ -1801,13 +1861,83 @@ fn view_mut(state: &mut State) -> Result<&mut view::View, Error> {
 
 /// The node's own admission given the room the holders' reservations leave it, at once (CV3). The keeper
 /// granted only what fits beside what the node holds, so its admission index never refuses the shrink.
+/// Gives the node's ledger the room its facts, the holders' reservations and its own holdings leave it
+/// now. Where what the node holds passes that room, its ledger can't be given less than it books: the node
+/// admits nothing of its own until it fits (`over`), typed, and goes on otherwise.
 fn readmit(state: &mut State) -> Result<(), Error> {
-    let spec = view_mut(state)?.admitted();
-    if let Some(spec) = finish(state, spec, false)? {
-        let result = state.node.refresh_node(spec);
-        finish(state, result, false)?;
+    let spec = admission_spec(state);
+    let Some(spec) = finish(state, spec, false)? else {
+        return Ok(());
+    };
+    if state.admitted == Some(spec.capacity) && state.over.is_none() {
+        return Ok(());
+    }
+    let capacity = spec.capacity;
+    match state.node.refresh_node(spec) {
+        Ok(()) => {
+            state.admitted = Some(capacity);
+            state.over = None;
+        }
+        Err(why) => {
+            state.over = Some(Refusal::Invalid {
+                what: "local admission",
+                why: format!(
+                    "what this node holds passes the room left it ({capacity:?}): {}",
+                    admission_refusal(&why)
+                ),
+            });
+        }
     }
     Ok(())
+}
+
+/// The spec this node's ledger admits against (joint plan steps 13 and 14): its facts, the machine's
+/// physical room less every holder's reservations (CV3), plus what its boxes' learned holdings leave of
+/// the receipts its ledger books, less what they take past them, so its free room is the physical room less
+/// what everything holds. None before its first facts.
+fn admission_spec(state: &State) -> Result<Option<NodeSpec>, Stop> {
+    let Some(facts) = state.facts.as_ref() else {
+        return Ok(None);
+    };
+    let foreign = state
+        .view
+        .as_ref()
+        .map_or(hex_api::capacity::Amounts::ZERO, view::View::foreign);
+    let booked = hex_api::capacity::Amounts::from_array(state.node.booked()?);
+    let held = hex_api::capacity::Amounts::from_array(state.node.held()?);
+    let (credit, debit) = (booked.less(held), held.less(booked));
+    let room = |physical: u64, credit: u64, foreign: u64, debit: u64| {
+        physical
+            .saturating_add(credit)
+            .saturating_sub(foreign)
+            .saturating_sub(debit)
+    };
+    let mut spec = facts
+        .try_clone()
+        .map_err(|e| Stop::Damaged(format!("the node's facts: {e}")))?;
+    spec.capacity = Resources {
+        cpu_milli: room(
+            facts.capacity.cpu_milli,
+            credit.cpu_milli,
+            foreign.cpu_milli,
+            debit.cpu_milli,
+        ),
+        mem_bytes: room(
+            facts.capacity.mem_bytes,
+            credit.mem_bytes,
+            foreign.mem_bytes,
+            debit.mem_bytes,
+        ),
+        disk_bytes: room(
+            facts.capacity.disk_bytes,
+            credit.disk_bytes,
+            foreign.disk_bytes,
+            debit.disk_bytes,
+        ),
+        // A holder holds no GPU (CV3) and a holding none past its receipt: the devices still agree.
+        gpus: facts.capacity.gpus,
+    };
+    Ok(Some(spec))
 }
 
 fn admission_refusal(why: &Stop) -> Refusal {
