@@ -78,8 +78,8 @@ The record (the guest's Books, the node's Store) and this process's run:
 | Held | `Ready` or `Deleting`, no exit | none: a run of an earlier node process | a host reboot (§5) |
 
 A call on a Booting box waits on nothing: it answers what is known (`Created`'s inspect, `Lifecycle { Pending }`
-for a stop), as `LifecycleCause::Pending` says. A Held box answers `Lifecycle { Uncertain }` to every call but
-recovery's adoption, which is `Awaits(AttachAfterCrash)`.
+for a stop or a delete), as `LifecycleCause::Pending` says. A Held box is refused `Awaits(AttachAfterCrash)` by every
+call, recovery's adoption among them, and is listed running: Hex can't prove it isn't.
 
 ## 4. Usage
 
@@ -100,9 +100,9 @@ D231's run ends with its owner: its `ImageGuest` dropped, stopped or its channel
 D231 gives no identity of the run's processes and no `attach`. So:
 
 - A Hex node that restarts ends its image VMs, but **Hex never assumes it**. A box whose record is `Ready` or
-  `Deleting` with no exit, of a node process before this one, is **held**: its record and its claim are kept, every
-  call on it is `Lifecycle { Uncertain }`, and recovery's adoption is refused `Awaits(AttachAfterCrash)`, which
-  recovery reports in its summary's `held` rather than failing the node's start.
+  `Deleting` with no exit, of a node process before this one, is **held**: its record and its claim are kept, and
+  every call on it, recovery's adoption among them, is refused `Awaits(AttachAfterCrash)`, which recovery reports
+  in its summary's `held` rather than failing the node's start.
 - The proof that ends a held box is a reboot of the host (the record's boot session differs from the host's, T-T7.1.2:
   that boot's end ended everything that ran of it). D231's `attach`, or the run's identity, would give a proof
   within a boot: that is `Upstream::AttachAfterCrash`, owed by Shards.
