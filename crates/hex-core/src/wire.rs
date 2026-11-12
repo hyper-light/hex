@@ -2102,7 +2102,28 @@ fn exit(r: &mut Reader<'_>) -> Result<Exit, Fault> {
     }
 }
 
+/// A refusal: an `Uncertain` one's tag, id and its two causes, each written by [`put_plain_refusal`], which refuses
+/// another `Uncertain` there, so no message nests them past one; any other, by [`put_plain_refusal`] alone. Neither
+/// reaches itself (CLAUDE.md §11).
 fn put_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
+    match refusal {
+        Refusal::Uncertain {
+            id,
+            refusal,
+            cleanup,
+        } => {
+            w.u8(12);
+            w.string(id.as_str())?;
+            put_plain_refusal(w, refusal)?;
+            put_plain_refusal(w, cleanup)
+        }
+        plain => put_plain_refusal(w, plain),
+    }
+}
+
+/// Any refusal but an `Uncertain` one, and so each of an `Uncertain` refusal's causes: an `Uncertain` here, a cause
+/// that is itself uncertain, is refused before any of it is written.
+fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
     match refusal {
         Refusal::Invalid { what, why } => {
             w.u8(0);
@@ -2180,28 +2201,11 @@ fn put_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             w.u32(*port);
             put_connect_failure(w, *failure)
         }
-        Refusal::Uncertain {
-            id,
-            refusal,
-            cleanup,
-        } => {
-            w.u8(12);
-            w.string(id.as_str())?;
-            put_cause(w, refusal)?;
-            put_cause(w, cleanup)
-        }
-    }
-}
-
-/// One of an `Uncertain` refusal's causes: any refusal but another `Uncertain`, so its depth is one.
-fn put_cause(w: &mut Writer, cause: &Refusal) -> Result<(), Fault> {
-    if matches!(cause, Refusal::Uncertain { .. }) {
-        return Err(Fault::value(
+        Refusal::Uncertain { .. } => Err(Fault::value(
             "uncertain refusal",
             "a cause is itself uncertain",
-        ));
+        )),
     }
-    put_refusal(w, cause)
 }
 
 /// A Connect refusal's body, exactly, reserved whole before any of it is written as a Backing
@@ -2223,14 +2227,30 @@ fn connect_refusal_bytes(failure: ConnectFailure) -> Option<usize> {
         .checked_add(fields)
 }
 
+/// A refusal: an `Uncertain` one's id and its two causes ([`uncertain_cause`]), or any other ([`plain_refusal`]).
+/// None of them reaches itself (CLAUDE.md §11).
 fn refusal(r: &mut Reader<'_>) -> Result<Refusal, Fault> {
-    refusal_of(r, false)
+    match r.u8()? {
+        12 => Ok(Refusal::Uncertain {
+            id: box_id(r)?,
+            refusal: Box::new(uncertain_cause(r)?),
+            cleanup: Box::new(uncertain_cause(r)?),
+        }),
+        tag => plain_refusal(r, tag),
+    }
 }
 
-/// A refusal, `cause` where it is an `Uncertain` refusal's: then never another `Uncertain`, refused at its tag before
-/// any of it is read, so no message nests them past one.
-fn refusal_of(r: &mut Reader<'_>, cause: bool) -> Result<Refusal, Fault> {
-    Ok(match r.u8()? {
+/// One of an `Uncertain` refusal's causes: any refusal but another `Uncertain`, refused at its tag before any of it
+/// is read, so no message nests them past one.
+fn uncertain_cause(r: &mut Reader<'_>) -> Result<Refusal, Fault> {
+    let tag = r.u8()?;
+    plain_refusal(r, tag)
+}
+
+/// Any refusal but an `Uncertain` one, its `tag` read: an `Uncertain` tag here is a cause that is itself uncertain,
+/// refused.
+fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
+    Ok(match tag {
         0 => Refusal::Invalid {
             what: name(&r.string("refusal name")?)?,
             why: r.string("refusal reason")?,
@@ -2274,11 +2294,6 @@ fn refusal_of(r: &mut Reader<'_>, cause: bool) -> Result<Refusal, Fault> {
         11 => Refusal::Connect {
             port: r.u32()?,
             failure: connect_failure(r)?,
-        },
-        12 if !cause => Refusal::Uncertain {
-            id: box_id(r)?,
-            refusal: Box::new(refusal_of(r, true)?),
-            cleanup: Box::new(refusal_of(r, true)?),
         },
         12 => {
             return Err(Fault::value(
