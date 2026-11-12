@@ -4170,6 +4170,7 @@ fn learned_end(id: &str, gib: u64) -> LearnedEnd {
         fleet_held: 17 << 30,
         fleet_growth: 2 << 30,
         fleet_budget: 16 << 30,
+        unmoved: Some(Upstream::LiveMove),
     }
 }
 
@@ -4331,15 +4332,16 @@ fn w14_a_capacitys_ends_are_held_to_its_bounds_and_fitted_after_its_holdings() {
         learned.ended = vec![learned_end("x", 5)];
     }
     let mut bytes = answer(14, &Answer::Capacity(Some(one)), MAX_MESSAGE).unwrap();
-    // The ends' count, then the one end: its id's length, the id, five u64s and its band.
-    let at = bytes.len() - (2 * size_of::<u32>() + 1 + 5 * size_of::<u64>() + 1);
+    // The ends' count, then the one end: its id's length, the id, five u64s, its band and its unmoved capability's
+    // option and tag.
+    let at = bytes.len() - (2 * size_of::<u32>() + 1 + 5 * size_of::<u64>() + 1 + 2);
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
     assert!(matches!(
         read_answer(&received(&bytes, 0), MAX_MESSAGE),
         Err(Fault::Value { .. })
     ));
-    let each = size_of::<u32>() + BoxId::MAX_LEN + 5 * size_of::<u64>() + 1;
+    let each = size_of::<u32>() + BoxId::MAX_LEN + 5 * size_of::<u64>() + 1 + 2;
     let ends: Vec<LearnedEnd> = (0..MAX_MESSAGE / each + 100)
         .map(|n| learned_end(&format!("{n:0>128}"), 5))
         .collect();

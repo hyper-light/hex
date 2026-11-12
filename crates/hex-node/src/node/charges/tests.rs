@@ -210,10 +210,11 @@ fn w14_the_learner_places_each_vm_its_fleet_and_vm_by_path_and_weight() {
     assert_eq!(io.take(), Vec::new(), "nothing changed, nothing written");
 }
 
-/// Joint plan step 14 (AC-T7.4.1), C7: a Shards guest's room can't be told yet. Do run a window of a Shards VM and a
-/// Firecracker VM; expect the Shards guest's room refused as awaiting `GuestRoom`, the Firecracker one's not.
+/// Joint plan step 14 (AC-T7.4.1), C7: a Shards guest can't yet be held within its room. Do run a window of a Shards
+/// VM and a Firecracker VM; expect the Shards guest's room refused as awaiting `GuestRoom`, its being told it, and
+/// `RingPinsWithinRoom`, its ring pins kept within it, the Firecracker one's neither.
 #[test]
-fn w14_a_shards_guests_room_awaits_guest_room() {
+fn w14_a_shards_guests_room_awaits_guest_room_and_its_ring_pins_within_it() {
     let io = Record::default();
     let vms = running(&[("vm-1", 1), ("vm-2", 2)]);
     for (_, _, cgroup) in &vms {
@@ -232,7 +233,13 @@ fn w14_a_shards_guests_room_awaits_guest_room() {
         .window(&io, vms, record, &[], machine(), Instant::now())
         .unwrap();
     let vm1 = BoxId::new("vm-1").unwrap();
-    assert_eq!(learner.awaits(), vec![(&vm1, Upstream::GuestRoom)]);
+    assert_eq!(
+        learner.awaits(),
+        vec![
+            (&vm1, Upstream::GuestRoom),
+            (&vm1, Upstream::RingPinsWithinRoom)
+        ]
+    );
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C2 and C8 in the node: what a capacity answer carries. Do warm one VM, booked at
@@ -576,6 +583,7 @@ fn w14_the_last_resort_ends_the_vm_most_past_its_budget_and_no_other() {
             fleet_held: 15 * GIB,
             fleet_growth: 15 * GIB,
             fleet_budget: 16 * GIB,
+            unmoved: Some(Upstream::LiveMove),
         }]
     );
     let other = learner.learned(Class::Firecracker, &[]).unwrap().unwrap();
