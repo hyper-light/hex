@@ -17,8 +17,8 @@
 //! boxes', which lacks what each runner's process and its runs use. Some runners name where their reserved work
 //! runs (a scope); the host's sample reads each synced runner's scope on either side of its read of free memory,
 //! keeps the smaller, and gives the keeper the room and the reads together, so the keeper credits the room each
-//! runner's use up to its reservations. The nemesis moves runs' use between samples, and once in a sample's window,
-//! before the free memory's read or after it (CV12's "a use that moved while free memory was read"); and the OS now
+//! runner's use up to its reservations. The nemesis moves runs' use between samples, and both ways, several times, in a
+//! sample's window, on either side of the free memory's read (any movement); and the OS now
 //! and then won't read a scope, which closes its runner's session. After every step the keeper's credit is at most
 //! what each scoped runner's reserved work used when free memory was last read, up to its reservations.
 //!
@@ -292,10 +292,10 @@ const MIX: [(Kind, u64); 20] = [
 /// bounded suite's few hundred reads close a dozen sessions for it. A test generator's parameter.
 const SCOPE_UNREADABLE: u64 = 32;
 
-/// How often a run's use moves in a sample's window, before the free memory's read, and failing that after it, in
-/// thousandths of the samples each: at most one move a window (CV12's claim is for a use that moved while free memory
-/// was read). A test generator's parameter.
-const MOVES_IN_WINDOW: u64 = 250;
+/// The most times a run's use moves on each side of the free memory's read in a sample's window, each move anywhere from
+/// none to its reservation: both ways, as often, so a use may fall and rise again while free memory is read (ROOT's bar
+/// for CV12: any movement). A test generator's parameter.
+const MOVES_IN_WINDOW: u64 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -611,8 +611,8 @@ impl World {
     }
 
     /// The host's sample (CV12): each synced runner's scope read on either side of its read of free memory, the
-    /// smaller kept (`hex_node::scopes::around`), then the room and the reads given the keeper together. One run's
-    /// use may move once in the window, before the free memory's read or after it. A scope the OS won't read is
+    /// smaller kept (`hex_node::scopes::around`), then the room and the reads given the keeper together. A run of a
+    /// runner it reads may move, both ways, several times, on either side of the free memory's read. A scope the OS won't read is
     /// refused, and the keeper closes its runner's session with its hints.
     fn sample(&mut self) -> Result<(), Violation> {
         let Some(keeper) = self.keeper.as_ref() else {
@@ -638,12 +638,14 @@ impl World {
             .pick(listed.len())
             .and_then(|at| listed.get(at))
             .map(|(_, n)| *n);
-        let early = self.rng.chance(MOVES_IN_WINDOW);
-        let mut moved = early && self.move_use(mover);
+        let mut moved = false;
+        for _ in 0..self.rng.range(0, MOVES_IN_WINDOW) {
+            moved |= self.move_use(mover);
+        }
         let room = self.measured()?;
         let at_free = self.works()?;
-        if !early && self.rng.chance(MOVES_IN_WINDOW) {
-            moved = self.move_use(mover);
+        for _ in 0..self.rng.range(0, MOVES_IN_WINDOW) {
+            moved |= self.move_use(mover);
         }
         let larger = self.planted(Mutant::CreditLargerRead);
         let whole = self.planted(Mutant::CreditWholeReservation);
