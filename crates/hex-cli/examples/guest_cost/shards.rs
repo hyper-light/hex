@@ -1101,6 +1101,67 @@ Swap:                  0 kB
         assert!(held.bytes >= 64 * 1024, "{held:?}");
     }
 
+    /// AC-T7.4.1 (ROOT: the shared images' page cache is no one VM's cost; original): two guests' VMM
+    /// cgroups as the Linux probe reads them, alike but that the first read the guest's images cold, its
+    /// cgroup charged their 20 MiB of page cache, and the second found them cached: expect the same memory
+    /// charged for both, the census's charge no matter which guest read the images first.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_cold_first_guest_is_charged_as_a_warm_one() {
+        use crate::run::{Readings, Tick, measured};
+        use crate::seam::Use;
+        const M: u64 = 1 << 20;
+        let (guest, anon, kernel) = (160 * M, 166 * M, 2 * M);
+        let charged = |file: u64| {
+            let dir = tempfile::tempdir().unwrap();
+            let cgroup = dir.path().join("cgroup");
+            std::fs::create_dir(&cgroup).unwrap();
+            let current = anon + kernel + file;
+            std::fs::write(cgroup.join("memory.current"), format!("{current}\n")).unwrap();
+            std::fs::write(cgroup.join("memory.peak"), format!("{current}\n")).unwrap();
+            std::fs::write(
+                cgroup.join("memory.stat"),
+                format!("anon {anon}\nfile {file}\nkernel {kernel}\nshmem 0\n"),
+            )
+            .unwrap();
+            let place = Place {
+                cgroup,
+                wrapper: dir.path().join("wrapper"),
+            };
+            let pid = i32::try_from(std::process::id()).unwrap();
+            let (_, mut holds) = probes(pid, u64::MAX, &place, Vec::new()).unwrap();
+            let mut held = holds.read().unwrap();
+            // This process maps no guest: its touched pages, as a VMM's guest RAM mapping would show them.
+            held.guest_memory = Some(guest);
+            let at = Duration::from_millis(100);
+            let readings = Readings {
+                cpu: vec![Tick {
+                    at,
+                    reading: Use {
+                        cpu: Duration::ZERO,
+                        guest_cpu: Duration::ZERO,
+                        guest_threads: None,
+                    },
+                }],
+                holdings: vec![Tick { at, reading: held }],
+            };
+            measured(
+                Duration::ZERO,
+                &readings,
+                CapacityResources::default(),
+                at,
+                1,
+                &Vec::new(),
+                &Vec::new(),
+            )
+            .unwrap()
+            .mem_bytes
+        };
+        let (cold, warm) = (charged(20 * M), charged(0));
+        assert_eq!(cold, warm, "cold {cold}, warm {warm}");
+        assert_eq!(warm, anon + kernel - guest);
+    }
+
     /// AC-T7.4.1 (light smoke, few boots): produce a pair over the configured Shards guest with SEEDABLE
     /// two, through the same census, evidence and output the measurement uses: expect it written and loaded
     /// as a node loads it, its envelope the configured guest's, two guests in its evidence, and each with
