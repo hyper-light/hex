@@ -22,6 +22,7 @@ pub const MAX_BOXES: usize = 65_536;
 
 pub mod devices;
 pub mod firecracker;
+pub mod grants;
 pub mod guest;
 
 #[cfg(target_os = "linux")]

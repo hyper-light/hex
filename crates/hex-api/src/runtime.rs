@@ -1478,11 +1478,17 @@ pub enum Upstream {
     AttachAfterCrash,
     /// A signal to the members of a Shards microVM: the signal of Shards' agent-control endpoint.
     MemberSignal,
+    /// A microVM member's grants to reach a peer at one address (kiln's endpoint by its address):
+    /// Shards' explicit grants naming the member, the address, the port and the direction.
+    MemberGrantsByAddress,
+    /// A microVM member's reach to a service its own host serves on its loopback (kiln beside the
+    /// VM): Shards' explicit host-service grants.
+    MemberHostService,
 }
 
 impl Upstream {
     /// Every capability, in the order the node's wire tags them.
-    pub const ALL: [Upstream; 7] = [
+    pub const ALL: [Upstream; 9] = [
         Upstream::GuestCpuTimePerVcpu,
         Upstream::MemberExec,
         Upstream::MemberGrantsByName,
@@ -1490,6 +1496,8 @@ impl Upstream {
         Upstream::WindowsRunHost,
         Upstream::AttachAfterCrash,
         Upstream::MemberSignal,
+        Upstream::MemberGrantsByAddress,
+        Upstream::MemberHostService,
     ];
 }
 
@@ -1507,6 +1515,8 @@ impl std::fmt::Display for Upstream {
                 "taking back an image's run after its owner's crash (owed by D231)"
             }
             Self::MemberSignal => "a signal to Shards members (its agent-control endpoint)",
+            Self::MemberGrantsByAddress => "a Shards member's grants by address",
+            Self::MemberHostService => "a Shards member's reach to its host's own service",
         })
     }
 }
