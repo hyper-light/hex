@@ -1,15 +1,15 @@
 //! The machine's capacity view in the node agent (joint plan step 13, `docs/design/capacity-view.md`;
 //! AC-T7.4.1): the keeper's shell. Its records are a folder of their own, written whole by the node's
-//! record files (CV2). The room it keeps is the node's facts' capacity, and the node admits its own boxes
-//! against that room less every holder's reservations (CV3), under the placement lock that serializes
-//! both, so the two admissions are one ledger's. Holders reach it over Hex's transport (Hex step 4);
-//! until that is on main, in process.
+//! record files (CV2). The room it keeps is the node's facts' capacity, the machine's physical room, and the
+//! node admits its own boxes against that room less every holder's reservations (CV3; the Driver's
+//! `admission_spec`), under the placement lock that serializes both, so the two admissions are one
+//! ledger's. Holders reach it over Hex's transport (Hex step 4); until that is on main, in process.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use hex_api::capacity::{self, Amounts, Forgotten, Keeper, NotForgotten, ToHolder, ToKeeper};
-use hex_sim::model::{NodeSpec, Resources};
+use hex_sim::model::Resources;
 use hex_sim::peer::{Records as _, Stop};
 
 use crate::records::{Files, MAX_BYTES};
@@ -62,12 +62,10 @@ pub(super) fn amounts(r: &Resources) -> Amounts {
     }
 }
 
-/// The keeper with its records, the node's facts and the links its holders came on (module docs).
+/// The keeper with its records and the links its holders came on (module docs).
 pub(super) struct View {
     keeper: Keeper,
     records: KeeperFiles,
-    /// The node's facts as last refreshed, before any holder's reservations come off.
-    facts: Option<NodeSpec>,
     /// The host's own held as the holders were last owed it.
     told: Amounts,
     /// Each link holding a current session, and that session.
@@ -102,40 +100,19 @@ impl View {
         Ok(Self {
             keeper,
             records,
-            facts: None,
             told: Amounts::ZERO,
             links: BTreeMap::new(),
         })
     }
 
-    /// The node's facts refreshed: the room the keeper keeps, and the spec the node admits against.
-    pub(super) fn refresh(&mut self, facts: &NodeSpec) -> Result<NodeSpec, Stop> {
-        self.keeper.set_room(amounts(&facts.capacity));
-        let admits = self.admits(facts)?;
-        self.facts = Some(cloned(facts)?);
-        Ok(admits)
+    /// The machine's physical room, as the node's facts measured it.
+    pub(super) fn set_room(&mut self, room: Amounts) {
+        self.keeper.set_room(room);
     }
 
-    /// The spec the node admits against now, from the facts last refreshed (none before the first).
-    pub(super) fn admitted(&self) -> Result<Option<NodeSpec>, Stop> {
-        self.facts
-            .as_ref()
-            .map(|facts| self.admits(facts))
-            .transpose()
-    }
-
-    /// `facts` with every holder's reservations off its capacity. A holder holds no GPU (CV3), so the
-    /// node's devices still agree with its count.
-    fn admits(&self, facts: &NodeSpec) -> Result<NodeSpec, Stop> {
-        let foreign = self.keeper.foreign();
-        let mut spec = cloned(facts)?;
-        spec.capacity = Resources {
-            cpu_milli: facts.capacity.cpu_milli.saturating_sub(foreign.cpu_milli),
-            mem_bytes: facts.capacity.mem_bytes.saturating_sub(foreign.mem_bytes),
-            disk_bytes: facts.capacity.disk_bytes.saturating_sub(foreign.disk_bytes),
-            gpus: facts.capacity.gpus,
-        };
-        Ok(spec)
+    /// The sum of every holder's reservations.
+    pub(super) fn foreign(&self) -> Amounts {
+        self.keeper.foreign()
     }
 
     /// A holder's word on `link`, decided beside the node's own `local`: the answer, and whether the
@@ -204,11 +181,6 @@ impl View {
     pub(super) fn view(&self, local: Amounts) -> capacity::View {
         self.keeper.view(local)
     }
-}
-
-fn cloned(spec: &NodeSpec) -> Result<NodeSpec, Stop> {
-    spec.try_clone()
-        .map_err(|e| Stop::Damaged(format!("the node's facts: {e}")))
 }
 
 #[cfg(test)]
