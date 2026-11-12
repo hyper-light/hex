@@ -109,6 +109,10 @@ pub(super) struct Learner {
     fleet: (BoxCgroup, Vec<Write>),
     /// `.vm`, the parent of every fleet under the node's root, and what the learner last wrote there.
     parent: (BoxCgroup, Vec<Write>),
+    /// The node's root (`<node root>`), whose children are its process boxes, `.oci` and `.vm`.
+    root: PathBuf,
+    /// `.oci`, the parent of the node's OCI boxes.
+    oci: PathBuf,
     /// The capability each Shards guest's room awaits, by its VM (C7).
     rooms: BTreeMap<Scope, Upstream>,
     /// Why the last window failed: until one passes, the capacity answers carry nothing learned.
@@ -180,6 +184,65 @@ fn tell_room(class: Class) -> Result<(), Upstream> {
     }
 }
 
+/// One of the node's process or OCI boxes, as its cgroup books it (C4).
+struct Native {
+    dir: PathBuf,
+    booked: CapacityResources,
+    /// Whether it is under `.oci`.
+    oci: bool,
+}
+
+fn unreadable(file: &'static str, text: &str) -> Refusal {
+    Refusal::Invalid {
+        what: file,
+        why: format!("{text:?} is no value the kernel writes"),
+    }
+}
+
+/// A box's CPU booking from its `cpu.max`, in milli-CPU: `max`, or none, books nothing.
+fn booked_cpu(max: Option<&str>) -> Result<u64, Refusal> {
+    let Some(text) = max else {
+        return Ok(0);
+    };
+    let parsed = CpuMax::parse(text).ok_or_else(|| unreadable("cpu.max", text))?;
+    let Some(quota) = parsed.quota_us else {
+        return Ok(0);
+    };
+    u128::from(quota)
+        .checked_mul(u128::from(CPU_MILLI))
+        .and_then(|n| n.checked_div(u128::from(parsed.period_us)))
+        .and_then(|n| u64::try_from(n).ok())
+        .ok_or_else(|| unreadable("cpu.max", text))
+}
+
+/// A box's memory booking from its `memory.max`, in bytes: `max`, or none, books nothing.
+fn booked_bytes(max: Option<&str>) -> Result<u64, Refusal> {
+    match max.map(str::trim) {
+        None | Some("max") => Ok(0),
+        Some(text) => text.parse().map_err(|_| unreadable("memory.max", text)),
+    }
+}
+
+/// Gives the cgroup at `dir` `weight` as its `cpu.weight` where it holds another: read first, as a box's own create or
+/// reuse writes its owner's weight. A cgroup gone before the write is passed over.
+fn weigh(io: &impl Cgroups, dir: &Path, weight: u16) -> Result<(), Refusal> {
+    let value = weight.to_string();
+    match io.read(dir, "cpu.weight")? {
+        None => return Ok(()),
+        Some(text) if text.trim() == value => return Ok(()),
+        Some(_) => {}
+    }
+    let write = Write {
+        file: "cpu.weight",
+        value,
+    };
+    match io.write(&BoxCgroup::at(dir.to_path_buf()), &write) {
+        Ok(()) => Ok(()),
+        Err(_) if io.read(dir, "cpu.weight")?.is_none() => Ok(()),
+        Err(why) => Err(why),
+    }
+}
+
 impl Learner {
     /// A learner for the fleet under `fleet` (`<node root>/.vm/<node key>`) on a machine of `machine`.
     pub(super) fn new(fleet: &Path, machine: CapacityResources) -> Result<Self, Refusal> {
@@ -188,6 +251,10 @@ impl Learner {
             why: format!("{} has no parent", fleet.display()),
         })?;
         let bound = population(machine)?;
+        let root = parent.parent().ok_or_else(|| Refusal::Invalid {
+            what: "a node's root cgroup",
+            why: format!("{} has no parent", parent.display()),
+        })?;
         Ok(Self {
             node: charge::Node::new(
                 WINDOW,
@@ -202,6 +269,8 @@ impl Learner {
             machine: machine.cpu_milli,
             fleet: (BoxCgroup::at(fleet.to_path_buf()), Vec::new()),
             parent: (BoxCgroup::at(parent.to_path_buf()), Vec::new()),
+            root: root.to_path_buf(),
+            oci: root.join(super::OCI_BOXES),
             rooms: BTreeMap::new(),
             fault: None,
         })
@@ -302,9 +371,24 @@ impl Learner {
                 },
             );
         }
-        self.node.set_budget(budget);
+        // Every child of the node's root on one scale (C4): the boxes' bookings come off the fleet's budget.
+        let natives = self.natives(io)?;
+        let booked = natives
+            .iter()
+            .try_fold(CapacityResources::default(), |sum, native| {
+                sum.checked_add(native.booked)
+            })
+            .ok_or_else(|| Refusal::Invalid {
+                what: "a node's boxes' bookings",
+                why: "they overflow".into(),
+            })?;
+        self.node.set_budget(CapacityResources {
+            cpu_milli: budget.cpu_milli.saturating_sub(booked.cpu_milli),
+            mem_bytes: budget.mem_bytes.saturating_sub(booked.mem_bytes),
+            disk_bytes: budget.disk_bytes.saturating_sub(booked.disk_bytes),
+        });
         self.node.settle().map_err(refused)?;
-        self.place(io)?;
+        self.place(io, &natives)?;
         for (scope, vm) in &self.vms {
             match tell_room(vm.class) {
                 Ok(()) => {}
@@ -316,8 +400,9 @@ impl Learner {
         Ok(())
     }
 
-    /// Writes the placement (C4, C5): each VM, the fleet's parent, and `.vm` by the sum of its fleets' budgets.
-    fn place(&mut self, io: &impl Cgroups) -> Result<(), Refusal> {
+    /// Writes the placement (C4, C5): each VM, the fleet's parent, `.vm` by the sum of its fleets' budgets, each
+    /// process and OCI box by its booking, and `.oci` by its boxes'.
+    fn place(&mut self, io: &impl Cgroups, natives: &[Native]) -> Result<(), Refusal> {
         let placed = self.node.placement(self.machine).map_err(refused)?;
         for (scope, bounds) in &placed.vms {
             if let Some(vm) = self.vms.get_mut(scope) {
@@ -339,7 +424,44 @@ impl Learner {
             cpu_weight: Some(weight),
             ..Bounds::default()
         };
-        rewrite(io, &self.parent.0, &parent, &mut self.parent.1)
+        rewrite(io, &self.parent.0, &parent, &mut self.parent.1)?;
+        let mut oci = 0u64;
+        for native in natives {
+            if native.oci {
+                oci = oci.saturating_add(native.booked.cpu_milli);
+            }
+            let weight =
+                charge::fleet_weight(native.booked.cpu_milli, self.machine).map_err(refused)?;
+            weigh(io, &native.dir, weight)?;
+        }
+        let weight = charge::fleet_weight(oci, self.machine).map_err(refused)?;
+        weigh(io, &self.oci, weight)
+    }
+
+    /// The node's process and OCI boxes (C4), each booked at its caps, its cgroup's `cpu.max` and `memory.max`: a
+    /// native box's receipt books its workload's caps until it is learned.
+    fn natives(&self, io: &impl Cgroups) -> Result<Vec<Native>, Refusal> {
+        let vm = self.parent.0.dir();
+        let mut out = Vec::new();
+        for (dir, oci) in [(self.root.as_path(), false), (self.oci.as_path(), true)] {
+            for child in io.children(dir)? {
+                if child == vm || child == self.oci {
+                    continue;
+                }
+                let cpu = booked_cpu(io.read(&child, "cpu.max")?.as_deref())?;
+                let mem = booked_bytes(io.read(&child, "memory.max")?.as_deref())?;
+                out.push(Native {
+                    dir: child,
+                    booked: CapacityResources {
+                        cpu_milli: cpu,
+                        mem_bytes: mem,
+                        disk_bytes: 0,
+                    },
+                    oci,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// The window's failure is `why`, which no read reached.
