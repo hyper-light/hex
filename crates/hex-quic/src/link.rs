@@ -17,6 +17,14 @@ pub struct Link {
     peer: PeerId,
 }
 
+impl Link {
+    /// The link to `peer` over `endpoint`, connected already ([`Endpoint::dial`]): what staging dials the node's files
+    /// port through (`hex_client::guest::stage`).
+    pub fn new(endpoint: Arc<Endpoint>, peer: PeerId) -> Self {
+        Self { endpoint, peer }
+    }
+}
+
 fn refusal(op: &'static str) -> impl Fn(Refused) -> Refusal {
     move |e| Refusal::Os {
         op,

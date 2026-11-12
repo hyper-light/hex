@@ -144,3 +144,88 @@ fn hex_quic_16_the_log_lane_sends_lines_and_tells_a_slow_reader_what_it_missed()
     }
     assert!(counted >= missed, "told {counted} of {missed} missed");
 }
+
+/// HEX-QUIC-17 (Q4, Linux): a file tree staged over QUIC lands under the node's staged folder as the guest's relay
+/// writes it, through the relay's own staging server; unstaged, it is gone.
+#[cfg(target_os = "linux")]
+#[test]
+fn hex_quic_17_a_tree_staged_over_quic_lands_and_unstages() {
+    use hex_client::guest::stage::{self, Item, Source};
+    let ca = SimCa::new().unwrap();
+    let limits = limits();
+    let node = Arc::new(
+        Endpoint::start(Config {
+            credentials: enrolled(&ca, "node.stage.test"),
+            bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            listen: true,
+            serves: ports(),
+            shape: Shape {
+                connections: limits.connections,
+                lanes: 8,
+            },
+        })
+        .unwrap(),
+    );
+    let cache =
+        std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/hex-t7/quic");
+    std::fs::create_dir_all(&cache).unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("s-")
+        .tempdir_in(&cache)
+        .unwrap();
+    let staged = dir.path().join("staged");
+    std::fs::create_dir_all(&staged).unwrap();
+    let _quic = Quic::new(
+        Native::bind(&dir.path().join("node.sock")).unwrap(),
+        Arc::clone(&node),
+        Bounds::of(&limits),
+        Some(staged.clone()),
+    )
+    .unwrap();
+    let client = Arc::new(
+        Endpoint::start(Config {
+            credentials: enrolled(&ca, "client.stage.test"),
+            bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            listen: false,
+            serves: Vec::new(),
+            shape: Shape {
+                connections: 1,
+                lanes: 8,
+            },
+        })
+        .unwrap(),
+    );
+    let deadline = Instant::now() + hex_api::conformance::PATIENCE;
+    let peer = client
+        .dial("node.stage.test", node.local_addr(), deadline)
+        .unwrap();
+    let link = hex_quic::link::Link::new(Arc::clone(&client), peer);
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(tree.join("etc")).unwrap();
+    std::fs::write(tree.join("etc/hostname"), b"quic\n").unwrap();
+    let id = hex_api::BoxId::new("staged-over-quic").unwrap();
+    stage::stage(
+        &link,
+        &id,
+        &[
+            Item {
+                name: "config.json".to_owned(),
+                source: Source::Bytes(b"{}".to_vec()),
+            },
+            Item {
+                name: "rootfs".to_owned(),
+                source: Source::Path(tree),
+            },
+        ],
+        &hex_core::stream::files::LIMITS,
+    )
+    .unwrap();
+    let copy = staged.join(id.as_str());
+    assert_eq!(std::fs::read(copy.join("config.json")).unwrap(), b"{}");
+    assert_eq!(
+        std::fs::read(copy.join("rootfs/etc/hostname")).unwrap(),
+        b"quic\n"
+    );
+    stage::unstage(&link, &id).unwrap();
+    assert!(!copy.exists(), "the staged copy is left");
+}
