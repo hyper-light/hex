@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use hex_api::CapacityResources as Amounts;
+use hex_api::Upstream;
 
 use crate::model::Class;
 
@@ -24,20 +25,6 @@ pub const SEEDABLE: usize = 1_000;
 pub const WEIGHT_MIN: u16 = 1;
 pub const WEIGHT_MAX: u16 = 10_000;
 
-/// A capability that waits on work upstream of Hex (`docs/design/learned-charge.md`, "Boundaries"). It stands
-/// for hex-api's shared `Refusal::Awaits { needs: Upstream }` (goal 12's), which replaces it once on main.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Upstream {
-    /// Each vCPU's guest time apart from the VMM's own: Shards' p/guest-cpu-time-v1, then goal 12's `Usage`.
-    GuestCpuTimePerVcpu,
-    /// The ring pins' share of a guest's room: Shards' p/ring-pins-v1, its room-bounded pins.
-    RingPinsWithinRoom,
-    /// A Hex-booted guest told its room: a shards-api call that sends init's `ROOM` (D188), which D231 lacks.
-    GuestRoom,
-    /// Moving a running VM instead of ending it: Shards' D176.
-    LiveMove,
-}
-
 /// Why the core refused, typed (CLAUDE.md §3).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ChargeError {
@@ -52,7 +39,8 @@ pub enum ChargeError {
     Overflow(&'static str),
     #[error("the node holds no such VM")]
     Unknown,
-    #[error("it waits on {0:?} upstream")]
+    /// What another product owes Hex (`hex_api::Upstream`), as `Refusal::Awaits` names it.
+    #[error("this needs {0}, which the revision Hex builds against doesn't give yet")]
     Awaits(Upstream),
     /// A start the node can't book now: its booking and the room it has (B3: a refusal carries the room).
     #[error("no room: its booking {booking:?} against the room {room:?}")]
@@ -857,7 +845,11 @@ impl<K: Ord + Copy> Node<K> {
             .filter_map(|(id, budget)| {
                 let vm = self.vms.get(id)?;
                 let past = u64::try_from(budget.room.checked_neg()?).ok()?;
-                (past > 0).then(|| (vm.band, std::cmp::Reverse(past), *id))
+                if past > 0 {
+                    Some((vm.band, std::cmp::Reverse(past), *id))
+                } else {
+                    None
+                }
             })
             .min()
             .map(|(_, _, id)| id))

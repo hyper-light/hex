@@ -41,7 +41,7 @@ pub use runtime::{
     Capacity, CapacityResources, ConnectFailure, ConnectPhase, ConnectReply, Execution, Exit,
     GpuEligibility, ImageArch, ImageOs, ImagePlatform, IoKind, LifecycleCause, MAX_RUNTIME_ROUTES,
     Membership, Proc, Refusal, RouteKey, RouteOffer, RouteReceipt, Runtime, RuntimeCost, Signal,
-    Usage,
+    Upstream, Usage,
 };
 pub use spec::{
     Ask, BlockCount, BoxOwner, BoxSpec, Class, ClassSpec, End, ExecLimit, Given, Mount, Network,
