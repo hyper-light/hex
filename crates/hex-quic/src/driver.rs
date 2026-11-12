@@ -218,8 +218,8 @@ const WAITING: usize = 6;
 /// Connections accepted for a port and not yet taken by its owner.
 #[derive(Default)]
 pub(crate) struct Accepts {
-    queues: Mutex<AcceptQueues>,
-    came: Condvar,
+    queues: hex_wait::Mutex<AcceptQueues>,
+    came: hex_wait::Condvar,
 }
 
 #[derive(Default)]
@@ -227,6 +227,18 @@ struct AcceptQueues {
     by_port: BTreeMap<u32, VecDeque<(PeerId, Arc<Shared>)>>,
     /// The driver has ended: no connection comes.
     closed: bool,
+}
+
+/// An accept's wait that couldn't wait: the queues' lock poisoned, the driver gone with it, or the OS refused it
+/// (macOS's kqueue).
+fn wait_refused(why: hex_wait::Failed) -> Refused {
+    match why {
+        hex_wait::Failed::Poisoned => Refused::Ended,
+        hex_wait::Failed::Os(why) => Refused::Os {
+            op: "waiting for an accepted connection",
+            why: why.to_string(),
+        },
+    }
 }
 
 impl Accepts {
@@ -244,7 +256,7 @@ impl Accepts {
                 return Err(Refused::Ended);
             }
             queues = match deadline {
-                None => self.came.wait(queues).map_err(|_| Refused::Ended)?,
+                None => self.came.wait(queues).map_err(wait_refused)?,
                 Some(at) => {
                     let left = at.saturating_duration_since(Instant::now());
                     if left.is_zero() {
@@ -254,7 +266,7 @@ impl Accepts {
                     }
                     self.came
                         .wait_timeout(queues, left)
-                        .map_err(|_| Refused::Ended)?
+                        .map_err(wait_refused)?
                         .0
                 }
             };

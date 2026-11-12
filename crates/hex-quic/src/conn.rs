@@ -10,10 +10,11 @@
 //! Every wait ends on a fact: bytes, room, the peer's End, or the connection's end with why (CLAUDE.md §4).
 
 use std::io;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::time::Instant;
 
 use hex_core::lanes::{self, Why};
+use hex_wait::{Condvar, Mutex, MutexGuard};
 
 use crate::driver::{Command, Commands};
 
@@ -276,7 +277,7 @@ impl Conn {
         deadline: Option<Instant>,
     ) -> io::Result<MutexGuard<'a, State>> {
         match deadline {
-            None => self.shared.changed.wait(state).map_err(poisoned),
+            None => self.shared.changed.wait(state).map_err(io::Error::from),
             Some(at) => {
                 let left = at.saturating_duration_since(Instant::now());
                 if left.is_zero() {
@@ -289,7 +290,7 @@ impl Conn {
                     .changed
                     .wait_timeout(state, left)
                     .map(|(state, _)| state)
-                    .map_err(poisoned)
+                    .map_err(io::Error::from)
             }
         }
     }
