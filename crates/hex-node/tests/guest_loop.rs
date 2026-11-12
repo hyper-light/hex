@@ -245,6 +245,8 @@ fn take_removal(conn: &mut TcpStream, gate: &Gate) {
 /// Box `id` as the stand-in guest's node reports it: an `oci` box, running.
 fn guest_box(id: &BoxId) -> hex_api::BoxInfo {
     hex_api::BoxInfo {
+        published: Vec::new(),
+        grants: Vec::new(),
         id: id.clone(),
         class: hex_api::Class::Oci,
         state: hex_api::BoxState::Running,

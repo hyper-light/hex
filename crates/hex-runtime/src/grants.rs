@@ -2,8 +2,10 @@
 //! N4): exactly what Shards `482c5d78` can hold, or a typed refusal naming the capability Hex awaits. Pure: the Shards
 //! image class hands [`ImageNetwork`] to `shards_api::image::ImageSpec` as it boots, and records what the boot bound.
 
-use hex_api::{Destination, Grant, Proto, Refusal, Upstream, check_grants};
-use shards_api::image::{Keep, Narrowing, Publish};
+use hex_api::{
+    Destination, Grant, MemberKind, Proto, Published, Receiver, Refusal, Upstream, check_grants,
+};
+use shards_api::image::{Bound, Keep, MemberInfo, Narrowing, Publish};
 
 /// What an image boot is told of a box's grants: the ports it publishes, and how the image's own grants past the
 /// microVM are narrowed.
@@ -71,6 +73,80 @@ pub fn program(grants: &[Grant]) -> Result<ImageNetwork, Refusal> {
             dns: false,
         },
     })
+}
+
+/// A booted VM's publishes as its run reports them, held to its grants (N6): each publish grant's member is one its
+/// image runs, and the host bound each publish grant's port once, where the grant names it, and nothing else. Returns
+/// each as bound, its receiver the image's declaration, which Shards names no further yet. A grant naming a member
+/// the image doesn't run is the spec's fault (`Invalid`); a socket bound past or short of the grants, Shards'
+/// (`Broken`).
+pub fn bound(
+    grants: &[Grant],
+    members: &[MemberInfo],
+    published: &[Bound],
+) -> Result<Vec<Published>, Refusal> {
+    let room = |what: &'static str, bound: usize| Refusal::Exhausted { what, bound };
+    let mut made = Vec::new();
+    made.try_reserve_exact(published.len())
+        .map_err(|_| room("published ports", published.len()))?;
+    let mut used = Vec::new();
+    used.try_reserve_exact(published.len())
+        .map_err(|_| room("published ports", published.len()))?;
+    used.resize(published.len(), false);
+    for (at, grant) in grants.iter().enumerate() {
+        let Grant::Publish {
+            member,
+            proto,
+            port,
+            host,
+            host_port,
+        } = grant
+        else {
+            continue;
+        };
+        let kind = match member.kind {
+            MemberKind::Agent => shards_api::image::MemberKind::Agent,
+            MemberKind::Harness => shards_api::image::MemberKind::Harness,
+        };
+        if !members
+            .iter()
+            .any(|m| m.kind == kind && m.name == member.name && m.runs)
+        {
+            return Err(Refusal::Invalid {
+                what: "grants",
+                why: format!("grants[{at}].member {member} isn't a member its image runs"),
+            });
+        }
+        let proto = match proto {
+            Proto::Tcp => shards_api::image::Proto::Tcp,
+            Proto::Udp => shards_api::image::Proto::Udp,
+        };
+        let found = published.iter().zip(used.iter_mut()).find(|(b, used)| {
+            !**used
+                && b.guest_port == *port
+                && b.proto == proto
+                && b.host.ip() == *host
+                && host_port.is_none_or(|wanted| wanted == b.host.port())
+        });
+        let Some((socket, taken)) = found else {
+            return Err(Refusal::Broken(format!(
+                "Shards bound no host socket for grants[{at}]"
+            )));
+        };
+        *taken = true;
+        made.push(Published {
+            grant: u32::try_from(at).map_err(|_| room("grants", at))?,
+            at: socket.host,
+            receiver: Receiver::Declared,
+        });
+    }
+    if let Some((extra, _)) = published.iter().zip(&used).find(|(_, used)| !**used) {
+        return Err(Refusal::Broken(format!(
+            "Shards published guest port {} ({:?}) at {}, which no grant names",
+            extra.guest_port, extra.proto, extra.host
+        )));
+    }
+    Ok(made)
 }
 
 #[cfg(test)]

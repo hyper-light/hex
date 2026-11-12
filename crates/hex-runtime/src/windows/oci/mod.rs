@@ -1237,6 +1237,8 @@ fn append_hosts(volume: &str, lines: &str) -> Result<(), Refusal> {
 /// A box's state for the runtime's `BoxInfo`.
 pub fn info(b: &OciBox) -> Result<hex_api::BoxInfo, Refusal> {
     Ok(hex_api::BoxInfo {
+        published: Vec::new(),
+        grants: Vec::new(),
         route: None,
         id: b.id()?.try_clone()?,
         class: hex_api::Class::Oci,

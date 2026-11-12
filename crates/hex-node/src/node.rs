@@ -1002,6 +1002,8 @@ impl Node {
             }
         };
         Ok(BoxInfo {
+            published: Vec::new(),
+            grants: Vec::new(),
             membership: None,
             id: id.clone(),
             class: record.spec.class.class(),
@@ -1505,6 +1507,8 @@ impl Node {
         // The box as create made it: its container created, its init at the exec FIFO, nothing exec'd
         // in it yet, as the state create wrote says without reading it back.
         Ok(BoxInfo {
+            published: Vec::new(),
+            grants: Vec::new(),
             membership: None,
             id,
             class: record.spec.class.class(),
@@ -2060,6 +2064,8 @@ impl Runtime for Node {
                     Err(Refusal::Awaits {
                         needs: hex_api::Upstream::AttachAfterCrash,
                     }) => out.push(BoxInfo {
+                        published: Vec::new(),
+                        grants: Vec::new(),
                         membership: None,
                         id,
                         class: record.spec.class.class(),
@@ -2077,6 +2083,8 @@ impl Runtime for Node {
                 // A box whose record can't be read is reported as its id with an empty state rather
                 // than hidden; recovery is what cleans it up.
                 out.push(BoxInfo {
+                    published: Vec::new(),
+                    grants: Vec::new(),
                     membership: None,
                     id,
                     class: Class::Process,

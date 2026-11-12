@@ -470,3 +470,55 @@ fn every_grant_is_written_whole_in_the_record_and_read_back() {
     let unknown = r#"[{"ingress":{"member":{"kind":"harness","name":"codex"},"port":1455}}]"#;
     assert!(serde_json::from_str::<Vec<Grant>>(unknown).is_err());
 }
+
+/// Joint plan step 15 (N6): do check reports of published ports against a harness's grants: each publish once at
+/// its address, one naming an egress grant, one past the grants, one at another address or host port, and one
+/// grant reported twice. Expect: the first passes; each other is refused as invalid published ports, by its place.
+#[test]
+fn a_report_of_published_ports_is_held_to_the_grants() {
+    let grants = harness_grants();
+    let published = |grant: u32, at: &str| Published {
+        grant,
+        at: at.parse().unwrap(),
+        receiver: Receiver::Declared,
+    };
+    assert_eq!(
+        check_published(
+            &grants,
+            &[published(5, "127.0.0.1:49152"), published(6, "[::1]:18080")]
+        ),
+        Ok(())
+    );
+    for (report, expected) in [
+        (
+            vec![published(0, "127.0.0.1:443")],
+            "published[0] names grants[0], which is no publish",
+        ),
+        (vec![published(7, "127.0.0.1:1")], "names grants[7]"),
+        (
+            vec![published(5, "10.0.0.2:49152")],
+            "published[0] is bound at 10.0.0.2:49152",
+        ),
+        (
+            vec![published(6, "[::1]:18081")],
+            "not where grants[6] publishes it",
+        ),
+        (
+            vec![published(5, "127.0.0.1:1"), published(5, "127.0.0.1:2")],
+            "names one grant twice",
+        ),
+    ] {
+        match check_published(&grants, &report) {
+            Err(Refusal::Invalid {
+                what: "published",
+                why,
+            }) => {
+                assert!(
+                    why.contains(expected),
+                    "{report:?}: {why:?}, not {expected:?}"
+                )
+            }
+            other => panic!("{report:?} was not refused: {other:?}"),
+        }
+    }
+}

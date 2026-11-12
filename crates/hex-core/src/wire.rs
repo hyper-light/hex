@@ -38,18 +38,20 @@
 //! [`Budgets::programs`]).
 
 use std::collections::BTreeSet;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use hex_api::{
     Allocation, BackendUnavailable, BackingGrant, BackingKey, BackingOffer, BackingPhase, Bounds,
     BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
-    ConnectFailure, ConnectPhase, ConnectReply, DeviceHolder, DeviceId, DeviceInfo, DeviceKind,
-    DeviceUnavailable, Execution, Exit, GpuEligibility, GuestTime, ImageArch, ImageOs,
-    ImagePlatform, IoKind, IoRates, Learned, LearnedHolding, LearnedPrior, LearnedUse,
+    ConnectFailure, ConnectPhase, ConnectReply, Destination, DeviceHolder, DeviceId, DeviceInfo,
+    DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant, GuestTime, ImageArch,
+    ImageOs, ImagePlatform, IoKind, IoRates, Learned, LearnedHolding, LearnedPrior, LearnedUse,
     LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES,
-    Mount, Network, OciSpec, PhysicalDevice, PhysicalReport, Program, Refusal, Rootfs, RouteKey,
-    RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, Upstream, Usage, User,
+    Member, MemberKind, Mount, Network, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program,
+    Proto, Published, Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost,
+    ShardsImage, Signal, Upstream, Usage, User, check_grants, check_published,
 };
 
 use crate::netns;
@@ -70,6 +72,7 @@ pub const IDENTITY: u64 = identity(&[
     include_bytes!("../../hex-api/src/bounds.rs"),
     include_bytes!("../../hex-api/src/devices.rs"),
     include_bytes!("../../hex-api/src/runtime.rs"),
+    include_bytes!("../../hex-api/src/grants.rs"),
 ]);
 /// The header's length: magic, wire identity, kind and id.
 pub const HEADER_BYTES: usize = 22;
@@ -2107,18 +2110,21 @@ fn oci(r: &mut Reader<'_>) -> Result<OciSpec, Fault> {
 }
 
 /// A Shards image VM's spec: its pinned image, then its run's command, an option of a list (joint plan
-/// step 12). Fields a later step adds go after the command (append-only).
+/// step 12), then its network grants (joint plan step 15). Fields a later step adds go after the grants
+/// (append-only).
 fn put_shards_image(w: &mut Writer, image: &ShardsImage) -> Result<(), Fault> {
     w.string(&image.image)?;
     w.option_with(image.command.as_deref(), |w, command| {
         w.list(command, |w, arg| w.string(arg))
-    })
+    })?;
+    put_grants(w, &image.grants)
 }
 
 fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
     Ok(ShardsImage {
         image: r.string("shards image")?,
         command: r.option(|r| r.list(|r| r.string("shards image command")))?,
+        grants: grants(r)?,
     })
 }
 
@@ -2160,6 +2166,161 @@ fn guest_time(r: &mut Reader<'_>) -> Result<GuestTime, Fault> {
         }
         1 => Ok(GuestTime::Awaits(upstream(r)?)),
         t => Err(Fault::value("guest time", format!("variant {t}"))),
+    }
+}
+
+// Joint plan step 15 (AC-T7.7.2): a box's network grants (docs/design/network-grants.md). Fixed tags independent of
+// Rust discriminants: a grant's way first (0 egress, 1 host, 2 publish), a member's kind as Shards' image wire tags
+// it (0 agent, 1 harness), a protocol by its IANA number, an address by its family (4, 6) then its octets. Both
+// sides run `check_grants`, so a list the check refuses is neither sent nor read.
+fn put_grants(w: &mut Writer, grants: &[Grant]) -> Result<(), Fault> {
+    check_grants(grants).map_err(|e| Fault::value("grants", e.to_string()))?;
+    w.list(grants, put_grant)
+}
+
+fn put_grant(w: &mut Writer, grant: &Grant) -> Result<(), Fault> {
+    match grant {
+        Grant::Egress { member, to, ports } => {
+            w.u8(0);
+            put_member(w, member)?;
+            match to {
+                Destination::Name(name) => {
+                    w.u8(0);
+                    w.string(name)?;
+                }
+                Destination::Address(address) => {
+                    w.u8(1);
+                    put_address(w, *address);
+                }
+            }
+            put_ports(w, *ports);
+        }
+        Grant::Host { member, ports } => {
+            w.u8(1);
+            put_member(w, member)?;
+            put_ports(w, *ports);
+        }
+        Grant::Publish {
+            member,
+            proto,
+            port,
+            host,
+            host_port,
+        } => {
+            w.u8(2);
+            put_member(w, member)?;
+            w.u8(proto_tag(*proto));
+            w.u16(*port);
+            put_address(w, *host);
+            w.option(*host_port, Writer::u16);
+        }
+    }
+    Ok(())
+}
+
+fn put_member(w: &mut Writer, member: &Member) -> Result<(), Fault> {
+    w.u8(match member.kind {
+        MemberKind::Agent => 0,
+        MemberKind::Harness => 1,
+    });
+    w.string(&member.name)
+}
+
+fn put_ports(w: &mut Writer, ports: Ports) {
+    w.u8(proto_tag(ports.proto));
+    w.u16(ports.first);
+    w.u16(ports.last);
+}
+
+fn proto_tag(proto: Proto) -> u8 {
+    match proto {
+        Proto::Tcp => 6,
+        Proto::Udp => 17,
+    }
+}
+
+fn put_address(w: &mut Writer, address: IpAddr) {
+    match address {
+        IpAddr::V4(v4) => {
+            w.u8(4);
+            w.raw(&v4.octets());
+        }
+        IpAddr::V6(v6) => {
+            w.u8(6);
+            w.raw(&v6.octets());
+        }
+    }
+}
+
+fn grants(r: &mut Reader<'_>) -> Result<Vec<Grant>, Fault> {
+    let grants = r.list(grant)?;
+    check_grants(&grants).map_err(|e| Fault::value("grants", e.to_string()))?;
+    Ok(grants)
+}
+
+fn grant(r: &mut Reader<'_>) -> Result<Grant, Fault> {
+    Ok(match r.u8()? {
+        0 => {
+            let member = member(r)?;
+            let to = match r.u8()? {
+                0 => Destination::Name(r.string("grant destination")?),
+                1 => Destination::Address(address(r)?),
+                t => return Err(Fault::value("grant destination", format!("variant {t}"))),
+            };
+            Grant::Egress {
+                member,
+                to,
+                ports: ports(r)?,
+            }
+        }
+        1 => Grant::Host {
+            member: member(r)?,
+            ports: ports(r)?,
+        },
+        2 => Grant::Publish {
+            member: member(r)?,
+            proto: proto(r)?,
+            port: r.u16()?,
+            host: address(r)?,
+            host_port: r.option(Reader::u16)?,
+        },
+        t => return Err(Fault::value("grant", format!("variant {t}"))),
+    })
+}
+
+fn member(r: &mut Reader<'_>) -> Result<Member, Fault> {
+    let kind = match r.u8()? {
+        0 => MemberKind::Agent,
+        1 => MemberKind::Harness,
+        t => return Err(Fault::value("grant member", format!("kind {t}"))),
+    };
+    Ok(Member {
+        kind,
+        name: r.string("grant member")?,
+    })
+}
+
+fn ports(r: &mut Reader<'_>) -> Result<Ports, Fault> {
+    Ok(Ports {
+        proto: proto(r)?,
+        first: r.u16()?,
+        last: r.u16()?,
+    })
+}
+
+fn proto(r: &mut Reader<'_>) -> Result<Proto, Fault> {
+    match r.u8()? {
+        6 => Ok(Proto::Tcp),
+        17 => Ok(Proto::Udp),
+        t => Err(Fault::value("grant protocol", format!("number {t}"))),
+    }
+}
+
+fn address(r: &mut Reader<'_>) -> Result<IpAddr, Fault> {
+    match r.u8()? {
+        4 => Ok(IpAddr::from(r.array::<4>()?)),
+        6 => Ok(IpAddr::from(r.array::<16>()?)),
+        t => Err(Fault::value("grant address", format!("family {t}"))),
     }
 }
 
@@ -2248,7 +2409,20 @@ fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
         w.option(allocation.booked, put_resources);
         Ok(())
     })?;
-    put_route_option(w, info.route)
+    put_route_option(w, info.route)?;
+    // Joint plan step 15: the record's grants, after every older field, then their ports as bound.
+    put_grants(w, &info.grants)?;
+    check_published(&info.grants, &info.published)
+        .map_err(|e| Fault::value("published", e.to_string()))?;
+    w.list(&info.published, |w, published| {
+        w.u32(published.grant);
+        put_address(w, published.at.ip());
+        w.u16(published.at.port());
+        w.u8(match published.receiver {
+            Receiver::Declared => 0,
+        });
+        Ok(())
+    })
 }
 
 fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
@@ -2278,8 +2452,21 @@ fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
             Ok(allocation)
         })?,
         route: r.option(route_receipt)?,
+        grants: grants(r)?,
+        published: r.list(|r| {
+            Ok(Published {
+                grant: r.u32()?,
+                at: SocketAddr::new(address(r)?, r.u16()?),
+                receiver: match r.u8()? {
+                    0 => Receiver::Declared,
+                    t => return Err(Fault::value("published receiver", format!("variant {t}"))),
+                },
+            })
+        })?,
     };
     check_info_route(&info)?;
+    check_published(&info.grants, &info.published)
+        .map_err(|e| Fault::value("published", e.to_string()))?;
     Ok(info)
 }
 

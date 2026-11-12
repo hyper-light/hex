@@ -170,7 +170,7 @@ Hex expresses everything through two fields of `shards_api::image::ImageSpec`:
 | A box's grants | What 482c5d78 can express | Hex today |
 |---|---|---|
 | none | `network none`: no NIC, no network process | programmed: `Narrowing { Only([]), Only([]), false }`, no publish |
-| `Publish` of a member's port at a host address | `Publish { guest_port, proto, host: Some(addr), host_port }`, only for a port the image gives a member for ingress (D122) | programmed; its receiver is unverified, see N6 |
+| `Publish` of a member's port at a host address | `Publish { guest_port, proto, host: Some(addr), host_port }`, for a port the image gives a member for ingress (D122); for a run with a command of its own, also for a port it gives no member, which then reaches that command | programmed; its receiver is unverified, see N6 |
 | `Egress` to a name, for a harness | no: harness egress is ports to any address, and `--dns` is any name (H2) | refused, `Awaits` member grants by name (step 9) |
 | `Egress` to a name, for an agent | an agent's remote MCP `host:port` is name-pinned, but `Keep` is image-wide, and shards-api shows no member's scope (`FOR`), so Hex can't prove it exact | refused, the same |
 | `Egress` to an address | no address-scoped egress | refused, `Awaits` member grants by address (step 9) |
@@ -199,17 +199,33 @@ program would widen. Hex never sends a widening: its narrowing is empty, and its
 
 ## N6. Hex's record of the VM
 
-The grants live in the image class's spec, in the box's durable record (`hex_core::record::BoxRecord`, JSON),
-and `inspect` reports them (`BoxInfo.grants`). Once a box is programmed, its record also holds what programming
-learned:
+The grants live in the image class's spec, `ShardsImage.grants`, in the box's durable record
+(`hex_core::record::BoxRecord`, JSON). `inspect` reports them as `BoxInfo.grants`, every grant as the record
+holds it. While the VM runs, `inspect` also reports what its boot bound, `BoxInfo.published`: one
+`Published { grant, at, receiver }` for each publish grant, at the host socket the host bound. That socket is
+the grant's host address, on its host port or on the one the OS picked. A run doesn't outlive its owner in
+D231's first version (`Awaits(AttachAfterCrash)`), so this report is the live run's, not the durable record's.
 
-- each publish's bound host socket (`ImageGuest::published()`);
-- the gaps that remain.
+At start, Hex holds the run's own report to the grants (`hex_runtime::grants::bound`):
 
-**The receiver gap.** shards-api 482c5d78 doesn't say which member receives a published port. `MemberInfo`
-carries no ports and `Bound` no member. So Hex checks that the member a `Publish` grant names exists and runs,
-and records that its receiver is the image's declaration (D122), which Hex can't verify. Hex's lead asked Shards
-to name the receiving member. When Shards does, the check becomes exact and the gap leaves the record.
+- each publish grant's member must be one the image runs (`ImageGuest::members()`);
+- the host must have bound each publish once, where the grant names it, and nothing else
+  (`ImageGuest::published()`).
+
+A run that breaks either is stopped, and its start is refused. A member the image doesn't run is the spec's
+fault, `Invalid` naming the grant's member. A socket bound past or short of the grants is Shards', `Broken`. So
+no port stays published for a member or a socket no grant names.
+
+**The receiver gap.** shards-api 482c5d78 doesn't say who receives a published port: `MemberInfo` carries no
+ports, and `Bound` names no member. Its run host binds a publish for a port the image's Agentfile gives a member
+coming in. For a run with a command of its own, it also binds one for a port the Agentfile gives no member and
+doesn't declare as egress, and that port reaches the command (D122: "A published port no member claims reaches
+the run's own command"; `ports_granted` in `crates/shards/src/api_run.rs`). A run of the members alone
+(`command: None`, the harness VM) is refused a port no member is given, so each of its publishes reaches a member,
+though not provably the grant's. So each `Published` records its receiver as `Receiver::Declared`: whoever the
+image declares for the port, which Hex can't verify is the grant's member. Hex's lead asked Shards to name the
+receiving member. When Shards does, the check becomes exact, and a new `Receiver` variant, appended after
+`Declared`, records it.
 
 ## N7. Bounds and literals
 
@@ -226,17 +242,33 @@ memory gives. It sorts that copy (O(n log n)), with no recursion (CLAUDE.md §11
 
 ## Tests
 
-- `crates/hex-api/src/grants.rs`: each malformed field is refused by name, well-formed grants pass, every
-  overlap is refused, and the record's JSON form round-trips.
-- With the image class's carrier:
-  - the wire codec's round trip and hostile-bytes property tests;
-  - the program's property test over generated grant sets (`AC-T7.7.2`): every publish it makes is one a grant
-    names, its narrowing keeps nothing, and every grant it can't program exactly is refused typed;
-  - inspect showing every grant.
+- `crates/hex-api/src/grants.rs`:
+  - each malformed field is refused by name, well-formed grants pass, and every overlap is refused;
+  - an oracle: the sorted check agrees with a pairwise model over every pair and triple of an 84-grant universe;
+  - the record's JSON form round-trips;
+  - a report of published ports is held to the grants it names.
+- `crates/hex-core/src/wire/tests.rs`:
+  - fixed tags;
+  - refusals both written and read;
+  - property tests: round trip, and any bytes read or refused;
+  - a Shards image VM's grants on the wire;
+  - an inspect's grants and bound ports.
+- `crates/hex-core/src/record.rs`: a Shards image VM's record keeps every grant.
+- `crates/hex-runtime/src/grants/tests.rs`:
+  - no grant is no network;
+  - each grant 482c5d78 can't hold is refused naming what it awaits;
+  - the program's property test (`AC-T7.7.2`): every publish it makes is one a grant names, its narrowing keeps
+    nothing, and every grant it can't program exactly is refused typed;
+  - a run's report is held to its grants.
+- `crates/hex-runtime/src/guest/image_tests.rs`:
+  - create refuses what awaits Shards before any record;
+  - a publish reaches the boot's `ImageSpec` exactly, and inspect shows it bound;
+  - a publish to a member the image doesn't run stops the VM.
+- Conformance `HEX-IMG-7`, which the simulator passes.
 - **Owed to Hex's lead, real VMs.**
   - A harness image booted with no grants: no NIC in the guest (`/sys/class/net` holds `lo` alone), and no DNS
     answer or packet for any name (`T-T7.7.1`).
-  - A `Publish` grant: the host connects at the recorded socket, and nothing else is bound.
+  - A `Publish` grant: the host connects at the reported socket, and nothing else is bound.
   - After step 9: the provider and kiln reach of the acceptance, and each N2 enforcer case.
 
 ## Sources
