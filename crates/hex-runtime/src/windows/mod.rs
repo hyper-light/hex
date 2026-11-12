@@ -2015,6 +2015,7 @@ impl Runtime for WinRuntime {
                 Vec::new()
             },
             unavailable: Vec::new(),
+            learned: None,
         };
         native_route_offer(&mut report, class, initialized)?;
         report.check()?;
@@ -2333,6 +2334,7 @@ mod tests {
             device_routes: Vec::new(),
             backings: Vec::new(),
             unavailable: Vec::new(),
+            learned: None,
         };
         native_route_offer(&mut report, Class::Oci, true).unwrap();
         assert_eq!(report.routes.len(), 1);
@@ -2367,6 +2369,7 @@ mod tests {
             device_routes: Vec::new(),
             backings: Vec::new(),
             unavailable: Vec::new(),
+            learned: None,
         };
         native_route_offer(&mut unavailable, Class::Oci, false).unwrap();
         assert!(

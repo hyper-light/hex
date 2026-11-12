@@ -28,6 +28,7 @@
 
 pub mod boxuser;
 pub mod bundle;
+pub mod capacity;
 pub mod cdi;
 pub mod cgroup;
 pub mod darwin;

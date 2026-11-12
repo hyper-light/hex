@@ -98,7 +98,6 @@ fn replayed_deletion_does_not_interrupt_the_reconnected_peer() {
         control_limit: AtomicUsize::new(crate::records::MOST),
         senders: BTreeMap::from([(NodeId(1), sender)]),
         refreshing: BTreeMap::from([(NodeId(1), Arc::new(AtomicBool::new(false)))]),
-        charges: None,
     };
     service.command(dto::Command::LinkUp { peer: 1 }).unwrap();
     assert!(
@@ -176,7 +175,6 @@ fn laptop_dispatch_and_common_wire_keep_the_box_until_explicit_delete() {
         control_limit: AtomicUsize::new(crate::records::MOST),
         senders: BTreeMap::new(),
         refreshing: BTreeMap::new(),
-        charges: None,
     });
     let demand = Demand {
         need,
@@ -363,7 +361,6 @@ fn cold_remote_creation_feedback_survives_owner_publication_busy() {
         control_limit: AtomicUsize::new(crate::records::MOST),
         senders: BTreeMap::from([(NodeId(1), owner_send)]),
         refreshing: BTreeMap::from([(NodeId(1), Arc::new(AtomicBool::new(false)))]),
-        charges: None,
     });
     let (key, submitted) = owner
         .driver
@@ -580,7 +577,6 @@ pub(super) fn advertise_service_with_budget(
         control_limit: AtomicUsize::new(crate::records::MOST),
         senders: BTreeMap::from([(other, sender)]),
         refreshing: BTreeMap::from([(other, Arc::new(AtomicBool::new(false)))]),
-        charges: None,
     })
 }
 
@@ -1237,6 +1233,7 @@ fn canonical_draining_action_is_not_filtered_by_unavailable_fresh_gpu_observatio
             backing: Some(key),
         }],
         unavailable: Vec::new(),
+        learned: None,
     };
     report.check().unwrap();
     let reports = vec![(hex_sim::model::Class::Firecracker, Some(report))];

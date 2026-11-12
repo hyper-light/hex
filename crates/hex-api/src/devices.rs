@@ -609,6 +609,7 @@ mod tests {
             devices,
             cost: None,
             unavailable: Vec::new(),
+            learned: None,
         }
     }
 

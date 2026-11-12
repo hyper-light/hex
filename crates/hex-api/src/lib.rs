@@ -42,9 +42,10 @@ pub use id::BoxId;
 pub use runtime::{
     Allocation, Asked, BackingGrant, BackingKey, BackingOffer, BackingPhase, BoxInfo, BoxState,
     Capacity, CapacityResources, ConnectFailure, ConnectPhase, ConnectReply, Execution, Exit,
-    GpuEligibility, ImageArch, ImageOs, ImagePlatform, IoKind, LifecycleCause, MAX_RUNTIME_ROUTES,
-    Membership, Proc, Refusal, RouteKey, RouteOffer, RouteReceipt, Runtime, RuntimeCost, Signal,
-    Upstream, Usage,
+    GpuEligibility, ImageArch, ImageOs, ImagePlatform, IoKind, Learned, LearnedHolding,
+    LearnedPrior, LearnedUse, LifecycleCause, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS,
+    MAX_RUNTIME_ROUTES, Membership, Proc, Refusal, RouteKey, RouteOffer, RouteReceipt, Runtime,
+    RuntimeCost, Signal, Upstream, Usage,
 };
 pub use spec::{
     Ask, BlockCount, BoxOwner, BoxSpec, Class, ClassSpec, End, ExecLimit, Given, Mount, Network,

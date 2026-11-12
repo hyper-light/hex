@@ -1034,13 +1034,29 @@ impl Driver {
         Ok(())
     }
 
+    /// Each box this node runs, by its physical id (joint plan step 14, C8): a capacity answer names a VM's holding
+    /// by its box, which [`Driver::rebook`] books against its key. Like rebook, it reads only state under the core
+    /// lock, so it takes no operation's and never waits on a placement.
+    pub fn running_ids(&self) -> Result<BTreeMap<BoxId, Key>, Error> {
+        let state = self.lock()?;
+        let mut ids = BTreeMap::new();
+        for (key, _, ended) in state.node.ran_keys() {
+            if !ended {
+                ids.insert(physical_id(&self.namespace, key)?, key);
+            }
+        }
+        Ok(ids)
+    }
+
+    // The view's calls and rebook change only state under the core lock, never a runtime's: they don't take the
+    // operation's, which refuses a call while another holds it, so a holder's word never waits on a placement.
+
     /// What each microVM this node runs holds now, as the learned charge has it (joint plan step 14, C8):
     /// its learned booking, and the memory and disk it holds past it. The machine's capacity view counts
     /// the node's own held so (step 13, CV2), and the node's ledger, which books each box at its receipt,
     /// is given the room those holdings leave, its room the machine's physical room still. Replaces what
     /// was said before; returns how many boxes it holds so.
     pub fn rebook(&self, holds: &[(Key, hex_api::CapacityResources)]) -> Result<usize, Error> {
-        let _operation = self.operation()?;
         let mut state = self.lock()?;
         let kept = state.node.rebook(holds.iter().map(|(key, holding)| {
             (
@@ -1065,7 +1081,6 @@ impl Driver {
         link: u64,
         msg: hex_api::capacity::ToKeeper,
     ) -> Result<hex_api::capacity::ToHolder, Error> {
-        let _operation = self.operation()?;
         let mut state = self.lock()?;
         let local = state
             .node
@@ -1082,7 +1097,6 @@ impl Driver {
 
     /// Link `link` dropped: its holder keeps what it holds (CV5).
     pub fn view_link_down(&self, link: u64) -> Result<(), Error> {
-        let _operation = self.operation()?;
         let mut state = self.lock()?;
         view_mut(&mut state)?.link_down(link);
         Ok(())
@@ -1090,7 +1104,6 @@ impl Driver {
 
     /// The hints owed to the holders, by link, with the view as it is now (CV7).
     pub fn view_hints(&self) -> Result<Vec<(u64, hex_api::capacity::ToHolder)>, Error> {
-        let _operation = self.operation()?;
         let mut state = self.lock()?;
         let local = state
             .node
@@ -1107,7 +1120,6 @@ impl Driver {
         &self,
         name: &str,
     ) -> Result<Result<hex_api::capacity::Forgotten, hex_api::capacity::NotForgotten>, Error> {
-        let _operation = self.operation()?;
         let mut state = self.lock()?;
         let forgotten = view_mut(&mut state)?.forget(name);
         let (forgotten, changed) = finish(&mut state, forgotten, false)?;
@@ -1701,65 +1713,6 @@ impl Driver {
         }
         Ok(resources)
     }
-
-    /// Joint plan step 14 (AC-T7.4.1): every microVM box this node runs on its own allocation, read now: its key,
-    /// class, receipt and use. A box gone between the listing and its read is passed over, as above.
-    pub fn measured_vms(&self) -> Result<Vec<MeasuredVm>, Error> {
-        let _operation = self.operation()?;
-        let state = self.lock()?;
-        let count = state.node.ran_keys().count();
-        let mut vms = Vec::new();
-        vms.try_reserve_exact(count)
-            .map_err(|_| Refusal::Exhausted {
-                what: "measured microVM identities",
-                bound: count,
-            })?;
-        for (key, _, ended) in state.node.ran_keys() {
-            if ended {
-                continue;
-            }
-            let demand = state
-                .node
-                .demand(key)
-                .ok_or_else(|| bad("ran demand missing"))?;
-            if !matches!(demand.class, Class::Shards | Class::Firecracker) {
-                continue;
-            }
-            if let Some(allocation) = state.node.assigned_allocation(key)? {
-                vms.push((key, demand.class, allocation));
-            }
-        }
-        drop(state);
-        let mut measured = Vec::new();
-        measured
-            .try_reserve_exact(vms.len())
-            .map_err(|_| Refusal::Exhausted {
-                what: "measured microVMs",
-                bound: vms.len(),
-            })?;
-        for (key, class, allocation) in vms {
-            match self.runtimes.get(class)?.usage(&self.physical_id(key)?) {
-                Ok(usage) => measured.push(MeasuredVm {
-                    key,
-                    class,
-                    allocation,
-                    usage,
-                }),
-                Err(Refusal::NoSuchBox(_)) => {}
-                Err(why) => return Err(why.into()),
-            }
-        }
-        Ok(measured)
-    }
-}
-
-/// A microVM box as [`Driver::measured_vms`] read it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MeasuredVm {
-    pub key: Key,
-    pub class: Class,
-    pub allocation: hex_api::Allocation,
-    pub usage: hex_api::Usage,
 }
 
 fn validate(demand: &Demand, payload: &Payload) -> Result<(), Error> {
@@ -1847,6 +1800,35 @@ fn finish<T>(state: &mut State, result: Result<T, Stop>, submit: bool) -> Result
         }
         Error::Core(stop)
     })
+}
+
+/// The node's capacity view as its lane serves it (`hex_quic::capacity::Server`; joint plan step 13, CV9): this
+/// Driver's keeper, each call under its core lock.
+pub struct DriverView(pub Arc<Driver>);
+
+impl hex_api::capacity::CapacityView for DriverView {
+    fn hear(
+        &mut self,
+        link: u64,
+        msg: hex_api::capacity::ToKeeper,
+    ) -> Result<hex_api::capacity::ToHolder, Refusal> {
+        self.0.view_hear(link, msg).map_err(placement_refusal)
+    }
+
+    fn link_down(&mut self, link: u64) -> Result<(), Refusal> {
+        self.0.view_link_down(link).map_err(placement_refusal)
+    }
+
+    fn hints(&mut self) -> Result<Vec<(u64, hex_api::capacity::ToHolder)>, Refusal> {
+        self.0.view_hints().map_err(placement_refusal)
+    }
+}
+
+fn placement_refusal(error: Error) -> Refusal {
+    match error {
+        Error::Runtime(refusal) => refusal,
+        Error::Core(stop) => admission_refusal(&stop),
+    }
 }
 
 fn view_mut(state: &mut State) -> Result<&mut view::View, Error> {

@@ -115,8 +115,17 @@ guarantee needs a VM's siblings to be VMs booked by this rule, and their parent 
   that one alone.
 
 `charge::Node::placement` gives these bounds: the parent's, and each VM's `cpu.weight` by booking, `cpu.max` and
-`memory.max` its ceiling, `memory.high` its budget at most its ceiling. A box whose owner sets its own `cpu.weight`
-(the process class's `Bounds`) is off this scale. Against it the fleet receives its weight's share, not its budget.
+`memory.max` its ceiling, `memory.high` its budget at most its ceiling.
+
+**One scale for every child of the node's cgroup** (ROOT, 2026-11-12). A process or OCI box is booked at its
+allocation until it is learned (its receipt's booking, else its workload's caps: `cpu_max_milli`), and weighs
+`ceil(10,000 × booking / machine CPU)` like a fleet. A fleet's budget is the room its machine leaves after those
+bookings, so the weights of every child sum to the scale's top and each child, box or fleet, receives at least
+`min(its need, its booking or budget)` under contention (`charge::tests`: a process box under contention, and the
+property over boxes in whole units of the scale). A box booked nothing weighs 1: it takes what booked work leaves
+idle. Its owner's own `cpu_weight` is not the node's scale. The node writing the boxes' weights, and `.oci`'s by
+its boxes' bookings, is checkpoint 4's remaining work; until then a box's cgroup keeps its owner's weight, and
+against it the fleet receives its weight's share, not its budget.
 
 **Sources.** Kubernetes makes a request a CPU weight and the limit a throttle (f35 A, f45 A); Borg gives batch
 work tiny shares beside latency-sensitive work (f44 A); weight by charge, the envelope the cap (f83 B). On macOS a box's CPU follows its weight only as QoS tiers, and the
@@ -176,16 +185,23 @@ places by reservation (f87 B, f21 A). Per-owner budgets across cells are B16's e
 
 ## C8. The interface with step 13 (goal 13)
 
-Taken by ROOT on 2026-11-12 and passed to goal 13; `Allocation`'s booked amount approved:
-- Hex publishes its reservation on a machine: per dimension, `sum(booking)`, and for memory and disk the excess held
-  past bookings too (`hex_sim::charge::Node::reservation`).
-- Hex admits a VM when its booking fits the combined view's free room for Hex (`Node::admit(.., free)`), refused
-  typed with that room.
-- The view carries Hex's reservation as a value that rises without an admission (a booking rising, memory held past
-  a booking) and tells kiln's balancer when it changes, so both back off.
+Taken by ROOT on 2026-11-12 and passed to goal 13; `Allocation`'s booked amount approved; how a VM's learned use
+reaches the view settled with goal 13 the same day:
+- The room in the machine's view stays physical, the machine's capacity. Nothing shifts it by a learned amount.
+- Hex's own local reservation in the view counts each running box at its holding, or at its receipt where it has
+  none. A VM's holding is its booking plus the memory and disk it holds past it. A VM that ends leaves the view
+  with its release, so no aggregate lags behind an end.
+- The node agent learns, so it reports. Its capacity answer for each VM class carries `Capacity::learned`: the
+  class's priors, its learned use for placement across nodes (`LearnedUse`: what the receipts booked, what their VMs
+  are learned to take), and each running VM's holding by box id. On each refresh the scheduler maps the box ids to
+  its keys and calls goal 13's `Driver::rebook` with them, right after it applies the answers.
+- The holdings are as fresh as the refreshes, not each window. Between two refreshes a VM growing past its booking
+  is held physically by C5's rule: its `memory.high` is its budget. The view lags, but the machine isn't overrun.
+- A capacity answer keeps to one message (`hex_core::wire::fit_learned`): the holdings go most past their receipts
+  first, and any left out is one least past its receipt, counted at its receipt.
+- Hex admits a VM when its booking fits the combined view's free room for Hex, refused typed with that room.
 - Hex's own ledger books a VM's booking: `hex_api::Allocation` gains an optional booked amount (append-only, absent
-  meaning today's whole allocation) that admission, records and recovery all use, and the node's facts reconcile the
-  learned bookings since admission each refresh, as they reconcile measured use today (`Facts::node_with_owned`).
+  meaning today's whole allocation) that admission, records and recovery all use.
 
 ## How it is wired
 
@@ -196,16 +212,21 @@ Taken by ROOT on 2026-11-12 and passed to goal 13; `Allocation`'s booked amount 
 - `NodeSpec::priors` carries each VM class's learned prior in a node's facts and offers. The placement index books a
   new VM's receipt at its node's prior (`model::booked_at`); a receiver admits an owner's receipt as it was booked,
   comparing charges with the booking aside (`model::same_charge`), so a stale view is never refused for it.
-- `hex-node`'s scheduler reads each microVM once a window (`Driver::measured_vms`, the shell `scheduler::charges`),
-  and on each refresh gives its facts the priors and moves its capacity by what receipts book past the learned
-  bookings, so the ledger's free room is the budget less what VMs are learned to take. It learns on Linux, where the
-  window is `cpu.max`'s period; on macOS and Windows the window their CPU control enforces (the managed control's
-  cycle, the job's rate) is not yet carried to the scheduler, so their VMs stay booked whole: Hex's own remaining
-  work, not upstream's.
-- C4's placement bounds come from `charge::Node::placement`. Only the node agent can write them: it owns `.vm` and
-  its VMs' cgroups. The scheduler is a separate process on the node socket, and no call there changes a running
-  box's bounds. Until the node agent writes them, a VM's cgroup keeps what its create gave it: `cpu.max` and
-  `memory.max` its ceiling, the kernel's default weight.
+- The learner is the node agent's (`hex-node`'s `node::charges`), the one authority, as the owner of its VMs'
+  cgroups. A monotonic timer wakes it once a window, `cpu.max`'s period. It reads each running VM's cgroup (the
+  supervisor's `running_vms`), learns, and writes the placement (C4, C5), each file only when its value changes
+  (`BoxCgroup::set`; a VM's create already wrote its ceiling): each VM's `cpu.weight` and `memory.high`, the fleet's
+  parent's `cpu.max` and `cpu.weight`, and `.vm`'s `cpu.weight`. Each Shards guest's room is refused
+  `Awaits(GuestRoom)` (C7). A failed window is kept, and the capacity answers then carry nothing learned, so the
+  class's VMs are booked whole until a window passes.
+- `hex_api::Capacity::learned` crosses the node socket's wire last on a VM class's capacity answer (append-only).
+  Its priors are bounded by a class's profiles, its holdings by a node's boxes, and the answer is fitted to one
+  message. On each refresh the scheduler (`scheduler::charges`) gives its node's facts the priors it carries, then,
+  right after applying the answers, maps the holdings' box ids to its keys (`Driver::running_ids`) and books each
+  VM at its holding (goal 13's `Driver::rebook`). Its capacity stays the machine's (C8).
+- It learns on Linux, where the window is `cpu.max`'s period. On macOS and Windows the window their CPU control
+  enforces (the managed control's cycle, the job's rate) has no learner yet, so their VMs stay booked whole: Hex's
+  own remaining work, not upstream's.
 
 ## Every number
 

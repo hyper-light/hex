@@ -698,6 +698,12 @@ impl<K: Ord + Copy> Node<K> {
         Ok(amounts(reserved))
     }
 
+    /// What one VM takes of its node (C8): its booking, and the memory and disk it holds past it. The node's
+    /// reservation is the sum of these.
+    pub fn holding(&self, id: &K) -> Option<Amounts> {
+        self.vms.get(id).map(|vm| amounts(physical(vm)))
+    }
+
     pub fn charge(&self, id: &K) -> Option<Amounts> {
         self.vms.get(id).map(|vm| amounts(vm.charge()))
     }

@@ -1,12 +1,11 @@
-//! The node's learned-charge shell (joint plan step 14, AC-T7.4.1; `docs/design/learned-charge.md`).
+//! What the scheduler takes of its node's charge learner (joint plan step 14, AC-T7.4.1;
+//! `docs/design/learned-charge.md`).
 
 use super::*;
-use hex_api::{RuntimeCost, Usage};
-use hex_sim::charge::SEEDABLE;
+use hex_api::{LearnedPrior, LearnedUse, RuntimeCost};
 use hex_sim::model::{NodeId, Resources};
 
 const GIB: u64 = 1 << 30;
-const WINDOW: Duration = Duration::from_millis(100);
 
 /// A default Shards VM's profile: every CPU of a 16-core host and 8 GiB, its envelope its floor and ceiling.
 fn cost() -> RuntimeCost {
@@ -29,27 +28,6 @@ fn cost() -> RuntimeCost {
     }
 }
 
-fn key(seq: u64) -> Key {
-    Key {
-        owner: 0,
-        epoch: 1,
-        seq,
-    }
-}
-
-fn vm(seq: u64, cpu_usec: u64, memory: u64, allocation: hex_api::Allocation) -> MeasuredVm {
-    MeasuredVm {
-        key: key(seq),
-        class: Class::Shards,
-        allocation,
-        usage: Usage {
-            cpu_usec,
-            memory_bytes: memory,
-            ..Usage::default()
-        },
-    }
-}
-
 fn node() -> NodeSpec {
     let mut node = NodeSpec::new(
         NodeId(0),
@@ -63,69 +41,120 @@ fn node() -> NodeSpec {
     node
 }
 
-/// Joint plan step 14 (AC-T7.4.1), C2 and C3 through the node's shell: do read a VM booked at its whole receipt at a
-/// tenth of a core and 1 GiB for SEEDABLE windows; expect no prior while it is cold and the node's capacity as it
-/// was, then the class's prior its learned tail and the capacity moved by what its receipt books past what it is
-/// learned to take, so the ledger's free room is the budget less the learned booking.
-#[test]
-fn w14_the_shell_learns_a_prior_and_moves_the_capacity_by_the_receipts() {
-    let allocation = cost().allocate(CapacityResources::default()).unwrap();
-    let mut charges = Charges::new(WINDOW, 8).unwrap();
-    let start = Instant::now();
-    let mut local = node();
-    charges.apply(&mut local).unwrap();
-    assert_eq!(local.priors, [None; Class::COUNT]);
-    for t in 0..=SEEDABLE as u64 {
-        let at = start + WINDOW * u32::try_from(t).unwrap();
-        // 100 ms of CPU in each 100 ms window... a tenth of it: 10,000 us.
-        charges
-            .observe(&[vm(1, t * 10_000, GIB, allocation)], at)
-            .unwrap();
-        if t == SEEDABLE as u64 - 1 {
-            let mut cold = node();
-            charges.apply(&mut cold).unwrap();
-            assert_eq!(cold.priors, [None; Class::COUNT], "cold at {t}");
-            assert_eq!(cold.capacity, node().capacity, "cold at {t}");
-        }
+fn capacity(learned: Option<Learned>) -> hex_api::Capacity {
+    hex_api::Capacity {
+        id: "shards".into(),
+        total: CapacityResources {
+            cpu_milli: 16_000,
+            mem_bytes: 64 * GIB,
+            disk_bytes: 0,
+        },
+        free: CapacityResources::default(),
+        devices: Vec::new(),
+        cost: Some(cost()),
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        unavailable: Vec::new(),
+        learned,
     }
-    let mut warm = node();
-    charges.apply(&mut warm).unwrap();
-    let learned = CapacityResources {
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C2 through the scheduler: do take a Shards answer carrying a prior for the class's
+/// profile and ceiling, then one carrying a prior for another profile, then none. Expect the first given to the
+/// node's facts as its Shards prior, which a new receipt is booked at; the second and third giving no prior; and the
+/// node's capacity the machine's throughout (C8).
+#[test]
+fn w14_the_scheduler_takes_the_priors_its_nodes_learner_carries() {
+    let booking = CapacityResources {
         cpu_milli: 100,
         mem_bytes: GIB,
         disk_bytes: 0,
     };
+    let carried = |profile: [u8; 32]| Learned {
+        priors: vec![LearnedPrior {
+            profile,
+            ceiling: cost()
+                .allocate(CapacityResources::default())
+                .unwrap()
+                .resources,
+            booking,
+        }],
+        used: LearnedUse::default(),
+        holdings: Vec::new(),
+    };
+    let reports = vec![(Class::Shards, Some(capacity(Some(carried([14; 32])))))];
+    let mut local = node();
+    apply(&mut local, &learned(&reports).unwrap()).unwrap();
     assert_eq!(
-        warm.priors[Class::Shards.index()],
+        local.priors[Class::Shards.index()],
         Some(Prior {
             profile: [14; 32],
-            booking: learned,
+            booking,
         })
     );
-    assert_eq!(warm.capacity.cpu_milli, 16_000 + 16_000 - 100);
-    assert_eq!(warm.capacity.mem_bytes, 64 * GIB + 8 * GIB - GIB);
-    // A new VM's receipt is booked at the prior, and the ledger's room after both is the budget less the bookings.
-    let booked = hex_sim::model::booked_at(Some(allocation), warm.priors[Class::Shards.index()]);
-    assert_eq!(booked.unwrap().booking(), learned);
+    assert_eq!(local.capacity, node().capacity);
+    let allocation = cost().allocate(CapacityResources::default()).unwrap();
+    let booked = hex_sim::model::booked_at(Some(allocation), local.priors[Class::Shards.index()]);
+    assert_eq!(booked.unwrap().booking(), booking);
+    for reports in [
+        vec![(Class::Shards, Some(capacity(Some(carried([15; 32])))))],
+        vec![(Class::Shards, Some(capacity(None)))],
+    ] {
+        let mut local = node();
+        apply(&mut local, &learned(&reports).unwrap()).unwrap();
+        assert_eq!(local.priors, [None; Class::COUNT]);
+        assert_eq!(local.capacity, node().capacity);
+    }
 }
 
-/// Joint plan step 14 (AC-T7.4.1), C3: do stop reading a VM; expect it ended in the shell, its receipt no longer
-/// moving the capacity.
+/// Joint plan step 14 (AC-T7.4.1, C8): a capacity answer's learned holdings are bounded by a node's most boxes, so a
+/// node never has more running VMs to report than its answer may carry.
 #[test]
-fn w14_a_vm_no_longer_read_has_ended() {
-    let allocation = cost().allocate(CapacityResources::default()).unwrap();
-    let mut charges = Charges::new(WINDOW, 8).unwrap();
-    let start = Instant::now();
-    charges
-        .observe(
-            &[vm(1, 0, GIB, allocation), vm(2, 0, GIB, allocation)],
-            start,
-        )
-        .unwrap();
-    charges
-        .observe(&[vm(1, 1_000, GIB, allocation)], start + WINDOW)
-        .unwrap();
-    assert!(charges.node.holds(&key(1)));
-    assert!(!charges.node.holds(&key(2)));
-    assert_eq!(charges.receipts.len(), 1);
+fn w14_learned_holdings_are_bounded_by_a_nodes_boxes() {
+    assert_eq!(hex_api::MAX_LEARNED_HOLDINGS, hex_runtime::MAX_BOXES);
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C8 through the scheduler: do take two classes' answers holding three boxes, two of
+/// which the node runs under its scheduler; expect those two booked at their holdings against their keys, in the
+/// answers' order, and the third passed over.
+#[test]
+fn w14_the_scheduler_books_each_vm_it_runs_at_its_holding() {
+    let key = |seq| hex_sim::peer::Key {
+        owner: 0,
+        epoch: 1,
+        seq,
+    };
+    let holding = |id: &str, gib: u64| hex_api::LearnedHolding {
+        id: BoxId::new(id).unwrap(),
+        holding: CapacityResources {
+            cpu_milli: 100,
+            mem_bytes: gib * GIB,
+            disk_bytes: 0,
+        },
+    };
+    let carrying = |holdings| Learned {
+        priors: Vec::new(),
+        used: LearnedUse::default(),
+        holdings,
+    };
+    let learned = vec![
+        (
+            Class::Shards,
+            carrying(vec![holding("vm-a", 2), holding("vm-stray", 9)]),
+        ),
+        (Class::Firecracker, carrying(vec![holding("vm-b", 1)])),
+    ];
+    let ids = BTreeMap::from([
+        (BoxId::new("vm-a").unwrap(), key(1)),
+        (BoxId::new("vm-b").unwrap(), key(2)),
+    ]);
+    let booked = holds(&learned, &ids).unwrap();
+    assert_eq!(
+        booked,
+        vec![
+            (key(1), holding("vm-a", 2).holding),
+            (key(2), holding("vm-b", 1).holding),
+        ]
+    );
 }
