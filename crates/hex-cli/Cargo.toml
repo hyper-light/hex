@@ -28,6 +28,8 @@ hex-api.workspace = true
 hex-client.workspace = true
 hex-core.workspace = true
 hex-node.workspace = true
+# `hex node --quic` and `hex node enroll` (src/node.rs; docs/design/hex-quic.md Q9).
+hex-quic.workspace = true
 hex-runtime.workspace = true
 rustix.workspace = true
 # `hex selftest-box tree`'s file hashes (HEX-GUEST-21, selftest/tree.rs).
@@ -41,6 +43,8 @@ socket2.workspace = true
 hex-api.workspace = true
 hex-core.workspace = true
 hex-node.workspace = true
+# `hex node --quic` and `hex node enroll` (src/node.rs; docs/design/hex-quic.md Q9).
+hex-quic.workspace = true
 hex-runtime.workspace = true
 rustix.workspace = true
 
@@ -52,6 +56,8 @@ rustix.workspace = true
 hex-api.workspace = true
 hex-core.workspace = true
 hex-node.workspace = true
+# `hex node --quic` and `hex node enroll` (src/node.rs; docs/design/hex-quic.md Q9).
+hex-quic.workspace = true
 hex-runtime.workspace = true
 
 [dev-dependencies]

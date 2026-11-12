@@ -47,8 +47,10 @@ impl Receive {
     pub(crate) fn new(limit: usize) -> Self {
         Self {
             active: None,
-            retired: Vec::with_capacity(limit),
-            grants: Vec::with_capacity(limit),
+            // Grown as chunks are added, to `limit` at most ([`Receive::grow`]): a bound, never laid out
+            // ahead, so an endpoint whose limits are large pays only for the chunks it holds.
+            retired: Vec::new(),
+            grants: Vec::new(),
             limit,
             copied: 0,
         }

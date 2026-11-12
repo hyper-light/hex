@@ -23,23 +23,50 @@ use std::time::Duration;
 use hex_api::{Refusal, Stdio};
 use hex_core::stream::{self, Deframer, Exec, Gather, Named};
 use hex_core::wire::{self, Call, Request, Streams};
-use hex_quic::{Acceptor, Endpoint, PeerId, Why};
+use hex_quic::{Acceptor, Endpoint, PeerId, Shape, Why};
 
 use crate::serve::{
     Accepted, EVENTS, Event, Handle, Interest, Limits, Os, Peer, Recv, Sent, Unwatched,
 };
 
-/// The ports a node's endpoint serves: its control, its programs' stdio, its log, and on Linux staging.
-pub fn ports() -> Vec<u32> {
+/// The ports a node's endpoint serves: its control, its programs' stdio, its log, and its staging where it stages
+/// (`staging`: a Linux node given a folder to stage into, [`Quic::new`]). A port it doesn't serve is refused by type
+/// ([`Why::NoPort`]).
+pub fn ports(staging: bool) -> Vec<u32> {
     let mut ports = vec![
         stream::CONTROL_PORT,
         stream::STDIO_PORT,
         hex_core::lanes::LOG_PORT,
     ];
-    if cfg!(target_os = "linux") {
+    if staging {
         ports.push(stream::files::FILES_PORT);
     }
     ports
+}
+
+/// A node endpoint's shape at `limits` (docs/design/hex-quic.md Q8), each number the node's own: as many peers as its
+/// connections bound, and for one peer every connection to its ports that can do work at once: a control connection
+/// for each call the node runs at once (`in_flight`, its workers: a connection past them has no call to run), each
+/// running program's streams and each gathering exec's ([`Bounds::unnamed`]), one log connection (a second reads the
+/// same lines), and where it stages a staging connection for each call it runs at once. hyper-transport grows to these
+/// and lays none out ahead (vendor/patches/hyper-raft/0003); hyper-quic lays out a table of the lanes a connected peer
+/// may open (quinn's `StreamsState::new`), a row each, so a peer costs that table while it is connected.
+pub fn shape(limits: &Limits, staging: bool) -> Shape {
+    let bounds = Bounds::of(limits);
+    let streams = limits
+        .programs
+        .saturating_mul(wire::MAX_FDS)
+        .saturating_add(bounds.unnamed);
+    let staged = if staging { limits.in_flight } else { 0 };
+    let lanes = limits
+        .in_flight
+        .saturating_add(streams)
+        .saturating_add(1)
+        .saturating_add(staged);
+    Shape {
+        connections: limits.connections,
+        lanes: u32::try_from(lanes).unwrap_or(u32::MAX),
+    }
 }
 
 /// The listener's bounds, each the node's own: the relay's rules over the node's socket bounds (`crate::relay`'s
@@ -164,13 +191,25 @@ pub struct Quic<N: Os> {
 }
 
 impl<N: Os> Quic<N> {
-    /// Serves `endpoint`'s connections beside `native`'s, held to `bounds`; staging under `staged` on Linux.
+    /// Serves `endpoint`'s connections beside `native`'s, held to `bounds`; staging under `staged`, which a Linux node
+    /// alone takes: the staging server is the guest relay's (`crate::relay::files`), and a macOS or Windows node stages
+    /// no file tree on any transport, only into its own guest, as its runtime's client (`hex_runtime::guest`).
     pub fn new(
         native: N,
         endpoint: Arc<Endpoint>,
         bounds: Bounds,
         staged: Option<std::path::PathBuf>,
     ) -> Result<Self, Refusal> {
+        #[cfg(not(target_os = "linux"))]
+        if staged.is_some() {
+            return Err(Refusal::Platform {
+                what: "staging file trees over QUIC",
+                platform: std::env::consts::OS,
+                why: "a node stages file trees only on Linux, where the relay's staging server runs; this node \
+                      stages none, on any transport"
+                    .to_owned(),
+            });
+        }
         let native = Arc::new(native);
         let wake: hex_quic::Notify = {
             let native = Arc::clone(&native);
@@ -217,8 +256,6 @@ impl<N: Os> Quic<N> {
                 move || stagings(&shared, &acceptor, &staged)
             })?;
         }
-        #[cfg(not(target_os = "linux"))]
-        drop(staged);
         Ok(Self {
             native,
             shared,
