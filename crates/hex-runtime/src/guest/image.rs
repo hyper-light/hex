@@ -270,6 +270,7 @@ fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, 
             ClassSpec::ShardsImage(image) => image.grants.clone(),
             _ => Vec::new(),
         },
+        last_resort: None,
     })
 }
 

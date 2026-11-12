@@ -16,11 +16,12 @@ use std::sync::{Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use hex_api::{
-    Allocation, Bounds, BoxId, CapacityResources, Learned, LearnedEnd, LearnedHolding,
+    Allocation, Bounds, BoxId, BoxInfo, CapacityResources, Learned, LearnedEnd, LearnedHolding,
     LearnedPrior, LearnedUse, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, Refusal, RuntimeCost,
     Upstream, Usage,
 };
 use hex_core::cgroup::{CPU_PERIOD_US, CpuMax, Write};
+use hex_core::record::BoxRecord;
 use hex_runtime::linux::cgroup::BoxCgroup;
 use hex_sim::charge::{self, ChargeError, ClassKey, Cpu, Excess, Sample};
 use hex_sim::model::Class;
@@ -133,6 +134,10 @@ pub(super) struct Learner {
     /// first, a machine never holding more VMs than its population at once.
     ended: VecDeque<(Class, LearnedEnd)>,
     ends: usize,
+    /// The same ends not yet in their boxes' records, oldest first, by box and VM lifetime: the node writes each into
+    /// its record after the window ([`Learner::unrecorded`]) and keeps one whose write failed for the next, at most
+    /// `ends` of them, the oldest forgotten first.
+    unrecorded: VecDeque<(BoxId, Scope, LearnedEnd)>,
 }
 
 /// The last resort's state from window to window (C5), explicit (R04).
@@ -215,6 +220,35 @@ fn tell_room(class: Class) -> Result<(), Upstream> {
         Class::Shards => Err(Upstream::GuestRoom),
         _ => Ok(()),
     }
+}
+
+/// A VM box's inspect from its backend, with why the last resort ended it where its record says so (C5), across the
+/// node's restarts.
+pub(super) fn with_last_resort(info: &mut BoxInfo, record: &BoxRecord) -> Result<(), Refusal> {
+    info.last_resort = record
+        .last_resort
+        .as_ref()
+        .map(LearnedEnd::try_clone)
+        .transpose()?;
+    Ok(())
+}
+
+/// Writes why the last resort ended VM `id` into its record in `store`, where the record is still that VM's lifetime
+/// (`scope`): false where none is, the box deleted since or made again.
+pub(super) fn record_last_resort(
+    store: &crate::store::Store,
+    id: &BoxId,
+    scope: Scope,
+    end: &LearnedEnd,
+) -> Result<bool, Refusal> {
+    let end = end.try_clone()?;
+    store.update(id, move |record| {
+        if record.native_scope.as_ref().map(|s| *s.bytes()) != Some(scope) {
+            return false;
+        }
+        record.last_resort = Some(end);
+        true
+    })
 }
 
 /// One of the node's process or OCI boxes, as its cgroup books it (C4).
@@ -365,6 +399,7 @@ impl Learner {
             resort: Resort::Held,
             ended: VecDeque::new(),
             ends: bound.min(MAX_LEARNED_HOLDINGS),
+            unrecorded: VecDeque::new(),
         })
     }
 
@@ -522,7 +557,7 @@ impl Learner {
                 let (class, id, cgroup) = (vm.class, vm.id.try_clone()?, vm.cgroup.clone());
                 match io.kill(&cgroup) {
                     Ok(()) => {
-                        self.record_end(class, &id, why)?;
+                        self.record_end(class, &id, scope, why)?;
                         Resort::Ending { scope, id, why }
                     }
                     Err(refusal) => Resort::Refused(refusal),
@@ -532,28 +567,56 @@ impl Learner {
         Ok(())
     }
 
-    /// Keeps why the last resort ended the VM `id`, forgetting the oldest end past the bound.
-    fn record_end(&mut self, class: Class, id: &BoxId, why: Excess) -> Result<(), Refusal> {
-        if self.ended.len() >= self.ends {
+    /// Keeps why the last resort ended the VM `id` of lifetime `scope`, for its class's capacity answers and for its
+    /// box's record, forgetting the oldest end past the bound.
+    fn record_end(
+        &mut self,
+        class: Class,
+        id: &BoxId,
+        scope: Scope,
+        why: Excess,
+    ) -> Result<(), Refusal> {
+        let end = LearnedEnd {
+            id: id.try_clone()?,
+            held: why.held,
+            budget: why.budget,
+            band: why.band,
+            fleet_held: why.fleet.held,
+            fleet_growth: why.fleet.growth,
+            fleet_budget: why.fleet.budget,
+        };
+        let bound = self.ends;
+        let full = |what| Refusal::Exhausted { what, bound };
+        if self.ended.len() >= bound {
             self.ended.pop_front();
         }
-        self.ended.try_reserve(1).map_err(|_| Refusal::Exhausted {
-            what: "the last resort's ends",
-            bound: self.ends,
-        })?;
-        self.ended.push_back((
-            class,
-            LearnedEnd {
-                id: id.try_clone()?,
-                held: why.held,
-                budget: why.budget,
-                band: why.band,
-                fleet_held: why.fleet.held,
-                fleet_growth: why.fleet.growth,
-                fleet_budget: why.fleet.budget,
-            },
-        ));
+        if self.unrecorded.len() >= bound {
+            self.unrecorded.pop_front();
+        }
+        self.ended
+            .try_reserve(1)
+            .map_err(|_| full("the last resort's ends"))?;
+        self.unrecorded
+            .try_reserve(1)
+            .map_err(|_| full("the last resort's unrecorded ends"))?;
+        self.unrecorded
+            .push_back((id.try_clone()?, scope, end.try_clone()?));
+        self.ended.push_back((class, end));
         Ok(())
+    }
+
+    /// Takes the ends not yet in their boxes' records, oldest first (C5).
+    pub(super) fn unrecorded(&mut self) -> VecDeque<(BoxId, Scope, LearnedEnd)> {
+        std::mem::take(&mut self.unrecorded)
+    }
+
+    /// Keeps `left`, ends whose record writes failed, for the next window, before any made since and within the bound.
+    pub(super) fn keep_unrecorded(&mut self, mut left: VecDeque<(BoxId, Scope, LearnedEnd)>) {
+        left.append(&mut self.unrecorded);
+        while left.len() > self.ends {
+            left.pop_front();
+        }
+        self.unrecorded = left;
     }
 
     /// Writes the placement (C4, C5): each VM, the fleet's parent, `.vm` by the sum of its fleets' budgets within the
@@ -737,10 +800,10 @@ impl Learner {
 impl Node {
     /// One window of the node's charge learner (joint plan step 14), its failure kept for the capacity answers.
     fn learn_window(&self) {
-        let Some(learner) = self.backends.get().and_then(|b| b.learner.as_ref()) else {
+        let Some(shared) = self.backends.get().and_then(|b| b.learner.as_ref()) else {
             return;
         };
-        let Ok(mut learner) = learner.lock() else {
+        let Ok(mut learner) = shared.lock() else {
             return;
         };
         let read = self.supervisor.running_vms().and_then(|running| {
@@ -767,6 +830,26 @@ impl Node {
         };
         // Its outcome is kept as the learner's fault, which the capacity answers read.
         let _ = learner.window(&Kernel, running, record, &held, budget, Instant::now());
+        // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
+        // is kept for the next window and fails this one.
+        let mut ends = learner.unrecorded();
+        drop(learner);
+        let mut failed = None;
+        ends.retain(
+            |(id, scope, end)| match record_last_resort(&self.store, id, *scope, end) {
+                Ok(_) => false,
+                Err(why) => {
+                    failed.get_or_insert(why);
+                    true
+                }
+            },
+        );
+        if let Some(why) = failed
+            && let Ok(mut learner) = shared.lock()
+        {
+            learner.keep_unrecorded(ends);
+            learner.failed(why);
+        }
     }
 
     /// What `class`'s capacity answer carries of the learner (C8), fitted to one message.
