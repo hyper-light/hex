@@ -626,6 +626,8 @@ fn oci_spec() -> BoxSpec {
 
 fn info() -> BoxInfo {
     BoxInfo {
+        published: Vec::new(),
+        grants: Vec::new(),
         allocation: None,
         route: None,
         membership: None,
@@ -967,6 +969,8 @@ fn answers() -> Vec<(u64, Answer)> {
                 infos: vec![
                     info(),
                     BoxInfo {
+                        published: Vec::new(),
+                        grants: Vec::new(),
                         allocation: None,
                         route: None,
                         membership: None,
@@ -1546,6 +1550,7 @@ fn the_wire_identity_is_its_definitions_digest_line_endings_aside() {
         "../../hex-api/src/bounds.rs",
         "../../hex-api/src/devices.rs",
         "../../hex-api/src/runtime.rs",
+        "../../hex-api/src/grants.rs",
     ];
     let mut sources: Vec<Vec<u8>> = paths
         .iter()
@@ -1870,8 +1875,9 @@ fn hostile_values_are_refused_by_name() {
         Fault::Truncated { .. }
     ));
     let mut info = answer(2, &Answer::Info(info()), MAX_MESSAGE).unwrap();
-    // None route/allocation tags follow abandoned's eight bytes and the exit's five plus tag.
-    let adopted = info.len() - 2 - 8 - 6 - 1;
+    // None route/allocation tags follow abandoned's eight bytes and the exit's five plus tag, and the
+    // empty grant and published lists' counts end the info.
+    let adopted = info.len() - NO_GRANTS - 2 - 8 - 6 - 1;
     info[adopted] = 2;
     assert!(matches!(
         read_answer(&received(&info, 0), MAX_MESSAGE),
@@ -2063,6 +2069,8 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
     )
         .prop_map(
             |(id, backend, state, bounds, adopted, exit, abandoned)| BoxInfo {
+                published: Vec::new(),
+                grants: Vec::new(),
                 allocation: None,
                 route: None,
                 membership: None,
@@ -3170,7 +3178,8 @@ fn route_wire_spec_and_info_inconsistent_route_receipts_refuse() {
         read_answer(&received(&bad, 0), MAX_MESSAGE).unwrap().1,
         valid_info
     );
-    let route_at = bad.len() - route_bytes;
+    // The info's route comes before its empty grant and published lists' counts.
+    let route_at = bad.len() - NO_GRANTS - route_bytes;
     assert_eq!(bad[route_at], 1);
     assert_eq!(bad[route_at + 1], class_tag(Class::Oci));
     assert_eq!(bad[route_at + 1 + ROUTE_KEY_BYTES], 1);
@@ -4280,4 +4289,361 @@ fn w14_a_capacitys_holdings_are_fitted_to_one_message_in_their_order() {
         learned.holdings.push(holdings[kept].clone());
     }
     assert!(answer(14, &Answer::Capacity(Some(more)), MAX_MESSAGE).is_err());
+}
+
+/// What ends an info without grants on the wire (joint plan step 15): its empty grant list's u32 count, then its
+/// empty list of published ports'.
+const NO_GRANTS: usize = 2 * size_of::<u32>();
+
+fn harness() -> Member {
+    Member {
+        kind: MemberKind::Harness,
+        name: "codex".to_owned(),
+    }
+}
+
+/// One grant of each way, as kiln would give a harness: a provider by name, kiln on the VM's host, and one port
+/// published on the host's loopback.
+fn each_way() -> Vec<Grant> {
+    vec![
+        Grant::Egress {
+            member: harness(),
+            to: Destination::Name("api.openai.com".to_owned()),
+            ports: Ports {
+                proto: Proto::Tcp,
+                first: 443,
+                last: 443,
+            },
+        },
+        Grant::Host {
+            member: harness(),
+            ports: Ports {
+                proto: Proto::Udp,
+                first: 7070,
+                last: 7071,
+            },
+        },
+        Grant::Publish {
+            member: harness(),
+            proto: Proto::Tcp,
+            port: 1455,
+            host: "127.0.0.1".parse().unwrap(),
+            host_port: None,
+        },
+    ]
+}
+
+/// The bytes `list` encodes to with the check skipped, as a peer that skipped it would send them.
+fn unchecked(list: &[Grant]) -> Vec<u8> {
+    let mut w = Writer::new(MAX_MESSAGE);
+    w.list(list, put_grant).unwrap();
+    w.done().unwrap()
+}
+
+/// Joint plan step 15, HEX-SOCK-2: do write one grant of each way and read it back; expect the same grants, the
+/// bytes exactly the fixed tags' (way, member kind, IANA protocol number, address family), and nothing left over.
+#[test]
+fn grants_survive_the_wire_with_fixed_tags() {
+    let list = each_way();
+    let mut w = Writer::new(MAX_MESSAGE);
+    put_grants(&mut w, &list).unwrap();
+    let bytes = w.done().unwrap();
+    let text = |s: &str| {
+        let mut out = u32::try_from(s.len()).unwrap().to_le_bytes().to_vec();
+        out.extend_from_slice(s.as_bytes());
+        out
+    };
+    let mut expected = 3u32.to_le_bytes().to_vec();
+    expected.extend([0, 1]);
+    expected.extend(text("codex"));
+    expected.push(0);
+    expected.extend(text("api.openai.com"));
+    expected.push(6);
+    expected.extend(443u16.to_le_bytes());
+    expected.extend(443u16.to_le_bytes());
+    expected.extend([1, 1]);
+    expected.extend(text("codex"));
+    expected.push(17);
+    expected.extend(7070u16.to_le_bytes());
+    expected.extend(7071u16.to_le_bytes());
+    expected.extend([2, 1]);
+    expected.extend(text("codex"));
+    expected.push(6);
+    expected.extend(1455u16.to_le_bytes());
+    expected.extend([4, 127, 0, 0, 1, 0]);
+    assert_eq!(bytes, expected);
+    let mut r = Reader::new(&bytes);
+    assert_eq!(grants(&mut r).unwrap(), list);
+    assert_eq!(r.at(), bytes.len());
+}
+
+/// Joint plan step 15, AC-T7.7.2: do write grants the check refuses (a loopback destination, one flow named twice),
+/// then read the same lists as a peer that skipped the check would send them; expect each refused both ways, typed
+/// as invalid grants, so no list the check refuses crosses the wire.
+#[test]
+fn a_grant_list_the_check_refuses_is_neither_written_nor_read() {
+    let mut loopback = each_way();
+    loopback.push(Grant::Egress {
+        member: harness(),
+        to: Destination::Address("127.0.0.1".parse().unwrap()),
+        ports: Ports {
+            proto: Proto::Tcp,
+            first: 7070,
+            last: 7070,
+        },
+    });
+    let mut twice = each_way();
+    twice.push(twice[0].clone());
+    for list in [loopback, twice] {
+        let mut w = Writer::new(MAX_MESSAGE);
+        assert!(
+            matches!(
+                put_grants(&mut w, &list),
+                Err(Fault::Value { what: "grants", .. })
+            ),
+            "{list:?} was written"
+        );
+        let bytes = unchecked(&list);
+        assert!(
+            matches!(
+                grants(&mut Reader::new(&bytes)),
+                Err(Fault::Value { what: "grants", .. })
+            ),
+            "{list:?} was read"
+        );
+    }
+}
+
+/// Joint plan step 15, HEX-SOCK-1: do read a grant whose way, destination, member kind, protocol or address family
+/// is a tag no grant has; expect each refused by the field's name, never read as another.
+#[test]
+fn unknown_grant_tags_are_refused_by_name() {
+    let good = unchecked(&each_way()[..1]);
+    // The single egress grant's tags: its way at 4 (after the count), its member's kind at 5, its destination's at
+    // 15 (after the name's length and "codex") and its protocol at 34 (after the name "api.openai.com").
+    for (at, tag, field) in [
+        (4, 3, "grant"),
+        (5, 2, "grant member"),
+        (15, 2, "grant destination"),
+        (34, 7, "grant protocol"),
+    ] {
+        let mut bytes = good.clone();
+        bytes[at] = tag;
+        assert!(
+            matches!(grants(&mut Reader::new(&bytes)), Err(Fault::Value { what, .. }) if what == field),
+            "tag {tag} at {at}: {:?}",
+            grants(&mut Reader::new(&bytes))
+        );
+    }
+    let publish = unchecked(&each_way()[2..]);
+    // The publish's address family follows its way, member, protocol and port: at 4 + 1 + 1 + 4 + 5 + 1 + 2.
+    let mut bytes = publish.clone();
+    bytes[18] = 5;
+    assert!(
+        matches!(
+            grants(&mut Reader::new(&bytes)),
+            Err(Fault::Value {
+                what: "grant address",
+                ..
+            })
+        ),
+        "{:?}",
+        grants(&mut Reader::new(&bytes))
+    );
+    for cut in 0..publish.len() {
+        assert!(
+            grants(&mut Reader::new(&publish[..cut])).is_err(),
+            "cut at {cut}"
+        );
+    }
+}
+
+/// Joint plan step 15 (every grant visible in Hex's record of the VM): do create a Shards image VM granted a provider
+/// by name, kiln on its host and a publish; expect it read back whole, its grants written after its command. Do
+/// write one whose grants the check refuses (a loopback destination), and read it as a peer that skipped the check
+/// would send it; expect both refused as invalid grants.
+#[test]
+fn a_shards_image_vm_carries_its_grants_on_the_wire() {
+    let spec = |grants: Vec<Grant>| BoxSpec {
+        id: id("image-grants"),
+        bounds: Bounds::default(),
+        class: ClassSpec::ShardsImage(Box::new(ShardsImage {
+            grants,
+            ..ShardsImage::new(hex_api::sim::SIM_IMAGE)
+        })),
+        owner: None,
+        devices: Vec::new(),
+        allocation: Some(hex_api::sim::sim_vm_allocation().unwrap()),
+        route: None,
+    };
+    let create = Request::Call(Call::Create(Box::new(spec(each_way()))));
+    let bytes = request(92, &create, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        create
+    );
+    let mut listed = Writer::new(MAX_MESSAGE);
+    put_grants(&mut listed, &each_way()).unwrap();
+    let listed = listed.done().unwrap();
+    let image = hex_api::sim::SIM_IMAGE.as_bytes();
+    let named = bytes.windows(image.len()).position(|w| w == image).unwrap();
+    // After the image, the command's option (none), then the grants.
+    let at = named + image.len() + 1;
+    assert_eq!(bytes[at - 1], 0);
+    assert_eq!(&bytes[at..at + listed.len()], listed.as_slice());
+    let mut loopback = each_way();
+    loopback.push(Grant::Egress {
+        member: harness(),
+        to: Destination::Address("127.0.0.1".parse().unwrap()),
+        ports: Ports {
+            proto: Proto::Tcp,
+            first: 7070,
+            last: 7070,
+        },
+    });
+    let refused = Request::Call(Call::Create(Box::new(spec(loopback.clone()))));
+    assert!(matches!(
+        request(93, &refused, MAX_MESSAGE),
+        Err(Fault::Value { what: "grants", .. })
+    ));
+    let mut spliced = bytes[..at].to_vec();
+    spliced.extend(unchecked(&loopback));
+    spliced.extend_from_slice(&bytes[at + listed.len()..]);
+    assert!(matches!(
+        read_request(&received(&spliced, 0), MAX_MESSAGE).map_err(|bad| bad.fault),
+        Err(Fault::Value { what: "grants", .. })
+    ));
+}
+
+/// Joint plan step 15 (N6): do answer an inspect of a running Shards image VM with its grants and its publish as
+/// the host bound it. Expect: read back whole, the bound port's grant, socket and receiver last. Do: answer one
+/// whose report names an egress grant, and read one whose receiver tag no receiver has. Expect: refused as
+/// "published" written, and by the receiver's name read.
+#[test]
+fn an_inspect_carries_its_grants_and_their_ports_as_bound() {
+    let published = Published {
+        grant: 2,
+        at: "127.0.0.1:49152".parse().unwrap(),
+        receiver: Receiver::Declared,
+    };
+    let shown = Answer::Info(BoxInfo {
+        class: Class::Shards,
+        grants: each_way(),
+        published: vec![published],
+        ..info()
+    });
+    let bytes = answer(94, &shown, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        shown
+    );
+    let mut tail = 1u32.to_le_bytes().to_vec();
+    tail.extend(2u32.to_le_bytes());
+    tail.extend([4, 127, 0, 0, 1]);
+    tail.extend(49152u16.to_le_bytes());
+    tail.push(0);
+    assert!(bytes.ends_with(&tail));
+    let wrong = Answer::Info(BoxInfo {
+        class: Class::Shards,
+        grants: each_way(),
+        published: vec![Published {
+            grant: 0,
+            ..published
+        }],
+        ..info()
+    });
+    assert!(matches!(
+        answer(95, &wrong, MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "published",
+            ..
+        })
+    ));
+    let mut hostile = bytes.clone();
+    let last = hostile.len() - 1;
+    hostile[last] = 1;
+    assert!(matches!(
+        read_answer(&received(&hostile, 0), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "published receiver",
+            ..
+        })
+    ));
+}
+
+fn any_member() -> impl Strategy<Value = Member> {
+    (any::<bool>(), "[a-z][a-z0-9._-]{0,6}").prop_map(|(agent, name)| Member {
+        kind: if agent {
+            MemberKind::Agent
+        } else {
+            MemberKind::Harness
+        },
+        name,
+    })
+}
+
+fn any_ports() -> impl Strategy<Value = Ports> {
+    (any::<bool>(), 1u16..=u16::MAX, 0u16..64).prop_map(|(udp, first, span)| Ports {
+        proto: if udp { Proto::Udp } else { Proto::Tcp },
+        first,
+        last: first.saturating_add(span),
+    })
+}
+
+fn any_grant() -> impl Strategy<Value = Grant> {
+    let to = prop_oneof![
+        "[a-z]([a-z0-9-]{0,6}[a-z0-9])?\\.[a-z]{2,6}".prop_map(Destination::Name),
+        any::<[u8; 4]>().prop_map(|a| Destination::Address(IpAddr::from(a))),
+        any::<[u8; 16]>().prop_map(|a| Destination::Address(IpAddr::from(a))),
+    ];
+    let host = prop_oneof![
+        Just("127.0.0.1"),
+        Just("::1"),
+        Just("10.0.0.2"),
+        Just("fd00::2")
+    ];
+    prop_oneof![
+        (any_member(), to, any_ports()).prop_map(|(member, to, ports)| Grant::Egress {
+            member,
+            to,
+            ports
+        }),
+        (any_member(), any_ports()).prop_map(|(member, ports)| Grant::Host { member, ports }),
+        (
+            any_member(),
+            any::<bool>(),
+            1u16..=u16::MAX,
+            host,
+            proptest::option::of(1u16..=u16::MAX)
+        )
+            .prop_map(|(member, udp, port, host, host_port)| Grant::Publish {
+                member,
+                proto: if udp { Proto::Udp } else { Proto::Tcp },
+                port,
+                host: host.parse().unwrap(),
+                host_port,
+            }),
+    ]
+    .prop_filter("a well-formed grant", |g| {
+        check_grants(std::slice::from_ref(g)).is_ok()
+    })
+}
+
+proptest! {
+    /// Joint plan step 15, HEX-SOCK-2: any well-formed list of grants of every way reads back as written, whole.
+    #[test]
+    fn any_grants_read_back_as_written(list in proptest::collection::vec(any_grant(), 0..6).prop_filter("each flow named once", |l| check_grants(l).is_ok())) {
+        let mut w = Writer::new(MAX_MESSAGE);
+        put_grants(&mut w, &list).unwrap();
+        let bytes = w.done().unwrap();
+        let mut r = Reader::new(&bytes);
+        prop_assert_eq!(grants(&mut r).unwrap(), list);
+        prop_assert_eq!(r.at(), bytes.len());
+    }
+
+    /// Joint plan step 15, HEX-SOCK-1: any bytes are a grant list or a typed refusal, never a panic.
+    #[test]
+    fn any_bytes_are_grants_or_refused(bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
+        let _ = grants(&mut Reader::new(&bytes));
+    }
 }

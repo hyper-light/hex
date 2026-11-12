@@ -422,6 +422,8 @@ impl MacRuntime {
 
     fn info(&self, b: &ProcessBox) -> Result<BoxInfo, Refusal> {
         Ok(BoxInfo {
+            published: Vec::new(),
+            grants: Vec::new(),
             route: None,
             id: b.id()?.try_clone()?,
             class: Class::Process,
@@ -557,6 +559,8 @@ fn remove_process_box(boxes: &NativeBoxes, id: &BoxId) -> Result<(), Refusal> {
 /// exit, and no abandoned programs (the node's disconnect rule is the helper's here).
 fn info(id: BoxId, bounds: Bounds, state: BoxState) -> BoxInfo {
     BoxInfo {
+        published: Vec::new(),
+        grants: Vec::new(),
         route: None,
         id,
         class: Class::Process,

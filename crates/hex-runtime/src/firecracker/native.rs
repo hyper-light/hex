@@ -1343,6 +1343,8 @@ impl Runtime for FirecrackerRuntime {
                     .map_err(|_| uncertain(id))?
             {
                 return Ok(BoxInfo {
+                    published: Vec::new(),
+                    grants: Vec::new(),
                     id: id.try_clone()?,
                     class: record.spec.class.class(),
                     state: hex_api::BoxState::Empty,

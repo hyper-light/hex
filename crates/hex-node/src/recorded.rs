@@ -1565,6 +1565,8 @@ mod projection_tests {
     }
     fn factual() -> BoxInfo {
         BoxInfo {
+            published: Vec::new(),
+            grants: Vec::new(),
             id: BoxId::new("canonical-route").unwrap(),
             class: Class::Process,
             state: hex_api::BoxState::Empty,

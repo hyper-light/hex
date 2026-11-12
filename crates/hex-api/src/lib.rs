@@ -37,7 +37,10 @@ pub use devices::{
     BackendUnavailable, DeviceHolder, DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable,
     MAX_DEVICES, PhysicalDevice, PhysicalReport,
 };
-pub use grants::{Destination, Grant, Member, MemberKind, Ports, Proto, check_grants};
+pub use grants::{
+    Destination, Grant, Member, MemberKind, Ports, Proto, Published, Receiver, check_grants,
+    check_published,
+};
 pub use id::BoxId;
 pub use runtime::{
     Allocation, Asked, BackingGrant, BackingKey, BackingOffer, BackingPhase, BoxInfo, BoxState,
