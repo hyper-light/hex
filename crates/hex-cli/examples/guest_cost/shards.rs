@@ -1,7 +1,8 @@
-//! The Shards class's driver (macOS HVF, Linux KVM): its guest booted by the configured `shards`, as a node
-//! boots it, with runtime folders of the run's own; ready when its agent answers (the relay's token and
-//! the node's hello, as `GuestRuntime`'s first dial is); its VMM read through its OS, and its own report
-//! read from its agent's `oci` capacity.
+//! The Shards class's driver (macOS HVF, Linux KVM): its guest launched by the configured `shards`, as a
+//! node launches it, with runtime folders of the run's own; ready when its agent answers (the relay's token
+//! and the node's hello, as `GuestRuntime`'s first dial is); its VMM read through its OS (its CPU and its
+//! guest's part of it, its footprint and its guest RAM's part of it, what its folders hold), and its own
+//! report read from its agent's `oci` capacity.
 
 use std::io::Read as _;
 use std::os::unix::fs::PermissionsExt as _;
@@ -15,19 +16,20 @@ use hex_runtime::guest::GuestConfig;
 use sha2::{Digest, Sha256};
 use shards_api::Guests as _;
 
-use super::seam::{Driver, Envelope, Host, Lines, Patience};
+use super::run::walk;
+use super::seam::{Driver, Envelope, Files, Holding, Launched, Lines, Patience, Probe, Use};
 
 pub struct Shards {
     config: GuestConfig,
     guests: shards_api::ConfiguredShards,
+    cache: PathBuf,
     home: PathBuf,
 }
 
-/// A ready guest: its VM, the agent's client, and its VMM's pid.
+/// A launched guest: its VM and, once it is ready, its agent's client.
 pub struct Guest {
     vm: Arc<dyn shards_api::Guest>,
-    client: Client,
-    pid: i32,
+    client: Option<Client>,
 }
 
 impl Shards {
@@ -36,8 +38,8 @@ impl Shards {
         Self::configured(GuestConfig::from_env().map_err(|e| e.to_string())?, out)
     }
 
-    /// The `config` guest, booted with `out/runtime/{cache,home}` as its runtime folders (made private).
-    fn configured(config: GuestConfig, out: &Path) -> Result<Self, String> {
+    /// The `config` guest, launched with `out/runtime/{cache,home}` as its runtime folders (made private).
+    pub fn configured(config: GuestConfig, out: &Path) -> Result<Self, String> {
         let runtime = out.join("runtime");
         let (cache, home) = (runtime.join("cache"), runtime.join("home"));
         for dir in [&runtime, &cache, &home] {
@@ -46,13 +48,22 @@ impl Shards {
                 .map_err(|e| format!("making {} private: {e}", dir.display()))?;
         }
         let absolute = |dir: &Path| std::path::absolute(dir).map_err(|e| e.to_string());
-        let guests = shards_api::Shards::configured(absolute(&cache)?, absolute(&home)?)
+        let (cache, home) = (absolute(&cache)?, absolute(&home)?);
+        let guests = shards_api::Shards::configured(cache.clone(), home.clone())
             .map_err(|e| e.to_string())?;
         Ok(Self {
             config,
             guests,
+            cache,
             home,
         })
+    }
+
+    fn ram(&self) -> Result<u64, String> {
+        self.config
+            .memory_mib
+            .checked_mul(1 << 20)
+            .ok_or_else(|| "the memory overflows".to_owned())
     }
 
     fn stop(vm: &dyn shards_api::Guest, deadline: Instant) -> Result<(), String> {
@@ -63,6 +74,25 @@ impl Shards {
             Ok(None) => Err(format!("the guest didn't end within {left:?} of its stop")),
             Err(e) => Err(format!("waiting for the guest's end: {e}")),
         }
+    }
+
+    /// The probes of a launched guest's VMM: its pid, its guest's RAM, and its folders (the runtime ones and
+    /// its socket's, which the API made for it alone).
+    fn probes(&self, vm: &dyn shards_api::Guest) -> Result<(VmmCpu, VmmHolds), String> {
+        let identity = vm
+            .identity()
+            .map_err(|e| format!("naming the guest's VMM: {e}"))?;
+        let pid = i32::try_from(identity.pid).map_err(|e| e.to_string())?;
+        let socket = identity
+            .vsock
+            .parent()
+            .ok_or("the guest's socket has no folder")?
+            .to_owned();
+        probes(
+            pid,
+            self.ram()?,
+            vec![self.cache.clone(), self.home.clone(), socket],
+        )
     }
 }
 
@@ -86,6 +116,8 @@ fn digest(path: &Path) -> Result<String, String> {
 
 impl Driver for Shards {
     type Guest = Guest;
+    type Cpu = VmmCpu;
+    type Holds = VmmHolds;
 
     fn class(&self) -> String {
         hex_runtime::guest::CLASS.to_owned()
@@ -134,13 +166,10 @@ impl Driver for Shards {
                 cpu_milli: u64::from(self.config.vcpus)
                     .checked_mul(1000)
                     .ok_or("the vCPUs overflow")?,
-                mem_bytes: self
-                    .config
-                    .memory_mib
-                    .checked_mul(1 << 20)
-                    .ok_or("the memory overflows")?,
+                mem_bytes: self.ram()?,
                 disk_bytes: 0,
             },
+            vcpus: self.config.vcpus,
             source: "HEX_GUEST_CPUS and HEX_GUEST_MEMORY_MIB; no disk: the guest's root and state are in its RAM (docs/design/shards-guest.md §4)".to_owned(),
         })
     }
@@ -159,70 +188,78 @@ impl Driver for Shards {
         &self.home
     }
 
-    fn host_source(&self) -> String {
-        if cfg!(target_os = "macos") {
-            "the VMM's proc_pid_rusage: ri_user_time + ri_system_time, ri_lifetime_max_phys_footprint, ri_diskio_byteswritten".to_owned()
-        } else {
-            "the VMM's /proc/<pid>/stat utime + stime, /proc/<pid>/status VmHWM, /proc/<pid>/io write_bytes".to_owned()
-        }
+    fn sources(&self) -> Lines {
+        let disk = format!(
+            "the allocated bytes (st_blocks x 512, a hard-linked file once) of every path under SHARDS_CACHE {}, SHARDS_HOME {} and the guest's socket folder (its vsock's, which the API makes for it alone)",
+            self.cache.display(),
+            self.home.display()
+        );
+        vec![
+            ("cpu".to_owned(), cpu_source()),
+            ("memory".to_owned(), memory_source()),
+            ("disk".to_owned(), disk),
+        ]
     }
 
-    fn boot(&mut self, deadline: Instant) -> Result<Option<Guest>, String> {
-        let span = deadline.saturating_duration_since(Instant::now());
+    fn held(&self) -> Result<Files, String> {
+        walk(&[self.cache.clone(), self.home.clone()])
+    }
+
+    fn launch(&mut self) -> Result<Launched<Self>, String> {
         let vm: Arc<dyn shards_api::Guest> = Arc::from(
             self.guests
                 .boot(&self.config.spec())
-                .map_err(|e| format!("booting the guest: {e}"))?,
+                .map_err(|e| format!("launching the guest: {e}"))?,
         );
-        let ready = vm
-            .identity()
-            .map_err(|e| format!("naming the guest's VMM: {e}"))
-            .and_then(|identity| i32::try_from(identity.pid).map_err(|e| e.to_string()))
-            .and_then(|pid| {
-                own_link(ShardsLink::new(Arc::clone(&vm), span))
-                    .and_then(|link| Client::connect_before(link, deadline))
-                    .map(|client| (client, pid))
-                    .map_err(|why| format!("reaching the guest's agent: {why}"))
-            });
-        match ready {
-            Ok((client, pid)) => Ok(Some(Guest { vm, client, pid })),
-            // Whatever kept it from being ready, the guest is stopped first: none is left running.
+        match self.probes(vm.as_ref()) {
+            Ok((cpu, holds)) => Ok((Guest { vm, client: None }, cpu, holds)),
+            // Whatever kept it from being read, the guest is stopped first: none is left running.
             Err(why) => {
-                let ran_out = Instant::now() >= deadline;
-                let stopped = Instant::now()
-                    .checked_add(span)
-                    .ok_or_else(|| "the stop's wait overflows".to_owned())
-                    .and_then(|at| Self::stop(vm.as_ref(), at));
-                match (ran_out, stopped) {
-                    (true, Ok(())) => Ok(None),
-                    (false, Ok(())) => Err(why),
-                    (_, Err(stop)) => Err(format!("{why}; then {stop}")),
-                }
+                let stopped = self.patience().and_then(|patience| {
+                    Instant::now()
+                        .checked_add(patience.bound)
+                        .ok_or_else(|| "the stop's wait overflows".to_owned())
+                        .and_then(|at| Self::stop(vm.as_ref(), at))
+                });
+                Err(match stopped {
+                    Ok(()) => why,
+                    Err(stop) => format!("{why}; then {stop}"),
+                })
             }
         }
     }
 
-    fn hold(&mut self, guest: &Guest, span: Duration) -> Result<Host, String> {
-        let before = vmm(guest.pid)?;
-        // The hold is a wait on the guest's end, for `span`: it must not come.
-        if let Some(end) = guest
-            .vm
-            .wait_for(span)
-            .map_err(|e| format!("holding the guest: {e}"))?
+    fn ready(&mut self, guest: &mut Guest, deadline: Instant) -> Result<bool, String> {
+        let span = deadline.saturating_duration_since(Instant::now());
+        match own_link(ShardsLink::new(Arc::clone(&guest.vm), span))
+            .and_then(|link| Client::connect_before(link, deadline))
         {
-            return Err(format!("the guest ended in its idle hold: {end:?}"));
+            Ok(client) => {
+                guest.client = Some(client);
+                Ok(true)
+            }
+            Err(_) if Instant::now() >= deadline => Ok(false),
+            Err(why) => Err(format!("reaching the guest's agent: {why}")),
         }
-        let after = vmm(guest.pid)?;
-        Ok(Host {
-            cpu: after.cpu.saturating_sub(before.cpu),
-            peak_bytes: after.peak_bytes,
-            written_bytes: after.written_bytes,
-        })
+    }
+
+    fn idle(&mut self, guest: &Guest, until: Instant) -> Result<(), String> {
+        // The hold is a wait on the guest's end, until `until`: it must not come.
+        match guest
+            .vm
+            .wait_for(until.saturating_duration_since(Instant::now()))
+        {
+            Ok(None) => Ok(()),
+            Ok(Some(end)) => Err(format!("the guest ended in its idle hold: {end:?}")),
+            Err(e) => Err(format!("holding the guest: {e}")),
+        }
     }
 
     fn report(&mut self, guest: &Guest, deadline: Instant) -> Result<CapacityResources, String> {
         guest
             .client
+            .as_ref()
+            .ok_or("the guest's agent never answered")?
             .capacity_before(Class::Oci, deadline)
             .map_err(|e| format!("reading the guest agent's capacity: {e}"))?
             .map(|capacity| capacity.free)
@@ -230,69 +267,459 @@ impl Driver for Shards {
     }
 
     fn tear_down(&mut self, guest: Guest, deadline: Instant) -> Result<(), String> {
-        let Guest { vm, client, .. } = guest;
+        let Guest { vm, client } = guest;
         drop(client);
         Self::stop(vm.as_ref(), deadline)
     }
 }
 
-/// The VMM's use so far: its CPU time, its peak memory, the bytes it wrote.
-#[cfg(target_os = "macos")]
-fn vmm(pid: i32) -> Result<Host, String> {
-    let usage = hex_runtime::macos::sys::rusage(pid)
-        .map_err(|e| format!("reading the VMM's use: {e}"))?
-        .filter(|usage| !usage.ended)
-        .ok_or("the guest's VMM has ended")?;
-    let timebase = hex_runtime::macos::sys::Timebase::get().map_err(|e| e.to_string())?;
-    Ok(Host {
-        cpu: Duration::from_nanos(timebase.nanos(usage.cpu)),
-        peak_bytes: usage.peak,
-        written_bytes: usage.written_bytes,
-    })
+/// The guest RAM's address range among a VMM's map entries (`(start, end, anonymous)`, in address order):
+/// the one run of anonymous entries, each where the one before ends, whose span is the guest's RAM (Shards
+/// maps each RAM range as one private anonymous mapping, `reserve_ram`, which XNU keeps as entries of at
+/// most 128 MiB and Linux splits where its advice differs). `None` while no run is that long (its RAM not
+/// yet mapped); an error where several are, as none is then told apart.
+fn guest_range(entries: &[(u64, u64, bool)], ram: u64) -> Result<Option<(u64, u64)>, String> {
+    let mut found = Vec::new();
+    for (at, &(start, _, anonymous)) in entries.iter().enumerate() {
+        if !anonymous {
+            continue;
+        }
+        let mut end = start;
+        for &(next, next_end, next_anonymous) in entries.iter().skip(at) {
+            if !next_anonymous || next != end {
+                break;
+            }
+            end = next_end;
+            let span = end.saturating_sub(start);
+            if span == ram {
+                found.push((start, end));
+            }
+            if span >= ram {
+                break;
+            }
+        }
+    }
+    match found.as_slice() {
+        [] => Ok(None),
+        [range] => Ok(Some(*range)),
+        runs => Err(format!(
+            "{} runs of the VMM's anonymous memory span its guest's RAM ({ram} bytes), at {runs:x?}: none is told apart",
+            runs.len()
+        )),
+    }
 }
 
-/// The VMM's use so far: its CPU time, its peak memory, the bytes it wrote.
+/// The bytes of the entries (`(start, end, bytes)`, in address order) that tile `range`, which must be
+/// mapped whole: each entry in it starts where the one before ends, from its start to its end.
+fn within(
+    entries: impl Iterator<Item = (u64, u64, u64)>,
+    range: (u64, u64),
+) -> Result<u64, String> {
+    let (mut at, mut bytes) = (range.0, 0u64);
+    for (start, end, held) in entries {
+        if end <= range.0 || start >= range.1 {
+            continue;
+        }
+        if start != at || end > range.1 {
+            return Err(format!(
+                "the guest's RAM {:#x}-{:#x} is no longer mapped whole (an entry {start:#x}-{end:#x})",
+                range.0, range.1
+            ));
+        }
+        at = end;
+        bytes = bytes.saturating_add(held);
+    }
+    if at != range.1 {
+        return Err(format!(
+            "the guest's RAM {:#x}-{:#x} is mapped only to {at:#x}",
+            range.0, range.1
+        ));
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "macos")]
+fn cpu_source() -> String {
+    "the VMM's proc_pid_rusage ri_user_time + ri_system_time, less its vCPU threads' (named vcpuN by Shards, crates/vmm/src/vm/runtime.rs; each read by proc_pidinfo PROC_PIDTHREADINFO), the threads XNU counts its guest's time on (Shards PM M288): a lower bound of its own CPU, which leaves out the vCPU threads' exit handling until Shards reports each vCPU's guest exec time (hv_vcpu_get_exec_time)".to_owned()
+}
+
 #[cfg(target_os = "linux")]
-fn vmm(pid: i32) -> Result<Host, String> {
-    let read = |name: &str| {
-        std::fs::read_to_string(format!("/proc/{pid}/{name}"))
-            .map_err(|e| format!("reading the VMM's /proc/{pid}/{name}: {e}"))
-    };
-    // proc(5): after the command's closing parenthesis, utime and stime are the 12th and 13th fields.
-    let stat = read("stat")?;
-    let fields: Vec<&str> = stat
-        .rsplit_once(')')
-        .map(|(_, rest)| rest.split_whitespace().collect())
-        .ok_or("the VMM's stat has no command")?;
-    let tick = |at: usize| -> Result<u64, String> {
-        fields
-            .get(at)
-            .and_then(|field| field.parse().ok())
-            .ok_or_else(|| format!("the VMM's stat field {at} isn't a count"))
-    };
-    let ticks = tick(11)?.saturating_add(tick(12)?);
-    let hz = rustix::param::clock_ticks_per_second();
-    let field = |text: &str, name: &str| -> Result<u64, String> {
-        text.lines()
-            .find_map(|line| line.strip_prefix(name))
-            .and_then(|value| value.trim().trim_end_matches("kB").trim().parse().ok())
-            .ok_or_else(|| format!("the VMM's {name} isn't a count"))
-    };
-    Ok(Host {
-        cpu: Duration::from_nanos(
-            u64::try_from(u128::from(ticks) * 1_000_000_000 / u128::from(hz.max(1)))
-                .map_err(|e| e.to_string())?,
-        ),
-        peak_bytes: field(&read("status")?, "VmHWM:")?.saturating_mul(1024),
-        written_bytes: field(&read("io")?, "write_bytes:")?,
-    })
+fn cpu_source() -> String {
+    format!(
+        "utime + stime less guest_time of the VMM's /proc/<pid>/stat (fields 14, 15 and 43; proc(5): utime counts its guest's time too), in clock ticks of 1/{} s: a window's figure is within 2 ticks of its own CPU, which the census maximum absorbs",
+        rustix::param::clock_ticks_per_second()
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn memory_source() -> String {
+    format!(
+        "the VMM's proc_pid_rusage ri_phys_footprint, less its guest RAM's pages resident and compressed (proc_pidinfo PROC_PIDREGIONINFO over the entries of the one run as long as its RAM of untagged entries it may read and write, outside any submap, PROC_PIDREGIONPATHINFO naming no file for any), in this host's {}-byte pages; ri_lifetime_max_phys_footprint is in the samples for the record",
+        rustix::param::page_size()
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn memory_source() -> String {
+    "the VMM's anonymous memory, resident and swapped (Anonymous + Swap over /proc/<pid>/smaps), less its guest RAM mapping's (the one run of private anonymous mappings as long as its RAM)".to_owned()
+}
+
+/// A launched guest's VMM's CPU, as macOS reads it: its own (`proc_pid_rusage`) and its vCPU threads'
+/// (`proc_pidinfo`).
+#[cfg(target_os = "macos")]
+pub struct VmmCpu {
+    pid: i32,
+    timebase: hex_runtime::macos::sys::Timebase,
+    handles: Vec<u64>,
+}
+
+/// What a launched guest's VMM holds, as macOS reads it: its footprint, its guest RAM's pages
+/// (`PROC_PIDREGIONINFO`, which counts an entry's pages one by one, so a reading takes as long as its RAM is
+/// large), and its folders.
+#[cfg(target_os = "macos")]
+pub struct VmmHolds {
+    pid: i32,
+    page: u64,
+    ram: u64,
+    guest: Option<(u64, u64)>,
+    folders: Vec<PathBuf>,
+}
+
+/// The probes of the VMM `pid`, whose guest has `ram` bytes of RAM and whose folders are `folders`.
+#[cfg(target_os = "macos")]
+fn probes(pid: i32, ram: u64, folders: Vec<PathBuf>) -> Result<(VmmCpu, VmmHolds), String> {
+    use hex_runtime::macos::sys;
+    // Room for every thread a task may have, so a thread list is whole.
+    let most = sys::sysctl_number(c"kern.num_taskthreads")
+        .map_err(|e| format!("reading kern.num_taskthreads: {e}"))?;
+    Ok((
+        VmmCpu {
+            pid,
+            timebase: sys::Timebase::get().map_err(|e| e.to_string())?,
+            handles: vec![0; usize::try_from(most).map_err(|e| e.to_string())?],
+        },
+        VmmHolds {
+            pid,
+            page: u64::try_from(rustix::param::page_size()).map_err(|e| e.to_string())?,
+            ram,
+            guest: None,
+            folders,
+        },
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn ended() -> String {
+    "the guest's VMM has ended".to_owned()
+}
+
+#[cfg(target_os = "macos")]
+impl Probe for VmmCpu {
+    type Reading = Use;
+
+    fn read(&mut self) -> Result<Use, String> {
+        use hex_runtime::macos::sys;
+        let threads = sys::threads(self.pid, &mut self.handles)
+            .map_err(|e| format!("reading the VMM's threads: {e}"))?
+            .ok_or_else(ended)?;
+        let vcpu = |name: &[u8]| {
+            name.strip_prefix(b"vcpu")
+                .is_some_and(|n| !n.is_empty() && n.iter().all(u8::is_ascii_digit))
+        };
+        let (mut guest_cpu, mut guest_threads) = (Duration::ZERO, 0u32);
+        for thread in threads.iter().filter(|thread| vcpu(&thread.name)) {
+            guest_cpu = guest_cpu.saturating_add(thread.cpu);
+            guest_threads = guest_threads.saturating_add(1);
+        }
+        let usage = sys::rusage(self.pid)
+            .map_err(|e| format!("reading the VMM's use: {e}"))?
+            .filter(|usage| !usage.ended)
+            .ok_or_else(ended)?;
+        Ok(Use {
+            cpu: Duration::from_nanos(self.timebase.nanos(usage.cpu)),
+            guest_cpu,
+            guest_threads: Some(guest_threads),
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl VmmHolds {
+    /// The VMM's map, entry by entry (`PROC_PIDREGIONINFO`), each with whether it may be the guest's RAM:
+    /// memory the VMM may read and write that no allocator tagged and no submap holds, as Shards' guest RAM is
+    /// (`reserve_ram`'s anonymous mmap, which XNU shows as `shared memory` once the hypervisor maps it too),
+    /// and as reservations of address space alone, which may never be read, are not.
+    fn entries(&self) -> Result<Vec<(u64, u64, bool)>, String> {
+        let mut entries = Vec::new();
+        let mut at = 0u64;
+        while let Some(entry) = hex_runtime::macos::sys::region(self.pid, at)
+            .map_err(|e| format!("reading the VMM's memory map: {e}"))?
+        {
+            let end = entry
+                .address
+                .checked_add(entry.size)
+                .filter(|end| *end > at)
+                .ok_or("the VMM's memory map doesn't advance")?;
+            // VM_PROT_READ | VM_PROT_WRITE (mach/vm_prot.h).
+            let usable = entry.max_protection & 3 == 3;
+            entries.push((
+                entry.address,
+                end,
+                entry.tag == 0 && !entry.submap && usable,
+            ));
+            at = end;
+        }
+        Ok(entries)
+    }
+
+    /// The guest's RAM, where the VMM maps it now: the one run [`guest_range`] finds in its map, each of
+    /// whose entries maps no file (`PROC_PIDREGIONPATHINFO`, read for those entries alone).
+    fn find_guest(&self) -> Result<Option<(u64, u64)>, String> {
+        let entries = self.entries()?;
+        let Some(range) = guest_range(&entries, self.ram)? else {
+            return Ok(None);
+        };
+        for &(start, _, _) in entries
+            .iter()
+            .filter(|(start, end, _)| *start >= range.0 && *end <= range.1)
+        {
+            let entry = hex_runtime::macos::sys::region_with_path(self.pid, start)
+                .map_err(|e| format!("reading the VMM's memory map: {e}"))?
+                .ok_or("the VMM's memory map ended inside its guest's RAM")?;
+            if entry.file != Some(false) {
+                return Ok(None);
+            }
+        }
+        Ok(Some(range))
+    }
+
+    /// The bytes of the guest's RAM the VMM holds, resident or compressed.
+    fn guest_bytes(&self, range: (u64, u64)) -> Result<u64, String> {
+        let mut entries = Vec::new();
+        let mut at = range.0;
+        while at < range.1 {
+            let Some(entry) = hex_runtime::macos::sys::region(self.pid, at)
+                .map_err(|e| format!("reading the VMM's memory map: {e}"))?
+            else {
+                break;
+            };
+            let end = entry
+                .address
+                .checked_add(entry.size)
+                .filter(|end| *end > at)
+                .ok_or("the VMM's memory map doesn't advance")?;
+            let pages = entry.resident.saturating_add(entry.swapped_out);
+            entries.push((entry.address, end, pages.saturating_mul(self.page)));
+            at = end;
+        }
+        within(entries.into_iter(), range)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Probe for VmmHolds {
+    type Reading = Holding;
+
+    fn read(&mut self) -> Result<Holding, String> {
+        let usage = hex_runtime::macos::sys::rusage(self.pid)
+            .map_err(|e| format!("reading the VMM's use: {e}"))?
+            .filter(|usage| !usage.ended)
+            .ok_or_else(ended)?;
+        if self.guest.is_none() {
+            self.guest = self.find_guest()?;
+        }
+        let guest_memory = self
+            .guest
+            .map(|range| self.guest_bytes(range))
+            .transpose()?;
+        Ok(Holding {
+            footprint: usage.footprint,
+            peak_footprint: Some(usage.peak),
+            guest_memory,
+            files: walk(&self.folders)?,
+        })
+    }
+
+    /// The map read whole again: the guest's RAM is still the one run found, so no reading took another
+    /// run for it.
+    fn verify(&mut self) -> Result<(), String> {
+        let now = self.find_guest()?;
+        if now != self.guest {
+            return Err(format!(
+                "the guest's RAM was read at {:x?} and is now at {now:x?}",
+                self.guest
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A launched guest's VMM's CPU, as Linux reads it: its own and its guest's (`/proc/<pid>/stat`).
+#[cfg(target_os = "linux")]
+pub struct VmmCpu {
+    pid: i32,
+    hz: u64,
+}
+
+/// What a launched guest's VMM holds, as Linux reads it: its anonymous memory and its guest RAM mapping's
+/// (`/proc/<pid>/smaps`, which walks each mapping's pages, so a reading takes as long as its RAM is large),
+/// and its folders.
+#[cfg(target_os = "linux")]
+pub struct VmmHolds {
+    pid: i32,
+    ram: u64,
+    guest: Option<(u64, u64)>,
+    folders: Vec<PathBuf>,
+}
+
+/// The probes of the VMM `pid`, whose guest has `ram` bytes of RAM and whose folders are `folders`.
+#[cfg(target_os = "linux")]
+fn probes(pid: i32, ram: u64, folders: Vec<PathBuf>) -> Result<(VmmCpu, VmmHolds), String> {
+    Ok((
+        VmmCpu {
+            pid,
+            hz: rustix::param::clock_ticks_per_second().max(1),
+        },
+        VmmHolds {
+            pid,
+            ram,
+            guest: None,
+            folders,
+        },
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn read_proc(pid: i32, name: &str) -> Result<String, String> {
+    std::fs::read_to_string(format!("/proc/{pid}/{name}"))
+        .map_err(|e| format!("reading the VMM's /proc/{pid}/{name}: {e}"))
+}
+
+/// One mapping of `/proc/<pid>/smaps`: where it is, whether it is private and anonymous (no path), and its
+/// anonymous bytes resident and swapped.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Mapping {
+    start: u64,
+    end: u64,
+    anonymous: bool,
+    held: u64,
+}
+
+/// The mappings of `/proc/<pid>/smaps` text (proc(5)): each a header `start-end perms offset dev inode
+/// [path]` and its fields, of which `Anonymous` and `Swap` (in kB) are counted.
+#[cfg(target_os = "linux")]
+fn mappings(text: &str) -> Result<Vec<Mapping>, String> {
+    let mut out: Vec<Mapping> = Vec::new();
+    for line in text.lines() {
+        let mut words = line.split_whitespace();
+        let Some(first) = words.next() else { continue };
+        if let Some((start, end)) = first.split_once('-')
+            && !first.ends_with(':')
+        {
+            let hex = |text: &str| {
+                u64::from_str_radix(text, 16).map_err(|_| format!("smaps names no address: {line}"))
+            };
+            let perms = words
+                .next()
+                .ok_or_else(|| format!("smaps names no access: {line}"))?;
+            let path = words.nth(3);
+            out.push(Mapping {
+                start: hex(start)?,
+                end: hex(end)?,
+                anonymous: path.is_none() && perms.ends_with('p'),
+                held: 0,
+            });
+            continue;
+        }
+        if matches!(first, "Anonymous:" | "Swap:") {
+            let kb: u64 = words
+                .next()
+                .and_then(|n| n.parse().ok())
+                .ok_or_else(|| format!("smaps' {first} isn't a count: {line}"))?;
+            let mapping = out
+                .last_mut()
+                .ok_or("smaps has a field before its first mapping")?;
+            mapping.held = mapping.held.saturating_add(kb.saturating_mul(1024));
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(target_os = "linux")]
+impl VmmCpu {
+    fn ticks(&self, ticks: u64) -> Result<Duration, String> {
+        u64::try_from(u128::from(ticks) * 1_000_000_000 / u128::from(self.hz))
+            .map(Duration::from_nanos)
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Probe for VmmCpu {
+    type Reading = Use;
+
+    fn read(&mut self) -> Result<Use, String> {
+        // proc(5): after the command's closing parenthesis, the state is the 3rd field, utime and stime the
+        // 14th and 15th, guest_time the 43rd.
+        let stat = read_proc(self.pid, "stat")?;
+        let fields: Vec<&str> = stat
+            .rsplit_once(')')
+            .map(|(_, rest)| rest.split_whitespace().collect())
+            .ok_or("the VMM's stat has no command")?;
+        if matches!(fields.first().copied(), Some("Z" | "X") | None) {
+            return Err("the guest's VMM has ended".to_owned());
+        }
+        let field = |at: usize| -> Result<u64, String> {
+            fields
+                .get(at)
+                .and_then(|field| field.parse().ok())
+                .ok_or_else(|| format!("the VMM's stat field {} isn't a count", at + 3))
+        };
+        Ok(Use {
+            cpu: self.ticks(field(11)?.saturating_add(field(12)?))?,
+            guest_cpu: self.ticks(field(40)?)?,
+            guest_threads: None,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Probe for VmmHolds {
+    type Reading = Holding;
+
+    fn read(&mut self) -> Result<Holding, String> {
+        let maps = mappings(&read_proc(self.pid, "smaps")?)?;
+        // Found again at each reading: once found, the same run, so no reading takes another for it.
+        let entries: Vec<(u64, u64, bool)> =
+            maps.iter().map(|m| (m.start, m.end, m.anonymous)).collect();
+        let found = guest_range(&entries, self.ram)?;
+        match (self.guest, found) {
+            (None, found) => self.guest = found,
+            (Some(was), Some(now)) if was == now => {}
+            (Some(was), now) => {
+                return Err(format!(
+                    "the guest's RAM was read at {was:x?} and is now at {now:x?}"
+                ));
+            }
+        }
+        let footprint = maps.iter().map(|m| m.held).fold(0, u64::saturating_add);
+        let guest_memory = self
+            .guest
+            .map(|range| within(maps.iter().map(|m| (m.start, m.end, m.held)), range))
+            .transpose()?;
+        Ok(Holding {
+            footprint,
+            peak_footprint: None,
+            guest_memory,
+            files: walk(&self.folders)?,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const PATIENCE: Duration = Duration::from_secs(30);
 
     fn config(dir: &Path) -> GuestConfig {
         for (name, bytes) in [
@@ -314,21 +741,23 @@ mod tests {
         }
     }
 
-    /// AC-T7.4.1: the driver's envelope is its configured guest's (vCPUs as milli-CPUs, MiB as bytes, no
-    /// disk), its runtime folders are made private under the run's, and it names each image by path and
-    /// SHA-256.
+    /// AC-T7.4.1: the driver's envelope is its configured guest's (vCPUs as milli-CPUs and threads, MiB as
+    /// bytes, no disk), its runtime folders are made private under the run's, and it names each image by
+    /// path and SHA-256.
     #[test]
     fn the_driver_measures_its_configured_guest() {
         let dir = tempfile::tempdir().unwrap();
         let driver = Shards::configured(config(dir.path()), &dir.path().join("out")).unwrap();
+        let envelope = driver.envelope().unwrap();
         assert_eq!(
-            driver.envelope().unwrap().resources,
+            envelope.resources,
             CapacityResources {
                 cpu_milli: 2000,
                 mem_bytes: 512 << 20,
                 disk_bytes: 0,
             }
         );
+        assert_eq!(envelope.vcpus, 2);
         let home = std::fs::metadata(driver.runtime()).unwrap();
         assert_eq!(home.permissions().mode() & 0o777, 0o700);
         let lines = driver.describe().unwrap();
@@ -348,32 +777,119 @@ mod tests {
         );
     }
 
-    /// AC-T7.4.1: the VMM's use, read as the hold reads it, of a real busy process: expect its CPU to grow
-    /// from nothing and its peak memory read.
+    /// AC-T7.4.1: the guest's RAM among a VMM's map entries: expect the one run of anonymous entries, each
+    /// where the one before ends, as long as its RAM (XNU's 128 MiB entries; Linux's split by advice), a
+    /// neighbour that abuts it or a file's entry in it never taken in, none while it isn't mapped, and two
+    /// such runs refused.
     #[test]
-    fn the_vmm_is_read_through_its_os() {
+    fn the_guest_ram_is_the_one_anonymous_run_as_long_as_it() {
+        const M: u64 = 1 << 20;
+        let ram = 512 * M;
+        let base = 0x1_0000_0000;
+        let chunks: Vec<(u64, u64, bool)> = (0..4)
+            .map(|n| (base + n * 128 * M, base + (n + 1) * 128 * M, true))
+            .collect();
+        let mut entries = vec![(base - M, base, true)];
+        entries.extend(chunks.iter().copied());
+        entries.push((base + ram, base + ram + M, true));
+        assert_eq!(
+            guest_range(&entries, ram).unwrap(),
+            Some((base, base + ram))
+        );
+        assert_eq!(guest_range(&entries[..3], ram).unwrap(), None);
+        let mut filed = entries.clone();
+        filed[2].2 = false;
+        assert_eq!(guest_range(&filed, ram).unwrap(), None);
+        let mut twice = entries.clone();
+        twice.push((base + 4 * ram, base + 5 * ram, true));
+        assert!(guest_range(&twice, ram).is_err());
+
+        let held: Vec<(u64, u64, u64)> = entries.iter().map(|&(s, e, _)| (s, e, 3)).collect();
+        assert_eq!(
+            within(held.iter().copied(), (base, base + ram)).unwrap(),
+            12
+        );
+        let mut holed = held.clone();
+        holed.remove(2);
+        assert!(within(holed.into_iter(), (base, base + ram)).is_err());
+    }
+
+    /// AC-T7.4.1: smaps text as proc(5) gives it: expect each mapping's range, whether it is private and
+    /// anonymous, and its Anonymous and Swap bytes.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn smaps_reads_each_mapping_and_its_anonymous_bytes() {
+        let text = "\
+55d0c0000000-55d0c0021000 r--p 00000000 08:01 1234                       /usr/bin/shards-vm
+Rss:                  12 kB
+Anonymous:             4 kB
+Swap:                  0 kB
+VmFlags: rd mr mw me dw sd
+7f0000000000-7f0020000000 rw-p 00000000 00:00 0
+Rss:               30720 kB
+Anonymous:         30720 kB
+Swap:                  8 kB
+VmFlags: rd wr mr mw me ac sd hg
+7ffd00000000-7ffd00021000 rw-p 00000000 00:00 0                          [stack]
+Anonymous:            16 kB
+Swap:                  0 kB
+";
+        let maps = mappings(text).unwrap();
+        assert_eq!(maps.len(), 3);
+        assert_eq!(
+            maps[1],
+            Mapping {
+                start: 0x7f00_0000_0000,
+                end: 0x7f00_2000_0000,
+                anonymous: true,
+                held: (30720 + 8) * 1024,
+            }
+        );
+        assert!(!maps[0].anonymous && !maps[2].anonymous);
+        assert_eq!(maps[2].held, 16 * 1024);
+    }
+
+    /// AC-T7.4.1: a real busy process read as a VMM is: expect its CPU to grow from nothing, its footprint
+    /// read, no RAM of a guest told apart in it (none is as long as the one asked for), and its folder's
+    /// bytes listed.
+    #[test]
+    fn a_process_is_read_as_a_vmm_is() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("held"), vec![1u8; 64 * 1024]).unwrap();
         let mut busy = std::process::Command::new("/usr/bin/yes")
             .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
         let pid = i32::try_from(busy.id()).unwrap();
-        let deadline = Instant::now() + PATIENCE;
-        let mut read = vmm(pid).unwrap();
-        while read.cpu.is_zero() {
+        let (mut cpu, mut holds) = probes(pid, u64::MAX, vec![dir.path().to_owned()]).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut used = cpu.read().unwrap();
+        while used.cpu.is_zero() {
             assert!(Instant::now() < deadline, "the process never used CPU");
             std::thread::park_timeout(Duration::from_millis(1));
-            read = vmm(pid).unwrap();
+            used = cpu.read().unwrap();
         }
+        let read = holds.read().unwrap();
+        holds.verify().unwrap();
         let _ = busy.kill();
         let _ = busy.wait();
-        assert!(read.peak_bytes > 0, "{read:?}");
+        assert!(read.footprint > 0, "{read:?}");
+        assert_eq!(read.guest_memory, None);
+        assert!(used.guest_cpu <= used.cpu, "{used:?}");
+        let held = read
+            .files
+            .iter()
+            .find(|held| held.path.ends_with("held"))
+            .unwrap();
+        assert!(held.bytes >= 64 * 1024, "{held:?}");
     }
 
     /// AC-T7.4.1 (light smoke, few boots): produce a pair over the configured Shards guest with SEEDABLE
     /// two, through the same census, evidence and output the measurement uses: expect it written and loaded
-    /// as a node loads it, its envelope the configured guest's, and two guests in its evidence.
-    /// Needs SHARDS_BIN, HEX_GUEST_KERNEL, HEX_GUEST_INITRD, HEX_GUEST_CPUS and HEX_GUEST_MEMORY_MIB, and
-    /// GUEST_COST_SMOKE_OUT (a folder under ~/.cache).
+    /// as a node loads it, its envelope the configured guest's, two guests in its evidence, and each with
+    /// its VMM's own memory. Needs SHARDS_BIN, HEX_GUEST_KERNEL, HEX_GUEST_INITRD, HEX_GUEST_CPUS and
+    /// HEX_GUEST_MEMORY_MIB, GUEST_COST_SMOKE_OUT (a folder under ~/.cache), and on a Mac the window's
+    /// CPU-response row file, GUEST_COST_SMOKE_ROW and GUEST_COST_SMOKE_ROW_SHA256.
     #[test]
     #[ignore = "boots two real guests: run with --ignored where a Shards guest is configured"]
     fn two_guests_make_a_pair_the_node_loads() {
@@ -381,22 +897,27 @@ mod tests {
             PathBuf::from(std::env::var_os("GUEST_COST_SMOKE_OUT").expect("GUEST_COST_SMOKE_OUT"));
         let mut driver = Shards::from_env(&out).unwrap();
         let envelope = driver.envelope().unwrap().resources;
-        let made =
-            super::super::run::produce(&mut driver, &super::super::run::Plan { seedable: 2 }, &out)
-                .unwrap();
+        let (window, prefix) = crate::window(&crate::smoke_args(&out), &driver).unwrap();
+        let made = super::super::run::produce(
+            &mut driver,
+            &super::super::run::Plan { seedable: 2 },
+            &out,
+            &window,
+            &prefix,
+        )
+        .unwrap();
         let (cost, _, rows) = hex_runtime::guest::load_runtime_evidence(
             &made.cost_file,
             made.cost_sha256,
             &made.evidence_file,
         )
         .unwrap();
-        assert!(rows.is_empty());
+        assert_eq!(rows.is_empty(), prefix.is_empty());
         assert_eq!((cost.floor, cost.ceiling), (envelope, envelope));
-        let evidence = std::fs::read_to_string(&made.evidence_file).unwrap();
-        assert_eq!(
-            evidence.lines().filter(|l| l.starts_with("ready ")).count(),
-            2
-        );
-        println!("{}\n{evidence}", made.summary);
+        assert!(cost.overhead.mem_bytes > 0, "{cost:?}");
+        let evidence = std::fs::read(&made.evidence_file).unwrap();
+        let text = String::from_utf8_lossy(&evidence[prefix.len()..]).into_owned();
+        assert_eq!(text.lines().filter(|l| l.starts_with("guest ")).count(), 2);
+        println!("{}\n{text}", made.summary);
     }
 }
