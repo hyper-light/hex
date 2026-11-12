@@ -15,10 +15,12 @@
 //!
 //! Explicit inputs only, each by its own variable; a missing one fails by name. Run alone, `--ignored`, inside a
 //! cgroup delegated to this binary (`HEX_DELEGATED`), as native_firecracker_smoke is:
-//! - `HEX_IMAGE`: the image, `NAME@sha256:...`, with a `/bin/sh` (HEX-IMG-3's command), pulled by its digest into
-//!   the node's Shards home before the node starts;
-//! - `SHARDS_BIN`: the `shards` binary, the node's and the pull's; `SHARDS_KERNEL`: the kernel the run hosts boot
-//!   (D231's own, as `shards run` takes it), so no first boot downloads one;
+//! - the image, with a `/bin/sh` (HEX-IMG-3's command), in the node's Shards home before the node starts: either
+//!   `HEX_IMAGE_CONTEXT`, an Agentfile image's build context (a harness image, which no registry need serve), built
+//!   there and pinned by the manifest digest its build says, as Shards' store finds a pinned image by content
+//!   (`Store::holding`); or else `HEX_IMAGE`, `NAME@sha256:...`, pulled there by its digest;
+//! - `SHARDS_BIN`: the `shards` binary, the node's and the pull's or build's; `SHARDS_KERNEL`: the kernel the run
+//!   hosts boot (D231's own, as `shards run` takes it), so no first boot downloads one;
 //! - the node's Shards guest configuration, as `hex node` reads it: `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`,
 //!   `HEX_GUEST_CPUS`, `HEX_GUEST_MEMORY_MIB`, `HEX_GUEST_COST_FILE`, `HEX_GUEST_COST_SHA256` and
 //!   `HEX_GUEST_COST_EVIDENCE`;
@@ -39,7 +41,8 @@
 )]
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -51,7 +54,55 @@ use hex_client::Client;
 
 #[path = "image_node/mod.rs"]
 mod image_node;
-use image_node::{Node, allocation, input, number, own_cgroup, pull, records, step};
+use image_node::{Node, allocation, input, number, own_cgroup, pull, records, shards_dirs, step};
+
+/// The name an image built from `HEX_IMAGE_CONTEXT` is tagged with in the node's Shards home; the cases pin it by
+/// its digest.
+const BUILT: &str = "hex-image-real/harness";
+
+/// Where the cases' image comes from.
+enum Source {
+    /// An Agentfile image's build context, built into the node's Shards home.
+    Context(PathBuf),
+    /// An image pinned by its digest, pulled there.
+    Pinned(String),
+}
+
+/// Builds the Agentfile image in `context` into the node's Shards home (`work`'s state), as `shards build image`
+/// builds one, then ends the daemon the build left there, so none of its processes runs beside the node; returns the
+/// image pinned by the manifest digest its build says (`--metadata-file`'s `containerimage.digest`), which Shards'
+/// store finds whatever it is named.
+fn built(shards: &Path, context: &Path, work: &Path) -> String {
+    let (home, cache) = shards_dirs(&work.join("state"));
+    let metadata = work.join("build-metadata.json");
+    let in_home = |command: &mut Command| {
+        let status = command
+            .env("SHARDS_HOME", &home)
+            .env("SHARDS_CACHE", &cache)
+            .stdin(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{command:?}: {status}");
+    };
+    let begun = Instant::now();
+    in_home(
+        Command::new(shards)
+            .args(["build", "image", "-t", BUILT, "--metadata-file"])
+            .arg(&metadata)
+            .arg(context),
+    );
+    in_home(Command::new(shards).args(["daemon", "stop"]));
+    let said: serde_json::Value = serde_json::from_slice(&fs::read(&metadata).unwrap()).unwrap();
+    let digest = said["containerimage.digest"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{metadata:?} names no containerimage.digest: {said}"));
+    let image = format!("{BUILT}@{digest}");
+    eprintln!(
+        "IMAGE built {image} from {context:?} in {:?}",
+        begun.elapsed()
+    );
+    image
+}
 
 /// Shards image VMs of the pinned image, each admitted for the run's workload: running its members alone, or a
 /// command for the act a case asks of its run.
@@ -116,8 +167,14 @@ fn the_shards_image_class_holds_its_contract_through_a_real_node() {
         std::env::var_os("HEX_DELEGATED").is_some(),
         "run inside a cgroup delegated to this binary (HEX_DELEGATED)"
     );
-    let image = input("HEX_IMAGE");
-    ShardsImage::new(&image).check().unwrap();
+    let source = match std::env::var_os("HEX_IMAGE_CONTEXT") {
+        Some(context) => Source::Context(PathBuf::from(context)),
+        None => {
+            let image = input("HEX_IMAGE");
+            ShardsImage::new(&image).check().unwrap();
+            Source::Pinned(image)
+        }
+    };
     let shards = PathBuf::from(input("SHARDS_BIN"));
     let kernel = PathBuf::from(input("SHARDS_KERNEL"));
     assert!(kernel.is_file(), "SHARDS_KERNEL {kernel:?} is no file");
@@ -137,7 +194,14 @@ fn the_shards_image_class_holds_its_contract_through_a_real_node() {
     let allocation = allocation();
     eprintln!("IMAGE each VM {:?}", allocation.vm_size().unwrap());
     let own = own_cgroup("hex-image-real");
-    pull(&shards, &image, &work.join("state"));
+    let image = match source {
+        Source::Context(context) => built(&shards, &context, &work),
+        Source::Pinned(image) => {
+            pull(&shards, &image, &work.join("state"));
+            image
+        }
+    };
+    ShardsImage::new(&image).check().unwrap();
     let node = Node::start(&work, &own, wait, "hex-image-node");
     let socket = node.socket.clone();
     let (done, verdicts) = mpsc::channel();
