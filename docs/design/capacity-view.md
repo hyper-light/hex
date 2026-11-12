@@ -460,15 +460,25 @@ window, which would under-count Hex here.
   (before and after a write lands), crashes runners (their runs outliving them or not), drops links with
   what was on them, partitions and heals them, lets a runner's wait run out, retires a runner whose
   reservations the person then releases, and has the person release a runner wrongly: one away (its link
-  down, or its process crashed with its runs outliving it) with work still running (CV6). After every step:
+  down, or its process crashed with its runs outliving it) with work still running (CV6). The room is measured
+  as the node measures it (CV12): every CPU, and the memory that is free or Hex's own boxes', which lacks what
+  each runner's process and its runs use. Half the runners name their runs' scope; each run uses memory within
+  its reservation, moved by the nemesis between samples; the host's sample reads each synced runner's scope on
+  either side of its read of free memory, keeps the smaller, and gives the keeper the room and the reads together;
+  one run of a runner it reads may move once in the window, before the free memory's read or after it; and the OS
+  now and then won't read a scope, which closes its runner's session. After every step:
   every running run is in the keeper's books while it is up, but one so released, until its runner's next
   sync adopts it (CV5); the work running fits the room but for what such a release hid and its sync then
-  adopted; and what the keeper books past the room (only an adoption's), its view says it is over by. After
+  adopted; what the keeper books past the room (only an adoption's), its view says it is over by; and the
+  keeper credits each scoped runner at most what its work used when free memory was last read, up to its
+  reservations (CV12). After
   settling (every link healed, every message delivered, every hint drained): the keeper's books of each
   runner, the runner's own, and what it runs are the same, and no sync said the counts disagree. Planted
   shell mistakes, each caught on some of 64 seeds: release on silence, a run started before its grant, a
   restart forgetting its survivors, a keeper answering before its write lands, Hex admitting against its own
-  boxes alone, a sync that drops what the keeper lacks instead of adopting it. Bounded seeds here (64 of
+  boxes alone, a sync that drops what the keeper lacks instead of adopting it; and CV12's: a host keeping the
+  larger of a scope's two reads, a host crediting whole reservations, a scope holding its runner's own process.
+  Bounded seeds here (64 of
   2,000 steps with two runners, 32 each with one and with three); ROOT's sweeps take
   `capacity::tests::the_record_sweep` (ignored; `HEX_CAPACITY_SEEDS`, `HEX_CAPACITY_STEPS`), every seed
   of which must hold, and each mistake caught on some.
@@ -485,4 +495,9 @@ window, which would under-count Hex here.
   of the lane's connections while it stays. Admitting by name at the endpoint is hex-quic's (`Directory`).
 - A scheduler with no runtime class keeps no holder reservation: CV8 bounds a holder's by the node's own record
   bound, which such a node derives as none.
+- The credit's window (CV12): a scope read on either side of the free memory's read, the smaller kept, is at most
+  what that read lacked when the scope's use moved one way in between. A use that falls and rises again inside the
+  window is credited at its high, the fall too much, until the next sample. The window today is the scheduler's
+  whole facts read (`runtime_observations`: its backend's physical report, then the machine's facts), not the free
+  memory's read alone; hex-sim moves one run once a window, the case CV12 claims.
 - kiln's runner implements its side (the section above); until it does, the lane serves no holder in production.
