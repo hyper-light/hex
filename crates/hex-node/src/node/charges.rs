@@ -17,8 +17,8 @@ use std::sync::{Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use hex_api::{
-    Allocation, Bounds, BoxId, CapacityResources, Learned, MAX_LEARNED_HOLDINGS, Refusal,
-    RuntimeCost, Upstream, Usage,
+    Allocation, Bounds, BoxId, CapacityResources, Learned, LearnedEnd, MAX_LEARNED_HOLDINGS,
+    Refusal, RuntimeCost, Upstream, Usage,
 };
 use hex_core::cgroup::{CPU_PERIOD_US, CpuMax, Write};
 use hex_runtime::linux::cgroup::BoxCgroup;
@@ -26,7 +26,7 @@ use hex_sim::charge::{self, ChargeError, ClassKey, Cpu, Sample};
 use hex_sim::model::Class;
 
 use super::Node;
-use crate::recorded::charges::{LastResort, Scope, write_ends};
+use crate::recorded::charges::{LastResort, Scope, record_last_resort, write_ends};
 
 /// The window the learner reads over (C1): `cpu.max`'s period, the one the kernel enforces a VM's CPU over.
 pub(super) const WINDOW: Duration = Duration::from_micros(CPU_PERIOD_US);
@@ -44,12 +44,17 @@ pub(super) trait Cgroups {
     fn read(&self, dir: &Path, file: &str) -> Result<Option<String>, Refusal>;
     /// Kills every process in a VM's cgroup (C5's last resort), through the descriptor its native owner pinned.
     fn kill(&self, cgroup: &BoxCgroup) -> Result<(), Refusal>;
+    /// Writes `end`, why the last resort is ending the VM of `scope`, into box `id`'s record where it is still that VM's
+    /// lifetime, before its end (C5, intent first): whether it was written.
+    fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal>;
 }
 
-/// The kernel's cgroups.
-pub(super) struct Kernel;
+/// The kernel's cgroups, and the node's records.
+pub(super) struct Kernel<'a> {
+    pub(super) store: &'a crate::store::Store,
+}
 
-impl Cgroups for Kernel {
+impl Cgroups for Kernel<'_> {
     fn usage(&self, cgroup: &BoxCgroup) -> Result<Usage, Refusal> {
         cgroup.managed_usage()
     }
@@ -81,6 +86,10 @@ impl Cgroups for Kernel {
     fn kill(&self, cgroup: &BoxCgroup) -> Result<(), Refusal> {
         cgroup.kill()
     }
+
+    fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal> {
+        record_last_resort(self.store, id, scope, end)
+    }
 }
 
 fn refused(why: ChargeError) -> Refusal {
@@ -92,6 +101,15 @@ fn refused(why: ChargeError) -> Refusal {
             why: other.to_string(),
         },
     }
+}
+
+/// What the learner reads of a VM's record when it first meets it (C2, C5): its class, its receipt and its band, and
+/// why the last resort is ending it, where its record says so.
+pub(super) struct Met {
+    pub(super) class: Class,
+    pub(super) allocation: Allocation,
+    pub(super) band: u8,
+    pub(super) intent: Option<LearnedEnd>,
 }
 
 /// One VM the learner reads.
@@ -346,14 +364,14 @@ impl Learner {
         })
     }
 
-    /// One window (C1 to C5, C7), read at `now`: the VMs `running`, each new one found by `record` (its class, receipt
-    /// and band; none for a box that isn't a VM with a receipt), the reuse slots live boxes hold (`held`, in order),
-    /// within the fleet's `budget`. A failure is kept until a window passes.
+    /// One window (C1 to C5, C7), read at `now`: the VMs `running`, each new one found by `record` (its class, receipt,
+    /// band and any intent; none for a box that isn't a VM with a receipt), the reuse slots live boxes hold (`held`, in
+    /// order), within the fleet's `budget`. A failure is kept until a window passes.
     pub(super) fn window(
         &mut self,
         io: &impl Cgroups,
         running: Vec<(BoxId, Scope, BoxCgroup)>,
-        record: impl Fn(&BoxId) -> Result<Option<(Class, Allocation, u8)>, Refusal>,
+        record: impl Fn(&BoxId) -> Result<Option<Met>, Refusal>,
         held: &[u64],
         budget: CapacityResources,
         now: Instant,
@@ -367,7 +385,7 @@ impl Learner {
         &mut self,
         io: &impl Cgroups,
         running: Vec<(BoxId, Scope, BoxCgroup)>,
-        record: impl Fn(&BoxId) -> Result<Option<(Class, Allocation, u8)>, Refusal>,
+        record: impl Fn(&BoxId) -> Result<Option<Met>, Refusal>,
         held: &[u64],
         budget: CapacityResources,
         now: Instant,
@@ -407,7 +425,13 @@ impl Learner {
                 vm.last = (usage.cpu_usec, now);
                 continue;
             }
-            let Some((class, allocation, band)) = record(&id)? else {
+            let Some(Met {
+                class,
+                allocation,
+                band,
+                intent: _,
+            }) = record(&id)?
+            else {
                 continue;
             };
             let receipt = allocation.booking();
@@ -647,7 +671,7 @@ impl Node {
             Ok(read) => read,
             Err(why) => return learner.failed(why),
         };
-        let record = |id: &BoxId| -> Result<Option<(Class, Allocation, u8)>, Refusal> {
+        let record = |id: &BoxId| -> Result<Option<Met>, Refusal> {
             let Some(record) = self.record(id)? else {
                 return Ok(None);
             };
@@ -656,13 +680,19 @@ impl Node {
                 hex_api::Class::Firecracker => Class::Firecracker,
                 hex_api::Class::Process | hex_api::Class::Oci => return Ok(None),
             };
-            Ok(record
-                .spec
-                .allocation
-                .map(|allocation| (class, allocation, record.spec.band)))
+            let Some(allocation) = record.spec.allocation else {
+                return Ok(None);
+            };
+            Ok(Some(Met {
+                class,
+                allocation,
+                band: record.spec.band,
+                intent: record.last_resort,
+            }))
         };
         // Its outcome is kept as the learner's fault, which the capacity answers read.
-        let _ = learner.window(&Kernel, running, record, &held, budget, Instant::now());
+        let io = Kernel { store: &self.store };
+        let _ = learner.window(&io, running, record, &held, budget, Instant::now());
         // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
         // is kept for the next window and fails this one.
         let ends = learner.unrecorded();

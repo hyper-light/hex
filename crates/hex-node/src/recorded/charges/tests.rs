@@ -77,6 +77,10 @@ struct Record {
     rates: RefCell<Vec<(String, u64)>>,
     refuse_rates: std::cell::Cell<bool>,
     stops: RefCell<Vec<String>>,
+    /// The node's records, where the test keeps them: an intent is written there, as the node writes it.
+    records: RefCell<Option<Store>>,
+    /// Every intent asked and every stop, in order: `intend <box>`, `stop <box>`.
+    events: RefCell<Vec<String>>,
 }
 
 impl Managed for Record {
@@ -102,7 +106,18 @@ impl Managed for Record {
         self.stops
             .borrow_mut()
             .push(record.spec.id.as_str().to_owned());
+        self.events
+            .borrow_mut()
+            .push(format!("stop {}", record.spec.id));
         Ok(())
+    }
+
+    fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal> {
+        self.events.borrow_mut().push(format!("intend {id}"));
+        match self.records.borrow().as_ref() {
+            Some(store) => record_last_resort(store, id, scope, end),
+            None => Ok(false),
+        }
     }
 }
 
@@ -430,4 +445,108 @@ fn w14_the_last_resorts_ends_are_kept_to_the_machines_population() {
     };
     assert_eq!(ids(Class::Shards), ["vm-2"], "vm-1 forgotten past two");
     assert_eq!(ids(Class::Firecracker), ["vm-3"]);
+}
+
+/// Three Shards VMs recorded in `store` as a node's create records them, booked at 4 GiB, as the node reads them.
+fn recorded_three(store: &Store) -> Vec<BoxRecord> {
+    ["vm-1", "vm-2", "vm-3"]
+        .iter()
+        .zip(1..)
+        .map(|(name, n)| {
+            let made = BoxRecord::new(vm(name, n).spec, Phase::Creating, Vec::new());
+            store.begin(&made).unwrap();
+            store.made(&made).unwrap();
+            store.get(&made.spec.id).unwrap().unwrap().unwrap()
+        })
+        .collect()
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C5 intent first on macOS and Windows: why survives a node that crashes after a
+/// VM's end and before the window's writes. Do record three Shards VMs in a node's store as its create does, run the
+/// learner's windows past their fleet's 16 GiB memory budget, vm-2 holding 7 GiB, until it stops vm-2, then crash:
+/// leave unmade the writes the window keeps for after it, and reopen the store as the restarted node does. Expect
+/// vm-2's record to say why it was ended, its intent written before its stop, and vm-1's and vm-3's records nothing.
+#[test]
+fn w14_why_survives_a_crash_between_a_capping_nodes_end_and_its_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let open = || Store::open(&dir.path().join("state"), &dir.path().join("run")).unwrap();
+    let store = open();
+    let vms = recorded_three(&store);
+    let io = Record::default();
+    *io.records.borrow_mut() = Some(store.clone());
+    for record in &vms {
+        io.set(record.spec.id.as_str(), 0, 0);
+    }
+    let budget = res(24_000, 16 * GIB);
+    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB)).unwrap();
+    let start = Instant::now();
+    learner.window(&io, &vms, budget, start).unwrap();
+    for (name, held) in [("vm-1", 6 * GIB), ("vm-2", 7 * GIB), ("vm-3", 2 * GIB)] {
+        io.set(name, 0, held);
+    }
+    learner.window(&io, &vms, budget, start + WINDOW).unwrap();
+    assert_eq!(*io.stops.borrow(), ["vm-2"]);
+    let events = io.events.take();
+    // The crash: the learner and its store go with the node, the window's writes unmade.
+    drop(learner);
+    drop(io);
+    drop(store);
+    let store = open();
+    let end = store
+        .get(&vms[1].spec.id)
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .last_resort;
+    let end = end.expect("vm-2's why, written before its end");
+    assert_eq!((end.id.as_str(), end.held), ("vm-2", 7 * GIB));
+    for other in [&vms[0], &vms[2]] {
+        let record = store.get(&other.spec.id).unwrap().unwrap().unwrap();
+        assert_eq!(record.last_resort, None);
+    }
+    assert_eq!(events, ["intend vm-2", "stop vm-2"]);
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C5 intent first on macOS and Windows: a node that crashed between a VM's intent and
+/// its end leaves that end to the next. Do record three Shards VMs in a node's store, vm-2's record naming why it is
+/// to be ended as a node that crashed right after writing it leaves it, then run a restarted node's learner over the
+/// three, each holding 2 GiB of their 16 GiB fleet, within every budget, then another window. Expect vm-2 stopped in
+/// the first window for the why its record names, that why on its class's capacity answer, and no other VM stopped.
+#[test]
+fn w14_a_restarted_capping_node_carries_out_the_end_its_intent_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("state"), &dir.path().join("run")).unwrap();
+    let made = recorded_three(&store);
+    let scope = *made[1].native_scope.unwrap().bytes();
+    let intent = LearnedEnd {
+        id: made[1].spec.id.clone(),
+        held: 7 * GIB,
+        budget: 6 * GIB,
+        band: 0,
+        fleet_held: 15 * GIB,
+        fleet_growth: 15 * GIB,
+        fleet_budget: 16 * GIB,
+        unmoved: Some(hex_api::Upstream::LiveMove),
+    };
+    assert!(record_last_resort(&store, &made[1].spec.id, scope, &intent).unwrap());
+    let vms: Vec<BoxRecord> = made
+        .iter()
+        .map(|record| store.get(&record.spec.id).unwrap().unwrap().unwrap())
+        .collect();
+    let io = Record::default();
+    for record in &vms {
+        io.set(record.spec.id.as_str(), 0, 2 * GIB);
+    }
+    let budget = res(24_000, 16 * GIB);
+    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB)).unwrap();
+    let start = Instant::now();
+    learner.window(&io, &vms, budget, start).unwrap();
+    assert_eq!(*io.stops.borrow(), ["vm-2"]);
+    let learned = learner
+        .learned(Class::Shards, &[cost()], &vms)
+        .unwrap()
+        .unwrap();
+    assert_eq!(learned.ended, vec![intent]);
+    learner.window(&io, &vms, budget, start + WINDOW).unwrap();
+    assert_eq!(io.stops.borrow().len(), 1, "one end is never two");
 }

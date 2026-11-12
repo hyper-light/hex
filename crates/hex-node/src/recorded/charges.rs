@@ -36,6 +36,9 @@ pub(crate) trait Managed {
     fn set_rate(&self, record: &BoxRecord, rate: u64) -> Result<(), Refusal>;
     /// Ends the VM through its managed receipt: the last resort (C5).
     fn stop(&self, record: &BoxRecord) -> Result<(), Refusal>;
+    /// Writes `end`, why the last resort is ending the VM of `scope`, into box `id`'s record where it is still that VM's
+    /// lifetime, before its end (C5, intent first): whether it was written.
+    fn intend(&self, id: &BoxId, scope: Scope, end: &LearnedEnd) -> Result<bool, Refusal>;
 }
 
 fn refused(why: ChargeError) -> Refusal {
