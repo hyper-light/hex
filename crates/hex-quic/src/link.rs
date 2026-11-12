@@ -59,12 +59,13 @@ impl guest::Link for Link {
 pub type Client = guest::Client<guest::Quic>;
 
 /// A client of the node agent named `name` at `address`, over `endpoint`: dialed, said hello to, and held to the
-/// node's own bound on connections, by `deadline`.
+/// node's own bound on connections, by `deadline` (none: the dial until the driver tells it, [`Endpoint::dial`], and
+/// the hello on its kind's learned wait, `client.quic.answer.hello`).
 pub fn connect(
     endpoint: Arc<Endpoint>,
     name: &str,
     address: SocketAddr,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<(Client, PeerId), Refused> {
     let peer = endpoint.dial(name, address, deadline)?;
     let link = guest::own_link(Link {

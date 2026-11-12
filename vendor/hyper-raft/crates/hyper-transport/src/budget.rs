@@ -133,7 +133,9 @@ impl Fixed {
         Self {
             capacity,
             used: 0,
-            spare: Vec::with_capacity(max_spare),
+            // Grown as buffers come back, to `max_spare` at most: a bound, never laid out ahead, so an
+            // owner whose bounds are large pays only for the buffers it holds.
+            spare: Vec::new(),
             max_spare,
             refused: 0,
         }

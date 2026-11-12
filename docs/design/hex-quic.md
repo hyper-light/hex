@@ -23,13 +23,15 @@ targets it names (cargo loads a package by them) and their licenses, and the roo
 hyper-swim in `vendor/MANIFEST.toml` is extended to these crates in the same words, and goes when hyper-raft
 publishes one.
 
-Two recorded changes (`vendor/hyper-raft/UPSTREAM.md`):
+Three recorded changes (`vendor/hyper-raft/UPSTREAM.md`):
 1. hyper-transport takes hyper-quic with `default-features = false`. hyper-quic's default `qlog` feature turns on
    serde_json's `preserve_order` for every crate of a build (hyper-quic `VENDORED.md` §20); Hex writes JSON
    documents (OCI configs, records, HCS documents) whose key order would change. Shards takes hyper-quic without it
    for the same reason (its `crates/remote/Cargo.toml`). hyper-transport names no qlog type.
 2. `Endpoint::negotiated(peer)`: the suite and group a connection negotiated, read from hyper-quic's handshake data,
    so each end of a link reports and a test asserts `TLS13_AES_256_GCM_SHA384` (Q5).
+3. `Fixed::new` and `Receive::new` grow to their bounds instead of laying them out at the start, so an endpoint pays
+   for the buffers and chunks it holds, not for its bounds (Q8): a node's bounds are its own, which can be a host's.
 
 **Alternatives.** A git dependency at a revision (Shards' `crates/remote` takes hyper-quic so): not Hex's vendoring
 rule (CLAUDE.md, Vendoring), and kiln, which vendors Hex, could not prove one revision. Taking the crates whole, as
@@ -110,12 +112,30 @@ whole messages framed as the guest's are; an exec's stdio connections are gather
 as the relay's does (HEX-GUEST-41): the peer's End ends the program's pipe; the program's letting its stdin go resets
 the connection, so the peer's client lets its caller's pipe go. On Unix its copier waits in poll(2) for the pipe's
 readers and for the connection, which writes to a pipe of the copier's own as it changes; Windows' pipes can't be
-waited on, so there the copy ends at the next write the pipe refuses, as the client's own stdin copy does. Staging
-connections are served by the relay's staging server (`hex-node` `relay/files.rs`, Linux). The log port carries the
-node's log lines, each counted where a slow reader makes it let one go.
+waited on, so there the copy ends at the next write the pipe refuses, as the client's own stdin copy does. The log
+port carries the node's log lines, each counted where a slow reader makes it let one go.
 
-**Falsified by** the hex-api conformance suite failing through the listener (HEX-QUIC-20), or a stdin connection
-that outlives its program's stdin or its peer's End (HEX-QUIC-21).
+Staging is a Linux node's alone, as on every transport Hex has: a macOS or Windows node stages no file tree on any
+transport. At this tree:
+- The one staging server is the guest relay's (`hex-node` `relay/files.rs`), built on Linux alone (`hex-node`
+  `lib.rs`: `#[cfg(target_os = "linux")] pub mod relay`). `hex guest relay` runs it inside a Linux guest, on the
+  guest's vsock files port (`hex_core::stream::files::FILES_PORT`), or on `files.sock` with `--unix` for the tests.
+  `hex-cli`'s `guest` module, which holds `hex guest relay`, is built on Linux alone too. A Linux node given a folder
+  to stage into (`hex node --staged`, Q9) serves the same server on its endpoint's files port.
+- A macOS or Windows node's local socket (`hex-node` `serve/macos.rs`, `serve/windows.rs`) carries the node's calls,
+  framed, and an exec's stdio as descriptors or handles. Its wire has no staging call (`hex_core::wire::Call`), and it
+  serves no files port.
+- Such a node stages only as a client. Its `oci` class sends each box's root into its own Shards guest over the guest
+  link (`hex_runtime::guest::GuestRuntime`'s `stage`, through `hex_client::guest::stage::stage`), and the guest's
+  relay, a Linux node, receives it.
+
+So its endpoint serves no files port. A peer's staging connection is refused by type (`Why::NoPort`), and a folder
+given it is refused as its platform's (`Refusal::Platform`). A peer over QUIC names the host paths such a node holds,
+as the node's local clients do.
+
+**Falsified by** the hex-api conformance suite failing through the listener (HEX-QUIC-20, and through `hex node`
+itself, HEX-QUIC-23), a stdin connection that outlives its program's stdin or its peer's End (HEX-QUIC-21), or a node
+that stages nothing taking a staging connection (HEX-QUIC-22).
 
 ## Q5. TLS: AES-256-GCM alone, mutual, under kiln's CA
 
@@ -136,7 +156,45 @@ ChaCha20-Poly1305 or AES-128-GCM connecting.
 
 A node generates its key where it runs and sends kiln's CA a certificate signing request (PKCS #10, RFC 2986) for
 its name; the CA answers with the node's chain and its roots. The key never leaves the node. Hex reaches kiln's CA
-through a seam (CLAUDE.md §9): a trait, a simulator CA and a conformance suite both pass (checkpoint 4).
+through a seam (CLAUDE.md §9): a trait, a simulator CA and a conformance suite both pass (checkpoint 4). A `hex node`
+keeps its enrollment in a folder of its own (`hex_quic::enroll::store`, Q9): `key.pem` (PKCS #8, made there, mode 0600
+on Unix, never sent), `request.pem` (the PKCS #10), and the CA's answer beside them, `chain.pem` (its own certificate
+first) and `roots.pem`, all PEM (RFC 7468).
+
+**What kiln implements against the seam.** kiln's CA is kiln's work; nothing here stands in for it.
+1. `impl hex_quic::enroll::Ca` over kiln's CA (`crates/kiln/src/pki.rs`), `Send + Sync`:
+   `fn enroll(&self, request: &Request) -> Result<Issued, CaRefused>`. `Request { name, csr, grant }` carries the
+   name the peer enrolls as, its PKCS #10 request in DER (kiln's `sign_csr` takes PEM), and kiln's enrollment token
+   for that name. The implementation:
+   - admits `name` only with the grant kiln issued for it, and that grant once, else `CaRefused::NotAdmitted { name,
+     why }` (HEX-ENROLL-3, -5);
+   - takes a request whose own signature verifies, else `CaRefused::Malformed { why }` (HEX-ENROLL-4). The signature is
+     ECDSA P-384 with SHA-384 (`hex_quic::enroll::request`, rcgen's `PKCS_ECDSA_P384_SHA384`); rcgen's
+     `CertificateSigningRequestParams::from_der` verifies it as it reads;
+   - issues a certificate for the request's public key whose first DNS subject alternative name is `name`, byte for
+     byte, whatever the request asked (HEX-ENROLL-2). Hex names a peer by its certificate's first valid DNS name
+     (`webpki`'s `valid_dns_names`) and refuses an answer naming another peer (`Refused::Issued`, HEX-ENROLL-7). So a
+     name kiln's `sanitize_name` would change is refused `NotAdmitted`, never issued changed;
+   - gives it extended key usages serverAuth and clientAuth both, because a node listens and dials (HEX-ENROLL-1
+     verifies the certificate for each). kiln's `machine_params` gives clientAuth alone; its `leaf_params` gives
+     both;
+   - makes it valid now, signed under kiln's CA with an algorithm aws-lc-rs's WebPKI set verifies: ECDSA P-256, P-384
+     or P-521, Ed25519, or RSA PKCS #1 or PSS. hyper-quic's node provider narrows suites and groups, not signatures;
+   - answers `Issued { chain, roots }`: `chain` is the certificate first, then any intermediates; `roots` are exactly
+     the roots every peer verifies under (HEX-ENROLL-1 compares them with the fixture's);
+   - refuses `CaRefused::Unreachable { why }` when the CA can't be reached or answers nothing usable.
+2. It passes `hex_quic::enroll::conformance::run` (`CASES`: HEX-ENROLL-1 to -5) with a `conformance::Fixture`. The
+   fixture's `admit(name)` returns a grant kiln's CA takes once for `name`, and its `roots()` returns the CA's roots.
+3. For a `hex node` it starts with `--quic`: it runs `hex node enroll --name <name> --credentials <dir>` on the
+   node's machine, takes `<dir>/request.pem` (read with `hex_quic::enroll::store::request(dir, grant)`) to its CA
+   with the node's grant, and keeps the answer in the folder with `hex_quic::enroll::store::finish(dir, &issued)`,
+   which takes it only once it proves to be for that key and name; then it starts `hex node ... --quic <address>
+   --credentials <dir>` and reads `quic <address>` and `ready <path>` from its stdout. Its peers dial the node by
+   the name its certificate carries.
+
+Nothing else crosses the seam. No private key travels (HEX-ENROLL-6). A folder holds one enrollment: `store::begin`
+refuses a folder that holds a key or request already, and `store::load` refuses a certificate that isn't valid now.
+So re-enrolling uses a new folder, with a new key and request under a new grant.
 
 ## Q7. Waits
 
@@ -144,7 +202,12 @@ A call's wait for its answer is learned per (call kind, class) through `hex_core
 `runtime-architecture.md`), as every transport's is: this transport's own table (`client.quic.answer.<kind>` and
 `client.quic.answer.<kind>.<class>`), measuring until a census over it records them, never another transport's
 record. The transport's own liveness is QUIC's: a connection that hears nothing for its idle timeout closes, and every
-call and program waiting on it is told why.
+call and program waiting on it is told why. So a dial or a connect with no deadline of its caller's
+(`Endpoint::dial`, `link::connect`) waits as long as the transport does, the driver telling every dial its end (a
+handshake nothing answers ends once the idle timeout passes with nothing from the peer, Q8), and the hello then waits
+on its kind's learned wait. The tests' waits over QUIC are each for their own fact (`test.hex_quic.*`,
+`test.hex_node.quic.*`, `test.hex_node.capacity.*`), measuring until a census over QUIC records them: the suites'
+program-end record bounds a program's end alone (hex-bench's `test_waits`).
 
 ## Q8. Numbers
 
@@ -155,12 +218,38 @@ Each count is derived where the endpoint is made; none is picked.
 | data frame bound | `stream::MAX_FRAME` (128 KiB + 4) | the longest unit any port's stream carries whole: one framed wire message (`wire::MAX_MESSAGE`, from the SEQPACKET record bound) |
 | lane window | 1 | a lossless lane holds one frame past what QUIC took (hyper-transport `send_frame`), and the driver polls each frame as it comes; QUIC's stream window holds the rest |
 | a connection's initial credit | 2 data frames | one frame its peer's owner reads while the next waits: a reader that keeps up never waits on credit, and one that stops holds at most these |
-| connections, identities, pending handshakes (node) | the node's connections bound | each connection holds one of the node's descriptors (`serve::limits`) |
+| connections, identities, pending handshakes (node) | the node's connections bound | the peers it serves as many as the connections its socket does (`serve::limits`) |
 | connections (client) | 1 | a client's endpoint dials its one node |
 | connections an identity holds | 2 | a connection and the one replacing it after its path changed |
-| lanes a peer may open | its connections' bound | every connection holds a lane each way, and lane 0 beside them |
+| lanes a peer may open (node) | its calls in flight, its programs' streams and its gathering execs' (`programs * 3 + in_flight * 3`), one log connection, and its calls in flight again where it stages | every connection to a port that can do work at once for one peer (`hex_node::quic::shape`): a control connection past the calls the node runs has no call to run, and a second log reader reads the same lines |
+| lanes a peer may open (client) | half its soft `RLIMIT_NOFILE` on Unix; on Windows half the dynamic port range's 16,384 (RFC 6335 §6, Windows' own since Vista) | each connection is bridged to a local socket pair, two descriptors on Unix, and on Windows a loopback TCP pair holding two ports of that range |
 | exchanges, streams a connection | 1 | the least the endpoint accepts: Hex opens none, and a peer's head is refused at 0 bytes |
 | window ceiling | `stream_window_ceiling()` | hyper-transport's: the largest window quinn's assembler can't be made to refuse |
 | idle timeout | 3 initial probe timeouts | RFC 9000 §10.1's floor, from RFC 9002's initial RTT (333 ms, §6.2.2), its PTO (§6.2.1) and the default max_ack_delay (25 ms, RFC 9000 §18.2); QUIC raises it with the path's own PTO |
 | keep-alive | 1 initial probe timeout | an idle connection stays up: three keep-alives fit in its idle timeout |
 | responses queued | 1 | the driver polls transmits after each datagram (hyper-transport `Limits::max_responses`) |
+
+A bound is paid for as it is used, never laid out ahead: the driver's command queue and hyper-transport's spare
+buffers and receive chunks grow to their bounds (vendor change 3). hyper-quic does lay out one row for each lane a
+peer may open as a connection starts (quinn's `StreamsState::new` inserts every remote stream up to the limit), so a
+connected peer costs that table, a node's per peer and a client's for its one node.
+
+## Q9. `hex node` over QUIC
+
+**Chosen.** `hex node --socket <path> --state <dir> [--quic <address> --credentials <dir> [--staged <dir>]]` serves
+its local socket and, with `--quic`, the same server over QUIC (Q4): its endpoint binds `<address>` and presents the
+enrollment kept in `--credentials` (Q6), and it says `quic <address bound>` on stdout before its `ready <path>`, so a
+port of 0 is told. The enrollment is read and checked whole before the node opens anything or binds: its key and its
+chain's own certificate must match, the certificate must name the node, and the chain must verify under the roots for
+both sides of a link; anything else is refused, typed, naming the file, with nothing bound (exit 1). `--quic` without
+`--credentials`, or the other way round, is refused as a usage (exit 2). Without `--quic` no endpoint starts and no UDP
+socket is bound. `--staged` is a Linux node's (Q4). `hex node enroll --name <name> --credentials <dir>` begins an
+enrollment: a key made there and its request, whose path it says as `request <path>`.
+
+**Alternatives.** Enrolling inside `hex node` at its start, through the seam: the node would need kiln's CA's address
+and a grant on its command line, and a start would wait on the CA; the folder keeps the CA's answer, so a restart
+needs no CA. Credentials in the environment: a key in the environment is readable by whatever reads the process's
+environment, and the rule is that keys never travel.
+
+**Falsified by** a configured `hex node` failing the suite over QUIC (HEX-QUIC-23), or one without `--quic` holding
+a UDP socket, or one asked for QUIC without an enrollment it can serve with binding anything (HEX-QUIC-24).

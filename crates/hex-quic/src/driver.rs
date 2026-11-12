@@ -830,13 +830,16 @@ impl Driver {
     }
 }
 
-/// Waits for a dial's answer until `deadline`.
+/// Waits for a dial's answer until `deadline` (none: until the driver tells it, or ends).
 pub(crate) fn wait_dial(
     answer: &Receiver<Result<PeerId, Refused>>,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<PeerId, Refused> {
-    let left = deadline.saturating_duration_since(Instant::now());
-    match answer.recv_timeout(left) {
+    let answered = match deadline {
+        Some(deadline) => answer.recv_timeout(deadline.saturating_duration_since(Instant::now())),
+        None => answer.recv().map_err(|_| RecvTimeoutError::Disconnected),
+    };
+    match answered {
         Ok(result) => result,
         Err(RecvTimeoutError::Timeout) => Err(Refused::Deadline { what: "a dial" }),
         Err(RecvTimeoutError::Disconnected) => Err(Refused::Ended),
