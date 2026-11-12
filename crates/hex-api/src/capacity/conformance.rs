@@ -3,7 +3,10 @@
 //! through its links ([`CapacityView`]) and its host ([`Host`]); each reads "do X, expect Y", cites the
 //! decision it holds (`docs/design/capacity-view.md`), and [`view`] returns the cases that failed and why.
 
-use super::{Amounts, Close, Fence, Held, Host, ReservationId, ToHolder, ToKeeper, View, Why};
+use super::{
+    Amounts, Close, Fence, Held, Host, ReservationId, Scope, ScopeRefused, ToHolder, ToKeeper,
+    View, Why,
+};
 use crate::Refusal;
 
 /// One part of the contract.
@@ -69,6 +72,16 @@ pub const CASES: &[Case] = &[
         says: "CV3, CV8: GPUs, nothing, a reserve before the sync, and a name not visible ASCII are refused, typed",
         run: refusals,
     },
+    Case {
+        id: "HEX-CV-9",
+        says: "CV12: a synced holder whose hello names its work's scope is credited what that work used in the host's sample, up to what it holds, and nothing once its link drops",
+        run: credits,
+    },
+    Case {
+        id: "HEX-CV-10",
+        says: "CV12: a sample that refuses a holder's scope credits nothing and closes its session, typed",
+        run: refused_scope,
+    },
 ];
 
 /// Runs every case on a fresh machine from `make`; returns the failures.
@@ -104,6 +117,7 @@ fn joined(host: &mut dyn Host, link: u64, name: &str, epoch: u64) -> Result<Fenc
     let hello = ToKeeper::Hello {
         holder: name.to_owned(),
         epoch,
+        scope: None,
     };
     let ToHolder::Welcome { fence, .. } = hear(host, link, hello)? else {
         return Err(format!("{name}: no welcome"));
@@ -186,6 +200,7 @@ fn fences(host: &mut dyn Host) -> Result<(), String> {
     let new = ToKeeper::Hello {
         holder: "conformance-a".to_owned(),
         epoch: 6,
+        scope: None,
     };
     let ToHolder::Welcome { fence: newer, .. } = hear(host, 2, new)? else {
         return Err("the newer process got no welcome".to_owned());
@@ -226,6 +241,7 @@ fn fences(host: &mut dyn Host) -> Result<(), String> {
     let older = ToKeeper::Hello {
         holder: "conformance-a".to_owned(),
         epoch: 5,
+        scope: None,
     };
     let answer = hear(host, 1, older)?;
     ensure(
@@ -269,6 +285,7 @@ fn syncs(host: &mut dyn Host) -> Result<(), String> {
     let hello = ToKeeper::Hello {
         holder: "conformance-a".to_owned(),
         epoch: 1,
+        scope: None,
     };
     let ToHolder::Welcome { fence, .. } = hear(host, 3, hello)? else {
         return Err("no welcome on the rejoin".to_owned());
@@ -341,6 +358,7 @@ fn restarts(host: &mut dyn Host) -> Result<(), String> {
     let hello = ToKeeper::Hello {
         holder: "conformance-a".to_owned(),
         epoch: 1,
+        scope: None,
     };
     let ToHolder::Welcome { fence, .. } = hear(host, 3, hello)? else {
         return Err("no welcome after the restart".to_owned());
@@ -441,6 +459,7 @@ fn refusals(host: &mut dyn Host) -> Result<(), String> {
     let hello = ToKeeper::Hello {
         holder: "has space".to_owned(),
         epoch: 1,
+        scope: None,
     };
     let answer = hear(host, 1, hello)?;
     ensure(
@@ -450,6 +469,7 @@ fn refusals(host: &mut dyn Host) -> Result<(), String> {
     let hello = ToKeeper::Hello {
         holder: "conformance-a".to_owned(),
         epoch: 1,
+        scope: None,
     };
     let ToHolder::Welcome { fence, .. } = hear(host, 2, hello)? else {
         return Err("no welcome".to_owned());
@@ -476,4 +496,97 @@ fn refusals(host: &mut dyn Host) -> Result<(), String> {
         refused(&empty).map(|(why, _)| why) == Some(Why::Empty),
         || format!("nothing: {empty:?}"),
     )
+}
+
+fn gib(n: u64) -> Amounts {
+    Amounts {
+        mem_bytes: n << 30,
+        ..Amounts::ZERO
+    }
+}
+
+/// A synced session on `link` for a holder whose hello names `scope`: its fence.
+fn scoped(host: &mut dyn Host, link: u64, scope: Scope) -> Result<Fence, String> {
+    let hello = ToKeeper::Hello {
+        holder: "conformance-a".to_owned(),
+        epoch: 1,
+        scope: Some(scope),
+    };
+    let ToHolder::Welcome { fence, .. } = hear(host, link, hello)? else {
+        return Err("no welcome".to_owned());
+    };
+    let synced = hear(
+        host,
+        link,
+        ToKeeper::Sync {
+            fence,
+            held: Vec::new(),
+        },
+    )?;
+    ensure(matches!(synced, ToHolder::Synced { .. }), || {
+        format!("sync answered {synced:?}")
+    })?;
+    Ok(fence)
+}
+
+/// HEX-CV-9: a holder naming its cgroup reserves 4 GiB while its work uses 3, the host's sample reading the room 3
+/// GiB short; expect its scope among those the host reads, a reserve of all that is left counting it once (granted),
+/// and after its link drops a new session's welcome saying the measured room alone.
+fn credits(host: &mut dyn Host) -> Result<(), String> {
+    let scope = Scope::Cgroup("conformance/a".to_owned());
+    let fence = scoped(host, 1, scope.clone())?;
+    ensure(granted(&reserve(host, 1, fence, id(1, 0), gib(4))?), || {
+        "4 GiB refused".to_owned()
+    })?;
+    let scopes = host.scopes().map_err(|e| format!("scopes: {e}"))?;
+    ensure(scopes == vec![(1, scope)], || format!("scopes {scopes:?}"))?;
+    let measured = ROOM.less(gib(3));
+    host.sample(measured, &[(1, Ok(gib(3)))])
+        .map_err(|e| format!("sample: {e}"))?;
+    let rest = Amounts {
+        mem_bytes: ROOM.mem_bytes.saturating_sub(4 << 30),
+        ..Amounts::ZERO
+    };
+    let all = reserve(host, 1, fence, id(1, 1), rest)?;
+    ensure(granted(&all), || {
+        format!("the rest of the room refused, the holder's use counted twice: {all:?}")
+    })?;
+    host.link_down(1).map_err(|e| format!("link down: {e}"))?;
+    let hello = ToKeeper::Hello {
+        holder: "conformance-a".to_owned(),
+        epoch: 1,
+        scope: None,
+    };
+    match hear(host, 2, hello)? {
+        ToHolder::Welcome { view, .. } if view.room == measured => Ok(()),
+        other => Err(format!("after its link dropped: {other:?}")),
+    }
+}
+
+/// HEX-CV-10: a holder naming a process group reserves 2 GiB, then the host's sample refuses the group as not its
+/// user's; expect the hints to close its session with Close::Scope(NotOwned), and a reserve on that fence closed as
+/// no session.
+fn refused_scope(host: &mut dyn Host) -> Result<(), String> {
+    let fence = scoped(host, 1, Scope::Group(4242))?;
+    ensure(granted(&reserve(host, 1, fence, id(1, 0), gib(2))?), || {
+        "2 GiB refused".to_owned()
+    })?;
+    let measured = ROOM.less(gib(1));
+    host.sample(measured, &[(1, Err(ScopeRefused::NotOwned))])
+        .map_err(|e| format!("sample: {e}"))?;
+    let hints = host.hints().map_err(|e| format!("hints: {e}"))?;
+    ensure(
+        matches!(
+            hints.as_slice(),
+            [(1, ToHolder::Closed { rejected: Some(f), why: Close::Scope(ScopeRefused::NotOwned) })] if *f == fence
+        ),
+        || format!("hints {hints:?}"),
+    )?;
+    match reserve(host, 1, fence, id(1, 1), gib(1))? {
+        ToHolder::Closed {
+            why: Close::Session,
+            ..
+        } => Ok(()),
+        other => Err(format!("a reserve on the closed session: {other:?}")),
+    }
 }

@@ -14,7 +14,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    Amounts, Close, Fence, Held, Invalid, ReservationId, ToHolder, ToKeeper, View, Why, count,
+    Amounts, Close, Fence, Held, Invalid, Read, ReservationId, Scope, ScopeRefused, ToHolder,
+    ToKeeper, View, Why, count,
 };
 
 /// The keeper's bounds, each derived by its shell (CV8).
@@ -88,6 +89,13 @@ struct Slot {
     sum: Amounts,
     /// A hint is owed: the view changed since this holder last heard it.
     owed: bool,
+    /// Where its session's hello said its reserved work runs (CV12): none once its session ends.
+    scope: Option<Scope>,
+    /// What its scope's work used in the host's last sample while synced: none until sampled, and once its session
+    /// ends. Its credit is the smaller of this and `sum`.
+    used: Amounts,
+    /// Its scope was refused in a sample: its session's close is owed, said with the hints.
+    refused: Option<ScopeRefused>,
 }
 
 impl Slot {
@@ -99,6 +107,27 @@ impl Slot {
             held: BTreeMap::new(),
             sum: Amounts::ZERO,
             owed: false,
+            scope: None,
+            used: Amounts::ZERO,
+            refused: None,
+        }
+    }
+
+    /// Its session ended: it is away, owes nothing, and its scope earns nothing.
+    fn away(&mut self) {
+        self.link = Link::Away;
+        self.owed = false;
+        self.scope = None;
+        self.used = Amounts::ZERO;
+        self.refused = None;
+    }
+
+    /// What its scope's work is credited to the room: what it used in the last sample, up to what it holds, while
+    /// synced.
+    fn credit(&self) -> Amounts {
+        match self.link {
+            Link::Synced { .. } => self.used.min(self.sum),
+            Link::Away | Link::Joined { .. } => Amounts::ZERO,
         }
     }
 }
@@ -281,6 +310,7 @@ impl Keeper {
         self.epoch
     }
 
+    /// The room as its host measured it.
     pub fn room(&self) -> Amounts {
         self.room
     }
@@ -289,6 +319,60 @@ impl Keeper {
     pub fn set_room(&mut self, room: Amounts) {
         if room != self.room {
             self.room = room;
+            self.owe(None);
+        }
+    }
+
+    /// What every synced holder's scope is credited to the room (CV12): each holder's last sampled use, up to
+    /// what it holds. Never more than the holders' sum, which is counted whole, so it can't overflow; were it to,
+    /// none is credited.
+    pub fn credit(&self) -> Amounts {
+        self.slots
+            .iter()
+            .try_fold(Amounts::ZERO, |sum, slot| sum.checked_add(slot.credit()))
+            .unwrap_or(Amounts::ZERO)
+    }
+
+    /// The room every admission is decided in: the measured room and the holders' credit (CV3, CV12). Past what a
+    /// u64 counts, the measured room alone.
+    fn admitting(&self) -> Amounts {
+        self.room
+    }
+
+    /// The sessions of every synced holder whose hello named a scope, its name, and the scope: what the host
+    /// reads in its next sample (CV12).
+    pub fn scopes(&self) -> Vec<(u64, String, Scope)> {
+        self.slots
+            .iter()
+            .filter_map(|slot| match (slot.link, &slot.scope) {
+                (Link::Synced { session }, Some(scope)) => {
+                    Some((session, slot.name.clone(), scope.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The host's sample of its holders' scopes, by session, read with its room (CV12): each synced holder's use
+    /// as read, none for one not in it, and a refused one's session closed, typed, its close said with the hints.
+    /// A change in what is credited is owed to every synced holder.
+    pub fn sampled(&mut self, used: &[(u64, Read)]) {
+        let before = self.credit();
+        for slot in &mut self.slots {
+            let Link::Synced { session } = slot.link else {
+                continue;
+            };
+            let read = used.iter().find(|(s, _)| *s == session).map(|(_, r)| r);
+            match (slot.scope.is_some(), read) {
+                (true, Some(Ok(amount))) => slot.used = *amount,
+                (true, Some(Err(why))) => {
+                    slot.used = Amounts::ZERO;
+                    slot.refused = Some(*why);
+                }
+                _ => slot.used = Amounts::ZERO,
+            }
+        }
+        if self.credit() != before {
             self.owe(None);
         }
     }
@@ -303,17 +387,17 @@ impl Keeper {
         self.foreign
     }
 
-    /// The budget the host's own ledger admits against: the room less every holder's reservations, so
-    /// its admission is the same rule as a holder's (CV3).
+    /// The budget the host's own ledger admits against: the room, with the holders' credit, less every holder's
+    /// reservations, so its admission is the same rule as a holder's (CV3).
     pub fn room_for_local(&self) -> Amounts {
-        self.room.less(self.foreign)
+        self.admitting().less(self.foreign)
     }
 
-    /// The view with the host's own admissions `local`. What is held saturates: past what a u64 counts,
-    /// none is free.
+    /// The view with the host's own admissions `local`: the room every admission is decided in. What is held
+    /// saturates: past what a u64 counts, none is free.
     pub fn view(&self, local: Amounts) -> View {
         View {
-            room: self.room,
+            room: self.admitting(),
             held: Amounts {
                 cpu_milli: local.cpu_milli.saturating_add(self.foreign.cpu_milli),
                 mem_bytes: local.mem_bytes.saturating_add(self.foreign.mem_bytes),
@@ -354,7 +438,11 @@ impl Keeper {
         records: &mut impl Records,
     ) -> Result<ToHolder, Stop> {
         let answer = match msg {
-            ToKeeper::Hello { holder, epoch } => self.hello(holder, epoch, local, records),
+            ToKeeper::Hello {
+                holder,
+                epoch,
+                scope,
+            } => self.hello(holder, epoch, scope, local, records),
             ToKeeper::Sync { fence, held } => self.sync(fence, held, local, records),
             ToKeeper::Reserve { fence, id, amount } => {
                 self.reserve(fence, id, amount, local, records)
@@ -374,15 +462,19 @@ impl Keeper {
         Ok(answer)
     }
 
-    /// The session `session` ended (its link dropped): its holder is away, and keeps what it holds (CV5).
+    /// The session `session` ended (its link dropped): its holder is away, and keeps what it holds (CV5); its
+    /// scope's credit ends with it (CV12), a change owed to every other synced holder.
     pub fn link_down(&mut self, session: u64) {
+        let before = self.credit();
         for slot in &mut self.slots {
             if let Link::Joined { session: s } | Link::Synced { session: s } = slot.link
                 && s == session
             {
-                slot.link = Link::Away;
-                slot.owed = false;
+                slot.away();
             }
+        }
+        if self.credit() != before {
+            self.owe(None);
         }
     }
 
@@ -421,12 +513,29 @@ impl Keeper {
         Ok(Ok(Forgotten { epoch, count, sum }))
     }
 
-    /// The hints owed, by session, each the view as it is now; one a holder however many changes.
+    /// The hints owed, by session, each the view as it is now; one a holder however many changes. A holder whose
+    /// scope a sample refused is told its session's close instead (CV12), and is away from then.
     pub fn hints(&mut self, local: Amounts) -> Vec<(u64, ToHolder)> {
         let view = self.view(local);
         let keeper = self.epoch;
         let mut out = Vec::new();
         for slot in &mut self.slots {
+            if let (Link::Synced { session }, Some(why)) = (slot.link, slot.refused) {
+                let fence = Fence {
+                    keeper,
+                    session,
+                    holder: slot.epoch,
+                };
+                slot.away();
+                out.push((
+                    session,
+                    ToHolder::Closed {
+                        rejected: Some(fence),
+                        why: Close::Scope(why),
+                    },
+                ));
+                continue;
+            }
             if let Link::Synced { session } = slot.link
                 && slot.owed
             {
@@ -450,12 +559,13 @@ impl Keeper {
         }
     }
 
-    /// Whether `amount` fits the room beside `local` and every holder's reservations (CV3).
+    /// Whether `amount` fits the room, with the holders' credit, beside `local` and every holder's reservations
+    /// (CV3, CV12).
     fn fits(&self, amount: Amounts, local: Amounts) -> bool {
         local
             .checked_add(self.foreign)
             .and_then(|held| held.checked_add(amount))
-            .is_some_and(|total| total.fits(self.room))
+            .is_some_and(|total| total.fits(self.admitting()))
     }
 
     /// The holder whose current session `fence` names, and whether it is synced.
@@ -486,6 +596,7 @@ impl Keeper {
         &mut self,
         holder: String,
         epoch: u64,
+        scope: Option<Scope>,
         local: Amounts,
         records: &mut impl Records,
     ) -> Result<ToHolder, Stop> {
@@ -524,9 +635,15 @@ impl Keeper {
             records.put(&holder_record(n), &format!("{epoch} {}", slot.name))?;
             slot.epoch = epoch;
         }
+        let credited = slot.credit();
+        slot.away();
         slot.link = Link::Joined { session };
-        slot.owed = false;
+        slot.scope = scope;
         self.sessions = session;
+        // A hello on a synced session ends that session's credit.
+        if !credited.is_zero() {
+            self.owe(Some(n));
+        }
         let fence = Fence {
             keeper: self.epoch,
             session,

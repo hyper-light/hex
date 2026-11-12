@@ -25,6 +25,7 @@ pub mod placement;
 pub mod quic;
 pub mod recorded;
 pub mod records;
+pub mod scopes;
 pub mod store;
 mod turns;
 
