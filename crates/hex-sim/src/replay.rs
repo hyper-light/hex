@@ -131,6 +131,7 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
                 nodes.push(NodeSpec {
                     routes: None,
                     costs: [None; crate::model::Class::COUNT],
+                    priors: Default::default(),
                     runtime_pools: Vec::new(),
                     id,
                     capacity: Resources {

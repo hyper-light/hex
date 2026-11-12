@@ -646,6 +646,7 @@ pub fn dangerous(seed: u64, kind: Class) -> Result<Dangerous, FaultError> {
         specs.push(NodeSpec {
             routes: None,
             costs: [None; crate::model::Class::COUNT],
+            priors: Default::default(),
             runtime_pools: Vec::new(),
             id: node_id(id)?,
             capacity,
@@ -867,6 +868,7 @@ pub fn correlated(seed: u64, mutant: Mutant) -> Result<Correlated, FaultError> {
         specs.push(NodeSpec {
             routes: None,
             costs: [None; crate::model::Class::COUNT],
+            priors: Default::default(),
             runtime_pools: Vec::new(),
             id: node_id(id)?,
             capacity,
