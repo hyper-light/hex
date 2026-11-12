@@ -575,6 +575,7 @@ fn kind(r: &Refusal) -> &'static str {
             crate::Upstream::MemberHostService => "Awaits(MemberHostService)",
             crate::Upstream::GuestRoom => "Awaits(GuestRoom)",
             crate::Upstream::RunHostStdioOnly => "Awaits(RunHostStdioOnly)",
+            crate::Upstream::PublishReceiver => "Awaits(PublishReceiver)",
         },
     }
 }

@@ -428,7 +428,7 @@ impl GuestRuntime {
     /// grants past the VM; D231 narrows, never widens), and the node's Shards binary and home, whose store
     /// holds the image.
     fn image_spec(&self, image: &ShardsImage, size: VmSize) -> Result<ImageSpec, Refusal> {
-        let network = crate::grants::program(&image.grants)?;
+        let network = crate::grants::program(image)?;
         let mut env = Vec::new();
         if let Some(paths) = &self.native_paths {
             env.push((
@@ -573,7 +573,7 @@ impl GuestRuntime {
         vm_size(&spec)?;
         // Grants Shards can't hold exactly are refused before anything is made (joint plan step 15).
         if let ClassSpec::ShardsImage(image) = &spec.class {
-            crate::grants::program(&image.grants)?;
+            crate::grants::program(image)?;
         }
         let books = self.image_books()?;
         let id = spec.id.try_clone()?;
