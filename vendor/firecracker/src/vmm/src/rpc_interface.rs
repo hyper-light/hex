@@ -1449,6 +1449,7 @@ mod tests {
             DevicePassthroughConfig {
                 id: String::new(),
                 sbdf: PciSBDF::new(0x0, 0x0, 0x0, 0x0),
+                vbios_path: None,
             },
         )));
     }

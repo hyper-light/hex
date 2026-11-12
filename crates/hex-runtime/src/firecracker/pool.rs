@@ -81,6 +81,12 @@ pub(super) fn observer_configuration(
         }
         part(&id.key.to_be_bytes())?;
     }
+    // A video BIOS image is part of what the observer VM boots with; none adds nothing, so a
+    // configuration without one keeps its identity.
+    for image in &config.vbios {
+        part(image.sbdf.as_bytes())?;
+        part(&image.sha256)?;
+    }
     Ok(hash.finalize().into())
 }
 
@@ -867,6 +873,7 @@ pub(super) mod tests {
                 bytes: 1 << 20,
                 path: 100,
             },
+            vbios: Vec::new(),
         }
     }
 
