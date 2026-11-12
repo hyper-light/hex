@@ -3,6 +3,7 @@
 use std::cell::{Cell, RefCell};
 
 use super::*;
+use hex_api::{LearnedPrior, LearnedUse};
 use hex_sim::charge::{SEEDABLE, WEIGHT_MAX};
 
 const GIB: u64 = 1 << 30;

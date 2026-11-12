@@ -275,6 +275,26 @@ impl MacRuntime {
     pub fn managed_usage(&self, record: NativeRecord<'_>) -> Result<Usage, Refusal> {
         managed::usage(self, record)
     }
+    /// Joint plan step 14 (C1 on macOS): the charge learner's window, the longest cycle this control runs at any rate the
+    /// learner sets: its cycle at Hex's least CPU bound (`hex_api::MIN_CPU_MILLI`, the least the learner caps a VM at),
+    /// so each VM's rate holds on average over one window. Refused where no measured control is configured.
+    pub fn charge_window(&self) -> Result<std::time::Duration, Refusal> {
+        let (control, ceiling) = self
+            .cpu_control
+            .ok_or_else(|| managed::configuration("managed VM CPU control is not initialized"))?;
+        let (run, hold) = cpu::cycle(u64::from(hex_api::MIN_CPU_MILLI), ceiling, control.response)
+            .map_err(|_| {
+                managed::configuration("the CPU control has no cycle at Hex's least CPU bound")
+            })?;
+        run.checked_add(hold)
+            .ok_or_else(|| managed::configuration("the CPU control's cycle overflows"))
+    }
+
+    /// Joint plan step 14 (C4 on macOS): the managed scope's CPU rate becomes `rate` milli-CPU, its share as the node's
+    /// charge learner water-fills it, through its persistent native owner.
+    pub fn set_managed_rate(&self, record: NativeRecord<'_>, rate: u64) -> Result<(), Refusal> {
+        managed::set_rate(self, record, rate)
+    }
 
     /// The growth rates the node's boxes are paced at, as its watchers have learned them (observability:
     /// what the watchers pace by).

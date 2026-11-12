@@ -4,6 +4,7 @@ use std::time::Duration;
 
 pub mod census;
 pub mod completed;
+pub mod rate;
 pub mod rejected;
 pub mod timed;
 

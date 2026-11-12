@@ -1106,6 +1106,15 @@ impl ProcessBox {
         Ok(())
     }
 
+    /// Joint plan step 14 (C4 on macOS): the managed scope's CPU rate becomes `rate`, and the watcher is woken to hold
+    /// or continue its members by it.
+    pub(super) fn set_managed_rate(&self, rate: u64) -> Result<(), Refusal> {
+        self.scope()
+            .ok_or_else(|| self.state.uncertain())?
+            .set_cpu_rate(self.owner(), rate)?;
+        self.state.wake()
+    }
+
     pub(super) fn resume_managed(&self) -> Result<(), Refusal> {
         let (pid, _) = self.group()?.ok_or_else(|| self.state.uncertain())?;
         let decision = self

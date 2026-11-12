@@ -129,7 +129,7 @@ pub fn committed_peak(peak: u64, limits: &Limits) -> u64 {
 /// was asked (CLAUDE.md §3: Hex refuses a value it would have to round up, where Docker floors it to 1).
 /// A bound that maps below 1 (finer than the machine's least cap) or above [`RATE_SCALE`] (more CPU
 /// than the whole machine) is refused by name.
-fn cap(milli: u32, processors: NonZeroU32) -> Result<u32, Refusal> {
+pub fn cap(milli: u32, processors: NonZeroU32) -> Result<u32, Refusal> {
     // milli / (1000 × processors) of the machine, per 10,000: milli × 10 / processors.
     let rate = u64::from(milli)
         .checked_mul(10)
