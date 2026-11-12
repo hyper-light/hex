@@ -1023,8 +1023,10 @@ fn programs_watched_are_bounded_for_the_node_and_each_connection_keeps_its_one()
 /// of `true` carrying three pipes' write ends, this test closing its own copies as it sends them, while another
 /// process holds a copy of the first's, as a child another test forks holds every descriptor of this one from its fork
 /// to its exec (the lead's flake of 2026-11-11, the full hex-node run on 00aad8da: "stream 0"). Expect: the exec
-/// refused naming the programs' budget while the inspect is still held, and each pipe's read end then at end of file,
-/// no copy of its write end left in the node; the inspect answered once the gate opens.
+/// refused naming the programs' budget while the inspect is still held, and then no copy of any stream's write end
+/// left in the node, this process (its descriptor table, by the pipe's inode), whatever another process holds: an end
+/// of file on the read end needs every process's copy closed, a fact no node decides; the inspect answered once the
+/// gate opens.
 #[test]
 fn an_exec_past_the_programs_budget_holds_none_of_its_streams() {
     let lab = Lab::with(
@@ -1100,20 +1102,26 @@ fn an_exec_past_the_programs_budget_holds_none_of_its_streams() {
         ) => {}
         other => panic!("refused while the inspect still holds the worker: {other:?}"),
     }
+    // The node dropped them before it answered, so its table holds none once the answer is read.
     for (n, r) in readers.iter().enumerate() {
-        let mut ready = [PollFd::new(r, PollFlags::IN)];
-        let none = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        assert_eq!(
-            rustix::event::poll(&mut ready, Some(&none)).unwrap(),
-            1,
-            "stream {n}"
-        );
+        use std::os::fd::AsRawFd;
+        let link = format!("pipe:[{}]", rustix::fs::fstat(r).unwrap().st_ino);
+        let reader = r.as_raw_fd().to_string();
+        let copies: Vec<String> = std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let fd = entry.file_name().to_string_lossy().into_owned();
+                if fd != reader && std::fs::read_link(entry.path()).ok()? == Path::new(&link) {
+                    Some(fd)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert!(
-            ready[0].revents().contains(PollFlags::HUP),
-            "stream {n}: a copy of its write end is still held"
+            copies.is_empty(),
+            "stream {n}: the node holds its write end as {copies:?}"
         );
     }
     lab.host.gate.set(false);
@@ -1122,9 +1130,14 @@ fn an_exec_past_the_programs_budget_holds_none_of_its_streams() {
         (Header { id: 2, .. }, Answer::Info(_))
     ));
     drop(outside);
+    // Its connection still watches the `sleep`, so the node reaps it as it ends and says how: this test's own wait
+    // for it would race the node's reap.
     let pid = Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
     rustix::process::kill_process(pid, Signal::KILL).unwrap();
-    rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty()).unwrap();
+    assert!(matches!(
+        answer_of(&fd),
+        (Header { id: 1, .. }, Answer::Exited(Exit::Signal(9)))
+    ));
 }
 
 /// HEX-SOCK-5, the lead's ruling of 2026-11-06: a client is told what the node keeps for each connection, beside the
