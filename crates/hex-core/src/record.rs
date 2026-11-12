@@ -433,9 +433,10 @@ mod tests {
     }
 
     /// Joint plan step 15 (every grant visible in Hex's record of the VM): do write the record of a Shards image VM
-    /// granted a provider by name, kiln on its host and a publish, and read it back; expect every grant whole, in
-    /// the record's own text. Do read a record written before grants existed; expect none, and a record with none
-    /// written without the field.
+    /// granted each way a grant takes (a provider by name, kiln by address, kiln on its host over TCP and over UDP,
+    /// and a publish on each loopback family, at a port the OS picks and at one it names), and read it back; expect
+    /// every grant whole, with its member, destination, ports and way, in the record's own text, and read back the
+    /// same. Do write one granted nothing; expect the field absent, read back as none.
     #[test]
     fn a_shards_image_vms_record_keeps_every_grant() {
         use hex_api::{Destination, Grant, Member, MemberKind, Ports, Proto, ShardsImage};
@@ -443,29 +444,41 @@ mod tests {
             kind: MemberKind::Harness,
             name: "codex".to_owned(),
         };
-        let tcp = |port| Ports {
-            proto: Proto::Tcp,
+        let one = |proto, port| Ports {
+            proto,
             first: port,
             last: port,
+        };
+        let publish = |host: &str, host_port| Grant::Publish {
+            member: codex.clone(),
+            proto: Proto::Tcp,
+            port: 1455,
+            host: host.parse().unwrap(),
+            host_port,
         };
         let grants = vec![
             Grant::Egress {
                 member: codex.clone(),
                 to: Destination::Name("api.openai.com".to_owned()),
-                ports: tcp(443),
+                ports: one(Proto::Tcp, 443),
+            },
+            Grant::Egress {
+                member: codex.clone(),
+                to: Destination::Address("100.64.0.7".parse().unwrap()),
+                ports: one(Proto::Tcp, 7070),
             },
             Grant::Host {
                 member: codex.clone(),
-                ports: tcp(7070),
+                ports: one(Proto::Tcp, 7070),
             },
-            Grant::Publish {
-                member: codex,
-                proto: Proto::Tcp,
-                port: 1455,
-                host: "127.0.0.1".parse().unwrap(),
-                host_port: None,
+            Grant::Host {
+                member: codex.clone(),
+                ports: one(Proto::Udp, 7071),
             },
+            publish("127.0.0.1", None),
+            publish("::1", Some(18080)),
         ];
+        assert_eq!(hex_api::check_grants(&grants), Ok(()));
         let mut r = record();
         r.spec.class = ClassSpec::ShardsImage(Box::new(ShardsImage {
             grants: grants.clone(),
@@ -473,9 +486,12 @@ mod tests {
         }));
         let text = String::from_utf8(r.encode().unwrap()).unwrap();
         for part in [
-            r#""to":{"name":"api.openai.com"}"#,
+            r#"{"egress":{"member":{"kind":"harness","name":"codex"},"to":{"name":"api.openai.com"},"ports":{"proto":"tcp","first":443,"last":443}}}"#,
+            r#"{"egress":{"member":{"kind":"harness","name":"codex"},"to":{"address":"100.64.0.7"},"ports":{"proto":"tcp","first":7070,"last":7070}}}"#,
             r#"{"host":{"member":{"kind":"harness","name":"codex"},"ports":{"proto":"tcp","first":7070,"last":7070}}}"#,
-            r#""port":1455,"host":"127.0.0.1""#,
+            r#"{"host":{"member":{"kind":"harness","name":"codex"},"ports":{"proto":"udp","first":7071,"last":7071}}}"#,
+            r#"{"publish":{"member":{"kind":"harness","name":"codex"},"proto":"tcp","port":1455,"host":"127.0.0.1"}}"#,
+            r#"{"publish":{"member":{"kind":"harness","name":"codex"},"proto":"tcp","port":1455,"host":"::1","host_port":18080}}"#,
         ] {
             assert!(text.contains(part), "{part} not in {text}");
         }
