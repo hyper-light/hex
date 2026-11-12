@@ -671,6 +671,7 @@ mod tests {
                     })
                     .unwrap(),
             ),
+            band: 0,
         }
     }
 

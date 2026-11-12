@@ -1591,6 +1591,7 @@ mod projection_tests {
                 },
                 backing: None,
             }),
+            band: 0,
         }
     }
     fn factual() -> BoxInfo {
@@ -3370,6 +3371,7 @@ mod macos_unsubmitted_tests {
                     generation: [0x93; 16],
                 }),
             }),
+            band: 0,
         };
         spec.check().unwrap();
         let mut record = BoxRecord::new(spec, Phase::Creating, Vec::new());
@@ -3403,6 +3405,7 @@ mod macos_unsubmitted_tests {
                 devices: Vec::new(),
                 allocation: None,
                 route: None,
+                band: 0,
             })
             .unwrap();
         assert!(matches!(

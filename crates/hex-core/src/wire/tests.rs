@@ -38,6 +38,7 @@ fn device_spec(devices: Vec<DeviceId>) -> BoxSpec {
         class: ClassSpec::Process,
         owner: None,
         devices,
+        band: 0,
     }
 }
 
@@ -84,11 +85,11 @@ fn with_device_tail(offer: bool, tail: &[u8]) -> Vec<u8> {
     };
     // Replace the device list while retaining valid absent charge/route receipts. Capacity
     // additionally ends with four empty u32 lists and no learned use (joint plan step 14); a spec
-    // ends with one route option.
+    // ends with one route option and its band, 0 here (joint plan step 14).
     let following = if offer {
         1 + 4 * size_of::<u32>() + 1
     } else {
-        2
+        3
     };
     bytes.truncate(bytes.len() - size_of::<u32>() - following);
     bytes.extend_from_slice(tail);
@@ -621,6 +622,7 @@ fn oci_spec() -> BoxSpec {
             hosts: vec![("db".to_owned(), "10.0.0.2".to_owned())],
         })),
         owner: None,
+        band: 0,
     }
 }
 
@@ -657,6 +659,7 @@ fn requests() -> Vec<(u64, Request, usize)> {
                 bounds: bounds(),
                 class: ClassSpec::Bundle(PathBuf::from("/run/bundle-sleep")),
                 owner: None,
+                band: 0,
             }))),
             0,
         ),
@@ -671,6 +674,7 @@ fn requests() -> Vec<(u64, Request, usize)> {
                 bounds: Bounds::default(),
                 class: ClassSpec::Process,
                 owner: None,
+                band: 0,
             }))),
             0,
         ),
@@ -752,6 +756,7 @@ fn run() -> Request {
             bounds: bounds(),
             class: ClassSpec::Process,
             owner: None,
+            band: 0,
         }),
         program: program(),
         streams: Streams {
@@ -2048,6 +2053,7 @@ fn any_spec() -> impl Strategy<Value = BoxSpec> {
         bounds,
         class,
         owner: owner.map(|(name, reuse)| BoxOwner { name, reuse }),
+        band: 0,
     })
 }
 
@@ -2766,9 +2772,12 @@ fn route_wire_spec_and_info_route_tails_roundtrip() {
             MAX_MESSAGE,
         )
         .unwrap();
+        // The route's option, then the band (0 here), end a spec (joint plan step 14).
         assert_eq!(plain.last(), Some(&0));
-        assert_eq!(&plain[..plain.len() - 1], &bytes[..plain.len() - 1]);
-        assert_eq!(bytes[plain.len() - 1], 1);
+        let route_at = plain.len() - 2;
+        assert_eq!(plain[route_at], 0);
+        assert_eq!(&plain[..route_at], &bytes[..route_at]);
+        assert_eq!(bytes[route_at], 1);
 
         let expected = Answer::Info(BoxInfo {
             class: spec.class.class(),
@@ -3150,8 +3159,9 @@ fn route_wire_spec_and_info_inconsistent_route_receipts_refuse() {
     }
     // Keep a valid encoded body and change only the committed original class.
     let mut bad = good;
+    // The band's byte follows the route (joint plan step 14).
     let route_bytes = 1 + ROUTE_KEY_BYTES + 1 + BACKING_KEY_BYTES;
-    let route_at = bad.len() - route_bytes;
+    let route_at = bad.len() - route_bytes - 1;
     assert_eq!(bad[route_at], 1);
     assert_eq!(bad[route_at + 1], class_tag(Class::Oci));
     assert_eq!(bad[route_at + 1 + ROUTE_KEY_BYTES], 1);
@@ -4049,6 +4059,7 @@ fn a_shards_image_spec_is_class_tag_5_then_its_image_and_command() {
         devices: Vec::new(),
         allocation: Some(hex_api::sim::sim_vm_allocation().unwrap()),
         route: None,
+        band: 0,
     };
     let image = hex_api::sim::SIM_IMAGE.as_bytes();
     let length = u32::try_from(image.len()).unwrap().to_le_bytes();
@@ -4398,6 +4409,36 @@ fn w14_an_infos_last_resort_crosses_the_wire_last() {
     assert_eq!(serde_json::from_value::<BoxInfo>(older).unwrap(), plain);
 }
 
+/// Joint plan step 14 (AC-T7.4.1), C5: a box's priority band reaches its node. Do send a create of a spec in band 3
+/// through the node's wire, then the same cut by its last byte, and the spec as JSON, then a band-0 spec as JSON. Expect
+/// the create back exactly, its band its last byte, the cut one refused as every truncation is, and the JSON back
+/// exactly, a band-0 spec's naming no band (its record and commitment those of a spec before the band).
+#[test]
+fn w14_a_specs_band_crosses_the_wire_last() {
+    let banded = BoxSpec {
+        band: 3,
+        ..oci_spec()
+    };
+    let call = Request::Call(Call::Create(Box::new(banded.clone())));
+    let bytes = request(4, &call, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        call
+    );
+    assert_eq!(bytes.last(), Some(&3), "the band ends it");
+    let cut = &bytes[..bytes.len() - 1];
+    assert!(matches!(
+        read_request(&received(cut, 0), MAX_MESSAGE).map_err(|bad| bad.fault),
+        Err(Fault::Truncated { .. })
+    ));
+    let json = serde_json::to_value(&banded).unwrap();
+    assert_eq!(serde_json::from_value::<BoxSpec>(json).unwrap(), banded);
+    let plain = oci_spec();
+    let older = serde_json::to_value(&plain).unwrap();
+    assert!(older.get("band").is_none(), "none named at band 0");
+    assert_eq!(serde_json::from_value::<BoxSpec>(older).unwrap(), plain);
+}
+
 fn harness() -> Member {
     Member {
         kind: MemberKind::Harness,
@@ -4578,6 +4619,7 @@ fn a_shards_image_vm_carries_its_grants_on_the_wire() {
         devices: Vec::new(),
         allocation: Some(hex_api::sim::sim_vm_allocation().unwrap()),
         route: None,
+        band: 0,
     };
     let create = Request::Call(Call::Create(Box::new(spec(each_way()))));
     let bytes = request(92, &create, MAX_MESSAGE).unwrap();

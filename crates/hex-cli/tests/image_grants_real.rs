@@ -89,6 +89,7 @@ fn image_box(
         devices: Vec::new(),
         allocation: Some(allocation),
         route: None,
+        band: 0,
     }
 }
 

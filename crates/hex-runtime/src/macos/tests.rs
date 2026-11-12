@@ -167,6 +167,7 @@ fn box_user_mode_routes_through_the_helper() {
         },
         class: ClassSpec::Process,
         owner: None,
+        band: 0,
     };
     let created = rt.create(spec).expect("create");
     assert_eq!(created.membership, Some(Membership::BoxUser));
@@ -384,6 +385,7 @@ fn a_box_user_programs_end_is_its_own_not_unknown() {
         bounds: Bounds::default(),
         class: ClassSpec::Process,
         owner: None,
+        band: 0,
     })
     .expect("create");
     let sh = |script: &str| Program {
@@ -446,6 +448,7 @@ fn a_box_user_program_is_killed_alone_through_its_proc() {
         bounds: Bounds::default(),
         class: ClassSpec::Process,
         owner: None,
+        band: 0,
     })
     .expect("create");
     let guard = HANG_GUARD.as_secs().to_string();
@@ -583,6 +586,7 @@ fn a_cap_kill_the_watcher_finds_reaped_is_counted_by_its_waiter() {
         },
         class: ClassSpec::Process,
         owner: None,
+        band: 0,
     })
     .expect("create");
     // A member that lives no longer than the hang guard, armed with the box's cap as every member is.
@@ -724,6 +728,7 @@ fn a_member_its_own_programs_stopped_stays_stopped_when_the_watcher_continues_th
         },
         class: ClassSpec::Process,
         owner: None,
+        band: 0,
     })
     .expect("create");
     // Members that live no longer than the hang guard.

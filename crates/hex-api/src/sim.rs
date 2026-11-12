@@ -775,6 +775,7 @@ impl Fixture for SimFixture {
                 Self::ShardsImage => self.image(None),
             },
             owner: None,
+            band: 0,
         }
     }
     fn init(&self, id: BoxId, act: &Act) -> BoxSpec {
@@ -790,6 +791,7 @@ impl Fixture for SimFixture {
                 Self::ShardsImage => self.image(Some(act)),
             },
             owner: None,
+            band: 0,
         }
     }
     fn program(&self, act: &Act) -> Program {

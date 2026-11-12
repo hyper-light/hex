@@ -133,6 +133,7 @@ pub(super) fn demand_of(cpu_milli: u64) -> (Demand, Payload) {
             },
             class: ClassSpec::Process,
             owner: None,
+            band: 0,
         },
         start: false,
     };

@@ -255,7 +255,9 @@ messages, each answered), so a holder that speaks only this protocol needs none 
   configuration names a lane (`capacity`: `bind`, `credentials`, the enrollment folder `hex node enroll` began and
   kiln's CA's answer completed, read whole before anything binds, and `holders`, each `name` and `user`). The view
   opens before any admission the scheduler makes, its endpoint serves `CAPACITY_PORT` alone, two connections a
-  holder (one, and the one replacing it: `hex-quic.md` Q8), and every command it takes ends with the hints owed.
+  holder (one, and the one replacing it: `hex-quic.md` Q8), and admits those holders alone: any other peer is
+  refused at its handshake and holds none of them (`hex-quic.md` Q10). Every command it takes ends with the hints
+  owed.
   It says `capacity <address>` before `ready`. Without a lane it keeps no view and binds nothing for one, and a
   release is refused, typed.
 
@@ -378,9 +380,11 @@ wire, the order of words and what each answer asks of it. The order itself is `h
 core kiln drives through hex-api (Shards R12: one implementation), feeding it what comes and saying what it sends.
 
 1. **Identity.** Enroll with kiln's CA by CSR (`hex_quic::enroll`: its key made where it runs and never sent). Its
-   certificate's DNS name is its holder name: the keeper hears only the names its configuration lists
-   (`capacity.holders[].name` in `hex schedule serve`'s configuration), each only as itself; any other word is
-   answered `Closed { NotAuthorized }` and logged (`hex.capacity event=refused`).
+   certificate's DNS name is its holder name: the keeper admits only the names its configuration lists
+   (`capacity.holders[].name` in `hex schedule serve`'s configuration), and another's dial is refused at its
+   handshake, `Refused::Identity` as for a certificate kiln's CA didn't issue (`hex-quic.md` Q10: admit nothing there
+   and tell the person). It hears each only as itself: a word naming another holder is answered
+   `Closed { NotAuthorized }` and logged (`hex.capacity event=refused`).
 2. **The link.** Dial the keeper's endpoint (the configured `capacity.bind`, which `hex schedule serve` prints as
    `capacity <address>` before `ready`), checking the certificate for the scheduler's name, and assert
    `TLS13_AES_256_GCM_SHA384` negotiated. Open one connection to `CAPACITY_PORT` (`0x4845_5805`): a connection is
@@ -491,8 +495,6 @@ window, which would under-count Hex here.
 - A holder's GPU reservations need device grants by identity (CV3).
 - The lane's log events (`hex.capacity event=refused`, `forgotten`, `lane_ended`, `hint_failed`) are to be agreed
   with kiln's Observe owner (CLAUDE.md §10).
-- The transport admits any peer kiln's CA enrolled: one the lane doesn't name is refused there (CV8) but holds one
-  of the lane's connections while it stays. Admitting by name at the endpoint is hex-quic's (`Directory`).
 - A scheduler with no runtime class keeps no holder reservation: CV8 bounds a holder's by the node's own record
   bound, which such a node derives as none.
 - The credit's window (CV12): a scope read on either side of the free memory's read, the smaller kept, is at most
