@@ -1,4 +1,5 @@
-//! Exact physical selection shared with the VMM; OS argument encoding stays here.
+//! A host GPU named by its exact native identity (D232), the type shards-abi shares with the VM
+//! process; here, its `--gpu-device` argument.
 
 use std::fmt;
 
@@ -141,7 +142,7 @@ mod tests {
         }
     }
 
-    /// AC-T7.4.1: a transferred/duplicated writer can have a different raw value;
+    /// D232: a transferred/duplicated writer can have a different raw value;
     /// the final-launch suffix must follow the actual owned writer, not its sender.
     #[test]
     fn managed_report_argument_follows_the_final_owned_writer() {
