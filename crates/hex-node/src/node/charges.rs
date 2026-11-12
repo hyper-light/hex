@@ -415,14 +415,14 @@ impl Learner {
         })
     }
 
-    /// One window (C1 to C5, C7), read at `now`: the VMs `running`, each new one found by `record` (its class and
-    /// receipt; none for a box that isn't a VM with a receipt), the reuse slots live boxes hold (`held`, in order),
+    /// One window (C1 to C5, C7), read at `now`: the VMs `running`, each new one found by `record` (its class, receipt
+    /// and band; none for a box that isn't a VM with a receipt), the reuse slots live boxes hold (`held`, in order),
     /// within the fleet's `budget`. A failure is kept until a window passes.
     pub(super) fn window(
         &mut self,
         io: &impl Cgroups,
         running: Vec<(BoxId, Scope, BoxCgroup)>,
-        record: impl Fn(&BoxId) -> Result<Option<(Class, Allocation)>, Refusal>,
+        record: impl Fn(&BoxId) -> Result<Option<(Class, Allocation, u8)>, Refusal>,
         held: &[u64],
         budget: CapacityResources,
         now: Instant,
@@ -436,7 +436,7 @@ impl Learner {
         &mut self,
         io: &impl Cgroups,
         running: Vec<(BoxId, Scope, BoxCgroup)>,
-        record: impl Fn(&BoxId) -> Result<Option<(Class, Allocation)>, Refusal>,
+        record: impl Fn(&BoxId) -> Result<Option<(Class, Allocation, u8)>, Refusal>,
         held: &[u64],
         budget: CapacityResources,
         now: Instant,
@@ -476,7 +476,7 @@ impl Learner {
                 vm.last = (usage.cpu_usec, now);
                 continue;
             }
-            let Some((class, allocation)) = record(&id)? else {
+            let Some((class, allocation, _band)) = record(&id)? else {
                 continue;
             };
             let receipt = allocation.booking();
@@ -784,7 +784,7 @@ impl Node {
             Ok(read) => read,
             Err(why) => return learner.failed(why),
         };
-        let record = |id: &BoxId| -> Result<Option<(Class, Allocation)>, Refusal> {
+        let record = |id: &BoxId| -> Result<Option<(Class, Allocation, u8)>, Refusal> {
             let Some(record) = self.record(id)? else {
                 return Ok(None);
             };
@@ -793,7 +793,10 @@ impl Node {
                 hex_api::Class::Firecracker => Class::Firecracker,
                 hex_api::Class::Process | hex_api::Class::Oci => return Ok(None),
             };
-            Ok(record.spec.allocation.map(|allocation| (class, allocation)))
+            Ok(record
+                .spec
+                .allocation
+                .map(|allocation| (class, allocation, record.spec.band)))
         };
         // Its outcome is kept as the learner's fault, which the capacity answers read.
         let _ = learner.window(&Kernel, running, record, &held, budget, Instant::now());

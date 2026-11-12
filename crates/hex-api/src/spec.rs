@@ -53,6 +53,16 @@ pub struct BoxSpec {
     /// Actual initialized execution selected before admission, beside the original workload form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<crate::runtime::RouteReceipt>,
+    /// Its priority band as its submitter gave it, 0 the lowest: where its node must end one of its microVMs to hold
+    /// its fleet's memory, the lowest band goes first (joint plan step 14, `docs/design/learned-charge.md` C5), as
+    /// Kubernetes' kubelet evicts by priority. Added after the spec's other fields, so a spec without it is band 0
+    /// (append-only), and a band-0 spec's record and native commitment are those of a spec before it.
+    #[serde(default, skip_serializing_if = "is_lowest")]
+    pub band: u8,
+}
+
+fn is_lowest(band: &u8) -> bool {
+    *band == 0
 }
 
 impl BoxSpec {
@@ -1133,6 +1143,7 @@ mod tests {
                     kind: crate::DeviceKind::Gpu,
                     key: u64::MAX,
                 }],
+                band: 0,
             };
             assert_eq!(boxed.class.class(), class);
             boxed.check().unwrap();
@@ -1163,6 +1174,7 @@ mod tests {
             devices: Vec::new(),
             allocation: Some(crate::sim::sim_vm_allocation().unwrap()),
             route: None,
+            band: 0,
         }
     }
 

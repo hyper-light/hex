@@ -84,6 +84,7 @@ impl ImageBoxes {
             devices: Vec::new(),
             allocation: Some(self.allocation),
             route: None,
+            band: 0,
         }
     }
 }

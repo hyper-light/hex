@@ -58,6 +58,7 @@ fn vm(name: &str, n: u8) -> BoxRecord {
         devices: Vec::new(),
         allocation: Some(allocation),
         route: None,
+        band: 0,
     };
     let mut record = BoxRecord::new(spec, Phase::Ready, Vec::new());
     record.native_scope = Some(NativeScope::from_bytes([n; 16]));

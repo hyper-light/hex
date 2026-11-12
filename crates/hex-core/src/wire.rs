@@ -1315,6 +1315,7 @@ fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
             })
         })?,
         route: r.option(route_receipt)?,
+        band: 0,
     };
     check_spec_route(&spec)?;
     spec.check_devices()
