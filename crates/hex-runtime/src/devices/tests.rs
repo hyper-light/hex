@@ -402,6 +402,17 @@ fn guest_recipe_is_separate_and_requires_exact_boot_owner_and_full_set() {
     ] {
         assert!(Catalog::parse(format!("hex-devices-1\n{row}\n").as_bytes()).is_err());
     }
+}
+
+/// AC-T7.4.1: the exact boot owner's full set plans a guest recipe from its file, and host CDI still refuses it. A
+/// guest-gpu file is the Linux guest's own path: the catalog takes one only from `/`, and only the Linux node's
+/// attachments read it. So this runs on Linux, where a test's file is named so. Do: write a recipe file, catalog it,
+/// and plan the selected box with its exact owner and full set. Expect: the file's one device node, and host CDI
+/// refused.
+#[cfg(target_os = "linux")]
+#[test]
+fn guest_recipe_plans_its_file_for_the_exact_boot_owner_and_full_set() {
+    let selected = spec("dedicated", 256);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("guest.cdi");
     std::fs::write(&path, br#"{"cdiVersion":"1.1.0","kind":"hex.shards/gpu","devices":[{"name":"256","containerEdits":{"deviceNodes":[{"path":"/dev/dri/renderD128","type":"c","major":226,"minor":128,"permissions":"rw"}]}}]}"#).unwrap();
