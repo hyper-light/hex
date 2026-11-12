@@ -99,6 +99,25 @@ takes only CPU the others leave idle; its neighbours are never starved. Were boo
 would keep the same fraction of its booking. The weight's range quantizes a share by at most one part in 10,000 of
 the largest booking (c).
 
+**The placement.** A weight is a share only among its cgroup's siblings (cgroup-v2.rst, "Weights"), so the
+guarantee needs a VM's siblings to be VMs booked by this rule, and their parent to receive the fleet's budget:
+- Every Hex microVM's cgroup sits under its fleet's parent, `<node root>/.vm/<node key>/<VM scope>`, which holds VMs
+  alone (process and OCI boxes are `<node root>/<box>`).
+- The parent's `cpu.max` is the fleet's CPU budget (C7), at least the kernel's least quota. However the VMs' weights
+  fall, the fleet together never takes more than its budget.
+- The parent's `cpu.weight` is that budget on the machine's scale, `ceil(10,000 × budget / the machine's CPU)`
+  (`charge::fleet_weight`): 10,000 is the whole machine, so against a sibling weighed on the same scale (another
+  node's fleet, a box weighed by its booking) the fleet receives its budget. `.vm`, the parent of the fleets of the
+  nodes sharing one box root, weighs the sum of their budgets on the same scale, each read from its fleet's
+  `cpu.max`.
+- The parent has no memory bound of its own. Its VMs' `memory.high` budgets already sum to the fleet's budget (C5);
+  a parent's `memory.high` would reclaim from VMs within their budgets whenever one passed its own, where C5 holds
+  that one alone.
+
+`charge::Node::placement` gives these bounds: the parent's, and each VM's `cpu.weight` by booking, `cpu.max` and
+`memory.max` its ceiling, `memory.high` its budget at most its ceiling. A box whose owner sets its own `cpu.weight`
+(the process class's `Bounds`) is off this scale. Against it the fleet receives its weight's share, not its budget.
+
 **Sources.** Kubernetes makes a request a CPU weight and the limit a throttle (f35 A, f45 A); Borg gives batch
 work tiny shares beside latency-sensitive work (f44 A); weight by charge, the envelope the cap (f83 B). On macOS a box's CPU follows its weight only as QoS tiers, and the
 managed control caps (f56 A, f38 A): the same shares there are the control's rate set to the water-filled share each
@@ -183,6 +202,10 @@ Taken by ROOT on 2026-11-12 and passed to goal 13; `Allocation`'s booked amount 
   window is `cpu.max`'s period; on macOS and Windows the window their CPU control enforces (the managed control's
   cycle, the job's rate) is not yet carried to the scheduler, so their VMs stay booked whole: Hex's own remaining
   work, not upstream's.
+- C4's placement bounds come from `charge::Node::placement`. Only the node agent can write them: it owns `.vm` and
+  its VMs' cgroups. The scheduler is a separate process on the node socket, and no call there changes a running
+  box's bounds. Until the node agent writes them, a VM's cgroup keeps what its create gave it: `cpu.max` and
+  `memory.max` its ceiling, the kernel's default weight.
 
 ## Every number
 
@@ -194,6 +217,8 @@ Taken by ROOT on 2026-11-12 and passed to goal 13; `Allocation`'s booked amount 
 | The ceiling | the allocation | (b) | guest_cost's census of the class | `charge::tests` |
 | The cold booking | the class's prior, else the allocation | (a) | p99.9 of the class's last SEEDABLE warmed windows | `charge::tests` |
 | `cpu.weight`'s range | 1 to 10,000 | (c) | cgroup-v2.rst | `charge::tests` |
+| The fleet's weight | `ceil(10,000 × budget / machine CPU)`, at least 1 | derived | its budget's share of the machine on the kernel's range | `charge::tests` (exact and property) |
+| The fleet's CPU cap | its CPU budget, at least 10 milli-CPU | (c) | the kernel's least quota, 1 ms a 100 ms period (`hex_api::MIN_CPU_MILLI`) | `charge::tests` |
 | The slack's split | in proportion to bookings | derived | budgets sum to the budget, no race in a window | `charge::tests` |
 | The fastest growth | learned per window | (a) | the node's own windows, only rising | `charge::tests` |
 | The eviction order | band, then excess | rule, cited | Kubernetes' documented order (f45 A) | `charge::tests` |

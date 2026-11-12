@@ -341,6 +341,20 @@ pub struct Budget {
     pub room: i64,
 }
 
+/// The bounds that hold the rule on Linux (C4, C5): the fleet's parent's, and each of its VMs'. A weight means a
+/// share only among its cgroup's siblings, so the fleet's VMs sit alone under its parent, and the parent carries
+/// the fleet among the parent's own siblings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placement<K> {
+    /// The fleet's parent: `cpu.max` the fleet's CPU budget, `cpu.weight` that budget on the machine's scale
+    /// ([`fleet_weight`]). No memory bound of its own: its VMs' budgets sum to the fleet's (C5).
+    pub fleet: hex_api::Bounds,
+    /// Each VM: `cpu.weight` by its booking ([`Node::weights`]), `cpu.max` and `memory.max` its ceiling, and
+    /// `memory.high` its budget ([`Node::budgets`]), at most its ceiling, as the kernel holds `memory.high` under
+    /// `memory.max`.
+    pub vms: Vec<(K, hex_api::Bounds)>,
+}
+
 /// Bugs planted in the core for its tests and hex-sim's scenarios to catch (as `lb::Mutant`). Tests only, on
 /// one thread at a time.
 #[cfg(test)]
@@ -823,6 +837,44 @@ impl<K: Ord + Copy> Node<K> {
         Ok(out)
     }
 
+    /// The bounds that hold the rule (C4, C5) on a machine of `machine_milli` CPU: the fleet's parent, its CPU
+    /// budget its cap (at least the kernel's least quota, `hex_api::MIN_CPU_MILLI`) and its weight among its
+    /// siblings ([`fleet_weight`]); each VM by its weight, budget and ceiling.
+    pub fn placement(&self, machine_milli: u64) -> Result<Placement<K>, ChargeError> {
+        let milli =
+            |what: &'static str, n: u64| u32::try_from(n).map_err(|_| ChargeError::Overflow(what));
+        let [cpu, _, _] = self.budget;
+        let fleet = hex_api::Bounds {
+            cpu_weight: Some(fleet_weight(cpu, machine_milli)?),
+            cpu_max_milli: Some(milli(
+                "a fleet's CPU budget",
+                cpu.max(u64::from(hex_api::MIN_CPU_MILLI)),
+            )?),
+            ..hex_api::Bounds::default()
+        };
+        let mut vms = Vec::new();
+        vms.try_reserve_exact(self.vms.len())
+            .map_err(|_| ChargeError::Full {
+                what: "a fleet's placement",
+                bound: self.vms.len(),
+            })?;
+        let each = self.vms.iter().zip(self.weights()?).zip(self.budgets()?);
+        for (((id, vm), (_, weight)), (_, budget)) in each {
+            let [cpu, mem, _] = vm.class.ceiling;
+            vms.push((
+                *id,
+                hex_api::Bounds {
+                    cpu_weight: Some(weight),
+                    cpu_max_milli: Some(milli("a VM's ceiling", cpu)?),
+                    memory_max: Some(mem),
+                    memory_high: Some(budget.bytes.min(mem)),
+                    ..hex_api::Bounds::default()
+                },
+            ));
+        }
+        Ok(Placement { fleet, vms })
+    }
+
     /// The last resort (C5): where what the fleet's VMs hold and the fastest growth on record in one window pass
     /// its budget, the VM holding most past its own budget, lowest band first; never one within its budget, so
     /// never one within its booking, nor one held at its budget as Linux's `memory.high` holds it.
@@ -887,6 +939,25 @@ fn physical(vm: &Vm) -> [u64; 3] {
     let [b0, b1, b2] = vm.booking;
     let [_, h1, h2] = vm.held;
     [b0, b1.max(h1), b2.max(h2)]
+}
+
+/// A fleet's `cpu.weight` among its parent's children (C4): its CPU budget's share of the machine's CPU on the
+/// kernel's range, rounded up, at least [`WEIGHT_MIN`]. [`WEIGHT_MAX`] is the whole machine, so siblings weighed
+/// on the same scale share by their budgets; a budget past the machine weighs the whole machine.
+pub fn fleet_weight(budget_milli: u64, machine_milli: u64) -> Result<u16, ChargeError> {
+    if machine_milli == 0 {
+        return Err(ChargeError::Invalid {
+            what: "a machine's CPU",
+            why: "a machine with no CPU",
+        });
+    }
+    let scaled = u128::from(budget_milli.min(machine_milli))
+        .checked_mul(u128::from(WEIGHT_MAX))
+        .map(|n| n.div_ceil(u128::from(machine_milli)))
+        .ok_or(ChargeError::Overflow("a fleet's CPU weight"))?;
+    let weight =
+        u16::try_from(scaled).map_err(|_| ChargeError::Overflow("a fleet's CPU weight"))?;
+    Ok(weight.max(WEIGHT_MIN))
 }
 
 /// Weighted water-filling (C4): `capacity` shared among `entries`, each `(weight, need)` with a weight of at least
