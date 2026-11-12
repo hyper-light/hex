@@ -2306,6 +2306,21 @@ impl<O: Os> Shared<O> {
             None
         };
         let pid = proc.pid();
+        // A program another host runs (a VM guest's, its pid the guest's) is never watched or signalled here by its
+        // pid, which may name no process of this host or an unrelated one: its host forwards its exec
+        // ([`Host::forward`]), its end coming as that host's message. One that reaches here is ended by its own
+        // means and refused.
+        if !proc.on_this_host() {
+            let _ = proc.kill();
+            self.unreserve(conn)?;
+            return reply(Answer::Refused(Refusal::Invalid {
+                what: "a started program",
+                why: format!(
+                    "pid {pid} is another host's (a VM guest's), which the node never watches or signals: its \
+                     host forwards its exec"
+                ),
+            }));
+        }
         // Announced and watched under the table, so the I/O thread can't send its end before its
         // start: it looks the program up under the same lock.
         let table = self.table()?;
