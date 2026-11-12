@@ -572,6 +572,7 @@ fn kind(r: &Refusal) -> &'static str {
             crate::Upstream::MemberSignal => "Awaits(MemberSignal)",
             crate::Upstream::MemberGrantsByAddress => "Awaits(MemberGrantsByAddress)",
             crate::Upstream::MemberHostService => "Awaits(MemberHostService)",
+            crate::Upstream::GuestRoom => "Awaits(GuestRoom)",
         },
     }
 }

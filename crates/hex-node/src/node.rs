@@ -59,6 +59,7 @@ use crate::turns::{Turn, Turns};
 
 mod attachments;
 mod backends;
+mod charges;
 
 /// overlayfs's magic number (include/uapi/linux/magic.h): a node whose state is on overlayfs can't
 /// keep a layered box's writable layer there, since overlayfs can't be an overlay's upper layer.
@@ -1755,7 +1756,12 @@ impl Runtime for Node {
     }
     fn capacity(&self, class: Class) -> Result<Option<hex_api::Capacity>, Refusal> {
         if let Some(backend) = self.backend(class)? {
-            return backend.capacity(class);
+            let mut capacity = backend.capacity(class)?;
+            // Joint plan step 14 (C8): what the node learned of the class's microVMs.
+            if let Some(capacity) = capacity.as_mut() {
+                self.attach_learned(class, capacity)?;
+            }
+            return Ok(capacity);
         }
         // node_key is stable across this state directory's recovery, shared by both native classes.
         let mut capacity = self.native_capacity()?;

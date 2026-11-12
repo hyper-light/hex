@@ -1692,11 +1692,14 @@ pub enum Upstream {
     /// A microVM member's reach to a service its own host serves on its loopback (kiln beside the
     /// VM): Shards' explicit host-service grants.
     MemberHostService,
+    /// A Shards guest told the room its host's budget leaves it (D188): init's `ROOM`, which
+    /// shards-api's image boot (D231) has no call to send (joint plan step 14).
+    GuestRoom,
 }
 
 impl Upstream {
     /// Every capability, in the order the node's wire tags them.
-    pub const ALL: [Upstream; 9] = [
+    pub const ALL: [Upstream; 10] = [
         Upstream::GuestCpuTimePerVcpu,
         Upstream::MemberExec,
         Upstream::MemberGrantsByName,
@@ -1706,6 +1709,7 @@ impl Upstream {
         Upstream::MemberSignal,
         Upstream::MemberGrantsByAddress,
         Upstream::MemberHostService,
+        Upstream::GuestRoom,
     ];
 }
 
@@ -1725,6 +1729,7 @@ impl std::fmt::Display for Upstream {
             Self::MemberSignal => "a signal to Shards members (its agent-control endpoint)",
             Self::MemberGrantsByAddress => "a Shards member's grants by address",
             Self::MemberHostService => "a Shards member's reach to its host's own service",
+            Self::GuestRoom => "a Shards guest told its room (init's ROOM, owed through D231)",
         })
     }
 }

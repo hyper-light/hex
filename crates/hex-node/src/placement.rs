@@ -1641,65 +1641,6 @@ impl Driver {
         }
         Ok(resources)
     }
-
-    /// Joint plan step 14 (AC-T7.4.1): every microVM box this node runs on its own allocation, read now: its key,
-    /// class, receipt and use. A box gone between the listing and its read is passed over, as above.
-    pub fn measured_vms(&self) -> Result<Vec<MeasuredVm>, Error> {
-        let _operation = self.operation()?;
-        let state = self.lock()?;
-        let count = state.node.ran_keys().count();
-        let mut vms = Vec::new();
-        vms.try_reserve_exact(count)
-            .map_err(|_| Refusal::Exhausted {
-                what: "measured microVM identities",
-                bound: count,
-            })?;
-        for (key, _, ended) in state.node.ran_keys() {
-            if ended {
-                continue;
-            }
-            let demand = state
-                .node
-                .demand(key)
-                .ok_or_else(|| bad("ran demand missing"))?;
-            if !matches!(demand.class, Class::Shards | Class::Firecracker) {
-                continue;
-            }
-            if let Some(allocation) = state.node.assigned_allocation(key)? {
-                vms.push((key, demand.class, allocation));
-            }
-        }
-        drop(state);
-        let mut measured = Vec::new();
-        measured
-            .try_reserve_exact(vms.len())
-            .map_err(|_| Refusal::Exhausted {
-                what: "measured microVMs",
-                bound: vms.len(),
-            })?;
-        for (key, class, allocation) in vms {
-            match self.runtimes.get(class)?.usage(&self.physical_id(key)?) {
-                Ok(usage) => measured.push(MeasuredVm {
-                    key,
-                    class,
-                    allocation,
-                    usage,
-                }),
-                Err(Refusal::NoSuchBox(_)) => {}
-                Err(why) => return Err(why.into()),
-            }
-        }
-        Ok(measured)
-    }
-}
-
-/// A microVM box as [`Driver::measured_vms`] read it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MeasuredVm {
-    pub key: Key,
-    pub class: Class,
-    pub allocation: hex_api::Allocation,
-    pub usage: hex_api::Usage,
 }
 
 fn validate(demand: &Demand, payload: &Payload) -> Result<(), Error> {

@@ -203,17 +203,20 @@ reaches the view settled with goal 13 the same day:
 - `NodeSpec::priors` carries each VM class's learned prior in a node's facts and offers. The placement index books a
   new VM's receipt at its node's prior (`model::booked_at`); a receiver admits an owner's receipt as it was booked,
   comparing charges with the booking aside (`model::same_charge`), so a stale view is never refused for it.
-- `hex-node`'s scheduler reads each microVM once a window (`Driver::measured_vms`, the shell `scheduler::charges`),
-  and on each refresh gives its facts the priors. Its capacity stays the machine's (C8). It learns on Linux, where
-  the window is `cpu.max`'s period; on macOS and Windows the window their CPU control enforces (the managed control's
-  cycle, the job's rate) is not yet carried to it, so their VMs stay booked whole: Hex's own remaining work, not
-  upstream's. The learner moves into the node agent next, and the scheduler then reads its capacity answers.
-- `hex_api::Capacity::learned` crosses the node socket's wire last on a capacity answer (append-only), its priors
-  bounded by a class's profiles and its holdings by a node's boxes, and fitted to one message.
-- C4's placement bounds come from `charge::Node::placement`. Only the node agent can write them: it owns `.vm` and
-  its VMs' cgroups. The scheduler is a separate process on the node socket, and no call there changes a running
-  box's bounds. Until the node agent writes them, a VM's cgroup keeps what its create gave it: `cpu.max` and
-  `memory.max` its ceiling, the kernel's default weight.
+- The learner is the node agent's (`hex-node`'s `node::charges`), the one authority, as the owner of its VMs'
+  cgroups. A monotonic timer wakes it once a window, `cpu.max`'s period. It reads each running VM's cgroup (the
+  supervisor's `running_vms`), learns, and writes the placement (C4, C5), each file only when its value changes
+  (`BoxCgroup::set`; a VM's create already wrote its ceiling): each VM's `cpu.weight` and `memory.high`, the fleet's
+  parent's `cpu.max` and `cpu.weight`, and `.vm`'s `cpu.weight`. Each Shards guest's room is refused
+  `Awaits(GuestRoom)` (C7). A failed window is kept, and the capacity answers then carry nothing learned, so the
+  class's VMs are booked whole until a window passes.
+- `hex_api::Capacity::learned` crosses the node socket's wire last on a VM class's capacity answer (append-only).
+  Its priors are bounded by a class's profiles, its holdings by a node's boxes, and the answer is fitted to one
+  message. The scheduler (`scheduler::charges`) gives its node's facts the priors it carries; its capacity stays the
+  machine's (C8). The scheduler calls goal 13's `Driver::rebook` with the holdings once that call is on main.
+- It learns on Linux, where the window is `cpu.max`'s period. On macOS and Windows the window their CPU control
+  enforces (the managed control's cycle, the job's rate) has no learner yet, so their VMs stay booked whole: Hex's
+  own remaining work, not upstream's.
 
 ## Every number
 
