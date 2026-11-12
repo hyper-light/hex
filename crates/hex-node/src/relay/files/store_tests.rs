@@ -62,6 +62,18 @@ fn one_layer(stage: &mut Stage, size: u64) {
     stage.end().unwrap();
 }
 
+thread_local! {
+    /// The free room a test pins its stage's reads to ([`pinned`]).
+    static PINNED: std::cell::Cell<Option<Free>> = const { std::cell::Cell::new(None) };
+}
+
+/// The free room the test pinned ([`PINNED`]), whatever the file system holds now.
+fn pinned(_: &OwnedFd) -> Result<Free, Refusal> {
+    PINNED
+        .with(std::cell::Cell::get)
+        .ok_or_else(|| Refusal::Broken("no free room pinned".to_owned()))
+}
+
 fn names_in(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
@@ -107,9 +119,11 @@ fn a_stage_without_room_stages_into_the_box_and_evicts_nothing() {
 }
 
 /// HEX-GUEST-14 (§4a, admission into room already free): the room a stage needs set 512 KiB short of what
-/// the stage learned is free; stage a named layer of a 1 MiB file: expect the layer, begun in the store, moved
-/// into the box when its file would cut into that room, the file whole there, and no partial or layer left in
-/// the store.
+/// the stage learned is free, and its later reads pinned to that room, so what other writers of the same file
+/// system free or fill meanwhile decides nothing (another's deletion between the reads once made the file fit,
+/// in the parallel run of 2026-11-11); stage a named layer of a 1 MiB file: expect the layer, begun in the
+/// store, moved into the box when its file would cut into that room, the file whole there, and no partial or
+/// layer left in the store.
 #[test]
 fn a_layer_that_would_cut_into_the_room_a_stage_needs_moves_into_the_box() {
     let dir = lab();
@@ -120,6 +134,8 @@ fn a_layer_that_would_cut_into_the_room_a_stage_needs_moves_into_the_box() {
         entries: 0,
         bytes: stage.free.bytes - (512 << 10),
     };
+    PINNED.with(|room| room.set(Some(stage.free)));
+    stage.read_free = pinned;
     one_layer(&mut stage, 1 << 20);
     let own = dir.path().join("b").join(BOX_LAYERS).join("0");
     assert!(std::fs::symlink_metadata(&own).unwrap().is_dir());
@@ -128,6 +144,46 @@ fn a_layer_that_would_cut_into_the_room_a_stage_needs_moves_into_the_box() {
         names_in(&store)
             .iter()
             .all(|n| !n.starts_with(PARTIAL) && !is_layer_name(n)),
+        "{:?}",
+        names_in(&store)
+    );
+}
+
+/// HEX-GUEST-14 (§4a, admission into room free now): the room a stage needs set 512 KiB short of what the
+/// stage learned is free, and its later reads pinned to 1 MiB more, as another writer's deletion leaves the
+/// file system; stage a named layer of a 1 MiB file: expect it admitted, the room freed meanwhile holding it
+/// with the room a stage needs to spare: the store holds it whole, the box's `layers/0` a link to it, no
+/// partial left.
+#[test]
+fn a_layer_the_room_freed_meanwhile_holds_stays_in_the_store() {
+    let dir = lab();
+    let store = dir.path().join(STORE);
+    let digest = [0xc1; 32];
+    let (mut stage, _) =
+        Stage::begin(dir.path(), BoxId::new("b").unwrap(), &[Some(digest)]).unwrap();
+    stage.need = Spend {
+        entries: 0,
+        bytes: stage.free.bytes - (512 << 10),
+    };
+    PINNED.with(|room| {
+        room.set(Some(Free {
+            bytes: stage.free.bytes + (1 << 20),
+            ..stage.free
+        }))
+    });
+    stage.read_free = pinned;
+    one_layer(&mut stage, 1 << 20);
+    let hex = files::digest_hex(&digest);
+    assert_eq!(
+        std::fs::metadata(store.join(&hex).join("f")).unwrap().len(),
+        1 << 20
+    );
+    assert_eq!(
+        std::fs::read_link(dir.path().join("b").join(BOX_LAYERS).join("0")).unwrap(),
+        Path::new("../../.layers").join(&hex)
+    );
+    assert!(
+        names_in(&store).iter().all(|n| !n.starts_with(PARTIAL)),
         "{:?}",
         names_in(&store)
     );
