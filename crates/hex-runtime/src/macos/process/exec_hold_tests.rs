@@ -177,7 +177,7 @@ fn a_held_member_stopped_after_its_exec_is_continued_again() {
 /// signal fenced on the group would take it for a process outside the scope.
 #[test]
 fn a_held_member_that_ended_is_no_longer_held() {
-    let mut held = Held::new();
+    let held = Held::new();
     rustix::process::kill_process(
         rustix::process::Pid::from_raw(held.pid).unwrap(),
         rustix::process::Signal::KILL,

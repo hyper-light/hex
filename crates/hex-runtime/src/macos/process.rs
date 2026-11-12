@@ -446,11 +446,14 @@ impl State {
     }
 
     /// Signals `member`: in a managed scope by its audit token, else by pid. Returns the member as signalled,
-    /// with the token that reached it, or `None` for a pid gone (an ordinary box's). XNU gives a process a new
-    /// audit-token pid version at exec, so a member that exec'd since its hold captured its token is refused by
-    /// that token (ESRCH) though it is the same process: its pid and birth (its start, which exec keeps) are
-    /// joined again in the scope's group, its token captured afresh, and the signal sent once with it. A pid of
-    /// another birth, or none, is not the member: that stays the control failure it was.
+    /// with the token that reached it, or `None` for one that has ended (its zombie, the same birth: an
+    /// ordinary box's pid gone too), which is no longer anyone's to signal; a zombie is in no process group
+    /// (`getpgid` finds no process), so the group check would take it for a process outside the scope. XNU
+    /// gives a process a new audit-token pid version at exec, so a member that exec'd since its hold captured
+    /// its token is refused by that token (ESRCH) though it is the same process: its pid and birth (its start,
+    /// which exec keeps) are joined again in the scope's group, its token captured afresh, and the signal sent
+    /// once with it. A pid of another birth, or none, is not the member: that stays the control failure it
+    /// was.
     fn signal_stopped(
         &self,
         member: Stopped,
@@ -467,6 +470,12 @@ impl State {
             if token.pid() != member.pid {
                 scope.failed(shards_api::ProcessFailure::DifferentScope);
                 return Err(self.uncertain());
+            }
+            if sys::rusage(member.pid)
+                .map_err(|error| Refusal::os("reading a held member's end", error))?
+                .is_some_and(|usage| usage.ended && usage.started == token.birth())
+            {
+                return Ok(None);
             }
             self.in_group(scope, member.pid, group)?;
             match sys::signal_member(&token, signal) {
@@ -491,7 +500,7 @@ impl State {
             sys::MemberSignal::Continue => rustix::process::Signal::CONT,
             sys::MemberSignal::Kill => rustix::process::Signal::KILL,
         };
-        signal_one(member.pid, signal).map(|sent| sent.then_some(member))
+        signal_one(member.pid, signal).map(|sent| if sent { Some(member) } else { None })
     }
 
     /// Whether `pid` is in the scope's `group`; one that left it has left the scope.
@@ -673,7 +682,9 @@ impl Stops {
             .filter(|held| {
                 held.native.map(|token| token.birth()) == member.native.map(|token| token.birth())
             })
-            .ok_or_else(|| super::managed::configuration("held native incarnation cannot be replaced"))?;
+            .ok_or_else(|| {
+                super::managed::configuration("held native incarnation cannot be replaced")
+            })?;
         *held = member;
         Ok(())
     }
