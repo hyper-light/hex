@@ -52,9 +52,13 @@ pub struct Use {
 /// One reading of what a guest's VMM holds, as its OS keeps it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Holding {
-    /// The VMM's footprint: the memory its OS charges it, the guest RAM it has touched included.
+    /// The VMM's footprint: the memory its OS charges it (Linux: its cgroup's `memory.current`; macOS: its
+    /// `ri_phys_footprint`), the guest RAM it has touched included.
     pub footprint: u64,
-    /// The highest footprint it has reached, where its OS keeps one.
+    /// The most the node's enforcement has charged it over its life, where the enforcement keeps one (Linux:
+    /// its cgroup's `memory.peak`, kernel memory included).
+    pub charged_peak: Option<u64>,
+    /// The highest footprint it has reached, for the record (macOS: `ri_lifetime_max_phys_footprint`).
     pub peak_footprint: Option<u64>,
     /// The part of `footprint` that is the guest's RAM: `None` while the VMM maps none it can tell apart.
     pub guest_memory: Option<u64>,
@@ -103,8 +107,9 @@ pub trait Driver {
 
     /// What is held on disk under the class's runtime folders now: before a guest, and after its end.
     fn held(&self) -> Result<Files, String>;
-    /// Starts one guest's VMM and returns it with the probes that read it.
-    fn launch(&mut self) -> Result<Launched<Self>, String>;
+    /// Starts one guest's VMM, told it has until `deadline` to be ready as the node tells its guests, and
+    /// returns it with the probes that read it.
+    fn launch(&mut self, deadline: Instant) -> Result<Launched<Self>, String>;
     /// Waits, until `deadline`, for the launched guest to be ready (its agent answering): `false` when
     /// the deadline passed first.
     fn ready(&mut self, guest: &mut Self::Guest, deadline: Instant) -> Result<bool, String>;

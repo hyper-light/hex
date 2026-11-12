@@ -1,7 +1,9 @@
 //! AC-T7.4.1 producer of a VM class's `RuntimeCost` and its base evidence, measured on the host it runs on:
 //! what a node reads as `HEX_GUEST_COST_FILE`, `HEX_GUEST_COST_SHA256` and `HEX_GUEST_COST_EVIDENCE`.
 //!
-//!   Linux:  cargo run --release --locked -p hex-cli --example guest_cost -- --class shards --out <dir>
+//!   Linux:  cargo build --release --locked -p hex-cli --example guest_cost, then, in a cgroup delegated to
+//!           it as the node's subtree is: systemd-run --user --scope -p Delegate=yes
+//!             target/release/examples/guest_cost --class shards --out <dir>
 //!   macOS:  cargo run --release --locked -p hex-cli --example guest_cost -- --class shards --out <dir>
 //!             --cpu-response <row file> --cpu-response-sha256 <hex>
 //!
@@ -11,20 +13,22 @@
 //! window the Mac's CPU control enforces, and its section heads the evidence, so the one pair carries both.
 //!
 //! A class is a driver on one seam ([`seam::Driver`]: launch, ready, idle, report, tear down, read through
-//! its probe); the census, the sampling, the evidence and the output are shared ([`run`]). No input is
+//! its probes); the census, the sampling, the evidence and the output are shared ([`run`]). No input is
 //! chosen; each is derived, and the evidence says how:
 //! - floor = ceiling = the configured guest envelope (what `GuestRuntime::with_runtime_cost` requires);
 //! - quantum = each dimension's unit, read here: the API's milli-CPU, the host's page size, and the block
 //!   size of the filesystem the VMM's own files go on;
 //! - window = the period of the CPU control the node enforces a VM's rate with: Linux's `cpu.max` period
-//!   (`hex_core::cgroup::CPU_PERIOD_US`), the Mac's managed control's cycle for its CPU-response row;
+//!   (`hex_core::cgroup::CPU_PERIOD_US`); the Mac's managed control's cycle for its CPU-response row at the
+//!   VM's rate, the envelope's and the overhead's, taken to the fixed point a census settles at;
 //! - overhead = the VMM's own cost outside the envelope, each guest read at every window boundary from its
-//!   launch through its readiness and an idle hold: its own CPU in one window (its guest's left out), its
-//!   footprint less its guest's RAM, and the bytes held in its own folders (one-time host caches left out);
-//!   guest_overhead = the kernel's and relay's use inside it, the envelope less what the guest agent reports
-//!   free. Each is the maximum over SEEDABLE guests (decision 9's census rule,
-//!   bench/competitive/probes/waits_census.py), each booted within the class's recorded patience, doubled
-//!   at each run-out.
+//!   launch through its readiness and an idle hold: its own CPU in one window of its steady state, from its
+//!   readiness on (its guest's left out; its boot's burst recorded apart, not charged); its own memory (Linux:
+//!   its cgroup's memory.peak less its guest's touched pages; macOS: its footprint less them, guest ready);
+//!   and the bytes held in its own folders (one-time host caches left out). guest_overhead = the kernel's and
+//!   relay's use inside it, the envelope less what the guest agent reports free. Each is the maximum over
+//!   SEEDABLE guests (decision 9's census rule, bench/competitive/probes/waits_census.py), each booted, told
+//!   its deadline as the node tells it, within the class's recorded patience, doubled at each run-out.
 // A measurement example, not production code (CLAUDE.md): the test crates' opt-outs.
 #![allow(
     clippy::unwrap_used,
@@ -152,9 +156,9 @@ fn produce(args: &Args) -> Result<run::Made, String> {
     let plan = run::Plan::derived()?;
     match args.class.as_str() {
         "shards" => {
+            let (windows, prefix) = windows(args)?;
             let mut driver = shards::Shards::from_env(&args.out)?;
-            let (window, prefix) = window(args, &driver)?;
-            run::produce(&mut driver, &plan, &args.out, &window, &prefix)
+            run::produce(&mut driver, &plan, &args.out, &windows, &prefix)
         }
         other => Err(format!(
             "no driver for class {other} on {}\n{USAGE}",
@@ -163,24 +167,24 @@ fn produce(args: &Args) -> Result<run::Made, String> {
     }
 }
 
-/// Linux's window: the `cpu.max` period the node writes for a VM's cgroup. No section heads the evidence.
+/// Linux's window: the `cpu.max` period the node writes for a VM's cgroup, whatever the VM's rate. No section
+/// heads the evidence.
 #[cfg(target_os = "linux")]
-fn window(_: &Args, _: &impl seam::Driver) -> Result<(run::Window, Vec<u8>), String> {
+fn windows(_: &Args) -> Result<(run::Windows, Vec<u8>), String> {
     Ok((
-        run::Window {
+        run::Windows::Fixed(run::Window {
             length: std::time::Duration::from_micros(hex_core::cgroup::CPU_PERIOD_US),
             source: "hex_core::cgroup::CPU_PERIOD_US, the cpu.max period the node writes for a VM's cgroup"
                 .to_owned(),
-        },
+        }),
         Vec::new(),
     ))
 }
 
-/// The Mac's window: its managed CPU control's cycle for this host class's CPU-response row, at the guest
-/// envelope's rate; the row file, checked against its SHA-256 and holding rows alone, heads the evidence
-/// as it is.
+/// The Mac's windows: its managed CPU control's cycle for this host class's CPU-response row, at a VM's
+/// rate; the row file, checked against its SHA-256 and holding rows alone, heads the evidence as it is.
 #[cfg(target_os = "macos")]
-fn window(args: &Args, driver: &impl seam::Driver) -> Result<(run::Window, Vec<u8>), String> {
+fn windows(args: &Args) -> Result<(run::Windows, Vec<u8>), String> {
     use sha2::{Digest, Sha256};
     use std::io::Read as _;
     let (path, expected) = &args.cpu_response;
@@ -219,26 +223,28 @@ fn window(args: &Args, driver: &impl seam::Driver) -> Result<(run::Window, Vec<u
             path.display()
         )
     })?;
-    let rate = driver.envelope()?.resources.cpu_milli;
-    let (run_for, held_for) =
-        hex_runtime::macos::cpu_control_cycle(rate, row.response()).map_err(|e| e.to_string())?;
+    let response = row.response();
     let ceiling = hex_runtime::macos::cpu_ceiling().map_err(|e| e.to_string())?;
-    let source = format!(
-        "the managed CPU control's cycle at the guest envelope's rate r={rate} milli-CPU (an allocation's rate adds overhead.cpu_milli): run burst/(M-r) {} ns, then held 2*burst/r {} ns, burst = M*R, M = hw.logicalcpu_max*1000 = {ceiling}, R = {} ns, the max of host class {host}'s CPU-response row (row file {} sha256={}, its samples sha256={})",
-        run_for.as_nanos(),
-        held_for.as_nanos(),
-        row.response().as_nanos(),
+    let named = format!(
+        "R = {} ns, the max of host class {host}'s CPU-response row (row file {} sha256={}, its samples sha256={})",
+        response.as_nanos(),
         path.display(),
         run::hex(expected),
         run::hex(&row.raw)
     );
-    Ok((
-        run::Window {
+    let cycle = move |rate: u64| -> Result<run::Window, String> {
+        let (run_for, held_for) =
+            hex_runtime::macos::cpu_control_cycle(rate, response).map_err(|e| e.to_string())?;
+        Ok(run::Window {
             length: run_for.checked_add(held_for).ok_or("the cycle overflows")?,
-            source,
-        },
-        section,
-    ))
+            source: format!(
+                "the managed CPU control's cycle at the rate r={rate} milli-CPU: run burst/(M-r) {} ns, then held 2*burst/r {} ns, burst = M*R, M = hw.logicalcpu_max*1000 = {ceiling}, {named}",
+                run_for.as_nanos(),
+                held_for.as_nanos(),
+            ),
+        })
+    };
+    Ok((run::Windows::AtRate(Box::new(cycle)), section))
 }
 
 /// The smoke's arguments: its folder, and on a Mac its row file from the environment.
@@ -314,10 +320,10 @@ mod tests {
         );
     }
 
-    /// AC-T7.4.1: the window on a Mac comes from a row file whose SHA-256 is given: expect the control's
-    /// cycle for this host's row at the guest's rate (its run then its hold), the file at the evidence's head
-    /// as it is, and a file that doesn't match its SHA-256, holds more than rows, or has no row for this
-    /// host refused.
+    /// AC-T7.4.1: the windows on a Mac come from a row file whose SHA-256 is given: expect the control's cycle
+    /// for this host's row at the rate asked (its run then its hold), the file at the evidence's head as it
+    /// is, and a file that doesn't match its SHA-256, holds more than rows, or has no row for this host
+    /// refused.
     #[cfg(target_os = "macos")]
     #[test]
     fn the_macs_window_is_its_controls_cycle_for_its_row() {
@@ -339,36 +345,29 @@ mod tests {
             std::fs::write(&path, bytes).unwrap();
             (path, Sha256::digest(bytes).into())
         };
-        let config = hex_runtime::guest::GuestConfig {
-            binary: dir.path().join("shards"),
-            kernel: dir.path().join("kernel"),
-            initrd: dir.path().join("initrd"),
-            vcpus: 2,
-            memory_mib: 512,
-            gpu: false,
-            shares: Vec::new(),
-            staged: hex_client::guest::stage::STAGED.to_owned(),
-        };
-        let driver = shards::Shards::configured(config, &dir.path().join("out")).unwrap();
         let args = |cpu_response| Args {
             class: "shards".to_owned(),
             out: dir.path().to_owned(),
             cpu_response,
         };
         let section = hex_runtime::guest::cpu_response_section(&[row(&host)]).unwrap();
-        let (cycle, prefix) = window(&args(write("row", &section)), &driver).unwrap();
-        let (run_for, held_for) =
-            hex_runtime::macos::cpu_control_cycle(2000, Duration::from_micros(117)).unwrap();
-        assert_eq!(cycle.length, run_for + held_for);
+        let (cycles, prefix) = windows(&args(write("row", &section))).unwrap();
+        for rate in [1000, 2536] {
+            let (run_for, held_for) =
+                hex_runtime::macos::cpu_control_cycle(rate, Duration::from_micros(117)).unwrap();
+            let cycle = cycles.at(rate).unwrap();
+            assert_eq!(cycle.length, run_for + held_for);
+            assert!(cycle.source.contains(&host), "{}", cycle.source);
+        }
+        assert!(cycles.at(1000).unwrap().length > cycles.at(2536).unwrap().length);
         assert_eq!(prefix, section);
-        assert!(cycle.source.contains(&host), "{}", cycle.source);
 
         let (path, _) = write("row", &section);
-        assert!(window(&args((path, [0; 32])), &driver).is_err());
+        assert!(windows(&args((path, [0; 32]))).is_err());
         let mut more = section.clone();
         more.extend_from_slice(b"hex-guest-cost 2\n");
-        assert!(window(&args(write("more", &more)), &driver).is_err());
+        assert!(windows(&args(write("more", &more))).is_err());
         let other = hex_runtime::guest::cpu_response_section(&[row("Other0,1")]).unwrap();
-        assert!(window(&args(write("other", &other)), &driver).is_err());
+        assert!(windows(&args(write("other", &other))).is_err());
     }
 }
