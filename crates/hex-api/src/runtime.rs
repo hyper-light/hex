@@ -1236,8 +1236,16 @@ impl Capacity {
 
 /// A program started in a box.
 pub trait Proc: Send {
-    /// Its process id on the node (0 in a simulator).
+    /// Its process id on the node (0 in a simulator); a program on another host, a VM's guest, gives that host's
+    /// ([`Proc::on_this_host`]).
     fn pid(&self) -> u32;
+
+    /// Whether it is a process of this host, so its [`Proc::pid`] names it here (AC-T7.4.1). A program in a VM's guest
+    /// isn't: its pid is the guest's and may name no process here, or another one, so the node never watches or
+    /// signals a process by it, and the guest's host forwards it.
+    fn on_this_host(&self) -> bool {
+        true
+    }
 
     /// Its end if it has ended; never blocks.
     fn try_wait(&mut self) -> Result<Option<Exit>, Refusal>;
@@ -1276,6 +1284,10 @@ impl<P: Proc> Proc for Asked<P> {
         self.proc.pid()
     }
 
+    fn on_this_host(&self) -> bool {
+        self.proc.on_this_host()
+    }
+
     fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
         self.proc.try_wait()
     }
@@ -1296,6 +1308,10 @@ impl<P: Proc> Proc for Asked<P> {
 impl Proc for Box<dyn Proc> {
     fn pid(&self) -> u32 {
         (**self).pid()
+    }
+
+    fn on_this_host(&self) -> bool {
+        (**self).on_this_host()
     }
 
     fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {

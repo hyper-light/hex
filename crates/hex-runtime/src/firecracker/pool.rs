@@ -903,6 +903,8 @@ pub(super) mod tests {
             host: vfio::Host::system().unwrap(),
             runtime: PathBuf::from("/nonexistent/runtime"),
             boot: None,
+            joins: std::sync::Mutex::new(None),
+            evented: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         };
         (runtime, owner)
     }

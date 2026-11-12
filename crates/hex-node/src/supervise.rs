@@ -796,6 +796,15 @@ impl Supervisor {
         }))
     }
 
+    /// Whether box `id` is an `oci` box whose init the supervisor watches, running or ended: read from its table alone,
+    /// so a call that only asks what kind of box it is reads nothing from disk ([`crate::Node`]'s exec forwarding).
+    pub fn watches_container(&self, id: &BoxId) -> Result<bool, Refusal> {
+        Ok(matches!(
+            self.inits()?.get(OwnerRef::Box(id)),
+            Some(Init::Container(_))
+        ))
+    }
+
     /// How box `id`'s init ended, if it is watched and has: reaped now if it has ended and the
     /// supervising thread hasn't come to it yet, so inspect never reads a stopped box without its
     /// exit. `None` when it runs or isn't watched.
