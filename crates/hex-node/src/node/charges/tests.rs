@@ -689,3 +689,131 @@ fn w14_the_last_resorts_ends_are_kept_to_the_machines_population() {
     assert_eq!(ids(Class::Shards), ["vm-2"], "vm-1 forgotten past two");
     assert_eq!(ids(Class::Firecracker), ["vm-3"]);
 }
+
+/// A Shards VM's spec of `cost()`'s 16 CPUs and 8 GiB, as a node records it.
+fn shards_spec(id: &BoxId) -> hex_api::BoxSpec {
+    hex_api::BoxSpec {
+        id: id.clone(),
+        bounds: Bounds {
+            cpu_max_milli: Some(16_000),
+            memory_max: Some(8 * GIB),
+            ..Bounds::default()
+        },
+        class: hex_api::ClassSpec::Shards(Box::new(hex_api::OciSpec {
+            rootfs: hex_api::Rootfs::Dir(PathBuf::from("/images/agent")),
+            init: hex_api::Program::of(&["/bin/true"]),
+            mounts: Vec::new(),
+            hostname: None,
+            network: hex_api::Network::Private,
+            hosts: Vec::new(),
+        })),
+        owner: None,
+        devices: Vec::new(),
+        allocation: Some(whole()),
+        route: None,
+    }
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C5 on the box itself (ROOT, 2026-11-12): a last-resort end shows in inspect and
+/// survives a restart. Do record three Shards VMs in a node's store as its create does, run the learner's windows past
+/// their fleet's 16 GiB memory budget until it ends vm-2, write the ends it hasn't recorded into their records as the
+/// node does after each window, reopen the store as a restarted node would, build vm-2's inspect from its backend's
+/// info and its record, and read that through the node's wire; then write the end against a lifetime vm-2's record
+/// isn't. Expect vm-2's record to say why after the reopen, its inspect and the wire's to say the same, vm-1's and
+/// vm-3's none, no end left unrecorded, and the end for another lifetime not written.
+#[test]
+fn w14_a_last_resort_end_shows_in_inspect_and_survives_a_restart() {
+    use crate::store::Store;
+    use hex_core::record::Phase;
+    let dir = tempfile::tempdir().unwrap();
+    let open = || Store::open(&dir.path().join("state"), &dir.path().join("run")).unwrap();
+    let store = open();
+    let mut vms = Vec::new();
+    for name in ["vm-1", "vm-2", "vm-3"] {
+        let id = BoxId::new(name).unwrap();
+        let made = BoxRecord::new(shards_spec(&id), Phase::Creating, Vec::new());
+        store.begin(&made).unwrap();
+        store.made(&made).unwrap();
+        let record = store.get(&id).unwrap().unwrap().unwrap();
+        let scope = *record.native_scope.unwrap().bytes();
+        vms.push((id, scope, BoxCgroup::at(fleet().join(name))));
+    }
+    let io = Record::default();
+    for (_, _, cgroup) in &vms {
+        io.set(cgroup.dir(), 0, 0);
+    }
+    let fleet_budget = res(32_000, 16 * GIB);
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    let start = Instant::now();
+    learner
+        .window(&io, vms.clone(), booked_at_four, &[], fleet_budget, start)
+        .unwrap();
+    for (name, held) in [("vm-1", 6 * GIB), ("vm-2", 7 * GIB), ("vm-3", 2 * GIB)] {
+        io.set(&fleet().join(name), 0, held);
+    }
+    learner
+        .window(
+            &io,
+            vms.clone(),
+            booked_at_four,
+            &[],
+            fleet_budget,
+            start + WINDOW,
+        )
+        .unwrap();
+    assert_eq!(*io.kills.borrow(), vec![fleet().join("vm-2")]);
+    let mut ends = learner.unrecorded();
+    assert_eq!(ends.len(), 1);
+    ends.retain(|(id, scope, end)| !record_last_resort(&store, id, *scope, end).unwrap());
+    assert!(ends.is_empty(), "every end written");
+    assert!(learner.unrecorded().is_empty(), "taken once");
+    drop(store);
+
+    let store = open();
+    let ended = store.get(&vms[1].0).unwrap().unwrap().unwrap();
+    let end = ended.last_resort.clone().unwrap();
+    assert_eq!(end.id.as_str(), "vm-2");
+    assert_eq!(end.held, 7 * GIB);
+    assert_eq!(
+        (end.fleet_held, end.fleet_growth, end.fleet_budget),
+        (15 * GIB, 15 * GIB, 16 * GIB)
+    );
+    for other in [&vms[0].0, &vms[2].0] {
+        assert_eq!(
+            store.get(other).unwrap().unwrap().unwrap().last_resort,
+            None
+        );
+    }
+    let mut info = hex_api::BoxInfo {
+        id: vms[1].0.clone(),
+        class: hex_api::Class::Shards,
+        state: hex_api::BoxState::Empty,
+        bounds: ended.spec.bounds.clone(),
+        allocation: ended.spec.allocation,
+        adopted: true,
+        membership: None,
+        exit: Some(hex_api::Exit::Signal(9)),
+        abandoned: 0,
+        route: None,
+        grants: Vec::new(),
+        published: Vec::new(),
+        last_resort: None,
+    };
+    with_last_resort(&mut info, &ended).unwrap();
+    assert_eq!(info.last_resort.as_ref(), Some(&end));
+    let answer = hex_core::wire::Answer::Info(info);
+    let bytes = hex_core::wire::answer(7, &answer, hex_core::wire::MAX_MESSAGE).unwrap();
+    let received = hex_core::wire::Received {
+        bytes: &bytes,
+        size: bytes.len(),
+        descriptors: 0,
+        descriptors_cut: false,
+    };
+    let read = hex_core::wire::read_answer(&received, hex_core::wire::MAX_MESSAGE)
+        .unwrap()
+        .1;
+    assert_eq!(read, answer);
+
+    let made_again = [7; 16];
+    assert!(!record_last_resort(&store, &vms[1].0, made_again, &end).unwrap());
+}

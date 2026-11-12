@@ -32,6 +32,7 @@ fn info(record: &BoxRecord) -> BoxInfo {
         exit: record.exit,
         abandoned: record.abandoned,
         allocation: record.spec.allocation,
+        last_resort: None,
     }
 }
 struct Registered {

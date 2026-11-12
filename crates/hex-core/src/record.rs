@@ -61,6 +61,11 @@ pub struct BoxRecord {
     /// recovery's other rules (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot: Option<BootSession>,
+    /// Why the node's last resort ended this VM, where it did (joint plan step 14, C5), which its inspect reports
+    /// across the node's restarts. Outside the spec, so no native commitment covers it. Added within version 1, so a
+    /// record without it reads as `None` (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_resort: Option<hex_api::LearnedEnd>,
 }
 
 /// The host's boot session as its kernel names it, a new one each boot: Linux's
@@ -180,6 +185,7 @@ impl BoxRecord {
             run: None,
             native_scope: None,
             boot: None,
+            last_resort: None,
         }
     }
 

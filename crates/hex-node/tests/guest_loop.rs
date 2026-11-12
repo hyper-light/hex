@@ -257,6 +257,7 @@ fn guest_box(id: &BoxId) -> hex_api::BoxInfo {
         exit: None,
         abandoned: 0,
         route: None,
+        last_resort: None,
     }
 }
 
