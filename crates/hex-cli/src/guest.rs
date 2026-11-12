@@ -961,6 +961,54 @@ mod tests {
         assert!(boot_deadline(Some(OsStr::from_bytes(b"\xff1")), now, 0).is_err());
     }
 
+    /// AC-T7.4.1 (original): init waited for each child's ready line with no bound, so a node or relay that never
+    /// said it was ready held the boot past its deadline. Do: start a child that says nothing and outlives the boot's
+    /// deadline (`sleep`, ten times as long), handed that deadline as init hands it. Expect: refused at the deadline,
+    /// naming it, not when the child ends.
+    #[test]
+    fn original_init_waits_for_a_childs_ready_line_within_the_boots_deadline() {
+        let within = Duration::from_millis(100);
+        let ready_by = boottime_ns() + within.as_nanos();
+        let began = Instant::now();
+        let started = start(
+            Path::new("sleep"),
+            &[OsStr::new("1")],
+            "ready\n",
+            None,
+            Some(ready_by),
+        )
+        .map_err(|why| why.to_string());
+        eprintln!(
+            "guest_init_ready_line within={within:?} took={:?} started={started:?}",
+            began.elapsed()
+        );
+        assert!(
+            matches!(&started, Err(why) if why.contains("the boot's deadline")),
+            "{started:?}"
+        );
+    }
+
+    /// AC-T7.4.1 (original): init's notice to Firecracker that the guest is ready took a whole fresh budget from its
+    /// own start, not what was left of the boot's. Do: notify within a boot budget this host's clock has long spent
+    /// (its boot is older than the budget). Expect: refused at once as timed out, before the budget it was handed.
+    #[test]
+    fn original_the_ready_notice_gets_what_is_left_of_the_boots_deadline() {
+        let budget = Duration::from_secs(1);
+        assert!(
+            boottime_ns() > budget.as_nanos(),
+            "this host booted within the budget"
+        );
+        let began = Instant::now();
+        let notified = notify_firecracker_ready(budget);
+        let took = began.elapsed();
+        eprintln!("guest_ready_notice budget={budget:?} took={took:?} notified={notified:?}");
+        assert!(
+            matches!(&notified, Err(e) if e.kind() == io::ErrorKind::TimedOut),
+            "{notified:?}"
+        );
+        assert!(took < budget, "{took:?}: the notice spent a fresh budget");
+    }
+
     /// HEX-GUEST-9 (docs/design/shards-guest.md §4, amended 2026-11-06): `init` mounts `/proc`, `/sys`,
     /// cgroup2, `devtmpfs` and a tmpfs `/run`, and the node's state lives on that tmpfs, never a disk;
     /// `/run` may run programs, since the staged bundles under it are containers' roots.
