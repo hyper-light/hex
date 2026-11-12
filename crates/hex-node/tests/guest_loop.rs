@@ -22,17 +22,17 @@
     clippy::disallowed_macros
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use hex_api::{Ask, Program, Stdio};
-use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Refusal, Runtime};
-use hex_core::record::ProcId;
+use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, LifecycleCause, Refusal, Runtime};
+use hex_core::record::{BoxRecord, Phase, ProcId};
 use hex_core::{stream, wire};
 use hex_node::recorded::{Recorded, Recover};
 use hex_node::serve::Server;
@@ -65,13 +65,16 @@ const PATIENCE: Duration = Duration::from_secs(30);
 /// names no process of its host.
 const GUEST_PID: u32 = (4 << 20) + 1;
 
-/// Whether the stand-in guest holds its answers to inspects, and how many it holds; and how many execs it
-/// started.
+/// Whether the stand-in guest holds its answers to inspects, and how many it holds; how many execs it
+/// started; the boxes its node holds, which its list names and its delete removes; and the boxes whose
+/// staged copies its relay was asked to remove.
 #[derive(Default)]
 struct Gate {
     state: Mutex<(bool, usize)>,
     changed: Condvar,
     execs: AtomicUsize,
+    boxes: Mutex<BTreeSet<BoxId>>,
+    unstaged: Mutex<Vec<String>>,
 }
 
 impl Gate {
@@ -141,15 +144,35 @@ impl Stdios {
 }
 
 /// A guest's relay and node agent, on loopback: each control connection's own token first, a hello's answer,
-/// every inspect answered `NoSuchBox` once the gate lets it pass, and every exec started as a program that
-/// echoes its stdin to its stdout, its pid [`GUEST_PID`], its end sent once its stdin has ended. Its stdio
-/// connections come on a port of their own, named by their first bytes. Each dial is served on a thread of its
-/// own. The control port's address, then the stdio port's.
-fn relay(gate: Arc<Gate>, conns: Arc<Mutex<Vec<TcpStream>>>) -> (SocketAddr, SocketAddr) {
+/// every inspect answered `NoSuchBox` once the gate lets it pass, every exec started as a program that
+/// echoes its stdin to its stdout, its pid [`GUEST_PID`], its end sent once its stdin has ended, and a list and
+/// a delete answered from the gate's boxes. Its stdio connections come on a port of their own, named by their
+/// first bytes, and its staging connections on another, each a removal it answers done. Each dial is served on
+/// a thread of its own. The control port's address, then the stdio port's, then the staging port's.
+fn relay(
+    gate: Arc<Gate>,
+    conns: Arc<Mutex<Vec<TcpStream>>>,
+) -> (SocketAddr, SocketAddr, SocketAddr) {
     let control = TcpListener::bind("127.0.0.1:0").unwrap();
     let stdio = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addrs = (control.local_addr().unwrap(), stdio.local_addr().unwrap());
+    let files = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addrs = (
+        control.local_addr().unwrap(),
+        stdio.local_addr().unwrap(),
+        files.local_addr().unwrap(),
+    );
     let stdios = Arc::new(Stdios::default());
+    {
+        let (gate, conns) = (Arc::clone(&gate), Arc::clone(&conns));
+        std::thread::spawn(move || {
+            for conn in files.incoming() {
+                let Ok(conn) = conn else { return };
+                conns.lock().unwrap().push(conn.try_clone().unwrap());
+                let gate = Arc::clone(&gate);
+                std::thread::spawn(move || unstage(conn, &gate));
+            }
+        });
+    }
     {
         let (stdios, conns) = (Arc::clone(&stdios), Arc::clone(&conns));
         std::thread::spawn(move || {
@@ -176,6 +199,63 @@ fn relay(gate: Arc<Gate>, conns: Arc<Mutex<Vec<TcpStream>>>) -> (SocketAddr, Soc
         }
     });
     addrs
+}
+
+/// A staging connection's removal, as a guest's relay answers it: the box's staged copy named to the gate,
+/// then done. A stage is never asked of the stand-in: its connection is let go. Either way the connection
+/// ends on this side once served, as the relay's list of connections holds another handle on it.
+fn unstage(mut conn: TcpStream, gate: &Gate) {
+    take_removal(&mut conn, gate);
+    let _ = conn.shutdown(Shutdown::Both);
+}
+
+/// Reads a staging connection's opening and answers a removal's: [`unstage`]'s.
+fn take_removal(conn: &mut TcpStream, gate: &Gate) {
+    let mut unpack = stream::files::Unpack::new(stream::files::LIMITS);
+    let mut buf = [0u8; 512];
+    loop {
+        let n = match conn.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        let mut input = &buf[..n];
+        while !input.is_empty() {
+            let Ok((took, step)) = unpack.take(input) else {
+                return;
+            };
+            input = &input[took..];
+            match step {
+                Some(stream::files::Step::Open {
+                    op: stream::files::Op::Remove,
+                    id,
+                    ..
+                }) => {
+                    gate.unstaged.lock().unwrap().push(id);
+                    let bytes = wire::answer(0, &wire::Answer::Done, wire::MAX_MESSAGE).unwrap();
+                    let _ = conn.write_all(&stream::frame(&bytes, wire::MAX_MESSAGE).unwrap());
+                    return;
+                }
+                Some(_) => return,
+                None => {}
+            }
+        }
+    }
+}
+
+/// Box `id` as the stand-in guest's node reports it: an `oci` box, running.
+fn guest_box(id: &BoxId) -> hex_api::BoxInfo {
+    hex_api::BoxInfo {
+        id: id.clone(),
+        class: hex_api::Class::Oci,
+        state: hex_api::BoxState::Running,
+        bounds: Bounds::default(),
+        allocation: None,
+        adopted: false,
+        membership: None,
+        exit: None,
+        abandoned: 0,
+        route: None,
+    }
 }
 
 /// Writes `answer` to request `h` on the stand-in's control connection, framed.
@@ -259,9 +339,16 @@ fn serve(conn: TcpStream, gate: &Gate, stdios: &Arc<Stdios>, token: u64) {
                     wire::Answer::Refused(Refusal::NoSuchBox(id))
                 }
                 wire::Request::Call(wire::Call::List) => wire::Answer::Boxes {
-                    infos: Vec::new(),
+                    infos: gate.boxes.lock().unwrap().iter().map(guest_box).collect(),
                     more: false,
                 },
+                wire::Request::Call(wire::Call::Delete(id)) => {
+                    if gate.boxes.lock().unwrap().remove(&id) {
+                        wire::Answer::Done
+                    } else {
+                        wire::Answer::Refused(Refusal::NoSuchBox(id))
+                    }
+                }
                 wire::Request::Call(wire::Call::Exec { .. }) => {
                     gate.execs.fetch_add(1, Ordering::SeqCst);
                     answer(&writer, h, &wire::Answer::Started { pid: GUEST_PID });
@@ -336,11 +423,12 @@ impl shards_api::Stream for Looped {
     }
 }
 
-/// A guest whose ports are the stand-in relay's: its stdio port, and its control port for every other; ended
-/// once the test says so.
+/// A guest whose ports are the stand-in relay's: its stdio port, its staging port, and its control port for
+/// every other; ended once the test says so.
 struct LoopGuest {
     control: SocketAddr,
     stdio: SocketAddr,
+    files: SocketAddr,
     ended: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(windows)]
     mux: Arc<windows_stdio::Mux>,
@@ -719,6 +807,8 @@ impl shards_api::Guest for LoopGuest {
     ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
         let to = if port == stream::STDIO_PORT {
             self.stdio
+        } else if port == stream::files::FILES_PORT {
+            self.files
         } else {
             self.control
         };
@@ -843,7 +933,7 @@ impl shards_api::Guests for Shared {
     ) -> Result<Box<dyn shards_api::Guest>, shards_api::Refusal> {
         let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let conns = Arc::new(Mutex::new(Vec::new()));
-        let (control, stdio) = relay(Arc::clone(&self.0.0), Arc::clone(&conns));
+        let (control, stdio, files) = relay(Arc::clone(&self.0.0), Arc::clone(&conns));
         #[cfg(windows)]
         let mux = Arc::new(windows_stdio::Mux::new(stdio, Arc::clone(&ended)));
         self.0.1.lock().unwrap().push(Booted {
@@ -855,6 +945,7 @@ impl shards_api::Guests for Shared {
         Ok(Box::new(LoopGuest {
             control,
             stdio,
+            files,
             ended,
             #[cfg(windows)]
             mux,
@@ -1361,4 +1452,163 @@ fn carried_streams() -> wire::Streams {
         stdout: true,
         stderr: false,
     }
+}
+
+/// `Recorded<WithGuest<…>>` over the stand-in guests `guests`, not yet recovered or served: the test's folder,
+/// whose `state` holds its records, and the node.
+fn recorded(guests: &Arc<LoopGuests>) -> (tempfile::TempDir, Recorded<WithGuest<Host>>) {
+    let dir = tempfile::Builder::new().prefix("gl-").tempdir().unwrap();
+    let node = WithGuest::new(
+        Host(hex_api::sim::SimRuntime::new()),
+        GuestRuntime::new(Arc::new(Shared(Arc::clone(guests))), config()),
+    )
+    .unwrap();
+    let node = Recorded::open(node, &dir.path().join("state")).unwrap();
+    (dir, node)
+}
+
+/// Box `id`'s record as a crash leaves it torn in `state`'s runtime record directory, where macOS's and Windows'
+/// nodes keep the records that needn't outlive their host: bytes that never decode. Its path.
+fn tear(state: &Path, id: &BoxId) -> PathBuf {
+    let path = hex_node::store::runtime_record(&state.join("@records"), id);
+    std::fs::write(&path, b"{\"version\":").unwrap();
+    path
+}
+
+/// T-T7.1.2, AC-T7.4.1: a record torn in the runtime record directory beside a guest whose node holds a box of
+/// its name, and another box a readable record names. `Recorded` writes a box's record before either side makes
+/// the box, and one name names one box across host and guest, so the first box is an orphan only that torn
+/// create can have left. Do: recover. Expect: the node starts; the orphan is deleted through the guest, its
+/// staged copy with it, and the box a record names kept; the torn record is removed as unreadable, and said so.
+#[test]
+fn t_t7_1_2_a_torn_records_box_in_the_guest_is_deleted_there_and_the_record_removed() {
+    if shards_api::backend().is_err() {
+        eprintln!("SKIP: Shards has no backend on this host, so no guest boots");
+        return;
+    }
+    let gate = Arc::new(Gate::default());
+    let (torn, named) = (BoxId::new("torn").unwrap(), BoxId::new("named").unwrap());
+    gate.boxes
+        .lock()
+        .unwrap()
+        .extend([torn.clone(), named.clone()]);
+    let guests = Arc::new(LoopGuests::new(Arc::clone(&gate)));
+    let (dir, node) = recorded(&guests);
+    let state = dir.path().join("state");
+    std::fs::write(
+        hex_node::store::runtime_record(&state.join("@records"), &named),
+        BoxRecord::new(process(&named), Phase::Ready, Vec::new())
+            .encode()
+            .unwrap(),
+    )
+    .unwrap();
+    let path = tear(&state, &torn);
+    let recovered = node
+        .recover()
+        .expect("the node starts beside a torn record");
+    assert_eq!(
+        *gate.boxes.lock().unwrap(),
+        BTreeSet::from([named.clone()]),
+        "the guest's boxes after recovery"
+    );
+    assert_eq!(*gate.unstaged.lock().unwrap(), [torn.to_string()]);
+    assert!(!path.exists(), "the torn record is left");
+    assert_eq!(recovered.removed.len(), 1, "{:?}", recovered.removed);
+    assert_eq!(recovered.removed[0].0, torn);
+    assert!(
+        recovered.removed[0].1.contains("couldn't be read"),
+        "{:?}",
+        recovered.removed
+    );
+    assert_eq!(recovered.adopted, [named]);
+}
+
+/// T-T7.1.2: a box the guest holds that no record names, as a crash leaves one between recovery's removal of
+/// a torn record and its delete of the record's box. Do: recover. Expect: the node starts, the box deleted
+/// through the guest, its staged copy with it, and said so.
+#[test]
+fn t_t7_1_2_a_guest_box_no_record_names_is_deleted_at_recovery() {
+    if shards_api::backend().is_err() {
+        eprintln!("SKIP: Shards has no backend on this host, so no guest boots");
+        return;
+    }
+    let gate = Arc::new(Gate::default());
+    let orphan = BoxId::new("orphan").unwrap();
+    gate.boxes.lock().unwrap().insert(orphan.clone());
+    let guests = Arc::new(LoopGuests::new(Arc::clone(&gate)));
+    let (_dir, node) = recorded(&guests);
+    let recovered = node.recover().expect("the node starts");
+    assert!(
+        gate.boxes.lock().unwrap().is_empty(),
+        "the orphan is left in the guest"
+    );
+    assert_eq!(*gate.unstaged.lock().unwrap(), [orphan.to_string()]);
+    assert_eq!(recovered.removed.len(), 1, "{:?}", recovered.removed);
+    assert_eq!(recovered.removed[0].0, orphan);
+}
+
+/// A `process` box named `id`, for the host.
+fn process(id: &BoxId) -> BoxSpec {
+    BoxSpec {
+        route: None,
+        allocation: None,
+        devices: Vec::new(),
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Process,
+        owner: None,
+    }
+}
+
+/// T-T7.1.2: a torn record no box of the guest's carries may be the host's, whose `process` boxes no name of
+/// theirs outlives the node to prove ended, so nothing proves what it holds. Do: recover. Expect: the node
+/// starts and keeps the record, so its name is never reused: a create of it is refused as `Exists`, and the
+/// box as uncertain.
+#[test]
+fn t_t7_1_2_a_torn_record_no_guest_box_carries_is_kept_and_its_name_never_reused() {
+    if shards_api::backend().is_err() {
+        eprintln!("SKIP: Shards has no backend on this host, so no guest boots");
+        return;
+    }
+    let gate = Arc::new(Gate::default());
+    let guests = Arc::new(LoopGuests::new(Arc::clone(&gate)));
+    let (dir, node) = recorded(&guests);
+    let torn = BoxId::new("torn").unwrap();
+    let path = tear(&dir.path().join("state"), &torn);
+    node.recover()
+        .expect("the node starts beside a torn record");
+    assert!(path.exists(), "a record nothing proved ended was removed");
+    assert_eq!(
+        node.create(process(&torn)),
+        Err(Refusal::Exists(torn.clone()))
+    );
+    assert_eq!(
+        node.inspect(&torn),
+        Err(Refusal::Lifecycle {
+            id: torn.clone(),
+            cause: LifecycleCause::Uncertain
+        })
+    );
+    assert!(gate.unstaged.lock().unwrap().is_empty());
+}
+
+/// T-T7.1.2: a guest that can't answer proves no box of it gone. Do: end the guest, its connections with it,
+/// then recover beside a torn record. Expect: the node starts and keeps the record.
+#[test]
+fn t_t7_1_2_a_guest_that_cant_answer_keeps_the_torn_record_and_the_node_starts() {
+    if shards_api::backend().is_err() {
+        eprintln!("SKIP: Shards has no backend on this host, so no guest boots");
+        return;
+    }
+    let gate = Arc::new(Gate::default());
+    let torn = BoxId::new("torn").unwrap();
+    gate.boxes.lock().unwrap().insert(torn.clone());
+    let guests = Arc::new(LoopGuests::new(Arc::clone(&gate)));
+    let (dir, node) = recorded(&guests);
+    let path = tear(&dir.path().join("state"), &torn);
+    guests.end_all();
+    node.recover()
+        .expect("the node starts beside a torn record its guest can't answer for");
+    assert!(path.exists(), "a record nothing proved ended was removed");
+    assert_eq!(*gate.boxes.lock().unwrap(), BTreeSet::from([torn]));
 }
