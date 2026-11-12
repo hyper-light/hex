@@ -126,17 +126,25 @@ pub(crate) fn budget(limits: &Limits) -> Fixed {
     Fixed::new(capacity, usize::try_from(frames).unwrap_or(usize::MAX))
 }
 
-/// A connection's lanes on a client: what the process's descriptors let it bridge, each connection a socket pair
-/// of two (docs/design/hex-quic.md Q8): the soft `RLIMIT_NOFILE` on Unix (getrlimit(2)); on Windows, the per-process
-/// handle table's 2^24 entries (Russinovich, "Pushing the Limits of Windows: Handles", 2009), which no rlimit lowers.
+/// A connection's lanes on a client: what the process can bridge at once (docs/design/hex-quic.md Q8). On Unix each
+/// bridged connection is a socket pair of two descriptors, so half the soft `RLIMIT_NOFILE` (getrlimit(2)). On Windows
+/// each is a loopback TCP pair that holds two ports of the dynamic range (its listener's, which its accepted end keeps,
+/// and its connecting end's): half of the range's 16,384 ports, IANA's 49152-65535 (RFC 6335 §6), Windows' own since
+/// Vista (Microsoft KB 929851), not its handle table's 2^24, which no pair reaches. hyper-quic lays out a row for each
+/// lane a peer may open when a connection starts (quinn's `StreamsState::new`), so this is paid per connection.
 pub fn client_lanes() -> u32 {
     #[cfg(unix)]
-    let descriptors = rustix::process::getrlimit(rustix::process::Resource::Nofile)
+    let pairs = rustix::process::getrlimit(rustix::process::Resource::Nofile)
         .current
-        .unwrap_or(u64::MAX);
+        .unwrap_or(u64::MAX)
+        / 2;
     #[cfg(windows)]
-    let descriptors: u64 = 1 << 24;
-    u32::try_from(descriptors / 2).unwrap_or(u32::MAX)
+    let pairs: u64 = {
+        /// RFC 6335 §6's dynamic ports, 49152 through 65535.
+        const DYNAMIC_PORTS: u64 = 16_384;
+        DYNAMIC_PORTS / 2
+    };
+    u32::try_from(pairs).unwrap_or(u32::MAX)
 }
 
 /// `wait` as poll(2) takes it, at most what a C `int` of milliseconds holds (poll's timeout where it has no `ppoll`,

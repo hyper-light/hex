@@ -13,8 +13,8 @@
 //! run 5, waits-census-20261109T184054Z on adacachy2, at ef259dbe): the largest answer of the debug-build arms, the
 //! debug arm and the suites', for the row and every test wait seeded from it, never under a bound one ran out at, named
 //! by its row, in nanoseconds as the census keeps them. [`until`] waits for a fact on a [`Patience`] seeded from one of
-//! them or measuring; where the census probe runs the suites (`HEX_WAITS_CENSUS`), every answer goes to its file, so
-//! the tests' own waits have rows of their own.
+//! them or measuring, and [`within`] gives a wait that takes its own deadline the patience's; where the census probe
+//! runs the suites (`HEX_WAITS_CENSUS`), every answer goes to its file, so the tests' own waits have rows of their own.
 
 use std::fs::File;
 use std::io::Write;
@@ -110,6 +110,23 @@ pub fn until(wait: &Patience, what: &str, mut fact: impl FnMut() -> bool) -> Res
 pub fn answered(wait: &Patience, took: Duration) {
     census();
     wait.answered(took);
+}
+
+/// Waits for a fact through `call`, a wait that takes its own deadline (a read's, an accept's, a dial's): `wait`'s
+/// deadline from now, none while it measures (the fact alone). Tells `wait`, and the census where the probe runs the
+/// suites, how long its answer took; one that came only once the deadline had passed is no sample (Karn's point), and
+/// the census is told it ran out at its bound, as [`until`] tells it.
+pub fn within<T>(wait: &Patience, call: impl FnOnce(Option<Instant>) -> T) -> T {
+    census();
+    let began = Instant::now();
+    let patience = wait.deadline();
+    let got = call(patience.and_then(|p| began.checked_add(p)));
+    let took = began.elapsed();
+    match patience {
+        Some(after) if took >= after => wait.ran_out(after),
+        _ => wait.answered(took),
+    }
+    got
 }
 
 /// The variable naming the census's file, and the one bounding its lines: the node's (`hex_node::census`).

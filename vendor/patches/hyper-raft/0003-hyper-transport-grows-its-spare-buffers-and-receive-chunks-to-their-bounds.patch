@@ -1,0 +1,35 @@
+Subject: hyper-transport grows its spare buffers and receive chunks to their bounds
+Why: Fixed::new laid out room for max_spare buffers and Receive::new for its limit of chunks at the start, so an endpoint's bounds were paid as memory before any peer came: a Hex node's bounds are its own (its connections and programs, docs/design/hex-quic.md Q8), and a client's lanes are its descriptors (2^23 on Windows), which laid out hundreds of megabytes, or more than a process can allocate. Each now grows as buffers and chunks come, to the same bound.
+
+diff --git a/crates/hyper-transport/src/budget.rs b/crates/hyper-transport/src/budget.rs
+index 95516f7c8c16a719d5cf1053a34f4dc54b380133..6ffc1998f1400b843c1bb442521831d0be3ecc4e 100644
+--- a/crates/hyper-transport/src/budget.rs
++++ b/crates/hyper-transport/src/budget.rs
+@@ -133,7 +133,9 @@ impl Fixed {
+         Self {
+             capacity,
+             used: 0,
+-            spare: Vec::with_capacity(max_spare),
++            // Grown as buffers come back, to `max_spare` at most: a bound, never laid out ahead, so an
++            // owner whose bounds are large pays only for the buffers it holds.
++            spare: Vec::new(),
+             max_spare,
+             refused: 0,
+         }
+diff --git a/crates/hyper-transport/src/receive.rs b/crates/hyper-transport/src/receive.rs
+index 4390cd6719099dece22956f040bf04e07a619197..50434507b706872444e0430bbf85e7fe90195cf1 100644
+--- a/crates/hyper-transport/src/receive.rs
++++ b/crates/hyper-transport/src/receive.rs
+@@ -47,8 +47,10 @@ impl Receive {
+     pub(crate) fn new(limit: usize) -> Self {
+         Self {
+             active: None,
+-            retired: Vec::with_capacity(limit),
+-            grants: Vec::with_capacity(limit),
++            // Grown as chunks are added, to `limit` at most ([`Receive::grow`]): a bound, never laid out
++            // ahead, so an endpoint whose limits are large pays only for the chunks it holds.
++            retired: Vec::new(),
++            grants: Vec::new(),
+             limit,
+             copied: 0,
+         }

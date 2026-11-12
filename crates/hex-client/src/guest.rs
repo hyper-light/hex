@@ -931,14 +931,22 @@ impl<W: Waits> Pump<W> {
 }
 
 impl<W: Waits> Core<Stream<W>> {
-    /// [`Client::connect_before`] over a link whose transport learns its own waits, `W`'s (a node over QUIC).
-    pub fn connect_timed_before(link: LinkOwner, deadline: Instant) -> Result<Self, Refusal> {
+    /// [`Client::connect_before`] over a link whose transport learns its own waits, `W`'s (a node over QUIC); with no
+    /// `deadline`, [`Client::connect`]: the link's reply budget where it has one, else the hello's learned wait.
+    pub fn connect_timed_before(
+        link: LinkOwner,
+        deadline: Option<Instant>,
+    ) -> Result<Self, Refusal> {
         let budget = link.reply_budget();
-        let deadline =
-            ReplyDeadline::caller_before(deadline)?.limited_by(ReplyDeadline::caller(budget)?);
+        let deadline = match deadline {
+            Some(at) => {
+                Some(ReplyDeadline::caller_before(at)?.limited_by(ReplyDeadline::caller(budget)?))
+            }
+            None => ReplyDeadline::caller(budget)?,
+        };
         Core::hello_before(
-            Shared::try_new(Stream::dial_before(link, budget, Some(deadline))?)?,
-            Some(deadline),
+            Shared::try_new(Stream::dial_before(link, budget, deadline)?)?,
+            deadline,
         )
     }
 }
@@ -946,12 +954,7 @@ impl<W: Waits> Core<Stream<W>> {
 impl Client {
     /// Dials the guest's node agent through `link` and learns what it runs and its bounds.
     pub fn connect(link: LinkOwner) -> Result<Self, Refusal> {
-        let budget = link.reply_budget();
-        let deadline = ReplyDeadline::caller(budget)?;
-        Core::hello_before(
-            Shared::try_new(Stream::dial_before(link, budget, deadline)?)?,
-            deadline,
-        )
+        Self::connect_timed_before(link, None)
     }
 
     /// Dials, reads the relay token and says hello within the caller's original absolute
@@ -959,7 +962,7 @@ impl Client {
     /// The resulting connection has no lifetime deadline; later bounded operations take their
     /// own original deadline.
     pub fn connect_before(link: LinkOwner, deadline: Instant) -> Result<Self, Refusal> {
-        Self::connect_timed_before(link, deadline)
+        Self::connect_timed_before(link, Some(deadline))
     }
 
     /// The event form ([`Pump`]): dials the guest's node agent through `link` and says hello, its answer read by
