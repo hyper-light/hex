@@ -1,15 +1,58 @@
 //! AC-T7.4.1: caller caps at the actual Core/guest setup seam, no VMM or GPU.
+//!
+//! Each wait here for something that should happen takes its own fact's patience (hex_testkit::waits; the lead's
+//! rules of 2026-11-06 and 2026-11-08), never a picked window: no recorded operation makes any of these facts, so each
+//! measures, for its fact alone, named `test.hex_client.budget.<fact>`, its answers recorded for the census that will
+//! seed it. A capped call ends on its own cap however late its answer reaches the test. A window stays only where it is
+//! the claim under test, and says so.
 
 use super::*;
 use crate::guest::{self, Duplex, DuplexOwner, Link, own_duplex};
+use hex_testkit::waits::within;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 
-// These are caller-supplied fixture policies, not production calibration or performance targets.
+// These are caller-supplied fixture policies, not production calibration or performance targets, and never waits.
 const CAP: Duration = Duration::from_millis(25);
-const OBSERVE: Duration = Duration::from_millis(100);
+/// A caller bound longer than [`CAP`], for the claims that need one: a learned wait seeded from it ends after CAP, a
+/// setup under it has room for its steps before CAP is left, and it is a later bound than CAP's.
+const LONG_CAP: Duration = Duration::from_millis(100);
+
+/// The next message from `from` by `by`, or with no deadline whenever it comes; a sender gone is `Disconnected`.
+fn recv_by<T>(from: &mpsc::Receiver<T>, by: Option<Instant>) -> Result<T, mpsc::RecvTimeoutError> {
+    match by {
+        Some(by) => from.recv_timeout(by.saturating_duration_since(Instant::now())),
+        None => from
+            .recv()
+            .map_err(|mpsc::RecvError| mpsc::RecvTimeoutError::Disconnected),
+    }
+}
+
+/// Waits on `wait`, its fact's own patience, for the next message from `from`.
+fn recv_on<T>(wait: &Patience, from: &mpsc::Receiver<T>) -> Result<T, mpsc::RecvTimeoutError> {
+    within(wait, |by| recv_by(from, by))
+}
+
+/// A socket's timeout for a wait by `by`: none with no deadline, and a timed-out refusal once it has passed, a zero
+/// timeout being none to a socket.
+fn timeout_by(by: Option<Instant>) -> io::Result<Option<Duration>> {
+    let Some(by) = by else {
+        return Ok(None);
+    };
+    let left = by.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(io::ErrorKind::TimedOut.into());
+    }
+    Ok(Some(left))
+}
+
+/// The deadline a wait by `by` gives a call that must be given one: `by`, or with none the longest one wait on a
+/// connection from now ([`MOST_ONE_WAIT`]), which no answer here comes near, so the call waits for its fact alone.
+fn answer_by(by: Option<Instant>) -> Instant {
+    by.unwrap_or_else(|| Instant::now().checked_add(MOST_ONE_WAIT).unwrap())
+}
 
 struct Stalled {
     socket: UdpSocket,
@@ -76,6 +119,8 @@ impl Transport for Stalled {
 /// expect caller expiry instead of waiting until the external original-control release.
 #[test]
 fn explicit_budget_caps_an_unarmed_core_hello() {
+    /// The hello's refusal at its caller's cap.
+    static CAPPED: Patience = Patience::measuring("test.hex_client.budget.unarmed_hello_capped");
     let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     socket.connect(socket.local_addr().unwrap()).unwrap();
     socket.set_nonblocking(true).unwrap();
@@ -93,14 +138,16 @@ fn explicit_budget_caps_an_unarmed_core_hello() {
         let result = Core::hello(control).map(drop);
         finished.send(result).unwrap();
     });
-    let observed_send = request.recv_timeout(OBSERVE);
-    let result = answer.recv_timeout(OBSERVE);
+    // Its send precedes its answer, so it is read once the answer has come: a hello whose cap passed before it sent
+    // leaves the test nothing to wait for.
+    let result = recv_on(&CAPPED, &answer);
+    let observed_send = request.try_recv();
     // Always release and join the exact owned actor before asserting the original symptom.
     shared.end(Refusal::Broken("owned original-control release".into()));
     worker.join().unwrap();
     observed_send.unwrap();
     eprintln!(
-        "client_budget_control phase=unarmed-hello cap={CAP:?} observation={OBSERVE:?} returned={}",
+        "client_budget_control phase=unarmed-hello cap={CAP:?} returned={}",
         result.is_ok()
     );
     assert!(
@@ -143,6 +190,10 @@ impl Link for TokenLink {
 /// expect the same caller cap to bound setup, rather than the peer's eventual close.
 #[test]
 fn explicit_budget_caps_token_after_a_bounded_dial() {
+    /// The connect's dial, accepted.
+    static DIALED: Patience = Patience::measuring("test.hex_client.budget.token_dialed");
+    /// The connect's refusal at its caller's cap, the token withheld.
+    static CAPPED: Patience = Patience::measuring("test.hex_client.budget.token_capped");
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
@@ -158,13 +209,8 @@ fn explicit_budget_caps_token_after_a_bounded_dial() {
             )
             .unwrap();
     });
-    let peer = accept_before(
-        &listener,
-        &stop,
-        &wake,
-        Instant::now().checked_add(OBSERVE).unwrap(),
-    );
-    let result = answer.recv_timeout(OBSERVE);
+    let peer = within(&DIALED, |by| accept_before(&listener, &stop, &wake, by));
+    let result = recv_on(&CAPPED, &answer);
     // No VM, signal or foreign PID: close only this test's peer and join its worker.
     let cleanup = peer.as_ref().map(|peer| peer.shutdown(Shutdown::Both));
     worker.join().unwrap();
@@ -177,7 +223,7 @@ fn explicit_budget_caps_token_after_a_bounded_dial() {
             || matches!(cleanup, Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotConnected)
     );
     eprintln!(
-        "client_budget_control phase=token cap={CAP:?} observation={OBSERVE:?} returned={}",
+        "client_budget_control phase=token cap={CAP:?} returned={}",
         result.is_ok()
     );
     assert!(
@@ -267,13 +313,15 @@ fn invalid_budgets_refuse_before_call_or_dial_effects() {
 /// to end acquisition with no write and no damage to the held sender or connection.
 #[test]
 fn queued_sender_consumes_its_own_budget_without_taking_authority() {
+    /// The queued list's refusal at its own cap, the sender held.
+    static CAPPED: Patience = Patience::measuring("test.hex_client.budget.queued_list_capped");
     let (transport, request) = stalled(Some(CAP));
     let client = Arc::new(configured(transport));
     let whole = client.conn.shared.sending.lock(None).unwrap().unwrap();
     let control = Arc::clone(&client);
     let (finished, answer) = mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || finished.send(control.list()).unwrap());
-    let result = answer.recv_timeout(OBSERVE);
+    let result = recv_on(&CAPPED, &answer);
     // Release the exact owned guard even if the budget assertion fails, then join its waiter.
     drop(whole);
     if result.is_err() {
@@ -298,12 +346,15 @@ fn queued_sender_consumes_its_own_budget_without_taking_authority() {
 /// until the exact connection is ended, rather than inheriting another client's cap.
 #[test]
 fn default_none_preserves_the_unarmed_wait() {
+    /// The uncapped list's send.
+    static SENT: Patience = Patience::measuring("test.hex_client.budget.uncapped_list_sent");
     let (transport, request) = stalled(None);
     let client = Arc::new(configured(transport));
     let control = Arc::clone(&client);
     let (finished, answer) = mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || finished.send(control.list()).unwrap());
-    let observed_send = request.recv_timeout(OBSERVE);
+    let observed_send = recv_on(&SENT, &request);
+    // Not a wait for a fact: CAP is another client's cap, which this call must not inherit, the claim under test.
     let before = answer.recv_timeout(CAP);
     client
         .conn
@@ -323,7 +374,7 @@ impl<const LONG: bool> Transport for Calibrated<LONG> {
     type Reading = ();
     fn answers() -> &'static [Patience; KINDS] {
         static LONG_WAIT: [Patience; KINDS] =
-            [const { Patience::seeded("test.client_budget.long", OBSERVE) }; KINDS];
+            [const { Patience::seeded("test.client_budget.long", LONG_CAP) }; KINDS];
         static SHORT: [Patience; KINDS] =
             [const { Patience::seeded("test.client_budget.short", Duration::from_millis(1)) };
                 KINDS];
@@ -348,12 +399,15 @@ impl<const LONG: bool> Transport for Calibrated<LONG> {
 }
 
 fn timed_call<T: Transport>(transport: T, request: mpsc::Receiver<()>) -> Refusal {
+    /// The list's refusal at its caller's cap.
+    static CAPPED: Patience = Patience::measuring("test.hex_client.budget.timed_list_capped");
     let client = Arc::new(configured(transport));
     let control = Arc::clone(&client);
     let (finished, answer) = mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || finished.send(control.list()).unwrap());
-    let observed_send = request.recv_timeout(OBSERVE);
-    let result = answer.recv_timeout(OBSERVE);
+    // Its send precedes its answer, so it is read once the answer has come.
+    let result = recv_on(&CAPPED, &answer);
+    let observed_send = request.try_recv();
     client
         .conn
         .shared
@@ -713,11 +767,13 @@ impl Link for RecordedLink {
     }
 }
 
+/// Accepts a dial on `listener` by `at`, or with no deadline whenever it comes, unless `stop` is set (and `wake`
+/// written) first.
 fn accept_before(
     listener: &TcpListener,
     stop: &AtomicBool,
     wake: &Wake,
-    at: Instant,
+    at: Option<Instant>,
 ) -> io::Result<TcpStream> {
     loop {
         if stop.load(Ordering::Acquire) {
@@ -731,15 +787,12 @@ fn accept_before(
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) => return Err(error),
         }
-        let left = at.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err(io::ErrorKind::TimedOut.into());
-        }
+        let left = timeout_by(at)?;
         #[cfg(unix)]
         let handle = std::os::fd::AsFd::as_fd(listener);
         #[cfg(windows)]
         let handle = std::os::windows::io::AsSocket::as_socket(listener);
-        ready(handle, false, Some(wake), Some(left))
+        ready(handle, false, Some(wake), left)
             .map_err(|error| io::Error::other(error.to_string()))?;
     }
 }
@@ -747,11 +800,10 @@ fn accept_before(
 fn actual_token_read(
     reads: &mpsc::Receiver<TokenRead>,
     events: &mut Vec<TokenRead>,
-    at: Instant,
+    at: Option<Instant>,
 ) -> Result<Instant, Refusal> {
     loop {
-        let event = reads
-            .recv_timeout(at.saturating_duration_since(Instant::now()))
+        let event = recv_by(reads, at)
             .map_err(|error| Refusal::os("observing an actual token read", error))?;
         events.push(event);
         match event.result {
@@ -766,6 +818,13 @@ fn actual_token_read(
 /// that deadline, rather than another whole cap after the most recent byte.
 #[test]
 fn partial_token_progress_does_not_reset_the_absolute_deadline() {
+    /// The connect's dial, accepted.
+    static DIALED: Patience = Patience::measuring("test.hex_client.budget.partial_token_dialed");
+    /// The client's read of the token's first byte.
+    static FIRST_READ: Patience =
+        Patience::measuring("test.hex_client.budget.partial_token_first_read");
+    /// The connect's refusal at its original deadline, the token cut short.
+    static EXPIRED: Patience = Patience::measuring("test.hex_client.budget.partial_token_expired");
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
@@ -777,40 +836,31 @@ fn partial_token_progress_does_not_reset_the_absolute_deadline() {
     let link = guest::own_link(RecordedLink {
         control: address,
         stdio: address,
-        budget: OBSERVE,
+        budget: LONG_CAP,
         deadlines: Arc::clone(&recorded_deadlines),
         read: Some(read),
     })
     .unwrap();
-    let control = link.clone();
     let (finished, answer) = mpsc::sync_channel(1);
+    // The worker holds the link alone, so a client that gives up takes every read notice's sender with it: a read
+    // wait then finds its sender gone rather than waiting for a read that won't come.
     let worker = std::thread::spawn(move || {
-        finished
-            .send(guest::Client::connect(control).map(drop))
-            .unwrap()
+        let result = guest::Client::connect(link).map(drop);
+        finished.send((Instant::now(), result)).unwrap()
     });
     let mut peer = None;
     let mut events = Vec::new();
     let observation = (|| -> Result<_, Refusal> {
         peer = Some(
-            accept_before(
-                &listener,
-                &stop,
-                &wake,
-                Instant::now().checked_add(OBSERVE).unwrap(),
-            )
-            .map_err(|error| Refusal::os("accepting the owned token peer", error))?,
+            within(&DIALED, |by| accept_before(&listener, &stop, &wake, by))
+                .map_err(|error| Refusal::os("accepting the owned token peer", error))?,
         );
         let peer = peer.as_mut().unwrap();
         peer.set_nodelay(true)
             .map_err(|error| Refusal::os("configuring token probe TCP", error))?;
         peer.write_all(&[1])
             .map_err(|error| Refusal::os("writing the first token byte", error))?;
-        let first = actual_token_read(
-            &reads,
-            &mut events,
-            Instant::now().checked_add(OBSERVE).unwrap(),
-        )?;
+        let first = within(&FIRST_READ, |by| actual_token_read(&reads, &mut events, by))?;
         let deadline = recorded_deadlines
             .lock()
             .unwrap()
@@ -826,14 +876,16 @@ fn partial_token_progress_does_not_reset_the_absolute_deadline() {
         }
         peer.write_all(&[2])
             .map_err(|error| Refusal::os("writing the second token byte", error))?;
+        // Not a wait for a fact: the claim's window. This read must come within CAP of its injection, by the original
+        // deadline, and past that deadline the client reads no more.
         let second = actual_token_read(
             &reads,
             &mut events,
-            Instant::now().checked_add(CAP).unwrap(),
+            Some(Instant::now().checked_add(CAP).unwrap()),
         )?;
         Ok((first, second, deadline))
     })();
-    let completed = answer.recv_timeout(CAP.checked_mul(2).unwrap());
+    let completed = recv_on(&EXPIRED, &answer);
     // Every observation error, including the first event/dial failure, reaches this cleanup.
     let cleanup = peer.as_ref().map(|peer| peer.shutdown(Shutdown::Both));
     drop(peer);
@@ -861,7 +913,14 @@ fn partial_token_progress_does_not_reset_the_absolute_deadline() {
             .iter()
             .any(|event| matches!(event.result, Err(io::ErrorKind::WouldBlock)))
     );
-    assert!(matches!(completed.unwrap(), Err(Refusal::Os { why, .. }) if why.contains("caller")));
+    let (returned, result) = completed.unwrap();
+    assert!(matches!(result, Err(Refusal::Os { why, .. }) if why.contains("caller")));
+    // A deadline that progress reset would end no sooner than a whole budget after the most recent byte's read.
+    assert!(
+        returned < second.checked_add(LONG_CAP).unwrap(),
+        "the connect ended {:?} after its most recent byte: progress reset its original deadline",
+        returned.saturating_duration_since(second)
+    );
     assert_eq!(recorded_deadlines.lock().unwrap().len(), 1);
 }
 
@@ -892,16 +951,22 @@ enum ControlPhase {
     Stop,
 }
 
-fn pending_control(
-    peer: &TcpStream,
+/// Waits for the owner to say `expected` is pending, then for what the client sends for it, read by `read` on that
+/// fact's own patience. Workload idle is not a protocol wait: the owner always sends Stop or closes peers on error, and
+/// the read's wait starts only when a control operation is actually pending.
+fn pending_control<R>(
+    peer: &mut TcpStream,
     phases: &mpsc::Receiver<ControlPhase>,
     expected: ControlPhase,
-) -> io::Result<()> {
-    // Workload idle is not a protocol wait. The owner always sends Stop/closes peers on error;
-    // the unchanged read observation guard starts only when a control operation is actually pending.
-    peer.set_read_timeout(None)?;
+    read: impl FnOnce(&mut TcpStream) -> io::Result<R>,
+) -> io::Result<R> {
+    /// What the client sends for an announced control operation: its request, or for a disconnect its end.
+    static ASKED: Patience = Patience::measuring("test.hex_client.budget.named_pending_asked");
     match phases.recv() {
-        Ok(phase) if phase == expected => peer.set_read_timeout(Some(OBSERVE)),
+        Ok(phase) if phase == expected => within(&ASKED, |by| {
+            peer.set_read_timeout(timeout_by(by)?)?;
+            read(peer)
+        }),
         Ok(ControlPhase::Stop) | Err(_) => Err(io::ErrorKind::Interrupted.into()),
         Ok(other) => Err(io::Error::other(format!(
             "expected {expected:?}, got {other:?}"
@@ -919,6 +984,18 @@ enum StreamPhase {
 #[test]
 fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer() {
     use hex_core::stream::{self, Named};
+    /// The client's control dial, accepted by the agent.
+    static CONTROL_DIALED: Patience =
+        Patience::measuring("test.hex_client.budget.named_control_dialed");
+    /// The exec's request, come to the agent.
+    static EXEC_ASKED: Patience = Patience::measuring("test.hex_client.budget.named_exec_asked");
+    /// The exec's three named dials, accepted and each named.
+    static STREAMS_DIALED: Patience =
+        Patience::measuring("test.hex_client.budget.named_streams_dialed");
+    /// The late stdout bytes, read through the exec's own stream.
+    static LATE_READ: Patience = Patience::measuring("test.hex_client.budget.named_late_read");
+    /// The agent's own end, once the last client has gone.
+    static AGENT_ENDED: Patience = Patience::measuring("test.hex_client.budget.named_agent_ended");
     let control = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let stdio = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     control.set_nonblocking(true).unwrap();
@@ -942,17 +1019,16 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
     let (phase, pending) = mpsc::sync_channel(2);
     let agent = std::thread::spawn(move || {
         let result = (|| -> io::Result<()> {
-            let mut peer = accept_before(
-                &control,
-                &agent_stop,
-                &agent_wake,
-                Instant::now().checked_add(OBSERVE).unwrap(),
-            )?;
+            let mut peer = within(&CONTROL_DIALED, |by| {
+                accept_before(&control, &agent_stop, &agent_wake, by)
+            })?;
             agent_owned.lock().unwrap().push(peer.try_clone()?);
             peer.set_nodelay(true)?;
-            peer.set_read_timeout(Some(OBSERVE))?;
             peer.write_all(&11u64.to_le_bytes())?;
-            let (exec, request) = next_request(&mut peer)?;
+            let (exec, request) = within(&EXEC_ASKED, |by| {
+                peer.set_read_timeout(timeout_by(by)?)?;
+                next_request(&mut peer)
+            })?;
             eprintln!("client_budget_named phase=agent_exec id={}", exec.id);
             assert!(matches!(
                 request,
@@ -966,13 +1042,13 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
                 })
             ));
             answer_to(&mut peer, exec.id, Answer::Started { pid: 7 })?;
-            pending_control(&peer, &pending, ControlPhase::Start)?;
-            let (header, request) = next_request(&mut peer)?;
+            let (header, request) =
+                pending_control(&mut peer, &pending, ControlPhase::Start, next_request)?;
             eprintln!("client_budget_named phase=agent_start id={}", header.id);
             assert!(matches!(request, Request::Call(Call::Start(_))));
             answer_to(&mut peer, header.id, Answer::Done)?;
-            pending_control(&peer, &pending, ControlPhase::Delete)?;
-            let (header, request) = next_request(&mut peer)?;
+            let (header, request) =
+                pending_control(&mut peer, &pending, ControlPhase::Delete, next_request)?;
             assert!(matches!(request, Request::Call(Call::Delete(_))));
             answer_to(&mut peer, header.id, Answer::Done)?;
             answer_to(&mut peer, exec.id, Answer::Exited(Exit::Code(0)))?;
@@ -980,9 +1056,11 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
                 "client_budget_named phase=agent_exited_written id={}",
                 exec.id
             );
-            pending_control(&peer, &pending, ControlPhase::Disconnected)?;
             // A completed Proc sends no Release; dropping the last client closes this control.
-            assert_eq!(peer.read(&mut [0])?, 0);
+            let end = pending_control(&mut peer, &pending, ControlPhase::Disconnected, |peer| {
+                peer.read(&mut [0])
+            })?;
+            assert_eq!(end, 0);
             Ok(())
         })();
         let _ = agent_finished.send(());
@@ -993,17 +1071,20 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
     let (streams_stop, streams_wake, streams_owned) =
         (Arc::clone(&stop), Arc::clone(&wake), Arc::clone(&owned));
     let streams = std::thread::spawn(move || -> io::Result<Vec<Named>> {
-        let mut held = Vec::new();
-        let accepting = Instant::now().checked_add(OBSERVE).unwrap();
-        for _ in 0..3 {
-            let mut peer = accept_before(&stdio, &streams_stop, &streams_wake, accepting)?;
-            streams_owned.lock().unwrap().push(peer.try_clone()?);
-            peer.set_nodelay(true)?;
-            peer.set_read_timeout(Some(OBSERVE))?;
-            let mut name = [0; stream::NAME_BYTES];
-            peer.read_exact(&mut name)?;
-            held.push((stream::read_name(&name).unwrap(), peer));
-        }
+        // One setup's three dials, one fact: one wait for all three accepted and named.
+        let mut held = within(&STREAMS_DIALED, |by| -> io::Result<Vec<_>> {
+            let mut held = Vec::new();
+            for _ in 0..3 {
+                let mut peer = accept_before(&stdio, &streams_stop, &streams_wake, by)?;
+                streams_owned.lock().unwrap().push(peer.try_clone()?);
+                peer.set_nodelay(true)?;
+                peer.set_read_timeout(timeout_by(by)?)?;
+                let mut name = [0; stream::NAME_BYTES];
+                peer.read_exact(&mut name)?;
+                held.push((stream::read_name(&name).unwrap(), peer));
+            }
+            Ok(held)
+        })?;
         if matches!(stream_phase.recv(), Ok(StreamPhase::WriteLate)) {
             for (name, peer) in &mut held {
                 if name.stream == stream::Stdio::Out {
@@ -1055,8 +1136,7 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
             let result = stdout.read_exact(&mut bytes).map(|()| bytes);
             let _ = read.send(result);
         }));
-        let bytes = bytes
-            .recv_timeout(OBSERVE)
+        let bytes = recv_on(&LATE_READ, &bytes)
             .map_err(|error| Refusal::os("observing requested late fixture bytes", error))?
             .map_err(|error| Refusal::os("reading late fixture stdio", error))?;
         eprintln!("client_budget_named phase=client_late_stdio_read");
@@ -1064,7 +1144,8 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
             .send(ControlPhase::Delete)
             .map_err(|error| Refusal::os("announcing pending fixture delete", error))?;
         client.delete(&id)?;
-        let ended = proc.wait_for(OBSERVE)?;
+        // A program's end through a Proc takes the suites' program-end record (hex_testkit::waits).
+        let ended = proc.wait_for(hex_api::conformance::PATIENCE)?;
         drop(proc);
         let clean = {
             let state = client.conn.shared.state()?;
@@ -1078,10 +1159,11 @@ fn named_streams_share_one_operation_cap_without_a_workload_or_connection_timer(
     })();
     let _ = phase.send(ControlPhase::Stop);
     let _ = late.send(StreamPhase::Stop);
-    let natural_agent_end = agent_done.recv_timeout(OBSERVE);
-    // Failed dial/setup before all three accepts still reaches a wakeable, bounded accept loop.
+    // A failed dial or setup can leave an accept waiting on a dial that won't come: wake both accept loops before
+    // waiting on the agent's end.
     stop.store(true, Ordering::Release);
     wake.wake();
+    let natural_agent_end = recv_on(&AGENT_ENDED, &agent_done);
     if result.is_err() || natural_agent_end.is_err() {
         for peer in owned.lock().unwrap().iter() {
             let _ = peer.shutdown(Shutdown::Both);
@@ -1167,7 +1249,7 @@ impl Transport for Offers {
         Stalled::answers()
     }
     fn reply_budget(&self) -> Option<Duration> {
-        Some(OBSERVE)
+        Some(LONG_CAP)
     }
     fn reading(&self) {}
     fn handle(&self) -> Handle<'_> {
@@ -1253,7 +1335,11 @@ impl Transport for Offers {
 /// never on an observation window (AC-T7.4.1).
 #[test]
 fn offered_expiry_releases_only_its_ownership_while_a_sibling_progresses() {
-    let (io, _) = stalled(Some(OBSERVE));
+    /// The worker's first event: its open begun, or its exec ended without one.
+    static FIRST: Patience = Patience::measuring("test.hex_client.budget.offered_first");
+    /// The exec's end, its open refused at the caller's expiry.
+    static ENDED: Patience = Patience::measuring("test.hex_client.budget.offered_ended");
+    let (io, _) = stalled(Some(LONG_CAP));
     let (seen, events) = mpsc::channel();
     let (sibling_done, sibling_wait) = mpsc::channel();
     let client = Arc::new(configured(Offers {
@@ -1289,14 +1375,14 @@ fn offered_expiry_releases_only_its_ownership_while_a_sibling_progresses() {
         seen.send(Offered::Ended(ended)).unwrap();
     });
     // The open began, or the exec ended without one: both are facts the worker sends.
-    let first = events.recv().unwrap();
+    let first = recv_on(&FIRST, &events).unwrap();
     let opened = matches!(first, Offered::Opening);
     let reading = client.conn.shared.state().unwrap().reading;
     let sibling = client.start(&id);
     sibling_done.send(()).unwrap();
     let ended = match first {
         Offered::Ended(ended) => ended,
-        Offered::Opening => match events.recv().unwrap() {
+        Offered::Opening => match recv_on(&ENDED, &events).unwrap() {
             Offered::Ended(ended) => ended,
             Offered::Opening => panic!("the exec opened its offer twice"),
         },
@@ -1396,6 +1482,8 @@ fn absolute_operations_reject_expired_before_effects() {
 /// cap and an unarmed Measuring wait. Caller expiry is not a learned sample.
 #[test]
 fn absolute_operations_cap_unarmed_answers_without_link_defaults() {
+    /// The run's or the delete's refusal at its absolute cap.
+    static CAPPED: Patience = Patience::measuring("test.hex_client.budget.absolute_op_capped");
     for run in [true, false] {
         let (transport, request) = stalled(None);
         let client = Arc::new(configured(AbsoluteStalled(transport)));
@@ -1417,8 +1505,9 @@ fn absolute_operations_cap_unarmed_answers_without_link_defaults() {
             };
             let _ = finished.send(result);
         });
-        let observed_send = request.recv_timeout(OBSERVE);
-        let result = answer.recv_timeout(OBSERVE);
+        // Its send precedes its answer, so it is read once the answer has come.
+        let result = recv_on(&CAPPED, &answer);
+        let observed_send = request.try_recv();
         // Every observation failure still closes this exact connection and joins its actor.
         client.conn.shared.end(Refusal::Broken(
             "absolute operation observation cleanup".into(),
@@ -1447,6 +1536,8 @@ fn absolute_operations_cap_unarmed_answers_without_link_defaults() {
 /// another sender's guard or positively reporting remote cleanup.
 #[test]
 fn absolute_delete_cap_covers_queued_sender() {
+    /// The queued delete's refusal at its absolute cap, the sender held.
+    static CAPPED: Patience = Patience::measuring("test.hex_client.budget.queued_delete_capped");
     let (transport, request) = stalled(None);
     let client = Arc::new(configured(AbsoluteStalled(transport)));
     let whole = client.conn.shared.sending.lock(None).unwrap().unwrap();
@@ -1458,7 +1549,7 @@ fn absolute_delete_cap_covers_queued_sender() {
             control.delete_before(&BoxId::new("absolute-operation-control").unwrap(), deadline),
         );
     });
-    let result = answer.recv_timeout(OBSERVE);
+    let result = recv_on(&CAPPED, &answer);
     drop(whole);
     if result.is_err() {
         client
@@ -1490,7 +1581,7 @@ fn absolute_delete_cap_covers_queued_sender() {
 #[test]
 fn absolute_caller_limit_keeps_original_instant_and_smaller_bounds() {
     let began = Instant::now();
-    let at = began.checked_add(OBSERVE).unwrap();
+    let at = began.checked_add(LONG_CAP).unwrap();
     let absolute = ReplyDeadline::caller_before(at).unwrap();
     assert_eq!(absolute.at(), at);
     assert_eq!(absolute.limited_by(None).at(), at);
@@ -1503,7 +1594,7 @@ fn absolute_caller_limit_keeps_original_instant_and_smaller_bounds() {
     assert_eq!(limited.at(), earlier);
     let later = ReplyDeadline {
         at,
-        source: ReplyBound::Caller(OBSERVE),
+        source: ReplyBound::Caller(LONG_CAP),
     };
     assert_eq!(limited.limited_by(Some(later)).at(), earlier);
     let tied = absolute.limited_by(Some(later));
@@ -1516,7 +1607,7 @@ fn absolute_caller_limit_keeps_original_instant_and_smaller_bounds() {
     let learned = learned.unwrap();
     assert_eq!(learned.at(), earlier);
     assert!(matches!(learned.source, ReplyBound::Learned(_)));
-    let (bound, learned) = ReplyDeadline::combine(Some(absolute), began, Some(OBSERVE));
+    let (bound, learned) = ReplyDeadline::combine(Some(absolute), began, Some(LONG_CAP));
     assert_eq!(bound.unwrap().at(), at);
     assert!(learned.is_none(), "a tie belongs to caller authority");
     let (bound, learned) = ReplyDeadline::combine(None, began, Some(CAP));
@@ -1559,15 +1650,19 @@ impl Link for AbsoluteNamedLink {
 }
 
 fn absolute_pair() -> (TcpStream, TcpStream) {
+    /// A loopback connection, connected and accepted.
+    static PAIRED: Patience = Patience::measuring("test.hex_client.budget.loopback_paired");
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     listener.set_nonblocking(true).unwrap();
-    let client = TcpStream::connect_timeout(&listener.local_addr().unwrap(), OBSERVE).unwrap();
-    let peer = accept_before(
-        &listener,
-        &AtomicBool::new(false),
-        &Wake::new().unwrap(),
-        Instant::now().checked_add(OBSERVE).unwrap(),
-    )
+    let address = listener.local_addr().unwrap();
+    let (client, peer) = within(&PAIRED, |by| -> io::Result<_> {
+        let client = match timeout_by(by)? {
+            Some(left) => TcpStream::connect_timeout(&address, left)?,
+            None => TcpStream::connect(address)?,
+        };
+        let peer = accept_before(&listener, &AtomicBool::new(false), &Wake::new()?, by)?;
+        Ok((client, peer))
+    })
     .unwrap();
     client.set_nodelay(true).unwrap();
     peer.set_nodelay(true).unwrap();
@@ -1580,6 +1675,12 @@ fn absolute_pair() -> (TcpStream, TcpStream) {
 #[test]
 fn absolute_run_caps_named_stdio_and_preserves_headers() {
     use hex_core::stream::{self, Named};
+    /// The run's refusal at its caller's cap, no answer come.
+    static CAPPED: Patience = Patience::measuring("test.hex_client.budget.absolute_run_capped");
+    /// The three named streams' headers, each stream then closed by the run.
+    static NAMED: Patience = Patience::measuring("test.hex_client.budget.absolute_run_named");
+    /// The run's request, come to the agent's end of the control.
+    static ASKED: Patience = Patience::measuring("test.hex_client.budget.absolute_run_asked");
     let (control, mut control_peer) = absolute_pair();
     control_peer.write_all(&11u64.to_le_bytes()).unwrap();
     let mut named = VecDeque::new();
@@ -1621,8 +1722,9 @@ fn absolute_run_caps_named_stdio_and_preserves_headers() {
             .map(drop);
         let _ = finished.send(result);
     });
-    let original = began.recv_timeout(OBSERVE);
-    let result = answer.recv_timeout(OBSERVE);
+    // Its deadline's notice precedes its answer, so it is read once the answer has come.
+    let result = recv_on(&CAPPED, &answer);
+    let original = began.try_recv();
     if result.is_err() {
         client
             .conn
@@ -1634,11 +1736,11 @@ fn absolute_run_caps_named_stdio_and_preserves_headers() {
         }
     }
     let joined = worker.join();
-    // All blocking reads below have a finite observation guard, after the actor joined.
-    let observed = (|| -> io::Result<Vec<Named>> {
+    // Each read below waits on its own fact's patience, after the actor joined: what the run wrote before it ended.
+    let observed = within(&NAMED, |by| -> io::Result<Vec<Named>> {
         let mut names = Vec::new();
         for peer in &mut peers {
-            peer.set_read_timeout(Some(OBSERVE))?;
+            peer.set_read_timeout(timeout_by(by)?)?;
             let mut name = [0; stream::NAME_BYTES];
             peer.read_exact(&mut name)?;
             names.push(
@@ -1649,10 +1751,11 @@ fn absolute_run_caps_named_stdio_and_preserves_headers() {
             }
         }
         Ok(names)
-    })();
-    let request_seen = control_peer
-        .set_read_timeout(Some(OBSERVE))
-        .and_then(|()| next_request(&mut control_peer));
+    });
+    let request_seen = within(&ASKED, |by| {
+        control_peer.set_read_timeout(timeout_by(by)?)?;
+        next_request(&mut control_peer)
+    });
     let state_clean = {
         let state = client.conn.shared.state().unwrap();
         state.calls.is_empty()
@@ -1745,6 +1848,8 @@ impl Transport for DropOriginal {
 /// unfinished RemoteProc. Only the existing sender guard delays that Drop here.
 #[test]
 fn absolute_run_error_return_does_not_renew_drop_sender_budget() {
+    /// The observer's error return, its unfinished Proc dropped with the sender held.
+    static RETURNED: Patience = Patience::measuring("test.hex_client.budget.drop_returned");
     let (io, _) = stalled(None);
     let client = Arc::new(configured(DropOriginal(Offers::unobserved(io))));
     let original = Instant::now().checked_add(CAP).unwrap();
@@ -1798,8 +1903,9 @@ fn absolute_run_error_return_does_not_renew_drop_sender_budget() {
     let held_exact_guard = matches!(&held, Ok(Some(_)));
     let expired = until(original);
     let released = release.send(());
-    let began = started.recv_timeout(OBSERVE);
-    let before_cleanup = answer.recv_timeout(OBSERVE);
+    // Its notice that it began precedes its answer, so it is read once the answer has come.
+    let before_cleanup = recv_on(&RETURNED, &answer);
+    let began = started.try_recv();
     let before_release_at = Instant::now();
     drop(held);
     client.conn.shared.end(Refusal::Broken(
@@ -1826,7 +1932,7 @@ fn absolute_run_error_return_does_not_renew_drop_sender_budget() {
             state.calls.is_empty() && state.programs.is_empty() && state.given.is_empty()
         });
     eprintln!(
-        "client_drop_original run_id={run_id} original={original:?} cap={CAP:?} observation={OBSERVE:?} held={held_exact_guard} expired={expired:?} gate={released:?} began={began:?} before_release={before_release_at:?} before_cleanup={before_cleanup:?} after_cleanup={after_cleanup:?} release_count={release_count} other_count={other_count} joined={} clean={clean:?}",
+        "client_drop_original run_id={run_id} original={original:?} cap={CAP:?} held={held_exact_guard} expired={expired:?} gate={released:?} began={began:?} before_release={before_release_at:?} before_cleanup={before_cleanup:?} after_cleanup={after_cleanup:?} release_count={release_count} other_count={other_count} joined={} clean={clean:?}",
         joined.is_ok()
     );
     joined.unwrap();
@@ -1971,6 +2077,8 @@ impl BootstrapCall {
 /// behavior and reject an already expired original deadline before any send.
 #[test]
 fn absolute_bootstrap_preserves_requests_and_typed_answers() {
+    /// A bootstrap call's answer from the probe, which answers as it is asked.
+    static ANSWERED: Patience = Patience::measuring("test.hex_client.budget.bootstrap_answered");
     for kind in [
         BootstrapCall::Capacity,
         BootstrapCall::PhysicalReport,
@@ -1995,8 +2103,7 @@ fn absolute_bootstrap_preserves_requests_and_typed_answers() {
         let reply = kind.reply();
         let expected = wire::answer(0, &reply, wire::MAX_MESSAGE).unwrap();
         let (client, _) = bootstrap_probe(Some(reply));
-        let at = Instant::now().checked_add(OBSERVE).unwrap();
-        let got = kind.invoke(&client, at).unwrap();
+        let got = within(&ANSWERED, |by| kind.invoke(&client, answer_by(by))).unwrap();
         assert_eq!(wire::answer(0, &got, wire::MAX_MESSAGE).unwrap(), expected);
         let outbound = client.conn.shared.transport.io.outbound.lock().unwrap();
         assert_eq!(outbound.len(), 1);
@@ -2005,13 +2112,17 @@ fn absolute_bootstrap_preserves_requests_and_typed_answers() {
         drop(outbound);
 
         let (client, _) = bootstrap_probe(Some(Answer::Done));
-        let at = Instant::now().checked_add(OBSERVE).unwrap();
-        assert!(matches!(kind.invoke(&client, at), Err(Refusal::Broken(_))));
+        assert!(matches!(
+            within(&ANSWERED, |by| kind.invoke(&client, answer_by(by))),
+            Err(Refusal::Broken(_))
+        ));
 
         let why = Refusal::Broken("owned typed bootstrap refusal".into());
         let (client, _) = bootstrap_probe(Some(Answer::Refused(why.clone())));
-        let at = Instant::now().checked_add(OBSERVE).unwrap();
-        assert_eq!(kind.invoke(&client, at), Err(why));
+        assert_eq!(
+            within(&ANSWERED, |by| kind.invoke(&client, answer_by(by))),
+            Err(why)
+        );
     }
 }
 
@@ -2019,6 +2130,8 @@ fn absolute_bootstrap_preserves_requests_and_typed_answers() {
 /// cannot extend the original bootstrap authority. Cleanup/join precedes assertions.
 #[test]
 fn absolute_bootstrap_caps_unarmed_answer_waits() {
+    /// The bootstrap call's refusal at its absolute cap, no answer come.
+    static CAPPED: Patience = Patience::measuring("test.hex_client.budget.bootstrap_capped");
     for kind in [
         BootstrapCall::Capacity,
         BootstrapCall::PhysicalReport,
@@ -2033,8 +2146,9 @@ fn absolute_bootstrap_caps_unarmed_answer_waits() {
             let result = kind.invoke(&control, at);
             let _ = finished.send(result);
         });
-        let observed_send = sent.recv_timeout(OBSERVE);
-        let observed = answer.recv_timeout(OBSERVE);
+        // Its send precedes its answer, so it is read once the answer has come.
+        let observed = recv_on(&CAPPED, &answer);
+        let observed_send = sent.try_recv();
         client.conn.shared.end(Refusal::Broken(
             "owned bootstrap observation cleanup".into(),
         ));
@@ -2194,6 +2308,9 @@ impl Transport for SettleOriginal {
 /// refusal must not replace run_before's authority with a fresh Kill answer wait.
 #[test]
 fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
+    /// The run's return, its settle refused and its Kill unanswered within its original authority.
+    static RETURNED: Patience =
+        Patience::measuring("test.hex_client.budget.settle_original_returned");
     let (io, _) = stalled(None);
     let (starting, started) = mpsc::sync_channel(1);
     let (killing, killed) = mpsc::sync_channel(1);
@@ -2233,11 +2350,12 @@ fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
         .unwrap();
 
     // Capture every error branch; end ONLY this connection, close its retained
-    // pipe, and join this worker BEFORE asserting any result or phase witness.
-    let actual_started = started.recv_timeout(OBSERVE);
-    let actual_kill = killed.recv_timeout(OBSERVE);
+    // pipe, and join this worker BEFORE asserting any result or phase witness. Its Started
+    // and its Kill precede its answer, so each is read once the answer has come.
+    let before_cleanup = recv_on(&RETURNED, &answer);
+    let actual_started = started.try_recv();
+    let actual_kill = killed.try_recv();
     let expired = until(original);
-    let before_cleanup = answer.recv_timeout(OBSERVE);
     let cleanup_at = Instant::now();
     eprintln!(
         "client_settle_phase phase=cleanup_begin started={actual_started:?} kill={actual_kill:?} before={before_cleanup:?}"
@@ -2286,7 +2404,7 @@ fn absolute_run_settle_error_does_not_renew_kill_answer_budget() {
             && state.waiting.is_empty()
     });
     eprintln!(
-        "client_settle_original original={original:?} cap={CAP:?} observation={OBSERVE:?} setup={setup:?} started={actual_started:?} kill={actual_kill:?} runs={run_ids:?} kills={kills:?} exits={exits} releases={releases} before_cleanup={before_cleanup:?} cleanup_at={cleanup_at:?} after_cleanup={after_cleanup:?} pipe_owned={pipe_was_owned} pipe_poisoned={pipe_poisoned} joined={} clean={clean:?}",
+        "client_settle_original original={original:?} cap={CAP:?} setup={setup:?} started={actual_started:?} kill={actual_kill:?} runs={run_ids:?} kills={kills:?} exits={exits} releases={releases} before_cleanup={before_cleanup:?} cleanup_at={cleanup_at:?} after_cleanup={after_cleanup:?} pipe_owned={pipe_was_owned} pipe_poisoned={pipe_poisoned} joined={} clean={clean:?}",
         joined.is_ok()
     );
     joined.unwrap();
@@ -2352,9 +2470,13 @@ struct Settled {
     clean: bool,
 }
 
+/// A settle test's start returning, its settlement refused and its Kill answered as the agent says.
+static SETTLED: Patience = Patience::measuring("test.hex_client.budget.settle_failure_returned");
+
 /// Do start a program by `start` whose stream settlement fails after its actual Started (the
-/// fixture gives an end its exec never asked for), the agent answering its Kill with `kill`.
-fn settle_failure(start: SettleStart, kill: Answer) -> Settled {
+/// fixture gives an end its exec never asked for), the agent answering its Kill with `kill`, every
+/// answer by `by`, a wait on [`SETTLED`].
+fn settle_failure(start: SettleStart, kill: Answer, by: Option<Instant>) -> Settled {
     let (io, _) = stalled(None);
     let (starting, _) = mpsc::sync_channel(1);
     let (killing, _) = mpsc::sync_channel(1);
@@ -2367,7 +2489,9 @@ fn settle_failure(start: SettleStart, kill: Answer) -> Settled {
         kill_answer: Mutex::new(Some(kill)),
         budget: match start {
             SettleStart::RunBefore => None,
-            SettleStart::Run | SettleStart::Exec => Some(OBSERVE),
+            SettleStart::Run | SettleStart::Exec => {
+                Some(answer_by(by).saturating_duration_since(Instant::now()))
+            }
         },
     });
     let stdio = Stdio {
@@ -2380,10 +2504,10 @@ fn settle_failure(start: SettleStart, kill: Answer) -> Settled {
     let program = Program::of(&["owned-settle-kill"]);
     let spec = absolute_spec();
     let (id, result) = match start {
-        SettleStart::RunBefore => {
-            let at = Instant::now().checked_add(OBSERVE).unwrap();
-            (spec.id.clone(), client.run_before(spec, program, stdio, at))
-        }
+        SettleStart::RunBefore => (
+            spec.id.clone(),
+            client.run_before(spec, program, stdio, answer_by(by)),
+        ),
         SettleStart::Run => (spec.id.clone(), client.run(spec, program, stdio)),
         SettleStart::Exec => {
             let id = BoxId::new("owned-settle-exec").unwrap();
@@ -2438,7 +2562,9 @@ fn a_settle_failure_whose_kill_is_refused_is_uncertain_and_never_released() {
         .into_iter()
         .map(|start| {
             let refused = Refusal::os("killing the program", "the model agent refuses");
-            settle_failure(start, Answer::Refused(refused))
+            within(&SETTLED, |by| {
+                settle_failure(start, Answer::Refused(refused), by)
+            })
         })
         .collect();
     for settled in &seen {
@@ -2473,7 +2599,7 @@ fn a_settle_failure_whose_kill_is_refused_is_uncertain_and_never_released() {
 fn a_settle_failure_whose_kill_is_confirmed_keeps_its_refusal_and_never_releases() {
     let seen: Vec<Settled> = [SettleStart::RunBefore, SettleStart::Run, SettleStart::Exec]
         .into_iter()
-        .map(|start| settle_failure(start, Answer::Done))
+        .map(|start| within(&SETTLED, |by| settle_failure(start, Answer::Done, by)))
         .collect();
     for settled in &seen {
         eprintln!("client_settle_kill kill=done {settled:?}");
@@ -2503,6 +2629,9 @@ fn a_settle_failure_whose_kill_is_confirmed_keeps_its_refusal_and_never_releases
 /// deadline consumed at setup, no send is attempted and the refusal is the caller's expiry.
 #[test]
 fn selected_callers_setup_expiry_prevents_send() {
+    /// The hello's return, its selected setup authority consumed before any send.
+    static RETURNED: Patience =
+        Patience::measuring("test.hex_client.budget.selected_setup_returned");
     let (transport, writes) = stalled(None);
     let client = Arc::new(configured(Calibrated::<false>(transport)));
     let control = Arc::clone(&client);
@@ -2537,8 +2666,9 @@ fn selected_callers_setup_expiry_prevents_send() {
             .map(drop);
         let _ = finished.send((Instant::now(), result));
     });
-    let selected = selection.recv_timeout(OBSERVE);
-    let observed = answer.recv_timeout(OBSERVE);
+    // Its selected deadline's notice precedes its answer, so it is read once the answer has come.
+    let observed = recv_on(&RETURNED, &answer);
+    let selected = selection.try_recv();
     client.conn.shared.end(Refusal::Broken(
         "owned selected-deadline observation cleanup".into(),
     ));
@@ -2681,6 +2811,11 @@ fn ordinary_hello_frame(
 /// caller's original cap. This is NOT the public calibrated constructor fixture.
 #[test]
 fn isolated_ordinary_stream_hello_withheld_answer_uses_original_cap() {
+    /// The hello's original deadline, sent as it begins.
+    static BEGAN: Patience = Patience::measuring("test.hex_client.budget.ordinary_hello_began");
+    /// The hello's refusal at its caller's cap, no answer come.
+    static RETURNED: Patience =
+        Patience::measuring("test.hex_client.budget.ordinary_hello_returned");
     let (socket, mut peer) = absolute_pair();
     peer.write_all(&11u64.to_le_bytes()).unwrap();
     let recorded = Arc::new(Mutex::new(Vec::new()));
@@ -2709,13 +2844,15 @@ fn isolated_ordinary_stream_hello_withheld_answer_uses_original_cap() {
         let result = Core::hello_before(control, Some(deadline)).map(drop);
         let _ = finished.send((Instant::now(), result));
     });
-    let deadline = started.recv_timeout(OBSERVE);
+    let deadline = recv_on(&BEGAN, &started);
+    // Not a wait for a fact: a frame is sent only within the hello's own deadline, so that deadline bounds its
+    // read, and what has come already is read however late.
     let frame = match &deadline {
         Ok(deadline) => ordinary_hello_frame(&mut peer, *deadline),
         Err(why) => Err(Refusal::os("observing isolated Hello authority", why)),
     };
     // The peer has sent the token only: no Hello response is queued or synthesized.
-    let observed = answer.recv_timeout(OBSERVE);
+    let observed = recv_on(&RETURNED, &answer);
     let stopped = peer.shutdown(Shutdown::Both);
     drop(peer);
     shared.end(Refusal::Broken("owned ordinary-Hello cleanup".into()));
@@ -2867,6 +3004,10 @@ impl Transport for SettleAligned {
 /// ROOT must compare this SAME selector before/after69a and under the missing-Kill-cap mutation.
 #[test]
 fn prepared_actor_settle_error_retains_original_kill_answer_authority() {
+    /// The prepared actor's notice that it is ready.
+    static READY: Patience = Patience::measuring("test.hex_client.budget.prepared_ready");
+    /// The prepared run's return, its settle refused and its Kill unanswered within its original authority.
+    static RETURNED: Patience = Patience::measuring("test.hex_client.budget.prepared_returned");
     let (io, _) = stalled(None);
     let (starting, started) = mpsc::sync_channel(1);
     let (killing, killed) = mpsc::sync_channel(1);
@@ -2931,13 +3072,15 @@ fn prepared_actor_settle_error_retains_original_kill_answer_authority() {
         })
         .unwrap();
 
-    let actor_ready = readiness.recv_timeout(OBSERVE);
+    let actor_ready = recv_on(&READY, &readiness);
     let released = actor_ready.is_ok().then(|| release.try_send(()));
     // Every early branch closes this owned barrier so joining can never wait for a lost start.
     drop(release);
-    let original = armed.recv_timeout(OBSERVE);
-    let actual_started = started.recv_timeout(OBSERVE);
-    let actual_kill = killed.recv_timeout(OBSERVE);
+    // Its arming, its Started and its Kill precede its answer, so each is read once the answer has come.
+    let before_cleanup = recv_on(&RETURNED, &answer);
+    let original = armed.try_recv();
+    let actual_started = started.try_recv();
+    let actual_kill = killed.try_recv();
     let expired = original.as_ref().ok().map(|at| {
         loop {
             let left = at.saturating_duration_since(Instant::now());
@@ -2950,7 +3093,6 @@ fn prepared_actor_settle_error_retains_original_kill_answer_authority() {
             }
         }
     });
-    let before_cleanup = answer.recv_timeout(OBSERVE);
     let cleanup_at = Instant::now();
     client
         .conn
@@ -3014,7 +3156,7 @@ fn prepared_actor_settle_error_retains_original_kill_answer_authority() {
         && !unused_end;
     // First diagnostics and all assertions occur only after the owned endpoint/ends close and join.
     eprintln!(
-        "client_settle_prepared classification={} scope=separate_successor ready={actor_ready:?} released={released:?} original={original:?} cap={CAP:?} observation={OBSERVE:?} setup={setup:?} started={actual_started:?} kill={actual_kill:?} runs={runs:?} kills={kills:?} exits={exits} other_answers={other_answers} releases={releases} before_cleanup={before_cleanup:?} cleanup_at={cleanup_at:?} after_cleanup={after_cleanup:?} pipe_owned={pipe_was_owned} unused_end={unused_end} pipe_poisoned={pipe_poisoned} end_poisoned={end_poisoned} joined={} clean={clean:?}",
+        "client_settle_prepared classification={} scope=separate_successor ready={actor_ready:?} released={released:?} original={original:?} cap={CAP:?} setup={setup:?} started={actual_started:?} kill={actual_kill:?} runs={runs:?} kills={kills:?} exits={exits} other_answers={other_answers} releases={releases} before_cleanup={before_cleanup:?} cleanup_at={cleanup_at:?} after_cleanup={after_cleanup:?} pipe_owned={pipe_was_owned} unused_end={unused_end} pipe_poisoned={pipe_poisoned} end_poisoned={end_poisoned} joined={} clean={clean:?}",
         if phase {
             "PHASE_WITNESSED"
         } else {
@@ -3386,15 +3528,17 @@ fn a_failed_setups_kill_goes_out_while_answers_for_others_keep_coming() {
     assert_eq!(kills, run.into_iter().collect::<Vec<_>>());
 }
 
-/// Whether the pipe `program` writes has no reader left, waited for as a fact, at most 30 s (as the Linux
-/// tests' `readerless`): another test's child holds a copy of every descriptor from its fork to its exec,
-/// which closes it (CLOEXEC), so a write in between would still find a reader. The pipe is filled first and
-/// nothing reads it, so a poll for room returns only once its last reader has gone: `POLLERR` on Linux
-/// (fs/pipe.c's `pipe_poll`), `POLLHUP` on macOS, whose poll reports nothing for an end asking for no event.
+/// Whether the pipe `program` writes has no reader left, waited for as a fact on its own patience: another
+/// test's child holds a copy of every descriptor from its fork to its exec, which closes it (CLOEXEC), so a
+/// write in between would still find a reader. The pipe is filled first and nothing reads it, so a poll for
+/// room returns only once its last reader has gone: `POLLERR` on Linux (fs/pipe.c's `pipe_poll`), `POLLHUP` on
+/// macOS, whose poll reports nothing for an end asking for no event.
 #[cfg(unix)]
 fn readerless(program: &std::io::PipeWriter) -> bool {
-    use rustix::event::{PollFd, PollFlags, Timespec};
+    use rustix::event::{PollFd, PollFlags};
     use rustix::io::Errno;
+    /// The late end's pipe with its last reader gone.
+    static READERLESS: Patience = Patience::measuring("test.hex_client.budget.late_end_readerless");
     rustix::io::ioctl_fionbio(program, true).unwrap();
     loop {
         match rustix::io::write(program, &[0; 4096]) {
@@ -3405,11 +3549,11 @@ fn readerless(program: &std::io::PipeWriter) -> bool {
         }
     }
     let mut room = [PollFd::new(program, PollFlags::OUT)];
-    let within = Timespec {
-        tv_sec: 30,
-        tv_nsec: 0,
-    };
-    rustix::event::poll(&mut room, Some(&within)).unwrap() == 1
+    let polled = within(&READERLESS, |by| {
+        let left = by.map(|by| timespec(by.saturating_duration_since(Instant::now())));
+        rustix::event::poll(&mut room, left.as_ref())
+    });
+    polled.unwrap() == 1
         && room[0]
             .revents()
             .intersects(PollFlags::ERR | PollFlags::HUP)

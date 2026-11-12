@@ -26,6 +26,8 @@ unsize.workspace = true
 hex-afunix.workspace = true
 
 [dev-dependencies]
+# The budget tests wait on their own facts' patiences (src/calls/budget_tests.rs).
+hex-testkit.workspace = true
 tempfile.workspace = true
 # tests/shards_borrowed_contract.rs, Hex's campaign over shards-api's borrowed connector: its directories,
 # and on Windows the AF_UNIX listener and the process calls it counts handles with, as when Shards' API carried it.
