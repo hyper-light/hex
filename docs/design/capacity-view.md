@@ -35,8 +35,9 @@ counts the two sides keep agree after a partition heals.
   ledger and admission index book, the larger per dimension, which charges backings too, each box the
   learner rebooked counted at its holding instead of its receipt).
 - hex-sim scenarios: crashes on either side, dropped links, partitions and heals.
-- The shell over hyper-transport, once Hex step 4's transport is on main: the scheduler opens the
-  view (`Driver::open_view`) with the holders its configuration authorizes, and carries the messages.
+- The lane over Hex's QUIC transport (CV9): `hex_core::capacity`'s frames on `CAPACITY_PORT`,
+  `hex_quic::capacity::Server` serving a keeper (the node's as `placement::DriverView`) and
+  `hex_quic::capacity::Link`, a holder's end.
 
 ## The defect today
 
@@ -224,12 +225,25 @@ view, so the next decision is made on the room there is (Omega §3.4: resync, th
 
 Every amount is an integer with checked arithmetic; a sum that would overflow is refused, typed.
 
-### CV9. Carried over hyper-transport, after Hex step 4
+### CV9. Carried over hyper-transport, on a lane of its own
 
-The messages become variants of `hex_core::wire` (append-only, as every wire change) carried on step 4's
-control lane, TLS 1.3 with `TLS13_AES_256_GCM_SHA384` alone and identities from kiln's CA (the plan's
-header). Until step 4 is on main the cores run in process and over hex-sim's simulated links only; a
-remote binding asked for before then is refused, typed, naming the transport it waits on.
+A holder reaches its keeper over Hex's QUIC transport (Hex step 4, `hex-quic.md`): TLS 1.3 with
+`TLS13_AES_256_GCM_SHA384` alone, both ends asserting it, each peer named by the certificate kiln's CA
+issued it by CSR. The view's messages are not variants of the node's wire: they have a port of their own,
+`hex_core::lanes::CAPACITY_PORT` (`0x4845_5805`, the port after the log's, of the control class: small
+messages, each answered), so a holder that speaks only this protocol needs none of the node agent's.
+- **Framing** (`hex_core::capacity`): each `ToKeeper` and `ToHolder` is one JSON message framed by its
+  length (`hex_core::stream`'s 4-byte big-endian prefix), at most the wire's message bound (128 KiB).
+- **A connection is a link**: the holder says its messages in order and the keeper answers each in
+  order; the hints owed to a link come on it between answers. When the connection ends the holder is
+  away (CV5); a connection that breaks the framing or says a message that isn't one is reset as breaking
+  the protocol.
+- **A sync fits one message**: the keeper holds each holder to the most reservations one sync lists at
+  their widest (`hex_core::capacity::most_held`), beside the node's own record bound (CV8).
+- **The shells**: `hex_quic::capacity::Server` serves any `CapacityView` on the port's acceptor, a thread
+  a link within the endpoint's connection bound, and delivers each hint to the link it is owed to after
+  each message and when its host calls `Server::hint`; `hex_quic::capacity::Link` is a holder's end.
+  The node's keeper is served as `placement::DriverView`.
 
 ### CV10. Where a keeper is, and where there is none
 
@@ -355,4 +369,6 @@ window, which would under-count Hex here.
 - The room counts a holder's used memory twice: the host's measured free memory already lacks it, and
   its reservation is held besides. Never an oversubscription, but under-use up to that holder's use,
   until the host can measure a holder's use itself (its cgroup on Linux, its process tree elsewhere).
-- The transport binding waits on Hex step 4 (CV9).
+- The scheduler process (`hex schedule serve`, which holds the Driver) opens no QUIC endpoint yet: wiring
+  it (its bind address, its enrollment with kiln's CA, the holders it authorizes, `Driver::open_view`, and
+  `Server::hint` after its own placements) is the step that puts the lane in production.
