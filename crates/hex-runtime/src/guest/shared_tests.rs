@@ -45,6 +45,8 @@ struct Owner {
     pool: Mutex<Option<PoolRecord>>,
     boxes: Mutex<Records>,
     launches: AtomicUsize,
+    /// Each launch's kernel command line.
+    cmdlines: Mutex<Vec<String>>,
     preparations: AtomicUsize,
     removals: AtomicUsize,
     submission: Mutex<Submission>,
@@ -68,6 +70,7 @@ impl Owner {
             pool: Mutex::new(None),
             boxes: Mutex::new(Records::new()),
             launches: AtomicUsize::new(0),
+            cmdlines: Mutex::new(Vec::new()),
             preparations: AtomicUsize::new(0),
             removals: AtomicUsize::new(0),
             submission: Mutex::new(Submission::Absent),
@@ -194,8 +197,17 @@ impl Transaction for Owner {
         _: shards_api::LaunchIo,
         _: Duration,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
-        assert!(matches!(plan, devices::ManagedLaunch::Shards(_)));
+        let devices::ManagedLaunch::Shards(prepared) = plan else {
+            panic!("a shared backing launches Shards")
+        };
         assert_eq!(self.row().phase, BackingPhase::Granted);
+        let cmdline = prepared
+            .arguments()
+            .iter()
+            .skip_while(|word| word.as_os_str() != "--cmdline")
+            .nth(1)
+            .map(|cmdline| cmdline.to_string_lossy().into_owned());
+        self.cmdlines.lock().unwrap().extend(cmdline);
         self.launches.fetch_add(1, Ordering::SeqCst);
         Err(refused(self.row().key, LifecycleCause::Uncertain))
     }
@@ -451,6 +463,30 @@ fn retained_backing_refuses_a_replaced_initialized_cost_without_inner_boxes() {
     assert_eq!(owner.launches.load(Ordering::SeqCst), 0);
     assert_eq!(replacement_owner.launches.load(Ordering::SeqCst), 0);
     assert!(owner.boxes.lock().unwrap().is_empty());
+}
+
+/// AC-T7.4.1 (original): a managed Shards boot tells its guest the boot's deadline as a CPU boot does, so its relay's
+/// hello to its node takes it as its caller's. Do: initialize a shared backing, whose launch the owner reads, then
+/// refuses. Expect the launch's kernel command line to name the boot's deadline once (`hex.ready-ms=`): what is left
+/// of the create's budget, the first dial's bound, in milliseconds rounded up.
+#[test]
+fn original_a_managed_shards_boot_tells_its_guest_the_boots_deadline() {
+    let dir = socket_fixture();
+    let (runtime, owner) = configured(dir.path());
+    let bound = runtime.first_dial_bound().unwrap();
+    let offer = runtime.prepare_backing().unwrap();
+    let initialized = runtime.initialize_backing(grant(&offer)).map(drop);
+    let cmdlines = owner.cmdlines.lock().unwrap().clone();
+    eprintln!(
+        "hex_guest_ready_word boot=managed bound={bound:?} initialized={initialized:?} cmdlines={cmdlines:?}"
+    );
+    assert_eq!(owner.launches.load(Ordering::SeqCst), 1);
+    assert_eq!(cmdlines.len(), 1);
+    let given = super::super::tests::ready_ms(&cmdlines[0]);
+    assert!(
+        !given.is_zero() && given <= bound + Duration::from_millis(1),
+        "{given:?} isn't what is left of the boot's bound {bound:?}"
+    );
 }
 
 #[test]
