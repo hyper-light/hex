@@ -18,21 +18,33 @@ exclude = ["rust-vmm-ci"]
 # Hex's own files in the vendored tree (not upstream's): the record of what Hex changed and why.
 own = ["UPSTREAM.md"]
 
-# hyper-raft (hyper-light): hex-sim scores placement with hyper-swim's own Vivaldi engine
+# hyper-raft (hyper-light), at the revision kiln vendors it (kiln's vendor/MANIFEST.toml), so kiln, Hex
+# and the fleet hold one hyper-raft: hex-sim scores placement with hyper-swim's own Vivaldi engine
 # (docs/design/hex-sim.md H20), and measures the crash class on hyper-swim's own failure detector, the
-# membership the node agent runs (docs/design/failure-isolation.md F1). hyper-raft has no -api crate
-# for Hex to depend on (CLAUDE.md §9), so only what hex-sim compiles is taken: coordinates.rs, included
-# unchanged by path, and the hyper-swim and hyper-timing crates with the workspace manifest their
-# packages inherit from, depended on by name and patched to this copy (Cargo.toml [patch.crates-io]),
-# as kiln patches the same names. When hyper-raft publishes these behind an -api crate, Hex depends on
-# that by name and this entry goes.
+# membership the node agent runs (docs/design/failure-isolation.md F1); and Hex's wire travels over
+# hyper-transport on hyper-quic, TLS 1.3 by hyper-tls (docs/design/hex-quic.md Q1). hyper-raft has no -api
+# crate for Hex to depend on (CLAUDE.md §9), so only what Hex compiles is taken: coordinates.rs, included
+# unchanged by path, the hyper-swim and hyper-timing crates, and the hyper-transport, hyper-quic and
+# hyper-tls crates (each manifest's named targets with it, as cargo loads a package by them), with the
+# workspace manifest their packages inherit from and its LICENSE, depended on by name and patched to this
+# copy (Cargo.toml [patch.crates-io]), as kiln patches the same names. Not hyper-rt or hyper-rt-transport:
+# Hex drives the sans-IO endpoint from a thread of its own (docs/design/hex-quic.md Q2). When hyper-raft
+# publishes these behind an -api crate, Hex depends on that by name and this entry goes.
 [projects.hyper-raft]
 kind = "git"
 repository = "https://github.com/hyper-light/hyper-raft"
-commit = "6a236ae4c73e10013b149699ca8ec6802d919476"
+commit = "0856e05df3d136f0870a98808113294a73399206"
 path = "vendor/hyper-raft"
 take = [
     "Cargo.toml",
+    "LICENSE",
+    "crates/hyper-quic/Cargo.toml",
+    "crates/hyper-quic/LICENSE-APACHE",
+    "crates/hyper-quic/LICENSE-MIT",
+    "crates/hyper-quic/VENDORED.md",
+    "crates/hyper-quic/benches",
+    "crates/hyper-quic/src",
+    "crates/hyper-quic/tests/e2e.rs",
     "crates/hyper-swim/Cargo.toml",
     "crates/hyper-swim/ORIGIN.md",
     "crates/hyper-swim/benches",
@@ -41,6 +53,18 @@ take = [
     "crates/hyper-timing/ORIGIN.md",
     "crates/hyper-timing/benches",
     "crates/hyper-timing/src",
+    "crates/hyper-tls/Cargo.toml",
+    "crates/hyper-tls/LICENSE-APACHE",
+    "crates/hyper-tls/LICENSE-ISC",
+    "crates/hyper-tls/LICENSE-MIT",
+    "crates/hyper-tls/VENDORED.md",
+    "crates/hyper-tls/benches",
+    "crates/hyper-tls/src",
+    "crates/hyper-transport/Cargo.toml",
+    "crates/hyper-transport/ORIGIN.md",
+    "crates/hyper-transport/benches",
+    "crates/hyper-transport/src",
+    "crates/hyper-transport/tests/e2e.rs",
 ]
 own = ["UPSTREAM.md"]
 

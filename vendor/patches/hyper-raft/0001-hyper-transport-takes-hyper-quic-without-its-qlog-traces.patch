@@ -1,0 +1,19 @@
+Subject: hyper-transport takes hyper-quic without its qlog traces
+Why: hyper-transport makes no qlog trace, and hyper-quic's default qlog feature turns on serde_json's preserve_order for every crate of the build it joins (hyper-quic VENDORED.md section 20), which would change the key order of every JSON document Hex writes; Hex asks hyper-quic without it by name, as Shards does, and this keeps hyper-transport's own path dependency from turning it back on.
+
+diff --git a/crates/hyper-transport/Cargo.toml b/crates/hyper-transport/Cargo.toml
+index b634d13c453dd8eec50e8e15beb3e208addb183e..a99b849f0477cdce016d8887d04e11330bc49e9f 100644
+--- a/crates/hyper-transport/Cargo.toml
++++ b/crates/hyper-transport/Cargo.toml
+@@ -8,7 +8,10 @@ license.workspace = true
+ repository.workspace = true
+ 
+ [dependencies]
+-hyper-quic = { path = "../hyper-quic" }
++# Without hyper-quic's qlog traces, which hyper-transport never makes: the `qlog` crate turns on serde_json's
++# `preserve_order` for the whole build it is in (hyper-quic VENDORED.md §20). hyper-quic's own features stay
++# what each consumer asks of it by name.
++hyper-quic = { path = "../hyper-quic", default-features = false }
+ hyper-timing = { path = "../hyper-timing" }
+ # The key an endpoint keeps across its restarts is expanded by HKDF into its reset key, an HMAC key
+ # (`RestartKey`), the provider hyper-quic's reset tokens are made with.
