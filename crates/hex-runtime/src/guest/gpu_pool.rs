@@ -410,7 +410,7 @@ impl GuestRuntime {
             .map_err(|_| Refusal::Full(hex_api::MAX_DEVICES))?;
         spec.gpu_devices.extend_from_slice(&receipt.physical);
         let socket = self.pool_socket(key)?;
-        let plan = self.managed_plan(&spec, &socket)?;
+        let plan = self.managed_plan(&spec, &socket, budget)?;
         let guest = match &receipt.phase {
             Phase::Intent if fresh => {
                 self.check_current_luids(

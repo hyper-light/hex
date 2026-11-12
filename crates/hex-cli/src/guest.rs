@@ -12,8 +12,9 @@
 //! as the guest has no disk: docs/design/shards-guest.md §4), mounts the Shards shares the kernel's
 //! command line names (`hex.shares=rw,ro,…`, §4a) at `/run/hex/shares/<i>`, gives the node the descriptor
 //! limit `hex node --descriptors` counts (soft and hard, `fs.nr_open` raised to it where lower), starts `hex node`
-//! and then `hex guest relay --vsock`, handing it the boot's deadline where its host gave one (`BOOT_READY_BY`),
-//! says `hex guest ready` on the console, and reaps every process that ends,
+//! and then `hex guest relay --vsock`, each within the boot's deadline where its host gave one (Firecracker's
+//! `hex.firecracker-ready-ms`, a Shards host's `hex.ready-ms`), which it hands them (`BOOT_READY_BY`), says
+//! `hex guest ready` on the console, and reaps every process that ends,
 //! as PID 1 must. When the node or the relay ends, it says why and powers the guest off, so the host sees
 //! the guest end.
 //!
@@ -228,13 +229,22 @@ impl Duplex for Vsock {
 /// and all three to the relay (its first entry, its mounts done, its node ready).
 const BOOT_T0: &str = "HEX_BOOT_T0";
 const BOOT_STAMPS: &str = "HEX_BOOT_STAMPS";
-/// The variable that carries the boot's deadline from init to the relay (AC-T7.4.1): the instant on the guest's own
-/// clock, `CLOCK_BOOTTIME` nanoseconds, by which its host waits for it to be ready, its readiness bound counted from
-/// the kernel's start, so the time the boot has spent is what the clock reads.
+/// The variable that carries the boot's deadline from init to each child it starts before the guest is ready, the
+/// node and the relay (AC-T7.4.1): the instant on the guest's own clock, `CLOCK_BOOTTIME` nanoseconds, by which its
+/// host waits for it to be ready, its readiness bound ([`boot_budget`]) counted from the kernel's start, so the time
+/// the boot has spent is what the clock reads. The relay's calls to its node take it as their caller's.
 const BOOT_READY_BY: &str = "HEX_BOOT_READY_BY";
 
-/// The boot's deadline init handed the relay (`given`, [`BOOT_READY_BY`]) as a monotonic instant: `now`, and as much
-/// after it as the guest's clock, at `boot_ns` (read after `now`, so the conversion never lends time), has left to it;
+/// `ready_by`, an instant on the guest's clock in nanoseconds, as a monotonic one: `now`, and as much after it as the
+/// clock, at `boot_ns` (read after `now`, so the conversion never lends time), has left to it; `now` itself once the
+/// clock has passed it; none where that is past what an instant holds.
+fn deadline_at(ready_by: u128, now: Instant, boot_ns: u128) -> Option<Instant> {
+    // Nothing left once the guest's clock has passed it: the boot's deadline has gone by.
+    let left = u64::try_from(ready_by.saturating_sub(boot_ns)).ok()?;
+    now.checked_add(Duration::from_nanos(left))
+}
+
+/// The boot's deadline init handed the relay (`given`, [`BOOT_READY_BY`]) as a monotonic instant ([`deadline_at`]);
 /// none where init handed none, as outside a guest.
 fn boot_deadline(
     given: Option<&OsStr>,
@@ -251,11 +261,7 @@ fn boot_deadline(
         .filter(|text| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
         .and_then(|text| text.parse::<u128>().ok())
         .ok_or_else(bad)?;
-    // Nothing left once the guest's clock has passed it: the boot's deadline has gone by.
-    let left = u64::try_from(at.saturating_sub(boot_ns)).map_err(|_| bad())?;
-    now.checked_add(Duration::from_nanos(left))
-        .map(Some)
-        .ok_or_else(bad)
+    deadline_at(at, now, boot_ns).map(Some).ok_or_else(bad)
 }
 
 /// Nanoseconds since the kernel began keeping time: `CLOCK_BOOTTIME` (clock_gettime(2)), the guest's own
@@ -334,7 +340,13 @@ fn init() -> Result<(), (u8, String)> {
     leave_rootfs(t0).map_err(fail)?;
     mount_all().map_err(fail)?;
     mount_shares().map_err(fail)?;
-    let ready_budget = firecracker_ready_budget(&kernel_cmdline().map_err(fail)?).map_err(fail)?;
+    let cmdline = kernel_cmdline().map_err(fail)?;
+    let ready_budget = firecracker_ready_budget(&cmdline).map_err(fail)?;
+    // AC-T7.4.1: the boot's deadline on the guest's clock, its host's readiness bound from the kernel's start, within
+    // which init waits for each child's ready line and the relay's calls to its node take it as their caller's.
+    let ready_by = boot_budget(&cmdline, ready_budget)
+        .map_err(fail)?
+        .map(|budget| budget.as_nanos());
     std::fs::write("/sys/fs/cgroup/cgroup.subtree_control", CONTROLLERS).map_err(|e| {
         fail(format!(
             "enabling the cgroup controllers {CONTROLLERS}: {e}"
@@ -363,12 +375,10 @@ fn init() -> Result<(), (u8, String)> {
         ],
         &format!("ready {}\n", socket.display()),
         None,
-        None,
+        ready_by,
     )
-    .map_err(fail)?;
+    .map_err(|why| fail(why.to_string()))?;
     let node_ready = boottime_ns();
-    // AC-T7.4.1: the host's readiness bound, from the kernel's start, is the boot's deadline on the guest's clock;
-    // the relay's calls to its node before it says ready take it as their caller's.
     let relay = start(
         &exe,
         &[
@@ -380,9 +390,9 @@ fn init() -> Result<(), (u8, String)> {
         ],
         "ready\n",
         Some(format!("{t0} {mounted} {node_ready}")),
-        ready_budget.map(|budget| budget.as_nanos()),
+        ready_by,
     )
-    .map_err(fail)?;
+    .map_err(|why| fail(why.to_string()))?;
     if let Some(budget) = ready_budget {
         notify_firecracker_ready(budget).map_err(|e| {
             fail(format!(
@@ -656,6 +666,36 @@ fn firecracker_ready_budget(cmdline: &str) -> Result<Option<Duration>, String> {
     }
 }
 
+/// The boot's readiness bound its host told the guest on its kernel command line, counted from the kernel's start
+/// (AC-T7.4.1): Firecracker's, `firecracker` ([`firecracker_ready_budget`]), or a Shards host's,
+/// [`hex_runtime::guest::READY_MS`]; none where the host told none, whose guest keeps its learned bounds. Refused where
+/// both are told, or the Shards word is malformed or told twice.
+fn boot_budget(cmdline: &str, firecracker: Option<Duration>) -> Result<Option<Duration>, String> {
+    use hex_runtime::guest::READY_MS;
+    let mut told = None;
+    for word in cmdline.split_whitespace().take_while(|word| *word != "--") {
+        let Some(rest) = word.strip_prefix(READY_MS) else {
+            continue;
+        };
+        let millis = rest
+            .strip_prefix('=')
+            .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|ms| *ms != 0)
+            .ok_or_else(|| format!("{READY_MS} needs positive milliseconds, not {word:?}"))?;
+        if told.replace(Duration::from_millis(millis)).is_some() {
+            return Err(format!("{READY_MS} is given twice"));
+        }
+    }
+    match (firecracker, told) {
+        (Some(_), Some(_)) => Err(format!(
+            "hex.firecracker-ready-ms and {READY_MS} both name the boot's deadline"
+        )),
+        (Some(budget), None) => Ok(Some(budget)),
+        (None, told) => Ok(told),
+    }
+}
+
 fn kernel_cmdline() -> Result<String, String> {
     let bound = usize::try_from(CMDLINE_BOUND)
         .map_err(|_| "kernel command line bound exceeds usize".to_owned())?;
@@ -672,14 +712,19 @@ fn kernel_cmdline() -> Result<String, String> {
     Ok(cmdline)
 }
 
+/// Tells Firecracker's host the guest is ready, within what is left of the boot's `budget`, its readiness bound from
+/// the kernel's start (AC-T7.4.1): timed out at once, with no connection tried, where the boot has spent it.
 fn notify_firecracker_ready(budget: Duration) -> io::Result<()> {
     let expired = || io::Error::from(io::ErrorKind::TimedOut);
-    let deadline = std::time::Instant::now()
-        .checked_add(budget)
+    let deadline = deadline_at(budget.as_nanos(), Instant::now(), boottime_ns())
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let left = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|left| !left.is_zero())
         .ok_or_else(expired)?;
     let socket = Socket::new(Domain::VSOCK, Type::STREAM.cloexec(), None)?;
     // VMADDR_CID_HOST is 2 (vsock(7)); the host bound this VM's private UDS before boot.
-    socket.connect_timeout(&SockAddr::vsock(2, stream::GUEST_READY_PORT), budget)?;
+    socket.connect_timeout(&SockAddr::vsock(2, stream::GUEST_READY_PORT), left)?;
     let mut pending = stream::GUEST_READY;
     while !pending.is_empty() {
         let left = deadline
@@ -794,7 +839,8 @@ fn mount_all() -> Result<(), String> {
 }
 
 /// Starts `/init` with `args` and waits for its first line, `ready`: read as far as its length and no
-/// further, as nothing else is that line.
+/// further, as nothing else is that line, and, where init has the boot's deadline `ready_by`, within what is left of
+/// it, refused past it with the child ended (AC-T7.4.1).
 /// `stamps`, where given, goes to the child as init's boot stamps ([`BOOT_STAMPS`]), and `ready_by` as the boot's
 /// deadline ([`BOOT_READY_BY`]), which no child takes from init's own environment.
 fn start(
@@ -803,13 +849,21 @@ fn start(
     ready: &str,
     stamps: Option<String>,
     ready_by: Option<u128>,
-) -> Result<u32, String> {
+) -> Result<u32, Refusal> {
     let what = args
         .iter()
         .take(2)
         .map(|a| a.to_string_lossy())
         .collect::<Vec<_>>()
         .join(" ");
+    let by = ready_by
+        .map(|at| {
+            deadline_at(at, Instant::now(), boottime_ns()).ok_or_else(|| Refusal::Invalid {
+                what: "the boot's deadline",
+                why: format!("{at} ns on the guest's clock is past a monotonic instant"),
+            })
+        })
+        .transpose()?;
     let mut command = std::process::Command::new(exe);
     if let Some(stamps) = stamps {
         command.env(BOOT_STAMPS, stamps);
@@ -822,24 +876,104 @@ fn start(
         .args(args)
         .stdout(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| format!("starting hex {what}: {e}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| format!("hex {what}'s stdout wasn't kept"))?;
-    let mut line = Vec::new();
-    let bound = u64::try_from(ready.len()).map_err(|_| format!("hex {what}'s ready line"))?;
-    stdout
-        .take(bound)
-        .read_to_end(&mut line)
-        .map_err(|e| format!("reading hex {what}'s first line: {e}"))?;
+        .map_err(|e| Refusal::Os {
+            op: "starting a guest process",
+            why: format!("hex {what}: {e}"),
+        })?;
+    let stdout = child.stdout.take().ok_or_else(|| Refusal::Os {
+        op: "starting a guest process",
+        why: format!("hex {what}'s stdout wasn't kept"),
+    })?;
+    let line = match ready_line(stdout, ready.len(), by, &what) {
+        Ok(line) => line,
+        Err(why) => {
+            // Not ready within the boot's deadline, or not read: it ends, as the boot does.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(why);
+        }
+    };
     if line != ready.as_bytes() {
-        return Err(format!(
-            "hex {what} said {:?}, not {ready:?}",
-            String::from_utf8_lossy(&line)
-        ));
+        return Err(Refusal::Invalid {
+            what: "a guest process's ready line",
+            why: format!(
+                "hex {what} said {:?}, not {ready:?}",
+                String::from_utf8_lossy(&line)
+            ),
+        });
     }
     Ok(child.id())
+}
+
+/// The first `want` bytes of `out`, a child's stdout, its ready line, or fewer where it ends first: within `by` where
+/// init has the boot's deadline, refused past it, else as long as it takes.
+fn ready_line(
+    mut out: std::process::ChildStdout,
+    want: usize,
+    by: Option<Instant>,
+    what: &str,
+) -> Result<Vec<u8>, Refusal> {
+    let failed = |e: &dyn std::fmt::Display| Refusal::Os {
+        op: "reading a guest process's ready line",
+        why: format!("hex {what}: {e}"),
+    };
+    let exhausted = || Refusal::Exhausted {
+        what: "a guest process's ready line",
+        bound: want,
+    };
+    let mut line = Vec::new();
+    line.try_reserve_exact(want).map_err(|_| exhausted())?;
+    let Some(by) = by else {
+        let bound = u64::try_from(want).map_err(|e| failed(&e))?;
+        out.take(bound)
+            .read_to_end(&mut line)
+            .map_err(|e| failed(&e))?;
+        return Ok(line);
+    };
+    let flags = rustix::fs::fcntl_getfl(&out).map_err(|e| failed(&e))?;
+    rustix::fs::fcntl_setfl(&out, flags | rustix::fs::OFlags::NONBLOCK).map_err(|e| failed(&e))?;
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(want).map_err(|_| exhausted())?;
+    buf.resize(want, 0);
+    while line.len() < want {
+        let left = by.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(Refusal::Os {
+                op: "waiting for a guest process to say it is ready",
+                why: format!(
+                    "hex {what} said {:?} by the boot's deadline",
+                    String::from_utf8_lossy(&line)
+                ),
+            });
+        }
+        let timeout = rustix::event::Timespec {
+            tv_sec: i64::try_from(left.as_secs()).map_err(|e| failed(&e))?,
+            tv_nsec: i64::from(left.subsec_nanos()),
+        };
+        let mut ready = [rustix::event::PollFd::new(
+            &out,
+            rustix::event::PollFlags::IN,
+        )];
+        match rustix::event::poll(&mut ready, Some(&timeout)) {
+            Ok(_) | Err(rustix::io::Errno::INTR) => {}
+            Err(e) => return Err(failed(&e)),
+        }
+        let room = want
+            .checked_sub(line.len())
+            .and_then(|room| buf.get_mut(..room))
+            .ok_or_else(exhausted)?;
+        match out.read(room) {
+            Ok(0) => break,
+            Ok(n) => line.extend_from_slice(room.get(..n).unwrap_or_default()),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) => {}
+            Err(e) => return Err(failed(&e)),
+        }
+    }
+    Ok(line)
 }
 
 /// Reaps every process that ends until the node or the relay does, and says which and how.
@@ -959,6 +1093,39 @@ mod tests {
             assert!(ready_by(bad, 0).is_err(), "{bad:?}");
         }
         assert!(boot_deadline(Some(OsStr::from_bytes(b"\xff1")), now, 0).is_err());
+    }
+
+    /// AC-T7.4.1: the boot's deadline is its host's readiness bound, Firecracker's (`hex.firecracker-ready-ms`) or a
+    /// Shards host's (`hex.ready-ms`), and a guest told none keeps its learned bounds. Do: read command lines that name
+    /// either, neither or both, malformed or repeated Shards words, and one after `--`. Expect each bound as told, none
+    /// for neither or init's own arguments, and a refusal for the rest.
+    #[test]
+    fn the_boots_deadline_is_its_hosts_readiness_bound_either_way() {
+        let firecracker = Some(Duration::from_secs(60));
+        assert_eq!(boot_budget("console=ttyS0 panic=-1", None), Ok(None));
+        assert_eq!(boot_budget("console=ttyS0", firecracker), Ok(firecracker));
+        assert_eq!(
+            boot_budget(
+                "console=ttyS0 panic=-1 hex.shares=rw hex.ready-ms=21056",
+                None
+            ),
+            Ok(Some(Duration::from_millis(21_056)))
+        );
+        assert_eq!(boot_budget("quiet -- hex.ready-ms=5", None), Ok(None));
+        for bad in [
+            "hex.ready-ms",
+            "hex.ready-ms=",
+            "hex.ready-ms=0",
+            "hex.ready-ms=-1",
+            "hex.ready-ms=+1",
+            "hex.ready-ms=1.5",
+            "hex.ready-msx=1",
+            "hex.ready-ms=18446744073709551616",
+            "hex.ready-ms=1 hex.ready-ms=2",
+        ] {
+            assert!(boot_budget(bad, None).is_err(), "{bad}");
+        }
+        assert!(boot_budget("hex.ready-ms=5", firecracker).is_err());
     }
 
     /// AC-T7.4.1 (original): init waited for each child's ready line with no bound, so a node or relay that never

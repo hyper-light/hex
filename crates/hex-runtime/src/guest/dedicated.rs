@@ -1593,7 +1593,7 @@ impl GuestRuntime {
                 report,
             )?;
         }
-        let plan = self.managed_plan(&spec, &identity.vsock)?;
+        let plan = self.managed_plan(&spec, &identity.vsock, budget)?;
         self.check_selected_observer(&receipt)?;
         let guest = managed::attach(transaction, plan, identity, budget)?;
         let booted = self.booted(guest, &receipt, record, budget)?;
@@ -1603,11 +1603,17 @@ impl GuestRuntime {
         Ok(Some(booted))
     }
 
+    /// The managed plan of `spec` on `socket`, its guest told what is left of the create's `budget`, its boot's deadline
+    /// (AC-T7.4.1, [`super::READY_MS`]); an attach's plan launches nothing, so its guest hears nothing of it.
     pub(super) fn managed_plan(
         &self,
         spec: &shards_api::GuestSpec,
         socket: &std::path::Path,
+        budget: managed::Budget,
     ) -> Result<shards_api::PreparedBoot, Refusal> {
+        let mut spec = spec.clone();
+        super::tell_ready(&mut spec.cmdline, budget.remaining()?)?;
+        let spec = &spec;
         let paths = self.native_paths.as_ref().ok_or_else(|| Refusal::Invalid {
             what: "managed Shards runtime paths",
             why: "the node's configured probe and native launch require the same explicit paths"
@@ -1750,7 +1756,7 @@ impl GuestRuntime {
                 .map_err(|e| Refusal::os("syncing selected guest receipt directory", e))?;
         }
         let socket = self.selected_socket(&receipt.id)?;
-        let mut plan = self.managed_plan(&guest_spec, &socket)?;
+        let mut plan = self.managed_plan(&guest_spec, &socket, budget)?;
         if !receipt.physical.is_empty() {
             self.check_current_luids(
                 &receipt.devices,
