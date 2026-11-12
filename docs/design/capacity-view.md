@@ -23,10 +23,19 @@ counts the two sides keep agree after a partition heals.
   and the [`Holder`](../../crates/hex-api/src/capacity/holder.rs), the side that reserves through it.
   They are in `hex-api` because kiln reaches Hex only through it (CLAUDE.md §9), and kiln's runner
   uses the same holder core (Shards R12: one implementation).
-- The seam (checkpoint 2): a trait over the keeper, its simulator and a conformance suite, so kiln's
-  binding passes the suite Hex's does; Hex's scheduler admission checks the view.
-- hex-sim scenarios (checkpoint 3): crashes on either side, dropped links, partitions and heals.
-- The shell over hyper-transport (checkpoint 4), once Hex step 4's transport is on main.
+- The seam (CLAUDE.md §9): `CapacityView`, the keeper as a transport serves it, and `Host`, its
+  host's side; the simulator `capacity::sim::SimView`, which kiln's simulator drives as the machine's
+  Hex node; and `capacity::conformance::view` (HEX-CV-1 to 8), which the simulator and the node's own
+  view both pass, and a keeper kiln hosts would.
+- The node's view (`crates/hex-node/src/placement/view.rs`): the keeper's shell in the placement
+  `Driver`, under the lock its own admissions take. Its records are a folder of their own in the
+  node's record files; its room is the node's facts' capacity (`Driver::refresh_node`); the node
+  admits its own boxes against that room less every holder's reservations, given to its admission at
+  once whenever they change; and `local` is what the node holds itself (`peer::Node::held`: the larger,
+  per dimension, of its ledger's admissions and its admission index's, which charges backings too).
+- hex-sim scenarios: crashes on either side, dropped links, partitions and heals.
+- The shell over hyper-transport, once Hex step 4's transport is on main: the scheduler opens the
+  view (`Driver::open_view`) with the holders its configuration authorizes, and carries the messages.
 
 ## The defect today
 
