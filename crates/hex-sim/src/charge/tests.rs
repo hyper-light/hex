@@ -340,10 +340,7 @@ fn w14_budgets_sum_to_the_fleet_budget_and_cover_every_booking() {
     }
     n.observe(3, &sample(0, 6 * GIB)).unwrap();
     let budgets = n.budgets().unwrap();
-    assert_eq!(
-        budgets.iter().map(|(_, b)| b.bytes).sum::<u64>(),
-        10 * GIB
-    );
+    assert_eq!(budgets.iter().map(|(_, b)| b.bytes).sum::<u64>(), 10 * GIB);
     let slack = 4 * GIB;
     for (id, budget) in &budgets {
         let booking = n.booking(id).unwrap().mem_bytes;
@@ -382,7 +379,12 @@ fn w14_the_last_resort_ends_only_a_vm_past_its_budget() {
     let mut within = node(res(16_000, 10 * GIB, 0));
     for id in 1..=2 {
         within
-            .admit(id, class_of(u8::try_from(id).unwrap(), 1_000, 5 * GIB), 0, 1)
+            .admit(
+                id,
+                class_of(u8::try_from(id).unwrap(), 1_000, 5 * GIB),
+                0,
+                1,
+            )
             .unwrap();
     }
     window(&mut within, &[(1, 0, 5 * GIB), (2, 0, 5 * GIB)]);
@@ -425,10 +427,7 @@ fn w14_classes_past_their_bound_forget_the_oldest_without_a_live_vm() {
         window(&mut n, &[(1, 10, GIB / 2), (2, 10, GIB / 2)]);
     }
     assert_eq!(n.prior(&a), res(10, GIB / 2, 0));
-    assert!(matches!(
-        n.admit(3, c, 0, 1),
-        Err(ChargeError::Full { .. })
-    ));
+    assert!(matches!(n.admit(3, c, 0, 1), Err(ChargeError::Full { .. })));
     n.end(&1).unwrap();
     n.admit(3, c, 0, 1).unwrap();
     assert_eq!(n.prior(&a), a.ceiling());
@@ -466,7 +465,8 @@ fn w14_bookings_past_the_room_are_caught() {
     let run = || {
         let mut n = node(res(4_000, 64 * GIB, 0));
         for id in 1..=2 {
-            n.admit(id, class_of(1, 4_000, GIB), 0, 4).unwrap_or_default();
+            n.admit(id, class_of(1, 4_000, GIB), 0, 4)
+                .unwrap_or_default();
         }
         for _ in 0..SEEDABLE {
             window(&mut n, &[(1, 100, GIB / 4)]);
