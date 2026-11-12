@@ -1934,9 +1934,10 @@ impl<P: Recover + 'static> Recorded<hex_runtime::guest::WithGuest<P>> {
         let weak = Arc::downgrade(&authority);
         self.runtime.host().bind_native_books(weak.clone())?;
         self.runtime.guest().bind_books(weak)?;
+        // The session this node's store stamps its records with (`store::host_boot`; none on Windows).
         self.runtime
             .guest()
-            .bind_boot_session(self.books.store.boot().cloned())
+            .bind_boot_session(crate::store::host_boot().as_ref().ok().cloned().flatten())
     }
 
     /// Publish only the configured shared backing after the complete retained-owner preflight.
