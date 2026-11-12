@@ -203,3 +203,26 @@ fn a_held_member_that_ended_is_no_longer_held() {
     let scope = held.boxed.state.vm.as_ref().unwrap();
     assert!(scope.watchable(held.boxed.state.id.as_ref()).unwrap());
 }
+
+/// The scope's end reaches a member that ended on its own after its token was read, and was reaped (as a
+/// controller's child is when the controller ends first, its foreground child killed: run 11 of the
+/// helper-flake sweep). The kill finds no process at its pid: expect it gone, nothing signalled, and the
+/// scope still Running, never Uncertain (a member that has ended needs no end).
+#[test]
+fn a_member_reaped_before_its_kill_is_gone_and_the_scope_stays_certain() {
+    let mut held = Held::new();
+    let member = held.boxed.state.held().unwrap().stopped.get(&held.pid).unwrap();
+    held.child.kill().unwrap();
+    held.child.wait().unwrap();
+    let killed = held
+        .boxed
+        .state
+        .signal_stopped(member, sys::MemberSignal::Kill);
+    assert!(
+        matches!(killed, Ok(None)),
+        "{:?}",
+        killed.map(|signalled| signalled.map(|member| member.pid))
+    );
+    let scope = held.boxed.state.vm.as_ref().unwrap();
+    assert!(scope.watchable(held.boxed.state.id.as_ref()).unwrap());
+}
