@@ -910,8 +910,12 @@ impl Service {
             .map_err(failed)?,
         );
         // The view opens before any admission this process makes, so none is made without it (CV1).
-        let lane: Option<Lane> = match capacity {
-            Some(_) => None,
+        let lane = match capacity {
+            Some((lane, credentials)) => {
+                let report = Arc::clone(&report);
+                let log: hex_quic::capacity::Log = Arc::new(move |line: &str| report(id, line));
+                Some(Lane::serve(&driver, &config.state, lane, credentials, log)?)
+            }
             None => None,
         };
         let control_limit =
