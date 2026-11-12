@@ -3,7 +3,8 @@
 //! audit-token pid version at exec, so the token names an image the member no longer runs. Each case drives
 //! the watcher's own steps in their order (`apply`'s hold, `run_one`'s continue for a read, `stop_again`) on
 //! a real member, the scope's group leader, and expects the same process (pid and birth) signalled, held as
-//! before, and its scope still Running.
+//! before, and its scope still Running. And one that ends while held (its zombie unreaped, as a scope's
+//! controller's stays until finalize) is let go of, never taken for a process outside the scope.
 use super::scope_completion_tests::{Birth, unobserved_box};
 use super::*;
 use std::io::{BufRead as _, Write as _};
@@ -168,4 +169,37 @@ fn a_held_member_stopped_after_its_exec_is_continued_again() {
     assert!(run.is_ok(), "{:?}", run.map(|ran| ran.map(|ran| ran.pid)));
     held.wait_until(sys::Run::Live);
     held.still_held();
+}
+
+/// The held member ends (killed; its zombie unreaped, its parent this test, as the helper keeps a scope's
+/// controller until finalize) and the watcher's read continues the held: expect no run, the member no
+/// longer held, and the scope Running. A zombie is no process group's (`getpgid` finds no process), so a
+/// signal fenced on the group would take it for a process outside the scope.
+#[test]
+fn a_held_member_that_ended_is_no_longer_held() {
+    let mut held = Held::new();
+    rustix::process::kill_process(
+        rustix::process::Pid::from_raw(held.pid).unwrap(),
+        rustix::process::Signal::KILL,
+    )
+    .unwrap();
+    // Its zombie: proc_pid_rusage reads one (proc_pidinfo's run state finds none).
+    let deadline = Instant::now() + PATIENCE;
+    while !sys::rusage(held.pid)
+        .unwrap()
+        .is_some_and(|usage| usage.ended && usage.started == held.started)
+    {
+        assert!(Instant::now() < deadline, "the member never ended");
+        std::thread::park_timeout(Duration::from_millis(1));
+    }
+    let mut pids = Held::listing();
+    let run = held.boxed.state.run_one(held.pid, &mut pids, 0);
+    assert!(
+        matches!(run, Ok(None)),
+        "{:?}",
+        run.map(|ran| ran.map(|ran| ran.pid))
+    );
+    assert!(!held.boxed.state.held().unwrap().stopped.contains(&held.pid));
+    let scope = held.boxed.state.vm.as_ref().unwrap();
+    assert!(scope.watchable(held.boxed.state.id.as_ref()).unwrap());
 }
