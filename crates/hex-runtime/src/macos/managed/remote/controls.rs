@@ -252,10 +252,18 @@ pub(super) fn around_peer_read(fd: BorrowedFd<'_>, now: Read) {
         }
         if let Some(end) = close.end.lock().unwrap().take() {
             drop(end);
-            assert!(
-                matches!(sys::peer_pid(fd), Err(sys::PeerPidFailure::Native(error)) if error.raw_os_error() == Some(libc::ENOTCONN)),
-                "the helper's end closed but the node's socket is still connected"
-            );
+            // A program another test starts while this one makes its pair (macOS's socketpair takes
+            // no close-on-exec flag, and std's spawn passes every descriptor not marked) holds a copy
+            // of the end until it ends: the close has landed once the node's socket is disconnected.
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !matches!(sys::peer_pid(fd), Err(sys::PeerPidFailure::Native(error)) if error.raw_os_error() == Some(libc::ENOTCONN))
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "the helper's end closed but the node's socket is still connected"
+                );
+                std::thread::park_timeout(Duration::from_millis(10));
+            }
         }
     });
 }
