@@ -655,9 +655,8 @@ pub fn booked_at(
 /// Whether two receipts charge alike, what each booked aside: a receiver books the owner's receipt as it was
 /// booked, whatever it would book a new one at now (C2, C6).
 pub fn same_charge(a: Option<hex_api::Allocation>, b: Option<hex_api::Allocation>) -> bool {
-    let unbooked = |a: Option<hex_api::Allocation>| {
-        a.map(|a| hex_api::Allocation { booked: None, ..a })
-    };
+    let unbooked =
+        |a: Option<hex_api::Allocation>| a.map(|a| hex_api::Allocation { booked: None, ..a });
     unbooked(a) == unbooked(b)
 }
 

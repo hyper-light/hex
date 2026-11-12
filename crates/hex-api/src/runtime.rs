@@ -753,7 +753,10 @@ impl Allocation {
                 "charge disagrees with its immutable workload and cost profile",
             ));
         }
-        if self.booked.is_some_and(|booked| !self.resources.holds(booked)) {
+        if self
+            .booked
+            .is_some_and(|booked| !self.resources.holds(booked))
+        {
             return Err(invalid_cost("booked past the admitted charge"));
         }
         Ok(())

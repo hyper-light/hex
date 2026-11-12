@@ -104,11 +104,7 @@ impl Charges {
         }
         for vm in vms {
             if !self.node.holds(&vm.key) {
-                let class = ClassKey::new(
-                    vm.class,
-                    vm.allocation.cost.id,
-                    vm.allocation.resources,
-                );
+                let class = ClassKey::new(vm.class, vm.allocation.cost.id, vm.allocation.resources);
                 self.node
                     .track(
                         vm.key,

@@ -567,7 +567,9 @@ fn allocation_of<'a>(
         .booked
         .is_some_and(|booked| booked == allocation.resources || !allocation.resources.holds(booked))
     {
-        return Err(damaged("allocation receipt books past its charge, or all of it as a2"));
+        return Err(damaged(
+            "allocation receipt books past its charge, or all of it as a2",
+        ));
     }
     Ok(Some(allocation))
 }

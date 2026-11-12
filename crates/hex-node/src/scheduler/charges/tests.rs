@@ -117,7 +117,10 @@ fn w14_a_vm_no_longer_read_has_ended() {
     let mut charges = Charges::new(WINDOW, 8).unwrap();
     let start = Instant::now();
     charges
-        .observe(&[vm(1, 0, GIB, allocation), vm(2, 0, GIB, allocation)], start)
+        .observe(
+            &[vm(1, 0, GIB, allocation), vm(2, 0, GIB, allocation)],
+            start,
+        )
         .unwrap();
     charges
         .observe(&[vm(1, 1_000, GIB, allocation)], start + WINDOW)
