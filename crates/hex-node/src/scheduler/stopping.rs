@@ -2,8 +2,11 @@
 //! the connection keeps the strong handle. Kill/reap never holds the registry mutex, so pipe I/O
 //! and connection Drop can finish while service shutdown or an explicit peer interrupt cancels it.
 
+#[cfg(target_os = "macos")]
+use hex_runtime::macos::command::Child;
 use std::collections::BTreeMap;
 use std::io;
+#[cfg(not(target_os = "macos"))]
 use std::process::Child;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
@@ -189,7 +192,10 @@ impl Stopping {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    use hex_runtime::macos::command::{ChildStdin, ChildStdout, Command, Stdio};
     use std::io::{BufRead, BufReader, Read, Write};
+    #[cfg(not(target_os = "macos"))]
     use std::process::{ChildStdin, ChildStdout, Command, Stdio};
 
     #[test]
