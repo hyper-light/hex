@@ -1727,7 +1727,9 @@ mod io_tests {
     /// a DMA map refused by RLIMIT_MEMLOCK ends one), ended before readiness first looks at it, its
     /// end not yet collected. Do: start a stand-in on the configured output sinks, its start time
     /// read while it is held; let it write and end, and see it a zombie (`waitid` with `WNOWAIT`);
-    /// then wait for readiness as create does. Expect the refusal to carry what it wrote.
+    /// then wait for readiness as create does. Expect the refusal to carry what it wrote. Red at
+    /// 925882c1 (and racy before, 2 of 7 runs at af9131d4): readiness read no start time for the
+    /// zombie and refused it Invalid, "native readiness identity changed".
     #[test]
     fn original_a_vmm_ending_before_readiness_is_refused_with_what_it_wrote() {
         let (shards_api::LaunchIo { stdout, stderr, .. }, mut output) =
@@ -1744,7 +1746,9 @@ mod io_tests {
     /// AC-T7.4.1: original. As above, but its receipt has collected its end before readiness first
     /// looks, as the node's supervisor collects an ended VMM's at once. Do: start the stand-in held,
     /// let it write and end, have its receipt reap it and see no child has its pid; then wait for
-    /// readiness as create does. Expect the refusal to carry what it wrote.
+    /// readiness as create does. Expect the refusal to carry what it wrote. Red at 925882c1:
+    /// readiness opened no pidfd at the reaped pid and refused Os, "observing native readiness
+    /// controller" (ESRCH).
     #[test]
     fn original_a_vmm_reaped_before_readiness_is_refused_with_what_it_wrote() {
         let (shards_api::LaunchIo { stdout, stderr, .. }, mut output) =
@@ -1757,6 +1761,22 @@ mod io_tests {
             matches!(&refusal, Refusal::Broken(why) if why.contains(MEMLOCK)),
             "{refusal:?}"
         );
+    }
+
+    /// AC-T7.4.1: non-vacuity of the identity check the originals above pass. Do: hold a stand-in
+    /// on its gate, so it runs throughout, and wait for readiness through a receipt naming its pid
+    /// with another start. Expect Invalid, "native readiness identity changed": its receipt says
+    /// it runs, and no process with that identity does.
+    #[test]
+    fn a_running_vmm_whose_identity_names_another_start_is_refused() {
+        let (shards_api::LaunchIo { stdout, stderr, .. }, mut output) =
+            FirecrackerRuntime::vm_io().unwrap();
+        let (mut vmm, gate) = StandIn::held("exit 0", stdout, stderr);
+        vmm.identity.started += 1;
+        let refused = readiness(&vmm, &mut output);
+        vmm.end(gate);
+        vmm.reap();
+        assert_eq!(refused, Err(invalid("native readiness identity changed")));
     }
 
     /// AC-T7.4.1: do have a stand-in VMM write twice what one wire answer holds, as invalid
@@ -1891,7 +1911,8 @@ mod io_tests {
     /// its end collected before readiness first looks, as on a node whose supervisor reaps it at once.
     /// Do: create a CPU box through the launcher above, its stand-in VMM's identity published while it
     /// is held, then the VMM ended and reaped as the launch answers. Expect the create refused with
-    /// what the VMM wrote, and nothing of the box kept.
+    /// what the VMM wrote, and nothing of the box kept. Red at 925882c1: refused Os, "observing
+    /// native readiness controller" (ESRCH).
     #[test]
     fn original_a_create_whose_vmm_ends_before_readiness_is_refused_with_what_it_wrote() {
         use sha2::Digest;
