@@ -1,6 +1,8 @@
 use std::net::IpAddr;
 
-use hex_api::{Destination, Grant, Member, MemberKind, Ports, Proto, Refusal, ShardsImage, Upstream};
+use hex_api::{
+    Destination, Grant, Member, MemberKind, Ports, Proto, Refusal, ShardsImage, Upstream,
+};
 use proptest::prelude::*;
 use shards_api::image::{Keep, Narrowing};
 
@@ -202,7 +204,8 @@ fn awaited(grant: &Grant, commanded: bool) -> Option<Upstream> {
             ..
         } => Some(Upstream::MemberGrantsByAddress),
         Grant::Host { .. } => Some(Upstream::MemberHostService),
-        Grant::Publish { .. } => commanded.then_some(Upstream::PublishReceiver),
+        Grant::Publish { .. } if commanded => Some(Upstream::PublishReceiver),
+        Grant::Publish { .. } => None,
     }
 }
 

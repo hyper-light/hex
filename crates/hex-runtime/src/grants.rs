@@ -16,10 +16,12 @@ pub struct ImageNetwork {
     pub egress: Narrowing,
 }
 
-/// `grants` as an image boot takes them, or the refusal of the first one 482c5d78 can't hold exactly:
+/// `image`'s grants as its boot takes them, or the refusal of the first one 482c5d78 can't hold exactly:
 /// - a name, for any member: a harness's egress is ports to every address and its DNS any name (Shards'
 ///   harness-bringup-v1, H2), and an agent's remote MCP grant is kept image-wide, its member's scope out of sight;
-/// - an address, and the VM's own host: no grant of either form exists.
+/// - an address, and the VM's own host: no grant of either form exists;
+/// - a publish, on a run with a command of its own: that command takes every port its Agentfile gives no member
+///   (D122), and Shards names no port's receiver, so the grant's member can't be held (N6).
 ///
 /// The image's own grants are never kept, where `Narrowing::default()` would keep them whole. So with no grant the
 /// run has no network at all (`shards api-run`'s `network none`), and every published port is a grant's, at the host
@@ -45,6 +47,7 @@ pub fn program(image: &ShardsImage) -> Result<ImageNetwork, Refusal> {
                 ..
             } => Upstream::MemberGrantsByAddress,
             Grant::Host { .. } => Upstream::MemberHostService,
+            Grant::Publish { .. } if image.command.is_some() => Upstream::PublishReceiver,
             Grant::Publish {
                 proto,
                 port,
