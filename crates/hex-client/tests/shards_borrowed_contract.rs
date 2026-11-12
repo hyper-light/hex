@@ -6,12 +6,17 @@
 //! and 0029 (crates/api/tests/hex_borrowed_contract.rs), which Shards classed as Hex-only when it upstreamed the
 //! rest (hex-upstream-v1's README at Shards 482c5d78), so it is a test of Hex's on its dependency. Its body is
 //! unchanged (AC-T7.4.1).
+// Hex's workspace lints, which Shards' crate didn't hold it to: its assertions and eprintln are Hex's
+// disallowed macros, and its native observations (`started`, the Windows handle counts) are unsafe foreign
+// calls, each with its SAFETY comment, which Hex's workspace denies by default.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::print_stderr
+    clippy::print_stderr,
+    clippy::disallowed_macros,
+    unsafe_code
 )]
 
 use std::io::{Read, Write};
