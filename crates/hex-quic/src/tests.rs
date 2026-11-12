@@ -280,7 +280,7 @@ fn hex_quic_14_an_unenrolled_peer_is_refused_identity() {
 /// connection whose link ends with nothing said.
 #[cfg(unix)]
 mod silent {
-    use std::io::{ErrorKind, Read, Write};
+    use std::io::ErrorKind;
     use std::net::{SocketAddr, UdpSocket};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
