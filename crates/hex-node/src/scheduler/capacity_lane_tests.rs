@@ -12,7 +12,7 @@ use hex_core::patience::Patience;
 use hex_core::schedule as dto;
 use hex_quic::capacity::Link;
 use hex_quic::enroll::{self, sim::SimCa, store};
-use hex_quic::{Endpoint, Shape};
+use hex_quic::{Endpoint, PeerId, Refused, Shape};
 use hex_testkit::waits::{until, within};
 
 use super::{CapacityHolder, CapacityLane, Config, Report, Service};
@@ -61,8 +61,8 @@ fn kept() -> (Report, Arc<Mutex<Vec<String>>>) {
     (report, lines)
 }
 
-/// A link to the lane at `address` from a new endpoint `ca` enrolls as `name`.
-fn linked(ca: &SimCa, address: SocketAddr, name: &str) -> (Endpoint, Link) {
+/// A new endpoint `ca` enrolls as `name`, and its dial of the lane at `address`: the lane's peer id, or why not.
+fn dialed(ca: &SimCa, address: SocketAddr, name: &str) -> (Endpoint, Result<PeerId, Refused>) {
     ca.admit(name, name.as_bytes());
     let end = Endpoint::start(hex_quic::Config {
         credentials: enroll::enroll(ca, name, name.as_bytes().to_vec()).unwrap(),
@@ -75,8 +75,14 @@ fn linked(ca: &SimCa, address: SocketAddr, name: &str) -> (Endpoint, Link) {
         },
     })
     .unwrap();
-    let peer = within(&DIAL, |by| end.dial(SCHEDULER, address, by)).unwrap();
-    let link = Link::open(&end, peer).unwrap();
+    let peer = within(&DIAL, |by| end.dial(SCHEDULER, address, by));
+    (end, peer)
+}
+
+/// A link to the lane at `address` from a new endpoint `ca` enrolls as `name`.
+fn linked(ca: &SimCa, address: SocketAddr, name: &str) -> (Endpoint, Link) {
+    let (end, peer) = dialed(ca, address, name);
+    let link = Link::open(&end, peer.unwrap()).unwrap();
     (end, link)
 }
 
@@ -188,6 +194,50 @@ fn the_scheduler_serves_its_capacity_view_to_the_holders_it_names_alone() {
         "{lines:?}"
     );
     assert_eq!(forget(&service, "nobody.test"), Some(dto::Forget::Unknown));
+    service.shutdown().unwrap();
+}
+
+/// AC-T7.4.1, CV8, CV9 (goal 13's finding; docs/design/hex-quic.md Q10): a lane that names kiln-a alone holds that
+/// holder's two connections (Q8); two peers kiln's CA enrolled but the lane doesn't name dial it and keep their
+/// endpoints up; then kiln-a dials and says hello. Expect each unnamed peer refused at its handshake, typed
+/// (`Refused::Identity`), so it holds none of the lane's connections, and kiln-a welcomed and synced.
+#[test]
+fn a_peer_the_lane_doesnt_name_holds_none_of_its_connections() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = SimCa::new().unwrap();
+    let credentials = dir.path().join("enrollment");
+    enrolled_in(&ca, &credentials, SCHEDULER);
+    let lane = CapacityLane {
+        bind: loopback(),
+        credentials,
+        holders: vec![CapacityHolder {
+            name: KILN.into(),
+            user: None,
+        }],
+    };
+    let (report, _) = kept();
+    let service = Service::open(&config(dir.path(), Some(lane)), report).unwrap();
+    let address = service.capacity_address().unwrap();
+
+    let unnamed: Vec<(Endpoint, Result<PeerId, Refused>)> =
+        ["mallory-1.capacity.test", "mallory-2.capacity.test"]
+            .into_iter()
+            .map(|name| dialed(&ca, address, name))
+            .collect();
+    let (kiln_end, kiln_peer) = dialed(&ca, address, KILN);
+    let kiln_peer = kiln_peer
+        .unwrap_or_else(|why| panic!("the lane refused kiln-a, the holder it names: {why:?}"));
+    let mut link = Link::open(&kiln_end, kiln_peer).unwrap();
+    let mut kiln = Holder::start(KILN.into(), 1, 4, &[]).unwrap();
+    let hello = kiln.connect().unwrap();
+    let joined = talk(&mut link, &mut kiln, vec![hello]);
+    assert!(
+        matches!(joined.as_slice(), [Event::Synced { agree: true, .. }]),
+        "{joined:?}"
+    );
+    for (_, dial) in &unnamed {
+        assert_eq!(dial.as_ref().err(), Some(&Refused::Identity), "{dial:?}");
+    }
     service.shutdown().unwrap();
 }
 
