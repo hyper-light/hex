@@ -1,9 +1,9 @@
 //! One connection to a port on a peer, as its owner holds it (docs/design/hex-quic.md Q3): a byte stream whose
 //! bytes cross between the owner's threads and the driver's through two bounded seats, each guarded by one lock.
 //!
-//! - **In:** the frames the peer sent, at most [`HELD_AT`] waiting for the owner; the driver holds the peer's lane
-//!   once they are there (`Endpoint::hold_lane`), so QUIC's stream flow control holds the peer, and lets it go once
-//!   the owner has read them all.
+//! - **In:** the frames the peer sent, at most its credit's worth ([`hex_core::lanes::INITIAL_CREDIT`]) waiting for
+//!   the owner: each frame the owner has read is granted back to the peer, so a reader that stops holds its own
+//!   connection alone, and the driver reads every lane as frames come, which QUIC's shared connection window needs.
 //! - **Out:** at most one frame waiting for the driver, which a writer waits to have gone before it places the next:
 //!   QUIC's stream holds what the peer's credit lets it, and the writer waits behind it, never a queue that grows.
 //!
@@ -17,8 +17,8 @@ use hex_core::lanes::{self, Why};
 
 use crate::driver::{Command, Commands};
 
-/// The frames that wait for the owner before the driver holds the peer's lane: one past the one being read, so
-/// a reader that keeps up never stops the lane, and one that doesn't holds at most two frames and QUIC's window.
+/// The frames that wait for the owner at most: its credit's worth, one being read and the next
+/// ([`hex_core::lanes::INITIAL_CREDIT`]).
 pub const HELD_AT: usize = 2;
 
 /// A connection's end as its owner sees it.
@@ -42,8 +42,6 @@ struct State {
     here_ended: bool,
     /// The connection is gone both ways: why.
     gone: Option<Why>,
-    /// The driver holds the peer's lane for this connection: the owner tells it once it has read all.
-    held: bool,
 }
 
 /// What a connection's driver and owner share.
@@ -74,33 +72,32 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> io::Error {
     io::Error::other("a lock of a QUIC connection was poisoned")
 }
 
-/// What of the front frame fits `buf`, and whether the owner has now read all that came while the driver held the
-/// peer's lane for it; `None` while nothing has come and the peer's half is open.
-fn take(state: &mut MutexGuard<'_, State>, buf: &mut [u8]) -> io::Result<Option<(usize, bool)>> {
+/// What of the front frame fits `buf`, and the bytes of a frame the owner has now read whole, to grant the peer
+/// back; `None` while nothing has come and the peer's half is open.
+fn take(state: &mut MutexGuard<'_, State>, buf: &mut [u8]) -> io::Result<Option<(usize, u64)>> {
     if let Some(why) = state.gone {
         return Err(gone_error(why));
     }
     let at = state.read;
     let Some(front) = state.inbound.front() else {
-        return Ok((state.there == There::Ended).then(|| (0, false)));
+        return Ok((state.there == There::Ended).then(|| (0, 0)));
     };
     let rest = front.get(at..).unwrap_or_default();
     let n = rest.len().min(buf.len());
     if let (Some(to), Some(from)) = (buf.get_mut(..n), rest.get(..n)) {
         to.copy_from_slice(from);
     }
-    let whole = at.saturating_add(n) >= front.len();
-    if whole {
+    let len = front.len();
+    let whole = at.saturating_add(n) >= len;
+    let read = if whole {
         state.inbound.pop_front();
         state.read = 0;
+        u64::try_from(len).unwrap_or(u64::MAX)
     } else {
         state.read = at.saturating_add(n);
-    }
-    let drained = state.inbound.is_empty() && state.held;
-    if drained {
-        state.held = false;
-    }
-    Ok(Some((n, drained)))
+        0
+    };
+    Ok(Some((n, read)))
 }
 
 impl Shared {
@@ -121,7 +118,6 @@ impl Shared {
                 outbox: None,
                 here_ended: false,
                 gone: None,
-                held: false,
             }),
             changed: Condvar::new(),
             commands,
@@ -142,22 +138,15 @@ impl Shared {
         }
     }
 
-    /// The driver: bytes from the peer. Whether the peer's lane is to be held now.
-    pub(crate) fn arrived(&self, bytes: Vec<u8>) -> bool {
-        let Ok(mut state) = self.state.lock() else {
-            return false;
-        };
-        if state.gone.is_some() {
-            return false;
+    /// The driver: bytes from the peer, within the credit it was granted.
+    pub(crate) fn arrived(&self, bytes: Vec<u8>) {
+        if let Ok(mut state) = self.state.lock() {
+            if state.gone.is_some() {
+                return;
+            }
+            state.inbound.push_back(bytes);
         }
-        state.inbound.push_back(bytes);
-        let hold = state.inbound.len() >= HELD_AT && !state.held;
-        if hold {
-            state.held = true;
-        }
-        drop(state);
         self.told();
-        hold
     }
 
     /// The driver: the peer's half ended.
@@ -188,6 +177,11 @@ impl Shared {
     /// The driver: whether a frame waits for it.
     pub(crate) fn outbox_waits(&self) -> bool {
         self.state.lock().is_ok_and(|state| state.outbox.is_some())
+    }
+
+    /// The driver: the length of the frame waiting for it, if any.
+    pub(crate) fn outbox_len(&self) -> Option<usize> {
+        self.state.lock().ok()?.outbox.as_ref().map(Vec::len)
     }
 
     /// The driver: the frame it took went (or the connection is gone): a writer may place the next.
@@ -236,9 +230,9 @@ impl Conn {
     pub fn read(&self, buf: &mut [u8], deadline: Option<Instant>) -> io::Result<usize> {
         let mut state = self.shared.state()?;
         loop {
-            if let Some((n, drained)) = take(&mut state, buf)? {
+            if let Some((n, read)) = take(&mut state, buf)? {
                 drop(state);
-                self.drained(drained)?;
+                self.consumed(read)?;
                 return Ok(n);
             }
             state = self.wait(state, deadline)?;
@@ -251,23 +245,24 @@ impl Conn {
         let taken = take(&mut state, buf)?;
         drop(state);
         match taken {
-            Some((n, drained)) => {
-                self.drained(drained)?;
+            Some((n, read)) => {
+                self.consumed(read)?;
                 Ok(Some(n))
             }
             None => Ok(None),
         }
     }
 
-    /// Tells the driver the owner read all that had come, once it held the peer's lane for it: never under the
+    /// Tells the driver the owner read a frame's `bytes` whole, which it grants the peer back: never under the
     /// connection's lock, which the driver takes to hand it bytes.
-    fn drained(&self, drained: bool) -> io::Result<()> {
-        if !drained {
+    fn consumed(&self, bytes: u64) -> io::Result<()> {
+        if bytes == 0 {
             return Ok(());
         }
-        self.shared.command(Command::Drained {
+        self.shared.command(Command::Consumed {
             peer: self.shared.peer,
             conn: self.shared.key,
+            bytes,
         })
     }
 

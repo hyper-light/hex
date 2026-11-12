@@ -259,7 +259,7 @@ fn hex_quic_7_kinds_classes_and_the_data_bound_hold() {
         assert!(kind.class().rank() < Class::RANKS);
     }
     assert_eq!(Kind::of(0), None);
-    assert_eq!(Kind::of(10), None);
+    assert_eq!(Kind::of(11), None);
     // A Welcome travels on the refusals' lane alone, empty.
     let (mut a, b) = pair();
     let Out::Send {
@@ -276,7 +276,7 @@ fn hex_quic_7_kinds_classes_and_the_data_bound_hold() {
     let (mut a, mut b) = pair();
     let (conn, open) = a.connect(stream::STDIO_PORT).unwrap();
     settle(&mut a, &mut b, vec![open]);
-    let big = vec![7u8; DATA_BOUND * 2 + 1];
+    let big = vec![7u8; DATA_BOUND + 1];
     let frames = a.send(conn, &big).unwrap();
     let sizes: Vec<usize> = frames
         .iter()
@@ -285,5 +285,41 @@ fn hex_quic_7_kinds_classes_and_the_data_bound_hold() {
             other => panic!("{other:?}"),
         })
         .collect();
-    assert_eq!(sizes, vec![DATA_BOUND, DATA_BOUND, 1]);
+    assert_eq!(sizes, vec![DATA_BOUND, 1]);
+}
+
+/// HEX-QUIC-18 (Q3): a connection's bytes go within the credit its peer grants: its first INITIAL_CREDIT, then what
+/// the peer's owner has read; one byte more is refused Credit here, and a peer that sends past what it was granted
+/// is Broken; a grant reaches the sender as Credit, and its room grows by it.
+#[test]
+fn hex_quic_18_bytes_go_within_the_credit_the_peer_grants() {
+    let (mut a, mut b) = pair();
+    let (conn, open) = a.connect(stream::STDIO_PORT).unwrap();
+    settle(&mut a, &mut b, vec![open]);
+    let there = Conn {
+        here: false,
+        id: conn.id,
+    };
+    assert_eq!(a.room(conn), INITIAL_CREDIT);
+    let all = vec![1u8; usize::try_from(INITIAL_CREDIT).unwrap()];
+    let frames = a.send(conn, &all).unwrap();
+    assert_eq!(a.room(conn), 0);
+    assert_eq!(a.send(conn, &[1]).unwrap_err(), Why::Credit);
+    let mut stray = Vec::new();
+    let delivered = deliver(frames, &mut b, &mut stray);
+    assert!(stray.is_empty());
+    assert_eq!(delivered.len(), 2, "two frames of data");
+    // b's owner reads one frame: its grant goes back on b's lane and a's room grows by it.
+    let grant = b.grant(there, u64::try_from(DATA_BOUND).unwrap()).unwrap();
+    let mut events = Vec::new();
+    let made = deliver(vec![grant], &mut a, &mut events);
+    assert_eq!(made, vec![Out::Credit { conn }]);
+    assert_eq!(a.room(conn), u64::try_from(DATA_BOUND).unwrap());
+    // A peer that sends past its grant breaks the protocol: b has granted INITIAL_CREDIT + one frame.
+    let Some(lane) = a.our_lane(conn) else {
+        panic!("a's half is open");
+    };
+    let past = vec![2u8; DATA_BOUND];
+    assert!(b.frame(lane, Kind::StreamData, past.clone()).is_ok());
+    assert!(b.frame(lane, Kind::StreamData, vec![3u8]).is_err());
 }

@@ -49,10 +49,11 @@ pub(crate) enum Command {
         conn: lanes::Conn,
         why: Why,
     },
-    /// A connection's owner read all that had come: the peer's lane, if held, is let go.
-    Drained {
+    /// A connection's owner read `bytes` whole: the peer may send that many more.
+    Consumed {
         peer: PeerId,
         conn: lanes::Conn,
+        bytes: u64,
     },
     Negotiated {
         peer: PeerId,
@@ -205,8 +206,6 @@ struct PeerState {
     conns: BTreeMap<lanes::Conn, Arc<Shared>>,
     /// Frames each of this side's lanes holds back until the lane has room, in order.
     waiting: BTreeMap<LaneId, VecDeque<(Kind, Vec<u8>)>>,
-    /// The peer's lane each connection's owner made the driver hold.
-    held: BTreeMap<lanes::Conn, LaneId>,
     /// Connections whose End waits for the frame in their outbox to go first.
     end_after: std::collections::BTreeSet<lanes::Conn>,
 }
@@ -521,19 +520,16 @@ impl Driver {
                 if let Some(state) = self.peers.get_mut(&peer) {
                     state.conns.remove(&conn);
                     let outs = state.mux.reset(conn, why);
-                    if let Some(lane) = state.held.remove(&conn) {
-                        let _ = self.ep.release_lane(peer, lane);
-                    }
                     self.apply(peer, outs);
                 }
             }
-            Command::Drained { peer, conn } => {
-                if let Some(lane) = self
+            Command::Consumed { peer, conn, bytes } => {
+                if let Some(out) = self
                     .peers
                     .get_mut(&peer)
-                    .and_then(|state| state.held.remove(&conn))
+                    .and_then(|state| state.mux.grant(conn, bytes))
                 {
-                    let _ = self.ep.release_lane(peer, lane);
+                    self.apply(peer, vec![out]);
                 }
             }
             Command::Negotiated { peer, reply } => {
@@ -560,10 +556,10 @@ impl Driver {
         Ok(shared)
     }
 
-    /// A connection's outbox holds a frame: it goes, unless its lane holds frames back, when it waits in the
-    /// outbox, and its writer with it, for the lane's room.
+    /// A connection's outbox holds a frame: it goes, unless its lane holds frames back or the peer's credit has no
+    /// room for it, when it waits in the outbox, and its writer with it, for the lane's room or the peer's Credit.
     fn send(&mut self, peer: PeerId, conn: lanes::Conn) {
-        let Some(state) = self.peers.get(&peer) else {
+        let Some(state) = self.peers.get_mut(&peer) else {
             return;
         };
         let Some(shared) = state.conns.get(&conn) else {
@@ -573,7 +569,8 @@ impl Driver {
             .mux
             .our_lane(conn)
             .is_some_and(|lane| state.waiting.get(&lane).is_some_and(|w| !w.is_empty()));
-        if lane_waits {
+        let room = usize::try_from(state.mux.room(conn)).unwrap_or(usize::MAX);
+        if lane_waits || shared.outbox_len().is_none_or(|len| len > room) {
             return;
         }
         let Some(bytes) = shared.take_outbox() else {
@@ -621,7 +618,6 @@ impl Driver {
                         mux,
                         conns: BTreeMap::new(),
                         waiting: BTreeMap::new(),
-                        held: BTreeMap::new(),
                         end_after: std::collections::BTreeSet::new(),
                     },
                 );
@@ -759,6 +755,8 @@ impl Driver {
                     self.accepts.put(port, peer, shared);
                 }
                 Out::Opened { .. } => {}
+                // The peer's room for it grew: its outbox, if it waited for it, goes.
+                Out::Credit { conn } => self.send(peer, conn),
                 Out::Welcomed => {
                     if let Some(state) = self.peers.get_mut(&peer) {
                         state.welcomed = true;
@@ -768,27 +766,21 @@ impl Driver {
                     }
                 }
                 Out::Refused { conn, why } | Out::Reset { conn, why } => {
-                    if let Some(state) = self.peers.get_mut(&peer) {
-                        if let Some(shared) = state.conns.remove(&conn) {
-                            shared.gone(why);
-                        }
-                        if let Some(lane) = state.held.remove(&conn) {
-                            let _ = self.ep.release_lane(peer, lane);
-                        }
+                    if let Some(shared) = self
+                        .peers
+                        .get_mut(&peer)
+                        .and_then(|state| state.conns.remove(&conn))
+                    {
+                        shared.gone(why);
                     }
                 }
                 Out::Data { conn, bytes } => {
-                    let Some(state) = self.peers.get_mut(&peer) else {
-                        continue;
-                    };
-                    let Some(shared) = state.conns.get(&conn) else {
-                        continue;
-                    };
-                    if shared.arrived(bytes)
-                        && let Some(lane) = state.mux.their_lane(conn)
-                        && self.ep.hold_lane(peer, lane).is_ok()
+                    if let Some(shared) = self
+                        .peers
+                        .get(&peer)
+                        .and_then(|state| state.conns.get(&conn))
                     {
-                        state.held.insert(conn, lane);
+                        shared.arrived(bytes);
                     }
                 }
                 Out::Ended { conn } => {

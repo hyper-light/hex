@@ -17,7 +17,11 @@
 //!   had sent before is let go, by the owner's own word;
 //! - **Welcome**, on lane 0, is the accepting side's word that it admitted the peer: TLS 1.3 completes a client's
 //!   handshake before the server has verified the client's certificate (RFC 8446 §4.4.4, RFC 9001 §4.1.2), so a
-//!   dialer counts itself connected once it has heard it.
+//!   dialer counts itself connected once it has heard it;
+//! - **Credit** `bytes` on a side's lane lets the peer send that many more bytes of the connection: each side may
+//!   send [`INITIAL_CREDIT`] at first, and its peer grants what its owner has read. A reader that stops holds its own
+//!   connection alone: its peer stops at its credit, while QUIC's connection window, which every stream shares and
+//!   only bytes read give back, keeps flowing, since every lane is read as frames come (docs/design/hex-quic.md Q3).
 //!
 //! A frame on a lane is read in order after the frames before it, so a lane taken again after an End
 //! needs no more than its next Open or Accept to say what it carries now.
@@ -41,6 +45,11 @@ pub const LOG_PORT: u32 = 0x4845_5804;
 /// longest unit any port's stream carries whole, so a control message never needs two frames.
 pub const DATA_BOUND: usize = stream::MAX_FRAME;
 
+/// The bytes of a connection each side may send before its peer grants more: two whole frames, one its peer's owner
+/// reads while the next waits, so a reader that keeps up never waits on its peer's credit, and one that doesn't holds
+/// at most these.
+pub const INITIAL_CREDIT: u64 = 2 * DATA_BOUND as u64;
+
 /// What a frame is: its kind's code on the wire is hyper-transport's (`Classes::kind_code`). Codes only
 /// append; a peer that speaks another version of this protocol is refused at the handshake by its
 /// application protocol (docs/design/hex-quic.md Q3).
@@ -58,10 +67,11 @@ pub enum Kind {
     /// Bytes of a staging or log connection.
     BulkData,
     Welcome,
+    Credit,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 9] = [
+    pub const ALL: [Kind; 10] = [
         Kind::Open,
         Kind::Accept,
         Kind::Refuse,
@@ -71,6 +81,7 @@ impl Kind {
         Kind::StreamData,
         Kind::BulkData,
         Kind::Welcome,
+        Kind::Credit,
     ];
 
     pub const fn code(self) -> u16 {
@@ -84,6 +95,7 @@ impl Kind {
             Kind::StreamData => 7,
             Kind::BulkData => 8,
             Kind::Welcome => 9,
+            Kind::Credit => 10,
         }
     }
 
@@ -101,6 +113,7 @@ impl Kind {
             | Kind::End
             | Kind::Reset
             | Kind::Welcome
+            | Kind::Credit
             | Kind::ControlData => Class::Control,
             Kind::StreamData => Class::Stream,
             Kind::BulkData => Class::Bulk,
@@ -165,6 +178,9 @@ pub enum Why {
     Gone,
     #[error("a frame broke the lanes' protocol")]
     Protocol,
+    /// Never on the wire: more bytes than the peer allows now ([`Mux::room`]).
+    #[error("the peer allows no more of its bytes now")]
+    Credit,
     /// Never on the wire: the connection to the peer closed, and every connection on it with it.
     #[error("the connection to the peer closed")]
     Closed,
@@ -181,6 +197,7 @@ impl Why {
             Why::Gone => 4,
             Why::Protocol => 5,
             Why::Closed => 6,
+            Why::Credit => 7,
             Why::Other(code) => code,
         }
     }
@@ -193,6 +210,7 @@ impl Why {
             4 => Why::Gone,
             5 => Why::Protocol,
             6 => Why::Closed,
+            7 => Why::Credit,
             other => Why::Other(other),
         }
     }
@@ -229,6 +247,8 @@ pub enum Out {
     Closed { conn: Conn },
     /// The peer admitted this side.
     Welcomed,
+    /// The peer granted `conn` more room: what waited for it may go.
+    Credit { conn: Conn },
 }
 
 /// The mux's bounds, each its owner's derived count (docs/design/hex-quic.md Q8).
@@ -246,6 +266,27 @@ struct State {
     data: Kind,
     here: Here,
     there: There,
+    /// The bytes the peer allows this side to send in all, and those sent.
+    allowed: u64,
+    sent: u64,
+    /// The bytes this side allows the peer to send in all, and those it sent.
+    granted: u64,
+    received: u64,
+}
+
+impl State {
+    fn new(port: u32, data: Kind, here: Here, there: There) -> Self {
+        Self {
+            port,
+            data,
+            here,
+            there,
+            allowed: INITIAL_CREDIT,
+            sent: 0,
+            granted: INITIAL_CREDIT,
+            received: 0,
+        }
+    }
 }
 
 /// This side's half, on this side's lane.
@@ -324,15 +365,6 @@ impl Mux {
         self.free.retain(|lane| *lane <= lanes);
     }
 
-    /// The peer's lane `conn`'s bytes come on, while its half is open: what the shell holds when its owner
-    /// doesn't read.
-    pub fn their_lane(&self, conn: Conn) -> Option<LaneId> {
-        match self.conns.get(&conn)?.there {
-            There::On(lane) => Some(lane),
-            There::Pending | There::Ended(_) => None,
-        }
-    }
-
     /// This side's lane `conn` sends on, while its half is open: where its next frames queue.
     pub fn our_lane(&self, conn: Conn) -> Option<LaneId> {
         match self.conns.get(&conn)?.here {
@@ -372,12 +404,7 @@ impl Mux {
         let conn = Conn { here: true, id };
         self.conns.insert(
             conn,
-            State {
-                port,
-                data,
-                here: Here::Open(lane),
-                there: There::Pending,
-            },
+            State::new(port, data, Here::Open(lane), There::Pending),
         );
         let mut payload = Vec::with_capacity(12);
         payload.extend_from_slice(&port.to_be_bytes());
@@ -393,12 +420,18 @@ impl Mux {
     }
 
     /// `bytes` of `conn` to the peer: the frames that carry them, each at most [`DATA_BOUND`]. Refused once this
-    /// side's half has ended, or for a connection that is gone.
-    pub fn send(&self, conn: Conn, bytes: &[u8]) -> Result<Vec<Out>, Why> {
-        let state = self.conns.get(&conn).ok_or(Why::Gone)?;
+    /// side's half has ended, for a connection that is gone, and past the room the peer allows ([`Mux::room`]).
+    pub fn send(&mut self, conn: Conn, bytes: &[u8]) -> Result<Vec<Out>, Why> {
+        let state = self.conns.get_mut(&conn).ok_or(Why::Gone)?;
         let Here::Open(lane) = state.here else {
             return Err(Why::Gone);
         };
+        let len = u64::try_from(bytes.len()).map_err(|_| Why::Credit)?;
+        let sent = state.sent.checked_add(len).ok_or(Why::Credit)?;
+        if sent > state.allowed {
+            return Err(Why::Credit);
+        }
+        state.sent = sent;
         Ok(bytes
             .chunks(DATA_BOUND)
             .map(|chunk| Out::Send {
@@ -407,6 +440,27 @@ impl Mux {
                 payload: chunk.to_vec(),
             })
             .collect())
+    }
+
+    /// The bytes of `conn` the peer allows this side to send now.
+    pub fn room(&self, conn: Conn) -> u64 {
+        self.conns
+            .get(&conn)
+            .map_or(0, |state| state.allowed.saturating_sub(state.sent))
+    }
+
+    /// `conn`'s owner has read `bytes` more: the peer may send that many more. Nothing for a connection gone.
+    pub fn grant(&mut self, conn: Conn, bytes: u64) -> Option<Out> {
+        let state = self.conns.get_mut(&conn)?;
+        if bytes == 0 || their_lane(state.there).is_none() {
+            return None;
+        }
+        state.granted = state.granted.checked_add(bytes)?;
+        Some(Out::Send {
+            lane: state.here.lane(),
+            kind: Kind::Credit,
+            payload: bytes.to_be_bytes().to_vec(),
+        })
     }
 
     /// The port `conn` is to.
@@ -519,6 +573,7 @@ impl Mux {
             Kind::ControlData | Kind::StreamData | Kind::BulkData => {
                 self.data(lane, kind, payload, &mut out)?;
             }
+            Kind::Credit => self.credited(lane, &payload, &mut out)?,
             Kind::Welcome => {
                 if lane != REFUSALS || !payload.is_empty() {
                     return Err(Broken(format!(
@@ -584,12 +639,7 @@ impl Mux {
         self.there.insert(lane, Lane::Bound(conn));
         self.conns.insert(
             conn,
-            State {
-                port,
-                data,
-                here: Here::Open(mine),
-                there: There::On(lane),
-            },
+            State::new(port, data, Here::Open(mine), There::On(lane)),
         );
         out.push(Out::Send {
             lane: mine,
@@ -745,6 +795,16 @@ impl Mux {
                         "{kind:?} on a connection whose port's bytes are {expected:?}"
                     )));
                 }
+                if let Some(state) = self.conns.get_mut(&conn) {
+                    let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                    state.received = state.received.saturating_add(len);
+                    if state.received > state.granted {
+                        return Err(Broken(format!(
+                            "{} bytes on connection {} past the {} it was granted",
+                            state.received, conn.id, state.granted
+                        )));
+                    }
+                }
                 if !bytes.is_empty() {
                     out.push(Out::Data { conn, bytes });
                 }
@@ -754,6 +814,41 @@ impl Mux {
                 "{kind:?} on lane {lane}, which carries nothing"
             ))),
         }
+    }
+}
+
+impl Mux {
+    fn credited(&mut self, lane: LaneId, payload: &[u8], out: &mut Vec<Out>) -> Result<(), Broken> {
+        let bytes = <[u8; 8]>::try_from(payload)
+            .map(u64::from_be_bytes)
+            .map_err(|_| Broken(format!("a Credit of {} bytes, not 8", payload.len())))?;
+        match self.there.get(&lane).copied() {
+            Some(Lane::Discard) => Ok(()),
+            Some(Lane::Bound(conn)) => {
+                let Some(state) = self.conns.get_mut(&conn) else {
+                    return Ok(());
+                };
+                state.allowed = state.allowed.checked_add(bytes).ok_or_else(|| {
+                    Broken(format!(
+                        "a Credit past every byte on connection {}",
+                        conn.id
+                    ))
+                })?;
+                out.push(Out::Credit { conn });
+                Ok(())
+            }
+            None => Err(Broken(format!(
+                "a Credit on lane {lane}, which carries nothing"
+            ))),
+        }
+    }
+}
+
+/// The peer's lane a half on one names, if it is on one.
+fn their_lane(there: There) -> Option<LaneId> {
+    match there {
+        There::On(lane) => Some(lane),
+        There::Pending | There::Ended(_) => None,
     }
 }
 
