@@ -45,10 +45,10 @@ use hex_api::{
     Allocation, BackendUnavailable, BackingGrant, BackingKey, BackingOffer, BackingPhase, Bounds,
     BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
     ConnectFailure, ConnectPhase, ConnectReply, DeviceHolder, DeviceId, DeviceInfo, DeviceKind,
-    Execution, Exit, GpuEligibility, ImageArch, ImageOs, ImagePlatform, IoKind, IoRates,
-    LifecycleCause, MAX_DEVICES, MAX_RUNTIME_ROUTES, Mount, Network, OciSpec, PhysicalDevice,
-    PhysicalReport, Program, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost,
-    Signal, Usage, User,
+    DeviceUnavailable, Execution, Exit, GpuEligibility, ImageArch, ImageOs, ImagePlatform, IoKind,
+    IoRates, LifecycleCause, MAX_DEVICES, MAX_RUNTIME_ROUTES, Mount, Network, OciSpec,
+    PhysicalDevice, PhysicalReport, Program, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt,
+    RuntimeCost, Signal, Usage, User,
 };
 
 use crate::netns;
@@ -542,7 +542,8 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
                     put_device_holder(w, device.holder.as_ref())?;
                 }
                 put_cost_option(w, capacity.cost)?;
-                put_capacity_routes(w, capacity)
+                put_capacity_routes(w, capacity)?;
+                put_unavailable_devices(w, &capacity.unavailable)
             })?;
         }
         Answer::PhysicalReport(report) => {
@@ -941,6 +942,17 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                     "backings",
                     backing_offer,
                 )?,
+                // Last, so an older peer's report, which ends before it, reads as none.
+                unavailable: if r.at_end() {
+                    Vec::new()
+                } else {
+                    r.device_list(UNAVAILABLE_MIN_BYTES, |r| {
+                        Ok(DeviceUnavailable {
+                            id: device_id(r)?,
+                            why: r.device_string("unavailable.why")?,
+                        })
+                    })?
+                },
             };
             check_capacity(&capacity)?;
             Ok(capacity)
@@ -1579,6 +1591,20 @@ fn backing_grant(r: &mut Reader<'_>) -> Result<BackingGrant, Fault> {
         .check()
         .map_err(|_| Fault::value("backing", "invalid fixed grant or physical claims"))?;
     Ok(grant)
+}
+
+/// A device a capacity won't offer: its kind and key, then its reason's length.
+const UNAVAILABLE_MIN_BYTES: usize = size_of::<u8>() + size_of::<u64>() + size_of::<u32>();
+
+/// The devices a capacity lists but won't offer, each with why: after every other field of it (AC-T7.4.1).
+fn put_unavailable_devices(w: &mut Writer, unavailable: &[DeviceUnavailable]) -> Result<(), Fault> {
+    w.reserve_fixed(size_of::<u32>())?;
+    w.device_count(unavailable.len(), UNAVAILABLE_MIN_BYTES)?;
+    for device in unavailable {
+        put_device_id(w, &device.id);
+        w.string(&device.why)?;
+    }
+    Ok(())
 }
 
 fn put_capacity_routes(w: &mut Writer, capacity: &Capacity) -> Result<(), Fault> {
@@ -2760,6 +2786,11 @@ impl<'a> Reader<'a> {
                 kind,
             })
         }
+    }
+
+    /// Whether nothing of the message is left to read.
+    pub(crate) fn at_end(&self) -> bool {
+        self.rest.is_empty()
     }
 
     /// That nothing follows what the message's version defines, in the other protocols this codec carries.

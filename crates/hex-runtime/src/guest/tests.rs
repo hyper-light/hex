@@ -1608,6 +1608,7 @@ fn runtime_capacity_forwards_guest_room_clamps_config_and_preserves_guest_disk()
             mem_bytes: 900 << 20,
             disk_bytes: 7 << 30,
         },
+        unavailable: Vec::new(),
     };
     let runtime = capacity_runtime(Some(reported.try_clone().unwrap()), config);
     let actual = runtime.capacity(Class::Oci).unwrap().unwrap();
@@ -1665,6 +1666,7 @@ fn runtime_capacity_keeps_smaller_actual_guest_room() {
             id: "inner".into(),
             total: room,
             free,
+            unavailable: Vec::new(),
         },
         &configured,
         &kept_identity(123),

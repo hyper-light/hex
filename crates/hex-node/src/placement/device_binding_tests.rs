@@ -148,6 +148,7 @@ impl Runtime for DeviceRuntime {
             total: room,
             free: room,
             devices,
+            unavailable: Vec::new(),
         };
         report.check()?;
         Ok(Some(report))

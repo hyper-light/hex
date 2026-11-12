@@ -51,6 +51,7 @@ fn device_capacity(devices: Vec<DeviceInfo>) -> Capacity {
         total: CapacityResources::default(),
         free: CapacityResources::default(),
         devices,
+        unavailable: Vec::new(),
     }
 }
 
@@ -407,6 +408,7 @@ fn runtime_capacity_roundtrip_and_invalid_room_refused() {
             mem_bytes: 600 << 20,
             disk_bytes: 7 << 30,
         },
+        unavailable: Vec::new(),
     };
     for value in [None, Some(capacity.try_clone().unwrap())] {
         let expected = Answer::Capacity(value);

@@ -97,6 +97,7 @@ fn report(devices: Vec<DeviceInfo>) -> Capacity {
         routes: Vec::new(),
         device_routes: Vec::new(),
         backings: Vec::new(),
+        unavailable: Vec::new(),
     }
 }
 
@@ -479,6 +480,34 @@ fn foreign_holders_are_unavailable_but_current_namespace_survives_for_recovery()
         assert_eq!((facts, reports), before_inputs);
         assert_eq!(cluster, before_cluster);
         eprintln!("DEVICE_OFFER holder={holder:?}; available={available}; bound={choice:?}");
+    }
+}
+
+/// The lead's ruling of 2026-11-11 (AC-T7.4.1; original): a device a runtime lists but won't offer, with why (a VFIO
+/// function no reset clears, spent on this boot), read as free, so placement chose it and only its create refused it.
+/// Do: offer a report whose one measured GPU, unheld, the report lists unavailable with its reason. Expect it offered
+/// unavailable and never bound; the same report without that listing offers it free and binds it.
+#[test]
+fn original_a_device_the_runtime_lists_unavailable_is_never_bound() {
+    for listed in [false, true] {
+        let (facts, mut reports) = inputs();
+        let report = reports[0].1.as_mut().unwrap();
+        report.devices.truncate(1);
+        report.device_routes.truncate(1);
+        if listed {
+            report.unavailable = vec![hex_api::DeviceUnavailable {
+                id: report.devices[0].id,
+                why: "0000:01:02.3 has no reset method that clears it between VMs, and a VM had it on this boot; \
+                      the host must reboot"
+                    .into(),
+            }];
+        }
+        let mut cluster = service_cluster(&facts);
+        let actual = offered(&reports, &facts, &mut cluster);
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].available, !listed, "listed unavailable: {listed}");
+        let choice = bind(&actual, |index| actual[index].available, 1, &Ask::default());
+        assert_eq!(choice.is_some(), !listed, "placement binds it: {choice:?}");
     }
 }
 

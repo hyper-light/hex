@@ -900,6 +900,7 @@ pub(super) mod tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
+            runtime: PathBuf::from("/nonexistent/runtime"),
             boot: None,
         };
         (runtime, owner)
