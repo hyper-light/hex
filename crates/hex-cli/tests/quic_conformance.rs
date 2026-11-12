@@ -59,6 +59,7 @@ impl Fixture for BinFixture {
             bounds,
             class: ClassSpec::Process,
             owner: None,
+            band: 0,
         }
     }
 

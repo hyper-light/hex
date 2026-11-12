@@ -368,6 +368,7 @@ fn spec(name: &str, command: Option<Vec<String>>) -> BoxSpec {
         devices: Vec::new(),
         allocation: Some(allocation()),
         route: None,
+        band: 0,
     }
 }
 

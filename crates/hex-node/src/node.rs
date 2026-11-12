@@ -2716,6 +2716,7 @@ mod tests {
                 class: ClassSpec::Bundle(PathBuf::from("bundle")),
                 owner: None,
                 allocation: None,
+                band: 0,
             },
             Phase::Ready,
             Vec::new(),

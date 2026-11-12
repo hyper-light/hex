@@ -158,8 +158,8 @@ fn whole() -> Allocation {
     cost().allocate(CapacityResources::default()).unwrap()
 }
 
-fn shards(_: &BoxId) -> Result<Option<(Class, Allocation)>, Refusal> {
-    Ok(Some((Class::Shards, whole())))
+fn shards(_: &BoxId) -> Result<Option<(Class, Allocation, u8)>, Refusal> {
+    Ok(Some((Class::Shards, whole(), 0)))
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C4 and C5 in the node: the placement's cgroup paths and weights. Do run a window
@@ -222,13 +222,13 @@ fn w14_a_shards_guests_room_awaits_guest_room_and_its_ring_pins_within_it() {
         io.set(cgroup.dir(), 0, GIB);
     }
     let mut learner = Learner::new(&fleet(), machine()).unwrap();
-    let record = |id: &BoxId| -> Result<Option<(Class, Allocation)>, Refusal> {
+    let record = |id: &BoxId| -> Result<Option<(Class, Allocation, u8)>, Refusal> {
         let class = if id.as_str() == "vm-1" {
             Class::Shards
         } else {
             Class::Firecracker
         };
-        Ok(Some((class, whole())))
+        Ok(Some((class, whole(), 0)))
     };
     learner
         .window(&io, vms, record, &[], machine(), Instant::now())
@@ -276,13 +276,13 @@ fn w14_a_capacity_answer_carries_priors_use_and_holdings_most_past_first() {
     assert_eq!(booked.booking(), prior);
     let both = running(&[("vm-1", 1), ("vm-2", 2)]);
     io.set(both[1].2.dir(), 0, 2 * GIB);
-    let record = move |id: &BoxId| -> Result<Option<(Class, Allocation)>, Refusal> {
+    let record = move |id: &BoxId| -> Result<Option<(Class, Allocation, u8)>, Refusal> {
         let allocation = if id.as_str() == "vm-2" {
             booked
         } else {
             whole()
         };
-        Ok(Some((Class::Shards, allocation)))
+        Ok(Some((Class::Shards, allocation, 0)))
     };
     let later = start + WINDOW * 2_000;
     learner
@@ -512,10 +512,11 @@ fn w14_every_child_of_the_nodes_cgroup_weighs_on_one_scale() {
 
 /// Three Shards VMs of 16 CPUs and 8 GiB, each booked at 4 GiB of memory (their class's prior), in a fleet whose
 /// memory budget is 16 GiB, so each VM's budget is its booking and a third of the 4 GiB slack: what `running` lists.
-fn booked_at_four(_: &BoxId) -> Result<Option<(Class, Allocation)>, Refusal> {
+fn booked_at_four(_: &BoxId) -> Result<Option<(Class, Allocation, u8)>, Refusal> {
     Ok(Some((
         Class::Shards,
         whole().booked_at(res(16_000, 4 * GIB)),
+        0,
     )))
 }
 
@@ -616,6 +617,58 @@ fn w14_the_last_resort_ends_the_vm_most_past_its_budget_and_no_other() {
         "{:?}",
         learner.resort()
     );
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C3 and C5 in the node agent: each VM in the band its record names. Do run a window
+/// of three VMs booked at 4 GiB in a 16 GiB fleet, vm-1 in band 2, vm-2 in band 3 and vm-3 in band 1, then one in
+/// which each holds its whole 8 GiB. Expect the fleet's 4 GiB of room raising vm-2's booking, the highest band's, to its
+/// 8 GiB, so vm-1 and vm-3 are each 4 GiB past their budgets; vm-3, the lower band of the two, ended; and its end
+/// saying band 1.
+#[test]
+fn w14_the_last_resort_ends_the_lowest_band_first() {
+    let banded = |id: &BoxId| -> Result<Option<(Class, Allocation, u8)>, Refusal> {
+        let band = match id.as_str() {
+            "vm-1" => 2,
+            "vm-2" => 3,
+            _ => 1,
+        };
+        Ok(Some((
+            Class::Shards,
+            whole().booked_at(res(16_000, 4 * GIB)),
+            band,
+        )))
+    };
+    let io = Record::default();
+    let fleet_budget = res(32_000, 16 * GIB);
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    let start = Instant::now();
+    for (_, _, cgroup) in &fleet_of_three() {
+        io.set(cgroup.dir(), 0, 0);
+    }
+    learner
+        .window(&io, fleet_of_three(), banded, &[], fleet_budget, start)
+        .unwrap();
+    for id in ["vm-1", "vm-2", "vm-3"] {
+        io.set(&fleet().join(id), 0, 8 * GIB);
+    }
+    learner
+        .window(
+            &io,
+            fleet_of_three(),
+            banded,
+            &[],
+            fleet_budget,
+            start + WINDOW,
+        )
+        .unwrap();
+    assert_eq!(*io.kills.borrow(), vec![fleet().join("vm-3")]);
+    let learned = learner.learned(Class::Shards, &[cost()]).unwrap().unwrap();
+    let ends: Vec<_> = learned
+        .ended
+        .iter()
+        .map(|end| (end.id.as_str(), end.band, end.held, end.budget))
+        .collect();
+    assert_eq!(ends, [("vm-3", 1, 8 * GIB, 4 * GIB)]);
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C5's last resort where the node can't act. Do run a window of three VMs booked at
@@ -722,6 +775,7 @@ fn shards_spec(id: &BoxId) -> hex_api::BoxSpec {
         devices: Vec::new(),
         allocation: Some(whole()),
         route: None,
+        band: 0,
     }
 }
 
