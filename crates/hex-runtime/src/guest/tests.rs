@@ -670,6 +670,8 @@ struct Planned {
     boots: AtomicUsize,
     /// Each boot's memory, in MiB.
     memory: Mutex<Vec<u64>>,
+    /// Each boot's kernel command line.
+    cmdlines: Mutex<Vec<String>>,
 }
 
 impl Planned {
@@ -682,8 +684,25 @@ impl Planned {
             stops: Arc::new(AtomicUsize::new(0)),
             boots: AtomicUsize::new(0),
             memory: Mutex::new(Vec::new()),
+            cmdlines: Mutex::new(Vec::new()),
         }
     }
+}
+
+/// The boot's deadline `cmdline`, a guest's kernel command line, names, once (`hex.ready-ms=`).
+pub(super) fn ready_ms(cmdline: &str) -> Duration {
+    let named: Vec<u64> = cmdline
+        .split_whitespace()
+        .filter_map(|word| word.strip_prefix("hex.ready-ms="))
+        .map(|ms| ms.parse().unwrap())
+        .collect();
+    let [ms] = named.as_slice() else {
+        panic!(
+            "{cmdline:?} names the boot's deadline (hex.ready-ms) {} times, not once",
+            named.len()
+        )
+    };
+    Duration::from_millis(*ms)
 }
 
 struct PlannedGuest {
@@ -899,6 +918,7 @@ impl shards_api::Guests for Planned {
         self.booted.lock().unwrap().push(Instant::now());
         self.boots.fetch_add(1, Ordering::SeqCst);
         self.memory.lock().unwrap().push(spec.memory_mib);
+        self.cmdlines.lock().unwrap().push(spec.cmdline.clone());
         let boots = self.plan.lock().unwrap().pop().unwrap();
         Ok(Box::new(PlannedGuest {
             boots,
@@ -952,6 +972,38 @@ fn the_first_dial_spends_the_boots_own_deadline() {
         deadlines[0],
         asked + bound,
         booted[0] + bound
+    );
+}
+
+/// AC-T7.4.1 (original): on 00aad a guest's relay was refused its node's hello at the hello's learned bound, the node
+/// busy initializing the guest's GPU, while the boot had most of its deadline left, and the guest panicked. A
+/// Firecracker guest is told its boot's deadline (`hex.firecracker-ready-ms`), which its relay's hello takes as its
+/// caller's; a Shards guest is told none. Do: boot a guest. Expect its kernel command line to name the boot's deadline
+/// once (`hex.ready-ms=`): what is left of the first dial's bound as it boots, in milliseconds rounded up, so that,
+/// counted from the boot, it ends no sooner than the host's.
+#[test]
+fn original_a_shards_boot_tells_its_guest_the_boots_deadline() {
+    if shards_api::backend().is_err() {
+        eprintln!("SKIP: no Shards backend on this host");
+        return;
+    }
+    let guests = Arc::new(Planned::new(&[Boots::Ready]));
+    let rt = GuestRuntime::new(guests.clone(), config());
+    let bound = rt.first_dial_bound().unwrap();
+    let asked = Instant::now();
+    rt.guest().unwrap();
+    let cmdlines = guests.cmdlines.lock().unwrap().clone();
+    let booted = guests.booted.lock().unwrap().clone();
+    eprintln!("hex_guest_ready_word boot=cpu bound={bound:?} cmdlines={cmdlines:?}");
+    assert_eq!(cmdlines.len(), 1);
+    let given = ready_ms(&cmdlines[0]);
+    assert!(
+        given <= bound + Duration::from_millis(1),
+        "{given:?} is past the boot's bound {bound:?}"
+    );
+    assert!(
+        booted[0] + given >= asked + bound,
+        "{given:?} from the boot ends before the host's deadline, {bound:?} from before it"
     );
 }
 

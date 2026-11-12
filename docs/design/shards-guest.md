@@ -626,6 +626,14 @@ Hex's tests of the channel, each citing its ID:
   `Recorded<WithGuest<…>>`, as the macOS and Windows nodes serve their guests, HEX-GUEST-18's simulated guest
   behind it: the guest reached from the host's node through the seam (native plan step 5), both stdio forms
   among its cases (`crates/hex-cli/tests/node_socket.rs`).
+- HEX-GUEST-43 (AC-T7.4.1): the host tells a guest its boot's deadline on its kernel command line,
+  `hex.ready-ms=`: what is left of HEX-GUEST-34's bound as it boots (a managed boot's, of its create's budget, the
+  same bound), in milliseconds rounded up, so the guest, counting from its kernel's start, ends no sooner than its
+  host (`hex_runtime::guest::READY_MS`), as a Firecracker guest is told `hex.firecracker-ready-ms`. Init waits for
+  its node's and relay's ready lines within it, refused past it, and hands it to them, whose calls to the node before
+  the guest is ready take it as their caller's, a learned wait passing on the way only a run-out recorded
+  (`hex guest`). A guest told none keeps its learned bounds. On 00aad the relay's hello, refused at its learned
+  bound while a GPU's initialization held the node, ended a boot with most of its deadline left.
 
 ## 7. What would falsify it
 
