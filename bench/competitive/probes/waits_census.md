@@ -43,7 +43,7 @@ seed for a row under it, and names the row's n.
 | `node.emptying` | a killed box's emptying, from its kill to `populated 0` | `tmpfs` | `EMPTY_PATIENCE`, serve's `STOP_PATIENCE` | `node.rs`, `EMPTYING` |
 | `node.listing` | a recovery's listing, per entry | `tmpfs` and `disk` (`restart`): the slower | `LIST_PATIENCE` | `node.rs`, `LISTING` |
 | `serve.reads` | a list's worker's wait for its client to read a part | `tmpfs` (`list`) | `READ_PATIENCE` | `crates/hex-node/src/serve.rs`, `READS` |
-| `client.answer.<kind>` | a client's call's wait for its answer, by kind | `tmpfs` | each kind's | `crates/hex-client/src/linux.rs`, `ANSWERS` |
+| `client.answer.<kind>` | a client's call's wait for its answer, by kind; a call a box's class times (a create, a start, a delete, an exec...), by kind and class, `client.answer.<kind>.<class>` from 2026-11-11 (AC-T7.4.1), the rows before it seeding `process` and `oci` | `tmpfs` | each kind's, and class's | `crates/hex-client/src/linux.rs`, `ANSWERS` and `CLASS_ANSWERS` |
 | `netcheck.settles`, `netcheck.answers` | a fresh namespace's IPv6 settle; a dump's read | `owner` | the network check's | `crates/hex-runtime/src/linux/oci/netcheck.rs` |
 | `netns.make` | the pool's refill thread's make of a network namespace (no node wait; the census's timing point) | `tmpfs` | the netns tests' patience | `crates/hex-node/src/netns/tests.rs`, `MAKE_RECORDED` |
 | `lifecycle.exec` (from `seam-<arm>.json`) | a container's exec of `true`, to the program's end | `debug` | a test's own child's end; the conformance suites' Linux seed is the slower first-run record above it (`HostClass::Linux`, 957 ms, merged 2026-11-09) | `crates/hex-testkit/src/waits.rs`, `PROGRAM`; `crates/hex-api/src/conformance.rs` |

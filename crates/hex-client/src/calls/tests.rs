@@ -36,13 +36,19 @@ impl Transport for Memory {
     const MAKES_ASKED: bool = true;
 
     fn answers() -> &'static [Patience; KINDS] {
-        static ANSWERS: [Patience; KINDS] = {
-            let mut answers = [const { Patience::measuring("test.deferred.answer") }; KINDS];
-            answers[LegacyKind::COUNT + WaitKind::COUNT] =
-                Patience::measuring("test.refusal.capacity");
-            answers
-        };
+        static ANSWERS: [Patience; KINDS] =
+            [const { Patience::measuring("test.deferred.answer") }; KINDS];
         &ANSWERS
+    }
+
+    fn class_answers(class: Class) -> &'static [Patience; BOX_KINDS] {
+        static CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
+            class_waits!("test.refusal", "process", measuring),
+            class_waits!("test.refusal", "oci", measuring),
+            class_waits!("test.refusal", "firecracker", measuring),
+            class_waits!("test.refusal", "shards", measuring),
+        ];
+        by_class(&CLASS_ANSWERS, class)
     }
 
     fn reading(&self) {}
@@ -1144,11 +1150,14 @@ mod release_frame {
     }
 }
 
-/// AC-T7.4.1: a new capacity wait appends after every historical runtime/scheduler wait.
+/// AC-T7.4.1: the plain kinds' waits keep their order, the scheduler's and a physical report's after a hello, a list
+/// and the network namespaces' counts; a call naming a box or a class is no plain kind's, its box kind's wait its
+/// class's ([`BoxKind`]). Do: map each plain kind and each box kind's request. Expect: each plain kind at its place
+/// in a table of 17; each box kind's none there, and its own kind and class.
 #[test]
-fn runtime_capacity_wait_appends_without_moving_existing_indexes() {
+fn plain_kinds_keep_their_order_and_box_kinds_are_their_classs() {
     let waits = <Memory as Transport>::answers();
-    assert_eq!(KINDS, 28);
+    assert_eq!((KINDS, BOX_KINDS, CLASSES), (17, 11, 4));
     for (request, index) in [
         (
             Request::Hello {
@@ -1156,7 +1165,8 @@ fn runtime_capacity_wait_appends_without_moving_existing_indexes() {
             },
             0,
         ),
-        (Request::Call(Call::List), 7),
+        (Request::Call(Call::List), 1),
+        (Request::Call(Call::Netns), 2),
         (
             Request::Call(Call::Schedule(Box::new(
                 hex_core::schedule::Command::Describe {
@@ -1164,7 +1174,7 @@ fn runtime_capacity_wait_appends_without_moving_existing_indexes() {
                     cluster: "pool".into(),
                 },
             ))),
-            13,
+            3,
         ),
         (
             Request::Call(Call::Schedule(Box::new(
@@ -1176,16 +1186,74 @@ fn runtime_capacity_wait_appends_without_moving_existing_indexes() {
                     },
                 },
             ))),
-            22,
+            12,
         ),
-        (Request::Call(Call::Capacity(Class::Oci)), 23),
-        (Request::Call(Call::PhysicalReport), 24),
+        (Request::Call(Call::PhysicalReport), 13),
     ] {
         assert!(
             std::ptr::eq(kind_of(waits, &request).unwrap(), &waits[index]),
             "{request:?}"
         );
     }
+    let b = BoxId::new("b").unwrap();
+    for (request, kind) in [
+        (Request::Call(Call::Start(b.clone())), BoxKind::Start),
+        (Request::Call(Call::Delete(b.clone())), BoxKind::Delete),
+        (Request::Call(Call::Kill { exec: 7 }), BoxKind::Kill),
+        (
+            Request::Call(Call::Capacity(Class::Shards)),
+            BoxKind::Capacity,
+        ),
+    ] {
+        assert!(kind_of(waits, &request).is_none(), "{request:?}");
+        assert_eq!(box_kind_of(&request).map(|(kind, _)| kind), Some(kind));
+    }
+}
+
+/// AC-T7.4.1: each (kind, class) has its own census name: `<prefix>.<kind>.<class>`, none shared with another wait
+/// of this platform's native transport or its guest's. Do: read every name of their plain and class tables. Expect:
+/// each class table's names its kinds' and its class's, in order, and no name twice.
+#[test]
+fn every_kind_and_class_has_its_own_census_name() {
+    #[cfg(target_os = "linux")]
+    type Native = crate::linux::Socket;
+    #[cfg(target_os = "macos")]
+    type Native = crate::macos::Socket;
+    #[cfg(windows)]
+    type Native = crate::windows::Socket;
+    fn names<T: Transport>(prefix: &str, seen: &mut BTreeSet<&'static str>) {
+        let kinds = [
+            "create",
+            "start",
+            "exec",
+            "signal",
+            "inspect",
+            "usage",
+            "delete",
+            "kill",
+            "exec_streams",
+            "run",
+            "capacity",
+        ];
+        for wait in T::answers() {
+            assert!(seen.insert(wait.name()), "{} twice", wait.name());
+        }
+        for class in [
+            Class::Process,
+            Class::Oci,
+            Class::Firecracker,
+            Class::Shards,
+        ] {
+            for (kind, wait) in kinds.iter().zip(T::class_answers(class)) {
+                assert_eq!(wait.name(), format!("{prefix}.{kind}.{}", class.name()));
+                assert!(seen.insert(wait.name()), "{} twice", wait.name());
+            }
+        }
+    }
+    let mut seen = BTreeSet::new();
+    names::<Native>("client.answer", &mut seen);
+    names::<crate::guest::Stream>("client.guest.answer", &mut seen);
+    assert_eq!(seen.len(), 2 * (KINDS + CLASSES * BOX_KINDS));
 }
 
 /// AC-T7.4.1: pool lifecycle waits append after all existing transport operation seeds.
@@ -1226,15 +1294,15 @@ fn backing_lifecycle_waits_append_without_reordering_old_operations() {
             &Request::Call(Call::InitializeBacking(triomphe::Arc::new(grant)))
         )
         .unwrap(),
-        &waits[25]
+        &waits[14]
     ));
     assert!(std::ptr::eq(
         kind_of(waits, &Request::Call(Call::ReleaseBacking(key))).unwrap(),
-        &waits[26]
+        &waits[15]
     ));
     assert!(std::ptr::eq(
         kind_of(waits, &Request::Call(Call::BackingUsage(key))).unwrap(),
-        &waits[27]
+        &waits[16]
     ));
 }
 
@@ -1243,7 +1311,7 @@ fn backing_lifecycle_waits_append_without_reordering_old_operations() {
 fn refusal_census_common_call_records_the_typed_wire_outcome() {
     static REFUSED: AtomicBool = AtomicBool::new(false);
     fn sink(name: &'static str, sample: hex_core::patience::Sample) {
-        if name == "test.refusal.capacity"
+        if name == "test.refusal.capacity.oci"
             && matches!(sample, hex_core::patience::Sample::Refused(_))
         {
             REFUSED.store(true, Ordering::SeqCst);
@@ -1258,11 +1326,7 @@ fn refusal_census_common_call_records_the_typed_wire_outcome() {
     *client.conn.shared.transport.reply.lock().unwrap() = Some(Answer::Refused(expected.clone()));
     assert_eq!(client.capacity(Class::Oci), Err(expected));
     assert!(REFUSED.load(Ordering::SeqCst));
-    let patience = kind_of(
-        <Memory as Transport>::answers(),
-        &Request::Call(Call::Capacity(Class::Oci)),
-    )
-    .unwrap();
+    let patience = &<Memory as Transport>::class_answers(Class::Oci)[BoxKind::Capacity as usize];
     assert!(
         patience.slowest().is_some(),
         "refusals still update online learning"

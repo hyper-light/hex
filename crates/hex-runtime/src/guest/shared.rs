@@ -860,7 +860,7 @@ impl GuestRuntime {
         };
         let spec = self.pool_spec(&receipt)?;
         let socket = self.pool_socket(key)?;
-        let plan = self.managed_plan(&spec, &socket)?;
+        let plan = self.managed_plan(&spec, &socket, budget)?;
         let guest = match &receipt.phase {
             Phase::Running(identity) => {
                 receipt.checked_report()?;

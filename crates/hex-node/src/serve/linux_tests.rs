@@ -8,7 +8,7 @@ use std::io::{Read, Write as _};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::PoisonError;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::net::{AddressFamily, SendFlags, SocketAddrUnix, SocketFlags, SocketType};
@@ -532,11 +532,15 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
 }
 
 /// HEX-SOCK-10: the node's network namespace counts cross the socket as its host holds them: asked
-/// through `hex-client`, and on a raw connection, answered with its request's id.
+/// through `hex-client`, and on a raw connection, answered with its request's id. The test times nothing, so the
+/// client's hello and call each take [`ANSWERED`], the test's own bound on an answer, as their caller's deadline: an
+/// answer slower than its learned wait, as under parallel suites, is a run-out recorded, not a refusal (AC-T7.4.1).
 #[test]
 fn the_network_namespace_counts_cross_the_socket() {
     let lab = Lab::new(limits());
-    assert_eq!(lab.client().netns().unwrap(), counts());
+    let answered = || Instant::now() + ANSWERED;
+    let client = Client::connect_before(lab.server.path(), answered()).unwrap();
+    assert_eq!(client.netns_before(answered()).unwrap(), counts());
     let fd = lab.raw();
     send_raw(&fd, &request(4, Call::Netns), &[]);
     let (h, answer) = answer_of(&fd);

@@ -16,7 +16,7 @@ from evidence import (BACKENDS, TARGETS, POLICY, RULES, InvalidEvidence, artifac
 
 
 def file_receipt(root, path):
-    return {"path": str(path.relative_to(root)), "sha256": sha256(path), "bytes": path.stat().st_size}
+    return {"path": path.relative_to(root).as_posix(), "sha256": sha256(path), "bytes": path.stat().st_size}
 
 
 def write_json(path, value):
@@ -47,6 +47,8 @@ def run(args):
     value = load_json(config, args.byte_limit)
     require(value.get("proof") == args.proof and value.get("source") == args.source and value.get("backend") == args.backend and
             value.get("topology") == args.topology, "fixture source/case mismatch")
+    require(value.get("execution_target") == args.target and value.get("origin_target") in TARGETS
+            and hex_digest(value.get("factory_contract_sha256")), "fixture lacks exact native route/factory contract pin")
     # No generic command or shell string can accidentally select a stale fixture or cargo build.
     test_name = f"completion_{args.backend}_{args.topology}" + ("_selected" if args.proof == "selected" else "")
     root = args.output.resolve()
@@ -63,6 +65,10 @@ def run(args):
     env = dict(os.environ)
     # No admin credentials are copied into receipts. Only this scope's fixture path is recorded.
     env.update(HEX_COMPLETION_CONFIG=str(root / "fixture.json"), HEX_COMPLETION_EVENTS=str(events),
+               HEX_COMPLETION_RESOURCES_BEFORE=str(root / "resources-before.json"),
+               HEX_COMPLETION_RESOURCES_AFTER=str(root / "resources-after.json"),
+               HEX_COMPLETION_SCOPE_HISTORY=str(root / "scope-history.json"),
+               HEX_COMPLETION_SCOPE_EVIDENCE=str(root / "scope-records"),
                HEX_COMPLETION_ROOT_AUTHORIZED="1", RUST_TEST_THREADS="1",
                CARGO_BUILD_JOBS="1", RAYON_NUM_THREADS="1")
     for name in list(env):
@@ -98,6 +104,11 @@ def run(args):
             receipt["log"] = file_receipt(root, log_path)
             if events.is_file():
                 receipt["events"] = file_receipt(root, events)
+            for name, filename in (("resources_before", "resources-before.json"),
+                                   ("resources_after", "resources-after.json"),
+                                   ("scope_history", "scope-history.json")):
+                if (root / filename).is_file():
+                    receipt[name] = file_receipt(root, root / filename)
             # A timeout never becomes cleanup proof; retain the fixture state/owned PID journal.
             write_json(root / "run.json", receipt)
     try:

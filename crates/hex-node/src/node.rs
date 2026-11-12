@@ -1045,6 +1045,7 @@ impl Node {
         // No native cleanup may run until every persisted backend is known and its own lifecycle
         // has been dispatched through the same Store/turn authority.
         let mut summary = self.recover_backends(&records)?;
+        summary.boot_unknown = self.store.boot_unread().map(str::to_owned);
         // What a crash at a record write left: a temp file never renamed into place.
         self.store.remove_strays()?;
         let mut seen: BTreeMap<BoxId, Seen> = BTreeMap::new();
@@ -1059,7 +1060,12 @@ impl Node {
                 backend_ids.insert(id);
                 continue;
             }
-            seen.entry(id).or_default().record = Some(record);
+            let s = seen.entry(id).or_default();
+            // T-T7.1.2: a native box whose record an earlier boot of the host wrote ran nothing past it.
+            s.earlier_boot = record
+                .as_ref()
+                .is_ok_and(|record| self.store.earlier_boot(record));
+            s.record = Some(record);
         }
         // A torn record's box is a native one (`preflight_configured`): removed below as unreadable,
         // ended by its own cgroup first.

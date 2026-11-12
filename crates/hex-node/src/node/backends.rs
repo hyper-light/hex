@@ -306,6 +306,12 @@ impl Node {
         self.attachments.clone()
     }
 
+    /// The host's boot session as this node's records carry it (T-T7.1.2), for a backend whose own marks last until
+    /// the host reboots: the Firecracker adapter's single-use functions. `None` where it can't be read.
+    pub fn boot_session(&self) -> Option<hex_core::record::BootSession> {
+        self.store.boot().cloned()
+    }
+
     fn initialize_vm_root(&self) -> Result<(BoxRoot, std::fs::File), Refusal> {
         let state = self.bundles.parent().ok_or(Refusal::Full(MAX_BOXES))?;
         let lease_path = native_path(state, "native-vm-owner.lock")?;

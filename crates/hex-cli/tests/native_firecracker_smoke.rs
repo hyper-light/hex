@@ -287,6 +287,8 @@ impl Drop for Reaper {
             if !running(pid, start) {
                 continue;
             }
+            // Its VM's directory in the backend's state, read from its command before it ends.
+            let vm = vm_of(pid, &self.dir);
             let Some(target) = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()) else {
                 continue;
             };
@@ -298,12 +300,34 @@ impl Drop for Reaper {
                 let _ = running(pid, start);
                 std::thread::park_timeout(read.elapsed());
             }
+            let ended = !running(pid, start);
+            // A VMM that ended leaves its VM's directory to whoever removes the VM: here, no node will.
+            if let Some(vm) = vm.filter(|_| ended) {
+                let _ = fs::remove_dir_all(&vm);
+                eprintln!(
+                    "SMOKE reaper: VM directory {} removed: {}",
+                    vm.display(),
+                    !vm.exists()
+                );
+            }
             eprintln!(
                 "SMOKE reaper: VMM {pid} (start {start}) ended by the test's cleanup; running: {}",
-                running(pid, start)
+                !ended
             );
         }
     }
+}
+
+/// The VM directory in `state` that VMM `pid`'s command names: its `--config-file`'s directory, where that lies
+/// directly in `state`.
+fn vm_of(pid: u32, state: &Path) -> Option<PathBuf> {
+    let cmdline = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let mut words = cmdline
+        .split(|b| *b == 0)
+        .map(|word| std::str::from_utf8(word).unwrap_or(""));
+    words.by_ref().find(|word| *word == "--config-file")?;
+    let vm = Path::new(words.next()?).parent()?;
+    (vm.parent() == Some(state)).then(|| vm.to_path_buf())
 }
 
 impl Reaper {
@@ -352,13 +376,16 @@ fn records(state: &Path, id: &BoxId) -> Vec<PathBuf> {
     found
 }
 
+/// The backend's marks of the functions no reset clears, in its state beside its VMs' directories.
+const MARKS: &str = "single-use";
+
 /// The one VM directory a single box leaves in the backend's state while it runs.
 fn vm_dir(config: &Path) -> PathBuf {
     let config = hex_runtime::firecracker::Config::from_file(config).unwrap();
     let mut dirs: Vec<_> = fs::read_dir(&config.state_dir)
         .unwrap()
         .map(|e| e.unwrap().path())
-        .filter(|p| p.is_dir())
+        .filter(|p| p.is_dir() && !p.ends_with(MARKS))
         .collect();
     assert_eq!(dirs.len(), 1, "one VM directory: {dirs:?}");
     dirs.pop().unwrap()
@@ -668,6 +695,34 @@ fn vfio_group_opens(group: u64) -> std::io::Result<()> {
 }
 
 /// The host driver of PCI function `sbdf`.
+/// Whether the host's kernel lists no reset that clears PCI function `sbdf`, alone in IOMMU group `group`, at its
+/// VM's end (docs/design/firecracker-gpu-host.md): no method of its own, and a bus reset, if listed, beside a device
+/// on its bus that its VM isn't given. 0000:79:00.0 on 00aad8da lists `bus` beside its audio, crypto and USB functions.
+fn single_use(sbdf: &str, group: u64) -> bool {
+    let methods = fs::read_to_string(
+        Path::new("/sys/bus/pci/devices")
+            .join(sbdf)
+            .join("reset_method"),
+    )
+    .unwrap_or_default();
+    let listed = |names: &[&str]| methods.split_whitespace().any(|m| names.contains(&m));
+    if listed(&["device_specific", "acpi", "flr", "af_flr", "pm"]) {
+        return false;
+    }
+    let names = |dir: &str| -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect()
+    };
+    let given = names(&format!("/sys/kernel/iommu_groups/{group}/devices"));
+    let bus = sbdf.rsplit_once(':').unwrap().0;
+    let foreign = names("/sys/bus/pci/devices").iter().any(|name| {
+        name.rsplit_once(':').is_some_and(|(on, _)| on == bus) && !given.contains(name)
+    });
+    !listed(&["bus", "cxl_bus"]) || foreign
+}
+
 fn driver(sbdf: &str) -> String {
     fs::read_link(format!("/sys/bus/pci/devices/{sbdf}/driver"))
         .unwrap()
@@ -928,14 +983,44 @@ fn native_firecracker_gpu_box_computes_recovers_and_returns_its_gpu() {
         "no VMM names the VM's directory"
     );
     assert!(!dir.exists(), "the VM's state is gone");
-    assert!(
-        state_dir_entries(&config).is_empty(),
-        "{:?}",
-        state_dir_entries(&config)
-    );
     assert!(vfio_holders(group).is_empty(), "no process holds the GPU");
     vfio_group_opens(group).unwrap();
     assert_eq!(driver(host_sbdf), "vfio-pci");
+    let state_dir = hex_runtime::firecracker::Config::from_file(&config)
+        .unwrap()
+        .state_dir;
+    if single_use(host_sbdf, group) {
+        // Its one VM of this boot has ended: marked so, and the next on this boot refused before its VMM.
+        assert_eq!(state_dir_entries(&config), vec![state_dir.join(MARKS)]);
+        assert!(state_dir.join(MARKS).join(host_sbdf).is_file());
+        let second = BoxId::new("fc-gpu-second").unwrap();
+        let begun = Instant::now();
+        let refused = client
+            .create_before(
+                gpu_spec(&inputs, &config, &second),
+                Instant::now() + inputs.wait,
+            )
+            .unwrap_err();
+        eprintln!(
+            "GPU second create on this boot refused after {:?}: {refused:?}",
+            begun.elapsed()
+        );
+        assert!(
+            matches!(&refused, Refusal::Platform { why, .. }
+                if ["no reset method", "the host must reboot", host_sbdf].iter().all(|named| why.contains(named))),
+            "{refused:?}"
+        );
+        assert!(client.list().unwrap().is_empty(), "the node lists no box");
+        assert!(vmm(&binary, &state_dir).is_empty(), "no VMM was started");
+        assert!(vfio_holders(group).is_empty(), "no process holds the GPU");
+        assert_eq!(state_dir_entries(&config), vec![state_dir.join(MARKS)]);
+    } else {
+        assert!(
+            state_dir_entries(&config).is_empty(),
+            "{:?}",
+            state_dir_entries(&config)
+        );
+    }
     drop(client);
     let state = node.state.clone();
     drop(node);
@@ -945,10 +1030,12 @@ fn native_firecracker_gpu_box_computes_recovers_and_returns_its_gpu() {
     );
 }
 
-/// AC-T7.4.1: a failed test leaves no VMM (r761 left one holding the GPU's group after a panic). Do: start a
-/// stand-in VMM, a copy of `/bin/sh` at a run's binary path whose command names the run's state, and drop a
-/// reaper for that binary and state. Expect the stand-in ended, by its own PID and start time, and nothing
-/// else touched: a second stand-in naming another state still runs.
+/// AC-T7.4.1: a failed test leaves no VMM (r761 left one holding the GPU's group after a panic), nor its VM's
+/// directory (r985's reaper ended the VMM and left it in the backend's state). Do: start a stand-in VMM, a copy of
+/// `/bin/sh` at a run's binary path whose command names its VM's config file in the run's state, as a VMM's does,
+/// and drop a reaper for that binary and state. Expect the stand-in ended, by its own PID and start time, and its
+/// VM's directory removed, and nothing else touched: a second stand-in naming another state still runs, its VM's
+/// directory kept.
 #[test]
 fn a_reaper_ends_the_vmm_its_failed_test_left() {
     use std::os::unix::process::ExitStatusExt;
@@ -957,12 +1044,14 @@ fn a_reaper_ends_the_vmm_its_failed_test_left() {
     fs::copy("/bin/sh", &binary).unwrap();
     let state = dir.path().join("fc-state");
     let other = dir.path().join("other-state");
-    let start = |names: &Path| {
+    let start = |vm: &Path| {
+        fs::create_dir_all(vm).unwrap();
         Command::new(&binary)
             .args([
                 "-c",
                 "while :; do read -r _ || exit 0; done",
-                &names.display().to_string(),
+                "--config-file",
+                &vm.join("config.json").display().to_string(),
             ])
             .stdin(HostStdio::piped())
             .spawn()
@@ -984,10 +1073,12 @@ fn a_reaper_ends_the_vmm_its_failed_test_left() {
         wait: Duration::from_secs(30),
     });
     assert!(!running(pid, began), "the left VMM {pid} ended");
+    assert!(!state.join("vm").exists(), "its VM's directory removed");
     assert!(
         running(kept_pid, kept_began),
         "another run's VMM {kept_pid} still runs"
     );
+    assert!(other.join("vm").is_dir(), "another run's VM directory kept");
     assert!(left.wait().unwrap().signal().is_some());
     drop(kept.stdin.take());
     assert!(kept.wait().unwrap().success());

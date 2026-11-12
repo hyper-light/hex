@@ -100,7 +100,10 @@ fn native_evidence_joins_same_cost_and_real_preparation_without_rewriting() {
         .last()
         .unwrap()
         .join("native-model.v");
-    let plan = runtime.managed_plan(&config.spec(), &socket).unwrap();
+    let budget = crate::guest::managed::Budget::new(runtime.first_dial_bound().unwrap()).unwrap();
+    let plan = runtime
+        .managed_plan(&config.spec(), &socket, budget)
+        .unwrap();
     let view = plan.native_startup().unwrap();
     assert_eq!(view.images(), images);
     assert_eq!(view.kernel(), config.kernel);

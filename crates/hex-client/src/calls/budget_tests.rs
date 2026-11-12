@@ -363,8 +363,11 @@ fn timed_call<T: Transport>(transport: T, request: mpsc::Receiver<()>) -> Refusa
     result.unwrap().unwrap_err()
 }
 
-/// Do exhaust caller and learned bounds separately in actual Core calls. The census runs in
-/// a fresh exact-test child so it never competes with the existing refusal-census unit's OnceLock.
+/// Do exhaust a caller's bound in actual Core calls, its learned wait ending once after it and
+/// once before it; expect each refused as the caller's expiry, the learned wait before it a
+/// run-out told to the census and never the call's end (AC-T7.4.1), after it nothing told. The
+/// census runs in a fresh exact-test child so it never competes with the existing
+/// refusal-census unit's OnceLock.
 #[test]
 fn timeout_cause_and_learning_keep_caller_authority_separate() {
     const CHILD: &str = "HEX_CLIENT_BUDGET_CENSUS_CHILD";
@@ -411,10 +414,188 @@ fn timeout_cause_and_learning_keep_caller_authority_separate() {
     let (transport, request) = stalled(Some(CAP));
     let learned = timed_call(Calibrated::<false>(transport), request);
     assert!(
-        matches!(learned, Refusal::Os { why, .. } if why.contains("twice") && !why.contains("caller"))
+        matches!(learned, Refusal::Os { why, .. } if why.contains("caller") && !why.contains("twice"))
     );
     assert_eq!(SAMPLES.load(Ordering::SeqCst), 1);
     assert_eq!(RUN_OUT.load(Ordering::SeqCst), 1);
+}
+
+/// What [`late_census`] was told, by wait name: run-outs at their bounds, answers at their times.
+static LATE_RAN_OUT: Mutex<Vec<(&'static str, Duration)>> = Mutex::new(Vec::new());
+static LATE_ANSWERED: Mutex<Vec<(&'static str, Duration)>> = Mutex::new(Vec::new());
+/// Whether a [`LateHello`] agent's answer is there to read: from its call's run-out on.
+static LATE_DUE: AtomicBool = AtomicBool::new(false);
+/// The agent's connection, written as its answer comes due, so a reader waiting on it reads it.
+static LATE_WAKE: std::sync::OnceLock<UdpSocket> = std::sync::OnceLock::new();
+
+fn late_census(name: &'static str, sample: hex_core::patience::Sample) {
+    match sample {
+        hex_core::patience::Sample::RanOut(after) => {
+            LATE_RAN_OUT.lock().unwrap().push((name, after));
+            LATE_DUE.store(true, Ordering::SeqCst);
+            if let Some(wake) = LATE_WAKE.get() {
+                wake.send(&[1]).unwrap();
+            }
+        }
+        hex_core::patience::Sample::Answered(took) => {
+            LATE_ANSWERED.lock().unwrap().push((name, took));
+        }
+        hex_core::patience::Sample::Refused(_) => {}
+    }
+}
+
+/// Runs test `name` again alone in a child of this binary, [`late_census`] installed there: a census installs once a
+/// process, and other tests' calls would reach it. True in the child, which runs the test; false in the parent once
+/// the child has passed.
+fn in_late_census_child(name: &str) -> bool {
+    const CHILD: &str = "HEX_CLIENT_LATE_CENSUS_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        assert!(hex_core::patience::census(late_census));
+        return true;
+    }
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture", "--test-threads=1"])
+        .env(CHILD, "1")
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let status = child.wait().unwrap();
+    eprintln!("client_late_census child_pid={pid} reaped=true exit={status}");
+    assert!(status.success(), "{name} failed in its census child");
+    false
+}
+
+/// A stand-in agent busy past its record, as the guest's node was initializing its GPU: it answers a hello only once
+/// the hello's learned wait, twice its record of 1 ms, has run out ([`LATE_DUE`], set by [`late_census`] where it is
+/// installed). `CALLER` names its waits apart.
+struct LateHello<const CALLER: bool> {
+    io: UdpSocket,
+    asked: Mutex<Option<u64>>,
+}
+
+fn late_hello<const CALLER: bool>() -> LateHello<CALLER> {
+    let io = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    io.connect(io.local_addr().unwrap()).unwrap();
+    io.set_nonblocking(true).unwrap();
+    let _ = LATE_WAKE.set(io.try_clone().unwrap());
+    LateHello {
+        io,
+        asked: Mutex::new(None),
+    }
+}
+
+impl<const CALLER: bool> Transport for LateHello<CALLER> {
+    type Reading = ();
+    fn answers() -> &'static [Patience; KINDS] {
+        static UNDER_CALLER: [Patience; KINDS] = [const {
+            Patience::seeded("test.client_budget.late.caller", Duration::from_millis(1))
+        }; KINDS];
+        static ALONE: [Patience; KINDS] =
+            [const { Patience::seeded("test.client_budget.late.alone", Duration::from_millis(1)) };
+                KINDS];
+        if CALLER { &UNDER_CALLER } else { &ALONE }
+    }
+    fn reading(&self) {}
+    fn handle(&self) -> Handle<'_> {
+        #[cfg(unix)]
+        return std::os::fd::AsFd::as_fd(&self.io);
+        #[cfg(windows)]
+        std::os::windows::io::AsSocket::as_socket(&self.io)
+    }
+    fn recv(&self, _: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
+        while self.io.recv(&mut [0]).is_ok() {}
+        if !LATE_DUE.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let Some(id) = self.asked.lock().unwrap().take() else {
+            return Ok(false);
+        };
+        let hello = wire::Hello {
+            build: wire::build(),
+            classes: vec![Class::Oci],
+            limits: Limits {
+                connections: 1,
+                message_bytes: wire::MAX_MESSAGE,
+                in_flight: 1,
+                programs: 1,
+            },
+            budgets: wire::Budgets {
+                in_flight: 1,
+                programs: 1,
+            },
+        };
+        let bytes = wire::answer(id, &Answer::Hello(hello), wire::MAX_MESSAGE).unwrap();
+        take(
+            &Received {
+                size: bytes.len(),
+                bytes: &bytes,
+                descriptors: 0,
+                descriptors_cut: false,
+            },
+            Vec::new(),
+        )?;
+        Ok(true)
+    }
+    fn try_send(&self, bytes: &[u8], at: &mut usize, _: &[Lent<'_>]) -> Result<bool, Sent> {
+        let (header, request) = wire::read_request_apart(bytes, wire::MAX_MESSAGE).unwrap();
+        assert!(matches!(request, Request::Hello { .. }), "{request:?}");
+        *self.asked.lock().unwrap() = Some(header.id);
+        *at = bytes.len();
+        Ok(true)
+    }
+    fn shutdown(&self) {
+        let _ = self.io.send(&[1]);
+    }
+}
+
+/// A caller's deadline no answer here comes near: the late answer is there to read as the learned wait runs out.
+const LATE_CAP: Duration = Duration::from_secs(30);
+
+/// AC-T7.4.1 (original): on 00aad a Firecracker guest with the AMD GPU passed through booted, and its relay's hello to
+/// its own node, busy with the GPU's initialization, was refused, "none came in 2.354074ms, twice the slowest answer to
+/// a call of its kind", while the boot had most of its 60 s left: the guest panicked. A learned bound is calibration,
+/// not the caller's authority. Do: say hello under a caller's absolute deadline to an agent that answers only once the
+/// hello's learned wait (twice its 1 ms record) has run out. Expect: the hello answered; its run-out told to the census
+/// once, at the learned bound; its answer told too, later than that bound.
+#[test]
+fn original_a_late_answer_inside_its_callers_deadline_is_taken_its_run_out_recorded() {
+    if !in_late_census_child(
+        "calls::budget_tests::original_a_late_answer_inside_its_callers_deadline_is_taken_its_run_out_recorded",
+    ) {
+        return;
+    }
+    let shared = Shared::try_new(late_hello::<true>()).unwrap();
+    let cap = ReplyDeadline::caller_before(Instant::now().checked_add(LATE_CAP).unwrap()).unwrap();
+    let result = Core::hello_before(shared, Some(cap)).map(drop);
+    let ran_out = LATE_RAN_OUT.lock().unwrap().clone();
+    let answered = LATE_ANSWERED.lock().unwrap().clone();
+    eprintln!(
+        "client_late_answer under=caller result={result:?} ran_out={ran_out:?} answered={answered:?}"
+    );
+    assert!(
+        result.is_ok(),
+        "a slow answer inside its caller's deadline was refused: {result:?}"
+    );
+    let bound = Duration::from_millis(2);
+    assert_eq!(ran_out, [("test.client_budget.late.caller", bound)]);
+    assert!(
+        matches!(answered.as_slice(), [("test.client_budget.late.caller", took)] if *took > bound),
+        "{answered:?}"
+    );
+}
+
+/// AC-T7.4.1: with no caller's deadline a call's learned wait is still its bound, its hang detection. Do: say hello with
+/// no caller deadline to the late agent, which no census tells its wait ran out here, so it never answers. Expect:
+/// refused as twice the slowest answer, at its 2 ms bound.
+#[test]
+fn with_no_callers_deadline_the_learned_wait_still_refuses() {
+    let shared = Shared::try_new(late_hello::<false>()).unwrap();
+    let result = Core::hello_before(shared, None).map(drop);
+    eprintln!("client_late_answer under=none result={result:?}");
+    assert!(
+        matches!(&result, Err(Refusal::Os { why, .. }) if why.contains("none came in 2ms, twice the slowest")),
+        "{result:?}"
+    );
 }
 
 fn until(at: Instant) -> Result<(), Refusal> {
@@ -1303,8 +1484,9 @@ fn absolute_delete_cap_covers_queued_sender() {
     );
 }
 
-/// AC-T7.4.1: supplied instants survive unchanged; an earlier transport/learned
-/// bound may shorten authority, while no later/default bound can enlarge it.
+/// AC-T7.4.1: supplied instants survive unchanged; an earlier transport bound may shorten
+/// authority, no later/default bound can enlarge it, and a learned wait never replaces it:
+/// ending first it is a run-out to record, a tie the caller's; with no caller it is the bound.
 #[test]
 fn absolute_caller_limit_keeps_original_instant_and_smaller_bounds() {
     let began = Instant::now();
@@ -1326,15 +1508,22 @@ fn absolute_caller_limit_keeps_original_instant_and_smaller_bounds() {
     assert_eq!(limited.limited_by(Some(later)).at(), earlier);
     let tied = absolute.limited_by(Some(later));
     assert!(matches!(tied.source, ReplyBound::CallerAbsolute));
-    assert_eq!(
-        ReplyDeadline::combine(Some(absolute), began, None)
-            .unwrap()
-            .at(),
-        at
-    );
-    let learned = ReplyDeadline::combine(Some(absolute), began, Some(CAP)).unwrap();
+    let (bound, learned) = ReplyDeadline::combine(Some(absolute), began, None);
+    assert_eq!(bound.unwrap().at(), at);
+    assert!(learned.is_none());
+    let (bound, learned) = ReplyDeadline::combine(Some(absolute), began, Some(CAP));
+    assert_eq!(bound.unwrap().at(), at);
+    let learned = learned.unwrap();
     assert_eq!(learned.at(), earlier);
     assert!(matches!(learned.source, ReplyBound::Learned(_)));
+    let (bound, learned) = ReplyDeadline::combine(Some(absolute), began, Some(OBSERVE));
+    assert_eq!(bound.unwrap().at(), at);
+    assert!(learned.is_none(), "a tie belongs to caller authority");
+    let (bound, learned) = ReplyDeadline::combine(None, began, Some(CAP));
+    let bound = bound.unwrap();
+    assert_eq!(bound.at(), earlier);
+    assert!(matches!(bound.source, ReplyBound::Learned(_)));
+    assert!(learned.is_none());
 }
 
 /// Shared observations of each actual port and its original optional dial deadline.
@@ -2306,10 +2495,11 @@ fn a_settle_failure_whose_kill_is_confirmed_keeps_its_refusal_and_never_releases
     }
 }
 
-/// AC-T7.4.1 control A: actual selection chooses the existing private smaller
-/// learned policy, consumed at the existing setup seam before any send is attempted.
+/// AC-T7.4.1 control A: actual selection lends the setup seam the caller's deadline, never the
+/// existing private smaller learned wait, whose end is a run-out to record, not the call's; that
+/// deadline consumed at setup, no send is attempted and the refusal is the caller's expiry.
 #[test]
-fn selected_smaller_learned_setup_expiry_prevents_send() {
+fn selected_callers_setup_expiry_prevents_send() {
     let (transport, writes) = stalled(None);
     let client = Arc::new(configured(Calibrated::<false>(transport)));
     let control = Arc::clone(&client);
@@ -2361,13 +2551,13 @@ fn selected_smaller_learned_setup_expiry_prevents_send() {
     );
     joined.unwrap();
     let (original, selected) = selected.unwrap();
-    assert!(matches!(selected.source, ReplyBound::Learned(_)));
-    assert!(selected.at() < original);
+    assert!(matches!(selected.source, ReplyBound::CallerAbsolute));
+    assert_eq!(selected.at(), original);
     let (returned, result) = observed.unwrap();
     assert!(returned >= selected.at());
     assert!(matches!(
         result,
-        Err(Refusal::Os { op: "sending to the node agent", why }) if why.contains("twice")
+        Err(Refusal::Os { op: "sending to the node agent", why }) if why.contains("absolute") && !why.contains("twice")
     ));
     // This Stalled transport commits its whole nonempty input on its first try_send;
     // no notification therefore independently witnesses zero send calls/bytes.
@@ -3193,6 +3383,41 @@ fn a_failed_setups_kill_goes_out_while_answers_for_others_keep_coming() {
     assert_eq!(kills, run.into_iter().collect::<Vec<_>>());
 }
 
+/// Whether the pipe `program` writes has no reader left, waited for as a fact, at most 30 s (as the Linux
+/// tests' `readerless`): another test's child holds a copy of every descriptor from its fork to its exec,
+/// which closes it (CLOEXEC), so a write in between would still find a reader. The pipe is filled first and
+/// nothing reads it, so a poll for room returns only once its last reader has gone: `POLLERR` on Linux
+/// (fs/pipe.c's `pipe_poll`), `POLLHUP` on macOS, whose poll reports nothing for an end asking for no event.
+#[cfg(unix)]
+fn readerless(program: &std::io::PipeWriter) -> bool {
+    use rustix::event::{PollFd, PollFlags, Timespec};
+    use rustix::io::Errno;
+    rustix::io::ioctl_fionbio(program, true).unwrap();
+    loop {
+        match rustix::io::write(program, &[0; 4096]) {
+            Ok(_) => {}
+            Err(Errno::AGAIN) => break,
+            Err(Errno::PIPE) => return true,
+            Err(e) => panic!("filling the late end's pipe: {e}"),
+        }
+    }
+    let mut room = [PollFd::new(program, PollFlags::OUT)];
+    let within = Timespec {
+        tv_sec: 30,
+        tv_nsec: 0,
+    };
+    rustix::event::poll(&mut room, Some(&within)).unwrap() == 1
+        && room[0]
+            .revents()
+            .intersects(PollFlags::ERR | PollFlags::HUP)
+}
+
+/// Windows lends a child only the handles named for it, so a write finds the pipe's last reader gone at once.
+#[cfg(windows)]
+fn readerless(program: &std::io::PipeWriter) -> bool {
+    matches!((&*program).write(&[1]), Err(e) if e.kind() == io::ErrorKind::BrokenPipe)
+}
+
 /// An agent whose answers come only as the test queues them, each with the ends it gives (a given
 /// answer's descriptors), but for a list's, which comes at once.
 struct Late {
@@ -3255,8 +3480,8 @@ impl Transport for Late {
 
 /// AC-T7.4.1: do give up on a run asking for its stdout at its deadline, the agent answering only
 /// after, with stdout's end, then make a list that reads that late answer before its own; expect
-/// the run's caller expiry, the list answered, the late end closed at once (its pipe has no reader
-/// left), nothing kept for the run, and the Taken word for it sent, so the agent lets its copy go.
+/// the run's caller expiry, the list answered, nothing kept for the run, the late end closed (its
+/// pipe has no reader left), and the Taken word for it sent, so the agent lets its copy go.
 #[test]
 fn a_given_answer_after_its_caller_gave_up_closes_its_ends() {
     let client = configured(Late {
@@ -3280,7 +3505,7 @@ fn a_given_answer_after_its_caller_gave_up_closes_its_ends() {
         )
         .map(drop);
     let run = late.sent.lock().unwrap()[0].0;
-    let (output, mut program) = std::io::pipe().unwrap();
+    let (output, program) = std::io::pipe().unwrap();
     let given = Answer::Given {
         pid: 9,
         given: Streams {
@@ -3291,7 +3516,8 @@ fn a_given_answer_after_its_caller_gave_up_closes_its_ends() {
     late.queue(run, &given, vec![output.into()]);
     let listed = client.list();
     let kept = client.conn.shared.state().unwrap().given.contains_key(&run);
-    let written = program.write(&[1]).map_err(|e| e.kind());
+    // Kept, it would never close: only a dropped end can be waited out.
+    let closed = !kept && readerless(&program);
     let taken = late
         .sent
         .lock()
@@ -3299,7 +3525,7 @@ fn a_given_answer_after_its_caller_gave_up_closes_its_ends() {
         .iter()
         .any(|(id, request)| *id == run && *request == Request::Taken);
     eprintln!(
-        "client_late_given gave_up={gave_up:?} listed={listed:?} kept={kept} written={written:?} taken={taken}"
+        "client_late_given gave_up={gave_up:?} listed={listed:?} kept={kept} closed={closed} taken={taken}"
     );
     assert!(
         matches!(&gave_up, Err(Refusal::Os { why, .. }) if why.contains("absolute")),
@@ -3310,10 +3536,6 @@ fn a_given_answer_after_its_caller_gave_up_closes_its_ends() {
         !kept,
         "the late answer's ends were kept for a run no one waits on"
     );
-    assert_eq!(
-        written,
-        Err(io::ErrorKind::BrokenPipe),
-        "the late stdout end is still open"
-    );
+    assert!(closed, "the late stdout end is still open");
     assert!(taken, "no Taken word for the late answer");
 }

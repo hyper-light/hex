@@ -241,6 +241,250 @@ pub fn task(pid: i32) -> io::Result<Option<Task>> {
     }))
 }
 
+/// `PROC_PIDLISTTHREADS` (`sys/proc_info.h:732`): a process's thread handles, 8 bytes each, each one
+/// `PROC_PIDTHREADINFO` reads.
+const PROC_PIDLISTTHREADS: c_int = 6;
+/// `PROC_PIDREGIONINFO` (`sys/proc_info.h:735`): the entry of a process's map at or after an address.
+const PROC_PIDREGIONINFO: c_int = 7;
+/// `PROC_PIDREGIONPATHINFO` (`sys/proc_info.h:738`): the same entry and the file it maps, if any.
+const PROC_PIDREGIONPATHINFO: c_int = 8;
+
+/// One thread of a process: its name (`pthread_setname_np`'s, empty for none) and the CPU it has used,
+/// user and system, as `proc_pidinfo(PROC_PIDTHREADINFO)` reads them (`struct proc_threadinfo`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadTime {
+    pub name: Vec<u8>,
+    pub cpu: Duration,
+}
+
+/// The threads of process `pid`, each by name and CPU, or `None` when no process has that pid (`ESRCH`).
+/// `handles` is the room for the list (8 bytes a thread), sized by the caller to the most threads a task
+/// may have (`kern.num_taskthreads`): one it fills is refused, as the list may have been cut short. A
+/// thread that ends between the list and its read is passed over.
+pub fn threads(pid: i32, handles: &mut [u64]) -> io::Result<Option<Vec<ThreadTime>>> {
+    let bytes = c_int::try_from(std::mem::size_of_val(handles))
+        .map_err(|_| io::Error::other("a thread list past an int's bytes"))?;
+    // SAFETY: for PROC_PIDLISTTHREADS proc_pidinfo writes at most `bytes` bytes, whole 8-byte thread handles,
+    // into the buffer it is given, which is `handles`, that many bytes long and alive for the call.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            PROC_PIDLISTTHREADS,
+            0,
+            handles.as_mut_ptr().cast::<c_void>(),
+            bytes,
+        )
+    };
+    if n <= 0 {
+        let e = io::Error::last_os_error();
+        return match e.raw_os_error() {
+            Some(libc::ESRCH) => Ok(None),
+            _ => Err(e),
+        };
+    }
+    if n >= bytes {
+        return Err(io::Error::other(format!(
+            "{pid}'s threads fill the {} handles given",
+            handles.len()
+        )));
+    }
+    let count = usize::try_from(n)
+        .map_err(|_| io::Error::other("a negative thread list"))?
+        .checked_div(size_of::<u64>())
+        .ok_or_else(|| io::Error::other("a thread handle of no bytes"))?;
+    let listed = handles
+        .get(..count)
+        .ok_or_else(|| io::Error::other("a thread list past its room"))?;
+    let size = c_int::try_from(size_of::<libc::proc_threadinfo>())
+        .map_err(|_| io::Error::other("a proc_threadinfo past an int's bytes"))?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(count)
+        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+    for &handle in listed {
+        let mut info = MaybeUninit::<libc::proc_threadinfo>::zeroed();
+        // SAFETY: for PROC_PIDTHREADINFO proc_pidinfo writes at most `size` bytes, one proc_threadinfo, into
+        // the buffer it is given, which is one proc_threadinfo, alive for the call; `handle` is a value.
+        let got = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTHREADINFO,
+                handle,
+                info.as_mut_ptr().cast::<c_void>(),
+                size,
+            )
+        };
+        if got <= 0 {
+            let e = io::Error::last_os_error();
+            match e.raw_os_error() {
+                Some(libc::ESRCH) => continue,
+                _ => return Err(e),
+            }
+        }
+        if got != size {
+            return Err(io::Error::other(format!(
+                "proc_pidinfo(PROC_PIDTHREADINFO) of {pid} wrote {got} of {size} bytes"
+            )));
+        }
+        // SAFETY: zeroed above and written whole by the kernel; every field is an integer or an array of
+        // them, so any bytes are valid.
+        let info = unsafe { info.assume_init() };
+        let name: Vec<u8> = info
+            .pth_name
+            .iter()
+            .map(|c| u8::from_ne_bytes(c.to_ne_bytes()))
+            .take_while(|b| *b != 0)
+            .collect();
+        out.push(ThreadTime {
+            name,
+            cpu: Duration::from_nanos(info.pth_user_time.saturating_add(info.pth_system_time)),
+        });
+    }
+    Ok(Some(out))
+}
+
+/// `struct proc_regioninfo` (`sys/proc_info.h:166`), which libc doesn't bind.
+#[repr(C)]
+struct RegionInfo {
+    protection: u32,
+    max_protection: u32,
+    inheritance: u32,
+    flags: u32,
+    offset: u64,
+    behavior: u32,
+    user_wired_count: u32,
+    user_tag: u32,
+    pages_resident: u32,
+    pages_shared_now_private: u32,
+    pages_swapped_out: u32,
+    pages_dirtied: u32,
+    ref_count: u32,
+    shadow_depth: u32,
+    share_mode: u32,
+    private_pages_resident: u32,
+    shared_pages_resident: u32,
+    obj_id: u32,
+    depth: u32,
+    address: u64,
+    size: u64,
+}
+
+/// `struct proc_regionwithpathinfo` (`sys/proc_info.h:331`).
+#[repr(C)]
+struct RegionWithPath {
+    info: RegionInfo,
+    file: libc::vnode_info_path,
+}
+
+/// `PROC_REGION_SUBMAP` (`sys/proc_info.h:190`): an entry that is a submap (the shared region's), no
+/// memory of the process's own.
+const PROC_REGION_SUBMAP: u32 = 1;
+
+/// One entry of a process's memory map: where it is, how long, its pages resident and its pages compressed
+/// or swapped out (in the map's pages), its VM tag (0 for memory no allocator tagged), the most access it
+/// may ever be given (`VM_PROT_*`: none for a reservation of address space alone), whether it is a submap,
+/// and whether it maps a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Region {
+    pub address: u64,
+    pub size: u64,
+    pub resident: u64,
+    pub swapped_out: u64,
+    pub tag: u32,
+    pub max_protection: u32,
+    pub submap: bool,
+    /// It maps a file (`PROC_PIDREGIONPATHINFO` names a vnode): `None` where read without its path.
+    pub file: Option<bool>,
+}
+
+/// The entry of process `pid`'s map at or after `address`, as `proc_pidinfo(PROC_PIDREGIONINFO)` reads it,
+/// or `None` past the map's last entry (`EINVAL`). A map is read of a live process: one gone is an error.
+pub fn region(pid: i32, address: u64) -> io::Result<Option<Region>> {
+    let mut info = MaybeUninit::<RegionInfo>::zeroed();
+    let size = c_int::try_from(size_of::<RegionInfo>())
+        .map_err(|_| io::Error::other("a proc_regioninfo past an int's bytes"))?;
+    // SAFETY: for PROC_PIDREGIONINFO proc_pidinfo writes at most `size` bytes, one proc_regioninfo, into the
+    // buffer it is given, which is one RegionInfo (that struct, field for field), alive for the call.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            PROC_PIDREGIONINFO,
+            address,
+            info.as_mut_ptr().cast::<c_void>(),
+            size,
+        )
+    };
+    if !read_whole(n, size, "PROC_PIDREGIONINFO", pid)? {
+        return Ok(None);
+    }
+    // SAFETY: zeroed above and written whole by the kernel; every field is an integer, so any bytes are valid.
+    let info = unsafe { info.assume_init() };
+    Ok(Some(Region {
+        address: info.address,
+        size: info.size,
+        resident: u64::from(info.pages_resident),
+        swapped_out: u64::from(info.pages_swapped_out),
+        tag: info.user_tag,
+        max_protection: info.max_protection,
+        submap: info.flags & PROC_REGION_SUBMAP != 0,
+        file: None,
+    }))
+}
+
+/// [`region`], with whether the entry maps a file (`proc_pidinfo(PROC_PIDREGIONPATHINFO)`: XNU zeroes the
+/// path of an entry with no vnode).
+pub fn region_with_path(pid: i32, address: u64) -> io::Result<Option<Region>> {
+    let mut info = MaybeUninit::<RegionWithPath>::zeroed();
+    let size = c_int::try_from(size_of::<RegionWithPath>())
+        .map_err(|_| io::Error::other("a proc_regionwithpathinfo past an int's bytes"))?;
+    // SAFETY: for PROC_PIDREGIONPATHINFO proc_pidinfo writes at most `size` bytes, one
+    // proc_regionwithpathinfo, into the buffer it is given, which is one RegionWithPath (that struct, field
+    // for field), alive for the call.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            PROC_PIDREGIONPATHINFO,
+            address,
+            info.as_mut_ptr().cast::<c_void>(),
+            size,
+        )
+    };
+    if !read_whole(n, size, "PROC_PIDREGIONPATHINFO", pid)? {
+        return Ok(None);
+    }
+    // SAFETY: zeroed above and written whole by the kernel; every field is an integer or an array of them,
+    // so any bytes are valid.
+    let info = unsafe { info.assume_init() };
+    let path = info.file.vip_path.iter().flatten().next().copied();
+    Ok(Some(Region {
+        address: info.info.address,
+        size: info.info.size,
+        resident: u64::from(info.info.pages_resident),
+        swapped_out: u64::from(info.info.pages_swapped_out),
+        tag: info.info.user_tag,
+        max_protection: info.info.max_protection,
+        submap: info.info.flags & PROC_REGION_SUBMAP != 0,
+        file: Some(path.is_some_and(|first| first != 0)),
+    }))
+}
+
+/// Whether a map read wrote its whole struct: false past the map's last entry (`EINVAL`), an error for any
+/// other failure or a short write.
+fn read_whole(n: c_int, size: c_int, flavor: &str, pid: i32) -> io::Result<bool> {
+    if n <= 0 {
+        let e = io::Error::last_os_error();
+        return match e.raw_os_error() {
+            Some(libc::EINVAL) => Ok(false),
+            _ => Err(e),
+        };
+    }
+    if n != size {
+        return Err(io::Error::other(format!(
+            "proc_pidinfo({flavor}) of {pid} wrote {n} of {size} bytes"
+        )));
+    }
+    Ok(true)
+}
+
 /// `PROC_PGRP_ONLY` (`sys/proc_info.h:52`): `proc_listpids` lists one process group.
 const PROC_PGRP_ONLY: u32 = 2;
 /// `PROC_UID_ONLY` (`sys/proc_info.h:54`): `proc_listpids` lists one user's processes. A box's user,
@@ -2311,5 +2555,96 @@ pub(crate) mod trusted_entry_native {
             );
             assert!(!touched.get());
         }
+    }
+}
+
+#[cfg(test)]
+mod map_controls {
+    use super::*;
+
+    /// The most threads a task may have, the room a whole thread list needs.
+    fn room() -> Vec<u64> {
+        let most = sysctl_number(c"kern.num_taskthreads").unwrap();
+        vec![0; usize::try_from(most).unwrap()]
+    }
+
+    fn me() -> i32 {
+        i32::try_from(std::process::id()).unwrap()
+    }
+
+    /// AC-T7.4.1 (guest_cost's macOS CPU split): a thread named as a VMM names its vCPU threads spins; read
+    /// this process's threads: expect it listed by its name with CPU it used, and a room too small for the
+    /// list refused rather than read short.
+    #[test]
+    fn a_process_threads_are_read_by_name_and_cpu() {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spinning = std::sync::Arc::clone(&stop);
+        let spinner = std::thread::Builder::new()
+            .name("vcpu7".to_owned())
+            .spawn(move || {
+                while !spinning.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::hint::spin_loop();
+                }
+            })
+            .unwrap();
+        let mut handles = room();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let named = loop {
+            let listed = threads(me(), &mut handles).unwrap().unwrap();
+            if let Some(thread) = listed.iter().find(|t| t.name == b"vcpu7")
+                && !thread.cpu.is_zero()
+            {
+                break thread.clone();
+            }
+            assert!(std::time::Instant::now() < deadline, "{listed:?}");
+            std::thread::yield_now();
+        };
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        spinner.join().unwrap();
+        assert!(named.cpu > Duration::ZERO);
+        assert!(threads(me(), &mut [0u64; 1]).is_err());
+    }
+
+    /// AC-T7.4.1 (guest_cost's macOS guest-RAM accounting): touch some pages of a fresh anonymous region and
+    /// read this process's map: expect the entry holding it found with at least those pages resident, no
+    /// file, and its process free to read and write it; the entry of this program's own code a file's; and a
+    /// walk of the map from its start to its end.
+    #[test]
+    fn a_process_map_is_read_entry_by_entry() {
+        let page = rustix::param::page_size();
+        let mut memory = vec![0u8; 64 * page];
+        for at in (0..16 * page).step_by(page) {
+            memory[at] = 1;
+        }
+        let address = u64::try_from(memory.as_ptr() as usize).unwrap();
+        let entry = region_with_path(me(), address).unwrap().unwrap();
+        assert!(
+            entry.address <= address && address < entry.address + entry.size,
+            "{entry:?}"
+        );
+        assert!(entry.resident >= 16, "{entry:?}");
+        assert_eq!(entry.file, Some(false));
+        assert!(entry.max_protection & 3 == 3 && !entry.submap, "{entry:?}");
+        // The same entry read without its path (its pages may change between the reads: tests share it).
+        let plain = region(me(), address).unwrap().unwrap();
+        assert_eq!(
+            (plain.address, plain.size, plain.file),
+            (entry.address, entry.size, None)
+        );
+        assert!(plain.resident >= 16, "{plain:?}");
+        let code =
+            u64::try_from(region as fn(i32, u64) -> io::Result<Option<Region>> as usize).unwrap();
+        assert_eq!(
+            region_with_path(me(), code).unwrap().unwrap().file,
+            Some(true)
+        );
+        let (mut at, mut entries) = (0u64, 0usize);
+        while let Some(entry) = region(me(), at).unwrap() {
+            assert!(entry.address + entry.size > at);
+            at = entry.address + entry.size;
+            entries += 1;
+        }
+        assert!(entries > 2, "{entries}");
+        std::hint::black_box(&memory);
     }
 }

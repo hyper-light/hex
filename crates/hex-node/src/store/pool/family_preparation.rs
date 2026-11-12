@@ -333,7 +333,7 @@ fn family_snapshot_fences_ordinary_record_and_pool_writers() {
     assert_eq!(returned, released);
     assert_eq!(
         store.read_lifecycle(&original.spec.id).unwrap(),
-        Some(original)
+        Some(crate::store::in_this_boot(original))
     );
     assert!(store.read_lifecycle(&proposed.spec.id).unwrap().is_none());
     assert_eq!(store.read_pool(&pending.key.pool).unwrap(), Some(pending));
