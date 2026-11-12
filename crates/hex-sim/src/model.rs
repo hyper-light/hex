@@ -608,6 +608,10 @@ pub struct NodeSpec {
     /// profile for each VM class; absent entries retain native identity-cost semantics only.
     #[serde(default, skip_serializing_if = "no_runtime_costs")]
     pub costs: [Option<hex_api::RuntimeCost>; Class::COUNT],
+    /// What a new VM of each class is booked at here, learned (joint plan step 14, C2); absent, its whole
+    /// allocation.
+    #[serde(default, skip_serializing_if = "no_priors")]
+    pub priors: [Option<Prior>; Class::COUNT],
     /// Absent retains unambiguous legacy admission. The owner is allocated fallibly once, then
     /// borrowed/shared across views; cloning a node never clones a backing's physical claim Vec.
     #[serde(
@@ -622,6 +626,41 @@ fn no_runtime_costs(costs: &[Option<hex_api::RuntimeCost>; Class::COUNT]) -> boo
     costs.iter().all(Option::is_none)
 }
 
+fn no_priors(priors: &[Option<Prior>; Class::COUNT]) -> bool {
+    priors.iter().all(Option::is_none)
+}
+
+/// A class's learned booking on a node (joint plan step 14, `docs/design/learned-charge.md` C2): for VMs of the cost
+/// profile `profile`, what a new one is booked at, at most its allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Prior {
+    pub profile: [u8; 32],
+    pub booking: hex_api::CapacityResources,
+}
+
+/// A receipt `allocation` booked at `prior` where it names the same cost profile (C2); as it was otherwise.
+pub fn booked_at(
+    allocation: Option<hex_api::Allocation>,
+    prior: Option<Prior>,
+) -> Option<hex_api::Allocation> {
+    match (allocation, prior) {
+        (Some(allocation), Some(prior)) if allocation.cost.id == prior.profile => {
+            Some(allocation.booked_at(prior.booking))
+        }
+        _ => allocation,
+    }
+}
+
+/// Whether two receipts charge alike, what each booked aside: a receiver books the owner's receipt as it was
+/// booked, whatever it would book a new one at now (C2, C6).
+pub fn same_charge(a: Option<hex_api::Allocation>, b: Option<hex_api::Allocation>) -> bool {
+    let unbooked = |a: Option<hex_api::Allocation>| {
+        a.map(|a| hex_api::Allocation { booked: None, ..a })
+    };
+    unbooked(a) == unbooked(b)
+}
+
 /// Physical resource units shared with the native allocation API; GPU counts stay in the sole
 /// existing device/holder authority and are never inferred from a runtime's resource profile.
 pub fn capacity_resources(need: Resources) -> hex_api::CapacityResources {
@@ -634,6 +673,7 @@ pub fn capacity_resources(need: Resources) -> hex_api::CapacityResources {
 
 /// Validate the immutable receipt against the original demand, including on recovery. This calls
 /// the API's single cost formula; it does not re-derive the charge using today's runtime profile.
+/// The ledger holds what the receipt booked (joint plan step 14), its whole charge where it booked none.
 pub fn allocated_resources(
     need: Resources,
     allocation: Option<hex_api::Allocation>,
@@ -642,10 +682,11 @@ pub fn allocated_resources(
         return Ok(need);
     };
     allocation.check(capacity_resources(need))?;
+    let booked = allocation.booking();
     Ok(Resources {
-        cpu_milli: allocation.resources.cpu_milli,
-        mem_bytes: allocation.resources.mem_bytes,
-        disk_bytes: allocation.resources.disk_bytes,
+        cpu_milli: booked.cpu_milli,
+        mem_bytes: booked.mem_bytes,
+        disk_bytes: booked.disk_bytes,
         gpus: need.gpus,
     })
 }
@@ -700,6 +741,7 @@ impl NodeSpec {
             devices,
             runtime_pools,
             costs: self.costs,
+            priors: self.priors,
             routes: self.routes.clone(),
         })
     }
@@ -752,6 +794,7 @@ impl NodeSpec {
             devices: unnamed_gpus(capacity.gpus),
             runtime_pools: Vec::new(),
             costs: [None; Class::COUNT],
+            priors: [None; Class::COUNT],
             routes: None,
         }
     }

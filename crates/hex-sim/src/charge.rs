@@ -12,6 +12,8 @@ use hex_api::CapacityResources as Amounts;
 
 use crate::model::Class;
 
+pub mod sim;
+
 /// The fewest windows whose nearest-rank p99.9 is an observed sample rather than their maximum: decision 9's
 /// census rule (`SEEDABLE` in `bench/competitive/probes/waits_census.py`, held to it by a doc-truth test). A
 /// charge is the nearest-rank p99.9 of a VM's last this many windows, and a VM is cold until it has them.
@@ -105,8 +107,9 @@ pub struct Sample {
     pub span: Duration,
     /// The most memory the VMM held in the window, as the census reads it, its guest's touched RAM included.
     pub mem_bytes: u64,
-    /// The bytes its own folders hold.
-    pub disk_bytes: u64,
+    /// The bytes its own folders hold, where the host reads them: unread, it is read as its booking, so no evidence
+    /// below the booking is made up.
+    pub disk_bytes: Option<u64>,
 }
 
 fn dims(a: Amounts) -> [u64; 3] {
@@ -475,6 +478,53 @@ impl<K: Ord + Copy> Node<K> {
         Ok(booking)
     }
 
+    /// Takes on a VM `id` its node's own ledger admitted, booked at `booking` (at most its allocation): no room is
+    /// checked here, the ledger's admission being the one. Refused past the VMs' bound.
+    pub fn track(
+        &mut self,
+        id: K,
+        class: ClassKey,
+        band: u8,
+        vcpus: u32,
+        booking: Amounts,
+    ) -> Result<(), ChargeError> {
+        if self.vms.contains_key(&id) {
+            return Err(ChargeError::Invalid {
+                what: "a tracked VM",
+                why: "the VM is booked already",
+            });
+        }
+        if self.vms.len() >= self.bounds.vms {
+            return Err(ChargeError::Full {
+                what: "a node's VMs",
+                bound: self.bounds.vms,
+            });
+        }
+        self.remember(class)?;
+        self.vms.insert(
+            id,
+            Vm {
+                class,
+                band,
+                vcpus,
+                booking: each(dims(booking), class.ceiling, u64::min),
+                held: [0; 3],
+                tail: Tail::new()?,
+            },
+        );
+        Ok(())
+    }
+
+    /// Whether the node holds the VM `id`.
+    pub fn holds(&self, id: &K) -> bool {
+        self.vms.contains_key(id)
+    }
+
+    /// The VMs it holds.
+    pub fn ids(&self) -> impl Iterator<Item = &K> {
+        self.vms.keys()
+    }
+
     /// Makes room for `class`'s record, forgetting the class longest untouched that no VM holds now.
     fn remember(&mut self, class: ClassKey) -> Result<(), ChargeError> {
         self.clock = self
@@ -521,7 +571,12 @@ impl<K: Ord + Copy> Node<K> {
             .map(|n| n.div_ceil(over))
             .and_then(|m| u64::try_from(m).ok())
             .ok_or(ChargeError::Overflow("a VM's CPU rate"))?;
-        let reading = [milli, sample.mem_bytes, sample.disk_bytes];
+        let [_, _, booked_disk] = vm.booking;
+        let reading = [
+            milli,
+            sample.mem_bytes,
+            sample.disk_bytes.unwrap_or(booked_disk),
+        ];
         let [_, before, _] = vm.held;
         vm.held = reading;
         let was_cold = !vm.tail.full();

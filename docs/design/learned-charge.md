@@ -168,6 +168,22 @@ Taken by ROOT on 2026-11-12 and passed to goal 13; `Allocation`'s booked amount 
   meaning today's whole allocation) that admission, records and recovery all use, and the node's facts reconcile the
   learned bookings since admission each refresh, as they reconcile measured use today (`Facts::node_with_owned`).
 
+## How it is wired
+
+- `hex_sim::charge` is the pure core: `Node` learns, books, shares and budgets; `sim` runs it window by window.
+- `hex_api::Allocation::booked` is what a receipt booked; `Allocation::booking()` is what the ledger holds, and
+  `RuntimeCost::allocate` books it whole. The node socket's wire carries it after the cost, and the peers' text
+  receipt as `a2:` (an unbooked one stays `a1:`, so records written before still read).
+- `NodeSpec::priors` carries each VM class's learned prior in a node's facts and offers. The placement index books a
+  new VM's receipt at its node's prior (`model::booked_at`); a receiver admits an owner's receipt as it was booked,
+  comparing charges with the booking aside (`model::same_charge`), so a stale view is never refused for it.
+- `hex-node`'s scheduler reads each microVM once a window (`Driver::measured_vms`, the shell `scheduler::charges`),
+  and on each refresh gives its facts the priors and moves its capacity by what receipts book past the learned
+  bookings, so the ledger's free room is the budget less what VMs are learned to take. It learns on Linux, where the
+  window is `cpu.max`'s period; on macOS and Windows the window their CPU control enforces (the managed control's
+  cycle, the job's rate) is not yet carried to the scheduler, so their VMs stay booked whole: Hex's own remaining
+  work, not upstream's.
+
 ## Every number
 
 | Number | Value | Kind | Derivation | Pinned by |

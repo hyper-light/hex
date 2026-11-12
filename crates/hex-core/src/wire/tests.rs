@@ -1240,6 +1240,7 @@ fn runtime_cost_and_admitted_allocation_survive_the_wire() {
     spec.allocation = Some(Allocation {
         resources: CapacityResources::default(),
         cost,
+        booked: None,
     });
     assert!(matches!(
         request(

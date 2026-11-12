@@ -37,7 +37,7 @@ fn sample(cpu_milli: u64, mem: u64) -> Sample {
         cpu: Cpu::Whole(Duration::from_nanos(cpu_milli * 100_000)),
         span: WINDOW,
         mem_bytes: mem,
-        disk_bytes: 0,
+        disk_bytes: Some(0),
     }
 }
 
@@ -221,7 +221,7 @@ fn w14_a_reading_is_charged_over_its_span_never_less_than_the_window() {
                 cpu: Cpu::Whole(cpu),
                 span,
                 mem_bytes: 0,
-                disk_bytes: 0,
+                disk_bytes: Some(0),
             },
         )
         .unwrap();
@@ -251,7 +251,7 @@ fn w14_per_vcpu_guest_time_awaits_upstream() {
         },
         span: WINDOW,
         mem_bytes: 0,
-        disk_bytes: 0,
+        disk_bytes: Some(0),
     };
     assert!(matches!(
         n.observe(1, &split(vec![WINDOW])),
@@ -380,6 +380,30 @@ fn w14_the_last_resort_ends_only_a_vm_past_its_budget() {
     window(&mut within, &[(1, 0, 5 * GIB), (2, 0, 5 * GIB)]);
     assert_eq!(within.growth(), 10 * GIB);
     assert_eq!(within.last_resort().unwrap(), None);
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C5 as ROOT took it (2026-11-12): a VM `memory.high` holds within its budget is
+/// never ended for growth to come. Do warm two VMs of 4 GiB allocations at 2 GiB each in an 8 GiB budget, so each is
+/// booked at 2 GiB with a 4 GiB budget, and let the first hold 3 GiB, past its booking but within its budget, while the
+/// growth on record (4 GiB, their first window) and what they hold pass the fleet's budget; expect none ended. Let
+/// the first then hold 5 GiB, past its budget; expect it ended.
+#[test]
+fn w14_a_vm_held_within_its_budget_is_never_ended_for_growth_to_come() {
+    let mut n = node(res(16_000, 8 * GIB, 0));
+    n.admit(1, class_of(1, 1_000, 4 * GIB), 0, 1).unwrap();
+    n.admit(2, class_of(2, 1_000, 4 * GIB), 0, 1).unwrap();
+    for _ in 0..SEEDABLE {
+        window(&mut n, &[(1, 0, 2 * GIB), (2, 0, 2 * GIB)]);
+    }
+    assert_eq!(n.booking(&1).unwrap().mem_bytes, 2 * GIB);
+    assert_eq!(n.growth(), 4 * GIB);
+    n.observe(1, &sample(0, 3 * GIB)).unwrap();
+    let budgets = n.budgets().unwrap();
+    assert_eq!(budgets[0].1.bytes, 4 * GIB);
+    assert_eq!(budgets[0].1.room, i64::try_from(GIB).unwrap());
+    assert_eq!(n.last_resort().unwrap(), None);
+    n.observe(1, &sample(0, 5 * GIB)).unwrap();
+    assert_eq!(n.last_resort().unwrap(), Some(1));
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C5's growth: do grow two VMs' memory by 1 and 2 GiB in one window and by 1 GiB
