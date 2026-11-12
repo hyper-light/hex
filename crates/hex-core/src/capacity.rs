@@ -103,6 +103,7 @@ mod tests {
             ToKeeper::Hello {
                 holder: "kiln-runner".to_owned(),
                 epoch: 3,
+                scope: None,
             },
             ToKeeper::Sync {
                 fence,

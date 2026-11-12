@@ -161,6 +161,22 @@ pub enum Run {
 
 /// Process `pid`'s run state, or `None` when no process has that pid (`ESRCH`).
 pub fn run_state(pid: i32) -> io::Result<Option<Run>> {
+    Ok(bsdinfo(pid)?.map(|info| match info.pbi_status {
+        libc::SSTOP => Run::Stopped,
+        libc::SZOMB => Run::Ended,
+        _ => Run::Live,
+    }))
+}
+
+/// The user process `pid` runs as, its effective uid (`pbi_uid`, XNU's `kauth_cred_getuid` of its credential,
+/// `bsd/kern/proc_info.c`), or `None` when no process has that pid (`ESRCH`): what proves a capacity holder's
+/// process group its own (joint plan step 13, CV12).
+pub fn user_of(pid: i32) -> io::Result<Option<u32>> {
+    Ok(bsdinfo(pid)?.map(|info| info.pbi_uid))
+}
+
+/// `proc_pidinfo(PROC_PIDTBSDINFO)` of `pid`, or `None` when no process has that pid (`ESRCH`).
+fn bsdinfo(pid: i32) -> io::Result<Option<libc::proc_bsdinfo>> {
     let mut info = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
     let size = c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
         .map_err(|_| io::Error::other("a proc_bsdinfo past an int's bytes"))?;
@@ -189,12 +205,7 @@ pub fn run_state(pid: i32) -> io::Result<Option<Run>> {
     }
     // SAFETY: zeroed above and written whole by the kernel; every field is an integer or an array of them,
     // so any bytes are valid.
-    let info = unsafe { info.assume_init() };
-    Ok(Some(match info.pbi_status {
-        libc::SSTOP => Run::Stopped,
-        libc::SZOMB => Run::Ended,
-        _ => Run::Live,
-    }))
+    Ok(Some(unsafe { info.assume_init() }))
 }
 
 /// The descriptors process `pid` holds, as `proc_pidinfo(PROC_PIDLISTFDS)` lists them: the read opens

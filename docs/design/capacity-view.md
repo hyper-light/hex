@@ -25,7 +25,7 @@ counts the two sides keep agree after a partition heals.
   uses the same holder core (Shards R12: one implementation).
 - The seam (CLAUDE.md §9): `CapacityView`, the keeper as a transport serves it, and `Host`, its
   host's side; the simulator `capacity::sim::SimView`, which kiln's simulator drives as the machine's
-  Hex node; and `capacity::conformance::view` (HEX-CV-1 to 8), which the simulator and the node's own
+  Hex node; and `capacity::conformance::view` (HEX-CV-1 to 10), which the simulator and the node's own
   view both pass, and a keeper kiln hosts would.
 - The node's view (`crates/hex-node/src/placement/view.rs`): the keeper's shell in the placement
   `Driver`, under the lock its own admissions take. Its records are a folder of their own in the
@@ -277,16 +277,65 @@ person removing it from the holder's configuration returns the holder to admitti
   lags that growth by up to one refresh; goal 14's contention rule holds the growth physically meanwhile
   (the VM is held at its budget), so the lag is never a double booking of room the view granted.
 
+### CV12. A holder's memory is counted once: its scope, read with the free memory
+
+**The defect.** The room is measured: free memory plus what Hex's own boxes use (`Facts::node_with_owned`). What a
+holder's work uses is missing from that free memory, and the holder's reservation is held besides, so each byte its
+work uses was counted twice: never an oversubscription, but room lost up to the holder's use
+(`placement::view::credit_tests`, red before this decision).
+
+**The choice** (ROOT, 2026-11-12, Option A with its conditions). A holder's hello may name where its reserved work
+runs, a `Scope` (an optional field, append-only): a cgroup v2 directory on Linux, a process group on macOS, a job
+object on Windows. The host reads each synced holder's scope in the same sample as its free memory, once on either
+side of that read, and keeps the smaller (`hex_node::scopes::around`): a use that moved while free memory was read
+is credited at its least. The room every admission is decided in, the keeper's and the node's ledger alike, is the
+measured room plus each synced holder's credit, `min(use, its reservations)` (`Keeper::credit`). Use past a holder's
+reservations stays counted against the room. The credit is the sample's and the session's: a holder's next sample
+replaces it, a hello replaces its session's, and a dropped link ends it at once (the node's admission given the room
+without it before the lock is let go). The room and the credit of one sample are set together, under the lock
+every admission commits under (`Driver::refresh_node_sampled`).
+
+**Ownership.** A scope earns credit only once proved its holder's user's, the user the person declares for that
+holder in the host's configuration (a uid, or a SID on Windows; nothing the holder says can name it):
+- Linux: some directory from the cgroup up to the hierarchy's root, the root not counted, is owned by the uid: a tree
+  the user owns, or one delegated to it (the kernel's `cgroup-v2.rst`, "Delegation": the delegatee is given the
+  subtree's directory and its `cgroup.procs`, `cgroup.threads` and `cgroup.subtree_control`). Its use is its
+  `memory.current` ("the total amount of memory currently being used by the cgroup and its descendants").
+- macOS: every member of the process group runs as the uid (`proc_pidinfo(PROC_PIDTBSDINFO)`'s `pbi_uid`); its use is
+  their footprints summed (`proc_pid_rusage`'s `ri_phys_footprint`, what the node already reads of its own boxes).
+- Windows: the job's owner, read from its security descriptor (`GetKernelObjectSecurity`,
+  `GetSecurityDescriptorOwner`), is the declared SID, compared byte for byte; its use is its processes' private
+  working sets summed (`PROCESS_MEMORY_COUNTERS_EX2.PrivateWorkingSetSize`), which the machine's available physical
+  memory (`ullAvailPhys`, the node's free memory there) lacks, shared pages not counted, so never more than the
+  work takes of it. An elevated runner makes jobs that BUILTIN\Administrators owns (an elevated token's default
+  owner): such a job fails the proof against the runner's own SID and earns no credit, the safe outcome
+  (`scopes::tests::cv12_a_job_is_its_holders_only_when_its_owner_is_the_declared_sid`).
+A scope the host can't prove or read earns nothing, and the holder's session is closed, typed, with the hints:
+`Close::Scope(NoUser | NotOwned | Unreadable | Invalid | NotThisPlatform)`; its holder drops the scope and may say
+hello again without it. Ownership doesn't widen what a holder could already do by releasing early; it keeps a
+mistaken scope from crediting someone else's memory.
+
+**Alternatives.**
+- *The holder reports its own use* (no platform code): rejected. A report goes stale when the use drops; credited
+  then, it lets others into the holder's reserved slack, which the work grows back into.
+- *The holder's whole process tree, or its runner's cgroup*: credits the runner's own memory, which no reservation
+  holds, so others admit into it.
+- *Crediting the whole reservation*: free room the work hasn't used yet becomes others' while it is still promised.
+
+**What would falsify it.** On the two-machine run, a holder whose work uses `U` under reservations `R >= U`, its use
+moving between samples: the free room the view says ever exceeding the room minus everything held at the larger of
+its use and its reservation, or a sample's credit exceeding the use read on either side of its free memory.
+
 ## The protocol
 
-**Holder to keeper** (`ToKeeper`): `Hello { holder, epoch }`; `Sync { fence, held: [(id, amount)] }`;
+**Holder to keeper** (`ToKeeper`): `Hello { holder, epoch, scope? }` (CV12); `Sync { fence, held: [(id, amount)] }`;
 `Reserve { fence, id, amount }`; `Release { fence, id }`.
 
 **Keeper to holder** (`ToHolder`): `Welcome { fence, view }`; `Synced { fence, view, count, sum,
 released, adopted, disagreed }`; `Granted { fence, id, amount, view }`; `Refused { fence, id, why,
 view }` (`why`: `Room`, `Full`, `Empty`, `Devices`, `Disagrees`); `Released { fence, id, view }`;
 `Hint { fence, view }`; `Closed { epoch, why }` (`why`: `OlderEpoch`, `Session`, `NotSynced`,
-`HoldersFull`, `Invalid`).
+`HoldersFull`, `Invalid`, `Scope`: CV12).
 
 **The keeper, per holder** (R04): `Away` (no session; its reservations kept) → hello → `Joined
 { session }` (a sync is owed) → sync → `Synced { session }` (reserves and releases served) → link down →
@@ -344,7 +393,7 @@ window, which would under-count Hex here.
 - Unit tests of both cores (`hex-api`, `capacity::tests`): each transition, each refusal, each fence,
   sync's three outcomes (released, adopted, disagreed), idempotent release, the person's release, the
   keeper crashed at every write of a conversation before and after the write lands, hostile record text.
-- The conformance suite (`capacity::conformance::view`, HEX-CV-1 to 8) against the simulator, and
+- The conformance suite (`capacity::conformance::view`, HEX-CV-1 to 10) against the simulator, and
   against the node's view over its record files, restarted from them (`hex-node`,
   `placement::view::tests`); and the node's own admission and a holder's reserve checking one view
   through the placement `Driver`.
@@ -369,9 +418,6 @@ window, which would under-count Hex here.
 - The person's release (CV6) is in the core (`Keeper::forget`); its command on the node, and the log
   event's name (agreed with kiln's Observe owner, CLAUDE.md §10), come with the node's shell.
 - A holder's GPU reservations need device grants by identity (CV3).
-- The room counts a holder's used memory twice: the host's measured free memory already lacks it, and
-  its reservation is held besides. Never an oversubscription, but under-use up to that holder's use,
-  until the host can measure a holder's use itself (its cgroup on Linux, its process tree elsewhere).
 - The scheduler process (`hex schedule serve`, which holds the Driver) opens no QUIC endpoint yet: wiring
   it (its bind address, its enrollment with kiln's CA, the holders it authorizes, `Driver::open_view`, and
   `Server::hint` after its own placements) is the step that puts the lane in production.
