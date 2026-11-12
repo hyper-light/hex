@@ -235,8 +235,9 @@ fn tell_the_service_manager() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Says on stderr each box a recovery removed and why, and each idle cgroup it removed that no box's record named,
-/// so nothing is dropped unseen (CLAUDE.md §3), before the socket opens.
+/// Says on stderr each box a recovery removed and why, each idle cgroup it removed that no box's record named, each
+/// torn record it held, why and what to do, why its guest couldn't say which boxes it holds, and why the host's
+/// boot session couldn't be read, so nothing is dropped unseen (CLAUDE.md §3), before the socket opens.
 fn say_recovered(recovered: &RecoverySummary) {
     let mut err = std::io::stderr().lock();
     // Slots are Linux's node's alone: no other OS's hands a box's cgroup on.
@@ -250,6 +251,23 @@ fn say_recovered(recovered: &RecoverySummary) {
     }
     for (id, why) in &recovered.removed {
         let _ = writeln!(err, "hex node: recovered: removed {id}: {why}");
+    }
+    for (id, why) in &recovered.held {
+        let _ = writeln!(err, "hex node: recovered: held {id}: {why}");
+    }
+    if let Some(why) = &recovered.orphans_unknown {
+        let _ = writeln!(
+            err,
+            "hex node: recovered: the guest couldn't say which boxes it holds ({why}): none was deleted, \
+             and a box no record names waits for the next start"
+        );
+    }
+    if let Some(why) = &recovered.boot_unknown {
+        let _ = writeln!(
+            err,
+            "hex node: recovered: the host's boot session couldn't be read ({why}): no record was known for \
+             an earlier boot's, and the records written now carry none"
+        );
     }
 }
 

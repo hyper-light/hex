@@ -21,6 +21,7 @@ from pathlib import Path
 from unittest import mock
 
 import build
+import cleanup_probe
 import load_probe
 import origin
 import run
@@ -125,11 +126,25 @@ class EvidenceBehavior(unittest.TestCase):
 
     def test_checks_artifact_bytes_and_hash(self):
         with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory);path=root/"log";path.write_bytes(b"checked")
+            # artifact() answers under the resolved root (macOS's /var is /private/var): compare with the same.
+            root=Path(directory).resolve();path=root/"log";path.write_bytes(b"checked")
             row={"path":"log","sha256":sha256(path),"bytes":7}
             self.assertEqual(artifact(root,row),path)
             path.write_bytes(b"changed")
             with self.assertRaises(InvalidEvidence):artifact(root,row)
+
+    def test_an_artifact_named_through_a_symlinked_ancestor_is_in_its_scope(self):
+        """AC-T7.4.1: a scope resolves through a symlinked ancestor (macOS's temporary directories are under /var,
+        a symlink to /private/var); an absent artifact named through the same unresolved ancestor lies in it, one
+        beside it does not."""
+        with tempfile.TemporaryDirectory() as directory:
+            real = Path(directory) / "real"
+            real.mkdir()
+            link = Path(directory) / "link"
+            link.symlink_to(real)
+            scope = link.resolve(strict=True)
+            self.assertTrue(cleanup_probe.within(link / "gone", scope))
+            self.assertFalse(cleanup_probe.within(Path(directory) / "beside", scope))
 
     def test_rejects_symlink_or_path_escape(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -172,6 +187,40 @@ class EvidenceBehavior(unittest.TestCase):
     def test_profiles_reject_nan_and_negative_values(self):
         for values in ([float("nan")],[float("inf")],[-1],[True]):
             with self.assertRaises(ValueError):comparison.distribution(values)
+
+    def native_run(self, root, run_signaled=False, build_signaled=False):
+        """A run receipt check_run accepts, its artifacts retained in `root`; each `*_signaled` says the driver
+        had to end what that child left in its group once it exited."""
+        def retained(path):
+            return {"path": path.name, "sha256": sha256(path), "bytes": path.stat().st_size}
+        binary = root / "binary"
+        binary.write_bytes(b"\x7fELF stand-in")
+        build = root / "build.json"
+        build.write_text(json.dumps({
+            "schema": "hex-completion-build-1", "source": "a" * 40, "target": TARGETS[0],
+            "test": "completion_backends", "exit": 0, "timed_out": False, "reaped": True,
+            "group_signaled": build_signaled, "group_gone": True, "source_unchanged": True,
+            "binary": retained(binary)}))
+        log = root / "log"
+        log.write_text("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n")
+        events = root / "events.json"
+        events.write_text(json.dumps(full_events()))
+        return {"schema": "hex-completion-run-1", "source": "a" * 40, "policy": POLICY, "rules_sha256": RULES,
+                "proof": "full", "scope": "root-native", "target": TARGETS[0], "backend": "oci",
+                "topology": "laptop", "exit": 0, "timed_out": False, "reaped": True,
+                "group_signaled": run_signaled, "group_gone": True, "binary": retained(binary),
+                "build": retained(build), "log": retained(log), "events": retained(events)}
+
+    def test_a_child_that_leaves_processes_after_a_normal_exit_is_refused(self):
+        """AC-T7.4.1 (ROOT, 2026-11-11): a native run, or the build it rests on, whose child exited 0 but left
+        processes in its group that the driver had to end (group_signaled) leaked them: refused, though the group
+        is gone now. The same receipt with nothing left is accepted."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            self.assertEqual(check_run(root, self.native_run(root), 1 << 20)["backend"], "oci")
+            for leaked in ({"run_signaled": True}, {"build_signaled": True}):
+                with self.subTest(**leaked), self.assertRaises(InvalidEvidence):
+                    check_run(root, self.native_run(root, **leaked), 1 << 20)
 
     def test_light_scope_cannot_be_promoted_to_native_run(self):
         receipt={"schema":"hex-completion-run-1","source":"a"*40,"policy":POLICY,"rules_sha256":RULES,
@@ -329,7 +378,9 @@ class ProcessGroupEnding(unittest.TestCase):
             "target": target, "test": "completion_backends", "exit": 0, "timed_out": False, "reaped": True,
             "group_gone": True, "source_unchanged": True, "binary": binary}))
         (self.root / "fixture.json").write_text(json.dumps({"proof": "selected", "source": source,
-                                                            "backend": "oci", "topology": "laptop"}))
+                                                            "backend": "oci", "topology": "laptop",
+                                                            "execution_target": target, "origin_target": target,
+                                                            "factory_contract_sha256": "c" * 64}))
         args = argparse.Namespace(root_authorized=True, source=source, binary=program, binary_sha256=binary["sha256"],
             build_receipt=built / "build.json", config=self.root / "fixture.json", backend="oci", topology="laptop",
             proof="selected", target=target, timeout=self.TIMEOUT, cleanup_timeout=self.CLEANUP,

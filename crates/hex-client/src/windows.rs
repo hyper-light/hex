@@ -2,36 +2,29 @@
 //! and handles the node duplicated into this process, named in each answer's envelope. The one client core
 //! owns reads, waits, whole-message sends and the Taken acknowledgement; this transport starts no thread.
 
-use std::io::Write as _;
 use std::os::windows::io::AsSocket;
 use std::path::Path;
 
 use hex_afunix::{self as socket, Socket as Raw};
-use hex_api::Refusal;
+use hex_api::{Class, Refusal};
 use hex_core::patience::Patience;
 use hex_core::stream::{self, Deframer};
 use hex_core::wire::{self, Received};
 
-use crate::calls::{Core, Handle, KINDS, Lent, Sent, Shared, Take, Transport};
+use crate::calls::{
+    BOX_KINDS, CLASSES, Core, Handle, KINDS, Lent, ReplyDeadline, Sent, Shared, Take, Transport,
+    by_class, class_waits,
+};
 
 /// The largest wire message plus its envelope's three stream handles and their count.
 const FRAME_BOUND: usize = wire::MAX_MESSAGE + socket::ENVELOPE_MAX;
 
-/// Each call kind learns its wait on this Windows node, as on the other native transports (decision 9).
+/// Each call kind learns its wait on this Windows node, as on the other native transports (decision 9); the kinds a
+/// box's class times are [`CLASS_ANSWERS`].
 static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.hello"),
-    Patience::measuring("client.answer.create"),
-    Patience::measuring("client.answer.start"),
-    Patience::measuring("client.answer.exec"),
-    Patience::measuring("client.answer.signal"),
-    Patience::measuring("client.answer.inspect"),
-    Patience::measuring("client.answer.usage"),
     Patience::measuring("client.answer.list"),
-    Patience::measuring("client.answer.delete"),
     Patience::measuring("client.answer.netns"),
-    Patience::measuring("client.answer.kill"),
-    Patience::measuring("client.answer.exec_streams"),
-    Patience::measuring("client.answer.run"),
     Patience::measuring("client.answer.schedule.describe"),
     Patience::measuring("client.answer.schedule.advertise"),
     Patience::measuring("client.answer.schedule.submit"),
@@ -42,11 +35,19 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.schedule.retry"),
     Patience::measuring("client.answer.schedule.delete"),
     Patience::measuring("client.answer.schedule.status"),
-    Patience::measuring("client.answer.capacity"),
     Patience::measuring("client.answer.physical_report"),
     Patience::measuring("client.answer.initialize_backing"),
     Patience::measuring("client.answer.release_backing"),
     Patience::measuring("client.answer.backing_usage"),
+];
+
+/// AC-T7.4.1: the kinds a box's class times, a wait for each (kind, class), named `client.answer.<kind>.<class>`; no
+/// census has timed any here: MEASURING, each, until one records it.
+static CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
+    class_waits!("client.answer", "process", measuring),
+    class_waits!("client.answer", "oci", measuring),
+    class_waits!("client.answer", "firecracker", measuring),
+    class_waits!("client.answer", "shards", measuring),
 ];
 
 pub type Client = Core<Socket>;
@@ -69,6 +70,10 @@ impl Transport for Socket {
         &ANSWERS
     }
 
+    fn class_answers(class: Class) -> &'static [Patience; BOX_KINDS] {
+        by_class(&CLASS_ANSWERS, class)
+    }
+
     fn reading(&self) -> Reading {
         Reading {
             buf: vec![0; stream::MAX_FRAME],
@@ -82,47 +87,15 @@ impl Transport for Socket {
     }
 
     fn open_offer(&self, offer: &wire::StreamOffer) -> Result<hex_api::Given, Refusal> {
-        let identity = shards_api::Identity {
-            pid: offer.pid,
-            started: offer.started,
-            vsock: offer.vsock.clone(),
-        };
-        let dial = |on: bool, stream| -> Result<Option<hex_api::End>, Refusal> {
-            if !on {
-                return Ok(None);
-            }
-            // The dedicated control connection has already said hello, so this is one attempt at an
-            // already-listening guest, bounded by Shards' existing CONNECT handshake and the VM's life.
-            let mut conn = shards_api::connect_borrowed(
-                &identity,
-                stream::STDIO_PORT,
-                std::time::Duration::ZERO,
-            )
-            .map_err(|why| {
-                crate::guest::shards::refusal("opening an offered guest stream", &why)
-            })?;
-            let named = stream::Named {
-                exec: stream::Exec {
-                    conn: offer.token,
-                    id: offer.exec,
-                },
-                stream,
-            };
-            conn.write_all(&stream::name(named))
-                .map_err(|why| Refusal::os("naming an offered guest stream", why))?;
-            let end = conn
-                .handle()
-                .try_clone_to_owned()
-                .map_err(|why| Refusal::os("owning the caller's guest stream socket", why))?;
-            socket::set_nonblocking(end.as_socket(), false)
-                .map_err(|why| Refusal::os("making the caller's guest stream socket wait", why))?;
-            Ok(Some(end.into()))
-        };
-        Ok(hex_api::Given {
-            stdin: dial(offer.streams.stdin, stream::Stdio::In)?,
-            stdout: dial(offer.streams.stdout, stream::Stdio::Out)?,
-            stderr: dial(offer.streams.stderr, stream::Stdio::Err)?,
-        })
+        crate::guest::open_offered(offer, None)
+    }
+
+    fn open_offer_before(
+        &self,
+        offer: &wire::StreamOffer,
+        deadline: ReplyDeadline,
+    ) -> Result<hex_api::Given, Refusal> {
+        crate::guest::open_offered(offer, Some(deadline))
     }
 
     fn recv(&self, reading: &mut Reading, take: &mut Take<'_>) -> Result<bool, Refusal> {

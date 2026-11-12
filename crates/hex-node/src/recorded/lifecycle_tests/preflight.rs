@@ -248,6 +248,135 @@ fn uppercase_retained_pool_body_cannot_be_ignored_before_cpu_adoption() {
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
 
+/// T-T7.1.2: a record in the state directory that can't be read is damage, never a crash's, as every write
+/// there is whole and synced. Do: recover beside one. Expect: refused before any backend effect, the refusal
+/// naming the file and what to do about it, and the file kept.
+#[test]
+fn t_t7_1_2_a_damaged_state_record_refuses_naming_its_file_and_the_remedy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node, effects, _) = retained(dir.path());
+    let path = dir.path().join("zz-damaged.json");
+    let bytes = b"{damaged durable record\n";
+    std::fs::write(&path, bytes).unwrap();
+    let refused = node.recover().unwrap_err().to_string();
+    assert!(refused.contains(&path.display().to_string()), "{refused}");
+    assert!(refused.contains("move the file aside"), "{refused}");
+    assert_eq!(effects.load(Ordering::SeqCst), 0);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+/// T-T7.1.2: a record torn in the runtime record directory beside no guest. Only the host can hold its box,
+/// and no name of a host box outlives the node to prove it ended. Do: recover. Expect: the node starts, its
+/// readable sibling taken back, and the torn record kept, its name refused as `Exists`.
+#[test]
+fn t_t7_1_2_a_torn_record_beside_no_guest_is_kept_and_the_node_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node, _, sibling) = retained(dir.path());
+    let torn = BoxId::new("ab-torn").unwrap();
+    let path = crate::store::runtime_record(&dir.path().join("@records"), &torn);
+    std::fs::write(&path, b"{\"version\":").unwrap();
+    let recovered = node
+        .recover()
+        .expect("the node starts beside a torn record");
+    assert_eq!(recovered.adopted, [sibling]);
+    assert!(path.exists(), "a record nothing proved ended was removed");
+    assert_eq!(recovered.held.len(), 1, "{:?}", recovered.held);
+    assert_eq!(recovered.held[0].0, torn);
+    let mut again = spec();
+    again.id = torn.clone();
+    assert_eq!(node.create(again), Err(Refusal::Exists(torn)));
+}
+
+/// A boot session no host is in: a UUID's form, all zeros. Every boot's is random (Linux's
+/// `random/boot_id`, macOS's `kern.bootsessionuuid`), so it stands for an earlier boot's.
+const EARLIER_BOOT: &str = "00000000-0000-0000-0000-000000000000";
+
+/// T-T7.1.2: a record torn in the runtime record directory before the host's latest boot, as its node's
+/// boot session marker says (a power loss tore it, and ended everything it named). Do: recover. Expect: the
+/// node starts, the torn record removed as an earlier boot's, said so, none held, its readable sibling kept.
+#[test]
+fn t_t7_1_2_a_torn_record_from_an_earlier_boot_is_removed_as_ended() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("@boot"), format!("{EARLIER_BOOT}\n")).unwrap();
+    let torn = BoxId::new("ab-torn").unwrap();
+    let path = crate::store::runtime_record(&dir.path().join("@records"), &torn);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"{\"version\":").unwrap();
+    let (node, _, sibling) = retained(dir.path());
+    let recovered = node
+        .recover()
+        .expect("the node starts beside a torn record");
+    assert!(!path.exists(), "the earlier boot's torn record is left");
+    assert!(recovered.held.is_empty(), "{:?}", recovered.held);
+    assert_eq!(recovered.removed.len(), 1, "{:?}", recovered.removed);
+    assert_eq!(recovered.removed[0].0, torn);
+    assert!(
+        recovered.removed[0].1.contains("earlier boot"),
+        "{:?}",
+        recovered.removed
+    );
+    assert_eq!(recovered.adopted, [sibling]);
+}
+
+/// T-T7.1.2: a record torn in this boot of the host, as its node's marker says: nothing tells its box ended.
+/// Do: recover. Expect: the record held, as a torn one is.
+#[test]
+fn t_t7_1_2_a_torn_record_of_this_boot_is_held() {
+    let Ok(Some(now)) = crate::store::host_boot().clone() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("@boot"), format!("{}\n", now.as_str())).unwrap();
+    let torn = BoxId::new("ab-torn").unwrap();
+    let path = crate::store::runtime_record(&dir.path().join("@records"), &torn);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"{\"version\":").unwrap();
+    let (node, _, _) = retained(dir.path());
+    let recovered = node
+        .recover()
+        .expect("the node starts beside a torn record");
+    assert!(
+        path.exists(),
+        "a record of this boot nothing proved ended was removed"
+    );
+    assert_eq!(recovered.held.len(), 1, "{:?}", recovered.held);
+    assert_eq!(recovered.held[0].0, torn);
+}
+
+/// T-T7.1.2: a whole record written in an earlier boot of the host: that boot's end ended everything of
+/// its box. Do: recover. Expect: the box removed as an earlier boot's, said so, never taken back; the
+/// record gone and nothing of it ended (no process of it outlived its boot).
+#[test]
+fn t_t7_1_2_a_record_from_an_earlier_boot_is_removed_never_taken_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node, effects, sibling) = retained(dir.path());
+    let mut earlier = spec();
+    earlier.id = BoxId::new("ab-earlier").unwrap();
+    let id = earlier.id.clone();
+    let mut bytes = BoxRecord::new(earlier, Phase::Ready, Vec::new())
+        .encode()
+        .unwrap();
+    // The record as a node writes it in a boot: its session beside the rest.
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    let body = text.trim_end().strip_suffix('}').unwrap();
+    bytes = format!("{body},\"boot\":\"{EARLIER_BOOT}\"}}\n").into_bytes();
+    let path = crate::store::runtime_record(&dir.path().join("@records"), &id);
+    std::fs::write(&path, &bytes).unwrap();
+    let before = effects.load(Ordering::SeqCst);
+    let recovered = node.recover().expect("the node starts");
+    assert!(!path.exists(), "the earlier boot's record is left");
+    assert_eq!(recovered.adopted, [sibling]);
+    assert_eq!(recovered.removed.len(), 1, "{:?}", recovered.removed);
+    assert_eq!(recovered.removed[0].0, id);
+    assert!(
+        recovered.removed[0].1.contains("earlier boot"),
+        "{:?}",
+        recovered.removed
+    );
+    // One alive and one adopt for the sibling; nothing asked or ended of the earlier boot's box.
+    assert_eq!(effects.load(Ordering::SeqCst) - before, 2);
+}
+
 /// Leaves the retained native-metadata cross-check to `Recover`'s default; its native
 /// initialization counts as an effect.
 struct Unchecked(CountedRecovery);

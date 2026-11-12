@@ -10,7 +10,7 @@ import re
 import signal
 import subprocess
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
 class InvalidEvidence(ValueError):
@@ -151,6 +151,7 @@ def artifact(root, row):
     require(isinstance(row, dict), "missing artifact receipt")
     name = row.get("path")
     require(isinstance(name, str) and name, "missing artifact path")
+    require("\\" not in name and not PureWindowsPath(name).drive, "portable POSIX relative artifact path required")
     relative = Path(name)
     require(not relative.is_absolute() and ".." not in relative.parts, "artifact escaped run")
     base = Path(root).resolve(strict=True)
@@ -235,28 +236,33 @@ def check_events(events, backend, topology, proof="full"):
         if matches:
             joins.append(device.get("uuid"))
     require(joins==[compute["uuid"]],"UUID/native physical join missing, ambiguous or inconsistent")
-    require(natural(compute.get("words"), positive=True) and compute.get("mismatches") == 0,
+    require(natural(compute.get("words"), positive=True)
+            and natural(compute.get("mismatches")) and compute["mismatches"] == 0,
             "vacuous or incorrect workload")
-    require(compute.get("prefill_mismatches") == compute["words"], "output was not poisoned before dispatch")
+    require(natural(compute.get("prefill_mismatches"), positive=True)
+            and compute["prefill_mismatches"] == compute["words"], "output was not poisoned before dispatch")
     require(compute.get("hardware") is True and compute.get("dispatch_completed") is True,
             "no completed hardware dispatch")
     if proof == "full":
         foreign, wrong, scheduler, runtime = events[3:7]
-        require(natural(foreign.get("host_accessible"), positive=True) and foreign.get("guest_accessible") == 0,
+        require(natural(foreign.get("host_accessible"), positive=True)
+                and natural(foreign.get("guest_accessible")) and foreign["guest_accessible"] == 0,
                 "foreign-device denial lacks a live positive host control")
-        require(wrong.get("dispatches") == 0 and wrong.get("refused") is True,
+        require(natural(wrong.get("dispatches")) and wrong["dispatches"] == 0 and wrong.get("refused") is True,
                 "wrong identity reached GPU dispatch")
         for recovery in (scheduler, runtime):
-            require(recovery.get("selected") == selected and recovery.get("holder_count") == 1,
+            require(recovery.get("selected") == selected and natural(recovery.get("holder_count"), positive=True)
+                    and recovery["holder_count"] == 1,
                     "recovery repicked or duplicated the physical holder")
             require(recovery.get("compute_verified") is True and recovery.get("same_physical_box") is True,
                     "recovery did not retain the running workload")
         require(runtime.get("catalog_reordered") is True and runtime.get("load_order_changed") is True,
                 "recovery never challenged catalog/load ordering")
-    require(cleanup.get("boxes") == 0 and cleanup.get("holders") == 0 and
-            cleanup.get("owned_native_processes") == 0 and cleanup.get("owned_artifacts") == 0,
+    require(all(natural(cleanup.get(name)) and cleanup[name] == 0
+                for name in ("boxes", "holders", "owned_native_processes", "owned_artifacts")),
             "native cleanup incomplete")
-    require(complete.get("selected_stages") == len(expected), "vacuous completion")
+    require(natural(complete.get("selected_stages"), positive=True)
+            and complete["selected_stages"] == len(expected), "vacuous completion")
     return {"backend": backend, "topology": topology, "proof": proof, "native_stages": len(expected),
             "physical":binding.get("physical"),"key":binding.get("key"),
             "remaining": [] if proof == "full" else ["foreign-device", "wrong-id", "scheduler-recovery", "runtime-recovery"]}
@@ -272,6 +278,8 @@ def check_run(root, receipt, byte_limit):
             "light/model/compile receipt is not native proof")
     require(receipt.get("exit") == 0 and receipt.get("timed_out") is False and receipt.get("reaped") is True and
             receipt.get("group_gone") is True, "failed/unreaped native invocation, or its process group not gone")
+    # A child that exits leaving processes in its group leaked them, though the driver then ended them.
+    require(receipt.get("group_signaled") is False, "the native invocation left processes running past its exit")
     binary = artifact(root, receipt.get("binary"))
     require(binary.stat().st_size > 0, "empty binary")
     build_path=artifact(root,receipt.get("build"))
@@ -282,7 +290,9 @@ def check_run(root, receipt, byte_limit):
             build.get("group_gone") is True and build.get("source_unchanged") is True and
             build.get("binary",{}).get("sha256")==receipt["binary"]["sha256"],
             "run is not tied to its actual successful pinned-source build")
+    require(build.get("group_signaled") is False, "the fixture build left processes running past its exit")
     log = artifact(root, receipt.get("log"))
+    require(log.stat().st_size <= byte_limit, "native log exceeds admitted byte bound")
     libtest_result(log.read_text(encoding="utf-8"), 1)
     event_file = artifact(root, receipt.get("events"))
     events = load_json(event_file, byte_limit)

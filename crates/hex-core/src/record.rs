@@ -55,6 +55,55 @@ pub struct BoxRecord {
     /// intent effect. A legacy missing value supplies no authority to adopt or stop a native scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_scope: Option<NativeScope>,
+    /// The host's boot session the record was written in ([`BootSession`]): one written in an earlier boot
+    /// names nothing that runs, that boot's end having ended it (T-T7.1.2). Added within version 1, so a
+    /// record without it, or one written where the host's session can't be read, reads as `None` and keeps
+    /// recovery's other rules (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot: Option<BootSession>,
+}
+
+/// The host's boot session as its kernel names it, a new one each boot: Linux's
+/// `/proc/sys/kernel/random/boot_id`, macOS's `kern.bootsessionuuid`. The core takes the kernel's text;
+/// the shell reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct BootSession(String);
+
+impl BootSession {
+    /// Most bytes of a kernel's name for its boot: a UUID's 36, with room for another spelling.
+    pub const MAX_BYTES: usize = 64;
+
+    /// The session the kernel's `text` names, a trailing newline aside: refused empty, past
+    /// [`BootSession::MAX_BYTES`], or holding anything but ASCII letters, digits and dashes.
+    pub fn new(text: &str) -> Result<Self, Refusal> {
+        let name = text.strip_suffix('\n').unwrap_or(text);
+        if name.is_empty()
+            || name.len() > Self::MAX_BYTES
+            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return Err(Refusal::Invalid {
+                what: "the host's boot session",
+                why: format!(
+                    "{} bytes that aren't a kernel's name for its boot",
+                    name.len()
+                ),
+            });
+        }
+        let mut owned = String::new();
+        owned
+            .try_reserve_exact(name.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "boot session bytes",
+                bound: Self::MAX_BYTES,
+            })?;
+        owned.push_str(name);
+        Ok(Self(owned))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// An opaque 128-bit native incarnation. The core accepts injected bytes and performs no OS call;
@@ -130,12 +179,18 @@ impl BoxRecord {
             slot: None,
             run: None,
             native_scope: None,
+            boot: None,
         }
     }
 
-    /// A fresh Store write adds its generated scope without cloning the original workload or
-    /// allocating a parallel record. The flattened source has no scope field in this case.
-    pub fn encode_fresh_scope(&self, scope: NativeScope) -> Result<Vec<u8>, Refusal> {
+    /// A fresh Store write adds its generated scope, and the boot session it is written in, without cloning
+    /// the original workload or allocating a parallel record. The flattened source has no scope field in
+    /// this case.
+    pub fn encode_fresh_scope(
+        &self,
+        scope: NativeScope,
+        boot: Option<&BootSession>,
+    ) -> Result<Vec<u8>, Refusal> {
         if self.native_scope.is_some() || self.phase != Phase::Creating {
             let message = "only a fresh Creating record can introduce a native scope";
             let mut why = String::new();
@@ -155,11 +210,48 @@ impl BoxRecord {
             #[serde(flatten)]
             original: &'a BoxRecord,
             native_scope: NativeScope,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            boot: Option<&'a BootSession>,
         }
+        // The record's own session is written by the flattened source; another replaces it.
+        let moved;
+        let original = if self.boot.is_some() && self.boot.as_ref() != boot {
+            moved = BoxRecord {
+                boot: None,
+                ..self.clone()
+            };
+            &moved
+        } else {
+            self
+        };
         encode_record(&Fresh {
-            original: self,
+            original,
             native_scope: scope,
+            boot: if original.boot.is_some() { None } else { boot },
         })
+    }
+
+    /// The record's file as written in boot session `boot` (`None` where the host's can't be read): a record
+    /// carries the session it was last written in, so one read from an earlier session takes this one's.
+    /// Refused as [`BoxRecord::encode`] refuses.
+    pub fn encode_in(&self, boot: Option<&BootSession>) -> Result<Vec<u8>, Refusal> {
+        #[derive(Serialize)]
+        struct InBoot<'a> {
+            #[serde(flatten)]
+            original: &'a BoxRecord,
+            boot: &'a BootSession,
+        }
+        match (self.boot.as_ref(), boot) {
+            (None, Some(now)) => encode_record(&InBoot {
+                original: self,
+                boot: now,
+            }),
+            (Some(was), now) if Some(was) != now => encode_record(&BoxRecord {
+                boot: now.cloned(),
+                ..self.clone()
+            }),
+            _ => encode_record(self),
+        }
     }
 
     /// The record's file: refused past [`MAX_RECORD_BYTES`], which [`BoxRecord::decode`] would refuse
@@ -449,7 +541,7 @@ mod tests {
         );
         assert_eq!(BoxRecord::decode(&legacy).unwrap().native_scope, None);
         let scope = NativeScope::from_bytes([0x31; 16]);
-        let encoded = original.encode_fresh_scope(scope).unwrap();
+        let encoded = original.encode_fresh_scope(scope, None).unwrap();
         let decoded = BoxRecord::decode(&encoded).unwrap();
         assert_eq!(decoded.spec, original.spec);
         assert_eq!(decoded.phase, Phase::Creating);
@@ -459,11 +551,11 @@ mod tests {
         assert_eq!(original.encode().unwrap(), legacy);
         assert!(
             decoded
-                .encode_fresh_scope(NativeScope::from_bytes([0x32; 16]))
+                .encode_fresh_scope(NativeScope::from_bytes([0x32; 16]), None)
                 .is_err()
         );
         original.phase = Phase::Ready;
-        assert!(original.encode_fresh_scope(scope).is_err());
+        assert!(original.encode_fresh_scope(scope, None).is_err());
     }
 
     /// AC-T7.4.1: malformed scope width cannot decode as a legacy record without scope.
@@ -472,7 +564,7 @@ mod tests {
         let mut original = record();
         original.phase = Phase::Creating;
         let bytes = original
-            .encode_fresh_scope(NativeScope::from_bytes([7; 16]))
+            .encode_fresh_scope(NativeScope::from_bytes([7; 16]), None)
             .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         for width in [0, 1, 15, 17, 32] {
@@ -507,7 +599,7 @@ mod tests {
             let mut original = record();
             original.phase = Phase::Creating;
             let scope = NativeScope::from_bytes(bytes);
-            let decoded = BoxRecord::decode(&original.encode_fresh_scope(scope).unwrap()).unwrap();
+            let decoded = BoxRecord::decode(&original.encode_fresh_scope(scope, None).unwrap()).unwrap();
             prop_assert_eq!(decoded.native_scope, Some(scope));
             prop_assert_eq!(scope.bytes(), &bytes);
         }
@@ -524,5 +616,75 @@ mod tests {
             let cut = cut.min(full.len().saturating_sub(2));
             prop_assert!(BoxRecord::decode(&full[..cut]).is_err());
         }
+    }
+
+    /// T-T7.1.2: do write a record in one boot session, again in another, and where none is known, and
+    /// fresh with its scope; read an old record that has no session. Expect: each carries the session it was
+    /// last written in, an old record none, and the fresh one its scope beside its session.
+    #[test]
+    fn t_t7_1_2_a_record_carries_the_boot_session_it_was_last_written_in() {
+        let (one, two) = (
+            BootSession::new("6d1c0e2a-7b4f-4a3e-9c51-1f0e2d3c4b5a\n").unwrap(),
+            BootSession::new("0f9e8d7c-6b5a-4c3d-8e1f-2a3b4c5d6e7f").unwrap(),
+        );
+        assert_eq!(one.as_str(), "6d1c0e2a-7b4f-4a3e-9c51-1f0e2d3c4b5a");
+        let old = record();
+        assert_eq!(
+            BoxRecord::decode(&old.encode().unwrap()).unwrap().boot,
+            None
+        );
+        let first = BoxRecord::decode(&old.encode_in(Some(&one)).unwrap()).unwrap();
+        assert_eq!(first.boot.as_ref(), Some(&one));
+        assert_eq!(
+            first,
+            BoxRecord {
+                boot: Some(one.clone()),
+                ..old.clone()
+            }
+        );
+        let again = BoxRecord::decode(&first.encode_in(Some(&two)).unwrap()).unwrap();
+        assert_eq!(again.boot.as_ref(), Some(&two));
+        let same = BoxRecord::decode(&again.encode_in(Some(&two)).unwrap()).unwrap();
+        assert_eq!(same, again);
+        let unknown = BoxRecord::decode(&again.encode_in(None).unwrap()).unwrap();
+        assert_eq!(unknown.boot, None);
+        let mut fresh = record();
+        fresh.phase = Phase::Creating;
+        let scope = NativeScope::from_bytes([9; 16]);
+        let made =
+            BoxRecord::decode(&fresh.encode_fresh_scope(scope, Some(&one)).unwrap()).unwrap();
+        assert_eq!(
+            (made.native_scope, made.boot.as_ref()),
+            (Some(scope), Some(&one))
+        );
+        fresh.boot = Some(two.clone());
+        let moved =
+            BoxRecord::decode(&fresh.encode_fresh_scope(scope, Some(&one)).unwrap()).unwrap();
+        assert_eq!(moved.boot.as_ref(), Some(&one));
+    }
+
+    /// T-T7.1.2: do name a boot session from text a kernel wouldn't give: empty, past the bound, or with
+    /// other characters. Expect each refused by type, naming the session.
+    #[test]
+    fn t_t7_1_2_a_boot_session_is_only_a_kernels_name_for_its_boot() {
+        for text in [
+            "",
+            "\n",
+            "a b",
+            "../etc",
+            &"a".repeat(BootSession::MAX_BYTES + 1),
+        ] {
+            assert!(
+                matches!(
+                    BootSession::new(text),
+                    Err(Refusal::Invalid {
+                        what: "the host's boot session",
+                        ..
+                    })
+                ),
+                "{text:?}"
+            );
+        }
+        assert!(BootSession::new(&"a".repeat(BootSession::MAX_BYTES)).is_ok());
     }
 }

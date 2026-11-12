@@ -368,6 +368,10 @@ struct Stage {
     opaque_xattr: &'static str,
     /// Layers this stage committed, counted for none to commit twice.
     seq: u64,
+    /// Reads the staged folder's file system's free room after the stage began ([`free`]): what admission
+    /// ([`Stage::admits_now`]) and what the stage took ([`Stage::end`]) are read from. A test pins it, so
+    /// what other writers of the same file system do meanwhile decides nothing of its own.
+    read_free: fn(&OwnedFd) -> Result<Free, Refusal>,
 }
 
 /// Where a directory whose mode and times are set last is.
@@ -741,6 +745,7 @@ impl Stage {
                 removals: Budget::new(usize::try_from(free.used).unwrap_or(usize::MAX)),
                 opaque_xattr,
                 seq: 0,
+                read_free: self::free,
             },
             // What the stage may spend: what's free, and what the last resort can take ([`Stage::room`]),
             // so the packer never refuses a stage whole-root staging would have staged.
@@ -946,7 +951,7 @@ impl Stage {
             self.since = charged;
             return Ok(true);
         }
-        self.last = free(&self.staged)?;
+        self.last = (self.read_free)(&self.staged)?;
         self.reads = self.reads.saturating_add(1);
         self.since = entry;
         Ok(admits(self.last, entry, self.need))
@@ -1464,7 +1469,7 @@ impl Stage {
         rustix::fs::fchmod(&self.root, Mode::from_raw_mode(ROOT_MODE.into()))
             .map_err(os("setting a staged root's mode"))?;
         if self.layers.is_some() {
-            let taken = taken(self.free, free(&self.staged)?);
+            let taken = taken(self.free, (self.read_free)(&self.staged)?);
             self.reads = self.reads.saturating_add(1);
             if taken.entries <= self.need.entries && taken.bytes <= self.need.bytes {
                 return Ok(());

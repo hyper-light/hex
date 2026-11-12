@@ -361,6 +361,52 @@ fn dial_bound(seen: Duration) -> Result<Duration, Refusal> {
     Ok(seen.max(recorded_boot()?).saturating_mul(2))
 }
 
+/// The word that tells a Shards guest its boot's deadline on its kernel command line (AC-T7.4.1), as a Firecracker
+/// guest is told its own (`hex.firecracker-ready-ms`): `hex.ready-ms=` and what is left of the boot's bound as it
+/// boots, in whole milliseconds rounded up, so the guest, counting from its kernel's start, ends no sooner than its
+/// host. Guest init hands it to the relay, whose calls to its node before the guest is ready take it as their
+/// caller's (hex-cli's `guest`); a guest told none keeps their learned bounds.
+pub const READY_MS: &str = "hex.ready-ms";
+
+/// Tells the guest booted with `cmdline` that `left` is what remains of its boot's deadline ([`READY_MS`]), within the
+/// kernel's command-line bound; refused where nothing is left, the word is there already, or init's arguments (`--`)
+/// begin, past which no word is the kernel's.
+pub(crate) fn tell_ready(cmdline: &mut String, left: Duration) -> Result<(), Refusal> {
+    let invalid = |why: &str| Refusal::Invalid {
+        what: "the guest's boot deadline",
+        why: why.to_owned(),
+    };
+    let millis = left.as_nanos().div_ceil(1_000_000);
+    if millis == 0 {
+        return Err(invalid("nothing of it is left to boot in"));
+    }
+    if cmdline
+        .split_whitespace()
+        .any(|word| word == "--" || word.starts_with(READY_MS))
+    {
+        return Err(invalid(
+            "the command line names it already, or passes init its arguments",
+        ));
+    }
+    let word = format!(" {READY_MS}={millis}");
+    let exhausted = Refusal::Exhausted {
+        what: "guest kernel command line",
+        bound: gpu::CMDLINE_BYTES,
+    };
+    if cmdline
+        .len()
+        .checked_add(word.len())
+        .is_none_or(|len| len >= gpu::CMDLINE_BYTES)
+    {
+        return Err(exhausted);
+    }
+    cmdline
+        .try_reserve_exact(word.len())
+        .map_err(|_| exhausted)?;
+    cmdline.push_str(&word);
+    Ok(())
+}
+
 /// Boots of one guest: the first, and one more where the first hung alive past its bound, as a hung
 /// boot has another guest to try before its caller is refused.
 const BOOTS: usize = 2;
@@ -718,9 +764,10 @@ impl GuestRuntime {
         least.memory_mib = shards_api::min_memory_mib(std::env::consts::ARCH);
         least.shares.clear();
         least.gpu = false;
-        let spec = least.spec();
+        let mut spec = least.spec();
         let guests = Arc::clone(&self.guests);
         let bound = self.first_dial_bound()?;
+        tell_ready(&mut spec.cmdline, bound)?;
         let thread = std::thread::Builder::new()
             .name("hex-guest-warm".to_owned())
             .spawn(move || {
@@ -794,9 +841,15 @@ impl GuestRuntime {
                 what: "the guest's boot bound",
                 why: format!("{bound:?} from now is past a monotonic deadline"),
             })?;
+            // AC-T7.4.1: the guest is told what is left of it, which its relay's hello to its node takes.
+            let mut spec = self.cpu_spec();
+            tell_ready(
+                &mut spec.cmdline,
+                ready_by.saturating_duration_since(Instant::now()),
+            )?;
             let guest: Arc<dyn shards_api::Guest> = self
                 .guests
-                .boot(&self.cpu_spec())
+                .boot(&spec)
                 .map_err(|why| refusal("booting the node's guest", &why))?
                 .into();
             let link: LinkOwner = own_link(ShardsLink::new(Arc::clone(&guest), bound))?;
@@ -1114,6 +1167,47 @@ impl GuestRuntime {
             };
         };
         b.client.delete(id)?;
+        match stage::unstage(b.link.as_ref(), id) {
+            Ok(()) | Err(Refusal::NoSuchBox(_)) => Ok(()),
+            Err(why) => Err(why),
+        }
+    }
+
+    /// The boxes the node's running guest holds under names no readable record of `records` carries: orphans
+    /// only a create whose record was torn can have left (T-T7.1.2). None while no guest runs here. A guest
+    /// that can't answer is its refusal, and proves no box gone.
+    pub fn orphans(&self, records: &crate::devices::Records) -> Result<Vec<BoxId>, Refusal> {
+        let Some(b) = self.running()? else {
+            return Ok(Vec::new());
+        };
+        let listed = b.client.list()?;
+        let mut orphans = Vec::new();
+        orphans
+            .try_reserve_exact(listed.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "orphaned guest boxes",
+                bound: listed.len(),
+            })?;
+        orphans.extend(
+            listed
+                .into_iter()
+                .map(|info| info.id)
+                .filter(|id| !matches!(records.get(id), Some(Ok(_)))),
+        );
+        Ok(orphans)
+    }
+
+    /// Deletes orphan `id` ([`GuestRuntime::orphans`]) through the running guest, then its staged copy: a box
+    /// the guest still holds keeps its root. One gone already is deleted, and so is any with no guest running
+    /// here to hold it.
+    pub fn delete_orphan(&self, id: &BoxId) -> Result<(), Refusal> {
+        let Some(b) = self.running()? else {
+            return Ok(());
+        };
+        match b.client.delete(id) {
+            Ok(()) | Err(Refusal::NoSuchBox(_)) => {}
+            Err(why) => return Err(why),
+        }
         match stage::unstage(b.link.as_ref(), id) {
             Ok(()) | Err(Refusal::NoSuchBox(_)) => Ok(()),
             Err(why) => Err(why),

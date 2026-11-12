@@ -584,7 +584,7 @@ impl FirecrackerRuntime {
             let record = transaction.grant_pool(&grant)?;
             self.preflight_backing(&record)?;
             self.config.verify_inputs()?;
-            let plan = vfio::plan(&self.catalog, &grant.devices)?;
+            let plan = vfio::plan(&self.host, &self.catalog, &grant.devices, &[])?;
             let paths = self.pool_paths(&record)?;
             match fs::symlink_metadata(&paths.dir) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -885,6 +885,7 @@ pub(super) mod tests {
             catalog: triomphe::Arc::try_new(catalog).unwrap(),
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
+            host: vfio::Host::system().unwrap(),
         };
         (runtime, owner)
     }
