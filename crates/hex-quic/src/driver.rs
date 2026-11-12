@@ -657,7 +657,8 @@ impl Driver {
                 let Some(state) = self.peers.get_mut(&peer) else {
                     return;
                 };
-                match state.mux.frame(lane, kind, bytes) {
+                let made = state.mux.frame(lane, kind, bytes);
+                match made {
                     Ok(outs) => self.apply(peer, outs),
                     Err(_broken) => {
                         self.ep

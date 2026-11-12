@@ -4,6 +4,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::LazyLock;
 use std::time::Instant;
 
+use hex_core::lanes;
 use hex_core::stream::{CONTROL_PORT, STDIO_PORT};
 use hyper_quic::rustls;
 
