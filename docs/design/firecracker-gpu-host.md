@@ -124,9 +124,18 @@ So 79:00.0's bus reset is always refused.
 - Any other function goes to one VM per host boot.
 - Its mark, `vfio-single-use/<sbdf>`, names the boot session the node stamps its records with. It
   is written durably before the VMM that opens the function starts.
-- The mark lives in the node's runtime directory, which every node on the host shares:
-  `/run/hex-node` for a root node, `$XDG_RUNTIME_DIR/hex-node` otherwise. So a node with another
-  state directory sees it too, and a reboot clears it.
+- The mark lives in the node's runtime directory, the one every node of its user on the host shares:
+  `/run/hex-node` for a root node, `$XDG_RUNTIME_DIR/hex-node` for another user's. So a node with
+  another state directory sees it too.
+- Only a node that reads where every node able to give the function out marks it gives it out
+  (`FirecrackerRuntime::unavailable_once`, after the lead's review of 3cea2fcf):
+  - A rootless node with no `$XDG_RUNTIME_DIR` keeps its runtime directory in its own state, so it
+    gives no such function to any VM.
+  - No node gives out one whose VFIO group interface, `/dev/vfio/<group>`, another user owns. That
+    user's nodes mark it in their own runtime directory, and a root node, which can open any group,
+    would never read it. So the nodes that can give a function out all read one directory.
+  Both are refused by type before anything starts, and capacity lists the function unavailable with
+  that reason.
 - A later VM on that boot, any node's, is refused by type before anything starts: "no reset method
   ... the host must reboot". This includes a pool's observer, and a box after that observer.
 - Capacity still lists the function, and lists it in `unavailable` with that reason. The scheduler
@@ -134,7 +143,8 @@ So 79:00.0's bus reset is always refused.
 - A later boot's session admits the function again. A boot session that can't be read refuses it.
 - Where the mark can be lost, so can its refusal:
   - `$XDG_RUNTIME_DIR` is removed when its user's last session ends, unless that user lingers.
-  - A rootless node with no `$XDG_RUNTIME_DIR` keeps its runtime directory in its own state.
+  - An administrator who gives a function's VFIO group to another user on a boot a VM had it: the
+    new owner's nodes read their own directory.
 - A function a reset clears keeps vfio-pci's reset at release, as before. That reset's outcome is
   invisible to Hex: the kernel reports it only at debug level, and to no process.
 

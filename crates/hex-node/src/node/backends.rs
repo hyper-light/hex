@@ -308,6 +308,81 @@ impl Node {
         self.attachments.clone()
     }
 
+    /// Joins the core's loop `lp` to its VM backends, whose evented connections to their guests a forwarded exec takes
+    /// ([`Node::forward_vm`]).
+    pub(super) fn attach_backends(&self, lp: Arc<dyn crate::serve::Loop>) -> Result<(), Refusal> {
+        let Some(backends) = self.backends.get() else {
+            return Ok(());
+        };
+        let joins: Arc<dyn hex_runtime::guest::Joins> = Arc::new(crate::recorded::LoopJoins(lp));
+        if let Some(backend) = &backends.firecracker {
+            backend.join_loop(Arc::clone(&joins))?;
+        }
+        if let Some(guest) = &backends.shards {
+            guest.join_loop(joins)?;
+        }
+        Ok(())
+    }
+
+    /// An exec into a VM box goes to its guest's node through its backend's evented connection
+    /// ([`crate::recorded::forward_evented`]), as a guest's call goes on every host (AC-T7.4.1): its answer and its
+    /// program's end come as the guest's messages. Its program is no process of this host's, its pid the guest's, so
+    /// the node never watches or signals a process by it (GPU run r1119: the guest pid, naming no host process, was
+    /// waited for as a gone one's and its end reported unknown). Every other call, and an exec into a native box, comes
+    /// back to run here: on a node with no VM backend, or into an `oci` box the supervisor watches, without reading the
+    /// box's record.
+    pub(super) fn forward_vm(
+        &self,
+        call: hex_core::wire::Call,
+        stdio: Stdio,
+        reply: crate::serve::Reply,
+        ended: crate::serve::Ended,
+    ) -> crate::serve::Forward {
+        use crate::serve::Forward;
+        use hex_core::wire::Call;
+        let id = match &call {
+            Call::Exec { id, .. } | Call::ExecStreams { id, .. } => id,
+            _ => return Forward::Back(Box::new((call, stdio))),
+        };
+        let Some(backends) = self
+            .backends
+            .get()
+            .filter(|backends| backends.firecracker.is_some() || backends.shards.is_some())
+        else {
+            return Forward::Back(Box::new((call, stdio)));
+        };
+        match self.supervisor.watches_container(id) {
+            Ok(true) => return Forward::Back(Box::new((call, stdio))),
+            Ok(false) => {}
+            Err(why) => return Forward::Refused(why),
+        }
+        let class = match self.store.read_lifecycle(id) {
+            Ok(Some(record)) => match record.spec.backend_class() {
+                Ok(class) => class,
+                Err(why) => return Forward::Refused(why),
+            },
+            Ok(None) => return Forward::Back(Box::new((call, stdio))),
+            Err(why) => return Forward::Refused(why),
+        };
+        let client = match class {
+            Class::Firecracker => match &backends.firecracker {
+                Some(backend) => backend.evented_for(id),
+                None => Err(uncertain(id)),
+            },
+            Class::Shards => match &backends.shards {
+                Some(guest) => guest
+                    .evented_for(id)
+                    .and_then(|client| client.ok_or_else(|| uncertain(id))),
+                None => Err(uncertain(id)),
+            },
+            Class::Process | Class::Oci => return Forward::Back(Box::new((call, stdio))),
+        };
+        match client {
+            Ok(client) => crate::recorded::forward_evented(client, call, stdio, reply, ended),
+            Err(why) => Forward::Refused(why),
+        }
+    }
+
     /// The host's boot session as this node's records carry it (T-T7.1.2), for a backend whose own marks last until
     /// the host reboots: the Firecracker adapter's single-use functions. `None` where it can't be read.
     pub fn boot_session(&self) -> Option<hex_core::record::BootSession> {
