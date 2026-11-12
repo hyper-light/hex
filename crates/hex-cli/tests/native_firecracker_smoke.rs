@@ -263,6 +263,60 @@ fn alive(pid: u32, start: u64) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether `pid`, started at `start`, still runs: there and not a zombie (`Z`), which holds nothing.
+fn running(pid: u32, start: u64) -> bool {
+    alive(pid, start)
+        && fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| stat.rsplit(") ").next().map(|rest| !rest.starts_with('Z')))
+            .unwrap_or(false)
+}
+
+/// The VMMs of `binary` naming `dir` (the backend's state), ended by their own PID and start time when this is
+/// dropped, however the test ends: a VMM outliving its killed node is the adoption path's to take back, never a
+/// failed test's to leave holding its devices. A VMM that ended already is left alone.
+struct Reaper {
+    binary: PathBuf,
+    dir: PathBuf,
+    wait: Duration,
+}
+
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        for (pid, start) in vmm(&self.binary, &self.dir) {
+            if !running(pid, start) {
+                continue;
+            }
+            let Some(target) = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()) else {
+                continue;
+            };
+            let _ = rustix::process::kill_process(target, rustix::process::Signal::KILL);
+            // Read again as long as the last read took, until it is gone or the run's wait has passed.
+            let until = Instant::now() + self.wait;
+            while running(pid, start) && Instant::now() < until {
+                let read = Instant::now();
+                let _ = running(pid, start);
+                std::thread::park_timeout(read.elapsed());
+            }
+            eprintln!(
+                "SMOKE reaper: VMM {pid} (start {start}) ended by the test's cleanup; running: {}",
+                running(pid, start)
+            );
+        }
+    }
+}
+
+impl Reaper {
+    fn of(config: &Path, wait: Duration) -> Self {
+        let config = hex_runtime::firecracker::Config::from_file(config).unwrap();
+        Self {
+            binary: config.binary,
+            dir: config.state_dir,
+            wait,
+        }
+    }
+}
+
 /// The host's TUN/TAP interfaces (those with `tun_flags`): what a Firecracker network would add.
 /// Other workloads' interfaces (a container's veth) come and go on a shared host.
 fn taps() -> Vec<String> {
@@ -331,6 +385,7 @@ fn native_firecracker_cpu_box_runs_and_leaves_nothing() {
         .unwrap()
         .binary;
     let before = taps();
+    let _reaper = Reaper::of(&config, inputs.wait);
     let node = Node::start(&inputs, &own, "a", &config);
     let client = node.client();
     assert!(
@@ -650,6 +705,7 @@ fn native_firecracker_gpu_vm_under_a_memlock_below_its_ram_is_refused_with_its_d
     let group = gpu(&inputs, "group").as_u64().unwrap();
     assert!(vfio_holders(group).is_empty(), "the GPU is free before");
     let catalog = gpu(&inputs, "catalog").as_str().unwrap();
+    let _reaper = Reaper::of(&config, inputs.wait);
     let node = Node::start_with(&inputs, &own, "gpu-memlock", &config, Some(catalog));
     let client = node.client();
     let id = BoxId::new("fc-gpu-memlock").unwrap();
@@ -723,16 +779,15 @@ fn native_firecracker_gpu_box_computes_recovers_and_returns_its_gpu() {
     assert!(vfio_holders(group).is_empty(), "the GPU is free before");
     vfio_group_opens(group).unwrap();
     let catalog = gpu(&inputs, "catalog").as_str().unwrap();
+    let _reaper = Reaper::of(&config, inputs.wait);
     let node = Node::start_with(&inputs, &own, "gpu", &config, Some(catalog));
     let client = node.client();
     let id = BoxId::new("fc-gpu").unwrap();
+    let spec = gpu_spec(&inputs, &config, &id);
 
     let begun = Instant::now();
     let info = client
-        .create_before(
-            gpu_spec(&inputs, &config, &id),
-            Instant::now() + inputs.wait,
-        )
+        .create_before(spec.clone(), Instant::now() + inputs.wait)
         .unwrap();
     eprintln!(
         "GPU create (boot with the GPU to readiness, guest box made) {:?}",
@@ -771,7 +826,28 @@ fn native_firecracker_gpu_box_computes_recovers_and_returns_its_gpu() {
     let pci = said.lines().nth(1).unwrap();
     assert!(pci.ends_with(" pci-gpu-functions 1"), "{pci}");
 
-    let max_items = gpu(&inputs, "max_items").as_u64().unwrap().to_string();
+    // The witness's inputs, each a fact or its protocol's, none picked:
+    // - max-items: the GPUs the box was given, all the physical devices it may see (its own arrays, a
+    //   device's extensions and queue families, it sizes by the driver's counts);
+    // - shader bytes: the shader's own size, in the root the box was staged from;
+    // - rounds: the oracle's period: it rotates a 32-bit word by 7 a round, coprime to 32, so 32 rounds
+    //   carry every bit through every position (compute.comp, the witness's `oracle`);
+    // - words: one page of them, the least a host-visible buffer maps (the guest's page, x86_64's as the host's);
+    // - the fence's wait: the run's own bound on each step; the challenge: the run's, fresh each run.
+    let max_items = spec.devices.len().to_string();
+    let shader = gpu(&inputs, "shader").as_str().unwrap();
+    let shader_bytes =
+        fs::metadata(gpu_path(&inputs, "rootfs").join(shader.trim_start_matches('/')))
+            .unwrap()
+            .len()
+            .to_string();
+    let rounds = u32::BITS.to_string();
+    let words = (rustix::param::page_size() / std::mem::size_of::<u32>()).to_string();
+    let wait_ns = inputs.wait.as_nanos().to_string();
+    let challenge = gpu(&inputs, "challenge").as_u64().unwrap().to_string();
+    eprintln!(
+        "GPU witness inputs: max-items {max_items} shader-bytes {shader_bytes} rounds {rounds} words {words} wait-ns {wait_ns} challenge {challenge}"
+    );
     let (exit, said, errors) = exec_to_end(
         &client,
         &id,
@@ -785,15 +861,6 @@ fn native_firecracker_gpu_box_computes_recovers_and_returns_its_gpu() {
     assert_eq!(devices.len(), 1, "the box sees the selected GPU alone");
     let uuid = devices[0]["uuid"].as_str().unwrap().to_owned();
 
-    let number = |field: &str| gpu(&inputs, field).as_u64().unwrap().to_string();
-    let (words, rounds, challenge, wait_ns, shader_bytes) = (
-        number("words"),
-        number("rounds"),
-        number("challenge"),
-        number("wait_ns"),
-        number("max_shader_bytes"),
-    );
-    let shader = gpu(&inputs, "shader").as_str().unwrap();
     let compute = |client: &Client, when: &str| {
         let args = [
             "--mode",
@@ -871,4 +938,52 @@ fn native_firecracker_gpu_box_computes_recovers_and_returns_its_gpu() {
     eprintln!(
         "GPU returned: group {group} unheld and openable, {host_sbdf} on vfio-pci, no record"
     );
+}
+
+/// AC-T7.4.1: a failed test leaves no VMM (r761 left one holding the GPU's group after a panic). Do: start a
+/// stand-in VMM, a copy of `/bin/sh` at a run's binary path whose command names the run's state, and drop a
+/// reaper for that binary and state. Expect the stand-in ended, by its own PID and start time, and nothing
+/// else touched: a second stand-in naming another state still runs.
+#[test]
+fn a_reaper_ends_the_vmm_its_failed_test_left() {
+    use std::os::unix::process::ExitStatusExt;
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("firecracker");
+    fs::copy("/bin/sh", &binary).unwrap();
+    let state = dir.path().join("fc-state");
+    let other = dir.path().join("other-state");
+    let start = |names: &Path| {
+        Command::new(&binary)
+            .args([
+                "-c",
+                "while :; do read -r _ || exit 0; done",
+                &names.display().to_string(),
+            ])
+            .stdin(HostStdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let mut left = start(&state.join("vm"));
+    let mut kept = start(&other.join("vm"));
+    let found = |dir: &Path| vmm(&binary, dir);
+    // The stand-ins are found once their exec is done, as the reaper finds a VMM.
+    let until = Instant::now() + Duration::from_secs(30);
+    while (found(&state).is_empty() || found(&other).is_empty()) && Instant::now() < until {
+        std::thread::yield_now();
+    }
+    let (pid, began) = found(&state)[0];
+    let (kept_pid, kept_began) = found(&other)[0];
+    drop(Reaper {
+        binary: binary.clone(),
+        dir: state.clone(),
+        wait: Duration::from_secs(30),
+    });
+    assert!(!running(pid, began), "the left VMM {pid} ended");
+    assert!(
+        running(kept_pid, kept_began),
+        "another run's VMM {kept_pid} still runs"
+    );
+    assert!(left.wait().unwrap().signal().is_some());
+    drop(kept.stdin.take());
+    assert!(kept.wait().unwrap().success());
 }
