@@ -99,11 +99,11 @@ by vCPU index, one for each vCPU of the VM's size, each only growing, none past 
 bound, `GuestTime::MAX_VCPUS`, is every 8-bit vCPU index: a Shards VM numbers its x86_64 vCPUs by 8-bit APIC id (at
 most 255) and has fewer on arm64 (123).
 
-Goal 14's learned charge (`hex-node` `scheduler/charges.rs`) reads `cpu_usec` and `memory_bytes` as a microVM's
-use on the host: its VMM's, as the dedicated Shards guest's native scope gives them. An image VM's are its run's in
-the guest, short of the guest kernel's and the run host's own, so the charge it learns for an image VM is low by
-those until the run host is launched through the client's native owner, where its scope gives the host's (§8), or
-the learner reads guest time per vCPU.
+Goal 14's learned charge (`hex-node` `node/charges.rs`) reads the cgroup of each VM the node launched through its
+native owner (`Supervisor::running_vms`): its VMM's use on the host. An image VM is none of those, its run host
+running in the node's own process tree (§8), so the learner neither learns nor places it, and it stays booked at its
+receipt, whole. Its Usage above is its run's in the guest, short of the guest kernel's and the run host's own, and
+is no stand-in for the host's. The run host's launch through the client's native owner gives the learner its cgroup.
 
 D231's STATS has no memory peak, OOM kill count or refused fork count. The image class reports none of these
 (0, as the Windows process class reports no refused forks), and says so here; Shards owes them for a full Usage.
