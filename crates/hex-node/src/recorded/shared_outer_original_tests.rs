@@ -126,6 +126,11 @@ fn guest_node(root: &Path) -> (Arc<Recorded<WithGuest<SimRuntime>>>, Arc<AtomicU
     .with_runtime_paths(
         shards_api::RuntimePaths::new(root.join("cache"), root.join("home")).unwrap(),
     )
+    // The image class as `hex node` configures its guest (hex-cli's configured_guest).
+    .with_images(
+        hex_runtime::guest::host_images(),
+        hex_runtime::guest::ImageWaits::recorded(),
+    )
     .with_runtime_cost(cost)
     .unwrap();
     let node = Arc::new(
@@ -359,4 +364,24 @@ fn an_orphaned_guest_receipt_is_refused_at_the_startup_barrier() {
         std::fs::read(receipts.join("orphaned-box")).unwrap(),
         b"retained receipt bytes"
     );
+}
+
+/// Joint plan step 12, T-T7.1.2 (AC-T7.4.1): a node binds its guest's image class to the session its own Store stamps
+/// records with, on every OS (none where the Store reads none). Do: bind a guest-backed node's books, then bind the
+/// guest's session again as the Store's stamp, and as another session. Expect: the Store's taken again, the one bound;
+/// another refused as a rebinding.
+#[test]
+fn a_nodes_image_class_takes_this_boot_from_its_stores_own_stamp() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node, _boots) = guest_node(dir.path());
+    let stamp = node.books.store.boot().cloned();
+    let guest = node.runtime.guest();
+    assert_eq!(guest.bind_boot_session(stamp.clone()), Ok(()));
+    let other =
+        Some(hex_core::record::BootSession::new("00000000-0000-0000-0000-000000000000").unwrap());
+    assert_ne!(stamp, other);
+    assert!(matches!(
+        guest.bind_boot_session(other),
+        Err(Refusal::Broken(_))
+    ));
 }
