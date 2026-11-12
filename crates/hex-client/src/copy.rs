@@ -158,3 +158,6 @@ fn feed(mut from: PipeReader, mut to: impl Feed, unit: usize) {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests;

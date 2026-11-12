@@ -275,3 +275,204 @@ fn hex_quic_14_an_unenrolled_peer_is_refused_identity() {
     .unwrap_err();
     assert_eq!(refused, Refused::Identity, "{refused}");
 }
+
+/// The link falling silent (AC-T7.4.1; HEX-QUIC-25 B3, 2026-11-12): a relay in front of the node, and the bridges of a
+/// connection whose link ends with nothing said.
+#[cfg(unix)]
+mod silent {
+    use std::io::{ErrorKind, Read, Write};
+    use std::net::{SocketAddr, UdpSocket};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use hex_client::guest::{DuplexOwner, Link as _};
+    use hex_core::patience::Patience;
+    use hex_core::stream::STDIO_PORT;
+    use hex_testkit::waits::{until, within};
+    use rustix::event::{PollFd, PollFlags, Timespec};
+
+    use super::{ACCEPT, DIAL, READ, ROOM, client, enrolled, loopback, node, read_exactly};
+    use crate::enroll::sim::SimCa;
+    use crate::link;
+
+    /// The client's connection ending once its link has fallen silent: QUIC's idle timeout (Q8), nothing said.
+    static IDLE_END: Patience = Patience::measuring("test.hex_quic.idle_end");
+    /// A bridge letting its owner's socket go once its connection has ended.
+    static LET_GO: Patience = Patience::measuring("test.hex_quic.bridge_let_go");
+
+    /// A UDP relay in front of a node: it passes datagrams both ways until it falls silent, then takes every datagram
+    /// and passes none, its sockets still bound, so the link ends with nothing said, no close and no ICMP, as with a
+    /// node that stops answering or a successor bound to its port (HEX-QUIC-25 B3).
+    struct Relay {
+        addr: SocketAddr,
+        silent: Arc<AtomicBool>,
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Relay {
+        fn start(node: SocketAddr) -> Self {
+            let front = UdpSocket::bind(loopback()).unwrap();
+            let back = UdpSocket::bind(loopback()).unwrap();
+            back.connect(node).unwrap();
+            front.set_nonblocking(true).unwrap();
+            back.set_nonblocking(true).unwrap();
+            let addr = front.local_addr().unwrap();
+            let silent = Arc::new(AtomicBool::new(false));
+            let stop = Arc::new(AtomicBool::new(false));
+            let (quiet, done) = (Arc::clone(&silent), Arc::clone(&stop));
+            let thread = std::thread::spawn(move || {
+                // A UDP datagram's most: its length is 16 bits (RFC 768).
+                let mut buf = vec![0u8; usize::from(u16::MAX)];
+                let mut client = None;
+                while !done.load(Ordering::Acquire) {
+                    let mut ready = [
+                        PollFd::new(&front, PollFlags::IN),
+                        PollFd::new(&back, PollFlags::IN),
+                    ];
+                    let _ = rustix::event::poll(&mut ready, None);
+                    let pass = !quiet.load(Ordering::Acquire);
+                    while let Ok((n, from)) = front.recv_from(&mut buf) {
+                        client = Some(from);
+                        if pass {
+                            let _ = back.send(&buf[..n]);
+                        }
+                    }
+                    while let Ok(n) = back.recv(&mut buf) {
+                        if pass && let Some(to) = client {
+                            let _ = front.send_to(&buf[..n], to);
+                        }
+                    }
+                }
+            });
+            Self {
+                addr,
+                silent,
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        /// From now on the relay passes nothing.
+        fn silence(&self) {
+            self.silent.store(true, Ordering::Release);
+        }
+    }
+
+    impl Drop for Relay {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            // Its wait ends with a datagram.
+            if let Ok(waker) = UdpSocket::bind(loopback()) {
+                let _ = waker.send_to(&[0], self.addr);
+            }
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// What `owner` holds now, read without waiting (its socket non-blocking) and kept in `got`: whether its end has
+    /// come (an end of input, or a reset).
+    fn drain(owner: &mut DuplexOwner, got: &mut Vec<u8>) -> bool {
+        let mut buf = [0u8; 64];
+        loop {
+            match owner.read(&mut buf) {
+                Ok(0) => return true,
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == ErrorKind::WouldBlock => return false,
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == ErrorKind::ConnectionReset => return true,
+                Err(e) => panic!("reading a bridged socket: {e}"),
+            }
+        }
+    }
+
+    /// Whether the bridge has let `owner`'s socket go: the pair's other end is closed, so it can't be written to
+    /// (poll(2)'s POLLHUP for writing: on Linux a socket shut both ways, on macOS one that can send no more).
+    fn let_go(owner: &DuplexOwner) -> bool {
+        let mut ready = [PollFd::from_borrowed_fd(owner.handle(), PollFlags::OUT)];
+        let now = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        rustix::event::poll(&mut ready, Some(&now)).is_ok()
+            && ready[0]
+                .revents()
+                .intersects(PollFlags::HUP | PollFlags::ERR)
+    }
+
+    /// AC-T7.4.1 (HEX-QUIC-25 B3, 2026-11-12; Q3): a connection's end ends every bridge on it, however each stood. Do:
+    /// over a relay, bridge three of a program's stdio connections as the client dials them (`link::Link`): one the node
+    /// wrote a line on and then ended, as a program's stdout at its program's end, read to its end and written on after
+    /// it, its owner's half still open; one open both ways, as a stdin its program reads; then the relay falls silent,
+    /// taking every datagram and passing none, and a third is dialed as the link goes, its Open lost. Expect: the
+    /// client's connection ends at QUIC's idle timeout, with no close and no ICMP, and every bridge then lets its
+    /// owner's socket go: its read ends, and a write is refused, none taken.
+    #[test]
+    fn ac_t7_4_1_a_connections_end_lets_every_bridged_socket_go() {
+        let ca = SimCa::new().unwrap();
+        let node = node(&ca, "node-silent.test");
+        let relay = Relay::start(node.local_addr());
+        let client = Arc::new(client(enrolled(&ca, "client-silent.test")));
+        let peer = within(&DIAL, |by| client.dial("node-silent.test", relay.addr, by)).unwrap();
+        let link = link::Link::new(Arc::clone(&client), peer);
+        // A program's stdout at its program's end: a line, then the node's End; its owner's half stays open.
+        let mut ended = link.dial(STDIO_PORT).unwrap();
+        ended.set_nonblocking(true).unwrap();
+        let (_, ended_there) = within(&ACCEPT, |by| node.accept(STDIO_PORT, by)).unwrap();
+        within(&ROOM, |by| ended_there.write_all(b"line\n", by)).unwrap();
+        within(&ROOM, |by| ended_there.end(by)).unwrap();
+        let mut got = Vec::new();
+        until(&READ, "the ended stream's line and end", || {
+            drain(&mut ended, &mut got)
+        })
+        .unwrap();
+        assert_eq!(got, b"line\n");
+        ended.write_all(b"after\n").unwrap();
+        assert_eq!(read_exactly(&ended_there, 6), b"after\n");
+        // A program's stdin, open both ways.
+        let mut open = link.dial(STDIO_PORT).unwrap();
+        open.write_all(b"in\n").unwrap();
+        open.set_nonblocking(true).unwrap();
+        let (_, open_there) = within(&ACCEPT, |by| node.accept(STDIO_PORT, by)).unwrap();
+        assert_eq!(read_exactly(&open_there, 3), b"in\n");
+        // The connection's end comes to the test on a connection of its own on the link.
+        let sentinel = client.open(peer, STDIO_PORT).unwrap();
+        within(&ROOM, |by| sentinel.write_all(b"s", by)).unwrap();
+        let (_, sentinel_there) = within(&ACCEPT, |by| node.accept(STDIO_PORT, by)).unwrap();
+        assert_eq!(read_exactly(&sentinel_there, 1), b"s");
+        relay.silence();
+        // Dialed as the link goes: its Open never reaches the node.
+        let mut opening = link.dial(STDIO_PORT).unwrap();
+        opening.set_nonblocking(true).unwrap();
+        let mut byte = [0u8; 1];
+        let end = within(&IDLE_END, |by| sentinel.read(&mut byte, by)).unwrap_err();
+        assert_eq!(end.kind(), ErrorKind::ConnectionAborted, "{end}");
+        for (what, owner) in [
+            ("open", &mut open),
+            ("opening", &mut opening),
+            ("ended", &mut ended),
+        ] {
+            eprintln!(
+                "the connection ended: waiting for the {what} stream's bridge to let its socket go"
+            );
+            until(
+                &LET_GO,
+                &format!("the {what} stream's socket let go"),
+                || let_go(owner),
+            )
+            .unwrap();
+            let mut rest = Vec::new();
+            assert!(
+                drain(owner, &mut rest),
+                "the {what} stream's read didn't end"
+            );
+            assert!(
+                owner.write(b"x").is_err(),
+                "the {what} stream took a write after its connection ended"
+            );
+        }
+        drop((ended_there, open_there, sentinel_there));
+    }
+}

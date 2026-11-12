@@ -565,6 +565,7 @@ dependencies = [
  "hex-afunix",
  "hex-api",
  "hex-core",
+ "hex-testkit",
  "libc",
  "rustix",
  "sha2 0.10.9",
