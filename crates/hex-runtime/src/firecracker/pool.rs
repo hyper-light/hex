@@ -886,6 +886,7 @@ pub(super) mod tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
+            boot: None,
         };
         (runtime, owner)
     }

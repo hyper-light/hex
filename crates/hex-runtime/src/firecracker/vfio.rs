@@ -520,6 +520,60 @@ pub(super) fn function_id(sbdf: &str) -> Result<String, Refusal> {
     Ok(id)
 }
 
+/// A stand-in host for tests: a tree laid out as the host's `/sys` and `/dev` are, where a test adds the PCI functions
+/// it needs.
+#[cfg(test)]
+pub(super) mod stand_in {
+    use super::*;
+
+    /// An empty stand-in host under `root`, opening its interfaces with `open`.
+    pub(in super::super) fn host(root: &Path, open: fn(&Path) -> std::io::Result<fs::File>) -> Host {
+        let host = Host {
+            sys: root.join("sys"),
+            dev: root.join("dev"),
+            open,
+        };
+        fs::create_dir_all(host.dev.join("vfio")).unwrap();
+        fs::write(host.dev.join("vfio/vfio"), "").unwrap();
+        host
+    }
+
+    /// The host's own way of opening an interface, for a stand-in's files.
+    pub(in super::super) fn opened(path: &Path) -> std::io::Result<fs::File> {
+        open_read_write(path)
+    }
+
+    /// Adds PCI function `sbdf` to `host`: in IOMMU group `group` (its interface in `/dev/vfio`), bound to `driver`,
+    /// of PCI class `class`, listing `reset` as its reset methods where `Some` (the kernel hides the file where it lists
+    /// none).
+    pub(in super::super) fn function(
+        host: &Host,
+        sbdf: &str,
+        group: u32,
+        driver: &str,
+        class: &str,
+        reset: Option<&str>,
+    ) {
+        let group_dir = host.sys.join(format!("kernel/iommu_groups/{group}"));
+        let driver = host.sys.join("bus/pci/drivers").join(driver);
+        let function = host.sys.join("bus/pci/devices").join(sbdf);
+        for dir in [&group_dir.join("devices"), &driver, &function] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(group_dir.join("devices").join(sbdf), "").unwrap();
+        std::os::unix::fs::symlink(&group_dir, function.join("iommu_group")).unwrap();
+        std::os::unix::fs::symlink(&driver, function.join("driver")).unwrap();
+        fs::write(function.join("class"), format!("{class}\n")).unwrap();
+        if let Some(reset) = reset {
+            fs::write(function.join("reset_method"), format!("{reset}\n")).unwrap();
+        }
+        let interface = host.dev.join("vfio").join(group.to_string());
+        if !interface.exists() {
+            fs::write(interface, "").unwrap();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,28 +651,8 @@ mod tests {
     /// A stand-in host for one function, `0000:01:00.0`, alone in IOMMU group 7, a display controller bound to
     /// vfio-pci, whose group's open answers EBUSY as a held group's does.
     fn held_host(root: &Path) -> Host {
-        let host = Host {
-            sys: root.join("sys"),
-            dev: root.join("dev"),
-            open: busy,
-        };
-        let group = host.sys.join("kernel/iommu_groups/7");
-        let driver = host.sys.join("bus/pci/drivers/vfio-pci");
-        let function = host.sys.join("bus/pci/devices/0000:01:00.0");
-        for dir in [
-            &group.join("devices"),
-            &driver,
-            &function,
-            &host.dev.join("vfio"),
-        ] {
-            fs::create_dir_all(dir).unwrap();
-        }
-        std::os::unix::fs::symlink(&group, function.join("iommu_group")).unwrap();
-        std::os::unix::fs::symlink(&driver, function.join("driver")).unwrap();
-        fs::write(function.join("class"), "0x030000\n").unwrap();
-        for interface in ["vfio", "7"] {
-            fs::write(host.dev.join("vfio").join(interface), "").unwrap();
-        }
+        let host = stand_in::host(root, busy);
+        stand_in::function(&host, "0000:01:00.0", 7, "vfio-pci", "0x030000", None);
         host
     }
 

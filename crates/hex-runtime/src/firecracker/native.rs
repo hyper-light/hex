@@ -11,7 +11,7 @@ use hex_api::{
     Refusal, Runtime, Signal, Stdio, Usage,
 };
 use hex_client::guest::{Client, LinkOwner, own_link, stage};
-use hex_core::record::{BoxRecord, Phase, PoolRecord};
+use hex_core::record::{BootSession, BoxRecord, Phase, PoolRecord};
 
 use super::{Books, Config, Transaction, exhausted, invalid, observations, transport, vfio};
 use crate::devices::{Binding, ManagedLaunch, Route, SharedCatalog, managed_scope_id};
@@ -28,6 +28,8 @@ pub struct FirecrackerRuntime {
     books: Weak<dyn Books>,
     initialized: std::sync::OnceLock<()>,
     host: vfio::Host,
+    /// The host's boot session, the node's (`Node::boot_session`): a function no reset clears goes to one VM per boot.
+    boot: Option<BootSession>,
 }
 
 struct Paths {
@@ -45,6 +47,7 @@ impl FirecrackerRuntime {
         config: Config,
         catalog: SharedCatalog,
         books: Weak<dyn Books>,
+        boot: Option<BootSession>,
     ) -> Result<Self, Refusal> {
         config.verify_inputs()?;
         Ok(Self {
@@ -53,6 +56,7 @@ impl FirecrackerRuntime {
             books,
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system()?,
+            boot,
         })
     }
 
@@ -1621,6 +1625,7 @@ mod handoff_tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
+            boot: None,
         };
         let devices = [256, 512]
             .map(|key| DeviceId {
@@ -1725,6 +1730,7 @@ mod handoff_tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
+            boot: None,
         };
         let full = [256, 512].map(|key| DeviceId {
             kind: DeviceKind::Gpu,
@@ -1928,6 +1934,7 @@ mod cleanup_tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
+            boot: None,
         };
         let id = BoxId::new("cleanup-refused").unwrap();
         let spec = BoxSpec {
@@ -2152,6 +2159,7 @@ mod memlock_tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
+            boot: None,
         };
         let id = BoxId::new("gpu-memlock").unwrap();
         let spec = BoxSpec {
@@ -2210,5 +2218,235 @@ mod memlock_tests {
             assert!(why.contains(&named), "{named} named: {why}");
         }
         eprintln!("{PASS}");
+    }
+}
+
+#[cfg(test)]
+mod single_use_tests {
+    use super::*;
+    use crate::devices::{Catalog, PoolRecords, Records};
+    use hex_api::{
+        CapacityResources, Execution, GpuEligibility, ImageArch, ImageOs, ImagePlatform, RouteKey,
+        RouteReceipt,
+    };
+    use sha2::{Digest, Sha256};
+    use std::cell::{Cell, RefCell};
+    use std::collections::BTreeMap;
+
+    /// A VMM that has ended, its whole scope released: a stand-in VMM whose guest never came up.
+    struct Ended(shards_api::Identity);
+
+    impl shards_api::ManagedProcess for Ended {
+        fn identity(&self) -> Result<&shards_api::Identity, shards_api::Refusal> {
+            Ok(&self.0)
+        }
+        fn wait_for(
+            &self,
+            _: std::time::Duration,
+        ) -> Result<Option<shards_api::ManagedEnd>, shards_api::Refusal> {
+            self.terminal()
+        }
+        fn stop(&self) -> Result<(), shards_api::Refusal> {
+            Ok(())
+        }
+        fn terminal(&self) -> Result<Option<shards_api::ManagedEnd>, shards_api::Refusal> {
+            Ok(Some(shards_api::ManagedEnd {
+                status: shards_api::ManagedStatus::Code(1),
+                scope: shards_api::TerminalScope::Released,
+            }))
+        }
+    }
+
+    /// One node's records of the VMs these tests make, and the VMMs it launches: each launch hands its VM the
+    /// functions it was given, and the VMM ends at once, as one whose guest never came up.
+    #[derive(Default)]
+    struct Handed {
+        records: RefCell<BTreeMap<BoxId, BoxRecord>>,
+        scopes: Cell<u8>,
+        launched: Cell<usize>,
+    }
+
+    impl Transaction for Handed {
+        fn records(&self) -> Result<Records, Refusal> {
+            Ok(self
+                .records
+                .borrow()
+                .iter()
+                .map(|(id, record)| (id.clone(), Ok(record.clone())))
+                .collect())
+        }
+        fn pool_records(&self) -> Result<PoolRecords, Refusal> {
+            Ok(PoolRecords::new())
+        }
+        fn read_pool(&self, _: &hex_api::BackingKey) -> Result<Option<PoolRecord>, Refusal> {
+            Ok(None)
+        }
+        fn put_pool(&self, _: &PoolRecord) -> Result<(), Refusal> {
+            panic!("a dedicated GPU VM writes no pool")
+        }
+        fn grant_pool(&self, _: &hex_api::BackingGrant) -> Result<PoolRecord, Refusal> {
+            panic!("a dedicated GPU VM is granted no pool")
+        }
+        fn remove_pool(&self, _: &hex_api::BackingKey) -> Result<(), Refusal> {
+            panic!("a dedicated GPU VM removes no pool")
+        }
+        fn check_unsubmitted_pool(&self) -> Result<(), Refusal> {
+            panic!("a dedicated GPU VM checks no pool")
+        }
+        fn read(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
+            Ok(self.records.borrow().get(id).cloned())
+        }
+        fn put(&self, record: &BoxRecord) -> Result<(), Refusal> {
+            let mut kept = record.clone();
+            if kept.native_scope.is_none() {
+                self.scopes.set(self.scopes.get() + 1);
+                kept.native_scope = Some(hex_core::record::NativeScope::from_bytes(
+                    [self.scopes.get(); 16],
+                ));
+            }
+            self.records
+                .borrow_mut()
+                .insert(record.spec.id.clone(), kept);
+            Ok(())
+        }
+        fn remove(&self, id: &BoxId) -> Result<(), Refusal> {
+            self.records.borrow_mut().remove(id);
+            Ok(())
+        }
+        fn launch_managed(
+            &self,
+            _: &ManagedLaunch<'_>,
+            _: shards_api::LaunchIo,
+            _: std::time::Duration,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            self.launched.set(self.launched.get() + 1);
+            Err(Refusal::Broken(
+                "the stand-in VMM ended before its guest was ready".to_owned(),
+            ))
+        }
+        fn attach_managed(
+            &self,
+            _: Option<&shards_api::Identity>,
+        ) -> Result<shards_api::ManagedReceipt, Refusal> {
+            Ok(shards_api::managed_receipt(triomphe::Arc::new(Ended(
+                shards_api::Identity {
+                    pid: 1,
+                    started: 1,
+                    vsock: PathBuf::from("/nonexistent/ended.vsock"),
+                },
+            ))))
+        }
+        fn finalize_managed(&self, _: Option<&shards_api::Identity>) -> Result<(), Refusal> {
+            Ok(())
+        }
+        fn managed_usage(&self) -> Result<hex_api::Usage, Refusal> {
+            panic!("an ended VM reads no usage")
+        }
+    }
+
+    fn boot(name: &str) -> Option<BootSession> {
+        Some(BootSession::new(name).unwrap())
+    }
+
+    /// The lead's ruling of 2026-11-11 (AC-T7.4.1; original): GPU run r940 on 00aad8da found 0000:79:00.0 broken in
+    /// the VM after r862's ("PSP create ring failed"): its kernel lists no reset that clears it between VMs, so the
+    /// next VM given it boots into the last one's state. Do: on a stand-in host, create a VM given a function whose
+    /// kernel lists no reset method, its VMM ending at once; then a second VM given it on the same boot; then a third
+    /// on a later boot. Expect the first handed it (its VMM launched), the second refused by type before its VMM,
+    /// saying it has no reset method and the host must reboot, and the third handed it again.
+    #[test]
+    fn original_a_function_no_reset_clears_goes_to_one_vm_per_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = vfio::stand_in::host(&dir.path().join("host"), vfio::stand_in::opened);
+        vfio::stand_in::function(&host, "0000:01:00.0", 7, "vfio-pci", "0x030000", None);
+        let pinned = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            fs::write(&path, bytes).unwrap();
+            (path, <[u8; 32]>::from(Sha256::digest(bytes)))
+        };
+        let mut config = pool::tests::config();
+        (config.binary, config.binary_sha256) = pinned("firecracker", b"a stand-in VMM, never run");
+        (config.cost_evidence, config.cost.id) = pinned("evidence", b"a stand-in cost's evidence");
+        config.state_dir = dir.path().join("state");
+        fs::create_dir(&config.state_dir).unwrap();
+        let allocation = config
+            .cost
+            .allocate(CapacityResources {
+                cpu_milli: 1000,
+                mem_bytes: hex_api::MIN_MEMORY,
+                disk_bytes: 0,
+            })
+            .unwrap();
+        let catalog =
+            Catalog::parse(b"hex-devices-1\ngpu\t256\ta\t1\tvfio\t0000:01:00.0\t7\n").unwrap();
+        let owner: Arc<dyn Books> = Arc::new(super::handoff_tests::NoOwnerCalls);
+        let mut runtime = FirecrackerRuntime {
+            config,
+            catalog: triomphe::Arc::try_new(catalog).unwrap(),
+            books: Arc::downgrade(&owner),
+            initialized: std::sync::OnceLock::new(),
+            host,
+            boot: boot("6d1c0e2a-7b4f-4a3e-9c51-1f0e2d3c4b5a"),
+        };
+        let spec = |name: &str| BoxSpec {
+            id: BoxId::new(name).unwrap(),
+            bounds: hex_api::Bounds {
+                cpu_max_milli: Some(1000),
+                memory_max: Some(hex_api::MIN_MEMORY),
+                ..hex_api::Bounds::default()
+            },
+            class: ClassSpec::Firecracker(Box::new(hex_api::OciSpec {
+                rootfs: hex_api::Rootfs::Dir("/fixture/root".into()),
+                init: Program::of(&["true"]),
+                mounts: Vec::new(),
+                hostname: None,
+                network: hex_api::Network::Private,
+                hosts: Vec::new(),
+            })),
+            owner: None,
+            devices: vec![DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 256,
+            }],
+            allocation: Some(allocation),
+            route: Some(RouteReceipt {
+                key: RouteKey {
+                    class: Class::Firecracker,
+                    image: ImagePlatform {
+                        os: ImageOs::Linux,
+                        arch: ImageArch::Amd64,
+                    },
+                    execution: Execution::Firecracker,
+                    gpu: GpuEligibility::Required,
+                },
+                backing: None,
+            }),
+        };
+        let books = Handed::default();
+        let create = |runtime: &FirecrackerRuntime, name: &str| {
+            let until = Instant::now() + std::time::Duration::from_secs(30);
+            runtime.create_or_cleanup(&BoxId::new(name).unwrap(), spec(name), None, &books, until)
+        };
+        let first = create(&runtime, "first-vm");
+        assert!(matches!(first, Err(Refusal::Broken(_))), "{first:?}");
+        assert_eq!(books.launched.get(), 1, "the first VM is handed it");
+        assert!(books.records.borrow().is_empty(), "the first VM is gone");
+        let second = create(&runtime, "second-vm");
+        assert_eq!(
+            books.launched.get(),
+            1,
+            "a second VM on the same boot is refused before its VMM: {second:?}"
+        );
+        let Err(Refusal::Platform { why, .. }) = &second else {
+            panic!("refused by type: {second:?}");
+        };
+        for named in ["0000:01:00.0", "no reset method", "the host must reboot"] {
+            assert!(why.contains(named), "{named}: {why}");
+        }
+        assert!(books.records.borrow().is_empty(), "nothing of it is kept");
+        runtime.boot = boot("0f9e8d7c-6b5a-4c3d-8e1f-2a3b4c5d6e7f");
+        let third = create(&runtime, "third-vm");
+        assert!(matches!(third, Err(Refusal::Broken(_))), "{third:?}");
+        assert_eq!(books.launched.get(), 2, "a later boot's VM is handed it");
     }
 }
