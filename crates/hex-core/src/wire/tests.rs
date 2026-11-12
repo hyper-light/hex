@@ -3931,7 +3931,10 @@ fn an_awaits_refusal_is_tagged_after_every_refusal_and_its_capability_by_place()
         assert!(
             matches!(
                 read_answer(&received(&hostile, 0), MAX_MESSAGE),
-                Err(Fault::Value { what: "upstream", .. })
+                Err(Fault::Value {
+                    what: "upstream",
+                    ..
+                })
             ),
             "capability tag {tag}"
         );
