@@ -1232,6 +1232,7 @@ fn canonical_draining_action_is_not_filtered_by_unavailable_fresh_gpu_observatio
             cost: Some(cost),
             backing: Some(key),
         }],
+        unavailable: Vec::new(),
     };
     report.check().unwrap();
     let reports = vec![(hex_sim::model::Class::Firecracker, Some(report))];

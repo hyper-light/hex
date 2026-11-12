@@ -318,6 +318,7 @@ mod tests {
             routes: vec![route],
             device_routes: Vec::new(),
             backings: Vec::new(),
+            unavailable: Vec::new(),
         };
         assert!(check_bindings(&[assignment], &actual, &capacity, None).is_err());
         capacity
