@@ -48,13 +48,19 @@ fn window(node: &mut Node<u32>, readings: &[(u32, u64, u64)]) {
     node.settle().unwrap();
 }
 
+/// waits_census.py's nearest rank of the p99.9, `ceil(0.999 n)`, in integers: `ceil(999 n / 1000)`. For every n up
+/// to SEEDABLE the float product is within an ulp of the exact one, which is whole only at n = 1000 (999), so the two
+/// agree.
+fn rank(n: usize) -> usize {
+    (999 * n).div_ceil(1000)
+}
+
 /// The definition: the nearest-rank p99.9 of the last SEEDABLE of `values`, as waits_census.py's `quantile` has it.
 fn nearest_rank(values: &[u64]) -> u64 {
     let last = &values[values.len().saturating_sub(SEEDABLE)..];
     let mut sorted = last.to_vec();
     sorted.sort_unstable();
-    let rank = ((0.999 * sorted.len() as f64).ceil() as usize).max(1);
-    sorted[rank - 1]
+    sorted[rank(sorted.len()).max(1) - 1]
 }
 
 /// The same by a scan: the `n / SEEDABLE + 1`-th largest of the last SEEDABLE, equal values counted apart.
@@ -81,7 +87,6 @@ fn w14_seedable_is_the_waits_census_rule() {
         .map(|n| n.trim().replace('_', "").parse().unwrap())
         .unwrap();
     assert_eq!(seedable, SEEDABLE);
-    let rank = |n: usize| (0.999 * n as f64).ceil() as usize;
     assert_eq!(rank(SEEDABLE), SEEDABLE - 1);
     assert_eq!(rank(SEEDABLE - 1), SEEDABLE - 1);
 }
@@ -345,7 +350,10 @@ fn w14_budgets_sum_to_the_fleet_budget_and_cover_every_booking() {
         let share = slack * booking / (6 * GIB);
         assert!(budget.bytes >= booking + share && budget.bytes <= booking + share + 1);
         let held = n.vms[id].held[1];
-        assert_eq!(budget.room, budget.bytes as i64 - held as i64);
+        assert_eq!(
+            budget.room,
+            i64::try_from(budget.bytes).unwrap() - i64::try_from(held).unwrap()
+        );
     }
     assert!(budgets[2].1.room < 0);
 }
