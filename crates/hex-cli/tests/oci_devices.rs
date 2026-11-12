@@ -9,6 +9,12 @@
 //! - a node restarted over boxes made before it: the oci boxes' root carries the same program (its id),
 //!   which the restart didn't attach again, and boxes made before and after the restart get the same
 //!   decisions;
+//!
+//! A holder keeps a root's program, and the command line takes a hinted one, only where the kernel proves a loaded
+//! program by its translation (`programs::shown`): a kernel that withholds a blinded program's dump from a caller
+//! without raw-dump rights (`kernel.kptr_restrict` 2, as the root lab's 7.3.3-1-cachyos on 00aad8da) or rewrites it
+//! proves nothing, so there each replaces or loads a copy of its own, and every box keeps its policy all the same. The
+//! cases take what they expect of keeping from what the kernel shows, and say it.
 //! - N creates with one other policy load its program once; boxes of more policies than the node's bound
 //!   close the program used longest ago (the node keeps no descriptor of it), and every box keeps its
 //!   policy;
@@ -48,7 +54,7 @@ use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Program, Runtime, Stdio};
 use hex_node::{Node, OCI_BOXES};
 use hex_runtime::linux::cgroup::BoxRoot;
 use hex_runtime::linux::oci::devshare::{self, HINTS_FILE, Hints};
-use hex_runtime::linux::oci::programs::Programs;
+use hex_runtime::linux::oci::programs::{self, Programs, Shown};
 use hex_runtime::linux::oci::resources::{
     self, ACC_MKNOD, ACC_READ, ACC_WRITE, DEV_CHAR, DeviceState, Exception, Plan,
 };
@@ -188,7 +194,7 @@ fn each_box_is_decided_by_its_policy(lab: &Lab, own: &Path) -> String {
 
     // The box whose policy denies c 1:3 (the module's head says why no spec can ask it): a cgroup under the
     // node's oci boxes' root, given that policy's program by a holder of the node's kind, which finds the
-    // root's default there and keeps it.
+    // root's default there and keeps it where the kernel proves it, and replaces it by one attach where not.
     let oci_boxes = BoxRoot::open(node.oci_boxes(), disks::under(state.path()).unwrap()).unwrap();
     let no_null = oci_boxes
         .create(&BoxId::new("dev-no-null").unwrap(), &Bounds::default())
@@ -207,9 +213,10 @@ fn each_box_is_decided_by_its_policy(lab: &Lab, own: &Path) -> String {
         ..Plan::default()
     };
     let held = Programs::at_root(node.oci_boxes(), 1).unwrap();
-    assert!(
-        !held.counts().unwrap().root_attached,
-        "the holder found the node's default on the root and kept it"
+    assert_eq!(
+        held.counts().unwrap().root_attached,
+        !lab.proves,
+        "the holder kept the node's default on the root where the kernel proves it, else replaced it"
     );
     held.attach(&no_null, &denies_null, false).unwrap();
     assert_eq!(
@@ -279,15 +286,21 @@ fn a_restarted_node_keeps_its_roots_program(lab: &Lab, own: &Path) -> String {
         assert!(summary.adopted.contains(id), "{id} taken back: {summary:?}");
     }
     let counts = second.device_programs().unwrap();
-    assert!(
-        !counts.root_attached,
-        "the restarted node found the default on the root and attached none: {counts:?}"
-    );
     assert_eq!(
-        attached(&oci),
-        program,
-        "the root's program is the same one"
+        counts.root_attached, !lab.proves,
+        "the restarted node kept the default on the root where the kernel proves it, else replaced it: {counts:?}"
     );
+    let now = attached(&oci);
+    if lab.proves {
+        assert_eq!(now, program, "the root's program is the same one");
+    } else {
+        assert_eq!(
+            (now.count, now.flags),
+            (1, BPF_F_ALLOW_OVERRIDE),
+            "the root's program replaced by one: {now:?}"
+        );
+        assert_ne!(now.ids, program.ids, "the root's program replaced");
+    }
     let after = [
         make(&second, "after-default", lab.bundle(None, None)),
         make(&second, "after-kmsg", lab.bundle(Some(KMSG), None)),
@@ -305,8 +318,13 @@ fn a_restarted_node_keeps_its_roots_program(lab: &Lab, own: &Path) -> String {
     drop(second);
     sweep(&box_root);
     format!(
-        "the root's program {:?} kept across the restart, none attached by it; boxes before and after alike",
-        program.ids
+        "the root's program {:?} {} across the restart; boxes before and after alike",
+        program.ids,
+        if lab.proves {
+            "kept, none attached by it"
+        } else {
+            "replaced by one attach, the kernel proving none"
+        }
     )
 }
 
@@ -469,17 +487,30 @@ fn a_planted_hint_is_refused_by_its_translation(lab: &Lab, own: &Path) -> String
         "the kmsg container"
     );
     let second = create("cli-kmsg2", Some(KMSG));
-    assert_eq!(
-        attached(&second).ids,
-        ours,
-        "the second takes the first's program, loading none"
-    );
+    let seconds = attached(&second).ids;
+    if lab.proves {
+        assert_eq!(
+            seconds, ours,
+            "the second takes the first's program, loading none"
+        );
+    } else {
+        assert_eq!(seconds.len(), 1, "the second's own program");
+        assert_ne!(
+            seconds, ours,
+            "the kernel proves no hint, so the second loads a copy"
+        );
+    }
     for id in ["cli-plain", "cli-kmsg", "cli-kmsg2"] {
         hex(&["delete", "--force", id]);
     }
     format!(
         "the planted hint's program {theirs:?} refused by its translation, {ours:?} loaded; the next create \
-         attached {ours:?}, loading none"
+         attached {seconds:?}, {}",
+        if lab.proves {
+            "loading none"
+        } else {
+            "a copy, the kernel proving no hint"
+        }
     )
 }
 
@@ -628,6 +659,9 @@ struct Lab {
     exe: String,
     rootfs: PathBuf,
     dir: tempfile::TempDir,
+    /// Whether the kernel proves a loaded device program by its translation, which keeping a root's program and
+    /// taking a hinted one rest on (`programs::shown`).
+    proves: bool,
 }
 
 impl Lab {
@@ -638,10 +672,13 @@ impl Lab {
             .unwrap();
         let rootfs = dir.path().join("rootfs");
         build_rootfs(&rootfs);
+        let shown = programs::shown(&programs::Kernel).unwrap();
+        eprintln!("oci_devices kernel: a device program it loaded shows as {shown:?}");
         Self {
             exe: exe.to_owned(),
             rootfs,
             dir,
+            proves: shown == Shown::Itself,
         }
     }
 
