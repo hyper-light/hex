@@ -1,7 +1,9 @@
 //! A connection as a local stream socket (docs/design/hex-quic.md Q3): the owner gets one end of a socket pair,
 //! a byte stream the node agent's client and the guest's protocol read and write as they do vsock's; two threads,
 //! one a direction with one frame's buffer, copy between the pair's other end and the connection. Each ends on a
-//! fact: the owner's close, the peer's End, or the connection's end.
+//! fact: the owner's close, the peer's End, or the connection's end. The bridge lasts as long as its connection:
+//! once both halves have ended, or the connection is gone, both threads end and the pair's other end closes, so the
+//! owner's socket ends both ways however its halves stood (AC-T7.4.1, HEX-QUIC-25 B3).
 
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
@@ -60,10 +62,16 @@ pub fn socket(conn: Conn) -> io::Result<Local> {
     Ok(owner)
 }
 
-/// What the owner writes, to the peer; the owner's close ends this side's half.
+/// What the owner writes, to the peer; the owner's close ends this side's half. The connection's end ends it too:
+/// [`downward`] then ends its reading.
 fn upward(conn: &Conn, mut from: Local) {
     let mut buf = vec![0u8; DATA_BOUND];
     loop {
+        #[cfg(target_os = "macos")]
+        if hex_client::wait_readable(std::os::fd::AsFd::as_fd(&from)).is_err() {
+            conn.reset(Why::Gone);
+            return;
+        }
         match from.read(&mut buf) {
             Ok(0) => {
                 let _ = conn.end(None);
@@ -87,26 +95,38 @@ fn upward(conn: &Conn, mut from: Local) {
     }
 }
 
-/// What the peer sends, to the owner; its End is the owner's end of input.
+/// What the peer sends, to the owner; its End is the owner's end of input. It stays until the connection is done
+/// both ways or gone, so the connection's end ends [`upward`] too, whichever half ended first.
 fn downward(conn: &Conn, mut to: Local) {
     let mut buf = vec![0u8; DATA_BOUND];
     loop {
         match conn.read(&mut buf, None) {
             Ok(0) => {
                 let _ = to.shutdown(Shutdown::Write);
+                if conn.finished().is_err() {
+                    let _ = to.shutdown(Shutdown::Read);
+                }
                 return;
             }
             Ok(n) => {
                 if to.write_all(buf.get(..n).unwrap_or_default()).is_err() {
                     conn.reset(Why::Gone);
-                    let _ = to.shutdown(Shutdown::Both);
+                    end(&to);
                     return;
                 }
             }
             Err(_) => {
-                let _ = to.shutdown(Shutdown::Both);
+                end(&to);
                 return;
             }
         }
     }
+}
+
+/// Ends the pair's other end one way at a time, writing first, so the owner reads its end whichever side half-closed
+/// first: macOS refuses `SHUT_RDWR` on a socket whose reading has ended (ENOTCONN) and shuts nothing (Shards M236,
+/// D175).
+fn end(to: &Local) {
+    let _ = to.shutdown(Shutdown::Write);
+    let _ = to.shutdown(Shutdown::Read);
 }
