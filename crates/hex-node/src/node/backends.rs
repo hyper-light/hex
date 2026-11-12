@@ -338,6 +338,15 @@ impl Node {
                 "node backends are already initialized".into(),
             ));
         }
+        // Each VM box holds descriptors of the node's past a box's, which only a start that ran VM boxes counted.
+        if (firecracker.is_some() || shards.is_some()) && !self.pools.vms {
+            return Err(Refusal::Invalid {
+                what: "VM backends",
+                why: "this node's start counted no VM boxes' descriptors among its own: open it running them \
+                      (Node::open_running, Runs { vms: true })"
+                    .to_owned(),
+            });
+        }
         if let Some(guest) = &shards {
             guest.bind_books(self.backend_books())?;
         }

@@ -102,6 +102,19 @@ const FDS_THE_SOCKET: u64 = 3;
 /// The supervisor's epoll set ([`crate::supervise::Supervisor::start`]), made once the node's bounds are fitted, as its
 /// budget is the inits'.
 const FDS_THE_SUPERVISOR: u64 = 1;
+/// A program place's streams at their most ([`crate::serve`]): for each of the [`hex_core::wire::MAX_FDS`] an exec
+/// carries, the one passed, or the pipe of two the node makes for one asked for (`hex_api::Stdio::make_asked`),
+/// until its program starts; then each asked for's given end, kept until its client takes it, or, for a program in a
+/// guest, each stream's connection to the guest and the passed pipe copied through it.
+const FDS_A_PLACE_STREAM: u64 = 2;
+/// A VM box's besides a box's (a Firecracker VM or a Shards guest, a row of the supervisor's inits): its cgroup's
+/// directory and `cgroup.events` (`crate::supervise`'s `ManagedVm`), its guest's control connections (a call's and the
+/// evented one, `hex_runtime::guest`'s `Booted`), and while it is made its readiness listener, the VMM's output pipe
+/// and its staging connection (`hex_runtime::firecracker`).
+const FDS_A_VM: u64 = 7;
+/// The VM boxes' root's own, once the node runs them (`crate::node`'s `initialize_vm_root`): its directory and the
+/// native VM owner's lease.
+const FDS_THE_VM_ROOT: u64 = 2;
 
 /// The mounts made ahead's (crate::devfs): the prepared `/dev` pool's at its bound, one descriptor each, and the
 /// proc pool's, two each (its pid namespace and its tree), each pool holding at most the seeds' bound
@@ -134,6 +147,9 @@ pub struct Pools {
     /// The files each cgroup made ahead opens ahead (`hex_runtime::linux::cgroup::ahead_files` over the disks its
     /// boxes' `io` bounds apply to), each a descriptor of the node's.
     pub files_ahead: usize,
+    /// Whether the node runs VM boxes (a Firecracker VM's or a Shards guest's), each holding descriptors of the node's
+    /// past a box's ([`Pools::running_vms`]).
+    pub vms: bool,
 }
 
 impl Pools {
@@ -147,6 +163,7 @@ impl Pools {
             devfs: true,
             sizes,
             files_ahead,
+            vms: false,
         }
     }
 
@@ -159,7 +176,14 @@ impl Pools {
             devfs: false,
             sizes,
             files_ahead,
+            vms: false,
         }
+    }
+
+    /// These pools for a node that runs VM boxes, or doesn't, as `vms` says: its start counts each VM box's
+    /// descriptors among its own (`crate::node::Runs`).
+    pub fn running_vms(self, vms: bool) -> Self {
+        Self { vms, ..self }
     }
 
     /// The descriptors the pools hold at their bounds, each pool's refill thread's beside, and the takes of every
@@ -211,11 +235,14 @@ fn kept_at_most(sizes: Sizes) -> u64 {
 /// root node holds for its life (`goal6-mntns.md` §12), counted for every node, as a rootless node holds none and a
 /// bound may be one over, never under; its socket's connections at their most ([`connections`]), the one it accepts
 /// past them to refuse and the socket's own, counted as the pruned namespace is, as a node embedded in a process
-/// serves no socket; the supervisor's epoll set; and `beside`, what the process held open as the bound was taken
-/// (its standard streams, the node's store, keeper and roots). Each bound among them is fitted to the hard limit as
-/// the node starts ([`hold_descriptors`]), so they hold no more than it (the lead, 2026-11-11, over 2026-11-06's
-/// connections taking what these left).
-fn descriptor_terms(pools: Pools, beside: u64) -> [(&'static str, u64); 13] {
+/// serves no socket; each program place's streams, and the message read past the places, refused with its streams
+/// closed ([`crate::serve`] takes a program's place as it reads its call); the exec'd programs' pidfds the supervisor
+/// keeps to reap, at the same budget, which it holds for every caller; where the node runs VM boxes, each one's past a
+/// box's and their root's; the supervisor's epoll set; and `beside`, what the process held open as the bound was taken
+/// (its standard streams, the node's store, keeper and roots, and the GPU handles of a prober made before it). Each
+/// bound among them is fitted to the hard limit as the node starts ([`hold_descriptors`]), so they hold no more than
+/// it (the lead, 2026-11-11, over 2026-11-06's connections taking what these left).
+fn descriptor_terms(pools: Pools, beside: u64) -> [(&'static str, u64); 17] {
     let parked = if pools.devfs {
         FDS_A_PARKED.saturating_add(FDS_A_PARKED_PROC)
     } else {
@@ -224,6 +251,13 @@ fn descriptor_terms(pools: Pools, beside: u64) -> [(&'static str, u64); 13] {
     let made_ahead = FDS_A_MADE_AHEAD
         .saturating_add(u64::try_from(pools.files_ahead).unwrap_or(u64::MAX))
         .saturating_add(parked);
+    let places = crate::serve::limits(&pools.sizes.platform()).programs;
+    let streams = u64::try_from(hex_core::wire::MAX_FDS).unwrap_or(u64::MAX);
+    let (vm_boxes, vm_root) = if pools.vms {
+        (of(pools.sizes.inits, FDS_A_VM), FDS_THE_VM_ROOT)
+    } else {
+        (0, 0)
+    };
     [
         ("the pools made ahead", pools.descriptors()),
         (
@@ -255,6 +289,13 @@ fn descriptor_terms(pools: Pools, beside: u64) -> [(&'static str, u64); 13] {
                 .saturating_add(1)
                 .saturating_add(FDS_THE_SOCKET),
         ),
+        (
+            "the program places' streams",
+            of(places, FDS_A_PLACE_STREAM.saturating_mul(streams)).saturating_add(streams),
+        ),
+        ("the exec'd programs the supervisor keeps", of(places, 1)),
+        ("VM boxes", vm_boxes),
+        ("the VM boxes' root", vm_root),
         ("the supervisor's epoll set", FDS_THE_SUPERVISOR),
         ("beside those", beside),
     ]
@@ -355,13 +396,14 @@ impl Needed {
     }
 }
 
-/// What a node of this process's owner, its state under `state`, needs of its descriptor limit on this host at a first
-/// start's bounds ([`crate::sizes::Sizes::now`]): its own and every kept namespace's files ([`FilesBound::needed`]),
-/// its cgroups made ahead opening their files over the disks under `state`, which its boxes' `io` bounds apply to.
-/// What this process holds now stands for what the node holds beside its bounds. The one formula for it: what
+/// What a node of this process's owner, its state under `state`, running what `runs` says, needs of its descriptor
+/// limit on this host at a first start's bounds ([`crate::sizes::Sizes::now`]): its own and every kept namespace's
+/// files ([`FilesBound::needed`]), its cgroups made ahead opening their files over the disks under `state`, which its
+/// boxes' `io` bounds apply to. What this process holds now, with the GPU handles a node's prober holds opened
+/// ([`crate::facts::shared_prober`]), stands for what the node holds beside its bounds. The one formula for it: what
 /// `hex node --descriptors` says and what a guest's init gives its node (the lead, 2026-11-11), so an installer gives
 /// its service that and the install lab checks it, never a figure copied from one host's (goal 6 step 6's HEX-INST-5).
-pub fn needed_on_this_host(state: &std::path::Path) -> Result<Needed, Refusal> {
+pub fn needed_on_this_host(state: &std::path::Path, runs: crate::Runs) -> Result<Needed, Refusal> {
     let sizes = Sizes::now()?;
     let disks = hex_runtime::linux::disks::under(state)?;
     let files_ahead = hex_runtime::linux::cgroup::ahead_files(&disks).len();
@@ -369,7 +411,9 @@ pub fn needed_on_this_host(state: &std::path::Path) -> Result<Needed, Refusal> {
         Pools::root(sizes, files_ahead)
     } else {
         Pools::rootless(sizes, files_ahead)
-    };
+    }
+    .running_vms(runs.vms);
+    let _prober = crate::facts::shared_prober(state, crate::facts::Declared::default())?;
     let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
     Ok(FilesBound::needed(pools, open_descriptors(&limit)?))
 }
@@ -485,6 +529,7 @@ fn shrunk(pools: Pools, num: u64, den: u64) -> Pools {
         devfs: pools.devfs,
         sizes,
         files_ahead: pools.files_ahead,
+        vms: pools.vms,
     }
 }
 
