@@ -239,8 +239,20 @@ impl Node {
         if left.is_zero() {
             return Err(record.refusal(LifecycleCause::Uncertain));
         }
-        self.supervisor
-            .bind_managed(&native, program, stdio, report, left, publish)
+        // A Firecracker VM given a device whole has its VMM's soft RLIMIT_MEMLOCK raised to its hard one, which its
+        // create found holds the RAM its VMM pins for DMA.
+        let memlock = match plan {
+            ManagedLaunch::Firecracker { memlock, .. } => *memlock,
+            ManagedLaunch::Shards(_) => None,
+        };
+        self.supervisor.bind_managed(
+            &native,
+            program,
+            stdio,
+            process::HeldLaunch { report, memlock },
+            left,
+            publish,
+        )
     }
 
     fn attach_managed(

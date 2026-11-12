@@ -188,6 +188,15 @@ pub struct ManagedReport {
     pub writer: std::io::PipeWriter,
 }
 
+/// What a held VM's launch carries past its program and stdio: its admitted final GPU report, and the locked-memory
+/// limit its VMM starts under where it isn't the node's own (a VM given a device whole, whose VMM pins its RAM for
+/// DMA: hex-runtime's firecracker vfio).
+#[derive(Default)]
+pub struct HeldLaunch {
+    pub report: Option<ManagedReport>,
+    pub memlock: Option<rustix::process::Rlimit>,
+}
+
 /// Start an explicitly configured VM binary, without executing it until its native identity and
 /// canonical record have been published. `gate_budget` is the caller's remaining finite create
 /// budget, never a process-completion timer. Ordinary `exec` retains its existing vfork path.
@@ -195,9 +204,10 @@ pub fn exec_held(
     cg: &BoxCgroup,
     program: &Program,
     stdio: Stdio,
-    report: Option<ManagedReport>,
+    launch: HeldLaunch,
     gate_budget: Duration,
 ) -> Result<HeldExec, Refusal> {
+    let HeldLaunch { report, memlock } = launch;
     program.check()?;
     program.fits(&exec_limit())?;
     if program.user.is_some() || !program.args.first().is_some_and(|arg| arg.starts_with('/')) {
@@ -269,7 +279,8 @@ pub fn exec_held(
             .map_or_else(|| null(OFlags::WRONLY), |pipe| Ok(OwnedFd::from(pipe)))?,
     ];
     let spawn = sys::Spawn::new(paths, argv, envp, cwd, stdio, super::default_nofile())
-        .map_err(|error| Refusal::os("preparing held VM descriptors", error))?;
+        .map_err(|error| Refusal::os("preparing held VM descriptors", error))?
+        .with_memlock(memlock);
     let dir = cg.open_dir()?;
     let procs = cg.procs_for_joining()?;
     sys::spawn_held(

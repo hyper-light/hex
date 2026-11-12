@@ -383,6 +383,10 @@ pub enum ManagedLaunch<'a> {
     Firecracker {
         program: &'a hex_api::Program,
         vsock: &'a Path,
+        /// The RLIMIT_MEMLOCK its VMM starts under where it isn't the node's own: a VM given a device whole pins all
+        /// its RAM for DMA, and its VMM's soft limit is raised to its hard one, which holds it (`firecracker::vfio`).
+        #[cfg(target_os = "linux")]
+        memlock: Option<rustix::process::Rlimit>,
     },
 }
 
