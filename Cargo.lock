@@ -543,6 +543,7 @@ dependencies = [
  "hex-client",
  "hex-core",
  "hex-node",
+ "hex-quic",
  "hex-runtime",
  "hex-testkit",
  "rustix",
