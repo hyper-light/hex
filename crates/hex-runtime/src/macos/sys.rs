@@ -1319,6 +1319,21 @@ fn token_io(operation: &'static str, error: io::Error) -> TokenFailure {
     }
 }
 
+impl TokenFailure {
+    /// The kernel resolved the token to no process: `proc_signal_with_audittoken`'s ESRCH, for a pid with
+    /// no process or one whose pid version, which exec changes, isn't the token's (XNU `proc_info.c`).
+    pub(super) fn unresolved(&self) -> bool {
+        matches!(
+            self,
+            Self::Io {
+                operation: "proc_signal_with_audittoken",
+                code: Some(libc::ESRCH),
+                ..
+            }
+        )
+    }
+}
+
 /// A genuine native incarnation retained in the SAME Hold entry; no public token constructor.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct MemberToken {
