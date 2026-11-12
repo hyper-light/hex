@@ -115,6 +115,7 @@ mod tests {
         let expected_config = DevicePassthroughConfig {
             id: "dev0".to_string(),
             sbdf: PciSBDF::new(0x0, 0x0, 0x1f, 0x0),
+            vbios_path: None,
         };
         assert_eq!(r, VmmAction::InsertPassthroughDevice(expected_config));
     }
