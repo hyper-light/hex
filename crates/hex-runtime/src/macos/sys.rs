@@ -723,6 +723,49 @@ fn sysctl_count(name: &std::ffi::CStr) -> io::Result<usize> {
         .map_err(|_| io::Error::other(format!("{} reads {v}", name.to_string_lossy())))
 }
 
+/// A string sysctl (`hw.model`, `kern.bootsessionuuid`), read from the kernel itself, so no program runs
+/// to print it: sized by a call with no buffer, then read whole, its terminating NUL dropped.
+pub fn sysctl_string(name: &std::ffi::CStr) -> io::Result<String> {
+    let mut len = 0usize;
+    // SAFETY: with a null buffer sysctlbyname writes only the bytes it needs into `len`; it reads the
+    // NUL-terminated name; both outlive the call, and nothing is set (newp null).
+    let r = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if r != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(len).map_err(io::Error::other)?;
+    bytes.resize(len, 0u8);
+    let mut wrote = len;
+    // SAFETY: sysctlbyname writes at most `wrote` bytes, the buffer's length, into `bytes`, and the length
+    // it wrote into `wrote`; all three outlive the call, and nothing is set (newp null).
+    let r = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            bytes.as_mut_ptr().cast::<c_void>(),
+            &raw mut wrote,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if r != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    bytes.truncate(wrote);
+    if bytes.last() == Some(&0) {
+        bytes.pop();
+    }
+    String::from_utf8(bytes).map_err(io::Error::other)
+}
+
 /// A numeric sysctl (`hw.memsize`, `hw.physicalcpu`, `kern.hv_support`, `vm.page_free_count`), whether
 /// the kernel keeps it in 4 bytes or 8: the node's facts (`hex-node`'s `facts`).
 pub fn sysctl_number(name: &std::ffi::CStr) -> io::Result<u64> {

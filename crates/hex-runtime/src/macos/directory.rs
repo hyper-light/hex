@@ -1,7 +1,8 @@
 //! The box helper's directory work for a pool grown on demand (the lead's call, 2026-11-06): it lists the
 //! pool's users, reads the ids held, makes an account from a fixed template, and keeps the peak of
 //! concurrent boxes. Every tool runs by absolute path with a fixed argv and no shell; nothing a caller sends
-//! reaches an argument but the account `hex_core::pool` named. No `unsafe`: these are subprocesses.
+//! reaches an argument but the account `hex_core::pool` named. No `unsafe`: these are subprocesses, started
+//! through [`super::command`], so each holds only its stdio.
 //!
 //! Each account is written to the installer's manifest before it is made, so uninstall removes it even if
 //! the helper stops part-way, and logged on the helper's stderr (launchd's log file).
@@ -10,7 +11,9 @@ use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::Output;
+
+use super::command::Command;
 
 use hex_core::pool::{Account, ROLE_UIDS, pool_index};
 
