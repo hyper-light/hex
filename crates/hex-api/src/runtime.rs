@@ -1834,8 +1834,10 @@ pub enum Refusal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Upstream {
-    /// A Shards microVM's guest time per vCPU, with a monotone total, on HVF, KVM and WHP: Shards'
-    /// guest CPU time work, in no Shards revision yet.
+    /// A Shards image VM's guest time per vCPU, with a monotone total, on HVF, KVM and WHP. Shards'
+    /// guest CPU time work (221c7377, 6396a78b) gives it to the daemon's runs alone; D231's image runs
+    /// don't carry it: `shards api-run` never asks its VM `GUEST_TIME`, and shards-api's image `Stats`
+    /// has no field for it (Shards 66113379).
     GuestCpuTimePerVcpu,
     /// A program started in a member of a Shards microVM: the exec of Shards' agent-control
     /// endpoint.
@@ -1846,8 +1848,9 @@ pub enum Upstream {
     /// What a runtime nested under shards-init needs: a delegated cgroup subtree, CAP_SYS_ADMIN for
     /// its boxes' namespaces and DRM render nodes, granted by name.
     NestedRuntime,
-    /// The Windows host of an image's run: `shards api-run` on Windows, whose AppContainer launch
-    /// Shards' D231 owes.
+    /// The Windows host of an image's run: `shards api-run` on Windows, which Shards gives since
+    /// 731b5e54 (D231). No call awaits it now; its place in [`Upstream::ALL`] stays, as the node's
+    /// wire tags it.
     WindowsRunHost,
     /// Taking back an image's run after its owner's crash: a run ends with its owner in D231's
     /// first version, which owes `attach`.
@@ -1863,10 +1866,13 @@ pub enum Upstream {
     /// A Shards guest told the room its host's budget leaves it (D188): init's `ROOM`, which
     /// shards-api's image boot (D231) has no call to send (joint plan step 14).
     GuestRoom,
-    /// The host of an image's run started holding only its stdio, as every program Hex starts on
-    /// macOS is: D231 starts `shards api-run` through std's `Command`, whose macOS spawn passes no
-    /// `POSIX_SPAWN_CLOEXEC_DEFAULT`, so it would inherit every descriptor another thread holds
-    /// without close-on-exec at that moment (CVE-2024-21626's class).
+    /// The host of an image's run started holding only its stdio, as every program Hex starts is:
+    /// D231 starts `shards api-run` through std's `Command` (Shards 66113379), so it would inherit
+    /// what another thread holds inheritable at that moment (CVE-2024-21626's class). On macOS std's
+    /// spawn passes no `POSIX_SPAWN_CLOEXEC_DEFAULT`, and a descriptor is made before it is marked
+    /// close-on-exec. On Windows std's `CreateProcessW` inherits handles with no handle list, so
+    /// every handle then inheritable goes too: a member's stdio, which Hex marks inheritable for
+    /// that member's own handle list as it starts it.
     RunHostStdioOnly,
     /// The member a published port reaches, named by Shards' image boot (D231): its `Bound` names none, and a run
     /// with a command of its own gives that command every port its Agentfile gives no member (D122), so a publish
@@ -1904,12 +1910,12 @@ impl std::fmt::Display for Upstream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::GuestCpuTimePerVcpu => {
-                "a Shards microVM's guest time per vCPU (Shards' guest CPU time work)"
+                "a Shards image VM's guest time per vCPU (D231's stats; its run host asks no GUEST_TIME)"
             }
             Self::MemberExec => "a program run in a Shards member (its agent-control endpoint)",
             Self::MemberGrantsByName => "a Shards member's grants by name",
             Self::NestedRuntime => "a runtime nested under shards-init, with its grants",
-            Self::WindowsRunHost => "Shards' Windows host of an image's run (owed by D231)",
+            Self::WindowsRunHost => "Shards' Windows host of an image's run (D231)",
             Self::AttachAfterCrash => {
                 "taking back an image's run after its owner's crash (owed by D231)"
             }
