@@ -2222,6 +2222,16 @@ impl<T: Transport> Core<T> {
         }
     }
 
+    /// The agent's network namespace counts within the caller's original absolute deadline, its kind's learned wait
+    /// only a run-out recorded (AC-T7.4.1).
+    pub fn netns_before(&self, deadline: Instant) -> Result<netns::Counts, Refusal> {
+        match self.plain_before(Call::Netns, deadline)?.1 {
+            Answer::Netns(counts) => Ok(counts),
+            Answer::Refused(r) => Err(r),
+            other => Err(unexpected("netns", &other)),
+        }
+    }
+
     /// Sends `request` on the connection with what `with` makes for its id and lends it, and waits for its
     /// answer.
     fn call<'l>(
