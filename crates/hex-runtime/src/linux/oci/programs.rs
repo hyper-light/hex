@@ -7,7 +7,7 @@
 //! loads nothing: loading needs CAP_BPF in the initial user namespace, so its containers are held to
 //! their device lists by construction, as before (`run::attach_device_program`).
 
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,6 +18,57 @@ use crate::linux::cgroup::BoxCgroup;
 use crate::linux::oci::devshare::{self, Give};
 use crate::linux::oci::resources::{self, Insn, Plan};
 use crate::linux::oci::{OciError, sys};
+
+/// What a holder asks the kernel of device programs ([`Programs::at_root_on`], [`program_for_on`]): the device programs
+/// a cgroup carries, a loaded program by its id, its identity and its translation, a load, and an attach that
+/// replaces. The kernel's own ([`Kernel`]), or a test's, so what a holder keeps on a kernel that shows a program's
+/// translation as it is, withholds it or rewrites it is shown without root.
+pub trait DevicePrograms {
+    /// A loaded program, open.
+    type Program;
+    /// The device programs `cgroup` carries itself ([`sys::attached_device_programs`]).
+    fn attached(&self, cgroup: BorrowedFd<'_>) -> Result<sys::Attached, OciError>;
+    /// Loaded program `id`, open, if there is one.
+    fn by_id(&self, id: u32) -> Result<Option<Self::Program>, OciError>;
+    /// What the kernel says `program` is.
+    fn identity(&self, program: &Self::Program) -> Result<sys::ProgramIdentity, OciError>;
+    /// `program`'s translated instructions, `len` bytes of them, where the kernel dumps them.
+    fn translation(&self, program: &Self::Program, len: u32) -> Result<Option<Vec<u8>>, OciError>;
+    /// `insns` loaded as a cgroup device program.
+    fn load(&self, insns: &[Insn]) -> Result<Self::Program, OciError>;
+    /// `program` attached to `cgroup` with `BPF_F_ALLOW_OVERRIDE`, replacing what it carries.
+    fn attach_override(
+        &self,
+        cgroup: BorrowedFd<'_>,
+        program: &Self::Program,
+    ) -> Result<(), OciError>;
+}
+
+/// The kernel's device programs (`bpf(2)`, through [`sys`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Kernel;
+
+impl DevicePrograms for Kernel {
+    type Program = OwnedFd;
+    fn attached(&self, cgroup: BorrowedFd<'_>) -> Result<sys::Attached, OciError> {
+        sys::attached_device_programs(cgroup)
+    }
+    fn by_id(&self, id: u32) -> Result<Option<OwnedFd>, OciError> {
+        sys::program_by_id(id)
+    }
+    fn identity(&self, program: &OwnedFd) -> Result<sys::ProgramIdentity, OciError> {
+        sys::program_identity(program.as_fd())
+    }
+    fn translation(&self, program: &OwnedFd, len: u32) -> Result<Option<Vec<u8>>, OciError> {
+        sys::program_instructions(program.as_fd(), len)
+    }
+    fn load(&self, insns: &[Insn]) -> Result<OwnedFd, OciError> {
+        sys::load_device_program(insns)
+    }
+    fn attach_override(&self, cgroup: BorrowedFd<'_>, program: &OwnedFd) -> Result<(), OciError> {
+        sys::attach_device_program(cgroup, program.as_fd(), sys::Attach::Override)
+    }
+}
 
 /// What a node's device programs have done since it opened them: what tests and the bench read.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -64,6 +115,15 @@ impl Programs {
     /// attach "will release old program and attach the new one"), or, where the kernel won't (programs
     /// attached with other flags, which Hex never attaches there), refused by name.
     pub fn at_root(root: &Path, bound: usize) -> Result<Self, OciError> {
+        Self::at_root_on(&Kernel, root, bound)
+    }
+
+    /// [`Programs::at_root`] over `kernel`'s device programs.
+    pub fn at_root_on<K: DevicePrograms>(
+        kernel: &K,
+        root: &Path,
+        bound: usize,
+    ) -> Result<Self, OciError> {
         let default = resources::default_program()?;
         let dir = rustix::fs::open(
             root,
@@ -76,28 +136,26 @@ impl Programs {
                 format!("{}: {e}", root.display()),
             )
         })?;
-        let there = sys::attached_device_programs(dir.as_fd())?;
+        let there = kernel.attached(dir.as_fd())?;
         let kept = there.count == 1
             && there.flags == sys::BPF_F_ALLOW_OVERRIDE
             && there
                 .ids
                 .first()
-                .is_some_and(|id| program_for(*id, &default).is_some());
+                .is_some_and(|id| program_for_on(kernel, *id, &default).is_some());
         if !kept {
-            let prog = sys::load_device_program(&default)?;
-            sys::attach_device_program(dir.as_fd(), prog.as_fd(), sys::Attach::Override).map_err(
-                |e| {
-                    OciError::os(
-                        "attaching the default device program to the oci boxes' root",
-                        format!(
-                            "{}: {e} (it holds {} program(s), attached with flags {:#x})",
-                            root.display(),
-                            there.count,
-                            there.flags
-                        ),
-                    )
-                },
-            )?;
+            let prog = kernel.load(&default)?;
+            kernel.attach_override(dir.as_fd(), &prog).map_err(|e| {
+                OciError::os(
+                    "attaching the default device program to the oci boxes' root",
+                    format!(
+                        "{}: {e} (it holds {} program(s), attached with flags {:#x})",
+                        root.display(),
+                        there.count,
+                        there.flags
+                    ),
+                )
+            })?;
             // `prog` closes here: the root's attachment holds the program (research f53).
         }
         Ok(Self::holding(bound, Some(default), !kept))
@@ -197,12 +255,137 @@ impl Programs {
 /// that check to its attach, so an id the kernel gives another program meanwhile (ids are reused,
 /// research f53) can't be what's attached. One gone, or one that can't be opened or read, is `None`.
 pub fn program_for(id: u32, insns: &[Insn]) -> Option<OwnedFd> {
-    let prog = sys::program_by_id(id).ok()??;
-    let identity = sys::program_identity(prog.as_fd()).ok()?;
-    let translation = sys::program_instructions(prog.as_fd(), identity.xlated_len).ok()?;
+    program_for_on(&Kernel, id, insns)
+}
+
+/// [`program_for`] over `kernel`'s device programs.
+pub fn program_for_on<K: DevicePrograms>(
+    kernel: &K,
+    id: u32,
+    insns: &[Insn],
+) -> Option<K::Program> {
+    let prog = kernel.by_id(id).ok()??;
+    let identity = kernel.identity(&prog).ok()?;
+    let translation = kernel.translation(&prog, identity.xlated_len).ok()?;
     if devshare::is_policy(&identity, translation.as_deref(), insns) {
         Some(prog)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::collections::BTreeMap;
+
+    /// What a kernel shows of a loaded program's translation: the program itself (fedora's, research f55), nothing (a
+    /// blinded program to a caller without raw-dump rights: `kernel.kptr_restrict` 2, as on 00aad8da), or a rewrite.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[expect(
+        dead_code,
+        reason = "the original asks only a kernel that withholds; the kernels it doesn't come with its fix"
+    )]
+    enum Shows {
+        Itself,
+        Withheld,
+        Rewritten,
+    }
+
+    /// A kernel of device programs: programs by id, and the one program a cgroup carries, attached with OVERRIDE.
+    struct Sim {
+        shows: Shows,
+        programs: RefCell<BTreeMap<u32, Vec<Insn>>>,
+        next: Cell<u32>,
+        root: Cell<Option<u32>>,
+        attaches: Cell<u32>,
+    }
+
+    impl Sim {
+        fn new(shows: Shows) -> Self {
+            Self {
+                shows,
+                programs: RefCell::new(BTreeMap::new()),
+                next: Cell::new(1),
+                root: Cell::new(None),
+                attaches: Cell::new(0),
+            }
+        }
+    }
+
+    impl DevicePrograms for Sim {
+        type Program = u32;
+        fn attached(&self, _: BorrowedFd<'_>) -> Result<sys::Attached, OciError> {
+            Ok(match self.root.get() {
+                Some(id) => sys::Attached {
+                    flags: sys::BPF_F_ALLOW_OVERRIDE,
+                    count: 1,
+                    ids: vec![id],
+                },
+                None => sys::Attached::default(),
+            })
+        }
+        fn by_id(&self, id: u32) -> Result<Option<u32>, OciError> {
+            Ok(if self.programs.borrow().contains_key(&id) {
+                Some(id)
+            } else {
+                None
+            })
+        }
+        fn identity(&self, program: &u32) -> Result<sys::ProgramIdentity, OciError> {
+            let len = self.programs.borrow().get(program).map_or(0, Vec::len);
+            let extra = usize::from(self.shows == Shows::Rewritten);
+            Ok(sys::ProgramIdentity {
+                prog_type: sys::BPF_PROG_TYPE_CGROUP_DEVICE,
+                id: *program,
+                xlated_len: u32::try_from((len + extra) * 8).unwrap(),
+                ..sys::ProgramIdentity::default()
+            })
+        }
+        fn translation(&self, program: &u32, _: u32) -> Result<Option<Vec<u8>>, OciError> {
+            let bytes = |insns: &Vec<Insn>| insns.iter().flat_map(Insn::bytes).collect::<Vec<u8>>();
+            Ok(match self.shows {
+                Shows::Itself => self.programs.borrow().get(program).map(bytes),
+                Shows::Withheld => None,
+                Shows::Rewritten => self.programs.borrow().get(program).map(|insns| {
+                    let mut rewritten = bytes(insns);
+                    rewritten.extend([0; 8]);
+                    rewritten
+                }),
+            })
+        }
+        fn load(&self, insns: &[Insn]) -> Result<u32, OciError> {
+            let id = self.next.get();
+            self.next.set(id + 1);
+            self.programs.borrow_mut().insert(id, insns.to_vec());
+            Ok(id)
+        }
+        fn attach_override(&self, _: BorrowedFd<'_>, program: &u32) -> Result<(), OciError> {
+            self.root.set(Some(*program));
+            self.attaches.set(self.attaches.get() + 1);
+            Ok(())
+        }
+    }
+
+    /// The lead's root lab of 2026-11-11 (oci_devices.rs:210 at main 2dc8295f on 00aad8da, kernel 7.3.3-1-cachyos,
+    /// `kernel.kptr_restrict` 2; original): oci_devices expects a second holder of the node's kind, opened over the
+    /// oci boxes' root that the node's start gave the default, to find it there and keep it. Do: over a kernel that
+    /// withholds a loaded program's translation, open a holder at an empty root, then a second at the same root.
+    /// Expect, as oci_devices does: the first attached the default; the second kept it.
+    #[test]
+    fn original_a_second_holder_keeps_the_roots_default() {
+        let root = tempfile::tempdir().unwrap();
+        let kernel = Sim::new(Shows::Withheld);
+        let node = Programs::at_root_on(&kernel, root.path(), 1).unwrap();
+        assert!(
+            node.counts().unwrap().root_attached,
+            "the node's start attached the default"
+        );
+        let held = Programs::at_root_on(&kernel, root.path(), 1).unwrap();
+        assert!(
+            !held.counts().unwrap().root_attached,
+            "the holder found the node's default on the root and kept it"
+        );
     }
 }
