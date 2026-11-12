@@ -64,10 +64,10 @@ fn incoming(listener: &UnixListener, deadline: Instant) -> UnixStream {
 }
 
 #[derive(Debug)]
-struct Birth {
-    pid: i32,
-    started: u64,
-    session: i32,
+pub(super) struct Birth {
+    pub(super) pid: i32,
+    pub(super) started: u64,
+    pub(super) session: i32,
 }
 
 // This test-only owner retains the real Child plus its ONE native waiter. Installing a
@@ -355,7 +355,7 @@ fn pool() -> PoolRecord {
     }
 }
 
-fn unobserved_box(controller: &Birth) -> ProcessBox {
+pub(super) fn unobserved_box(controller: &Birth) -> ProcessBox {
     let record = pool();
     record.check().unwrap();
     let native = NativeRecord::Pool(&record);

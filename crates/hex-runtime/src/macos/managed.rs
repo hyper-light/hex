@@ -227,17 +227,24 @@ impl Scope {
             .map_err(|_| self.refusal(id))
     }
     pub(super) fn notify(&self) -> Result<(), ProcessFailure> {
-        let channel = self
+        let mut channel = self
             .notification
             .lock()
             .map_err(|_| ProcessFailure::Poisoned {
                 what: "native scope notification",
             })?;
-        let Some(channel) = channel.as_ref() else {
+        let Some(writer) = channel.as_ref() else {
             return Ok(());
         };
-        let result = match rustix::io::write(channel.as_fd(), &[1]) {
+        let result = match rustix::io::write(writer.as_fd(), &[1]) {
             Ok(1) | Err(rustix::io::Errno::AGAIN) => Ok(()),
+            // Its one reader, the attached node's proxy, has ended (that node died or let go): no one is
+            // left to wake. The channel goes; the next attach makes a new one and notifies it at once
+            // (remote's `attached`), so nothing it would have said is lost.
+            Err(rustix::io::Errno::PIPE) => {
+                *channel = None;
+                return Ok(());
+            }
             Ok(_) => Err(ProcessFailure::InvalidStartRecord),
             Err(error) => Err(process_failure(ProcessOperation::QueryScope, error.into())),
         };
@@ -1023,6 +1030,20 @@ mod tests {
         assert!(scope.running(OwnerRef::Pool(&pool)).is_err());
         scope.held(OwnerRef::Pool(&pool)).unwrap();
         scope.running(OwnerRef::Pool(&pool)).unwrap();
+    }
+
+    /// AC-T7.4.1 (restart): a scope whose attached node died (its notification reader closed) is
+    /// notified: expect no failure, none retained, and the channel let go for the next attach's.
+    #[test]
+    fn a_notification_whose_reader_ended_lets_the_channel_go() {
+        let scope = scope();
+        let (reader, writer) = rustix::pipe::pipe().unwrap();
+        *scope.notification.lock().unwrap() = Some(writer);
+        drop(reader);
+        scope.notify().unwrap();
+        assert!(scope.notification.lock().unwrap().is_none());
+        assert!(scope.notification_error.lock().unwrap().is_none());
+        assert!(scope.observation_error().unwrap().is_none());
     }
 
     /// AC-T7.4.1: a controller cannot become watchable before its held publication stage.
