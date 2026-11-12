@@ -1,8 +1,9 @@
 //! The Shards class's driver (macOS HVF, Linux KVM): its guest launched by the configured `shards`, as a
-//! node launches it, with runtime folders of the run's own; ready when its agent answers (the relay's token
-//! and the node's hello, as `GuestRuntime`'s first dial is); its VMM read through its OS (its CPU and its
-//! guest's part of it, its footprint and its guest RAM's part of it, what its folders hold), and its own
-//! report read from its agent's `oci` capacity.
+//! node launches it (told its boot's deadline, `hex_runtime::guest::tell_ready`; on Linux in a cgroup of its
+//! own), with runtime folders of the run's own; ready when its agent answers (the relay's token and the
+//! node's hello, as `GuestRuntime`'s first dial is); its VMM read through its OS (its CPU and its guest's part
+//! of it, its footprint and its guest RAM's part of it, what its folders hold), and its own report read from
+//! its agent's `oci` capacity.
 
 use std::io::Read as _;
 use std::os::unix::fs::PermissionsExt as _;
@@ -24,12 +25,151 @@ pub struct Shards {
     guests: shards_api::ConfiguredShards,
     cache: PathBuf,
     home: PathBuf,
+    /// The run's own folder of runtime folders, the wrappers' among them.
+    folder: PathBuf,
+    /// Where its VMMs run, made at the first launch.
+    places: Option<Places>,
 }
 
-/// A launched guest: its VM and, once it is ready, its agent's client.
+/// A launched guest: its VM, where its VMM runs, and, once it is ready, its agent's client.
 pub struct Guest {
     vm: Arc<dyn shards_api::Guest>,
+    place: Place,
     client: Option<Client>,
+}
+
+/// Where a Linux run's VMMs run: each in a cgroup of its own, as the node runs each VM's, beneath this
+/// process's own cgroup, which must hold the memory controller to hand down (run guest_cost in a cgroup
+/// delegated to it, as the node's subtree is: `systemd-run --user --scope -p Delegate=yes ...`). Every
+/// process in it moves into a leaf (`producer`) first: a cgroup with processes of its own hands no
+/// controller down (cgroup v2's no-internal-process rule).
+#[cfg(target_os = "linux")]
+struct Places {
+    root: PathBuf,
+    wrappers: PathBuf,
+    next: u64,
+}
+
+/// One VMM's cgroup, and the wrapper the API launches for it: a script that joins the cgroup, then runs the
+/// configured `shards` in its place, so all the VMM holds is charged there from its start.
+#[cfg(target_os = "linux")]
+struct Place {
+    cgroup: PathBuf,
+    wrapper: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+struct Places;
+
+#[cfg(target_os = "macos")]
+struct Place;
+
+#[cfg(target_os = "linux")]
+impl Places {
+    fn delegated(runtime: &Path) -> Result<Self, String> {
+        let root = hex_runtime::linux::cgroup::own_cgroup().map_err(|e| e.to_string())?;
+        let read = |name: &str| {
+            std::fs::read_to_string(root.join(name))
+                .map_err(|e| format!("reading {}: {e}", root.join(name).display()))
+        };
+        if !read("cgroup.controllers")?
+            .split_whitespace()
+            .any(|controller| controller == "memory")
+        {
+            return Err(format!(
+                "{} holds no memory controller to give each VMM a cgroup of its own, as the node does: run guest_cost in a cgroup delegated to it (systemd-run --user --scope -p Delegate=yes <guest_cost> ...)",
+                root.display()
+            ));
+        }
+        let leaf = root.join("producer");
+        match std::fs::create_dir(&leaf) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("making {}: {e}", leaf.display())),
+        }
+        for pid in read("cgroup.procs")?.lines() {
+            match std::fs::write(leaf.join("cgroup.procs"), pid) {
+                Ok(()) => {}
+                // A process that has ended since the listing.
+                Err(e) if e.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) => {}
+                Err(e) => return Err(format!("moving {pid} into {}: {e}", leaf.display())),
+            }
+        }
+        std::fs::write(root.join("cgroup.subtree_control"), "+memory").map_err(|e| {
+            format!(
+                "handing the memory controller down from {}: {e}",
+                root.display()
+            )
+        })?;
+        let wrappers = runtime.join("wrappers");
+        std::fs::create_dir_all(&wrappers)
+            .map_err(|e| format!("making {}: {e}", wrappers.display()))?;
+        Ok(Self {
+            root,
+            wrappers,
+            next: 0,
+        })
+    }
+
+    /// A new VMM's place: its cgroup, and the wrapper that joins it and runs `binary`, set as `spec`'s.
+    fn place(&mut self, binary: &Path, spec: &mut shards_api::GuestSpec) -> Result<Place, String> {
+        let name = format!("vm-{}", self.next);
+        self.next = self.next.saturating_add(1);
+        let quoted = |path: &Path| {
+            path.to_str()
+                .filter(|text| !text.contains('\''))
+                .map(|text| format!("'{text}'"))
+                .ok_or_else(|| format!("{} can't be quoted for sh", path.display()))
+        };
+        let place = Place {
+            cgroup: self.root.join(&name),
+            wrapper: self.wrappers.join(&name),
+        };
+        let script = format!(
+            "#!/bin/sh\necho $$ > {} || exit 125\nexec {} \"$@\"\n",
+            quoted(&place.cgroup.join("cgroup.procs"))?,
+            quoted(binary)?
+        );
+        std::fs::create_dir(&place.cgroup)
+            .map_err(|e| format!("making {}: {e}", place.cgroup.display()))?;
+        std::fs::write(&place.wrapper, script)
+            .and_then(|()| {
+                std::fs::set_permissions(&place.wrapper, std::fs::Permissions::from_mode(0o700))
+            })
+            .map_err(|e| format!("writing {}: {e}", place.wrapper.display()))?;
+        spec.binary = Some(place.wrapper.clone());
+        Ok(place)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Place {
+    /// Its VMM ended, its cgroup and wrapper go.
+    fn remove(&self) -> Result<(), String> {
+        std::fs::remove_dir(&self.cgroup)
+            .map_err(|e| format!("removing {}: {e}", self.cgroup.display()))?;
+        std::fs::remove_file(&self.wrapper)
+            .map_err(|e| format!("removing {}: {e}", self.wrapper.display()))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Places {
+    fn delegated(_: &Path) -> Result<Self, String> {
+        Ok(Self)
+    }
+
+    /// The Mac's managed control holds a VM's process group, not a cgroup: the VMM runs where launched.
+    fn place(&mut self, _: &Path, _: &mut shards_api::GuestSpec) -> Result<Place, String> {
+        Ok(Place)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Place {
+    fn remove(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 impl Shards {
@@ -56,6 +196,8 @@ impl Shards {
             guests,
             cache,
             home,
+            folder: absolute(&runtime)?,
+            places: None,
         })
     }
 
@@ -76,9 +218,13 @@ impl Shards {
         }
     }
 
-    /// The probes of a launched guest's VMM: its pid, its guest's RAM, and its folders (the runtime ones and
-    /// its socket's, which the API made for it alone).
-    fn probes(&self, vm: &dyn shards_api::Guest) -> Result<(VmmCpu, VmmHolds), String> {
+    /// The probes of a launched guest's VMM: its pid, its guest's RAM, where it runs, and its folders (the
+    /// runtime ones and its socket's, which the API made for it alone).
+    fn probes(
+        &self,
+        vm: &dyn shards_api::Guest,
+        place: &Place,
+    ) -> Result<(VmmCpu, VmmHolds), String> {
         let identity = vm
             .identity()
             .map_err(|e| format!("naming the guest's VMM: {e}"))?;
@@ -91,6 +237,7 @@ impl Shards {
         probes(
             pid,
             self.ram()?,
+            place,
             vec![self.cache.clone(), self.home.clone(), socket],
         )
     }
@@ -205,22 +352,49 @@ impl Driver for Shards {
         walk(&[self.cache.clone(), self.home.clone()])
     }
 
-    fn launch(&mut self) -> Result<Launched<Self>, String> {
-        let vm: Arc<dyn shards_api::Guest> = Arc::from(
-            self.guests
-                .boot(&self.config.spec())
-                .map_err(|e| format!("launching the guest: {e}"))?,
-        );
-        match self.probes(vm.as_ref()) {
-            Ok((cpu, holds)) => Ok((Guest { vm, client: None }, cpu, holds)),
+    fn launch(&mut self, deadline: Instant) -> Result<Launched<Self>, String> {
+        let mut spec = self.config.spec();
+        hex_runtime::guest::tell_ready(
+            &mut spec.cmdline,
+            deadline.saturating_duration_since(Instant::now()),
+        )
+        .map_err(|e| format!("telling the guest its boot's deadline: {e}"))?;
+        let places = match &mut self.places {
+            Some(places) => places,
+            None => self.places.insert(Places::delegated(&self.folder)?),
+        };
+        let place = places.place(&self.config.binary, &mut spec)?;
+        let vm: Arc<dyn shards_api::Guest> = match self.guests.boot(&spec) {
+            Ok(vm) => Arc::from(vm),
+            Err(e) => {
+                let why = format!("launching the guest: {e}");
+                return Err(match place.remove() {
+                    Ok(()) => why,
+                    Err(remove) => format!("{why}; then {remove}"),
+                });
+            }
+        };
+        match self.probes(vm.as_ref(), &place) {
+            Ok((cpu, holds)) => Ok((
+                Guest {
+                    vm,
+                    place,
+                    client: None,
+                },
+                cpu,
+                holds,
+            )),
             // Whatever kept it from being read, the guest is stopped first: none is left running.
             Err(why) => {
-                let stopped = self.patience().and_then(|patience| {
-                    Instant::now()
-                        .checked_add(patience.bound)
-                        .ok_or_else(|| "the stop's wait overflows".to_owned())
-                        .and_then(|at| Self::stop(vm.as_ref(), at))
-                });
+                let stopped = self
+                    .patience()
+                    .and_then(|patience| {
+                        Instant::now()
+                            .checked_add(patience.bound)
+                            .ok_or_else(|| "the stop's wait overflows".to_owned())
+                            .and_then(|at| Self::stop(vm.as_ref(), at))
+                    })
+                    .and_then(|()| place.remove());
                 Err(match stopped {
                     Ok(()) => why,
                     Err(stop) => format!("{why}; then {stop}"),
@@ -267,9 +441,10 @@ impl Driver for Shards {
     }
 
     fn tear_down(&mut self, guest: Guest, deadline: Instant) -> Result<(), String> {
-        let Guest { vm, client } = guest;
+        let Guest { vm, place, client } = guest;
         drop(client);
-        Self::stop(vm.as_ref(), deadline)
+        Self::stop(vm.as_ref(), deadline)?;
+        place.remove()
     }
 }
 
@@ -354,14 +529,14 @@ fn cpu_source() -> String {
 #[cfg(target_os = "macos")]
 fn memory_source() -> String {
     format!(
-        "the VMM's proc_pid_rusage ri_phys_footprint, less its guest RAM's pages resident and compressed (proc_pidinfo PROC_PIDREGIONINFO over the entries of the one run as long as its RAM of untagged entries it may read and write, outside any submap, PROC_PIDREGIONPATHINFO naming no file for any), in this host's {}-byte pages; ri_lifetime_max_phys_footprint is in the samples for the record",
+        "in production's state, the guest ready and its node agent running (the readings from its readiness on): the VMM's proc_pid_rusage ri_phys_footprint, less its guest RAM's pages resident and compressed (proc_pidinfo PROC_PIDREGIONINFO over the entries of the one run as long as its RAM of untagged entries it may read and write, outside any submap, PROC_PIDREGIONPATHINFO naming no file for any), in this host's {}-byte pages; ri_lifetime_max_phys_footprint is in the samples for the record",
         rustix::param::page_size()
     )
 }
 
 #[cfg(target_os = "linux")]
 fn memory_source() -> String {
-    "the VMM's anonymous memory, resident and swapped (Anonymous + Swap over /proc/<pid>/smaps), less its guest RAM mapping's (the one run of private anonymous mappings as long as its RAM)".to_owned()
+    "the VMM's cgroup, its own from its start as the node gives each VM one (a wrapper joins it, then runs SHARDS_BIN): its memory.peak (kernel memory, KVM's among it, included) less its guest RAM's touched pages at their most (Anonymous + Swap of the one run of private anonymous mappings as long as its RAM in /proc/<pid>/smaps), or a reading's memory.current less its guest's pages where more".to_owned()
 }
 
 /// A launched guest's VMM's CPU, as macOS reads it: its own (`proc_pid_rusage`) and its vCPU threads'
@@ -387,7 +562,12 @@ pub struct VmmHolds {
 
 /// The probes of the VMM `pid`, whose guest has `ram` bytes of RAM and whose folders are `folders`.
 #[cfg(target_os = "macos")]
-fn probes(pid: i32, ram: u64, folders: Vec<PathBuf>) -> Result<(VmmCpu, VmmHolds), String> {
+fn probes(
+    pid: i32,
+    ram: u64,
+    _: &Place,
+    folders: Vec<PathBuf>,
+) -> Result<(VmmCpu, VmmHolds), String> {
     use hex_runtime::macos::sys;
     // Room for every thread a task may have, so a thread list is whole.
     let most = sys::sysctl_number(c"kern.num_taskthreads")
@@ -534,6 +714,7 @@ impl Probe for VmmHolds {
             .transpose()?;
         Ok(Holding {
             footprint: usage.footprint,
+            charged_peak: None,
             peak_footprint: Some(usage.peak),
             guest_memory,
             files: walk(&self.folders)?,
@@ -561,20 +742,27 @@ pub struct VmmCpu {
     hz: u64,
 }
 
-/// What a launched guest's VMM holds, as Linux reads it: its anonymous memory and its guest RAM mapping's
-/// (`/proc/<pid>/smaps`, which walks each mapping's pages, so a reading takes as long as its RAM is large),
-/// and its folders.
+/// What a launched guest's VMM holds, as Linux reads it: what its cgroup is charged (`memory.current` and
+/// `memory.peak`, kernel memory included), its guest RAM mapping's touched pages (`/proc/<pid>/smaps`, which
+/// walks each mapping's pages, so a reading takes as long as its RAM is large), and its folders.
 #[cfg(target_os = "linux")]
 pub struct VmmHolds {
     pid: i32,
     ram: u64,
+    cgroup: PathBuf,
     guest: Option<(u64, u64)>,
     folders: Vec<PathBuf>,
 }
 
-/// The probes of the VMM `pid`, whose guest has `ram` bytes of RAM and whose folders are `folders`.
+/// The probes of the VMM `pid`, whose guest has `ram` bytes of RAM, which runs in `place`'s cgroup, and
+/// whose folders are `folders`.
 #[cfg(target_os = "linux")]
-fn probes(pid: i32, ram: u64, folders: Vec<PathBuf>) -> Result<(VmmCpu, VmmHolds), String> {
+fn probes(
+    pid: i32,
+    ram: u64,
+    place: &Place,
+    folders: Vec<PathBuf>,
+) -> Result<(VmmCpu, VmmHolds), String> {
     Ok((
         VmmCpu {
             pid,
@@ -583,10 +771,23 @@ fn probes(pid: i32, ram: u64, folders: Vec<PathBuf>) -> Result<(VmmCpu, VmmHolds
         VmmHolds {
             pid,
             ram,
+            cgroup: place.cgroup.clone(),
             guest: None,
             folders,
         },
     ))
+}
+
+/// A count of bytes a cgroup file holds, as `memory.current` and `memory.peak` do (one decimal and a
+/// newline).
+#[cfg(target_os = "linux")]
+fn cgroup_bytes(cgroup: &Path, name: &str) -> Result<u64, String> {
+    let path = cgroup.join(name);
+    std::fs::read_to_string(&path)
+        .map_err(|e| format!("reading {}: {e}", path.display()))?
+        .trim()
+        .parse()
+        .map_err(|_| format!("{} isn't a count of bytes", path.display()))
 }
 
 #[cfg(target_os = "linux")]
@@ -703,13 +904,13 @@ impl Probe for VmmHolds {
                 ));
             }
         }
-        let footprint = maps.iter().map(|m| m.held).fold(0, u64::saturating_add);
         let guest_memory = self
             .guest
             .map(|range| within(maps.iter().map(|m| (m.start, m.end, m.held)), range))
             .transpose()?;
         Ok(Holding {
-            footprint,
+            footprint: cgroup_bytes(&self.cgroup, "memory.current")?,
+            charged_peak: Some(cgroup_bytes(&self.cgroup, "memory.peak")?),
             peak_footprint: None,
             guest_memory,
             files: walk(&self.folders)?,
@@ -850,18 +1051,32 @@ Swap:                  0 kB
     }
 
     /// AC-T7.4.1: a real busy process read as a VMM is: expect its CPU to grow from nothing, its footprint
-    /// read, no RAM of a guest told apart in it (none is as long as the one asked for), and its folder's
-    /// bytes listed.
+    /// read (on Linux its cgroup's charge, here a folder that holds what a cgroup's memory files do), no RAM
+    /// of a guest told apart in it (none is as long as the one asked for), and its folder's bytes listed.
     #[test]
     fn a_process_is_read_as_a_vmm_is() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("held"), vec![1u8; 64 * 1024]).unwrap();
+        #[cfg(target_os = "linux")]
+        let place = {
+            let cgroup = dir.path().join("cgroup");
+            std::fs::create_dir(&cgroup).unwrap();
+            std::fs::write(cgroup.join("memory.current"), "123\n").unwrap();
+            std::fs::write(cgroup.join("memory.peak"), "456\n").unwrap();
+            Place {
+                cgroup,
+                wrapper: dir.path().join("wrapper"),
+            }
+        };
+        #[cfg(target_os = "macos")]
+        let place = Place;
         let mut busy = std::process::Command::new("/usr/bin/yes")
             .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
         let pid = i32::try_from(busy.id()).unwrap();
-        let (mut cpu, mut holds) = probes(pid, u64::MAX, vec![dir.path().to_owned()]).unwrap();
+        let (mut cpu, mut holds) =
+            probes(pid, u64::MAX, &place, vec![dir.path().join("held")]).unwrap();
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut used = cpu.read().unwrap();
         while used.cpu.is_zero() {
@@ -874,6 +1089,8 @@ Swap:                  0 kB
         let _ = busy.kill();
         let _ = busy.wait();
         assert!(read.footprint > 0, "{read:?}");
+        #[cfg(target_os = "linux")]
+        assert_eq!((read.footprint, read.charged_peak), (123, Some(456)));
         assert_eq!(read.guest_memory, None);
         assert!(used.guest_cpu <= used.cpu, "{used:?}");
         let held = read
@@ -888,8 +1105,9 @@ Swap:                  0 kB
     /// two, through the same census, evidence and output the measurement uses: expect it written and loaded
     /// as a node loads it, its envelope the configured guest's, two guests in its evidence, and each with
     /// its VMM's own memory. Needs SHARDS_BIN, HEX_GUEST_KERNEL, HEX_GUEST_INITRD, HEX_GUEST_CPUS and
-    /// HEX_GUEST_MEMORY_MIB, GUEST_COST_SMOKE_OUT (a folder under ~/.cache), and on a Mac the window's
-    /// CPU-response row file, GUEST_COST_SMOKE_ROW and GUEST_COST_SMOKE_ROW_SHA256.
+    /// HEX_GUEST_MEMORY_MIB, GUEST_COST_SMOKE_OUT (a folder under ~/.cache), on a Mac the window's
+    /// CPU-response row file, GUEST_COST_SMOKE_ROW and GUEST_COST_SMOKE_ROW_SHA256, and on Linux a cgroup
+    /// delegated to the test (`systemd-run --user --scope -p Delegate=yes <the test binary> ...`).
     #[test]
     #[ignore = "boots two real guests: run with --ignored where a Shards guest is configured"]
     fn two_guests_make_a_pair_the_node_loads() {
@@ -897,12 +1115,12 @@ Swap:                  0 kB
             PathBuf::from(std::env::var_os("GUEST_COST_SMOKE_OUT").expect("GUEST_COST_SMOKE_OUT"));
         let mut driver = Shards::from_env(&out).unwrap();
         let envelope = driver.envelope().unwrap().resources;
-        let (window, prefix) = crate::window(&crate::smoke_args(&out), &driver).unwrap();
+        let (windows, prefix) = crate::windows(&crate::smoke_args(&out)).unwrap();
         let made = super::super::run::produce(
             &mut driver,
             &super::super::run::Plan { seedable: 2 },
             &out,
-            &window,
+            &windows,
             &prefix,
         )
         .unwrap();

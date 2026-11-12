@@ -38,9 +38,42 @@ impl Plan {
 
 /// The window the node's CPU control enforces a VM's rate over (Linux: its cgroup's `cpu.max` period;
 /// macOS: the managed CPU control's cycle), and where it comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Window {
     pub length: Duration,
     pub source: String,
+}
+
+/// The windows a VM's rate is enforced over: one period whatever the rate (Linux's `cpu.max`), or one that
+/// the VM's rate sets (the Mac control's cycle), given that rate in milli-CPU.
+pub enum Windows {
+    #[cfg(any(target_os = "linux", test))]
+    Fixed(Window),
+    #[cfg(any(target_os = "macos", test))]
+    AtRate(Box<dyn Fn(u64) -> Result<Window, String>>),
+}
+
+impl Windows {
+    pub fn at(&self, rate: u64) -> Result<Window, String> {
+        match self {
+            #[cfg(any(target_os = "linux", test))]
+            Self::Fixed(window) => {
+                let _ = rate;
+                Ok(window.clone())
+            }
+            #[cfg(any(target_os = "macos", test))]
+            Self::AtRate(at) => at(rate),
+        }
+    }
+
+    pub fn depends_on_rate(&self) -> bool {
+        match self {
+            #[cfg(any(target_os = "linux", test))]
+            Self::Fixed(_) => false,
+            #[cfg(any(target_os = "macos", test))]
+            Self::AtRate(_) => true,
+        }
+    }
 }
 
 /// One reading, `at` after its VMM's launch.
@@ -211,7 +244,7 @@ enum Boot {
 /// thread outlives this.
 fn measure<D: Driver>(driver: &mut D, bound: Duration, window: Duration) -> Result<Boot, String> {
     let began = Instant::now();
-    let (mut guest, cpu, holds) = driver.launch()?;
+    let (mut guest, cpu, holds) = driver.launch(after(began, bound)?)?;
     let started = match sampler("guest-cost-cpu", cpu, began, window) {
         Ok(cpu) => match sampler("guest-cost-holdings", holds, began, window) {
             Ok(holds) => Ok((cpu, holds)),
@@ -290,13 +323,18 @@ pub struct Sample {
     /// Its CPU's windows, and its longest (a boundary read late after a stall makes one longer).
     pub windows: usize,
     pub longest: Duration,
-    /// Its VMM's own CPU in one window, its guest's left out, in milli-CPU rounded up.
+    /// Its VMM's own CPU in one window from its readiness on (its steady state, idle), its guest's left out,
+    /// in milli-CPU rounded up: what is charged.
     pub cpu_milli: u64,
+    /// The same in one window before its readiness: its boot's burst, not charged.
+    pub boot_milli: u64,
     /// Its VMM's whole CPU in one window, its guest's included, for the record.
     pub total_milli: u64,
     /// Its readings of what it held.
     pub holdings: usize,
-    /// Its VMM's footprint less its guest's RAM at a reading.
+    /// Its VMM's own memory: where the node's enforcement keeps a peak (Linux's cgroup), that peak less its
+    /// guest's touched pages at their most, or any reading's charge less its guest's pages if more; else
+    /// (macOS) its footprint less its guest's pages at a reading from its readiness on.
     pub mem_bytes: u64,
     /// Its readings whose footprint was below their guest RAM's pages (macOS's ledger charges the pages a
     /// guest touches after the region holds them, in its boot): each counted none of the VMM's own.
@@ -384,10 +422,11 @@ fn own_disk(files: &Files, before: &Files, after: &Files) -> u64 {
 /// A ready guest's measure from its readings, what its agent reported, and what its folders held before its
 /// launch and after its end. Its CPU is its VMM's less its guest's, each window's from the reading before
 /// (the first from its launch, when its VMM had used nothing) over the window or, read late, over its whole
-/// span: a reading never charges a window shorter than the window. Its vCPU threads at its last CPU reading
-/// are the envelope's where its OS names them. Its memory is its VMM's footprint less its guest's RAM, which
-/// its last reading of what it held must tell apart (a reading whose footprint is below its guest's RAM
-/// counts none, and is counted).
+/// span: a reading never charges a window shorter than the window. A window that began before its readiness
+/// is its boot's; one that began at or after it, its steady state's, of which there must be one. Its vCPU
+/// threads at its last CPU reading are the envelope's where its OS names them. Its memory is as
+/// [`Sample::mem_bytes`] says, its guest's RAM told apart by its last reading of what it held (a reading
+/// whose footprint is below its guest's RAM counts none, and is counted).
 pub fn measured(
     ready: Duration,
     readings: &Readings,
@@ -420,6 +459,7 @@ pub fn measured(
         windows: readings.cpu.len(),
         longest: Duration::ZERO,
         cpu_milli: 0,
+        boot_milli: 0,
         total_milli: 0,
         holdings: readings.holdings.len(),
         mem_bytes: 0,
@@ -427,6 +467,7 @@ pub fn measured(
         disk_bytes: 0,
         free,
     };
+    let mut steady = 0usize;
     let (mut at, mut cpu, mut own) = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
     for tick in &readings.cpu {
         let reading = &tick.reading;
@@ -434,27 +475,56 @@ pub fn measured(
         sample.longest = sample.longest.max(span);
         let charged = span.max(window);
         let now_own = reading.cpu.saturating_sub(reading.guest_cpu);
-        sample.cpu_milli = sample
-            .cpu_milli
-            .max(milli(now_own.saturating_sub(own), charged)?);
+        let used = milli(now_own.saturating_sub(own), charged)?;
+        if at >= ready {
+            steady = steady.saturating_add(1);
+            sample.cpu_milli = sample.cpu_milli.max(used);
+        } else {
+            sample.boot_milli = sample.boot_milli.max(used);
+        }
         sample.total_milli = sample
             .total_milli
             .max(milli(reading.cpu.saturating_sub(cpu), charged)?);
         // Counters read in whole ticks can read a little lower than before: a dip is charged once, never twice.
         (at, cpu, own) = (tick.at, cpu.max(reading.cpu), own.max(now_own));
     }
+    if steady == 0 {
+        return Err("no window began after its readiness".to_owned());
+    }
+    let enforced = readings
+        .holdings
+        .iter()
+        .filter_map(|tick| tick.reading.charged_peak)
+        .max();
+    let most_guest = readings
+        .holdings
+        .iter()
+        .filter_map(|tick| tick.reading.guest_memory)
+        .max()
+        .unwrap_or(0);
+    let mut settled = 0usize;
     for tick in &readings.holdings {
         let reading = &tick.reading;
         let guest = reading.guest_memory.unwrap_or(0);
         if guest > reading.footprint {
             sample.behind = sample.behind.saturating_add(1);
         }
-        sample.mem_bytes = sample
-            .mem_bytes
-            .max(reading.footprint.saturating_sub(guest));
+        // With an enforced peak every reading counts, as the peak does; without one, production's state alone.
+        if enforced.is_some() || tick.at >= ready {
+            settled = settled.saturating_add(1);
+            sample.mem_bytes = sample
+                .mem_bytes
+                .max(reading.footprint.saturating_sub(guest));
+        }
         sample.disk_bytes = sample
             .disk_bytes
             .max(own_disk(&reading.files, before, after));
+    }
+    if let Some(peak) = enforced {
+        sample.mem_bytes = sample.mem_bytes.max(peak.saturating_sub(most_guest));
+    }
+    if settled == 0 {
+        return Err("no reading of what it held after its readiness".to_owned());
     }
     Ok(sample)
 }
@@ -467,7 +537,7 @@ pub struct Record {
 }
 
 impl Record {
-    pub fn create(path: PathBuf, window: &Window) -> Result<Self, String> {
+    pub fn create(path: PathBuf) -> Result<Self, String> {
         let file =
             std::fs::File::create(&path).map_err(|e| format!("making {}: {e}", path.display()))?;
         let mut record = Self {
@@ -475,11 +545,11 @@ impl Record {
             file: std::io::BufWriter::new(file),
             hash: Sha256::new(),
         };
-        record.line("# hex-guest-cost samples 1")?;
-        record.line(&format!("# window_ns {}", window.length.as_nanos()))?;
+        record.line("# hex-guest-cost samples 2")?;
+        record.line("# a census at a window: \"census <k> window_ns <ns> rate_cpu_milli <r>\", then its guests")?;
         record.line("# a ready guest: \"guest <n> ready_ns <ns>\", then its readings, each stamped from its VMM's launch:")?;
         record.line("#   cpu at_ns cpu_ns guest_cpu_ns guest_threads|-")?;
-        record.line("#   held at_ns footprint_bytes peak_footprint_bytes|- guest_memory_bytes|- own_disk_bytes held_disk_bytes")?;
+        record.line("#   held at_ns footprint_bytes charged_peak_bytes|- peak_footprint_bytes|- guest_memory_bytes|- own_disk_bytes held_disk_bytes")?;
         record.line("# a guest that ran out: \"ran_out <n> bound_ns <ns>\"")?;
         Ok(record)
     }
@@ -518,9 +588,10 @@ impl Record {
                 .map(|held| held.bytes)
                 .fold(0, u64::saturating_add);
             self.line(&format!(
-                "held {} {} {} {} {} {held}",
+                "held {} {} {} {} {} {} {held}",
                 tick.at.as_nanos(),
                 r.footprint,
+                dash(r.charged_peak),
                 dash(r.peak_footprint),
                 dash(r.guest_memory),
                 own_disk(&r.files, before, after),
@@ -537,9 +608,9 @@ impl Record {
     }
 }
 
-/// A run's guests: each that was ready, the bound each one that ran out passed, and what the first guest
-/// left on disk after its end, which later guests found there and left as it was: the host's one-time
-/// caches, no one VM's.
+/// A run's guests at one window: each that was ready, the bound each one that ran out passed, and what its
+/// first guest left on disk after its end (the run's first census's alone may: what later guests found there
+/// and left as it was is the host's one-time caches, no one VM's).
 pub struct Census {
     pub first: Duration,
     pub samples: Vec<Sample>,
@@ -559,14 +630,16 @@ fn new_paths(before: &Files, after: &Files) -> Files {
 /// Launches guests one at a time until `seedable` were ready. Each is booted within the bound, which starts
 /// at `first` and doubles at each run-out (decision 9's run-outs, each recorded), read per window from its
 /// launch through its readiness and an idle hold, reported on and torn down. A run whose run-outs reach
-/// `seedable` is refused: its class's guest runs out as often as the census needs answers. A guest after
-/// the first that leaves anything new on disk is refused: a VM's leftovers are no one-time cache.
+/// `seedable` is refused: its class's guest runs out as often as the census needs answers. Only the run's
+/// first guest (`caches`: this census's first) may leave anything new on disk; any other that does is
+/// refused: a VM's leftovers are no one-time cache.
 pub fn census<D: Driver>(
     driver: &mut D,
     seedable: usize,
     first: Duration,
     window: &Window,
     vcpus: u32,
+    caches: bool,
     record: &mut Record,
 ) -> Result<Census, String> {
     let mut census = Census {
@@ -588,7 +661,7 @@ pub fn census<D: Driver>(
         let boot = measure(driver, bound, window.length)?;
         let after = driver.held()?;
         let left = new_paths(&known, &after);
-        if launched == 0 {
+        if caches && launched == 0 {
             census.caches = left;
         } else if !left.is_empty() {
             let named: Vec<String> = left
@@ -630,14 +703,15 @@ pub fn census<D: Driver>(
     Ok(census)
 }
 
-/// The cost's measured parts, each the census maximum (its rule's recorded maximum) and each dimension apart.
-/// Overhead, outside the envelope: the VMM's own CPU in one window, its own memory, and the bytes held in
-/// its own folders. Guest overhead, inside: the envelope less what the guest's agent reported free.
+/// The census's measured parts, each its maximum (its rule's recorded maximum) and each dimension apart.
+/// Overhead, outside the envelope: the VMM's own CPU in one window of its steady state, its own memory, and
+/// the bytes held in its own folders. Guest overhead, inside: the envelope less what the guest's agent
+/// reported free. And the boot's burst, the VMM's own CPU in one window before its guest was ready.
 pub fn derive(
     envelope: CapacityResources,
     census: &Census,
     seedable: usize,
-) -> Result<(CapacityResources, CapacityResources), String> {
+) -> Result<(CapacityResources, CapacityResources, u64), String> {
     if census.samples.len() < seedable {
         return Err(format!(
             "{} guests measured, fewer than SEEDABLE {seedable}",
@@ -646,10 +720,12 @@ pub fn derive(
     }
     let mut overhead = CapacityResources::default();
     let mut inside = CapacityResources::default();
+    let mut boot = 0u64;
     for sample in &census.samples {
         overhead.cpu_milli = overhead.cpu_milli.max(sample.cpu_milli);
         overhead.mem_bytes = overhead.mem_bytes.max(sample.mem_bytes);
         overhead.disk_bytes = overhead.disk_bytes.max(sample.disk_bytes);
+        boot = boot.max(sample.boot_milli);
         inside.cpu_milli = inside
             .cpu_milli
             .max(envelope.cpu_milli.saturating_sub(sample.free.cpu_milli));
@@ -660,7 +736,7 @@ pub fn derive(
             .disk_bytes
             .max(envelope.disk_bytes.saturating_sub(sample.free.disk_bytes));
     }
-    Ok((overhead, inside))
+    Ok((overhead, inside, boot))
 }
 
 pub fn hex(bytes: &[u8]) -> String {
@@ -676,20 +752,28 @@ pub struct Made {
     pub samples_file: PathBuf,
 }
 
-/// The run on `driver`, per `window`: its census, the cost and evidence derived from it, written under `out`
-/// as `cost.json`, `evidence` and `samples`, the cost's id the evidence's SHA-256. `prefix` goes at the
-/// evidence's head as it is (a Mac's CPU-response section, its rows read back by the node; empty
-/// elsewhere).
+/// One census of a run at its window: the CPU rate the window was taken at (the envelope's and what was
+/// charged before it), the window, and the steady CPU the census measured at it.
+struct Iteration {
+    rate: u64,
+    window: Duration,
+    measured: u64,
+}
+
+/// The run on `driver`: its census at the window the node's CPU control enforces with, the cost and evidence
+/// derived from it, written under `out` as `cost.json`, `evidence` and `samples`, the cost's id the evidence's
+/// SHA-256. A window that depends on the VM's rate (the Mac's cycle) is taken first at the envelope's rate,
+/// then at the envelope's and what the census before measured, until a census measures no more than the
+/// window was taken at: that is charged, and its window is the one the allocation's own rate is enforced over
+/// (the charge only grows, so the run ends). `prefix` goes at the evidence's head as it is (a Mac's
+/// CPU-response section, its rows read back by the node; empty elsewhere).
 pub fn produce<D: Driver>(
     driver: &mut D,
     plan: &Plan,
     out: &Path,
-    window: &Window,
+    windows: &Windows,
     prefix: &[u8],
 ) -> Result<Made, String> {
-    if window.length.is_zero() {
-        return Err("a window of no time".to_owned());
-    }
     let class = driver.class();
     let described = driver.describe()?;
     let envelope = driver.envelope()?;
@@ -704,17 +788,50 @@ pub fn produce<D: Driver>(
         disk_bytes: block,
     };
     std::fs::create_dir_all(out).map_err(|e| format!("making {}: {e}", out.display()))?;
-    let mut record = Record::create(out.join("samples"), window)?;
-    let census = census(
-        driver,
-        plan.seedable,
-        patience.bound,
-        window,
-        envelope.vcpus,
-        &mut record,
-    )?;
+    let mut record = Record::create(out.join("samples"))?;
+    let mut iterations: Vec<Iteration> = Vec::new();
+    let mut caches = Files::new();
+    let mut charged = 0u64;
+    let (window, census, mut overhead, inside, boot) = loop {
+        let rate = envelope
+            .resources
+            .cpu_milli
+            .checked_add(charged)
+            .ok_or("the CPU rate overflows")?;
+        let window = windows.at(rate)?;
+        if window.length.is_zero() {
+            return Err("a window of no time".to_owned());
+        }
+        record.line(&format!(
+            "census {} window_ns {} rate_cpu_milli {rate}",
+            iterations.len(),
+            window.length.as_nanos()
+        ))?;
+        let census = census(
+            driver,
+            plan.seedable,
+            patience.bound,
+            &window,
+            envelope.vcpus,
+            iterations.is_empty(),
+            &mut record,
+        )?;
+        caches.extend(census.caches.iter().cloned());
+        let (overhead, inside, boot) = derive(envelope.resources, &census, plan.seedable)?;
+        iterations.push(Iteration {
+            rate,
+            window: window.length,
+            measured: overhead.cpu_milli,
+        });
+        if !windows.depends_on_rate() || overhead.cpu_milli <= charged {
+            break (window, census, overhead, inside, boot);
+        }
+        charged = overhead.cpu_milli;
+    };
+    if windows.depends_on_rate() {
+        overhead.cpu_milli = charged;
+    }
     let (samples_file, samples_sha256) = record.finish()?;
-    let (overhead, inside) = derive(envelope.resources, &census, plan.seedable)?;
 
     let mut body = String::new();
     let mut line = |text: String| {
@@ -752,6 +869,19 @@ pub fn produce<D: Driver>(
         window.length.as_nanos(),
         window.source
     ));
+    for (k, it) in iterations.iter().enumerate() {
+        line(format!(
+            "window_census {k} rate_cpu_milli={} window_ns={} steady_cpu_milli={}{}",
+            it.rate,
+            it.window.as_nanos(),
+            it.measured,
+            if k + 1 == iterations.len() {
+                " (charged: no more than its window's rate was taken at)"
+            } else {
+                " (more than its window's rate was taken at: the next census at the rate with it)"
+            }
+        ));
+    }
     line(format!(
         "census seedable={} (SEEDABLE, bench/competitive/probes/waits_census.py, decision 9) ready={} ran_out={} first_bound_ns={} ({}), doubled at each run-out; each guest read at every window boundary from its VMM's launch through its readiness and an idle hold as long as its boot took and at least one whole window after it, to a whole window",
         plan.seedable,
@@ -761,16 +891,20 @@ pub fn produce<D: Driver>(
         patience.source
     ));
     line(format!(
-        "overhead {} (the census maximum of each ready guest's: its VMM's own CPU in one window, its guest's left out, rounded up; its VMM's footprint less its guest's RAM at a reading; the bytes held in its own folders at a reading, there during its life and neither before it nor after it)",
-        resources(overhead)
+        "overhead {} at RAM {} bytes (the envelope's: a cost is per envelope) (the census maximum of each ready guest's: its VMM's own CPU in one window from its readiness on, its guest's left out, rounded up; its VMM's own memory, as the memory source says; the bytes held in its own folders at a reading, there during its life and neither before it nor after it)",
+        resources(overhead),
+        envelope.resources.mem_bytes
+    ));
+    line(format!(
+        "boot_burst cpu_milli={boot} (the census maximum of its VMM's own CPU in one window that began before its guest was ready: not charged; for concurrent-boot admission)"
     ));
     for (name, value) in driver.sources() {
         line(format!("source {name} {value}"));
     }
-    if census.caches.is_empty() {
+    if caches.is_empty() {
         line("disk_host none (the first guest left nothing new on disk)".to_owned());
     }
-    for held in &census.caches {
+    for held in &caches {
         line(format!(
             "disk_host {} {} (left by the first guest and found by every later one, which left nothing new: a one-time cache of the host's, no one VM's, left out)",
             held.path.display(),
@@ -782,18 +916,19 @@ pub fn produce<D: Driver>(
         resources(inside)
     ));
     line(format!(
-        "samples {} sha256={} (each ready guest's readings)",
+        "samples {} sha256={} (each census's ready guests' readings)",
         samples_file.display(),
         hex(&samples_sha256)
     ));
-    line("guests ready_ns windows longest_ns cpu_milli total_milli holdings mem_bytes behind disk_bytes free_cpu_milli free_mem_bytes free_disk_bytes (holdings: readings of what it held; behind: those whose footprint was below their guest RAM's pages)".to_owned());
+    line("guests ready_ns windows longest_ns cpu_milli boot_milli total_milli holdings mem_bytes behind disk_bytes free_cpu_milli free_mem_bytes free_disk_bytes (the charged census's; holdings: readings of what it held; behind: those whose footprint was below their guest RAM's pages)".to_owned());
     for (n, s) in census.samples.iter().enumerate() {
         line(format!(
-            "guest {n} {} {} {} {} {} {} {} {} {} {} {} {}",
+            "guest {n} {} {} {} {} {} {} {} {} {} {} {} {} {}",
             s.ready.as_nanos(),
             s.windows,
             s.longest.as_nanos(),
             s.cpu_milli,
+            s.boot_milli,
             s.total_milli,
             s.holdings,
             s.mem_bytes,
@@ -834,10 +969,11 @@ pub fn produce<D: Driver>(
     let mut summary = String::new();
     let _ = write!(
         summary,
-        "{class}: {} guests ready, {} ran out, window {:?}; overhead {}; guest_overhead {}",
+        "{class}: {} guests ready, {} ran out, window {:?} after {} census(es); overhead {}; boot burst cpu_milli={boot}; guest_overhead {}",
         census.samples.len(),
         census.ran_out.len(),
         window.length,
+        iterations.len(),
         resources(overhead),
         resources(inside)
     );
@@ -932,7 +1068,7 @@ mod tests {
         fn held(&self) -> Result<Files, String> {
             Ok(self.disk.clone())
         }
-        fn launch(&mut self) -> Result<Launched<Self>, String> {
+        fn launch(&mut self, _: Instant) -> Result<Launched<Self>, String> {
             let next = self
                 .boots
                 .get(self.launched)
@@ -1003,6 +1139,7 @@ mod tests {
             },
             Holding {
                 footprint: own + guest,
+                charged_peak: None,
                 peak_footprint: None,
                 guest_memory: Some(guest),
                 files,
@@ -1036,8 +1173,8 @@ mod tests {
         }
     }
 
-    fn record(dir: &Path, window: &Window) -> Record {
-        Record::create(dir.join("samples"), window).unwrap()
+    fn record(dir: &Path) -> Record {
+        Record::create(dir.join("samples")).unwrap()
     }
 
     fn tick<R>(ms: u64, reading: R) -> Tick<R> {
@@ -1072,19 +1209,21 @@ mod tests {
         assert_eq!(Plan::derived().unwrap().seedable, 1_000);
     }
 
-    /// AC-T7.4.1: a guest's readings each charge their window: expect each window's own CPU (its VMM's less
-    /// its guest's) over the window, the first from the launch; a reading late after a stall charged over its
-    /// whole span, an early one over no less than the window; own CPU that reads lower than before (its
-    /// counters' ticks) charged nothing and its dip never charged again; and its memory its footprint less
-    /// its guest's RAM at its most.
+    /// AC-T7.4.1 (ROOT: the steady state is charged, the boot's burst recorded): a guest ready at 150 ms whose
+    /// readings each charge their window: expect each window's own CPU (its VMM's less its guest's) over the
+    /// window, the first from the launch; a reading late after a stall charged over its whole span, an early
+    /// one over no less than the window; own CPU that reads lower than before (its counters' ticks) charged
+    /// nothing and its dip never charged again; the windows that began before 150 ms its boot's burst, the
+    /// rest its charged steady state; and its memory its footprint less its guest's RAM at a reading from its
+    /// readiness on (no enforced peak: the Mac's rule).
     #[test]
     fn each_window_charges_its_own_cpu_and_the_most_own_memory() {
         let ticks = readings(vec![
-            (100, reading(40, 30, 10 << 20, 1 << 20, Vec::new())),
-            (190, reading(60, 45, 30 << 20, 2 << 20, Vec::new())),
-            (400, reading(70, 50, 20 << 20, 8 << 20, Vec::new())),
-            (500, reading(75, 60, 20 << 20, 8 << 20, Vec::new())),
-            (600, reading(90, 60, 20 << 20, 8 << 20, Vec::new())),
+            (100, reading(50, 30, 30 << 20, 1 << 20, Vec::new())),
+            (190, reading(70, 45, 10 << 20, 2 << 20, Vec::new())),
+            (400, reading(80, 50, 20 << 20, 8 << 20, Vec::new())),
+            (500, reading(85, 60, 20 << 20, 8 << 20, Vec::new())),
+            (600, reading(100, 60, 20 << 20, 8 << 20, Vec::new())),
         ]);
         let sample = measured(
             Duration::from_millis(150),
@@ -1096,16 +1235,64 @@ mod tests {
             &Vec::new(),
         )
         .unwrap();
-        // Own CPU: 10 ms in the first 100 ms (100 milli); 5 ms in 90 ms, charged over 100 (50); 5 ms in a
-        // late 210 ms (24, rounded up); none where it reads 15 against 20 before; then 10 ms above the 20 it
-        // had reached (100), never 15 above its dip (150).
+        // Boot, the windows from 0 and from 100 ms: 20 ms of its own in the first 100 ms (200 milli); 5 ms
+        // in 90 ms, charged over 100 (50).
+        assert_eq!(sample.boot_milli, 200);
+        // Steady, the windows from 190 ms on: 5 ms in a late 210 ms (24, rounded up); none where it reads
+        // 25 against 30 before; then 10 ms above the 30 it had reached (100), never 15 above its dip (150).
         assert_eq!(sample.cpu_milli, 100);
-        // The whole VMM's: 40 ms in the first 100 ms.
-        assert_eq!(sample.total_milli, 400);
-        assert_eq!(sample.mem_bytes, 30 << 20);
+        // The whole VMM's: 50 ms in the first 100 ms.
+        assert_eq!(sample.total_milli, 500);
+        // From 150 ms on: 20 MiB its own; the 30 MiB of its boot's first reading not charged.
+        assert_eq!(sample.mem_bytes, 20 << 20);
         assert_eq!(sample.behind, 0);
         assert_eq!(sample.longest, Duration::from_millis(210));
         assert_eq!((sample.windows, sample.holdings), (5, 5));
+    }
+
+    /// AC-T7.4.1 (ROOT, Linux memory: the VMM cgroup's memory.peak): readings that carry the enforcement's
+    /// peak: expect the VMM's own memory that peak less the guest's touched pages at their most, or a
+    /// reading's charge less its guest's pages where more, its boot's readings counted as the peak counts
+    /// them.
+    #[test]
+    fn an_enforced_peak_less_the_guests_pages_is_the_vmms_memory() {
+        let charged = |footprint: u64, guest: u64, peak: u64| {
+            let (used, mut held) = reading(1, 0, 0, guest, Vec::new());
+            held.footprint = footprint;
+            held.charged_peak = Some(peak);
+            (used, held)
+        };
+        let measure = |ticks| {
+            measured(
+                Duration::from_millis(150),
+                &readings(ticks),
+                free(0),
+                Duration::from_millis(100),
+                2,
+                &Vec::new(),
+                &Vec::new(),
+            )
+            .unwrap()
+            .mem_bytes
+        };
+        // The peak, 90 MiB, less the guest's 40 MiB at their most: 50 MiB.
+        assert_eq!(
+            measure(vec![
+                (100, charged(50 << 20, 10 << 20, 80 << 20)),
+                (200, charged(60 << 20, 40 << 20, 90 << 20)),
+                (300, charged(60 << 20, 40 << 20, 90 << 20)),
+            ]),
+            50 << 20
+        );
+        // A boot reading charging 70 MiB with 5 MiB of the guest's: 65 MiB, more than the peak less 40.
+        assert_eq!(
+            measure(vec![
+                (100, charged(70 << 20, 5 << 20, 80 << 20)),
+                (200, charged(60 << 20, 40 << 20, 90 << 20)),
+                (300, charged(60 << 20, 40 << 20, 90 << 20)),
+            ]),
+            65 << 20
+        );
     }
 
     /// AC-T7.4.1: a guest whose last reading never told its RAM apart, or whose VMM names other than its
@@ -1115,7 +1302,7 @@ mod tests {
     fn a_reading_that_cannot_tell_the_guest_apart_is_refused() {
         let measure = |r: (Use, Holding)| {
             measured(
-                Duration::from_millis(1),
+                Duration::ZERO,
                 &readings(vec![(100, r)]),
                 free(0),
                 Duration::from_millis(100),
@@ -1139,9 +1326,9 @@ mod tests {
     }
 
     /// AC-T7.4.1 (ROOT, CPU per window): a guest ready at once whose VMM used 1 ms of its own (40 ms in all,
-    /// 39 its guest's) before its first boundary: expect its CPU figure that millisecond over the window,
-    /// never over its boot's microseconds (the old rate over a boot-sized hold), and its guest's time left
-    /// out.
+    /// 39 its guest's) before its first boundary: expect that millisecond its boot's burst over the window,
+    /// never over its boot's microseconds (the old rate over a boot-sized hold), its guest's time left out,
+    /// and nothing charged, its steady state having used none.
     #[test]
     fn a_short_boot_does_not_set_the_cpu_figure_from_noise() {
         let dir = tempfile::tempdir().unwrap();
@@ -1162,19 +1349,21 @@ mod tests {
             Duration::from_secs(1),
             &window,
             2,
-            &mut record(dir.path(), &window),
+            true,
+            &mut record(dir.path()),
         )
         .unwrap();
         for sample in &census.samples {
             assert!(sample.ready < window.length, "{sample:?}");
             assert!(
-                (1..=20).contains(&sample.cpu_milli),
+                (1..=20).contains(&sample.boot_milli),
                 "1 ms over a 50 ms window: {sample:?}"
             );
-            assert!(sample.total_milli >= 10 * sample.cpu_milli, "{sample:?}");
+            assert!(sample.total_milli >= 10 * sample.boot_milli, "{sample:?}");
         }
-        let (overhead, _) = derive(envelope(), &census, 2).unwrap();
-        assert!(overhead.cpu_milli <= 20, "{overhead:?}");
+        let (overhead, _, boot) = derive(envelope(), &census, 2).unwrap();
+        assert_eq!(overhead.cpu_milli, 0);
+        assert!((1..=20).contains(&boot), "{boot}");
     }
 
     /// AC-T7.4.1 (ROOT, VMM memory): a guest that touched 30 MiB of its 512 MiB, its VMM holding 60 MiB of
@@ -1200,10 +1389,11 @@ mod tests {
             Duration::from_secs(1),
             &window,
             2,
-            &mut record(dir.path(), &window),
+            true,
+            &mut record(dir.path()),
         )
         .unwrap();
-        let (overhead, inside) = derive(envelope(), &census, 2).unwrap();
+        let (overhead, inside, _) = derive(envelope(), &census, 2).unwrap();
         assert_eq!(overhead.mem_bytes, 60 << 20);
         assert_eq!(inside.mem_bytes, (512 << 20) - (400 << 20));
     }
@@ -1243,10 +1433,11 @@ mod tests {
             Duration::from_secs(1),
             &window,
             2,
-            &mut record(dir.path(), &window),
+            true,
+            &mut record(dir.path()),
         )
         .unwrap();
-        let (overhead, _) = derive(envelope(), &taken, 2).unwrap();
+        let (overhead, _, _) = derive(envelope(), &taken, 2).unwrap();
         assert_eq!(overhead.disk_bytes, 4096);
         assert_eq!(taken.caches, vec![binary]);
 
@@ -1259,7 +1450,8 @@ mod tests {
             Duration::from_secs(1),
             &window,
             2,
-            &mut record(dir.path(), &window),
+            true,
+            &mut record(dir.path()),
         );
         assert!(refused.is_err());
         assert_eq!(driver.torn_down, 2);
@@ -1282,7 +1474,8 @@ mod tests {
             Duration::from_secs(1),
             &window,
             2,
-            &mut record(dir.path(), &window),
+            true,
+            &mut record(dir.path()),
         )
         .unwrap();
         assert_eq!(census.samples.len(), 3);
@@ -1313,11 +1506,65 @@ mod tests {
                 Duration::from_secs(1),
                 &window,
                 2,
-                &mut record(dir.path(), &window)
+                true,
+                &mut record(dir.path())
             )
             .is_err()
         );
         assert_eq!(driver.launched, 2);
+    }
+
+    /// AC-T7.4.1 (ROOT, the Mac window's fixed point): a window that the rate sets, over guests whose VMM uses
+    /// 1 ms of its own in each window of their steady state: expect the first census at the envelope's rate,
+    /// each next at the envelope's and what the one before measured, the run ending at the first census that
+    /// measures no more than its window's rate was taken at, that charged, and each census in the evidence.
+    #[test]
+    fn the_mac_window_settles_at_the_rate_it_charges() {
+        let dir = tempfile::tempdir().unwrap();
+        // Its own CPU grows 1 ms a reading, its guest's not at all.
+        let steady: Vec<(Use, Holding)> = (0..64)
+            .map(|n| reading(n, 0, 1 << 20, 1 << 20, Vec::new()))
+            .collect();
+        let mut driver = Driven::new(dir.path(), vec![Some(script(steady, 400 << 20)); 64]);
+        let windows = Windows::AtRate(Box::new(|rate| {
+            Ok(Window {
+                length: Duration::from_millis(if rate == 2000 { 40 } else { 20 }),
+                source: format!("at {rate}"),
+            })
+        }));
+        let out = dir.path().join("out");
+        let made = produce(&mut driver, &Plan { seedable: 2 }, &out, &windows, &[]).unwrap();
+        let text = std::fs::read_to_string(&made.evidence_file).unwrap();
+        let censuses: Vec<(u64, u64)> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("window_census "))
+            .map(|l| {
+                let field = |name: &str| -> u64 {
+                    l.split(' ')
+                        .find_map(|w| w.strip_prefix(name))
+                        .unwrap()
+                        .parse()
+                        .unwrap()
+                };
+                (field("rate_cpu_milli="), field("steady_cpu_milli="))
+            })
+            .collect();
+        assert!(censuses.len() >= 2, "{text}");
+        assert_eq!(censuses[0].0, 2000);
+        for pair in censuses.windows(2) {
+            assert_eq!(pair[1].0, 2000 + pair[0].1, "{censuses:?}");
+            assert!(pair[0].1 > pair[0].0 - 2000, "{censuses:?}");
+        }
+        let (rate, measured) = *censuses.last().unwrap();
+        assert!(measured <= rate - 2000, "{censuses:?}");
+        let (cost, _, _) = hex_runtime::guest::load_runtime_evidence(
+            &made.cost_file,
+            made.cost_sha256,
+            &made.evidence_file,
+        )
+        .unwrap();
+        assert_eq!(cost.overhead.cpu_milli, rate - 2000);
+        assert!(text.contains("\nwindow 20000000 ns (at "), "{text}");
     }
 
     /// AC-T7.4.1: produce over a scripted class, with and without a CPU-response section at its head: expect
@@ -1346,7 +1593,7 @@ mod tests {
                 &mut driver,
                 &Plan { seedable: 2 },
                 &out,
-                &window(5),
+                &Windows::Fixed(window(5)),
                 &prefix,
             )
             .unwrap();

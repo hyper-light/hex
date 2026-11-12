@@ -370,8 +370,9 @@ pub const READY_MS: &str = "hex.ready-ms";
 
 /// Tells the guest booted with `cmdline` that `left` is what remains of its boot's deadline ([`READY_MS`]), within the
 /// kernel's command-line bound; refused where nothing is left, the word is there already, or init's arguments (`--`)
-/// begin, past which no word is the kernel's.
-pub(crate) fn tell_ready(cmdline: &mut String, left: Duration) -> Result<(), Refusal> {
+/// begin, past which no word is the kernel's. Public for the guest-cost producer, which boots its guests as the node
+/// does (AC-T7.4.1).
+pub fn tell_ready(cmdline: &mut String, left: Duration) -> Result<(), Refusal> {
     let invalid = |why: &str| Refusal::Invalid {
         what: "the guest's boot deadline",
         why: why.to_owned(),
