@@ -47,6 +47,9 @@ impl guest::Link for Link {
     }
 }
 
+/// The node agent's client over QUIC: the guest's protocol, its waits QUIC's own (`hex_client::guest::Quic`).
+pub type Client = guest::Client<guest::Quic>;
+
 /// A client of the node agent named `name` at `address`, over `endpoint`: dialed, said hello to, and held to the
 /// node's own bound on connections, by `deadline`.
 pub fn connect(
@@ -54,14 +57,14 @@ pub fn connect(
     name: &str,
     address: SocketAddr,
     deadline: Instant,
-) -> Result<(guest::Client, PeerId), Refused> {
+) -> Result<(Client, PeerId), Refused> {
     let peer = endpoint.dial(name, address, deadline)?;
     let link = guest::own_link(Link {
         endpoint: Arc::clone(&endpoint),
         peer,
     })
     .map_err(Refused::Node)?;
-    let client = guest::Client::connect_before(link, deadline).map_err(Refused::Node)?;
+    let client = Client::connect_timed_before(link, deadline).map_err(Refused::Node)?;
     let lanes = u32::try_from(client.limits().connections).unwrap_or(u32::MAX);
     endpoint.limit(peer, lanes)?;
     Ok((client, peer))
