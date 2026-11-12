@@ -21,7 +21,7 @@ use hex_api::{
 };
 use hex_core::cgroup::{CPU_PERIOD_US, CpuMax, Write};
 use hex_runtime::linux::cgroup::BoxCgroup;
-use hex_sim::charge::{self, ChargeError, ClassKey, Cpu, Sample};
+use hex_sim::charge::{self, ChargeError, ClassKey, Cpu, Excess, Sample};
 use hex_sim::model::Class;
 
 use super::Node;
@@ -43,6 +43,8 @@ pub(super) trait Cgroups {
     fn children(&self, dir: &Path) -> Result<Vec<PathBuf>, Refusal>;
     /// A cgroup's file as the kernel says it, `None` where the cgroup or the file is none.
     fn read(&self, dir: &Path, file: &str) -> Result<Option<String>, Refusal>;
+    /// Kills every process in a VM's cgroup (C5's last resort), through the descriptor its native owner pinned.
+    fn kill(&self, cgroup: &BoxCgroup) -> Result<(), Refusal>;
 }
 
 /// The kernel's cgroups.
@@ -75,6 +77,10 @@ impl Cgroups for Kernel {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(Refusal::os("reading a cgroup's file", e)),
         }
+    }
+
+    fn kill(&self, cgroup: &BoxCgroup) -> Result<(), Refusal> {
+        cgroup.kill()
     }
 }
 
@@ -120,6 +126,25 @@ pub(super) struct Learner {
     rooms: BTreeMap<Scope, Upstream>,
     /// Why the last window failed: until one passes, the capacity answers carry nothing learned.
     fault: Option<Refusal>,
+    /// The last resort's state (C5).
+    resort: Resort,
+}
+
+/// The last resort's state from window to window (C5), explicit (R04).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Resort {
+    /// What the fleet's VMs hold, with the fastest growth on record in one window, is within its budget.
+    Held,
+    /// It wasn't: the VM `id` held most past its own budget, lowest band first, and its cgroup was killed for `why`.
+    /// None other is ended until its VMM is gone, so one end is never two.
+    Ending {
+        scope: Scope,
+        id: BoxId,
+        why: Excess,
+    },
+    /// It isn't, and the node can't act: every VM holds within its own budget, growth being no fact yet, or ending
+    /// the VM the rule chose was refused. Kept until a window moves it.
+    Refused(Refusal),
 }
 
 /// The most VMs a machine of `machine` could hold, each at least the least reservation placement takes
@@ -332,6 +357,7 @@ impl Learner {
             oci: root.join(super::OCI_BOXES),
             rooms: BTreeMap::new(),
             fault: None,
+            resort: Resort::Held,
         })
     }
 
@@ -611,6 +637,12 @@ impl Learner {
             used,
             holdings: holdings.into_iter().map(|(_, holding)| holding).collect(),
         }))
+    }
+
+    /// The last resort's state (C5).
+    #[cfg(test)]
+    fn resort(&self) -> &Resort {
+        &self.resort
     }
 
     /// The capability each guest's room awaits, by its box (C7).

@@ -1,6 +1,6 @@
 //! The node agent's charge learner (joint plan step 14, AC-T7.4.1; `docs/design/learned-charge.md`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use super::*;
 use hex_sim::charge::{SEEDABLE, WEIGHT_MAX};
@@ -47,6 +47,9 @@ struct Record {
     usage: RefCell<BTreeMap<PathBuf, Usage>>,
     files: RefCell<BTreeMap<PathBuf, BTreeMap<String, String>>>,
     writes: RefCell<Vec<(PathBuf, &'static str, String)>>,
+    /// Every cgroup killed, in order, and whether a kill is refused.
+    kills: RefCell<Vec<PathBuf>>,
+    refuse_kills: Cell<bool>,
 }
 
 impl Cgroups for Record {
@@ -89,6 +92,14 @@ impl Cgroups for Record {
             .get(dir)
             .and_then(|files| files.get(file))
             .cloned())
+    }
+
+    fn kill(&self, cgroup: &BoxCgroup) -> Result<(), Refusal> {
+        if self.refuse_kills.get() {
+            return Err(Refusal::Broken("cgroup.kill refused".into()));
+        }
+        self.kills.borrow_mut().push(cgroup.dir().to_path_buf());
+        Ok(())
     }
 }
 
@@ -489,4 +500,134 @@ fn w14_every_child_of_the_nodes_cgroup_weighs_on_one_scale() {
         .map(|dir| weight(dir).unwrap().parse::<u64>().unwrap())
         .sum();
     assert_eq!(siblings, u64::from(WEIGHT_MAX));
+}
+
+/// Three Shards VMs of 16 CPUs and 8 GiB, each booked at 4 GiB of memory (their class's prior), in a fleet whose
+/// memory budget is 16 GiB, so each VM's budget is its booking and a third of the 4 GiB slack: what `running` lists.
+fn booked_at_four(_: &BoxId) -> Result<Option<(Class, Allocation)>, Refusal> {
+    Ok(Some((
+        Class::Shards,
+        whole().booked_at(res(16_000, 4 * GIB)),
+    )))
+}
+
+fn fleet_of_three() -> Vec<(BoxId, Scope, BoxCgroup)> {
+    running(&[("vm-1", 1), ("vm-2", 2), ("vm-3", 3)])
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C5's last resort in the node agent. Do run a window of three VMs, each booked at
+/// 4 GiB in a 16 GiB fleet, then one where they hold 6, 7 and 2 GiB, past the fleet's budget with the growth on
+/// record; then another with all still running; then one with vm-2 gone. Expect vm-2, the VM holding most past its own
+/// budget, its cgroup killed and the state `Ending` with why (its 7 GiB against its budget, the fleet's 15 GiB, 15 GiB
+/// of growth, its 16 GiB budget); no second kill while vm-2 runs; and with it gone, vm-1 within its new budget and
+/// vm-3 within its own, nothing more killed and the state refused, typed: every VM within its budget.
+#[test]
+fn w14_the_last_resort_ends_the_vm_most_past_its_budget_and_no_other() {
+    let io = Record::default();
+    let fleet_budget = res(32_000, 16 * GIB);
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    let start = Instant::now();
+    let vms = fleet_of_three();
+    for (_, _, cgroup) in &vms {
+        io.set(cgroup.dir(), 0, 0);
+    }
+    learner
+        .window(&io, vms, booked_at_four, &[], fleet_budget, start)
+        .unwrap();
+    assert_eq!(learner.resort(), &Resort::Held);
+    for (id, held) in [("vm-1", 6 * GIB), ("vm-2", 7 * GIB), ("vm-3", 2 * GIB)] {
+        io.set(&fleet().join(id), 0, held);
+    }
+    learner
+        .window(
+            &io,
+            fleet_of_three(),
+            booked_at_four,
+            &[],
+            fleet_budget,
+            start + WINDOW,
+        )
+        .unwrap();
+    assert_eq!(*io.kills.borrow(), vec![fleet().join("vm-2")]);
+    let Resort::Ending { id, why, .. } = learner.resort() else {
+        panic!("not ending: {:?}", learner.resort());
+    };
+    assert_eq!(id.as_str(), "vm-2");
+    assert_eq!(why.held, 7 * GIB);
+    assert!(why.budget < why.held, "{why:?}");
+    assert_eq!(
+        why.fleet,
+        charge::Pressure {
+            held: 15 * GIB,
+            growth: 15 * GIB,
+            budget: 16 * GIB,
+        }
+    );
+    learner
+        .window(
+            &io,
+            fleet_of_three(),
+            booked_at_four,
+            &[],
+            fleet_budget,
+            start + WINDOW * 2,
+        )
+        .unwrap();
+    assert_eq!(io.kills.borrow().len(), 1, "one end is never two");
+    learner
+        .window(
+            &io,
+            running(&[("vm-1", 1), ("vm-3", 3)]),
+            booked_at_four,
+            &[],
+            fleet_budget,
+            start + WINDOW * 3,
+        )
+        .unwrap();
+    assert_eq!(io.kills.borrow().len(), 1, "never a VM within its budget");
+    assert!(
+        matches!(learner.resort(), Resort::Refused(Refusal::Exhausted { .. })),
+        "{:?}",
+        learner.resort()
+    );
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C5's last resort where the node can't act. Do run a window of three VMs booked at
+/// 4 GiB in a 16 GiB fleet, then one past its budget whose kill the cgroup refuses. Expect no end taken for done, and
+/// the state the kill's refusal, typed.
+#[test]
+fn w14_a_refused_end_is_kept_typed() {
+    let io = Record::default();
+    let fleet_budget = res(32_000, 16 * GIB);
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    let start = Instant::now();
+    learner
+        .window(
+            &io,
+            fleet_of_three(),
+            booked_at_four,
+            &[],
+            fleet_budget,
+            start,
+        )
+        .unwrap();
+    for (id, held) in [("vm-1", 6 * GIB), ("vm-2", 7 * GIB), ("vm-3", 2 * GIB)] {
+        io.set(&fleet().join(id), 0, held);
+    }
+    io.refuse_kills.set(true);
+    learner
+        .window(
+            &io,
+            fleet_of_three(),
+            booked_at_four,
+            &[],
+            fleet_budget,
+            start + WINDOW,
+        )
+        .unwrap();
+    assert!(io.kills.borrow().is_empty());
+    assert_eq!(
+        learner.resort(),
+        &Resort::Refused(Refusal::Broken("cgroup.kill refused".into()))
+    );
 }
