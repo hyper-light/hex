@@ -973,6 +973,13 @@ impl BoxCgroup {
         Ok(())
     }
 
+    /// Writes the one bound `w` and nothing else (joint plan step 14: the node's charge learner moves a running VM's
+    /// `cpu.weight` and `memory.high`, and its fleet's parent's, each time the learned charges move them), as
+    /// [`BoxRoot::rebound`] writes each.
+    pub fn set(&self, w: &core::Write) -> Result<(), Refusal> {
+        self.write_bound(w)
+    }
+
     /// Writes one bound. A kernel without swap accounting has no memory.swap.max: with no swap on, the
     /// memory bound holds without it; with swap on it cannot hold, so the box is refused by name.
     fn write_bound(&self, w: &core::Write) -> Result<(), Refusal> {

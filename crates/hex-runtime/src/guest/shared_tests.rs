@@ -310,6 +310,7 @@ impl Books for Owner {
             device_routes: Vec::new(),
             backings: Vec::new(),
             unavailable: Vec::new(),
+            learned: None,
         })
     }
     fn with_transaction(
@@ -778,6 +779,7 @@ fn empty_native_oci_prefix_adds_guest_route_without_native_facts_query() {
             },
         ],
         unavailable: Vec::new(),
+        learned: None,
     };
     native.check().unwrap();
     assert_eq!(owner.capacity_calls.load(Ordering::SeqCst), 0);

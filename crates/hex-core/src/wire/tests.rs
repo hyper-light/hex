@@ -52,6 +52,7 @@ fn device_capacity(devices: Vec<DeviceInfo>) -> Capacity {
         free: CapacityResources::default(),
         devices,
         unavailable: Vec::new(),
+        learned: None,
     }
 }
 
@@ -82,8 +83,13 @@ fn with_device_tail(offer: bool, tail: &[u8]) -> Vec<u8> {
         .unwrap()
     };
     // Replace the device list while retaining valid absent charge/route receipts. Capacity
-    // additionally ends with four empty u32 lists; a spec ends with one route option.
-    let following = if offer { 1 + 4 * size_of::<u32>() } else { 2 };
+    // additionally ends with four empty u32 lists and no learned use (joint plan step 14); a spec
+    // ends with one route option.
+    let following = if offer {
+        1 + 4 * size_of::<u32>() + 1
+    } else {
+        2
+    };
     bytes.truncate(bytes.len() - size_of::<u32>() - following);
     bytes.extend_from_slice(tail);
     bytes.extend(std::iter::repeat_n(0, following));
@@ -147,8 +153,9 @@ fn device_claims_and_offers_roundtrip_with_explicit_tags_and_catalog_order() {
     assert_eq!(answer(91, &decoded, MAX_MESSAGE).unwrap(), bytes);
 }
 
-/// AC-T7.4.1: a capacity's devices it lists but won't offer, each with why, cross the wire last. Do: encode a capacity
-/// listing one of its two devices unavailable; cut the same capacity, listing none, before that list's count; read an
+/// AC-T7.4.1: a capacity's devices it lists but won't offer, each with why, cross the wire after its routes, before
+/// only what the node learned (joint plan step 14). Do: encode a capacity listing one of its two devices unavailable;
+/// cut the same capacity, listing none and no learned use, before that list's count; read an
 /// older JSON report, which has no such field; and encode one listing a device it doesn't hold. Expect the first back
 /// exactly, the cut refused as truncated, as every truncation is (only this same wire's builds talk: IDENTITY), the
 /// JSON report listing none, and the last refused by the capacity's own check before any byte is written.
@@ -195,11 +202,11 @@ fn a_capacitys_unavailable_devices_cross_the_wire_last() {
     )
     .unwrap();
     assert_eq!(
-        cut[cut.len() - 4..],
-        [0; 4],
-        "the empty list's count ends it"
+        cut[cut.len() - 5..],
+        [0; 5],
+        "the empty list's count, then no learned use, ends it"
     );
-    cut.truncate(cut.len() - 4);
+    cut.truncate(cut.len() - 5);
     assert!(matches!(
         read_answer(&received(&cut, 0), MAX_MESSAGE),
         Err(Fault::Truncated { .. })
@@ -475,6 +482,7 @@ fn runtime_capacity_roundtrip_and_invalid_room_refused() {
             disk_bytes: 7 << 30,
         },
         unavailable: Vec::new(),
+        learned: None,
     };
     for value in [None, Some(capacity.try_clone().unwrap())] {
         let expected = Answer::Capacity(value);
@@ -2450,8 +2458,9 @@ fn route_wire_capacity_bytes(
         MAX_MESSAGE,
     )
     .unwrap();
-    // Its three route lists and its unavailable devices' count, all empty, end it.
-    prefix.truncate(prefix.len() - 4 * size_of::<u32>());
+    // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14),
+    // end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1);
     let mut w = Writer::new(MAX_MESSAGE);
     w.raw(&prefix);
     w.u32(u32::try_from(routes.len()).unwrap());
@@ -2467,6 +2476,7 @@ fn route_wire_capacity_bytes(
         put_backing_offer(&mut w, backing).unwrap();
     }
     w.u32(0);
+    w.u8(0);
     w.done().unwrap()
 }
 
@@ -2913,8 +2923,9 @@ fn route_wire_hostile_counts_and_minimum_bytes_refuse_before_parse() {
         MAX_MESSAGE,
     )
     .unwrap();
-    // Its three route lists and its unavailable devices' count, all empty, end it.
-    prefix.truncate(prefix.len() - 4 * size_of::<u32>());
+    // Its three route lists and its unavailable devices' count, all empty, then no learned use (joint plan step 14),
+    // end it.
+    prefix.truncate(prefix.len() - 4 * size_of::<u32>() - 1);
     for count in [1u32, 65, u32::MAX] {
         let mut bytes = prefix.clone();
         bytes.extend(count.to_le_bytes());
@@ -4003,4 +4014,152 @@ fn an_untagged_io_kind_reads_back_unnamed_and_apart_from_other_with_its_code() {
             answer(4, &connect(other, code), MAX_MESSAGE).unwrap()
         );
     }
+}
+
+fn learned_resources(cpu_milli: u64, gib: u64) -> CapacityResources {
+    CapacityResources {
+        cpu_milli,
+        mem_bytes: gib << 30,
+        disk_bytes: 0,
+    }
+}
+
+fn learned_holding(id: &str, cpu_milli: u64, gib: u64) -> LearnedHolding {
+    LearnedHolding {
+        id: BoxId::new(id).unwrap(),
+        holding: learned_resources(cpu_milli, gib),
+    }
+}
+
+fn learned_capacity() -> Capacity {
+    let mut capacity = device_capacity(Vec::new());
+    capacity.learned = Some(Learned {
+        priors: vec![LearnedPrior {
+            profile: [3; 32],
+            ceiling: learned_resources(2_000, 4),
+            booking: learned_resources(300, 1),
+        }],
+        used: LearnedUse {
+            booked: learned_resources(4_000, 8),
+            reservation: learned_resources(900, 3),
+        },
+        holdings: vec![
+            learned_holding("hex-place-a-1-0-7", 600, 2),
+            learned_holding("hex-place-a-1-0-8", 300, 1),
+        ],
+    });
+    capacity
+}
+
+/// Joint plan step 14 (AC-T7.4.1, C2 and C8): what a node learned of a class's microVMs crosses the wire last on its
+/// capacity answer. Do: encode a capacity with its priors, learned use and holdings, and one with none; cut the second
+/// before its last byte; read and write both as JSON. Expect both back exactly, the second ending with its none tag
+/// and refused once cut, as every truncation is, and JSON without the field reading as none.
+#[test]
+fn w14_a_capacitys_learned_use_crosses_the_wire_last() {
+    let learned = learned_capacity();
+    let offered = Answer::Capacity(Some(learned.try_clone().unwrap()));
+    let bytes = answer(14, &offered, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        offered
+    );
+    let none = device_capacity(Vec::new());
+    let mut cut = answer(
+        14,
+        &Answer::Capacity(Some(none.try_clone().unwrap())),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    assert_eq!(cut.last(), Some(&0), "no learned use ends it");
+    cut.truncate(cut.len() - 1);
+    assert!(matches!(
+        read_answer(&received(&cut, 0), MAX_MESSAGE),
+        Err(Fault::Truncated { .. })
+    ));
+    let older = serde_json::to_value(&none).unwrap();
+    assert!(older.get("learned").is_none(), "skipped when none");
+    assert_eq!(serde_json::from_value::<Capacity>(older).unwrap(), none);
+    let json = serde_json::to_value(&learned).unwrap();
+    assert_eq!(serde_json::from_value::<Capacity>(json).unwrap(), learned);
+}
+
+/// Joint plan step 14 (AC-T7.4.1): a capacity's learned use is held to its bounds on both sides. Do: encode one with
+/// a prior more than a class has profiles, a prior booked past its ceiling, and a box's holding twice; then read one
+/// whose holdings' count says one more than a node's boxes. Expect each refused, the last before any holding is read.
+#[test]
+fn w14_a_capacitys_learned_use_is_held_to_its_bounds() {
+    let prior = learned_capacity().learned.unwrap().priors[0];
+    let mut too_many = learned_capacity();
+    if let Some(learned) = too_many.learned.as_mut() {
+        learned.priors = (0..=MAX_LEARNED_PRIORS)
+            .map(|n| LearnedPrior {
+                profile: [u8::try_from(n % 256).unwrap(); 32],
+                ceiling: learned_resources(2_000 + u64::try_from(n).unwrap(), 4),
+                ..prior
+            })
+            .collect();
+    }
+    assert!(answer(14, &Answer::Capacity(Some(too_many)), MAX_MESSAGE).is_err());
+    let mut past = learned_capacity();
+    if let Some(learned) = past.learned.as_mut() {
+        learned.priors[0].booking = learned_resources(2_001, 1);
+    }
+    assert!(answer(14, &Answer::Capacity(Some(past)), MAX_MESSAGE).is_err());
+    let mut twice = learned_capacity();
+    if let Some(learned) = twice.learned.as_mut() {
+        learned.holdings[1].id = learned.holdings[0].id.clone();
+    }
+    assert!(answer(14, &Answer::Capacity(Some(twice)), MAX_MESSAGE).is_err());
+    let mut one = learned_capacity();
+    if let Some(learned) = one.learned.as_mut() {
+        learned.holdings = vec![learned_holding("x", 1, 1)];
+    }
+    let mut bytes = answer(14, &Answer::Capacity(Some(one)), MAX_MESSAGE).unwrap();
+    // The holdings' count, then the one holding: its id's length, the id and its resources.
+    let at = bytes.len() - (2 * size_of::<u32>() + 1 + 3 * size_of::<u64>());
+    let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
+    bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
+    assert!(matches!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE),
+        Err(Fault::Value { .. })
+    ));
+}
+
+/// Joint plan step 14 (AC-T7.4.1, C8): a node's holdings are kept to what one message holds, in their order. Do: fit a
+/// capacity whose holdings fit, then one with more 128-byte box ids than a message has room for. Expect the first
+/// unchanged; the second cut to a prefix of its holdings, encoded within the message, with room for none more.
+#[test]
+fn w14_a_capacitys_holdings_are_fitted_to_one_message_in_their_order() {
+    let mut fits = learned_capacity();
+    fit_learned(&mut fits).unwrap();
+    assert_eq!(fits, learned_capacity());
+    let each = size_of::<u32>() + BoxId::MAX_LEN + 3 * size_of::<u64>();
+    let holdings: Vec<LearnedHolding> = (0..MAX_MESSAGE / each + 100)
+        .map(|n| learned_holding(&format!("{n:0>128}"), 1, 1))
+        .collect();
+    let mut full = learned_capacity();
+    if let Some(learned) = full.learned.as_mut() {
+        learned.holdings = holdings.clone();
+    }
+    fit_learned(&mut full).unwrap();
+    let kept = full.learned.as_ref().unwrap().holdings.len();
+    assert!(
+        kept > 0 && kept < holdings.len(),
+        "{kept} of {}",
+        holdings.len()
+    );
+    assert_eq!(full.learned.as_ref().unwrap().holdings, holdings[..kept]);
+    let bytes = answer(
+        14,
+        &Answer::Capacity(Some(full.try_clone().unwrap())),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    assert!(bytes.len() <= MAX_MESSAGE);
+    let mut more = full;
+    if let Some(learned) = more.learned.as_mut() {
+        learned.holdings.push(holdings[kept].clone());
+    }
+    assert!(answer(14, &Answer::Capacity(Some(more)), MAX_MESSAGE).is_err());
 }
