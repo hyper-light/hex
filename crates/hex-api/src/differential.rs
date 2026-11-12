@@ -561,6 +561,16 @@ fn kind(r: &Refusal) -> &'static str {
         Refusal::Backing { .. } => "Backing",
         Refusal::Connect { .. } => "Connect",
         Refusal::Uncertain { .. } => "Uncertain",
+        // What it awaits is the contract's, not a runtime's wording.
+        Refusal::Awaits { needs } => match needs {
+            crate::Upstream::GuestCpuTimePerVcpu => "Awaits(GuestCpuTimePerVcpu)",
+            crate::Upstream::MemberExec => "Awaits(MemberExec)",
+            crate::Upstream::MemberGrantsByName => "Awaits(MemberGrantsByName)",
+            crate::Upstream::NestedRuntime => "Awaits(NestedRuntime)",
+            crate::Upstream::WindowsRunHost => "Awaits(WindowsRunHost)",
+            crate::Upstream::AttachAfterCrash => "Awaits(AttachAfterCrash)",
+            crate::Upstream::MemberSignal => "Awaits(MemberSignal)",
+        },
     }
 }
 
