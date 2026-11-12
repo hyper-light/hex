@@ -4,9 +4,12 @@
 //! by the stand-in shim's bystander in `run::a_process_started_while_a_shim_starts_inherits_none_of_its_descriptors`,
 //! which failed 2 of 3 in the full suite and passed alone (the lead, 2026-11-09). A pipe a program is to hold is made
 //! close-on-exec and given to it in its child (`sys.rs`'s `dup2` onto its stdio), never left inheritable in the agent.
-//! `std::io::pipe` makes its pipes close-on-exec (`pipe2(O_CLOEXEC)`); rustix's `pipe()` is pipe(2), with none, and
-//! `pipe_with` is close-on-exec only when its flags say so. This reads every source in the workspace and names each
-//! pipe made otherwise, by file and line.
+//! `std::io::pipe` makes its pipes close-on-exec: at once on Linux (`pipe2(O_CLOEXEC)`), and on macOS, which has no
+//! pipe2, by pipe(2) and then fcntl, a gap a spawn that passes on every descriptor not marked (std's, whose posix_spawn
+//! sets no `POSIX_SPAWN_CLOEXEC_DEFAULT`) hands to its program; so on macOS every program Hex starts is started with
+//! `POSIX_SPAWN_CLOEXEC_DEFAULT` (`hex_runtime::macos::command` for std's `Command` calls). rustix's `pipe()` is
+//! pipe(2), with none, and `pipe_with` is close-on-exec only when its flags say so. This reads every source in the
+//! workspace and names each pipe made otherwise, by file and line.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
