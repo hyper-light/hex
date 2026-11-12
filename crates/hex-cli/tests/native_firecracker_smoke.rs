@@ -1,5 +1,7 @@
 //! AC-T7.4.1: a CPU-only Firecracker microVM through the real `hex node` and its `firecracker`
-//! class: the native lane's smoke boot before any GPU is bound (no device, no network).
+//! class: the native lane's smoke boot before any GPU is bound (no device, no network); and, with
+//! a VFIO-bound GPU (`gpu` inputs), the GPU run: a memlock below the VM's RAM refused with its DMA
+//! error, then a GPU VM that computes, survives its node's restart and returns its GPU.
 //! Explicit inputs only (`HEX_NATIVE_FC_SMOKE`, a JSON file); run alone, `--ignored`, inside a
 //! cgroup delegated to this binary (`HEX_DELEGATED`) whose outer scope bounds the whole process.
 //! Missing hardware or configuration fails by name; nothing here enables hardware.
@@ -21,8 +23,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hex_api::{
-    Bounds, BoxId, BoxSpec, BoxState, CapacityResources, Class, ClassSpec, Exit, Network, OciSpec,
-    Program, Refusal, Rootfs, Runtime, Stdio,
+    Bounds, BoxId, BoxSpec, BoxState, CapacityResources, Class, ClassSpec, DeviceId, DeviceKind,
+    Exit, Network, OciSpec, Program, Refusal, Rootfs, Runtime, Stdio,
 };
 use hex_client::Client;
 use serde_json::Value;
@@ -81,9 +83,36 @@ struct Node {
 
 impl Node {
     fn start(inputs: &Inputs, own: &Path, name: &str, config: &Path) -> Self {
+        Self::start_with(inputs, own, name, config, None)
+    }
+
+    /// A node whose device catalog (its state's `devices` file) is `catalog`, where given.
+    fn start_with(
+        inputs: &Inputs,
+        own: &Path,
+        name: &str,
+        config: &Path,
+        catalog: Option<&str>,
+    ) -> Self {
         let dir = inputs.path("work").join(name);
         assert!(!dir.exists(), "exclusive node directory {dir:?}");
-        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(dir.join("state")).unwrap();
+        if let Some(catalog) = catalog {
+            fs::write(dir.join("state").join("devices"), catalog).unwrap();
+        }
+        Self::run(inputs, own, name, config, "node.stderr")
+    }
+
+    /// Ends this node by its own PID (SIGKILL, as a crash ends one), leaving its boxes' VMs running, and starts
+    /// another on the same socket, state and box root: the restart its recovery answers.
+    fn restart(mut self, inputs: &Inputs, own: &Path, name: &str, config: &Path) -> Self {
+        self.child.kill().unwrap();
+        drop(self);
+        Self::run(inputs, own, name, config, "node.stderr.restarted")
+    }
+
+    fn run(inputs: &Inputs, own: &Path, name: &str, config: &Path, stderr: &str) -> Self {
+        let dir = inputs.path("work").join(name);
         let socket = dir.join("node.sock");
         let state = dir.join("state");
         let begun = Instant::now();
@@ -98,7 +127,7 @@ impl Node {
             .env("HEX_FIRECRACKER_CONFIG", config)
             .stdin(HostStdio::null())
             .stdout(HostStdio::piped())
-            .stderr(fs::File::create(dir.join("node.stderr")).unwrap())
+            .stderr(fs::File::create(dir.join(stderr)).unwrap())
             .spawn()
             .unwrap();
         // The node's own "ready <socket>" line is the fact waited on; the deadline only guards it.
@@ -121,7 +150,7 @@ impl Node {
                 Ok(line) => eprintln!("node {name}: {line}"),
                 Err(error) => panic!(
                     "node {name} not ready: {error}; stderr: {}",
-                    fs::read_to_string(dir.join("node.stderr")).unwrap_or_default()
+                    fs::read_to_string(dir.join(stderr)).unwrap_or_default()
                 ),
             }
         }
@@ -451,4 +480,395 @@ fn native_firecracker_vmm_ending_before_readiness_is_refused_with_its_output() {
     let state = node.state.clone();
     drop(node);
     assert!(records(&state, &id).is_empty(), "no record of the box");
+}
+
+/// The GPU run's input `field`, under `gpu` in HEX_NATIVE_FC_SMOKE.
+fn gpu<'a>(inputs: &'a Inputs, field: &str) -> &'a Value {
+    let value = &inputs.value["gpu"][field];
+    assert!(!value.is_null(), "input gpu.{field}");
+    value
+}
+
+fn gpu_path(inputs: &Inputs, field: &str) -> PathBuf {
+    PathBuf::from(gpu(inputs, field).as_str().unwrap())
+}
+
+/// The GPU box's spec: the selected GPU, named by its catalog key, in a box of the witness's root, its admitted
+/// charge from the backend's own cost.
+fn gpu_spec(inputs: &Inputs, config: &Path, id: &BoxId) -> BoxSpec {
+    let config = hex_runtime::firecracker::Config::from_file(config).unwrap();
+    let cpu_milli = gpu(inputs, "cpu_milli").as_u64().unwrap();
+    let mem_bytes = gpu(inputs, "memory_bytes").as_u64().unwrap();
+    let allocation = config
+        .cost
+        .allocate(CapacityResources {
+            cpu_milli,
+            mem_bytes,
+            disk_bytes: 0,
+        })
+        .unwrap();
+    BoxSpec {
+        id: id.clone(),
+        bounds: Bounds {
+            cpu_max_milli: Some(u32::try_from(cpu_milli).unwrap()),
+            memory_max: Some(mem_bytes),
+            ..Bounds::default()
+        },
+        class: ClassSpec::Firecracker(Box::new(OciSpec {
+            rootfs: Rootfs::Dir(gpu_path(inputs, "rootfs")),
+            init: Program::of(&["/probe", "--hold"]),
+            mounts: Vec::new(),
+            hostname: None,
+            network: Network::Private,
+            hosts: Vec::new(),
+        })),
+        owner: None,
+        devices: vec![DeviceId {
+            kind: DeviceKind::Gpu,
+            key: gpu(inputs, "key").as_u64().unwrap(),
+        }],
+        allocation: Some(allocation),
+        route: None,
+    }
+}
+
+/// Runs `program` in box `id`: its exit, stdout and stderr. Its output's end comes when it ends; `wait` bounds its
+/// exit after that.
+fn exec_to_end(
+    client: &Client,
+    id: &BoxId,
+    program: Program,
+    wait: Duration,
+) -> (Option<Exit>, String, String) {
+    let (mut out, out_writer) = std::io::pipe().unwrap();
+    let (mut err, err_writer) = std::io::pipe().unwrap();
+    let mut proc = client
+        .exec(
+            id,
+            program,
+            Stdio {
+                stdout: Some(out_writer),
+                stderr: Some(err_writer),
+                ..Stdio::null()
+            },
+        )
+        .unwrap();
+    let errors = std::thread::spawn(move || {
+        let mut text = String::new();
+        err.read_to_string(&mut text).unwrap();
+        text
+    });
+    let mut said = String::new();
+    out.read_to_string(&mut said).unwrap();
+    let exit = proc.wait_for(wait).unwrap();
+    (exit, said, errors.join().unwrap())
+}
+
+/// The Vulkan witness with `args`, its environment the run's (`gpu.env`) beside `PATH`.
+fn witness(inputs: &Inputs, args: &[&str]) -> Program {
+    let path = gpu(inputs, "witness").as_str().unwrap();
+    let mut all = vec![path];
+    all.extend_from_slice(args);
+    let mut program = Program::of(&all);
+    for pair in gpu(inputs, "env").as_array().unwrap() {
+        let pair = pair.as_array().unwrap();
+        program.env.push((
+            pair[0].as_str().unwrap().to_owned(),
+            pair[1].as_str().unwrap().to_owned(),
+        ));
+    }
+    program
+}
+
+/// The processes this user can see holding VFIO group `group`'s file.
+fn vfio_holders(group: u64) -> Vec<u32> {
+    let target = PathBuf::from(format!("/dev/vfio/{group}"));
+    let mut holders = Vec::new();
+    for entry in fs::read_dir("/proc").unwrap() {
+        let entry = entry.unwrap();
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(fds) = fs::read_dir(entry.path().join("fd")) else {
+            continue;
+        };
+        if fds
+            .flatten()
+            .any(|fd| fs::read_link(fd.path()).is_ok_and(|link| link == target))
+        {
+            holders.push(pid);
+        }
+    }
+    holders
+}
+
+/// Opens VFIO group `group`'s file and closes it: a group is one holder's at a time (another open is EBUSY), so it
+/// opens only while no process, of any user, holds its device. Nothing is done to the device.
+fn vfio_group_opens(group: u64) -> std::io::Result<()> {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(format!("/dev/vfio/{group}"))
+        .map(drop)
+}
+
+/// The host driver of PCI function `sbdf`.
+fn driver(sbdf: &str) -> String {
+    fs::read_link(format!("/sys/bus/pci/devices/{sbdf}/driver"))
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The GPU VM's RAM as the run gives it: its box's memory, the least its VM holds.
+fn gpu_ram(inputs: &Inputs) -> u64 {
+    gpu(inputs, "memory_bytes").as_u64().unwrap()
+}
+
+/// AC-T7.4.1 (L1's memlock repro): a VFIO VM's VMM maps all its guest's RAM for DMA, pinning it against its
+/// RLIMIT_MEMLOCK. Do: under a RLIMIT_MEMLOCK below the GPU VM's RAM, which this test reads and requires (the run
+/// lowers it with `ulimit -l` in its own shell; the node and its VMM inherit it), create the GPU box. Expect its create
+/// refused Broken before readiness, the VMM's last output naming the DMA map's ENOMEM, and the GPU returned: no box,
+/// no VM state, no VMM, no holder of its VFIO group, which opens.
+#[test]
+#[ignore = "native GPU: KVM, a VFIO-bound GPU, a delegated cgroup and pinned inputs (HEX_NATIVE_FC_SMOKE gpu)"]
+fn native_firecracker_gpu_vm_under_a_memlock_below_its_ram_is_refused_with_its_dma_error() {
+    let inputs = Inputs::load();
+    let memlock = rustix::process::getrlimit(rustix::process::Resource::Memlock).current;
+    let ram = gpu_ram(&inputs);
+    assert!(
+        memlock.is_some_and(|locked| locked < ram),
+        "RLIMIT_MEMLOCK {memlock:?} must be below the VM's RAM ({ram} bytes): lower it with `ulimit -l`"
+    );
+    let own = own_cgroup();
+    let config = gpu_path(&inputs, "config");
+    let binary = hex_runtime::firecracker::Config::from_file(&config)
+        .unwrap()
+        .binary;
+    let group = gpu(&inputs, "group").as_u64().unwrap();
+    assert!(vfio_holders(group).is_empty(), "the GPU is free before");
+    let catalog = gpu(&inputs, "catalog").as_str().unwrap();
+    let node = Node::start_with(&inputs, &own, "gpu-memlock", &config, Some(catalog));
+    let client = node.client();
+    let id = BoxId::new("fc-gpu-memlock").unwrap();
+    let begun = Instant::now();
+    let refusal = client
+        .create_before(
+            gpu_spec(&inputs, &config, &id),
+            Instant::now() + inputs.wait,
+        )
+        .unwrap_err();
+    eprintln!(
+        "GPU memlock {memlock:?} below RAM {ram}: refused after {:?}: {refusal:?}",
+        begun.elapsed()
+    );
+    let Refusal::Broken(why) = &refusal else {
+        panic!("{refusal:?}")
+    };
+    assert!(
+        why.starts_with("Firecracker ended before guest readiness; its last output:\n"),
+        "{why:?}"
+    );
+    assert!(
+        why.contains("os error 12") || why.contains("Cannot allocate memory"),
+        "the VMM's DMA map ENOMEM: {why:?}"
+    );
+    assert!(client.list().unwrap().is_empty(), "the node lists no box");
+    assert!(
+        state_dir_entries(&config).is_empty(),
+        "{:?}",
+        state_dir_entries(&config)
+    );
+    let state_dir = hex_runtime::firecracker::Config::from_file(&config)
+        .unwrap()
+        .state_dir;
+    assert!(vmm(&binary, &state_dir).is_empty(), "no VMM is left");
+    assert!(vfio_holders(group).is_empty(), "no process holds the GPU");
+    vfio_group_opens(group).unwrap();
+    drop(client);
+    let state = node.state.clone();
+    drop(node);
+    assert!(records(&state, &id).is_empty(), "no record of the box");
+    eprintln!("GPU memlock: returned, group {group} unheld and openable, no record");
+}
+
+/// AC-T7.4.1: the GPU run. Do, under an unlimited RLIMIT_MEMLOCK, through the real node and its `firecracker` class:
+/// boot a VM with the selected GPU (the catalog's VFIO function) passed through; list the guest's PCI functions;
+/// take the GPU's Vulkan identity in the box (the witness's inventory) and compute on it (its compute mode, checked
+/// against its oracle); end the node by its PID (SIGKILL), its VM left running, and start another on the same state;
+/// compute again through it; delete the box. Expect: one VMM, the only holder of the GPU's VFIO group, its boot words
+/// the owner's and one GPU's, its passthrough the selected function; one GPU function in the guest and one Vulkan
+/// device in the box, which computes with no mismatch on hardware; the restarted node's box adopted, the same VMM,
+/// still computing; and after the delete no box, VM state, VMM, record or holder: the group opens, the function still
+/// on vfio-pci.
+#[test]
+#[ignore = "native GPU: KVM, a VFIO-bound GPU, a delegated cgroup and pinned inputs (HEX_NATIVE_FC_SMOKE gpu)"]
+fn native_firecracker_gpu_box_computes_recovers_and_returns_its_gpu() {
+    let inputs = Inputs::load();
+    let memlock = rustix::process::getrlimit(rustix::process::Resource::Memlock).current;
+    let ram = gpu_ram(&inputs);
+    assert!(
+        memlock.is_none_or(|locked| locked >= ram),
+        "RLIMIT_MEMLOCK {memlock:?} holds the VM's RAM ({ram} bytes)"
+    );
+    let own = own_cgroup();
+    let config = gpu_path(&inputs, "config");
+    let binary = hex_runtime::firecracker::Config::from_file(&config)
+        .unwrap()
+        .binary;
+    let group = gpu(&inputs, "group").as_u64().unwrap();
+    let host_sbdf = gpu(&inputs, "host_sbdf").as_str().unwrap();
+    assert!(vfio_holders(group).is_empty(), "the GPU is free before");
+    vfio_group_opens(group).unwrap();
+    let catalog = gpu(&inputs, "catalog").as_str().unwrap();
+    let node = Node::start_with(&inputs, &own, "gpu", &config, Some(catalog));
+    let client = node.client();
+    let id = BoxId::new("fc-gpu").unwrap();
+
+    let begun = Instant::now();
+    let info = client
+        .create_before(
+            gpu_spec(&inputs, &config, &id),
+            Instant::now() + inputs.wait,
+        )
+        .unwrap();
+    eprintln!(
+        "GPU create (boot with the GPU to readiness, guest box made) {:?}",
+        begun.elapsed()
+    );
+    if client.inspect(&id).unwrap().state == BoxState::Created {
+        client.start(&id).unwrap();
+    }
+    let dir = vm_dir(&config);
+    let running = vmm(&binary, &dir);
+    assert_eq!(running.len(), 1, "one live VMM for the box: {running:?}");
+    let vm: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+    let boot = vm["boot-source"]["boot_args"].as_str().unwrap();
+    let passthrough = &vm["device-passthrough"];
+    eprintln!(
+        "GPU VMM pid {} start {}; boot_args {boot:?}; device-passthrough {passthrough}",
+        running[0].0, running[0].1
+    );
+    assert!(
+        boot.contains(&format!("hex.gpu.box={id}")) && boot.contains("hex.gpu.pci=1"),
+        "{boot}"
+    );
+    assert_eq!(passthrough.as_array().unwrap().len(), 1, "{passthrough}");
+    assert_eq!(passthrough[0]["sbdf"], host_sbdf);
+    assert_eq!(
+        vfio_holders(group),
+        vec![running[0].0],
+        "the VMM alone holds the GPU"
+    );
+
+    let (exit, said, errors) =
+        exec_to_end(&client, &id, Program::of(&["/probe", "gpu"]), inputs.wait);
+    eprintln!("GPU probe: {exit:?} {said:?} {errors:?}");
+    assert_eq!(exit, Some(Exit::Code(0)));
+    let pci = said.lines().nth(1).unwrap();
+    assert!(pci.ends_with(" pci-gpu-functions 1"), "{pci}");
+
+    let max_items = gpu(&inputs, "max_items").as_u64().unwrap().to_string();
+    let (exit, said, errors) = exec_to_end(
+        &client,
+        &id,
+        witness(&inputs, &["--mode", "inventory", "--max-items", &max_items]),
+        inputs.wait,
+    );
+    eprintln!("GPU inventory: {exit:?} {said:?} {errors:?}");
+    assert_eq!(exit, Some(Exit::Code(0)));
+    let inventory: Value = serde_json::from_str(said.trim()).unwrap();
+    let devices = inventory["devices"].as_array().unwrap();
+    assert_eq!(devices.len(), 1, "the box sees the selected GPU alone");
+    let uuid = devices[0]["uuid"].as_str().unwrap().to_owned();
+
+    let number = |field: &str| gpu(&inputs, field).as_u64().unwrap().to_string();
+    let (words, rounds, challenge, wait_ns, shader_bytes) = (
+        number("words"),
+        number("rounds"),
+        number("challenge"),
+        number("wait_ns"),
+        number("max_shader_bytes"),
+    );
+    let shader = gpu(&inputs, "shader").as_str().unwrap();
+    let compute = |client: &Client, when: &str| {
+        let args = [
+            "--mode",
+            "compute",
+            "--uuid",
+            &uuid,
+            "--max-items",
+            &max_items,
+            "--shader",
+            shader,
+            "--max-shader-bytes",
+            &shader_bytes,
+            "--words",
+            &words,
+            "--rounds",
+            &rounds,
+            "--challenge",
+            &challenge,
+            "--wait-ns",
+            &wait_ns,
+        ];
+        let begun = Instant::now();
+        let (exit, said, errors) = exec_to_end(client, &id, witness(&inputs, &args), inputs.wait);
+        eprintln!(
+            "GPU compute ({when}) {:?}: {exit:?} {said:?} {errors:?}",
+            begun.elapsed()
+        );
+        assert_eq!(exit, Some(Exit::Code(0)));
+        let done: Value = serde_json::from_str(said.lines().last().unwrap()).unwrap();
+        assert_eq!(done["uuid"], uuid.as_str());
+        assert_eq!(done["mismatches"], 0);
+        assert_eq!(done["hardware"], true);
+        assert_eq!(done["dispatch_completed"], true);
+    };
+    compute(&client, "first");
+
+    drop(client);
+    let begun = Instant::now();
+    let node = node.restart(&inputs, &own, "gpu", &config);
+    let client = node.client();
+    let adopted = client.inspect(&id).unwrap();
+    eprintln!(
+        "GPU node restarted, ready after {:?}: {adopted:?}",
+        begun.elapsed()
+    );
+    assert!(adopted.adopted, "the restarted node took its VM back");
+    assert_eq!(adopted.allocation, info.allocation);
+    assert_eq!(vmm(&binary, &dir), running, "the same VMM, never restarted");
+    assert_eq!(vfio_holders(group), vec![running[0].0]);
+    compute(&client, "after the node's restart");
+
+    let begun = Instant::now();
+    client.delete(&id).unwrap();
+    eprintln!("GPU delete {:?}", begun.elapsed());
+    assert!(client.list().unwrap().is_empty(), "the node lists no box");
+    let (pid, start) = running[0];
+    assert!(!alive(pid, start), "the VMM {pid} is gone");
+    assert!(
+        vmm(&binary, &dir).is_empty(),
+        "no VMM names the VM's directory"
+    );
+    assert!(!dir.exists(), "the VM's state is gone");
+    assert!(
+        state_dir_entries(&config).is_empty(),
+        "{:?}",
+        state_dir_entries(&config)
+    );
+    assert!(vfio_holders(group).is_empty(), "no process holds the GPU");
+    vfio_group_opens(group).unwrap();
+    assert_eq!(driver(host_sbdf), "vfio-pci");
+    drop(client);
+    let state = node.state.clone();
+    drop(node);
+    assert!(records(&state, &id).is_empty(), "no record of the box");
+    eprintln!(
+        "GPU returned: group {group} unheld and openable, {host_sbdf} on vfio-pci, no record"
+    );
 }

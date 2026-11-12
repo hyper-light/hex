@@ -88,6 +88,20 @@ const FDS_PRUNED: u64 = 1;
 /// A pool's descriptors past what it holds: its refill thread's own namespace, which it goes back to, and the one
 /// it is making.
 const FDS_A_REFILL: u64 = 2;
+/// An init parked in an idle cgroup or one made ahead (decision 8): its pidfd and this end of the socket its claim
+/// goes on (`hex_runtime::linux::oci::run::Parked`).
+const FDS_A_PARKED: u64 = 2;
+/// A parked init's proc, a root node's (decision 8, parked procs): its pid namespace and its tree
+/// (`hex_runtime::linux::oci::init::PreparedProc`).
+const FDS_A_PARKED_PROC: u64 = 2;
+/// A cgroup made ahead's besides its parked init and the files it opens ahead: its directory and its `memory.peak`
+/// (`crate::cgroups`'s `MadeAhead`).
+const FDS_A_MADE_AHEAD: u64 = 2;
+/// The node's socket's own (`crate::serve::linux::Linux`): its listener, its epoll set and the eventfd that wakes it.
+const FDS_THE_SOCKET: u64 = 3;
+/// The supervisor's epoll set ([`crate::supervise::Supervisor::start`]), made once the node's bounds are fitted, as its
+/// budget is the inits'.
+const FDS_THE_SUPERVISOR: u64 = 1;
 
 /// The mounts made ahead's (crate::devfs): the prepared `/dev` pool's at its bound, one descriptor each, and the
 /// proc pool's, two each (its pid namespace and its tree), each pool holding at most the seeds' bound
@@ -117,27 +131,34 @@ pub struct Pools {
     pub devfs: bool,
     /// The node's pools' bounds on its host, which the kept namespaces and the seeds are counted at.
     pub sizes: Sizes,
+    /// The files each cgroup made ahead opens ahead (`hex_runtime::linux::cgroup::ahead_files` over the disks its
+    /// boxes' `io` bounds apply to), each a descriptor of the node's.
+    pub files_ahead: usize,
 }
 
 impl Pools {
     /// A root node's on a host whose pools' bounds are `sizes`, each pool at its bound unless set: the network
-    /// namespaces and ipc and uts pairs at the most their learned sizes may reach.
-    pub fn root(sizes: Sizes) -> Self {
+    /// namespaces and ipc and uts pairs at the most their learned sizes may reach; its cgroups made ahead each open
+    /// `files_ahead` files.
+    pub fn root(sizes: Sizes, files_ahead: usize) -> Self {
         Self {
             netns: sizes.netns,
             ipc_uts: sizes.ipc_uts,
             devfs: true,
             sizes,
+            files_ahead,
         }
     }
 
-    /// A rootless node's, which makes no namespaces or mounts ahead.
-    pub fn rootless(sizes: Sizes) -> Self {
+    /// A rootless node's, which makes no namespaces or mounts ahead; its cgroups made ahead each open `files_ahead`
+    /// files.
+    pub fn rootless(sizes: Sizes, files_ahead: usize) -> Self {
         Self {
             netns: 0,
             ipc_uts: 0,
             devfs: false,
             sizes,
+            files_ahead,
         }
     }
 
@@ -176,31 +197,40 @@ fn of(count: usize, each: u64) -> u64 {
         .saturating_mul(each)
 }
 
-/// The kept namespaces there may be at once: idle, on the checkers' line, and one for each live box.
+/// The kept namespaces there may be at once: idle, on the checkers' line, and one for each `oci` box the node holds
+/// ([`Sizes::boxes`]).
 fn kept_at_most(sizes: Sizes) -> u64 {
-    of(sizes.idle_netns, 2).saturating_add(of(hex_runtime::linux::cgroup::MAX_BOXES, 1))
+    of(sizes.idle_netns, 2).saturating_add(of(sizes.boxes, 1))
 }
 
 /// The descriptors this node may hold at once without the namespaces' `/proc/net` files, each by its bound and named: the
 /// kept namespaces; each live box's own; the programs its socket watches, a pidfd each, at the node's budget for
 /// them ([`crate::serve::limits`]); the seeds of both pools (the exec seeds at their most, [`crate::seed::most`]);
-/// the namespaces and the mounts made ahead under `pools`; the create seeds' one pruned mount namespace, which a root
-/// node holds for its life (`goal6-mntns.md` §12), counted for every node, as a rootless node holds none and a bound
-/// may be one over, never under; and `beside`, what the agent held open as the bound was taken (its listener, its
-/// polls, its standard streams). The socket's connections aren't among them: each is one of what remains, which the
-/// kernel refuses an accept past (`EMFILE`), the socket then pausing its accepts until one closes (the lead,
-/// 2026-11-06).
-fn descriptor_terms(pools: Pools, beside: u64) -> [(&'static str, u64); 9] {
+/// the namespaces and the mounts made ahead under `pools`; the inits parked in idle cgroups and the cgroups made
+/// ahead, each with its parked init and the files it opens ahead; the create seeds' one pruned mount namespace, which a
+/// root node holds for its life (`goal6-mntns.md` §12), counted for every node, as a rootless node holds none and a
+/// bound may be one over, never under; its socket's connections at their most ([`connections`]), the one it accepts
+/// past them to refuse and the socket's own, counted as the pruned namespace is, as a node embedded in a process
+/// serves no socket; the supervisor's epoll set; and `beside`, what the process held open as the bound was taken
+/// (its standard streams, the node's store, keeper and roots). Each bound among them is fitted to the hard limit as
+/// the node starts ([`hold_descriptors`]), so they hold no more than it (the lead, 2026-11-11, over 2026-11-06's
+/// connections taking what these left).
+fn descriptor_terms(pools: Pools, beside: u64) -> [(&'static str, u64); 13] {
+    let parked = if pools.devfs {
+        FDS_A_PARKED.saturating_add(FDS_A_PARKED_PROC)
+    } else {
+        FDS_A_PARKED
+    };
+    let made_ahead = FDS_A_MADE_AHEAD
+        .saturating_add(u64::try_from(pools.files_ahead).unwrap_or(u64::MAX))
+        .saturating_add(parked);
     [
         ("the pools made ahead", pools.descriptors()),
         (
             "kept namespaces",
             kept_at_most(pools.sizes).saturating_mul(FDS_A_KEPT),
         ),
-        (
-            "live boxes",
-            of(hex_runtime::linux::cgroup::MAX_BOXES, FDS_A_BOX),
-        ),
+        ("live boxes", of(pools.sizes.boxes, FDS_A_BOX)),
         (
             "programs watched",
             of(crate::serve::limits(&pools.sizes.platform()).programs, 1),
@@ -213,9 +243,33 @@ fn descriptor_terms(pools: Pools, beside: u64) -> [(&'static str, u64); 9] {
             "exec seeds",
             of(crate::seed::most(&pools.sizes), FDS_A_SEED),
         ),
+        (
+            "idle cgroups' parked inits",
+            of(pools.sizes.idle_cgroups, parked),
+        ),
+        ("cgroups made ahead", of(pools.sizes.ahead, made_ahead)),
         ("the create seeds' pruned mount namespace", FDS_PRUNED),
+        (
+            "the socket's connections",
+            of(connections(&pools.sizes), 1)
+                .saturating_add(1)
+                .saturating_add(FDS_THE_SOCKET),
+        ),
+        ("the supervisor's epoll set", FDS_THE_SUPERVISOR),
         ("beside those", beside),
     ]
+}
+
+/// The connections the node's socket holds at most, a descriptor each: its bound on them, and no more than its
+/// programs' and calls' budgets admit, as it keeps [`crate::serve::KEPT`] of each for every connection it admits
+/// ([`crate::serve::limits`]).
+fn connections(sizes: &Sizes) -> usize {
+    let limits = crate::serve::limits(&sizes.platform());
+    let admitted = |budget: usize| budget.checked_div(crate::serve::KEPT).unwrap_or(budget);
+    limits
+        .connections
+        .min(admitted(limits.programs))
+        .min(admitted(limits.in_flight))
 }
 
 /// All the descriptors this node may hold at once without the namespaces' files ([`descriptor_terms`]).
@@ -226,12 +280,11 @@ fn descriptors_of_the_node(pools: Pools, beside: u64) -> u64 {
         .fold(0, u64::saturating_add)
 }
 
-/// How many kept namespaces may hold their `/proc/net` files at once: what the soft descriptor limit the node was
-/// given leaves past its own descriptors at its bounds, four a namespace, none where it leaves none. The limit
-/// stays as given: a box without an rlimit of its own sees the limit it would without the files (the lead,
-/// 2026-11-03T23:07Z). A namespace past the bound is checked by entering it, counted (`files_bounded`), as one
-/// whose files couldn't be read is, and as a rootless node's are; a limit too small for the node's own work
-/// shows where it runs out, as each call's own typed refusal.
+/// How many kept namespaces may hold their `/proc/net` files at once: what the soft descriptor limit, which the node's
+/// start raised to its hard one ([`hold_descriptors`]), leaves past its own descriptors at its bounds, four a
+/// namespace, none where it leaves none. A namespace past the bound is checked by entering it, counted
+/// (`files_bounded`), as one whose files couldn't be read is, and as a rootless node's are. The node's own are fitted
+/// to the limit as it starts, so the files and its own together never pass it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FilesBound {
     /// The soft limit, `None` where it is unlimited.
@@ -302,12 +355,34 @@ impl Needed {
     }
 }
 
-/// A node's start within its descriptor limit, whatever process it runs in, `hex node` or an embedding: the soft
-/// limit raised to the hard one its sizes count on ([`crate::sizes::Host::descriptors`]), as a process may (setrlimit(2)),
-/// and the start refused by type where even that can't hold the node's own descriptors at its pools' bounds
-/// ([`FilesBound::needed`]'s `own`), which would otherwise run out wherever its pools reached the limit, EMFILE in
-/// whichever call came next. The kept namespaces' files need not fit: [`FilesBound::of`] bounds them by what is left.
-pub fn hold_descriptors(pools: Pools) -> Result<(), Refusal> {
+/// What a node of this process's owner, its state under `state`, needs of its descriptor limit on this host at a first
+/// start's bounds ([`crate::sizes::Sizes::now`]): its own and every kept namespace's files ([`FilesBound::needed`]),
+/// its cgroups made ahead opening their files over the disks under `state`, which its boxes' `io` bounds apply to.
+/// What this process holds now stands for what the node holds beside its bounds. The one formula for it: what
+/// `hex node --descriptors` says and what a guest's init gives its node (the lead, 2026-11-11), so an installer gives
+/// its service that and the install lab checks it, never a figure copied from one host's (goal 6 step 6's HEX-INST-5).
+pub fn needed_on_this_host(state: &std::path::Path) -> Result<Needed, Refusal> {
+    let sizes = Sizes::now()?;
+    let disks = hex_runtime::linux::disks::under(state)?;
+    let files_ahead = hex_runtime::linux::cgroup::ahead_files(&disks).len();
+    let pools = if rustix::process::geteuid().is_root() {
+        Pools::root(sizes, files_ahead)
+    } else {
+        Pools::rootless(sizes, files_ahead)
+    };
+    let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+    Ok(FilesBound::needed(pools, open_descriptors(&limit)?))
+}
+
+/// A node's start within its descriptor limit, whatever process it runs in, `hex node` or an embedding: the soft limit
+/// raised to the hard one (setrlimit(2), as any process may), and every bound that holds descriptors fitted to what the
+/// hard limit leaves past those held ([`fit`]; bounds come from the OS limit at run time, less what is held, as the
+/// namespaces' files' do, [`FilesBound::of`]: the lead's ruling, 2026-11-11). The node then admits what fits, refusing
+/// past it by its budgets' own refusals: its create turns' (`Refusal::Full`), its supervisor's inits' and its socket's
+/// connections' and programs' (`Refusal::Exhausted`). Its start is refused by type only where the hard limit can't hold
+/// the least node, one box and one connection, naming both. The fitted pools come with the bound on the namespaces'
+/// files under the same limit, beside the same descriptors held, so the node's own and the files together fit it.
+pub fn hold_descriptors(pools: Pools) -> Result<(Pools, FilesBound), Refusal> {
     use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
     let given = getrlimit(Resource::Nofile);
     if let (Some(soft), Some(hard)) = (given.current, given.maximum)
@@ -323,24 +398,109 @@ pub fn hold_descriptors(pools: Pools) -> Result<(), Refusal> {
         .map_err(|e| Refusal::os("raising the descriptor limit to its hard one", e))?;
     }
     let limit = getrlimit(Resource::Nofile);
-    let needed = FilesBound::needed(pools, open_descriptors(&limit)?);
+    let beside = open_descriptors(&limit)?;
     let shown = |n: Option<u64>| n.map_or_else(|| "unlimited".to_owned(), |n| n.to_string());
-    match limit.current {
-        Some(soft) if needed.own > soft => Err(Refusal::Platform {
-            what: "a node within its descriptor limit",
-            platform: "linux",
-            why: format!(
-                "its own {} descriptors at its pools' bounds exceed RLIMIT_NOFILE: the hard limit of {}, its soft one \
-                 raised to {soft} from {} as given; give its service LimitNOFILE={} or more, as `hex node --descriptors` \
-                 says",
-                needed.own,
-                shown(limit.maximum),
-                shown(given.current),
-                needed.total()
-            ),
-        }),
-        _ => Ok(()),
+    // An unlimited limit holds the node at the bounds its host gave.
+    let hard = limit.current.unwrap_or(u64::MAX);
+    let fitted = fit(pools, hard, beside).map_err(|least| Refusal::Platform {
+        what: "a node within its descriptor limit",
+        platform: "linux",
+        why: format!(
+            "the least node, one box and one connection, holds {least} descriptors, past RLIMIT_NOFILE: the hard limit \
+             of {}, its soft one raised to {hard} from {} as given",
+            shown(limit.maximum),
+            shown(given.current)
+        ),
+    })?;
+    Ok((fitted, FilesBound::of(&limit, fitted, beside)))
+}
+
+/// `pools` with every bound that holds descriptors fitted to `hard`, the node holding `beside` past its bounds: where
+/// its own at the bounds its host gave fit, they stay; where they don't, each such bound (boxes, inits, device
+/// programs, seeds, idle and made-ahead cgroups, idle and made-ahead namespaces, ipc and uts pairs, and with the inits
+/// the socket's connections) keeps one common share of what it would hold past its least, the largest whose
+/// descriptors fit, found by halving the shares (at most 64 halvings, a `u64`'s width). The socket's bound on its
+/// connections is then what it admits ([`connections`]), and the namespaces' files take what the node's own leave
+/// ([`FilesBound::of`]). `Err` carries the least node's descriptors, one box, init, device program, seed and
+/// connection and no pool made ahead, where even those don't fit.
+pub fn fit(pools: Pools, hard: u64, beside: u64) -> Result<Pools, u64> {
+    let own = |at: Pools| descriptors_of_the_node(at, beside);
+    let least = own(shrunk(pools, 0, 1));
+    if least > hard {
+        return Err(least);
     }
+    let whole = own(pools);
+    let mut fitted = if whole <= hard {
+        pools
+    } else {
+        shrunk(pools, share(pools, hard, beside), whole)
+    };
+    fitted.sizes.descriptors = connections(&fitted.sizes);
+    Ok(fitted)
+}
+
+/// The largest share of what `pools`' bounds hold past their least, in parts of the descriptors they hold whole, whose
+/// descriptors fit `hard` beside `beside` ([`fit`]). Each bound holds at most the whole, so each part moves each bound
+/// by one at most. Share 0 is the least node's, which the caller has found to fit; and the node's own grows with the
+/// share, so halving finds it.
+fn share(pools: Pools, hard: u64, beside: u64) -> u64 {
+    let whole = descriptors_of_the_node(pools, beside);
+    let (mut low, mut high) = (0u64, whole);
+    while low < high {
+        let mid = low.saturating_add(high.saturating_sub(low).div_ceil(2));
+        if descriptors_of_the_node(shrunk(pools, mid, whole), beside) <= hard {
+            low = mid;
+        } else {
+            high = mid.saturating_sub(1);
+        }
+    }
+    low
+}
+
+/// `pools` with each bound that holds descriptors at its least plus the share `num`/`den` of the rest, its learned
+/// starts within them.
+fn shrunk(pools: Pools, num: u64, den: u64) -> Pools {
+    let mut sizes = pools.sizes;
+    sizes.boxes = scaled(sizes.boxes, 1, num, den);
+    sizes.inits = scaled(sizes.inits, 1, num, den).min(sizes.boxes);
+    sizes.programs = scaled(sizes.programs, 1, num, den).min(sizes.boxes);
+    sizes.seeds = std::num::NonZeroUsize::new(scaled(sizes.seeds.get(), 1, num, den))
+        .unwrap_or(std::num::NonZeroUsize::MIN);
+    sizes.idle_cgroups = scaled(sizes.idle_cgroups, 0, num, den);
+    sizes.ahead = scaled(sizes.ahead, 0, num, den);
+    sizes.idle_netns = scaled(sizes.idle_netns, 0, num, den);
+    sizes.netns = scaled(sizes.netns, 0, num, den);
+    sizes.ipc_uts = scaled(sizes.ipc_uts, 0, num, den);
+    let starts = &mut sizes.starts;
+    starts.owner_cgroups = starts.owner_cgroups.min(sizes.idle_cgroups);
+    starts.ahead = starts.ahead.min(sizes.ahead);
+    starts.owner_netns = starts.owner_netns.min(sizes.idle_netns);
+    starts.netns = starts.netns.min(sizes.netns);
+    starts.ipc_uts = starts.ipc_uts.min(sizes.ipc_uts);
+    starts.seeds = starts.seeds.min(sizes.seeds.get());
+    starts.devfs_per_key = starts.devfs_per_key.min(sizes.seeds.get());
+    Pools {
+        netns: scaled(pools.netns, 0, num, den),
+        ipc_uts: scaled(pools.ipc_uts, 0, num, den),
+        devfs: pools.devfs,
+        sizes,
+        files_ahead: pools.files_ahead,
+    }
+}
+
+/// `least` plus the share `num`/`den` of what `bound` holds past it, never past `bound`; a bound under `least` as it
+/// is.
+fn scaled(bound: usize, least: usize, num: u64, den: u64) -> usize {
+    let Some(span) = bound.checked_sub(least) else {
+        return bound;
+    };
+    let part = u128::from(u64::try_from(span).unwrap_or(u64::MAX))
+        .saturating_mul(u128::from(num))
+        .checked_div(u128::from(den))
+        .unwrap_or(0);
+    least
+        .saturating_add(usize::try_from(part).unwrap_or(usize::MAX))
+        .min(bound)
 }
 
 /// How many descriptors this process holds now: the entries of `/proc/self/fd` (proc(5)), less the one the

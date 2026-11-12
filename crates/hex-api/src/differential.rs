@@ -560,6 +560,7 @@ fn kind(r: &Refusal) -> &'static str {
         Refusal::Lifecycle { .. } => "Lifecycle",
         Refusal::Backing { .. } => "Backing",
         Refusal::Connect { .. } => "Connect",
+        Refusal::Uncertain { .. } => "Uncertain",
     }
 }
 
