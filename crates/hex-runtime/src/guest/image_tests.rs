@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use crate::devices::{Books, Records, Transaction};
 use hex_api::{Allocation, Bounds, Capacity, CapacityResources, DeviceInfo, Runtime};
-use shards_api::image::{Bound, Channel, MemberEnd, MemberInfo, MemberName};
+use shards_api::image::{Bound, Channel, Keep, MemberEnd, MemberInfo, MemberName};
 
 /// A record owner keeping the node Store's rules (hex-node's `Store::update_lifecycle`): a first record
 /// is Creating; Creating becomes anything, Ready Ready or Deleting, Deleting Deleting alone; an exit, once
@@ -175,14 +175,20 @@ struct ModelRun {
     stats: Mutex<Stats>,
 }
 
-struct ModelGuest(Arc<ModelRun>);
+/// A booted run in the model: its members, as the test gives the image them, and its ports, bound as its boot
+/// asked them (joint plan step 15).
+struct ModelGuest {
+    run: Arc<ModelRun>,
+    members: Vec<MemberInfo>,
+    published: Vec<Bound>,
+}
 
 impl ImageGuest for ModelGuest {
     fn members(&self) -> &[MemberInfo] {
-        &[]
+        &self.members
     }
     fn published(&self) -> &[Bound] {
-        &[]
+        &self.published
     }
     fn take_output(&self, _: &MemberName, _: Channel) -> Result<std::io::PipeReader, ImageRefusal> {
         Err(ImageRefusal::Unsupported {
@@ -200,18 +206,18 @@ impl ImageGuest for ModelGuest {
         Ok(None)
     }
     fn stats(&self, _: StatsScope, _: Duration) -> Result<Stats, ImageRefusal> {
-        match self.0.end.lock().unwrap().clone() {
+        match self.run.end.lock().unwrap().clone() {
             Some(end) => Err(ImageRefusal::Ended(end)),
-            None => Ok(*self.0.stats.lock().unwrap()),
+            None => Ok(*self.run.stats.lock().unwrap()),
         }
     }
     fn stop(&self) -> Result<(), ImageRefusal> {
-        self.0.stops.fetch_add(1, Ordering::SeqCst);
-        self.0.end.lock().unwrap().get_or_insert(RunEnd::Stopped);
+        self.run.stops.fetch_add(1, Ordering::SeqCst);
+        self.run.end.lock().unwrap().get_or_insert(RunEnd::Stopped);
         Ok(())
     }
     fn wait_for(&self, _: Duration) -> Result<Option<RunEnd>, ImageRefusal> {
-        Ok(self.0.end.lock().unwrap().clone())
+        Ok(self.run.end.lock().unwrap().clone())
     }
 }
 
@@ -223,6 +229,8 @@ struct ModelImages {
     open: Mutex<bool>,
     opened: Condvar,
     run: Arc<ModelRun>,
+    /// The members the image runs, as the test sets them: none unless it does.
+    members: Mutex<Vec<MemberInfo>>,
 }
 
 impl ModelImages {
@@ -233,6 +241,7 @@ impl ModelImages {
             open: Mutex::new(true),
             opened: Condvar::new(),
             run: Arc::new(ModelRun::default()),
+            members: Mutex::new(Vec::new()),
         })
     }
 
@@ -253,7 +262,29 @@ impl Images for ModelImages {
         if let Some(why) = self.refuse.lock().unwrap().take() {
             return Err(why);
         }
-        Ok(Box::new(ModelGuest(Arc::clone(&self.run))))
+        // Each port bound as asked, one the OS picks from IANA's dynamic range (RFC 6335 §6) where asked.
+        let published = spec
+            .publish
+            .iter()
+            .zip(49152u16..)
+            .map(|(publish, picked)| Bound {
+                guest_port: publish.guest_port,
+                proto: publish.proto,
+                host: std::net::SocketAddr::new(
+                    publish.host.unwrap(),
+                    if publish.host_port == 0 {
+                        picked
+                    } else {
+                        publish.host_port
+                    },
+                ),
+            })
+            .collect();
+        Ok(Box::new(ModelGuest {
+            run: Arc::clone(&self.run),
+            members: self.members.lock().unwrap().clone(),
+            published,
+        }))
     }
 }
 
@@ -694,4 +725,157 @@ fn kill_before_start_ends_the_vm_without_a_boot() {
         Err(Refusal::NotRunning(_, "start"))
     ));
     assert!(images.asked.lock().unwrap().is_empty());
+}
+
+/// Joint plan step 15 (AC-T7.7.2): do create image VMs granted, in turn, a provider by name, kiln by address
+/// and kiln on the VM's host. Expect: each refused Awaits naming the capability it waits on, with no record made
+/// and no boot asked. Do: create one granted a publish of its harness's port on the host's loopback, and start
+/// it, the image running that harness. Expect: its boot asks for exactly that publish and none of its image's
+/// grants past the VM, and its inspect shows its every grant, as its record holds them, and the publish as the
+/// host bound it, its receiver the image's declaration.
+#[test]
+fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
+    use hex_api::{Destination, Grant, Member, MemberKind, Ports, Proto};
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let codex = Member {
+        kind: MemberKind::Harness,
+        name: "codex".to_owned(),
+    };
+    let tcp = |port| Ports {
+        proto: Proto::Tcp,
+        first: port,
+        last: port,
+    };
+    let granted = |name: &str, grants: Vec<Grant>| {
+        let mut spec = spec(name, None);
+        if let ClassSpec::ShardsImage(image) = &mut spec.class {
+            image.grants = grants;
+        }
+        spec
+    };
+    for (grant, needs) in [
+        (
+            Grant::Egress {
+                member: codex.clone(),
+                to: Destination::Name("api.openai.com".to_owned()),
+                ports: tcp(443),
+            },
+            Upstream::MemberGrantsByName,
+        ),
+        (
+            Grant::Egress {
+                member: codex.clone(),
+                to: Destination::Address("10.0.0.5".parse().unwrap()),
+                ports: tcp(7070),
+            },
+            Upstream::MemberGrantsByAddress,
+        ),
+        (
+            Grant::Host {
+                member: codex.clone(),
+                ports: tcp(7070),
+            },
+            Upstream::MemberHostService,
+        ),
+    ] {
+        assert_eq!(
+            runtime.create(granted("image-unheld", vec![grant])),
+            Err(Refusal::Awaits { needs })
+        );
+        assert!(Transaction::records(owner.as_ref()).unwrap().is_empty());
+    }
+    let publish = Grant::Publish {
+        member: codex,
+        proto: Proto::Tcp,
+        port: 1455,
+        host: "127.0.0.1".parse().unwrap(),
+        host_port: None,
+    };
+    let id = runtime
+        .create(granted("image-published", vec![publish.clone()]))
+        .unwrap()
+        .id;
+    *images.members.lock().unwrap() = vec![MemberInfo {
+        index: 0,
+        kind: shards_api::image::MemberKind::Harness,
+        name: "codex".to_owned(),
+        runs: true,
+    }];
+    runtime.start(&id).unwrap();
+    let asked = images.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    let boot = &asked[0];
+    assert_eq!(
+        boot.publish,
+        vec![shards_api::image::Publish {
+            guest_port: 1455,
+            proto: shards_api::image::Proto::Tcp,
+            host: Some("127.0.0.1".parse().unwrap()),
+            host_port: 0,
+        }]
+    );
+    assert_eq!(boot.egress.egress, Keep::Only(Vec::new()));
+    assert_eq!(boot.egress.mcp, Keep::Only(Vec::new()));
+    assert!(!boot.egress.dns);
+    let shown = runtime.inspect(&id).unwrap();
+    assert_eq!(shown.grants, vec![publish]);
+    assert_eq!(
+        shown.published,
+        vec![hex_api::Published {
+            grant: 0,
+            at: "127.0.0.1:49152".parse().unwrap(),
+            receiver: hex_api::Receiver::Declared,
+        }]
+    );
+}
+
+/// Joint plan step 15 (N6): do start an image VM granted a publish to a harness its image doesn't run, then one
+/// whose image runs it only as files. Expect: each start refused Invalid naming the grant's member, its run
+/// stopped and the box ended with KILL's signal, so no port stays published for a member no grant names.
+#[test]
+fn a_publish_to_a_member_the_image_doesnt_run_stops_the_vm() {
+    use hex_api::{Grant, Member, MemberKind, Proto};
+    for (name, members) in [
+        ("image-nobody", Vec::new()),
+        (
+            "image-files",
+            vec![MemberInfo {
+                index: 0,
+                kind: shards_api::image::MemberKind::Harness,
+                name: "codex".to_owned(),
+                runs: false,
+            }],
+        ),
+    ] {
+        let images = ModelImages::new();
+        *images.members.lock().unwrap() = members;
+        let (runtime, owner) = model_runtime(&images, waits());
+        let mut spec = spec(name, None);
+        if let ClassSpec::ShardsImage(image) = &mut spec.class {
+            image.grants = vec![Grant::Publish {
+                member: Member {
+                    kind: MemberKind::Harness,
+                    name: "codex".to_owned(),
+                },
+                proto: Proto::Tcp,
+                port: 1455,
+                host: "127.0.0.1".parse().unwrap(),
+                host_port: None,
+            }];
+        }
+        let id = runtime.create(spec).unwrap().id;
+        assert!(matches!(
+            runtime.start(&id),
+            Err(Refusal::Invalid { what: "grants", why }) if why.contains("grants[0].member harness codex")
+        ));
+        assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+        // The start's own stop waited for the run's end and recorded it before the start returned, so the box
+        // shows it with no wait of the test's.
+        let shown = runtime.inspect(&id).unwrap();
+        assert_eq!(shown.state, BoxState::Empty);
+        assert_eq!(shown.exit, Some(Exit::Signal(9)));
+        assert!(shown.published.is_empty());
+        assert_eq!(record(&owner, &id).unwrap().exit, Some(Exit::Signal(9)));
+    }
 }

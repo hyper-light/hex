@@ -1939,6 +1939,8 @@ impl BootstrapCall {
             Self::Create => {
                 let spec = absolute_spec();
                 Answer::Info(BoxInfo {
+                    published: Vec::new(),
+                    grants: Vec::new(),
                     id: spec.id,
                     class: Class::Process,
                     state: hex_api::BoxState::Empty,
