@@ -17,6 +17,7 @@ mod devices;
 mod physical;
 mod rows;
 use rows::{Context, Rows};
+mod view;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Payload {
@@ -573,6 +574,8 @@ struct State {
     rows: Rows,
     stopped: Option<Stop>,
     admission: Option<Refusal>,
+    /// The machine's capacity view, once opened (joint plan step 13).
+    view: Option<view::View>,
 }
 
 enum Effect {
@@ -775,6 +778,7 @@ impl Driver {
                 node,
                 rows,
                 stopped: None,
+                view: None,
                 admission: raised.then(||Refusal::Invalid {
                     what:"local admission",
                     why:format!("current host or runtime pool room cannot cover recovered physical reservations {retained:?}; a successful live-room refresh is required before new local admission"),
@@ -954,11 +958,114 @@ impl Driver {
         let _operation = self.operation()?;
         let mut state = self.lock()?;
         let local = spec.id == state.node.id();
+        // The node admits its own boxes against its room less every holder's reservations (CV3).
+        let spec = match state.view.as_mut().filter(|_| local) {
+            Some(view) => {
+                let refreshed = view.refresh(&spec);
+                finish(&mut state, refreshed, false)?
+            }
+            None => spec,
+        };
         let result = state.node.refresh_node(spec);
         if local {
             state.admission = result.as_ref().err().map(admission_refusal);
         }
         result.map_err(Error::Core)
+    }
+
+    /// Opens the machine's capacity view in `dir` (joint plan step 13, `docs/design/capacity-view.md`),
+    /// serving `holders` holders, each bounded as the node's own records are. The node admits nothing of
+    /// its own until its next facts refresh gives the view its room: the reservations the view recovered
+    /// come off the node's room first.
+    pub fn open_view(&self, dir: &Path, holders: usize) -> Result<(), Error> {
+        let _operation = self.operation()?;
+        let mut state = self.lock()?;
+        if state.view.is_some() {
+            return Err(Refusal::Invalid {
+                what: "capacity view",
+                why: "it is open already".into(),
+            }
+            .into());
+        }
+        let opened = view::View::open(dir, holders, state.node.budget().ran);
+        state.view = Some(finish(&mut state, opened, false)?);
+        state.admission = Some(Refusal::Invalid {
+            what: "local admission",
+            why: "the capacity view opened; a live-room refresh is required before new local admission"
+                .into(),
+        });
+        Ok(())
+    }
+
+    /// A holder's word on `link`, decided beside what this node holds itself. A change to the holders'
+    /// reservations gives the node its new room before the lock is let go, so no admission of either side
+    /// sees the room the other's took.
+    pub fn view_hear(
+        &self,
+        link: u64,
+        msg: hex_api::capacity::ToKeeper,
+    ) -> Result<hex_api::capacity::ToHolder, Error> {
+        let _operation = self.operation()?;
+        let mut state = self.lock()?;
+        let local = state
+            .node
+            .held()
+            .map(hex_api::capacity::Amounts::from_array);
+        let local = finish(&mut state, local, false)?;
+        let heard = view_mut(&mut state)?.hear(link, msg, local);
+        let (answer, changed) = finish(&mut state, heard, false)?;
+        if changed {
+            readmit(&mut state)?;
+        }
+        Ok(answer)
+    }
+
+    /// Link `link` dropped: its holder keeps what it holds (CV5).
+    pub fn view_link_down(&self, link: u64) -> Result<(), Error> {
+        let _operation = self.operation()?;
+        let mut state = self.lock()?;
+        view_mut(&mut state)?.link_down(link);
+        Ok(())
+    }
+
+    /// The hints owed to the holders, by link, with the view as it is now (CV7).
+    pub fn view_hints(&self) -> Result<Vec<(u64, hex_api::capacity::ToHolder)>, Error> {
+        let _operation = self.operation()?;
+        let mut state = self.lock()?;
+        let local = state
+            .node
+            .held()
+            .map(hex_api::capacity::Amounts::from_array);
+        let local = finish(&mut state, local, false)?;
+        let hints = view_mut(&mut state)?.hints(local);
+        finish(&mut state, hints, false)
+    }
+
+    /// The person's release of holder `name`'s reservations, refused while it is connected (CV6). What
+    /// it released is returned for the caller to log.
+    pub fn view_forget(
+        &self,
+        name: &str,
+    ) -> Result<Result<hex_api::capacity::Forgotten, hex_api::capacity::NotForgotten>, Error> {
+        let _operation = self.operation()?;
+        let mut state = self.lock()?;
+        let forgotten = view_mut(&mut state)?.forget(name);
+        let (forgotten, changed) = finish(&mut state, forgotten, false)?;
+        if changed {
+            readmit(&mut state)?;
+        }
+        Ok(forgotten)
+    }
+
+    /// The machine's view as the keeper would answer it now.
+    pub fn view(&self) -> Result<hex_api::capacity::View, Error> {
+        let mut state = self.lock()?;
+        let local = state
+            .node
+            .held()
+            .map(hex_api::capacity::Amounts::from_array);
+        let local = finish(&mut state, local, false)?;
+        Ok(view_mut(&mut state)?.view(local))
     }
 
     /// The existing operation receipt spans the pure grant, unlocked native call and exact
@@ -1534,6 +1641,65 @@ impl Driver {
         }
         Ok(resources)
     }
+
+    /// Joint plan step 14 (AC-T7.4.1): every microVM box this node runs on its own allocation, read now: its key,
+    /// class, receipt and use. A box gone between the listing and its read is passed over, as above.
+    pub fn measured_vms(&self) -> Result<Vec<MeasuredVm>, Error> {
+        let _operation = self.operation()?;
+        let state = self.lock()?;
+        let count = state.node.ran_keys().count();
+        let mut vms = Vec::new();
+        vms.try_reserve_exact(count)
+            .map_err(|_| Refusal::Exhausted {
+                what: "measured microVM identities",
+                bound: count,
+            })?;
+        for (key, _, ended) in state.node.ran_keys() {
+            if ended {
+                continue;
+            }
+            let demand = state
+                .node
+                .demand(key)
+                .ok_or_else(|| bad("ran demand missing"))?;
+            if !matches!(demand.class, Class::Shards | Class::Firecracker) {
+                continue;
+            }
+            if let Some(allocation) = state.node.assigned_allocation(key)? {
+                vms.push((key, demand.class, allocation));
+            }
+        }
+        drop(state);
+        let mut measured = Vec::new();
+        measured
+            .try_reserve_exact(vms.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "measured microVMs",
+                bound: vms.len(),
+            })?;
+        for (key, class, allocation) in vms {
+            match self.runtimes.get(class)?.usage(&self.physical_id(key)?) {
+                Ok(usage) => measured.push(MeasuredVm {
+                    key,
+                    class,
+                    allocation,
+                    usage,
+                }),
+                Err(Refusal::NoSuchBox(_)) => {}
+                Err(why) => return Err(why.into()),
+            }
+        }
+        Ok(measured)
+    }
+}
+
+/// A microVM box as [`Driver::measured_vms`] read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeasuredVm {
+    pub key: Key,
+    pub class: Class,
+    pub allocation: hex_api::Allocation,
+    pub usage: hex_api::Usage,
 }
 
 fn validate(demand: &Demand, payload: &Payload) -> Result<(), Error> {
@@ -1621,6 +1787,27 @@ fn finish<T>(state: &mut State, result: Result<T, Stop>, submit: bool) -> Result
         }
         Error::Core(stop)
     })
+}
+
+fn view_mut(state: &mut State) -> Result<&mut view::View, Error> {
+    state.view.as_mut().ok_or_else(|| {
+        Refusal::Invalid {
+            what: "capacity view",
+            why: "it isn't open".into(),
+        }
+        .into()
+    })
+}
+
+/// The node's own admission given the room the holders' reservations leave it, at once (CV3). The keeper
+/// granted only what fits beside what the node holds, so its admission index never refuses the shrink.
+fn readmit(state: &mut State) -> Result<(), Error> {
+    let spec = view_mut(state)?.admitted();
+    if let Some(spec) = finish(state, spec, false)? {
+        let result = state.node.refresh_node(spec);
+        finish(state, result, false)?;
+    }
+    Ok(())
 }
 
 fn admission_refusal(why: &Stop) -> Refusal {

@@ -451,6 +451,7 @@ mod tests {
         NodeSpec {
             routes: None,
             costs: [None; crate::model::Class::COUNT],
+            priors: Default::default(),
             runtime_pools: Vec::new(),
             id: NodeId(0),
             capacity: Resources {
