@@ -34,7 +34,10 @@ impl WinRuntime {
                 &super::oci::scratch_folder(&self.scratch_root, &spec.id)?,
             )?,
             ClassSpec::Bundle(path) => hcs::from_bundle(&super::oci::bundle_config(path)?)?,
-            ClassSpec::Process | ClassSpec::Firecracker(_) | ClassSpec::Shards(_) => {
+            ClassSpec::Process
+            | ClassSpec::Firecracker(_)
+            | ClassSpec::Shards(_)
+            | ClassSpec::ShardsImage(_) => {
                 return Err(NativeRecord::Box(record).refusal(LifecycleCause::Uncertain));
             }
         };

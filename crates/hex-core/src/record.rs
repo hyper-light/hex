@@ -371,7 +371,7 @@ pub fn create_steps(class: &ClassSpec) -> &'static [Step] {
             Step::StartInit,
             Step::MarkReady,
         ],
-        ClassSpec::Firecracker(_) | ClassSpec::Shards(_) => {
+        ClassSpec::Firecracker(_) | ClassSpec::Shards(_) | ClassSpec::ShardsImage(_) => {
             &[Step::MarkCreating, Step::StartInit, Step::MarkReady]
         }
     }

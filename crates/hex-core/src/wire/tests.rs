@@ -958,6 +958,7 @@ fn answers() -> Vec<(u64, Answer)> {
                 cpu_usec: 6,
                 io_read_bytes: 7,
                 io_write_bytes: u64::MAX,
+                guest: Some(GuestTime::PerVcpuNs(vec![0, 1, u64::MAX])),
             }),
         ),
         (
@@ -2568,10 +2569,12 @@ fn route_wire_backing_calls_and_all_phases_roundtrip() {
         cpu_usec: 77,
         io_read_bytes: 17,
         io_write_bytes: 19,
+        guest: None,
     });
     let bytes = answer(203, &expected, MAX_MESSAGE).unwrap();
     assert_eq!(&bytes[12..14], &0x8005u16.to_le_bytes());
-    assert_eq!(bytes.len(), HEADER_BYTES + size_of::<[u64; 8]>());
+    // The counters, then guest time's option byte, appended (joint plan step 12): none here.
+    assert_eq!(bytes.len(), HEADER_BYTES + size_of::<[u64; 8]>() + 1);
     assert_eq!(
         read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
         expected
@@ -4014,6 +4017,121 @@ fn an_untagged_io_kind_reads_back_unnamed_and_apart_from_other_with_its_code() {
             answer(4, &connect(other, code), MAX_MESSAGE).unwrap()
         );
     }
+}
+
+/// AC-T7.4.1 (joint plan step 12): a Shards image VM's spec is class tag 5, after every class before
+/// it, then its pinned image and its command's option. Do: create one running its members alone and
+/// one with a command. Expect: each read back as written, tag 5 before the image's length. Do: its
+/// command's option byte 2, and the message cut inside the image. Expect: refused as "option" and
+/// Truncated.
+#[test]
+fn a_shards_image_spec_is_class_tag_5_then_its_image_and_command() {
+    let spec = |command: Option<Vec<String>>| BoxSpec {
+        id: id("image-wire"),
+        bounds: Bounds::default(),
+        class: ClassSpec::ShardsImage(Box::new(ShardsImage {
+            command,
+            ..ShardsImage::new(hex_api::sim::SIM_IMAGE)
+        })),
+        owner: None,
+        devices: Vec::new(),
+        allocation: Some(hex_api::sim::sim_vm_allocation().unwrap()),
+        route: None,
+    };
+    let image = hex_api::sim::SIM_IMAGE.as_bytes();
+    let length = u32::try_from(image.len()).unwrap().to_le_bytes();
+    for command in [None, Some(vec!["sleep".to_owned(), "600".to_owned()])] {
+        let create = Request::Call(Call::Create(Box::new(spec(command))));
+        let bytes = request(91, &create, MAX_MESSAGE).unwrap();
+        assert_eq!(
+            read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+            create
+        );
+        let at = bytes.windows(image.len()).position(|w| w == image).unwrap();
+        assert_eq!(&bytes[at - 4..at], &length);
+        assert_eq!(bytes[at - 5], 5);
+        let mut hostile = bytes.clone();
+        hostile[at + image.len()] = 2;
+        assert!(matches!(
+            read_request(&received(&hostile, 0), MAX_MESSAGE).map_err(|bad| bad.fault),
+            Err(Fault::Value { what: "option", .. })
+        ));
+        assert!(matches!(
+            read_request(&received(&bytes[..at + 1], 0), MAX_MESSAGE).map_err(|bad| bad.fault),
+            Err(Fault::Truncated { .. })
+        ));
+    }
+}
+
+/// AC-T7.4.1 (joint plan steps 12 and 14): a usage answer's guest time follows its eight counters as
+/// an option: tag 0 and a count of nanoseconds by vCPU, or tag 1 and what its backend awaits. Do: answer
+/// each. Expect: read back as written, its option, tag and count where said. Do: a guest-time tag 2, and
+/// more vCPUs than a VM's index space, written and read. Expect: each refused as "guest time".
+#[test]
+fn guest_time_follows_the_usage_counters_by_vcpu_or_what_it_awaits() {
+    let counters = HEADER_BYTES + size_of::<[u64; 8]>();
+    let usage = |guest| {
+        Answer::Usage(Usage {
+            pids: 1,
+            guest,
+            ..Usage::default()
+        })
+    };
+    let per_vcpu = usage(Some(GuestTime::PerVcpuNs(vec![5, 7])));
+    let bytes = answer(4, &per_vcpu, MAX_MESSAGE).unwrap();
+    assert_eq!(&bytes[counters..counters + 6], &[1, 0, 2, 0, 0, 0]);
+    assert_eq!(bytes.len(), counters + 6 + 2 * size_of::<u64>());
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        per_vcpu
+    );
+    let awaits = usage(Some(GuestTime::Awaits(Upstream::GuestCpuTimePerVcpu)));
+    let bytes = answer(4, &awaits, MAX_MESSAGE).unwrap();
+    assert_eq!(&bytes[counters..], &[1, 1, 0]);
+    assert_eq!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        awaits
+    );
+    let mut hostile = bytes;
+    hostile[counters + 1] = 2;
+    assert!(matches!(
+        read_answer(&received(&hostile, 0), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "guest time",
+            ..
+        })
+    ));
+    let past = usage(Some(GuestTime::PerVcpuNs(vec![
+        0;
+        GuestTime::MAX_VCPUS + 1
+    ])));
+    assert!(matches!(
+        answer(4, &past, MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "guest time",
+            ..
+        })
+    ));
+    let mut read_past = answer(
+        4,
+        &usage(Some(GuestTime::PerVcpuNs(Vec::new()))),
+        MAX_MESSAGE,
+    )
+    .unwrap();
+    let count = u32::try_from(GuestTime::MAX_VCPUS + 1).unwrap();
+    read_past.truncate(read_past.len() - size_of::<u32>());
+    read_past.extend_from_slice(&count.to_le_bytes());
+    read_past.extend(std::iter::repeat_n(
+        0,
+        (GuestTime::MAX_VCPUS + 1) * size_of::<u64>(),
+    ));
+    assert!(matches!(
+        read_answer(&received(&read_past, 0), MAX_MESSAGE),
+        Err(Fault::Value {
+            what: "guest time",
+            ..
+        })
+    ));
 }
 
 fn learned_resources(cpu_milli: u64, gib: u64) -> CapacityResources {

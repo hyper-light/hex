@@ -92,6 +92,13 @@ pub fn rewrite(
                 why: "the Shards adapter cannot execute Firecracker work".into(),
             });
         }
+        ClassSpec::ShardsImage(_) => {
+            return Err(Refusal::Invalid {
+                what: "guest backend",
+                why: "a Shards image VM boots its image under shards-init, never a staged payload"
+                    .into(),
+            });
+        }
     };
     Ok(Rewritten {
         spec: BoxSpec {

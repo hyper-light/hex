@@ -63,7 +63,12 @@ impl GuestRuntime {
             && match spec.route_execution() {
                 Some(hex_api::Execution::ShardsDedicated) => true,
                 Some(_) => false,
-                None => matches!(spec.class, ClassSpec::Shards(_)) || !spec.devices.is_empty(),
+                // A Shards image VM is this owner's whole, its record included: a refused
+                // create leaves no record of another owner's behind.
+                None => {
+                    matches!(spec.class, ClassSpec::Shards(_) | ClassSpec::ShardsImage(_))
+                        || !spec.devices.is_empty()
+                }
             }
     }
 
