@@ -13,7 +13,9 @@ use hex_api::{
 use hex_client::guest::{Client, LinkOwner, own_link, stage};
 use hex_core::record::{BootSession, BoxRecord, Phase, PoolRecord};
 
-use super::{Books, Config, Transaction, exhausted, invalid, observations, transport, vfio};
+use super::{
+    Books, Config, Transaction, exhausted, invalid, observations, single_use, transport, vfio,
+};
 use crate::devices::{Binding, ManagedLaunch, Route, SharedCatalog, managed_scope_id};
 
 #[path = "pool.rs"]
@@ -461,6 +463,12 @@ impl FirecrackerRuntime {
         }
         let mut record = transaction.read(&id)?.ok_or_else(|| uncertain(&id))?;
         let plan = vfio::plan(&self.host, &self.catalog, &record.spec.devices, &[])?;
+        // A function no reset clears goes to one VM per host boot: refused where a VM had it on this one.
+        let once = vfio::once_per_boot(&self.host, &plan)?;
+        let marks = single_use::Marks::of(&self.config.state_dir, self.boot.as_ref())?;
+        if let Some((function, spent)) = marks.check(&once)? {
+            return Err(single_use::refused(function, spent, self.boot.as_ref()));
+        }
         let paths = self.paths(&record)?;
         match fs::symlink_metadata(&paths.dir) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -498,6 +506,8 @@ impl FirecrackerRuntime {
             .map_err(|e| Refusal::os("binding private guest readiness endpoint", e))?;
         let program = self.vm_program(&paths)?;
         let (io, mut output) = Self::vm_io()?;
+        // Given on this boot before the VMM that opens them starts, so no crash past here forgets it.
+        marks.spend(&once)?;
         let native = transaction.launch_managed(
             &ManagedLaunch::Firecracker {
                 program: &program,
@@ -701,12 +711,27 @@ impl FirecrackerRuntime {
         // This is an exact isolation/identity check, not another picker. Refuse an inseparable
         // unselected GPU before draining the observer; companion metadata cannot enlarge S.
         // The source's observer holds the full set's groups until it is drained below.
-        drop(vfio::plan(
+        let plan = vfio::plan(
             &self.host,
             &self.catalog,
             &spec.devices,
             source.init.as_slice(),
-        )?);
+        )?;
+        // A function no reset clears that the observer had on this boot can't go to a box before the host reboots:
+        // the pool says so before its observer is drained.
+        let once = vfio::once_per_boot(&self.host, &plan)?;
+        if let Some((function, spent)) =
+            single_use::Marks::of(&self.config.state_dir, self.boot.as_ref())?.check(&once)?
+        {
+            return Err(single_use::pool_refused(
+                "a GPU pool's handoff to a box (VFIO)",
+                &key,
+                function,
+                spent,
+                self.boot.as_ref(),
+            ));
+        }
+        drop(plan);
         let keys = self.catalog.conflict_ids(&source.devices)?;
         let id = spec.id.try_clone()?;
         let (pending, commitment, init) = crate::devices::with_handoff_transaction(
