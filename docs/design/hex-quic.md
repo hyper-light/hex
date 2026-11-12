@@ -106,9 +106,16 @@ before its last connection's End reached the peer (HEX-QUIC-1, -4), or bytes pas
 **Chosen.** The node serves its control connections through its own socket server's core (`hex-node` `serve.rs`:
 its bounds, workers, disconnect rule and program watches), each control connection one of the server's connections,
 whole messages framed as the guest's are; an exec's stdio connections are gathered as the guest's relay gathers them
-(`hex_core::stream::Gather`) and become the program's pipes, copied to and from their lanes. Staging connections are
-served by the relay's staging server (`hex-node` `relay/files.rs`, Linux). The log port carries the node's log lines,
-each counted where a slow reader makes it let one go.
+(`hex_core::stream::Gather`) and become the program's pipes, copied to and from their lanes. A stdin connection ends
+as the relay's does (HEX-GUEST-41): the peer's End ends the program's pipe; the program's letting its stdin go resets
+the connection, so the peer's client lets its caller's pipe go. On Unix its copier waits in poll(2) for the pipe's
+readers and for the connection, which writes to a pipe of the copier's own as it changes; Windows' pipes can't be
+waited on, so there the copy ends at the next write the pipe refuses, as the client's own stdin copy does. Staging
+connections are served by the relay's staging server (`hex-node` `relay/files.rs`, Linux). The log port carries the
+node's log lines, each counted where a slow reader makes it let one go.
+
+**Falsified by** the hex-api conformance suite failing through the listener (HEX-QUIC-20), or a stdin connection
+that outlives its program's stdin or its peer's End (HEX-QUIC-21).
 
 ## Q5. TLS: AES-256-GCM alone, mutual, under kiln's CA
 

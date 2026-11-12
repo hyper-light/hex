@@ -229,3 +229,74 @@ fn hex_quic_17_a_tree_staged_over_quic_lands_and_unstages() {
     stage::unstage(&link, &id).unwrap();
     assert!(!copy.exists(), "the staged copy is left");
 }
+
+/// HEX-QUIC-21 (Q4; HEX-GUEST-41's rule, as the guest's relay keeps it): a program's stdin connection ends once its
+/// program lets its stdin go, on Unix with no byte more from the peer (Windows' pipes can't be waited on: there, at
+/// the peer's next write), so the peer's client lets its caller's pipe go; and the peer's end of its stdin ends the
+/// program's pipe after every byte, then the connection, both halves.
+#[test]
+fn hex_quic_21_a_programs_stdin_connection_ends_with_its_program_or_its_peer() {
+    let ca = SimCa::new().unwrap();
+    let node = Endpoint::start(Config {
+        credentials: enrolled(&ca, "node.stdin.test"),
+        bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        listen: true,
+        serves: vec![stream::STDIO_PORT],
+        shape: Shape {
+            connections: 1,
+            lanes: 4,
+        },
+    })
+    .unwrap();
+    let client = Endpoint::start(Config {
+        credentials: enrolled(&ca, "client.stdin.test"),
+        bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        listen: false,
+        serves: Vec::new(),
+        shape: Shape {
+            connections: 1,
+            lanes: 4,
+        },
+    })
+    .unwrap();
+    let deadline = Instant::now() + hex_api::conformance::PATIENCE;
+    let peer = client
+        .dial("node.stdin.test", node.local_addr(), deadline)
+        .unwrap();
+    let mut buf = [0u8; 64];
+
+    // The program lets its stdin go.
+    let theirs = client.open(peer, stream::STDIO_PORT).unwrap();
+    let (_, ours) = node.accept(stream::STDIO_PORT, Some(deadline)).unwrap();
+    let (r, w) = std::io::pipe().unwrap();
+    let copier = std::thread::spawn(move || feed(&ours, w));
+    drop(r);
+    #[cfg(windows)]
+    theirs.write_all(b"after its end\n", Some(deadline)).unwrap();
+    let ended = theirs.read(&mut buf, Some(deadline));
+    assert!(
+        matches!(&ended, Ok(0))
+            || ended
+                .as_ref()
+                .is_err_and(|e| e.kind() != std::io::ErrorKind::TimedOut),
+        "the stdin connection outlived its program's stdin: {ended:?}"
+    );
+    copier.join().unwrap();
+
+    // The peer ends its stdin.
+    let theirs = client.open(peer, stream::STDIO_PORT).unwrap();
+    let (_, ours) = node.accept(stream::STDIO_PORT, Some(deadline)).unwrap();
+    let (mut r, w) = std::io::pipe().unwrap();
+    let copier = std::thread::spawn(move || feed(&ours, w));
+    theirs.write_all(b"round trip\n", Some(deadline)).unwrap();
+    theirs.end(Some(deadline)).unwrap();
+    let mut got = String::new();
+    r.read_to_string(&mut got).unwrap();
+    assert_eq!(got, "round trip\n");
+    assert_eq!(
+        theirs.read(&mut buf, Some(deadline)).unwrap(),
+        0,
+        "the node's half of a stdin connection didn't end after its peer's"
+    );
+    copier.join().unwrap();
+}

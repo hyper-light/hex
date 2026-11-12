@@ -127,6 +127,8 @@ struct Shared {
     accepting: AtomicBool,
     tokens: AtomicU64,
     unnamed: AtomicUsize,
+    /// Staging connections being served: only Linux nodes serve the files port.
+    #[cfg(target_os = "linux")]
     stagings: AtomicUsize,
     /// Wakes the server's wait.
     wake: hex_quic::Notify,
@@ -187,6 +189,7 @@ impl<N: Os> Quic<N> {
             accepting: AtomicBool::new(true),
             tokens: AtomicU64::new(0),
             unnamed: AtomicUsize::new(0),
+            #[cfg(target_os = "linux")]
             stagings: AtomicUsize::new(0),
             wake,
         });
@@ -494,29 +497,12 @@ fn stream_conn(shared: &Arc<Shared>, peer: PeerId, conn: hex_quic::Conn) {
         stream::Stdio::In => (PipeEnd::Stdin(reader), Ours::Writer(writer)),
         stream::Stdio::Out | stream::Stdio::Err => (PipeEnd::Out(writer), Ours::Reader(reader)),
     };
-    if matches!(ours, Ours::Writer(_)) {
-        // Nothing goes to the peer on its stdin.
-        let _ = conn.close_write();
-    }
     if !gathered(shared, named, program) {
         conn.reset(Why::Protocol);
         return;
     }
     match ours {
-        Ours::Writer(mut to) => {
-            let mut buf = vec![0u8; hex_core::lanes::DATA_BOUND];
-            loop {
-                match conn.read(&mut buf, None) {
-                    Ok(0) | Err(_) => return,
-                    Ok(n) => {
-                        if to.write_all(buf.get(..n).unwrap_or_default()).is_err() {
-                            conn.reset(Why::Gone);
-                            return;
-                        }
-                    }
-                }
-            }
-        }
+        Ours::Writer(to) => feed(&conn, to),
         Ours::Reader(mut from) => {
             let mut buf = vec![0u8; hex_core::lanes::DATA_BOUND];
             loop {
@@ -541,6 +527,123 @@ fn stream_conn(shared: &Arc<Shared>, peer: PeerId, conn: hex_quic::Conn) {
                 }
             }
         }
+    }
+}
+
+/// Moves a program's stdin from its connection into its pipe until either ends, as the guest's relay does
+/// (`crate::relay`'s `feed`, HEX-GUEST-41): the peer's End ends the pipe, so the program reads its stdin's end, and this
+/// side's half then ends, closing the connection; the program's letting its stdin go (as its exit does) resets the
+/// connection, so the peer's client lets its caller's pipe go, as a local program's stdin pipe has no reader once the
+/// program has ended. Nothing goes to the peer on it. On Unix the copier waits for the connection and for the pipe's
+/// readers together, in poll(2): the connection tells a pipe of the copier's own whenever it changes ([`Wake`]), and
+/// the program's pipe's write end reports its readers gone, asked for `POLLHUP`: Linux reports `POLLERR` asked or not
+/// (`pipe_poll`, fs/pipe.c), and macOS's poll registers its read filter for a `POLLHUP` asked, whose pipe filter
+/// reports the reader's close as its end (`filt_piperead_common`, bsd/kern/sys_pipe.c), told as `POLLHUP`.
+#[cfg(unix)]
+fn feed(conn: &hex_quic::Conn, mut to: PipeWriter) {
+    use rustix::event::{PollFd, PollFlags};
+    let Ok(wake) = Wake::new() else {
+        conn.reset(Why::Gone);
+        return;
+    };
+    if conn.set_notify(wake.notify()).is_err() {
+        conn.reset(Why::Gone);
+        return;
+    }
+    let mut buf = vec![0u8; hex_core::lanes::DATA_BOUND];
+    loop {
+        match conn.try_read(&mut buf) {
+            Ok(Some(0)) => {
+                drop(to);
+                let _ = conn.end(None);
+                return;
+            }
+            Ok(Some(n)) => {
+                if to.write_all(buf.get(..n).unwrap_or_default()).is_err() {
+                    conn.reset(Why::Gone);
+                    return;
+                }
+                continue;
+            }
+            Ok(None) => {}
+            Err(_) => return,
+        }
+        let gone = {
+            let mut ready = [
+                PollFd::new(&to, PollFlags::HUP),
+                PollFd::new(&wake.reader, PollFlags::IN),
+            ];
+            match rustix::event::poll(&mut ready, None) {
+                Ok(_) => {}
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(_) => {
+                    conn.reset(Why::Gone);
+                    return;
+                }
+            }
+            let [pipe, _] = &ready;
+            !pipe.revents().is_empty()
+        };
+        if gone {
+            conn.reset(Why::Gone);
+            return;
+        }
+        wake.drain(&mut buf);
+    }
+}
+
+/// Where a pipe can't be waited on beside the connection (Windows'), the copy ends with the peer's End or a write the
+/// program's pipe refuses, its readers gone, as the client's own stdin copy there does (hex-client's `copy_in`).
+#[cfg(not(unix))]
+fn feed(conn: &hex_quic::Conn, mut to: PipeWriter) {
+    let mut buf = vec![0u8; hex_core::lanes::DATA_BOUND];
+    loop {
+        match conn.read(&mut buf, None) {
+            Ok(0) => {
+                drop(to);
+                let _ = conn.end(None);
+                return;
+            }
+            Ok(n) => {
+                if to.write_all(buf.get(..n).unwrap_or_default()).is_err() {
+                    conn.reset(Why::Gone);
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+/// A pipe of a stdin copier's own, which its connection writes a byte to whenever it changes, never waiting: both
+/// ends non-blocking, as a full pipe already says it changed. The copier empties it before it looks again.
+#[cfg(unix)]
+struct Wake {
+    reader: PipeReader,
+    writer: Arc<PipeWriter>,
+}
+
+#[cfg(unix)]
+impl Wake {
+    fn new() -> std::io::Result<Self> {
+        let (reader, writer) = std::io::pipe()?;
+        rustix::io::ioctl_fionbio(&reader, true)?;
+        rustix::io::ioctl_fionbio(&writer, true)?;
+        Ok(Self {
+            reader,
+            writer: Arc::new(writer),
+        })
+    }
+
+    fn notify(&self) -> hex_quic::Notify {
+        let writer = Arc::clone(&self.writer);
+        Arc::new(move || {
+            let _ = (&*writer).write(&[0]);
+        })
+    }
+
+    fn drain(&self, buf: &mut [u8]) {
+        while matches!((&self.reader).read(buf), Ok(n) if n > 0) {}
     }
 }
 
