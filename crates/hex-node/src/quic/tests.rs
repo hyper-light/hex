@@ -272,7 +272,9 @@ fn hex_quic_21_a_programs_stdin_connection_ends_with_its_program_or_its_peer() {
     let copier = std::thread::spawn(move || feed(&ours, w));
     drop(r);
     #[cfg(windows)]
-    theirs.write_all(b"after its end\n", Some(deadline)).unwrap();
+    theirs
+        .write_all(b"after its end\n", Some(deadline))
+        .unwrap();
     let ended = theirs.read(&mut buf, Some(deadline));
     assert!(
         matches!(&ended, Ok(0))
