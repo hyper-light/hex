@@ -221,6 +221,18 @@ pub enum ToKeeper {
     Release { fence: Fence, id: ReservationId },
 }
 
+impl ToKeeper {
+    /// The fence it carries: every message but a hello's.
+    pub fn fence(&self) -> Option<Fence> {
+        match self {
+            ToKeeper::Hello { .. } => None,
+            ToKeeper::Sync { fence, .. }
+            | ToKeeper::Reserve { fence, .. }
+            | ToKeeper::Release { fence, .. } => Some(*fence),
+        }
+    }
+}
+
 /// Why the keeper didn't grant a reservation. The answer carries the view, so the next decision is made
 /// on the room there is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -272,6 +284,9 @@ pub enum Close {
     Invalid(Invalid),
     /// The scope the hello named earns no credit, and why (CV12): the holder may say hello again without it.
     Scope(ScopeRefused),
+    /// The peer isn't a holder the host's configuration authorizes, or said hello as another holder than the one its
+    /// link authenticates (CV8, CV9).
+    NotAuthorized,
 }
 
 /// The keeper's word to a holder.

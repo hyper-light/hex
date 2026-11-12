@@ -82,6 +82,11 @@ pub const CASES: &[Case] = &[
         says: "CV12: a sample that refuses a holder's scope credits nothing and closes its session, typed",
         run: refused_scope,
     },
+    Case {
+        id: "HEX-CV-11",
+        says: "CV4: a link speaks for its own session alone: a fence of another link's session is closed as no session, and changes nothing",
+        run: own_session,
+    },
 ];
 
 /// Runs every case on a fresh machine from `make`; returns the failures.
@@ -589,4 +594,25 @@ fn refused_scope(host: &mut dyn Host) -> Result<(), String> {
         } => Ok(()),
         other => Err(format!("a reserve on the closed session: {other:?}")),
     }
+}
+
+/// HEX-CV-11: two holders joined on links 1 and 2; link 2 reserves under link 1's fence, then link 1 reserves the whole
+/// room; expect link 2's word closed as no session (naming the fence it said) and link 1's reserve granted.
+fn own_session(host: &mut dyn Host) -> Result<(), String> {
+    let first = joined(host, 1, "conformance-a", 1)?;
+    joined(host, 2, "conformance-b", 1)?;
+    match reserve(host, 2, first, id(1, 0), cpu(1000))? {
+        ToHolder::Closed {
+            rejected: Some(fence),
+            why: Close::Session,
+        } if fence == first => {}
+        other => return Err(format!("another link's fence: {other:?}")),
+    }
+    let whole = Amounts {
+        cpu_milli: ROOM.cpu_milli,
+        ..Amounts::ZERO
+    };
+    ensure(granted(&reserve(host, 1, first, id(1, 0), whole)?), || {
+        "the whole room refused after another link said its fence".to_owned()
+    })
 }

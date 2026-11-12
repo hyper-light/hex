@@ -3,9 +3,12 @@
 
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::Mutex;
 
 use hex_api::capacity::sim::SimView;
-use hex_api::capacity::{Amounts, Budget, Event, Holder, Out, ToHolder, ToKeeper, Why};
+use hex_api::capacity::{
+    Amounts, Budget, Close, Event, Holder, Out, ReservationId, ToHolder, ToKeeper, Why,
+};
 use hex_core::patience::Patience;
 use hex_testkit::waits::within;
 use hyper_quic::rustls;
@@ -50,6 +53,19 @@ fn endpoint(ca: &SimCa, name: &str, listen: bool) -> Endpoint {
         },
     })
     .unwrap()
+}
+
+/// The holders a keeper serves, by the names their certificates carry.
+fn named(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| (*name).to_owned()).collect()
+}
+
+/// A log that keeps what it is told.
+fn kept() -> (Log, Arc<Mutex<Vec<String>>>) {
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&lines);
+    let log: Log = Arc::new(move |line: &str| sink.lock().unwrap().push(line.to_owned()));
+    (log, lines)
 }
 
 fn cpu(milli: u64) -> Amounts {
@@ -104,7 +120,12 @@ fn holders_reserve_through_their_keeper_over_quic() {
         reservations: 8,
         name_bytes: 64,
     };
-    let server = Server::new(SimView::new(budget, cpu(4000)).unwrap());
+    let (log, _) = kept();
+    let server = Server::new(
+        SimView::new(budget, cpu(4000)).unwrap(),
+        &named(&["kiln-a.capacity.test", "kiln-b.capacity.test"]),
+        log,
+    );
     let serving = {
         let server = Arc::clone(&server);
         let acceptor = node.acceptor(CAPACITY_PORT);
@@ -119,7 +140,7 @@ fn holders_reserve_through_their_keeper_over_quic() {
     let (suite, _) = a_end.negotiated(a_peer).unwrap().unwrap();
     assert_eq!(suite, rustls::CipherSuite::TLS13_AES_256_GCM_SHA384);
     let mut a_link = Link::open(&a_end, a_peer).unwrap();
-    let mut a = Holder::start("kiln-a".into(), 1, 8, &[]).unwrap();
+    let mut a = Holder::start("kiln-a.capacity.test".into(), 1, 8, &[]).unwrap();
     join(&mut a_link, &mut a);
     let (big, msg) = a.reserve(cpu(3000)).unwrap();
     assert_eq!(
@@ -133,7 +154,7 @@ fn holders_reserve_through_their_keeper_over_quic() {
     })
     .unwrap();
     let mut b_link = Link::open(&b_end, b_peer).unwrap();
-    let mut b = Holder::start("kiln-b".into(), 1, 8, &[]).unwrap();
+    let mut b = Holder::start("kiln-b.capacity.test".into(), 1, 8, &[]).unwrap();
     join(&mut b_link, &mut b);
 
     let (half, msg) = a.reserve(cpu(500)).unwrap();
@@ -164,7 +185,12 @@ fn holders_reserve_through_their_keeper_over_quic() {
 
     let mut a_link = Link::open(&a_end, a_peer).unwrap();
     join(&mut a_link, &mut a);
-    let books = server.view().lock().unwrap().held_by("kiln-a").unwrap();
+    let books = server
+        .view()
+        .lock()
+        .unwrap()
+        .held_by("kiln-a.capacity.test")
+        .unwrap();
     assert_eq!(books, a.held().collect::<Vec<_>>());
 
     drop((a_link, b_link, a_end, b_end, node));
@@ -182,7 +208,12 @@ fn a_connection_that_breaks_the_protocol_is_reset() {
         reservations: 8,
         name_bytes: 64,
     };
-    let server = Server::new(SimView::new(budget, cpu(4000)).unwrap());
+    let (log, _) = kept();
+    let server = Server::new(
+        SimView::new(budget, cpu(4000)).unwrap(),
+        &named(&["kiln-bad.capacity.test"]),
+        log,
+    );
     {
         let server = Arc::clone(&server);
         let acceptor = node.acceptor(CAPACITY_PORT);
@@ -205,6 +236,109 @@ fn a_connection_that_breaks_the_protocol_is_reset() {
         "{read:?}"
     );
     let mut link = Link::open(&end, peer).unwrap();
-    let mut holder = Holder::start("kiln-a".into(), 1, 8, &[]).unwrap();
+    let mut holder = Holder::start("kiln-bad.capacity.test".into(), 1, 8, &[]).unwrap();
     join(&mut link, &mut holder);
+}
+
+/// A link to the keeper at `node` from a new endpoint enrolled as `name`.
+fn linked(ca: &SimCa, node: &Endpoint, name: &str) -> (Endpoint, Link) {
+    let end = endpoint(ca, name, false);
+    let peer = within(&DIAL, |by| {
+        end.dial("keeper-auth.capacity.test", node.local_addr(), by)
+    })
+    .unwrap();
+    let link = Link::open(&end, peer).unwrap();
+    (end, link)
+}
+
+/// AC-T7.4.1, CV8, CV9: a keeper that authorizes kiln-a and kiln-b alone; kiln-a joins and reserves; a peer kiln's CA
+/// enrolled but the keeper doesn't authorize says hello, then a reserve under kiln-a's fence; kiln-b says hello as
+/// kiln-a. Expect kiln-a served; the other peer's hello and reserve closed as not authorized, typed (its holder told
+/// Closed(NotAuthorized)), kiln-a's books unchanged, and one refusal logged for it; kiln-b's hello closed the same way
+/// and logged.
+#[test]
+fn only_the_holders_its_host_authorizes_are_served() {
+    let ca = SimCa::new().unwrap();
+    let node = endpoint(&ca, "keeper-auth.capacity.test", true);
+    let budget = Budget {
+        holders: 2,
+        reservations: 8,
+        name_bytes: 64,
+    };
+    let (log, lines) = kept();
+    let server = Server::new(
+        SimView::new(budget, cpu(4000)).unwrap(),
+        &named(&["kiln-a.capacity.test", "kiln-b.capacity.test"]),
+        log,
+    );
+    {
+        let server = Arc::clone(&server);
+        let acceptor = node.acceptor(CAPACITY_PORT);
+        std::thread::spawn(move || server.serve(acceptor));
+    }
+    let (_a_end, mut a_link) = linked(&ca, &node, "kiln-a.capacity.test");
+    let mut a = Holder::start("kiln-a.capacity.test".into(), 1, 8, &[]).unwrap();
+    join(&mut a_link, &mut a);
+    let (run, msg) = a.reserve(cpu(1000)).unwrap();
+    let ToKeeper::Reserve { fence, .. } = msg.clone() else {
+        panic!("{msg:?}");
+    };
+    assert_eq!(
+        talk(&mut a_link, &mut a, vec![msg]),
+        vec![Event::Granted(run)]
+    );
+
+    let (_m_end, mut m_link) = linked(&ca, &node, "mallory.capacity.test");
+    let mut mallory = Holder::start("mallory.capacity.test".into(), 1, 8, &[]).unwrap();
+    let hello = mallory.connect().unwrap();
+    assert_eq!(
+        talk(&mut m_link, &mut mallory, vec![hello]),
+        vec![Event::Closed(Close::NotAuthorized)]
+    );
+    let theirs = ToKeeper::Reserve {
+        fence,
+        id: ReservationId { epoch: 1, seq: 7 },
+        amount: cpu(3000),
+    };
+    within(&SAY, |by| m_link.say(&theirs, by)).unwrap();
+    assert_eq!(
+        within(&HEAR, |by| m_link.hear(by)).unwrap(),
+        ToHolder::Closed {
+            rejected: Some(fence),
+            why: Close::NotAuthorized
+        }
+    );
+    let books = server
+        .view()
+        .lock()
+        .unwrap()
+        .held_by("kiln-a.capacity.test")
+        .unwrap();
+    assert_eq!(books, a.held().collect::<Vec<_>>());
+
+    let (_b_end, mut b_link) = linked(&ca, &node, "kiln-b.capacity.test");
+    let mut posing = Holder::start("kiln-a.capacity.test".into(), 2, 8, &[]).unwrap();
+    let hello = posing.connect().unwrap();
+    assert_eq!(
+        talk(&mut b_link, &mut posing, vec![hello]),
+        vec![Event::Closed(Close::NotAuthorized)]
+    );
+    let lines = lines.lock().unwrap();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines
+            .iter()
+            .all(|line| line.starts_with("hex.capacity event=refused ")
+                && line.ends_with(" why=not-authorized")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("holder=\"mallory.capacity.test\""))
+            && lines
+                .iter()
+                .any(|line| line.contains("holder=\"kiln-a.capacity.test\"")),
+        "{lines:?}"
+    );
 }
