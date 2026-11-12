@@ -30,6 +30,9 @@ pub struct FirecrackerRuntime {
     books: Weak<dyn Books>,
     initialized: std::sync::OnceLock<()>,
     host: vfio::Host,
+    /// The node's runtime directory (`Node::oci_root`): on tmpfs and shared by every node on the host, where a
+    /// function no reset clears is marked given on this boot.
+    runtime: PathBuf,
     /// The host's boot session, the node's (`Node::boot_session`): a function no reset clears goes to one VM per boot.
     boot: Option<BootSession>,
 }
@@ -49,6 +52,7 @@ impl FirecrackerRuntime {
         config: Config,
         catalog: SharedCatalog,
         books: Weak<dyn Books>,
+        runtime: PathBuf,
         boot: Option<BootSession>,
     ) -> Result<Self, Refusal> {
         config.verify_inputs()?;
@@ -58,6 +62,7 @@ impl FirecrackerRuntime {
             books,
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system()?,
+            runtime,
             boot,
         })
     }
@@ -463,9 +468,10 @@ impl FirecrackerRuntime {
         }
         let mut record = transaction.read(&id)?.ok_or_else(|| uncertain(&id))?;
         let plan = vfio::plan(&self.host, &self.catalog, &record.spec.devices, &[])?;
-        // A function no reset clears goes to one VM per host boot: refused where a VM had it on this one.
-        let once = vfio::once_per_boot(&self.host, &plan)?;
-        let marks = single_use::Marks::of(&self.config.state_dir, self.boot.as_ref())?;
+        // A function no reset clears goes to one VM per host boot: refused where any node's VM had it on this one.
+        let functions = vfio::functions(&plan)?;
+        let once = vfio::once_per_boot(&self.host, &functions)?;
+        let marks = single_use::Marks::of(&self.runtime, self.boot.as_ref())?;
         if let Some((function, spent)) = marks.check(&once)? {
             return Err(single_use::refused(function, spent, self.boot.as_ref()));
         }
@@ -719,9 +725,10 @@ impl FirecrackerRuntime {
         )?;
         // A function no reset clears that the observer had on this boot can't go to a box before the host reboots:
         // the pool says so before its observer is drained.
-        let once = vfio::once_per_boot(&self.host, &plan)?;
+        let functions = vfio::functions(&plan)?;
+        let once = vfio::once_per_boot(&self.host, &functions)?;
         if let Some((function, spent)) =
-            single_use::Marks::of(&self.config.state_dir, self.boot.as_ref())?.check(&once)?
+            single_use::Marks::of(&self.runtime, self.boot.as_ref())?.check(&once)?
         {
             return Err(single_use::pool_refused(
                 "a GPU pool's handoff to a box (VFIO)",
@@ -923,13 +930,19 @@ impl FirecrackerRuntime {
             .devices
             .try_reserve_exact(self.catalog.entries().len())
             .map_err(|_| exhausted("VFIO capacity", self.catalog.entries().len()))?;
+        // A function no reset clears that a VM had on this boot is listed, never offered: unavailable, with why.
+        let marks = single_use::Marks::of(&self.runtime, self.boot.as_ref())?;
+        let mut unavailable = Vec::new();
+        unavailable
+            .try_reserve_exact(self.catalog.entries().len())
+            .map_err(|_| exhausted("unavailable VFIO capacity", self.catalog.entries().len()))?;
         for entry in self
             .catalog
             .entries()
             .iter()
             .filter(|entry| entry.binding(Route::Vfio).is_some())
         {
-            if entry.info.id.kind == DeviceKind::Gpu {
+            let device = if entry.info.id.kind == DeviceKind::Gpu {
                 // An administrator's catalog is not current VRAM/load evidence. Prebound VFIO
                 // may hide host NVML: only the same initialized facts provider may supply this
                 // actual identity/metadata observation (including a witnessed live guest).
@@ -943,15 +956,23 @@ impl FirecrackerRuntime {
                 vfio::validate(&self.host, entry, &vmms)?;
                 let mut actual = actual.try_clone()?;
                 actual.holder = self.catalog.holder(entry.info.id, &records, &pools)?;
-                capacity.devices.push(actual);
-                continue;
+                actual
+            } else {
+                vfio::validate(&self.host, entry, &vmms)?;
+                entry.report(self.catalog.holder(entry.info.id, &records, &pools)?)?
+            };
+            // A box holding it keeps it as its own; anything else, a pool's observer included, may not offer it on.
+            if !matches!(device.holder, Some(hex_api::DeviceHolder::Box(_))) {
+                let declared = vfio::declared(entry)?;
+                let once = vfio::once_per_boot(&self.host, &declared)?;
+                if let Some((function, spent)) = marks.check(&once)? {
+                    unavailable.push(hex_api::DeviceUnavailable {
+                        id: device.id,
+                        why: single_use::reason(function, spent, self.boot.as_ref()),
+                    });
+                }
             }
-            vfio::validate(&self.host, entry, &vmms)?;
-            capacity.devices.push(entry.report(self.catalog.holder(
-                entry.info.id,
-                &records,
-                &pools,
-            )?)?);
+            capacity.devices.push(device);
         }
         let count = pools
             .iter()
@@ -1024,11 +1045,13 @@ impl FirecrackerRuntime {
             if let Some((source, bit)) = fresh
                 && (device.id.kind != DeviceKind::Gpu
                     || source.devices.binary_search(&device.id).is_ok())
+                && !unavailable.iter().any(|spent| spent.id == device.id)
             {
                 word |= bit;
             }
             capacity.device_routes.push(word);
         }
+        capacity.unavailable = unavailable;
         capacity.check()?;
         Ok(Some(capacity))
     }
@@ -1650,6 +1673,7 @@ mod handoff_tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
+            runtime: PathBuf::from("/nonexistent/runtime"),
             boot: None,
         };
         let devices = [256, 512]
@@ -1755,6 +1779,7 @@ mod handoff_tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
+            runtime: PathBuf::from("/nonexistent/runtime"),
             boot: None,
         };
         let full = [256, 512].map(|key| DeviceId {
@@ -1959,6 +1984,7 @@ mod cleanup_tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
+            runtime: PathBuf::from("/nonexistent/runtime"),
             boot: None,
         };
         let id = BoxId::new("cleanup-refused").unwrap();
@@ -2184,6 +2210,7 @@ mod memlock_tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
+            runtime: PathBuf::from("/nonexistent/runtime"),
             boot: None,
         };
         let id = BoxId::new("gpu-memlock").unwrap();
@@ -2373,47 +2400,56 @@ mod single_use_tests {
         Some(BootSession::new(name).unwrap())
     }
 
-    /// The lead's ruling of 2026-11-11 (AC-T7.4.1; original): GPU run r940 on 00aad8da found 0000:79:00.0 broken in
-    /// the VM after r862's ("PSP create ring failed"): its kernel lists no reset that clears it between VMs, so the
-    /// next VM given it boots into the last one's state. Do: on a stand-in host, create a VM given a function whose
-    /// kernel lists no reset method, its VMM ending at once; then a second VM given it on the same boot; then a third
-    /// on a later boot. Expect the first handed it (its VMM launched), the second refused by type before its VMM,
-    /// saying it has no reset method and the host must reboot, and the third handed it again.
-    #[test]
-    fn original_a_function_no_reset_clears_goes_to_one_vm_per_boot() {
-        let dir = tempfile::tempdir().unwrap();
-        let host = vfio::stand_in::host(&dir.path().join("host"), vfio::stand_in::opened);
+    const THIS_BOOT: &str = "6d1c0e2a-7b4f-4a3e-9c51-1f0e2d3c4b5a";
+
+    /// The host the tests' nodes share, at `root`: one function, `0000:01:00.0`, alone in IOMMU group 7, a display
+    /// controller bound to vfio-pci whose kernel lists no reset method.
+    fn stand_in(root: &Path) {
+        let host = vfio::stand_in::host(root, vfio::stand_in::opened);
         vfio::stand_in::function(&host, "0000:01:00.0", 7, "vfio-pci", "0x030000", None);
+    }
+
+    /// A node's adapter on the host at `host` with catalog `catalog`: its state under `dir`, its runtime directory
+    /// `runtime`, on boot `boot`.
+    fn node(
+        dir: &Path,
+        host: &Path,
+        runtime: &Path,
+        catalog: &[u8],
+        owner: &Arc<dyn Books>,
+    ) -> FirecrackerRuntime {
+        fs::create_dir_all(dir).unwrap();
+        fs::create_dir_all(runtime).unwrap();
         let pinned = |name: &str, bytes: &[u8]| {
-            let path = dir.path().join(name);
+            let path = dir.join(name);
             fs::write(&path, bytes).unwrap();
             (path, <[u8; 32]>::from(Sha256::digest(bytes)))
         };
         let mut config = pool::tests::config();
         (config.binary, config.binary_sha256) = pinned("firecracker", b"a stand-in VMM, never run");
         (config.cost_evidence, config.cost.id) = pinned("evidence", b"a stand-in cost's evidence");
-        config.state_dir = dir.path().join("state");
+        config.state_dir = dir.join("state");
         fs::create_dir(&config.state_dir).unwrap();
-        let allocation = config
-            .cost
-            .allocate(CapacityResources {
-                cpu_milli: 1000,
-                mem_bytes: hex_api::MIN_MEMORY,
-                disk_bytes: 0,
-            })
-            .unwrap();
-        let catalog =
-            Catalog::parse(b"hex-devices-1\ngpu\t256\ta\t1\tvfio\t0000:01:00.0\t7\n").unwrap();
-        let owner: Arc<dyn Books> = Arc::new(super::handoff_tests::NoOwnerCalls);
-        let mut runtime = FirecrackerRuntime {
+        FirecrackerRuntime {
             config,
-            catalog: triomphe::Arc::try_new(catalog).unwrap(),
-            books: Arc::downgrade(&owner),
+            catalog: triomphe::Arc::try_new(Catalog::parse(catalog).unwrap()).unwrap(),
+            books: Arc::downgrade(owner),
             initialized: std::sync::OnceLock::new(),
-            host,
-            boot: boot("6d1c0e2a-7b4f-4a3e-9c51-1f0e2d3c4b5a"),
-        };
-        let spec = |name: &str| BoxSpec {
+            host: vfio::Host {
+                sys: host.join("sys"),
+                dev: host.join("dev"),
+                open: vfio::stand_in::opened,
+            },
+            runtime: runtime.to_path_buf(),
+            boot: boot(THIS_BOOT),
+        }
+    }
+
+    const GPU: &[u8] = b"hex-devices-1\ngpu\t256\ta\t1\tvfio\t0000:01:00.0\t7\n";
+
+    /// A VM given the stand-in GPU on `node`.
+    fn spec(node: &FirecrackerRuntime, name: &str) -> BoxSpec {
+        BoxSpec {
             id: BoxId::new(name).unwrap(),
             bounds: hex_api::Bounds {
                 cpu_max_milli: Some(1000),
@@ -2433,7 +2469,16 @@ mod single_use_tests {
                 kind: DeviceKind::Gpu,
                 key: 256,
             }],
-            allocation: Some(allocation),
+            allocation: Some(
+                node.config
+                    .cost
+                    .allocate(CapacityResources {
+                        cpu_milli: 1000,
+                        mem_bytes: hex_api::MIN_MEMORY,
+                        disk_bytes: 0,
+                    })
+                    .unwrap(),
+            ),
             route: Some(RouteReceipt {
                 key: RouteKey {
                     class: Class::Firecracker,
@@ -2446,32 +2491,208 @@ mod single_use_tests {
                 },
                 backing: None,
             }),
+        }
+    }
+
+    fn create(node: &FirecrackerRuntime, books: &Handed, name: &str) -> Result<BoxInfo, Refusal> {
+        let until = Instant::now() + std::time::Duration::from_secs(30);
+        node.create_or_cleanup(
+            &BoxId::new(name).unwrap(),
+            spec(node, name),
+            None,
+            books,
+            until,
+        )
+    }
+
+    fn refused_for_its_boot(refused: &Result<BoxInfo, Refusal>) {
+        let Err(Refusal::Platform { why, .. }) = refused else {
+            panic!("refused by type: {refused:?}");
         };
+        for named in ["0000:01:00.0", "no reset method", "the host must reboot"] {
+            assert!(why.contains(named), "{named}: {why}");
+        }
+    }
+
+    /// The lead's ruling of 2026-11-11 (AC-T7.4.1; original): GPU run r940 on 00aad8da found 0000:79:00.0 broken in
+    /// the VM after r862's ("PSP create ring failed"): its kernel lists no reset that clears it between VMs, so the
+    /// next VM given it boots into the last one's state. Do: on a stand-in host, create a VM given a function whose
+    /// kernel lists no reset method, its VMM ending at once; then a second VM given it on the same boot; then a third
+    /// on a later boot. Expect the first handed it (its VMM launched), the second refused by type before its VMM,
+    /// saying it has no reset method and the host must reboot, and the third handed it again.
+    #[test]
+    fn original_a_function_no_reset_clears_goes_to_one_vm_per_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        stand_in(&dir.path().join("host"));
+        let owner: Arc<dyn Books> = Arc::new(super::handoff_tests::NoOwnerCalls);
+        let mut runtime = node(
+            &dir.path().join("node"),
+            &dir.path().join("host"),
+            &dir.path().join("runtime"),
+            GPU,
+            &owner,
+        );
         let books = Handed::default();
-        let create = |runtime: &FirecrackerRuntime, name: &str| {
-            let until = Instant::now() + std::time::Duration::from_secs(30);
-            runtime.create_or_cleanup(&BoxId::new(name).unwrap(), spec(name), None, &books, until)
-        };
-        let first = create(&runtime, "first-vm");
+        let first = create(&runtime, &books, "first-vm");
         assert!(matches!(first, Err(Refusal::Broken(_))), "{first:?}");
         assert_eq!(books.launched.get(), 1, "the first VM is handed it");
         assert!(books.records.borrow().is_empty(), "the first VM is gone");
-        let second = create(&runtime, "second-vm");
+        let second = create(&runtime, &books, "second-vm");
         assert_eq!(
             books.launched.get(),
             1,
             "a second VM on the same boot is refused before its VMM: {second:?}"
         );
-        let Err(Refusal::Platform { why, .. }) = &second else {
-            panic!("refused by type: {second:?}");
-        };
-        for named in ["0000:01:00.0", "no reset method", "the host must reboot"] {
-            assert!(why.contains(named), "{named}: {why}");
-        }
+        refused_for_its_boot(&second);
         assert!(books.records.borrow().is_empty(), "nothing of it is kept");
         runtime.boot = boot("0f9e8d7c-6b5a-4c3d-8e1f-2a3b4c5d6e7f");
-        let third = create(&runtime, "third-vm");
+        let third = create(&runtime, &books, "third-vm");
         assert!(matches!(third, Err(Refusal::Broken(_))), "{third:?}");
         assert_eq!(books.launched.get(), 2, "a later boot's VM is handed it");
+    }
+
+    /// The lead's ruling of 2026-11-11 (AC-T7.4.1; original): a function's mark lay in its node's own state, so a node
+    /// with another state directory on the same host and boot (a fresh one, or the lab's next run) handed the same
+    /// spent function out again. Do: on one stand-in host and boot, create a VM given a function no reset clears on
+    /// one node, its VMM ending at once, then on a second node with another state directory but the host's runtime
+    /// directory. Expect the first handed it and the second refused by type before its VMM.
+    #[test]
+    fn original_another_node_on_the_host_is_refused_a_function_one_node_spent_this_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        stand_in(&dir.path().join("host"));
+        let owner: Arc<dyn Books> = Arc::new(super::handoff_tests::NoOwnerCalls);
+        let [first, second] = ["first-node", "second-node"].map(|name| {
+            node(
+                &dir.path().join(name),
+                &dir.path().join("host"),
+                &dir.path().join("runtime"),
+                GPU,
+                &owner,
+            )
+        });
+        let (first_books, second_books) = (Handed::default(), Handed::default());
+        let given = create(&first, &first_books, "first-vm");
+        assert!(matches!(given, Err(Refusal::Broken(_))), "{given:?}");
+        assert_eq!(first_books.launched.get(), 1, "the first node hands it out");
+        let refused = create(&second, &second_books, "second-vm");
+        assert_eq!(
+            second_books.launched.get(),
+            0,
+            "another node on the same boot is refused it before its VMM: {refused:?}"
+        );
+        refused_for_its_boot(&refused);
+    }
+
+    /// One node's records, empty, over a host of ample room: what a backend's capacity reads.
+    struct Room;
+
+    impl Books for Room {
+        fn records(&self) -> Result<Records, Refusal> {
+            Ok(Records::new())
+        }
+        fn pool_records(&self) -> Result<PoolRecords, Refusal> {
+            Ok(PoolRecords::new())
+        }
+        fn prepare_pool(
+            &self,
+            _: [u8; 32],
+            _: Execution,
+            _: hex_api::RuntimeCost,
+            _: &[DeviceId],
+            _: (&[u8; 32], &[DeviceId], Option<&PoolRecord>),
+            _: &mut crate::devices::PoolPreparationCheck<'_>,
+        ) -> Result<PoolRecord, Refusal> {
+            panic!("a host of no GPU prepares no pool")
+        }
+        fn capacity(&self) -> Result<hex_api::Capacity, Refusal> {
+            let room = CapacityResources {
+                cpu_milli: 64_000,
+                mem_bytes: 1 << 40,
+                disk_bytes: 1 << 40,
+            };
+            Ok(hex_api::Capacity {
+                id: "node:stand-in".into(),
+                total: room,
+                free: room,
+                devices: Vec::new(),
+                cost: None,
+                routes: Vec::new(),
+                device_routes: Vec::new(),
+                backings: Vec::new(),
+                unavailable: Vec::new(),
+            })
+        }
+        fn physical_devices(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {
+            panic!("a backend's capacity probes nothing")
+        }
+        fn with_transaction(
+            &self,
+            _: &BoxId,
+            _: &[DeviceId],
+            _: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+        ) -> Result<(), Refusal> {
+            panic!("a backend's capacity enters no transaction")
+        }
+        fn with_pool_transaction(
+            &self,
+            _: &hex_api::BackingKey,
+            _: &[DeviceId],
+            _: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+        ) -> Result<(), Refusal> {
+            panic!("a backend's capacity enters no transaction")
+        }
+        fn with_handoff_transaction(
+            &self,
+            _: &BoxId,
+            _: &hex_api::BackingKey,
+            _: &[DeviceId],
+            _: &mut dyn FnMut(&dyn Transaction) -> Result<(), Refusal>,
+        ) -> Result<(), Refusal> {
+            panic!("a backend's capacity enters no transaction")
+        }
+    }
+
+    /// The lead's ruling of 2026-11-11 (AC-T7.4.1; original): a VFIO function no reset clears, spent on this boot, read
+    /// as free in the backend's capacity, so placement could choose it and only its create refused it. Do: mark a
+    /// stand-in VFIO group's one function given on this boot, as a VM given it leaves it, and read the backend's
+    /// capacity. Expect the group listed, and listed unavailable with why: no reset method, the host must reboot.
+    #[test]
+    fn original_a_spent_function_is_listed_unavailable_with_why() {
+        let dir = tempfile::tempdir().unwrap();
+        stand_in(&dir.path().join("host"));
+        let owner: Arc<dyn Books> = Arc::new(Room);
+        let node = node(
+            &dir.path().join("node"),
+            &dir.path().join("host"),
+            &dir.path().join("runtime"),
+            b"hex-devices-1\nvfio\t7\tgroup-7\t0\tvfio\t0000:01:00.0\t7\n",
+            &owner,
+        );
+        node.initialized.set(()).unwrap();
+        single_use::Marks::of(&dir.path().join("runtime"), node.boot.as_ref())
+            .unwrap()
+            .spend(&["0000:01:00.0"])
+            .unwrap();
+        let group = DeviceId {
+            kind: DeviceKind::Vfio,
+            key: 7,
+        };
+        let capacity = node.capacity(Class::Firecracker).unwrap().unwrap();
+        assert!(
+            capacity.devices.iter().any(|device| device.id == group),
+            "listed: {:?}",
+            capacity.devices
+        );
+        let [unavailable] = &capacity.unavailable[..] else {
+            panic!("listed unavailable once: {:?}", capacity.unavailable);
+        };
+        assert_eq!(unavailable.id, group);
+        for named in ["0000:01:00.0", "no reset method", "the host must reboot"] {
+            assert!(
+                unavailable.why.contains(named),
+                "{named}: {}",
+                unavailable.why
+            );
+        }
     }
 }

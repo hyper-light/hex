@@ -64,10 +64,15 @@ and vfio-pci proceeds without one
 ([vfio_pci_core.c](https://github.com/torvalds/linux/blob/v7.3/drivers/vfio/pci/vfio_pci_core.c#L612)).
 The guest driver resets no APU at init
 ([nv.c at v6.18](https://github.com/torvalds/linux/blob/v6.18/drivers/gpu/drm/amd/amdgpu/nv.c#L542)).
-Its VBIOS is also unverified: the VMM ignores ROM BAR access (`vendor/firecracker/src/vmm/src/vfio.rs`)
-and builds no VFCT table (upstream `src/vmm/src/acpi/mod.rs` at the pinned commit), so amdgpu can
-use only a copy at the start of BAR0, which firmware leaves "if a discrete card is present"
-([amdgpu_bios.c at v6.18](https://github.com/torvalds/linux/blob/v6.18/drivers/gpu/drm/amd/amdgpu/amdgpu_bios.c#L94)).
+Its VBIOS comes from the host. The VMM ignores ROM BAR access (`vendor/firecracker/src/vmm/src/vfio.rs`),
+and firmware leaves a copy at the start of BAR0 only "if a discrete card is present"
+([amdgpu_bios.c at v6.18](https://github.com/torvalds/linux/blob/v6.18/drivers/gpu/drm/amd/amdgpu/amdgpu_bios.c#L94)),
+so GPU run r690's guest found none ("Unable to locate a BIOS ROM"). amdgpu reads the ACPI VFCT table
+first. Hex's recorded patch
+`vendor/patches/firecracker/0004-vfio-give-a-passthrough-function-s-video-bios-image-to-the.patch`
+builds that table from the image file the administrator names for each function in the Firecracker
+config (`vbios`: its path and SHA-256, checked at launch as the VMM binary is). Runs r761 and r985
+found the image there.
 
 ## Option B: the NVIDIA GPU (either host)
 
@@ -117,11 +122,19 @@ So 79:00.0's bus reset is always refused.
 
 **What Hex does** (`firecracker/vfio.rs` `once_per_boot`, `firecracker/single_use.rs`):
 - Any other function goes to one VM per host boot.
-- Its mark in the adapter's state, `single-use/<sbdf>`, names the boot session the node stamps its
-  records with. It is written durably before the VMM that opens the function starts.
-- A later VM on that boot is refused by type before anything starts: "no reset method ... the host
-  must reboot". This includes a pool's observer, and a box after that observer.
+- Its mark, `vfio-single-use/<sbdf>`, names the boot session the node stamps its records with. It
+  is written durably before the VMM that opens the function starts.
+- The mark lives in the node's runtime directory, which every node on the host shares:
+  `/run/hex-node` for a root node, `$XDG_RUNTIME_DIR/hex-node` otherwise. So a node with another
+  state directory sees it too, and a reboot clears it.
+- A later VM on that boot, any node's, is refused by type before anything starts: "no reset method
+  ... the host must reboot". This includes a pool's observer, and a box after that observer.
+- Capacity still lists the function, and lists it in `unavailable` with that reason. The scheduler
+  never offers it, and a spent observer GPU loses its pool's fresh route.
 - A later boot's session admits the function again. A boot session that can't be read refuses it.
+- Where the mark can be lost, so can its refusal:
+  - `$XDG_RUNTIME_DIR` is removed when its user's last session ends, unless that user lingers.
+  - A rootless node with no `$XDG_RUNTIME_DIR` keeps its runtime directory in its own state.
 - A function a reset clears keeps vfio-pci's reset at release, as before. That reset's outcome is
   invisible to Hex: the kernel reports it only at debug level, and to no process.
 
@@ -131,5 +144,6 @@ So 79:00.0's bus reset is always refused.
 
 ## What would change this
 
-A guest amdgpu "Unable to locate a BIOS ROM" makes option A need a VMM change (a ROM BAR served from
-a file, or a VFCT table).
+- A guest amdgpu that refuses the VFCT image makes option A need another way to its VBIOS.
+- A kernel or firmware that lists a reset of 79:00.0's own makes its GPU go to more than one VM per
+  boot.
