@@ -41,23 +41,32 @@ pub struct ImageWaits {
 
 impl ImageWaits {
     /// Seeded from records.tsv ([`hex_client::guest::shards::recorded`]): `image_boot`, `image_stats` and
-    /// `image_stop`. A measure no host class records is refused, naming the record to take.
+    /// `image_stop`. A measure no host class records is refused, naming the record to take, but where the
+    /// waits census runs ([`hex_core::patience::measures_all`]): it arms no wait, so there each measures, and
+    /// the census takes its first record (hex-cli's `image_real`; docs/design/shards-image-class.md §6).
     pub fn recorded() -> Result<Self, Refusal> {
-        use hex_client::guest::shards::recorded;
-        Ok(Self::seeded(
-            recorded("image_boot")?,
-            recorded("image_stats")?,
-            recorded("image_stop")?,
-        ))
+        Self::from_records(
+            hex_client::guest::shards::recorded,
+            hex_core::patience::measures_all(),
+        )
     }
 
-    /// Seeded from these slowest answers.
-    pub fn seeded(boot: Duration, stats: Duration, stop: Duration) -> Self {
-        Self {
-            boot: Patience::seeded("hex.image.boot", boot),
-            stats: Patience::seeded("hex.image.stats", stats),
-            stop: Patience::seeded("hex.image.stop", stop),
-        }
+    /// Each wait seeded from `record`'s slowest answer for its measure, or, where it has none, measuring
+    /// while the `census` runs, else refused as `record` refuses it.
+    fn from_records(
+        record: impl Fn(&str) -> Result<Duration, Refusal>,
+        census: bool,
+    ) -> Result<Self, Refusal> {
+        let wait = |name: &'static str, measure: &str| match record(measure) {
+            Ok(slowest) => Ok(Patience::seeded(name, slowest)),
+            Err(_) if census => Ok(Patience::measuring(name)),
+            Err(why) => Err(why),
+        };
+        Ok(Self {
+            boot: wait("hex.image.boot", "image_boot")?,
+            stats: wait("hex.image.stats", "image_stats")?,
+            stop: wait("hex.image.stop", "image_stop")?,
+        })
     }
 }
 
