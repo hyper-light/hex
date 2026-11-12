@@ -197,6 +197,45 @@ pub fn run_state(pid: i32) -> io::Result<Option<Run>> {
     }))
 }
 
+/// The descriptors process `pid` holds, as `proc_pidinfo(PROC_PIDLISTFDS)` lists them: the read opens
+/// none itself. XNU sizes the list from a call with no buffer (its open slots and 20 more) and then
+/// writes at most the slots the buffer holds (`bsd/kern/proc_info.c` `proc_pidfdlist`).
+#[cfg(test)]
+pub(crate) fn descriptors(pid: i32) -> io::Result<Vec<i32>> {
+    // SAFETY: with a null buffer and a size of 0, proc_pidinfo writes nothing and returns the bytes it needs.
+    let needed =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    if needed <= 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let each = size_of::<libc::proc_fdinfo>();
+    let slots = usize::try_from(needed).map_err(io::Error::other)? / each;
+    let mut list = vec![
+        libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0,
+        };
+        slots
+    ];
+    let size = c_int::try_from(slots * each).map_err(io::Error::other)?;
+    // SAFETY: proc_pidinfo writes at most `size` bytes, whole proc_fdinfo entries, into `list`, which
+    // holds `slots` of them and outlives the call.
+    let wrote = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            list.as_mut_ptr().cast::<c_void>(),
+            size,
+        )
+    };
+    if wrote <= 0 {
+        return Err(io::Error::last_os_error());
+    }
+    list.truncate(usize::try_from(wrote).map_err(io::Error::other)? / each);
+    Ok(list.iter().map(|info| info.proc_fd).collect())
+}
+
 /// What a process's threads are doing, as `proc_pidinfo(PROC_PIDTASKINFO)` reads them: XNU counts each
 /// thread whose state has `TH_RUN`, on a core or waiting for one (`fill_taskprocinfo`,
 /// `osfmk/kern/bsd_kern.c`).

@@ -164,3 +164,63 @@ impl Directory {
         std::fs::rename(&next, &self.peak_file)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The argument that turns `descriptor_probe` on: a filter no test is named, so the probe's run
+    /// runs it alone.
+    const PROBE: &str = "hex-descriptor-probe";
+
+    /// Not a test of its own: the tool `a_tool_the_directory_runs_holds_only_its_stdio` starts (this
+    /// binary, named so), which prints the descriptors it holds.
+    #[test]
+    fn descriptor_probe() {
+        if !std::env::args_os().any(|arg| arg == PROBE) {
+            return;
+        }
+        let pid = rustix::process::getpid().as_raw_nonzero().get();
+        let held = crate::macos::sys::descriptors(pid).unwrap();
+        let held: Vec<String> = held.iter().map(i32::to_string).collect();
+        println!("HEX_FDS {}", held.join(" "));
+    }
+
+    /// AC-T7.4.1 (CLAUDE.md §12, CVE-2024-21626's class): a tool the box helper runs holds only the
+    /// descriptors it is given, its stdio. Do: hold a descriptor without close-on-exec, as a pipe
+    /// another thread has just made holds its ends until its fcntl (macOS's pipe(2) takes no flag),
+    /// and run a tool through the directory's runner: this binary's descriptor probe, which lists
+    /// what it holds (proc_pidinfo). Expect: its stdio, 0, 1 and 2, and nothing else.
+    #[test]
+    fn a_tool_the_directory_runs_holds_only_its_stdio() {
+        let (reader, _writer) = std::io::pipe().unwrap();
+        // dup(2) leaves the copy without close-on-exec: the state of a fresh pipe's end before its fcntl.
+        let open = rustix::io::dup(&reader).unwrap();
+        assert!(
+            !rustix::io::fcntl_getfd(&open)
+                .unwrap()
+                .contains(rustix::io::FdFlags::CLOEXEC)
+        );
+        let exe = std::env::current_exe().unwrap();
+        let probe = concat!(module_path!(), "::descriptor_probe");
+        let probe = probe.split_once("::").map_or(probe, |(_, test)| test);
+        let printed = run(
+            exe.to_str().unwrap(),
+            &["--exact", probe, "--nocapture", "--test-threads=1", PROBE],
+        )
+        .unwrap();
+        let held: Vec<i32> = printed
+            .lines()
+            .find_map(|line| line.strip_prefix("HEX_FDS "))
+            .unwrap_or_else(|| panic!("the probe printed no descriptors: {printed}"))
+            .split_whitespace()
+            .map(|fd| fd.parse().unwrap())
+            .collect();
+        assert_eq!(
+            held,
+            [0, 1, 2],
+            "the tool held descriptors it wasn't given (this process's {} without close-on-exec among them)",
+            std::os::fd::AsRawFd::as_raw_fd(&open)
+        );
+    }
+}
