@@ -2,8 +2,10 @@
 
 Joint plan step 14 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d`, "[Hex + Shards] Learned microVM charge, a
 contention rule, and budgets per fleet"), serving AC-T7.4.1 (placement) and AC-T7.5.2 (shares under
-contention). Status: the charge by measured use is the person's decision; the contention rule (C4 to C6) and
-the admission interface with step 13 (C8) are proposed for ROOT and, where it needs her choice, the person.
+contention). Status: the charge by measured use is the person's decision (below); the plan has the research shape
+the rule without holding the step up, and ROOT took the rule (C1 to C7) and the interface with step 13 (C8) on
+2026-11-12, correcting C1's memory and C2's prior to the forms below. ROOT measures density, fairness and the
+violation rates once it is built.
 
 Sources: kiln research `01a1cd8f5b8b77649ccb95ad26875842` (findings cited `f<n>` with kiln's grade; raw texts in
 `~/.cache/hex-lead/research/hexres-c14`); Linux `Documentation/admin-guide/cgroup-v2.rst` at `1590cf03`; Shards
@@ -13,7 +15,8 @@ Sources: kiln research `01a1cd8f5b8b77649ccb95ad26875842` (findings cited `f<n>`
 ## The person's choice
 
 "For 14 - of course go" (the plan header's decision 3): Hex charges a microVM by its measured use, its envelope
-the ceiling.
+the ceiling. Published schedulers and production fleets, from a laptop to multi-datacenter scale, shape the
+contention rule and the predictors; they do not hold the step up.
 
 ## What is charged today (Hex main `0f28f75e`)
 
@@ -34,37 +37,40 @@ the ceiling.
 - **A window's sample** is the VMM's whole CPU over it, which KVM and HVF count with its guest's (guest_cost's
   `Use`): every vCPU's guest time plus the VMM's own. The per-vCPU split is typed-absent
   (`Awaits(GuestCpuTimePerVcpu)`) until Shards' p/guest-cpu-time-v1 and goal 12 put it in `Usage`; the charge
-  needs only the sum, and checks the split against it once it comes. Memory is what the VMM holds as the census
-  reads it (Linux `memory.stat` anon plus kernel; macOS its physical footprint), its guest's touched RAM
-  included; disk is its folders' bytes.
-- **CPU charge**: the nearest-rank p99.9 of its last SEEDABLE windows' CPU, the second largest of 1,000.
-- **Memory and disk charge**: `INPUT_MARGIN` (2) times the most it has held.
+  needs only the sum, and checks the split against it once it comes. Memory is the most the VMM held in the window
+  as the census reads it (Linux `memory.stat` anon plus kernel; macOS its physical footprint), its guest's touched
+  RAM included; disk is its folders' bytes.
+- **The charge**, each of CPU, memory and disk: the nearest-rank p99.9 of its last SEEDABLE windows (of CPU, and of
+  memory's and disk's high-water marks), the second largest of 1,000.
 - **Ceiling**: each at most its allocation (envelope and VMM overhead). Learning never raises authority (R03).
 - **Cold**: until it has SEEDABLE windows its charge is no less than its booking (C2), as its p99.9 is not yet an
   observed sample.
+- Use that grows past the charge is the contention rule's (C4, C5), not a margin's.
 
-**Sources.** CPU past its share only throttles; memory past it is killed (f23 A, f43 A, f44 A), so CPU takes a
-tail of its use and memory a margin over its peak (f82 B). A per-task percentile, summed per machine, is the
-per-task half of Google's production peak predictor (f27 A), taken here at Hex's tail of record: p99.9 is the
-bar's (`hex-sim-constants.md`, "the quantiles reported"), and decision 9's census rule makes SEEDABLE the fewest
-samples whose nearest-rank p99.9 is an observed sample, not the maximum (`bench/competitive/probes/waits_census.py`).
-The memory margin is the lead's input-bound rule (`hex_sim::census::INPUT_MARGIN`); one agent task's runs vary
-1.8x (f76 A), inside it. With no history every production system charges the limit (f60 A).
+**Sources.** A per-task percentile, summed per machine, is the per-task half of Google's production peak
+predictor (f27 A), taken here at Hex's tail of record: p99.9 is the bar's (`hex-sim-constants.md`, "the quantiles
+reported"), and decision 9's census rule makes SEEDABLE the fewest samples whose nearest-rank p99.9 is an observed
+sample, not the maximum (`bench/competitive/probes/waits_census.py`). Memory follows its high-water marks, not its
+mean (f82 B; Autopilot's memory signal is the peak, f24 A). CPU past its share only throttles and memory past it is
+reclaimed or killed (f23 A, f43 A, f44 A), which C4 and C5 handle. With no history every production system charges
+the limit (f60 A).
 
-**What would falsify it.** On ROOT's recorded Shards agent traces, a VM's windows past its CPU charge more often
-than one in SEEDABLE (the violation rate, which tracks scheduling latency: f28 A). The history is SEEDABLE windows
-of the enforcement window, 100 s on Linux and a few seconds on macOS, whose cycle is milliseconds; if it is too
-short there, the history becomes the VM's life. Or a VM's memory past twice its peak within one session.
+**What would falsify it.** On ROOT's recorded Shards agent traces, a VM's windows past its charge more often than
+one in SEEDABLE (the violation rate, which tracks scheduling latency: f28 A). The history is SEEDABLE windows of the
+enforcement window, 100 s on Linux and a few seconds on macOS, whose cycle is milliseconds; if it is too short
+there, the history becomes the VM's life.
 
 ## C2. A new VM is booked at its class's learned prior
 
 **The choice.** A VM's class is its runtime class, its cost profile's id and its ceiling: VMs of one Agentfile
-image and size. A new VM is booked at its class's prior: the most any VM of the class was charged on this node's
-record once it had SEEDABLE windows, only rising, as `Patience` learns a wait; with none on record, its allocation.
+image and size. A new VM is booked at its class's prior: by the same sample rule, the nearest-rank p99.9 of the
+class's last SEEDABLE windows of its warmed VMs (each warmed VM's window a sample, as its own charge's is), each
+dimension at most the allocation. It falls when the evidence does: an outlier's windows leave the sample as newer
+ones come. With no warmed VM of the class on record, its allocation.
 
 **Sources.** Resource Central predicts a new VM from its class, as a subscription's VMs behave alike, 81% accurate
 for average CPU (f62 A), and counts a VM it can't predict as using all it was allocated (f29 A); an empirical-Bayes
-prior by class is kiln's (f64 C). Only rising is decision 9's rule for a learned bound.
+prior by class is kiln's (f64 C).
 
 **What would falsify it.** New VMs of a class exceeding the prior they were booked at more often than warmed ones
 exceed their own charge.
@@ -111,9 +117,10 @@ on hardware (ROOT's fairness run).
   its ceiling.
 - **An over VM** is held at its budget; its booking rises into slack as other VMs' bookings fall or end.
 - **Last**, when what the fleet's VMs hold plus the fastest growth on record in one window passes the fleet's
-  budget, the node ends the over VM with the largest excess past its booking, lowest band first; never a VM within
-  its booking. The fastest growth is learned from the node's own windows, only rising. Moving it instead of ending it
-  waits on Shards' D176 (`Awaits(LiveMove)`).
+  budget, the node ends the VM holding most past its own budget, lowest band first; never a VM within its budget,
+  so never one within its booking, nor one `memory.high` holds at its budget (growth is no fact yet). The fastest
+  growth is learned from the node's own windows, only rising. Moving it instead of ending it waits on Shards' D176
+  (`Awaits(LiveMove)`).
 
 **Sources.** Admit within room, take back cold pages first, then end or move the lowest-priority VM past its
 charge, never one within it (f84 B: Kubernetes' order f45 A, ESX f47 A, far memory f49 A); D188's give-back is
@@ -150,7 +157,7 @@ places by reservation (f87 B, f21 A). Per-owner budgets across cells are B16's e
 
 ## C8. The interface with step 13 (goal 13)
 
-Proposed:
+Taken by ROOT on 2026-11-12 and passed to goal 13; `Allocation`'s booked amount approved:
 - Hex publishes its reservation on a machine: per dimension, `sum(booking)`, and for memory and disk the excess held
   past bookings too (`hex_sim::charge::Node::reservation`).
 - Hex admits a VM when its booking fits the combined view's free room for Hex (`Node::admit(.., free)`), refused
@@ -167,10 +174,9 @@ Proposed:
 |---|---|---|---|---|
 | The window | Linux 100 ms; macOS the control's cycle | (c) Linux's `cpu.max` default period, Hex's; (b) macOS's CPU-response row | guest_cost's window | `charge::tests` |
 | SEEDABLE | 1,000 | (b) rule | the fewest samples whose nearest-rank p99.9 is observed (decision 9) | doc-truth test against `waits_census.py` |
-| The CPU tail | p99.9 | requirement | the bar's tail (`hex-sim-constants.md`) | `charge::tests` |
-| The memory and disk margin | 2 | rule | the lead's input-bound rule | `census::INPUT_MARGIN` |
+| The charge's tail | p99.9 of CPU and of memory's and disk's high-water marks | requirement | the bar's tail (`hex-sim-constants.md`) | `charge::tests` |
 | The ceiling | the allocation | (b) | guest_cost's census of the class | `charge::tests` |
-| The cold booking | the class's prior, else the allocation | (a) | most a warmed VM of the class was charged | `charge::tests` |
+| The cold booking | the class's prior, else the allocation | (a) | p99.9 of the class's last SEEDABLE warmed windows | `charge::tests` |
 | `cpu.weight`'s range | 1 to 10,000 | (c) | cgroup-v2.rst | `charge::tests` |
 | The slack's split | in proportion to bookings | derived | budgets sum to the budget, no race in a window | `charge::tests` |
 | The fastest growth | learned per window | (a) | the node's own windows, only rising | `charge::tests` |
