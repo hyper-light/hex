@@ -1400,6 +1400,9 @@ impl GuestRuntime {
     }
 
     pub fn validate_binding(&self, spec: &BoxSpec) -> Result<(), Refusal> {
+        if matches!(spec.class, ClassSpec::ShardsImage(_)) {
+            return self.recover_image(spec);
+        }
         if spec.devices.is_empty() && !matches!(spec.class, ClassSpec::Shards(_)) {
             return Ok(());
         }
@@ -1556,6 +1559,9 @@ impl GuestRuntime {
     }
 
     pub fn recover_managed(&self, spec: &BoxSpec) -> Result<(), Refusal> {
+        if matches!(spec.class, ClassSpec::ShardsImage(_)) {
+            return self.recover_image(spec);
+        }
         if !self.owns_record(spec) {
             return Ok(());
         }

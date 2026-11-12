@@ -269,6 +269,7 @@ fn oracle_of(fx: &dyn Fixture) -> Result<SimFixture, String> {
         ClassSpec::Oci(_) => SimFixture::Spec,
         ClassSpec::Firecracker(_) => SimFixture::Firecracker,
         ClassSpec::Shards(_) => SimFixture::Shards,
+        ClassSpec::ShardsImage(_) => SimFixture::ShardsImage,
     })
 }
 
@@ -573,6 +574,7 @@ fn kind(r: &Refusal) -> &'static str {
             crate::Upstream::MemberGrantsByAddress => "Awaits(MemberGrantsByAddress)",
             crate::Upstream::MemberHostService => "Awaits(MemberHostService)",
             crate::Upstream::GuestRoom => "Awaits(GuestRoom)",
+            crate::Upstream::RunHostStdioOnly => "Awaits(RunHostStdioOnly)",
         },
     }
 }

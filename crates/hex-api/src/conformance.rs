@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::{
-    Bounds, BoxId, BoxOwner, BoxSpec, BoxState, Class, ClassSpec, Exit, Mount, Network, OciSpec,
-    Program, Refusal, Rootfs, Runtime, Signal, Stdio,
+    Bounds, BoxId, BoxOwner, BoxSpec, BoxState, Class, ClassSpec, DeviceId, DeviceKind, Exit,
+    GuestTime, Mount, Network, OciSpec, Program, Refusal, Rootfs, Runtime, Signal, Stdio, Upstream,
 };
 
 /// What a fixture's program does.
@@ -311,7 +311,54 @@ pub const CASES: &[Case] = &[
 
 /// Runs every case on fresh boxes; returns the failures.
 pub fn run(rt: &dyn Runtime, fx: &dyn Fixture) -> Vec<Failure> {
-    CASES
+    run_cases(CASES, rt, fx)
+}
+
+/// The Shards image class's own cases (joint plan step 12, Shards' D231), on a fixture whose boxes are
+/// Shards image VMs ([`ClassSpec::ShardsImage`]): [`Fixture::spec`] a VM running its image's members
+/// alone, [`Fixture::init`] one whose run's command does the act, [`Fixture::program`] a member's
+/// program. Its members are reached through Shards' agent-control endpoint, so what needs that is
+/// refused naming it, never stubbed.
+pub const IMAGE_CASES: &[Case] = &[
+    Case {
+        id: "HEX-IMG-1",
+        says: "create makes a Shards image VM that list and inspect show Created, of class Shards, with no exit, and a second create of its id is Exists; start boots it, Running, and a second start is refused as Invalid naming start; delete removes it, and every call on it is then NoSuchBox",
+        run: image_lifecycle,
+    },
+    Case {
+        id: "HEX-IMG-2",
+        says: "stop, a signal KILL, ends a running VM: inspect reports it Empty with Signal(9), a second signal is NotRunning, and it stays until delete",
+        run: image_stop,
+    },
+    Case {
+        id: "HEX-IMG-3",
+        says: "a VM whose run's command exits 3 is Empty once it has ended, and inspect reports Code(3)",
+        run: image_command_exit,
+    },
+    Case {
+        id: "HEX-IMG-4",
+        says: "usage of a running VM reports its guest time per vCPU: one entry for each vCPU its allocation sizes, each no smaller at a second read, none past the wall time since its start; before its start and after its end usage is NotRunning",
+        run: image_guest_time,
+    },
+    Case {
+        id: "HEX-IMG-5",
+        says: "a program exec'd in a running VM is refused Awaits(MemberExec), and a signal but KILL Awaits(MemberSignal); the VM runs on",
+        run: image_members,
+    },
+    Case {
+        id: "HEX-IMG-6",
+        says: "create of a VM whose image isn't pinned by a digest, whose run's command is empty, with no allocation or naming a device is refused as Invalid naming the field, and makes nothing",
+        run: image_unbootable,
+    },
+];
+
+/// Runs every Shards image case on fresh boxes; returns the failures.
+pub fn run_image(rt: &dyn Runtime, fx: &dyn Fixture) -> Vec<Failure> {
+    run_cases(IMAGE_CASES, rt, fx)
+}
+
+fn run_cases(cases: &[Case], rt: &dyn Runtime, fx: &dyn Fixture) -> Vec<Failure> {
+    cases
         .iter()
         .filter_map(|c| (c.run)(rt, fx).err().map(|why| Failure { case: c.id, why }))
         .collect()
@@ -1063,6 +1110,234 @@ fn run_removes(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         format!("what a let-go run left in its box ended {ended_by:?}")
     })?;
     gone_within(rt, &id, patience())
+}
+
+/// A Shards image VM `name`, made and not started.
+fn image_made(rt: &dyn Runtime, fx: &dyn Fixture, name: &str) -> Result<BoxId, String> {
+    let id = id(name)?;
+    let _ = rt.delete(&id);
+    rt.create(fx.spec(id.clone(), Bounds::default()))
+        .map_err(|e| format!("create: {e}"))?;
+    Ok(id)
+}
+
+/// Runs `case` on box `id`, then deletes it whatever the case found: a failed case leaves no VM.
+fn deleting(
+    rt: &dyn Runtime,
+    id: &BoxId,
+    case: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let outcome = case();
+    let deleted = rt.delete(id).map_err(|e| format!("delete: {e}"));
+    outcome.and(deleted)
+}
+
+fn image_lifecycle(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let id = image_made(rt, fx, "image-life")?;
+    deleting(rt, &id, || {
+        let listed = rt.list().map_err(|e| e.to_string())?;
+        ensure(listed.iter().any(|b| b.id == id), || {
+            format!("{id} isn't in {listed:?}")
+        })?;
+        let info = rt.inspect(&id).map_err(|e| e.to_string())?;
+        ensure(
+            (info.class, info.state, info.exit) == (Class::Shards, BoxState::Created, None),
+            || format!("a new VM: {info:?}"),
+        )?;
+        let again = rt.create(fx.spec(id.clone(), Bounds::default()));
+        ensure(again == Err(Refusal::Exists(id.clone())), || {
+            format!("second create: {again:?}")
+        })?;
+        rt.start(&id).map_err(|e| format!("start: {e}"))?;
+        let info = rt.inspect(&id).map_err(|e| e.to_string())?;
+        ensure((info.state, info.exit) == (BoxState::Running, None), || {
+            format!("a started VM: {info:?}")
+        })?;
+        let again = rt.start(&id);
+        ensure(
+            matches!(again, Err(Refusal::Invalid { what: "start", .. })),
+            || format!("a second start: {again:?}"),
+        )
+    })?;
+    let gone = Refusal::NoSuchBox(id.clone());
+    for (call, got) in [
+        ("inspect", rt.inspect(&id).err()),
+        ("usage", rt.usage(&id).err()),
+        ("signal", rt.signal(&id, Signal::KILL).err()),
+        ("start", rt.start(&id).err()),
+        ("delete", rt.delete(&id).err()),
+    ] {
+        ensure(got.as_ref() == Some(&gone), || {
+            format!("{call} after delete: {got:?}")
+        })?;
+    }
+    Ok(())
+}
+
+fn image_stop(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let id = image_made(rt, fx, "image-stop")?;
+    deleting(rt, &id, || {
+        rt.start(&id).map_err(|e| format!("start: {e}"))?;
+        rt.signal(&id, Signal::KILL)
+            .map_err(|e| format!("stop: {e}"))?;
+        let info = exit_of(rt, &id, patience())?;
+        ensure(
+            (info.state, info.exit) == (BoxState::Empty, Some(Exit::Signal(9))),
+            || format!("a stopped VM: {info:?}"),
+        )?;
+        let again = rt.signal(&id, Signal::KILL);
+        ensure(matches!(again, Err(Refusal::NotRunning(..))), || {
+            format!("a signal to a stopped VM: {again:?}")
+        })?;
+        let kept = rt.inspect(&id).map(|info| info.id);
+        ensure(kept.as_ref() == Ok(&id), || {
+            format!("a stopped VM before its delete: {kept:?}")
+        })
+    })
+}
+
+fn image_command_exit(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let id = id("image-exit")?;
+    let _ = rt.delete(&id);
+    rt.create(fx.init(id.clone(), &Act::Fail(3)))
+        .map_err(|e| format!("create: {e}"))?;
+    deleting(rt, &id, || {
+        rt.start(&id).map_err(|e| format!("start: {e}"))?;
+        let info = exit_of(rt, &id, patience())?;
+        ensure(
+            (info.state, info.exit) == (BoxState::Empty, Some(Exit::Code(3))),
+            || format!("a VM whose command exited 3: {info:?}"),
+        )
+    })
+}
+
+/// A usage's guest time per vCPU, or why a case can't hold it to the contract.
+fn per_vcpu(usage: crate::Usage) -> Result<Vec<u64>, String> {
+    match usage.guest {
+        Some(GuestTime::PerVcpuNs(ns)) => Ok(ns),
+        Some(GuestTime::Awaits(needs)) => Err(format!("guest time per vCPU awaits {needs}")),
+        None => Err("usage reports no guest time per vCPU".to_owned()),
+    }
+}
+
+fn image_guest_time(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let id = image_made(rt, fx, "image-guest")?;
+    let vcpus = fx
+        .spec(id.clone(), Bounds::default())
+        .allocation
+        .ok_or("the fixture's VM has no allocation")?
+        .vm_size()
+        .map_err(|e| e.to_string())?
+        .vcpus;
+    deleting(rt, &id, || {
+        let early = rt.usage(&id);
+        ensure(matches!(early, Err(Refusal::NotRunning(..))), || {
+            format!("usage before its start: {early:?}")
+        })?;
+        let before = std::time::Instant::now();
+        rt.start(&id).map_err(|e| format!("start: {e}"))?;
+        let first = per_vcpu(rt.usage(&id).map_err(|e| format!("usage: {e}"))?)?;
+        let second = per_vcpu(rt.usage(&id).map_err(|e| format!("usage: {e}"))?)?;
+        let wall = u64::try_from(before.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let count = usize::try_from(vcpus).map_err(|e| e.to_string())?;
+        ensure(first.len() == count && second.len() == count, || {
+            format!(
+                "{} and {} entries for {vcpus} vCPUs",
+                first.len(),
+                second.len()
+            )
+        })?;
+        ensure(first.iter().zip(&second).all(|(a, b)| a <= b), || {
+            format!("guest time fell between reads: {first:?} then {second:?}")
+        })?;
+        ensure(second.iter().all(|ns| *ns <= wall), || {
+            format!("guest time {second:?} past the {wall} ns since its start")
+        })?;
+        rt.signal(&id, Signal::KILL)
+            .map_err(|e| format!("stop: {e}"))?;
+        exit_of(rt, &id, patience())?;
+        let late = rt.usage(&id);
+        ensure(matches!(late, Err(Refusal::NotRunning(..))), || {
+            format!("usage after its end: {late:?}")
+        })
+    })
+}
+
+fn image_members(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let id = image_made(rt, fx, "image-members")?;
+    deleting(rt, &id, || {
+        rt.start(&id).map_err(|e| format!("start: {e}"))?;
+        let exec = rt.exec(&id, fx.program(&Act::Say("never")), Stdio::null());
+        ensure(
+            matches!(
+                exec.as_ref().err(),
+                Some(Refusal::Awaits {
+                    needs: Upstream::MemberExec
+                })
+            ),
+            || format!("exec in a VM: {:?}", exec.as_ref().err()),
+        )?;
+        let term = rt.signal(&id, Signal::TERM);
+        ensure(
+            term == Err(Refusal::Awaits {
+                needs: Upstream::MemberSignal,
+            }),
+            || format!("TERM to a VM: {term:?}"),
+        )?;
+        let info = rt.inspect(&id).map_err(|e| e.to_string())?;
+        ensure((info.state, info.exit) == (BoxState::Running, None), || {
+            format!("a VM after its members were refused: {info:?}")
+        })
+    })
+}
+
+/// A change that leaves a Shards image VM's spec unbootable, and the field its refusal names.
+type Unbootable = (&'static str, fn(&mut BoxSpec));
+
+fn image_unbootable(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let id = id("image-unbootable")?;
+    let _ = rt.delete(&id);
+    let cases: [Unbootable; 5] = [
+        ("image", |spec| {
+            if let ClassSpec::ShardsImage(image) = &mut spec.class {
+                image.image = "hex-conformance/harness:latest".to_owned();
+            }
+        }),
+        ("digest", |spec| {
+            if let ClassSpec::ShardsImage(image) = &mut spec.class {
+                image.image = "hex-conformance/harness@sha256:abc".to_owned();
+            }
+        }),
+        ("command", |spec| {
+            if let ClassSpec::ShardsImage(image) = &mut spec.class {
+                image.command = Some(Vec::new());
+            }
+        }),
+        ("allocation", |spec| spec.allocation = None),
+        ("devices", |spec| {
+            spec.devices = vec![DeviceId {
+                kind: DeviceKind::Gpu,
+                key: 0,
+            }]
+        }),
+    ];
+    for (field, unboot) in cases {
+        let mut spec = fx.spec(id.clone(), Bounds::default());
+        ensure(matches!(spec.class, ClassSpec::ShardsImage(_)), || {
+            "the fixture's spec isn't a Shards image VM".to_owned()
+        })?;
+        unboot(&mut spec);
+        let got = rt.create(spec);
+        ensure(
+            matches!(&got, Err(Refusal::Invalid { what: "shards image", why }) if why.contains(field)),
+            || format!("create with a broken {field}: {got:?}"),
+        )?;
+        let left = rt.inspect(&id);
+        ensure(left == Err(Refusal::NoSuchBox(id.clone())), || {
+            format!("a refused create (broken {field}) made {left:?}")
+        })?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
