@@ -402,7 +402,8 @@ fn node_descriptors(need: u64, given: &rustix::process::Rlimit, nr_open: u64) ->
 /// that refuses silently.
 fn give_descriptors(state: &Path) -> Result<NodeDescriptors, Refusal> {
     use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
-    let need = hex_node::netns::needed_on_this_host(state)?.total();
+    // The guest's node runs containers alone, no VM boxes of its own.
+    let need = hex_node::netns::needed_on_this_host(state, hex_node::Runs::default())?.total();
     let nr_open = read_nr_open()?;
     let given = node_descriptors(need, &getrlimit(Resource::Nofile), nr_open);
     let refused = |why: String| Refusal::Platform {
@@ -826,7 +827,7 @@ mod tests {
     /// `fs.nr_open` raised to it first only where it was lower.
     #[test]
     fn original_the_limit_init_gives_the_node_holds_its_need() {
-        let need = hex_node::netns::needed_on_this_host(Path::new("/"))
+        let need = hex_node::netns::needed_on_this_host(Path::new("/"), hex_node::Runs::default())
             .unwrap()
             .total();
         let guest = rustix::process::Rlimit {
