@@ -3,7 +3,9 @@
 use std::cell::{Cell, RefCell};
 
 use super::*;
-use hex_api::{LearnedPrior, LearnedUse};
+use crate::recorded::charges::{Resort, record_last_resort, with_last_resort};
+use hex_api::{LearnedEnd, LearnedPrior, LearnedUse};
+use hex_core::record::BoxRecord;
 use hex_sim::charge::{SEEDABLE, WEIGHT_MAX};
 
 const GIB: u64 = 1 << 30;
@@ -712,46 +714,6 @@ fn w14_a_refused_end_is_kept_typed() {
         learner.resort(),
         &Resort::Refused(Refusal::Broken("cgroup.kill refused".into()))
     );
-}
-
-/// Joint plan step 14 (AC-T7.4.1), C5's record of why, bounded (CLAUDE.md §2). Do record three ends on a learner for a
-/// 20 milli-CPU machine, whose population is two VMs, the third of another class. Expect the class's capacity answer
-/// to carry its two latest ends, latest first, and the oldest forgotten once a third came.
-#[test]
-fn w14_the_last_resorts_ends_are_kept_to_the_machines_population() {
-    let mut learner = Learner::new(&fleet(), res(20, 64 * GIB)).unwrap();
-    let why = |held: u64| charge::Excess {
-        held,
-        budget: GIB,
-        band: 0,
-        fleet: charge::Pressure {
-            held: 4 * GIB,
-            growth: GIB,
-            budget: 4 * GIB,
-        },
-    };
-    for (n, class) in [
-        (1, Class::Shards),
-        (2, Class::Shards),
-        (3, Class::Firecracker),
-    ] {
-        let id = BoxId::new(&format!("vm-{n}")).unwrap();
-        learner
-            .record_end(class, &id, [u8::try_from(n).unwrap(); 16], why(n * GIB))
-            .unwrap();
-    }
-    let ids = |class| -> Vec<String> {
-        learner
-            .learned(class, &[])
-            .unwrap()
-            .unwrap()
-            .ended
-            .iter()
-            .map(|end| end.id.as_str().to_owned())
-            .collect()
-    };
-    assert_eq!(ids(Class::Shards), ["vm-2"], "vm-1 forgotten past two");
-    assert_eq!(ids(Class::Firecracker), ["vm-3"]);
 }
 
 /// A Shards VM's spec of `cost()`'s 16 CPUs and 8 GiB, as a node records it.

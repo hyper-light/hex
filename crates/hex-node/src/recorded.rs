@@ -2053,7 +2053,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
     /// machine less what its native boxes are capped at (C4: their bookings off the fleet's budget). Its failure is
     /// kept for the capacity answers.
     fn learn_window(&self) {
-        let Some((learner, _)) = self.books.charges.get() else {
+        let Some((shared, _)) = self.books.charges.get() else {
             return;
         };
         let read = self
@@ -2061,7 +2061,7 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             .store
             .all()
             .and_then(|records| Ok((records, self.machine()?)));
-        let Ok(mut learner) = learner.lock() else {
+        let Ok(mut learner) = shared.lock() else {
             return;
         };
         let (records, machine) = match read {
@@ -2096,6 +2096,17 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             budget,
             std::time::Instant::now(),
         );
+        // Each end the last resort made goes into its box's record (C5), off the learner's lock; a write that fails
+        // is kept for the next window and fails this one.
+        let ends = learner.unrecorded();
+        drop(learner);
+        let (left, failed) = charges::write_ends(&self.books.store, ends);
+        if let Some(why) = failed
+            && let Ok(mut learner) = shared.lock()
+        {
+            learner.keep_unrecorded(left);
+            learner.failed(why);
+        }
     }
 }
 
@@ -2224,6 +2235,8 @@ impl Books {
         let recorded = match self.store.get(&info.id)? {
             Some(Ok(record)) => {
                 let abandoned = record.abandoned;
+                // Why the last resort ended it, where it did (joint plan step 14, C5), across the node's restarts.
+                charges::with_last_resort(&mut info, &record)?;
                 project_info(&mut info, &projection(record.spec)?)?;
                 abandoned
             }

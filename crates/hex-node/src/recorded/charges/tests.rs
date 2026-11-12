@@ -270,6 +270,11 @@ fn w14_a_capping_node_ends_the_vm_most_past_its_budget_through_its_receipt() {
     }
     learner.window(&io, &vms, budget, start + WINDOW).unwrap();
     assert_eq!(*io.stops.borrow(), ["vm-2"]);
+    assert!(
+        matches!(learner.last.resort(), Resort::Ending { id, .. } if id.as_str() == "vm-2"),
+        "{:?}",
+        learner.last.resort()
+    );
     let learned = learner
         .learned(Class::Shards, &[cost()], &vms)
         .unwrap()
@@ -297,11 +302,23 @@ fn w14_a_capping_node_ends_the_vm_most_past_its_budget_through_its_receipt() {
             Some(hex_api::Upstream::LiveMove)
         )]
     );
-    learner.window(&io, &vms, budget, start + WINDOW * 2).unwrap();
+    learner
+        .window(&io, &vms, budget, start + WINDOW * 2)
+        .unwrap();
     assert_eq!(io.stops.borrow().len(), 1, "one end is never two");
     let left = vec![vm("vm-1", 1), vm("vm-3", 3)];
-    learner.window(&io, &left, budget, start + WINDOW * 3).unwrap();
+    learner
+        .window(&io, &left, budget, start + WINDOW * 3)
+        .unwrap();
     assert_eq!(io.stops.borrow().len(), 1, "never a VM within its budget");
+    assert!(
+        matches!(
+            learner.last.resort(),
+            Resort::Refused(Refusal::Exhausted { .. })
+        ),
+        "{:?}",
+        learner.last.resort()
+    );
 }
 
 /// The records a node keeps of its boxes, in `dir`, as `Recorded::open` makes them.
@@ -372,4 +389,45 @@ fn w14_a_capping_nodes_inspect_says_why_its_last_resort_ended_a_vm() {
         })
         .unwrap();
     assert_eq!(info.last_resort, Some(end));
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C5's record of why, bounded (CLAUDE.md §2), as every OS's learner keeps it. Do record
+/// three ends on a learner for a 20 milli-CPU machine, whose population is two VMs, the third of another class. Expect
+/// the class's capacity answer to carry its two latest ends, latest first, and the oldest forgotten once a third came.
+#[test]
+fn w14_the_last_resorts_ends_are_kept_to_the_machines_population() {
+    let mut learner = Learner::new(WINDOW, res(20, 64 * GIB)).unwrap();
+    let why = |held: u64| charge::Excess {
+        held,
+        budget: GIB,
+        band: 0,
+        fleet: charge::Pressure {
+            held: 4 * GIB,
+            growth: GIB,
+            budget: 4 * GIB,
+        },
+    };
+    for (n, class) in [
+        (1, Class::Shards),
+        (2, Class::Shards),
+        (3, Class::Firecracker),
+    ] {
+        let id = BoxId::new(&format!("vm-{n}")).unwrap();
+        learner
+            .last
+            .record_end(class, &id, [u8::try_from(n).unwrap(); 16], why(n * GIB))
+            .unwrap();
+    }
+    let ids = |class| -> Vec<String> {
+        learner
+            .learned(class, &[], &[])
+            .unwrap()
+            .unwrap()
+            .ended
+            .iter()
+            .map(|end| end.id.as_str().to_owned())
+            .collect()
+    };
+    assert_eq!(ids(Class::Shards), ["vm-2"], "vm-1 forgotten past two");
+    assert_eq!(ids(Class::Firecracker), ["vm-3"]);
 }

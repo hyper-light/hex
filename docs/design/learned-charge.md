@@ -268,8 +268,12 @@ reaches the view settled with goal 13 the same day:
   (`recorded::charges::learned`, shared with Linux's). Neither platform holds a VM's memory at a budget below its
   ceiling (macOS ends past a footprint limit, Windows refuses past a commit limit, neither throttles at a level), so
   each VM's memory budget is refused, typed (`Platform`, `memory_high`), which the node says as it starts. On Windows
-  the learner is refused, typed, until its window is measured (C1). Their last resort, which would stop a VM through
-  its managed receipt, isn't wired yet: Hex's own remaining work.
+  the learner is refused, typed, until its window is measured (C1). Their last resort is Linux's, in the state every
+  learner shares (`recorded::charges::LastResort`: one end at a time, why kept for the class's capacity answers and the
+  box's record), and ends the VM it chooses through its managed receipt (`Recover::stop_managed`): on macOS the native
+  helper's stop of the VM's scope, the stop its receipt sends; on Windows the termination of the job the node holds, as
+  its receipt's stop terminates it. Its end is then observed as any other, why goes into the VM's record after the
+  window, and its inspect says it (`Books::counted`), as Linux's does.
 
 ## Every number
 
