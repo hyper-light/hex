@@ -213,6 +213,10 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
             op: what,
             why: format!("{kind:?}"),
         },
+        // Only a plug or an unplug (D235) is refused so, and this class makes neither.
+        ImageRefusal::Plug(cause, why) => {
+            Refusal::Broken(format!("Shards refused {op} as a plug ({cause:?}): {why}"))
+        }
     }
 }
 
@@ -463,6 +467,9 @@ impl GuestRuntime {
             publish: network.publish,
             egress: network.egress,
             shares: Vec::new(),
+            // No nesting grant (D234): a harness VM's command is never a nested runtime's here.
+            nesting: false,
+            ready_by: None,
             binary: Some(self.config.binary.clone()),
             env,
         })
@@ -644,9 +651,10 @@ impl GuestRuntime {
         image.insert(&id, Run::Booting(Arc::clone(&slot)))?;
         let answer = Arc::clone(&slot);
         let asked = Instant::now();
+        // Shards' own patience unbounded, as before D231 gave one: the caller's wait is bounded below.
         let spawned = std::thread::Builder::new()
             .name("hex-image-boot".to_owned())
-            .spawn(move || answer.put(images.boot(&spec)));
+            .spawn(move || answer.put(images.boot(&spec, Duration::MAX)));
         if let Err(why) = spawned {
             // No boot began: the box ends, its intent's record kept with its end.
             image.insert(&id, Run::Ended(Exit::Unknown))?;

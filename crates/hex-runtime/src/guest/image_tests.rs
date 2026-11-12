@@ -215,6 +215,36 @@ impl ImageGuest for ModelGuest {
             None => Ok(*self.run.stats.lock().unwrap()),
         }
     }
+    // As Shards refuses them for a run that asks no nesting grant (D234) and of a model with no plugs (D235).
+    fn wait_ready(
+        &self,
+        _: Option<shards_api::image::Ready>,
+        _: Duration,
+    ) -> Result<Option<shards_api::image::Ready>, ImageRefusal> {
+        Err(ImageRefusal::Spec {
+            what: "nesting",
+            why: "the model's runs ask no nesting grant".to_owned(),
+        })
+    }
+    fn plug(
+        &self,
+        _: &MemberName,
+        _: &std::path::Path,
+        _: &str,
+        _: bool,
+        _: Duration,
+    ) -> Result<(), ImageRefusal> {
+        Err(ImageRefusal::Unsupported {
+            what: "the model's plugs",
+            why: "it has none".to_owned(),
+        })
+    }
+    fn unplug(&self, _: &str, _: Duration) -> Result<(), ImageRefusal> {
+        Err(ImageRefusal::Unsupported {
+            what: "the model's plugs",
+            why: "it has none".to_owned(),
+        })
+    }
     fn stop(&self) -> Result<(), ImageRefusal> {
         self.run.stops.fetch_add(1, Ordering::SeqCst);
         self.run.end.lock().unwrap().get_or_insert(RunEnd::Stopped);
@@ -259,7 +289,7 @@ impl Images for ModelImages {
     fn backend(&self) -> Result<shards_api::Backend, ImageRefusal> {
         Ok(shards_api::Backend::Kvm)
     }
-    fn boot(&self, spec: &ImageSpec) -> Result<Box<dyn ImageGuest>, ImageRefusal> {
+    fn boot(&self, spec: &ImageSpec, _: Duration) -> Result<Box<dyn ImageGuest>, ImageRefusal> {
         self.asked.lock().unwrap().push(spec.clone());
         let open = self.open.lock().unwrap();
         drop(self.opened.wait_while(open, |open| !*open).unwrap());
@@ -282,6 +312,7 @@ impl Images for ModelImages {
                         publish.host_port
                     },
                 ),
+                to: Vec::new(),
             })
             .collect();
         Ok(Box::new(ModelGuest {
@@ -396,7 +427,10 @@ fn a_created_vm_boots_at_start_its_admitted_size_and_no_grant() {
     );
     assert_eq!(boot.egress.egress, Keep::Only(Vec::new()));
     assert_eq!(boot.egress.mcp, Keep::Only(Vec::new()));
+    // No destination by name kept (D236), where Narrowing::default() keeps every one the image grants.
+    assert_eq!(boot.egress.destinations, Keep::Only(Vec::new()));
     assert!(!boot.egress.dns && boot.publish.is_empty() && boot.members.is_empty());
+    assert_eq!((boot.nesting, boot.ready_by), (false, None));
     assert_eq!(
         boot.binary.as_deref(),
         Some(super::super::tests::config().binary.as_path())
@@ -836,6 +870,7 @@ fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
     );
     assert_eq!(boot.egress.egress, Keep::Only(Vec::new()));
     assert_eq!(boot.egress.mcp, Keep::Only(Vec::new()));
+    assert_eq!(boot.egress.destinations, Keep::Only(Vec::new()));
     assert!(!boot.egress.dns);
     let shown = runtime.inspect(&id).unwrap();
     assert_eq!(shown.grants, vec![publish]);
