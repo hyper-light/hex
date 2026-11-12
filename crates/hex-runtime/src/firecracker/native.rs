@@ -35,6 +35,12 @@ pub struct FirecrackerRuntime {
     runtime: PathBuf,
     /// The host's boot session, the node's (`Node::boot_session`): a function no reset clears goes to one VM per boot.
     boot: Option<BootSession>,
+    /// The node's loop (`Node`'s `Host::attach`), which each VM box's evented connection to its guest joins.
+    joins: std::sync::Mutex<Option<Arc<dyn crate::guest::Joins>>>,
+    /// Each VM box's evented connection to its guest's node, joined to the node's loop: an exec the node forwards there
+    /// is answered, and its program's end told, as the guest's messages (AC-T7.4.1). At most one a box, at most
+    /// [`crate::MAX_BOXES`], let go with its box.
+    evented: std::sync::Mutex<std::collections::BTreeMap<BoxId, crate::guest::EventedClient>>,
 }
 
 struct Paths {
@@ -64,6 +70,8 @@ impl FirecrackerRuntime {
             host: vfio::Host::system()?,
             runtime,
             boot,
+            joins: std::sync::Mutex::new(None),
+            evented: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         })
     }
 
@@ -591,6 +599,60 @@ impl FirecrackerRuntime {
             .and_then(|file| file.sync_all())
             .map_err(|e| Refusal::os("syncing VM state removal", e))?;
         transaction.remove(id)
+    }
+
+    /// Joins `joins`, the node's loop, which each VM box's evented connection to its guest joins from now
+    /// ([`FirecrackerRuntime::evented_for`]).
+    pub fn join_loop(&self, joins: Arc<dyn crate::guest::Joins>) -> Result<(), Refusal> {
+        *self
+            .joins
+            .lock()
+            .map_err(|_| Refusal::Broken("the VM backend's loop lock was poisoned".to_owned()))? =
+            Some(joins);
+        Ok(())
+    }
+
+    /// VM box `id`'s evented connection to its guest's node, joined to the node's loop, for an exec the node forwards
+    /// there: its answer and its program's end come as the guest's messages, never as a pid the node watches (the
+    /// guest's pid names no process of the host's, or an unrelated one). One whose connection ended while its VM runs
+    /// is opened again, the box's record and native receipt checked as any call's are ([`Self::client`]).
+    pub fn evented_for(&self, id: &BoxId) -> Result<crate::guest::EventedClient, Refusal> {
+        let poisoned = || Refusal::Broken("the VM backend's evented lock was poisoned".to_owned());
+        let held = self
+            .evented
+            .lock()
+            .map_err(|_| poisoned())?
+            .get(id)
+            .filter(|client| !client.closed())
+            .cloned();
+        if let Some(client) = held {
+            return Ok(client);
+        }
+        let joins = self
+            .joins
+            .lock()
+            .map_err(|_| poisoned())?
+            .clone()
+            .ok_or_else(|| invalid("the VM box's guest has no node event loop to join"))?;
+        let link = self.with_record(id, |record, transaction| {
+            if record.phase != Phase::Ready {
+                return Err(lifecycle(id, LifecycleCause::Pending)?);
+            }
+            self.check_process(record, transaction)?;
+            self.link(record, None)
+        })?;
+        let (token, room) = joins.reserve()?;
+        let (client, pump) = Client::connect_evented(link, room)?;
+        let client = triomphe::Arc::try_new(client)
+            .map_err(|_| exhausted("guest evented client owner", crate::MAX_BOXES))?;
+        joins.join(token, pump)?;
+        let mut evented = self.evented.lock().map_err(|_| poisoned())?;
+        evented.retain(|_, held| !held.closed());
+        if evented.len() >= crate::MAX_BOXES && !evented.contains_key(id) {
+            return Err(Refusal::Full(crate::MAX_BOXES));
+        }
+        evented.insert(id.try_clone()?, triomphe::Arc::clone(&client));
+        Ok(client)
     }
 
     /// Recovery uses the canonical native scope and VMM witnesses, never another backend or pick.
@@ -1285,6 +1347,11 @@ impl Runtime for FirecrackerRuntime {
         Ok(boxes)
     }
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        // Its evented connection goes with it: a program forwarded there ends with its VM.
+        self.evented
+            .lock()
+            .map_err(|_| Refusal::Broken("the VM backend's evented lock was poisoned".to_owned()))?
+            .remove(id);
         let record = self.record(id)?;
         if let Some(key) = record.spec.route.and_then(|route| route.backing) {
             let source = self
@@ -1675,6 +1742,8 @@ mod handoff_tests {
             host: vfio::Host::system().unwrap(),
             runtime: PathBuf::from("/nonexistent/runtime"),
             boot: None,
+            joins: std::sync::Mutex::new(None),
+            evented: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         };
         let devices = [256, 512]
             .map(|key| DeviceId {
@@ -1781,6 +1850,8 @@ mod handoff_tests {
             host: vfio::Host::system().unwrap(),
             runtime: PathBuf::from("/nonexistent/runtime"),
             boot: None,
+            joins: std::sync::Mutex::new(None),
+            evented: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         };
         let full = [256, 512].map(|key| DeviceId {
             kind: DeviceKind::Gpu,
@@ -1986,6 +2057,8 @@ mod cleanup_tests {
             host: vfio::Host::system().unwrap(),
             runtime: PathBuf::from("/nonexistent/runtime"),
             boot: None,
+            joins: std::sync::Mutex::new(None),
+            evented: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         };
         let id = BoxId::new("cleanup-refused").unwrap();
         let spec = BoxSpec {
@@ -2212,6 +2285,8 @@ mod memlock_tests {
             host: vfio::Host::system().unwrap(),
             runtime: PathBuf::from("/nonexistent/runtime"),
             boot: None,
+            joins: std::sync::Mutex::new(None),
+            evented: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         };
         let id = BoxId::new("gpu-memlock").unwrap();
         let spec = BoxSpec {
@@ -2442,6 +2517,8 @@ mod single_use_tests {
             },
             runtime: runtime.to_path_buf(),
             boot: boot(THIS_BOOT),
+            joins: std::sync::Mutex::new(None),
+            evented: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         }
     }
 

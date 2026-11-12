@@ -22,18 +22,6 @@ fn refusal(stop: Stop) -> Refusal {
     Refusal::Broken(format!("{stop:?}"))
 }
 
-fn spec(room: Amounts) -> NodeSpec {
-    NodeSpec::new(
-        NodeId(0),
-        Resources {
-            cpu_milli: room.cpu_milli,
-            mem_bytes: room.mem_bytes,
-            disk_bytes: room.disk_bytes,
-            gpus: u32::try_from(room.gpus).unwrap(),
-        },
-    )
-}
-
 fn cpu(milli: u64) -> Amounts {
     Amounts {
         cpu_milli: milli,
@@ -54,7 +42,7 @@ impl NodeHost {
     fn new() -> Result<Self, Refusal> {
         let dir = tempfile::tempdir().map_err(|e| Refusal::Broken(e.to_string()))?;
         let mut view = View::open(dir.path(), HOLDERS, RAN).map_err(refusal)?;
-        view.refresh(&spec(conformance::ROOM)).map_err(refusal)?;
+        view.set_room(conformance::ROOM);
         Ok(Self {
             dir,
             view,
@@ -85,7 +73,8 @@ impl CapacityView for NodeHost {
 impl Host for NodeHost {
     fn set_room(&mut self, room: Amounts) -> Result<(), Refusal> {
         self.room = room;
-        self.view.refresh(&spec(room)).map(drop).map_err(refusal)
+        self.view.set_room(room);
+        Ok(())
     }
 
     fn set_local(&mut self, local: Amounts) -> Result<(), Refusal> {
@@ -95,10 +84,8 @@ impl Host for NodeHost {
 
     fn restart(&mut self) -> Result<(), Refusal> {
         self.view = View::open(self.dir.path(), HOLDERS, RAN).map_err(refusal)?;
-        self.view
-            .refresh(&spec(self.room))
-            .map(drop)
-            .map_err(refusal)
+        self.view.set_room(self.room);
+        Ok(())
     }
 }
 
@@ -243,4 +230,173 @@ fn the_nodes_admission_and_a_holders_reserve_check_one_view() {
     );
     assert_eq!(kiln.view().unwrap().free().cpu_milli, 1000);
     assert_eq!(driver.view().unwrap().held.cpu_milli, 1000);
+}
+
+/// A node whose facts say `room`, its capacity view open for one holder, and that holder joined.
+fn booted(dir: &std::path::Path, room: Resources) -> (Driver, Holder) {
+    let runtime: Arc<dyn Runtime> = Arc::new(hex_api::sim::SimRuntime::default());
+    let driver = Driver::boot(
+        NodeId(0),
+        &[NodeSpec::new(NodeId(0), room)],
+        &[],
+        Budget { owned: 4, ran: 4 },
+        Pick::default(),
+        dir,
+        Runtimes::new([(Class::Oci, runtime)]).unwrap(),
+    )
+    .unwrap();
+    driver.refresh_node(NodeSpec::new(NodeId(0), room)).unwrap();
+    driver.open_view(&dir.join("capacity"), 1).unwrap();
+    let mut kiln = Holder::start("kiln-runner".into(), 1, 4, &[]).unwrap();
+    let hello = kiln.connect().unwrap();
+    let joined = talk(&driver, &mut kiln, vec![hello]);
+    assert!(
+        matches!(joined.as_slice(), [Event::Synced { agree: true, .. }]),
+        "{joined:?}"
+    );
+    (driver, kiln)
+}
+
+/// What the learner says a box holds now: `cpu_milli`, and the least memory a box holds.
+fn holding(cpu_milli: u64) -> hex_api::CapacityResources {
+    hex_api::CapacityResources {
+        cpu_milli,
+        mem_bytes: hex_api::MIN_MEMORY,
+        disk_bytes: 0,
+    }
+}
+
+fn four_cpus() -> Resources {
+    Resources {
+        cpu_milli: 4000,
+        mem_bytes: 8 * hex_api::MIN_MEMORY,
+        ..Resources::default()
+    }
+}
+
+/// AC-T7.4.1, joint plan steps 13 and 14 (C8): the node runs a box booked at 3 of its 4 CPUs and a holder
+/// asks 2; then the learner rebooks the box at 1 CPU, the holder asks again, and the node places a box of
+/// 1 CPU, then another; expect the first ask refused for room and the second granted, the node's first new
+/// box started in the room the holding left and its second refused, and the view's room the machine's 4
+/// CPUs throughout.
+#[test]
+fn a_falling_learned_holding_frees_room_while_the_physical_room_stays() {
+    let dir = tempfile::tempdir().unwrap();
+    let (driver, mut kiln) = booted(dir.path(), four_cpus());
+    let (d, p) = demand_of(3000);
+    let (vm, step) = driver.submit(d, p).unwrap();
+    assert!(started(&quiesce(&driver, step)));
+    let (early, msg) = kiln.reserve(cpu(2000)).unwrap();
+    assert_eq!(
+        talk(&driver, &mut kiln, vec![msg]),
+        vec![Event::Refused(early, Why::Room)]
+    );
+    assert_eq!(driver.rebook(&[(vm, holding(1000))]).unwrap(), 1);
+    let view = driver.view().unwrap();
+    assert_eq!((view.room.cpu_milli, view.held.cpu_milli), (4000, 1000));
+    let (late, msg) = kiln.reserve(cpu(2000)).unwrap();
+    assert_eq!(
+        talk(&driver, &mut kiln, vec![msg]),
+        vec![Event::Granted(late)]
+    );
+    let (d, p) = demand_of(1000);
+    let (_, step) = driver.submit(d, p).unwrap();
+    assert!(started(&quiesce(&driver, step)));
+    let (d, p) = demand_of(1000);
+    let (_, step) = driver.submit(d, p).unwrap();
+    assert!(!started(&quiesce(&driver, step)));
+    let view = driver.view().unwrap();
+    assert_eq!(
+        (
+            view.room.cpu_milli,
+            view.held.cpu_milli,
+            view.free().cpu_milli
+        ),
+        (4000, 4000, 0)
+    );
+}
+
+/// AC-T7.4.1, joint plan steps 13 and 14: a box booked at 3 of 4 CPUs is rebooked at 1 and a holder takes
+/// 2.5; the box then ends in the middle of the learner's window, before any rebook, and right after the
+/// node places a box of 2 CPUs and the holder asks 2, then 1.5; expect the node's box and the holder's 2
+/// refused, its 1.5 granted, and what is held never past the machine's 4 CPUs.
+#[test]
+fn a_box_ending_mid_window_lets_nothing_past_the_physical_room() {
+    let dir = tempfile::tempdir().unwrap();
+    let (driver, mut kiln) = booted(dir.path(), four_cpus());
+    let (d, p) = demand_of(3000);
+    let (vm, step) = driver.submit(d, p).unwrap();
+    assert!(started(&quiesce(&driver, step)));
+    driver.rebook(&[(vm, holding(1000))]).unwrap();
+    let (first, msg) = kiln.reserve(cpu(2500)).unwrap();
+    assert_eq!(
+        talk(&driver, &mut kiln, vec![msg]),
+        vec![Event::Granted(first)]
+    );
+    let ended = quiesce(&driver, driver.delete(vm).unwrap());
+    assert!(ended.iter().any(|n| matches!(n, Notice::Ended { .. })));
+    let (d, p) = demand_of(2000);
+    let (_, step) = driver.submit(d, p).unwrap();
+    assert!(
+        !started(&quiesce(&driver, step)),
+        "the node placed into room the ended box's holding no longer leaves"
+    );
+    let (big, msg) = kiln.reserve(cpu(2000)).unwrap();
+    assert_eq!(
+        talk(&driver, &mut kiln, vec![msg]),
+        vec![Event::Refused(big, Why::Room)]
+    );
+    let (fits, msg) = kiln.reserve(cpu(1500)).unwrap();
+    assert_eq!(
+        talk(&driver, &mut kiln, vec![msg]),
+        vec![Event::Granted(fits)]
+    );
+    let view = driver.view().unwrap();
+    assert!(
+        view.room.cpu_milli == 4000 && view.held.fits(view.room),
+        "{view:?}"
+    );
+}
+
+/// AC-T7.4.1, joint plan steps 13 and 14: a box booked at 1 of 4 CPUs grows and the learner rebooks it at
+/// 5, past the machine's room; the node then places a box of 1 CPU and a holder asks 1; then the holding
+/// falls back to 1 CPU and both try again; expect the view over by 1 CPU, the node's box refused typed as
+/// local admission and the holder's ask refused for room, then both admitted.
+#[test]
+fn a_holding_past_the_room_blocks_the_nodes_admission_typed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (driver, mut kiln) = booted(dir.path(), four_cpus());
+    let (d, p) = demand_of(1000);
+    let (vm, step) = driver.submit(d, p).unwrap();
+    assert!(started(&quiesce(&driver, step)));
+    driver.rebook(&[(vm, holding(5000))]).unwrap();
+    assert_eq!(driver.view().unwrap().over().cpu_milli, 1000);
+    let (d, p) = demand_of(1000);
+    let (_, step) = driver.submit(d, p).unwrap();
+    let notices = quiesce(&driver, step);
+    assert!(
+        notices.iter().any(|n| matches!(
+            n,
+            Notice::Refused {
+                refusal: Refusal::Invalid {
+                    what: "local admission",
+                    ..
+                },
+                ..
+            }
+        )),
+        "{notices:?}"
+    );
+    let (early, msg) = kiln.reserve(cpu(1000)).unwrap();
+    assert_eq!(
+        talk(&driver, &mut kiln, vec![msg]),
+        vec![Event::Refused(early, Why::Room)]
+    );
+    driver.rebook(&[(vm, holding(1000))]).unwrap();
+    assert!(started(&quiesce(&driver, driver.retry().unwrap())));
+    let (late, msg) = kiln.reserve(cpu(1000)).unwrap();
+    assert_eq!(
+        talk(&driver, &mut kiln, vec![msg]),
+        vec![Event::Granted(late)]
+    );
 }
