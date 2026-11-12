@@ -402,7 +402,7 @@ impl Learner {
                 },
             ));
         }
-        holdings.sort_by(|a, b| b.0.cmp(&a.0));
+        holdings.sort_by_key(|(past, _)| std::cmp::Reverse(*past));
         Ok(Some(Learned {
             priors,
             used,
