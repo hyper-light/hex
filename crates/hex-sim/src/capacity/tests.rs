@@ -35,7 +35,8 @@ fn seeds(runners: usize, seeds: u64, steps: u64) -> Report {
 /// dropped with what was on them, partitioned and healed; waits run out; a runner retired and released
 /// by the person); expect the work running never past the room and every running run in the keeper's
 /// books at every step, and once settled the keeper's books, each runner's and what it runs the same;
-/// and (non-vacuity) each fault struck, both sides refused for room, and syncs released what ended.
+/// and (non-vacuity) each fault struck, both sides refused for room, syncs released what ended, and a sync
+/// adopted work the person had released while its runner was away (CV6).
 #[test]
 fn no_oversubscription_and_the_books_agree_across_crash_seeds() {
     let all = seeds(2, 64, 2_000);
@@ -51,7 +52,8 @@ fn no_oversubscription_and_the_books_agree_across_crash_seeds() {
             && all.crashes_at_write > 0
             && all.runner_crashes > 0
             && all.released_at_sync > 0
-            && all.forgotten > 0,
+            && all.forgotten > 0
+            && all.adopted_at_sync > 0,
         "{all:?}"
     );
 }
