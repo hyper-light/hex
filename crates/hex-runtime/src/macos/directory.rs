@@ -2,24 +2,30 @@
 //! pool's users, reads the ids held, makes an account from a fixed template, and keeps the peak of
 //! concurrent boxes. Every tool runs by absolute path with a fixed argv and no shell; nothing a caller sends
 //! reaches an argument but the account `hex_core::pool` named. No `unsafe`: these are subprocesses, started
-//! through [`super::command`], so each holds only its stdio.
+//! through [`super::command`], so each holds only its stdio. What a tool prints is read a line at a time,
+//! each line within the most its call can print (a record's name, the attribute asked for, a u32's digits),
+//! and only what the pool needs is kept: nothing a tool prints accumulates (CLAUDE.md §2). A tool's stderr
+//! is the helper's own (launchd's log).
 //!
 //! Each account is written to the installer's manifest before it is made, so uninstall removes it even if
 //! the helper stops part-way, and logged on the helper's stderr (launchd's log file).
 
+use super::command::{Command, Stdio};
+use super::sys;
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::process::Output;
 
-use super::command::Command;
-
+use hex_api::Refusal;
 use hex_core::pool::{Account, ROLE_UIDS, pool_index};
 
 const DSCL: &str = "/usr/bin/dscl";
 const DSEDITGROUP: &str = "/usr/sbin/dseditgroup";
 const PS: &str = "/bin/ps";
+/// What a line past its bound is refused as (`Refusal::Exhausted`), each naming its tool.
+const DSCL_LINE: &str = "bytes in a line /usr/bin/dscl prints";
+const PS_LINE: &str = "bytes in a line /bin/ps prints";
 
 /// Where the helper grows its pool: the pool's group, the installer's manifest, and the file it keeps the
 /// peak in.
@@ -34,86 +40,148 @@ pub struct Directory {
     pub peak_file: PathBuf,
 }
 
-/// Runs `tool` with `args` (no shell) and returns its stdout, or an error naming the tool, its arguments and
-/// its stderr.
-fn run(tool: &str, args: &[&str]) -> io::Result<String> {
-    let Output {
-        status,
-        stdout,
-        stderr,
-    } = Command::new(tool).args(args).output()?;
-    if !status.success() {
-        return Err(io::Error::other(format!(
-            "{tool} {}: {status}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&stderr).trim()
-        )));
-    }
-    String::from_utf8(stdout)
-        .map_err(|e| io::Error::other(format!("{tool} printed non-UTF-8: {e}")))
+/// The decimal digits of the widest u32: the most a uid or gid prints in.
+fn id_digits() -> usize {
+    u32::MAX.to_string().len()
 }
 
-/// Runs `tool` with `args` and hands `each` every line it prints, each at most `line_max` bytes (`what`
-/// names that bound): today the runner above, which reads the tool's whole output first.
-#[cfg(test)]
+/// Runs `tool` with `args` (no shell) to its end, handing `each` every line it prints as it comes, each at
+/// most `line_max` bytes (past it, `Exhausted` with `what`); an exit but 0 is an error naming the tool and
+/// its arguments.
 fn lines(
-    tool: &'static str,
+    tool: &str,
     what: &'static str,
     args: &[&str],
     line_max: usize,
     mut each: impl FnMut(&str) -> io::Result<()>,
 ) -> io::Result<()> {
-    let _ = (what, line_max);
-    for line in run(tool, args)?.lines() {
-        each(line)?;
+    let status = Command::new(tool)
+        .args(args)
+        .lines(what, line_max, |line| {
+            each(
+                std::str::from_utf8(line)
+                    .map_err(|e| io::Error::other(format!("{tool} printed non-UTF-8: {e}")))?,
+            )
+        })?;
+    exited(tool, args, status)
+}
+
+/// Runs `tool` with `args` (no shell) for what it does: none of its stdout is read (it goes to the null
+/// device); an exit but 0 is an error naming the tool and its arguments.
+fn run(tool: &str, args: &[&str]) -> io::Result<()> {
+    let status = Command::new(tool)
+        .args(args)
+        .stdout(Stdio::null())
+        .status()?;
+    exited(tool, args, status)
+}
+
+fn exited(tool: &str, args: &[&str], status: std::process::ExitStatus) -> io::Result<()> {
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "{tool} {}: {status} (its stderr is in the helper's log)",
+            args.join(" ")
+        )));
     }
     Ok(())
 }
 
-/// `dscl . -list <path> <attribute>`'s lines as (name, number) pairs; a line that isn't one is skipped as
-/// not a numbered record (dscl lists one record a line).
-fn listed(path: &str, attribute: &str) -> io::Result<Vec<(String, u32)>> {
-    Ok(run(DSCL, &[".", "-list", path, attribute])?
-        .lines()
-        .filter_map(|line| {
+/// The longest line `dscl . -list` prints for a numbered record: its name (at most the longest login name,
+/// `sysconf(_SC_LOGIN_NAME_MAX)`, 255), padded to dscl's column (23 wide, far narrower), a space, and a
+/// u32's digits.
+fn list_line() -> io::Result<usize> {
+    sys::login_name_max()?
+        .checked_add(1)
+        .and_then(|length| length.checked_add(id_digits()))
+        .ok_or_else(|| io::Error::other("a dscl listing's line bound isn't representable"))
+}
+
+/// The longest line `dscl . -search /Users UniqueID <uid>` prints: a holder's name (at most the longest
+/// login name), two tabs and the attribute asked for (`UniqueID = (`); the value's lines are shorter.
+fn search_line() -> io::Result<usize> {
+    sys::login_name_max()?
+        .checked_add("\t\tUniqueID = (".len())
+        .ok_or_else(|| io::Error::other("a dscl search's line bound isn't representable"))
+}
+
+/// `dscl . -list <path> <attribute>`'s numbered records, each handed to `keep` as its line comes as (name,
+/// number); a line that isn't one is skipped as not a numbered record (dscl lists one record a line).
+fn listed(
+    path: &str,
+    attribute: &str,
+    mut keep: impl FnMut(&str, u32) -> io::Result<()>,
+) -> io::Result<()> {
+    lines(
+        DSCL,
+        DSCL_LINE,
+        &[".", "-list", path, attribute],
+        list_line()?,
+        |line| {
             let mut words = line.split_whitespace();
-            let name = words.next()?;
-            let n = words.next()?.parse().ok()?;
-            Some((name.to_owned(), n))
-        })
-        .collect())
+            match (words.next(), words.next().and_then(|n| n.parse().ok())) {
+                (Some(name), Some(number)) => keep(name, number),
+                _ => Ok(()),
+            }
+        },
+    )
+}
+
+/// Past `bound` of what the pool keeps: the directory holds more of it than the role range can.
+fn past(what: &'static str, bound: usize) -> io::Error {
+    io::Error::other(Refusal::Exhausted { what, bound })
 }
 
 impl Directory {
-    /// The pool's users: those `hex_core::pool` names, at a role uid, whose primary group is the pool's.
+    /// The pool's users: those `hex_core::pool` names, at a role uid, whose primary group is the pool's. At
+    /// most one a role uid: the directory read past that holds more than the pool can, and is refused.
     pub fn pool_users(&self) -> io::Result<Vec<(String, u32)>> {
-        let groups: Vec<(String, u32)> = listed("/Users", "PrimaryGroupID")?;
-        Ok(listed("/Users", "UniqueID")?
-            .into_iter()
-            .filter(|(name, uid)| {
-                pool_index(name).is_some()
-                    && ROLE_UIDS.contains(uid)
-                    && groups.iter().any(|(n, g)| n == name && *g == self.gid)
-            })
-            .collect())
+        let bound = ROLE_UIDS.clone().count();
+        let mut members = BTreeSet::new();
+        listed("/Users", "PrimaryGroupID", |name, gid| {
+            if gid == self.gid && pool_index(name).is_some() {
+                if members.len() >= bound {
+                    return Err(past("pool users in the pool's group", bound));
+                }
+                members.insert(name.to_owned());
+            }
+            Ok(())
+        })?;
+        let mut users = Vec::new();
+        listed("/Users", "UniqueID", |name, uid| {
+            if ROLE_UIDS.contains(&uid) && members.contains(name) {
+                if users.len() >= bound {
+                    return Err(past("pool users at a role uid", bound));
+                }
+                users.push((name.to_owned(), uid));
+            }
+            Ok(())
+        })?;
+        Ok(users)
     }
 
-    /// Every id held now: users' uids, groups' gids and running processes' uids.
+    /// Every role id held now (`ROLE_UIDS`, the only ids `hex_core::pool::next_account` weighs): users'
+    /// uids, groups' gids and running processes' uids.
     pub fn taken_ids(&self) -> io::Result<BTreeSet<u32>> {
-        let mut taken: BTreeSet<u32> = listed("/Users", "UniqueID")?
-            .into_iter()
-            .map(|(_, u)| u)
-            .collect();
-        taken.extend(
-            listed("/Groups", "PrimaryGroupID")?
-                .into_iter()
-                .map(|(_, g)| g),
-        );
-        taken.extend(
-            run(PS, &["-axo", "uid="])?
-                .lines()
-                .filter_map(|l| l.trim().parse::<u32>().ok()),
-        );
+        let mut taken = BTreeSet::new();
+        let mut hold = |id: u32| {
+            if ROLE_UIDS.contains(&id) {
+                taken.insert(id);
+            }
+            Ok(())
+        };
+        listed("/Users", "UniqueID", |_, uid| hold(uid))?;
+        listed("/Groups", "PrimaryGroupID", |_, gid| hold(gid))?;
+        // `ps -o uid=` prints each uid right-aligned in a column narrower than a u32's digits.
+        lines(
+            PS,
+            PS_LINE,
+            &["-axo", "uid="],
+            id_digits(),
+            |line| match line.trim().parse::<u32>() {
+                Ok(uid) => hold(uid),
+                Err(_) => Ok(()),
+            },
+        )?;
         Ok(taken)
     }
 
@@ -128,12 +196,22 @@ impl Directory {
             )));
         }
         let uid = account.uid.to_string();
-        let holders = run(DSCL, &[".", "-search", "/Users", "UniqueID", &uid])?;
-        if !holders.trim().is_empty() {
-            return Err(io::Error::other(format!(
-                "uid {uid} is taken: {}",
-                holders.trim()
-            )));
+        // Any record dscl finds holds the uid; the first one's name is kept to say which.
+        let mut holder = None;
+        lines(
+            DSCL,
+            DSCL_LINE,
+            &[".", "-search", "/Users", "UniqueID", &uid],
+            search_line()?,
+            |line| {
+                if holder.is_none() {
+                    holder = line.split_whitespace().next().map(str::to_owned);
+                }
+                Ok(())
+            },
+        )?;
+        if let Some(holder) = holder {
+            return Err(io::Error::other(format!("uid {uid} is taken: {holder}")));
         }
         let mut manifest = OpenOptions::new().append(true).open(&self.manifest)?;
         writeln!(manifest, "user {}", account.name)?;
@@ -247,6 +325,23 @@ pub(crate) mod tests {
         );
     }
 
+    /// AC-T7.4.1 (CLAUDE.md §2): this Mac's directory reads within the bounds each call derives. Do: read
+    /// the role ids held, and the users of a pool whose group no record has, through the real dscl and ps.
+    /// Expect: both read to their end, no line past its bound, and only role ids kept.
+    #[test]
+    fn this_macs_directory_reads_within_its_bounds() {
+        let directory = Directory {
+            group: "hex-test-no-group".to_owned(),
+            gid: u32::MAX,
+            manifest: PathBuf::new(),
+            peak_file: PathBuf::new(),
+        };
+        let taken = directory.taken_ids().unwrap();
+        assert!(taken.iter().all(|id| ROLE_UIDS.contains(id)), "{taken:?}");
+        let users = directory.pool_users().unwrap();
+        assert!(users.is_empty(), "{users:?}");
+    }
+
     /// Not a test of its own: the tool the descriptor tests start (this binary, named so), which
     /// prints the descriptors it holds.
     #[test]
@@ -276,7 +371,19 @@ pub(crate) mod tests {
                 .contains(rustix::io::FdFlags::CLOEXEC)
         );
         let exe = std::env::current_exe().unwrap();
-        let printed = run(exe.to_str().unwrap(), &probe_args()).unwrap();
+        let mut printed = String::new();
+        lines(
+            exe.to_str().unwrap(),
+            "bytes in a line the probe prints",
+            &probe_args(),
+            4096,
+            |line| {
+                printed.push_str(line);
+                printed.push('\n');
+                Ok(())
+            },
+        )
+        .unwrap();
         assert_eq!(
             held(&printed),
             [0, 1, 2],
