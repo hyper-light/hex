@@ -10,18 +10,19 @@
 //! room: shards-api has no call that sends init's `ROOM` (D188), so that is refused `Awaits(GuestRoom)` while its
 //! VMM's `memory.high` holds it at its budget (C7).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use hex_api::{
-    Allocation, Bounds, BoxId, CapacityResources, Learned, LearnedHolding, LearnedPrior,
-    LearnedUse, MAX_LEARNED_PRIORS, Refusal, RuntimeCost, Upstream, Usage,
+    Allocation, Bounds, BoxId, CapacityResources, Learned, LearnedEnd, LearnedHolding,
+    LearnedPrior, LearnedUse, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, Refusal, RuntimeCost,
+    Upstream, Usage,
 };
 use hex_core::cgroup::{CPU_PERIOD_US, CpuMax, Write};
 use hex_runtime::linux::cgroup::BoxCgroup;
-use hex_sim::charge::{self, ChargeError, ClassKey, Cpu, Sample};
+use hex_sim::charge::{self, ChargeError, ClassKey, Cpu, Excess, Sample};
 use hex_sim::model::Class;
 
 use super::Node;
@@ -43,6 +44,8 @@ pub(super) trait Cgroups {
     fn children(&self, dir: &Path) -> Result<Vec<PathBuf>, Refusal>;
     /// A cgroup's file as the kernel says it, `None` where the cgroup or the file is none.
     fn read(&self, dir: &Path, file: &str) -> Result<Option<String>, Refusal>;
+    /// Kills every process in a VM's cgroup (C5's last resort), through the descriptor its native owner pinned.
+    fn kill(&self, cgroup: &BoxCgroup) -> Result<(), Refusal>;
 }
 
 /// The kernel's cgroups.
@@ -75,6 +78,10 @@ impl Cgroups for Kernel {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(Refusal::os("reading a cgroup's file", e)),
         }
+    }
+
+    fn kill(&self, cgroup: &BoxCgroup) -> Result<(), Refusal> {
+        cgroup.kill()
     }
 }
 
@@ -120,6 +127,29 @@ pub(super) struct Learner {
     rooms: BTreeMap<Scope, Upstream>,
     /// Why the last window failed: until one passes, the capacity answers carry nothing learned.
     fault: Option<Refusal>,
+    /// The last resort's state (C5).
+    resort: Resort,
+    /// The VMs the last resort ended and why, by class, oldest first: at most `ends` of them, the oldest forgotten
+    /// first, a machine never holding more VMs than its population at once.
+    ended: VecDeque<(Class, LearnedEnd)>,
+    ends: usize,
+}
+
+/// The last resort's state from window to window (C5), explicit (R04).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Resort {
+    /// What the fleet's VMs hold, with the fastest growth on record in one window, is within its budget.
+    Held,
+    /// It wasn't: the VM `id` held most past its own budget, lowest band first, and its cgroup was killed for `why`.
+    /// None other is ended until its VMM is gone, so one end is never two.
+    Ending {
+        scope: Scope,
+        id: BoxId,
+        why: Excess,
+    },
+    /// It isn't, and the node can't act: every VM holds within its own budget, growth being no fact yet, or ending
+    /// the VM the rule chose was refused. Kept until a window moves it.
+    Refused(Refusal),
 }
 
 /// The most VMs a machine of `machine` could hold, each at least the least reservation placement takes
@@ -332,6 +362,9 @@ impl Learner {
             oci: root.join(super::OCI_BOXES),
             rooms: BTreeMap::new(),
             fault: None,
+            resort: Resort::Held,
+            ended: VecDeque::new(),
+            ends: bound.min(MAX_LEARNED_HOLDINGS),
         })
     }
 
@@ -455,6 +488,7 @@ impl Learner {
         });
         self.node.settle().map_err(refused)?;
         self.place(io, &natives, &scale)?;
+        self.last_resort(io)?;
         for (scope, vm) in &self.vms {
             match tell_room(vm.class) {
                 Ok(()) => {}
@@ -463,6 +497,62 @@ impl Learner {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// The last resort (C5), once the placement holds what it can: while a VM it ended still runs, nothing more, so one
+    /// end is never two; else the core's verdict, the VM it chooses ended by killing its cgroup and why recorded, or
+    /// refused, typed, where the node can't act.
+    fn last_resort(&mut self, io: &impl Cgroups) -> Result<(), Refusal> {
+        if let Resort::Ending { scope, .. } = &self.resort
+            && self.vms.contains_key(scope)
+        {
+            return Ok(());
+        }
+        self.resort = match self.node.last_resort().map_err(refused)? {
+            charge::Resort::Held => Resort::Held,
+            charge::Resort::Within(fleet) => Resort::Refused(Refusal::Exhausted {
+                what: "a microVM fleet's memory budget, every VM within its own",
+                bound: usize::try_from(fleet.budget).unwrap_or(usize::MAX),
+            }),
+            charge::Resort::End { vm: scope, why } => {
+                let vm = self.vms.get(&scope).ok_or_else(|| {
+                    Refusal::Broken("the last resort chose a VM the learner doesn't hold".into())
+                })?;
+                let (class, id, cgroup) = (vm.class, vm.id.try_clone()?, vm.cgroup.clone());
+                match io.kill(&cgroup) {
+                    Ok(()) => {
+                        self.record_end(class, &id, why)?;
+                        Resort::Ending { scope, id, why }
+                    }
+                    Err(refusal) => Resort::Refused(refusal),
+                }
+            }
+        };
+        Ok(())
+    }
+
+    /// Keeps why the last resort ended the VM `id`, forgetting the oldest end past the bound.
+    fn record_end(&mut self, class: Class, id: &BoxId, why: Excess) -> Result<(), Refusal> {
+        if self.ended.len() >= self.ends {
+            self.ended.pop_front();
+        }
+        self.ended.try_reserve(1).map_err(|_| Refusal::Exhausted {
+            what: "the last resort's ends",
+            bound: self.ends,
+        })?;
+        self.ended.push_back((
+            class,
+            LearnedEnd {
+                id: id.try_clone()?,
+                held: why.held,
+                budget: why.budget,
+                band: why.band,
+                fleet_held: why.fleet.held,
+                fleet_growth: why.fleet.growth,
+                fleet_budget: why.fleet.budget,
+            },
+        ));
         Ok(())
     }
 
@@ -547,9 +637,10 @@ impl Learner {
         self.fault = Some(why);
     }
 
-    /// What `class`'s capacity answer carries (C2, C8): the priors of `costs` (its own and its routes'), the class's
-    /// learned use, and each of its running VMs' holdings, those most past their receipts first (memory, then CPU,
-    /// then disk). None after a failed window, so its VMs are booked whole.
+    /// What `class`'s capacity answer carries (C2, C5, C8): the priors of `costs` (its own and its routes'), the
+    /// class's learned use, each of its running VMs' holdings, those most past their receipts first (memory, then CPU,
+    /// then disk), and the VMs of the class the last resort ended and why, latest first. None after a failed window,
+    /// so its VMs are booked whole.
     pub(super) fn learned(
         &self,
         class: Class,
@@ -606,11 +697,31 @@ impl Learner {
             ));
         }
         holdings.sort_by_key(|(past, _)| std::cmp::Reverse(*past));
+        let mut ended = Vec::new();
+        for (of, end) in self.ended.iter().rev() {
+            if *of == class {
+                ended.try_reserve(1).map_err(|_| Refusal::Exhausted {
+                    what: "a class's learned ends",
+                    bound: self.ends,
+                })?;
+                ended.push(LearnedEnd {
+                    id: end.id.try_clone()?,
+                    ..*end
+                });
+            }
+        }
         Ok(Some(Learned {
             priors,
             used,
             holdings: holdings.into_iter().map(|(_, holding)| holding).collect(),
+            ended,
         }))
+    }
+
+    /// The last resort's state (C5).
+    #[cfg(test)]
+    fn resort(&self) -> &Resort {
+        &self.resort
     }
 
     /// The capability each guest's room awaits, by its box (C7).

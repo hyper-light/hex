@@ -31,6 +31,14 @@ fn node(budget: Amounts) -> Node<u32> {
     .unwrap()
 }
 
+/// The VM the last resort ends, if any.
+fn ended(n: &Node<u32>) -> Option<u32> {
+    match n.last_resort().unwrap() {
+        Resort::End { vm, .. } => Some(vm),
+        Resort::Held | Resort::Within(_) => None,
+    }
+}
+
 /// One window's reading: `cpu_milli` of the window's CPU, `mem` held at most.
 fn sample(cpu_milli: u64, mem: u64) -> Sample {
     Sample {
@@ -358,8 +366,9 @@ fn w14_budgets_sum_to_the_fleet_budget_and_cover_every_booking() {
 /// Joint plan step 14 (AC-T7.4.1), C5's last resort: do book VMs at 2 GiB (band 1), 2 and 3 GiB (band 0) of a 10 GiB
 /// budget and let the first hold 8 GiB and the second 3, each past its budget (its booking and its share of the
 /// slack), the third within its; expect the band-0 VM past its budget ended first, then the band-1 one while the
-/// rest still pass the fleet's budget, then none, and never the VM within its budget. With every VM within its
-/// budget but the growth on record past the fleet's, expect none: growth is no fact yet.
+/// rest still pass the fleet's budget, then none, and never the VM within its budget; the first end's why its own
+/// memory against its budget, its band and the fleet's. With every VM within its budget but the growth on record past
+/// the fleet's, expect none, said as within: growth is no fact yet.
 #[test]
 fn w14_the_last_resort_ends_only_a_vm_past_its_budget() {
     let mut n = node(res(16_000, 10 * GIB, 0));
@@ -370,11 +379,34 @@ fn w14_the_last_resort_ends_only_a_vm_past_its_budget() {
     for (id, held) in [(1, 8 * GIB), (2, 3 * GIB), (3, 3 * GIB)] {
         n.observe(id, &sample(0, held)).unwrap();
     }
-    assert_eq!(n.last_resort().unwrap(), Some(2));
+    let budget = n
+        .budgets()
+        .unwrap()
+        .into_iter()
+        .find(|(id, _)| *id == 2)
+        .unwrap()
+        .1
+        .bytes;
+    assert_eq!(
+        n.last_resort().unwrap(),
+        Resort::End {
+            vm: 2,
+            why: Excess {
+                held: 3 * GIB,
+                budget,
+                band: 0,
+                fleet: Pressure {
+                    held: 14 * GIB,
+                    growth: 0,
+                    budget: 10 * GIB,
+                },
+            },
+        }
+    );
     n.end(&2).unwrap();
-    assert_eq!(n.last_resort().unwrap(), Some(1));
+    assert_eq!(ended(&n), Some(1));
     n.end(&1).unwrap();
-    assert_eq!(n.last_resort().unwrap(), None);
+    assert_eq!(n.last_resort().unwrap(), Resort::Held);
 
     let mut within = node(res(16_000, 10 * GIB, 0));
     for id in 1..=2 {
@@ -389,7 +421,14 @@ fn w14_the_last_resort_ends_only_a_vm_past_its_budget() {
     }
     window(&mut within, &[(1, 0, 5 * GIB), (2, 0, 5 * GIB)]);
     assert_eq!(within.growth(), 10 * GIB);
-    assert_eq!(within.last_resort().unwrap(), None);
+    assert_eq!(
+        within.last_resort().unwrap(),
+        Resort::Within(Pressure {
+            held: 10 * GIB,
+            growth: 10 * GIB,
+            budget: 10 * GIB,
+        })
+    );
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C5 as ROOT took it (2026-11-12): a VM `memory.high` holds within its budget is
@@ -411,9 +450,9 @@ fn w14_a_vm_held_within_its_budget_is_never_ended_for_growth_to_come() {
     let budgets = n.budgets().unwrap();
     assert_eq!(budgets[0].1.bytes, 4 * GIB);
     assert_eq!(budgets[0].1.room, i64::try_from(GIB).unwrap());
-    assert_eq!(n.last_resort().unwrap(), None);
+    assert!(matches!(n.last_resort().unwrap(), Resort::Within(_)));
     n.observe(1, &sample(0, 5 * GIB)).unwrap();
-    assert_eq!(n.last_resort().unwrap(), Some(1));
+    assert_eq!(ended(&n), Some(1));
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C5's growth: do grow two VMs' memory by 1 and 2 GiB in one window and by 1 GiB
@@ -518,8 +557,8 @@ fn w14_ending_a_vm_within_its_booking_is_caught() {
     for (id, held) in [(1, 4 * GIB + 1), (2, 6 * GIB)] {
         n.observe(id, &sample(0, held)).unwrap();
     }
-    assert_eq!(n.last_resort().unwrap(), Some(1));
-    let mutated = with_mutant(Some(Mutant::EndLargestHolder), || n.last_resort().unwrap());
+    assert_eq!(ended(&n), Some(1));
+    let mutated = with_mutant(Some(Mutant::EndLargestHolder), || ended(&n));
     assert_eq!(mutated, Some(2));
 }
 

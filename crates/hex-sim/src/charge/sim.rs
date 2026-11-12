@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use hex_api::CapacityResources as Amounts;
 
-use super::{Bounds, ChargeError, ClassKey, Cpu, Node, Sample};
+use super::{Bounds, ChargeError, ClassKey, Cpu, Node, Resort, Sample};
 use crate::model::Class;
 use crate::rng::Rng;
 
@@ -368,7 +368,7 @@ pub fn run(s: &Scenario) -> Result<Report, ChargeError> {
         }
 
         // The last resort, then the VMs whose lives end.
-        if let Some(id) = node.last_resort()? {
+        if let Resort::End { vm: id, .. } = node.last_resort()? {
             let within = node
                 .budgets()?
                 .into_iter()
