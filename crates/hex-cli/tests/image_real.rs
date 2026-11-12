@@ -39,141 +39,19 @@
 )]
 
 use std::fs;
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio as HostStdio};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hex_api::conformance::{self, Act, Failure, Fixture};
 use hex_api::{
-    Allocation, Bounds, BoxId, BoxSpec, CapacityResources, Class, ClassSpec, Program, Runtime,
-    ShardsImage,
+    Allocation, Bounds, BoxId, BoxSpec, Class, ClassSpec, Program, Runtime, ShardsImage,
 };
 use hex_client::Client;
 
-/// The variable `name`'s value, which the run needs: failing by name where it is unset.
-fn input(name: &str) -> String {
-    std::env::var(name)
-        .unwrap_or_else(|_| panic!("{name} is unset (crates/hex-cli/tests/image_real.rs)"))
-}
-
-fn number(name: &str) -> u64 {
-    input(name)
-        .parse()
-        .unwrap_or_else(|e| panic!("{name}: {e}"))
-}
-
-/// This binary's own cgroup, made a parent: it moves into a leaf, as native_firecracker_smoke does.
-fn own_cgroup() -> PathBuf {
-    let line = fs::read_to_string("/proc/self/cgroup").unwrap();
-    let own = Path::new("/sys/fs/cgroup").join(line.trim().strip_prefix("0::/").unwrap());
-    if own.file_name().is_some_and(|name| name == "hex-image-real") {
-        return own.parent().unwrap().to_path_buf();
-    }
-    let leaf = own.join("hex-image-real");
-    fs::create_dir_all(&leaf).unwrap();
-    fs::write(leaf.join("cgroup.procs"), std::process::id().to_string()).unwrap();
-    own
-}
-
-/// The node's Shards home and cache (`hex-node`'s `shards_native_paths`: beside its state's records), whose store
-/// its image VMs boot from.
-fn shards_dirs(state: &Path) -> (PathBuf, PathBuf) {
-    (
-        state.join("shards-native-home"),
-        state.join("shards-native-cache"),
-    )
-}
-
-/// Pulls `image` by its digest into the node's Shards home, then ends the daemon the pull started there, so no
-/// process of the pull's runs beside the node.
-fn pull(shards: &Path, image: &str, state: &Path) {
-    let (home, cache) = shards_dirs(state);
-    let shards_in_home = |args: &[&str]| {
-        let status = Command::new(shards)
-            .args(args)
-            .env("SHARDS_HOME", &home)
-            .env("SHARDS_CACHE", &cache)
-            .stdin(HostStdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success(), "shards {args:?}: {status}");
-    };
-    let begun = Instant::now();
-    shards_in_home(&["pull", image]);
-    eprintln!("IMAGE pulled {image} in {:?}", begun.elapsed());
-    shards_in_home(&["daemon", "stop"]);
-}
-
-/// A `hex node` with the Shards class, in the waits census, ended by its own PID when dropped: its image VMs' run
-/// hosts then see their channel close and end their VMs (D231's run ends with its owner).
-struct Node {
-    child: Child,
-    socket: PathBuf,
-}
-
-impl Node {
-    fn start(work: &Path, own: &Path, wait: Duration) -> Self {
-        let socket = work.join("node.sock");
-        let stderr = work.join("node.stderr");
-        let begun = Instant::now();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_hex"))
-            .arg("node")
-            .arg("--socket")
-            .arg(&socket)
-            .arg("--state")
-            .arg(work.join("state"))
-            .arg("--box-root")
-            .arg(own.join("hex-image-node"))
-            .env("HEX_WAITS_CENSUS", work.join("census.txt"))
-            .env("HEX_WAITS_CENSUS_MAX", input("HEX_WAITS_CENSUS_MAX"))
-            .stdin(HostStdio::null())
-            .stdout(HostStdio::piped())
-            .stderr(fs::File::create(&stderr).unwrap())
-            .spawn()
-            .unwrap();
-        // The node's own "ready <socket>" line is the fact waited on; the run's deadline only guards it.
-        let (tx, rx) = mpsc::channel();
-        let stdout = child.stdout.take().unwrap();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-        let want = format!("ready {}", socket.display());
-        let until = begun + wait;
-        loop {
-            match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
-                Ok(line) if line == want => break,
-                Ok(line) => eprintln!("node: {line}"),
-                Err(error) => panic!(
-                    "node not ready: {error}; stderr: {}",
-                    fs::read_to_string(&stderr).unwrap_or_default()
-                ),
-            }
-        }
-        eprintln!(
-            "IMAGE node ready after {:?} (pid {})",
-            begun.elapsed(),
-            child.id()
-        );
-        Self { child, socket }
-    }
-}
-
-impl Drop for Node {
-    fn drop(&mut self) {
-        if self.child.try_wait().unwrap().is_none() {
-            self.child.kill().unwrap();
-        }
-        let status = self.child.wait().unwrap();
-        eprintln!("IMAGE node ended: {status}");
-    }
-}
+#[path = "image_node/mod.rs"]
+mod image_node;
+use image_node::{Node, allocation, input, number, own_cgroup, pull, records, step};
 
 /// Shards image VMs of the pinned image, each admitted for the run's workload: running its members alone, or a
 /// command for the act a case asks of its run.
@@ -231,42 +109,6 @@ impl Fixture for ImageBoxes {
     }
 }
 
-/// Every answer the client's own waits record, as the census line it is, said as it comes.
-fn step(name: &'static str, sample: hex_core::patience::Sample) {
-    eprint!(
-        "IMAGE-STEP {}",
-        hex_core::patience::census_line(name, sample)
-    );
-}
-
-/// Each image wait's answers in the node's census file, `name nanos` (a refusal `name !nanos`, a run-out
-/// `name >nanos`): its count, fastest and slowest answer, the slowest the record's.
-fn records(census: &Path) {
-    let text = fs::read_to_string(census).unwrap();
-    if let Some(full) = text.lines().find(|l| l.starts_with("census full")) {
-        eprintln!("IMAGE-RECORD cut: {full}");
-    }
-    for wait in ["hex.image.boot", "hex.image.stats", "hex.image.stop"] {
-        let answers: Vec<u64> = text
-            .lines()
-            .filter_map(|l| l.strip_prefix(wait)?.strip_prefix(' ')?.parse().ok())
-            .collect();
-        let other = text
-            .lines()
-            .filter(|l| {
-                l.strip_prefix(wait)
-                    .and_then(|rest| rest.strip_prefix(' '))
-                    .is_some_and(|v| v.starts_with('!') || v.starts_with('>'))
-            })
-            .count();
-        let (fastest, slowest) = (answers.iter().min(), answers.iter().max());
-        eprintln!(
-            "IMAGE-RECORD {wait} n={} fastest_ns={fastest:?} slowest_ns={slowest:?} refused_or_ran_out={other}",
-            answers.len()
-        );
-    }
-}
-
 #[test]
 #[ignore = "native: KVM, a delegated cgroup, a Shards guest configuration and a pinned image (HEX_IMAGE)"]
 fn the_shards_image_class_holds_its_contract_through_a_real_node() {
@@ -292,20 +134,11 @@ fn the_shards_image_class_holds_its_contract_through_a_real_node() {
         "a census sink was installed before this one"
     );
     // Admitted as the node's own cost sizes a VM, from the same configuration the node reads.
-    let cost = hex_runtime::guest::GuestConfig::from_env_with_native_inputs()
-        .unwrap()
-        .cost;
-    let allocation = cost
-        .allocate(CapacityResources {
-            cpu_milli: number("HEX_IMAGE_CPU_MILLI"),
-            mem_bytes: number("HEX_IMAGE_MEMORY_BYTES"),
-            disk_bytes: 0,
-        })
-        .unwrap();
+    let allocation = allocation();
     eprintln!("IMAGE each VM {:?}", allocation.vm_size().unwrap());
-    let own = own_cgroup();
+    let own = own_cgroup("hex-image-real");
     pull(&shards, &image, &work.join("state"));
-    let node = Node::start(&work, &own, wait);
+    let node = Node::start(&work, &own, wait, "hex-image-node");
     let socket = node.socket.clone();
     let (done, verdicts) = mpsc::channel();
     std::thread::spawn(move || {
