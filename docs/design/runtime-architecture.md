@@ -2447,8 +2447,12 @@ decision covers the node's waits for an answer whose time it can observe (source
   A wait that ran out is no sample, nor is a dead or hung seed (Karn's point).
 - **No caller failure where an alternative exists**: a seed past its bound is retired, counted, and the create goes
   to another seed (when the hung seed is reaped with the box's cgroup still empty, so nothing of the create was
-  made); the network check past its bound throws the namespace away, counted; only where there is no alternative (a
-  record write, a client's call) is the caller refused, by type.
+  made); the network check past its bound throws the namespace away, counted; a client's call whose caller gave a
+  deadline waits on to it, the learned bound's end a run-out it records (`Patience::ran_out`); only where there is no
+  alternative (a record write, a client's call with no caller's deadline) is the caller refused, by type. (AC-T7.4.1,
+  2026-11-11: on 00aad a Firecracker guest's relay was refused its node's hello at 2.354 ms, twice the release record,
+  the node busy initializing the guest's GPU with most of the boot's 60 s left, and the guest panicked; the relay's
+  hello now carries the boot's deadline, `hex guest`.)
 - **Measuring**: where no record exists yet, the wait says so (`Patience::measuring`) and names the record to come;
   no value is picked. It is never armed: its answers are only recorded, for the census that seeds it, so no first
   answer becomes its bound.

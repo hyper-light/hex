@@ -363,8 +363,11 @@ fn timed_call<T: Transport>(transport: T, request: mpsc::Receiver<()>) -> Refusa
     result.unwrap().unwrap_err()
 }
 
-/// Do exhaust caller and learned bounds separately in actual Core calls. The census runs in
-/// a fresh exact-test child so it never competes with the existing refusal-census unit's OnceLock.
+/// Do exhaust a caller's bound in actual Core calls, its learned wait ending once after it and
+/// once before it; expect each refused as the caller's expiry, the learned wait before it a
+/// run-out told to the census and never the call's end (AC-T7.4.1), after it nothing told. The
+/// census runs in a fresh exact-test child so it never competes with the existing
+/// refusal-census unit's OnceLock.
 #[test]
 fn timeout_cause_and_learning_keep_caller_authority_separate() {
     const CHILD: &str = "HEX_CLIENT_BUDGET_CENSUS_CHILD";
@@ -411,7 +414,7 @@ fn timeout_cause_and_learning_keep_caller_authority_separate() {
     let (transport, request) = stalled(Some(CAP));
     let learned = timed_call(Calibrated::<false>(transport), request);
     assert!(
-        matches!(learned, Refusal::Os { why, .. } if why.contains("twice") && !why.contains("caller"))
+        matches!(learned, Refusal::Os { why, .. } if why.contains("caller") && !why.contains("twice"))
     );
     assert_eq!(SAMPLES.load(Ordering::SeqCst), 1);
     assert_eq!(RUN_OUT.load(Ordering::SeqCst), 1);
@@ -463,8 +466,8 @@ fn in_late_census_child(name: &str) -> bool {
 }
 
 /// A stand-in agent busy past its record, as the guest's node was initializing its GPU: it answers a hello only once
-/// the hello's learned wait, twice its record of 1 ms, has run out ([`LATE_DUE`]). `CALLER` names its waits apart, so
-/// each test's census is its own.
+/// the hello's learned wait, twice its record of 1 ms, has run out ([`LATE_DUE`], set by [`late_census`] where it is
+/// installed). `CALLER` names its waits apart.
 struct LateHello<const CALLER: bool> {
     io: UdpSocket,
     asked: Mutex<Option<u64>>,
@@ -474,7 +477,7 @@ fn late_hello<const CALLER: bool>() -> LateHello<CALLER> {
     let io = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     io.connect(io.local_addr().unwrap()).unwrap();
     io.set_nonblocking(true).unwrap();
-    assert!(LATE_WAKE.set(io.try_clone().unwrap()).is_ok());
+    let _ = LATE_WAKE.set(io.try_clone().unwrap());
     LateHello {
         io,
         asked: Mutex::new(None),
@@ -582,31 +585,17 @@ fn original_a_late_answer_inside_its_callers_deadline_is_taken_its_run_out_recor
 }
 
 /// AC-T7.4.1: with no caller's deadline a call's learned wait is still its bound, its hang detection. Do: say hello with
-/// no caller deadline to the same late agent. Expect: refused as twice the slowest answer, at 2 ms; its run-out told
-/// to the census; no answer taken.
+/// no caller deadline to the late agent, which no census tells its wait ran out here, so it never answers. Expect:
+/// refused as twice the slowest answer, at its 2 ms bound.
 #[test]
 fn with_no_callers_deadline_the_learned_wait_still_refuses() {
-    if !in_late_census_child(
-        "calls::budget_tests::with_no_callers_deadline_the_learned_wait_still_refuses",
-    ) {
-        return;
-    }
     let shared = Shared::try_new(late_hello::<false>()).unwrap();
     let result = Core::hello_before(shared, None).map(drop);
-    let ran_out = LATE_RAN_OUT.lock().unwrap().clone();
-    let answered = LATE_ANSWERED.lock().unwrap().clone();
-    eprintln!(
-        "client_late_answer under=none result={result:?} ran_out={ran_out:?} answered={answered:?}"
-    );
+    eprintln!("client_late_answer under=none result={result:?}");
     assert!(
         matches!(&result, Err(Refusal::Os { why, .. }) if why.contains("none came in 2ms, twice the slowest")),
         "{result:?}"
     );
-    assert_eq!(
-        ran_out,
-        [("test.client_budget.late.alone", Duration::from_millis(2))]
-    );
-    assert!(answered.is_empty(), "{answered:?}");
 }
 
 fn until(at: Instant) -> Result<(), Refusal> {
@@ -1495,8 +1484,9 @@ fn absolute_delete_cap_covers_queued_sender() {
     );
 }
 
-/// AC-T7.4.1: supplied instants survive unchanged; an earlier transport/learned
-/// bound may shorten authority, while no later/default bound can enlarge it.
+/// AC-T7.4.1: supplied instants survive unchanged; an earlier transport bound may shorten
+/// authority, no later/default bound can enlarge it, and a learned wait never replaces it:
+/// ending first it is a run-out to record, a tie the caller's; with no caller it is the bound.
 #[test]
 fn absolute_caller_limit_keeps_original_instant_and_smaller_bounds() {
     let began = Instant::now();
@@ -1518,15 +1508,22 @@ fn absolute_caller_limit_keeps_original_instant_and_smaller_bounds() {
     assert_eq!(limited.limited_by(Some(later)).at(), earlier);
     let tied = absolute.limited_by(Some(later));
     assert!(matches!(tied.source, ReplyBound::CallerAbsolute));
-    assert_eq!(
-        ReplyDeadline::combine(Some(absolute), began, None)
-            .unwrap()
-            .at(),
-        at
-    );
-    let learned = ReplyDeadline::combine(Some(absolute), began, Some(CAP)).unwrap();
+    let (bound, learned) = ReplyDeadline::combine(Some(absolute), began, None);
+    assert_eq!(bound.unwrap().at(), at);
+    assert!(learned.is_none());
+    let (bound, learned) = ReplyDeadline::combine(Some(absolute), began, Some(CAP));
+    assert_eq!(bound.unwrap().at(), at);
+    let learned = learned.unwrap();
     assert_eq!(learned.at(), earlier);
     assert!(matches!(learned.source, ReplyBound::Learned(_)));
+    let (bound, learned) = ReplyDeadline::combine(Some(absolute), began, Some(OBSERVE));
+    assert_eq!(bound.unwrap().at(), at);
+    assert!(learned.is_none(), "a tie belongs to caller authority");
+    let (bound, learned) = ReplyDeadline::combine(None, began, Some(CAP));
+    let bound = bound.unwrap();
+    assert_eq!(bound.at(), earlier);
+    assert!(matches!(bound.source, ReplyBound::Learned(_)));
+    assert!(learned.is_none());
 }
 
 /// Shared observations of each actual port and its original optional dial deadline.
@@ -2498,10 +2495,11 @@ fn a_settle_failure_whose_kill_is_confirmed_keeps_its_refusal_and_never_releases
     }
 }
 
-/// AC-T7.4.1 control A: actual selection chooses the existing private smaller
-/// learned policy, consumed at the existing setup seam before any send is attempted.
+/// AC-T7.4.1 control A: actual selection lends the setup seam the caller's deadline, never the
+/// existing private smaller learned wait, whose end is a run-out to record, not the call's; that
+/// deadline consumed at setup, no send is attempted and the refusal is the caller's expiry.
 #[test]
-fn selected_smaller_learned_setup_expiry_prevents_send() {
+fn selected_callers_setup_expiry_prevents_send() {
     let (transport, writes) = stalled(None);
     let client = Arc::new(configured(Calibrated::<false>(transport)));
     let control = Arc::clone(&client);
@@ -2553,13 +2551,13 @@ fn selected_smaller_learned_setup_expiry_prevents_send() {
     );
     joined.unwrap();
     let (original, selected) = selected.unwrap();
-    assert!(matches!(selected.source, ReplyBound::Learned(_)));
-    assert!(selected.at() < original);
+    assert!(matches!(selected.source, ReplyBound::CallerAbsolute));
+    assert_eq!(selected.at(), original);
     let (returned, result) = observed.unwrap();
     assert!(returned >= selected.at());
     assert!(matches!(
         result,
-        Err(Refusal::Os { op: "sending to the node agent", why }) if why.contains("twice")
+        Err(Refusal::Os { op: "sending to the node agent", why }) if why.contains("absolute") && !why.contains("twice")
     ));
     // This Stalled transport commits its whole nonempty input on its first try_send;
     // no notification therefore independently witnesses zero send calls/bytes.

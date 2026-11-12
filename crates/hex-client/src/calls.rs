@@ -193,7 +193,15 @@ impl ReplyDeadline {
         }
     }
 
-    fn combine(caller: Option<Self>, asked: Instant, patience: Option<Duration>) -> Option<Self> {
+    /// The bound that fails a call asked at `asked`, and the learned wait's end it passes on the way (decision 9,
+    /// AC-T7.4.1). With a caller's deadline only that fails it: its kind's learned wait (`patience`), where it ends
+    /// first, is a run-out to record as it passes, an answer slower than any before, not an agent taken for dead.
+    /// With none, the learned wait is the call's bound, its hang detection.
+    fn combine(
+        caller: Option<Self>,
+        asked: Instant,
+        patience: Option<Duration>,
+    ) -> (Option<Self>, Option<Self>) {
         let learned = patience.and_then(|wait| {
             asked.checked_add(wait).map(|at| Self {
                 at,
@@ -202,9 +210,11 @@ impl ReplyDeadline {
         });
         match (caller, learned) {
             // A tie belongs to caller authority, so it cannot enlarge the calibration census.
-            (Some(caller), Some(learned)) if learned.at < caller.at => Some(learned),
-            (Some(caller), _) => Some(caller),
-            (None, learned) => learned,
+            (Some(caller), Some(learned)) if learned.at < caller.at => {
+                (Some(caller), Some(learned))
+            }
+            (Some(caller), _) => (Some(caller), None),
+            (None, learned) => (learned, None),
         }
     }
 
@@ -229,6 +239,14 @@ impl ReplyDeadline {
     fn ran_out(self, waits: Option<&Patience>) {
         if let (ReplyBound::Learned(wait), Some(waits)) = (self.source, waits) {
             waits.ran_out(wait);
+        }
+    }
+
+    /// A call's `budget` passed with no answer, and with it every learned wait before it: the call's own where its
+    /// caller gave no deadline, else `learned`, the one under the caller's not yet told, each a run-out to `waits`.
+    fn ended(budget: Option<Self>, learned: Option<Self>, waits: Option<&Patience>) {
+        for bound in [budget, learned].into_iter().flatten() {
+            bound.ran_out(waits);
         }
     }
 }
@@ -387,7 +405,8 @@ pub trait Transport: Send + Sync + 'static {
     /// holders, so a frame cut across reads is whole when its last bytes come.
     type Reading: Send;
     /// Its call kinds' learned waits for an answer, by [`kind_of`]'s order: each its own record's, as its
-    /// transport and its agent answer it, measuring where none is recorded yet (decision 9).
+    /// transport and its agent answer it, measuring where none is recorded yet (decision 9). A call's bound where its
+    /// caller gives no deadline; under one, a run-out recorded as it passes ([`ReplyDeadline::combine`]).
     fn answers() -> &'static [Patience; KINDS];
     /// Optional caller policy for one synchronous reply, separate from learned calibration.
     /// None preserves the transport's existing wait behavior.
@@ -1120,10 +1139,10 @@ impl<'a, T: Transport> Caller<'a, T> {
     }
 
     /// Sends `bytes` whole with `lent`, under the send lock, waiting for room in the agent's socket until `deadline`
-    /// (none: as long as it takes), its call's learned wait (`patience`, named in a refusal). The node agent reads no
-    /// request while its answers wait for room in the client's socket, so a send waiting for room has someone reading:
-    /// itself while it holds the reader's turn, which it takes when free or is handed, reading what comes as it waits;
-    /// else the turn's holder, which hands the turn to it, waking it, as it goes.
+    /// (none: as long as it takes), its call's; `patience`, its learned wait, is named in a refusal. The node agent
+    /// reads no request while its answers wait for room in the client's socket, so a send waiting for room has
+    /// someone reading: itself while it holds the reader's turn, which it takes when free or is handed, reading what
+    /// comes as it waits; else the turn's holder, which hands the turn to it, waking it, as it goes.
     fn send(
         &mut self,
         bytes: &[u8],
@@ -1317,6 +1336,25 @@ impl<'a, T: Transport> Caller<'a, T> {
             }
         }
     }
+
+    /// Its answer, waited for until `deadline` as [`Caller::wait`] waits; where `learned`, its kind's learned wait
+    /// under its caller's deadline, ends first with none come, the run-out is told to `waits` as it passes, once, and
+    /// the wait goes on (decision 9, AC-T7.4.1).
+    fn wait_past(
+        &mut self,
+        learned: &mut Option<ReplyDeadline>,
+        deadline: Option<Instant>,
+        waits: Option<&Patience>,
+    ) -> Option<Result<Answer, Refusal>> {
+        if let Some(bound) = *learned {
+            if let Some(answer) = self.wait(Some(bound.at)) {
+                return Some(answer);
+            }
+            *learned = None;
+            bound.ran_out(waits);
+        }
+        self.wait(deadline)
+    }
 }
 
 impl<T: Transport> Drop for Caller<'_, T> {
@@ -1356,10 +1394,12 @@ impl<T: Transport> Drop for Conn<T> {
 
 impl<T: Transport> Conn<T> {
     /// Sends `request` with the descriptors `with` lends it, once `with` has made what its id names (an exec's
-    /// streams its transport makes), and waits for its answer: at most twice the slowest answer this process has had
-    /// to a call of its kind ([`Transport::answers`]), past which the call is refused by type, the only way left to
-    /// it; as long as it takes while its kind's wait measures. With `program`, a `Proc`'s place for the end of the
-    /// program an exec starts is made before the exec goes, so the end can't come first.
+    /// streams its transport makes), and waits for its answer: with no deadline of its caller's, at most twice the
+    /// slowest answer this process has had to a call of its kind ([`Transport::answers`]), past which the call is
+    /// refused by type, the only way left to it, and as long as it takes while its kind's wait measures; with one,
+    /// until that deadline, its kind's learned wait a run-out recorded as it passes ([`ReplyDeadline::combine`]). With
+    /// `program`, a `Proc`'s place for the end of the program an exec starts is made before the exec goes, so the end
+    /// can't come first.
     fn call<'l>(
         &self,
         bound: usize,
@@ -1386,26 +1426,24 @@ impl<T: Transport> Conn<T> {
         let waits = kind_of(T::answers(), request);
         let patience = waits.and_then(Patience::deadline);
         let asked = Instant::now();
-        let budget = ReplyDeadline::combine(cap, asked, patience);
+        let (budget, mut learned) = ReplyDeadline::combine(cap, asked, patience);
         let deadline = budget.map(ReplyDeadline::at);
         let mut caller = Caller::new(shared, program)?;
         let bytes = wire::request(caller.id, request, bound)
             .map_err(Refusal::from)
             .and_then(T::frame)?;
         // Legacy transports retain their existing setup path. An explicit cap requires an adapter
-        // that consumes the same effective caller/learned deadline before any request is sent.
-        let lent = with(caller.id, cap.and(budget))?;
+        // that consumes the caller's deadline, the call's, before any request is sent.
+        let lent = with(caller.id, cap)?;
         let mut pending = None;
         match caller.send(&bytes, lent, deadline, patience) {
             // Sent, or the agent has gone: why reaches the call as it waits, which sees the end.
             Ok(()) | Err(Sent::Gone) => {}
-            // No room for the request in all the call's patience: its wait ran out, as an answer's would.
+            // No room for the request until the call's deadline: it ran out, as an answer's wait would.
             Err(Sent::Full(r)) => {
                 pending = caller.wait(Some(Instant::now()));
                 if pending.is_none() {
-                    if let Some(budget) = budget {
-                        budget.ran_out(waits);
-                    }
+                    ReplyDeadline::ended(budget, learned.take(), waits);
                     return Err(budget.map_or(r, |d| d.refusal("sending to the node agent")));
                 }
             }
@@ -1413,7 +1451,10 @@ impl<T: Transport> Conn<T> {
         }
         let mut offered = false;
         loop {
-            match pending.take().or_else(|| caller.wait(deadline)) {
+            match pending
+                .take()
+                .or_else(|| caller.wait_past(&mut learned, deadline, waits))
+            {
                 Some(Ok(Answer::Offered(offer))) => {
                     offered = true;
                     caller.answered = false;
@@ -1430,7 +1471,7 @@ impl<T: Transport> Conn<T> {
                             caller.mine = false;
                         }
                     }
-                    let opened = match cap.and(budget) {
+                    let opened = match cap {
                         Some(deadline) => deadline
                             .remaining("opening offered streams")
                             .and_then(|_| shared.transport.open_offer_before(&offer, deadline)),
@@ -1463,9 +1504,7 @@ impl<T: Transport> Conn<T> {
                         shared.send_owed_now();
                         return Err(match why {
                             Sent::Full(why) => {
-                                if let Some(budget) = budget {
-                                    budget.ran_out(waits);
-                                }
+                                ReplyDeadline::ended(budget, learned.take(), waits);
                                 budget.map_or(why, |d| d.refusal("accepting offered streams"))
                             }
                             Sent::Refused(why) => why,
@@ -1492,9 +1531,7 @@ impl<T: Transport> Conn<T> {
                         shared.owe(caller.id, &Request::Release)?;
                         shared.send_owed_now();
                     }
-                    if let Some(budget) = budget {
-                        budget.ran_out(waits);
-                    }
+                    ReplyDeadline::ended(budget, learned.take(), waits);
                     return Err(budget.map_or_else(
                         || {
                             Refusal::Broken(
@@ -1957,7 +1994,8 @@ impl<T: Transport> Core<T> {
     }
 
     /// Run with one original absolute deadline for control send/answer and stream setup.
-    /// A smaller configured or learned bound still wins. The returned program's lifetime and
+    /// A smaller configured bound still wins; a learned one ending first is a run-out recorded,
+    /// not the call's end ([`ReplyDeadline::combine`]). The returned program's lifetime and
     /// caller-owned stdio have no deadline attached; use [`Proc::wait_for`] for completion.
     /// An expired call does not prove whether the agent started or removed the workload.
     pub fn run_before(
@@ -1984,7 +2022,8 @@ impl<T: Transport> Core<T> {
     }
 
     /// Reads capacity within the caller's original operation deadline on this connection.
-    /// A smaller configured or learned wait still wins; telemetry grants no ownership.
+    /// A smaller configured wait still wins, a learned one only a run-out recorded; telemetry
+    /// grants no ownership.
     pub fn capacity_before(
         &self,
         class: Class,
