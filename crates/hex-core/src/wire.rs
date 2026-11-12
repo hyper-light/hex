@@ -38,17 +38,18 @@
 //! [`Budgets::programs`]).
 
 use std::collections::BTreeSet;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use hex_api::{
     Allocation, BackendUnavailable, BackingGrant, BackingKey, BackingOffer, BackingPhase, Bounds,
     BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
-    ConnectFailure, ConnectPhase, ConnectReply, DeviceHolder, DeviceId, DeviceInfo, DeviceKind,
-    Execution, Exit, GpuEligibility, ImageArch, ImageOs, ImagePlatform, IoKind, IoRates,
-    LifecycleCause, MAX_DEVICES, MAX_RUNTIME_ROUTES, Mount, Network, OciSpec, PhysicalDevice,
-    PhysicalReport, Program, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost,
-    Signal, Usage, User,
+    ConnectFailure, ConnectPhase, ConnectReply, Destination, DeviceHolder, DeviceId, DeviceInfo,
+    DeviceKind, Execution, Exit, GpuEligibility, Grant, ImageArch, ImageOs, ImagePlatform, IoKind,
+    IoRates, LifecycleCause, MAX_DEVICES, MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network,
+    OciSpec, PhysicalDevice, PhysicalReport, Ports, Program, Proto, Refusal, Rootfs, RouteKey,
+    RouteOffer, RouteReceipt, RuntimeCost, Signal, Usage, User, check_grants,
 };
 
 use crate::netns;
@@ -69,6 +70,7 @@ pub const IDENTITY: u64 = identity(&[
     include_bytes!("../../hex-api/src/bounds.rs"),
     include_bytes!("../../hex-api/src/devices.rs"),
     include_bytes!("../../hex-api/src/runtime.rs"),
+    include_bytes!("../../hex-api/src/grants.rs"),
 ]);
 /// The header's length: magic, wire identity, kind and id.
 pub const HEADER_BYTES: usize = 22;
@@ -1960,6 +1962,161 @@ fn oci(r: &mut Reader<'_>) -> Result<OciSpec, Fault> {
         network,
         hosts,
     })
+}
+
+// Joint plan step 15 (AC-T7.7.2): a box's network grants (docs/design/network-grants.md). Fixed tags independent of
+// Rust discriminants: a grant's way first (0 egress, 1 host, 2 publish), a member's kind as Shards' image wire tags
+// it (0 agent, 1 harness), a protocol by its IANA number, an address by its family (4, 6) then its octets. Both
+// sides run `check_grants`, so a list the check refuses is neither sent nor read.
+fn put_grants(w: &mut Writer, grants: &[Grant]) -> Result<(), Fault> {
+    check_grants(grants).map_err(|e| Fault::value("grants", e.to_string()))?;
+    w.list(grants, put_grant)
+}
+
+fn put_grant(w: &mut Writer, grant: &Grant) -> Result<(), Fault> {
+    match grant {
+        Grant::Egress { member, to, ports } => {
+            w.u8(0);
+            put_member(w, member)?;
+            match to {
+                Destination::Name(name) => {
+                    w.u8(0);
+                    w.string(name)?;
+                }
+                Destination::Address(address) => {
+                    w.u8(1);
+                    put_address(w, *address);
+                }
+            }
+            put_ports(w, *ports);
+        }
+        Grant::Host { member, ports } => {
+            w.u8(1);
+            put_member(w, member)?;
+            put_ports(w, *ports);
+        }
+        Grant::Publish {
+            member,
+            proto,
+            port,
+            host,
+            host_port,
+        } => {
+            w.u8(2);
+            put_member(w, member)?;
+            w.u8(proto_tag(*proto));
+            w.u16(*port);
+            put_address(w, *host);
+            w.option(*host_port, Writer::u16);
+        }
+    }
+    Ok(())
+}
+
+fn put_member(w: &mut Writer, member: &Member) -> Result<(), Fault> {
+    w.u8(match member.kind {
+        MemberKind::Agent => 0,
+        MemberKind::Harness => 1,
+    });
+    w.string(&member.name)
+}
+
+fn put_ports(w: &mut Writer, ports: Ports) {
+    w.u8(proto_tag(ports.proto));
+    w.u16(ports.first);
+    w.u16(ports.last);
+}
+
+fn proto_tag(proto: Proto) -> u8 {
+    match proto {
+        Proto::Tcp => 6,
+        Proto::Udp => 17,
+    }
+}
+
+fn put_address(w: &mut Writer, address: IpAddr) {
+    match address {
+        IpAddr::V4(v4) => {
+            w.u8(4);
+            w.raw(&v4.octets());
+        }
+        IpAddr::V6(v6) => {
+            w.u8(6);
+            w.raw(&v6.octets());
+        }
+    }
+}
+
+fn grants(r: &mut Reader<'_>) -> Result<Vec<Grant>, Fault> {
+    let grants = r.list(grant)?;
+    check_grants(&grants).map_err(|e| Fault::value("grants", e.to_string()))?;
+    Ok(grants)
+}
+
+fn grant(r: &mut Reader<'_>) -> Result<Grant, Fault> {
+    Ok(match r.u8()? {
+        0 => {
+            let member = member(r)?;
+            let to = match r.u8()? {
+                0 => Destination::Name(r.string("grant destination")?),
+                1 => Destination::Address(address(r)?),
+                t => return Err(Fault::value("grant destination", format!("variant {t}"))),
+            };
+            Grant::Egress {
+                member,
+                to,
+                ports: ports(r)?,
+            }
+        }
+        1 => Grant::Host {
+            member: member(r)?,
+            ports: ports(r)?,
+        },
+        2 => Grant::Publish {
+            member: member(r)?,
+            proto: proto(r)?,
+            port: r.u16()?,
+            host: address(r)?,
+            host_port: r.option(Reader::u16)?,
+        },
+        t => return Err(Fault::value("grant", format!("variant {t}"))),
+    })
+}
+
+fn member(r: &mut Reader<'_>) -> Result<Member, Fault> {
+    let kind = match r.u8()? {
+        0 => MemberKind::Agent,
+        1 => MemberKind::Harness,
+        t => return Err(Fault::value("grant member", format!("kind {t}"))),
+    };
+    Ok(Member {
+        kind,
+        name: r.string("grant member")?,
+    })
+}
+
+fn ports(r: &mut Reader<'_>) -> Result<Ports, Fault> {
+    Ok(Ports {
+        proto: proto(r)?,
+        first: r.u16()?,
+        last: r.u16()?,
+    })
+}
+
+fn proto(r: &mut Reader<'_>) -> Result<Proto, Fault> {
+    match r.u8()? {
+        6 => Ok(Proto::Tcp),
+        17 => Ok(Proto::Udp),
+        t => Err(Fault::value("grant protocol", format!("number {t}"))),
+    }
+}
+
+fn address(r: &mut Reader<'_>) -> Result<IpAddr, Fault> {
+    match r.u8()? {
+        4 => Ok(IpAddr::from(r.array::<4>()?)),
+        6 => Ok(IpAddr::from(r.array::<16>()?)),
+        t => Err(Fault::value("grant address", format!("family {t}"))),
+    }
 }
 
 pub(crate) fn put_program(w: &mut Writer, p: &Program) -> Result<(), Fault> {
