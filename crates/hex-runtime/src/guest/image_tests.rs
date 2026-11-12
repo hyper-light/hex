@@ -255,12 +255,23 @@ impl ImageGuest for ModelGuest {
     }
 }
 
-/// Shards' image boot in the model: what each boot was asked, a refusal for the next where the test
-/// sets one, and a gate a boot waits at, open unless the test closes it.
+/// Where the model holds a boot, as D231's boot goes: before its run host has started, when its patience
+/// isn't counting yet; at its run's start, its patience counting from its host's start; or nowhere.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    Host,
+    Run,
+    Open,
+}
+
+/// Shards' image boot in the model: what each boot was asked and the patience it was given, a refusal
+/// for the next where the test sets one, and a gate a boot waits at, open unless the test closes it.
+/// A boot held at its run past its patience is refused as D231 refuses it.
 struct ModelImages {
     asked: Mutex<Vec<ImageSpec>>,
+    patience: Mutex<Vec<Duration>>,
     refuse: Mutex<Option<ImageRefusal>>,
-    open: Mutex<bool>,
+    gate: Mutex<Gate>,
     opened: Condvar,
     run: Arc<ModelRun>,
     /// The members the image runs, as the test sets them: none unless it does.
@@ -271,16 +282,17 @@ impl ModelImages {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             asked: Mutex::new(Vec::new()),
+            patience: Mutex::new(Vec::new()),
             refuse: Mutex::new(None),
-            open: Mutex::new(true),
+            gate: Mutex::new(Gate::Open),
             opened: Condvar::new(),
             run: Arc::new(ModelRun::default()),
             members: Mutex::new(Vec::new()),
         })
     }
 
-    fn gate(&self, open: bool) {
-        *self.open.lock().unwrap() = open;
+    fn gate(&self, gate: Gate) {
+        *self.gate.lock().unwrap() = gate;
         self.opened.notify_all();
     }
 }
@@ -289,10 +301,28 @@ impl Images for ModelImages {
     fn backend(&self) -> Result<shards_api::Backend, ImageRefusal> {
         Ok(shards_api::Backend::Kvm)
     }
-    fn boot(&self, spec: &ImageSpec, _: Duration) -> Result<Box<dyn ImageGuest>, ImageRefusal> {
+    fn boot(
+        &self,
+        spec: &ImageSpec,
+        patience: Duration,
+    ) -> Result<Box<dyn ImageGuest>, ImageRefusal> {
         self.asked.lock().unwrap().push(spec.clone());
-        let open = self.open.lock().unwrap();
-        drop(self.opened.wait_while(open, |open| !*open).unwrap());
+        self.patience.lock().unwrap().push(patience);
+        let gate = self.gate.lock().unwrap();
+        let gate = self
+            .opened
+            .wait_while(gate, |gate| *gate == Gate::Host)
+            .unwrap();
+        let (gate, _) = self
+            .opened
+            .wait_timeout_while(gate, patience, |gate| *gate == Gate::Run)
+            .unwrap();
+        if *gate == Gate::Run {
+            return Err(ImageRefusal::Boot(format!(
+                "the run did not start within {patience:?}"
+            )));
+        }
+        drop(gate);
         if let Some(why) = self.refuse.lock().unwrap().take() {
             return Err(why);
         }
@@ -381,6 +411,9 @@ fn record(owner: &Owner, id: &BoxId) -> Option<BoxRecord> {
 /// makes either, so each measures, for its fact alone (hex_testkit::waits).
 static LATE_BOOT_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_late_boot_shown");
 static REAPED_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_reaped_shown");
+/// The model's boot asked, and a box its refused boot ended shown Empty: facts no recorded operation makes either.
+static BOOT_ASKED: Patience = Patience::measuring("test.hex_runtime.image_boot_asked");
+static REFUSED_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_refused_shown");
 
 /// Waits on `wait`, its fact's own patience, for box `id` to show `state`.
 fn shown(runtime: &GuestRuntime, id: &BoxId, state: BoxState, wait: &Patience) -> BoxInfo {
@@ -435,6 +468,8 @@ fn a_created_vm_boots_at_start_its_admitted_size_and_no_grant() {
         boot.binary.as_deref(),
         Some(super::super::tests::config().binary.as_path())
     );
+    // Its wait measures, so Shards' boot is given no bound of its own either.
+    assert_eq!(*images.patience.lock().unwrap(), vec![Duration::MAX]);
     assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Running);
     assert!(matches!(
         runtime.start(&id),
@@ -576,15 +611,16 @@ fn a_refused_boot_ends_the_box_and_says_why() {
     runtime.delete(&id).unwrap();
 }
 
-/// Decision 9, joint plan step 12: do start a VM whose boot passes its learned patience. Expect: start
-/// refused Lifecycle Pending, the box Created while its boot runs, delete Pending; then, the boot
-/// answering, the box Running with no second boot.
+/// Decision 9, joint plan step 12: do start a VM whose boot passes its learned patience before its run host
+/// has started (Shards' own patience counting from that start, after the caller's). Expect: start refused
+/// Lifecycle Pending, the box Created while its boot runs, delete Pending; then, the boot answering, the box
+/// Running with no second boot.
 #[test]
 fn a_boot_past_its_patience_is_pending_and_its_answer_lands_after() {
     let images = ModelImages::new();
-    images.gate(false);
-    // The model holds the boot at its closed gate, which no bound outlasts, so a 1 ns record runs the
-    // start's wait out at once. The stats and stop waits measure, as waits() says.
+    images.gate(Gate::Host);
+    // The model holds the boot before its run host's start, which no bound outlasts, so a 1 ns record runs
+    // the start's wait out at once. The stats and stop waits measure, as waits() says.
     let held = ImageWaits {
         boot: Patience::seeded("test.hex_runtime.image_boot_held", Duration::from_nanos(1)),
         ..waits().unwrap()
@@ -606,9 +642,62 @@ fn a_boot_past_its_patience_is_pending_and_its_answer_lands_after() {
             ..
         })
     ));
-    images.gate(true);
+    images.gate(Gate::Open);
     shown(&runtime, &id, BoxState::Running, &LATE_BOOT_SHOWN);
     assert_eq!(images.asked.lock().unwrap().len(), 1);
+}
+
+/// Decision 9, joint plan step 12 (CLAUDE.md §2: every wait has a bound): do start a VM whose run host starts but
+/// whose run doesn't, its boot past its learned patience. Expect: Shards' boot given that patience as its own; start
+/// refused Lifecycle Pending; then Shards' refusal at its patience ends the box (Exit::Unknown), shown Empty, its
+/// record keeping it, with no second boot.
+#[test]
+fn a_boot_is_given_its_learned_patience_and_ends_the_box_past_it() {
+    let images = ModelImages::new();
+    images.gate(Gate::Run);
+    // A 1 ns record arms the boot's bound at once; the model's twin of it says what that bound is.
+    let seed = Duration::from_nanos(1);
+    let bound = Patience::seeded("test.hex_runtime.image_boot_bounded_twin", seed)
+        .deadline()
+        .unwrap();
+    let bounded = ImageWaits {
+        boot: Patience::seeded("test.hex_runtime.image_boot_bounded", seed),
+        ..waits().unwrap()
+    };
+    let (runtime, owner) = model_runtime(&images, Ok(bounded));
+    let id = runtime.create(spec("image-bounded", None)).unwrap().id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    hex_testkit::waits::until(&BOOT_ASKED, "the model's boot asked", || {
+        !images.patience.lock().unwrap().is_empty()
+    })
+    .unwrap();
+    assert_eq!(*images.patience.lock().unwrap(), vec![bound]);
+    let info = shown(&runtime, &id, BoxState::Empty, &REFUSED_SHOWN);
+    assert_eq!(info.exit, Some(Exit::Unknown));
+    assert_eq!(record(&owner, &id).unwrap().exit, Some(Exit::Unknown));
+    assert_eq!(images.asked.lock().unwrap().len(), 1);
+}
+
+/// Joint plan step 12, CLAUDE.md §12: do ask what D231's run host awaits on each host OS. Expect: on macOS and on
+/// Windows its start holding only its stdio (RunHostStdioOnly), as Shards starts it through std's spawn, which hands
+/// it what another thread holds inheritable then: on macOS every descriptor not yet marked close-on-exec, on Windows
+/// every inheritable handle (no handle list), though Shards gives the Windows run host itself since 731b5e54; on
+/// Linux nothing.
+#[test]
+fn the_run_host_awaits_its_stdio_alone_on_macos_and_windows() {
+    for (os, awaits) in [
+        ("macos", Some(Upstream::RunHostStdioOnly)),
+        ("windows", Some(Upstream::RunHostStdioOnly)),
+        ("linux", None),
+    ] {
+        assert_eq!(run_host_awaits(os), awaits, "{os}");
+    }
 }
 
 /// Joint plan step 12, the owner's crash (ROOT, 2026-11-12): do give the runtime a Ready record with no
@@ -701,8 +790,8 @@ fn a_create_is_refused_before_any_record_without_its_waits_or_a_bootable_size() 
     assert!(images.asked.lock().unwrap().is_empty());
 }
 
-/// Joint plan step 12: do create where the host has no image boot, as macOS's is until D231's run host
-/// is started holding only its stdio. Expect: refused naming that, before any record.
+/// Joint plan step 12: do create where the host has no image boot, as macOS's and Windows' are until D231's run
+/// host is started holding only its stdio. Expect: refused naming that, before any record.
 #[test]
 fn a_create_is_refused_before_any_record_on_a_host_without_an_image_boot() {
     let owner = Arc::new(Owner::default());
@@ -725,18 +814,13 @@ fn a_create_is_refused_before_any_record_on_a_host_without_an_image_boot() {
     assert!(Transaction::records(owner.as_ref()).unwrap().is_empty());
 }
 
-/// Joint plan step 12, CLAUDE.md §12: do ask for this host's image boot. Expect: Shards' on Linux; on
-/// Windows the refusal naming Shards' owed Windows run host; on macOS the one naming a run host started
-/// holding only its stdio, since D231 starts it through std's spawn, which hands it every descriptor
-/// another thread holds without close-on-exec.
+/// Joint plan step 12, CLAUDE.md §12: do ask for this host's image boot. Expect: Shards' on Linux; on macOS and
+/// Windows the refusal naming a run host started holding only its stdio, since D231 starts it through std's spawn,
+/// which hands it what another thread holds inheritable then.
 #[test]
 fn this_hosts_image_boot_is_shards_on_linux_and_names_what_d231_owes_elsewhere() {
     let host = host_images().map(|_| ());
-    let expected = if cfg!(windows) {
-        Err(Refusal::Awaits {
-            needs: Upstream::WindowsRunHost,
-        })
-    } else if cfg!(target_os = "macos") {
+    let expected = if cfg!(any(windows, target_os = "macos")) {
         Err(Refusal::Awaits {
             needs: Upstream::RunHostStdioOnly,
         })
