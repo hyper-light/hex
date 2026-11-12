@@ -400,3 +400,102 @@ fn a_holding_past_the_room_blocks_the_nodes_admission_typed() {
         vec![Event::Granted(late)]
     );
 }
+
+/// AC-T7.4.1, CV9: a holder on an endpoint of its own reaches the node's own keeper, the Driver's view served on its
+/// QUIC port, reserves 3 of 4 CPUs, and the node then places a box of 2 CPUs and one of 1; expect the grant, the
+/// node's 2 CPUs refused and its 1 started, and the holder told over QUIC the view with all 4 CPUs held.
+#[test]
+fn a_holder_reaches_the_nodes_keeper_over_quic() {
+    use hex_quic::capacity::{CAPACITY_PORT, Link, Server};
+    use hex_quic::enroll::{self, sim::SimCa};
+    use hex_quic::{Config, Endpoint, Shape};
+
+    let dir = tempfile::tempdir().unwrap();
+    let runtime: Arc<dyn Runtime> = Arc::new(hex_api::sim::SimRuntime::default());
+    let room = four_cpus();
+    let driver = Arc::new(
+        Driver::boot(
+            NodeId(0),
+            &[NodeSpec::new(NodeId(0), room)],
+            &[],
+            Budget { owned: 4, ran: 4 },
+            Pick::default(),
+            dir.path(),
+            Runtimes::new([(Class::Oci, runtime)]).unwrap(),
+        )
+        .unwrap(),
+    );
+    driver.refresh_node(NodeSpec::new(NodeId(0), room)).unwrap();
+    driver.open_view(&dir.path().join("capacity"), 1).unwrap();
+
+    let ca = SimCa::new().unwrap();
+    let enrolled = |name: &str| {
+        ca.admit(name, name.as_bytes());
+        enroll::enroll(&ca, name, name.as_bytes().to_vec()).unwrap()
+    };
+    let loopback = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
+    let node = Endpoint::start(Config {
+        credentials: enrolled("node.capacity.test"),
+        bind: loopback,
+        listen: true,
+        serves: vec![CAPACITY_PORT],
+        shape: Shape {
+            connections: 2,
+            lanes: 8,
+        },
+    })
+    .unwrap();
+    let server = Server::new(super::super::DriverView(Arc::clone(&driver)));
+    {
+        let server = Arc::clone(&server);
+        let acceptor = node.acceptor(CAPACITY_PORT);
+        std::thread::spawn(move || server.serve(acceptor));
+    }
+    let kiln_end = Endpoint::start(Config {
+        credentials: enrolled("kiln.capacity.test"),
+        bind: loopback,
+        listen: false,
+        serves: Vec::new(),
+        shape: Shape {
+            connections: 1,
+            lanes: 8,
+        },
+    })
+    .unwrap();
+    let patience = || std::time::Instant::now() + hex_api::conformance::PATIENCE;
+    let peer = kiln_end
+        .dial("node.capacity.test", node.local_addr(), patience())
+        .unwrap();
+    let mut link = Link::open(&kiln_end, peer).unwrap();
+    let mut kiln = Holder::start("kiln-runner".into(), 1, 4, &[]).unwrap();
+    let mut said = VecDeque::from(vec![kiln.connect().unwrap()]);
+    let mut events = Vec::new();
+    let mut converse = |link: &mut Link, kiln: &mut Holder, said: &mut VecDeque<ToKeeper>| {
+        while let Some(msg) = said.pop_front() {
+            link.say(&msg, Some(patience())).unwrap();
+            let mut out = Out::default();
+            kiln.hear(link.hear(Some(patience())).unwrap(), &mut out);
+            said.extend(out.send);
+            events.extend(out.events);
+        }
+    };
+    converse(&mut link, &mut kiln, &mut said);
+    let (run, msg) = kiln.reserve(cpu(3000)).unwrap();
+    said.push_back(msg);
+    converse(&mut link, &mut kiln, &mut said);
+    assert!(
+        matches!(events.as_slice(), [Event::Synced { agree: true, .. }, Event::Granted(id)] if *id == run),
+        "{events:?}"
+    );
+    let (d, p) = demand_of(2000);
+    let (_, step) = driver.submit(d, p).unwrap();
+    assert!(!started(&quiesce(&driver, step)));
+    let (d, p) = demand_of(1000);
+    let (_, step) = driver.submit(d, p).unwrap();
+    assert!(started(&quiesce(&driver, step)));
+    server.hint().unwrap();
+    let ToHolder::Hint { view, .. } = link.hear(Some(patience())).unwrap() else {
+        panic!("no hint");
+    };
+    assert_eq!((view.room.cpu_milli, view.held.cpu_milli), (4000, 4000));
+}
