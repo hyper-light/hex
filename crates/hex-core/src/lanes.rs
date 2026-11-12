@@ -41,6 +41,10 @@ pub const REFUSALS: LaneId = 0;
 /// spell `HEX` so a capture reads them), so one namespace names every port a peer opens.
 pub const LOG_PORT: u32 = 0x4845_5804;
 
+/// The machine's capacity view (joint plan step 13, `docs/design/capacity-view.md` CV9): a holder's connection
+/// to its keeper, the port after the log's. Its messages are a control's, small and answered one by one.
+pub const CAPACITY_PORT: u32 = 0x4845_5805;
+
 /// The most bytes one data frame carries: one whole framed wire message ([`stream::MAX_FRAME`]), the
 /// longest unit any port's stream carries whole, so a control message never needs two frames.
 pub const DATA_BOUND: usize = stream::MAX_FRAME;
@@ -149,7 +153,7 @@ impl Class {
 /// The data kind a port's bytes travel as, or `None` for a port no peer serves.
 pub fn data_kind(port: u32) -> Option<Kind> {
     match port {
-        stream::CONTROL_PORT => Some(Kind::ControlData),
+        stream::CONTROL_PORT | CAPACITY_PORT => Some(Kind::ControlData),
         stream::STDIO_PORT => Some(Kind::StreamData),
         files::FILES_PORT | LOG_PORT => Some(Kind::BulkData),
         _ => None,

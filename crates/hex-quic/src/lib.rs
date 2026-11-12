@@ -18,6 +18,7 @@
 )]
 
 pub mod bridge;
+pub mod capacity;
 pub mod classes;
 mod conn;
 mod driver;
@@ -86,6 +87,10 @@ pub enum Refused {
     /// The endpoint's driver has ended.
     #[error("the endpoint has ended")]
     Ended,
+    /// A capacity message can't be carried: its bytes aren't one, or it passes the bound
+    /// (docs/design/capacity-view.md CV9).
+    #[error("a capacity message can't be carried: {0}")]
+    Message(hex_core::wire::Fault),
 }
 
 impl Refused {
