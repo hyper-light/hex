@@ -895,7 +895,7 @@ fn a_relays_bounds_are_its_nodes_as_its_hello_tells_them() {
     let lab = Lab::new(limits());
     let node = lab.node.try_clone().unwrap();
     let agent = std::thread::spawn(move || hello(&node));
-    let asked = Limits::asked(&lab.dir.path().join("node.sock")).unwrap();
+    let asked = Limits::asked(&lab.dir.path().join("node.sock"), None).unwrap();
     drop(agent.join().unwrap());
     let (node, budgets) = (node_limits(), budgets());
     assert_eq!(asked.connections, node.connections);
