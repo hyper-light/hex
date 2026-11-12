@@ -3193,17 +3193,33 @@ fn a_failed_setups_kill_goes_out_while_answers_for_others_keep_coming() {
     assert_eq!(kills, run.into_iter().collect::<Vec<_>>());
 }
 
-/// Whether the pipe `program` writes has no reader left, waited for as a fact: another test's child holds a
-/// copy of every descriptor from its fork to its exec, which closes it (CLOEXEC), so a write in between would
-/// still find a reader. A poll asking for no event returns only once the last reader has gone (POLLERR).
+/// Whether the pipe `program` writes has no reader left, waited for as a fact, at most 30 s (as the Linux
+/// tests' `readerless`): another test's child holds a copy of every descriptor from its fork to its exec,
+/// which closes it (CLOEXEC), so a write in between would still find a reader. The pipe is filled first and
+/// nothing reads it, so a poll for room returns only once its last reader has gone: `POLLERR` on Linux
+/// (fs/pipe.c's `pipe_poll`), `POLLHUP` on macOS, whose poll reports nothing for an end asking for no event.
 #[cfg(unix)]
 fn readerless(program: &std::io::PipeWriter) -> bool {
-    let mut ready = [rustix::event::PollFd::new(
-        program,
-        rustix::event::PollFlags::empty(),
-    )];
-    rustix::event::poll(&mut ready, None).unwrap();
-    ready[0].revents().contains(rustix::event::PollFlags::ERR)
+    use rustix::event::{PollFd, PollFlags, Timespec};
+    use rustix::io::Errno;
+    rustix::io::ioctl_fionbio(program, true).unwrap();
+    loop {
+        match rustix::io::write(program, &[0; 4096]) {
+            Ok(_) => {}
+            Err(Errno::AGAIN) => break,
+            Err(Errno::PIPE) => return true,
+            Err(e) => panic!("filling the late end's pipe: {e}"),
+        }
+    }
+    let mut room = [PollFd::new(program, PollFlags::OUT)];
+    let within = Timespec {
+        tv_sec: 30,
+        tv_nsec: 0,
+    };
+    rustix::event::poll(&mut room, Some(&within)).unwrap() == 1
+        && room[0]
+            .revents()
+            .intersects(PollFlags::ERR | PollFlags::HUP)
 }
 
 /// Windows lends a child only the handles named for it, so a write finds the pipe's last reader gone at once.
