@@ -15,10 +15,10 @@ use hyper_quic::rustls::{CipherSuite, NamedGroup};
 use hyper_transport::tls::CertificateDer;
 use hyper_transport::{Authenticated, Directory, Event, PeerId};
 
-use crate::Refused;
 use crate::classes::{Hex, Role};
 use crate::conn::{Conn, Shared};
 use crate::limits::Derived;
+use crate::{Admits, Refused};
 
 /// The endpoint the driver owns.
 type Endpoint = hyper_transport::Endpoint<Hex, hyper_transport::Fixed, Names>;
@@ -153,10 +153,12 @@ impl Queue {
 }
 
 /// Which peer a connection's handshake names: the DNS name its certificate carries, which kiln's CA binds at
-/// enrollment (docs/design/hex-quic.md Q5), as its id ([`peer_id`]).
+/// enrollment (docs/design/hex-quic.md Q5), as its id ([`peer_id`]); a connection the peer opened, only where the
+/// endpoint admits that name (Q10).
 pub(crate) struct Names {
     /// The names this side dials, by id: the name a server's certificate is checked against.
     dialing: BTreeMap<PeerId, String>,
+    admits: Admits,
 }
 
 /// A peer's id: the first eight bytes of the SHA-256 of its name, so a dialer knows the id of the peer it dials
@@ -186,10 +188,15 @@ impl Directory for Names {
         }
         let name = certificate_name(authenticated.certificate?)?;
         let peer = peer_id(&name);
-        if authenticated.dialed.is_some_and(|dialed| dialed != peer) {
-            return None;
+        let admitted = match authenticated.dialed {
+            Some(dialed) => dialed == peer,
+            None => self.admits.admits(&name),
+        };
+        if admitted {
+            Some((peer, Role::Member))
+        } else {
+            None
         }
-        Some((peer, Role::Member))
     }
 
     fn server_name(&self, peer: PeerId) -> Option<&str> {
@@ -322,12 +329,25 @@ pub(crate) struct Started {
 }
 
 impl Driver {
+    /// A driver admitting every peer kiln's CA enrolled: the tests' endpoints of another TLS (`tests.rs`, `under`).
+    #[cfg(test)]
     pub(crate) fn start(
         ep_config: hyper_transport::Config<Role>,
         budget: hyper_transport::Fixed,
         bind: SocketAddr,
         derived: Derived,
         serves: Vec<u32>,
+    ) -> Result<Started, Refused> {
+        Self::start_admitting(ep_config, budget, bind, derived, serves, Admits::Enrolled)
+    }
+
+    pub(crate) fn start_admitting(
+        ep_config: hyper_transport::Config<Role>,
+        budget: hyper_transport::Fixed,
+        bind: SocketAddr,
+        derived: Derived,
+        serves: Vec<u32>,
+        admits: Admits,
     ) -> Result<Started, Refused> {
         let os = |op: &'static str| {
             move |e: std::io::Error| Refused::Os {
@@ -343,6 +363,7 @@ impl Driver {
             .map_err(os("reading the endpoint's address"))?;
         let names = Names {
             dialing: BTreeMap::new(),
+            admits,
         };
         let ep = Endpoint::new(ep_config, budget, names, Instant::now())
             .map_err(|refusal| Refused::Transport { refusal })?;
@@ -867,3 +888,6 @@ pub(crate) fn wait_dial(
 pub(crate) fn conn(shared: Arc<Shared>) -> Conn {
     Conn { shared }
 }
+
+#[cfg(test)]
+mod tests;
