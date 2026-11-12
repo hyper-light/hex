@@ -452,7 +452,8 @@ fn flag<'a>(words: &mut impl Iterator<Item = &'a str>) -> Result<bool, Stop> {
 
 // a1 + SHA256-width evidence identity + 18 u64 physical-unit fields. Each decimal u64 uses at
 // most 20 digits plus its colon; this is a fixed receipt, independent of workload/catalog size.
-const ALLOCATION_BYTES: usize = 445;
+// a2 adds what was booked (joint plan step 14), three fields more: 445 + 3 x 21.
+const ALLOCATION_BYTES: usize = 508;
 
 fn write_allocation(
     out: &mut impl std::fmt::Write,
@@ -461,7 +462,11 @@ fn write_allocation(
     let Some(allocation) = allocation else {
         return Ok(());
     };
-    out.write_str("a1:")?;
+    out.write_str(if allocation.booked.is_some() {
+        "a2:"
+    } else {
+        "a1:"
+    })?;
     for byte in allocation.cost.id {
         write!(out, "{byte:02x}")?;
     }
@@ -472,7 +477,10 @@ fn write_allocation(
         allocation.cost.quantum,
         allocation.cost.guest_overhead,
         allocation.cost.overhead,
-    ] {
+    ]
+    .into_iter()
+    .chain(allocation.booked)
+    {
         write!(
             out,
             ":{}:{}:{}",
@@ -485,7 +493,11 @@ fn write_allocation(
 fn allocation_of<'a>(
     words: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
 ) -> Result<Option<hex_api::Allocation>, Stop> {
-    let Some(word) = words.peek().copied().filter(|word| word.starts_with("a1:")) else {
+    let Some(word) = words
+        .peek()
+        .copied()
+        .filter(|word| word.starts_with("a1:") || word.starts_with("a2:"))
+    else {
         return Ok(None);
     };
     if word.len() > ALLOCATION_BYTES {
@@ -495,9 +507,11 @@ fn allocation_of<'a>(
     }
     words.next();
     let mut fields = word.split(':');
-    if fields.next() != Some("a1") {
-        return Err(damaged("allocation receipt version"));
-    }
+    let booked = match fields.next() {
+        Some("a1") => false,
+        Some("a2") => true,
+        _ => return Err(damaged("allocation receipt version")),
+    };
     let digest = fields
         .next()
         .ok_or_else(|| damaged("allocation receipt identity"))?;
@@ -540,6 +554,7 @@ fn allocation_of<'a>(
             guest_overhead: resource()?,
             overhead: resource()?,
         },
+        booked: if booked { Some(resource()?) } else { None },
     };
     if fields.next().is_some() {
         return Err(damaged("trailing allocation receipt fields"));
@@ -548,6 +563,14 @@ fn allocation_of<'a>(
         .cost
         .check()
         .map_err(|_| damaged("invalid initialized runtime cost receipt"))?;
+    if allocation
+        .booked
+        .is_some_and(|booked| booked == allocation.resources || !allocation.resources.holds(booked))
+    {
+        return Err(damaged(
+            "allocation receipt books past its charge, or all of it as a2",
+        ));
+    }
     Ok(Some(allocation))
 }
 
@@ -2070,7 +2093,10 @@ impl Node {
         }
         if self.ran.len() >= self.budget.ran
             || self.admission.verdict(self.id, &demand) != Ok(Verdict::Admits)
-            || self.admission.allocation(self.id, &demand).ok() != Some(allocation)
+            || !self
+                .admission
+                .allocation(self.id, &demand)
+                .is_ok_and(|own| crate::model::same_charge(own, allocation))
             || self.admission.route(self.id, &demand).ok() != Some(route)
         {
             out.push((owner, Msg::Refused { key }));

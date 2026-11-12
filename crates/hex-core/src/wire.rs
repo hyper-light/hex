@@ -1259,7 +1259,9 @@ fn put_box_spec(w: &mut Writer, spec: &BoxSpec) -> Result<(), Fault> {
     })?;
     w.option_with(spec.allocation, |w, allocation| {
         put_resources(w, allocation.resources);
-        put_cost(w, allocation.cost)
+        put_cost(w, allocation.cost)?;
+        w.option(allocation.booked, put_resources);
+        Ok(())
     })?;
     put_route_option(w, spec.route)
 }
@@ -1290,6 +1292,7 @@ fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
             Ok(Allocation {
                 resources: resources(r)?,
                 cost: runtime_cost(r)?,
+                booked: r.option(resources)?,
             })
         })?,
         route: r.option(route_receipt)?,
@@ -1309,7 +1312,8 @@ fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
 const RESOURCE_BYTES: usize = 3 * size_of::<u64>();
 const COST_BYTES: usize = 32 + 5 * RESOURCE_BYTES;
 const OPTIONAL_COST_BYTES: usize = 1 + COST_BYTES;
-const OPTIONAL_ALLOCATION_BYTES: usize = 1 + RESOURCE_BYTES + COST_BYTES;
+// Joint plan step 14: what was booked follows the cost, an option of its own.
+const OPTIONAL_ALLOCATION_BYTES: usize = 1 + RESOURCE_BYTES + COST_BYTES + 1 + RESOURCE_BYTES;
 
 // Append-only route/backing widths: five enum bytes per key; opaque pool/generation bytes;
 // optional tags; and a u32 device count followed by the existing nine-byte DeviceId codec.
@@ -1581,6 +1585,7 @@ fn backing_grant(r: &mut Reader<'_>) -> Result<BackingGrant, Fault> {
         allocation: Allocation {
             resources: resources(r)?,
             cost: runtime_cost(r)?,
+            booked: None,
         },
         devices: r.device_list(9, device_id)?,
     };
@@ -2066,7 +2071,9 @@ fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
             .guest()
             .map_err(|e| Fault::value("allocation", e.to_string()))?;
         put_resources(w, allocation.resources);
-        put_cost(w, allocation.cost)
+        put_cost(w, allocation.cost)?;
+        w.option(allocation.booked, put_resources);
+        Ok(())
     })?;
     put_route_option(w, info.route)
 }
@@ -2090,6 +2097,7 @@ fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
             let allocation = Allocation {
                 resources: resources(r)?,
                 cost: runtime_cost(r)?,
+                booked: r.option(resources)?,
             };
             allocation
                 .guest()

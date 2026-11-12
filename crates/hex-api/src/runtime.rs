@@ -145,6 +145,11 @@ pub struct RuntimeCost {
 pub struct Allocation {
     pub resources: CapacityResources,
     pub cost: RuntimeCost,
+    /// What the ledger booked at admission, at most `resources`: the VM's class's learned prior (joint plan step
+    /// 14, `docs/design/learned-charge.md` C2). `resources` stays its configuration and ceiling. None books it
+    /// all, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub booked: Option<CapacityResources>,
 }
 
 /// Snapshot route eligibility is a fixed u64 word, not a tuning or an inventory cache.
@@ -417,7 +422,9 @@ impl BackingGrant {
     pub fn check(&self) -> Result<(), Refusal> {
         check_provisioning(&self.devices)?;
         self.allocation.check(CapacityResources::default())?;
-        if self.allocation.cost.floor != self.allocation.cost.ceiling {
+        if self.allocation.cost.floor != self.allocation.cost.ceiling
+            || self.allocation.booked.is_some()
+        {
             return Err(invalid_route(
                 "a backing grant must name its exact configured native envelope",
             ));
@@ -618,7 +625,7 @@ impl RouteReceipt {
             }
             (Execution::ShardsDedicated | Execution::Firecracker, Some(allocation)) => {
                 allocation.check(workload)?;
-                Ok(allocation.resources)
+                Ok(allocation.booking())
             }
             _ => Err(invalid_route(
                 "committed route and immutable charge disagree",
@@ -728,19 +735,53 @@ impl RuntimeCost {
                 .checked_add(self.overhead)
                 .ok_or_else(|| invalid_cost("host charge overflows"))?,
             cost: self,
+            booked: None,
         })
     }
 }
 
 impl Allocation {
-    /// Recheck the original durable demand rather than recalculating against a newer cost profile.
+    /// Recheck the original durable demand rather than recalculating against a newer cost profile. What was
+    /// booked is no part of the formula, but is never past what it charges.
     pub fn check(self, workload: CapacityResources) -> Result<(), Refusal> {
-        if self.cost.allocate(workload)? != self {
+        let derived = Allocation {
+            booked: self.booked,
+            ..self.cost.allocate(workload)?
+        };
+        if derived != self {
             return Err(invalid_cost(
                 "charge disagrees with its immutable workload and cost profile",
             ));
         }
+        if self
+            .booked
+            .is_some_and(|booked| !self.resources.holds(booked))
+        {
+            return Err(invalid_cost("booked past the admitted charge"));
+        }
         Ok(())
+    }
+
+    /// What the ledger holds of it (joint plan step 14, C2): what was booked, else the whole charge.
+    pub fn booking(self) -> CapacityResources {
+        self.booked.unwrap_or(self.resources)
+    }
+
+    /// The same charge booked at `prior` where that is less, dimension by dimension; none where it books it all.
+    pub fn booked_at(self, prior: CapacityResources) -> Self {
+        let booked = CapacityResources {
+            cpu_milli: self.resources.cpu_milli.min(prior.cpu_milli),
+            mem_bytes: self.resources.mem_bytes.min(prior.mem_bytes),
+            disk_bytes: self.resources.disk_bytes.min(prior.disk_bytes),
+        };
+        Self {
+            booked: if booked == self.resources {
+                None
+            } else {
+                Some(booked)
+            },
+            ..self
+        }
     }
 
     /// Actual VM configuration is derived from the admitted host charge, paying host overhead once.
