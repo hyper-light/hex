@@ -53,6 +53,23 @@ fn run(tool: &str, args: &[&str]) -> io::Result<String> {
         .map_err(|e| io::Error::other(format!("{tool} printed non-UTF-8: {e}")))
 }
 
+/// Runs `tool` with `args` and hands `each` every line it prints, each at most `line_max` bytes (`what`
+/// names that bound): today the runner above, which reads the tool's whole output first.
+#[cfg(test)]
+fn lines(
+    tool: &'static str,
+    what: &'static str,
+    args: &[&str],
+    line_max: usize,
+    mut each: impl FnMut(&str) -> io::Result<()>,
+) -> io::Result<()> {
+    let _ = (what, line_max);
+    for line in run(tool, args)?.lines() {
+        each(line)?;
+    }
+    Ok(())
+}
+
 /// `dscl . -list <path> <attribute>`'s lines as (name, number) pairs; a line that isn't one is skipped as
 /// not a numbered record (dscl lists one record a line).
 fn listed(path: &str, attribute: &str) -> io::Result<Vec<(String, u32)>> {
@@ -192,6 +209,42 @@ pub(crate) mod tests {
             .split_whitespace()
             .map(|fd| fd.parse().unwrap())
             .collect()
+    }
+
+    /// AC-T7.4.1 (CLAUDE.md §2, every buffer has a bound): a directory tool's output is read within the
+    /// bound its call derives, never whole. Do: run a tool that prints one line of 4096 bytes where its
+    /// call allows 64. Expect: a typed refusal, Exhausted naming that tool's lines and the bound, and no
+    /// line past the bound handed on.
+    #[test]
+    fn a_tool_line_past_its_bound_is_refused_by_name() {
+        const WHAT: &str = "bytes in a line the test's shell prints";
+        let mut past = 0usize;
+        let read = lines(
+            "/bin/sh",
+            WHAT,
+            &["-c", "head -c 4096 /dev/zero | tr '\\000' x; echo"],
+            64,
+            |line| {
+                if line.len() > 64 {
+                    past += 1;
+                }
+                Ok(())
+            },
+        );
+        assert_eq!(past, 0, "a line past its bound was handed on");
+        let refused = read.expect_err("a line past its bound was read whole");
+        assert!(
+            matches!(
+                refused
+                    .get_ref()
+                    .and_then(|error| error.downcast_ref::<hex_api::Refusal>()),
+                Some(hex_api::Refusal::Exhausted {
+                    what: WHAT,
+                    bound: 64
+                })
+            ),
+            "{refused}"
+        );
     }
 
     /// Not a test of its own: the tool the descriptor tests start (this binary, named so), which
