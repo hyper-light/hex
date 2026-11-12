@@ -476,7 +476,7 @@ impl Supervisor {
         native: &triomphe::Arc<ManagedVm>,
         program: &hex_api::Program,
         stdio: hex_api::Stdio,
-        report: Option<hex_runtime::linux::process::ManagedReport>,
+        launch: hex_runtime::linux::process::HeldLaunch,
         gate_budget: Duration,
         publish: &mut dyn FnMut(&shards_api::Identity) -> Result<(), Refusal>,
     ) -> Result<shards_api::ManagedReceipt, Refusal> {
@@ -495,7 +495,7 @@ impl Supervisor {
                 &native.cgroup,
                 program,
                 stdio,
-                report,
+                launch,
                 gate_budget,
             )?;
             let (pid, pidfd, gate) = child.into_parts();
