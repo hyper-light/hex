@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 use hex_core::lanes;
 use hex_core::patience::Patience;
 use hex_core::stream::{CONTROL_PORT, STDIO_PORT};
-use hex_testkit::waits::within;
+use hex_testkit::waits::{until, within};
 use hyper_quic::rustls;
 
 use super::*;
@@ -25,6 +25,8 @@ static READ: Patience = Patience::measuring("test.hex_quic.read");
 static ROOM: Patience = Patience::measuring("test.hex_quic.room");
 /// Room for a stopped reader's bytes: the grants its reader gives only once it reads again.
 static HELD_ROOM: Patience = Patience::measuring("test.hex_quic.held_room");
+/// A peer's Reset that follows its End, come to the reader.
+static RESET_AFTER_END: Patience = Patience::measuring("test.hex_quic.reset_after_end");
 
 fn loopback() -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
@@ -173,6 +175,66 @@ fn hex_quic_15_an_unserved_port_is_refused_by_type() {
     let err = within(&READ, |by| conn.read(&mut buf, by)).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::ConnectionRefused, "{err}");
     assert_eq!(conn.gone(), Some(Why::NoPort));
+}
+
+/// What `owner` holds now, read without waiting and kept in `got`: whether its end has come.
+fn drained(owner: &mut bridge::Local, got: &mut Vec<u8>) -> bool {
+    let mut buf = [0u8; 64];
+    loop {
+        match std::io::Read::read(owner, &mut buf) {
+            Ok(0) => return true,
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return false,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => panic!("reading a bridged socket: {e}"),
+        }
+    }
+}
+
+/// AC-T7.4.1 (joint plan step 4, Q3; HEX-QUIC-23's lost stdout, 2026-11-12): what a peer wrote before its End reaches
+/// the reader, whatever ends the connection after it. Do: as the node relays a program's stdout (`hex-node`
+/// `quic::stream_conn`), the node writes a line on a stdio connection, ends its half and lets the connection go with
+/// the client's half still open, so its Reset follows its End; the client bridges the connection (`link::Link`'s
+/// dial) only once that Reset has come, as a bridge whose reader the scheduler ran late reads it; then again with the
+/// client's endpoint ended before its bridge reads. Expect: each bridged socket reads the line, then its end.
+#[test]
+fn ac_t7_4_1_what_a_peer_wrote_before_its_end_outlasts_its_reset() {
+    let ca = SimCa::new().unwrap();
+    let node = node(&ca, "node-ended.test");
+    for endpoint_ended in [false, true] {
+        let client = client(enrolled(
+            &ca,
+            &format!("client-ended-{endpoint_ended}.test"),
+        ));
+        let peer = within(&DIAL, |by| {
+            client.dial("node-ended.test", node.local_addr(), by)
+        })
+        .unwrap();
+        let conn = client.open(peer, STDIO_PORT).unwrap();
+        let (_, there) = within(&ACCEPT, |by| node.accept(STDIO_PORT, by)).unwrap();
+        within(&ROOM, |by| there.write_all(b"line\n", by)).unwrap();
+        within(&ROOM, |by| there.end(by)).unwrap();
+        drop(there);
+        until(&RESET_AFTER_END, "the node's Reset after its End", || {
+            conn.gone() == Some(Why::Gone)
+        })
+        .unwrap();
+        if endpoint_ended {
+            drop(client);
+        }
+        let mut owner = bridge::socket(conn).unwrap();
+        owner.set_nonblocking(true).unwrap();
+        let mut got = Vec::new();
+        until(&READ, "the bridged line and its end", || {
+            drained(&mut owner, &mut got)
+        })
+        .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&got),
+            "line\n",
+            "the client's endpoint ended before its bridge read: {endpoint_ended}"
+        );
+    }
 }
 
 /// A provider that shares everything with Hex's links but its suites.
