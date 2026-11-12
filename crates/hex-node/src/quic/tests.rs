@@ -25,6 +25,23 @@ fn limits() -> Limits {
     }
 }
 
+/// A folder of the test's own: under ~/.cache on Unix (the hazards' rule: never /tmp), the system's temp folder on
+/// Windows, as Hex's Windows tests take.
+fn scratch(prefix: &str) -> tempfile::TempDir {
+    #[cfg(unix)]
+    {
+        let cache =
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/hex-t7/quic");
+        std::fs::create_dir_all(&cache).unwrap();
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in(&cache)
+            .unwrap()
+    }
+    #[cfg(windows)]
+    tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
+}
+
 fn enrolled(ca: &SimCa, name: &str) -> hex_quic::tls::Credentials {
     ca.admit(name, name.as_bytes());
     enroll::enroll(ca, name, name.as_bytes().to_vec()).unwrap()
@@ -56,7 +73,7 @@ fn hex_quic_16_the_log_lane_sends_lines_and_tells_a_slow_reader_what_it_missed()
             credentials: enrolled(&ca, "node.log.test"),
             bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             listen: true,
-            serves: ports(),
+            serves: ports(false),
             shape: Shape {
                 connections: limits.connections,
                 lanes: 8,
@@ -64,13 +81,7 @@ fn hex_quic_16_the_log_lane_sends_lines_and_tells_a_slow_reader_what_it_missed()
         })
         .unwrap(),
     );
-    let cache =
-        std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/hex-t7/quic");
-    std::fs::create_dir_all(&cache).unwrap();
-    let dir = tempfile::Builder::new()
-        .prefix("l-")
-        .tempdir_in(&cache)
-        .unwrap();
+    let dir = scratch("l-");
     let quic = Quic::new(
         Native::bind(&dir.path().join("node.sock")).unwrap(),
         Arc::clone(&node),
@@ -158,7 +169,7 @@ fn hex_quic_17_a_tree_staged_over_quic_lands_and_unstages() {
             credentials: enrolled(&ca, "node.stage.test"),
             bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             listen: true,
-            serves: ports(),
+            serves: ports(true),
             shape: Shape {
                 connections: limits.connections,
                 lanes: 8,
@@ -166,13 +177,7 @@ fn hex_quic_17_a_tree_staged_over_quic_lands_and_unstages() {
         })
         .unwrap(),
     );
-    let cache =
-        std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/hex-t7/quic");
-    std::fs::create_dir_all(&cache).unwrap();
-    let dir = tempfile::Builder::new()
-        .prefix("s-")
-        .tempdir_in(&cache)
-        .unwrap();
+    let dir = scratch("s-");
     let staged = dir.path().join("staged");
     std::fs::create_dir_all(&staged).unwrap();
     let _quic = Quic::new(
@@ -301,4 +306,86 @@ fn hex_quic_21_a_programs_stdin_connection_ends_with_its_program_or_its_peer() {
         "the node's half of a stdin connection didn't end after its peer's"
     );
     copier.join().unwrap();
+}
+
+/// HEX-QUIC-22 (Q4): a node that stages nothing serves no files port, so a peer's staging connection is refused by
+/// type: every macOS and Windows node, which stage no file tree on any transport (their runtime stages only into its
+/// own guest), and a Linux node given no folder. A macOS or Windows node given one is refused as its platform's,
+/// typed. And the node's shape at its bounds starts its endpoint at once (hyper-transport lays none of it out ahead).
+#[test]
+fn hex_quic_22_a_node_that_stages_nothing_refuses_staging_by_type() {
+    let ca = SimCa::new().unwrap();
+    let limits = limits();
+    let node = Arc::new(
+        Endpoint::start(Config {
+            credentials: enrolled(&ca, "node.nostage.test"),
+            bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            listen: true,
+            serves: ports(false),
+            shape: shape(&limits, false),
+        })
+        .unwrap(),
+    );
+    let dir = scratch("n-");
+    let _quic = Quic::new(
+        Native::bind(&dir.path().join("node.sock")).unwrap(),
+        Arc::clone(&node),
+        Bounds::of(&limits),
+        None,
+    )
+    .unwrap();
+    let client = Endpoint::start(Config {
+        credentials: enrolled(&ca, "client.nostage.test"),
+        bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        listen: false,
+        serves: Vec::new(),
+        shape: Shape {
+            connections: 1,
+            lanes: 4,
+        },
+    })
+    .unwrap();
+    let deadline = Instant::now() + hex_api::conformance::PATIENCE;
+    let peer = client
+        .dial("node.nostage.test", node.local_addr(), deadline)
+        .unwrap();
+    let staging = client.open(peer, stream::files::FILES_PORT).unwrap();
+    let mut buf = [0u8; 1];
+    let refused = staging.read(&mut buf, Some(deadline)).unwrap_err();
+    assert_eq!(
+        refused.kind(),
+        std::io::ErrorKind::ConnectionRefused,
+        "{refused}"
+    );
+    assert_eq!(staging.gone(), Some(Why::NoPort));
+    #[cfg(not(target_os = "linux"))]
+    {
+        let other = scratch("n-");
+        let given = Quic::new(
+            Native::bind(&other.path().join("node.sock")).unwrap(),
+            Arc::clone(&node),
+            Bounds::of(&limits),
+            Some(other.path().join("staged")),
+        );
+        assert!(
+            matches!(&given, Err(Refusal::Platform { .. })),
+            "a node off Linux took a folder to stage into: {:?}",
+            given.err()
+        );
+    }
+    // A host's bounds: hyper-transport grows to them, laying none out ahead, so the endpoint starts at once.
+    let host = Limits {
+        connections: 1 << 20,
+        message_bytes: wire::MAX_MESSAGE,
+        in_flight: 1 << 12,
+        programs: 1 << 16,
+    };
+    let big = Endpoint::start(Config {
+        credentials: enrolled(&ca, "node.big.test"),
+        bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        listen: true,
+        serves: ports(false),
+        shape: shape(&host, false),
+    });
+    assert!(big.is_ok(), "{:?}", big.err());
 }
