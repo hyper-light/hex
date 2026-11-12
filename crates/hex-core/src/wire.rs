@@ -47,11 +47,12 @@ use hex_api::{
     BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
     ConnectFailure, ConnectPhase, ConnectReply, Destination, DeviceHolder, DeviceId, DeviceInfo,
     DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant, GuestTime, ImageArch,
-    ImageOs, ImagePlatform, IoKind, IoRates, Learned, LearnedHolding, LearnedPrior, LearnedUse,
-    LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES,
-    Member, MemberKind, Mount, Network, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program,
-    Proto, Published, Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost,
-    ShardsImage, Signal, Upstream, Usage, User, check_grants, check_published,
+    ImageOs, ImagePlatform, IoKind, IoRates, Learned, LearnedEnd, LearnedHolding, LearnedPrior,
+    LearnedUse, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS,
+    MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, OciSpec, PhysicalDevice,
+    PhysicalReport, Ports, Program, Proto, Published, Receiver, Refusal, Rootfs, RouteKey,
+    RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, Upstream, Usage, User,
+    check_grants, check_published,
 };
 
 use crate::netns;
@@ -1633,15 +1634,23 @@ const LEARNED_PRIOR_BYTES: usize = 32 + 2 * RESOURCE_BYTES;
 const LEARNED_USE_BYTES: usize = 2 * RESOURCE_BYTES;
 /// One learned holding at its least: a one-byte box id with its length, then its resources.
 const LEARNED_HOLDING_MIN_BYTES: usize = size_of::<u32>() + 1 + RESOURCE_BYTES;
+/// One learned end past its box id: what the VM held and its budget, its band, and its fleet's held, growth and
+/// budget.
+const LEARNED_END_BYTES: usize = 5 * size_of::<u64>() + 1;
+/// One learned end at its least: a one-byte box id with its length, then the rest.
+const LEARNED_END_MIN_BYTES: usize = size_of::<u32>() + 1 + LEARNED_END_BYTES;
 
 /// Joint plan step 14 (C8): keeps as many of `capacity`'s learned holdings, in their order, as its answer has room
 /// for within [`MAX_MESSAGE`], so a node's capacity answer is never refused for them. The node orders them most past
 /// their receipts first, and a holding left out counts at its receipt: only those least past theirs are dropped.
+/// Then, in the room the holdings leave, as many of its ends as fit (C5), in their order: the node puts the latest
+/// first, so only the oldest are left out.
 pub fn fit_learned(capacity: &mut Capacity) -> Result<(), Fault> {
     let Some(learned) = capacity.learned.as_mut() else {
         return Ok(());
     };
     let holdings = std::mem::take(&mut learned.holdings);
+    let ended = std::mem::take(&mut learned.ended);
     let probe = capacity
         .try_clone()
         .map_err(|e| Fault::value("capacity", e.to_string()))?;
@@ -1663,8 +1672,25 @@ pub fn fit_learned(capacity: &mut Capacity) -> Result<(), Fault> {
         room = left;
         kept.push(holding);
     }
+    let mut ends = Vec::new();
+    ends.try_reserve_exact(ended.len())
+        .map_err(|_| Fault::Storage {
+            what: "learned ends",
+            bound: ended.len(),
+        })?;
+    for end in ended {
+        let bytes = size_of::<u32>()
+            .saturating_add(end.id.as_str().len())
+            .saturating_add(LEARNED_END_BYTES);
+        let Some(left) = room.checked_sub(bytes) else {
+            break;
+        };
+        room = left;
+        ends.push(end);
+    }
     if let Some(learned) = capacity.learned.as_mut() {
         learned.holdings = kept;
+        learned.ended = ends;
     }
     Ok(())
 }
@@ -1689,6 +1715,18 @@ fn put_learned(w: &mut Writer, learned: &Learned) -> Result<(), Fault> {
         w.string(holding.id.as_str())?;
         w.reserve_fixed(RESOURCE_BYTES)?;
         put_resources(w, holding.holding);
+    }
+    w.reserve_fixed(size_of::<u32>())?;
+    w.device_count(learned.ended.len(), LEARNED_END_MIN_BYTES)?;
+    for end in &learned.ended {
+        w.string(end.id.as_str())?;
+        w.reserve_fixed(LEARNED_END_BYTES)?;
+        w.u64(end.held);
+        w.u64(end.budget);
+        w.u8(end.band);
+        w.u64(end.fleet_held);
+        w.u64(end.fleet_growth);
+        w.u64(end.fleet_budget);
     }
     Ok(())
 }
@@ -1721,10 +1759,27 @@ fn learned(r: &mut Reader<'_>) -> Result<Learned, Fault> {
             })
         },
     )?;
+    let ended = r.bounded_list(
+        LEARNED_END_MIN_BYTES,
+        MAX_LEARNED_HOLDINGS,
+        "learned ends",
+        |r| {
+            Ok(LearnedEnd {
+                id: box_id(r)?,
+                held: r.u64()?,
+                budget: r.u64()?,
+                band: r.u8()?,
+                fleet_held: r.u64()?,
+                fleet_growth: r.u64()?,
+                fleet_budget: r.u64()?,
+            })
+        },
+    )?;
     Ok(Learned {
         priors,
         used,
         holdings,
+        ended,
     })
 }
 
@@ -3318,7 +3373,7 @@ impl<'a> Reader<'a> {
                     "count exceeds the supported VM backend classes"
                 } else if what == "learned priors" {
                     "count exceeds a class's profiles"
-                } else if what == "learned holdings" {
+                } else if what == "learned holdings" || what == "learned ends" {
                     "count exceeds a node's boxes"
                 } else {
                     "count exceeds the route eligibility word"

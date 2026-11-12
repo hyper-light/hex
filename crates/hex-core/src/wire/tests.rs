@@ -4158,6 +4158,18 @@ fn learned_holding(id: &str, cpu_milli: u64, gib: u64) -> LearnedHolding {
     }
 }
 
+fn learned_end(id: &str, gib: u64) -> LearnedEnd {
+    LearnedEnd {
+        id: BoxId::new(id).unwrap(),
+        held: gib << 30,
+        budget: (gib - 1) << 30,
+        band: 0,
+        fleet_held: 17 << 30,
+        fleet_growth: 2 << 30,
+        fleet_budget: 16 << 30,
+    }
+}
+
 fn learned_capacity() -> Capacity {
     let mut capacity = device_capacity(Vec::new());
     capacity.learned = Some(Learned {
@@ -4174,14 +4186,16 @@ fn learned_capacity() -> Capacity {
             learned_holding("hex-place-a-1-0-7", 600, 2),
             learned_holding("hex-place-a-1-0-8", 300, 1),
         ],
+        ended: vec![learned_end("hex-place-a-1-0-6", 5)],
     });
     capacity
 }
 
-/// Joint plan step 14 (AC-T7.4.1, C2 and C8): what a node learned of a class's microVMs crosses the wire last on its
-/// capacity answer. Do: encode a capacity with its priors, learned use and holdings, and one with none; cut the second
-/// before its last byte; read and write both as JSON. Expect both back exactly, the second ending with its none tag
-/// and refused once cut, as every truncation is, and JSON without the field reading as none.
+/// Joint plan step 14 (AC-T7.4.1, C2, C5 and C8): what a node learned of a class's microVMs crosses the wire last on
+/// its capacity answer. Do: encode a capacity with its priors, learned use, holdings and the VMs its last resort
+/// ended, and one with none; cut the second before its last byte; read and write both as JSON, and read the first's
+/// JSON without its ends. Expect both back exactly, the second ending with its none tag and refused once cut, as every
+/// truncation is, JSON without the field reading as none, and JSON without the ends as none ended.
 #[test]
 fn w14_a_capacitys_learned_use_crosses_the_wire_last() {
     let learned = learned_capacity();
@@ -4207,8 +4221,14 @@ fn w14_a_capacitys_learned_use_crosses_the_wire_last() {
     let older = serde_json::to_value(&none).unwrap();
     assert!(older.get("learned").is_none(), "skipped when none");
     assert_eq!(serde_json::from_value::<Capacity>(older).unwrap(), none);
-    let json = serde_json::to_value(&learned).unwrap();
-    assert_eq!(serde_json::from_value::<Capacity>(json).unwrap(), learned);
+    let mut json = serde_json::to_value(&learned).unwrap();
+    assert_eq!(
+        serde_json::from_value::<Capacity>(json.clone()).unwrap(),
+        learned
+    );
+    json["learned"].as_object_mut().unwrap().remove("ended");
+    let unended = serde_json::from_value::<Capacity>(json).unwrap();
+    assert!(unended.learned.unwrap().ended.is_empty());
 }
 
 /// Joint plan step 14 (AC-T7.4.1): a capacity's learned use is held to its bounds on both sides. Do: encode one with
@@ -4241,10 +4261,11 @@ fn w14_a_capacitys_learned_use_is_held_to_its_bounds() {
     let mut one = learned_capacity();
     if let Some(learned) = one.learned.as_mut() {
         learned.holdings = vec![learned_holding("x", 1, 1)];
+        learned.ended = Vec::new();
     }
     let mut bytes = answer(14, &Answer::Capacity(Some(one)), MAX_MESSAGE).unwrap();
-    // The holdings' count, then the one holding: its id's length, the id and its resources.
-    let at = bytes.len() - (2 * size_of::<u32>() + 1 + 3 * size_of::<u64>());
+    // The holdings' count, then the one holding (its id's length, the id and its resources), then no end's count.
+    let at = bytes.len() - (3 * size_of::<u32>() + 1 + 3 * size_of::<u64>());
     let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
     bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
     assert!(matches!(
@@ -4289,6 +4310,51 @@ fn w14_a_capacitys_holdings_are_fitted_to_one_message_in_their_order() {
         learned.holdings.push(holdings[kept].clone());
     }
     assert!(answer(14, &Answer::Capacity(Some(more)), MAX_MESSAGE).is_err());
+}
+
+/// Joint plan step 14 (AC-T7.4.1, C5): a node's ends are held to its bounds and fitted after its holdings, latest
+/// first. Do: check one with more ends than a node has boxes; read one whose ends' count says one more; fit one whose
+/// holdings leave room for some of its many 128-byte-id ends. Expect the first two refused, the second before any end
+/// is read; the third's holdings kept whole and its ends cut to a prefix, encoded within the message.
+#[test]
+fn w14_a_capacitys_ends_are_held_to_its_bounds_and_fitted_after_its_holdings() {
+    let mut too_many = learned_capacity();
+    if let Some(learned) = too_many.learned.as_mut() {
+        learned.ended = vec![learned_end("x", 5); MAX_LEARNED_HOLDINGS + 1];
+    }
+    assert!(too_many.learned.as_ref().unwrap().check().is_err());
+    let mut one = learned_capacity();
+    if let Some(learned) = one.learned.as_mut() {
+        learned.ended = vec![learned_end("x", 5)];
+    }
+    let mut bytes = answer(14, &Answer::Capacity(Some(one)), MAX_MESSAGE).unwrap();
+    // The ends' count, then the one end: its id's length, the id, five u64s and its band.
+    let at = bytes.len() - (2 * size_of::<u32>() + 1 + 5 * size_of::<u64>() + 1);
+    let count = u32::try_from(MAX_LEARNED_HOLDINGS + 1).unwrap();
+    bytes[at..at + size_of::<u32>()].copy_from_slice(&count.to_le_bytes());
+    assert!(matches!(
+        read_answer(&received(&bytes, 0), MAX_MESSAGE),
+        Err(Fault::Value { .. })
+    ));
+    let each = size_of::<u32>() + BoxId::MAX_LEN + 5 * size_of::<u64>() + 1;
+    let ends: Vec<LearnedEnd> = (0..MAX_MESSAGE / each + 100)
+        .map(|n| learned_end(&format!("{n:0>128}"), 5))
+        .collect();
+    let mut full = learned_capacity();
+    if let Some(learned) = full.learned.as_mut() {
+        learned.ended = ends.clone();
+    }
+    fit_learned(&mut full).unwrap();
+    let learned = full.learned.as_ref().unwrap();
+    assert_eq!(
+        learned.holdings,
+        learned_capacity().learned.unwrap().holdings
+    );
+    let kept = learned.ended.len();
+    assert!(kept > 0 && kept < ends.len(), "{kept} of {}", ends.len());
+    assert_eq!(learned.ended, ends[..kept]);
+    let bytes = answer(14, &Answer::Capacity(Some(full)), MAX_MESSAGE).unwrap();
+    assert!(bytes.len() <= MAX_MESSAGE);
 }
 
 /// What ends an info without grants on the wire (joint plan step 15): its empty grant list's u32 count, then its
