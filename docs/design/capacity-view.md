@@ -131,7 +131,10 @@ escrow alternative, with each side's share learned from its measured arrival rat
 A charge `c` is admitted iff, in every dimension, `c <= room - local - foreign`, with checked
 arithmetic (Omega's "common notion of whether a machine is full"). The host's ledger admits against a
 budget of `room - foreign` (`Keeper::room_for_local`), so its own check is the same inequality; a
-holder's reserve is checked by the keeper against it. The charge is what each side's admission charges:
+holder's reserve is checked by the keeper against it. Each check is made where it commits, under one hold of
+the host's lock: the node re-derives its ledger's room and whether the view is over at each admission's commit,
+never before a backend call it makes with the lock let go, where a holder's reserve or sync, or a rebook,
+could move the room unseen (`placement::view::race_tests`). The charge is what each side's admission charges:
 on Hex's side goal 14's learned charge, its envelope the ceiling; on kiln's, its run's ask. The room is
 the host's measured room (Hex: `Facts::node_with_owned`). When the room shrinks below what is held, the
 view is **over**: nothing new is admitted until it fits, and running work keeps its reservations (kiln's

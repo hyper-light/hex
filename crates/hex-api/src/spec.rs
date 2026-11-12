@@ -285,22 +285,29 @@ pub struct ShardsImage {
     /// alone (D231's `ATTEND`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Vec<String>>,
+    /// What its members may reach past the VM and what its host publishes into them (joint plan step
+    /// 15; docs/design/network-grants.md): none by default, so nothing passes the VM. After the command
+    /// (append-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<crate::Grant>,
 }
 
 impl ShardsImage {
-    /// The image `image` (pinned by digest), its members alone.
+    /// The image `image` (pinned by digest), its members alone, granted nothing.
     pub fn new(image: &str) -> Self {
         Self {
             image: image.to_owned(),
             command: None,
+            grants: Vec::new(),
         }
     }
 
     /// Whether Shards can be asked to boot it: the image pinned by a digest go-digest validates (the
     /// algorithm `sha256`, `sha384` or `sha512` and exactly that many lowercase hex digits, as Shards'
-    /// reference parser checks it), and a command, where there is one, of a non-empty program and no
-    /// NUL. Refused by its field's name (CLAUDE.md §3); the rest of the name's grammar is Shards' to
-    /// refuse as it resolves the image.
+    /// reference parser checks it), a command, where there is one, of a non-empty program and no NUL,
+    /// and grants [`crate::check_grants`] takes. Refused by its field's name (CLAUDE.md §3); the rest of
+    /// the name's grammar is Shards' to refuse as it resolves the image, and a grant Shards can't hold
+    /// exactly is the runtime's to refuse as it programs the boot.
     pub fn check(&self) -> Result<(), Refusal> {
         let (name, digest) = self.image.rsplit_once('@').ok_or_else(|| {
             invalid_image(format!(
@@ -350,7 +357,7 @@ impl ShardsImage {
                 return Err(invalid_image(format!("command[{at}] holds a NUL")));
             }
         }
-        Ok(())
+        crate::check_grants(&self.grants)
     }
 }
 

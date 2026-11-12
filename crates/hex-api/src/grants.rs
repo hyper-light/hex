@@ -4,7 +4,7 @@
 //! [`check_grants`] is the one check, run wherever grants enter, so each point refuses alike (N5).
 
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use serde::{Deserialize, Serialize};
 
@@ -231,6 +231,29 @@ impl Grant {
     }
 }
 
+/// A publish grant's port as the VM's boot bound it on the host (N6): what kiln connects to, reported by inspect
+/// while the VM runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Published {
+    /// The publish grant it serves, by its place in the box's grants.
+    pub grant: u32,
+    /// The host socket it is bound at: the grant's host address, on its host port or the one the OS picked.
+    pub at: SocketAddr,
+    /// Who receives what connects there.
+    pub receiver: Receiver,
+}
+
+/// Who receives a published port's flows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Receiver {
+    /// Whoever the image declares for the port: the member its Agentfile gives the port coming in (Shards D122), or,
+    /// where it gives the port to none and the run has a command of its own, that command (D122; D231's run host,
+    /// `ports_granted`). Shards 482c5d78's image boot names no receiver, so Hex can't verify it is the grant's member:
+    /// N6's gap, recorded here until Shards names it.
+    Declared,
+}
+
 /// Whether every grant is well formed and no flow is named twice, refused by the field that fails, never dropped or
 /// half-applied (CLAUDE.md §3). Bounded by its input: one fallibly reserved working list, sorted (N7).
 pub fn check_grants(grants: &[Grant]) -> Result<(), Refusal> {
@@ -239,6 +262,44 @@ pub fn check_grants(grants: &[Grant]) -> Result<(), Refusal> {
     }
     check_ranges(grants)?;
     check_publishes(grants)
+}
+
+/// Whether each published port is one of `grants`' publishes, bound where it names, and no grant bound twice
+/// (N6): a report of the run is held to the grants it reports, never read past them.
+pub fn check_published(grants: &[Grant], published: &[Published]) -> Result<(), Refusal> {
+    let mut seen: Vec<u32> = working(published.len())?;
+    for (at, port) in published.iter().enumerate() {
+        let refused = |why: String| {
+            Err(Refusal::Invalid {
+                what: "published",
+                why: format!("published[{at}] {why}"),
+            })
+        };
+        let grant = usize::try_from(port.grant)
+            .ok()
+            .and_then(|grant| grants.get(grant));
+        let Some(Grant::Publish {
+            host, host_port, ..
+        }) = grant
+        else {
+            return refused(format!("names grants[{}], which is no publish", port.grant));
+        };
+        if port.at.ip() != *host || host_port.is_some_and(|wanted| wanted != port.at.port()) {
+            return refused(format!(
+                "is bound at {}, not where grants[{}] publishes it",
+                port.at, port.grant
+            ));
+        }
+        seen.push(port.grant);
+    }
+    seen.sort_unstable();
+    if seen.windows(2).any(|pair| matches!(pair, [a, b] if a == b)) {
+        return Err(Refusal::Invalid {
+            what: "published",
+            why: "names one grant twice".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Why `address` names nothing a grant may reach past the VM (RFC 6890's special purposes), if it doesn't.
