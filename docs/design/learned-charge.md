@@ -115,8 +115,17 @@ guarantee needs a VM's siblings to be VMs booked by this rule, and their parent 
   that one alone.
 
 `charge::Node::placement` gives these bounds: the parent's, and each VM's `cpu.weight` by booking, `cpu.max` and
-`memory.max` its ceiling, `memory.high` its budget at most its ceiling. A box whose owner sets its own `cpu.weight`
-(the process class's `Bounds`) is off this scale. Against it the fleet receives its weight's share, not its budget.
+`memory.max` its ceiling, `memory.high` its budget at most its ceiling.
+
+**One scale for every child of the node's cgroup** (ROOT, 2026-11-12). A process or OCI box is booked at its
+allocation until it is learned (its receipt's booking, else its workload's caps: `cpu_max_milli`), and weighs
+`ceil(10,000 × booking / machine CPU)` like a fleet. A fleet's budget is the room its machine leaves after those
+bookings, so the weights of every child sum to the scale's top and each child, box or fleet, receives at least
+`min(its need, its booking or budget)` under contention (`charge::tests`: a process box under contention, and the
+property over boxes in whole units of the scale). A box booked nothing weighs 1: it takes what booked work leaves
+idle. Its owner's own `cpu_weight` is not the node's scale. The node writing the boxes' weights, and `.oci`'s by
+its boxes' bookings, is checkpoint 4's remaining work; until then a box's cgroup keeps its owner's weight, and
+against it the fleet receives its weight's share, not its budget.
 
 **Sources.** Kubernetes makes a request a CPU weight and the limit a throttle (f35 A, f45 A); Borg gives batch
 work tiny shares beside latency-sensitive work (f44 A); weight by charge, the envelope the cap (f83 B). On macOS a box's CPU follows its weight only as QoS tiers, and the

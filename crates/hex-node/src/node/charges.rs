@@ -441,7 +441,7 @@ impl Node {
             let Some(record) = self.record(id)? else {
                 return Ok(None);
             };
-            let class = match record.spec.class {
+            let class = match record.spec.class.class() {
                 hex_api::Class::Shards => Class::Shards,
                 hex_api::Class::Firecracker => Class::Firecracker,
                 hex_api::Class::Process | hex_api::Class::Oci => return Ok(None),
