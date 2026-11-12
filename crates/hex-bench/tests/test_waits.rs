@@ -27,7 +27,7 @@ fn repo() -> PathBuf {
 const CONFORMANCE: &str = "crates/hex-api/src/conformance.rs";
 
 /// Every `.rs` file under the workspace's crates, walked with an explicit stack (CLAUDE.md §11), its path relative to
-/// the repository.
+/// the repository as the repository names it: its components joined by `/` on every OS, where Windows walks `\`.
 fn sources() -> Vec<String> {
     let root = repo();
     let mut out = Vec::new();
@@ -38,12 +38,13 @@ fn sources() -> Vec<String> {
             if path.is_dir() {
                 walk.push(path);
             } else if path.extension().is_some_and(|e| e == "rs") {
-                out.push(
-                    path.strip_prefix(&root)
-                        .unwrap()
-                        .to_string_lossy()
-                        .into_owned(),
-                );
+                let names: Vec<String> = path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                out.push(names.join("/"));
             }
         }
     }

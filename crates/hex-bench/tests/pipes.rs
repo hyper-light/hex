@@ -26,7 +26,7 @@ fn repo() -> PathBuf {
 }
 
 /// Every `.rs` file under the workspace's crates, walked with an explicit stack (CLAUDE.md §11), its path relative to
-/// the repository.
+/// the repository as the repository names it: its components joined by `/` on every OS, where Windows walks `\`.
 fn sources() -> Vec<String> {
     let root = repo();
     let mut out = Vec::new();
@@ -37,12 +37,13 @@ fn sources() -> Vec<String> {
             if path.is_dir() {
                 walk.push(path);
             } else if path.extension().is_some_and(|e| e == "rs") {
-                out.push(
-                    path.strip_prefix(&root)
-                        .unwrap()
-                        .to_string_lossy()
-                        .into_owned(),
-                );
+                let names: Vec<String> = path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                out.push(names.join("/"));
             }
         }
     }
@@ -63,10 +64,15 @@ fn flags_of(text: &str, at: usize) -> &str {
 fn inheritable_in(text: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     let mut at = 0;
-    for (n, line) in text.lines().enumerate() {
+    // Each line with its own end, `\n` or a checkout's `\r\n`, so its offset in `text` is its own.
+    for (n, ended) in text.split_inclusive('\n').enumerate() {
+        let line = ended
+            .strip_suffix("\r\n")
+            .or_else(|| ended.strip_suffix('\n'))
+            .unwrap_or(ended);
         let code = line.trim_start();
         let start = at;
-        at += line.len() + 1;
+        at += ended.len();
         if code.starts_with("//") {
             continue;
         }
