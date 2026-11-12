@@ -12,6 +12,7 @@ fn nothing_kept() -> Narrowing {
     Narrowing {
         egress: Keep::Only(Vec::new()),
         mcp: Keep::Only(Vec::new()),
+        destinations: Keep::Only(Vec::new()),
         dns: false,
     }
 }
@@ -40,13 +41,15 @@ fn commanded(grants: &[Grant]) -> ShardsImage {
 }
 
 /// Joint plan step 15, T-T7.7.1: do program no grant at all; expect no publish and the image's every grant past the
-/// microVM dropped, so its run has no network (`shards api-run`'s `network none`), never the image's own grants that
-/// `Narrowing::default()` keeps.
+/// microVM dropped, its destinations by name (D236) among them, so its run has no network (`shards api-run`'s
+/// `network none`), never the image's own grants that `Narrowing::default()` keeps.
 #[test]
 fn no_grant_is_programmed_as_no_network() {
     let made = program(&members_alone(&[])).unwrap();
     assert!(made.publish.is_empty());
     assert_eq!(made.egress, nothing_kept());
+    assert_eq!(made.egress.destinations, Keep::Only(Vec::new()));
+    assert_eq!(Narrowing::default().destinations, Keep::All);
     assert_ne!(made.egress, Narrowing::default());
 }
 
@@ -323,6 +326,7 @@ fn bound_at(guest_port: u16, at: &str) -> shards_api::image::Bound {
         guest_port,
         proto: shards_api::image::Proto::Tcp,
         host: at.parse().unwrap(),
+        to: Vec::new(),
     }
 }
 
