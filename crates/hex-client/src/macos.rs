@@ -2,7 +2,8 @@
 //! socket, as macOS has no `SOCK_SEQPACKET` local socket, each message framed ([`hex_core::stream`]), an exec's stdio
 //! as `SCM_RIGHTS` descriptors at its message's first byte, on the core every transport shares (`crate::calls`): no
 //! thread of its own reads it, each message is written whole under the connection's send lock, and a call waits for
-//! its answer at most twice the slowest answer to a call of its kind ([`ANSWERS`]).
+//! its answer until its caller's deadline, or with none at most twice the slowest answer to a call of its kind
+//! ([`ANSWERS`]).
 
 use std::io::{IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;

@@ -877,8 +877,9 @@ impl Client {
     }
 
     /// Dials, reads the relay token and says hello within the caller's original absolute
-    /// deadline. A smaller configured or learned wait still wins. The resulting connection
-    /// has no lifetime deadline; later bounded operations take their own original deadline.
+    /// deadline. A smaller configured wait still wins, a learned one only a run-out recorded.
+    /// The resulting connection has no lifetime deadline; later bounded operations take their
+    /// own original deadline.
     pub fn connect_before(link: LinkOwner, deadline: Instant) -> Result<Self, Refusal> {
         let budget = link.reply_budget();
         let deadline =

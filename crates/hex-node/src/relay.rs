@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Instant;
 
 use hex_api::Refusal;
 use hex_client::guest::Duplex;
@@ -76,9 +77,14 @@ impl Limits {
         }
     }
 
-    /// The relay's bounds over the node agent at `node`, asked of it in a hello of their own.
-    pub fn asked(node: &Path) -> Result<Self, Refusal> {
-        let told = hex_client::Client::connect(node)?;
+    /// The relay's bounds over the node agent at `node`, asked of it in a hello of their own, within `deadline` where
+    /// its caller gives one: the guest's boot's (AC-T7.4.1), which a node busy past the hello's learned wait, as it
+    /// initializes the guest's GPU, doesn't end sooner.
+    pub fn asked(node: &Path, deadline: Option<Instant>) -> Result<Self, Refusal> {
+        let told = match deadline {
+            Some(deadline) => hex_client::Client::connect_before(node, deadline)?,
+            None => hex_client::Client::connect(node)?,
+        };
         Ok(Self::of(&told.limits(), &told.budgets()))
     }
 }

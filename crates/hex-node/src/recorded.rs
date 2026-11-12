@@ -40,6 +40,9 @@ pub struct RecoverySummary {
     /// Why the guest couldn't say which boxes it holds, when it couldn't: none was proved an orphan, so
     /// none was deleted, and a box no record names waits for the next recovery (T-T7.1.2).
     pub orphans_unknown: Option<String>,
+    /// Why the host's boot session couldn't be read, when it couldn't: no record was known for an earlier
+    /// boot's, and each keeps recovery's other rules (T-T7.1.2).
+    pub boot_unknown: Option<String>,
 }
 
 /// Why a box was removed, for its summary.
@@ -68,6 +71,10 @@ pub(crate) fn why_text(why: &Why) -> String {
         Why::Unreadable(w) => format!("its record couldn't be read: {w}"),
         Why::StartInterrupted => {
             "the node agent stopped while it started the box, in its startContainer hooks"
+                .to_owned()
+        }
+        Why::EarlierBoot => {
+            "it was made in an earlier boot of the host, whose end ended everything that ran of it"
                 .to_owned()
         }
     }
@@ -322,6 +329,9 @@ struct Books {
     abandoned: Abandoned,
     /// Boxes a recovery took back, which inspect reports as adopted.
     adopted: Mutex<BTreeSet<BoxId>>,
+    /// The boot session the store's records were written in before this node opened it, as its marker said
+    /// ([`Store::take_boot_marker`]): what tells a torn record from an earlier boot (T-T7.1.2).
+    last_boot: Option<hex_core::record::BootSession>,
 }
 
 /// Concrete shared transaction; its caller keeps the same method/device Turn on stack.
@@ -1654,10 +1664,13 @@ impl<R: Recover> Recorded<R> {
         state_dir: &Path,
         prober: Option<crate::facts::SharedProber>,
     ) -> Result<Self, Refusal> {
+        let store = Store::open(state_dir, &state_dir.join("@records"))?;
+        // Before this node writes any record: so every record written from here is known as this boot's.
+        let last_boot = store.take_boot_marker()?;
         Ok(Self {
             runtime,
             books: Arc::new(Books {
-                store: Store::open(state_dir, &state_dir.join("@records"))?,
+                store,
                 prober,
                 lifecycle: Turns::new(
                     "changing a recorded box's lifecycle",
@@ -1672,6 +1685,7 @@ impl<R: Recover> Recorded<R> {
                 ),
                 abandoned: Abandoned::default(),
                 adopted: Mutex::new(BTreeSet::new()),
+                last_boot,
             }),
         })
     }
@@ -1696,17 +1710,25 @@ impl<R: Recover> Recorded<R> {
         self.runtime.initialize_native()?;
         // What a crash at a record write left: a temp file never renamed into place.
         self.books.store.remove_strays()?;
-        let mut summary = RecoverySummary::default();
+        let mut summary = RecoverySummary {
+            boot_unknown: self.books.store.boot_unread().map(str::to_owned),
+            ..RecoverySummary::default()
+        };
+        let torn = self.remove_torn_before_this_boot(torn, &mut summary)?;
         self.recover_orphans(&records, torn, &mut summary)?;
         let mut seen: BTreeMap<BoxId, Seen> = BTreeMap::new();
         for (id, record) in &records {
             // Without a readable class/identity this owner cannot choose a cleanup backend.
             // Retain the row and its claims rather than run native host cleanup by guesswork.
-            record.as_ref().map_err(|_| uncertain(id))?;
+            let r = record.as_ref().map_err(|_| uncertain(id))?;
+            // T-T7.1.2: a box this node keeps the record of, written in an earlier boot of the host, ran
+            // nothing that outlived that boot. A backend that keeps its own records proves its own.
+            let earlier_boot =
+                !self.runtime.owns_records(&r.spec)? && self.books.store.earlier_boot(r);
             let alive = match record {
                 // Incomplete creates and durable deletes are removed, never adopted. Asking alive
                 // first would require a pending native create to look Ready before cleanup can run.
-                Ok(r) if r.phase == Phase::Ready => self.runtime.alive(&r.spec)?,
+                Ok(r) if r.phase == Phase::Ready && !earlier_boot => self.runtime.alive(&r.spec)?,
                 Ok(_) => None,
                 Err(_) => None,
             };
@@ -1722,6 +1744,7 @@ impl<R: Recover> Recorded<R> {
                     },
                     init_alive: alive,
                     start_interrupted: false,
+                    earlier_boot,
                 },
             );
         }
@@ -1754,7 +1777,11 @@ impl<R: Recover> Recorded<R> {
                         let r = record.ok_or_else(|| uncertain(&id))?;
                         self.runtime.runtime_for(&r.spec)?.delete(&id)?;
                     } else if let Some(r) = record {
-                        self.runtime.end_for(&r.spec, trace)?;
+                        // An earlier boot ended what ran of it: a process named by its record now may be
+                        // another's, never ended for it.
+                        if !matches!(why, Why::EarlierBoot) {
+                            self.runtime.end_for(&r.spec, trace)?;
+                        }
                         self.runtime.discard(&r.spec)?;
                         self.books.store.remove(&id)?;
                     } else {
@@ -1765,6 +1792,34 @@ impl<R: Recover> Recorded<R> {
             }
         }
         Ok(summary)
+    }
+
+    /// T-T7.1.2: the records torn in the runtime place ([`Store::take_torn`]) before this boot of the host, as
+    /// the boot session marker this node took as it opened says ([`Store::take_boot_marker`]): that boot's end
+    /// ended everything that ran of each, host or guest, and a torn record is kept only where nothing on disk
+    /// outlives a host crash, so each is removed, saying so. The rest are this boot's, returned.
+    fn remove_torn_before_this_boot(
+        &self,
+        torn: crate::store::Torn,
+        summary: &mut RecoverySummary,
+    ) -> Result<crate::store::Torn, Refusal> {
+        if !self
+            .books
+            .store
+            .before_this_boot(self.books.last_boot.as_ref())
+        {
+            return Ok(torn);
+        }
+        for (id, why) in torn {
+            let _turn = self.books.lifecycle.try_take_devices(&id, &[])?;
+            self.books.store.remove(&id)?;
+            let said = format!(
+                "its record couldn't be read ({why}) and was written before the host's latest boot: {}",
+                why_text(&Why::EarlierBoot)
+            );
+            summary.removed.push((id, said));
+        }
+        Ok(Vec::new())
     }
 
     /// T-T7.1.2: the boxes a live guest holds under names no readable record carries, and the records torn in

@@ -1,13 +1,13 @@
 //! The client on Linux: one `SOCK_SEQPACKET` connection to the node agent's socket, which keeps each message whole
 //! (unix(7)), an exec's stdio passed as `SCM_RIGHTS` descriptors, on the core every transport shares
-//! (`crate::calls`): no thread of its own reads it, and a call waits for its answer at most twice the slowest
-//! answer this process has had to a call of its kind ([`ANSWERS`]).
+//! (`crate::calls`): no thread of its own reads it, and a call waits for its answer until its caller's deadline,
+//! or with none at most twice the slowest answer this process has had to a call of its kind ([`ANSWERS`]).
 
 use std::io::{IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hex_api::{Class, Refusal};
 use hex_core::patience::Patience;
@@ -20,20 +20,20 @@ use rustix::net::{
 };
 
 use crate::calls::{
-    BOX_KINDS, CLASSES, Core, Handle, KINDS, Lent, Sent, Shared, Take, Transport, by_class,
-    class_waits,
+    BOX_KINDS, CLASSES, Core, Handle, KINDS, Lent, ReplyDeadline, Sent, Shared, Take, Transport,
+    by_class, class_waits,
 };
 
 /// How long a call waits for the node agent's answer, and its send for room in the agent's socket, one wait a kind
 /// of call (`crate::calls::kind_of`'s order), since a list waits on its parts, so a fast hello's answer says nothing of
 /// its: twice the slowest answer this process has had to a call of that kind (decision 9; the lead's failure-bound rule
-/// of 2026-11-06), past which the call is refused by type, the only way left to it. Each kind is seeded by build
-/// profile from its `client.answer.<kind>` rows of `bench/competitive/probes/waits_census.md`, in nanoseconds as the
-/// census keeps them: a release build from run 4's largest max of the release arms with a row's 1,000 samples
-/// (adacachy2), a debug build from run 5's largest answer of the debug-build arms, the debug arm and the suites'
-/// (adacachy2), never under a bound one ran out at (decision 9), nor under the release seed (`Patience::by_profile`).
-/// The scheduler operations have no rows yet: MEASURING until a census with them in records them. The kinds a box's
-/// class times are [`CLASS_ANSWERS`].
+/// of 2026-11-06), past which a call with no caller's deadline is refused by type, the only way left to it (under one,
+/// a run-out recorded). Each kind is seeded by build profile from its `client.answer.<kind>` rows of
+/// `bench/competitive/probes/waits_census.md`, in nanoseconds as the census keeps them: a release build from run 4's
+/// largest max of the release arms with a row's 1,000 samples (adacachy2), a debug build from run 5's largest answer
+/// of the debug-build arms, the debug arm and the suites' (adacachy2), never under a bound one ran out at (decision 9),
+/// nor under the release seed (`Patience::by_profile`). The scheduler operations have no rows yet: MEASURING until a
+/// census with them in records them. The kinds a box's class times are [`CLASS_ANSWERS`].
 static ANSWERS: [Patience; KINDS] = [
     Patience::by_profile(
         "client.answer.hello",
@@ -281,25 +281,37 @@ impl Transport for Socket {
 impl Client {
     /// Connects to the node agent at `path` and learns what it runs and its bounds.
     pub fn connect(path: &Path) -> Result<Self, Refusal> {
-        let addr = SocketAddrUnix::new(path).map_err(|e| Refusal::Invalid {
-            what: "socket path",
-            why: format!("{}: {e}", path.display()),
-        })?;
-        let fd = rustix::net::socket_with(
-            AddressFamily::UNIX,
-            SocketType::SEQPACKET,
-            SocketFlags::CLOEXEC,
-            None,
-        )
-        .map_err(|e| Refusal::os("making a socket", e))?;
-        // A connect to a socket the agent listens on doesn't wait for it to accept (unix(7)); each call's send
-        // is bounded by its kind's learned wait.
-        rustix::net::connect(&fd, &addr).map_err(|e| Refusal::Os {
-            op: "connecting to the node agent's socket",
-            why: format!("{}: {e}", path.display()),
-        })?;
-        Core::hello(Shared::try_new(Socket { fd })?)
+        Core::hello(Shared::try_new(connected(path)?)?)
     }
+
+    /// Connects as [`Client::connect`] does, its hello within the caller's original absolute `deadline`, which its
+    /// kind's learned wait never ends sooner (AC-T7.4.1: a guest's relay asking its node, busy as the guest boots).
+    pub fn connect_before(path: &Path, deadline: Instant) -> Result<Self, Refusal> {
+        let deadline = ReplyDeadline::caller_before(deadline)?;
+        Core::hello_before(Shared::try_new(connected(path)?)?, Some(deadline))
+    }
+}
+
+/// A connection to the node agent's socket at `path`.
+fn connected(path: &Path) -> Result<Socket, Refusal> {
+    let addr = SocketAddrUnix::new(path).map_err(|e| Refusal::Invalid {
+        what: "socket path",
+        why: format!("{}: {e}", path.display()),
+    })?;
+    let fd = rustix::net::socket_with(
+        AddressFamily::UNIX,
+        SocketType::SEQPACKET,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .map_err(|e| Refusal::os("making a socket", e))?;
+    // A connect to a socket the agent listens on doesn't wait for it to accept (unix(7)); each call's send
+    // is bounded by its call's deadline.
+    rustix::net::connect(&fd, &addr).map_err(|e| Refusal::Os {
+        op: "connecting to the node agent's socket",
+        why: format!("{}: {e}", path.display()),
+    })?;
+    Ok(Socket { fd })
 }
 
 #[cfg(test)]
