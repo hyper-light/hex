@@ -367,6 +367,7 @@ impl Conn {
         }
         state.here_ended = true;
         drop(state);
+        self.shared.told();
         self.shared.command(Command::End {
             peer: self.shared.peer,
             conn: self.shared.key,
@@ -403,10 +404,26 @@ impl Conn {
         }
         state.here_ended = true;
         drop(state);
+        self.shared.told();
         self.shared.command(Command::End {
             peer: self.shared.peer,
             conn: self.shared.key,
         })
+    }
+
+    /// Waits until the connection is done: both halves ended (`Ok`), or it is gone (its end's error). What a bridge
+    /// waits on once the peer's half has ended, so the connection's end ends this side's too ([`crate::bridge`]).
+    pub(crate) fn finished(&self) -> io::Result<()> {
+        let mut state = self.shared.state()?;
+        loop {
+            if let Some(why) = state.gone {
+                return Err(gone_error(why));
+            }
+            if state.here_ended && state.there == There::Ended {
+                return Ok(());
+            }
+            state = self.shared.changed.wait(state).map_err(io::Error::from)?;
+        }
     }
 
     /// Ends the connection both ways now, for `why`: what the peer sends from now is let go.
