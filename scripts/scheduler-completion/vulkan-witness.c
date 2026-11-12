@@ -1,7 +1,11 @@
 /* AC-T7.3.1: standalone ROOT workload, never a production driver or GPU picker.
  * Vulkan 1.1 deviceUUID and native PCI/LUID are queried independently.
  * Caller supplies every work/count/wait budget. Retain compiler, source, shader
- * and binary hashes. max-items bounds every enumerated Vulkan array.
+ * and binary hashes. max-items bounds the physical devices and device groups the
+ * caller expects to see (the GPUs it was given); an array the driver sizes for
+ * one device (its extensions, its queue families) is sized by the driver's own
+ * count, read before it is, never by a picked budget (AC-T7.4.1: RADV's
+ * extension list outgrew one).
  */
 #include <vulkan/vulkan.h>
 #include <errno.h>
@@ -109,10 +113,10 @@ static void hex(const uint8_t *bytes, size_t length) {
     for (size_t i = 0; i < length; ++i) printf("%02x", bytes[i]);
 }
 
-static int extension(VkPhysicalDevice physical, const char *name, uint32_t budget) {
+static int extension(VkPhysicalDevice physical, const char *name) {
     uint32_t count = 0;
     VkResult result = vkEnumerateDeviceExtensionProperties(physical, NULL, &count, NULL);
-    if (result != VK_SUCCESS || count > budget) return -1;
+    if (result != VK_SUCCESS) return -1;
     VkExtensionProperties *rows = calloc(count ? count : 1, sizeof(*rows));
     if (!rows) return -1;
     uint32_t available = count;
@@ -150,8 +154,8 @@ static int inventory(const struct inputs *args, struct owned *own, VkPhysicalDev
         VkPhysicalDeviceIDProperties id = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES };
         VkPhysicalDevicePCIBusInfoPropertiesEXT pci = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT };
         VkPhysicalDeviceProperties2 row = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &id };
-        int has_pci = extension(devices[i], VK_EXT_PCI_BUS_INFO_EXTENSION_NAME, args->max_items);
-        if (has_pci < 0) { free(devices); return fail("extension_inventory_budget", 0); }
+        int has_pci = extension(devices[i], VK_EXT_PCI_BUS_INFO_EXTENSION_NAME);
+        if (has_pci < 0) { free(devices); return fail("extension_inventory", 0); }
         if (has_pci) id.pNext = &pci;
         vkGetPhysicalDeviceProperties2(devices[i], &row);
         if (!memcmp(args->uuid, id.deviceUUID, VK_UUID_SIZE)) {
@@ -232,7 +236,7 @@ static int compute(const struct inputs *args, struct owned *own, VkPhysicalDevic
         (args->words && sizeof(uint32_t) > SIZE_MAX / args->words)) return fail("work_exceeds_device_limits", 0);
     uint32_t queue_count = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physical, &queue_count, NULL);
-    if (!queue_count || queue_count > args->max_items) return fail("queue_budget", 0);
+    if (!queue_count) return fail("queue_families", 0);
     VkQueueFamilyProperties *queues = calloc(queue_count, sizeof(*queues));
     if (!queues) return fail("queue_allocation", 0);
     uint32_t actual = queue_count;
