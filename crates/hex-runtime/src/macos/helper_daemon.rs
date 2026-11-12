@@ -249,7 +249,8 @@ pub trait Privileged {
         Ok(Vec::new())
     }
 
-    /// Every id held now: users' uids, groups' gids and running processes' uids (default: none).
+    /// Every role id held now (`ROLE_UIDS`, the only ids `next_account` weighs): users' uids, groups'
+    /// gids and running processes' uids (default: none).
     fn taken_ids(&self) -> io::Result<BTreeSet<u32>> {
         Ok(BTreeSet::new())
     }
