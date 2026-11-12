@@ -27,7 +27,6 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio as Std};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Program};
@@ -250,10 +249,10 @@ fn exercise(host: Arc<dyn Host>) {
         })
         .unwrap(),
     );
-    let deadline = Instant::now() + hex_api::conformance::PATIENCE;
+    // No deadline of the test's own: the dial until the driver tells it, the hello on its kind's learned wait
+    // (`client.quic.answer.hello`, measuring until a census over QUIC records it).
     let (client, peer) =
-        hex_quic::link::connect(Arc::clone(&client_end), "node.quic.test", address, deadline)
-            .unwrap();
+        hex_quic::link::connect(Arc::clone(&client_end), "node.quic.test", address, None).unwrap();
     let aes = hex_quic::CipherSuite::TLS13_AES_256_GCM_SHA384;
     assert_eq!(client_end.negotiated(peer).unwrap().unwrap().0, aes);
     assert_eq!(
@@ -527,10 +526,9 @@ fn configured(box_root: Option<&Path>) {
         })
         .unwrap(),
     );
-    let deadline = Instant::now() + hex_api::conformance::PATIENCE;
+    // As HEX-QUIC-20's: the dial and the hello each on their own wait.
     let (client, peer) =
-        hex_quic::link::connect(Arc::clone(&client_end), "node.cli.test", address, deadline)
-            .unwrap();
+        hex_quic::link::connect(Arc::clone(&client_end), "node.cli.test", address, None).unwrap();
     assert_eq!(
         client_end.negotiated(peer).unwrap().unwrap().0,
         hex_quic::CipherSuite::TLS13_AES_256_GCM_SHA384

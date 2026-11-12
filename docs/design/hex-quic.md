@@ -175,7 +175,12 @@ A call's wait for its answer is learned per (call kind, class) through `hex_core
 `runtime-architecture.md`), as every transport's is: this transport's own table (`client.quic.answer.<kind>` and
 `client.quic.answer.<kind>.<class>`), measuring until a census over it records them, never another transport's
 record. The transport's own liveness is QUIC's: a connection that hears nothing for its idle timeout closes, and every
-call and program waiting on it is told why.
+call and program waiting on it is told why. So a dial or a connect with no deadline of its caller's
+(`Endpoint::dial`, `link::connect`) waits as long as the transport does, the driver telling every dial its end (a
+handshake nothing answers ends once the idle timeout passes with nothing from the peer, Q8), and the hello then waits
+on its kind's learned wait. The tests' waits over QUIC are each for their own fact (`test.hex_quic.*`,
+`test.hex_node.quic.*`, `test.hex_node.capacity.*`), measuring until a census over QUIC records them: the suites'
+program-end record bounds a program's end alone (hex-bench's `test_waits`).
 
 ## Q8. Numbers
 

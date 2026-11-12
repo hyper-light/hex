@@ -645,6 +645,7 @@ dependencies = [
  "hex-api",
  "hex-client",
  "hex-core",
+ "hex-testkit",
  "hyper-quic",
  "hyper-transport",
  "pem",

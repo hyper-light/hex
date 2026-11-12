@@ -3,19 +3,27 @@
 
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::time::Instant;
 
 use hex_api::capacity::sim::SimView;
 use hex_api::capacity::{Amounts, Budget, Event, Holder, Out, ToHolder, ToKeeper, Why};
+use hex_core::patience::Patience;
+use hex_testkit::waits::within;
 use hyper_quic::rustls;
 
 use super::*;
 use crate::enroll::{self, sim::SimCa};
 use crate::{Config, Shape, tls};
 
-fn patience() -> Instant {
-    Instant::now() + hex_api::conformance::PATIENCE
-}
+// Each wait over loopback is for its own fact, named for it. No census over QUIC has recorded one yet, so each
+// measures, for the fact alone, its answers recorded for the census that will seed it (hex-testkit's rule).
+/// A dial's answer: its handshake, taken or refused, and the keeper's endpoint's Welcome.
+static DIAL: Patience = Patience::measuring("test.hex_quic.capacity.dial");
+/// Room on the keeper's port for what a holder says: the keeper's grants.
+static SAY: Patience = Patience::measuring("test.hex_quic.capacity.say");
+/// The keeper's next word to a holder: its answer to what the holder said, or a hint.
+static HEAR: Patience = Patience::measuring("test.hex_quic.capacity.hear");
+/// The keeper's reset of a connection that broke the protocol.
+static RESET: Patience = Patience::measuring("test.hex_quic.capacity.reset");
 
 fn loopback() -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
@@ -57,9 +65,9 @@ fn talk(link: &mut Link, holder: &mut Holder, first: Vec<ToKeeper>) -> Vec<Event
     let mut queue = VecDeque::from(first);
     let mut events = Vec::new();
     while let Some(msg) = queue.pop_front() {
-        link.say(&msg, Some(patience())).unwrap();
+        within(&SAY, |by| link.say(&msg, by)).unwrap();
         loop {
-            let answer = link.hear(Some(patience())).unwrap();
+            let answer = within(&HEAR, |by| link.hear(by)).unwrap();
             let hint = matches!(answer, ToHolder::Hint { .. });
             let mut out = Out::default();
             holder.hear(answer, &mut out);
@@ -104,9 +112,10 @@ fn holders_reserve_through_their_keeper_over_quic() {
     };
 
     let a_end = endpoint(&ca, "kiln-a.capacity.test", false);
-    let a_peer = a_end
-        .dial("keeper.capacity.test", node.local_addr(), patience())
-        .unwrap();
+    let a_peer = within(&DIAL, |by| {
+        a_end.dial("keeper.capacity.test", node.local_addr(), by)
+    })
+    .unwrap();
     let (suite, _) = a_end.negotiated(a_peer).unwrap().unwrap();
     assert_eq!(suite, rustls::CipherSuite::TLS13_AES_256_GCM_SHA384);
     let mut a_link = Link::open(&a_end, a_peer).unwrap();
@@ -119,9 +128,10 @@ fn holders_reserve_through_their_keeper_over_quic() {
     );
 
     let b_end = endpoint(&ca, "kiln-b.capacity.test", false);
-    let b_peer = b_end
-        .dial("keeper.capacity.test", node.local_addr(), patience())
-        .unwrap();
+    let b_peer = within(&DIAL, |by| {
+        b_end.dial("keeper.capacity.test", node.local_addr(), by)
+    })
+    .unwrap();
     let mut b_link = Link::open(&b_end, b_peer).unwrap();
     let mut b = Holder::start("kiln-b".into(), 1, 8, &[]).unwrap();
     join(&mut b_link, &mut b);
@@ -131,7 +141,7 @@ fn holders_reserve_through_their_keeper_over_quic() {
         talk(&mut a_link, &mut a, vec![msg]),
         vec![Event::Granted(half)]
     );
-    let hint = b_link.hear(Some(patience())).unwrap();
+    let hint = within(&HEAR, |by| b_link.hear(by)).unwrap();
     assert!(matches!(hint, ToHolder::Hint { .. }), "{hint:?}");
     let mut out = Out::default();
     b.hear(hint, &mut out);
@@ -179,14 +189,17 @@ fn a_connection_that_breaks_the_protocol_is_reset() {
         std::thread::spawn(move || server.serve(acceptor));
     }
     let end = endpoint(&ca, "kiln-bad.capacity.test", false);
-    let peer = end
-        .dial("keeper-bad.capacity.test", node.local_addr(), patience())
-        .unwrap();
+    let peer = within(&DIAL, |by| {
+        end.dial("keeper-bad.capacity.test", node.local_addr(), by)
+    })
+    .unwrap();
     let conn = end.open(peer, CAPACITY_PORT).unwrap();
-    conn.write_all(&[0, 0, 0, 3, b'{', b'{', b'{'], Some(patience()))
-        .unwrap();
+    within(&SAY, |by| {
+        conn.write_all(&[0, 0, 0, 3, b'{', b'{', b'{'], by)
+    })
+    .unwrap();
     let mut buf = [0u8; 16];
-    let read = conn.read(&mut buf, Some(patience()));
+    let read = within(&RESET, |by| conn.read(&mut buf, by));
     assert!(
         read.is_err() || read.as_ref().is_ok_and(|n| *n == 0),
         "{read:?}"

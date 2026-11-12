@@ -156,13 +156,15 @@ impl Endpoint {
         self.local
     }
 
-    /// Dials the peer named `name` at `address`, its certificate checked for that name, until `deadline`: the peer's
+    /// Dials the peer named `name` at `address`, its certificate checked for that name, until `deadline` (none: until
+    /// the driver tells it, as it tells every dial: a handshake nothing answers ends once QUIC's idle timeout passes
+    /// with nothing from the peer, RFC 9000 §10.1, Q8; a connected peer's Welcome is the peer's to send): the peer's
     /// id once the connection is up, or why it isn't.
     pub fn dial(
         &self,
         name: &str,
         address: SocketAddr,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> Result<PeerId, Refused> {
         let (reply, answer) = sync_channel(1);
         self.commands.send(Command::Dial {

@@ -3,11 +3,11 @@
 use super::*;
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::time::Instant;
 
 use hex_core::patience::Patience;
 use hex_quic::enroll::{self, sim::SimCa};
 use hex_quic::{Config, Shape};
+use hex_testkit::waits::within;
 
 use crate::serve::Native;
 
@@ -15,6 +15,20 @@ use crate::serve::Native;
 static READER: Patience = Patience::measuring("test.hex_node.quic.log_reader");
 /// A line the stopped reader missed: made by the reader's lane filling, which no record times.
 static MISSED: Patience = Patience::measuring("test.hex_node.quic.log_missed");
+/// The reader's lane taking the node's lines again once its reader has read what waited: no record times it.
+static LOG_ROOM: Patience = Patience::measuring("test.hex_node.quic.log_room");
+// Each wait over loopback below is for its own fact, named for it. No census over QUIC has recorded one yet, so each
+// measures, for the fact alone, its answers recorded for the census that will seed it (hex-testkit's rule).
+/// A dial's answer: its handshake, taken or refused, and the node's Welcome.
+static DIAL: Patience = Patience::measuring("test.hex_node.quic.dial");
+/// A connection a peer opened, taken at the node.
+static ACCEPT: Patience = Patience::measuring("test.hex_node.quic.accept");
+/// Bytes the other end wrote, its end, or the node's refusal of a port, come to the reader.
+static READ: Patience = Patience::measuring("test.hex_node.quic.read");
+/// Room for bytes or an end: the other end's grants.
+static ROOM: Patience = Patience::measuring("test.hex_node.quic.room");
+/// A program's stdin connection ended by the node: once its program let its stdin go, or after its peer's end.
+static STDIN_END: Patience = Patience::measuring("test.hex_node.quic.stdin_end");
 
 fn limits() -> Limits {
     Limits {
@@ -48,14 +62,13 @@ fn enrolled(ca: &SimCa, name: &str) -> hex_quic::tls::Credentials {
 }
 
 fn read_line(conn: &hex_quic::Conn, pending: &mut Vec<u8>) -> String {
-    let deadline = Instant::now() + hex_api::conformance::PATIENCE;
     let mut buf = vec![0u8; hex_core::lanes::DATA_BOUND];
     loop {
         if let Some(at) = pending.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = pending.drain(..=at).collect();
             return String::from_utf8(line).unwrap();
         }
-        let n = conn.read(&mut buf, Some(deadline)).unwrap();
+        let n = within(&READ, |by| conn.read(&mut buf, by)).unwrap();
         assert_ne!(n, 0, "the log ended");
         pending.extend_from_slice(&buf[..n]);
     }
@@ -101,10 +114,10 @@ fn hex_quic_16_the_log_lane_sends_lines_and_tells_a_slow_reader_what_it_missed()
         },
     })
     .unwrap();
-    let deadline = Instant::now() + hex_api::conformance::PATIENCE;
-    let peer = client
-        .dial("node.log.test", node.local_addr(), deadline)
-        .unwrap();
+    let peer = within(&DIAL, |by| {
+        client.dial("node.log.test", node.local_addr(), by)
+    })
+    .unwrap();
     let reader = client.open(peer, hex_core::lanes::LOG_PORT).unwrap();
     hex_testkit::waits::until(&READER, "the log's reader", || log.readers() == 1).unwrap();
     let mut pending = Vec::new();
@@ -133,7 +146,7 @@ fn hex_quic_16_the_log_lane_sends_lines_and_tells_a_slow_reader_what_it_missed()
         }
         panic!("a line out of order: {} bytes", line.len());
     }
-    hex_testkit::waits::until(&READER, "the reader's room", || {
+    hex_testkit::waits::until(&LOG_ROOM, "the reader's room", || {
         log.say("hex.node event=after\n");
         log.missed() == 0
     })
@@ -200,10 +213,10 @@ fn hex_quic_17_a_tree_staged_over_quic_lands_and_unstages() {
         })
         .unwrap(),
     );
-    let deadline = Instant::now() + hex_api::conformance::PATIENCE;
-    let peer = client
-        .dial("node.stage.test", node.local_addr(), deadline)
-        .unwrap();
+    let peer = within(&DIAL, |by| {
+        client.dial("node.stage.test", node.local_addr(), by)
+    })
+    .unwrap();
     let link = hex_quic::link::Link::new(Arc::clone(&client), peer);
     let tree = dir.path().join("tree");
     std::fs::create_dir_all(tree.join("etc")).unwrap();
@@ -264,23 +277,21 @@ fn hex_quic_21_a_programs_stdin_connection_ends_with_its_program_or_its_peer() {
         },
     })
     .unwrap();
-    let deadline = Instant::now() + hex_api::conformance::PATIENCE;
-    let peer = client
-        .dial("node.stdin.test", node.local_addr(), deadline)
-        .unwrap();
+    let peer = within(&DIAL, |by| {
+        client.dial("node.stdin.test", node.local_addr(), by)
+    })
+    .unwrap();
     let mut buf = [0u8; 64];
 
     // The program lets its stdin go.
     let theirs = client.open(peer, stream::STDIO_PORT).unwrap();
-    let (_, ours) = node.accept(stream::STDIO_PORT, Some(deadline)).unwrap();
+    let (_, ours) = within(&ACCEPT, |by| node.accept(stream::STDIO_PORT, by)).unwrap();
     let (r, w) = std::io::pipe().unwrap();
     let copier = std::thread::spawn(move || feed(&ours, w));
     drop(r);
     #[cfg(windows)]
-    theirs
-        .write_all(b"after its end\n", Some(deadline))
-        .unwrap();
-    let ended = theirs.read(&mut buf, Some(deadline));
+    within(&ROOM, |by| theirs.write_all(b"after its end\n", by)).unwrap();
+    let ended = within(&STDIN_END, |by| theirs.read(&mut buf, by));
     assert!(
         matches!(&ended, Ok(0))
             || ended
@@ -292,16 +303,16 @@ fn hex_quic_21_a_programs_stdin_connection_ends_with_its_program_or_its_peer() {
 
     // The peer ends its stdin.
     let theirs = client.open(peer, stream::STDIO_PORT).unwrap();
-    let (_, ours) = node.accept(stream::STDIO_PORT, Some(deadline)).unwrap();
+    let (_, ours) = within(&ACCEPT, |by| node.accept(stream::STDIO_PORT, by)).unwrap();
     let (mut r, w) = std::io::pipe().unwrap();
     let copier = std::thread::spawn(move || feed(&ours, w));
-    theirs.write_all(b"round trip\n", Some(deadline)).unwrap();
-    theirs.end(Some(deadline)).unwrap();
+    within(&ROOM, |by| theirs.write_all(b"round trip\n", by)).unwrap();
+    within(&ROOM, |by| theirs.end(by)).unwrap();
     let mut got = String::new();
     r.read_to_string(&mut got).unwrap();
     assert_eq!(got, "round trip\n");
     assert_eq!(
-        theirs.read(&mut buf, Some(deadline)).unwrap(),
+        within(&STDIN_END, |by| theirs.read(&mut buf, by)).unwrap(),
         0,
         "the node's half of a stdin connection didn't end after its peer's"
     );
@@ -345,13 +356,13 @@ fn hex_quic_22_a_node_that_stages_nothing_refuses_staging_by_type() {
         },
     })
     .unwrap();
-    let deadline = Instant::now() + hex_api::conformance::PATIENCE;
-    let peer = client
-        .dial("node.nostage.test", node.local_addr(), deadline)
-        .unwrap();
+    let peer = within(&DIAL, |by| {
+        client.dial("node.nostage.test", node.local_addr(), by)
+    })
+    .unwrap();
     let staging = client.open(peer, stream::files::FILES_PORT).unwrap();
     let mut buf = [0u8; 1];
-    let refused = staging.read(&mut buf, Some(deadline)).unwrap_err();
+    let refused = within(&READ, |by| staging.read(&mut buf, by)).unwrap_err();
     assert_eq!(
         refused.kind(),
         std::io::ErrorKind::ConnectionRefused,

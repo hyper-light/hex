@@ -25,6 +25,8 @@ thiserror.workspace = true
 webpki.workspace = true
 
 [dev-dependencies]
+# The tests' waits on their own facts' records (src/tests.rs).
+hex-testkit.workspace = true
 tempfile.workspace = true
 
 [lints]
