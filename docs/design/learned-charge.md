@@ -32,8 +32,12 @@ contention rule and the predictors; they do not hold the step up.
 
 **The choice.**
 - **The window** is the period the node enforces a VM's CPU over, guest_cost's: on Linux `cpu.max`'s period
-  (`hex_core::cgroup::CPU_PERIOD_US`), on macOS the managed control's cycle at the VM's rate (its host class's
-  CPU-response row). A charge and the census's overhead are per the same window.
+  (`hex_core::cgroup::CPU_PERIOD_US`); on macOS the managed control's longest cycle, its cycle at Hex's least CPU
+  bound (`hex_api::MIN_CPU_MILLI`, the least the learner caps a VM at) on its host class's CPU-response row
+  (`MacRuntime::charge_window`), so every VM's rate holds on average over one window. On Windows a job's hard cap holds
+  per scheduling interval, which Windows doesn't document (`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`), so no window
+  derives from it yet: the learner there is refused, typed, until ROOT measures the interval on the host. A charge and
+  the census's overhead are per the same window.
 - **A window's sample** is the VMM's whole CPU over it, which KVM and HVF count with its guest's (guest_cost's
   `Use`): every vCPU's guest time plus the VMM's own. The per-vCPU split is typed-absent
   (`Awaits(GuestCpuTimePerVcpu)`) until Shards' p/guest-cpu-time-v1 and goal 12 put it in `Usage`; the charge
@@ -132,9 +136,13 @@ weights the node writes, shared as the kernel shares them). Its owner's own `cpu
 node writes the boxes' weights each window, so a box made between two windows keeps its owner's weight until the next.
 
 **Sources.** Kubernetes makes a request a CPU weight and the limit a throttle (f35 A, f45 A); Borg gives batch
-work tiny shares beside latency-sensitive work (f44 A); weight by charge, the envelope the cap (f83 B). On macOS a box's CPU follows its weight only as QoS tiers, and the
-managed control caps (f56 A, f38 A): the same shares there are the control's rate set to the water-filled share each
-window, from the same pure function (`hex_sim::charge::shares`).
+work tiny shares beside latency-sensitive work (f44 A); weight by charge, the envelope the cap (f83 B). On macOS a box's
+CPU follows its weight only as QoS tiers, and the managed control caps (f56 A, f38 A); a Windows job holds a weight of
+1 to 9 or a hard cap. Where the platform caps, each VM is capped each window at its water-filled share
+(`charge::Node::rates`): its booking, then what the fleet's CPU budget leaves past the bookings, shared by booking over
+what each asked past its booking in its last window, one that used its whole cap or ran none yet asking its ceiling.
+So each keeps at least its booking whatever it asks next, the caps fit the budget, and CPU the others leave goes to the
+VMs asking past their bookings, a window late.
 
 **What would falsify it.** A VM within its booking receiving less than `min(demand, booking)` in a contended window
 on hardware (ROOT's fairness run).
@@ -246,15 +254,24 @@ reaches the view settled with goal 13 the same day:
   message. On each refresh the scheduler (`scheduler::charges`) gives its node's facts the priors it carries, then,
   right after applying the answers, maps the holdings' box ids to its keys (`Driver::running_ids`) and books each
   VM at its holding (goal 13's `Driver::rebook`). Its capacity stays the machine's (C8).
-- It learns on Linux, where the window is `cpu.max`'s period. On macOS and Windows the window their CPU control
-  enforces (the managed control's cycle, the job's rate) has no learner yet, so their VMs stay booked whole: Hex's
-  own remaining work, not upstream's.
+- On macOS and Windows the learner is `hex_node::recorded::charges`, started by `Recorded::start_charges` (hex-cli
+  on both): a thread that waits on the node's end beside the window, and once a window reads each running managed
+  VM's usage through its native owner (`Recover::managed_usage`), learns as Linux's does, and caps each VM at its
+  water-filled share (`Recover::set_managed_rate`): on macOS a native-helper `rate` request (kind 0x0014, the scope's
+  whole key and its rate) sets its control's rate, its debt kept and what came before charged at the old rate; on
+  Windows the job's hard cap, at least the machine's least. Its capacity answers carry what it learned
+  (`recorded::charges::learned`, shared with Linux's). Neither platform holds a VM's memory at a budget below its
+  ceiling (macOS ends past a footprint limit, Windows refuses past a commit limit, neither throttles at a level), so
+  each VM's memory budget is refused, typed (`Platform`, `memory_high`), which the node says as it starts. On Windows
+  the learner is refused, typed, until its window is measured (C1). Their last resort, which would stop a VM through
+  its managed receipt, isn't wired yet: Hex's own remaining work.
 
 ## Every number
 
 | Number | Value | Kind | Derivation | Pinned by |
 |---|---|---|---|---|
-| The window | Linux 100 ms; macOS the control's cycle | (c) Linux's `cpu.max` default period, Hex's; (b) macOS's CPU-response row | guest_cost's window | `charge::tests` |
+| The window | Linux 100 ms; macOS the control's cycle at Hex's least CPU bound; Windows none until measured | (c) Linux's `cpu.max` default period, Hex's; (b) macOS's CPU-response row | guest_cost's window; macOS's longest cycle at any rate the learner sets | `charge::tests`, `macos::cpu::tests` |
+| A capped VM's least | `hex_api::MIN_CPU_MILLI` | (c) | Hex's least CPU bound, the kernel's least quota | `charge::tests` |
 | SEEDABLE | 1,000 | (b) rule | the fewest samples whose nearest-rank p99.9 is observed (decision 9) | doc-truth test against `waits_census.py` |
 | The charge's tail | p99.9 of CPU and of memory's and disk's high-water marks | requirement | the bar's tail (`hex-sim-constants.md`) | `charge::tests` |
 | The ceiling | the allocation | (b) | guest_cost's census of the class | `charge::tests` |

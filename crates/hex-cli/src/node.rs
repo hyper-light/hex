@@ -397,17 +397,23 @@ fn tell_the_service_manager() -> std::io::Result<()> {
 /// Says on stderr each box a recovery removed and why, each idle cgroup it removed that no box's record named, each
 /// torn record it held, why and what to do, why its guest couldn't say which boxes it holds, and why the host's
 /// boot session couldn't be read, so nothing is dropped unseen (CLAUDE.md §3), before the socket opens.
-/// Starts the node's charge learner (joint plan step 14), or says why it doesn't run: a platform whose window nothing
-/// derives yet refuses it, typed, and the node runs on with its VMs booked whole.
+/// Starts the node's charge learner (joint plan step 14) and says what of the rule its platform can't hold, or says
+/// why it doesn't run: a platform whose window nothing derives yet refuses it, typed, and the node runs on with its
+/// VMs booked whole.
 #[cfg(any(target_os = "macos", windows))]
 fn charges<R: hex_node::recorded::Recover + Send + Sync + 'static>(
     node: &Arc<hex_node::recorded::Recorded<R>>,
 ) {
-    if let Err(why) = node.start_charges() {
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "hex node: the charge learner doesn't run: {why}"
-        );
+    let mut err = std::io::stderr().lock();
+    match node.start_charges() {
+        Ok(unheld) => {
+            for why in unheld {
+                let _ = writeln!(err, "hex node: the charge learner can't hold this: {why}");
+            }
+        }
+        Err(why) => {
+            let _ = writeln!(err, "hex node: the charge learner doesn't run: {why}");
+        }
     }
 }
 

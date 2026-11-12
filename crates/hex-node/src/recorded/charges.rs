@@ -184,7 +184,8 @@ impl Learner {
                         },
                     )
                     .map_err(refused)?;
-                let milli = u128::from(cpu.as_micros())
+                let milli = cpu
+                    .as_micros()
                     .checked_mul(u128::from(CPU_MILLI))
                     .and_then(|n| n.checked_div(span.as_micros().max(1)))
                     .and_then(|n| u64::try_from(n).ok())
@@ -220,7 +221,24 @@ impl Learner {
         }
         self.node.set_budget(budget);
         self.node.settle().map_err(refused)?;
-        let _ = &used;
+        let rates = self
+            .node
+            .rates(budget.cpu_milli, &used, u64::from(hex_api::MIN_CPU_MILLI))
+            .map_err(refused)?;
+        for (scope, rate) in rates {
+            let Some(vm) = self.vms.get_mut(&scope) else {
+                continue;
+            };
+            if vm.rate == rate {
+                continue;
+            }
+            let record = running
+                .iter()
+                .find(|record| scope_of(record) == Some(scope))
+                .ok_or_else(|| Refusal::Broken("a learned VM without its record".into()))?;
+            io.set_rate(record, rate)?;
+            vm.rate = rate;
+        }
         Ok(())
     }
 
@@ -271,11 +289,11 @@ impl Learner {
 /// `costs` (at most one per profile and ceiling, none booked whole), the class's learned use and each of its `vms`'
 /// holdings (by scope, box and receipt), those most past their receipts first (memory, then CPU, then disk), and the
 /// class's `ended` VMs.
-pub(crate) fn learned<'a>(
+pub(crate) fn learned(
     node: &charge::Node<Scope>,
     class: Class,
     costs: &[RuntimeCost],
-    vms: Vec<(Scope, &'a hex_api::BoxId, CapacityResources)>,
+    vms: Vec<(Scope, &hex_api::BoxId, CapacityResources)>,
     ended: Vec<hex_api::LearnedEnd>,
 ) -> Result<Learned, Refusal> {
     let mut priors: Vec<hex_api::LearnedPrior> = Vec::new();

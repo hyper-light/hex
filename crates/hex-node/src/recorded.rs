@@ -1971,12 +1971,21 @@ impl<R: Recover> charges::Managed for Managed<'_, R> {
 }
 
 impl<R: Recover + Send + Sync + 'static> Recorded<R> {
-    /// Joint plan step 14 (C1, C4): starts the charge learner of the node's managed VMs, a thread that runs a window
-    /// each time the platform's window passes, until the node is gone. Refused, typed, where the platform derives no
-    /// window (`Recover::charge_window`): the node runs on, its VMs booked whole, as before.
-    pub fn start_charges(self: &Arc<Self>) -> Result<(), Refusal> {
+    /// Joint plan step 14 (C1, C4, C5): starts the charge learner of the node's managed VMs, a thread that runs a window
+    /// each time the platform's window passes, until the node is gone, and says what of the rule the platform can't
+    /// hold, typed: each VM's memory budget. Refused, typed, where the platform derives no window
+    /// (`Recover::charge_window`): the node runs on, its VMs booked whole, as before.
+    pub fn start_charges(self: &Arc<Self>) -> Result<Vec<Refusal>, Refusal> {
         let window = self.runtime.charge_window()?;
         let learner = charges::Learner::new(window, self.machine()?)?;
+        let mut unheld = Vec::new();
+        unheld
+            .try_reserve_exact(1)
+            .map_err(|_| Refusal::Exhausted {
+                what: "the charge learner's refusals",
+                bound: 1,
+            })?;
+        unheld.push(learner.unheld().clone());
         let (end, ended) = std::sync::mpsc::channel();
         self.books
             .charges
@@ -1997,8 +2006,8 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
                     node.learn_window();
                 }
             })
-            .map(drop)
-            .map_err(|e| Refusal::os("starting the charge learner", e))
+            .map_err(|e| Refusal::os("starting the charge learner", e))?;
+        Ok(unheld)
     }
 
     /// The machine's resources, as its facts say them.
