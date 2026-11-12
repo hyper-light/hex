@@ -170,7 +170,7 @@ Hex expresses everything through two fields of `shards_api::image::ImageSpec`:
 | A box's grants | What 482c5d78 can express | Hex today |
 |---|---|---|
 | none | `network none`: no NIC, no network process | programmed: `Narrowing { Only([]), Only([]), false }`, no publish |
-| `Publish` of a member's port at a host address | `Publish { guest_port, proto, host: Some(addr), host_port }`, only for a port the image gives a member for ingress (D122) | programmed; its receiver is unverified, see N6 |
+| `Publish` of a member's port at a host address | `Publish { guest_port, proto, host: Some(addr), host_port }`, for a port the image gives a member for ingress (D122); for a run with a command of its own, also for a port it gives no member, which then reaches that command | programmed; its receiver is unverified, see N6 |
 | `Egress` to a name, for a harness | no: harness egress is ports to any address, and `--dns` is any name (H2) | refused, `Awaits` member grants by name (step 9) |
 | `Egress` to a name, for an agent | an agent's remote MCP `host:port` is name-pinned, but `Keep` is image-wide, and shards-api shows no member's scope (`FOR`), so Hex can't prove it exact | refused, the same |
 | `Egress` to an address | no address-scoped egress | refused, `Awaits` member grants by address (step 9) |
@@ -216,11 +216,16 @@ A run that breaks either is stopped, and its start is refused. A member the imag
 fault, `Invalid` naming the grant's member. A socket bound past or short of the grants is Shards', `Broken`. So
 no port stays published for a member or a socket no grant names.
 
-**The receiver gap.** shards-api 482c5d78 doesn't say which member receives a published port: `MemberInfo`
-carries no ports, and `Bound` names no member. So each `Published` records its receiver as
-`Receiver::Declared`: the member the image's Agentfile declares for the port (D122), which Hex can't verify is
-the grant's. Hex's lead asked Shards to name the receiving member. When Shards does, the check becomes exact,
-and a new `Receiver` variant, appended after `Declared`, records it.
+**The receiver gap.** shards-api 482c5d78 doesn't say who receives a published port: `MemberInfo` carries no
+ports, and `Bound` names no member. Its run host binds a publish for a port the image's Agentfile gives a member
+coming in. For a run with a command of its own, it also binds one for a port the Agentfile gives no member and
+doesn't declare as egress, and that port reaches the command (D122: "A published port no member claims reaches
+the run's own command"; `ports_granted` in `crates/shards/src/api_run.rs`). A run of the members alone
+(`command: None`, the harness VM) is refused a port no member is given, so each of its publishes reaches a member,
+though not provably the grant's. So each `Published` records its receiver as `Receiver::Declared`: whoever the
+image declares for the port, which Hex can't verify is the grant's member. Hex's lead asked Shards to name the
+receiving member. When Shards does, the check becomes exact, and a new `Receiver` variant, appended after
+`Declared`, records it.
 
 ## N7. Bounds and literals
 
