@@ -135,6 +135,22 @@ fn the_program_end_record_bounds_a_programs_end_alone() {
     );
 }
 
+/// The walk names each source as the repository does, so the file defining the record, whose bare `PATIENCE` is the
+/// record, and this one, which isn't read, are found by their names on every OS (AC-T7.4.1). Do: walk the workspace.
+/// Expect: [`CONFORMANCE`] and [`SELF`] each named once.
+#[test]
+fn the_walk_names_the_record_and_this_file_as_the_repository_does() {
+    let files = sources();
+    for named in [CONFORMANCE, SELF] {
+        assert_eq!(
+            files.iter().filter(|f| f.as_str() == named).count(),
+            1,
+            "{named} among the {} sources walked",
+            files.len()
+        );
+    }
+}
+
 /// Non-vacuity: the reading finds the record where it is used rightly and where it isn't. Do: read a test source
 /// that brings the record in by name, a `Proc`'s wait, a cgroup's emptying and a deadline bounded by it, and a word
 /// that only contains its name. Expect: the emptying and the deadline named, the program's wait and the word not.

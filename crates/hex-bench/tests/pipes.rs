@@ -110,12 +110,9 @@ fn every_pipe_the_workspace_makes_is_close_on_exec() {
     );
 }
 
-/// Non-vacuity: the reading finds a pipe made without close-on-exec, and only that. Do: read a source with rustix's
-/// `pipe()`, a `pipe_with` of other flags, one of `CLOEXEC` with them across lines, std's pipe, and a comment naming
-/// `pipe()`. Expect: the first two named, by line, and none of the rest.
-#[test]
-fn the_reading_names_a_pipe_made_without_close_on_exec_alone() {
-    let text = "\
+/// A source with rustix's `pipe()`, a `pipe_with` of other flags, one of `CLOEXEC` with them across lines, std's pipe,
+/// and a comment naming `pipe()`: its first two lines alone make a pipe without close-on-exec.
+const CALLS: &str = "\
 let (r, w) = rustix::pipe::pipe().unwrap();
 let (r, w) = rustix::pipe::pipe_with(PipeFlags::NONBLOCK).unwrap();
 let (r, w) = rustix::pipe::pipe_with(
@@ -125,6 +122,23 @@ let (r, w) = rustix::pipe::pipe_with(
 let (r, w) = std::io::pipe().unwrap();
 // rustix::pipe::pipe() would leave it inheritable
 ";
-    let found: Vec<usize> = inheritable_in(text).into_iter().map(|(n, _)| n).collect();
+
+/// Non-vacuity: the reading finds a pipe made without close-on-exec, and only that. Do: read [`CALLS`]. Expect: the
+/// first two named, by line, and none of the rest.
+#[test]
+fn the_reading_names_a_pipe_made_without_close_on_exec_alone() {
+    let found: Vec<usize> = inheritable_in(CALLS).into_iter().map(|(n, _)| n).collect();
     assert_eq!(found, vec![1, 2]);
+}
+
+/// A checkout's lines may end `\r\n` (git's `core.autocrlf`, on by default on Windows), and a call's flags are read at
+/// its own offset however many such lines come before it (AC-T7.4.1). Do: read [`CALLS`] with `\r\n` ends, ten times
+/// over. Expect: the first two lines of each copy named, by line, and none of the rest.
+#[test]
+fn a_crlf_checkout_is_read_at_each_calls_own_offset() {
+    let lines = CALLS.lines().count();
+    let text = CALLS.replace('\n', "\r\n").repeat(10);
+    let found: Vec<usize> = inheritable_in(&text).into_iter().map(|(n, _)| n).collect();
+    let want: Vec<usize> = (0..10).flat_map(|copy| [copy * lines + 1, copy * lines + 2]).collect();
+    assert_eq!(found, want);
 }
