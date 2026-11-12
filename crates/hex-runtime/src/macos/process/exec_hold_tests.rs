@@ -230,7 +230,14 @@ fn a_held_member_that_ended_is_no_longer_held() {
 #[test]
 fn a_member_reaped_before_its_kill_is_gone_and_the_scope_stays_certain() {
     let mut held = Held::new();
-    let member = held.boxed.state.held().unwrap().stopped.get(&held.pid).unwrap();
+    let member = held
+        .boxed
+        .state
+        .held()
+        .unwrap()
+        .stopped
+        .get(&held.pid)
+        .unwrap();
     held.child.kill().unwrap();
     held.child.wait().unwrap();
     let killed = held
@@ -241,6 +248,38 @@ fn a_member_reaped_before_its_kill_is_gone_and_the_scope_stays_certain() {
         matches!(killed, Ok(None)),
         "{:?}",
         killed.map(|signalled| signalled.map(|member| member.pid))
+    );
+    let scope = held.boxed.state.vm.as_ref().unwrap();
+    assert!(scope.watchable(held.boxed.state.id.as_ref()).unwrap());
+}
+
+/// A member listed by the watcher's read ends before its hold reaches it (its zombie unreaped): expect
+/// no member to stop, and the scope still Running. The hold's capture of an exiting member is the same
+/// race (task_name_for_pid finds its process but no task: NoRight), which a test can't stop inside.
+#[test]
+fn a_member_that_ended_before_its_hold_is_not_held_and_the_scope_stays_certain() {
+    let mut held = Held::new();
+    let member = Member {
+        pid: u32::try_from(held.pid).unwrap(),
+        started: held.started,
+        footprint: 0,
+        life: Life::Running,
+        armed: false,
+    };
+    held.child.kill().unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    while !sys::rusage(held.pid)
+        .unwrap()
+        .is_some_and(|usage| usage.ended)
+    {
+        assert!(Instant::now() < deadline, "the member never ended");
+        std::thread::park_timeout(Duration::from_millis(1));
+    }
+    let stopped = held.boxed.state.stopped_member(held.pid, &[member]);
+    assert!(
+        matches!(stopped, Ok(None)),
+        "{:?}",
+        stopped.map(|member| member.map(|member| member.pid))
     );
     let scope = held.boxed.state.vm.as_ref().unwrap();
     assert!(scope.watchable(held.boxed.state.id.as_ref()).unwrap());
