@@ -22,7 +22,7 @@ fn refusal(stop: Stop) -> Refusal {
     Refusal::Broken(format!("{stop:?}"))
 }
 
-fn cpu(milli: u64) -> Amounts {
+pub(super) fn cpu(milli: u64) -> Amounts {
     Amounts {
         cpu_milli: milli,
         ..Amounts::ZERO
@@ -98,7 +98,7 @@ fn the_nodes_view_passes_the_conformance_suite() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
-fn demand_of(cpu_milli: u64) -> (Demand, Payload) {
+pub(super) fn demand_of(cpu_milli: u64) -> (Demand, Payload) {
     let need = Resources {
         cpu_milli,
         mem_bytes: hex_api::MIN_MEMORY,
@@ -130,7 +130,7 @@ fn demand_of(cpu_milli: u64) -> (Demand, Payload) {
 }
 
 /// Delivers a step's messages to this one node until it has nothing more to say: its notices.
-fn quiesce(driver: &Driver, step: Step) -> Vec<Notice> {
+pub(super) fn quiesce(driver: &Driver, step: Step) -> Vec<Notice> {
     let mut send = VecDeque::from(step.send);
     let mut notices = step.notices;
     while let Some((to, envelope)) = send.pop_front() {
@@ -143,12 +143,12 @@ fn quiesce(driver: &Driver, step: Step) -> Vec<Notice> {
     notices
 }
 
-fn started(notices: &[Notice]) -> bool {
+pub(super) fn started(notices: &[Notice]) -> bool {
     notices.iter().any(|n| matches!(n, Notice::Started { .. }))
 }
 
 /// Says `msgs` to the node's keeper on link 1, and its answers to `holder`, until neither has more to say.
-fn talk(driver: &Driver, holder: &mut Holder, msgs: Vec<ToKeeper>) -> Vec<Event> {
+pub(super) fn talk(driver: &Driver, holder: &mut Holder, msgs: Vec<ToKeeper>) -> Vec<Event> {
     let mut queue = VecDeque::from(msgs);
     let mut events = Vec::new();
     while let Some(msg) = queue.pop_front() {
@@ -258,7 +258,7 @@ fn booted(dir: &std::path::Path, room: Resources) -> (Driver, Holder) {
 }
 
 /// What the learner says a box holds now: `cpu_milli`, and the least memory a box holds.
-fn holding(cpu_milli: u64) -> hex_api::CapacityResources {
+pub(super) fn holding(cpu_milli: u64) -> hex_api::CapacityResources {
     hex_api::CapacityResources {
         cpu_milli,
         mem_bytes: hex_api::MIN_MEMORY,
@@ -266,7 +266,7 @@ fn holding(cpu_milli: u64) -> hex_api::CapacityResources {
     }
 }
 
-fn four_cpus() -> Resources {
+pub(super) fn four_cpus() -> Resources {
     Resources {
         cpu_milli: 4000,
         mem_bytes: 8 * hex_api::MIN_MEMORY,

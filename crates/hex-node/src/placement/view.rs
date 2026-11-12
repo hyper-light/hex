@@ -190,3 +190,7 @@ impl View {
 #[cfg(test)]
 #[path = "view_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "race_tests.rs"]
+mod race_tests;
