@@ -156,6 +156,24 @@ fn dropping_what_the_keeper_lacks_at_a_sync_is_caught() {
     );
 }
 
+/// AC-T7.4.1, joint plan step 13 (CV12): do run the nemesis's 64 seeds of 2,000 steps with two runners and read the
+/// keeper's credit after every step; expect some step to credit a scoped runner's measured use, so the sweep holds the
+/// credit's invariant where there is a credit to hold it to (non-vacuity).
+#[test]
+fn cv12_the_nemesis_credits_scoped_runners_their_measured_use() {
+    let credited = (0..64).any(|seed| {
+        let mut world = World::new(seed, 2, None).unwrap();
+        (0..2_000).any(|_| {
+            world.step().unwrap();
+            world.keeper.as_ref().is_some_and(|k| !k.credit().is_zero())
+        })
+    });
+    assert!(
+        credited,
+        "no step of 64 seeds credited a runner's use: the nemesis names no scope and samples no use"
+    );
+}
+
 /// T-T7.4.1's determinism: one seed, one run.
 #[test]
 fn a_seed_names_one_run() {
