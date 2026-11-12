@@ -36,8 +36,10 @@ type Scope = [u8; 16];
 pub(super) trait Cgroups {
     fn usage(&self, cgroup: &BoxCgroup) -> Result<Usage, Refusal>;
     fn write(&self, cgroup: &BoxCgroup, write: &Write) -> Result<(), Refusal>;
-    /// Each fleet's parent under `parent` (`.vm`), with its `cpu.max` as the kernel says it, `None` where it has none.
-    fn fleets(&self, parent: &Path) -> Result<Vec<(PathBuf, Option<String>)>, Refusal>;
+    /// The cgroups directly under `dir`.
+    fn children(&self, dir: &Path) -> Result<Vec<PathBuf>, Refusal>;
+    /// A cgroup's file as the kernel says it, `None` where the cgroup or the file is none.
+    fn read(&self, dir: &Path, file: &str) -> Result<Option<String>, Refusal>;
 }
 
 /// The kernel's cgroups.
@@ -52,23 +54,24 @@ impl Cgroups for Kernel {
         cgroup.set(write)
     }
 
-    fn fleets(&self, parent: &Path) -> Result<Vec<(PathBuf, Option<String>)>, Refusal> {
-        let listing = |e| Refusal::os("listing the VM fleets' parent cgroup", e);
+    fn children(&self, dir: &Path) -> Result<Vec<PathBuf>, Refusal> {
+        let listing = |e| Refusal::os("listing a cgroup's children", e);
         let mut out = Vec::new();
-        for entry in std::fs::read_dir(parent).map_err(listing)? {
+        for entry in std::fs::read_dir(dir).map_err(listing)? {
             let entry = entry.map_err(listing)?;
-            if !entry.file_type().map_err(listing)?.is_dir() {
-                continue;
+            if entry.file_type().map_err(listing)?.is_dir() {
+                out.push(entry.path());
             }
-            let path = entry.path();
-            let max = match std::fs::read_to_string(path.join("cpu.max")) {
-                Ok(text) => Some(text),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => return Err(Refusal::os("reading a VM fleet's cpu.max", e)),
-            };
-            out.push((path, max));
         }
         Ok(out)
+    }
+
+    fn read(&self, dir: &Path, file: &str) -> Result<Option<String>, Refusal> {
+        match std::fs::read_to_string(dir.join(file)) {
+            Ok(text) => Ok(Some(text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(Refusal::os("reading a cgroup's file", e)),
+        }
     }
 }
 
@@ -323,11 +326,11 @@ impl Learner {
         }
         rewrite(io, &self.fleet.0, &placed.fleet, &mut self.fleet.1)?;
         let mut fleets = 0u64;
-        for (path, max) in io.fleets(self.parent.0.dir())? {
+        for path in io.children(self.parent.0.dir())? {
             let budget = if path == self.fleet.0.dir() {
                 u64::from(placed.fleet.cpu_max_milli.unwrap_or(0))
             } else {
-                budget_of(max.as_deref(), self.machine)
+                budget_of(io.read(&path, "cpu.max")?.as_deref(), self.machine)
             };
             fleets = fleets.saturating_add(budget);
         }
