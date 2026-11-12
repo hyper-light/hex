@@ -112,6 +112,25 @@ at it, load 7 to 12) and 2768d0d5 (Mac16,9, macOS 26.2, nobody at it, load 1 to 
   reached: a refusal, or a period's end.
 - **Unsafe:** `crates/hex-wait/src/macos/sys.rs`, named in CLAUDE.md §12.
 
+## The channel and the timer (second step, 2026-11-12)
+
+std's other timed waits take the same leeway on macOS: an mpsc receive with a timeout parks its thread
+(`thread::park_timeout`, a dispatch semaphore, `darwin.rs`), and `thread::sleep` is `nanosleep`. Both wait on Mach
+semaphores with user urgency (`sync_sema.c:694`; `gen/nanosleep.c:104`). Their rows in the table above are
+`dispatch_semaphore_wait` and `nanosleep`. The model is the condition variable's.
+
+- **`hex_wait::mpsc`** is a bounded channel, std's `sync_channel` API but for its failures. It is one implementation
+  on every platform: a queue under hex-wait's `Mutex`, whose receiver waits on hex-wait's `Condvar`. So it is std's
+  condition variable on Linux and Windows, and the waiter's kqueue on macOS. Its room is reserved when it is made,
+  so a send never allocates; making one may be refused (`Failed::Os`, out of memory). A receive's wait may fail as
+  hex-wait's waits may: `RecvTimeoutError::Failed` and `RecvError::Failed`. A bound of 0 is a rendezvous, taking a
+  message only while its receiver waits. What the receiver hadn't taken is dropped once it goes, outside the lock.
+- **`hex_wait::rest_until`** waits to a deadline. On macOS it uses a kqueue of its own and the same `NOTE_CRITICAL`
+  timer, with nothing to wake it. Elsewhere it is std's `park_timeout`, looped to the deadline. It serves the waits
+  that have no event to wait on: the conformance cases poll a box's state, resting as long as the last read took.
+- **Bounds:** a channel holds at most its bound, one receiver and its counted senders. A rest holds one kqueue
+  descriptor while it waits.
+
 ## Sites
 
 - **Moved (12):** hex-api `sim.rs` (a simulated program's end); hex-client `calls.rs` (the send lock, and a
@@ -121,13 +140,36 @@ at it, load 7 to 12) and 2768d0d5 (Mac16,9, macOS 26.2, nobody at it, load 1 to 
 - **Left (4):** the Linux-only hex-node `createpool.rs`, `seed.rs` and `supervise/run.rs`, and the Windows-only
   hex-runtime `windows/wmi.rs`.
 
+The second step, std's channel receives and timed parks:
+
+- **Moved:**
+  - hex-client `calls.rs`: a call's answer under its caller's cap, on its mailbox;
+  - hex-quic `driver.rs` and `lib.rs`: a dial's answer by its deadline;
+  - hex-node `recorded.rs`: the charge learner's window, a wait it ends early when the node goes;
+  - hex-api `conformance.rs`: `rest`, the pause of `exit_of`'s, `gone_within`'s and differential `until`'s reads of a
+    fact, each under its patience;
+  - two tests that bound a wait for a fact: hex-node `store.rs`'s 31 writes, and `store/pool/family_preparation.rs`'s
+    callback.
+- **Left:**
+  - the Linux-only hex-node `createpool.rs:1603`;
+  - the Windows-only hex-runtime `windows/oci/launch.rs:150` and `windows/mod.rs:3109,3270`;
+  - hex-cli `selftest.rs:368,410`: a box member's holds, of its memory until a bound's kill lands, and while a
+    watcher is measured. They are least times, not deadlines: a late wake only holds longer.
+  - two tests' poll pauses, each under a bound the clock checks every round: hex-node `disk_probe.rs:280` (a 5 ms
+    pause between level reads) and hex-runtime `macos/managed/remote/controls.rs:265` (a 10 ms pause in a test's
+    nemesis).
+
 ## The test
 
 - `hex_client::calls::budget_tests::ac_t7_4_1_a_queued_sender_is_refused_by_its_deadline` (macOS) expects a queued
   delete's refusal no later than its absolute deadline and twice `hex_testkit::waits::OVERSHOOT`. That record is
   2.743 ms, the `NOTE_CRITICAL` timer's slowest of the 1,000 waits on the two Macs. The test was red on std's
   `Condvar` (70.07 ms late) and is green on hex-wait's.
-- hex-wait's own tests hold its semantics on every platform.
+- `ac_t7_4_1_a_call_waiting_for_its_answer_is_refused_by_its_deadline` (macOS) holds the reader's turn as another
+  call's would be, so a delete with an absolute deadline waits for its answer on its mailbox. It expects the same
+  bound, and was red on std's mpsc (44.00 ms late at 36864a83 on 75694786).
+- hex-wait's own tests hold its semantics on every platform: the condition variable's, the channel's (order,
+  fullness, a timeout, disconnection, a rendezvous, what a gone receiver left) and the rest's.
 
 ## What would falsify it
 
@@ -139,11 +181,22 @@ at it, load 7 to 12) and 2768d0d5 (Mac16,9, macOS 26.2, nobody at it, load 1 to 
 
 ## Open
 
-- **Windows** wasn't measured here; its timed waits are std's, and the probe needs a Windows port.
-- **Other timed waits share the defect.** std's mpsc `recv_timeout` and `thread::park_timeout` (dispatch semaphores)
-  and `thread::sleep` (`nanosleep`) do too, and none was moved here. In production code: hex-client `calls.rs`
-  (a call's answer under its caller's cap, by `recv_timeout`), hex-quic `driver.rs`, hex-node
-  `store/pool/family_preparation.rs`, hex-api `conformance.rs`, hex-runtime `macos/managed/remote/controls.rs`,
-  and hex-cli `selftest.rs`.
+- **Windows wasn't measured here.** Its waits are std's, and the two client tests run on macOS alone until it is.
+  This is ROOT's plan for jupiter:
+  1. Port `deadline_waits.c` to Windows with these mechanisms:
+     - std's `Condvar` (`SleepConditionVariableSRW`);
+     - std's `park_timeout` and `sleep`;
+     - `WaitForSingleObject` on an event;
+     - a high-resolution waitable timer (`CreateWaitableTimerExW` with `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`),
+       waited with `WaitForMultipleObjects` beside an event that wakes it.
+
+     Use the same timeouts (0.1, 1, 5, 25 and 100 ms), n = 100 and the two arms. Print the system timer's
+     resolution before and after.
+  2. Run it as the kiln runner's command on jupiter (x86_64), as on the Macs, and on an arm64 Windows host if there
+     is one.
+  3. If std's waits come within the high-resolution timer's precision, record Windows's `OVERSHOOT` (std's slowest
+     wait) in `hex_testkit::waits`, and turn both client tests on for Windows. If they come late by the system
+     timer's resolution, choose a Windows wait by this record's method before moving Windows's sites, including the
+     three left above.
 - **hex-runtime's macOS `Kqueue`** arms the same timer, so one could be built on the other.
 - **QoS tiers other than utility** were read from XNU's source, not measured: the probe ran as the runner's command.

@@ -131,3 +131,11 @@ fn ac_t7_4_1_a_wait_on_a_poisoned_mutex_is_refused_poisoned() {
     let refused = cv.wait_timeout(held, Duration::ZERO).map(|_| ());
     assert!(matches!(refused, Err(Failed::Poisoned)));
 }
+
+/// Do rest until a deadline; expect it to return no sooner than the deadline.
+#[test]
+fn ac_t7_4_1_a_rest_ends_no_sooner_than_its_deadline() {
+    let deadline = Instant::now() + DEADLINE;
+    rest_until(deadline).unwrap();
+    assert!(Instant::now() >= deadline);
+}

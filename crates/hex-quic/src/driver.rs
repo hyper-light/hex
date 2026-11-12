@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -28,7 +28,7 @@ pub(crate) enum Command {
     Dial {
         name: String,
         address: SocketAddr,
-        reply: SyncSender<Result<PeerId, Refused>>,
+        reply: hex_wait::mpsc::SyncSender<Result<PeerId, Refused>>,
     },
     Open {
         peer: PeerId,
@@ -308,7 +308,7 @@ pub(crate) struct Driver {
     derived: Derived,
     serves: Vec<u32>,
     peers: BTreeMap<PeerId, PeerState>,
-    dials: BTreeMap<PeerId, Vec<SyncSender<Result<PeerId, Refused>>>>,
+    dials: BTreeMap<PeerId, Vec<hex_wait::mpsc::SyncSender<Result<PeerId, Refused>>>>,
     out: Vec<u8>,
     buf: Vec<u8>,
 }
@@ -844,17 +844,22 @@ impl Driver {
 
 /// Waits for a dial's answer until `deadline` (none: until the driver tells it, or ends).
 pub(crate) fn wait_dial(
-    answer: &Receiver<Result<PeerId, Refused>>,
+    answer: &hex_wait::mpsc::Receiver<Result<PeerId, Refused>>,
     deadline: Option<Instant>,
 ) -> Result<PeerId, Refused> {
+    use hex_wait::mpsc::RecvTimeoutError;
     let answered = match deadline {
         Some(deadline) => answer.recv_timeout(deadline.saturating_duration_since(Instant::now())),
-        None => answer.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        None => answer.recv().map_err(RecvTimeoutError::from),
     };
     match answered {
         Ok(result) => result,
         Err(RecvTimeoutError::Timeout) => Err(Refused::Deadline { what: "a dial" }),
         Err(RecvTimeoutError::Disconnected) => Err(Refused::Ended),
+        Err(RecvTimeoutError::Failed(why)) => Err(Refused::Os {
+            op: "waiting for a dial's answer",
+            why: why.to_string(),
+        }),
     }
 }
 

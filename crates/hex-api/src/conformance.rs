@@ -787,18 +787,13 @@ fn started(rt: &dyn Runtime, id: &BoxId, class: Class) -> Result<(), String> {
     )
 }
 
-/// Waits `d` at least: `park_timeout` may wake early, and `thread::sleep` is disallowed.
-pub(crate) fn rest(d: Duration) {
+/// Waits `d` at least, on hex-wait's timer: on macOS std's `park_timeout` comes late by the waiting thread's QoS
+/// leeway, at utility QoS up to four times `d` (docs/design/deadline-waits.md), and `thread::sleep` is disallowed.
+pub(crate) fn rest(d: Duration) -> Result<(), String> {
     let Some(end) = std::time::Instant::now().checked_add(d) else {
-        return;
+        return Ok(());
     };
-    loop {
-        let left = end.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
-            return;
-        }
-        std::thread::park_timeout(left);
-    }
+    hex_wait::rest_until(end).map_err(|why| format!("a rest of {d:?}: {why}"))
 }
 
 /// Polls `inspect` until the box reports an exit, for at most `patience` (the cases': [`patience`]): the fact the
@@ -819,7 +814,7 @@ fn exit_of(rt: &dyn Runtime, id: &BoxId, patience: Duration) -> Result<crate::Bo
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return Err(format!("no exit reported after {patience:?}: {info:?}"));
         }
-        rest(took);
+        rest(took)?;
     }
 }
 
@@ -846,7 +841,7 @@ fn gone_within(rt: &dyn Runtime, id: &BoxId, patience: Duration) -> Result<(), S
                 "a let-go run's box still there {patience:?} after its program ended: {left:?}"
             ));
         }
-        rest(took);
+        rest(took)?;
     }
 }
 

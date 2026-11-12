@@ -213,6 +213,13 @@ impl Condvar {
     }
 }
 
+/// Waits until `deadline`, on a kqueue of its own, its one-shot `NOTE_CRITICAL` timer armed for what is left.
+pub fn rest_until(deadline: Instant) -> Result<(), Failed> {
+    let timer = Kqueue::new().map_err(Failed::Os)?;
+    // Nothing triggers its user event: each return is its timer's or a signal's, and the clock says which.
+    sleep(&timer, Some(deadline)).map_err(Failed::Os)
+}
+
 /// Wakes a waiter a notification took from the queue. Its trigger can't fail: it touches the user event the live
 /// kqueue's making added, which kevent(2) does without allocating and with no EBADF, ENOENT or EINVAL possible, the
 /// kqueue held open by the notification's `Arc` meanwhile.

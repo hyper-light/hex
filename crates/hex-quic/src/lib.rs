@@ -166,7 +166,10 @@ impl Endpoint {
         address: SocketAddr,
         deadline: Option<Instant>,
     ) -> Result<PeerId, Refused> {
-        let (reply, answer) = sync_channel(1);
+        let (reply, answer) = hex_wait::mpsc::sync_channel(1).map_err(|why| Refused::Os {
+            op: "making a dial's answer",
+            why: why.to_string(),
+        })?;
         self.commands.send(Command::Dial {
             name: name.to_owned(),
             address,

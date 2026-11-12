@@ -345,7 +345,8 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   which Hex declares itself; std has no AF_UNIX socket or completion port on Windows, and a buffer the kernel
   writes after the call returns is beyond Rust's borrow rules. Rust can express none of them safely.
 - `crates/hex-wait/src/macos/sys.rs`: the kqueue a thread waits on in Hex's condition variable on macOS
-  (`hex_wait::Condvar`, docs/design/deadline-waits.md). XNU times std's condition variable waits, and its
+  (`hex_wait::Condvar`, and so `hex_wait::mpsc`'s receive), and to a deadline (`hex_wait::rest_until`;
+  docs/design/deadline-waits.md). XNU times std's condition variable waits, and its
   semaphores' and `nanosleep`'s, with the leeway of the waiting thread's latency QoS tier (at utility QoS up to
   four times the wait and 75 ms, doubled while the user is idle), and a timer marked `NOTE_CRITICAL` alone with
   none. rustix makes the kqueue (kqueue(2)); `libc::kevent` adds its user event (`EVFILT_USER`, `EV_CLEAR`),

@@ -364,7 +364,10 @@ struct Books {
     last_boot: Option<hex_core::record::BootSession>,
     /// Joint plan step 14: the charge learner of the managed VMs, where the node's platform caps them, and the end its
     /// window's thread waits on beside the window: dropped with the node.
-    charges: std::sync::OnceLock<(Mutex<charges::Learner>, Mutex<std::sync::mpsc::Sender<()>>)>,
+    charges: std::sync::OnceLock<(
+        Mutex<charges::Learner>,
+        Mutex<hex_wait::mpsc::SyncSender<()>>,
+    )>,
 }
 
 /// Concrete shared transaction; its caller keeps the same method/device Turn on stack.
@@ -1986,7 +1989,9 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
                 bound: 1,
             })?;
         unheld.push(learner.unheld().clone());
-        let (end, ended) = std::sync::mpsc::channel();
+        // Nothing is sent on it: the end is its sender's drop, with the node.
+        let (end, ended) = hex_wait::mpsc::sync_channel(1)
+            .map_err(|why| Refusal::os("making the charge learner's end", why))?;
         self.books
             .charges
             .set((Mutex::new(learner), Mutex::new(end)))
@@ -1997,8 +2002,21 @@ impl<R: Recover + Send + Sync + 'static> Recorded<R> {
             .spawn(move || {
                 loop {
                     match ended.recv_timeout(window) {
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                        Err(hex_wait::mpsc::RecvTimeoutError::Timeout) => {}
+                        Ok(()) | Err(hex_wait::mpsc::RecvTimeoutError::Disconnected) => return,
+                        Err(hex_wait::mpsc::RecvTimeoutError::Failed(why)) => {
+                            // It can't wait out a window: it says so where its failures are kept, and stops.
+                            if let Some(node) = node.upgrade()
+                                && let Some((learner, _)) = node.books.charges.get()
+                                && let Ok(mut learner) = learner.lock()
+                            {
+                                learner.failed(Refusal::os(
+                                    "waiting out the charge learner's window",
+                                    why,
+                                ));
+                            }
+                            return;
+                        }
                     }
                     let Some(node) = node.upgrade() else {
                         return;

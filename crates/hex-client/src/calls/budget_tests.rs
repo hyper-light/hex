@@ -1614,6 +1614,47 @@ fn ac_t7_4_1_a_queued_sender_is_refused_by_its_deadline() {
     assert!(matches!(request.try_recv(), Err(mpsc::TryRecvError::Empty)));
 }
 
+/// AC-T7.4.1: do send an actual delete with an absolute deadline while another call holds the reader's turn, so it
+/// waits for its answer on its mailbox; expect its refusal no later than that deadline and twice the platform's
+/// slowest recorded timer overshoot (`waits::OVERSHOOT`). The deadline is the claim under test. macOS times std's
+/// channel receive, a dispatch semaphore's wait, by the waiting thread's QoS, as it times its condition variable.
+#[cfg(target_os = "macos")]
+#[test]
+fn ac_t7_4_1_a_call_waiting_for_its_answer_is_refused_by_its_deadline() {
+    use hex_testkit::waits::OVERSHOOT;
+    /// The delete's refusal at its absolute deadline, its answer waited for on its mailbox.
+    static CAPPED: Patience = Patience::measuring("test.hex_client.budget.mailbox_deadline");
+    let (transport, request) = stalled(None);
+    let client = Arc::new(configured(AbsoluteStalled(transport)));
+    // Held, as another call's would be: this call can't take the turn, so it waits on its mailbox.
+    client.conn.shared.state().unwrap().reading = true;
+    let control = Arc::clone(&client);
+    let (finished, answer) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let deadline = Instant::now().checked_add(CAP).unwrap();
+        let refused = control.delete_before(&BoxId::new("mailbox-control").unwrap(), deadline);
+        let late = Instant::now().saturating_duration_since(deadline);
+        let _ = finished.send((refused, late));
+    });
+    let result = recv_on(&CAPPED, &answer);
+    if result.is_err() {
+        client
+            .conn
+            .shared
+            .end(Refusal::Broken("mailbox deadline cleanup".into()));
+    }
+    worker.join().unwrap();
+    let (refused, late) = result.unwrap();
+    assert!(matches!(refused, Err(Refusal::Os { why, .. }) if why.contains("absolute")));
+    assert!(
+        late <= OVERSHOOT * 2,
+        "refused {late:?} past its deadline, more than twice the slowest recorded overshoot, {OVERSHOOT:?}"
+    );
+    // Its request went, and only its answer was waited for.
+    assert!(matches!(request.try_recv(), Ok(())));
+    assert!(client.conn.shared.state().unwrap().calls.is_empty());
+}
+
 /// AC-T7.4.1: supplied instants survive unchanged; an earlier transport bound may shorten
 /// authority, no later/default bound can enlarge it, and a learned wait never replaces it:
 /// ending first it is a run-out to record, a tie the caller's; with no caller it is the bound.
