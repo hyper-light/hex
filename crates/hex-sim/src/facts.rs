@@ -287,6 +287,7 @@ impl Facts {
             routes: None,
             runtime_pools: Vec::new(),
             costs: [None; Class::COUNT],
+            priors: Default::default(),
             id,
             capacity: Resources {
                 cpu_milli: u64::from(self.cpu.threads).saturating_mul(crate::lb::CPU),

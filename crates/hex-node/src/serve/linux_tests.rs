@@ -62,11 +62,64 @@ impl Gate {
     }
 }
 
-/// Boxes in the simulator; programs real processes of this test, started on the request's stdio.
+/// Whether a guest's stand-in program has ended, and the condition its waiters wait on: it ends once the test says.
+type GuestEnd = Arc<(Mutex<bool>, Condvar)>;
+
+/// A stand-in for a program in a VM's guest as its backend's client hands it over: its pid the guest's, which names no
+/// process of this host or an unrelated one, and its end the guest's message, which comes once the test lets it.
+struct GuestProgram {
+    pid: u32,
+    /// Whether it says it is a process of this host: a backend's that is, as a misbehaving one would.
+    on_this_host: bool,
+    ended: GuestEnd,
+}
+
+impl Proc for GuestProgram {
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+    fn on_this_host(&self) -> bool {
+        self.on_this_host
+    }
+    fn try_wait(&mut self) -> Result<Option<hex_api::Exit>, Refusal> {
+        let ended = *self.ended.0.lock().unwrap();
+        Ok(if ended {
+            Some(hex_api::Exit::Code(7))
+        } else {
+            None
+        })
+    }
+    fn wait_for(&mut self, timeout: Duration) -> Result<Option<hex_api::Exit>, Refusal> {
+        let (ended, came) = &*self.ended;
+        let (ended, _) = came
+            .wait_timeout_while(ended.lock().unwrap(), timeout, |ended| !*ended)
+            .unwrap();
+        Ok(if *ended {
+            Some(hex_api::Exit::Code(7))
+        } else {
+            None
+        })
+    }
+    /// The guest's kill: its end, as the guest tells it.
+    fn kill(&mut self) -> Result<(), Refusal> {
+        *self.ended.0.lock().unwrap() = true;
+        self.ended.1.notify_all();
+        Ok(())
+    }
+    fn streams(&mut self) -> Result<hex_api::Given, Refusal> {
+        Ok(hex_api::Given::default())
+    }
+}
+
+/// Boxes in the simulator; programs real processes of this test, started on the request's stdio, or, where a test
+/// sets [`TestHost::guest`], a VM guest's stand-in.
 #[derive(Default)]
 struct TestHost {
     sim: SimRuntime,
     gate: Gate,
+    /// The pid an exec's program has, whether it says it is this host's, and its end: an exec then hands over a guest's
+    /// program ([`GuestProgram`]) rather than start a process.
+    guest: Mutex<Option<(u32, bool, GuestEnd)>>,
     abandoned: Mutex<Vec<BoxId>>,
     /// Each descriptor an exec's streams came to the host as, or that it made for those asked for, by what it is, and
     /// whether it was close-on-exec as the host started the program.
@@ -90,6 +143,13 @@ impl Runtime for TestHost {
         mut stdio: Stdio,
     ) -> Result<Box<dyn Proc>, Refusal> {
         self.sim.inspect(id)?;
+        if let Some((pid, on_this_host, ended)) = self.guest.lock().unwrap().clone() {
+            return Ok(Box::new(GuestProgram {
+                pid,
+                on_this_host,
+                ended,
+            }));
+        }
         let given = stdio.make_asked()?;
         let ends = [
             ("the program's stdin", stdio.stdin.as_ref().map(AsFd::as_fd)),
@@ -1569,4 +1629,108 @@ fn every_descriptor_the_node_makes_for_an_execs_streams_is_close_on_exec() {
     drop(ends);
     let (h, end) = answer_of(&raw);
     assert!(matches!((h.id, end), (2, Answer::Exited(_))));
+}
+
+/// A live process of this host that isn't this test's child (nor the server's, which runs in this process): `sleep`,
+/// let go by a shell that ends at once, so it is orphaned to the session's reaper. Its pid, which only this test ends.
+fn unrelated_sleep() -> u32 {
+    let out = std::process::Command::new("setsid")
+        .args(["sh", "-c", "sleep 600 </dev/null >/dev/null 2>&1 & echo $!"])
+        .output()
+        .unwrap();
+    let pid: u32 = String::from_utf8(out.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let parent: u32 = stat
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_ne!(
+        parent,
+        std::process::id(),
+        "the stand-in is no child of the server's process"
+    );
+    pid
+}
+
+/// GPU run r1119 (AC-T7.4.1; original): a Firecracker box's program came back from its backend as its guest's client
+/// hands it, its pid the guest's, and the server watched that pid as one of this host's: it named no process here, so
+/// it was waited for as a gone program, for the node's wait for a box to empty, and its end reported `Unknown` while it
+/// still ran in its guest. Do: exec a guest's stand-in program that says it is another host's, its pid past the host's
+/// `pid_max` (so it names no process here), its end held by the test. Expect the exec refused by type, never watched by
+/// that pid, so no end is reported for it, `Unknown` least of all: its host forwards such an exec ([`Host::forward`]).
+#[test]
+fn original_a_guest_program_whose_pid_names_no_host_process_is_never_waited_for_here() {
+    let lab = Lab::new(limits());
+    let pid_max: u32 = std::fs::read_to_string("/proc/sys/kernel/pid_max")
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let pid = pid_max + 1;
+    let ended = Arc::new((Mutex::new(false), Condvar::new()));
+    *lab.host.guest.lock().unwrap() = Some((pid, false, Arc::clone(&ended)));
+    let client = lab.client();
+    match client.exec(&b(), Program::of(&["the-guests-program"]), Stdio::null()) {
+        Err(Refusal::Invalid { what, why }) => {
+            assert_eq!(what, "a started program");
+            assert!(why.contains(&format!("pid {pid} ")), "{why}");
+        }
+        Err(other) => panic!("refused by another type: {other:?}"),
+        Ok(mut proc) => panic!(
+            "watched by its guest's pid {pid} as this host's: told {:?} while it runs in its guest",
+            proc.wait_for(EMPTYING.saturating_mul(2))
+        ),
+    }
+    assert_eq!(lab.watched(), 0, "nothing is watched for it");
+}
+
+/// The lead's ruling on GPU run r1119 (AC-T7.4.1; original): a guest's pid can name an unrelated process of this host,
+/// which the server then watched as the program (and, were its watch refused, sent KILL). Do: exec a stand-in program
+/// whose pid is a live `sleep` of this host that isn't the server's child, its backend saying, as a misbehaving one
+/// would, that it is this host's; then let the program end. Expect the exec refused by type, as its pid is no child of
+/// this node, the `sleep` alive and never watched.
+#[test]
+fn original_a_program_whose_pid_names_another_process_is_never_watched_or_signalled() {
+    let lab = Lab::new(limits());
+    let sleep = unrelated_sleep();
+    let ended = Arc::new((Mutex::new(false), Condvar::new()));
+    *lab.host.guest.lock().unwrap() = Some((sleep, true, Arc::clone(&ended)));
+    let client = lab.client();
+    let exec = client.exec(&b(), Program::of(&["the-guests-program"]), Stdio::null());
+    // The program ends in its guest.
+    *ended.0.lock().unwrap() = true;
+    ended.1.notify_all();
+    let (refused, told) = match exec {
+        Ok(mut proc) => (None, Some(proc.wait_for(ANSWERED))),
+        Err(why) => (Some(why), None),
+    };
+    let alive_after = alive(sleep);
+    // Only the sleep this test started is ended, by its own pid.
+    let _ = rustix::process::kill_process(
+        Pid::from_raw(i32::try_from(sleep).unwrap()).unwrap(),
+        Signal::KILL,
+    );
+    match (refused, alive_after) {
+        (Some(Refusal::Os { op, why }), true) => {
+            assert_eq!(op, "watching a started program");
+            assert!(
+                why.contains(&format!("pid {sleep} is no child of this node")),
+                "{why}"
+            );
+        }
+        (refused, alive_after) => panic!(
+            "watched the unrelated process {sleep} as the program: refused {refused:?}, told {told:?}, alive after: \
+             {alive_after}"
+        ),
+    }
+    assert_eq!(lab.watched(), 0, "nothing is watched for it");
 }

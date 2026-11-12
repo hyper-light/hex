@@ -5,6 +5,10 @@ use hex_core::record::{PoolRecord, RECORD_VERSION};
 use std::num::NonZeroU64;
 
 pub(super) fn helper(directory: &Path) -> Arc<Helper> {
+    helper_with(directory, Duration::from_secs(1))
+}
+/// The same helper, each request bounded by `rpc`.
+fn helper_with(directory: &Path, rpc: Duration) -> Arc<Helper> {
     // The helper's endpoint and receipt parents are private to its UID (0700).
     std::fs::set_permissions(
         directory,
@@ -16,7 +20,7 @@ pub(super) fn helper(directory: &Path) -> Arc<Helper> {
             directory.join("hex"),
             directory.join("s"),
             directory.join("r"),
-            Duration::from_secs(1),
+            rpc,
         )
         .unwrap(),
         protocol::CpuControl {
@@ -213,4 +217,129 @@ fn weak_restart_fence_reads_only_the_same_live_canonical_owner() {
     drop(books);
     drop(owner);
     assert!(helper.restart_fence(&completed(&pool())).is_err());
+}
+
+/// Where a helper's close lands against the node's next read of its peer PID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Read {
+    Before,
+    After,
+}
+
+/// A helper's end of its connection, closed once the helper has answered, at the node's next read
+/// of its peer PID: the close the helper makes after each answer, wherever it lands.
+struct CloseAfterAnswer {
+    at: Read,
+    answered: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    end: std::sync::Arc<Mutex<Option<OwnedFd>>>,
+}
+
+thread_local! {
+    static NEMESIS: std::cell::RefCell<Option<CloseAfterAnswer>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs before and after each node read of a helper connection's peer PID (`super::peer_pid`), on
+/// the reading thread. Once the helper has answered, it closes the helper's end at its point, and the
+/// node's socket is then disconnected: the end held the last reference.
+pub(super) fn around_peer_read(fd: BorrowedFd<'_>, now: Read) {
+    NEMESIS.with(|nemesis| {
+        let nemesis = nemesis.borrow();
+        let Some(close) = nemesis.as_ref() else {
+            return;
+        };
+        if close.at != now || !close.answered.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Some(end) = close.end.lock().unwrap().take() {
+            drop(end);
+            assert!(
+                matches!(sys::peer_pid(fd), Err(sys::PeerPidFailure::Native(error)) if error.raw_os_error() == Some(libc::ENOTCONN)),
+                "the helper's end closed but the node's socket is still connected"
+            );
+        }
+    });
+}
+
+/// AC-T7.4.1 (a reply's peer check): the helper closes each connection once it has answered (each
+/// request's, and its startup socket after the first Prepare), whenever its scheduler runs it. Do: a
+/// helper (this test's process, the live incarnation its key names) answers a request on a private
+/// connection, and its end closes once it has answered: before the node's next read of the peer, and
+/// right after it. Expect: the node takes the answer both times; the close is no refusal wherever it
+/// lands (non-vacuity: the end closed, and the node's socket was disconnected).
+#[test]
+fn a_whole_reply_holds_wherever_the_helpers_close_lands_against_the_nodes_peer_reads() {
+    for at in [Read::Before, Read::After] {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = helper_with(dir.path(), Duration::from_secs(60));
+        let pid = rustix::process::getpid().as_raw_nonzero().get();
+        let own = ProcId {
+            pid: u32::try_from(pid).unwrap(),
+            start_ticks: sys::rusage(pid).unwrap().unwrap().started,
+        };
+        let key = protocol::Key::from_record(NativeRecord::Pool(&pool()), own).unwrap();
+        let (node, end) = rustix::net::socketpair(
+            AddressFamily::UNIX,
+            SocketType::STREAM,
+            SocketFlags::empty(),
+            None,
+        )
+        .unwrap();
+        for fd in [&node, &end] {
+            crate::macos::private_descriptor(fd, true).unwrap();
+        }
+        let answered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let end = std::sync::Arc::new(Mutex::new(Some(end)));
+        NEMESIS.with(|nemesis| {
+            *nemesis.borrow_mut() = Some(CloseAfterAnswer {
+                at,
+                answered: std::sync::Arc::clone(&answered),
+                end: std::sync::Arc::clone(&end),
+            });
+        });
+        let answering = std::thread::spawn({
+            let (answered, end) = (
+                std::sync::Arc::clone(&answered),
+                std::sync::Arc::clone(&end),
+            );
+            move || {
+                let slot = end.lock().unwrap();
+                let fd = slot.as_ref().unwrap().as_fd();
+                let until = Some(Instant::now() + Duration::from_secs(60));
+                let (bytes, fds) = frame::receive(fd, protocol::timed::MAX_MESSAGE, until).unwrap();
+                let (_, id, _, request) = protocol::timed::read(&bytes, fds.len()).unwrap();
+                let answer = protocol::Answer::Done {
+                    key: request.key().try_clone().unwrap(),
+                };
+                let bytes = protocol::encode_answer(VERSION, id, &answer).unwrap();
+                answered.store(true, Ordering::SeqCst);
+                frame::send(fd, &bytes, &[], protocol::MAX_MESSAGE, until).unwrap();
+            }
+        });
+        let result = helper.rpc_on(
+            &protocol::Request::Control {
+                key,
+                action: protocol::Action::Inspect,
+                controller: None,
+            },
+            &[],
+            None,
+            Some(node.as_fd()),
+        );
+        answering.join().unwrap();
+        NEMESIS.with(|nemesis| nemesis.borrow_mut().take());
+        assert!(
+            end.lock().unwrap().is_none(),
+            "{at:?}: the helper's end never closed after its answer"
+        );
+        match result.map_err(CallFailure::refusal) {
+            Ok((protocol::Answer::Done { key }, descriptors)) => {
+                assert_eq!(key.helper, own);
+                assert!(descriptors.is_empty());
+            }
+            Ok((other, _)) => panic!("{at:?}: the helper's answer changed: {other:?}"),
+            Err(refusal) => {
+                panic!("{at:?}: a whole answer was refused for the close after it: {refusal:?}")
+            }
+        }
+    }
 }

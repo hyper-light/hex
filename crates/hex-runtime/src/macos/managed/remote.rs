@@ -1032,43 +1032,65 @@ fn check_process(expected: ProcId) -> Result<(), Refusal> {
     Ok(())
 }
 /// The same peer check once a whole reply is read. The helper closes a connection when it has
-/// answered (each request's, and its startup socket after the first Prepare), so a peer already
-/// gone then is the one checked before the request, not another: its process must still be the
-/// same live incarnation. Every other failure still refuses.
+/// answered (each request's, and its startup socket after the first Prepare), at any point after
+/// its answer, so the peer's PID is read once: a second read let a close landing between the two
+/// refuse a whole answer. A peer already gone then is the one checked before the request, not
+/// another: its UID (kept from the connection) and its process, still the same live incarnation,
+/// are checked as before. Every other failure still refuses.
 fn peer_after_reply(fd: impl AsFd, expected: ProcId) -> Result<(), Refusal> {
-    match sys::peer_pid(fd.as_fd()) {
-        Err(sys::PeerPidFailure::Native(error)) if error.raw_os_error() == Some(libc::ENOTCONN) => {
-            check_process(expected)
-        }
-        _ => peer(fd, expected),
-    }
+    checked_peer(fd.as_fd(), expected, Peer::Answered)
 }
 
 fn peer(fd: impl AsFd, expected: ProcId) -> Result<(), Refusal> {
+    checked_peer(fd.as_fd(), expected, Peer::Connected)
+}
+
+/// What a helper connection's peer may be when it is checked: connected before a request, or gone
+/// once its whole answer is read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Peer {
+    Connected,
+    Answered,
+}
+
+fn checked_peer(fd: BorrowedFd<'_>, expected: ProcId, peer: Peer) -> Result<(), Refusal> {
     check_process(expected)?;
-    if sys::peer_euid(fd.as_fd())
-        .map_err(|error| Refusal::os("reading native helper peer UID", error))?
+    if sys::peer_euid(fd).map_err(|error| Refusal::os("reading native helper peer UID", error))?
         != rustix::process::geteuid().as_raw()
     {
         return Err(super::configuration(
             "the native helper belongs to another user",
         ));
     }
-    let pid = match sys::peer_pid(fd.as_fd()) {
-        Ok(pid) => pid,
+    match peer_pid(fd) {
+        Ok(pid) => {
+            if u32::try_from(pid).ok() != Some(expected.pid) {
+                return Err(super::configuration(
+                    "the native helper socket peer changed",
+                ));
+            }
+        }
+        Err(sys::PeerPidFailure::Native(error))
+            if peer == Peer::Answered && error.raw_os_error() == Some(libc::ENOTCONN) => {}
         Err(failure) => {
             return Err(Refusal::Os {
                 op: "reading the native helper peer PID",
                 why: diagnostic(failure)?,
             });
         }
-    };
-    if u32::try_from(pid).ok() != Some(expected.pid) {
-        return Err(super::configuration(
-            "the native helper socket peer changed",
-        ));
     }
     check_process(expected)
+}
+
+/// The node's read of a helper connection's peer PID (LOCAL_PEERPID). The controls' nemesis runs
+/// around each read on the reading thread, to land the helper's close before or after it.
+fn peer_pid(fd: BorrowedFd<'_>) -> Result<libc::pid_t, sys::PeerPidFailure> {
+    #[cfg(test)]
+    controls::around_peer_read(fd, controls::Read::Before);
+    let read = sys::peer_pid(fd);
+    #[cfg(test)]
+    controls::around_peer_read(fd, controls::Read::After);
+    read
 }
 
 // Native raw uptime is the SAME clock used by pinned Rust1.99.1 Instant on Apple.

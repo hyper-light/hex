@@ -3,7 +3,11 @@
 //! seed, virtual time and a single-threaded event loop decide everything, so a run is reproducible
 //! and a regression is a changed number, not noise.
 //!
+//! - [`capacity`]: one machine's capacity view under a nemesis: Hex's own boxes and kiln's runners on its
+//!   keeper, crashes on either side, dropped links, partitions and heals (joint plan step 13).
 //! - [`census`]: the most the recorded inputs hold, and the input-bound rule that bounds inputs by it.
+//! - [`charge`]: a microVM's charge learned from its measured use, its bookings within its node's fleet budget,
+//!   and the contention rule's decisions (joint plan step 14, `docs/design/learned-charge.md`).
 //! - [`model`]: nodes, workloads and their resources; nodes' platforms and devices, workloads' asks.
 //! - [`needs`]: what a box needs of a node, in kiln's needs grammar adapted to boxes.
 //! - [`facts`]: what a node reports about itself, read from its OS's text, and the node it makes.
@@ -44,7 +48,9 @@
 )]
 
 pub mod baseline;
+pub mod capacity;
 pub mod census;
+pub mod charge;
 pub mod danger;
 pub mod error;
 pub mod facts;

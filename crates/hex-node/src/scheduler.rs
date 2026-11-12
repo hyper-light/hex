@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::placement::{Driver, Envelope, Error, Notice, Payload, Runtimes, Step};
 use crate::serve::Host;
 
+mod charges;
 mod offer;
 mod order;
 mod stopping;
@@ -604,7 +605,20 @@ pub struct Service {
     control_limit: AtomicUsize,
     senders: BTreeMap<NodeId, Sender<Queued>>,
     refreshing: BTreeMap<NodeId, Arc<AtomicBool>>,
+    /// Joint plan step 14: the microVMs' learned charges and bookings (`charges`), where the node has the window
+    /// they are learned over.
+    charges: Option<Mutex<charges::Charges>>,
 }
+
+/// The window a node learns its microVMs' charges over (joint plan step 14, C1): the period it enforces their CPU
+/// over, on Linux `cpu.max`'s (`hex_core::cgroup::CPU_PERIOD_US`). Where the window isn't carried to the scheduler
+/// (macOS's managed control's cycle, Windows' job rate), no charge is learned: its VMs stay booked whole.
+#[cfg(target_os = "linux")]
+const CHARGE_WINDOW: Option<std::time::Duration> = Some(std::time::Duration::from_micros(
+    hex_core::cgroup::CPU_PERIOD_US,
+));
+#[cfg(not(target_os = "linux"))]
+const CHARGE_WINDOW: Option<std::time::Duration> = None;
 
 impl Service {
     pub fn open(config: &Config, report: Report) -> Result<Arc<Self>, Refusal> {
@@ -805,6 +819,9 @@ impl Service {
             refreshing.insert(node, Arc::new(AtomicBool::new(false)));
             senders.insert(node, send);
         }
+        let charges = CHARGE_WINDOW
+            .map(|window| charges::Charges::new(window, charges::bound(&facts)?).map(Mutex::new))
+            .transpose()?;
         let service = Arc::new(Self {
             id,
             realm: config.cluster.clone(),
@@ -824,7 +841,35 @@ impl Service {
             control_limit: AtomicUsize::new(control_limit),
             senders,
             refreshing,
+            charges,
         });
+        if let Some(window) = CHARGE_WINDOW {
+            let stopping = Arc::clone(&service.stopping);
+            let learner = Arc::downgrade(&service);
+            let report = Arc::clone(&report);
+            std::thread::Builder::new()
+                .name("hex-charges".into())
+                .spawn(move || {
+                    // Once a window until the service stops or is gone (joint plan step 14, C1).
+                    loop {
+                        match stopping.wait_retry(window) {
+                            Ok(false) => {}
+                            Ok(true) => return,
+                            Err(why) => {
+                                report(id, &format!("the microVMs' charge learner stops: {why}"));
+                                return;
+                            }
+                        }
+                        let Some(service) = learner.upgrade() else {
+                            return;
+                        };
+                        if let Err(why) = service.learn_charges() {
+                            report(id, &why.to_string());
+                        }
+                    }
+                })
+                .map_err(|e| Refusal::os("starting the microVMs' charge learner", e))?;
+        }
         *source
             .lock()
             .map_err(|_| Refusal::Broken("peer feedback lock poisoned".into()))? =
@@ -844,6 +889,19 @@ impl Service {
             service.dispatch(recovered)?;
         }
         Ok(service)
+    }
+
+    /// One window's reading of every microVM this node runs, learned (joint plan step 14, C1 to C3).
+    fn learn_charges(&self) -> Result<(), Refusal> {
+        let Some(charges) = &self.charges else {
+            return Ok(());
+        };
+        let vms = self.driver.measured_vms().map_err(failed)?;
+        let now = std::time::Instant::now();
+        charges
+            .lock()
+            .map_err(|_| Refusal::Broken("learned charge lock poisoned".into()))?
+            .observe(&vms, now)
     }
 
     /// Cancels and reaps only this service's authenticated peer children.
@@ -1162,6 +1220,12 @@ impl Service {
             backing_owned,
         )?;
         capacity::retain_unavailable(&mut local, previous.as_ref(), &snapshot.unavailable)?;
+        if let Some(charges) = &self.charges {
+            charges
+                .lock()
+                .map_err(|_| Refusal::Broken("learned charge lock poisoned".into()))?
+                .apply(&mut local)?;
+        }
         self.driver
             .refresh_node(local.try_clone().map_err(|_| Refusal::Exhausted {
                 what: "local node snapshot",

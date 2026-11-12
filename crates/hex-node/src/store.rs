@@ -100,18 +100,12 @@ fn read_host_boot() -> Result<Option<BootSession>, String> {
         .map_err(|e| format!("{path}: {e}"))
 }
 
+/// Read by sysctlbyname: no program runs, so none can inherit a descriptor another thread holds.
 #[cfg(target_os = "macos")]
 fn read_host_boot() -> Result<Option<BootSession>, String> {
-    let out = std::process::Command::new("/usr/sbin/sysctl")
-        .args(["-n", "kern.bootsessionuuid"])
-        .output()
-        .map_err(|e| format!("running sysctl -n kern.bootsessionuuid: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("sysctl -n kern.bootsessionuuid: {}", out.status));
-    }
-    let text = std::str::from_utf8(&out.stdout)
-        .map_err(|e| format!("sysctl -n kern.bootsessionuuid: {e}"))?;
-    BootSession::new(text)
+    let text = hex_runtime::macos::sys::sysctl_string(c"kern.bootsessionuuid")
+        .map_err(|e| format!("reading kern.bootsessionuuid: {e}"))?;
+    BootSession::new(&text)
         .map(Some)
         .map_err(|e| format!("kern.bootsessionuuid: {e}"))
 }

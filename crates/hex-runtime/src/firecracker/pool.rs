@@ -907,6 +907,8 @@ pub(super) mod tests {
             },
             uid: 0,
             boot: None,
+            joins: std::sync::Mutex::new(None),
+            evented: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         };
         (runtime, owner)
     }

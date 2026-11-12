@@ -65,6 +65,7 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
         nodes.push(NodeSpec {
             routes: None,
             costs: [None; crate::model::Class::COUNT],
+            priors: Default::default(),
             runtime_pools: Vec::new(),
             id: NodeId(id),
             capacity: Resources {
@@ -381,6 +382,7 @@ pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
         .map(|id| NodeSpec {
             routes: None,
             costs: [None; crate::model::Class::COUNT],
+            priors: Default::default(),
             runtime_pools: Vec::new(),
             id: NodeId(id),
             capacity: day.node,
@@ -572,6 +574,7 @@ impl NodeModel {
             NodeModel::M5dMetal => NodeSpec {
                 routes: None,
                 costs: [None; crate::model::Class::COUNT],
+                priors: Default::default(),
                 runtime_pools: Vec::new(),
                 id: NodeId(id),
                 capacity: Resources {
@@ -607,6 +610,7 @@ impl NodeModel {
                 NodeSpec {
                     routes: None,
                     costs: [None; crate::model::Class::COUNT],
+                    priors: Default::default(),
                     runtime_pools: Vec::new(),
                     id: NodeId(id),
                     capacity: Resources {

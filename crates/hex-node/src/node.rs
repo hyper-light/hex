@@ -2133,6 +2133,22 @@ impl crate::serve::Host for Node {
         Node::abandoned(self, id)
     }
 
+    /// Its VM backends' evented connections to their guests join the core's loop ([`Node::forward_vm`]).
+    fn attach(&self, lp: Arc<dyn crate::serve::Loop>) -> Result<(), Refusal> {
+        self.attach_backends(lp)
+    }
+
+    /// A VM box's exec goes to its guest ([`Node::forward_vm`]); every other call runs here.
+    fn forward(
+        &self,
+        call: hex_core::wire::Call,
+        stdio: Stdio,
+        reply: crate::serve::Reply,
+        ended: crate::serve::Ended,
+    ) -> crate::serve::Forward {
+        self.forward_vm(call, stdio, reply, ended)
+    }
+
     fn netns(&self) -> Result<netns::Counts, Refusal> {
         Node::netns(self)
     }

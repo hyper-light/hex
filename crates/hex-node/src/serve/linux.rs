@@ -4,7 +4,7 @@
 
 use std::io::IoSliceMut;
 use std::mem::MaybeUninit;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
@@ -310,6 +310,31 @@ impl Os for Linux {
                 }));
             }
         };
+        // Only this node's own child is watched, or signalled, through its pidfd: every program it exec'd or ran is
+        // one (one an intermediate let go is orphaned to it, a child subreaper). Another host's pid (a VM guest's) can
+        // name an unrelated process here; the kernel tells which through this same pidfd, so no pid reuse fools it.
+        match rustix::process::waitid(
+            rustix::process::WaitId::PidFd(pidfd.as_fd()),
+            rustix::process::WaitIdOptions::EXITED
+                | rustix::process::WaitIdOptions::NOHANG
+                | rustix::process::WaitIdOptions::NOWAIT,
+        ) {
+            Ok(_) => {}
+            Err(Errno::CHILD) => {
+                return Err(Unwatched::Runs(Refusal::Os {
+                    op: "watching a started program",
+                    why: format!(
+                        "pid {pid} is no child of this node, which never watches or signals another's process"
+                    ),
+                }));
+            }
+            Err(e) => {
+                return Err(Unwatched::Runs(Refusal::Os {
+                    op: "watching a started program",
+                    why: format!("{e}: whether pid {pid} is this node's child can't be told"),
+                }));
+            }
+        }
         if let Err(e) = epoll::add(
             &self.epoll,
             &pidfd,
