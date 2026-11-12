@@ -417,6 +417,198 @@ fn timeout_cause_and_learning_keep_caller_authority_separate() {
     assert_eq!(RUN_OUT.load(Ordering::SeqCst), 1);
 }
 
+/// What [`late_census`] was told, by wait name: run-outs at their bounds, answers at their times.
+static LATE_RAN_OUT: Mutex<Vec<(&'static str, Duration)>> = Mutex::new(Vec::new());
+static LATE_ANSWERED: Mutex<Vec<(&'static str, Duration)>> = Mutex::new(Vec::new());
+/// Whether a [`LateHello`] agent's answer is there to read: from its call's run-out on.
+static LATE_DUE: AtomicBool = AtomicBool::new(false);
+/// The agent's connection, written as its answer comes due, so a reader waiting on it reads it.
+static LATE_WAKE: std::sync::OnceLock<UdpSocket> = std::sync::OnceLock::new();
+
+fn late_census(name: &'static str, sample: hex_core::patience::Sample) {
+    match sample {
+        hex_core::patience::Sample::RanOut(after) => {
+            LATE_RAN_OUT.lock().unwrap().push((name, after));
+            LATE_DUE.store(true, Ordering::SeqCst);
+            if let Some(wake) = LATE_WAKE.get() {
+                wake.send(&[1]).unwrap();
+            }
+        }
+        hex_core::patience::Sample::Answered(took) => {
+            LATE_ANSWERED.lock().unwrap().push((name, took));
+        }
+        hex_core::patience::Sample::Refused(_) => {}
+    }
+}
+
+/// Runs test `name` again alone in a child of this binary, [`late_census`] installed there: a census installs once a
+/// process, and other tests' calls would reach it. True in the child, which runs the test; false in the parent once
+/// the child has passed.
+fn in_late_census_child(name: &str) -> bool {
+    const CHILD: &str = "HEX_CLIENT_LATE_CENSUS_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        assert!(hex_core::patience::census(late_census));
+        return true;
+    }
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture", "--test-threads=1"])
+        .env(CHILD, "1")
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let status = child.wait().unwrap();
+    eprintln!("client_late_census child_pid={pid} reaped=true exit={status}");
+    assert!(status.success(), "{name} failed in its census child");
+    false
+}
+
+/// A stand-in agent busy past its record, as the guest's node was initializing its GPU: it answers a hello only once
+/// the hello's learned wait, twice its record of 1 ms, has run out ([`LATE_DUE`]). `CALLER` names its waits apart, so
+/// each test's census is its own.
+struct LateHello<const CALLER: bool> {
+    io: UdpSocket,
+    asked: Mutex<Option<u64>>,
+}
+
+fn late_hello<const CALLER: bool>() -> LateHello<CALLER> {
+    let io = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    io.connect(io.local_addr().unwrap()).unwrap();
+    io.set_nonblocking(true).unwrap();
+    assert!(LATE_WAKE.set(io.try_clone().unwrap()).is_ok());
+    LateHello {
+        io,
+        asked: Mutex::new(None),
+    }
+}
+
+impl<const CALLER: bool> Transport for LateHello<CALLER> {
+    type Reading = ();
+    fn answers() -> &'static [Patience; KINDS] {
+        static UNDER_CALLER: [Patience; KINDS] = [const {
+            Patience::seeded("test.client_budget.late.caller", Duration::from_millis(1))
+        }; KINDS];
+        static ALONE: [Patience; KINDS] =
+            [const { Patience::seeded("test.client_budget.late.alone", Duration::from_millis(1)) };
+                KINDS];
+        if CALLER { &UNDER_CALLER } else { &ALONE }
+    }
+    fn reading(&self) {}
+    fn handle(&self) -> Handle<'_> {
+        #[cfg(unix)]
+        return std::os::fd::AsFd::as_fd(&self.io);
+        #[cfg(windows)]
+        std::os::windows::io::AsSocket::as_socket(&self.io)
+    }
+    fn recv(&self, _: &mut (), take: &mut Take<'_>) -> Result<bool, Refusal> {
+        while self.io.recv(&mut [0]).is_ok() {}
+        if !LATE_DUE.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let Some(id) = self.asked.lock().unwrap().take() else {
+            return Ok(false);
+        };
+        let hello = wire::Hello {
+            build: wire::build(),
+            classes: vec![Class::Oci],
+            limits: Limits {
+                connections: 1,
+                message_bytes: wire::MAX_MESSAGE,
+                in_flight: 1,
+                programs: 1,
+            },
+            budgets: wire::Budgets {
+                in_flight: 1,
+                programs: 1,
+            },
+        };
+        let bytes = wire::answer(id, &Answer::Hello(hello), wire::MAX_MESSAGE).unwrap();
+        take(
+            &Received {
+                size: bytes.len(),
+                bytes: &bytes,
+                descriptors: 0,
+                descriptors_cut: false,
+            },
+            Vec::new(),
+        )?;
+        Ok(true)
+    }
+    fn try_send(&self, bytes: &[u8], at: &mut usize, _: &[Lent<'_>]) -> Result<bool, Sent> {
+        let (header, request) = wire::read_request_apart(bytes, wire::MAX_MESSAGE).unwrap();
+        assert!(matches!(request, Request::Hello { .. }), "{request:?}");
+        *self.asked.lock().unwrap() = Some(header.id);
+        *at = bytes.len();
+        Ok(true)
+    }
+    fn shutdown(&self) {
+        let _ = self.io.send(&[1]);
+    }
+}
+
+/// A caller's deadline no answer here comes near: the late answer is there to read as the learned wait runs out.
+const LATE_CAP: Duration = Duration::from_secs(30);
+
+/// AC-T7.4.1 (original): on 00aad a Firecracker guest with the AMD GPU passed through booted, and its relay's hello to
+/// its own node, busy with the GPU's initialization, was refused, "none came in 2.354074ms, twice the slowest answer to
+/// a call of its kind", while the boot had most of its 60 s left: the guest panicked. A learned bound is calibration,
+/// not the caller's authority. Do: say hello under a caller's absolute deadline to an agent that answers only once the
+/// hello's learned wait (twice its 1 ms record) has run out. Expect: the hello answered; its run-out told to the census
+/// once, at the learned bound; its answer told too, later than that bound.
+#[test]
+fn original_a_late_answer_inside_its_callers_deadline_is_taken_its_run_out_recorded() {
+    if !in_late_census_child(
+        "calls::budget_tests::original_a_late_answer_inside_its_callers_deadline_is_taken_its_run_out_recorded",
+    ) {
+        return;
+    }
+    let shared = Shared::try_new(late_hello::<true>()).unwrap();
+    let cap = ReplyDeadline::caller_before(Instant::now().checked_add(LATE_CAP).unwrap()).unwrap();
+    let result = Core::hello_before(shared, Some(cap)).map(drop);
+    let ran_out = LATE_RAN_OUT.lock().unwrap().clone();
+    let answered = LATE_ANSWERED.lock().unwrap().clone();
+    eprintln!(
+        "client_late_answer under=caller result={result:?} ran_out={ran_out:?} answered={answered:?}"
+    );
+    assert!(
+        result.is_ok(),
+        "a slow answer inside its caller's deadline was refused: {result:?}"
+    );
+    let bound = Duration::from_millis(2);
+    assert_eq!(ran_out, [("test.client_budget.late.caller", bound)]);
+    assert!(
+        matches!(answered.as_slice(), [("test.client_budget.late.caller", took)] if *took > bound),
+        "{answered:?}"
+    );
+}
+
+/// AC-T7.4.1: with no caller's deadline a call's learned wait is still its bound, its hang detection. Do: say hello with
+/// no caller deadline to the same late agent. Expect: refused as twice the slowest answer, at 2 ms; its run-out told
+/// to the census; no answer taken.
+#[test]
+fn with_no_callers_deadline_the_learned_wait_still_refuses() {
+    if !in_late_census_child(
+        "calls::budget_tests::with_no_callers_deadline_the_learned_wait_still_refuses",
+    ) {
+        return;
+    }
+    let shared = Shared::try_new(late_hello::<false>()).unwrap();
+    let result = Core::hello_before(shared, None).map(drop);
+    let ran_out = LATE_RAN_OUT.lock().unwrap().clone();
+    let answered = LATE_ANSWERED.lock().unwrap().clone();
+    eprintln!(
+        "client_late_answer under=none result={result:?} ran_out={ran_out:?} answered={answered:?}"
+    );
+    assert!(
+        matches!(&result, Err(Refusal::Os { why, .. }) if why.contains("none came in 2ms, twice the slowest")),
+        "{result:?}"
+    );
+    assert_eq!(
+        ran_out,
+        [("test.client_budget.late.alone", Duration::from_millis(2))]
+    );
+    assert!(answered.is_empty(), "{answered:?}");
+}
+
 fn until(at: Instant) -> Result<(), Refusal> {
     let timer = Wake::new().map_err(|e| Refusal::os("making the fixture timer wake", e))?;
     loop {
