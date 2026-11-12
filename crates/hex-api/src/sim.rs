@@ -8,6 +8,13 @@
 //! [`SimRuntime::with_term_ending_init`], for a class that ends its init on TERM). Once the init has ended the box is empty and inspect reports how it ended, as the node
 //! agent does for a container whose init it reaped. A box a run made ([`Runtime::run`]) goes once its
 //! program has ended, ending what else ran in it, as the node agent removes it (decision 7).
+//!
+//! A Shards image VM ([`ClassSpec::ShardsImage`]) is a box whose init is its run's command, as the
+//! image class's own cases ([`crate::conformance::IMAGE_CASES`]) hold it: created without a VM, booted
+//! by start, ended by KILL, its members unreached (their exec and signals refused as awaiting Shards'
+//! agent-control endpoint), and its guest time per vCPU read while it runs. The simulated VM runs every
+//! vCPU the whole time it runs: the most guest time a real one can report, so a consumer's bound holds
+//! against it.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -16,8 +23,9 @@ use std::time::{Duration, Instant};
 
 use crate::conformance::{Act, Fixture};
 use crate::{
-    Bounds, BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, Exit, Network, OciSpec, Proc,
-    Program, Refusal, Rootfs, Runtime, Signal, Stdio, Usage,
+    Allocation, Bounds, BoxId, BoxInfo, BoxSpec, BoxState, CapacityResources, Class, ClassSpec,
+    Exit, GuestTime, Network, OciSpec, Proc, Program, Refusal, Rootfs, Runtime, RuntimeCost,
+    ShardsImage, Signal, Stdio, Upstream, Usage,
 };
 
 /// Most boxes a [`SimRuntime`] holds; past it `create` is refused with [`Refusal::Full`].
@@ -60,6 +68,14 @@ struct SimBox {
     init_ends: Option<Exit>,
     /// The program a [`Runtime::run`] made the box for: once it has ended the box is gone.
     run: Option<Arc<SimProc>>,
+    /// A Shards image box's VM: its vCPUs and when it booted.
+    vm: Option<SimVm>,
+}
+
+/// A simulated Shards image VM: its vCPUs, from its allocation, and when its start booted it.
+struct SimVm {
+    vcpus: u32,
+    booted: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -182,27 +198,85 @@ impl SimRuntime {
     }
 }
 
+impl SimRuntime {
+    /// A signal to an image VM: KILL stops it, ending its run as Shards' stop does; any other is its
+    /// members' and awaits Shards' agent-control endpoint; once it has ended, none reaches it.
+    fn signal_vm(b: &SimBox, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
+        let init = match &b.init {
+            Some(init) if init.exit()?.is_none() => init,
+            _ => return Err(Refusal::NotRunning(id.clone(), "signal")),
+        };
+        if signal == Signal::KILL {
+            return init.end(Exit::Signal(Signal::KILL.number()));
+        }
+        Err(Refusal::Awaits {
+            needs: Upstream::MemberSignal,
+        })
+    }
+
+    /// A running image VM's usage: every vCPU ran the guest the whole time since its boot. Before its
+    /// boot and after its end there is no VM to read.
+    fn usage_vm(b: &SimBox, vm: &SimVm, id: &BoxId) -> Result<Usage, Refusal> {
+        let running = match &b.init {
+            Some(init) => init.exit()?.is_none(),
+            None => false,
+        };
+        let Some(booted) = vm.booted.filter(|_| running) else {
+            return Err(Refusal::NotRunning(id.clone(), "usage"));
+        };
+        let ran = u64::try_from(booted.elapsed().as_nanos())
+            .map_err(|_| Refusal::Broken("a simulated VM ran past u64 nanoseconds".to_owned()))?;
+        let vcpus = usize::try_from(vm.vcpus)
+            .ok()
+            .filter(|n| *n <= GuestTime::MAX_VCPUS)
+            .ok_or(Refusal::Exhausted {
+                what: "guest time per vCPU",
+                bound: GuestTime::MAX_VCPUS,
+            })?;
+        let mut per_vcpu = Vec::new();
+        per_vcpu
+            .try_reserve_exact(vcpus)
+            .map_err(|_| Refusal::Exhausted {
+                what: "guest time per vCPU",
+                bound: vcpus,
+            })?;
+        per_vcpu.extend(std::iter::repeat_n(ran, vcpus));
+        Ok(Usage {
+            pids: 1,
+            guest: Some(GuestTime::PerVcpuNs(per_vcpu)),
+            ..b.usage.clone()
+        })
+    }
+}
+
 /// How a simulated init ends once started: `fail N` with N, `say` with 0, anything else (and a
-/// bundle, whose program the simulator can't read) not until it is signalled.
+/// bundle, whose program the simulator can't read, and an image VM running its members alone) not
+/// until it is signalled. An image VM's init is its run's command.
 fn init_ends(class: &ClassSpec) -> Result<Option<Exit>, Refusal> {
-    let spec = match class {
-        ClassSpec::Oci(spec) | ClassSpec::Firecracker(spec) | ClassSpec::Shards(spec) => spec,
+    let args: &[String] = match class {
+        ClassSpec::Oci(spec) | ClassSpec::Firecracker(spec) | ClassSpec::Shards(spec) => {
+            &spec.init.args
+        }
+        ClassSpec::ShardsImage(image) => image.command.as_deref().unwrap_or_default(),
         ClassSpec::Process | ClassSpec::Bundle(_) => return Ok(None),
     };
-    match spec.init.args.first().map(String::as_str) {
-        Some("fail") => Ok(Some(Exit::Code(arg(&spec.init, 1)?))),
+    match args.first().map(String::as_str) {
+        Some("fail") => Ok(Some(Exit::Code(arg_in(args, 1)?))),
         Some("say") => Ok(Some(Exit::Code(0))),
         _ => Ok(None),
     }
 }
 
 fn arg<T: std::str::FromStr>(p: &Program, i: usize) -> Result<T, Refusal> {
-    p.args
-        .get(i)
+    arg_in(&p.args, i)
+}
+
+fn arg_in<T: std::str::FromStr>(args: &[String], i: usize) -> Result<T, Refusal> {
+    args.get(i)
         .and_then(|a| a.parse().ok())
         .ok_or(Refusal::Invalid {
             what: "program",
-            why: format!("{:?} needs a number as argument {i}", p.args.first()),
+            why: format!("{:?} needs a number as argument {i}", args.first()),
         })
 }
 
@@ -259,8 +333,31 @@ impl Runtime for SimRuntime {
             ClassSpec::Oci(oci) | ClassSpec::Firecracker(oci) | ClassSpec::Shards(oci) => {
                 oci.init.fits(&SIM_EXEC_LIMIT)?
             }
+            // The run's command runs in the VM's Linux guest, held to the same bound.
+            ClassSpec::ShardsImage(image) => {
+                if let Some(command) = &image.command {
+                    Program {
+                        args: command.clone(),
+                        ..Program::default()
+                    }
+                    .fits(&SIM_EXEC_LIMIT)?
+                }
+            }
             ClassSpec::Process | ClassSpec::Bundle(_) => {}
         }
+        let vm = match &spec.class {
+            ClassSpec::ShardsImage(_) => Some(SimVm {
+                vcpus: spec
+                    .allocation
+                    .ok_or_else(|| {
+                        Refusal::Broken("a checked Shards image spec has no allocation".to_owned())
+                    })?
+                    .vm_size()?
+                    .vcpus,
+                booted: None,
+            }),
+            _ => None,
+        };
         let mut boxes = self.boxes()?;
         if boxes.contains_key(&spec.id) {
             return Err(Refusal::Exists(spec.id));
@@ -278,6 +375,7 @@ impl Runtime for SimRuntime {
             started: false,
             init_ends,
             run: None,
+            vm,
         };
         let info = Self::info(&b)?;
         boxes.insert(b.spec.id.clone(), b);
@@ -304,6 +402,9 @@ impl Runtime for SimRuntime {
         if init.exit()?.is_some() {
             return Err(Refusal::NotRunning(id.clone(), "start"));
         }
+        if let Some(vm) = &mut b.vm {
+            vm.booted = Some(Instant::now());
+        }
         if let Some(exit) = b.init_ends {
             init.end(exit)?;
         }
@@ -324,6 +425,11 @@ impl Runtime for SimRuntime {
         let b = boxes
             .get_mut(id)
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+        if b.vm.is_some() {
+            return Err(Refusal::Awaits {
+                needs: Upstream::MemberExec,
+            });
+        }
         if b.procs.len() >= SIM_PROCS {
             return Err(Refusal::Full(SIM_PROCS));
         }
@@ -433,6 +539,9 @@ impl Runtime for SimRuntime {
         let b = boxes
             .get(id)
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+        if b.vm.is_some() {
+            return Self::signal_vm(b, id, signal);
+        }
         let mut any = false;
         // Each program takes the signal itself, a run's among them, whose box then goes.
         for p in &b.procs {
@@ -473,7 +582,10 @@ impl Runtime for SimRuntime {
         let b = boxes
             .get(id)
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
-        let mut u = b.usage;
+        if let Some(vm) = &b.vm {
+            return Self::usage_vm(b, vm, id);
+        }
+        let mut u = b.usage.clone();
         let mut running = 0u64;
         for p in b.procs.iter().chain(&b.init) {
             if p.exit()?.is_none() {
@@ -548,6 +660,38 @@ pub enum SimFixture {
     Spec,
     Firecracker,
     Shards,
+    /// A Shards image VM, for the image class's own cases ([`crate::conformance::IMAGE_CASES`]).
+    ShardsImage,
+}
+
+/// The image the simulator's Shards image VMs boot, pinned by a digest: a name and a sha256's 64 hex
+/// digits, the fixture's own.
+pub const SIM_IMAGE: &str =
+    "hex-sim/harness@sha256:5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
+
+/// The simulator's Shards image VM's admitted allocation, the fixture's own inputs: two vCPUs, so the
+/// per-vCPU cases see more than one, and 256 MiB, even and past Shards' least on every host (128 MiB,
+/// x86_64's; shards_api::min_memory_mib), under a cost profile of its own (a named identity, unit
+/// quanta, no overhead), not a measured one.
+pub fn sim_vm_allocation() -> Result<Allocation, Refusal> {
+    let vm = CapacityResources {
+        cpu_milli: 2_000,
+        mem_bytes: 256 << 20,
+        disk_bytes: 0,
+    };
+    RuntimeCost {
+        id: *b"hex-sim shards image VM fixture.",
+        floor: CapacityResources::default(),
+        ceiling: vm,
+        quantum: CapacityResources {
+            cpu_milli: 1_000,
+            mem_bytes: 1 << 20,
+            disk_bytes: 1,
+        },
+        guest_overhead: CapacityResources::default(),
+        overhead: CapacityResources::default(),
+    }
+    .allocate(vm)
 }
 
 impl SimFixture {
@@ -563,7 +707,25 @@ impl SimFixture {
         match self {
             Self::Firecracker => ClassSpec::Firecracker(workload),
             Self::Shards => ClassSpec::Shards(workload),
-            Self::Process | Self::Bundle | Self::Spec => ClassSpec::Oci(workload),
+            Self::Process | Self::Bundle | Self::Spec | Self::ShardsImage => {
+                ClassSpec::Oci(workload)
+            }
+        }
+    }
+
+    /// An image VM whose run's command does `act`, or that runs its members alone.
+    fn image(&self, act: Option<&Act>) -> ClassSpec {
+        ClassSpec::ShardsImage(Box::new(ShardsImage {
+            command: act.map(|act| self.program(act).args),
+            ..ShardsImage::new(SIM_IMAGE)
+        }))
+    }
+
+    /// An image VM's admitted size; none for any other class.
+    fn allocation(&self) -> Option<Allocation> {
+        match self {
+            Self::ShardsImage => sim_vm_allocation().ok(),
+            Self::Process | Self::Bundle | Self::Spec | Self::Firecracker | Self::Shards => None,
         }
     }
 }
@@ -575,7 +737,7 @@ impl Fixture for SimFixture {
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
             devices: Vec::new(),
-            allocation: None,
+            allocation: self.allocation(),
             route: None,
             id,
             bounds,
@@ -583,6 +745,7 @@ impl Fixture for SimFixture {
                 Self::Process => ClassSpec::Process,
                 Self::Bundle => ClassSpec::Bundle("/bundle".into()),
                 Self::Spec | Self::Firecracker | Self::Shards => self.oci(&Act::Wait),
+                Self::ShardsImage => self.image(None),
             },
             owner: None,
         }
@@ -590,13 +753,14 @@ impl Fixture for SimFixture {
     fn init(&self, id: BoxId, act: &Act) -> BoxSpec {
         BoxSpec {
             devices: Vec::new(),
-            allocation: None,
+            allocation: self.allocation(),
             route: None,
             id,
             bounds: Bounds::default(),
             class: match self {
                 Self::Process => ClassSpec::Process,
                 Self::Bundle | Self::Spec | Self::Firecracker | Self::Shards => self.oci(act),
+                Self::ShardsImage => self.image(Some(act)),
             },
             owner: None,
         }
@@ -630,6 +794,44 @@ mod tests {
             let failures = conformance::run(&SimRuntime::new(), &fixture);
             assert!(failures.is_empty(), "{fixture:?}: {failures:#?}");
         }
+    }
+
+    /// AC-T7.4.1 (joint plan step 12): run the Shards image class's own cases on the simulator. Expect:
+    /// none fails.
+    #[test]
+    fn the_simulator_passes_the_shards_image_cases() {
+        let failures = conformance::run_image(&SimRuntime::new(), &SimFixture::ShardsImage);
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// AC-T7.4.1 (joint plan step 12, the learned charge's input): read a running image VM's usage
+    /// twice. Expect: one entry for each of its two vCPUs, each grown between the reads, as a VM that
+    /// runs every vCPU does, and none past the wall time since its start.
+    #[test]
+    fn a_running_image_vms_guest_time_grows_by_vcpu_within_its_wall_time() {
+        let rt = SimRuntime::new();
+        let id = BoxId::new("guest-time").unwrap();
+        rt.create(SimFixture::ShardsImage.spec(id.clone(), Bounds::default()))
+            .unwrap();
+        let before = Instant::now();
+        rt.start(&id).unwrap();
+        let per_vcpu = |u: Usage| match u.guest {
+            Some(GuestTime::PerVcpuNs(ns)) => ns,
+            other => panic!("{other:?}"),
+        };
+        let first = per_vcpu(rt.usage(&id).unwrap());
+        let second = loop {
+            let read = per_vcpu(rt.usage(&id).unwrap());
+            if read.iter().zip(&first).all(|(b, a)| b > a) {
+                break read;
+            }
+        };
+        let wall = u64::try_from(before.elapsed().as_nanos()).unwrap();
+        assert_eq!(second.len(), 2);
+        assert!(
+            second.iter().all(|ns| *ns <= wall),
+            "{second:?} past {wall}"
+        );
     }
 
     /// HEX-DIFF-1/2's oci half: signal TERM to an oci box ends its exec'd programs and leaves its init

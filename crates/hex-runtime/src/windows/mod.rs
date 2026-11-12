@@ -1520,7 +1520,9 @@ impl WinRuntime {
                 }
                 oci::alive(&marker).map(Some)
             }
-            ClassSpec::Firecracker(_) | ClassSpec::Shards(_) => Err(wrong_backend(spec)),
+            ClassSpec::Firecracker(_) | ClassSpec::Shards(_) | ClassSpec::ShardsImage(_) => {
+                Err(wrong_backend(spec))
+            }
         }
     }
 
@@ -1633,7 +1635,7 @@ impl WinRuntime {
             ClassSpec::Process => true,
             ClassSpec::Bundle(dir) => oci::bundle_config(dir)?.get("windows").is_some(),
             ClassSpec::Oci(o) => matches!(o.rootfs, Rootfs::Layers(_)),
-            ClassSpec::Shards(_) => false,
+            ClassSpec::Shards(_) | ClassSpec::ShardsImage(_) => false,
             ClassSpec::Firecracker(_) => {
                 return Err(Refusal::Platform {
                     what: "Firecracker runtime",
@@ -1755,7 +1757,9 @@ impl WinRuntime {
                     "a process spec reached the oci class".to_owned(),
                 ));
             }
-            ClassSpec::Firecracker(_) | ClassSpec::Shards(_) => return Err(wrong_backend(spec)),
+            ClassSpec::Firecracker(_) | ClassSpec::Shards(_) | ClassSpec::ShardsImage(_) => {
+                return Err(wrong_backend(spec));
+            }
         };
         let bindings = self.bindings(spec)?;
         container

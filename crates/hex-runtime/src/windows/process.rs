@@ -554,6 +554,7 @@ impl JobBox {
             cpu_usec: a.cpu_100ns.saturating_div(10),
             io_read_bytes: a.read_bytes,
             io_write_bytes: a.write_bytes,
+            guest: None,
         })
     }
 

@@ -112,7 +112,29 @@ impl BoxSpec {
             ClassSpec::Oci(oci) | ClassSpec::Firecracker(oci) | ClassSpec::Shards(oci) => {
                 oci.check()?
             }
+            ClassSpec::ShardsImage(image) => self.check_image(image)?,
             ClassSpec::Process | ClassSpec::Bundle(_) => {}
+        }
+        Ok(())
+    }
+
+    /// A Shards image VM: its image and command ([`ShardsImage::check`]), its size from an admitted
+    /// allocation of whole vCPUs and MiB ([`crate::Allocation::vm_size`]), and no physical device,
+    /// which D231's image boot takes none of.
+    fn check_image(&self, image: &ShardsImage) -> Result<(), Refusal> {
+        image.check()?;
+        self.allocation
+            .ok_or_else(|| {
+                invalid_image(
+                    "allocation is missing: a Shards image VM is sized by its admitted allocation"
+                        .to_owned(),
+                )
+            })?
+            .vm_size()?;
+        if !self.devices.is_empty() {
+            return Err(invalid_image(
+                "devices are named: D231's image boot attaches no physical device".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -234,6 +256,10 @@ pub enum ClassSpec {
     Firecracker(Box<OciSpec>),
     /// A guest workload run by Shards, with host configuration owned by its initialized backend.
     Shards(Box<OciSpec>),
+    /// An image Shards boots under shards-init, a microVM of its own (Shards' D231, joint plan step 12):
+    /// an Agentfile's image, its members started in their confined domains as the Agentfile declares
+    /// them. Sized by the box's admitted allocation ([`crate::Allocation::vm_size`]).
+    ShardsImage(Box<ShardsImage>),
 }
 
 impl ClassSpec {
@@ -242,8 +268,96 @@ impl ClassSpec {
             Self::Process => Class::Process,
             Self::Oci(_) | Self::Bundle(_) => Class::Oci,
             Self::Firecracker(_) => Class::Firecracker,
-            Self::Shards(_) => Class::Shards,
+            Self::Shards(_) | Self::ShardsImage(_) => Class::Shards,
         }
+    }
+}
+
+/// The image a Shards microVM boots under shards-init, and the run's own command (Shards' D231,
+/// `shards_api::image::ImageSpec`). Its size is the box's allocation's, never a field here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShardsImage {
+    /// The image as `shards run` names one in the node's Shards store, pinned by its digest
+    /// (`NAME@sha256:…`; distribution's reference grammar, as Shards reads it): the box boots the image
+    /// it was admitted with, whatever a tag names by then.
+    pub image: String,
+    /// The run's own command, as `shards run IMAGE COMMAND` takes one; `None` runs the image's members
+    /// alone (D231's `ATTEND`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+}
+
+impl ShardsImage {
+    /// The image `image` (pinned by digest), its members alone.
+    pub fn new(image: &str) -> Self {
+        Self {
+            image: image.to_owned(),
+            command: None,
+        }
+    }
+
+    /// Whether Shards can be asked to boot it: the image pinned by a digest go-digest validates (the
+    /// algorithm `sha256`, `sha384` or `sha512` and exactly that many lowercase hex digits, as Shards'
+    /// reference parser checks it), and a command, where there is one, of a non-empty program and no
+    /// NUL. Refused by its field's name (CLAUDE.md §3); the rest of the name's grammar is Shards' to
+    /// refuse as it resolves the image.
+    pub fn check(&self) -> Result<(), Refusal> {
+        let (name, digest) = self.image.rsplit_once('@').ok_or_else(|| {
+            invalid_image(format!(
+                "image {:?} isn't pinned by a digest (NAME@sha256:…)",
+                self.image
+            ))
+        })?;
+        if name.is_empty() || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(invalid_image(format!(
+                "image {:?} names no image before its digest",
+                self.image
+            )));
+        }
+        let (algorithm, hex) = digest.split_once(':').unwrap_or((digest, ""));
+        // go-digest v1.0.0's algorithms and their encoded lengths (sha256, sha384, sha512), as Shards'
+        // reference parser takes them (crates/image/src/reference.rs at 482c5d78).
+        let length = match algorithm {
+            "sha256" => 64,
+            "sha384" => 96,
+            "sha512" => 128,
+            _ => {
+                return Err(invalid_image(format!(
+                    "image {:?}'s digest algorithm isn't sha256, sha384 or sha512",
+                    self.image
+                )));
+            }
+        };
+        if hex.len() != length || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Err(invalid_image(format!(
+                "image {:?}'s digest isn't {length} lowercase hex digits",
+                self.image
+            )));
+        }
+        if let Some(command) = &self.command {
+            match command.first() {
+                None => {
+                    return Err(invalid_image(
+                        "command is empty: none runs the image's members alone".to_owned(),
+                    ));
+                }
+                Some(program) if program.is_empty() => {
+                    return Err(invalid_image("command[0] is empty".to_owned()));
+                }
+                Some(_) => {}
+            }
+            if let Some(at) = command.iter().position(|arg| arg.contains('\0')) {
+                return Err(invalid_image(format!("command[{at}] holds a NUL")));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn invalid_image(why: String) -> Refusal {
+    Refusal::Invalid {
+        what: "shards image",
+        why,
     }
 }
 
@@ -1030,6 +1144,117 @@ mod tests {
             assert!(boxed.check().is_err());
             assert!(runtime.create(boxed).is_err());
             assert!(runtime.list().unwrap().is_empty());
+        }
+    }
+
+    fn image_box(image: ShardsImage) -> BoxSpec {
+        BoxSpec {
+            id: BoxId::new("image").unwrap(),
+            bounds: Bounds::default(),
+            class: ClassSpec::ShardsImage(Box::new(image)),
+            owner: None,
+            devices: Vec::new(),
+            allocation: Some(crate::sim::sim_vm_allocation().unwrap()),
+            route: None,
+        }
+    }
+
+    /// AC-T7.4.1 (joint plan step 12): a Shards image VM of class Shards, its image pinned by a digest
+    /// and its size its allocation's. Do: check a pinned image running its members alone, and one with a
+    /// command, and read each back from JSON. Expect: both pass, read back whole, and a run of either is
+    /// refused (a VM has an init). Do: break the image's pin, its digest's algorithm or digits, the name
+    /// before it, the command, the allocation and the devices. Expect: each refused as Invalid naming the
+    /// field, the box's whole check included.
+    #[test]
+    fn a_shards_image_vm_is_pinned_sized_and_refused_by_its_field() {
+        let pinned = ShardsImage::new(crate::sim::SIM_IMAGE);
+        let commanded = ShardsImage {
+            command: Some(vec!["sleep".to_owned(), "600".to_owned()]),
+            ..pinned.clone()
+        };
+        for image in [pinned.clone(), commanded] {
+            let boxed = image_box(image);
+            assert_eq!(boxed.class.class(), Class::Shards);
+            assert_eq!(boxed.check(), Ok(()));
+            assert!(matches!(
+                boxed.check_run(),
+                Err(Refusal::Invalid { what: "run", .. })
+            ));
+            let json = serde_json::to_vec(&boxed).unwrap();
+            assert_eq!(serde_json::from_slice::<BoxSpec>(&json).unwrap(), boxed);
+        }
+        let sha512 = format!("harness@sha512:{}", "0f".repeat(64));
+        assert_eq!(ShardsImage::new(&sha512).check(), Ok(()));
+        let digits = "ab".repeat(32);
+        type Break = Box<dyn Fn(&mut BoxSpec)>;
+        let image = |text: String| -> Break {
+            Box::new(move |spec: &mut BoxSpec| {
+                if let ClassSpec::ShardsImage(image) = &mut spec.class {
+                    image.image = text.clone();
+                }
+            })
+        };
+        let cases: Vec<(&str, Break)> = vec![
+            ("pinned", image("harness:1".to_owned())),
+            ("algorithm", image(format!("harness@md5:{digits}"))),
+            (
+                "hex digits",
+                image(format!("harness@sha256:{}", "AB".repeat(32))),
+            ),
+            ("hex digits", image(format!("harness@sha256:{digits}0"))),
+            ("names no image", image(format!("@sha256:{digits}"))),
+            (
+                "names no image",
+                image(format!("two words@sha256:{digits}")),
+            ),
+            (
+                "command is empty",
+                Box::new(|spec: &mut BoxSpec| {
+                    if let ClassSpec::ShardsImage(image) = &mut spec.class {
+                        image.command = Some(Vec::new());
+                    }
+                }),
+            ),
+            (
+                "command[0] is empty",
+                Box::new(|spec: &mut BoxSpec| {
+                    if let ClassSpec::ShardsImage(image) = &mut spec.class {
+                        image.command = Some(vec![String::new()]);
+                    }
+                }),
+            ),
+            (
+                "command[1] holds a NUL",
+                Box::new(|spec: &mut BoxSpec| {
+                    if let ClassSpec::ShardsImage(image) = &mut spec.class {
+                        image.command = Some(vec!["sh".to_owned(), "a\0b".to_owned()]);
+                    }
+                }),
+            ),
+            (
+                "allocation",
+                Box::new(|spec: &mut BoxSpec| spec.allocation = None),
+            ),
+            (
+                "devices",
+                Box::new(|spec: &mut BoxSpec| {
+                    spec.devices = vec![DeviceId {
+                        kind: crate::DeviceKind::Gpu,
+                        key: 1,
+                    }]
+                }),
+            ),
+        ];
+        for (says, break_it) in cases {
+            let mut boxed = image_box(pinned.clone());
+            break_it(&mut boxed);
+            match boxed.check() {
+                Err(Refusal::Invalid {
+                    what: "shards image",
+                    why,
+                }) => assert!(why.contains(says), "{says}: refused as {why:?}"),
+                other => panic!("{says}: {other:?}"),
+            }
         }
     }
 
