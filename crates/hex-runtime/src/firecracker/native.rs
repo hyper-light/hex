@@ -30,11 +30,22 @@ pub struct FirecrackerRuntime {
     books: Weak<dyn Books>,
     initialized: std::sync::OnceLock<()>,
     host: vfio::Host,
-    /// The node's runtime directory (`Node::oci_root`): on tmpfs and shared by every node on the host, where a
-    /// function no reset clears is marked given on this boot.
-    runtime: PathBuf,
+    /// Where a function no reset clears is marked given on this boot: the node's runtime directory (`Node::oci_root`),
+    /// the one every node of its user on the host shares (`/run/hex-node` for root, `$XDG_RUNTIME_DIR/hex-node` for
+    /// another user), or, where it is the node's own (a rootless node with no `$XDG_RUNTIME_DIR` keeps it in its own
+    /// state), why; such a node gives no such function to a VM, and no node gives one whose VFIO group another user
+    /// owns ([`FirecrackerRuntime::unavailable_once`]).
+    marks: single_use::MarksAt,
+    /// This node's effective user.
+    uid: u32,
     /// The host's boot session, the node's (`Node::boot_session`): a function no reset clears goes to one VM per boot.
     boot: Option<BootSession>,
+    /// The node's loop (`Node`'s `Host::attach`), which each VM box's evented connection to its guest joins.
+    joins: std::sync::Mutex<Option<Arc<dyn crate::guest::Joins>>>,
+    /// Each VM box's evented connection to its guest's node, joined to the node's loop: an exec the node forwards there
+    /// is answered, and its program's end told, as the guest's messages (AC-T7.4.1). At most one a box, at most
+    /// [`crate::MAX_BOXES`], let go with its box.
+    evented: std::sync::Mutex<std::collections::BTreeMap<BoxId, crate::guest::EventedClient>>,
 }
 
 struct Paths {
@@ -52,7 +63,7 @@ impl FirecrackerRuntime {
         config: Config,
         catalog: SharedCatalog,
         books: Weak<dyn Books>,
-        runtime: PathBuf,
+        marks: single_use::MarksAt,
         boot: Option<BootSession>,
     ) -> Result<Self, Refusal> {
         config.verify_inputs()?;
@@ -62,8 +73,11 @@ impl FirecrackerRuntime {
             books,
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system()?,
-            runtime,
+            marks,
+            uid: rustix::process::geteuid().as_raw(),
             boot,
+            joins: std::sync::Mutex::new(None),
+            evented: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         })
     }
 
@@ -468,13 +482,14 @@ impl FirecrackerRuntime {
         }
         let mut record = transaction.read(&id)?.ok_or_else(|| uncertain(&id))?;
         let plan = vfio::plan(&self.host, &self.catalog, &record.spec.devices, &[])?;
-        // A function no reset clears goes to one VM per host boot: refused where any node's VM had it on this one.
+        // A function no reset clears goes to one VM per host boot: refused where any node's VM had it on this one, or
+        // where this node can't tell (unavailable_once).
         let functions = vfio::functions(&plan)?;
         let once = vfio::once_per_boot(&self.host, &functions)?;
-        let marks = single_use::Marks::of(&self.runtime, self.boot.as_ref())?;
-        if let Some((function, spent)) = marks.check(&once)? {
-            return Err(single_use::refused(function, spent, self.boot.as_ref()));
+        if let Some((function, spent)) = self.unavailable_once(&once)? {
+            return Err(single_use::refused(function, &spent, self.boot.as_ref()));
         }
+        let marks = single_use::Marks::of(&self.marks.dir, self.boot.as_ref())?;
         let paths = self.paths(&record)?;
         match fs::symlink_metadata(&paths.dir) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -591,6 +606,95 @@ impl FirecrackerRuntime {
             .and_then(|file| file.sync_all())
             .map_err(|e| Refusal::os("syncing VM state removal", e))?;
         transaction.remove(id)
+    }
+
+    /// The first of `once`, functions no reset clears (by SBDF), that can't go to a VM now, and why. Only a node whose
+    /// marks every node of its user on the host reads gives one out: one whose runtime directory is its own doesn't,
+    /// and none takes a function whose VFIO group another user owns, whose nodes mark it in their own runtime
+    /// directory. Then the marks say whether a VM had it on this boot ([`single_use::Marks`]).
+    fn unavailable_once<'f>(
+        &self,
+        once: &[&'f str],
+    ) -> Result<Option<(&'f str, single_use::Spent)>, Refusal> {
+        let Some(&first) = once.first() else {
+            return Ok(None);
+        };
+        if let Some(why) = &self.marks.unshared {
+            return Ok(Some((
+                first,
+                single_use::Spent::Unshared {
+                    dir: copy_path(&self.marks.dir)?,
+                    why: text(why)?,
+                },
+            )));
+        }
+        for &function in once {
+            let owner = vfio::group_owner(&self.host, function)?;
+            if owner != self.uid {
+                return Ok(Some((
+                    function,
+                    single_use::Spent::Foreign {
+                        owner,
+                        uid: self.uid,
+                    },
+                )));
+            }
+        }
+        single_use::Marks::of(&self.marks.dir, self.boot.as_ref())?.check(once)
+    }
+
+    /// Joins `joins`, the node's loop, which each VM box's evented connection to its guest joins from now
+    /// ([`FirecrackerRuntime::evented_for`]).
+    pub fn join_loop(&self, joins: Arc<dyn crate::guest::Joins>) -> Result<(), Refusal> {
+        *self
+            .joins
+            .lock()
+            .map_err(|_| Refusal::Broken("the VM backend's loop lock was poisoned".to_owned()))? =
+            Some(joins);
+        Ok(())
+    }
+
+    /// VM box `id`'s evented connection to its guest's node, joined to the node's loop, for an exec the node forwards
+    /// there: its answer and its program's end come as the guest's messages, never as a pid the node watches (the
+    /// guest's pid names no process of the host's, or an unrelated one). One whose connection ended while its VM runs
+    /// is opened again, the box's record and native receipt checked as any call's are ([`Self::client`]).
+    pub fn evented_for(&self, id: &BoxId) -> Result<crate::guest::EventedClient, Refusal> {
+        let poisoned = || Refusal::Broken("the VM backend's evented lock was poisoned".to_owned());
+        let held = self
+            .evented
+            .lock()
+            .map_err(|_| poisoned())?
+            .get(id)
+            .filter(|client| !client.closed())
+            .cloned();
+        if let Some(client) = held {
+            return Ok(client);
+        }
+        let joins = self
+            .joins
+            .lock()
+            .map_err(|_| poisoned())?
+            .clone()
+            .ok_or_else(|| invalid("the VM box's guest has no node event loop to join"))?;
+        let link = self.with_record(id, |record, transaction| {
+            if record.phase != Phase::Ready {
+                return Err(lifecycle(id, LifecycleCause::Pending)?);
+            }
+            self.check_process(record, transaction)?;
+            self.link(record, None)
+        })?;
+        let (token, room) = joins.reserve()?;
+        let (client, pump) = Client::connect_evented(link, room)?;
+        let client = triomphe::Arc::try_new(client)
+            .map_err(|_| exhausted("guest evented client owner", crate::MAX_BOXES))?;
+        joins.join(token, pump)?;
+        let mut evented = self.evented.lock().map_err(|_| poisoned())?;
+        evented.retain(|_, held| !held.closed());
+        if evented.len() >= crate::MAX_BOXES && !evented.contains_key(id) {
+            return Err(Refusal::Full(crate::MAX_BOXES));
+        }
+        evented.insert(id.try_clone()?, triomphe::Arc::clone(&client));
+        Ok(client)
     }
 
     /// Recovery uses the canonical native scope and VMM witnesses, never another backend or pick.
@@ -727,14 +831,12 @@ impl FirecrackerRuntime {
         // the pool says so before its observer is drained.
         let functions = vfio::functions(&plan)?;
         let once = vfio::once_per_boot(&self.host, &functions)?;
-        if let Some((function, spent)) =
-            single_use::Marks::of(&self.runtime, self.boot.as_ref())?.check(&once)?
-        {
+        if let Some((function, spent)) = self.unavailable_once(&once)? {
             return Err(single_use::pool_refused(
                 "a GPU pool's handoff to a box (VFIO)",
                 &key,
                 function,
-                spent,
+                &spent,
                 self.boot.as_ref(),
             ));
         }
@@ -930,8 +1032,8 @@ impl FirecrackerRuntime {
             .devices
             .try_reserve_exact(self.catalog.entries().len())
             .map_err(|_| exhausted("VFIO capacity", self.catalog.entries().len()))?;
-        // A function no reset clears that a VM had on this boot is listed, never offered: unavailable, with why.
-        let marks = single_use::Marks::of(&self.runtime, self.boot.as_ref())?;
+        // A function no reset clears that can't go to a VM now (unavailable_once) is listed, never offered:
+        // unavailable, with why.
         let mut unavailable = Vec::new();
         unavailable
             .try_reserve_exact(self.catalog.entries().len())
@@ -965,10 +1067,10 @@ impl FirecrackerRuntime {
             if !matches!(device.holder, Some(hex_api::DeviceHolder::Box(_))) {
                 let declared = vfio::declared(entry)?;
                 let once = vfio::once_per_boot(&self.host, &declared)?;
-                if let Some((function, spent)) = marks.check(&once)? {
+                if let Some((function, spent)) = self.unavailable_once(&once)? {
                     unavailable.push(hex_api::DeviceUnavailable {
                         id: device.id,
-                        why: single_use::reason(function, spent, self.boot.as_ref()),
+                        why: single_use::reason(function, &spent, self.boot.as_ref()),
                     });
                 }
             }
@@ -1287,6 +1389,11 @@ impl Runtime for FirecrackerRuntime {
         Ok(boxes)
     }
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        // Its evented connection goes with it: a program forwarded there ends with its VM.
+        self.evented
+            .lock()
+            .map_err(|_| Refusal::Broken("the VM backend's evented lock was poisoned".to_owned()))?
+            .remove(id);
         let record = self.record(id)?;
         if let Some(key) = record.spec.route.and_then(|route| route.backing) {
             let source = self
@@ -1675,8 +1782,14 @@ mod handoff_tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
-            runtime: PathBuf::from("/nonexistent/runtime"),
+            marks: single_use::MarksAt {
+                dir: PathBuf::from("/nonexistent/runtime"),
+                unshared: None,
+            },
+            uid: 0,
             boot: None,
+            joins: std::sync::Mutex::new(None),
+            evented: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         };
         let devices = [256, 512]
             .map(|key| DeviceId {
@@ -1781,8 +1894,14 @@ mod handoff_tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
-            runtime: PathBuf::from("/nonexistent/runtime"),
+            marks: single_use::MarksAt {
+                dir: PathBuf::from("/nonexistent/runtime"),
+                unshared: None,
+            },
+            uid: 0,
             boot: None,
+            joins: std::sync::Mutex::new(None),
+            evented: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         };
         let full = [256, 512].map(|key| DeviceId {
             kind: DeviceKind::Gpu,
@@ -1986,8 +2105,14 @@ mod cleanup_tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
-            runtime: PathBuf::from("/nonexistent/runtime"),
+            marks: single_use::MarksAt {
+                dir: PathBuf::from("/nonexistent/runtime"),
+                unshared: None,
+            },
+            uid: 0,
             boot: None,
+            joins: std::sync::Mutex::new(None),
+            evented: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         };
         let id = BoxId::new("cleanup-refused").unwrap();
         let spec = BoxSpec {
@@ -2212,8 +2337,14 @@ mod memlock_tests {
             books: Arc::downgrade(&owner),
             initialized: std::sync::OnceLock::new(),
             host: vfio::Host::system().unwrap(),
-            runtime: PathBuf::from("/nonexistent/runtime"),
+            marks: single_use::MarksAt {
+                dir: PathBuf::from("/nonexistent/runtime"),
+                unshared: None,
+            },
+            uid: 0,
             boot: None,
+            joins: std::sync::Mutex::new(None),
+            evented: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         };
         let id = BoxId::new("gpu-memlock").unwrap();
         let spec = BoxSpec {
@@ -2442,8 +2573,14 @@ mod single_use_tests {
                 dev: host.join("dev"),
                 open: vfio::stand_in::opened,
             },
-            runtime: runtime.to_path_buf(),
+            marks: single_use::MarksAt {
+                dir: runtime.to_path_buf(),
+                unshared: None,
+            },
+            uid: rustix::process::geteuid().as_raw(),
             boot: boot(THIS_BOOT),
+            joins: std::sync::Mutex::new(None),
+            evented: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         }
     }
 
@@ -2585,6 +2722,78 @@ mod single_use_tests {
         refused_for_its_boot(&refused);
     }
 
+    /// The lead's review of 3cea2fcf (AC-T7.4.1; original): a rootless node with no absolute `$XDG_RUNTIME_DIR` keeps its
+    /// runtime directory in its own state, which no other node on the host reads, so another node on the same boot handed
+    /// out a function one node had spent (r940's failure). Do: on one stand-in host and boot, create a VM given a function
+    /// no reset clears on two nodes whose runtime directories are each their own. Expect each refused by type before its
+    /// VMM, saying the directory is the node's own and why.
+    #[test]
+    fn original_a_node_whose_runtime_directory_is_its_own_gives_out_no_single_use_function() {
+        let dir = tempfile::tempdir().unwrap();
+        stand_in(&dir.path().join("host"));
+        let owner: Arc<dyn Books> = Arc::new(super::handoff_tests::NoOwnerCalls);
+        let why = "a rootless node with no absolute $XDG_RUNTIME_DIR keeps it in its own state";
+        for name in ["first-node", "second-node"] {
+            let mut node = node(
+                &dir.path().join(name),
+                &dir.path().join("host"),
+                &dir.path().join(name).join("oci"),
+                GPU,
+                &owner,
+            );
+            node.marks.unshared = Some(why.to_owned());
+            let books = Handed::default();
+            let refused = create(&node, &books, "vm");
+            assert_eq!(
+                books.launched.get(),
+                0,
+                "{name}: refused before its VMM: {refused:?}"
+            );
+            let Err(Refusal::Platform { why: said, .. }) = &refused else {
+                panic!("{name}: refused by type: {refused:?}");
+            };
+            for named in ["0000:01:00.0", "its own", why] {
+                assert!(said.contains(named), "{named}: {said}");
+            }
+        }
+    }
+
+    /// The lead's review of 3cea2fcf (AC-T7.4.1; original): a root node opens any VFIO group, and marked a function in
+    /// `/run/hex-node`, where a rootless node of the group's owner, marking in its own runtime directory, never looked.
+    /// Do: create a VM given a function no reset clears on a node whose user isn't its group's owner. Expect it refused
+    /// by type before its VMM, naming the group's owner.
+    #[test]
+    fn original_a_node_is_refused_a_single_use_function_another_users_group_holds() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        stand_in(&dir.path().join("host"));
+        let owner: Arc<dyn Books> = Arc::new(super::handoff_tests::NoOwnerCalls);
+        let mut node = node(
+            &dir.path().join("node"),
+            &dir.path().join("host"),
+            &dir.path().join("runtime"),
+            GPU,
+            &owner,
+        );
+        let group = fs::metadata(dir.path().join("host/dev/vfio/7"))
+            .unwrap()
+            .uid();
+        node.uid = if group == 0 { 1 } else { 0 };
+        let books = Handed::default();
+        let refused = create(&node, &books, "vm");
+        assert_eq!(
+            books.launched.get(),
+            0,
+            "refused before its VMM: {refused:?}"
+        );
+        let Err(Refusal::Platform { why, .. }) = &refused else {
+            panic!("refused by type: {refused:?}");
+        };
+        for named in ["0000:01:00.0".to_owned(), format!("user {group}")] {
+            assert!(why.contains(&named), "{named}: {why}");
+        }
+    }
+
     /// One node's records, empty, over a host of ample room: what a backend's capacity reads.
     struct Room;
 
@@ -2622,6 +2831,7 @@ mod single_use_tests {
                 device_routes: Vec::new(),
                 backings: Vec::new(),
                 unavailable: Vec::new(),
+                learned: None,
             })
         }
         fn physical_devices(&self) -> Result<Vec<hex_api::DeviceInfo>, Refusal> {

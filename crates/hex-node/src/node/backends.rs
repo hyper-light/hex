@@ -16,6 +16,8 @@ pub(super) struct Backends {
     firecracker: Option<Arc<FirecrackerRuntime>>,
     shards: Option<Arc<GuestRuntime>>,
     vm_root: Option<BoxRoot>,
+    /// Joint plan step 14: the charge learner of the VMs under `vm_root`, where there are any.
+    pub(super) learner: Option<super::charges::Shared>,
 }
 
 /// Only frozen initialized configurations participate. This runs inside the existing metadata
@@ -306,6 +308,82 @@ impl Node {
         self.attachments.clone()
     }
 
+    /// Joins the core's loop `lp` to its VM backends, whose evented connections to their guests a forwarded exec takes
+    /// ([`Node::forward_vm`]).
+    pub(super) fn attach_backends(&self, lp: Arc<dyn crate::serve::Loop>) -> Result<(), Refusal> {
+        let Some(backends) = self.backends.get() else {
+            return Ok(());
+        };
+        let joins: Arc<dyn hex_runtime::guest::Joins> = Arc::new(crate::recorded::LoopJoins(lp));
+        if let Some(backend) = &backends.firecracker {
+            backend.join_loop(Arc::clone(&joins))?;
+        }
+        if let Some(guest) = &backends.shards {
+            guest.join_loop(joins)?;
+        }
+        Ok(())
+    }
+
+    /// An exec into a VM box goes to its guest's node through its backend's evented connection
+    /// ([`crate::recorded::forward_evented`]), as a guest's call goes on every host (AC-T7.4.1): its answer and its
+    /// program's end come as the guest's messages. Its program is no process of this host's, its pid the guest's, so
+    /// the node never watches or signals a process by it (GPU run r1119: the guest pid, naming no host process, was
+    /// waited for as a gone one's and its end reported unknown). Every other call, and an exec into a native box or a
+    /// Shards image VM, whose guest runs no node of Hex's ([`guest_node_class`]), comes back to run here: on a node with
+    /// no VM backend, or into an `oci` box the supervisor watches, without reading the box's record.
+    pub(super) fn forward_vm(
+        &self,
+        call: hex_core::wire::Call,
+        stdio: Stdio,
+        reply: crate::serve::Reply,
+        ended: crate::serve::Ended,
+    ) -> crate::serve::Forward {
+        use crate::serve::Forward;
+        use hex_core::wire::Call;
+        let id = match &call {
+            Call::Exec { id, .. } | Call::ExecStreams { id, .. } => id,
+            _ => return Forward::Back(Box::new((call, stdio))),
+        };
+        let Some(backends) = self
+            .backends
+            .get()
+            .filter(|backends| backends.firecracker.is_some() || backends.shards.is_some())
+        else {
+            return Forward::Back(Box::new((call, stdio)));
+        };
+        match self.supervisor.watches_container(id) {
+            Ok(true) => return Forward::Back(Box::new((call, stdio))),
+            Ok(false) => {}
+            Err(why) => return Forward::Refused(why),
+        }
+        let class = match self.store.read_lifecycle(id) {
+            Ok(Some(record)) => match guest_node_class(&record.spec) {
+                Ok(Some(class)) => class,
+                Ok(None) => return Forward::Back(Box::new((call, stdio))),
+                Err(why) => return Forward::Refused(why),
+            },
+            Ok(None) => return Forward::Back(Box::new((call, stdio))),
+            Err(why) => return Forward::Refused(why),
+        };
+        let client = match class {
+            Class::Firecracker => match &backends.firecracker {
+                Some(backend) => backend.evented_for(id),
+                None => Err(uncertain(id)),
+            },
+            Class::Shards => match &backends.shards {
+                Some(guest) => guest
+                    .evented_for(id)
+                    .and_then(|client| client.ok_or_else(|| uncertain(id))),
+                None => Err(uncertain(id)),
+            },
+            Class::Process | Class::Oci => return Forward::Back(Box::new((call, stdio))),
+        };
+        match client {
+            Ok(client) => crate::recorded::forward_evented(client, call, stdio, reply, ended),
+            Err(why) => Forward::Refused(why),
+        }
+    }
+
     /// The host's boot session as this node's records carry it (T-T7.1.2), for a backend whose own marks last until
     /// the host reboots: the Firecracker adapter's single-use functions. `None` where it can't be read.
     pub fn boot_session(&self) -> Option<hex_core::record::BootSession> {
@@ -381,6 +459,13 @@ impl Node {
         if let (Some(root), Some(lease)) = (vm_root.as_ref(), lease) {
             self.supervisor.bind_managed_root(root.dir(), lease)?;
         }
+        let learner = match vm_root.as_ref() {
+            Some(root) => Some(Mutex::new(super::charges::Learner::new(
+                root.dir(),
+                self.native_capacity()?.total,
+            )?)),
+            None => None,
+        };
         // The same initialized owner must exist before guarded metadata preparation projects
         // its real routes. The complete retained-state barrier above precedes this publication;
         // startup still returns only after preparation and capacity validation below succeed.
@@ -389,6 +474,7 @@ impl Node {
                 firecracker,
                 shards,
                 vm_root,
+                learner,
             })
             .map_err(|_| {
                 projection_refused("node backend initialization raced another initializer")
@@ -443,6 +529,9 @@ impl Node {
                 }
                 // Per-route cost/backing validation above replaces the legacy class-wide cost.
             }
+        }
+        if backends.learner.is_some() {
+            super::charges::spawn(Arc::downgrade(self))?;
         }
         Ok(())
     }
@@ -1052,6 +1141,65 @@ fn native_path(parent: &Path, child: &str) -> Result<PathBuf, Refusal> {
     Ok(path)
 }
 
+/// The VM backend whose guest's node an exec into a box of `spec` goes to ([`Node::forward_vm`]), or none where it
+/// runs here: a native box's, and a Shards image VM's, whose guest runs no node of Hex's, so its runtime answers the
+/// exec, refused naming the members' exec it awaits (joint plan step 12, docs/design/shards-image-class.md §2).
+fn guest_node_class(spec: &BoxSpec) -> Result<Option<Class>, Refusal> {
+    if matches!(spec.class, ClassSpec::ShardsImage(_)) {
+        return Ok(None);
+    }
+    Ok(match spec.backend_class()? {
+        class @ (Class::Firecracker | Class::Shards) => Some(class),
+        Class::Process | Class::Oci => None,
+    })
+}
+
+#[cfg(test)]
+mod forward_route_tests {
+    use super::*;
+    use hex_api::{Bounds, Network};
+
+    fn spec(class: ClassSpec, allocation: Option<hex_api::Allocation>) -> BoxSpec {
+        BoxSpec {
+            id: BoxId::new("forwarded").unwrap(),
+            bounds: Bounds::default(),
+            class,
+            owner: None,
+            devices: Vec::new(),
+            allocation,
+            route: None,
+        }
+    }
+
+    /// Joint plan step 12, AC-T7.4.1: do route an exec by its box's spec. Expect: a Shards guest box's to its
+    /// guest's node; a Shards image VM's back to run here, whose runtime refuses it naming the members' exec it
+    /// awaits, since no node of Hex's runs in its guest (forwarded, it was refused Uncertain); a native box's back.
+    #[test]
+    fn an_exec_into_a_shards_image_vm_runs_here_and_into_a_shards_guest_box_at_its_node() {
+        let image = spec(
+            ClassSpec::ShardsImage(Box::new(hex_api::ShardsImage::new(hex_api::sim::SIM_IMAGE))),
+            Some(hex_api::sim::sim_vm_allocation().unwrap()),
+        );
+        assert_eq!(guest_node_class(&image).unwrap(), None);
+        let guest = spec(
+            ClassSpec::Shards(Box::new(OciSpec {
+                rootfs: Rootfs::Dir(PathBuf::from("/")),
+                init: Program::of(&["/bin/true"]),
+                mounts: Vec::new(),
+                hostname: None,
+                network: Network::Private,
+                hosts: Vec::new(),
+            })),
+            None,
+        );
+        assert_eq!(guest_node_class(&guest).unwrap(), Some(Class::Shards));
+        assert_eq!(
+            guest_node_class(&spec(ClassSpec::Process, None)).unwrap(),
+            None
+        );
+    }
+}
+
 #[cfg(test)]
 mod preflight_dispatch_tests {
     use super::*;
@@ -1072,6 +1220,7 @@ mod preflight_dispatch_tests {
             firecracker: None,
             shards: None,
             vm_root: None,
+            learner: None,
         };
         assert_eq!(
             project_initialized_routes(Some(&no_vm), &[], None)

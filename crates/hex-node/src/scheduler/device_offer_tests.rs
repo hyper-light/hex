@@ -98,6 +98,7 @@ fn report(devices: Vec<DeviceInfo>) -> Capacity {
         device_routes: Vec::new(),
         backings: Vec::new(),
         unavailable: Vec::new(),
+        learned: None,
     }
 }
 

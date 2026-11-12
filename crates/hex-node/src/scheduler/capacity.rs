@@ -215,6 +215,7 @@ mod tests {
                 disk_bytes: free,
             },
             unavailable: Vec::new(),
+            learned: None,
         }
     }
 

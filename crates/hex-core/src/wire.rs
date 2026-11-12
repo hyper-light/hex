@@ -47,7 +47,8 @@ use hex_api::{
     BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Capacity, CapacityResources, Class, ClassSpec,
     ConnectFailure, ConnectPhase, ConnectReply, Destination, DeviceHolder, DeviceId, DeviceInfo,
     DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant, GuestTime, ImageArch,
-    ImageOs, ImagePlatform, IoKind, IoRates, LifecycleCause, MAX_DEVICES, MAX_RUNTIME_ROUTES,
+    ImageOs, ImagePlatform, IoKind, IoRates, Learned, LearnedHolding, LearnedPrior, LearnedUse,
+    LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES,
     Member, MemberKind, Mount, Network, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program,
     Proto, Published, Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost,
     ShardsImage, Signal, Upstream, Usage, User, check_grants, check_published,
@@ -546,7 +547,10 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
                 }
                 put_cost_option(w, capacity.cost)?;
                 put_capacity_routes(w, capacity)?;
-                put_unavailable_devices(w, &capacity.unavailable)
+                put_unavailable_devices(w, &capacity.unavailable)?;
+                // Joint plan step 14: last, after `unavailable`.
+                w.reserve_fixed(1)?;
+                w.option_with(capacity.learned.as_ref(), put_learned)
             })?;
         }
         Answer::PhysicalReport(report) => {
@@ -947,14 +951,17 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                     "backings",
                     backing_offer,
                 )?,
-                // Last. Only a build of this same wire reaches here (IDENTITY), so it is always present, and a capacity
-                // cut before it is refused as any truncation is; an older JSON report reads as none (serde default).
+                // Only a build of this same wire reaches here (IDENTITY), so it and `learned` after it are always
+                // present, and a capacity cut before either is refused as any truncation is; an older JSON report
+                // reads each as none (serde default).
                 unavailable: r.device_list(UNAVAILABLE_MIN_BYTES, |r| {
                     Ok(DeviceUnavailable {
                         id: device_id(r)?,
                         why: r.device_string("unavailable.why")?,
                     })
                 })?,
+                // Last (joint plan step 14).
+                learned: r.option(learned)?,
             };
             check_capacity(&capacity)?;
             Ok(capacity)
@@ -1618,6 +1625,107 @@ fn put_unavailable_devices(w: &mut Writer, unavailable: &[DeviceUnavailable]) ->
         w.string(&device.why)?;
     }
     Ok(())
+}
+
+/// One learned prior: its profile's id, its ceiling and its booking (joint plan step 14).
+const LEARNED_PRIOR_BYTES: usize = 32 + 2 * RESOURCE_BYTES;
+/// A learned use: what the receipts booked and what their VMs are learned to take.
+const LEARNED_USE_BYTES: usize = 2 * RESOURCE_BYTES;
+/// One learned holding at its least: a one-byte box id with its length, then its resources.
+const LEARNED_HOLDING_MIN_BYTES: usize = size_of::<u32>() + 1 + RESOURCE_BYTES;
+
+/// Joint plan step 14 (C8): keeps as many of `capacity`'s learned holdings, in their order, as its answer has room
+/// for within [`MAX_MESSAGE`], so a node's capacity answer is never refused for them. The node orders them most past
+/// their receipts first, and a holding left out counts at its receipt: only those least past theirs are dropped.
+pub fn fit_learned(capacity: &mut Capacity) -> Result<(), Fault> {
+    let Some(learned) = capacity.learned.as_mut() else {
+        return Ok(());
+    };
+    let holdings = std::mem::take(&mut learned.holdings);
+    let probe = capacity
+        .try_clone()
+        .map_err(|e| Fault::value("capacity", e.to_string()))?;
+    let base = answer(0, &Answer::Capacity(Some(probe)), MAX_MESSAGE)?.len();
+    let mut room = MAX_MESSAGE.saturating_sub(base);
+    let mut kept = Vec::new();
+    kept.try_reserve_exact(holdings.len())
+        .map_err(|_| Fault::Storage {
+            what: "learned holdings",
+            bound: holdings.len(),
+        })?;
+    for holding in holdings {
+        let bytes = size_of::<u32>()
+            .saturating_add(holding.id.as_str().len())
+            .saturating_add(RESOURCE_BYTES);
+        let Some(left) = room.checked_sub(bytes) else {
+            break;
+        };
+        room = left;
+        kept.push(holding);
+    }
+    if let Some(learned) = capacity.learned.as_mut() {
+        learned.holdings = kept;
+    }
+    Ok(())
+}
+
+/// What a node learned of a class's microVMs (joint plan step 14): its priors, then its learned use.
+/// `Capacity::check` bounded its priors before this point.
+fn put_learned(w: &mut Writer, learned: &Learned) -> Result<(), Fault> {
+    w.reserve_fixed(size_of::<u32>())?;
+    w.device_count(learned.priors.len(), LEARNED_PRIOR_BYTES)?;
+    for prior in &learned.priors {
+        w.reserve_fixed(LEARNED_PRIOR_BYTES)?;
+        w.raw(&prior.profile);
+        put_resources(w, prior.ceiling);
+        put_resources(w, prior.booking);
+    }
+    w.reserve_fixed(LEARNED_USE_BYTES)?;
+    put_resources(w, learned.used.booked);
+    put_resources(w, learned.used.reservation);
+    w.reserve_fixed(size_of::<u32>())?;
+    w.device_count(learned.holdings.len(), LEARNED_HOLDING_MIN_BYTES)?;
+    for holding in &learned.holdings {
+        w.string(holding.id.as_str())?;
+        w.reserve_fixed(RESOURCE_BYTES)?;
+        put_resources(w, holding.holding);
+    }
+    Ok(())
+}
+
+fn learned(r: &mut Reader<'_>) -> Result<Learned, Fault> {
+    let priors = r.bounded_list(
+        LEARNED_PRIOR_BYTES,
+        MAX_LEARNED_PRIORS,
+        "learned priors",
+        |r| {
+            Ok(LearnedPrior {
+                profile: r.array::<32>()?,
+                ceiling: resources(r)?,
+                booking: resources(r)?,
+            })
+        },
+    )?;
+    let used = LearnedUse {
+        booked: resources(r)?,
+        reservation: resources(r)?,
+    };
+    let holdings = r.bounded_list(
+        LEARNED_HOLDING_MIN_BYTES,
+        MAX_LEARNED_HOLDINGS,
+        "learned holdings",
+        |r| {
+            Ok(LearnedHolding {
+                id: box_id(r)?,
+                holding: resources(r)?,
+            })
+        },
+    )?;
+    Ok(Learned {
+        priors,
+        used,
+        holdings,
+    })
 }
 
 fn put_capacity_routes(w: &mut Writer, capacity: &Capacity) -> Result<(), Fault> {
@@ -3208,6 +3316,10 @@ impl<'a> Reader<'a> {
                     "count exceeds the u16 device index address space"
                 } else if what == "physical report.unavailable" {
                     "count exceeds the supported VM backend classes"
+                } else if what == "learned priors" {
+                    "count exceeds a class's profiles"
+                } else if what == "learned holdings" {
+                    "count exceeds a node's boxes"
                 } else {
                     "count exceeds the route eligibility word"
                 },

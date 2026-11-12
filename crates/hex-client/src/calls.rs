@@ -3059,6 +3059,11 @@ impl<T: Transport> Proc for RemoteProc<T> {
         self.pid
     }
 
+    /// Its node's process, never this one's: its end comes as its node's message.
+    fn on_this_host(&self) -> bool {
+        false
+    }
+
     fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
         self.wait(None)
     }

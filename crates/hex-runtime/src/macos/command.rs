@@ -6,15 +6,16 @@
 //! part of std's `Command` Hex uses, on [`sys::spawn`] (`POSIX_SPAWN_CLOEXEC_DEFAULT`). As with std's,
 //! the program runs in the caller's process group with the caller's environment (and the variables
 //! the command adds), found as execvp(3) finds it, and is reaped only by the [`Child`] that owns it.
+//! What a program prints is read a line at a time within a bound its caller derives
+//! ([`Command::lines`]), so none of it accumulates here (CLAUDE.md §2).
 
 use std::ffi::{CString, OsStr, OsString};
 use std::io::{self, Read};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::process::ExitStatusExt;
-use std::process::{ExitStatus, Output};
+use std::process::ExitStatus;
 
-use rustix::event::{PollFd, PollFlags};
 use rustix::fs::OFlags;
 use rustix::process::{Pid, Signal, WaitOptions};
 
@@ -110,19 +111,43 @@ impl Command {
         self.start([Stream::Inherit; 3])
     }
 
-    /// Runs the program to its end and returns its status and what it wrote: a stream not set is the
-    /// null device for stdin and a pipe read whole for stdout and stderr, as std's `output`.
-    pub fn output(&mut self) -> io::Result<Output> {
-        let mut child = self.start([Stream::Null, Stream::Piped, Stream::Piped])?;
-        let read = capture(child.stdout.take(), child.stderr.take());
-        // The program is reaped whether or not its output was read whole.
+    /// Runs the program to its end and returns its status; a stream not set is the caller's own, as
+    /// std's `status`.
+    pub fn status(&mut self) -> io::Result<ExitStatus> {
+        self.start([Stream::Inherit; 3])?.wait()
+    }
+
+    /// Runs the program to its end, handing `each` every line of its stdout as it comes (its newline
+    /// dropped), so nothing it prints accumulates here: a line holds at most `line_max` bytes, and one
+    /// past that ends the program and is refused, `Exhausted` with `what`. A failure of `each` ends it
+    /// too. stdin not set is the null device and stderr not set the caller's own; stdout is the pipe
+    /// read here.
+    pub fn lines(
+        &mut self,
+        what: &'static str,
+        line_max: usize,
+        mut each: impl FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<ExitStatus> {
+        self.stdout = Some(Stream::Piped);
+        let mut child = self.start([Stream::Null, Stream::Piped, Stream::Inherit])?;
+        let read = match child.stdout.take() {
+            Some(stdout) => split(stdout, what, line_max, &mut each),
+            None => Err(io::Error::other("the program's stdout isn't piped")),
+        };
+        // A program refused mid-output may still be writing: it ends here, and is reaped either way.
+        let ended = match &read {
+            Ok(()) => None,
+            Err(_) => child.kill().err(),
+        };
         let status = child.wait()?;
-        let (stdout, stderr) = read?;
-        Ok(Output {
-            status,
-            stdout,
-            stderr,
-        })
+        match (read, ended) {
+            (Ok(()), _) => Ok(status),
+            (Err(error), None) => Err(error),
+            (Err(error), Some(kill)) => Err(io::Error::new(
+                error.kind(),
+                format!("{error}; ending the program: {kill}"),
+            )),
+        }
     }
 
     fn start(&self, unset: [Stream; 3]) -> io::Result<Child> {
@@ -304,52 +329,60 @@ fn refused(refusal: hex_api::Refusal) -> io::Error {
     io::Error::other(refusal.to_string())
 }
 
-/// Reads stdout and stderr whole, together, so a program filling one pipe never waits on a reader
-/// blocked on the other (std's `read2`).
-fn capture(
-    stdout: Option<io::PipeReader>,
-    stderr: Option<io::PipeReader>,
-) -> io::Result<(Vec<u8>, Vec<u8>)> {
-    let mut streams = [(stdout, Vec::new()), (stderr, Vec::new())];
-    let mut chunk = [0u8; 8192];
-    while streams.iter().any(|(reader, _)| reader.is_some()) {
-        let mut ready = [false; 2];
-        {
-            let mut watched: Vec<PollFd<'_>> = streams
-                .iter()
-                .filter_map(|(reader, _)| reader.as_ref())
-                .map(|reader| PollFd::new(reader, PollFlags::IN))
-                .collect();
-            match rustix::event::poll(&mut watched, None) {
-                Ok(_) => {}
-                Err(rustix::io::Errno::INTR) => continue,
-                Err(error) => return Err(error.into()),
-            }
-            let mut woke = watched.iter().map(|fd| !fd.revents().is_empty());
-            for ((reader, _), flag) in streams.iter().zip(ready.iter_mut()) {
-                if reader.is_some() {
-                    *flag = woke.next().unwrap_or(false);
-                }
-            }
-        }
-        for ((reader, bytes), flag) in streams.iter_mut().zip(ready) {
-            let Some(open) = reader.as_mut().filter(|_| flag) else {
-                continue;
+/// Reads `stdout` to its end, handing `each` every line as it completes: one line and one read are
+/// held, each at most `line_max` bytes (a read holds one line and its newline), and a line past that
+/// is refused, `Exhausted` with `what`.
+fn split(
+    mut stdout: io::PipeReader,
+    what: &'static str,
+    line_max: usize,
+    each: &mut impl FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    let exhausted = || {
+        io::Error::other(hex_api::Refusal::Exhausted {
+            what,
+            bound: line_max,
+        })
+    };
+    let room = line_max.checked_add(1).ok_or_else(exhausted)?;
+    let mut line = Vec::new();
+    line.try_reserve_exact(line_max).map_err(|_| exhausted())?;
+    let mut chunk = Vec::new();
+    chunk.try_reserve_exact(room).map_err(|_| exhausted())?;
+    chunk.resize(room, 0u8);
+    loop {
+        let count = match stdout.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        let read = chunk
+            .get(..count)
+            .ok_or_else(|| io::Error::other("a read past its buffer"))?;
+        for piece in read.split_inclusive(|byte| *byte == b'\n') {
+            let (body, whole) = match piece.strip_suffix(b"\n") {
+                Some(body) => (body, true),
+                None => (piece, false),
             };
-            match open.read(&mut chunk) {
-                Ok(0) => *reader = None,
-                Ok(count) => bytes.extend_from_slice(
-                    chunk
-                        .get(..count)
-                        .ok_or_else(|| io::Error::other("a read past its buffer"))?,
-                ),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) => return Err(error),
+            if line
+                .len()
+                .checked_add(body.len())
+                .is_none_or(|length| length > line_max)
+            {
+                return Err(exhausted());
+            }
+            line.extend_from_slice(body);
+            if whole {
+                each(&line)?;
+                line.clear();
             }
         }
     }
-    let [(_, stdout), (_, stderr)] = streams;
-    Ok((stdout, stderr))
+    if !line.is_empty() {
+        each(&line)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -410,35 +443,49 @@ mod tests {
         child.kill().unwrap();
     }
 
-    /// AC-T7.4.1: `output` reads stdout and stderr whole, together. Do: run a shell that writes more
-    /// than a pipe holds to stderr, then to stdout, and exits 3. Expect: both whole and code 3 (a
-    /// reader of one stream alone would wait forever on a program blocked writing the other).
+    /// AC-T7.4.1 (CLAUDE.md §2): `lines` hands on each line as it comes, holding one. Do: run `seq`
+    /// for more lines than a pipe holds (100,000 of at most 6 bytes) with a bound of 6. Expect: every
+    /// line in order, and its status.
     #[test]
-    fn output_reads_both_streams_whole() {
-        let out = Command::new("/bin/sh")
-            .args([
-                "-c",
-                "head -c 300000 /dev/zero >&2; head -c 200000 /dev/zero; exit 3",
-            ])
-            .output()
+    fn lines_hands_on_each_line_as_it_comes() {
+        let mut next = 1u32;
+        let status = Command::new("seq")
+            .args(["1", "100000"])
+            .lines("bytes in a line seq prints", 6, |line| {
+                assert_eq!(line, next.to_string().as_bytes());
+                next += 1;
+                Ok(())
+            })
             .unwrap();
-        assert_eq!(out.status.code(), Some(3));
-        assert_eq!(out.stdout.len(), 200_000);
-        assert_eq!(out.stderr.len(), 300_000);
+        assert!(status.success());
+        assert_eq!(next, 100_001);
+    }
+
+    /// AC-T7.4.1: a reader that refuses a line ends the program. Do: read `yes`, which never ends,
+    /// and refuse its first line. Expect: that refusal, with the program ended and reaped.
+    #[test]
+    fn a_refused_line_ends_the_program() {
+        let refused = Command::new("yes")
+            .lines("bytes in a line yes prints", 2, |_| {
+                Err(io::Error::other("enough"))
+            })
+            .unwrap_err();
+        assert_eq!(refused.to_string(), "enough");
     }
 
     /// AC-T7.4.1: the machine's model is the kernel's `hw.model`, read with no program run. Do: read
     /// it, and run `sysctl -n hw.model`. Expect: the same model.
     #[test]
     fn the_machine_model_is_hw_model() {
-        let printed = Command::new("/usr/sbin/sysctl")
+        let mut printed = Vec::new();
+        let status = Command::new("/usr/sbin/sysctl")
             .args(["-n", "hw.model"])
-            .output()
+            .lines("bytes in a line sysctl prints", 256, |line| {
+                printed.push(String::from_utf8(line.to_vec()).unwrap());
+                Ok(())
+            })
             .unwrap();
-        assert!(printed.status.success());
-        assert_eq!(
-            crate::macos::machine_model().unwrap(),
-            String::from_utf8(printed.stdout).unwrap().trim()
-        );
+        assert!(status.success());
+        assert_eq!(printed, [crate::macos::machine_model().unwrap()]);
     }
 }

@@ -2848,23 +2848,62 @@ fn forward_guest(
         Ok(None) => return Forward::Refused(Refusal::NoSuchBox(id.clone())),
         Err(why) => return Forward::Refused(why),
     };
-    let (call, stdio) = match call {
+    if !offer {
+        return forward_evented(client, call, stdio, reply, ended);
+    }
+    let (call, stdio) = match guest_call(call, stdio) {
+        Ok(prepared) => prepared,
+        Err(why) => return Forward::Refused(why),
+    };
+    let then = started_then(&client, reply);
+    let streams = hex_core::wire::Streams {
+        stdin: stdio.ask.stdin,
+        stdout: stdio.ask.stdout,
+        stderr: stdio.ask.stderr,
+    };
+    let call = match call {
+        Call::Exec { id, program, .. } | Call::ExecStreams { id, program, .. } => Call::Exec {
+            id,
+            program,
+            streams,
+        },
+        _ => {
+            return Forward::Refused(Refusal::Broken(
+                "only an exec can offer guest streams".to_owned(),
+            ));
+        }
+    };
+    let pending = match client.defer(call, then, ended) {
+        Ok(pending) => pending,
+        Err(why) => return Forward::Refused(why),
+    };
+    let streams = match client.stream_offer(pending.id(), streams) {
+        Ok(streams) => streams,
+        Err(why) => return Forward::Refused(why),
+    };
+    Forward::Offered(serve::Offering {
+        streams,
+        ready: Box::new(move || pending.send()),
+    })
+}
+
+/// A call about a box a guest holds as it goes to the guest: an exec's streams are the guest's own stdio connections,
+/// asked for, whose ends go to the caller's client with the answer, and the caller's own pipes are let go here, its
+/// client keeping its own (native plan step 8).
+fn guest_call(call: Call, stdio: Stdio) -> Result<(Call, Stdio), Refusal> {
+    Ok(match call {
         Call::Exec { id, program, .. } | Call::ExecStreams { id, program, .. } => {
-            if let Err(why) = stdio.check() {
-                return Forward::Refused(why);
-            }
+            stdio.check()?;
             let ask = Ask {
                 stdin: stdio.stdin.is_some() || stdio.ask.stdin,
                 stdout: stdio.stdout.is_some() || stdio.ask.stdout,
                 stderr: stdio.stderr.is_some() || stdio.ask.stderr,
             };
-            // The caller's own pipes, let go here: its client keeps its own.
             drop(stdio);
-            let streams = hex_core::wire::Streams::default();
             let exec = Call::Exec {
                 id,
                 program,
-                streams,
+                streams: hex_core::wire::Streams::default(),
             };
             let asked = Stdio {
                 ask,
@@ -2873,9 +2912,14 @@ fn forward_guest(
             (exec, asked)
         }
         call => (call, stdio),
-    };
-    let started = triomphe::Arc::clone(&client);
-    let then: hex_client::Then = Box::new(move |exec, got| {
+    })
+}
+
+/// What answers a call sent through `client`: a started program, its end to come as the guest's message, or the
+/// guest's answer, to `reply`.
+fn started_then(client: &hex_runtime::guest::EventedClient, reply: Reply) -> hex_client::Then {
+    let started = triomphe::Arc::clone(client);
+    Box::new(move |exec, got| {
         reply(match got {
             Ok(Answer::Started { pid }) => Ok(Forwarded::Started {
                 pid,
@@ -2888,38 +2932,24 @@ fn forward_guest(
             Ok(Answer::Refused(why)) | Err(why) => Err(why),
             Ok(answer) => Ok(Forwarded::Answer(Box::new(answer))),
         })
-    });
-    if offer {
-        let streams = hex_core::wire::Streams {
-            stdin: stdio.ask.stdin,
-            stdout: stdio.ask.stdout,
-            stderr: stdio.ask.stderr,
-        };
-        let call = match call {
-            Call::Exec { id, program, .. } | Call::ExecStreams { id, program, .. } => Call::Exec {
-                id,
-                program,
-                streams,
-            },
-            _ => {
-                return Forward::Refused(Refusal::Broken(
-                    "only an exec can offer guest streams".to_owned(),
-                ));
-            }
-        };
-        let pending = match client.defer(call, then, ended) {
-            Ok(pending) => pending,
-            Err(why) => return Forward::Refused(why),
-        };
-        let streams = match client.stream_offer(pending.id(), streams) {
-            Ok(streams) => streams,
-            Err(why) => return Forward::Refused(why),
-        };
-        return Forward::Offered(serve::Offering {
-            streams,
-            ready: Box::new(move || pending.send()),
-        });
-    }
+    })
+}
+
+/// Sends `call`, about a box a guest holds, through `client`, the event form's connection to that guest's node joined
+/// to the core's loop (AC-T7.4.1): its answer goes to `reply` and an exec's program's end to `ended`, each as the
+/// guest's message, never as a pid this host watches. Shared by [`Recorded`]'s guest and the Linux node's VM backends.
+pub(crate) fn forward_evented(
+    client: hex_runtime::guest::EventedClient,
+    call: Call,
+    stdio: Stdio,
+    reply: Reply,
+    ended: serve::Ended,
+) -> Forward {
+    let (call, stdio) = match guest_call(call, stdio) {
+        Ok(prepared) => prepared,
+        Err(why) => return Forward::Refused(why),
+    };
+    let then = started_then(&client, reply);
     // Refused before it was sent: `then` is dropped unrun, and the caller hears why.
     match client.begin(call, stdio, then, ended) {
         Ok(_) => Forward::Taken,
@@ -2927,8 +2957,9 @@ fn forward_guest(
     }
 }
 
-/// The core's loop as the guest's runtime joins its connections to it.
-struct LoopJoins(Arc<dyn Loop>);
+/// The core's loop as the guest's runtime joins its connections to it: Recorded's guest's, and the Linux node's VM
+/// backends'.
+pub(crate) struct LoopJoins(pub(crate) Arc<dyn Loop>);
 
 impl hex_runtime::guest::Joins for LoopJoins {
     fn reserve(&self) -> Result<(u64, hex_runtime::guest::Room), Refusal> {

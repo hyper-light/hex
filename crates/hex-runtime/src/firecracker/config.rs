@@ -855,6 +855,7 @@ mod tests {
             device_routes: Vec::new(),
             backings: Vec::new(),
             unavailable: Vec::new(),
+            learned: None,
         };
         crate::devices::native_routes(
             &mut capacity,

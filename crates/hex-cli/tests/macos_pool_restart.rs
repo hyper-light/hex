@@ -77,6 +77,7 @@ impl Runtime for GuestNode {
             device_routes: Vec::new(),
             backings: Vec::new(),
             unavailable: Vec::new(),
+            learned: None,
         }))
     }
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
