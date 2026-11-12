@@ -1020,7 +1020,9 @@ fn programs_watched_are_bounded_for_the_node_and_each_connection_keeps_its_one()
 /// place, so what the node holds of them is bounded by its programs' budget, which its start fits to its descriptor
 /// limit, never by its calls in flight. Do: a server of one worker under a programs budget of one; an exec of `sleep`
 /// taking the connection's kept place; the host's gate shut and an inspect sent, which holds the worker; then an exec
-/// of `true` carrying three pipes' write ends, this test closing its own copies as it sends them. Expect: the exec
+/// of `true` carrying three pipes' write ends, this test closing its own copies as it sends them, while another
+/// process holds a copy of the first's, as a child another test forks holds every descriptor of this one from its fork
+/// to its exec (the lead's flake of 2026-11-11, the full hex-node run on 00aad8da: "stream 0"). Expect: the exec
 /// refused naming the programs' budget while the inspect is still held, and each pipe's read end then at end of file,
 /// no copy of its write end left in the node; the inspect answered once the gate opens.
 #[test]
@@ -1054,6 +1056,22 @@ fn an_exec_past_the_programs_budget_holds_none_of_its_streams() {
     let pipes: Vec<(std::io::PipeReader, std::io::PipeWriter)> =
         (0..3).map(|_| std::io::pipe().unwrap()).collect();
     let ends: Vec<BorrowedFd<'_>> = pipes.iter().map(|(_, w)| w.as_fd()).collect();
+    // Another process's copy of the first stream's write end, held across the check, made deterministic; ended as
+    // the test ends, however it ends.
+    struct Outside(std::process::Child);
+    impl Drop for Outside {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let outside = Outside(
+        std::process::Command::new("sleep")
+            .arg("1000")
+            .stdout(std::process::Stdio::from(pipes[0].1.try_clone().unwrap()))
+            .spawn()
+            .unwrap(),
+    );
     send_raw(
         &fd,
         &request(
@@ -1103,6 +1121,7 @@ fn an_exec_past_the_programs_budget_holds_none_of_its_streams() {
         answer_of(&fd),
         (Header { id: 2, .. }, Answer::Info(_))
     ));
+    drop(outside);
     let pid = Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
     rustix::process::kill_process(pid, Signal::KILL).unwrap();
     rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty()).unwrap();
