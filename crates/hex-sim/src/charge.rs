@@ -758,6 +758,53 @@ impl<K: Ord + Copy> Node<K> {
             .collect()
     }
 
+    /// Each VM's CPU cap for its next window where the platform caps CPU rather than weighs it (C4 on macOS and
+    /// Windows): each VM its booking, then what `capacity` milli-CPU (the fleet's CPU budget) leaves past the bookings
+    /// water-filled by booking, as the kernel's weights would share it, over what each asked past its booking in its
+    /// last window. `used` says what each used against the cap it ran under: one that used its whole cap, or has run no
+    /// window yet, may ask its ceiling. So every VM keeps at least its booking, the caps sum to at most `capacity`
+    /// where the bookings fit it (C3; bookings past it stay, as C3 keeps them), and each cap is at most its ceiling and
+    /// at least `least`, the least rate the platform holds.
+    pub fn rates(
+        &self,
+        capacity: u64,
+        used: &BTreeMap<K, (u64, u64)>,
+        least: u64,
+    ) -> Result<Vec<(K, u64)>, ChargeError> {
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(self.vms.len())
+            .map_err(|_| ChargeError::Full {
+                what: "a window's rates",
+                bound: self.vms.len(),
+            })?;
+        let mut booked = 0u64;
+        for (id, vm) in &self.vms {
+            let [ceiling, _, _] = vm.class.ceiling;
+            let [booking, _, _] = vm.booking;
+            let asked = match used.get(id) {
+                Some((used, cap)) if used < cap => *used,
+                _ => ceiling,
+            };
+            booked = booked
+                .checked_add(booking)
+                .ok_or(ChargeError::Overflow("a fleet's CPU bookings"))?;
+            entries.push((booking.max(1), asked.min(ceiling).saturating_sub(booking)));
+        }
+        let extra = shares(capacity.saturating_sub(booked), &entries)?;
+        self.vms
+            .iter()
+            .zip(extra)
+            .map(|((id, vm), extra)| {
+                let [booking, _, _] = vm.booking;
+                let cap = booking
+                    .checked_add(extra)
+                    .ok_or(ChargeError::Overflow("a VM's CPU cap"))?;
+                Ok((*id, cap.max(least)))
+            })
+            .collect()
+    }
+
     /// CPU over a contended window (C4): `capacity` milli-CPU shared by water-filling, each VM weighted by its
     /// booking (at least 1, as the kernel's least weight) and given at most what it asks and its ceiling.
     pub fn shares(

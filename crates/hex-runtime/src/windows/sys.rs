@@ -550,22 +550,28 @@ impl Job {
         ext.BasicLimitInformation.LimitFlags = flags;
         self.set(JobObjectExtendedLimitInformation, &ext)?;
         if let Some(cpu) = limits.cpu {
-            let mut rate: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = zeroed_struct();
-            match cpu {
-                Cpu::Weight(w) => {
-                    rate.ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE
-                        | JOB_OBJECT_CPU_RATE_CONTROL_WEIGHT_BASED;
-                    rate.Anonymous.Weight = w;
-                }
-                Cpu::Cap(r) => {
-                    rate.ControlFlags =
-                        JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
-                    rate.Anonymous.CpuRate = r;
-                }
-            }
-            self.set(JobObjectCpuRateControlInformation, &rate)?;
+            self.set_cpu(cpu)?;
         }
         Ok(())
+    }
+
+    /// Sets the job's CPU weight or hard cap, as [`Job::configure`] does; also the charge learner's, which caps a
+    /// managed VM's job at its water-filled share each window (joint plan step 14, C4 on Windows).
+    pub fn set_cpu(&self, cpu: Cpu) -> io::Result<()> {
+        let mut rate: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = zeroed_struct();
+        match cpu {
+            Cpu::Weight(w) => {
+                rate.ControlFlags =
+                    JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_WEIGHT_BASED;
+                rate.Anonymous.Weight = w;
+            }
+            Cpu::Cap(r) => {
+                rate.ControlFlags =
+                    JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+                rate.Anonymous.CpuRate = r;
+            }
+        }
+        self.set(JobObjectCpuRateControlInformation, &rate)
     }
 
     fn set<T>(&self, class: i32, value: &T) -> io::Result<()> {

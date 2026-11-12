@@ -17,9 +17,8 @@ use std::sync::{Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use hex_api::{
-    Allocation, Bounds, BoxId, BoxInfo, CapacityResources, Learned, LearnedEnd, LearnedHolding,
-    LearnedPrior, LearnedUse, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, Refusal, RuntimeCost,
-    Upstream, Usage,
+    Allocation, Bounds, BoxId, BoxInfo, CapacityResources, Learned, LearnedEnd,
+    MAX_LEARNED_HOLDINGS, Refusal, RuntimeCost, Upstream, Usage,
 };
 use hex_core::cgroup::{CPU_PERIOD_US, CpuMax, Write};
 use hex_core::record::BoxRecord;
@@ -724,54 +723,17 @@ impl Learner {
         if self.fault.is_some() {
             return Ok(None);
         }
-        let mut priors: Vec<LearnedPrior> = Vec::new();
-        for cost in costs {
-            let ceiling = cost.allocate(CapacityResources::default())?.resources;
-            let booking = self.node.prior(&ClassKey::new(class, cost.id, ceiling));
-            let known = priors
-                .iter()
-                .any(|prior| prior.profile == cost.id && prior.ceiling == ceiling);
-            if booking != ceiling && !known && priors.len() < MAX_LEARNED_PRIORS {
-                priors.push(LearnedPrior {
-                    profile: cost.id,
-                    ceiling,
-                    booking,
-                });
-            }
-        }
-        let mut used = LearnedUse::default();
-        let mut holdings = Vec::new();
+        let mut vms = Vec::new();
+        vms.try_reserve_exact(self.vms.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "a class's learned holdings",
+                bound: self.vms.len(),
+            })?;
         for (scope, vm) in &self.vms {
-            if vm.class != class {
-                continue;
+            if vm.class == class {
+                vms.push((*scope, &vm.id, vm.receipt));
             }
-            let holding = self
-                .node
-                .holding(scope)
-                .ok_or_else(|| Refusal::Broken("a learned VM without a holding".into()))?;
-            used = used
-                .checked_add(LearnedUse {
-                    booked: vm.receipt,
-                    reservation: holding,
-                })
-                .ok_or_else(|| Refusal::Invalid {
-                    what: "a microVM's learned charge",
-                    why: "a class's learned use overflows".into(),
-                })?;
-            let past = (
-                holding.mem_bytes.saturating_sub(vm.receipt.mem_bytes),
-                holding.cpu_milli.saturating_sub(vm.receipt.cpu_milli),
-                holding.disk_bytes.saturating_sub(vm.receipt.disk_bytes),
-            );
-            holdings.push((
-                past,
-                LearnedHolding {
-                    id: vm.id.try_clone()?,
-                    holding,
-                },
-            ));
         }
-        holdings.sort_by_key(|(past, _)| std::cmp::Reverse(*past));
         let mut ended = Vec::new();
         for (of, end) in self.ended.iter().rev() {
             if *of == class {
@@ -779,18 +741,10 @@ impl Learner {
                     what: "a class's learned ends",
                     bound: self.ends,
                 })?;
-                ended.push(LearnedEnd {
-                    id: end.id.try_clone()?,
-                    ..*end
-                });
+                ended.push(end.try_clone()?);
             }
         }
-        Ok(Some(Learned {
-            priors,
-            used,
-            holdings: holdings.into_iter().map(|(_, holding)| holding).collect(),
-            ended,
-        }))
+        crate::recorded::charges::learned(&self.node, class, costs, vms, ended).map(Some)
     }
 
     /// The last resort's state (C5).

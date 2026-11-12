@@ -319,6 +319,35 @@ fn serve(
         )
         .map_err(frame::Failure::refusal);
     }
+    // Joint plan step 14 (C4 on macOS): the node's learner sets a scope's CPU rate to its water-filled share.
+    if let Ok((version, id, key, rate)) = protocol::rate::read(&bytes, descriptors.len()) {
+        if matches!(entry, Entry::FirstPrepare(_)) {
+            return Err(super::super::configuration(
+                "first helper request must be scoped Prepare",
+            ));
+        }
+        if version != VERSION || key.helper != process {
+            return Err(super::super::configuration(
+                "foreign native helper incarnation",
+            ));
+        }
+        let answer =
+            match get(runtime, &key, None).and_then(|boxed| boxed.set_managed_rate(rate)) {
+                Ok(()) => protocol::encode_answer(VERSION, id, &protocol::Answer::Done { key }),
+                Err(error) => {
+                    protocol::rejected::encode(VERSION, id, &PendingReply::new(error).detail()?)
+                }
+            }
+            .map_err(|_| super::super::configuration("encoding a native rate answer"))?;
+        return frame::send(
+            connection.as_fd(),
+            &answer,
+            &[],
+            protocol::MAX_MESSAGE.max(protocol::rejected::MAX_MESSAGE),
+            Some(until),
+        )
+        .map_err(frame::Failure::refusal);
+    }
     let (version, id, expires, request) = protocol::timed::read(&bytes, descriptors.len())
         .map_err(|_| super::super::configuration("invalid bounded native request"))?;
     let until = deadline(expires, helper.config.rpc_budget)?.min(until);

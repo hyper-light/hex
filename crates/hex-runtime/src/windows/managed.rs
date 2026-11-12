@@ -432,6 +432,18 @@ fn existing(
     }
 }
 
+/// Joint plan step 14 (C4 on Windows): the managed VM's job is capped at `rate` milli-CPU, its water-filled share. Only a
+/// VM this node holds is capped: one it hasn't taken back is refused, uncertain.
+pub(super) fn set_rate(
+    runtime: &WinRuntime,
+    record: NativeRecord<'_>,
+    rate: u64,
+) -> Result<(), Refusal> {
+    existing(runtime, record)?
+        .ok_or_else(|| uncertain(record))?
+        .set_cpu_cap(rate, runtime.processors)
+}
+
 pub(super) fn usage(
     runtime: &WinRuntime,
     record: NativeRecord<'_>,

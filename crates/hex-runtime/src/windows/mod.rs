@@ -1462,6 +1462,11 @@ impl WinRuntime {
         managed::finalize(self, record, identity)
     }
 
+    /// Joint plan step 14 (C4 on Windows): the managed VM's job is capped at `rate` milli-CPU, its share as the node's
+    /// charge learner water-fills it.
+    pub fn set_managed_rate(&self, record: NativeRecord<'_>, rate: u64) -> Result<(), Refusal> {
+        managed::set_rate(self, record, rate)
+    }
     pub fn managed_usage(&self, record: NativeRecord<'_>) -> Result<Usage, Refusal> {
         managed::usage(self, record)
     }
