@@ -214,6 +214,7 @@ mod tests {
                 mem_bytes: free,
                 disk_bytes: free,
             },
+            unavailable: Vec::new(),
         }
     }
 

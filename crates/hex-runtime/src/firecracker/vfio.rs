@@ -100,22 +100,20 @@ fn reset_methods(function: &Path) -> Result<String, Refusal> {
     String::from_utf8(bytes).map_err(|_| invalid("a PCI function's reset methods aren't text"))
 }
 
-/// The functions of one VM's `devices` that no reset clears at their release ([`cleared`]), as `host` lists them: each
-/// one's reset methods and every device on its bus. Such a function goes to one VM per host boot (`super::single_use`).
-pub(super) fn once_per_boot<'a>(
-    host: &Host,
-    devices: &'a [Passthrough],
-) -> Result<Vec<&'a str>, Refusal> {
+/// The functions among `given`, one VM's (by SBDF), that no reset clears at their release ([`cleared`]), as `host`
+/// lists them: each one's reset methods and every device on its bus. Such a function goes to one VM per host boot
+/// (`super::single_use`).
+pub(super) fn once_per_boot<'a>(host: &Host, given: &[&'a str]) -> Result<Vec<&'a str>, Refusal> {
     let functions = host.functions()?;
     let mut methods = Vec::new();
-    reserve(&mut methods, devices.len())?;
-    for device in devices {
-        methods.push(reset_methods(&path(&functions, &device.sbdf)?)?);
+    reserve(&mut methods, given.len())?;
+    for function in given {
+        methods.push(reset_methods(&path(&functions, function)?)?);
     }
     // Which of the VM's functions share their bus with a device that goes to no VM with them.
     let mut shared = Vec::new();
-    reserve(&mut shared, devices.len())?;
-    shared.resize(devices.len(), false);
+    reserve(&mut shared, given.len())?;
+    shared.resize(given.len(), false);
     let mut count = 0usize;
     for entry in fs::read_dir(&functions).map_err(|e| Refusal::os("listing PCI functions", e))? {
         if count >= hex_api::MAX_DEVICES {
@@ -129,29 +127,56 @@ pub(super) fn once_per_boot<'a>(
         let name = name
             .to_str()
             .ok_or_else(|| invalid("native PCI function is not UTF-8"))?;
-        if devices.iter().any(|device| device.sbdf == name) {
+        if given.contains(&name) {
             continue;
         }
-        for (device, shares) in devices.iter().zip(shared.iter_mut()) {
-            if bus(&device.sbdf).is_some_and(|own| bus(name) == Some(own)) {
+        for (function, shares) in given.iter().zip(shared.iter_mut()) {
+            if bus(function).is_some_and(|own| bus(name) == Some(own)) {
                 *shares = true;
             }
         }
     }
     let mut once = Vec::new();
-    reserve(&mut once, devices.len())?;
-    for ((device, own), shares) in devices.iter().zip(&methods).zip(&shared) {
-        let bus_reset = devices.iter().zip(&methods).any(|(other, listed)| {
-            bus(&other.sbdf) == bus(&device.sbdf)
+    reserve(&mut once, given.len())?;
+    for ((function, own), shares) in given.iter().zip(&methods).zip(&shared) {
+        let bus_reset = given.iter().zip(&methods).any(|(other, listed)| {
+            bus(other) == bus(function)
                 && listed
                     .split_ascii_whitespace()
                     .any(|method| BUS_RESETS.contains(&method))
         });
         if !cleared(own, bus_reset, *shares) {
-            once.push(device.sbdf.as_str());
+            once.push(*function);
         }
     }
     Ok(once)
+}
+
+/// The SBDFs of a VM's `plan`.
+pub(super) fn functions(plan: &[Passthrough]) -> Result<Vec<&str>, Refusal> {
+    let mut functions = Vec::new();
+    reserve(&mut functions, plan.len())?;
+    functions.extend(plan.iter().map(|device| device.sbdf.as_str()));
+    Ok(functions)
+}
+
+/// The functions a catalogued VFIO entry names, by SBDF: its own and its companions, those a VM given it gets.
+pub(super) fn declared(entry: &Entry) -> Result<Vec<&str>, Refusal> {
+    let Some(Binding::Vfio {
+        sbdf, companions, ..
+    }) = entry.binding(Route::Vfio)
+    else {
+        return Err(invalid("Firecracker requires VFIO native bindings"));
+    };
+    let mut functions = Vec::new();
+    let count = companions
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| exhausted("VFIO function metadata", hex_api::MAX_DEVICES))?;
+    reserve(&mut functions, count)?;
+    functions.push(sbdf.as_str());
+    functions.extend(companions.iter().map(String::as_str));
+    Ok(functions)
 }
 
 fn pci(sbdf: &str) -> Result<hex_gpu::PciAddress, Refusal> {
@@ -843,15 +868,7 @@ mod tests {
             stand_in::function(&host, sbdf, group, driver, "0x030000", reset);
         }
         let check = |given: &[&str], once: &[&str]| {
-            let devices: Vec<_> = given
-                .iter()
-                .map(|sbdf| Passthrough {
-                    id: function_id(sbdf).unwrap(),
-                    sbdf: (*sbdf).to_owned(),
-                    graphics: true,
-                })
-                .collect();
-            assert_eq!(once_per_boot(&host, &devices).unwrap(), once, "{given:?}");
+            assert_eq!(once_per_boot(&host, given).unwrap(), once, "{given:?}");
         };
         check(&["0000:01:00.0"], &["0000:01:00.0"]);
         check(&["0000:02:00.0"], &[]);

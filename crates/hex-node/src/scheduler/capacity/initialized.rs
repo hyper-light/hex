@@ -499,6 +499,7 @@ mod tests {
             devices,
             device_routes: masks,
             backings,
+            unavailable: Vec::new(),
         }
     }
     fn facts() -> Facts {

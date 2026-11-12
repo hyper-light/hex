@@ -145,7 +145,12 @@ fn collect_offers(
                 device: Device {
                     kind,
                     key: Some(offer.id.key),
+                    // A device the runtime lists unavailable, with why, is never offered (AC-T7.4.1).
                     available: observed
+                        && !report
+                            .unavailable
+                            .iter()
+                            .any(|unavailable| unavailable.id == offer.id)
                         && offer.holder.as_ref().is_none_or(|holder| match holder {
                             hex_api::DeviceHolder::Box(id) => id.as_str().starts_with(&own_prefix),
                             hex_api::DeviceHolder::Backing(key) => {
@@ -202,6 +207,8 @@ fn collect_offers(
                     previous.device.classes = previous.device.classes.with(class);
                 }
             }
+            // Unavailable where any backend listing it says so.
+            previous.device.available &= candidate.device.available;
             previous.order = previous.order.min(candidate.order);
         } else {
             if aliases.len() >= hex_api::MAX_DEVICES {
