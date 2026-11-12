@@ -5,13 +5,35 @@ import argparse
 import json
 from pathlib import Path
 
-from evidence import BACKENDS, hex_digest, load_json, require, sha256
+from evidence import BACKENDS, TARGETS, artifact, finite_positive, hex_digest, load_json, natural, require, sha256
+
+
+def case_inputs(lab, source):
+    """Validate caller inputs without choosing an adapter, device or operation budget."""
+    require(hex_digest(source, 40) and lab.get("backend") in BACKENDS, "fixed source/backend required")
+    require(lab.get("topology") in ("laptop", "peer") and lab.get("proof") in ("full", "selected"), "case identity")
+    require(lab.get("origin_target") in TARGETS and lab.get("execution_target") in TARGETS,
+            "explicit origin and native execution targets required")
+    require(lab["topology"] == "peer" or lab["origin_target"] == lab["execution_target"],
+            "local fixture cannot substitute another execution target")
+    if lab["topology"] == "peer":
+        require(lab.get("require_remote_origin") is True, "peer topology requires an actual origin barrier")
+    for name in ("wait_ms", "byte_limit", "max_items", "max_shader_bytes", "words", "rounds", "gpu_wait_ns",
+                 "creating_entry_limit", "creating_event_limit", "creating_notification_bytes"):
+        require(natural(lab.get(name), positive=True), "explicit positive integer input required: " + name)
+    require(natural(lab.get("challenge")), "explicit non-boolean challenge required")
+    require(finite_positive(lab.get("observer_timeout_seconds")), "finite native observer budget required")
+    contract = lab.get("factory_contract")
+    require(isinstance(contract, dict) and isinstance(contract.get("path"), str), "retained factory contract required")
+    path = Path(contract["path"])
+    require(path.is_absolute(), "explicit absolute factory contract path required")
+    checked = artifact(path.parent, {**contract, "path": path.name})
+    require(checked.stat().st_size > 0, "empty factory contract")
+    return checked
 
 
 def prepare(lab, source):
-    require(hex_digest(source,40) and lab["backend"] in BACKENDS,"fixed source/backend required")
-    require(lab["topology"] in ("laptop","peer") and lab["proof"] in ("full","selected"),"case identity")
-    require(lab["wait_ms"]>0 and lab["byte_limit"]>0,"explicit finite bounds required")
+    contract = case_inputs(lab, source)
     for name in ("hex","python","vulkan","native_executable"):
         row=lab[name]
         path=Path(row["path"]).resolve(strict=True)
@@ -24,16 +46,39 @@ def prepare(lab, source):
     value={key:lab[key] for key in ("backend","topology","proof","scratch","wait_ms","byte_limit",
         "hex","services","scheduler_socket","backend_socket","runner","record_root","demand","payload")}
     value.update(source=source,files=list(lab["files"]))
+    if "native_resources" in lab:
+        row = lab["native_resources"]
+        require(isinstance(row, dict) and Path(row["path"]).is_absolute()
+                and sha256(Path(row["path"])) == row["sha256"], "explicit pinned native resource producer required")
+        value["native_resources"] = row
+    value.update(origin_target=lab["origin_target"], execution_target=lab["execution_target"],
+                 factory_contract_sha256=sha256(contract), factory_contract_path="@SCOPE@/factory-contract")
+    for name in ("creating_entry_limit", "creating_event_limit", "creating_notification_bytes"):
+        value[name] = lab[name]
+    value["files"].append({"path": "@SCOPE@/factory-contract", "copy_from": str(contract), "sha256": sha256(contract)})
     scoped_hex="@SCOPE@/helpers/hex"+(".exe" if lab.get("host_windows") else "")
     value["files"].append({"path":scoped_hex,"copy_from":lab["hex"]["path"],"sha256":lab["hex"]["sha256"]})
     value["hex"]={"path":scoped_hex,"sha256":lab["hex"]["sha256"]}
-    for name in ("evidence.py","native_probe.py","cleanup_probe.py","load_probe.py","firecracker_probe.py","origin.py"):
+    for name in ("evidence.py","native_probe.py","cleanup_probe.py","load_probe.py","firecracker_probe.py","origin.py",
+                 "creating_events.py", "creating_events.ps1"):
         value["files"].append({"path":f"@SCOPE@/helpers/{name}","text":(root/name).read_text()})
     witness="@SCOPE@/helpers/vulkan-witness"+(".exe" if lab.get("host_windows") else "")
     value["files"].append({"path":witness,"copy_from":lab["vulkan"]["path"],"sha256":lab["vulkan"]["sha256"]})
     def python_command(script,args):
         return {"path":lab["python"]["path"],"sha256":lab["python"]["sha256"],
                 "args":[f"@SCOPE@/helpers/{script}",*args]}
+    if lab["execution_target"].endswith("apple-darwin"):
+        value["creating_notifications"] = python_command("creating_events.py", ["--root-authorized",
+            "--root", lab["record_root"], "--timeout", str(lab["wait_ms"] / 1000),
+            "--entry-limit", str(lab["creating_entry_limit"]), "--event-limit", str(lab["creating_event_limit"])])
+    elif "windows" in lab["execution_target"]:
+        shell = lab["powershell"]
+        require(Path(shell["path"]).is_absolute() and sha256(Path(shell["path"])) == shell["sha256"],
+                "explicit pinned existing PowerShell executable required for filesystem notifications")
+        value["creating_notifications"] = {"path": shell["path"], "sha256": shell["sha256"],
+            "args": ["-NoProfile", "-NonInteractive", "-File", "@SCOPE@/helpers/creating_events.ps1",
+                "-RecordRoot", lab["record_root"], "-TimeoutSeconds", str(lab["wait_ms"] / 1000),
+                "-EventLimit", str(lab["creating_event_limit"]), "-BufferBytes", str(lab["creating_notification_bytes"])]}
     common=["--root-authorized","--timeout",str(lab["observer_timeout_seconds"]),
             "--byte-limit",str(lab["byte_limit"])]
     if lab.get("require_remote_origin"):
