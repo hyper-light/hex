@@ -39,6 +39,7 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.answer.initialize_backing"),
     Patience::measuring("client.answer.release_backing"),
     Patience::measuring("client.answer.backing_usage"),
+    Patience::measuring("client.answer.schedule.forget"),
 ];
 
 /// AC-T7.4.1: the kinds a box's class times, a wait for each (kind, class), named `client.answer.<kind>.<class>`; no

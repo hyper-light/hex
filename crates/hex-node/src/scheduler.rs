@@ -1377,6 +1377,44 @@ impl Service {
             .collect())
     }
 
+    /// The person's release of `holder`'s reservations (joint plan step 13, CV6), logged as `hex.capacity
+    /// event=forgotten`; refused, typed, while it is connected, for a name never seen, and without a lane.
+    fn forget(&self, holder: &str) -> Result<dto::Reply, Refusal> {
+        let Some(lane) = &self.lane else {
+            return Err(Refusal::Invalid {
+                what: "capacity view",
+                why: "this scheduler's configuration declares no capacity lane".into(),
+            });
+        };
+        let forget = match self.driver.view_forget(holder).map_err(failed)? {
+            Ok(released) => {
+                let sum = released.sum;
+                (lane.log)(&format!(
+                    "hex.capacity event=forgotten holder={holder:?} epoch={} count={} cpu_milli={} mem_bytes={} \
+                     disk_bytes={} gpus={}",
+                    released.epoch,
+                    released.count,
+                    sum.cpu_milli,
+                    sum.mem_bytes,
+                    sum.disk_bytes,
+                    sum.gpus
+                ));
+                dto::Forget::Released {
+                    holder: holder.to_owned(),
+                    epoch: released.epoch,
+                    count: released.count,
+                    sum,
+                }
+            }
+            Err(hex_api::capacity::NotForgotten::Connected) => dto::Forget::Connected,
+            Err(hex_api::capacity::NotForgotten::Unknown) => dto::Forget::Unknown,
+        };
+        Ok(dto::Reply {
+            forget: Some(forget),
+            ..dto::Reply::default()
+        })
+    }
+
     fn rebudget(&self, cluster: &Cluster) -> Result<(), Refusal> {
         let budget = crate::placement::budget::runtime_budget(self.id, &cluster.nodes)?;
         let candidate = budget
@@ -1629,6 +1667,7 @@ impl Service {
                 requested = Some(key(k));
                 self.driver.poll_status().map_err(failed)?
             }
+            dto::Command::Forget { holder } => return self.forget(&holder),
         };
         let dispatch = self.dispatch(step)?;
         let refusals = if cleanup_failures.is_empty() {

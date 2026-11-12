@@ -5,9 +5,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use hex_api::Refusal;
-use hex_core::{schedule::Command, wire};
+use hex_core::schedule::{Command, Forget};
+use hex_core::wire;
 
-const USAGE: &str = "usage: hex schedule serve --config <file> | hex schedule call --socket <path> --request <file> | hex schedule tunnel --socket <path> --from <node>";
+const USAGE: &str = "usage: hex schedule serve --config <file> | hex schedule call --socket <path> --request <file> | hex schedule tunnel --socket <path> --from <node> | hex schedule forget --socket <path> --holder <name>";
 
 pub fn main(args: &[String]) -> u8 {
     match run(args) {
@@ -80,6 +81,11 @@ fn run(args: &[String]) -> Result<(), Refusal> {
                 .and_then(|()| output.write_all(b"\n"))
                 .map_err(|e| Refusal::os("writing scheduler reply", e))
         }
+        [verb, socket_flag, socket, holder_flag, holder]
+            if verb == "forget" && socket_flag == "--socket" && holder_flag == "--holder" =>
+        {
+            forget(Path::new(socket), holder)
+        }
         [verb, flag, socket, from_flag, from]
             if verb == "tunnel" && flag == "--socket" && from_flag == "--from" =>
         {
@@ -102,6 +108,46 @@ fn run(args: &[String]) -> Result<(), Refusal> {
             )
         }
         _ => Err(invalid()),
+    }
+}
+
+/// `hex schedule forget --socket <path> --holder <name>`: the person's release of a capacity holder gone for good
+/// (joint plan step 13, `docs/design/capacity-view.md` CV6), which the scheduler logs as `hex.capacity
+/// event=forgotten`. Says `released <name> ...` with what it released; refused, typed, while the holder is connected
+/// (its own sync says what it holds), for a name never seen, and where the scheduler keeps no capacity view.
+fn forget(socket: &Path, holder: &str) -> Result<(), Refusal> {
+    let command = Command::Forget {
+        holder: holder.to_owned(),
+    };
+    let reply = hex_client::Client::connect(socket)?.schedule(command)?;
+    let release = |why: String| Refusal::Invalid {
+        what: "capacity holder's release",
+        why,
+    };
+    match reply.forget {
+        Some(Forget::Released {
+            holder,
+            epoch,
+            count,
+            sum,
+        }) => writeln!(
+            std::io::stdout(),
+            "released {holder} epoch={epoch} count={count} cpu_milli={} mem_bytes={} disk_bytes={} gpus={}",
+            sum.cpu_milli,
+            sum.mem_bytes,
+            sum.disk_bytes,
+            sum.gpus
+        )
+        .map_err(|e| Refusal::os("reporting the release", e)),
+        Some(Forget::Connected) => Err(release(format!(
+            "{holder} is connected: its own sync says what it holds"
+        ))),
+        Some(Forget::Unknown) => Err(release(format!(
+            "no holder named {holder} was ever here"
+        ))),
+        None => Err(Refusal::Broken(
+            "the scheduler's answer to a release says nothing of it".into(),
+        )),
     }
 }
 

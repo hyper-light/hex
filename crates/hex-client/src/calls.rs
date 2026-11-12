@@ -44,8 +44,9 @@ pub type Then = Box<dyn FnOnce(u64, Result<Answer, Refusal>) + Send>;
 pub type Ended = Box<dyn FnOnce(Result<Exit, Refusal>) + Send>;
 
 /// The kinds whose answer no box's class times, in their table's order ([`Transport::answers`]): a hello, a list, the
-/// network namespaces' counts; then the scheduler's operations in [`WaitKind`] order; then a native physical report
-/// and the backing lifecycle's three. Waits only append.
+/// network namespaces' counts; then the scheduler's operations in [`WaitKind`] order up to the person's release; then
+/// a native physical report and the backing lifecycle's three; then the release (joint plan step 13). Waits only
+/// append.
 #[repr(usize)]
 enum PlainKind {
     Hello,
@@ -56,8 +57,12 @@ impl PlainKind {
     const COUNT: usize = Self::Netns as usize + 1;
 }
 
+/// The scheduler's kinds laid out after the plain ones, those before the person's release: the release's wait came
+/// later, so it appends after the backing lifecycle's.
+const SCHEDULED: usize = WaitKind::Forget as usize;
+
 /// The plain kinds' waits, scheduler's among them ([`PlainKind`]).
-pub const KINDS: usize = PlainKind::COUNT + WaitKind::COUNT + 4;
+pub const KINDS: usize = PlainKind::COUNT + SCHEDULED + 5;
 
 /// AC-T7.4.1: the kinds whose answer a box's class times, in their tables' order ([`Transport::class_answers`]): its
 /// class's runtime does their work, a microVM's boot, its guest's relay, its teardown, orders of magnitude from a
@@ -161,19 +166,16 @@ pub(crate) fn kind_of<'a>(waits: &'a [Patience; KINDS], request: &Request) -> Op
         Request::Call(call) => match call {
             Call::List => PlainKind::List as usize,
             Call::Netns => PlainKind::Netns as usize,
-            Call::Schedule(command) => {
-                PlainKind::COUNT.checked_add(WaitKind::classify(command).index())?
+            Call::Schedule(command) => match WaitKind::classify(command) {
+                WaitKind::Forget => PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(4)?,
+                kind => PlainKind::COUNT.checked_add(kind.index())?,
+            },
+            Call::PhysicalReport => PlainKind::COUNT.checked_add(SCHEDULED)?,
+            Call::InitializeBacking(_) => {
+                PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(1)?
             }
-            Call::PhysicalReport => PlainKind::COUNT.checked_add(WaitKind::COUNT)?,
-            Call::InitializeBacking(_) => PlainKind::COUNT
-                .checked_add(WaitKind::COUNT)?
-                .checked_add(1)?,
-            Call::ReleaseBacking(_) => PlainKind::COUNT
-                .checked_add(WaitKind::COUNT)?
-                .checked_add(2)?,
-            Call::BackingUsage(_) => PlainKind::COUNT
-                .checked_add(WaitKind::COUNT)?
-                .checked_add(3)?,
+            Call::ReleaseBacking(_) => PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(2)?,
+            Call::BackingUsage(_) => PlainKind::COUNT.checked_add(SCHEDULED)?.checked_add(3)?,
             Call::Create(_)
             | Call::Start(_)
             | Call::Exec { .. }

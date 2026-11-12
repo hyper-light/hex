@@ -1,19 +1,19 @@
-//! The scheduler's capacity lane (joint plan step 13, `docs/design/capacity-view.md` CV8, CV9; AC-T7.4.1):
+//! The scheduler's capacity lane (joint plan step 13, `docs/design/capacity-view.md` CV6, CV8, CV9; AC-T7.4.1):
 //! `hex schedule serve`'s service binds its configured address with the enrollment kept for it, serves the
-//! Driver's view to the holders it names alone, and hints them after its own words.
+//! Driver's view to the holders it names alone, hints them after its own words, and takes the person's release.
 
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use hex_api::capacity::{Close, Event, Holder, Out, ToHolder, ToKeeper};
+use hex_api::capacity::{Amounts, Close, Event, Holder, Out, ToHolder, ToKeeper};
 use hex_core::patience::Patience;
 use hex_core::schedule as dto;
 use hex_quic::capacity::Link;
 use hex_quic::enroll::{self, sim::SimCa, store};
 use hex_quic::{Endpoint, Shape};
-use hex_testkit::waits::within;
+use hex_testkit::waits::{until, within};
 
 use super::{CapacityHolder, CapacityLane, Config, Report, Service};
 
@@ -21,6 +21,7 @@ use super::{CapacityHolder, CapacityLane, Config, Report, Service};
 static DIAL: Patience = Patience::measuring("test.hex_node.capacity_lane.dial");
 static SAY: Patience = Patience::measuring("test.hex_node.capacity_lane.say");
 static HEAR: Patience = Patience::measuring("test.hex_node.capacity_lane.hear");
+static AWAY: Patience = Patience::measuring("test.hex_node.capacity_lane.away");
 
 const SCHEDULER: &str = "scheduler.capacity.test";
 const KILN: &str = "kiln-a.capacity.test";
@@ -94,11 +95,22 @@ fn talk(link: &mut Link, holder: &mut Holder, first: Vec<ToKeeper>) -> Vec<Event
     events
 }
 
-/// AC-T7.4.1, CV8, CV9: a scheduler whose configuration names a capacity lane on loopback, its enrollment, and kiln-a
-/// alone; kiln-a joins and the scheduler refreshes; a peer kiln's CA enrolled but the lane doesn't name says hello.
-/// Expect the lane bound, kiln-a welcomed and hinted the measured room after the scheduler's own word, and the other
-/// peer closed as not authorized and that logged. (This scheduler has no backend, so its node runs nothing and keeps
-/// no reservation of a holder's, CV8: the grant through the node's view is
+fn forget(service: &Service, holder: &str) -> Option<dto::Forget> {
+    service
+        .command(dto::Command::Forget {
+            holder: holder.into(),
+        })
+        .unwrap()
+        .forget
+}
+
+/// AC-T7.4.1, CV6, CV8, CV9: a scheduler whose configuration names a capacity lane on loopback, its enrollment, and
+/// kiln-a alone; kiln-a joins and the scheduler refreshes; a peer kiln's CA enrolled but the lane doesn't name says
+/// hello; the person releases kiln-a while it is connected, again once its link has ended, and a name never seen.
+/// Expect the lane bound, kiln-a welcomed and hinted the measured room after the scheduler's own word; the other peer
+/// closed as not authorized and that logged; the release refused as connected, then done and logged as
+/// `hex.capacity event=forgotten`, and the name never seen unknown. (This scheduler has no backend, so its node runs
+/// nothing and keeps no reservation of a holder's, CV8: the grant through the node's view is
 /// `placement::view::tests::a_holder_reaches_the_nodes_keeper_over_quic`.)
 #[test]
 fn the_scheduler_serves_its_capacity_view_to_the_holders_it_names_alone() {
@@ -151,18 +163,58 @@ fn the_scheduler_serves_its_capacity_view_to_the_holders_it_names_alone() {
             .any(|line| line.starts_with("hex.capacity event=refused ")),
         "{lines:?}"
     );
+
+    assert_eq!(forget(&service, KILN), Some(dto::Forget::Connected));
+    drop(link);
+    let mut released = None;
+    until(&AWAY, "kiln-a's link heard ended", || {
+        released = forget(&service, KILN).filter(|f| *f != dto::Forget::Connected);
+        released.is_some()
+    })
+    .unwrap();
+    assert_eq!(
+        released,
+        Some(dto::Forget::Released {
+            holder: KILN.into(),
+            epoch: 1,
+            count: 0,
+            sum: Amounts::ZERO,
+        })
+    );
+    assert!(
+        lines.lock().unwrap().iter().any(|line| line
+            == "hex.capacity event=forgotten holder=\"kiln-a.capacity.test\" epoch=1 count=0 cpu_milli=0 \
+                mem_bytes=0 disk_bytes=0 gpus=0"),
+        "{lines:?}"
+    );
+    assert_eq!(forget(&service, "nobody.test"), Some(dto::Forget::Unknown));
     service.shutdown().unwrap();
 }
 
 /// AC-T7.4.1, CV9: a scheduler whose configuration names no capacity lane, then one whose lane's enrollment has
-/// begun but kiln's CA hasn't answered. Expect the first to bind nothing for one; the second refused at its open,
-/// typed, before anything is bound.
+/// begun but kiln's CA hasn't answered. Expect the first to bind nothing for one and to refuse the person's release,
+/// typed; the second refused at its open, typed, before anything is bound.
 #[test]
-fn without_a_lane_nothing_is_bound() {
+fn without_a_lane_nothing_is_bound_and_a_release_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let (report, _) = kept();
     let service = Service::open(&config(&dir.path().join("none"), None), report).unwrap();
     assert_eq!(service.capacity_address(), None);
+    let refused = service
+        .command(dto::Command::Forget {
+            holder: KILN.into(),
+        })
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            hex_api::Refusal::Invalid {
+                what: "capacity view",
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
     service.shutdown().unwrap();
 
     let begun = dir.path().join("begun");
