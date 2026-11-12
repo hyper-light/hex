@@ -2,8 +2,9 @@
 //! AC-T7.4.1): the keeper's shell. Its records are a folder of their own, written whole by the node's
 //! record files (CV2). The room it keeps is the node's facts' capacity, the machine's physical room, and the
 //! node admits its own boxes against that room less every holder's reservations (CV3; the Driver's
-//! `admission_spec`), under the placement lock that serializes both, so the two admissions are one
-//! ledger's. Holders reach it over Hex's transport (Hex step 4); until that is on main, in process.
+//! `admission_spec`). Each admission, a holder's or the node's, checks and commits under one hold of
+//! the core lock, the node's re-deriving its room at its commit, so the two admissions are one
+//! ledger's. Holders reach it over Hex's transport (CV9, `hex_quic::capacity`).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -190,3 +191,7 @@ impl View {
 #[cfg(test)]
 #[path = "view_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "race_tests.rs"]
+mod race_tests;
