@@ -34,6 +34,9 @@ pub struct Seen {
     /// For an `oci` box: a start of it had begun and never took the byte when the agent stopped (its
     /// state directory's start mark beside its exec FIFO, hex_runtime's `state::start_interrupted`).
     pub start_interrupted: bool,
+    /// Its record was written in an earlier boot of the host than this one ([`crate::record::BootSession`]),
+    /// whose end ended every process of it.
+    pub earlier_boot: bool,
 }
 
 /// What to do with a box.
@@ -67,6 +70,9 @@ pub enum Why {
     /// The agent stopped while it started the box, as the box's startContainer hooks ran: the start never
     /// took, and its init ends when it finds the start gone. Removed whether the init has ended yet or not.
     StartInterrupted,
+    /// Its record was written in an earlier boot of the host: that boot's end ended everything that ran of it,
+    /// so nothing is left to end, and what is left of it on disk goes (T-T7.1.2).
+    EarlierBoot,
 }
 
 /// The decision for one box.
@@ -74,6 +80,7 @@ pub fn decide(seen: &Seen) -> Decision {
     match &seen.record {
         None => Decision::Remove(Why::NoRecord(seen.parts)),
         Some(Err(why)) => Decision::Remove(Why::Unreadable(why.clone())),
+        Some(Ok(_)) if seen.earlier_boot => Decision::Remove(Why::EarlierBoot),
         Some(Ok(r)) => match r.phase {
             Phase::Creating => Decision::Remove(Why::MidCreate),
             Phase::Deleting => Decision::Remove(Why::MidDelete),
@@ -412,6 +419,7 @@ mod tests {
                     parts: parts(m, id),
                     init_alive,
                     start_interrupted: false,
+                    earlier_boot: false,
                 },
             );
         }
@@ -421,6 +429,7 @@ mod tests {
                 parts: parts(m, id),
                 init_alive: None,
                 start_interrupted: false,
+                earlier_boot: false,
             });
         }
         seen
@@ -566,6 +575,7 @@ mod tests {
                 parts,
                 init_alive: None,
                 start_interrupted: false,
+                earlier_boot: false,
             };
             assert_eq!(
                 decide(&seen),
@@ -603,6 +613,7 @@ mod tests {
                     parts: cgroup,
                     init_alive: None,
                     start_interrupted: false,
+                    earlier_boot: false,
                 },
                 Decision::Remove(Why::NoRecord(cgroup)),
             ),
@@ -612,6 +623,7 @@ mod tests {
                     parts: cgroup,
                     init_alive: None,
                     start_interrupted: false,
+                    earlier_boot: false,
                 },
                 Decision::Remove(Why::Unreadable("bad".into())),
             ),
@@ -622,6 +634,7 @@ mod tests {
                     parts: cgroup,
                     init_alive: None,
                     start_interrupted: false,
+                    earlier_boot: false,
                 },
                 Decision::Remove(Why::MidCreate),
             ),
@@ -631,6 +644,7 @@ mod tests {
                     parts: cgroup,
                     init_alive: None,
                     start_interrupted: false,
+                    earlier_boot: false,
                 },
                 Decision::Remove(Why::MidDelete),
             ),
@@ -640,6 +654,7 @@ mod tests {
                     parts: Parts::default(),
                     init_alive: None,
                     start_interrupted: false,
+                    earlier_boot: false,
                 },
                 Decision::Remove(Why::NoCgroup),
             ),
@@ -649,6 +664,7 @@ mod tests {
                     parts: cgroup,
                     init_alive: Some(false),
                     start_interrupted: false,
+                    earlier_boot: false,
                 },
                 Decision::Remove(Why::InitGone),
             ),
@@ -658,6 +674,7 @@ mod tests {
                     parts: cgroup,
                     init_alive: Some(true),
                     start_interrupted: false,
+                    earlier_boot: false,
                 },
                 Decision::Adopt,
             ),
@@ -669,6 +686,7 @@ mod tests {
                     parts: cgroup,
                     init_alive: Some(true),
                     start_interrupted: true,
+                    earlier_boot: false,
                 },
                 Decision::Remove(Why::StartInterrupted),
             ),
@@ -678,6 +696,7 @@ mod tests {
                     parts: cgroup,
                     init_alive: Some(false),
                     start_interrupted: true,
+                    earlier_boot: false,
                 },
                 Decision::Remove(Why::StartInterrupted),
             ),
@@ -687,6 +706,7 @@ mod tests {
                     parts: cgroup,
                     init_alive: None,
                     start_interrupted: false,
+                    earlier_boot: false,
                 },
                 Decision::Adopt,
             ),
@@ -698,6 +718,7 @@ mod tests {
                     parts: cgroup,
                     init_alive: Some(false),
                     start_interrupted: false,
+                    earlier_boot: false,
                 },
                 Decision::Remove(Why::RunEnded),
             ),
@@ -707,12 +728,45 @@ mod tests {
                     parts: cgroup,
                     init_alive: Some(true),
                     start_interrupted: false,
+                    earlier_boot: false,
                 },
                 Decision::Adopt,
             ),
         ];
         for (seen, want) in cases {
             assert_eq!(decide(&seen), want, "{seen:?}");
+        }
+        // T-T7.1.2: a record from an earlier boot of the host names nothing that runs, whatever this boot
+        // shows at its paths or under its pid: removed as that boot's, never taken back, in any phase. A
+        // record no boot names is decided as before.
+        for (phase, kind) in [
+            (Phase::Ready, Kind::Process),
+            (Phase::Ready, Kind::Bundle),
+            (Phase::Ready, Kind::Run),
+            (Phase::Creating, Kind::Bundle),
+            (Phase::Deleting, Kind::Process),
+        ] {
+            let seen = Seen {
+                record: r(phase, kind),
+                parts: cgroup,
+                init_alive: Some(true),
+                start_interrupted: false,
+                earlier_boot: true,
+            };
+            assert_eq!(
+                decide(&seen),
+                Decision::Remove(Why::EarlierBoot),
+                "{seen:?}"
+            );
+            let this_boot = Seen {
+                earlier_boot: false,
+                ..seen
+            };
+            assert_ne!(
+                decide(&this_boot),
+                Decision::Remove(Why::EarlierBoot),
+                "{this_boot:?}"
+            );
         }
     }
 }

@@ -318,6 +318,31 @@ fn t_t7_1_2_a_torn_record_from_an_earlier_boot_is_removed_as_ended() {
     assert_eq!(recovered.adopted, [sibling]);
 }
 
+/// T-T7.1.2: a record torn in this boot of the host, as its node's marker says: nothing tells its box ended.
+/// Do: recover. Expect: the record held, as a torn one is.
+#[test]
+fn t_t7_1_2_a_torn_record_of_this_boot_is_held() {
+    let Ok(Some(now)) = crate::store::host_boot().clone() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("@boot"), format!("{}\n", now.as_str())).unwrap();
+    let torn = BoxId::new("ab-torn").unwrap();
+    let path = crate::store::runtime_record(&dir.path().join("@records"), &torn);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"{\"version\":").unwrap();
+    let (node, _, _) = retained(dir.path());
+    let recovered = node
+        .recover()
+        .expect("the node starts beside a torn record");
+    assert!(
+        path.exists(),
+        "a record of this boot nothing proved ended was removed"
+    );
+    assert_eq!(recovered.held.len(), 1, "{:?}", recovered.held);
+    assert_eq!(recovered.held[0].0, torn);
+}
+
 /// T-T7.1.2: a whole record written in an earlier boot of the host: that boot's end ended everything of
 /// its box. Do: recover. Expect: the box removed as an earlier boot's, said so, never taken back; the
 /// record gone and nothing of it ended (no process of it outlived its boot).
