@@ -536,7 +536,7 @@ fn memory_source() -> String {
 
 #[cfg(target_os = "linux")]
 fn memory_source() -> String {
-    "the VMM's cgroup, its own from its start as the node gives each VM one (a wrapper joins it, then runs SHARDS_BIN): its memory.peak (kernel memory, KVM's among it, included) less its guest RAM's touched pages at their most (Anonymous + Swap of the one run of private anonymous mappings as long as its RAM in /proc/<pid>/smaps), or a reading's memory.current less its guest's pages where more".to_owned()
+    "in production's state, the guest ready and its node agent running (the readings from its readiness on): the VMM's cgroup, its own from its start as the node gives each VM one (a wrapper joins it, then runs SHARDS_BIN), its non-file memory (memory.stat anon + kernel: the VMM's own and the kernel's for it, KVM's page tables among them) less its guest RAM's touched pages (Anonymous of the one run of private anonymous mappings as long as its RAM in /proc/<pid>/smaps); its page cache (memory.stat file: the images it read, shared by every VM that reads them and reclaimable) recorded apart, not charged".to_owned()
 }
 
 /// A launched guest's VMM's CPU, as macOS reads it: its own (`proc_pid_rusage`) and its vCPU threads'
@@ -714,7 +714,7 @@ impl Probe for VmmHolds {
             .transpose()?;
         Ok(Holding {
             footprint: usage.footprint,
-            charged_peak: None,
+            file_pages: None,
             peak_footprint: Some(usage.peak),
             guest_memory,
             files: walk(&self.folders)?,
@@ -742,9 +742,10 @@ pub struct VmmCpu {
     hz: u64,
 }
 
-/// What a launched guest's VMM holds, as Linux reads it: what its cgroup is charged (`memory.current` and
-/// `memory.peak`, kernel memory included), its guest RAM mapping's touched pages (`/proc/<pid>/smaps`, which
-/// walks each mapping's pages, so a reading takes as long as its RAM is large), and its folders.
+/// What a launched guest's VMM holds, as Linux reads it: what its cgroup is charged (`memory.stat`: its
+/// non-file memory, `anon` and `kernel`, and its page cache, `file`, apart), its guest RAM mapping's touched
+/// pages (`/proc/<pid>/smaps`, which walks each mapping's pages, so a reading takes as long as its RAM is
+/// large), and its folders.
 #[cfg(target_os = "linux")]
 pub struct VmmHolds {
     pid: i32,
@@ -778,16 +779,30 @@ fn probes(
     ))
 }
 
-/// A count of bytes a cgroup file holds, as `memory.current` and `memory.peak` do (one decimal and a
-/// newline).
+/// A cgroup's charge as its `memory.stat` keeps it (cgroup-v2.rst, "memory.stat"; one `name bytes` a line):
+/// its non-file memory, `anon` and `kernel` (the kernel's own for it: stacks, page tables, KVM's among them,
+/// slab), and its page cache, `file`.
 #[cfg(target_os = "linux")]
-fn cgroup_bytes(cgroup: &Path, name: &str) -> Result<u64, String> {
-    let path = cgroup.join(name);
-    std::fs::read_to_string(&path)
-        .map_err(|e| format!("reading {}: {e}", path.display()))?
-        .trim()
-        .parse()
-        .map_err(|_| format!("{} isn't a count of bytes", path.display()))
+fn charged(cgroup: &Path) -> Result<(u64, u64), String> {
+    let path = cgroup.join("memory.stat");
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let field = |name: &str| -> Result<u64, String> {
+        text.lines()
+            .find_map(|line| {
+                line.split_once(' ')
+                    .filter(|(key, _)| *key == name)
+                    .map(|(_, value)| value)
+            })
+            .and_then(|value| value.trim().parse().ok())
+            .ok_or_else(|| format!("{} names no {name} count", path.display()))
+    };
+    Ok((
+        field("anon")?
+            .checked_add(field("kernel")?)
+            .ok_or("a cgroup's charge overflows")?,
+        field("file")?,
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -797,7 +812,7 @@ fn read_proc(pid: i32, name: &str) -> Result<String, String> {
 }
 
 /// One mapping of `/proc/<pid>/smaps`: where it is, whether it is private and anonymous (no path), and its
-/// anonymous bytes resident and swapped.
+/// anonymous bytes resident (as the cgroup's `anon` counts them).
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Mapping {
@@ -808,7 +823,7 @@ struct Mapping {
 }
 
 /// The mappings of `/proc/<pid>/smaps` text (proc(5)): each a header `start-end perms offset dev inode
-/// [path]` and its fields, of which `Anonymous` and `Swap` (in kB) are counted.
+/// [path]` and its fields, of which `Anonymous` (in kB) is counted.
 #[cfg(target_os = "linux")]
 fn mappings(text: &str) -> Result<Vec<Mapping>, String> {
     let mut out: Vec<Mapping> = Vec::new();
@@ -833,7 +848,7 @@ fn mappings(text: &str) -> Result<Vec<Mapping>, String> {
             });
             continue;
         }
-        if matches!(first, "Anonymous:" | "Swap:") {
+        if first == "Anonymous:" {
             let kb: u64 = words
                 .next()
                 .and_then(|n| n.parse().ok())
@@ -908,9 +923,10 @@ impl Probe for VmmHolds {
             .guest
             .map(|range| within(maps.iter().map(|m| (m.start, m.end, m.held)), range))
             .transpose()?;
+        let (footprint, file) = charged(&self.cgroup)?;
         Ok(Holding {
-            footprint: cgroup_bytes(&self.cgroup, "memory.current")?,
-            charged_peak: Some(cgroup_bytes(&self.cgroup, "memory.peak")?),
+            footprint,
+            file_pages: Some(file),
             peak_footprint: None,
             guest_memory,
             files: walk(&self.folders)?,
@@ -1016,7 +1032,7 @@ mod tests {
     }
 
     /// AC-T7.4.1: smaps text as proc(5) gives it: expect each mapping's range, whether it is private and
-    /// anonymous, and its Anonymous and Swap bytes.
+    /// anonymous, and its Anonymous bytes (its swapped ones not: the cgroup's anon counts resident pages).
     #[cfg(target_os = "linux")]
     #[test]
     fn smaps_reads_each_mapping_and_its_anonymous_bytes() {
@@ -1043,7 +1059,7 @@ Swap:                  0 kB
                 start: 0x7f00_0000_0000,
                 end: 0x7f00_2000_0000,
                 anonymous: true,
-                held: (30720 + 8) * 1024,
+                held: 30720 * 1024,
             }
         );
         assert!(!maps[0].anonymous && !maps[2].anonymous);
@@ -1061,8 +1077,11 @@ Swap:                  0 kB
         let place = {
             let cgroup = dir.path().join("cgroup");
             std::fs::create_dir(&cgroup).unwrap();
-            std::fs::write(cgroup.join("memory.current"), "123\n").unwrap();
-            std::fs::write(cgroup.join("memory.peak"), "456\n").unwrap();
+            std::fs::write(
+                cgroup.join("memory.stat"),
+                "anon 100\nfile 456\nkernel 23\nshmem 0\n",
+            )
+            .unwrap();
             Place {
                 cgroup,
                 wrapper: dir.path().join("wrapper"),
@@ -1090,7 +1109,7 @@ Swap:                  0 kB
         let _ = busy.wait();
         assert!(read.footprint > 0, "{read:?}");
         #[cfg(target_os = "linux")]
-        assert_eq!((read.footprint, read.charged_peak), (123, Some(456)));
+        assert_eq!((read.footprint, read.file_pages), (123, Some(456)));
         assert_eq!(read.guest_memory, None);
         assert!(used.guest_cpu <= used.cpu, "{used:?}");
         let held = read
