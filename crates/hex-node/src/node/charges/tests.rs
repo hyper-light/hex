@@ -519,8 +519,9 @@ fn fleet_of_three() -> Vec<(BoxId, Scope, BoxCgroup)> {
 /// 4 GiB in a 16 GiB fleet, then one where they hold 6, 7 and 2 GiB, past the fleet's budget with the growth on
 /// record; then another with all still running; then one with vm-2 gone. Expect vm-2, the VM holding most past its own
 /// budget, its cgroup killed and the state `Ending` with why (its 7 GiB against its budget, the fleet's 15 GiB, 15 GiB
-/// of growth, its 16 GiB budget); no second kill while vm-2 runs; and with it gone, vm-1 within its new budget and
-/// vm-3 within its own, nothing more killed and the state refused, typed: every VM within its budget.
+/// of growth, its 16 GiB budget), the same why on the class's capacity answer and none on another class's; no second
+/// kill while vm-2 runs; and with it gone, vm-1 within its new budget and vm-3 within its own, nothing more killed and
+/// the state refused, typed: every VM within its budget.
 #[test]
 fn w14_the_last_resort_ends_the_vm_most_past_its_budget_and_no_other() {
     let io = Record::default();
@@ -563,6 +564,22 @@ fn w14_the_last_resort_ends_the_vm_most_past_its_budget_and_no_other() {
             budget: 16 * GIB,
         }
     );
+    let why = *why;
+    let learned = learner.learned(Class::Shards, &[cost()]).unwrap().unwrap();
+    assert_eq!(
+        learned.ended,
+        vec![LearnedEnd {
+            id: BoxId::new("vm-2").unwrap(),
+            held: 7 * GIB,
+            budget: why.budget,
+            band: 0,
+            fleet_held: 15 * GIB,
+            fleet_growth: 15 * GIB,
+            fleet_budget: 16 * GIB,
+        }]
+    );
+    let other = learner.learned(Class::Firecracker, &[]).unwrap().unwrap();
+    assert!(other.ended.is_empty());
     learner
         .window(
             &io,
@@ -601,6 +618,9 @@ fn w14_a_refused_end_is_kept_typed() {
     let fleet_budget = res(32_000, 16 * GIB);
     let mut learner = Learner::new(&fleet(), machine()).unwrap();
     let start = Instant::now();
+    for (_, _, cgroup) in &fleet_of_three() {
+        io.set(cgroup.dir(), 0, 0);
+    }
     learner
         .window(
             &io,
@@ -630,4 +650,42 @@ fn w14_a_refused_end_is_kept_typed() {
         learner.resort(),
         &Resort::Refused(Refusal::Broken("cgroup.kill refused".into()))
     );
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C5's record of why, bounded (CLAUDE.md §2). Do record three ends on a learner for a
+/// 20 milli-CPU machine, whose population is two VMs, the third of another class. Expect the class's capacity answer
+/// to carry its two latest ends, latest first, and the oldest forgotten once a third came.
+#[test]
+fn w14_the_last_resorts_ends_are_kept_to_the_machines_population() {
+    let mut learner = Learner::new(&fleet(), res(20, 64 * GIB)).unwrap();
+    let why = |held: u64| charge::Excess {
+        held,
+        budget: GIB,
+        band: 0,
+        fleet: charge::Pressure {
+            held: 4 * GIB,
+            growth: GIB,
+            budget: 4 * GIB,
+        },
+    };
+    for (n, class) in [
+        (1, Class::Shards),
+        (2, Class::Shards),
+        (3, Class::Firecracker),
+    ] {
+        let id = BoxId::new(&format!("vm-{n}")).unwrap();
+        learner.record_end(class, &id, why(n * GIB)).unwrap();
+    }
+    let ids = |class| -> Vec<String> {
+        learner
+            .learned(class, &[])
+            .unwrap()
+            .unwrap()
+            .ended
+            .iter()
+            .map(|end| end.id.as_str().to_owned())
+            .collect()
+    };
+    assert_eq!(ids(Class::Shards), ["vm-2"], "vm-1 forgotten past two");
+    assert_eq!(ids(Class::Firecracker), ["vm-3"]);
 }

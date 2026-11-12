@@ -153,6 +153,16 @@ on hardware (ROOT's fairness run).
   so never one within its booking, nor one `memory.high` holds at its budget (growth is no fact yet). The fastest
   growth is learned from the node's own windows, only rising. Moving it instead of ending it waits on Shards' D176
   (`Awaits(LiveMove)`).
+- **In the node** (`node::charges`), once a window after the placement: the learner kills the chosen VM's cgroup
+  through the descriptor its native owner pinned, so its VMM ends as the kernel's OOM killer would end it and is reaped
+  as any other end; it records why (`hex_api::LearnedEnd`: what the VM held against its budget, its band, and its
+  fleet's held, growth and budget), and ends no other while that VM's VMM still runs, so one end is never two. Its
+  state is explicit (`Resort`: `Held`, `Ending`, `Refused`). Where the fleet passes its budget with every VM within its
+  own, the node can't act and says so, typed (`Refusal::Exhausted`); a refused kill is kept typed too, and the next
+  window asks the rule again. Each class's capacity answer carries the VMs of the class it ended, latest first
+  (`Learned::ended`, fitted after the holdings), of the at most the machine's VM population it keeps, the oldest
+  forgotten first. A node's VMs carry no band yet (neither a box's spec nor the live demand names one), so on a node
+  every VM is band 0 and the one holding most past its budget goes first.
 
 **Sources.** Admit within room, take back cold pages first, then end or move the lowest-priority VM past its
 charge, never one within it (f84 B: Kubernetes' order f45 A, ESX f47 A, far memory f49 A); D188's give-back is
@@ -250,6 +260,7 @@ reaches the view settled with goal 13 the same day:
 | The slack's split | in proportion to bookings | derived | budgets sum to the budget, no race in a window | `charge::tests` |
 | The fastest growth | learned per window | (a) | the node's own windows, only rising | `charge::tests` |
 | The eviction order | band, then excess | rule, cited | Kubernetes' documented order (f45 A) | `charge::tests` |
+| The ends a node keeps | its machine's VM population, at most a node's boxes | derived | a machine never holds more VMs at once | `node::charges::tests` |
 
 ## Alternatives not taken
 

@@ -958,7 +958,11 @@ impl<K: Ord + Copy> Node<K> {
             .filter_map(|(id, budget)| {
                 let vm = self.vms.get(id)?;
                 let past = u64::try_from(budget.room.checked_neg()?).ok()?;
-                (past > 0).then_some((vm.band, std::cmp::Reverse(past), *id, budget.bytes))
+                if past > 0 {
+                    Some((vm.band, std::cmp::Reverse(past), *id, budget.bytes))
+                } else {
+                    None
+                }
             })
             .min();
         Ok(chosen
