@@ -27,6 +27,7 @@ hex-sim = { path = "crates/hex-sim", version = "0.1.0" }
 hex-health = { path = "crates/hex-health", version = "0.1.0" }
 hex-gpu = { path = "crates/hex-gpu", version = "0.1.0" }
 hex-afunix = { path = "crates/hex-afunix", version = "0.1.0" }
+hex-quic = { path = "crates/hex-quic", version = "0.1.0" }
 # Shards' guests (docs/design/shards-guest.md §2, Appendix A): the oci class's Linux guest on macOS and
 # Windows. By name and version, patched below to a copy of Shards' draft until Shards lands it, then to
 # vendor/shards as every other vendored project (vendor/shards/Cargo.toml says which).
@@ -37,6 +38,17 @@ flate2 = "1.1.10"
 # patches the same names.
 hyper-swim = "0.1.0"
 hyper-timing = "0.1.0"
+# Hex's wire over QUIC (docs/design/hex-quic.md): hyper-raft's application layer and its QUIC, by name and
+# pinned exactly, as kiln names them (crates.io holds unrelated crates under some hyper names, and a newer
+# compatible one there would be chosen over the patch); hyper-quic without its qlog traces, which would turn
+# on serde_json's preserve_order for every crate here (vendor/hyper-raft/UPSTREAM.md, change 1).
+hyper-quic = { version = "=0.1.0", default-features = false }
+hyper-transport = "=0.1.0"
+# A peer's key and its signing request, and the simulator CA that issues from one (crates/hex-quic enroll; Q6):
+# kiln's own version and features (kiln crates/kiln/Cargo.toml), so kiln vendoring Hex adds no second copy.
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "pem", "x509-parser"] }
+# The name a peer's certificate carries, and the CA conformance suite's chain check: hyper-tls's own webpki.
+webpki = { package = "rustls-webpki", version = "0.103.15", default-features = false, features = ["alloc", "std", "aws-lc-rs"] }
 libc = "0.2.190"
 # AF_VSOCK, for the guest relay: its safe `SockAddr::vsock` needs feature `all` (docs/design/shards-guest.md §3).
 socket2 = { version = "0.6", features = ["all"] }
@@ -147,4 +159,6 @@ opt-level = 3
 seccompiler = { path = "vendor/seccompiler" }
 hyper-swim = { path = "vendor/hyper-raft/crates/hyper-swim" }
 hyper-timing = { path = "vendor/hyper-raft/crates/hyper-timing" }
+hyper-quic = { path = "vendor/hyper-raft/crates/hyper-quic" }
+hyper-transport = { path = "vendor/hyper-raft/crates/hyper-transport" }
 shards-api = { path = "vendor/shards/crates/api" }
