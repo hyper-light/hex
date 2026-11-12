@@ -16,6 +16,9 @@
 #   this process as on macOS, with shards' patch for Windows, resources/gpu) and
 #   epoxy.lib. Vulkan is the host's, its loader (vulkan-1.dll) opened as the renderer
 #   starts.
+# - Every host: libshards_gpu_selection.a (shards_gpu_selection.lib on Windows), the identity
+#   bridge (resources/gpu/native-identity.c) that binds a VM's Venus contexts to the GPUs it
+#   was given (D232); and the renderer patched for that (resources/gpu/physical-*.patch).
 # Needs python3 (3.10 or later on Windows), for meson and ninja, pinned by hash in a
 # virtual environment of the build's own, and a C compiler: Xcode's command-line tools on
 # macOS, the host's `cc` on Linux, and on Windows LLVM's clang-cl with Visual Studio's
@@ -77,10 +80,8 @@ moltenvk_sha256=f95765a6229cb7b915990a2890ce12ebe36a730b021545d3d52ae69ce4c4024e
 vkh_url=https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.3.252.tar.gz
 vkh_sha256=2262a7ba3e12583a5f5f7ebac0c01003cf106baf0ea75809e07958fa9334ea49
 
-work_root=${XDG_CACHE_HOME:-$HOME/.cache}/shards/gpu-libs
-mkdir -p "$work_root"
-work=$(mktemp -d "$work_root/build.XXXXXX")
-trap 'rm -rf "${work:?}"' EXIT
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
 
 fetch() {
     curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o "$work/$2" "$1"
@@ -100,19 +101,21 @@ tar -xzf "$work/epoxy.tar.gz" -C "$work/src"
 if [[ $host == Windows-* ]]; then
     patch -p1 -s -d "$work/src/$virgl_name" <"$repo/resources/gpu/venus-windows.patch"
 fi
-# Apply the reviewed filter followed by the matching host/server transport to the
-# complete pinned renderer, including the Windows patch where needed.
+# Each Venus context bound to the GPUs its VM was given (D232): the renderer's physical-device
+# filter, then the selection's transport to its render server, for the renderer this host
+# builds (resources/gpu), after Windows' own patch where it has one.
 case $host in
 Linux-*) selector_pin=linux ;;
 *) selector_pin=krunkit ;;
 esac
 patch -p1 -s -d "$work/src/$virgl_name" <"$repo/resources/gpu/physical-$selector_pin.patch"
 patch -p1 -s -d "$work/src/$virgl_name" <"$repo/resources/gpu/physical-transport-$selector_pin.patch"
+# Vulkan's headers, for Windows' renderer and every host's identity bridge.
 fetch "$vkh_url" vkh.tar.gz "$vkh_sha256"
 tar -xzf "$work/vkh.tar.gz" -C "$work/src"
 
 # meson and ninja, as PyPI published them: ninja's wheels for macOS, for Linux on x86_64
-# and arm64, with glibc (manylinux) and with musl (musllinux), and for x86_64 Windows.
+# and arm64, with glibc (manylinux) and with musl (musllinux), and for Windows on x86_64 and arm64.
 cat >"$work/tools.txt" <<'EOF'
 meson==1.11.2 --hash=sha256:7e4f6e83fec83e3eaac928e058b073c7557b282c35b6a2024cea143a39926a39
 ninja==1.13.2 --hash=sha256:fd82e26c0706ad4ab88e5fdd26f3fab0a987a90f810160f6c322e752c6af298b --hash=sha256:65a24341b5ac09fcadcc37082660be40a94174e51a937fabf6e2cae26225fa2c --hash=sha256:d775a5e43e9088f507a6250d57fcf5678eb31268c545feb5064ffeee33735622 --hash=sha256:1293f4078278b70d0ee4b6cc8f3a9e030656c9b2f59909970343c4fe76070118 --hash=sha256:915bd482c4be41c75120fd67a22e0bb3f0fbb3bbc5f95b89787deadd59e27ef2 --hash=sha256:0e083700470c02ca154a855ae6d692d03564f5064cae52e113896f9ccc078418 --hash=sha256:1db9852e528efa7702f5123969f86678663e46d57ff28ab13f5fd84d64a85fb1
@@ -125,7 +128,7 @@ Linux-*)
 PyYAML==6.0.3 --hash=sha256:b8bb0864c5a28024fac8a632c443c87c5aa6f215c0b126c449ae1a150412f31d --hash=sha256:10892704fc220243f5305762e276552a0395f7beb4dbf9b14ec8fd43b57f126c --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc --hash=sha256:9149cad251584d5fb4981be1ecde53a1ca46c891a79788c0df828d2f166bda28 --hash=sha256:0f29edc409a6392443abf94b9cf89ce99889a1dd5376d94316ae5145dfedd5d6 --hash=sha256:ee2922902c45ae8ccada2c5b501ab86c36525b883eff4255313a253a3160861c --hash=sha256:c458b6d084f9b935061bc36216e8a69a7e293a2f1e68bf956dcd9e6cbcd143f5 --hash=sha256:501a031947e3a9025ed4405a168e6ef5ae3126c59f90ce0cd6f2bfc477be31b7 --hash=sha256:5e0b74767e5f8c593e8c9b5912019159ed0533c70051e9cce3e8b6aa699fcd69 --hash=sha256:418cf3f2111bc80e0933b2cd8cd04f286338bb88bdc7bc8e6dd775ebde60b5e0 --hash=sha256:37503bfbfc9d2c40b344d06b2199cf0e96e97957ab1c1b546fd4f87e53e5d3e4 --hash=sha256:1d37d57ad971609cf3c53ba6a7e365e40660e3be0e5175fa9f2365a379d6095a --hash=sha256:41715c910c881bc081f1e8872880d3c650acf13dfa8214bad49ed4cede7c34ea --hash=sha256:8dc52c23056b9ddd46818a57b78404882310fb473d63f17b07d5c40421e47f8e --hash=sha256:eda16858a3cab07b80edaf74336ece1f986ba330fdb8ee0d6c0d68fe82bc96be --hash=sha256:f7057c9a337546edc7973c0d3ba84ddcdf0daa14533c2065749c9075001090e6 --hash=sha256:5190d403f121660ce8d1d2c1bb2ef1bd05b5f68533fc5c2ea899bd15f4399b35 --hash=sha256:7c6610def4f163542a622a73fb39f534f8c101d690126992300bf3207eab9764
 EOF
     ;;
-# pkg-config, which a Windows host has none of: pkgconf's wheel for x86_64 Windows, and
+# pkg-config, which a Windows host has none of: pkgconf's wheels for Windows on x86_64 and arm64, and
 # colorama's, which it requires there.
 Windows-*)
     cat >>"$work/tools.txt" <<'EOF'
@@ -275,9 +278,9 @@ else
     cp "$work/virgl/src/libvirglrenderer.a" "$prefix/lib/libepoxy.a" "$out/"
     libs=(libvirglrenderer.a librender_server.a libepoxy.a)
 fi
-# The small ABI bridge uses the pinned complete Vulkan structures, and only
-# calls the loader function pointers Rust supplies. It installs with the same
-# renderer libraries, not as another executable or device broker.
+# The identity bridge (D232): reads a selected GPU's identities through the pinned Vulkan
+# structures, calling only the loader's functions the VM process hands it; a library linked
+# beside the renderer's, no program of its own.
 mkdir "$work/selection-src"
 cp "$repo/resources/gpu/native-identity.c" "$work/selection-src/"
 vkh=$(native "$work/src/Vulkan-Headers-1.3.252/include")

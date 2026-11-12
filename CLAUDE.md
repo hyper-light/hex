@@ -341,22 +341,9 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   which Hex declares itself; std has no AF_UNIX socket or completion port on Windows, and a buffer the kernel
   writes after the call returns is beyond Rust's borrow rules. Rust can express none of them safely.
 
-- `vendor/shards/crates/api/src/client.rs` (Windows module): the borrowed guest connector
-  opens only a non-inheritable query/synchronize process handle (`OpenProcess`), verifies its creation time
-  (`GetProcessTimes`) and current exit state (`WaitForSingleObject` with zero timeout), then closes only
-  that observation handle (`CloseHandle`). These Windows calls are unsafe foreign functions; the handle
-  owns no VM lifecycle and has no termination or duplication rights (HEX-RT-17).
-
-- `vendor/shards/crates/api/src/physical/report/unix.rs`: the managed GPU report's private
-  pipe uses `fcntl` to retain its flags while making only its read end nonblocking, and `poll`
-  spends the caller's original absolute deadline. libc exposes these native descriptor calls as
-  unsafe; the fixed stack poll entry and the private descriptor remain owned for the whole call.
-- `vendor/shards/crates/api/src/physical/report/windows.rs`: the managed GPU report owns one
-  private named pipe/event and heap-stable `OVERLAPPED`/buffer cells through native completion.
-  `CreateNamedPipeW`, `CreateFileW`, `ReadFile`, `GetOverlappedResult`, `CancelIoEx`, event waits
-  and peer-PID queries are unsafe SDK calls. The existing managed watcher retains pending storage
-  after errors and observes its actual private completion event before release; that event grants
-  storage ownership only, never native-scope release. A failed completion wait retains uncertainty.
+Vendored Shards (`vendor/shards`, `vendor/shards-gpu`) is Shards' own code at one upstream revision, with
+no Hex change but shards-gpu's Windows arm64 packaging patch (`vendor/MANIFEST.toml`): its `unsafe` follows
+Shards' rules, not this list.
 
 ## 13. Lean code
 

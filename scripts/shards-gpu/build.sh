@@ -2,15 +2,18 @@
 # Rebuilds the `shards` binary a node's Shards GPU guests boot with (SHARDS_BIN), its GPU VM process carrying
 # the Venus renderer that renders them on the host's driver, from Hex's main alone (AC-T7.4.1):
 #   scripts/shards-gpu/build.sh OUT [FROM]
-# Upstream at vendor/MANIFEST.toml's [projects.shards-gpu] commit, each vendor/patches/shards-gpu change
-# applied in name order as scripts/vendor.py replays them (the physical-GPU filter, selector transport and
-# native identity bridge, and the managed launch, report and carried-identity changes the node's vendored API
-# speaks to), built as upstream's release builds Linux with glibc (.github/workflows/release.yml): upstream's
-# scripts/gpu-libs builds the renderer from its pinned sources, with the patched renderer filter and transport,
-# into OUT/gpu-libs, which SHARDS_GPU_LIBS names to `cargo build --release --locked -p shards`, with the Rust
-# toolchain upstream's rust-toolchain.toml names, for this host's <arch>-unknown-linux-gnu.
+# Upstream at vendor/MANIFEST.toml's [projects.shards-gpu] commit, which holds the physical-GPU filter,
+# selector transport, native identity bridge and the managed launch and report the node's vendored API speaks to
+# (D232, D233), each vendor/patches/shards-gpu change applied in name order as scripts/vendor.py replays them
+# (Windows on arm64's GPU VM process, which upstream holds), built as upstream's release builds Linux with glibc
+# (.github/workflows/release.yml): upstream's scripts/gpu-libs builds the renderer from its pinned sources, with
+# its renderer filter and transport, into OUT/gpu-libs, which SHARDS_GPU_LIBS names to
+# `cargo build --release --locked -p shards`, with the Rust toolchain upstream's rust-toolchain.toml names, for
+# this host's <arch>-unknown-linux-gnu.
 # FROM is a clone that has the commit, for when the repository no longer serves it.
-# Writes to OUT, which must be new or empty (gpu-libs uses its own scratch under ~/.cache/shards and removes it):
+# Writes to OUT, which must be new or empty. gpu-libs builds in a scratch of mktemp's, which it removes; TMPDIR puts it
+# under ~/.cache/hex/shards-gpu/tmp, since /tmp is a RAM disk every session shares on the Linux runners and a renderer
+# build fills it:
 # - src/: the patched source, a git repository whose HEAD is the pin and whose index holds the changes, each
 #   changed file checked byte for byte against vendor/shards-gpu (which `vendor.py check` proves);
 # - gpu-libs/: the renderer's static libraries; target/: cargo's build;
@@ -87,6 +90,11 @@ done
             exit 1
         }
     done
+
+# gpu-libs' scratch (mktemp -d), off /tmp: a RAM disk every session shares on the Linux runners (Hex's hazard rule:
+# big files under ~/.cache, never /tmp).
+export TMPDIR="${XDG_CACHE_HOME:-$HOME/.cache}/hex/shards-gpu/tmp"
+mkdir -p "$TMPDIR"
 
 channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$src/rust-toolchain.toml")
 if [ -z "$channel" ]; then

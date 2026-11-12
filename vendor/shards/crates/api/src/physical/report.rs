@@ -211,7 +211,7 @@ mod tests {
         (request, report)
     }
 
-    /// AC-T7.4.1: only the private writer's complete scoped frame transfers;
+    /// D232: only the private writer's complete scoped frame transfers;
     /// console framing is unrelated and a second consumer gets no second report.
     #[test]
     fn private_report_transfers_exactly_once_after_writer_eof() {
@@ -228,7 +228,7 @@ mod tests {
         receiver.finish().unwrap();
     }
 
-    /// AC-T7.4.1: an empty/malformed/oversized private stream is uncertainty,
+    /// D232: an empty/malformed/oversized private stream is uncertainty,
     /// and never a successful renderer observation or release receipt.
     #[test]
     fn private_report_refuses_missing_torn_and_over_bound_bytes() {
@@ -259,7 +259,7 @@ mod tests {
         taken
     }
 
-    /// AC-T7.4.1: take a complete frame whose read ends as the original deadline
+    /// D232: take a complete frame whose read ends as the original deadline
     /// passes; expect Pending, never the frame.
     #[test]
     fn private_report_frame_read_ending_at_the_deadline_is_pending() {
@@ -269,7 +269,7 @@ mod tests {
         ));
     }
 
-    /// AC-T7.4.1: take a valid frame whose parse ends as the original deadline
+    /// D232: take a valid frame whose parse ends as the original deadline
     /// passes; expect Pending, never the parsed report.
     #[test]
     fn private_report_parse_ending_at_the_deadline_is_pending() {
@@ -279,7 +279,7 @@ mod tests {
         ));
     }
 
-    /// AC-T7.4.1: take the same frame with neither recheck expired; expect the
+    /// D232: take the same frame with neither recheck expired; expect the
     /// report, so both Pending results above come from their recheck alone.
     #[test]
     fn private_report_neither_recheck_expired_transfers_the_frame() {
