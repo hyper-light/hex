@@ -162,7 +162,11 @@ impl<V: CapacityView + Send + 'static> Server<V> {
     /// A word from `peer` the keeper doesn't hear: anything from a peer its host doesn't authorize, or a hello naming
     /// another holder than the one `peer`'s certificate names. Answered closed as not authorized.
     fn refused(&self, peer: PeerId, msg: &ToKeeper) -> Option<ToHolder> {
-        let refused = self.holders.get(&peer).is_none() && self.holders.is_empty();
+        let refused = match (self.holders.get(&peer), msg) {
+            (None, _) => true,
+            (Some(name), ToKeeper::Hello { holder, .. }) => holder != name,
+            (Some(_), _) => false,
+        };
         refused.then(|| ToHolder::Closed {
             rejected: msg.fence(),
             why: Close::NotAuthorized,

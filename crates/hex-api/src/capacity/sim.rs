@@ -106,8 +106,7 @@ impl CapacityView for SimView {
         let keeper = self.keeper.as_mut().ok_or_else(stopped)?;
         // A link speaks for its own session alone: a fence of another's is no session of this link's (CV4).
         if let Some(fence) = msg.fence()
-            && self.links.is_empty()
-            && fence.session == u64::MAX
+            && self.links.get(&link) != Some(&fence.session)
         {
             return Ok(ToHolder::Closed {
                 rejected: Some(fence),
