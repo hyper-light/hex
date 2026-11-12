@@ -1,0 +1,197 @@
+//! The capacity view over QUIC, in process (joint plan step 13, CV9; AC-T7.4.1): a keeper served on its port of an
+//! endpoint enrolled with the simulator CA, and holders on endpoints of their own.
+
+use std::collections::VecDeque;
+use std::net::{Ipv4Addr, SocketAddr};
+use std::time::Instant;
+
+use hex_api::capacity::sim::SimView;
+use hex_api::capacity::{Amounts, Budget, Event, Holder, Out, ToHolder, ToKeeper, Why};
+use hyper_quic::rustls;
+
+use super::*;
+use crate::enroll::{self, sim::SimCa};
+use crate::{Config, Shape, tls};
+
+fn patience() -> Instant {
+    Instant::now() + hex_api::conformance::PATIENCE
+}
+
+fn loopback() -> SocketAddr {
+    SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
+}
+
+fn enrolled(ca: &SimCa, name: &str) -> tls::Credentials {
+    ca.admit(name, name.as_bytes());
+    enroll::enroll(ca, name, name.as_bytes().to_vec()).unwrap()
+}
+
+fn endpoint(ca: &SimCa, name: &str, listen: bool) -> Endpoint {
+    Endpoint::start(Config {
+        credentials: enrolled(ca, name),
+        bind: loopback(),
+        listen,
+        serves: if listen {
+            vec![CAPACITY_PORT]
+        } else {
+            Vec::new()
+        },
+        shape: Shape {
+            connections: 4,
+            lanes: 8,
+        },
+    })
+    .unwrap()
+}
+
+fn cpu(milli: u64) -> Amounts {
+    Amounts {
+        cpu_milli: milli,
+        ..Amounts::ZERO
+    }
+}
+
+/// Says `first` on `link`, and each answer to `holder`, until neither has more to say: hints that come between are
+/// heard too.
+fn talk(link: &mut Link, holder: &mut Holder, first: Vec<ToKeeper>) -> Vec<Event> {
+    let mut queue = VecDeque::from(first);
+    let mut events = Vec::new();
+    while let Some(msg) = queue.pop_front() {
+        link.say(&msg, Some(patience())).unwrap();
+        loop {
+            let answer = link.hear(Some(patience())).unwrap();
+            let hint = matches!(answer, ToHolder::Hint { .. });
+            let mut out = Out::default();
+            holder.hear(answer, &mut out);
+            queue.extend(out.send);
+            events.extend(out.events);
+            if !hint {
+                break;
+            }
+        }
+    }
+    events
+}
+
+fn join(link: &mut Link, holder: &mut Holder) {
+    let hello = holder.connect().unwrap();
+    let events = talk(link, holder, vec![hello]);
+    assert!(
+        matches!(events.as_slice(), [Event::Synced { agree: true, .. }]),
+        "{events:?}"
+    );
+}
+
+/// AC-T7.4.1, CV9 (and the plan's AES-256-GCM only): two holders on endpoints of their own reach a keeper served on
+/// its port over QUIC; one reserves 3 of the room's 4 CPUs and then half of one, the other asks one; the first's
+/// connection is dropped and the other asks again, then the first opens a new one and rejoins; expect the link to
+/// have negotiated TLS13_AES_256_GCM_SHA384, the grants, a hint to the other holder with the view, its ask refused
+/// for room both times (a dropped link releasing nothing), and the rejoin's sync agreeing with the keeper's books.
+#[test]
+fn holders_reserve_through_their_keeper_over_quic() {
+    let ca = SimCa::new().unwrap();
+    let node = endpoint(&ca, "keeper.capacity.test", true);
+    let budget = Budget {
+        holders: 2,
+        reservations: 8,
+        name_bytes: 64,
+    };
+    let server = Server::new(SimView::new(budget, cpu(4000)).unwrap());
+    let serving = {
+        let server = Arc::clone(&server);
+        let acceptor = node.acceptor(CAPACITY_PORT);
+        std::thread::spawn(move || server.serve(acceptor))
+    };
+
+    let a_end = endpoint(&ca, "kiln-a.capacity.test", false);
+    let a_peer = a_end
+        .dial("keeper.capacity.test", node.local_addr(), patience())
+        .unwrap();
+    let (suite, _) = a_end.negotiated(a_peer).unwrap().unwrap();
+    assert_eq!(suite, rustls::CipherSuite::TLS13_AES_256_GCM_SHA384);
+    let mut a_link = Link::open(&a_end, a_peer).unwrap();
+    let mut a = Holder::start("kiln-a".into(), 1, 8, &[]).unwrap();
+    join(&mut a_link, &mut a);
+    let (big, msg) = a.reserve(cpu(3000)).unwrap();
+    assert_eq!(
+        talk(&mut a_link, &mut a, vec![msg]),
+        vec![Event::Granted(big)]
+    );
+
+    let b_end = endpoint(&ca, "kiln-b.capacity.test", false);
+    let b_peer = b_end
+        .dial("keeper.capacity.test", node.local_addr(), patience())
+        .unwrap();
+    let mut b_link = Link::open(&b_end, b_peer).unwrap();
+    let mut b = Holder::start("kiln-b".into(), 1, 8, &[]).unwrap();
+    join(&mut b_link, &mut b);
+
+    let (half, msg) = a.reserve(cpu(500)).unwrap();
+    assert_eq!(
+        talk(&mut a_link, &mut a, vec![msg]),
+        vec![Event::Granted(half)]
+    );
+    let hint = b_link.hear(Some(patience())).unwrap();
+    assert!(matches!(hint, ToHolder::Hint { .. }), "{hint:?}");
+    let mut out = Out::default();
+    b.hear(hint, &mut out);
+    assert_eq!(b.view().map(|view| view.held), Some(cpu(3500)));
+
+    let (first, msg) = b.reserve(cpu(1000)).unwrap();
+    assert_eq!(
+        talk(&mut b_link, &mut b, vec![msg]),
+        vec![Event::Refused(first, Why::Room)]
+    );
+
+    drop(a_link);
+    let mut out = Out::default();
+    a.link_down(&mut out);
+    let (second, msg) = b.reserve(cpu(1000)).unwrap();
+    assert_eq!(
+        talk(&mut b_link, &mut b, vec![msg]),
+        vec![Event::Refused(second, Why::Room)]
+    );
+
+    let mut a_link = Link::open(&a_end, a_peer).unwrap();
+    join(&mut a_link, &mut a);
+    let books = server.view().lock().unwrap().held_by("kiln-a").unwrap();
+    assert_eq!(books, a.held().collect::<Vec<_>>());
+
+    drop((a_link, b_link, a_end, b_end, node));
+    assert!(matches!(serving.join().unwrap(), Refused::Ended));
+}
+
+/// AC-T7.4.1, CV9, CLAUDE.md §3: say bytes that aren't a capacity message on the keeper's port; expect the keeper
+/// to reset that connection as breaking the protocol, and to serve a new one.
+#[test]
+fn a_connection_that_breaks_the_protocol_is_reset() {
+    let ca = SimCa::new().unwrap();
+    let node = endpoint(&ca, "keeper-bad.capacity.test", true);
+    let budget = Budget {
+        holders: 1,
+        reservations: 8,
+        name_bytes: 64,
+    };
+    let server = Server::new(SimView::new(budget, cpu(4000)).unwrap());
+    {
+        let server = Arc::clone(&server);
+        let acceptor = node.acceptor(CAPACITY_PORT);
+        std::thread::spawn(move || server.serve(acceptor));
+    }
+    let end = endpoint(&ca, "kiln-bad.capacity.test", false);
+    let peer = end
+        .dial("keeper-bad.capacity.test", node.local_addr(), patience())
+        .unwrap();
+    let conn = end.open(peer, CAPACITY_PORT).unwrap();
+    conn.write_all(&[0, 0, 0, 3, b'{', b'{', b'{'], Some(patience()))
+        .unwrap();
+    let mut buf = [0u8; 16];
+    let read = conn.read(&mut buf, Some(patience()));
+    assert!(
+        read.is_err() || read.as_ref().is_ok_and(|n| *n == 0),
+        "{read:?}"
+    );
+    let mut link = Link::open(&end, peer).unwrap();
+    let mut holder = Holder::start("kiln-a".into(), 1, 8, &[]).unwrap();
+    join(&mut link, &mut holder);
+}
