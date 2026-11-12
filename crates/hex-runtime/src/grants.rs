@@ -75,6 +75,7 @@ pub fn program(image: &ShardsImage) -> Result<ImageNetwork, Refusal> {
         egress: Narrowing {
             egress: Keep::Only(Vec::new()),
             mcp: Keep::Only(Vec::new()),
+            destinations: Keep::Only(Vec::new()),
             dns: false,
         },
     })
