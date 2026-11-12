@@ -341,6 +341,36 @@ pub struct Budget {
     pub room: i64,
 }
 
+/// A fleet's memory against its budget (C5): what its VMs hold, the fastest growth of that on record in one window,
+/// and the budget, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pressure {
+    pub held: u64,
+    pub growth: u64,
+    pub budget: u64,
+}
+
+/// Why the last resort ends a VM (C5): what it holds past its own memory budget, its band, and its fleet's memory,
+/// which with the fastest growth on record passes the fleet's budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Excess {
+    pub held: u64,
+    pub budget: u64,
+    pub band: u8,
+    pub fleet: Pressure,
+}
+
+/// The last resort's verdict on a window (C5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resort<K> {
+    /// What the fleet's VMs hold, with the fastest growth on record in one window, is within its budget.
+    Held,
+    /// It isn't: end `vm`, which holds most past its own budget, lowest band first.
+    End { vm: K, why: Excess },
+    /// It isn't, and every VM holds within its own budget, so none may be ended: growth is no fact yet.
+    Within(Pressure),
+}
+
 /// The bounds that hold the rule on Linux (C4, C5): the fleet's parent's, and each of its VMs'. A weight means a
 /// share only among its cgroup's siblings, so the fleet's VMs sit alone under its parent, and the parent carries
 /// the fleet among the parent's own siblings.
@@ -884,41 +914,60 @@ impl<K: Ord + Copy> Node<K> {
     /// The last resort (C5): where what the fleet's VMs hold and the fastest growth on record in one window pass
     /// its budget, the VM holding most past its own budget, lowest band first; never one within its budget, so
     /// never one within its booking, nor one held at its budget as Linux's `memory.high` holds it.
-    pub fn last_resort(&self) -> Result<Option<K>, ChargeError> {
+    pub fn last_resort(&self) -> Result<Resort<K>, ChargeError> {
         let [_, budget, _] = self.budget;
         let held = self
             .vms
             .values()
             .map(|vm| vm.held)
             .fold(0u64, |total, [_, mem, _]| total.saturating_add(mem));
+        let fleet = Pressure {
+            held,
+            growth: self.growth,
+            budget,
+        };
         if held.saturating_add(self.growth) <= budget {
-            return Ok(None);
+            return Ok(Resort::Held);
         }
+        let budgets = self.budgets()?;
+        let excess = |id: &K, bytes: u64| {
+            self.vms.get(id).map(|vm| {
+                let [_, held, _] = vm.held;
+                Excess {
+                    held,
+                    budget: bytes,
+                    band: vm.band,
+                    fleet,
+                }
+            })
+        };
         #[cfg(test)]
         if planted(Mutant::EndLargestHolder) {
-            return Ok(self
-                .vms
-                .iter()
-                .max_by_key(|(_, vm)| {
+            let largest = budgets.iter().max_by_key(|(id, _)| {
+                self.vms.get(id).map_or(0, |vm| {
                     let [_, mem, _] = vm.held;
                     mem
                 })
-                .map(|(id, _)| *id));
+            });
+            return Ok(largest
+                .and_then(|(id, b)| excess(id, b.bytes).map(|why| Resort::End { vm: *id, why }))
+                .unwrap_or(Resort::Within(fleet)));
         }
-        let budgets = self.budgets()?;
-        Ok(budgets
+        let chosen = budgets
             .iter()
             .filter_map(|(id, budget)| {
                 let vm = self.vms.get(id)?;
                 let past = u64::try_from(budget.room.checked_neg()?).ok()?;
                 if past > 0 {
-                    Some((vm.band, std::cmp::Reverse(past), *id))
+                    Some((vm.band, std::cmp::Reverse(past), *id, budget.bytes))
                 } else {
                     None
                 }
             })
-            .min()
-            .map(|(_, _, id)| id))
+            .min();
+        Ok(chosen
+            .and_then(|(_, _, id, bytes)| excess(&id, bytes).map(|why| Resort::End { vm: id, why }))
+            .unwrap_or(Resort::Within(fleet)))
     }
 
     /// The fastest growth of what the fleet's VMs hold over one window, on this node's record.
@@ -964,6 +1013,29 @@ pub fn fleet_weight(budget_milli: u64, machine_milli: u64) -> Result<u16, Charge
     let weight =
         u16::try_from(scaled).map_err(|_| ChargeError::Overflow("a fleet's CPU weight"))?;
     Ok(weight.max(WEIGHT_MIN))
+}
+
+/// What the fleet may take of the machine's scale (C4) once every other child of the node's cgroup has its weight,
+/// `taken` their sum: the units left, at least [`WEIGHT_MIN`], and the CPU those units carry, in milli-CPU rounded
+/// down. Each other child weighs its booking rounded up ([`fleet_weight`]), so a fleet budgeted within that CPU and
+/// weighed by [`fleet_weight`] keeps the children's weights within the scale's top: under contention each child,
+/// given at least its weight's share of the machine, receives at least min(its need, its booking or budget).
+pub fn fleet_room(taken: u64, machine_milli: u64) -> Result<(u16, u64), ChargeError> {
+    if machine_milli == 0 {
+        return Err(ChargeError::Invalid {
+            what: "a machine's CPU",
+            why: "a machine with no CPU",
+        });
+    }
+    let left = u64::from(WEIGHT_MAX).saturating_sub(taken);
+    let carried = u128::from(machine_milli)
+        .checked_mul(u128::from(left))
+        .and_then(|n| n.checked_div(u128::from(WEIGHT_MAX)))
+        .and_then(|n| u64::try_from(n).ok())
+        .ok_or(ChargeError::Overflow("the CPU a fleet's units carry"))?;
+    let units = u16::try_from(left.max(u64::from(WEIGHT_MIN)))
+        .map_err(|_| ChargeError::Overflow("a fleet's units"))?;
+    Ok((units, carried))
 }
 
 /// Weighted water-filling (C4): `capacity` shared among `entries`, each `(weight, need)` with a weight of at least

@@ -1,6 +1,6 @@
 //! The node agent's charge learner (joint plan step 14, AC-T7.4.1; `docs/design/learned-charge.md`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use super::*;
 use hex_sim::charge::{SEEDABLE, WEIGHT_MAX};
@@ -47,6 +47,9 @@ struct Record {
     usage: RefCell<BTreeMap<PathBuf, Usage>>,
     files: RefCell<BTreeMap<PathBuf, BTreeMap<String, String>>>,
     writes: RefCell<Vec<(PathBuf, &'static str, String)>>,
+    /// Every cgroup killed, in order, and whether a kill is refused.
+    kills: RefCell<Vec<PathBuf>>,
+    refuse_kills: Cell<bool>,
 }
 
 impl Cgroups for Record {
@@ -89,6 +92,14 @@ impl Cgroups for Record {
             .get(dir)
             .and_then(|files| files.get(file))
             .cloned())
+    }
+
+    fn kill(&self, cgroup: &BoxCgroup) -> Result<(), Refusal> {
+        if self.refuse_kills.get() {
+            return Err(Refusal::Broken("cgroup.kill refused".into()));
+        }
+        self.kills.borrow_mut().push(cgroup.dir().to_path_buf());
+        Ok(())
     }
 }
 
@@ -171,7 +182,7 @@ fn w14_the_learner_places_each_vm_its_fleet_and_vm_by_path_and_weight() {
     let mut learner = Learner::new(&fleet(), machine()).unwrap();
     let start = Instant::now();
     learner
-        .window(&io, vms, shards, res(16_000, 64 * GIB), start)
+        .window(&io, vms, shards, &[], res(16_000, 64 * GIB), start)
         .unwrap();
     let vm = |id: &str, file: &'static str, value: &str| (fleet().join(id), file, value.to_owned());
     assert_eq!(
@@ -191,6 +202,7 @@ fn w14_the_learner_places_each_vm_its_fleet_and_vm_by_path_and_weight() {
             &io,
             running(&[("vm-1", 1), ("vm-2", 2)]),
             shards,
+            &[],
             res(16_000, 64 * GIB),
             start + WINDOW,
         )
@@ -217,7 +229,7 @@ fn w14_a_shards_guests_room_awaits_guest_room() {
         Ok(Some((class, whole())))
     };
     learner
-        .window(&io, vms, record, machine(), Instant::now())
+        .window(&io, vms, record, &[], machine(), Instant::now())
         .unwrap();
     let vm1 = BoxId::new("vm-1").unwrap();
     assert_eq!(learner.awaits(), vec![(&vm1, Upstream::GuestRoom)]);
@@ -239,7 +251,7 @@ fn w14_a_capacity_answer_carries_priors_use_and_holdings_most_past_first() {
         io.set(&dir, t * 10_000, GIB);
         let at = start + WINDOW * u32::try_from(t).unwrap();
         learner
-            .window(&io, running(&[("vm-1", 1)]), shards, machine(), at)
+            .window(&io, running(&[("vm-1", 1)]), shards, &[], machine(), at)
             .unwrap();
     }
     let learned = learner.learned(Class::Shards, &[cost()]).unwrap().unwrap();
@@ -265,12 +277,15 @@ fn w14_a_capacity_answer_carries_priors_use_and_holdings_most_past_first() {
         Ok(Some((Class::Shards, allocation)))
     };
     let later = start + WINDOW * 2_000;
-    learner.window(&io, both, record, machine(), later).unwrap();
+    learner
+        .window(&io, both, record, &[], machine(), later)
+        .unwrap();
     learner
         .window(
             &io,
             running(&[("vm-1", 1), ("vm-2", 2)]),
             record,
+            &[],
             machine(),
             later + WINDOW,
         )
@@ -291,6 +306,7 @@ fn w14_a_capacity_answer_carries_priors_use_and_holdings_most_past_first() {
             &io,
             running(&[("vm-1", 1)]),
             record,
+            &[],
             machine(),
             later + WINDOW * 2,
         )
@@ -305,6 +321,7 @@ fn w14_a_capacity_answer_carries_priors_use_and_holdings_most_past_first() {
             &io,
             running(&[("vm-1", 1)]),
             record,
+            &[],
             machine(),
             later + WINDOW * 3,
         )
@@ -312,15 +329,9 @@ fn w14_a_capacity_answer_carries_priors_use_and_holdings_most_past_first() {
     assert!(learner.learned(Class::Shards, &[cost()]).unwrap().is_some());
 }
 
-/// Joint plan step 14 (AC-T7.4.1), C4 in the node: every child of the node's cgroup on one scale (ROOT, 2026-11-12). Do
-/// run a window on a 32-CPU, 64 GiB machine whose node root holds a process box capped at 4 CPUs and 4 GiB, one with
-/// no cap, and under `.oci` a box capped at 2 CPUs, beside a fleet of one VM. Expect each box weighed by its booking
-/// (its caps until learned), the uncapped one booked nothing and so at the least weight, `.oci` by its boxes'
-/// bookings, the fleet's budget the machine less the boxes' bookings with its cap and weight and `.vm`'s following it,
-/// and the node root's children weighing the scale's top, past it by the least weight of the box booked nothing.
-#[test]
-fn w14_every_child_of_the_nodes_cgroup_weighs_on_one_scale() {
-    let io = Record::default();
+/// The node root of the one-scale tests: a process box capped at 4 CPUs and 4 GiB, one with no cap, and under `.oci` a
+/// box capped at 2 CPUs, each still at its owner's weight, beside a fleet of one VM; the VM's running list.
+fn boxes_beside_a_fleet(io: &Record) -> Vec<(BoxId, Scope, BoxCgroup)> {
     let gib4 = (4 * GIB).to_string();
     io.dir(
         &root().join("box-a"),
@@ -351,9 +362,122 @@ fn w14_every_child_of_the_nodes_cgroup_weighs_on_one_scale() {
     io.dir(&fleet(), &[]);
     let vms = running(&[("vm-1", 1)]);
     io.set(vms[0].2.dir(), 0, GIB);
+    vms
+}
+
+/// A cgroup's `cpu.max` in milli-CPU, as the learner wrote it.
+fn cap_of(io: &Record, dir: &Path) -> u64 {
+    let max = io.file(dir, "cpu.max").unwrap();
+    let parsed = CpuMax::parse(&max).unwrap();
+    parsed.quota_us.unwrap() * 1_000 / parsed.period_us
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C4 in the node: every child of the node's cgroup under contention gets at least
+/// min(its need, its booking) by the weights the learner wrote (ROOT, 2026-11-12). Do run a window on a 32-CPU machine
+/// whose node root holds a process box capped at 4 CPUs, one with no cap, and under `.oci` a box capped at 2 CPUs,
+/// beside a fleet of one VM; then share the machine among the root's children by the `cpu.weight`s written, as the
+/// kernel does (`charge::shares`, cgroup-v2.rst "Weights"), for every set of them asking the whole machine, the fleet
+/// no more than its `cpu.max`. Expect each asking box given at least its booking, `.oci` its box's, and the fleet its
+/// budget, its `cpu.max`.
+#[test]
+fn w14_a_box_under_contention_gets_its_booking_by_the_weights_written() {
+    let io = Record::default();
+    let vms = boxes_beside_a_fleet(&io);
+    let whole = machine().cpu_milli;
     let mut learner = Learner::new(&fleet(), machine()).unwrap();
     learner
-        .window(&io, vms, shards, machine(), Instant::now())
+        .window(&io, vms, shards, &[], machine(), Instant::now())
+        .unwrap();
+    let budget = cap_of(&io, &fleet());
+    let children = [
+        (root().join("box-a"), 4_000, whole),
+        (root().join("box-b"), 0, whole),
+        (root().join(".oci"), 2_000, whole),
+        (root().join(".vm"), budget, budget),
+    ];
+    let weight = |dir: &Path| io.file(dir, "cpu.weight").unwrap().parse::<u64>().unwrap();
+    for asking in 1u32..16 {
+        let asks = |k: usize| asking & (1 << k) != 0;
+        let entries: Vec<(u64, u64)> = children
+            .iter()
+            .enumerate()
+            .map(|(k, (dir, _, need))| (weight(dir), if asks(k) { *need } else { 0 }))
+            .collect();
+        let given = charge::shares(whole, &entries).unwrap();
+        for (k, ((dir, booking, need), got)) in children.iter().zip(&given).enumerate() {
+            if asks(k) {
+                assert!(
+                    *got >= (*booking).min(*need),
+                    "{} given {got} of its booking {booking} (asking {asking:04b}, weights {entries:?})",
+                    dir.display()
+                );
+            }
+        }
+    }
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C4 in the node: a reuse slot no box holds books nothing (ROOT, 2026-11-12). Do run a
+/// window on a 32-CPU machine whose `.oci` holds slot 7, idle with the 2-CPU, 2 GiB caps and the weight its last box
+/// left (a slot given back keeps them: `Cgroups::give_back` writes no bound), and slot 8 held by a box capped at 1 CPU,
+/// beside a fleet of one VM. Expect slot 8 weighed by its box's booking and `.oci` by it alone, slot 7 at the least
+/// weight, and the fleet's budget the CPU the units slot 8's box leaves carry.
+#[test]
+fn w14_an_idle_slot_books_nothing() {
+    let io = Record::default();
+    io.dir(&root().join(".oci"), &[("cpu.weight", "100")]);
+    io.dir(
+        &root().join(".oci").join(".7"),
+        &[
+            ("cpu.max", "200000 100000"),
+            ("memory.max", &(2 * GIB).to_string()),
+            ("cpu.weight", "625"),
+        ],
+    );
+    io.dir(
+        &root().join(".oci").join(".8"),
+        &[
+            ("cpu.max", "100000 100000"),
+            ("memory.max", &GIB.to_string()),
+            ("cpu.weight", "100"),
+        ],
+    );
+    io.dir(&root().join(".vm"), &[("cpu.weight", "100")]);
+    io.dir(&fleet(), &[]);
+    let vms = running(&[("vm-1", 1)]);
+    io.set(vms[0].2.dir(), 0, GIB);
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    learner
+        .window(&io, vms, shards, &[8], machine(), Instant::now())
+        .unwrap();
+    let weight = |dir: &Path| io.file(dir, "cpu.weight");
+    // Slot 8's box: ceil(10,000 x 1,000 / 32,000) = 313 units; the fleet the 9,687 left, 30,998.4 milli-CPU, floored.
+    assert_eq!(
+        weight(&root().join(".oci").join(".8")).as_deref(),
+        Some("313")
+    );
+    assert_eq!(weight(&root().join(".oci")).as_deref(), Some("313"));
+    assert_eq!(
+        weight(&root().join(".oci").join(".7")).as_deref(),
+        Some("1")
+    );
+    assert_eq!(cap_of(&io, &fleet()), 30_998);
+    assert_eq!(weight(&root().join(".vm")).as_deref(), Some("9687"));
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C4 in the node: every child of the node's cgroup on one scale (ROOT, 2026-11-12). Do
+/// run a window on a 32-CPU, 64 GiB machine whose node root holds a process box capped at 4 CPUs and 4 GiB, one with
+/// no cap, and under `.oci` a box capped at 2 CPUs, beside a fleet of one VM. Expect each box weighed by its booking
+/// (its caps until learned), the uncapped one booked nothing and so at the least weight, `.oci` by its boxes'
+/// weights together, the fleet the units the boxes leave (8,124 of 10,000), its budget the CPU they carry rounded down
+/// (25,996 milli-CPU, within the machine less the boxes' bookings) with its cap and weight and `.vm`'s following it,
+/// and the node root's children weighing the scale's top exactly.
+#[test]
+fn w14_every_child_of_the_nodes_cgroup_weighs_on_one_scale() {
+    let io = Record::default();
+    let vms = boxes_beside_a_fleet(&io);
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    learner
+        .window(&io, vms, shards, &[], machine(), Instant::now())
         .unwrap();
     let weight = |dir: &Path| io.file(dir, "cpu.weight");
     assert_eq!(weight(&root().join("box-a")).as_deref(), Some("1250"));
@@ -365,15 +489,203 @@ fn w14_every_child_of_the_nodes_cgroup_weighs_on_one_scale() {
     assert_eq!(weight(&root().join(".oci")).as_deref(), Some("625"));
     assert_eq!(
         io.file(&fleet(), "cpu.max").as_deref(),
-        Some("2600000 100000")
+        Some("2599600 100000")
     );
-    assert_eq!(weight(&fleet()).as_deref(), Some("8125"));
-    assert_eq!(weight(&root().join(".vm")).as_deref(), Some("8125"));
+    assert_eq!(weight(&fleet()).as_deref(), Some("8124"));
+    assert_eq!(weight(&root().join(".vm")).as_deref(), Some("8124"));
     let siblings: u64 = io
         .children(&root())
         .unwrap()
         .iter()
         .map(|dir| weight(dir).unwrap().parse::<u64>().unwrap())
         .sum();
-    assert_eq!(siblings, u64::from(WEIGHT_MAX) + 1);
+    assert_eq!(siblings, u64::from(WEIGHT_MAX));
+}
+
+/// Three Shards VMs of 16 CPUs and 8 GiB, each booked at 4 GiB of memory (their class's prior), in a fleet whose
+/// memory budget is 16 GiB, so each VM's budget is its booking and a third of the 4 GiB slack: what `running` lists.
+fn booked_at_four(_: &BoxId) -> Result<Option<(Class, Allocation)>, Refusal> {
+    Ok(Some((
+        Class::Shards,
+        whole().booked_at(res(16_000, 4 * GIB)),
+    )))
+}
+
+fn fleet_of_three() -> Vec<(BoxId, Scope, BoxCgroup)> {
+    running(&[("vm-1", 1), ("vm-2", 2), ("vm-3", 3)])
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C5's last resort in the node agent. Do run a window of three VMs, each booked at
+/// 4 GiB in a 16 GiB fleet, then one where they hold 6, 7 and 2 GiB, past the fleet's budget with the growth on
+/// record; then another with all still running; then one with vm-2 gone. Expect vm-2, the VM holding most past its own
+/// budget, its cgroup killed and the state `Ending` with why (its 7 GiB against its budget, the fleet's 15 GiB, 15 GiB
+/// of growth, its 16 GiB budget), the same why on the class's capacity answer and none on another class's; no second
+/// kill while vm-2 runs; and with it gone, vm-1 within its new budget and vm-3 within its own, nothing more killed and
+/// the state refused, typed: every VM within its budget.
+#[test]
+fn w14_the_last_resort_ends_the_vm_most_past_its_budget_and_no_other() {
+    let io = Record::default();
+    let fleet_budget = res(32_000, 16 * GIB);
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    let start = Instant::now();
+    let vms = fleet_of_three();
+    for (_, _, cgroup) in &vms {
+        io.set(cgroup.dir(), 0, 0);
+    }
+    learner
+        .window(&io, vms, booked_at_four, &[], fleet_budget, start)
+        .unwrap();
+    assert_eq!(learner.resort(), &Resort::Held);
+    for (id, held) in [("vm-1", 6 * GIB), ("vm-2", 7 * GIB), ("vm-3", 2 * GIB)] {
+        io.set(&fleet().join(id), 0, held);
+    }
+    learner
+        .window(
+            &io,
+            fleet_of_three(),
+            booked_at_four,
+            &[],
+            fleet_budget,
+            start + WINDOW,
+        )
+        .unwrap();
+    assert_eq!(*io.kills.borrow(), vec![fleet().join("vm-2")]);
+    let Resort::Ending { id, why, .. } = learner.resort() else {
+        panic!("not ending: {:?}", learner.resort());
+    };
+    assert_eq!(id.as_str(), "vm-2");
+    assert_eq!(why.held, 7 * GIB);
+    assert!(why.budget < why.held, "{why:?}");
+    assert_eq!(
+        why.fleet,
+        charge::Pressure {
+            held: 15 * GIB,
+            growth: 15 * GIB,
+            budget: 16 * GIB,
+        }
+    );
+    let why = *why;
+    let learned = learner.learned(Class::Shards, &[cost()]).unwrap().unwrap();
+    assert_eq!(
+        learned.ended,
+        vec![LearnedEnd {
+            id: BoxId::new("vm-2").unwrap(),
+            held: 7 * GIB,
+            budget: why.budget,
+            band: 0,
+            fleet_held: 15 * GIB,
+            fleet_growth: 15 * GIB,
+            fleet_budget: 16 * GIB,
+        }]
+    );
+    let other = learner.learned(Class::Firecracker, &[]).unwrap().unwrap();
+    assert!(other.ended.is_empty());
+    learner
+        .window(
+            &io,
+            fleet_of_three(),
+            booked_at_four,
+            &[],
+            fleet_budget,
+            start + WINDOW * 2,
+        )
+        .unwrap();
+    assert_eq!(io.kills.borrow().len(), 1, "one end is never two");
+    learner
+        .window(
+            &io,
+            running(&[("vm-1", 1), ("vm-3", 3)]),
+            booked_at_four,
+            &[],
+            fleet_budget,
+            start + WINDOW * 3,
+        )
+        .unwrap();
+    assert_eq!(io.kills.borrow().len(), 1, "never a VM within its budget");
+    assert!(
+        matches!(learner.resort(), Resort::Refused(Refusal::Exhausted { .. })),
+        "{:?}",
+        learner.resort()
+    );
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C5's last resort where the node can't act. Do run a window of three VMs booked at
+/// 4 GiB in a 16 GiB fleet, then one past its budget whose kill the cgroup refuses. Expect no end taken for done, and
+/// the state the kill's refusal, typed.
+#[test]
+fn w14_a_refused_end_is_kept_typed() {
+    let io = Record::default();
+    let fleet_budget = res(32_000, 16 * GIB);
+    let mut learner = Learner::new(&fleet(), machine()).unwrap();
+    let start = Instant::now();
+    for (_, _, cgroup) in &fleet_of_three() {
+        io.set(cgroup.dir(), 0, 0);
+    }
+    learner
+        .window(
+            &io,
+            fleet_of_three(),
+            booked_at_four,
+            &[],
+            fleet_budget,
+            start,
+        )
+        .unwrap();
+    for (id, held) in [("vm-1", 6 * GIB), ("vm-2", 7 * GIB), ("vm-3", 2 * GIB)] {
+        io.set(&fleet().join(id), 0, held);
+    }
+    io.refuse_kills.set(true);
+    learner
+        .window(
+            &io,
+            fleet_of_three(),
+            booked_at_four,
+            &[],
+            fleet_budget,
+            start + WINDOW,
+        )
+        .unwrap();
+    assert!(io.kills.borrow().is_empty());
+    assert_eq!(
+        learner.resort(),
+        &Resort::Refused(Refusal::Broken("cgroup.kill refused".into()))
+    );
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C5's record of why, bounded (CLAUDE.md §2). Do record three ends on a learner for a
+/// 20 milli-CPU machine, whose population is two VMs, the third of another class. Expect the class's capacity answer
+/// to carry its two latest ends, latest first, and the oldest forgotten once a third came.
+#[test]
+fn w14_the_last_resorts_ends_are_kept_to_the_machines_population() {
+    let mut learner = Learner::new(&fleet(), res(20, 64 * GIB)).unwrap();
+    let why = |held: u64| charge::Excess {
+        held,
+        budget: GIB,
+        band: 0,
+        fleet: charge::Pressure {
+            held: 4 * GIB,
+            growth: GIB,
+            budget: 4 * GIB,
+        },
+    };
+    for (n, class) in [
+        (1, Class::Shards),
+        (2, Class::Shards),
+        (3, Class::Firecracker),
+    ] {
+        let id = BoxId::new(&format!("vm-{n}")).unwrap();
+        learner.record_end(class, &id, why(n * GIB)).unwrap();
+    }
+    let ids = |class| -> Vec<String> {
+        learner
+            .learned(class, &[])
+            .unwrap()
+            .unwrap()
+            .ended
+            .iter()
+            .map(|end| end.id.as_str().to_owned())
+            .collect()
+    };
+    assert_eq!(ids(Class::Shards), ["vm-2"], "vm-1 forgotten past two");
+    assert_eq!(ids(Class::Firecracker), ["vm-3"]);
 }

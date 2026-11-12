@@ -2,20 +2,29 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::LazyLock;
-use std::time::Instant;
 
 use hex_core::lanes;
+use hex_core::patience::Patience;
 use hex_core::stream::{CONTROL_PORT, STDIO_PORT};
+use hex_testkit::waits::within;
 use hyper_quic::rustls;
 
 use super::*;
 use crate::enroll::sim::SimCa;
 
-/// How long a test waits for a fact over loopback before it fails rather than hang: a bound, the conformance
-/// suite's own patience on this host (`hex_api::conformance::PATIENCE`), never a wait the fact itself sets.
-fn patience() -> Instant {
-    Instant::now() + hex_api::conformance::PATIENCE
-}
+// Each wait over loopback is for its own fact, named for it. No census over QUIC has recorded one yet, so each
+// measures, for the fact alone, its answers recorded for the census that will seed it (hex-testkit's rule; Q7: QUIC's
+// waits are its own, never another transport's record).
+/// A dial's answer: its handshake, taken or refused, and the node's Welcome.
+static DIAL: Patience = Patience::measuring("test.hex_quic.dial");
+/// A connection a peer opened, taken at the node.
+static ACCEPT: Patience = Patience::measuring("test.hex_quic.accept");
+/// Bytes the peer wrote, its end, or its refusal of the port, come to the reader.
+static READ: Patience = Patience::measuring("test.hex_quic.read");
+/// Room for bytes or an end: the peer's grants.
+static ROOM: Patience = Patience::measuring("test.hex_quic.room");
+/// Room for a stopped reader's bytes: the grants its reader gives only once it reads again.
+static HELD_ROOM: Patience = Patience::measuring("test.hex_quic.held_room");
 
 fn loopback() -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
@@ -58,7 +67,7 @@ fn read_exactly(conn: &Conn, n: usize) -> Vec<u8> {
     let mut got = Vec::new();
     let mut buf = vec![0u8; n.max(1)];
     while got.len() < n {
-        let read = conn.read(&mut buf, Some(patience())).unwrap();
+        let read = within(&READ, |by| conn.read(&mut buf, by)).unwrap();
         assert_ne!(read, 0, "ended after {} of {n} bytes", got.len());
         got.extend_from_slice(&buf[..read]);
     }
@@ -73,12 +82,13 @@ fn hex_quic_10_both_ends_report_tls13_aes_256_gcm_sha384() {
     let ca = SimCa::new().unwrap();
     let node = node(&ca, "node-10.test");
     let client = client(enrolled(&ca, "client-10.test"));
-    let peer = client
-        .dial("node-10.test", node.local_addr(), patience())
-        .unwrap();
+    let peer = within(&DIAL, |by| {
+        client.dial("node-10.test", node.local_addr(), by)
+    })
+    .unwrap();
     let conn = client.open(peer, CONTROL_PORT).unwrap();
-    conn.write_all(b"ping", Some(patience())).unwrap();
-    let (from, accepted) = node.accept(CONTROL_PORT, Some(patience())).unwrap();
+    within(&ROOM, |by| conn.write_all(b"ping", by)).unwrap();
+    let (from, accepted) = within(&ACCEPT, |by| node.accept(CONTROL_PORT, by)).unwrap();
     assert_eq!(read_exactly(&accepted, 4), b"ping");
     assert_eq!(from, peer_id("client-10.test"));
     for (end, peer) in [(&client, peer), (&node, from)] {
@@ -106,16 +116,17 @@ fn hex_quic_11_a_reader_that_stops_holds_its_own_connection_alone() {
     let ca = SimCa::new().unwrap();
     let node = node(&ca, "node-11.test");
     let client = client(enrolled(&ca, "client-11.test"));
-    let peer = client
-        .dial("node-11.test", node.local_addr(), patience())
-        .unwrap();
+    let peer = within(&DIAL, |by| {
+        client.dial("node-11.test", node.local_addr(), by)
+    })
+    .unwrap();
     let slow = client.open(peer, STDIO_PORT).unwrap();
-    slow.write_all(b"s", Some(patience())).unwrap();
-    let (_, slow_there) = node.accept(STDIO_PORT, Some(patience())).unwrap();
+    within(&ROOM, |by| slow.write_all(b"s", by)).unwrap();
+    let (_, slow_there) = within(&ACCEPT, |by| node.accept(STDIO_PORT, by)).unwrap();
     assert_eq!(read_exactly(&slow_there, 1), b"s");
     let fast = client.open(peer, STDIO_PORT).unwrap();
-    fast.write_all(b"f", Some(patience())).unwrap();
-    let (_, fast_there) = node.accept(STDIO_PORT, Some(patience())).unwrap();
+    within(&ROOM, |by| fast.write_all(b"f", by)).unwrap();
+    let (_, fast_there) = within(&ACCEPT, |by| node.accept(STDIO_PORT, by)).unwrap();
     assert_eq!(read_exactly(&fast_there, 1), b"f");
     // The node writes far past the connection's credit (two frames) to the connection the client doesn't read, on a
     // thread of its own, which waits for the client's grants.
@@ -124,27 +135,27 @@ fn hex_quic_11_a_reader_that_stops_holds_its_own_connection_alone() {
     let writer = {
         let expected = pattern.clone();
         std::thread::spawn(move || {
-            slow_there.write_all(&expected, Some(patience())).unwrap();
-            slow_there.end(Some(patience())).unwrap();
+            within(&HELD_ROOM, |by| slow_there.write_all(&expected, by)).unwrap();
+            within(&ROOM, |by| slow_there.end(by)).unwrap();
             slow_there
         })
     };
     // Meanwhile the other connection carries a round trip each way.
     for round in 0..8u8 {
-        fast_there.write_all(&[round], Some(patience())).unwrap();
+        within(&ROOM, |by| fast_there.write_all(&[round], by)).unwrap();
         assert_eq!(read_exactly(&fast, 1), [round]);
-        fast.write_all(&[round], Some(patience())).unwrap();
+        within(&ROOM, |by| fast.write_all(&[round], by)).unwrap();
         assert_eq!(read_exactly(&fast_there, 1), [round]);
     }
     // Now the stopped connection is read: every byte, in order, then its end.
     assert_eq!(read_exactly(&slow, total), pattern);
     let mut end = [0u8; 1];
-    assert_eq!(slow.read(&mut end, Some(patience())).unwrap(), 0);
+    assert_eq!(within(&READ, |by| slow.read(&mut end, by)).unwrap(), 0);
     drop(writer.join().unwrap());
-    slow.end(Some(patience())).unwrap();
-    fast.end(Some(patience())).unwrap();
-    fast_there.end(Some(patience())).unwrap();
-    assert_eq!(fast.read(&mut end, Some(patience())).unwrap(), 0);
+    within(&ROOM, |by| slow.end(by)).unwrap();
+    within(&ROOM, |by| fast.end(by)).unwrap();
+    within(&ROOM, |by| fast_there.end(by)).unwrap();
+    assert_eq!(within(&READ, |by| fast.read(&mut end, by)).unwrap(), 0);
 }
 
 /// HEX-QUIC-15 (Q3): a port the node doesn't serve is refused to its opener, typed, NoPort.
@@ -153,12 +164,13 @@ fn hex_quic_15_an_unserved_port_is_refused_by_type() {
     let ca = SimCa::new().unwrap();
     let node = node(&ca, "node-12.test");
     let client = client(enrolled(&ca, "client-12.test"));
-    let peer = client
-        .dial("node-12.test", node.local_addr(), patience())
-        .unwrap();
+    let peer = within(&DIAL, |by| {
+        client.dial("node-12.test", node.local_addr(), by)
+    })
+    .unwrap();
     let conn = client.open(peer, lanes::LOG_PORT).unwrap();
     let mut buf = [0u8; 1];
-    let err = conn.read(&mut buf, Some(patience())).unwrap_err();
+    let err = within(&READ, |by| conn.read(&mut buf, by)).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::ConnectionRefused, "{err}");
     assert_eq!(conn.gone(), Some(Why::NoPort));
 }
@@ -216,7 +228,7 @@ fn hex_quic_13_a_peer_limited_to_another_suite_is_refused_either_way() {
         let theirs = format!("their-node-{i}.test");
         let limited = under(other, &enrolled(&ca, &theirs), true, vec![CONTROL_PORT]);
         let ours = client(enrolled(&ca, &format!("our-client-{i}.test")));
-        let dialed = ours.dial(&theirs, limited.local_addr(), patience());
+        let dialed = within(&DIAL, |by| ours.dial(&theirs, limited.local_addr(), by));
         assert!(
             dialed.is_err(),
             "a node limited to {:?} took us",
@@ -230,7 +242,7 @@ fn hex_quic_13_a_peer_limited_to_another_suite_is_refused_either_way() {
             false,
             Vec::new(),
         );
-        let dialed = theirs.dial(&ours, node.local_addr(), patience());
+        let dialed = within(&DIAL, |by| theirs.dial(&ours, node.local_addr(), by));
         assert!(
             dialed.is_err(),
             "our node took a client limited to {:?}",
@@ -251,13 +263,15 @@ fn hex_quic_14_an_unenrolled_peer_is_refused_identity() {
     // It trusts kiln's CA, so it verifies the node: what fails is the node's verification of it.
     stranger.roots = vec![ca.root()];
     let stranger = client(stranger);
-    let refused = stranger
-        .dial("node-14.test", node.local_addr(), patience())
-        .unwrap_err();
+    let refused = within(&DIAL, |by| {
+        stranger.dial("node-14.test", node.local_addr(), by)
+    })
+    .unwrap_err();
     assert_eq!(refused, Refused::Identity, "{refused}");
     let ours = client(enrolled(&ca, "client-14.test"));
-    let refused = ours
-        .dial("someone-else-14.test", node.local_addr(), patience())
-        .unwrap_err();
+    let refused = within(&DIAL, |by| {
+        ours.dial("someone-else-14.test", node.local_addr(), by)
+    })
+    .unwrap_err();
     assert_eq!(refused, Refused::Identity, "{refused}");
 }

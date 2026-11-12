@@ -775,8 +775,8 @@ impl Store {
     }
 
     /// The host's boot session this store stamps every record it writes with ([`host_boot`]); `None` where it can't
-    /// be read. Read for the Linux node's Firecracker backend alone (`Node::boot_session`).
-    #[cfg(target_os = "linux")]
+    /// be read. Every node's VM backends judge a record's boot by it: the Linux node's (`Node::boot_session`), and the
+    /// guest's image class on every OS (`Recorded::bind_guest_books`).
     pub(crate) fn boot(&self) -> Option<&BootSession> {
         self.boot.as_ref()
     }

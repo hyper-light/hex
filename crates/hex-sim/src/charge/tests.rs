@@ -31,6 +31,14 @@ fn node(budget: Amounts) -> Node<u32> {
     .unwrap()
 }
 
+/// The VM the last resort ends, if any.
+fn ended(n: &Node<u32>) -> Option<u32> {
+    match n.last_resort().unwrap() {
+        Resort::End { vm, .. } => Some(vm),
+        Resort::Held | Resort::Within(_) => None,
+    }
+}
+
 /// One window's reading: `cpu_milli` of the window's CPU, `mem` held at most.
 fn sample(cpu_milli: u64, mem: u64) -> Sample {
     Sample {
@@ -358,8 +366,9 @@ fn w14_budgets_sum_to_the_fleet_budget_and_cover_every_booking() {
 /// Joint plan step 14 (AC-T7.4.1), C5's last resort: do book VMs at 2 GiB (band 1), 2 and 3 GiB (band 0) of a 10 GiB
 /// budget and let the first hold 8 GiB and the second 3, each past its budget (its booking and its share of the
 /// slack), the third within its; expect the band-0 VM past its budget ended first, then the band-1 one while the
-/// rest still pass the fleet's budget, then none, and never the VM within its budget. With every VM within its
-/// budget but the growth on record past the fleet's, expect none: growth is no fact yet.
+/// rest still pass the fleet's budget, then none, and never the VM within its budget; the first end's why its own
+/// memory against its budget, its band and the fleet's. With every VM within its budget but the growth on record past
+/// the fleet's, expect none, said as within: growth is no fact yet.
 #[test]
 fn w14_the_last_resort_ends_only_a_vm_past_its_budget() {
     let mut n = node(res(16_000, 10 * GIB, 0));
@@ -370,11 +379,34 @@ fn w14_the_last_resort_ends_only_a_vm_past_its_budget() {
     for (id, held) in [(1, 8 * GIB), (2, 3 * GIB), (3, 3 * GIB)] {
         n.observe(id, &sample(0, held)).unwrap();
     }
-    assert_eq!(n.last_resort().unwrap(), Some(2));
+    let budget = n
+        .budgets()
+        .unwrap()
+        .into_iter()
+        .find(|(id, _)| *id == 2)
+        .unwrap()
+        .1
+        .bytes;
+    assert_eq!(
+        n.last_resort().unwrap(),
+        Resort::End {
+            vm: 2,
+            why: Excess {
+                held: 3 * GIB,
+                budget,
+                band: 0,
+                fleet: Pressure {
+                    held: 14 * GIB,
+                    growth: 0,
+                    budget: 10 * GIB,
+                },
+            },
+        }
+    );
     n.end(&2).unwrap();
-    assert_eq!(n.last_resort().unwrap(), Some(1));
+    assert_eq!(ended(&n), Some(1));
     n.end(&1).unwrap();
-    assert_eq!(n.last_resort().unwrap(), None);
+    assert_eq!(n.last_resort().unwrap(), Resort::Held);
 
     let mut within = node(res(16_000, 10 * GIB, 0));
     for id in 1..=2 {
@@ -389,7 +421,14 @@ fn w14_the_last_resort_ends_only_a_vm_past_its_budget() {
     }
     window(&mut within, &[(1, 0, 5 * GIB), (2, 0, 5 * GIB)]);
     assert_eq!(within.growth(), 10 * GIB);
-    assert_eq!(within.last_resort().unwrap(), None);
+    assert_eq!(
+        within.last_resort().unwrap(),
+        Resort::Within(Pressure {
+            held: 10 * GIB,
+            growth: 10 * GIB,
+            budget: 10 * GIB,
+        })
+    );
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C5 as ROOT took it (2026-11-12): a VM `memory.high` holds within its budget is
@@ -411,9 +450,9 @@ fn w14_a_vm_held_within_its_budget_is_never_ended_for_growth_to_come() {
     let budgets = n.budgets().unwrap();
     assert_eq!(budgets[0].1.bytes, 4 * GIB);
     assert_eq!(budgets[0].1.room, i64::try_from(GIB).unwrap());
-    assert_eq!(n.last_resort().unwrap(), None);
+    assert!(matches!(n.last_resort().unwrap(), Resort::Within(_)));
     n.observe(1, &sample(0, 5 * GIB)).unwrap();
-    assert_eq!(n.last_resort().unwrap(), Some(1));
+    assert_eq!(ended(&n), Some(1));
 }
 
 /// Joint plan step 14 (AC-T7.4.1), C5's growth: do grow two VMs' memory by 1 and 2 GiB in one window and by 1 GiB
@@ -518,8 +557,8 @@ fn w14_ending_a_vm_within_its_booking_is_caught() {
     for (id, held) in [(1, 4 * GIB + 1), (2, 6 * GIB)] {
         n.observe(id, &sample(0, held)).unwrap();
     }
-    assert_eq!(n.last_resort().unwrap(), Some(1));
-    let mutated = with_mutant(Some(Mutant::EndLargestHolder), || n.last_resort().unwrap());
+    assert_eq!(ended(&n), Some(1));
+    let mutated = with_mutant(Some(Mutant::EndLargestHolder), || ended(&n));
     assert_eq!(mutated, Some(2));
 }
 
@@ -540,7 +579,47 @@ fn w14_a_fleet_weighs_its_cpu_budget_on_the_machines_scale() {
     ));
 }
 
+/// Joint plan step 14 (AC-T7.4.1), C4 across the node's cgroup: the fleet takes the units the other children leave.
+/// Do take units from 32-CPU machines; expect the units left and the CPU they carry rounded down, the least weight and
+/// no CPU once the others take the whole scale or more, and a machine with no CPU refused.
+#[test]
+fn w14_the_fleet_takes_the_units_the_boxes_leave() {
+    assert_eq!(fleet_room(0, 32_000), Ok((WEIGHT_MAX, 32_000)));
+    // A 4-CPU box (1,250), one booked nothing (1) and a 2-CPU OCI box (625): 8,124 units, 25,996.8 milli-CPU.
+    assert_eq!(fleet_room(1_876, 32_000), Ok((8_124, 25_996)));
+    assert_eq!(fleet_room(10_000, 32_000), Ok((WEIGHT_MIN, 0)));
+    assert_eq!(fleet_room(12_000, 32_000), Ok((WEIGHT_MIN, 0)));
+    assert!(matches!(fleet_room(0, 0), Err(ChargeError::Invalid { .. })));
+}
+
 proptest! {
+    /// Joint plan step 14 (AC-T7.4.1), C4 across the node's cgroup: do weigh up to eight boxes by any bookings, some
+    /// booked nothing, the fleet budgeted the CPU the units they leave carry (`fleet_room`), within the machine less
+    /// their bookings, give each any need and share the machine as the kernel does; expect the weights within the
+    /// scale's top and every box and the fleet given at least min(its need, its booking or budget).
+    #[test]
+    fn w14_the_fleet_in_the_units_left_keeps_every_childs_booking(
+        machine in 1_000u64..=1_024_000,
+        parts in proptest::collection::vec(0u64..=1_000, 1..=8),
+        needs in proptest::collection::vec(0u64..=1_024_000, 9),
+    ) {
+        // Each box books up to a sixteenth of the machine, so together they leave the fleet some of the scale.
+        let bookings: Vec<u64> = parts.iter().map(|p| machine / 16 * p / 1_000).collect();
+        let weights: Vec<u64> = bookings.iter().map(|b| u64::from(fleet_weight(*b, machine).unwrap())).collect();
+        let (rest, carried) = fleet_room(weights.iter().sum(), machine).unwrap();
+        let budget = (machine - bookings.iter().sum::<u64>()).min(carried);
+        let fleet = u64::from(fleet_weight(budget, machine).unwrap());
+        prop_assert!(fleet <= u64::from(rest));
+        prop_assert!(weights.iter().sum::<u64>() + fleet <= u64::from(WEIGHT_MAX));
+        let mut entries = vec![(fleet, needs[0].min(budget))];
+        entries.extend(weights.iter().zip(&needs[1..]).map(|(w, n)| (*w, *n)));
+        let given = shares(machine, &entries).unwrap();
+        prop_assert!(given[0] >= budget.min(needs[0]));
+        for ((booking, need), got) in bookings.iter().zip(&needs[1..]).zip(&given[1..]) {
+            prop_assert!(*got >= (*booking).min(*need), "{} for booking {}, need {}", got, booking, need);
+        }
+    }
+
     /// Joint plan step 14 (AC-T7.4.1), C4: do weigh two budgets against one machine; expect each weight never under
     /// its budget's share of the kernel's range and over it by less than one unit (or the least weight), and the
     /// larger budget never weighing less.

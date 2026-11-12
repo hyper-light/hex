@@ -51,6 +51,34 @@ fn a_measuring_wait_waits_for_its_fact_alone() {
     );
 }
 
+/// AC-T7.4.1. Do: wait through a call that takes its own deadline, with a measuring patience, and with a patience
+/// seeded from a record of a nanosecond for a call that answers only once its deadline has passed. Expect: the
+/// measuring call given no deadline and its answer recorded; the seeded call given its deadline, twice the record from
+/// its start, and no answer recorded (Karn's point), only the least the run-out proved, so its next deadline doubles.
+#[test]
+fn a_wait_that_takes_its_own_deadline_is_given_its_patience() {
+    let measured = Patience::measuring("test.testkit.within");
+    assert_eq!(within(&measured, |deadline| deadline), None);
+    assert!(measured.slowest().is_some(), "the answer was recorded");
+    let seeded = Patience::seeded("test.testkit.within_bounded", Duration::from_nanos(1));
+    let patience = seeded.deadline().unwrap();
+    let before = Instant::now();
+    let given = within(&seeded, |deadline| {
+        let at = deadline.unwrap();
+        while Instant::now() < at {
+            std::thread::yield_now();
+        }
+        at
+    });
+    assert!(given >= before + patience, "given {given:?}");
+    assert_eq!(
+        seeded.slowest(),
+        Some(patience),
+        "no answer recorded, only the least the run-out proved"
+    );
+    assert_eq!(seeded.deadline(), patience.checked_mul(2), "backed off");
+}
+
 /// The census's child: run only by [`the_census_records_a_tests_waits_and_disarms_none`], in a process of its own,
 /// with the census's variables set. It waits once on a measuring fact, and once on a fact that comes only at the
 /// millionth look with a patience of a nanosecond's record: refused at its bound, unless the census disarmed it.

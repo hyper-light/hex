@@ -2,6 +2,17 @@
 //! to callers that don't link Hex (decision 3 of docs/design/runtime-architecture.md):
 //!
 //!   hex node --socket <path> --state <dir> [--box-root <cgroup dir>]
+//!            [--quic <address> --credentials <dir> [--staged <dir>]]
+//!   hex node enroll --name <name> --credentials <dir>
+//!
+//! With `--quic` it serves the same seam over QUIC too (docs/design/hex-quic.md Q9): its listener binds `<address>`
+//! and presents the enrollment kept in `--credentials` (its key, made by `hex node enroll`, and kiln's CA's answer to
+//! the request that made: `chain.pem` and `roots.pem`, [`hex_quic::enroll::store`]), read whole before anything opens
+//! or binds, so one it can't serve with is refused, typed, with nothing bound; it says `quic <address bound>` on
+//! stdout before its `ready`. On Linux `--staged` names where it stages file trees over QUIC; a macOS or Windows node
+//! stages none, on any transport. Without `--quic` it binds no QUIC listener. `hex node enroll` begins an enrollment:
+//! a key made here, kept in `<dir>` for this user alone, and its request for kiln's CA, whose path it says as
+//! `request <path>`.
 //!
 //! On macOS (native plan step 8b) the node is the macOS runtime's `process` class with its boxes'
 //! records kept in `--state` ([`hex_node::recorded::Recorded`]), and, where a Shards guest is configured
@@ -57,7 +68,11 @@ pub fn main(args: &[String]) -> u8 {
         }
         _ => {}
     }
-    match serve(args) {
+    let ran = match args {
+        [verb, rest @ ..] if verb == "enroll" => enroll(rest),
+        _ => serve(args),
+    };
+    match ran {
         Ok(()) => 0,
         Err((status, why)) => {
             let _ = std::io::stderr()
@@ -68,10 +83,40 @@ pub fn main(args: &[String]) -> u8 {
     }
 }
 
+const ENROLL_USAGE: &str = "usage: hex node enroll --name <name> --credentials <dir>";
+
+/// `hex node enroll --name <name> --credentials <dir>`: begins `<name>`'s enrollment in `<dir>`
+/// ([`hex_quic::enroll::store::begin`]) and says `request <path>` on stdout, the request kiln's CA answers.
+fn enroll(args: &[String]) -> Result<(), (u8, String)> {
+    let (mut name, mut dir) = (None, None);
+    let mut rest = args.iter();
+    while let Some(flag) = rest.next() {
+        let slot = match flag.as_str() {
+            "--name" => &mut name,
+            "--credentials" => &mut dir,
+            other => return Err((2, format!("unknown argument {other:?}\n{ENROLL_USAGE}"))),
+        };
+        let value = rest
+            .next()
+            .ok_or_else(|| (2, format!("{flag} needs a value\n{ENROLL_USAGE}")))?;
+        if slot.replace(value.clone()).is_some() {
+            return Err((2, format!("{flag} is given twice\n{ENROLL_USAGE}")));
+        }
+    }
+    let name = name.ok_or_else(|| (2, format!("--name is needed\n{ENROLL_USAGE}")))?;
+    let dir = dir.ok_or_else(|| (2, format!("--credentials is needed\n{ENROLL_USAGE}")))?;
+    let request =
+        hex_quic::enroll::store::begin(Path::new(&dir), &name).map_err(|e| (1, e.to_string()))?;
+    let mut out = std::io::stdout().lock();
+    out.write_all(format!("request {}\n", request.display()).as_bytes())
+        .and_then(|()| out.flush())
+        .map_err(|e| (1, format!("saying the request's path: {e}")))
+}
+
 #[cfg(target_os = "linux")]
-const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--box-root <cgroup dir>] | hex node --descriptors [--state <dir>]";
+const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--box-root <cgroup dir>] [--quic <address> --credentials <dir> [--staged <dir>]] | hex node --descriptors [--state <dir>] | hex node enroll --name <name> --credentials <dir>";
 #[cfg(not(target_os = "linux"))]
-const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--box-root <cgroup dir>]";
+const USAGE: &str = "usage: hex node --socket <path> --state <dir> [--quic <address> --credentials <dir>] | hex node enroll --name <name> --credentials <dir>";
 
 /// `hex node --descriptors [--state <dir>]`: what a node of this process's owner, its state under `state` (`/` where
 /// none is named), running VM boxes where a backend is configured as `hex node` reads it, needs of its soft
@@ -105,16 +150,40 @@ struct Args {
     socket: PathBuf,
     state: PathBuf,
     box_root: Option<PathBuf>,
+    quic: Option<QuicArgs>,
     #[cfg(all(target_os = "linux", debug_assertions))]
     crash_at: Option<CrashPoint>,
 }
 
+/// The node's listener over QUIC, where `--quic` asks for one (docs/design/hex-quic.md Q9).
+struct QuicArgs {
+    /// The address it binds.
+    bind: std::net::SocketAddr,
+    /// The folder its enrollment is kept in ([`hex_quic::enroll::store`]).
+    credentials: PathBuf,
+    /// Where a Linux node stages file trees over QUIC.
+    staged: Option<PathBuf>,
+}
+
 fn parse(args: &[String]) -> Result<Args, String> {
     let (mut socket, mut state, mut box_root) = (None, None, None);
+    let (mut quic, mut credentials, mut staged) = (None, None, None);
     #[cfg(all(target_os = "linux", debug_assertions))]
     let mut crash_at = None;
     let mut rest = args.iter();
     while let Some(flag) = rest.next() {
+        if flag == "--quic" {
+            let value = rest
+                .next()
+                .ok_or_else(|| format!("{flag} needs a value\n{USAGE}"))?;
+            let bind = value.parse::<std::net::SocketAddr>().map_err(|e| {
+                format!("{flag} needs an address and port, not {value:?}: {e}\n{USAGE}")
+            })?;
+            if quic.replace(bind).is_some() {
+                return Err(format!("{flag} is given twice\n{USAGE}"));
+            }
+            continue;
+        }
         #[cfg(all(target_os = "linux", debug_assertions))]
         if flag == "--crash-at" {
             let name = rest
@@ -131,6 +200,8 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--socket" => &mut socket,
             "--state" => &mut state,
             "--box-root" => &mut box_root,
+            "--credentials" => &mut credentials,
+            "--staged" => &mut staged,
             other => return Err(format!("unknown argument {other:?}\n{USAGE}")),
         };
         let value = rest
@@ -140,10 +211,33 @@ fn parse(args: &[String]) -> Result<Args, String> {
             return Err(format!("{flag} is given twice\n{USAGE}"));
         }
     }
+    let quic = match (quic, credentials, staged) {
+        (None, None, None) => None,
+        (Some(_), None, _) => {
+            return Err(format!(
+                "--quic needs --credentials <dir>, the node's enrollment (`hex node enroll`)\n{USAGE}"
+            ));
+        }
+        (None, _, _) => return Err(format!("--credentials and --staged are --quic's\n{USAGE}")),
+        (Some(bind), Some(credentials), staged) => {
+            if staged.is_some() && !cfg!(target_os = "linux") {
+                return Err(format!(
+                    "--staged names where a Linux node stages file trees over QUIC; this node stages none, \
+                     on any transport\n{USAGE}"
+                ));
+            }
+            Some(QuicArgs {
+                bind,
+                credentials,
+                staged,
+            })
+        }
+    };
     Ok(Args {
         socket: socket.ok_or_else(|| format!("--socket is needed\n{USAGE}"))?,
         state: state.ok_or_else(|| format!("--state is needed\n{USAGE}"))?,
         box_root,
+        quic,
         #[cfg(all(target_os = "linux", debug_assertions))]
         crash_at,
     })
@@ -152,6 +246,22 @@ fn parse(args: &[String]) -> Result<Args, String> {
 fn serve(args: &[String]) -> Result<(), (u8, String)> {
     let mut args = parse(args).map_err(|why| (2, why))?;
     let failed = |e: Refusal| (1, e.to_string());
+    // The enrollment the QUIC listener presents is read whole before anything opens or binds: one it can't serve with
+    // is refused, typed, with nothing bound (docs/design/hex-quic.md Q9).
+    let credentials = args
+        .quic
+        .as_ref()
+        .map(|quic| {
+            hex_quic::enroll::store::load(&quic.credentials).map_err(|e| {
+                (
+                    1,
+                    format!(
+                        "{e} (enroll with `hex node enroll`, and keep kiln's CA's answer there)"
+                    ),
+                )
+            })
+        })
+        .transpose()?;
     // The waits census, where the probe asks for it (bench/competitive/probes/waits_census.md); nothing otherwise.
     hex_node::census::install_from_env().map_err(failed)?;
     // SIGTERM is read from a signalfd, blocked before the node starts a thread so every thread inherits the block;
@@ -173,10 +283,59 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
     let (ended, end) = std::sync::mpsc::channel();
     #[cfg(target_os = "linux")]
     end_on_sigterm(term, Arc::clone(&hosted.node), ended.clone()).map_err(failed)?;
-    let mut server =
-        Server::bind(&args.socket, hosted.host, hosted.limits, hosted.workers).map_err(failed)?;
+    match (args.quic.take(), credentials) {
+        (Some(quic), Some(credentials)) => {
+            let staging = quic.staged.is_some();
+            let endpoint = hex_quic::Endpoint::start(hex_quic::Config {
+                credentials,
+                bind: quic.bind,
+                listen: true,
+                serves: hex_node::quic::ports(staging),
+                shape: hex_node::quic::shape(&hosted.limits, staging),
+            })
+            .map_err(|e| {
+                (
+                    1,
+                    format!("starting the QUIC listener at {}: {e}", quic.bind),
+                )
+            })?;
+            let endpoint = Arc::new(endpoint);
+            let bound = endpoint.local_addr();
+            let os = hex_node::quic::Quic::new(
+                hex_node::serve::Native::bind(&args.socket).map_err(failed)?,
+                endpoint,
+                hex_node::quic::Bounds::of(&hosted.limits),
+                quic.staged,
+            )
+            .map_err(failed)?;
+            let server =
+                Server::with_os(os, hosted.host, hosted.limits, hosted.workers, &args.socket)
+                    .map_err(failed)?;
+            served(server, &args.socket, Some(bound), ended, &end)
+        }
+        _ => {
+            let server = Server::bind(&args.socket, hosted.host, hosted.limits, hosted.workers)
+                .map_err(failed)?;
+            served(server, &args.socket, None, ended, &end)
+        }
+    }
+}
+
+/// Says the node is ready, its QUIC listener's address first where it has one (`quic <address>`), then `ready <path>`,
+/// and serves until [`serve`]'s end comes: the server's own, or on Linux a SIGTERM's.
+fn served<O: hex_node::serve::Os + 'static>(
+    mut server: Server<O>,
+    socket: &Path,
+    quic: Option<std::net::SocketAddr>,
+    ended: std::sync::mpsc::Sender<(u8, String)>,
+    end: &std::sync::mpsc::Receiver<(u8, String)>,
+) -> Result<(), (u8, String)> {
     let mut out = std::io::stdout().lock();
-    out.write_all(format!("ready {}\n", args.socket.display()).as_bytes())
+    let said = match quic {
+        Some(at) => format!("quic {at}\nready {}\n", socket.display()),
+        None => format!("ready {}\n", socket.display()),
+    };
+    out.write_all(said.as_bytes())
         .and_then(|()| out.flush())
         .map_err(|e| (1, format!("saying it is ready: {e}")))?;
     drop(out);
@@ -815,6 +974,51 @@ mod tests {
             assert!(
                 why.starts_with("unknown argument \"--parked-procs\""),
                 "{value}: {why}"
+            );
+        }
+    }
+
+    /// HEX-QUIC-24 (docs/design/hex-quic.md Q9), as parsed: `--quic` asks for a listener only with the enrollment it
+    /// presents, and the enrollment's flags only with `--quic`; `--staged` is a Linux node's. Do: parse each half of the
+    /// pair, a bad address, both, and `--staged`. Expect: each half refused naming what it lacks, the address refused,
+    /// both taken, and `--staged` taken on Linux and refused elsewhere.
+    #[test]
+    fn hex_quic_24_quic_is_asked_with_its_enrollment_or_not_at_all() {
+        let why = parse(&args(&["--quic", "127.0.0.1:0"])).err().unwrap();
+        assert!(why.starts_with("--quic needs --credentials"), "{why}");
+        let why = parse(&args(&["--credentials", "/c"])).err().unwrap();
+        assert!(
+            why.starts_with("--credentials and --staged are --quic's"),
+            "{why}"
+        );
+        let why = parse(&args(&["--quic", "node:1", "--credentials", "/c"]))
+            .err()
+            .unwrap();
+        assert!(why.starts_with("--quic needs an address and port"), "{why}");
+        let both = parse(&args(&["--quic", "127.0.0.1:0", "--credentials", "/c"])).unwrap();
+        let quic = both.quic.unwrap();
+        assert_eq!(quic.bind, "127.0.0.1:0".parse().unwrap());
+        assert_eq!(quic.credentials, PathBuf::from("/c"));
+        assert!(parse(&args(&[])).unwrap().quic.is_none());
+        let staged = parse(&args(&[
+            "--quic",
+            "127.0.0.1:0",
+            "--credentials",
+            "/c",
+            "--staged",
+            "/s",
+        ]));
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                staged.unwrap().quic.unwrap().staged,
+                Some(PathBuf::from("/s"))
+            );
+        } else {
+            assert!(
+                staged
+                    .err()
+                    .unwrap()
+                    .starts_with("--staged names where a Linux node stages")
             );
         }
     }

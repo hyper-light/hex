@@ -347,8 +347,8 @@ impl Runtime for SimRuntime {
                     }
                     .fits(&SIM_EXEC_LIMIT)?
                 }
-                // Grants as the class holds them (joint plan step 15, HEX-IMG-7): publishes alone, the rest
-                // awaiting Shards' explicit grants, refused before anything is made.
+                // Grants as the class holds them (joint plan step 15, HEX-IMG-7): publishes alone, on a run of
+                // the members alone, the rest awaiting Shards, refused before anything is made.
                 for grant in &image.grants {
                     let needs = match grant {
                         Grant::Egress {
@@ -360,6 +360,9 @@ impl Runtime for SimRuntime {
                             ..
                         } => Upstream::MemberGrantsByAddress,
                         Grant::Host { .. } => Upstream::MemberHostService,
+                        Grant::Publish { .. } if image.command.is_some() => {
+                            Upstream::PublishReceiver
+                        }
                         Grant::Publish { .. } => continue,
                     };
                     return Err(Refusal::Awaits { needs });

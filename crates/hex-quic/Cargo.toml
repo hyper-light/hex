@@ -15,12 +15,19 @@ hex-client.workspace = true
 hex-core.workspace = true
 hyper-quic.workspace = true
 hyper-transport.workspace = true
+# A peer's enrollment kept in its folder, as PEM (src/enroll/store.rs).
+pem.workspace = true
 rcgen.workspace = true
 # The driver's wait on its socket and wake: poll(2), Winsock's WSAPoll (src/driver.rs); a client's descriptor bound.
 rustix.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 webpki.workspace = true
+
+[dev-dependencies]
+# The tests' waits on their own facts' records (src/tests.rs).
+hex-testkit.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

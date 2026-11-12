@@ -907,6 +907,25 @@ pub struct LearnedHolding {
     pub holding: CapacityResources,
 }
 
+/// Joint plan step 14 (C5): a microVM its node's last resort ended, and why. Its fleet's VMs held, with the fastest
+/// growth of what they hold on record in one window, more memory than the fleet's budget, and it held the most past
+/// its own budget, lowest band first: no VM within its budget is ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearnedEnd {
+    pub id: BoxId,
+    /// What it held, and its memory budget, in bytes.
+    pub held: u64,
+    pub budget: u64,
+    /// Its priority band: a lower one is ended first.
+    pub band: u8,
+    /// Its fleet's: what its VMs held, the fastest growth of that on record in one window, and its memory budget, in
+    /// bytes.
+    pub fleet_held: u64,
+    pub fleet_growth: u64,
+    pub fleet_budget: u64,
+}
+
 /// Joint plan step 14 (C2, C8): what a node learned of one class's microVMs, carried on its capacity answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -928,6 +947,14 @@ pub struct Learned {
         deserialize_with = "Learned::deserialize_holdings"
     )]
     pub holdings: Vec<LearnedHolding>,
+    /// The VMs of the class its last resort ended, and why (C5), latest first: as many as the answer has room for
+    /// once the holdings are in. Added after the holdings, so absent means none (append-only).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Learned::deserialize_ends"
+    )]
+    pub ended: Vec<LearnedEnd>,
 }
 
 impl Learned {
@@ -939,6 +966,17 @@ impl Learned {
             deserializer,
             MAX_LEARNED_PRIORS,
             "learned priors exceed a class's profiles",
+        )
+    }
+
+    /// At most [`MAX_LEARNED_HOLDINGS`]: a node ends no more VMs than it holds boxes before it forgets the oldest.
+    pub fn deserialize_ends<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<LearnedEnd>, D::Error> {
+        bounded_values(
+            deserializer,
+            MAX_LEARNED_HOLDINGS,
+            "learned ends exceed a node's boxes",
         )
     }
 
@@ -954,8 +992,14 @@ impl Learned {
     }
 
     /// At most [`MAX_LEARNED_PRIORS`] priors, each booking within its ceiling, no profile and ceiling twice; at most
-    /// [`MAX_LEARNED_HOLDINGS`] holdings, no box twice.
+    /// [`MAX_LEARNED_HOLDINGS`] holdings, no box twice; at most as many ends.
     pub fn check(&self) -> Result<(), Refusal> {
+        if self.ended.len() > MAX_LEARNED_HOLDINGS {
+            return Err(Refusal::Exhausted {
+                what: "learned ends",
+                bound: MAX_LEARNED_HOLDINGS,
+            });
+        }
         if self.holdings.len() > MAX_LEARNED_HOLDINGS {
             return Err(Refusal::Exhausted {
                 what: "learned holdings",
@@ -1006,10 +1050,24 @@ impl Learned {
                 holding: holding.holding,
             });
         }
+        let mut ended = Vec::new();
+        ended
+            .try_reserve_exact(self.ended.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "learned ends",
+                bound: self.ended.len(),
+            })?;
+        for end in &self.ended {
+            ended.push(LearnedEnd {
+                id: end.id.try_clone()?,
+                ..*end
+            });
+        }
         Ok(Self {
             priors: copy_capacity_values(&self.priors, "learned priors")?,
             used: self.used,
             holdings,
+            ended,
         })
     }
 }
@@ -1795,11 +1853,15 @@ pub enum Upstream {
     /// `POSIX_SPAWN_CLOEXEC_DEFAULT`, so it would inherit every descriptor another thread holds
     /// without close-on-exec at that moment (CVE-2024-21626's class).
     RunHostStdioOnly,
+    /// The member a published port reaches, named by Shards' image boot (D231): its `Bound` names none, and a run
+    /// with a command of its own gives that command every port its Agentfile gives no member (D122), so a publish
+    /// grant on such a run can't be held to the member it names (joint plan step 15).
+    PublishReceiver,
 }
 
 impl Upstream {
     /// Every capability, in the order the node's wire tags them.
-    pub const ALL: [Upstream; 11] = [
+    pub const ALL: [Upstream; 12] = [
         Upstream::GuestCpuTimePerVcpu,
         Upstream::MemberExec,
         Upstream::MemberGrantsByName,
@@ -1811,6 +1873,7 @@ impl Upstream {
         Upstream::MemberHostService,
         Upstream::GuestRoom,
         Upstream::RunHostStdioOnly,
+        Upstream::PublishReceiver,
     ];
 }
 
@@ -1833,6 +1896,9 @@ impl std::fmt::Display for Upstream {
             Self::GuestRoom => "a Shards guest told its room (init's ROOM, owed through D231)",
             Self::RunHostStdioOnly => {
                 "Shards' host of an image's run started holding only its stdio (owed by D231)"
+            }
+            Self::PublishReceiver => {
+                "Shards' image boot naming the member a published port reaches (owed by D231)"
             }
         })
     }

@@ -247,10 +247,10 @@ pub struct Published {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Receiver {
-    /// Whoever the image declares for the port: the member its Agentfile gives the port coming in (Shards D122), or,
-    /// where it gives the port to none and the run has a command of its own, that command (D122; D231's run host,
-    /// `ports_granted`). Shards 482c5d78's image boot names no receiver, so Hex can't verify it is the grant's member:
-    /// N6's gap, recorded here until Shards names it.
+    /// The member the image's Agentfile gives the port coming in (Shards D122). A publish is granted only on a run of
+    /// the members alone, which Shards' run host refuses a port no member is given; on a run with a command of its
+    /// own, which takes every such port, it is refused `Awaits(PublishReceiver)`. Shards 482c5d78's image boot names
+    /// no receiver, so Hex can't verify it is the grant's member: N6's gap, recorded here until Shards names it.
     Declared,
 }
 
