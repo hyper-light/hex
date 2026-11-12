@@ -418,6 +418,63 @@ mod tests {
         assert!(derive(envelope(), &census, 4).is_err());
     }
 
+    /// AC-T7.4.1 (ROOT, CPU per window; original red): two guests ready at once whose VMMs used 1 ms of CPU
+    /// before their first boundary: expect the CPU figure that millisecond over the node's control window
+    /// (no less than 50 ms: at most 20 milli-CPU), never over the boot's own microseconds.
+    #[test]
+    fn a_short_boot_does_not_set_the_cpu_figure_from_noise() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut driver = Scripted {
+            runtime: dir.path().to_owned(),
+            boots: vec![Some(sample(1, 64 << 20, 0, 400 << 20)); 2],
+            booted: 0,
+            torn_down: 0,
+            bounds: Vec::new(),
+        };
+        let census = census(&mut driver, 2, Duration::from_secs(1)).unwrap();
+        let (overhead, _) = derive(envelope(), &census, 2).unwrap();
+        assert!(overhead.cpu_milli <= 20, "{overhead:?}");
+    }
+
+    /// AC-T7.4.1 (ROOT, VMM memory; original red): a guest that touched 30 MiB of its 512 MiB, its VMM's
+    /// footprint 90 MiB: expect the VMM's own memory as the overhead, never nothing because the footprint
+    /// stayed under the envelope's.
+    #[test]
+    fn a_partial_touch_guest_still_shows_vmm_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut driver = Scripted {
+            runtime: dir.path().to_owned(),
+            boots: vec![Some(sample(1, 90 << 20, 0, 400 << 20)); 2],
+            booted: 0,
+            torn_down: 0,
+            bounds: Vec::new(),
+        };
+        let census = census(&mut driver, 2, Duration::from_secs(1)).unwrap();
+        let (overhead, _) = derive(envelope(), &census, 2).unwrap();
+        assert!(overhead.mem_bytes > 0, "{overhead:?}");
+    }
+
+    /// AC-T7.4.1 (ROOT, disk per VM; original red): the first guest's VMM writes the host's carried 2 MiB
+    /// binary into the cache, the second writes nothing, and neither holds a byte of its own: expect no disk
+    /// overhead, the cache being the host's.
+    #[test]
+    fn a_first_boot_cache_write_is_not_disk_overhead() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut driver = Scripted {
+            runtime: dir.path().to_owned(),
+            boots: vec![
+                Some(sample(1, 64 << 20, 2 << 20, 400 << 20)),
+                Some(sample(1, 64 << 20, 0, 400 << 20)),
+            ],
+            booted: 0,
+            torn_down: 0,
+            bounds: Vec::new(),
+        };
+        let census = census(&mut driver, 2, Duration::from_secs(1)).unwrap();
+        let (overhead, _) = derive(envelope(), &census, 2).unwrap();
+        assert_eq!(overhead.disk_bytes, 0, "{overhead:?}");
+    }
+
     /// AC-T7.4.1: a class whose guests run out as often as the census needs answers is refused, not
     /// waited on forever.
     #[test]
