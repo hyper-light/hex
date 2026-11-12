@@ -22,6 +22,13 @@
 //! always written whole — points at anything a host crash leaves behind to remove
 //! (docs/design/runtime-architecture.md, decision 1).
 //!
+//! On macOS and Windows the node has no tmpfs runtime directory: those records go to `@records` under its
+//! state directory, unsynced, every write of them to a temp file renamed into place. A crash of the node
+//! leaves the old record or the new one there too; a crash of the host can leave one torn, its rename on
+//! disk before its bytes. Whose box it named, and whether that box ended, recovery proves where it can and
+//! holds the record where it can't (`crate::recorded`). Only a record in the state directory that can't be
+//! read is never a crash's (every write there is whole and synced): damage the node won't start over.
+//!
 //! Changes of one box's record are made one at a time; changes of different boxes never wait on each
 //! other, so one box's fsync never holds up another box's create (goal 5 plan step 2). Nor do they wait on
 //! one directory's lock: the runtime directory's records are spread over [`SHARDS`] subdirectories by
@@ -34,12 +41,12 @@ use std::path::{Path, PathBuf};
 #[cfg(all(debug_assertions, target_os = "linux"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
+use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 use std::time::Duration;
 
 use hex_api::{BoxId, Refusal};
 use hex_core::patience::Patience;
-use hex_core::record::{BoxRecord, Phase};
+use hex_core::record::{BootSession, BoxRecord, Phase};
 
 use crate::turns::{Turn, Turns};
 
@@ -67,6 +74,69 @@ const SHARD_MASK: u64 = 0x3f;
 /// budget ([`hex_runtime::MAX_BOXES`]), so the changes of the boxes a node holds never reach it. Past it
 /// a change is refused by type ([`Refusal::Exhausted`]), never kept waiting (CLAUDE.md §2).
 pub const TURNS: usize = hex_runtime::MAX_BOXES;
+
+/// The records torn in the runtime place, each with why it couldn't be read ([`Store::take_torn`]).
+pub(crate) type Torn = Vec<(BoxId, String)>;
+
+/// The boot session marker's name in the state directory, and its write's temp ([`Store::take_boot_marker`]):
+/// `@` is in no box id, so neither is read as a box's record.
+const BOOT_MARKER: &str = "@boot";
+const BOOT_MARKER_TEMP: &str = ".@boot.tmp";
+
+/// The host's boot session as its kernel names it, read once a process, as no process outlives its boot:
+/// Linux's `/proc/sys/kernel/random/boot_id`, macOS's `kern.bootsessionuuid`. `Err` says why it couldn't
+/// be read. Windows' is not read yet: `None`, so its records keep recovery's other rules.
+pub(crate) fn host_boot() -> &'static Result<Option<BootSession>, String> {
+    static HOST_BOOT: OnceLock<Result<Option<BootSession>, String>> = OnceLock::new();
+    HOST_BOOT.get_or_init(read_host_boot)
+}
+
+#[cfg(target_os = "linux")]
+fn read_host_boot() -> Result<Option<BootSession>, String> {
+    let path = "/proc/sys/kernel/random/boot_id";
+    let text = fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+    BootSession::new(&text)
+        .map(Some)
+        .map_err(|e| format!("{path}: {e}"))
+}
+
+#[cfg(target_os = "macos")]
+fn read_host_boot() -> Result<Option<BootSession>, String> {
+    let out = std::process::Command::new("/usr/sbin/sysctl")
+        .args(["-n", "kern.bootsessionuuid"])
+        .output()
+        .map_err(|e| format!("running sysctl -n kern.bootsessionuuid: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("sysctl -n kern.bootsessionuuid: {}", out.status));
+    }
+    let text = std::str::from_utf8(&out.stdout)
+        .map_err(|e| format!("sysctl -n kern.bootsessionuuid: {e}"))?;
+    BootSession::new(text)
+        .map(Some)
+        .map_err(|e| format!("kern.bootsessionuuid: {e}"))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn read_host_boot() -> Result<Option<BootSession>, String> {
+    Ok(None)
+}
+
+/// `record` as this store writes it in this boot of the host: carrying its session ([`host_boot`]).
+#[cfg(test)]
+pub(crate) fn in_this_boot(record: BoxRecord) -> BoxRecord {
+    BoxRecord {
+        boot: host_boot().clone().ok().flatten(),
+        ..record
+    }
+}
+
+/// Flushes the state directory `dir` after the boot session marker's rename or removal, so it outlives a
+/// host crash; apart from the records' own counted flushes ([`Store::syncs`]).
+fn sync_marker_dir(dir: &Path) -> Result<(), Refusal> {
+    File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| Refusal::os("flushing the boot session marker's directory", e))
+}
 
 /// Box records, one file each, named `<id>.json`, in the place each belongs ([`Store`]).
 #[derive(Debug, Clone)]
@@ -96,6 +166,9 @@ pub struct Store {
     /// torn record ([`crate::Node::with_crash_point`]). Shared by clones, as every field is.
     #[cfg(all(debug_assertions, target_os = "linux"))]
     crash_before_write: Arc<AtomicBool>,
+    /// The host's boot session ([`host_boot`]), which every record it writes carries; `None` where it
+    /// can't be read, with why in [`Store::boot_unread`].
+    boot: Option<BootSession>,
 }
 
 #[derive(Debug, Default)]
@@ -165,6 +238,7 @@ impl Store {
             synced: Arc::default(),
             #[cfg(all(debug_assertions, target_os = "linux"))]
             crash_before_write: Arc::default(),
+            boot: host_boot().as_ref().ok().cloned().flatten(),
         };
         Ok(store)
     }
@@ -434,11 +508,20 @@ impl Store {
             return Err(uncertain(&record.spec.id));
         }
         let scope = fresh_scope()?;
-        self.write_encoded(record, record.encode_fresh_scope(scope)?, true)
+        self.write_encoded(
+            record,
+            record.encode_fresh_scope(scope, self.boot.as_ref())?,
+            true,
+        )
     }
 
+    /// Writes `record` in its place, carrying the host's boot session (T-T7.1.2).
     fn write(&self, record: &BoxRecord) -> Result<(), Refusal> {
-        self.write_encoded(record, record.encode()?, record.native_scope.is_some())
+        self.write_encoded(
+            record,
+            record.encode_in(self.boot.as_ref())?,
+            record.native_scope.is_some(),
+        )
     }
 
     fn write_encoded(
@@ -617,14 +700,13 @@ impl Store {
     }
 
     /// Takes the torn records out of `records`, a [`Store::retained_records`]: each unreadable one the
-    /// runtime directory holds, its first write cut short (above). Every other write is whole, and only an
-    /// unscoped record is kept there; whose box that makes it, the caller says. Each comes with why it
-    /// couldn't be read. The Linux node's recovery is its caller.
-    #[cfg(target_os = "linux")]
+    /// runtime place holds, a crash's (above): on Linux a first write cut short, elsewhere an unsynced write a
+    /// host crash cut. Only an unscoped record is kept there; whose box that makes it, the caller says. Each
+    /// comes with why it couldn't be read.
     pub(crate) fn take_torn(
         &self,
         records: &mut BTreeMap<BoxId, Result<BoxRecord, String>>,
-    ) -> Result<Vec<(BoxId, String)>, Refusal> {
+    ) -> Result<Torn, Refusal> {
         let mut torn = Vec::new();
         torn.try_reserve_exact(records.len())
             .map_err(|_| Refusal::Exhausted {
@@ -645,6 +727,106 @@ impl Store {
             records.remove(id);
         }
         Ok(torn)
+    }
+
+    /// Where box `id`'s record is kept in the runtime place, where [`Store::take_torn`] finds a torn one.
+    pub(crate) fn runtime_place(&self, id: &BoxId) -> PathBuf {
+        runtime_record(&self.run, id)
+    }
+
+    /// Refuses the node's start over a record in the state directory that can't be read, naming its file and
+    /// what to do (T-T7.1.2). Every write there is whole and synced, so no crash tore it: it is damage, and what
+    /// its box holds can't be known from it. `records` is past [`Store::take_torn`], so every unreadable one
+    /// left is the state directory's.
+    pub(crate) fn refuse_unreadable(
+        &self,
+        records: &BTreeMap<BoxId, Result<BoxRecord, String>>,
+    ) -> Result<(), Refusal> {
+        let mut unreadable = records
+            .iter()
+            .filter_map(|(id, record)| record.as_ref().err().map(|why| (id, why)));
+        let Some((id, why)) = unreadable.next() else {
+            return Ok(());
+        };
+        let mut said = format!(
+            "box {id}'s record {} can't be read ({why}). The state directory's records are written whole \
+             and synced, so this is damage, not a crash, and what the box holds can't be known from it: \
+             restore the file, or end what remains of box {id} and move the file aside; the node starts \
+             once every record reads",
+            record_file(&self.disk, id).display()
+        );
+        let more = unreadable.count();
+        if more > 0 {
+            said.push_str(&format!(" ({more} more can't be read)"));
+        }
+        Err(Refusal::Broken(said))
+    }
+
+    /// Whether `record` was written in an earlier boot of the host than this one, whose end ended every
+    /// process of it (T-T7.1.2). Not where either session is unknown: an older node's record, or a host
+    /// whose session can't be read.
+    pub(crate) fn earlier_boot(&self, record: &BoxRecord) -> bool {
+        self.before_this_boot(record.boot.as_ref())
+    }
+
+    /// Whether boot session `then` is an earlier one than this boot's: not where either is unknown.
+    pub(crate) fn before_this_boot(&self, then: Option<&BootSession>) -> bool {
+        matches!((&self.boot, then), (Some(now), Some(then)) if now != then)
+    }
+
+    /// Why the host's boot session couldn't be read, where it couldn't: records then carry none, and keep
+    /// recovery's other rules.
+    pub(crate) fn boot_unread(&self) -> Option<&str> {
+        host_boot().as_ref().err().map(String::as_str)
+    }
+
+    /// The boot session the runtime place's records were written in before this node, as the marker says
+    /// that its node keeps beside them: then this boot's, written durably before this node writes any record
+    /// (T-T7.1.2). A torn record's own session can't be read, so a node over a place whose writes a host
+    /// crash can tear (`crate::recorded`) takes this once, as it opens, to know one from an earlier boot.
+    /// `None` with no marker, or an unreadable one, as an older node leaves. Where this boot's session is
+    /// unknown the marker goes, so no later node takes a record of this boot for an earlier one's.
+    pub(crate) fn take_boot_marker(&self) -> Result<Option<BootSession>, Refusal> {
+        let path = self.disk.join(BOOT_MARKER);
+        let was = match fs::read(&path) {
+            Ok(bytes) if bytes.len() <= BootSession::MAX_BYTES + 1 => std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|text| BootSession::new(text).ok()),
+            Ok(_) => None,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(Refusal::os("reading the boot session marker", e)),
+        };
+        match &self.boot {
+            Some(now) if was.as_ref() == Some(now) => {}
+            Some(now) => {
+                let temporary = self.disk.join(BOOT_MARKER_TEMP);
+                let mut bytes = Vec::new();
+                bytes
+                    .try_reserve_exact(now.as_str().len().saturating_add(1))
+                    .map_err(|_| Refusal::Exhausted {
+                        what: "boot session marker bytes",
+                        bound: BootSession::MAX_BYTES,
+                    })?;
+                bytes.extend_from_slice(now.as_str().as_bytes());
+                bytes.push(b'\n');
+                {
+                    let mut file = File::create(&temporary)
+                        .map_err(|e| Refusal::os("making the boot session marker", e))?;
+                    file.write_all(&bytes)
+                        .and_then(|()| file.sync_all())
+                        .map_err(|e| Refusal::os("writing the boot session marker", e))?;
+                }
+                fs::rename(&temporary, &path)
+                    .map_err(|e| Refusal::os("publishing the boot session marker", e))?;
+                sync_marker_dir(&self.disk)?;
+            }
+            None => match fs::remove_file(&path) {
+                Ok(()) => sync_marker_dir(&self.disk)?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Refusal::os("removing the boot session marker", e)),
+            },
+        }
+        Ok(was)
     }
 
     fn scan_records(
@@ -1030,11 +1212,17 @@ mod tests {
         replacement.spec.bounds.memory_max = Some(4096);
         for attempt in [&first, &replacement] {
             assert!(matches!(store.begin(attempt), Err(Refusal::Exists(_))));
-            assert_eq!(store.get(&first.spec.id).unwrap(), Some(Ok(first.clone())));
+            assert_eq!(
+                store.get(&first.spec.id).unwrap(),
+                Some(Ok(in_this_boot(first.clone())))
+            );
         }
         store.remove(&first.spec.id).unwrap();
         store.begin(&replacement).unwrap();
-        assert_eq!(store.get(&first.spec.id).unwrap(), Some(Ok(replacement)));
+        assert_eq!(
+            store.get(&first.spec.id).unwrap(),
+            Some(Ok(in_this_boot(replacement)))
+        );
     }
 
     /// AC-T7.4.1/T-T7.1.2: a delayed native create cannot erase cancellation, and cannot publish a
@@ -1138,7 +1326,10 @@ mod tests {
         assert_eq!(store.get(&BoxId::new("a").unwrap()).unwrap(), None);
         let r = record("a");
         store.put(&r).unwrap();
-        assert_eq!(store.get(&r.spec.id).unwrap(), Some(Ok(r.clone())));
+        assert_eq!(
+            store.get(&r.spec.id).unwrap(),
+            Some(Ok(in_this_boot(r.clone())))
+        );
         store.remove(&r.spec.id).unwrap();
         assert_eq!(store.get(&r.spec.id).unwrap(), None);
     }
@@ -1196,7 +1387,7 @@ mod tests {
         assert_eq!(store.syncs(), none, "a record on tmpfs alone is not synced");
         assert_eq!(
             store.get(&on_tmpfs_alone.spec.id).unwrap(),
-            Some(Ok(on_tmpfs_alone.clone())),
+            Some(Ok(in_this_boot(on_tmpfs_alone.clone()))),
             "it's written all the same"
         );
 
@@ -1287,7 +1478,10 @@ mod tests {
             drop(turn);
             second.join().unwrap().unwrap();
         });
-        assert_eq!(store.get(&held.spec.id).unwrap(), Some(Ok(held)));
+        assert_eq!(
+            store.get(&held.spec.id).unwrap(),
+            Some(Ok(in_this_boot(held)))
+        );
     }
 
     /// CLAUDE.md §2 and §3: with [`TURNS`] boxes' records being changed at once, a change of one more
@@ -1514,8 +1708,8 @@ mod tests {
 
     /// T-T7.1.2/AC-T7.4.1: do keep a record torn at its first write in the runtime directory, one
     /// unreadable in the state directory, which no write tears, and a whole one; expect only the torn one
-    /// taken, with why it couldn't be read, and the other two left for the whole-owner barrier.
-    #[cfg(target_os = "linux")]
+    /// taken, with why it couldn't be read, and the other two left for the whole-owner barrier, which refuses
+    /// the unreadable one naming its file.
     #[test]
     fn only_a_record_torn_in_the_runtime_directory_is_taken_as_torn() {
         let dir = tempfile::tempdir().unwrap();
@@ -1541,5 +1735,64 @@ mod tests {
         assert!(!records.contains_key(&torn));
         assert!(records.get(&unread).is_some_and(Result::is_err));
         assert!(records.get(&whole.spec.id).is_some_and(Result::is_ok));
+        let Err(Refusal::Broken(said)) = store.refuse_unreadable(&records) else {
+            panic!("the unreadable state record was let through");
+        };
+        let file = record_file(&dir.path().join("state"), &unread);
+        assert!(said.contains(&file.display().to_string()), "{said}");
+    }
+
+    /// T-T7.1.2: do read the host's boot session, write a record through the store, update it, and update
+    /// one an earlier boot wrote. Expect: the session read on Linux and macOS, and each record carrying it.
+    #[test]
+    fn t_t7_1_2_every_record_the_store_writes_carries_this_boot() {
+        let boot = host_boot().clone().unwrap();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert!(boot.is_some(), "the host's boot session wasn't read");
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let carried = record("carried");
+        store.put(&carried).unwrap();
+        let read = |id: &BoxId| store.get(id).unwrap().unwrap().unwrap();
+        assert_eq!(read(&carried.spec.id).boot, boot);
+        let bump = |r: &mut BoxRecord| {
+            r.abandoned += 1;
+            true
+        };
+        assert!(store.update(&carried.spec.id, bump).unwrap());
+        assert_eq!(read(&carried.spec.id).boot, boot);
+        let mut earlier = record("earlier");
+        earlier.boot = Some(BootSession::new("00000000-0000-0000-0000-000000000000").unwrap());
+        let path = runtime_record(&dir.path().join("run"), &earlier.spec.id);
+        fs::write(&path, earlier.encode().unwrap()).unwrap();
+        assert_eq!(read(&earlier.spec.id).boot, earlier.boot);
+        assert_eq!(store.earlier_boot(&read(&earlier.spec.id)), boot.is_some());
+        assert!(store.update(&earlier.spec.id, bump).unwrap());
+        assert_eq!(read(&earlier.spec.id).boot, boot);
+        assert!(!store.earlier_boot(&read(&earlier.spec.id)));
+    }
+
+    /// T-T7.1.2: do take the boot session marker with none there, again, and after a node of an earlier boot
+    /// left one. Expect: none, then this boot's, then that earlier boot's, and the marker naming this boot after
+    /// each.
+    #[test]
+    fn t_t7_1_2_the_boot_marker_names_the_last_boot_and_takes_this_one() {
+        let Ok(Some(now)) = host_boot().clone() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let marker = dir.path().join("state").join(BOOT_MARKER);
+        let this_boot = format!("{}\n", now.as_str());
+        assert_eq!(store.take_boot_marker().unwrap(), None);
+        assert_eq!(fs::read_to_string(&marker).unwrap(), this_boot);
+        assert_eq!(store.take_boot_marker().unwrap(), Some(now.clone()));
+        fs::write(&marker, "00000000-0000-0000-0000-000000000000\n").unwrap();
+        let earlier = store.take_boot_marker().unwrap().unwrap();
+        assert!(store.before_this_boot(Some(&earlier)));
+        assert!(!store.before_this_boot(Some(&now)));
+        assert!(!store.before_this_boot(None));
+        assert_eq!(fs::read_to_string(&marker).unwrap(), this_boot);
+        assert!(!dir.path().join("state").join(BOOT_MARKER_TEMP).exists());
     }
 }

@@ -398,19 +398,20 @@ fn serve(
     .map_err(frame::Failure::refusal)
 }
 
+/// Each record kept boxed: the two differ in size by more than the workspace's variant bound.
 enum Record {
-    Box(BoxRecord),
-    Pool(PoolRecord),
+    Box(Box<BoxRecord>),
+    Pool(Box<PoolRecord>),
 }
 impl Record {
     fn decode(launch: &protocol::Launch) -> Result<Self, Refusal> {
         let record = match launch.record_kind {
             protocol::RecordKind::Box => {
-                Self::Box(serde_json::from_slice(&launch.record).map_err(|_| {
-                    super::super::configuration("invalid canonical native Box record")
-                })?)
+                Self::Box(Box::new(serde_json::from_slice(&launch.record).map_err(
+                    |_| super::super::configuration("invalid canonical native Box record"),
+                )?))
             }
-            protocol::RecordKind::Pool => Self::Pool(PoolRecord::decode(&launch.record)?),
+            protocol::RecordKind::Pool => Self::Pool(Box::new(PoolRecord::decode(&launch.record)?)),
         };
         match record.as_ref() {
             NativeRecord::Box(record) => record.spec.check()?,

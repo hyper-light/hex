@@ -34,6 +34,15 @@ pub struct RecoverySummary {
     /// before its record (goal 5 extended, step 6). Linux's node's alone: no other OS's hands a box's
     /// cgroup on.
     pub slots_removed: Vec<u64>,
+    /// Boxes whose record was torn and whose end nothing proved, each with why: the record kept, so the
+    /// name is never reused and the box stays uncertain (T-T7.1.2).
+    pub held: Vec<(BoxId, String)>,
+    /// Why the guest couldn't say which boxes it holds, when it couldn't: none was proved an orphan, so
+    /// none was deleted, and a box no record names waits for the next recovery (T-T7.1.2).
+    pub orphans_unknown: Option<String>,
+    /// Why the host's boot session couldn't be read, when it couldn't: no record was known for an earlier
+    /// boot's, and each keeps recovery's other rules (T-T7.1.2).
+    pub boot_unknown: Option<String>,
 }
 
 /// Why a box was removed, for its summary.
@@ -64,7 +73,21 @@ pub(crate) fn why_text(why: &Why) -> String {
             "the node agent stopped while it started the box, in its startContainer hooks"
                 .to_owned()
         }
+        Why::EarlierBoot => {
+            "it was made in an earlier boot of the host, whose end ended everything that ran of it"
+                .to_owned()
+        }
     }
+}
+
+/// Why a torn record was held, for its summary: its file, why it couldn't be read, why nothing proved its
+/// box ended, and what to do (T-T7.1.2).
+fn held_text(path: &Path, why: &str, because: &str) -> String {
+    format!(
+        "its record {} couldn't be read ({why}) and {because}: kept, so its name isn't reused; once \
+         nothing of the box runs, move the file aside",
+        path.display()
+    )
 }
 
 /// What a node needs of its runtime to take its boxes back after a crash (T-T7.1.2).
@@ -256,6 +279,17 @@ pub trait Recover: Runtime {
         let _ = spec;
         Ok(())
     }
+    /// The boxes a live guest's node holds under names no readable record of `records` carries: orphans
+    /// (T-T7.1.2). A runtime with no guest has none.
+    fn orphans(&self, records: &hex_runtime::devices::Records) -> Result<Vec<BoxId>, Refusal> {
+        let _ = records;
+        Ok(Vec::new())
+    }
+    /// Deletes orphan `id` ([`Recover::orphans`]) through its guest. A runtime with no guest has none to
+    /// delete, so it refuses.
+    fn delete_orphan(&self, id: &BoxId) -> Result<(), Refusal> {
+        Err(uncertain(id))
+    }
     /// The core's loop, for connections of its own ([`Host::attach`]). By default it has none.
     fn attach(&self, lp: Arc<dyn Loop>) -> Result<(), Refusal> {
         let _ = lp;
@@ -295,6 +329,9 @@ struct Books {
     abandoned: Abandoned,
     /// Boxes a recovery took back, which inspect reports as adopted.
     adopted: Mutex<BTreeSet<BoxId>>,
+    /// The boot session the store's records were written in before this node opened it, as its marker said
+    /// ([`Store::take_boot_marker`]): what tells a torn record from an earlier boot (T-T7.1.2).
+    last_boot: Option<hex_core::record::BootSession>,
 }
 
 /// Concrete shared transaction; its caller keeps the same method/device Turn on stack.
@@ -1238,8 +1275,15 @@ fn native_metadata(
 }
 
 impl<R: Recover> Recorded<R> {
-    fn preflight_snapshot(&self) -> Result<hex_runtime::devices::Records, Refusal> {
-        let records = self.books.store.retained_records()?;
+    /// The retained records past the whole-owner barrier, and apart from them the torn ones
+    /// ([`Store::take_torn`]), which no barrier can check: [`Recorded::recover`] proves their boxes gone or
+    /// holds them. A record in the state directory that can't be read is refused, naming its file.
+    fn preflight_snapshot(
+        &self,
+    ) -> Result<(hex_runtime::devices::Records, crate::store::Torn), Refusal> {
+        let mut records = self.books.store.retained_records()?;
+        let torn = self.books.store.take_torn(&mut records)?;
+        self.books.store.refuse_unreadable(&records)?;
         let pools = self.books.store.all_pools()?;
         let catalog = self.runtime.device_catalog()?;
         preflight_records(&records, &pools, catalog.as_deref())?;
@@ -1273,7 +1317,7 @@ impl<R: Recover> Recorded<R> {
             self.runtime.preflight_pool(record)?;
         }
         self.runtime.preflight_retained(&records, &pools)?;
-        Ok(records)
+        Ok((records, torn))
     }
 
     /// Startup preflight over ALL retained owners, before backend preparation/recovery or serving
@@ -1620,10 +1664,13 @@ impl<R: Recover> Recorded<R> {
         state_dir: &Path,
         prober: Option<crate::facts::SharedProber>,
     ) -> Result<Self, Refusal> {
+        let store = Store::open(state_dir, &state_dir.join("@records"))?;
+        // Before this node writes any record: so every record written from here is known as this boot's.
+        let last_boot = store.take_boot_marker()?;
         Ok(Self {
             runtime,
             books: Arc::new(Books {
-                store: Store::open(state_dir, &state_dir.join("@records"))?,
+                store,
                 prober,
                 lifecycle: Turns::new(
                     "changing a recorded box's lifecycle",
@@ -1638,6 +1685,7 @@ impl<R: Recover> Recorded<R> {
                 ),
                 abandoned: Abandoned::default(),
                 adopted: Mutex::new(BTreeSet::new()),
+                last_boot,
             }),
         })
     }
@@ -1658,20 +1706,29 @@ impl<R: Recover> Recorded<R> {
     }
 
     pub fn recover(&self) -> Result<RecoverySummary, Refusal> {
-        let records = self.preflight_snapshot()?;
+        let (records, torn) = self.preflight_snapshot()?;
         self.runtime.initialize_native()?;
         // What a crash at a record write left: a temp file never renamed into place.
         self.books.store.remove_strays()?;
-        let mut summary = RecoverySummary::default();
+        let mut summary = RecoverySummary {
+            boot_unknown: self.books.store.boot_unread().map(str::to_owned),
+            ..RecoverySummary::default()
+        };
+        let torn = self.remove_torn_before_this_boot(torn, &mut summary)?;
+        self.recover_orphans(&records, torn, &mut summary)?;
         let mut seen: BTreeMap<BoxId, Seen> = BTreeMap::new();
         for (id, record) in &records {
             // Without a readable class/identity this owner cannot choose a cleanup backend.
             // Retain the row and its claims rather than run native host cleanup by guesswork.
-            record.as_ref().map_err(|_| uncertain(id))?;
+            let r = record.as_ref().map_err(|_| uncertain(id))?;
+            // T-T7.1.2: a box this node keeps the record of, written in an earlier boot of the host, ran
+            // nothing that outlived that boot. A backend that keeps its own records proves its own.
+            let earlier_boot =
+                !self.runtime.owns_records(&r.spec)? && self.books.store.earlier_boot(r);
             let alive = match record {
                 // Incomplete creates and durable deletes are removed, never adopted. Asking alive
                 // first would require a pending native create to look Ready before cleanup can run.
-                Ok(r) if r.phase == Phase::Ready => self.runtime.alive(&r.spec)?,
+                Ok(r) if r.phase == Phase::Ready && !earlier_boot => self.runtime.alive(&r.spec)?,
                 Ok(_) => None,
                 Err(_) => None,
             };
@@ -1687,6 +1744,7 @@ impl<R: Recover> Recorded<R> {
                     },
                     init_alive: alive,
                     start_interrupted: false,
+                    earlier_boot,
                 },
             );
         }
@@ -1719,7 +1777,11 @@ impl<R: Recover> Recorded<R> {
                         let r = record.ok_or_else(|| uncertain(&id))?;
                         self.runtime.runtime_for(&r.spec)?.delete(&id)?;
                     } else if let Some(r) = record {
-                        self.runtime.end_for(&r.spec, trace)?;
+                        // An earlier boot ended what ran of it: a process named by its record now may be
+                        // another's, never ended for it.
+                        if !matches!(why, Why::EarlierBoot) {
+                            self.runtime.end_for(&r.spec, trace)?;
+                        }
                         self.runtime.discard(&r.spec)?;
                         self.books.store.remove(&id)?;
                     } else {
@@ -1730,6 +1792,86 @@ impl<R: Recover> Recorded<R> {
             }
         }
         Ok(summary)
+    }
+
+    /// T-T7.1.2: the records torn in the runtime place ([`Store::take_torn`]) before this boot of the host, as
+    /// the boot session marker this node took as it opened says ([`Store::take_boot_marker`]): that boot's end
+    /// ended everything that ran of each, host or guest, and a torn record is kept only where nothing on disk
+    /// outlives a host crash, so each is removed, saying so. The rest are this boot's, returned.
+    fn remove_torn_before_this_boot(
+        &self,
+        torn: crate::store::Torn,
+        summary: &mut RecoverySummary,
+    ) -> Result<crate::store::Torn, Refusal> {
+        if !self
+            .books
+            .store
+            .before_this_boot(self.books.last_boot.as_ref())
+        {
+            return Ok(torn);
+        }
+        for (id, why) in torn {
+            let _turn = self.books.lifecycle.try_take_devices(&id, &[])?;
+            self.books.store.remove(&id)?;
+            let said = format!(
+                "its record couldn't be read ({why}) and was written before the host's latest boot: {}",
+                why_text(&Why::EarlierBoot)
+            );
+            summary.removed.push((id, said));
+        }
+        Ok(Vec::new())
+    }
+
+    /// T-T7.1.2: the boxes a live guest holds under names no readable record carries, and the records torn in
+    /// the runtime place ([`Store::take_torn`]), whose boxes no barrier can check. This node writes a box's
+    /// record before either side makes the box, and one name names one box across host and guest, so such a
+    /// box is an orphan only a torn create can have left, as Linux's node finds a cgroup no record names. Each
+    /// is deleted through the guest; a torn record whose name the guest held owns nothing then, and is removed
+    /// as unreadable, before its box, so a crash between leaves a box no record names, which the next recovery
+    /// deletes. Every other torn record is held: kept, so its name is never reused and its box stays
+    /// uncertain, as no host runtime here proves a box ended without its record, and a guest that can't answer
+    /// proves nothing gone. The node starts either way, saying which.
+    fn recover_orphans(
+        &self,
+        records: &hex_runtime::devices::Records,
+        torn: crate::store::Torn,
+        summary: &mut RecoverySummary,
+    ) -> Result<(), Refusal> {
+        let orphans = self.runtime.orphans(records);
+        if let Err(refused) = &orphans {
+            summary.orphans_unknown = Some(refused.to_string());
+        }
+        for (id, why) in &torn {
+            let path = self.books.store.runtime_place(id);
+            let held = match &orphans {
+                Ok(orphans) if orphans.contains(id) => {
+                    let _turn = self.books.lifecycle.try_take_devices(id, &[])?;
+                    self.books.store.remove(id)?;
+                    continue;
+                }
+                Ok(_) => held_text(
+                    &path,
+                    why,
+                    "no box of its guest's has its name, and no host box of it is proved ended",
+                ),
+                Err(refused) => held_text(
+                    &path,
+                    why,
+                    &format!("its guest couldn't say whether it holds the box ({refused})"),
+                ),
+            };
+            summary.held.push((id.try_clone()?, held));
+        }
+        for id in orphans.into_iter().flatten() {
+            let _turn = self.books.lifecycle.try_take_devices(&id, &[])?;
+            self.runtime.delete_orphan(&id)?;
+            let why = match torn.iter().find(|(torn, _)| *torn == id) {
+                Some((_, why)) => why_text(&Why::Unreadable(why.clone())),
+                None => "its guest held it and no record named it".to_owned(),
+            };
+            summary.removed.push((id, why));
+        }
+        Ok(())
     }
 
     fn counted(&self, info: BoxInfo) -> Result<BoxInfo, Refusal> {
@@ -2586,6 +2728,14 @@ impl<P: Recover> Recover for hex_runtime::guest::WithGuest<P> {
             },
             hex_runtime::guest::Side::Host => self.host().discard(spec),
         }
+    }
+
+    fn orphans(&self, records: &hex_runtime::devices::Records) -> Result<Vec<BoxId>, Refusal> {
+        self.guest().orphans(records)
+    }
+
+    fn delete_orphan(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.guest().delete_orphan(id)
     }
 
     /// Its guest's control connection, in the event form, joins the core's loop, and so does every guest's

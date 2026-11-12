@@ -118,7 +118,7 @@ fn exact_prepared_callback_is_read_only_and_scoped_with_a_retained_cpu_sibling()
     assert_eq!(store.read_pool(&row.key.pool).unwrap().unwrap(), row);
     assert_eq!(
         store.read_lifecycle(&sibling.spec.id).unwrap(),
-        Some(sibling)
+        Some(crate::store::in_this_boot(sibling))
     );
     assert_eq!(store.syncs(), syncs);
 }
@@ -380,7 +380,7 @@ fn cancelled_unallocated_ack_rechecks_native_metadata_and_fences_reused_generati
     assert_eq!(store.read_pool(&key.pool).unwrap().unwrap(), replacement);
     assert_eq!(
         store.read_lifecycle(&sibling.spec.id).unwrap(),
-        Some(sibling)
+        Some(crate::store::in_this_boot(sibling))
     );
     assert_eq!(store.syncs(), syncs);
 }
