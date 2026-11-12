@@ -1,0 +1,27 @@
+#!/bin/sh
+# zig as the C compiler for a target other than the host's, for checking the workspace from one host
+# (scripts/gates.sh): aws-lc-sys, under hyper-quic's TLS, compiles AWS-LC's C for each target, which a check
+# never links (Shards does the same, its scripts/zig-cc). cc-rs passes clang's --target with LLVM's triple,
+# which zig doesn't parse, so it is read here and zig is given its own: Linux's libc and ABI as named;
+# macOS; and for an MSVC target, zig's MinGW headers, enough to compile what a lint never links (a Windows
+# build compiles with MSVC's own, on Windows).
+target=
+for arg do
+	shift
+	case $arg in
+	--target=*) target=${arg#--target=}; continue ;;
+	esac
+	set -- "$@" "$arg"
+done
+# A build script's compiler inherits cargo's TARGET, Rust's triple, where cc-rs passes none.
+target=${target:-${TARGET:-}}
+arch=${target%%-*}
+case $arch in arm64) arch=aarch64 ;; esac
+case $target in
+*-linux-musl*) zig_target=$arch-linux-musl ;;
+*-linux-gnu*) zig_target=$arch-linux-gnu ;;
+*-apple-*) zig_target=$arch-macos ;;
+*-windows-*) zig_target=$arch-windows-gnu ;;
+*) echo "zig-cc: no zig target for '$target'" >&2; exit 2 ;;
+esac
+exec zig cc -target "$zig_target" "$@"
