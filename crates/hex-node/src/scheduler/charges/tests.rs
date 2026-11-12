@@ -82,6 +82,7 @@ fn w14_the_scheduler_takes_the_priors_its_nodes_learner_carries() {
         }],
         used: LearnedUse::default(),
         holdings: Vec::new(),
+        ended: Vec::new(),
     };
     let reports = vec![(Class::Shards, Some(capacity(Some(carried([14; 32])))))];
     let mut local = node();
@@ -137,6 +138,7 @@ fn w14_the_scheduler_books_each_vm_it_runs_at_its_holding() {
         priors: Vec::new(),
         used: LearnedUse::default(),
         holdings,
+        ended: Vec::new(),
     };
     let learned = vec![
         (
