@@ -81,6 +81,7 @@ fn fixture() -> (Capacity, NodeSpec, BackingKey) {
                 key: 7,
             }],
         }],
+        unavailable: Vec::new(),
     };
     report.check().unwrap();
     let mut node = NodeSpec::new(

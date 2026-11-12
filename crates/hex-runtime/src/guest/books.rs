@@ -606,6 +606,7 @@ mod tests {
                 routes: Vec::new(),
                 device_routes: Vec::new(),
                 backings: Vec::new(),
+                unavailable: Vec::new(),
             })
         }
         fn with_transaction(

@@ -813,6 +813,14 @@ pub struct Capacity {
         deserialize_with = "Capacity::deserialize_backings"
     )]
     pub backings: Vec<BackingOffer>,
+    /// Devices listed above that this runtime won't offer now, each with why (AC-T7.4.1): never free while listed
+    /// here. None from an older peer's report.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "Capacity::deserialize_unavailable"
+    )]
+    pub unavailable: Vec<crate::DeviceUnavailable>,
 }
 
 impl Capacity {
@@ -849,6 +857,17 @@ impl Capacity {
         )
     }
 
+    /// At most one per device, as each names a device listed in the same report.
+    pub fn deserialize_unavailable<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<crate::DeviceUnavailable>, D::Error> {
+        bounded_values(
+            deserializer,
+            crate::MAX_DEVICES,
+            "unavailable device count exceeds its address space",
+        )
+    }
+
     /// Copy an owned snapshot without unchecked allocation. Validation remains explicit: copying
     /// scalar facts cannot turn a malformed report into an initialized capability.
     pub fn try_clone(&self) -> Result<Self, Refusal> {
@@ -879,6 +898,16 @@ impl Capacity {
         for backing in &self.backings {
             backings.push(backing.try_clone()?);
         }
+        let mut unavailable = Vec::new();
+        unavailable
+            .try_reserve_exact(self.unavailable.len())
+            .map_err(|_| Refusal::Exhausted {
+                what: "runtime capacity unavailable devices",
+                bound: self.unavailable.len(),
+            })?;
+        for device in &self.unavailable {
+            unavailable.push(device.try_clone()?);
+        }
         Ok(Self {
             id,
             total: self.total,
@@ -891,6 +920,7 @@ impl Capacity {
                 "runtime capacity eligibility",
             )?,
             backings,
+            unavailable,
         })
     }
 
@@ -917,6 +947,23 @@ impl Capacity {
             }
         }
         crate::devices::check_ids(self.devices.iter().map(|device| device.id))?;
+        // Each unavailable device is one listed above, once, with its reason.
+        for (at, device) in self.unavailable.iter().enumerate() {
+            device.id.check()?;
+            if device.why.is_empty()
+                || !self.devices.iter().any(|listed| listed.id == device.id)
+                || self
+                    .unavailable
+                    .iter()
+                    .take(at)
+                    .any(|earlier| earlier.id == device.id)
+            {
+                return Err(Refusal::Invalid {
+                    what: "runtime capacity",
+                    why: "an unavailable device is unlisted, repeated or has no reason".to_owned(),
+                });
+            }
+        }
         self.check_routes()
     }
 }
@@ -1927,6 +1974,7 @@ mod route_tests {
             routes: Vec::new(),
             device_routes: Vec::new(),
             backings: Vec::new(),
+            unavailable: Vec::new(),
         }
     }
     /// AC-T7.4.1: original OCI form can identify a real Linux guest on Mac and alongside Windows HCS.
