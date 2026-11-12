@@ -1448,6 +1448,10 @@ pub struct BoxInfo {
     pub abandoned: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<RouteReceipt>,
+    /// The box's network grants as its record holds them (joint plan step 15; docs/design/network-grants.md N6):
+    /// a Shards image VM's, none for any other class. After `route`, so absent means none (append-only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<crate::Grant>,
 }
 
 fn is_zero(n: &u64) -> bool {

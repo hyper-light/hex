@@ -432,6 +432,65 @@ mod tests {
         assert_eq!(BoxRecord::decode(&r.encode().unwrap()).unwrap(), r);
     }
 
+    /// Joint plan step 15 (every grant visible in Hex's record of the VM): do write the record of a Shards image VM
+    /// granted a provider by name, kiln on its host and a publish, and read it back; expect every grant whole, in
+    /// the record's own text. Do read a record written before grants existed; expect none, and a record with none
+    /// written without the field.
+    #[test]
+    fn a_shards_image_vms_record_keeps_every_grant() {
+        use hex_api::{Destination, Grant, Member, MemberKind, Ports, Proto, ShardsImage};
+        let codex = Member {
+            kind: MemberKind::Harness,
+            name: "codex".to_owned(),
+        };
+        let tcp = |port| Ports {
+            proto: Proto::Tcp,
+            first: port,
+            last: port,
+        };
+        let grants = vec![
+            Grant::Egress {
+                member: codex.clone(),
+                to: Destination::Name("api.openai.com".to_owned()),
+                ports: tcp(443),
+            },
+            Grant::Host {
+                member: codex.clone(),
+                ports: tcp(7070),
+            },
+            Grant::Publish {
+                member: codex,
+                proto: Proto::Tcp,
+                port: 1455,
+                host: "127.0.0.1".parse().unwrap(),
+                host_port: None,
+            },
+        ];
+        let mut r = record();
+        r.spec.class = ClassSpec::ShardsImage(Box::new(ShardsImage {
+            grants: grants.clone(),
+            ..ShardsImage::new(hex_api::sim::SIM_IMAGE)
+        }));
+        let text = String::from_utf8(r.encode().unwrap()).unwrap();
+        for part in [
+            r#""to":{"name":"api.openai.com"}"#,
+            r#"{"host":{"member":{"kind":"harness","name":"codex"},"ports":{"proto":"tcp","first":7070,"last":7070}}}"#,
+            r#""port":1455,"host":"127.0.0.1""#,
+        ] {
+            assert!(text.contains(part), "{part} not in {text}");
+        }
+        let read = BoxRecord::decode(text.as_bytes()).unwrap();
+        assert_eq!(read, r);
+        let ClassSpec::ShardsImage(image) = &read.spec.class else {
+            panic!("{:?}", read.spec.class);
+        };
+        assert_eq!(image.grants, grants);
+        r.spec.class = ClassSpec::ShardsImage(Box::new(ShardsImage::new(hex_api::sim::SIM_IMAGE)));
+        let none = String::from_utf8(r.encode().unwrap()).unwrap();
+        assert!(!none.contains("grants"), "{none}");
+        assert_eq!(BoxRecord::decode(none.as_bytes()).unwrap(), r);
+    }
+
     /// Decision 7, append-only: a record written before `run` existed reads as a box made by create,
     /// one with no run is written without the field, and a run's program round-trips.
     #[test]

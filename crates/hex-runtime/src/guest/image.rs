@@ -25,9 +25,7 @@ use hex_api::{
 };
 use hex_core::patience::Patience;
 use hex_core::record::{BootSession, BoxRecord, Phase};
-use shards_api::image::{
-    ImageGuest, ImageRefusal, ImageSpec, Images, Keep, Narrowing, RunEnd, Stats, StatsScope,
-};
+use shards_api::image::{ImageGuest, ImageRefusal, ImageSpec, Images, RunEnd, Stats, StatsScope};
 
 use super::{GuestRuntime, poisoned};
 use crate::devices;
@@ -256,6 +254,11 @@ fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, 
         exit,
         abandoned: 0,
         route: spec.route,
+        // Every grant as the record holds it (joint plan step 15, docs/design/network-grants.md N6).
+        grants: match &spec.class {
+            ClassSpec::ShardsImage(image) => image.grants.clone(),
+            _ => Vec::new(),
+        },
     })
 }
 
@@ -385,11 +388,12 @@ impl GuestRuntime {
             .filter(|record| matches!(record.spec.class, ClassSpec::ShardsImage(_))))
     }
 
-    /// The image Shards boots for a box: its pinned image and command, its admitted size, none of its
-    /// image's grants until goal 15's programs them (default deny: D231 narrows, never widens), and the
-    /// node's Shards binary and home, whose store holds the image. Goal 15's `program(&grants)` gives
-    /// `publish` and `egress` here.
+    /// The image Shards boots for a box: its pinned image and command, its admitted size, its grants as
+    /// `crate::grants::program` makes them (joint plan step 15: its publishes, and none of its image's own
+    /// grants past the VM; D231 narrows, never widens), and the node's Shards binary and home, whose store
+    /// holds the image.
     fn image_spec(&self, image: &ShardsImage, size: VmSize) -> Result<ImageSpec, Refusal> {
+        let network = crate::grants::program(&image.grants)?;
         let mut env = Vec::new();
         if let Some(paths) = &self.native_paths {
             env.push((
@@ -407,12 +411,8 @@ impl GuestRuntime {
             memory_mib: size.memory_mib,
             command: image.command.clone(),
             members: Vec::new(),
-            publish: Vec::new(),
-            egress: Narrowing {
-                egress: Keep::Only(Vec::new()),
-                mcp: Keep::Only(Vec::new()),
-                dns: false,
-            },
+            publish: network.publish,
+            egress: network.egress,
             shares: Vec::new(),
             binary: Some(self.config.binary.clone()),
             env,
@@ -539,6 +539,10 @@ impl GuestRuntime {
         }
         self.image()?.waits()?;
         vm_size(&spec)?;
+        // Grants Shards can't hold exactly are refused before anything is made (joint plan step 15).
+        if let ClassSpec::ShardsImage(image) = &spec.class {
+            crate::grants::program(&image.grants)?;
+        }
         let books = self.image_books()?;
         let id = spec.id.try_clone()?;
         let made = info(&spec, BoxState::Created, None)?;

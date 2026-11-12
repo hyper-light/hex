@@ -1281,6 +1281,7 @@ fn a_vm_create_slower_than_the_oci_record_is_not_refused_by_it() {
         let mut quiet = [PollFd::new(&conn, PollFlags::IN)];
         let _ = rustix::event::poll(&mut quiet, Some(&Timespec::try_from(b * 4).unwrap()));
         let info = hex_api::BoxInfo {
+            grants: Vec::new(),
             id: spec.id,
             class: Class::Firecracker,
             state: hex_api::BoxState::Created,

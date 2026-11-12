@@ -2002,18 +2002,21 @@ fn oci(r: &mut Reader<'_>) -> Result<OciSpec, Fault> {
 }
 
 /// A Shards image VM's spec: its pinned image, then its run's command, an option of a list (joint plan
-/// step 12). Fields a later step adds go after the command (append-only).
+/// step 12), then its network grants (joint plan step 15). Fields a later step adds go after the grants
+/// (append-only).
 fn put_shards_image(w: &mut Writer, image: &ShardsImage) -> Result<(), Fault> {
     w.string(&image.image)?;
     w.option_with(image.command.as_deref(), |w, command| {
         w.list(command, |w, arg| w.string(arg))
-    })
+    })?;
+    put_grants(w, &image.grants)
 }
 
 fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
     Ok(ShardsImage {
         image: r.string("shards image")?,
         command: r.option(|r| r.list(|r| r.string("shards image command")))?,
+        grants: grants(r)?,
     })
 }
 
@@ -2298,7 +2301,9 @@ fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
         w.option(allocation.booked, put_resources);
         Ok(())
     })?;
-    put_route_option(w, info.route)
+    put_route_option(w, info.route)?;
+    // Joint plan step 15: the record's grants, after every older field.
+    put_grants(w, &info.grants)
 }
 
 fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
@@ -2328,6 +2333,7 @@ fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
             Ok(allocation)
         })?,
         route: r.option(route_receipt)?,
+        grants: grants(r)?,
     };
     check_info_route(&info)?;
     Ok(info)

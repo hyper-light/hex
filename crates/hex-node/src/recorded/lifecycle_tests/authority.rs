@@ -20,6 +20,7 @@ fn guest_spec(id: &str) -> BoxSpec {
 }
 fn info(record: &BoxRecord) -> BoxInfo {
     BoxInfo {
+        grants: Vec::new(),
         route: record.spec.route,
         id: record.spec.id.clone(),
         class: record.spec.class.class(),

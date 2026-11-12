@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use crate::devices::{Books, Records, Transaction};
 use hex_api::{Allocation, Bounds, Capacity, CapacityResources, DeviceInfo, Runtime};
-use shards_api::image::{Bound, Channel, MemberEnd, MemberInfo, MemberName};
+use shards_api::image::{Bound, Channel, Keep, MemberEnd, MemberInfo, MemberName};
 
 /// A record owner keeping the node Store's rules (hex-node's `Store::update_lifecycle`): a first record
 /// is Creating; Creating becomes anything, Ready Ready or Deleting, Deleting Deleting alone; an exit, once
@@ -644,4 +644,91 @@ fn kill_before_start_ends_the_vm_without_a_boot() {
         Err(Refusal::NotRunning(_, "start"))
     ));
     assert!(images.asked.lock().unwrap().is_empty());
+}
+
+/// Joint plan step 15 (AC-T7.7.2): do create image VMs granted, in turn, a provider by name, kiln by address
+/// and kiln on the VM's host. Expect: each refused Awaits naming the capability it waits on, with no record made
+/// and no boot asked. Do: create one granted a publish of its harness's port on the host's loopback, and start
+/// it. Expect: its boot asks for exactly that publish and none of its image's grants past the VM, and its inspect
+/// shows its every grant, as its record holds them.
+#[test]
+fn a_vms_grants_are_programmed_into_its_boot_or_refused_before_its_record() {
+    use hex_api::{Destination, Grant, Member, MemberKind, Ports, Proto};
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let codex = Member {
+        kind: MemberKind::Harness,
+        name: "codex".to_owned(),
+    };
+    let tcp = |port| Ports {
+        proto: Proto::Tcp,
+        first: port,
+        last: port,
+    };
+    let granted = |name: &str, grants: Vec<Grant>| {
+        let mut spec = spec(name, None);
+        if let ClassSpec::ShardsImage(image) = &mut spec.class {
+            image.grants = grants;
+        }
+        spec
+    };
+    for (grant, needs) in [
+        (
+            Grant::Egress {
+                member: codex.clone(),
+                to: Destination::Name("api.openai.com".to_owned()),
+                ports: tcp(443),
+            },
+            Upstream::MemberGrantsByName,
+        ),
+        (
+            Grant::Egress {
+                member: codex.clone(),
+                to: Destination::Address("10.0.0.5".parse().unwrap()),
+                ports: tcp(7070),
+            },
+            Upstream::MemberGrantsByAddress,
+        ),
+        (
+            Grant::Host {
+                member: codex.clone(),
+                ports: tcp(7070),
+            },
+            Upstream::MemberHostService,
+        ),
+    ] {
+        assert_eq!(
+            runtime.create(granted("image-unheld", vec![grant])),
+            Err(Refusal::Awaits { needs })
+        );
+        assert!(Transaction::records(owner.as_ref()).unwrap().is_empty());
+    }
+    let publish = Grant::Publish {
+        member: codex,
+        proto: Proto::Tcp,
+        port: 1455,
+        host: "127.0.0.1".parse().unwrap(),
+        host_port: None,
+    };
+    let id = runtime
+        .create(granted("image-published", vec![publish.clone()]))
+        .unwrap()
+        .id;
+    runtime.start(&id).unwrap();
+    let asked = images.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    let boot = &asked[0];
+    assert_eq!(
+        boot.publish,
+        vec![shards_api::image::Publish {
+            guest_port: 1455,
+            proto: shards_api::image::Proto::Tcp,
+            host: Some("127.0.0.1".parse().unwrap()),
+            host_port: 0,
+        }]
+    );
+    assert_eq!(boot.egress.egress, Keep::Only(Vec::new()));
+    assert_eq!(boot.egress.mcp, Keep::Only(Vec::new()));
+    assert!(!boot.egress.dns);
+    assert_eq!(runtime.inspect(&id).unwrap().grants, vec![publish]);
 }

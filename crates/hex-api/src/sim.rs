@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 use crate::conformance::{Act, Fixture};
 use crate::{
     Allocation, Bounds, BoxId, BoxInfo, BoxSpec, BoxState, CapacityResources, Class, ClassSpec,
-    Exit, GuestTime, Network, OciSpec, Proc, Program, Refusal, Rootfs, Runtime, RuntimeCost,
-    ShardsImage, Signal, Stdio, Upstream, Usage,
+    Destination, Exit, Grant, GuestTime, Network, OciSpec, Proc, Program, Refusal, Rootfs, Runtime,
+    RuntimeCost, ShardsImage, Signal, Stdio, Upstream, Usage,
 };
 
 /// Most boxes a [`SimRuntime`] holds; past it `create` is refused with [`Refusal::Full`].
@@ -175,6 +175,10 @@ impl SimRuntime {
             None => None,
         };
         Ok(BoxInfo {
+            grants: match &b.spec.class {
+                ClassSpec::ShardsImage(image) => image.grants.clone(),
+                _ => Vec::new(),
+            },
             membership: None,
             id: b.spec.id.clone(),
             class: b.spec.class.class(),
@@ -341,6 +345,23 @@ impl Runtime for SimRuntime {
                         ..Program::default()
                     }
                     .fits(&SIM_EXEC_LIMIT)?
+                }
+                // Grants as the class holds them (joint plan step 15, HEX-IMG-7): publishes alone, the rest
+                // awaiting Shards' explicit grants, refused before anything is made.
+                for grant in &image.grants {
+                    let needs = match grant {
+                        Grant::Egress {
+                            to: Destination::Name(_),
+                            ..
+                        } => Upstream::MemberGrantsByName,
+                        Grant::Egress {
+                            to: Destination::Address(_),
+                            ..
+                        } => Upstream::MemberGrantsByAddress,
+                        Grant::Host { .. } => Upstream::MemberHostService,
+                        Grant::Publish { .. } => continue,
+                    };
+                    return Err(Refusal::Awaits { needs });
                 }
             }
             ClassSpec::Process | ClassSpec::Bundle(_) => {}

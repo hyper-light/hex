@@ -289,6 +289,7 @@ mod tests {
 
     fn info(id: &BoxId) -> BoxInfo {
         BoxInfo {
+            grants: Vec::new(),
             id: id.clone(),
             class: Class::Oci,
             allocation: None,

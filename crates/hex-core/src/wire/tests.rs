@@ -618,6 +618,7 @@ fn oci_spec() -> BoxSpec {
 
 fn info() -> BoxInfo {
     BoxInfo {
+        grants: Vec::new(),
         allocation: None,
         route: None,
         membership: None,
@@ -959,6 +960,7 @@ fn answers() -> Vec<(u64, Answer)> {
                 infos: vec![
                     info(),
                     BoxInfo {
+                        grants: Vec::new(),
                         allocation: None,
                         route: None,
                         membership: None,
@@ -2056,6 +2058,7 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
     )
         .prop_map(
             |(id, backend, state, bounds, adopted, exit, abandoned)| BoxInfo {
+                grants: Vec::new(),
                 allocation: None,
                 route: None,
                 membership: None,
@@ -4285,6 +4288,63 @@ fn unknown_grant_tags_are_refused_by_name() {
             "cut at {cut}"
         );
     }
+}
+
+/// Joint plan step 15 (every grant visible in Hex's record of the VM): do create a Shards image VM granted a provider
+/// by name, kiln on its host and a publish; expect it read back whole, its grants written after its command. Do
+/// write one whose grants the check refuses (a loopback destination), and read it as a peer that skipped the check
+/// would send it; expect both refused as invalid grants.
+#[test]
+fn a_shards_image_vm_carries_its_grants_on_the_wire() {
+    let spec = |grants: Vec<Grant>| BoxSpec {
+        id: id("image-grants"),
+        bounds: Bounds::default(),
+        class: ClassSpec::ShardsImage(Box::new(ShardsImage {
+            grants,
+            ..ShardsImage::new(hex_api::sim::SIM_IMAGE)
+        })),
+        owner: None,
+        devices: Vec::new(),
+        allocation: Some(hex_api::sim::sim_vm_allocation().unwrap()),
+        route: None,
+    };
+    let create = Request::Call(Call::Create(Box::new(spec(each_way()))));
+    let bytes = request(92, &create, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        create
+    );
+    let mut listed = Writer::new(MAX_MESSAGE);
+    put_grants(&mut listed, &each_way()).unwrap();
+    let listed = listed.done().unwrap();
+    let image = hex_api::sim::SIM_IMAGE.as_bytes();
+    let named = bytes.windows(image.len()).position(|w| w == image).unwrap();
+    // After the image, the command's option (none), then the grants.
+    let at = named + image.len() + 1;
+    assert_eq!(bytes[at - 1], 0);
+    assert_eq!(&bytes[at..at + listed.len()], listed.as_slice());
+    let mut loopback = each_way();
+    loopback.push(Grant::Egress {
+        member: harness(),
+        to: Destination::Address("127.0.0.1".parse().unwrap()),
+        ports: Ports {
+            proto: Proto::Tcp,
+            first: 7070,
+            last: 7070,
+        },
+    });
+    let refused = Request::Call(Call::Create(Box::new(spec(loopback.clone()))));
+    assert!(matches!(
+        request(93, &refused, MAX_MESSAGE),
+        Err(Fault::Value { what: "grants", .. })
+    ));
+    let mut spliced = bytes[..at].to_vec();
+    spliced.extend(unchecked(&loopback));
+    spliced.extend_from_slice(&bytes[at + listed.len()..]);
+    assert!(matches!(
+        read_request(&received(&spliced, 0), MAX_MESSAGE).map_err(|bad| bad.fault),
+        Err(Fault::Value { what: "grants", .. })
+    ));
 }
 
 fn any_member() -> impl Strategy<Value = Member> {
