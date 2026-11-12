@@ -329,7 +329,7 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
                 config,
                 node.device_catalog(),
                 node.backend_books(),
-                node.oci_root().to_path_buf(),
+                node.single_use_marks(),
                 node.boot_session(),
             )
             .map(Arc::new)

@@ -451,6 +451,23 @@ fn native_firecracker_cpu_box_runs_and_leaves_nothing() {
         "a VM given no GPU carries no GPU words"
     );
 
+    // GPU run r1119 (AC-T7.4.1; original): a program that runs until the test ends it. Its end is the guest's message:
+    // the node never takes the guest's pid for a process of this host's, which named none there, so the node waited for
+    // it as for a gone one, for its own wait for a box to empty, and told its end `Unknown` while it still ran. No end
+    // comes within twice that wait's record (the suites' 904.7 ms), and the one its kill makes comes as the guest's.
+    let mut held = client
+        .exec(&id, Program::of(&["/probe", "--hold"]), Stdio::null())
+        .unwrap();
+    let early = held
+        .wait_for(hex_testkit::waits::EMPTYING.saturating_mul(2))
+        .unwrap();
+    eprintln!("SMOKE held program before its kill: {early:?}");
+    assert_eq!(early, None, "an end told while the guest's program runs");
+    held.kill().unwrap();
+    let killed = held.wait_for(inputs.wait).unwrap();
+    eprintln!("SMOKE held program after its kill: {killed:?}");
+    assert_eq!(killed, Some(Exit::Signal(9)));
+
     let challenge = inputs.value["challenge"].as_str().unwrap();
     let begun = Instant::now();
     let (mut out, writer) = std::io::pipe().unwrap();
@@ -720,9 +737,10 @@ fn single_use(sbdf: &str, group: u64) -> bool {
     !listed(&["bus", "cxl_bus"]) || foreign
 }
 
-/// The mark of `sbdf`, a function no reset clears, that the backend leaves once a VM was given it: in the runtime
-/// directory every node on the host shares (hex-node's `oci_root`: `/run/hex-node` for root, else
-/// `$XDG_RUNTIME_DIR/hex-node`, else the node's state's `oci`).
+/// The mark of `sbdf`, a function no reset clears, that the backend leaves once a VM was given it: in the node's
+/// runtime directory (hex-node's `oci_root`), the one every node of its user on the host shares, `/run/hex-node` for
+/// root, else `$XDG_RUNTIME_DIR/hex-node`. A rootless node with no `$XDG_RUNTIME_DIR` keeps it in its state's `oci`,
+/// read by no other node, and gives no such function to a VM.
 fn mark(state: &Path, sbdf: &str) -> PathBuf {
     let runtime = if rustix::process::geteuid().is_root() {
         PathBuf::from("/run/hex-node")

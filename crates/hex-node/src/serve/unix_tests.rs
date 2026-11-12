@@ -15,12 +15,13 @@ use hex_client::Client;
 /// closing its copy at once, 719 arrived dead; with it kept until received, 0.
 const PROBED: usize = 20_000;
 
-/// A program that doesn't end while the test runs: this test's own process, which its kill leaves be.
-struct Unending;
+/// A program that doesn't end while the test runs: a `sleep` the test started, a child of this process as the node's
+/// programs are of the node's (the server watches no other process: GPU run r1119), which its kill leaves be.
+struct Unending(u32);
 
 impl Proc for Unending {
     fn pid(&self) -> u32 {
-        std::process::id()
+        self.0
     }
     fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
         Ok(None)
@@ -36,11 +37,12 @@ impl Proc for Unending {
     }
 }
 
-/// Boxes in the simulator; each program [`Unending`], and the stdout an exec asks for one end of a Unix socket pair
-/// whose other end has written one byte and closed: a guest program's streams are connections like it.
-#[derive(Default)]
+/// Boxes in the simulator; each program [`Unending`], the one `sleep` whose pid is `program`, and the stdout an exec
+/// asks for one end of a Unix socket pair whose other end has written one byte and closed: a guest program's streams
+/// are connections like it.
 struct SocketHost {
     sim: SimRuntime,
+    program: u32,
 }
 
 impl Runtime for SocketHost {
@@ -63,7 +65,7 @@ impl Runtime for SocketHost {
                 .map_err(|e| Refusal::os("writing a stream", e))?;
             given.stdout = Some(far.into());
         }
-        Ok(Box::new(hex_api::Asked::new(Unending, given)))
+        Ok(Box::new(hex_api::Asked::new(Unending(self.program), given)))
     }
     /// The run's box in the simulator, its program the exec's, as the other hosts' run is.
     fn run(&self, spec: BoxSpec, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
@@ -124,7 +126,14 @@ fn a_given_answers_sockets_arrive_alive_while_other_unix_sockets_close() {
         .prefix("sock-")
         .tempdir_in(&cache)
         .unwrap();
-    let host = Arc::new(SocketHost::default());
+    let mut program = std::process::Command::new("sleep")
+        .arg("600")
+        .spawn()
+        .unwrap();
+    let host = Arc::new(SocketHost {
+        sim: SimRuntime::default(),
+        program: program.id(),
+    });
     host.sim
         .create(BoxSpec {
             route: None,
@@ -177,6 +186,10 @@ fn a_given_answers_sockets_arrive_alive_while_other_unix_sockets_close() {
     }
     stop.store(true, Ordering::Relaxed);
     let closed = churn.join().unwrap();
+    // The server first, so the program's end, which this test makes, reaches no watcher of it.
+    drop((client, server));
+    let _ = program.kill();
+    let _ = program.wait();
     assert_eq!(
         dead, 0,
         "{dead} of {PROBED} given sockets arrived dead while {closed} other Unix socket pairs closed"
