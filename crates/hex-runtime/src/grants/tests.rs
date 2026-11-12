@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use hex_api::{Destination, Grant, Member, MemberKind, Ports, Proto, Refusal, Upstream};
+use hex_api::{Destination, Grant, Member, MemberKind, Ports, Proto, Refusal, ShardsImage, Upstream};
 use proptest::prelude::*;
 use shards_api::image::{Keep, Narrowing};
 
@@ -21,12 +21,28 @@ fn codex() -> Member {
     }
 }
 
+/// An image VM of the members alone (no command of its run's own), granted `grants`.
+fn members_alone(grants: &[Grant]) -> ShardsImage {
+    ShardsImage {
+        grants: grants.to_vec(),
+        ..ShardsImage::new(hex_api::sim::SIM_IMAGE)
+    }
+}
+
+/// An image VM whose run has a command of its own, granted `grants`.
+fn commanded(grants: &[Grant]) -> ShardsImage {
+    ShardsImage {
+        command: Some(vec!["serve".to_owned()]),
+        ..members_alone(grants)
+    }
+}
+
 /// Joint plan step 15, T-T7.7.1: do program no grant at all; expect no publish and the image's every grant past the
 /// microVM dropped, so its run has no network (`shards api-run`'s `network none`), never the image's own grants that
 /// `Narrowing::default()` keeps.
 #[test]
 fn no_grant_is_programmed_as_no_network() {
-    let made = program(&[]).unwrap();
+    let made = program(&members_alone(&[])).unwrap();
     assert!(made.publish.is_empty());
     assert_eq!(made.egress, nothing_kept());
     assert_ne!(made.egress, Narrowing::default());
@@ -79,7 +95,7 @@ fn each_grant_482c5d78_cant_hold_is_refused_naming_what_it_awaits() {
         ),
     ] {
         assert_eq!(
-            program(std::slice::from_ref(&grant)),
+            program(&members_alone(std::slice::from_ref(&grant))),
             Err(Refusal::Awaits { needs }),
             "{grant:?}"
         );
@@ -100,7 +116,7 @@ fn each_grant_482c5d78_cant_hold_is_refused_naming_what_it_awaits() {
             host_port: Some(18080),
         },
     ];
-    let made = program(&publishes).unwrap();
+    let made = program(&members_alone(&publishes)).unwrap();
     assert_eq!(made.egress, nothing_kept());
     assert_eq!(
         made.publish,
@@ -121,16 +137,61 @@ fn each_grant_482c5d78_cant_hold_is_refused_naming_what_it_awaits() {
     );
     // A malformed grant is the check's refusal, before anything is programmed.
     assert!(matches!(
-        program(&[Grant::Host {
+        program(&members_alone(&[Grant::Host {
             member: codex(),
             ports: tcp(0),
-        }]),
+        }])),
         Err(Refusal::Invalid { what: "grants", .. })
     ));
 }
 
-/// The capability a grant 482c5d78 can't hold awaits; none for one it holds.
-fn awaited(grant: &Grant) -> Option<Upstream> {
+/// Joint plan step 15 (N6's receiver gap): do program a publish of a harness's port for a run with a command of its
+/// own, alone and after an egress by name, and that run with no grant at all. Expect: the publish refused
+/// `Awaits(PublishReceiver)`, since Shards' run host gives such a run's command every port its Agentfile gives no
+/// member (D122) and names no port's receiver, so the grant's member can't be held; the first unheld grant of the
+/// list refused first; and no grant still no network. Do program the same publish for a run of the members alone;
+/// expect it programmed.
+#[test]
+fn a_publish_on_a_run_with_its_own_command_awaits_its_receivers_name() {
+    let publish = Grant::Publish {
+        member: codex(),
+        proto: Proto::Tcp,
+        port: 1455,
+        host: "127.0.0.1".parse().unwrap(),
+        host_port: None,
+    };
+    assert_eq!(
+        program(&commanded(std::slice::from_ref(&publish))),
+        Err(Refusal::Awaits {
+            needs: Upstream::PublishReceiver
+        })
+    );
+    let by_name = Grant::Egress {
+        member: codex(),
+        to: Destination::Name("api.openai.com".to_owned()),
+        ports: Ports {
+            proto: Proto::Tcp,
+            first: 443,
+            last: 443,
+        },
+    };
+    assert_eq!(
+        program(&commanded(&[by_name, publish.clone()])),
+        Err(Refusal::Awaits {
+            needs: Upstream::MemberGrantsByName
+        })
+    );
+    let none = program(&commanded(&[])).unwrap();
+    assert!(none.publish.is_empty());
+    assert_eq!(none.egress, nothing_kept());
+    let made = program(&members_alone(std::slice::from_ref(&publish))).unwrap();
+    assert_eq!(made.publish.len(), 1);
+    assert_eq!(made.egress, nothing_kept());
+}
+
+/// The capability a grant 482c5d78 can't hold awaits, on a run with a command of its own or not; none for one it
+/// holds.
+fn awaited(grant: &Grant, commanded: bool) -> Option<Upstream> {
     match grant {
         Grant::Egress {
             to: Destination::Name(_),
@@ -141,7 +202,7 @@ fn awaited(grant: &Grant) -> Option<Upstream> {
             ..
         } => Some(Upstream::MemberGrantsByAddress),
         Grant::Host { .. } => Some(Upstream::MemberHostService),
-        Grant::Publish { .. } => None,
+        Grant::Publish { .. } => commanded.then_some(Upstream::PublishReceiver),
     }
 }
 
@@ -200,18 +261,21 @@ fn any_grant() -> impl Strategy<Value = Grant> {
 }
 
 proptest! {
-    /// AC-T7.7.2 (joint plan step 15): do program any well-formed list of grants of every way; expect either a typed
-    /// `Awaits` naming the capability of its first grant 482c5d78 can't hold exactly, or a program that keeps none of
-    /// the image's grants past the microVM and publishes exactly the list's publish grants, in order, each at the host
-    /// address and port it names. So the flows a program allows that no grant names are exactly 0.
+    /// AC-T7.7.2 (joint plan step 15): do program any well-formed list of grants of every way, for a run of the
+    /// members alone and for one with a command of its own; expect either a typed `Awaits` naming the capability of
+    /// its first grant 482c5d78 can't hold exactly (any publish, on a run with its own command), or a program that
+    /// keeps none of the image's grants past the microVM and publishes exactly the list's publish grants, in order,
+    /// each at the host address and port it names. So the flows a program allows that no grant names are exactly 0.
     #[test]
     fn a_program_allows_no_flow_its_grants_do_not_name(
         list in proptest::collection::vec(any_grant(), 0..6)
-            .prop_filter("each flow named once", |l| hex_api::check_grants(l).is_ok())
+            .prop_filter("each flow named once", |l| hex_api::check_grants(l).is_ok()),
+        with_command in any::<bool>(),
     ) {
-        match program(&list) {
+        let image = if with_command { commanded(&list) } else { members_alone(&list) };
+        match program(&image) {
             Ok(made) => {
-                prop_assert!(list.iter().all(|g| awaited(g).is_none()));
+                prop_assert!(list.iter().all(|g| awaited(g, with_command).is_none()));
                 prop_assert_eq!(&made.egress, &nothing_kept());
                 prop_assert_eq!(made.publish.len(), list.len());
                 for (published, grant) in made.publish.iter().zip(&list) {
@@ -231,7 +295,7 @@ proptest! {
                 }
             }
             Err(Refusal::Awaits { needs }) => {
-                prop_assert_eq!(Some(needs), list.iter().find_map(awaited));
+                prop_assert_eq!(Some(needs), list.iter().find_map(|g| awaited(g, with_command)));
             }
             Err(other) => return Err(TestCaseError::fail(format!("{other:?}"))),
         }

@@ -1795,11 +1795,15 @@ pub enum Upstream {
     /// `POSIX_SPAWN_CLOEXEC_DEFAULT`, so it would inherit every descriptor another thread holds
     /// without close-on-exec at that moment (CVE-2024-21626's class).
     RunHostStdioOnly,
+    /// The member a published port reaches, named by Shards' image boot (D231): its `Bound` names none, and a run
+    /// with a command of its own gives that command every port its Agentfile gives no member (D122), so a publish
+    /// grant on such a run can't be held to the member it names (joint plan step 15).
+    PublishReceiver,
 }
 
 impl Upstream {
     /// Every capability, in the order the node's wire tags them.
-    pub const ALL: [Upstream; 11] = [
+    pub const ALL: [Upstream; 12] = [
         Upstream::GuestCpuTimePerVcpu,
         Upstream::MemberExec,
         Upstream::MemberGrantsByName,
@@ -1811,6 +1815,7 @@ impl Upstream {
         Upstream::MemberHostService,
         Upstream::GuestRoom,
         Upstream::RunHostStdioOnly,
+        Upstream::PublishReceiver,
     ];
 }
 
@@ -1833,6 +1838,9 @@ impl std::fmt::Display for Upstream {
             Self::GuestRoom => "a Shards guest told its room (init's ROOM, owed through D231)",
             Self::RunHostStdioOnly => {
                 "Shards' host of an image's run started holding only its stdio (owed by D231)"
+            }
+            Self::PublishReceiver => {
+                "Shards' image boot naming the member a published port reaches (owed by D231)"
             }
         })
     }
