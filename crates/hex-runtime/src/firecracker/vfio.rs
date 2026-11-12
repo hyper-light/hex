@@ -313,8 +313,11 @@ fn authorize_function(
 }
 
 /// Checks a catalogued VFIO function as `host` lists it, and that this process may open its container and group.
-/// `vmms`: the VMMs of this node's own that may hold its group now.
-pub(super) fn validate(host: &Host, entry: &Entry, _vmms: &[ProcId]) -> Result<(), Refusal> {
+/// `vmms`: the VMMs of this node's own that may hold its group now, a recorded VM's or pool observer's. vfio gives a
+/// group to one opener at a time (a second open answers EBUSY), so a group one of them is seen holding ([`holds`]) is
+/// in use by this node's own VM and isn't opened; held by any other process, it is refused by type, naming that
+/// process ([`held`]).
+pub(super) fn validate(host: &Host, entry: &Entry, vmms: &[ProcId]) -> Result<(), Refusal> {
     let Some(Binding::Vfio { sbdf, group, .. }) = entry.binding(Route::Vfio) else {
         return Err(invalid("Firecracker requires VFIO native bindings"));
     };
@@ -332,12 +335,117 @@ pub(super) fn validate(host: &Host, entry: &Entry, _vmms: &[ProcId]) -> Result<(
             "selected native function is not a GPU/compute accelerator",
         ));
     }
-    let group_name = group_name(*group)?;
-    for interface in ["vfio", group_name.as_str()] {
-        let _access = (host.open)(&host.interface(interface)?)
-            .map_err(|e| Refusal::os("opening selected VFIO interface", e))?;
+    let _container = (host.open)(&host.interface("vfio")?)
+        .map_err(|e| Refusal::os("opening selected VFIO interface", e))?;
+    let interface = host.interface(&group_name(*group)?)?;
+    if !vmms.is_empty()
+        && let Ok(named) = fs::canonicalize(&interface)
+    {
+        let descriptors = kernel_bound("fs/nr_open")?;
+        for vmm in vmms {
+            if holds(*vmm, &named, descriptors)? {
+                return Ok(());
+            }
+        }
     }
-    Ok(())
+    match (host.open)(&interface) {
+        Ok(_access) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(rustix::io::Errno::BUSY.raw_os_error()) => {
+            Err(held(&interface, &e)?)
+        }
+        Err(e) => Err(Refusal::os("opening selected VFIO interface", e)),
+    }
+}
+
+/// A kernel limit `/proc/sys` names (`kernel/pid_max`, `fs/nr_open`), the bound of a walk over what it limits.
+fn kernel_bound(name: &str) -> Result<usize, Refusal> {
+    let text = fs::read_to_string(path(Path::new("/proc/sys"), name)?)
+        .map_err(|e| Refusal::os("reading a kernel limit", e))?;
+    text.trim()
+        .parse()
+        .map_err(|_| invalid("a kernel limit isn't a count"))
+}
+
+/// Whether process `vmm`, the one its pid and start time name, holds `interface` (resolved) open: a process that
+/// ended, or another given its pid since, holds nothing of this node's.
+fn holds(vmm: ProcId, interface: &Path, descriptors: usize) -> Result<bool, Refusal> {
+    let Ok(pid) = i32::try_from(vmm.pid) else {
+        return Ok(false);
+    };
+    if crate::linux::oci::state::start_time(pid) != Some(vmm.start_ticks) {
+        return Ok(false);
+    }
+    names(vmm.pid, interface, descriptors)
+}
+
+/// Whether one of process `pid`'s open descriptors, its `/proc/<pid>/fd` links (at most the kernel's `nr_open`,
+/// `descriptors`), names `interface`. A process that ended, or that this node may not read, names none it sees.
+fn names(pid: u32, interface: &Path, descriptors: usize) -> Result<bool, Refusal> {
+    let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return Ok(false);
+    };
+    let mut count = 0usize;
+    for entry in entries {
+        if count >= descriptors {
+            return Err(exhausted("a process's open descriptors", descriptors));
+        }
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| invalid("descriptor count overflow"))?;
+        let Ok(entry) = entry else {
+            continue;
+        };
+        if fs::read_link(entry.path()).is_ok_and(|target| target == interface) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The refusal of a VFIO group another process holds: its open's error, naming the first process this node can read
+/// that holds it, by pid and command, from a walk of `/proc` (at most the kernel's `pid_max` processes), or saying it
+/// sees none: another user's, which this node may not read.
+fn held(interface: &Path, error: &std::io::Error) -> Result<Refusal, Refusal> {
+    let mut holder = None;
+    if let Ok(named) = fs::canonicalize(interface) {
+        let processes = kernel_bound("kernel/pid_max")?;
+        let descriptors = kernel_bound("fs/nr_open")?;
+        let mut count = 0usize;
+        for entry in fs::read_dir("/proc").map_err(|e| Refusal::os("listing processes", e))? {
+            let Some(pid) = entry
+                .ok()
+                .and_then(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if count >= processes {
+                return Err(exhausted("processes", processes));
+            }
+            count = count
+                .checked_add(1)
+                .ok_or_else(|| invalid("process count overflow"))?;
+            if names(pid, &named, descriptors)? {
+                let command = fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+                holder = Some((pid, command));
+                break;
+            }
+        }
+    }
+    let why = match holder {
+        Some((pid, command)) => format!(
+            "{}: {error}: held by pid {pid} ({}), no VM this node records",
+            interface.display(),
+            command.trim()
+        ),
+        None => format!(
+            "{}: {error}: held by a process this node can't read, no VM this node records",
+            interface.display()
+        ),
+    };
+    Ok(Refusal::Os {
+        op: "opening selected VFIO interface",
+        why,
+    })
 }
 
 fn validate_function(host: &Host, sbdf: &str, group: u32) -> Result<u32, Refusal> {
@@ -497,7 +605,12 @@ mod tests {
         let group = host.sys.join("kernel/iommu_groups/7");
         let driver = host.sys.join("bus/pci/drivers/vfio-pci");
         let function = host.sys.join("bus/pci/devices/0000:01:00.0");
-        for dir in [&group.join("devices"), &driver, &function, &host.dev.join("vfio")] {
+        for dir in [
+            &group.join("devices"),
+            &driver,
+            &function,
+            &host.dev.join("vfio"),
+        ] {
             fs::create_dir_all(dir).unwrap();
         }
         std::os::unix::fs::symlink(&group, function.join("iommu_group")).unwrap();
@@ -533,8 +646,7 @@ mod tests {
         let pid = vmm.id();
         let own = ProcId {
             pid,
-            start_ticks: crate::linux::oci::state::start_time(i32::try_from(pid).unwrap())
-                .unwrap(),
+            start_ticks: crate::linux::oci::state::start_time(i32::try_from(pid).unwrap()).unwrap(),
         };
         let checked = validate(&host, entry, &[own]);
         let other = ProcId {
@@ -550,7 +662,10 @@ mod tests {
                 panic!("refused by type: {refused:?}");
             };
             assert_eq!(*op, "opening selected VFIO interface");
-            assert!(why.contains(&format!("pid {pid} ")), "names the holder: {why}");
+            assert!(
+                why.contains(&format!("pid {pid} ")),
+                "names the holder: {why}"
+            );
         }
     }
 

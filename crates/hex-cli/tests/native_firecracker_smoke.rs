@@ -287,6 +287,8 @@ impl Drop for Reaper {
             if !running(pid, start) {
                 continue;
             }
+            // Its VM's directory in the backend's state, read from its command before it ends.
+            let vm = vm_of(pid, &self.dir);
             let Some(target) = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()) else {
                 continue;
             };
@@ -298,12 +300,34 @@ impl Drop for Reaper {
                 let _ = running(pid, start);
                 std::thread::park_timeout(read.elapsed());
             }
+            let ended = !running(pid, start);
+            // A VMM that ended leaves its VM's directory to whoever removes the VM: here, no node will.
+            if let Some(vm) = vm.filter(|_| ended) {
+                let _ = fs::remove_dir_all(&vm);
+                eprintln!(
+                    "SMOKE reaper: VM directory {} removed: {}",
+                    vm.display(),
+                    !vm.exists()
+                );
+            }
             eprintln!(
                 "SMOKE reaper: VMM {pid} (start {start}) ended by the test's cleanup; running: {}",
-                running(pid, start)
+                !ended
             );
         }
     }
+}
+
+/// The VM directory in `state` that VMM `pid`'s command names: its `--config-file`'s directory, where that lies
+/// directly in `state`.
+fn vm_of(pid: u32, state: &Path) -> Option<PathBuf> {
+    let cmdline = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let mut words = cmdline
+        .split(|b| *b == 0)
+        .map(|word| std::str::from_utf8(word).unwrap_or(""));
+    words.by_ref().find(|word| *word == "--config-file")?;
+    let vm = Path::new(words.next()?).parent()?;
+    (vm.parent() == Some(state)).then(|| vm.to_path_buf())
 }
 
 impl Reaper {

@@ -696,7 +696,13 @@ impl FirecrackerRuntime {
         self.preflight_backing(&source)?;
         // This is an exact isolation/identity check, not another picker. Refuse an inseparable
         // unselected GPU before draining the observer; companion metadata cannot enlarge S.
-        drop(vfio::plan(&self.host, &self.catalog, &spec.devices, &[])?);
+        // The source's observer holds the full set's groups until it is drained below.
+        drop(vfio::plan(
+            &self.host,
+            &self.catalog,
+            &spec.devices,
+            source.init.as_slice(),
+        )?);
         let keys = self.catalog.conflict_ids(&source.devices)?;
         let id = spec.id.try_clone()?;
         let (pending, commitment, init) = crate::devices::with_handoff_transaction(
@@ -877,6 +883,8 @@ impl FirecrackerRuntime {
             .map_err(|_| exhausted("current observer facts", guest_observed.len()))?;
         observed.extend(guest_observed.into_iter().map(|actual| actual.info));
         observed.sort_unstable_by_key(|actual| actual.id);
+        // A group one of this node's own VMMs holds is in use by its VM, never opened beside it (vfio::validate).
+        let vmms = recorded_vmms(&records, &pools)?;
         capacity.cost = None;
         capacity.routes.clear();
         capacity.device_routes.clear();
@@ -903,13 +911,13 @@ impl FirecrackerRuntime {
                 else {
                     continue;
                 };
-                vfio::validate(&self.host, entry, &[])?;
+                vfio::validate(&self.host, entry, &vmms)?;
                 let mut actual = actual.try_clone()?;
                 actual.holder = self.catalog.holder(entry.info.id, &records, &pools)?;
                 capacity.devices.push(actual);
                 continue;
             }
-            vfio::validate(&self.host, entry, &[])?;
+            vfio::validate(&self.host, entry, &vmms)?;
             capacity.devices.push(entry.report(self.catalog.holder(
                 entry.info.id,
                 &records,
@@ -1009,6 +1017,37 @@ impl FirecrackerRuntime {
         }
         Ok(())
     }
+}
+
+/// The native identities of this node's VMMs as its records name them: each Firecracker VM's and pool observer's
+/// that launched.
+fn recorded_vmms(
+    records: &crate::devices::Records,
+    pools: &[PoolRecord],
+) -> Result<Vec<hex_core::record::ProcId>, Refusal> {
+    let count = records
+        .len()
+        .checked_add(pools.len())
+        .ok_or_else(|| exhausted("recorded VMMs", crate::MAX_BOXES))?;
+    let mut vmms = Vec::new();
+    vmms.try_reserve_exact(count)
+        .map_err(|_| exhausted("recorded VMMs", count))?;
+    for record in records.values().filter_map(|record| record.as_ref().ok()) {
+        if matches!(record.spec.class, ClassSpec::Firecracker(_))
+            && let Some(init) = record.init
+        {
+            vmms.push(init);
+        }
+    }
+    for pool in pools
+        .iter()
+        .filter(|pool| pool.execution == hex_api::Execution::Firecracker)
+    {
+        if let Some(init) = pool.init {
+            vmms.push(init);
+        }
+    }
+    Ok(vmms)
 }
 
 fn remaining(until: Instant) -> Result<std::time::Duration, Refusal> {
