@@ -18,7 +18,8 @@
 //!   cargo test --locked -p hex-runtime --test windows_charge_window -- --ignored --nocapture --test-threads=1
 //! With `HEX_CHARGE_WINDOW_OUT` naming a directory, each run's raw samples go there too, `<cap>.csv` (`uncapped.csv`
 //! for the first): the sample's time since the run's start and the job's CPU time so far, both in 100 ns units.
-#![cfg(windows)]
+//!
+//! Its reckoning (the CPU time's steps, the cap's cycles, the sampler's cadence) is pure and checked on every OS.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -28,16 +29,22 @@
     clippy::disallowed_macros
 )]
 
-use std::fmt::Write as _;
+#[cfg(windows)]
 use std::os::windows::io::OwnedHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(windows)]
+use std::time::Instant;
 
+#[cfg(windows)]
 use hex_runtime::windows::sys::{self, Job, Limits, Spawn};
 
 /// How often the job's CPU time is read, and for how long each run: ROOT's probe, as step 14's brief asks it.
+#[cfg(windows)]
 const EVERY: Duration = Duration::from_millis(1);
+#[cfg(windows)]
 const FOR: Duration = Duration::from_secs(10);
 /// The caps, per `hex_core::job::RATE_SCALE` (10,000) of the machine: 10%, 20% and 50%.
+#[cfg(windows)]
 const CAPS: [u32; 3] = [1_000, 2_000, 5_000];
 /// What the child is told: how many threads to spin.
 const SPIN: &str = "HEX_TEST_SPIN_THREADS";
@@ -67,12 +74,14 @@ fn spin() {
 
 /// Spins until `due`: the sampler has a processor of its own, and a timed wait on Windows ends at its timer's
 /// resolution (15.6 ms by default), not at a 1 ms sample's deadline.
+#[cfg(windows)]
 fn until(due: Instant) {
     while Instant::now() < due {
         std::hint::spin_loop();
     }
 }
 
+#[cfg(windows)]
 fn nul() -> OwnedHandle {
     OwnedHandle::from(
         std::fs::OpenOptions::new()
@@ -85,6 +94,7 @@ fn nul() -> OwnedHandle {
 
 /// One run: a job capped at `cap` (none uncapped) running `threads` spinners, its CPU time in 100 ns read every
 /// [`EVERY`] for [`FOR`], each with its time since the run's start.
+#[cfg(windows)]
 fn run(cap: Option<u32>, threads: u32) -> Vec<(Duration, u64)> {
     let job = Job::create().unwrap();
     job.configure(&Limits {
@@ -162,6 +172,7 @@ fn steps(samples: &[(Duration, u64)]) -> Vec<Duration> {
 }
 
 /// A capped run's runs, stops and periods: a stop is a gap between two steps longer than `step`, the accounting's own.
+#[cfg(windows)]
 fn cycles(
     samples: &[(Duration, u64)],
     step: Duration,
@@ -185,7 +196,25 @@ fn cycles(
     (runs, stops, periods)
 }
 
+/// The gaps between the reads of consecutive samples: the sampler's own cadence.
+fn gaps(samples: &[(Duration, u64)]) -> Vec<Duration> {
+    samples
+        .windows(2)
+        .map(|pair| pair[1].0 - pair[0].0)
+        .collect()
+}
+
+/// The sampler's cadence over `samples` (n, p50, p99 and max of its gaps), refused where its longest gap isn't shorter
+/// than `step`, the gap the run tells the CPU time's steps by: there a gap between steps may be the sampler's own,
+/// not the accounting's or the cap's.
+fn cadence(samples: &[(Duration, u64)], step: Duration) -> Result<String, String> {
+    let _ = (samples, step, gaps);
+    Ok(String::new())
+}
+
+#[cfg(windows)]
 fn keep(name: &str, samples: &[(Duration, u64)]) {
+    use std::fmt::Write as _;
     let Some(dir) = std::env::var_os("HEX_CHARGE_WINDOW_OUT") else {
         return;
     };
@@ -200,6 +229,7 @@ fn keep(name: &str, samples: &[(Duration, u64)]) {
 /// loop uncapped, then capped at 10%, 20% and 50% of the machine, each sampled every 1 ms for 10 s. Expect each capped
 /// run held near its cap and stopped past the accounting's own step, its runs, stops and periods printed; the window
 /// `WinRuntime::charge_window` derives from is the period's.
+#[cfg(windows)]
 #[test]
 #[ignore = "ROOT's probe on a quiet Windows host (jupiter): about 40 s of every processor but one"]
 fn the_interval_a_jobs_cpu_hard_cap_holds_over() {
@@ -245,4 +275,43 @@ fn the_interval_a_jobs_cpu_hard_cap_holds_over() {
             "a job capped at {cap}/10000 never stopped past the accounting's step of {step:?}"
         );
     }
+}
+
+/// `count` reads, the k-th at `at(k)`, the job's CPU time `cpu(t)` at each.
+fn sampled(
+    count: u64,
+    at: impl Fn(u64) -> Duration,
+    cpu: impl Fn(Duration) -> u64,
+) -> Vec<(Duration, u64)> {
+    (0..count).map(|k| (at(k), cpu(at(k)))).collect()
+}
+
+/// Joint plan step 14 (AC-T7.4.1), the probe's own check (ROOT, 2026-11-12, r563): a sampler that lost its cadence
+/// can't measure the accounting's step. Do reckon r563's uncapped run as its samples had it: a read every 41 ms (a
+/// Windows quantum behind 31 spinners of its priority), one 584 ms late, the CPU time stepping at each. Expect the
+/// accounting's step taken as 584 ms, the sampler's own gap, and the run refused, naming both.
+#[test]
+fn w14_a_sampler_slower_than_the_step_it_measures_is_refused() {
+    let at = |k: u64| Duration::from_millis(41 * k + if k >= 50 { 543 } else { 0 });
+    let samples = sampled(100, at, |t| u64::try_from(t.as_millis()).unwrap() * 310);
+    let times = steps(&samples);
+    let step = times.windows(2).map(|p| p[1] - p[0]).max().unwrap();
+    assert_eq!(step, Duration::from_millis(584));
+    let refused = cadence(&samples, step).unwrap_err();
+    assert!(refused.contains("584ms"), "{refused}");
+}
+
+/// Joint plan step 14 (AC-T7.4.1): a sampler that keeps its deadlines measures the accounting's step. Do reckon a run
+/// read every 1 ms for 200 ms whose CPU time steps every 15 ms, the clock's tick. Expect the step 15 ms and the cadence
+/// kept, its gaps 1 ms.
+#[test]
+fn w14_a_sampler_that_keeps_its_deadlines_measures_the_step() {
+    let samples = sampled(201, Duration::from_millis, |t| {
+        u64::try_from(t.as_millis() / 15).unwrap() * 150_000
+    });
+    let times = steps(&samples);
+    let step = times.windows(2).map(|p| p[1] - p[0]).max().unwrap();
+    assert_eq!(step, Duration::from_millis(15));
+    let kept = cadence(&samples, step).unwrap();
+    assert!(kept.contains("n=200 p50=1ms p99=1ms max=1ms"), "{kept}");
 }
