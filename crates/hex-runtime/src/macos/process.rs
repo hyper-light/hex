@@ -504,12 +504,22 @@ impl State {
             if !self.in_scope(scope, member.pid, token.birth(), group)? {
                 return Ok(None);
             }
-            send(&fresh, signal)
-                .map_err(|failure| scope.control_failed(failure, self.id.as_ref()))?;
-            return Ok(Some(Stopped {
-                pid: member.pid,
-                native: Some(fresh),
-            }));
+            return match send(&fresh, signal) {
+                Ok(()) => Ok(Some(Stopped {
+                    pid: member.pid,
+                    native: Some(fresh),
+                })),
+                // Refused by its fresh token too, and gone from the scope: it ended after the check above (an
+                // exiting process's token resolves to none), the end the signal wanted, never a failure of the
+                // scope (AC-T7.4.1).
+                Err(failure)
+                    if failure.unresolved()
+                        && !self.in_scope(scope, member.pid, token.birth(), group)? =>
+                {
+                    Ok(None)
+                }
+                Err(failure) => Err(scope.control_failed(failure, self.id.as_ref())),
+            };
         }
         let signal = match signal {
             sys::MemberSignal::Stop => rustix::process::Signal::STOP,
