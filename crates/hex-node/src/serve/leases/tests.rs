@@ -30,7 +30,10 @@ impl Line for TestLine {
     }
 
     fn tell(&self, id: u64, answer: &Answer) -> Result<(), Refusal> {
-        self.told.lock().unwrap().push((id, answer.clone_for_test()));
+        self.told
+            .lock()
+            .unwrap()
+            .push((id, answer.clone_for_test()));
         Ok(())
     }
 
@@ -153,11 +156,20 @@ fn s33_a_box_no_leasing_connection_created_leases_from_no_one() {
     ));
     routed(&wire, &id, &line);
     wire.route(&id, 8, None);
-    assert!(matches!(wire.lessor(&id), Err(Refusal::Unconfigured { .. })));
+    assert!(matches!(
+        wire.lessor(&id),
+        Err(Refusal::Unconfigured { .. })
+    ));
     routed(&wire, &other, &line);
     wire.deleted(&other);
-    assert!(matches!(wire.lessor(&other), Err(Refusal::Unconfigured { .. })));
-    assert!(line.told.lock().unwrap().is_empty(), "nothing was asked of the line");
+    assert!(matches!(
+        wire.lessor(&other),
+        Err(Refusal::Unconfigured { .. })
+    ));
+    assert!(
+        line.told.lock().unwrap().is_empty(),
+        "nothing was asked of the line"
+    );
 }
 
 /// docs/design/credential-grants.md C7: a connection that ends refuses its waiting lease ask, typed, naming the end, and
@@ -188,5 +200,8 @@ fn s33_a_lease_asked_on_a_line_that_ends_is_refused_by_its_end() {
         other => panic!("a lease asked of an ended line: {other:?}"),
     }
     wire.closed(7);
-    assert!(matches!(wire.lessor(&id), Err(Refusal::Unconfigured { .. })));
+    assert!(matches!(
+        wire.lessor(&id),
+        Err(Refusal::Unconfigured { .. })
+    ));
 }

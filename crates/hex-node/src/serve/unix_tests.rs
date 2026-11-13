@@ -204,8 +204,11 @@ fn a_given_answers_sockets_arrive_alive_while_other_unix_sockets_close() {
 struct LeasingRuntime {
     sim: SimRuntime,
     lessors: Arc<WireLessors>,
-    runs: Mutex<BTreeMap<String, (Arc<dyn hex_api::lease::Lessor>, Vec<hex_api::lease::Lease>)>>,
+    runs: Mutex<BTreeMap<String, Leasing>>,
 }
+
+/// A run's lessor and the leases it holds.
+type Leasing = (Arc<dyn hex_api::lease::Lessor>, Vec<hex_api::lease::Lease>);
 
 impl LeasingRuntime {
     fn new(lessors: Arc<WireLessors>) -> Self {
@@ -318,7 +321,11 @@ impl crate::recorded::Recover for LeasingRuntime {
     fn trace(&self, id: &BoxId) -> Result<Option<hex_core::record::ProcId>, Refusal> {
         crate::recorded::Recover::trace(&self.sim, id)
     }
-    fn adopt(&self, spec: &BoxSpec, trace: Option<hex_core::record::ProcId>) -> Result<(), Refusal> {
+    fn adopt(
+        &self,
+        spec: &BoxSpec,
+        trace: Option<hex_core::record::ProcId>,
+    ) -> Result<(), Refusal> {
         crate::recorded::Recover::adopt(&self.sim, spec, trace)
     }
     fn end(&self, trace: Option<hex_core::record::ProcId>) -> Result<(), Refusal> {
@@ -410,7 +417,11 @@ fn s33_a_remote_harnesss_lease_is_answered_through_the_wire_and_given_back_at_it
         Some(VALUE),
         "the run holds its credential's value, leased through the wire"
     );
-    assert_eq!(broker.held().unwrap(), 1, "the broker holds the run's one lease");
+    assert_eq!(
+        broker.held().unwrap(),
+        1,
+        "the broker holds the run's one lease"
+    );
 
     client.signal(&id, HexSignal::KILL).unwrap();
     follow::until(

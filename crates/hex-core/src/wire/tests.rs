@@ -5577,7 +5577,10 @@ fn s33_a_leases_value_crosses_marked_and_never_printed() {
         }),
     };
     let bytes = request(4, &leased, MAX_MESSAGE).unwrap();
-    assert!(carries_secret(&bytes), "a leased message says it carries a value");
+    assert!(
+        carries_secret(&bytes),
+        "a leased message says it carries a value"
+    );
     for (n, other, _) in requests() {
         if !matches!(other, Request::Leased { answer: Ok(_), .. }) {
             let other = request(n, &other, MAX_MESSAGE).unwrap();

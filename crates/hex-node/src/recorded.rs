@@ -1363,10 +1363,12 @@ impl<R: Recover> Recorded<R> {
     /// `lessors`, which its guest runtime's image class was built with, each box's route kept by its socket as the box is
     /// created. Given once.
     pub fn lease_over_wire(&self, lessors: Arc<crate::serve::WireLessors>) -> Result<(), Refusal> {
-        self.wire_lessors.set(lessors).map_err(|_| Refusal::Invalid {
-            what: "lessors over the node's wire",
-            why: "the node was given them already".to_owned(),
-        })
+        self.wire_lessors
+            .set(lessors)
+            .map_err(|_| Refusal::Invalid {
+                what: "lessors over the node's wire",
+                why: "the node was given them already".to_owned(),
+            })
     }
 
     /// The retained records past the whole-owner barrier, and apart from them the torn ones

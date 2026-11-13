@@ -216,7 +216,11 @@ impl Leasing {
 
     /// Run `run` has ended: its lessor let go, any lease of it not given back given back first.
     fn run_ended(&self, run: u64) {
-        let ended = self.held.lock().ok().and_then(|mut held| held.runs.remove(&run));
+        let ended = self
+            .held
+            .lock()
+            .ok()
+            .and_then(|mut held| held.runs.remove(&run));
         if let Some(Run { lessor, leases }) = ended {
             for lease in &leases {
                 lessor.release(lease);

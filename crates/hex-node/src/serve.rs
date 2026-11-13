@@ -2326,7 +2326,8 @@ impl<O: Os> Shared<O> {
             Call::Delete(id) => {
                 let deleted = host.delete(&id);
                 // Its route goes with it, as does one of a box already gone.
-                if let (Some(wire), Ok(()) | Err(Refusal::NoSuchBox(_))) = (&self.lessors, &deleted) {
+                if let (Some(wire), Ok(()) | Err(Refusal::NoSuchBox(_))) = (&self.lessors, &deleted)
+                {
                     wire.deleted(&id);
                 }
                 deleted.map(|()| Answer::Done)
@@ -2872,9 +2873,9 @@ impl<O: Os> leases::Line for ConnLine<O> {
             });
         }
         let id = out.next_ask;
-        out.next_ask = id
-            .checked_add(1)
-            .ok_or_else(|| Refusal::Broken("a connection's lease asks ran out of ids".to_owned()))?;
+        out.next_ask = id.checked_add(1).ok_or_else(|| {
+            Refusal::Broken("a connection's lease asks ran out of ids".to_owned())
+        })?;
         let slot = leases::Slot::new();
         out.asks.insert(id, Arc::clone(&slot));
         Ok((id, slot))
@@ -2934,7 +2935,13 @@ impl<O: Os> Shared<O> {
     /// kept before the create is answered: to its connection where the box grants a credential and the connection
     /// leases, else none.
     fn create(&self, conn: &Conn<O>, spec: BoxSpec) -> Result<hex_api::BoxInfo, Refusal> {
-        let line = conn.out.lock().map_err(poisoned)?.line.as_ref().map(Arc::downgrade);
+        let line = conn
+            .out
+            .lock()
+            .map_err(poisoned)?
+            .line
+            .as_ref()
+            .map(Arc::downgrade);
         let granting = grants_credentials(&spec);
         if granting && line.is_none() {
             return Err(Refusal::Unconfigured {

@@ -150,9 +150,11 @@ impl WireLessors {
 
     /// Whether box `id`'s runs lease here: a route to the connection that created it.
     pub fn routed(&self, id: &BoxId) -> bool {
-        self.routes
-            .lock()
-            .is_ok_and(|routes| routes.get(id).is_some_and(|route| route.line.strong_count() > 0))
+        self.routes.lock().is_ok_and(|routes| {
+            routes
+                .get(id)
+                .is_some_and(|route| route.line.strong_count() > 0)
+        })
     }
 }
 
