@@ -11,7 +11,7 @@ use crate::devices::{Books, Records, Transaction};
 use hex_api::{Allocation, Bounds, Capacity, CapacityResources, DeviceInfo, Runtime};
 use shards_api::image::{
     Bound, Channel, GuestTimes, HostUse, Keep, MemberEnd, MemberInfo, MemberName, Microvm,
-    Receiving, VcpuTime,
+    Receiving, StartedFrom, VcpuTime,
 };
 
 /// A record owner keeping the node Store's rules (hex-node's `Store::update_lifecycle`): a first record
@@ -216,6 +216,8 @@ struct ModelGuest {
     members: Vec<MemberInfo>,
     published: Vec<Bound>,
     outside: Mutex<std::collections::BTreeMap<String, Outside>>,
+    /// How its microVM started (D253), as the model's run host said it at its boot.
+    started_from: StartedFrom,
 }
 
 /// The period the model's run host says its VM's governor holds a rate over (D247's `rate_period`): the model's
@@ -235,6 +237,9 @@ impl ImageGuest for ModelGuest {
     }
     fn rate_period(&self) -> Duration {
         MODEL_RATE_PERIOD
+    }
+    fn started_from(&self) -> StartedFrom {
+        self.started_from
     }
     fn take_output(
         &self,
@@ -381,6 +386,8 @@ struct ModelImages {
     /// `Agentfile::named`), as the test sets it: the run host holds every one to its reach of the names kept where a
     /// boot holds members apart (`Narrowing::members`, D246).
     named: Mutex<Vec<(shards_api::image::MemberKind, String, Vec<String>)>>,
+    /// How the next boot's microVM starts (D253), as the test sets it: booted alone unless it does.
+    started_from: Mutex<StartedFrom>,
 }
 
 impl ModelImages {
@@ -395,6 +402,7 @@ impl ModelImages {
             members: Mutex::new(Vec::new()),
             receivers: Mutex::new(Vec::new()),
             named: Mutex::new(Vec::new()),
+            started_from: Mutex::new(StartedFrom::Booted),
         })
     }
 
@@ -564,6 +572,7 @@ impl Images for ModelImages {
             members: self.members.lock().unwrap().clone(),
             published,
             outside: Mutex::new(outside),
+            started_from: *self.started_from.lock().unwrap(),
         }))
     }
 }
@@ -692,6 +701,21 @@ fn a_created_vm_boots_at_start_its_admitted_size_and_no_grant() {
         Err(Refusal::Invalid { what: "start", .. })
     ));
     assert!(runtime.list().unwrap().iter().any(|info| info.id == id));
+}
+
+/// Joint plan step 12 (D242, image channel v20): a box's spec grants its VM no credential by reference, so its boot
+/// names no lessor to lease one, which Shards takes as a run that asks nothing of a lessor (and would refuse with a
+/// grant). Do create and start an image VM. Expect its one boot asked no credential grant and no lessor.
+#[test]
+fn w12_a_vm_granted_no_credential_boots_with_no_lessor() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-no-lessor", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    let asked = images.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    assert!(asked[0].credentials.is_empty());
+    assert!(asked[0].lessor.is_none());
 }
 
 /// Joint plan step 12, Hex's stop: do signal KILL to a running VM. Expect: its run stopped once, its

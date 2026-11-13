@@ -419,6 +419,8 @@ fn member_spec(m: &ImageMember) -> MemberSpec {
         workdir: m.workdir.clone(),
         stdin: true,
         terminal: false,
+        // No run-time argument (D256): its image's command alone.
+        args: Vec::new(),
     }
 }
 
@@ -703,8 +705,9 @@ impl GuestRuntime {
             // No nesting grant (D234): a harness VM's command is never a nested runtime's here.
             nesting: false,
             ready_by: None,
-            // No credential granted by reference (D242): a box's spec names none.
+            // No credential granted by reference (D242): a box's spec names none, so nothing leases one.
             credentials: Vec::new(),
+            lessor: None,
             binary: Some(self.config.binary.clone()),
             env,
             // No agent-control endpoint (D238, D252): a member's program runs through none here yet.
