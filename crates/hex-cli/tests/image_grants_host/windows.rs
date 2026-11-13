@@ -15,8 +15,8 @@ pub const HOW: &str = "powershell: Get-CimInstance Win32_Process for the process
                        (NetTCPIP) for the TCP and UDP sockets, each by its owning process. Windows' UDP table names \
                        no peer, so every UDP socket reads as taking what comes in";
 
-/// `MSFT_NetTCPConnection.State`'s Listen (the NetTCPIP provider's TCP states, MIB_TCP_STATE's numbering).
-const LISTEN: u64 = 2;
+/// `MSFT_NetTCPConnection.State`'s name for a listening socket, as the NetTCPIP module's State enumeration names it.
+const LISTEN: &str = "Listen";
 
 /// Base64 (RFC 4648 §4, padded) of `bytes`: `-EncodedCommand`'s form.
 fn base64(bytes: &[u8]) -> String {
@@ -183,7 +183,7 @@ pub fn sockets(pids: &[u32]) -> Vec<Socket> {
     let tables = powershell(
         "$tcp = @(Get-NetTCPConnection -ErrorAction Stop | ForEach-Object {\n\
          [pscustomobject]@{ owner = [uint32]$_.OwningProcess; local = [string]$_.LocalAddress; lport = [int]$_.LocalPort;\n\
-         remote = [string]$_.RemoteAddress; rport = [int]$_.RemotePort; state = [int]$_.State } })\n\
+         remote = [string]$_.RemoteAddress; rport = [int]$_.RemotePort; state = [string]$_.State } })\n\
          $udp = @(Get-NetUDPEndpoint -ErrorAction Stop | ForEach-Object {\n\
          [pscustomobject]@{ owner = [uint32]$_.OwningProcess; local = [string]$_.LocalAddress; lport = [int]$_.LocalPort } })\n\
          ConvertTo-Json -InputObject ([pscustomobject]@{ tcp = $tcp; udp = $udp }) -Compress -Depth 4",
@@ -211,7 +211,7 @@ fn read_sockets(tables: &serde_json::Value, pids: &[u32]) -> Vec<Socket> {
             } else {
                 Some(remote)
             },
-            listening: row["state"].as_u64() == Some(LISTEN),
+            listening: row["state"].as_str() == Some(LISTEN),
         };
         if !out.contains(&socket) {
             out.push(socket);
@@ -296,9 +296,9 @@ fn cims_and_nettcpips_rows_read_as_processes_and_sockets() {
     assert_eq!(read[0].args, [r"C:\s\shards.exe", "api-run"]);
     let tables = serde_json::json!({
         "tcp": [
-            {"owner": 701, "local": "127.0.0.1", "lport": 7101, "remote": "0.0.0.0", "rport": 0, "state": 2},
-            {"owner": 701, "local": "10.0.0.2", "lport": 50000, "remote": "192.0.2.1", "rport": 443, "state": 5},
-            {"owner": 9, "local": "0.0.0.0", "lport": 445, "remote": "0.0.0.0", "rport": 0, "state": 2},
+            {"owner": 701, "local": "127.0.0.1", "lport": 7101, "remote": "0.0.0.0", "rport": 0, "state": "Listen"},
+            {"owner": 701, "local": "10.0.0.2", "lport": 50000, "remote": "192.0.2.1", "rport": 443, "state": "Established"},
+            {"owner": 9, "local": "0.0.0.0", "lport": 445, "remote": "0.0.0.0", "rport": 0, "state": "Listen"},
         ],
         "udp": [{"owner": 700, "local": "::", "lport": 5353}],
     });

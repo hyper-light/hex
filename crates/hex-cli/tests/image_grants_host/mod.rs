@@ -200,9 +200,11 @@ pub fn no_run_left(node: u32) {
 
 /// The non-vacuity of this OS's reading (no VM), on every OS: do start a known child, `sort` waiting on its stdin
 /// (a program each OS has), and hold, in this process, a TCP listener and a UDP socket on the loopback and a TCP
-/// connection to the listener. Expect the child found under this process by its name, the listener and the UDP
-/// socket listening at their addresses, and the connection at its own, its peer the listener's, neither listening
-/// nor leaving the host.
+/// connection to the listener, and the connection the listener accepted. Expect the child found under this process
+/// by its name; the listener (at its address, no peer) and the UDP socket listening; and the connection at its own
+/// address, its peer the listener's, and the accepted one at the listener's, its peer the connection's, neither
+/// listening nor leaving the host. Each socket is told by its address and its peer's: the accepted connection shares
+/// the listener's address.
 #[test]
 fn the_hosts_reading_finds_a_known_child_and_a_processs_own_sockets() {
     let mut child = std::process::Command::new("sort")
@@ -213,7 +215,7 @@ fn the_hosts_reading_finds_a_known_child_and_a_processs_own_sockets() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let connection = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (_accepted, _) = listener.accept().unwrap();
+    let (accepted, _) = listener.accept().unwrap();
     let this = std::process::id();
     let all = os::processes();
     let sockets = os::sockets(&[this]);
@@ -230,17 +232,25 @@ fn the_hosts_reading_finds_a_known_child_and_a_processs_own_sockets() {
         "{found:?}"
     );
     assert!(under(&all, vec![this]).contains(&child.id()));
-    let at = |local: SocketAddr, tcp: bool| {
+    let at = |local: SocketAddr, remote: Option<SocketAddr>, tcp: bool| {
         sockets
             .iter()
-            .find(|s| s.local == local && s.tcp == tcp)
-            .unwrap_or_else(|| panic!("no socket at {local} (tcp {tcp}) in {sockets:#?}"))
+            .find(|s| s.local == local && s.remote == remote && s.tcp == tcp)
+            .unwrap_or_else(|| {
+                panic!("no socket at {local}, peer {remote:?} (tcp {tcp}) in {sockets:#?}")
+            })
     };
-    assert!(at(listener.local_addr().unwrap(), true).listens());
-    assert!(at(udp.local_addr().unwrap(), false).listens());
-    let near = at(connection.local_addr().unwrap(), true);
-    assert_eq!(near.remote, Some(listener.local_addr().unwrap()));
-    assert!(!near.listens() && !near.leaves(), "{near:?}");
+    let (listening, near) = (
+        listener.local_addr().unwrap(),
+        connection.local_addr().unwrap(),
+    );
+    assert!(at(listening, None, true).listens());
+    assert!(at(udp.local_addr().unwrap(), None, false).listens());
+    for (local, remote) in [(near, listening), (listening, near)] {
+        let flow = at(local, Some(remote), true);
+        assert!(!flow.listens() && !flow.leaves(), "{flow:?}");
+    }
+    drop(accepted);
 }
 
 /// What leaves the host, judged alike on every OS (no VM): do judge sockets whose peers are past the loopback, at it
