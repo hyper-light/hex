@@ -845,7 +845,7 @@ fn configured_guest(
         .with_gpu_catalog(catalog)
         .with_images(
             hex_runtime::guest::host_images(),
-            hex_runtime::guest::ImageWaits::recorded(),
+            Ok(hex_runtime::guest::ImageWaits::new()),
         )
         .with_runtime_cost(cost)
         .map_err(failed)?;

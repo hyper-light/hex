@@ -14,11 +14,11 @@ fn a_fact_already_true_takes_one_look_and_is_recorded() {
 }
 
 /// Do: wait for a fact that never comes, with a patience seeded from a record of a nanosecond. Expect: refused once
-/// its deadline, twice the record, has passed, naming the fact and that patience; no answer recorded (Karn's point),
-/// but the fact is slower than that patience, so the wait's slowest is the patience and its next deadline twice it
-/// (AC-T7.4.1: `Patience::ran_out` backs off in process, RFC 6298 §5.5).
+/// its deadline, the record itself (decision 9: no margin), has passed, naming the fact and that patience; no answer
+/// recorded (Karn's point), but the fact is slower than that patience, so the wait's slowest is the patience and its
+/// next deadline twice it (AC-T7.4.1: `Patience::ran_out` backs off in process, RFC 6298 §5.5).
 #[test]
-fn a_fact_that_never_comes_is_refused_at_twice_its_record() {
+fn a_fact_that_never_comes_is_refused_at_its_record() {
     let wait = Patience::seeded("test.testkit.never", Duration::from_nanos(1));
     let patience = wait.deadline().unwrap();
     assert_eq!(
@@ -53,8 +53,8 @@ fn a_measuring_wait_waits_for_its_fact_alone() {
 
 /// AC-T7.4.1. Do: wait through a call that takes its own deadline, with a measuring patience, and with a patience
 /// seeded from a record of a nanosecond for a call that answers only once its deadline has passed. Expect: the
-/// measuring call given no deadline and its answer recorded; the seeded call given its deadline, twice the record from
-/// its start, and no answer recorded (Karn's point), only the least the run-out proved, so its next deadline doubles.
+/// measuring call given no deadline and its answer recorded; the seeded call given its deadline, the record from its
+/// start, and no answer recorded (Karn's point), only the least the run-out proved, so its next deadline doubles.
 #[test]
 fn a_wait_that_takes_its_own_deadline_is_given_its_patience() {
     let measured = Patience::measuring("test.testkit.within");
@@ -126,6 +126,6 @@ fn the_census_records_a_tests_waits_and_disarms_none() {
     let (name, nanos) = lines[0].split_once(' ').unwrap();
     assert_eq!(name, "test.testkit.census");
     assert!(nanos.parse::<u64>().is_ok(), "{text:?}");
-    // Its bound, twice a record of a nanosecond.
-    assert_eq!(lines[1], "test.testkit.bounded >2", "{text:?}");
+    // Its bound, a record of a nanosecond itself (decision 9: no margin).
+    assert_eq!(lines[1], "test.testkit.bounded >1", "{text:?}");
 }

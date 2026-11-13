@@ -19,6 +19,9 @@ const CAP: Duration = Duration::from_millis(25);
 /// A caller bound longer than [`CAP`], for the claims that need one: a learned wait seeded from it ends after CAP, a
 /// setup under it has room for its steps before CAP is left, and it is a later bound than CAP's.
 const LONG_CAP: Duration = Duration::from_millis(100);
+/// What a learned wait's refusal says, which a caller's own refusal never does: the slowest answer to a call of its
+/// kind, recorded or seen, or the back-off of one that ran out, is its bound (decision 9).
+const LEARNED: &str = "the slowest answer to a call of its kind";
 
 /// The next message from `from` by `by`, or with no deadline whenever it comes; a sender gone is `Disconnected`.
 fn recv_by<T>(from: &mpsc::Receiver<T>, by: Option<Instant>) -> Result<T, mpsc::RecvTimeoutError> {
@@ -332,7 +335,7 @@ fn queued_sender_consumes_its_own_budget_without_taking_authority() {
     worker.join().unwrap();
     let why = result.unwrap().unwrap_err();
     assert!(
-        matches!(why, Refusal::Os { ref why, .. } if why.contains("caller") && !why.contains("twice"))
+        matches!(why, Refusal::Os { ref why, .. } if why.contains("caller") && !why.contains(LEARNED))
     );
     assert!(matches!(request.try_recv(), Err(mpsc::TryRecvError::Empty)));
     let state = client.conn.shared.state().unwrap();
@@ -458,7 +461,7 @@ fn timeout_cause_and_learning_keep_caller_authority_separate() {
     let (transport, request) = stalled(Some(CAP));
     let caller = timed_call(Calibrated::<true>(transport), request);
     assert!(
-        matches!(caller, Refusal::Os { why, .. } if why.contains("caller") && !why.contains("twice"))
+        matches!(caller, Refusal::Os { why, .. } if why.contains("caller") && !why.contains(LEARNED))
     );
     assert_eq!(
         SAMPLES.load(Ordering::SeqCst),
@@ -468,7 +471,7 @@ fn timeout_cause_and_learning_keep_caller_authority_separate() {
     let (transport, request) = stalled(Some(CAP));
     let learned = timed_call(Calibrated::<false>(transport), request);
     assert!(
-        matches!(learned, Refusal::Os { why, .. } if why.contains("caller") && !why.contains("twice"))
+        matches!(learned, Refusal::Os { why, .. } if why.contains("caller") && !why.contains(LEARNED))
     );
     assert_eq!(SAMPLES.load(Ordering::SeqCst), 1);
     assert_eq!(RUN_OUT.load(Ordering::SeqCst), 1);
@@ -520,7 +523,7 @@ fn in_late_census_child(name: &str) -> bool {
 }
 
 /// A stand-in agent busy past its record, as the guest's node was initializing its GPU: it answers a hello only once
-/// the hello's learned wait, twice its record of 1 ms, has run out ([`LATE_DUE`], set by [`late_census`] where it is
+/// the hello's learned wait, its record of 1 ms, has run out ([`LATE_DUE`], set by [`late_census`] where it is
 /// installed). `CALLER` names its waits apart.
 struct LateHello<const CALLER: bool> {
     io: UdpSocket,
@@ -609,7 +612,7 @@ const LATE_CAP: Duration = Duration::from_secs(30);
 /// its own node, busy with the GPU's initialization, was refused, "none came in 2.354074ms, twice the slowest answer to
 /// a call of its kind", while the boot had most of its 60 s left: the guest panicked. A learned bound is calibration,
 /// not the caller's authority. Do: say hello under a caller's absolute deadline to an agent that answers only once the
-/// hello's learned wait (twice its 1 ms record) has run out. Expect: the hello answered; its run-out told to the census
+/// hello's learned wait (its 1 ms record, decision 9) has run out. Expect: the hello answered; its run-out told to the census
 /// once, at the learned bound; its answer told too, later than that bound.
 #[test]
 fn original_a_late_answer_inside_its_callers_deadline_is_taken_its_run_out_recorded() {
@@ -630,7 +633,7 @@ fn original_a_late_answer_inside_its_callers_deadline_is_taken_its_run_out_recor
         result.is_ok(),
         "a slow answer inside its caller's deadline was refused: {result:?}"
     );
-    let bound = Duration::from_millis(2);
+    let bound = Duration::from_millis(1);
     assert_eq!(ran_out, [("test.client_budget.late.caller", bound)]);
     assert!(
         matches!(answered.as_slice(), [("test.client_budget.late.caller", took)] if *took > bound),
@@ -640,14 +643,14 @@ fn original_a_late_answer_inside_its_callers_deadline_is_taken_its_run_out_recor
 
 /// AC-T7.4.1: with no caller's deadline a call's learned wait is still its bound, its hang detection. Do: say hello with
 /// no caller deadline to the late agent, which no census tells its wait ran out here, so it never answers. Expect:
-/// refused as twice the slowest answer, at its 2 ms bound.
+/// refused at the slowest answer to a call of its kind, its 1 ms bound.
 #[test]
 fn with_no_callers_deadline_the_learned_wait_still_refuses() {
     let shared = Shared::try_new(late_hello::<false>()).unwrap();
     let result = Core::hello_before(shared, None).map(drop);
     eprintln!("client_late_answer under=none result={result:?}");
     assert!(
-        matches!(&result, Err(Refusal::Os { why, .. }) if why.contains("none came in 2ms, twice the slowest")),
+        matches!(&result, Err(Refusal::Os { why, .. }) if why.contains("none came in 1ms") && why.contains(LEARNED)),
         "{result:?}"
     );
 }
@@ -1521,7 +1524,7 @@ fn absolute_operations_cap_unarmed_answers_without_link_defaults() {
         joined.unwrap();
         observed_send.unwrap();
         assert!(
-            matches!(result.unwrap(), Err(Refusal::Os { why, .. }) if why.contains("absolute") && !why.contains("twice"))
+            matches!(result.unwrap(), Err(Refusal::Os { why, .. }) if why.contains("absolute") && !why.contains(LEARNED))
         );
         let state = client.conn.shared.state().unwrap();
         assert!(state.calls.is_empty() && state.programs.is_empty() && state.given.is_empty());
@@ -2331,7 +2334,7 @@ fn absolute_bootstrap_caps_unarmed_answer_waits() {
         assert!(clean.unwrap());
         assert!(matches!(
             observed.unwrap(),
-            Err(Refusal::Os { why, .. }) if why.contains("absolute") && !why.contains("twice")
+            Err(Refusal::Os { why, .. }) if why.contains("absolute") && !why.contains(LEARNED)
         ));
     }
 }
@@ -2853,7 +2856,7 @@ fn selected_callers_setup_expiry_prevents_send() {
     assert!(returned >= selected.at());
     assert!(matches!(
         result,
-        Err(Refusal::Os { op: "sending to the node agent", why }) if why.contains("absolute") && !why.contains("twice")
+        Err(Refusal::Os { op: "sending to the node agent", why }) if why.contains("absolute") && !why.contains(LEARNED)
     ));
     // This Stalled transport commits its whole nonempty input on its first try_send;
     // no notification therefore independently witnesses zero send calls/bytes.
@@ -3043,7 +3046,7 @@ fn isolated_ordinary_stream_hello_withheld_answer_uses_original_cap() {
     assert!(matches!(
         result,
         Err(Refusal::Os { op: "waiting for the node agent's answer", why })
-            if why.contains("absolute") && !why.contains("twice")
+            if why.contains("absolute") && !why.contains(LEARNED)
     ));
     assert_eq!(shared.transport.reply_budget(), None);
     assert!(clean.unwrap());

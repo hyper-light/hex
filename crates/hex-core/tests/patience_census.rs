@@ -7,12 +7,13 @@ use std::time::Duration;
 
 use hex_core::patience::{Patience, measure_all, measures_all};
 
-/// Do: make a wait seeded from a 1 ms record, then measure all. Expect: armed at 2 ms before, unarmed after, while
-/// its answers still keep its slowest; and the process says it measures all only after.
+/// Do: answer a wait in 1 ms, then measure all. Expect: armed at 1 ms before, the slowest seen, unarmed after,
+/// while its answers still keep its slowest; and the process says it measures all only after.
 #[test]
 fn measuring_all_disarms_every_wait() {
-    let p = Patience::seeded("census.all", Duration::from_millis(1));
-    assert_eq!(p.deadline(), Some(Duration::from_millis(2)));
+    let p = Patience::measuring("census.all");
+    p.answered(Duration::from_millis(1));
+    assert_eq!(p.deadline(), Some(Duration::from_millis(1)));
     assert!(!measures_all());
     measure_all();
     assert!(measures_all());

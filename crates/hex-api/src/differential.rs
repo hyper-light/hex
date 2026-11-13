@@ -755,8 +755,8 @@ mod tests {
 
     /// Hex's rule for a learned wait's seed (the lead, 2026-11-07): a host class seeds from its own slowest
     /// end on record, a record that holds a first run after a rebuild; a class with no such record (or a
-    /// host of no class) seeds from the slowest of any class's, never refused; and the fixed wait is twice
-    /// this host's seed (`conformance::PATIENCE`). Do: ask each class's seed, a class with no record's, and
+    /// host of no class) seeds from the slowest of any class's, never refused; and the fixed wait is this host's seed
+    /// itself (`conformance::PATIENCE`; decision 9: no margin past the slowest answer). Do: ask each class's seed, a class with no record's, and
     /// a host of no class's. Expect: each class its own record, none past the slowest of any; no record and
     /// no class the slowest of any class's.
     #[test]
@@ -771,24 +771,23 @@ mod tests {
         }
         assert_eq!(seed_from(None), SLOWEST_RECORDED_END);
         assert_eq!(seed(None), SLOWEST_RECORDED_END);
-        let twice_this_hosts_seed = seed(HostClass::THIS).saturating_mul(2);
-        assert_eq!(conformance::PATIENCE, twice_this_hosts_seed);
+        assert_eq!(conformance::PATIENCE, seed(HostClass::THIS));
     }
 
-    /// The rule for a learned wait: before any sample its bound is twice the slowest answer on record;
-    /// then twice the slowest of the record and what it has seen; and it only rises. Do: seed one at
-    /// 100 ms, see 30 ms, then 300 ms, then 50 ms. Expect 200 ms, 200 ms, 600 ms, 600 ms.
+    /// The rule for a learned wait (decision 9): before any sample its bound is the slowest answer on record, with
+    /// no margin; then the slowest of the record and what it has seen; and it only rises. Do: seed one at 100 ms, see
+    /// 30 ms, then 300 ms, then 50 ms. Expect 100 ms, 100 ms, 300 ms, 300 ms.
     #[test]
-    fn a_learned_wait_starts_at_twice_its_record_and_only_rises() {
+    fn a_learned_wait_starts_at_its_record_and_only_rises() {
         let ms = Duration::from_millis;
         let wait = conformance::LearnedWait::new(ms(100));
-        assert_eq!(wait.bound(), ms(200));
+        assert_eq!(wait.bound(), ms(100));
         wait.saw(ms(30));
-        assert_eq!(wait.bound(), ms(200));
+        assert_eq!(wait.bound(), ms(100));
         wait.saw(ms(300));
-        assert_eq!(wait.bound(), ms(600));
+        assert_eq!(wait.bound(), ms(300));
         wait.saw(ms(50));
-        assert_eq!(wait.bound(), ms(600));
+        assert_eq!(wait.bound(), ms(300));
     }
 
     /// Do: read with a look that takes a measurable time and never shows the oracle's answer, for a

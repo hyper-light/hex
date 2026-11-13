@@ -499,8 +499,8 @@ fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
     const RUNS: usize = 60;
     // A missed exit event makes the wait sleep out its whole budget (XNU's exit event came before the zombie
     // could be reaped, abdbfd0), so an end seen only at the budget is the fault. The budget is the suite's
-    // learned patience, at least twice the slowest end on macOS's record, so a legitimate end, even a rebuilt
-    // binary's first (939 ms on adas-mac-studio.local-2 at load 15-20), comes well before it. On time is the
+    // learned patience, at least the slowest end on macOS's record (decision 9), so a legitimate end, even a rebuilt
+    // binary's first (939 ms on adas-mac-studio.local-2 at load 15-20, that record), comes within it. On time is the
     // bound's kill before then: a refused exec's SIGKILL is no bound's end (bound_end).
     let budget = hex_api::conformance::patience();
     let late_after = budget;

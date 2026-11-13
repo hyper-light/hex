@@ -1,9 +1,9 @@
 //! What the tests' waits take (decision 9 of docs/design/runtime-architecture.md; the lead's rules for test patiences
 //! of 2026-11-06 and 2026-11-08: every wait in the tests uses its own record's patience). A test waits for a fact for
-//! at most twice the slowest answer recorded for that fact, so a slow but healthy fact passes and only a stuck one
-//! fails:
+//! at most the slowest answer recorded or seen for that fact (decision 9: no margin past it), so a fact as slow as any
+//! on record passes and one slower runs out, the run-out told to the census, whose next record covers it:
 //! - a fact a census row records takes that row's record, here; a program's end through a `Proc` takes the suites'
-//!   program-end record (`hex_api::conformance::PATIENCE`, its host class's slowest recorded end, twice);
+//!   program-end record (`hex_api::conformance::PATIENCE`, its host class's slowest recorded end);
 //! - a fact one node operation makes within itself takes that operation's record, the relation stated where it is
 //!   waited for and tested there (a hook holding a create is bounded by the create's answer);
 //! - a fact no recorded operation makes is waited for measuring, for the fact alone, its answers recorded for the
@@ -12,7 +12,8 @@
 //! The tests run debug builds, so each record here is a debug build's (`bench/competitive/probes/waits_census.md`,
 //! run 5, waits-census-20261109T184054Z on adacachy2, at ef259dbe): the largest answer of the debug-build arms, the
 //! debug arm and the suites', for the row and every test wait seeded from it, never under a bound one ran out at, named
-//! by its row, in nanoseconds as the census keeps them. [`until`] waits for a fact on a [`Patience`] seeded from one of
+//! by its row, in nanoseconds as the census keeps them. They seed tests' waits alone ([`Patience::seeded`], a test-only
+//! constructor): no production wait is seeded from a record (decision 9). [`until`] waits for a fact on a [`Patience`] seeded from one of
 //! them or measuring, and [`within`] gives a wait that takes its own deadline the patience's; where the census probe
 //! runs the suites (`HEX_WAITS_CENSUS`), every answer goes to its file, so the tests' own waits have rows of their own.
 
@@ -52,9 +53,12 @@ pub const START: Duration = Duration::from_nanos(16_120_605);
 pub const DELETE: Duration = Duration::from_nanos(706_090_511);
 /// `client.answer.exec`: an exec's answer (100.781 ms: the suites', of 1,890), once its program is started.
 pub const EXEC: Duration = Duration::from_nanos(100_780_659);
-/// `node.listing`: a recovery's listing, an entry (137.124 us: the bound run 3's record ran out at in the suites, so it
-/// doubles), what a restart's recovery takes for each entry of the directories it lists.
+/// `node.listing`: a recovery's listing, an entry (137.124 us: the bound run 3's record ran out at in the suites, the
+/// least its slowest is), what a restart's recovery takes for each entry of the directories it lists.
 pub const LISTING_ENTRY: Duration = Duration::from_nanos(137_124);
+/// `seeds.hang`: a seed's answer to a create (652.938 ms: the suites', of 493,529), what a test's wait for a seed, in
+/// line or for its answer, takes.
+pub const SEEDS: Duration = Duration::from_nanos(652_937_547);
 /// `timer.overshoot`: how late past its deadline macOS returns a timed wait on Hex's condition variable
 /// (`hex_wait::Condvar`), a one-shot `NOTE_CRITICAL` kqueue timer's (2.743 ms: the largest of 1,000 waits of 0.1 to
 /// 100 ms on 75694786 and 2768d0d5 at the kiln runner's utility QoS, to the microsecond,
@@ -69,7 +73,7 @@ pub const OVERSHOOT: Duration = Duration::from_nanos(2_743_000);
 pub struct Waited {
     /// The fact waited for.
     pub what: String,
-    /// How long it was waited for: twice the slowest answer recorded or seen.
+    /// How long it was waited for: the slowest answer recorded or seen.
     pub patience: Duration,
 }
 
@@ -77,7 +81,7 @@ impl std::fmt::Display for Waited {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "no {} within {:?}, twice the slowest recorded",
+            "no {} within {:?}, the slowest recorded or seen",
             self.what, self.patience
         )
     }

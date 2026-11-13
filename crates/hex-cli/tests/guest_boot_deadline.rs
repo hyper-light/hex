@@ -155,8 +155,8 @@ fn boottime() -> u128 {
 /// AC-T7.4.1 (original): do start `hex guest relay` to a stand-in node that never answers its hello, with no boot
 /// deadline, measuring `m` from reading the hello to the relay's end; then start it again with the boot's deadline as
 /// init hands it, to a node that answers `2m` after reading its hello: past the hello's learned wait, well inside the
-/// boot's deadline. Expect: the first refused at its learned bound, "twice the slowest", unchanged where no caller
-/// gives a deadline; the second ready.
+/// boot's deadline. Expect: the first refused at its learned bound, "the slowest answer to a call of its kind",
+/// unchanged where no caller gives a deadline; the second ready.
 #[test]
 fn original_the_relays_hello_waits_out_a_busy_node_within_the_boots_deadline() {
     let (dir, node, listener) = agent_socket();
@@ -169,7 +169,8 @@ fn original_the_relays_hello_waits_out_a_busy_node_within_the_boots_deadline() {
     eprintln!("guest_boot_deadline ready_by=none m={m:?} said={line:?} stderr={err:?}");
     assert_eq!(line, "", "{err}");
     assert!(
-        err.contains("asking the node its bounds") && err.contains("twice the slowest answer"),
+        err.contains("asking the node its bounds")
+            && err.contains("the slowest answer to a call of its kind"),
         "{err}"
     );
     let ready_by = boottime() + FIXTURE.as_nanos();

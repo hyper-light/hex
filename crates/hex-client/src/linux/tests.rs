@@ -1260,7 +1260,7 @@ fn container_box(id: &str, class: Class) -> hex_api::BoxSpec {
 /// yet measures, never borrowing another's. Do: through the node agent's socket, create an `oci` box the stand-in
 /// agent never answers, so the create runs out at the `oci` create's bound `b`; then create a `firecracker` box, which
 /// the agent answers only 4`b` after it reads it, a microVM's boot being slower than any OCI create recorded. Expect:
-/// the `oci` create refused as twice its slowest; the `firecracker` create answered.
+/// the `oci` create refused at its slowest (decision 9); the `firecracker` create answered.
 #[test]
 fn a_vm_create_slower_than_the_oci_record_is_not_refused_by_it() {
     let (_dir, path, listener) = agent_socket();
@@ -1307,7 +1307,7 @@ fn a_vm_create_slower_than_the_oci_record_is_not_refused_by_it() {
     let vm = client.create(container_box("v", Class::Firecracker));
     eprintln!("client_class_waits oci={oci:?} vm={vm:?}");
     assert!(
-        matches!(&oci, Err(Refusal::Os { why, .. }) if why.contains("twice the slowest")),
+        matches!(&oci, Err(Refusal::Os { why, .. }) if why.contains("the slowest answer to a call of its kind")),
         "{oci:?}"
     );
     assert!(

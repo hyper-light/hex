@@ -45,9 +45,8 @@ pub struct SeedPool {
     budget: usize,
     inner: Mutex<Inner>,
     free: Condvar,
-    /// How long an exec waits for a busy seed to free: twice the slowest an exec has held a seed on this node,
-    /// seeded from the clone record ([`hex_core::seeds::CLONE_SLOWEST`], `seed_path.md` run 3), an exec seed's work
-    /// being the same kind of clone with a few `setns` (decision 9; the lead's rule of 2026-11-06).
+    /// How long an exec waits for a busy seed to free: the slowest an exec has held a seed on this node; before the
+    /// first, and after a wait that ran out, it follows the busy seeds, waiting while they live (decision 9).
     answers: Patience,
 }
 
@@ -89,11 +88,7 @@ impl SeedPool {
         Self {
             exe,
             budget: budget.max(1),
-            answers: Patience::by_profile(
-                ANSWERS,
-                hex_core::seeds::CLONE_SLOWEST,
-                Some(hex_core::seeds::CLONE_SLOWEST_DEBUG),
-            ),
+            answers: Patience::measuring(ANSWERS),
             inner: Mutex::new(Inner::default()),
             free: Condvar::new(),
         }
@@ -326,20 +321,12 @@ fn round_trip(
 mod tests {
     use super::*;
 
-    /// Decision 9 (the lead's failure-bound rule of 2026-11-06, by build profile; AC-T7.1.3): an exec's wait for a
-    /// busy seed to free is seeded from the seeds' record, an exec seed's work being a clone with a few `setns`: the
-    /// `seeds.hang` rows of `bench/competitive/probes/waits_census.md`, its build's. Do: open an exec seed pool and ask
-    /// its wait before any exec. Expect: twice its build's slowest recorded answer
-    /// ([`hex_core::seeds::CLONE_SLOWEST_DEBUG`] in a debug build, [`hex_core::seeds::CLONE_SLOWEST`] in a release
-    /// one), armed at once, no picked 30 s.
+    /// Decision 9 (no record is read; AC-T7.1.3): an exec's wait for a busy seed to free follows the busy seeds until
+    /// an exec has held one. Do: open an exec seed pool and ask its wait before any exec. Expect: no bound, no picked
+    /// 30 s and no record.
     #[test]
-    fn an_execs_wait_for_a_seed_is_seeded_from_the_clone_record() {
+    fn an_execs_wait_for_a_seed_follows_the_seeds_until_an_exec_has_held_one() {
         let pool = SeedPool::with_budget(PathBuf::from("/nonexistent/hex-for-the-test"), 1);
-        let built = if cfg!(debug_assertions) {
-            hex_core::seeds::CLONE_SLOWEST_DEBUG
-        } else {
-            hex_core::seeds::CLONE_SLOWEST
-        };
-        assert_eq!(pool.answers.deadline(), Some(built * 2));
+        assert_eq!(pool.answers.deadline(), None);
     }
 }

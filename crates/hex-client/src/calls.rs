@@ -101,14 +101,11 @@ pub(crate) fn by_class<W>(tables: &[W; CLASSES], class: Class) -> &W {
     }
 }
 
-/// One wait of a class's table ([`class_waits`]): `measuring`, or `(release, debug)`'s records as
-/// [`Patience::by_profile`] takes them.
+/// One wait of a class's table ([`class_waits`]): `measuring`, following its party until its first answer (decision 9:
+/// no record is read).
 macro_rules! class_wait {
     ($name:expr, measuring) => {
         hex_core::patience::Patience::measuring($name)
-    };
-    ($name:expr, ($release:expr, $debug:expr)) => {
-        hex_core::patience::Patience::by_profile($name, $release, $debug)
     };
 }
 
@@ -448,7 +445,9 @@ impl ReplyDeadline {
                 "the caller's explicit absolute reply deadline expired".to_owned()
             }
             ReplyBound::Learned(wait) => {
-                format!("none came in {wait:?}, twice the slowest answer to a call of its kind")
+                format!(
+                    "none came in {wait:?}, the slowest answer to a call of its kind, or the back-off of one that ran out"
+                )
             }
             ReplyBound::Link(bound) => {
                 format!("the guest link's own setup bound of {bound:?} expired")
@@ -1429,7 +1428,8 @@ impl<'a, T: Transport> Caller<'a, T> {
         let no_room = || Refusal::Os {
             op: "sending to the node agent",
             why: format!(
-                "no room in its socket for {:?}, twice the slowest answer to a call of its kind: it isn't reading",
+                "no room in its socket for {:?}, the slowest answer to a call of its kind, or the back-off of one that \
+                 ran out: it isn't reading",
                 patience.unwrap_or_default()
             ),
         };
@@ -1670,8 +1670,9 @@ impl<T: Transport> Drop for Conn<T> {
 
 impl<T: Transport> Conn<T> {
     /// Sends `request` with the descriptors `with` lends it, once `with` has made what its id names (an exec's
-    /// streams its transport makes), and waits for its answer: with no deadline of its caller's, at most twice the
-    /// slowest answer this process has had to a call of its kind ([`Transport::answers`]), past which the call is
+    /// streams its transport makes), and waits for its answer: with no deadline of its caller's, at most the slowest
+    /// answer this process has had or recorded to a call of its kind, or the back-off of one that ran out
+    /// ([`Transport::answers`]; decision 9), past which the call is
     /// refused by type, the only way left to it, and as long as it takes while its kind's wait measures; with one,
     /// until that deadline, its kind's learned wait a run-out recorded as it passes ([`ReplyDeadline::combine`]). With
     /// `program`, a `Proc`'s place for the end of the program an exec starts is made before the exec goes, so the end

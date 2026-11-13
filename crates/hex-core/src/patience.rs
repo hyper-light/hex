@@ -1,42 +1,31 @@
-//! How long a wait for an answer lasts (decision 9 of docs/design/runtime-architecture.md; Ada's 2026-11-06 rule, no
-//! picked constants, and the lead's failure-bound rule of the same day). Pure: the shell times each answer on its
-//! monotonic clock and reports it ([`Patience::answered`]), and asks how long the next wait lasts
-//! ([`Patience::deadline`]). One type for every wait the node times, the seeds', the turns', an emptying's, a
-//! listing's and the network check's; shared by threads as it is (`&self`, one atomic word), so a static may hold it.
+//! How long a wait for an answer lasts (decision 9 of docs/design/runtime-architecture.md; Ada's rules of 2026-11-06
+//! and 2026-11-13: no picked constant, and no value measured on our machines and baked in, per profile, OS or build:
+//! "citing a number doesn't count as derived; an estimator of what's seen does"). Pure: the shell times each answer on
+//! its monotonic clock and reports it ([`Patience::answered`]), and asks how long the next wait lasts
+//! ([`Patience::deadline`]). One type for every wait the node times; shared by threads as it is (`&self`, atomic
+//! words), so a static may hold it.
 //!
-//! - **Seeded from a record**: before this node has an answer of its own, a wait's bound is [`TIMES_SLOWEST`] times
-//!   the slowest answer in that wait's recorded distribution for the host class, a named record cited where the
-//!   wait is made ([`Patience::seeded`]). No calibration read, no unbounded first wait.
-//! - **Learned**: the bound is [`TIMES_SLOWEST`] times the larger of the record's slowest and this node's slowest
-//!   answer, a running maximum, so it only rises. A wait runs out only for an answer more than twice slower than any
-//!   recorded or seen, or than the least a run-out proved one.
-//! - **Measuring**: a wait whose distribution has no record yet says so ([`Patience::measuring`], with the record to
-//!   come named at the wait). It is never armed: its answers are only recorded, for the census that seeds it, so no
-//!   value is picked for it and no first answer becomes its bound. A tree with a measuring wait doesn't land.
-//! - **By build profile**: a wait's record is of the build it runs in ([`Patience::by_profile`]): a release build
-//!   is seeded from the release census, a debug build (the suites') from the debug one, measuring until it has
-//!   one, since a debug build's answers are slower and the release record isn't theirs (the lead, 2026-11-08). Being
-//!   no faster, a debug build's slowest is at least the release record's, whose cohorts (a cold start the debug
-//!   campaign never met) bound it from below: its seed is the larger of the two records.
-//! - **Karn's point**: a wait that ran out is no sample, nor is an answer from a server taken for dead or hung; the
-//!   shell reports only answers it waited for and got. A run-out for a slow answer still proves that answer slower
-//!   than the bound it ran out at, so this node's slowest is at least that bound from then, and its next wait twice
-//!   it: the timer backs off in process (RFC 6298 §5.5), rather than every slow call failing at one bound until a new
-//!   record lands ([`Patience::ran_out`]).
+//! - **Learned**: once this process has an answer, a wait's bound is the slowest answer it has seen, a running maximum
+//!   that only rises: the least bound of least expected cost per call where no answer fails to come, as the waits
+//!   census measures them (decision 9). No factor, no margin: past the slowest of `n` answers no bound holds whatever
+//!   their distribution (Wilks, 1941), and the next answer outruns them with chance at most `1 / (n + 1)`.
+//! - **Following** (the cold start): before its first answer a wait has no bound ([`Patience::deadline`] is `None`). It
+//!   follows its party: it lasts while the party is alive and advancing, and is refused, typed, at the party's death, a
+//!   reset or a stall of its own measured progress ([`Follow`]). No record is read: a record is another machine's
+//!   answers, which the waits census keeps as evidence of the method, never as a seed.
+//! - **After a run-out**: a wait that ran out is no sample (Karn's point), and the tail it ran into is unknown, the cold
+//!   start's case: the next wait follows its party again ([`Patience::ran_out`], [`Patience::expired`]), its answer
+//!   comes in uncensored, and the bound rises to it. No factor: the following wait measures how long to wait.
 //! - **The census**: each wait is named, and every answer it records goes to the census sink as well, where a shell
 //!   installs one ([`census`]): the waits census probe's record of each wait's distribution
-//!   (`bench/competitive/probes/waits_census.md`), from the code's own timing points. A wait that ran out for a slow
-//!   answer tells the census too ([`Patience::ran_out`]): no sample, but its slowest is at least the bound it ran out
-//!   at, which the census's seed rule takes, so a wait the census saw run out has its patience raised past that bound
-//!   (Karn's point, made learned; the lead, 2026-11-09).
+//!   (`bench/competitive/probes/waits_census.md`), from the code's own timing points, the evidence decision 9's rule is
+//!   held to. A wait that ran out for a slow answer tells the census too ([`Patience::ran_out`]); a party taken for
+//!   dead or hung tells it nothing ([`Patience::expired`]): it says nothing of how long an answer takes. Where the
+//!   census runs, every wait follows its party, unarmed ([`measure_all`]), so the distribution keeps its tail.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-
-/// How many times the slowest answer a wait lasts: twice, so a wait runs out only for an answer more than twice
-/// slower than any recorded or seen. The lead's failure-bound rule (2026-11-06), stated here.
-pub const TIMES_SLOWEST: u32 = 2;
 
 /// What a wait tells the census: an answer it got, the time after its wait began, or that it ran out, the bound that
 /// passed with no answer, the least its slowest is.
@@ -92,64 +81,119 @@ pub fn census_full_line(max: u64) -> String {
     format!("census full at {max} lines\n")
 }
 
-/// A wait's bound, seeded from a record and learned from its answers ([module docs](self)).
+/// What a following wait's party is doing as its shell looks at it: alive, with how far it has got (a count that only
+/// rises while it works: its CPU time, the bytes it has sent, the entries listed), or ended (it died, or its
+/// connection was reset or closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Party {
+    Alive { progress: u64 },
+    Ended,
+}
+
+/// Why a following wait ended with no answer: the refusal's cause, typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stopped {
+    /// The party died, or its connection was reset or closed.
+    Ended,
+    /// The party is alive but its progress has stood still since `since`, longer than `longest`, the longest it went
+    /// between advances in this wait.
+    Stalled { since: Duration, longest: Duration },
+}
+
+/// A following wait, the cold start's and the one after a run-out: it lasts while its party is alive and advancing,
+/// and its only bound is what it measures as it runs, the longest the party has gone between advances in this wait.
+/// Until it has measured such a gap it judges no stall, only the party's end. Pure: the shell looks at the party (its
+/// pidfd, process handle or connection state, and its progress count) on its monotonic clock, at the party's own
+/// events and at [`Follow::stalls_after`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Follow {
+    /// The progress at the last advance, and when it was seen.
+    last: Option<(u64, Duration)>,
+    /// The longest gap between advances measured in this wait.
+    longest: Duration,
+}
+
+impl Follow {
+    /// A following wait with nothing seen of its party yet.
+    pub const fn new() -> Self {
+        Self {
+            last: None,
+            longest: Duration::ZERO,
+        }
+    }
+
+    /// The party as looked at `now`: `Ok` to wait on, or why the wait is refused. An advance (more progress than at
+    /// the last) measures the gap since the last advance; a look with none judges a stall only past the longest gap
+    /// measured.
+    pub fn look(&mut self, party: Party, now: Duration) -> Result<(), Stopped> {
+        let Party::Alive { progress } = party else {
+            return Err(Stopped::Ended);
+        };
+        match self.last {
+            Some((was, at)) if progress > was => {
+                self.longest = self.longest.max(now.saturating_sub(at));
+                self.last = Some((progress, now));
+                Ok(())
+            }
+            Some((_, at)) if !self.longest.is_zero() && now.saturating_sub(at) > self.longest => {
+                Err(Stopped::Stalled {
+                    since: at,
+                    longest: self.longest,
+                })
+            }
+            Some(_) => Ok(()),
+            None => {
+                self.last = Some((progress, now));
+                Ok(())
+            }
+        }
+    }
+
+    /// When the party, advancing no further, is taken for stalled: its last advance plus the longest gap measured.
+    /// `None` before a gap is measured, when only the party's end or its answer ends the wait.
+    pub fn stalls_after(&self) -> Option<Duration> {
+        let (_, at) = self.last?;
+        (!self.longest.is_zero()).then(|| at.saturating_add(self.longest))
+    }
+}
+
+/// A wait's bound, learned from its answers, following its party where it has none ([module docs](self)).
 #[derive(Debug)]
 pub struct Patience {
     /// The wait's name, as the census records it: dotted, as the node's event targets are.
     name: &'static str,
-    /// The record's slowest answer, in nanoseconds and one; 0 while measuring.
-    recorded: u64,
-    /// This node's slowest answer, or the least a run-out proved one, in nanoseconds and one; 0 before any.
+    /// The slowest answer this process has seen, in nanoseconds and one; 0 before any.
     seen: AtomicU64,
+    /// Whether the next wait follows its party though an answer was seen: from a run-out until the next answer.
+    following: AtomicBool,
 }
 
 impl Patience {
-    /// The wait `name`, whose recorded distribution's slowest answer for this host class is `slowest`, cited at the
-    /// caller.
-    pub const fn seeded(name: &'static str, slowest: Duration) -> Self {
-        Self {
-            name,
-            recorded: stored(slowest),
-            seen: AtomicU64::new(0),
-        }
-    }
-
-    /// The wait `name` seeded from its record for this build's profile: `release`'s slowest answer in a release build,
-    /// `debug`'s in a debug one, never under `release`'s (`None`: measuring, until the census's debug arm records it),
-    /// each cited at the caller. A debug build's answers are no faster than a release build's under the same
-    /// conditions, so the release record's cohorts bound its slowest from below (AC-T7.4.1: macOS's guest hello, whose
-    /// debug campaign met no cold first hello, ran out at a tenth of the release record). The choice is made as the
-    /// wait is built, so a release build holds only its release seed.
-    pub const fn by_profile(
-        name: &'static str,
-        release: Duration,
-        debug: Option<Duration>,
-    ) -> Self {
-        if cfg!(debug_assertions) {
-            match debug {
-                Some(slowest) if stored(slowest) < stored(release) => Self::seeded(name, release),
-                Some(slowest) => Self::seeded(name, slowest),
-                None => Self::measuring(name),
-            }
-        } else {
-            Self::seeded(name, release)
-        }
-    }
-
-    /// The wait `name`, with no record yet (MEASURING, the record to come named at the caller): never armed, its
-    /// answers only recorded.
+    /// The wait `name`, with no answer yet: it follows its party until its first answer ([`Follow`]).
     pub const fn measuring(name: &'static str) -> Self {
         Self {
             name,
-            recorded: 0,
             seen: AtomicU64::new(0),
+            following: AtomicBool::new(false),
         }
     }
 
-    /// An answer came `took` after its wait began: this node's slowest if it is slower than any before, and told
-    /// to the census where one is installed.
+    /// For tests alone (cfg(test), or the `test-seeds` feature, which only hex-testkit's dependency turns on and which
+    /// is a dev-dependency everywhere): the wait `name` as it would be once it had seen an answer of `slowest`. No
+    /// production wait is seeded (decision 9).
+    #[cfg(any(test, feature = "test-seeds"))]
+    pub const fn seeded(name: &'static str, slowest: Duration) -> Self {
+        Self {
+            name,
+            seen: AtomicU64::new(stored(slowest)),
+            following: AtomicBool::new(false),
+        }
+    }
+
+    /// An answer came `took` after its wait began: this process's slowest if it is slower than any before, the wait
+    /// bounded again by the slowest, and told to the census where one is installed.
     pub fn answered(&self, took: Duration) {
-        self.seen.fetch_max(stored(took), Ordering::Relaxed);
+        self.learn(took);
         if let Some(sink) = CENSUS.get() {
             sink(self.name, Sample::Answered(took));
         }
@@ -158,22 +202,33 @@ impl Patience {
     /// AC-T7.4.1: a completed typed refusal keeps exactly the same online maximum/deadline update
     /// as an answer. Only the optional census distinguishes it from successful completions.
     pub fn refused(&self, took: Duration) {
-        self.seen.fetch_max(stored(took), Ordering::Relaxed);
+        self.learn(took);
         if let Some(sink) = CENSUS.get() {
             sink(self.name, Sample::Refused(took));
         }
     }
 
-    /// The wait ran out, `after` passing with no answer: no sample (Karn's point), but the answer is slower than
-    /// `after`, so this node's slowest is at least that from now and its next wait twice it (RFC 6298 §5.5's back-off);
-    /// told to the census too where one is installed, whose seed rule takes the same least. Said where the answer is
-    /// slow, never where its server is taken for dead or hung (a seed's hang bound): that says nothing of how long an
-    /// answer takes.
+    fn learn(&self, took: Duration) {
+        self.seen.fetch_max(stored(took), Ordering::Relaxed);
+        self.following.store(false, Ordering::Relaxed);
+    }
+
+    /// The wait ran out, `after` passing with no answer: no sample (Karn's point), so the slowest seen stays, but the
+    /// tail is unknown, so the next wait follows its party until an answer comes; told to the census where one is
+    /// installed. Said where the answer is slow, never where its party is taken for dead or hung
+    /// ([`Patience::expired`]).
     pub fn ran_out(&self, after: Duration) {
-        self.seen.fetch_max(stored(after), Ordering::Relaxed);
+        self.following.store(true, Ordering::Relaxed);
         if let Some(sink) = CENSUS.get() {
             sink(self.name, Sample::RanOut(after));
         }
+    }
+
+    /// The wait's bound passed and its party was taken for dead or hung (a seed's hang bound, a parked init's silence):
+    /// no sample and nothing for the census, a hung party saying nothing of how long an answer takes, but the next
+    /// wait follows its party, so a slow party past the slowest seen is waited for while it lives and advances.
+    pub fn expired(&self) {
+        self.following.store(true, Ordering::Relaxed);
     }
 
     /// The wait's name.
@@ -181,24 +236,25 @@ impl Patience {
         self.name
     }
 
-    /// The slowest answer, the record's or this node's (or the least a run-out proved), whichever is slower: `None`
-    /// while measuring with none seen.
+    /// The slowest answer this process has seen: `None` before any.
     pub fn slowest(&self) -> Option<Duration> {
-        let slowest = self.recorded.max(self.seen.load(Ordering::Relaxed));
-        slowest.checked_sub(1).map(Duration::from_nanos)
+        self.seen
+            .load(Ordering::Relaxed)
+            .checked_sub(1)
+            .map(Duration::from_nanos)
     }
 
-    /// How long the next wait lasts: [`TIMES_SLOWEST`] times [`Patience::slowest`], `None` for a measuring wait.
+    /// How long the next wait lasts: the slowest answer seen; `None` where it follows its party ([`Follow`]): before
+    /// any answer, from a run-out until the next answer, and where the census measures every wait ([`measure_all`]).
     pub fn deadline(&self) -> Option<Duration> {
-        if self.recorded == 0 || MEASURE_ALL.load(Ordering::Relaxed) {
+        if self.following.load(Ordering::Relaxed) || MEASURE_ALL.load(Ordering::Relaxed) {
             return None;
         }
         self.slowest()
-            .map(|slowest| slowest.saturating_mul(TIMES_SLOWEST))
     }
 }
 
-/// `d` in nanoseconds and one, saturating: the form both words keep, so 0 is none. Const for the constructors.
+/// `d` in nanoseconds and one, saturating: the form the word keeps, so 0 is none. Const for the constructors.
 const fn stored(d: Duration) -> u64 {
     d.as_secs()
         .saturating_mul(1_000_000_000)

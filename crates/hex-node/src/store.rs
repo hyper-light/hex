@@ -219,19 +219,14 @@ impl Store {
             // A change waits for the change of the same box before it: that one's write and its fsyncs.
             // How long is learned from the changes made (decision 9), so a disk that has stopped answering is
             // reported as a fault, refused by type, never waited on for ever (CLAUDE.md §4): a record write has
-            // no other path. Seeded by build profile from the `store.turns` rows of
-            // `bench/competitive/probes/waits_census.md`: release, run 4's largest max of the release arms, 3.136 ms
-            // (adacachy2, its tmpfs arm, of 138,598); debug, run 5's largest answer of the debug-build arms, the debug
-            // arm and the suites' (adacachy2), 367.733 ms (the suites', of 4,109,178).
+            // no other path. Before the first change is let go, and after a wait that ran out, a wait follows the
+            // holder until it lets go (decision 9: no record is read; the `store.turns` rows of
+            // `bench/competitive/probes/waits_census.md` are evidence, never a seed).
             turns: Arc::new(Turns::new(
                 "changing a box's record",
                 "record changes under way",
                 TURNS,
-                Patience::by_profile(
-                    "store.turns",
-                    Duration::from_nanos(3_135_674),
-                    Some(Duration::from_nanos(367_732_601)),
-                ),
+                Patience::measuring("store.turns"),
             )),
             synced: Arc::default(),
             #[cfg(all(debug_assertions, target_os = "linux"))]
@@ -1486,14 +1481,14 @@ mod tests {
     /// Goal 5 plan step 2: writes of two boxes never wait on each other; two of one box do. While one
     /// box's turn is held, as its write holds it across the fsyncs, 31 other boxes' records are written
     /// from 31 threads at once, none of them waiting; a second write of the held box waits, its record
-    /// not written, until the turn is let go, and then is. Every wait here is a write's, bounded by twice the
+    /// not written, until the turn is let go, and then is. Every wait here is a write's, bounded by the
     /// `store.turns` record (hex_testkit::waits::STORE_TURN, the store's own bound in this build): each other box's
     /// write is answered within it; and the held box's turn is taken again just before its second write, so the hold
     /// that write waits on is that write's own wait starting, within the record, never the test's whole first half
-    /// (decision 9: a hold past twice the slowest recorded is a fault the store refuses).
+    /// (decision 9: a hold past the slowest recorded or seen is a fault the store refuses).
     #[test]
     fn writes_of_two_boxes_never_wait_on_each_other_and_of_one_box_do() {
-        let write = STORE_TURN.saturating_mul(2);
+        let write = STORE_TURN;
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path());
         let held = record("held");

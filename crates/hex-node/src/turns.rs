@@ -5,8 +5,9 @@
 //! takes one for each create and delete of a box, which has no record while it's being made (goal 5
 //! extended, step 5).
 //!
-//! The patience is twice the longest a turn has been held (decision 9; Ada's 2026-11-06 rule, the lead's
-//! failure-bound rule; [`hex_core::patience`]): each turn let go is a sample of what a wait for one waits on.
+//! The patience is the longest a turn has been held, recorded or seen, or the back-off of a wait that ran out
+//! (decision 9; Ada's rules of 2026-11-06 and 2026-11-13; [`hex_core::patience`]): each turn let go is a sample of
+//! what a wait for one waits on.
 //! Each owner seeds its turns from the record of its holds, or, with none yet, measures ([`Patience::measuring`]):
 //! until the first sample a measuring wait is unarmed and lasts until the turn is let go.
 
@@ -471,13 +472,13 @@ mod tests {
         assert!(turns.take(&id("c")).is_ok());
     }
 
-    /// CLAUDE.md §2 (T-T7.1.2), decision 9: a wait for the same box's turn ends at twice the slowest hold recorded,
-    /// refused by type, never longer, and the refusal is no sample, but the hold outlasted the 50 ms it waited, so the
-    /// next wait is twice that (AC-T7.4.1: `Patience::ran_out` backs off in process, RFC 6298 §5.5). Do: seed the turns
-    /// from a hold of 25 ms, hold box a's turn and take it again. Expect: refused as `Os` for the turns' op after at
-    /// least 50 ms, the wait counted once, and the wait 100 ms after.
+    /// CLAUDE.md §2 (T-T7.1.2), decision 9: a wait for the same box's turn ends at the slowest hold recorded, with no
+    /// margin, refused by type, never longer, and the refusal is no sample, but the hold outlasted the 25 ms it waited,
+    /// so the next wait is twice that (AC-T7.4.1: `Patience::ran_out` backs off in process, RFC 6298 §5.5). Do: seed the
+    /// turns from a hold of 25 ms, hold box a's turn and take it again. Expect: refused as `Os` for the turns' op after
+    /// at least 25 ms, the wait counted once, and the wait 50 ms after.
     #[test]
-    fn a_wait_for_the_same_box_ends_at_twice_the_slowest_hold() {
+    fn a_wait_for_the_same_box_ends_at_the_slowest_hold() {
         let turns = Turns::new(
             "op",
             "turns under way",
@@ -488,7 +489,7 @@ mod tests {
         let _held = turns.take(&id("a")).unwrap();
         let refused = turns.take(&id("a")).err();
         assert!(
-            asked.elapsed() >= Duration::from_millis(50),
+            asked.elapsed() >= Duration::from_millis(25),
             "it waited out its patience"
         );
         assert!(
@@ -496,7 +497,7 @@ mod tests {
             "{refused:?}"
         );
         assert_eq!(turns.waited(), 1);
-        assert_eq!(turns.patience(), Some(Duration::from_millis(100)));
+        assert_eq!(turns.patience(), Some(Duration::from_millis(50)));
     }
 
     /// AC-T7.4.1/T-T7.1.2: overlap refuses without waiting or taking another box's ownership.

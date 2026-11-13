@@ -16,6 +16,11 @@ sha2.workspace = true
 thiserror.workspace = true
 triomphe.workspace = true
 
+[features]
+# `Patience::seeded`, for tests alone: only hex-testkit's dependency turns it on, and hex-testkit is a dev-dependency
+# everywhere, so no production build has it (decision 9: no production wait is seeded from a record).
+test-seeds = []
+
 [dev-dependencies]
 proptest = "1.12.0"
 

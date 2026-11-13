@@ -28,8 +28,8 @@ struct Setup {
 }
 
 impl Setup {
-    /// The pool, each wait seeded with half the wait it is to start with, so it starts at twice that
-    /// (`patience::TIMES_SLOWEST`).
+    /// The pool, each wait as it would be once it had seen an answer of the wait it is to start with (test-only
+    /// [`Patience::seeded`]; a node's pool starts with none and follows its seeds, decision 9).
     fn pool(self) -> Seeds {
         let mut pool = Seeds::new(self.limits);
         calibrate(&mut pool.wait, &mut pool.hang, self);
@@ -39,7 +39,7 @@ impl Setup {
 
 fn calibrate(wait: &mut Patience, hang: &mut Patience, setup: Setup) {
     let seed = |name, ms_: Option<u64>| match ms_ {
-        Some(n) => Patience::seeded(name, ms(n) / 2),
+        Some(n) => Patience::seeded(name, ms(n)),
         None => Patience::measuring(name),
     };
     *wait = seed(WAIT, setup.wait);
@@ -130,9 +130,9 @@ struct Oracle {
     asking: bool,
     counts: Counts,
     handed: Vec<u64>,
-    /// The line's wait and the hang bound, each twice the slowest answer recorded (`crate::patience`, tested on its
-    /// own): from each wait that ends in a seed and each create a seed is done with; no sample from a wait that ran
-    /// out or a seed that died or hung, though a line's wait that ran out backs off past its bound (Karn's point).
+    /// The line's wait and the hang bound, each the slowest answer seen (`crate::patience`, tested on its own): from
+    /// each wait that ends in a seed and each create a seed is done with; no sample from a wait that ran out or a seed
+    /// that died or hung (Karn's point), after which the next wait follows its party until an answer comes.
     wait: Patience,
     hang: Patience,
 }
@@ -620,6 +620,8 @@ fn play(setup: Setup, events: &[Event], paths: &Cell<Paths>) -> Result<(), TestC
                     };
                     let hang = until.unwrap() - since;
                     prop_assert_eq!(refused, Refused::Hung { seed, hang });
+                    // No sample, but the next seed's wait follows it until an answer comes.
+                    oracle.hang.expired();
                     oracle.set(seed, None);
                     oracle.counts.hung += 1;
                     oracle.counts.refused_hung += 1;
@@ -875,7 +877,8 @@ fn a_seed_that_dies_mid_create_refuses_that_create_and_is_restarted_and_counted(
 
 /// HEX-SEEDS-4: a seed that has served a create for the hang bound is taken for hung, returned with its create's
 /// refusal for the shell to kill it, and started again, counted; a waiting create it was handed to meets the refusal
-/// at its claim, and the late report of the create it served finds it gone.
+/// at its claim, and the late report of the create it served finds it gone. The hang makes the next seed's wait follow
+/// it (decision 9): no clock takes the next seed for hung, only its death ends its create.
 #[test]
 fn a_seed_busy_past_the_hang_bound_is_taken_for_hung_and_its_create_refused() {
     let mut pool = seeds(1, 4, 1_000, 30);
@@ -894,17 +897,22 @@ fn a_seed_busy_past_the_hang_bound_is_taken_for_hung_and_its_create_refused() {
     assert_eq!(pool.done(first, ms(31)), Err(Stale::Gone(first)));
     let second = pool.start().unwrap();
     assert_eq!(pool.started(second, ms(32)), Ok(Some(ticket)));
-    assert_eq!(pool.hung(ms(61)), None);
-    let hung = Refused::Hung {
-        seed: second,
-        hang: ms(30),
-    };
-    assert_eq!(pool.hung(ms(62)), Some((second, hung)));
-    assert_eq!(pool.claim(ticket, ms(62)), Ok(Claim::Refused(hung)));
+    assert_eq!(pool.until(second), Ok(None));
+    assert_eq!(pool.hung(ms(1_000_000)), None);
+    let died = Refused::Died { seed: second };
+    assert_eq!(pool.died(second), Ok(Some(died)));
+    assert_eq!(pool.claim(ticket, ms(1_000_000)), Ok(Claim::Refused(died)));
     let c = pool.counts();
     assert_eq!(
-        (c.hung, c.refused_hung, c.started, c.restarted),
-        (2, 2, 2, 1)
+        (
+            c.hung,
+            c.refused_hung,
+            c.died,
+            c.refused_died,
+            c.started,
+            c.restarted
+        ),
+        (1, 1, 1, 1, 2, 1)
     );
 }
 
@@ -1045,49 +1053,52 @@ fn a_growing_pool_adds_a_slot_for_each_create_that_finds_none_free_up_to_its_bou
     );
 }
 
-/// Decision 9 (Ada's 2026-11-06 rule, the lead's failure-bound rule; AC-T7.1.3): the line's wait and the hang bound
-/// are each twice the larger of the record's slowest answer and the slowest the pool has seen. Do: on a pool of one
-/// seed whose record's slowest is 2 ms, serve a create for 4 ms while another waits 3 ms in line; let the second's
-/// seed pass its bound; then let a create's wait in line end. Expect: the first waits within the record's 4 ms, then
-/// the hang bound 8 ms and the line's wait 6 ms; the seed taken for hung at 8 ms and not before; the create refused
-/// after 6 ms; the hang bound unmoved by the hang, which is no sample; the line's wait backed off past the 6 ms it ran
-/// out at, to 12 ms (Karn's point: no sample, but its answer is slower than that bound).
+/// Decision 9 (Ada's rules of 2026-11-06 and 2026-11-13; AC-T7.1.3): the line's wait and the hang bound are each the
+/// slowest answer the pool has seen, with no margin, and a wait past its bound makes the next one follow its party. Do:
+/// on a pool of one seed whose waits have seen 4 ms, serve a create for 3 ms while another waits 2 ms in line; let the
+/// second's seed pass its bound; then let a create's wait in line end, and serve a create for 6 ms. Expect: the first
+/// waits within the 4 ms; the faster answers leaving both bounds at 4 ms; the seed taken for hung at 4 ms and not
+/// before, which is no sample, the next seed's wait following it (no bound); the create refused after 4 ms, and the
+/// line's next wait following too; the 6 ms answer, waited for while its seed lived, the hang bound's slowest then.
 #[test]
-fn the_wait_and_the_hang_bound_are_twice_the_slowest_answer() {
+fn the_wait_and_the_hang_bound_are_the_slowest_answer_and_follow_past_a_run_out() {
     let mut pool = seeds(1, 4, 4, 4);
     let seed = up(&mut pool, ms(0));
     assert_eq!(pool.deadlines(), (Some(ms(4)), Some(ms(4))));
     assert_eq!(pool.create(ms(0)), Ok(Admit::Seed(seed)));
-    assert_eq!(
-        pool.until(seed),
-        Ok(Some(ms(4))),
-        "the first clone's wait is the record's"
-    );
+    assert_eq!(pool.until(seed), Ok(Some(ms(4))));
     let Ok(Admit::Wait { ticket, until }) = pool.create(ms(1)) else {
         panic!("a create with its only seed busy didn't wait");
     };
     assert_eq!(until, Some(ms(5)));
-    assert_eq!(pool.done(seed, ms(4)), Ok(Some(ticket)));
-    assert_eq!(pool.deadlines(), (Some(ms(6)), Some(ms(8))));
-    assert_eq!(pool.claim(ticket, ms(4)), Ok(Claim::Seed(seed)));
-    assert_eq!(pool.until(seed), Ok(Some(ms(12))));
-    assert_eq!(pool.hung(ms(11)), None);
-    let hung = Refused::Hung { seed, hang: ms(8) };
-    assert_eq!(pool.hung(ms(12)), Some((seed, hung)));
-    assert_eq!(pool.deadlines(), (Some(ms(6)), Some(ms(8))));
+    assert_eq!(pool.done(seed, ms(3)), Ok(Some(ticket)));
+    assert_eq!(pool.deadlines(), (Some(ms(4)), Some(ms(4))));
+    assert_eq!(pool.claim(ticket, ms(3)), Ok(Claim::Seed(seed)));
+    assert_eq!(pool.until(seed), Ok(Some(ms(7))));
+    assert_eq!(pool.hung(ms(6)), None);
+    let hung = Refused::Hung { seed, hang: ms(4) };
+    assert_eq!(pool.hung(ms(7)), Some((seed, hung)));
+    assert_eq!(pool.deadlines(), (Some(ms(4)), None));
 
     let next = pool.start().unwrap();
-    assert_eq!(pool.started(next, ms(12)), Ok(None));
-    assert_eq!(pool.create(ms(12)), Ok(Admit::Seed(next)));
-    let Ok(Admit::Wait { ticket, until }) = pool.create(ms(12)) else {
+    assert_eq!(pool.started(next, ms(7)), Ok(None));
+    assert_eq!(pool.create(ms(7)), Ok(Admit::Seed(next)));
+    assert_eq!(
+        pool.until(next),
+        Ok(None),
+        "the next seed's wait follows it"
+    );
+    let Ok(Admit::Wait { ticket, until }) = pool.create(ms(7)) else {
         panic!("a create with its only seed busy didn't wait");
     };
-    assert_eq!(until, Some(ms(18)));
+    assert_eq!(until, Some(ms(11)));
     assert_eq!(
-        pool.claim(ticket, ms(18)),
-        Ok(Claim::Refused(Refused::Waited { wait: ms(6) }))
+        pool.claim(ticket, ms(11)),
+        Ok(Claim::Refused(Refused::Waited { wait: ms(4) }))
     );
-    assert_eq!(pool.deadlines(), (Some(ms(12)), Some(ms(8))));
+    assert_eq!(pool.deadlines(), (None, None));
+    assert_eq!(pool.done(next, ms(13)), Ok(None));
+    assert_eq!(pool.deadlines(), (None, Some(ms(6))));
 }
 
 /// A failed start with no seed up or starting refuses the line at once, since no seed can come for it. Do: on a new
@@ -1115,7 +1126,7 @@ fn a_failed_start_with_no_seed_left_refuses_the_line() {
 /// AC-T7.4.1 (Karn's point; the audit of `Patience::ran_out`'s sites, 2026-11-11): a line refused because its only
 /// seed failed to start is no answer and no run-out: no seed was slow, none came. Do: on an armed pool of one slot
 /// (the line's wait 4 ms, the hang bound 8 ms), let a create wait in line, then fail the seed's start at 3 ms. Expect:
-/// the create refused, its wait the 3 ms it waited; both waits as they were, the line's not backed off.
+/// the create refused, its wait the 3 ms it waited; both waits as they were, the line's not following.
 #[test]
 fn a_failed_start_refusing_the_line_moves_no_wait() {
     let mut pool = seeds(1, 4, 4, 8);
@@ -1136,35 +1147,20 @@ fn a_failed_start_refusing_the_line_moves_no_wait() {
     assert_eq!(pool.deadlines(), (Some(ms(4)), Some(ms(8))));
 }
 
-/// Decision 9 (the lead's failure-bound rule, by build profile; AC-T7.1.3): before any answer of its own, a node's pool
-/// bounds its waits from its build's record. Do: open a pool with the node's seeds; then one seeded from the release
-/// record, serve a create for 1 ms, then one 5 ms slower than that record's slowest. Expect: the node's pool armed at
-/// once, both waits at twice its build's slowest recorded answer ([`CLONE_SLOWEST_DEBUG`] in a debug build,
-/// [`CLONE_SLOWEST`] in a release one: the waits census's runs 1 and 3), no calibration read; the seeded pool's at twice
-/// [`CLONE_SLOWEST`], the fast answer leaving the hang bound there, the slow one raising it to twice its own; the
-/// line's wait untouched.
+/// Decision 9 (no record is read; AC-T7.1.3): before any answer of its own, a node's pool follows its seeds. Do: open
+/// a pool with the node's seeds, serve a create for 1 ms, then one for 5 ms. Expect: both waits following (no bound)
+/// before any answer, the busy seed's create unbounded by any clock; the hang bound then each answer, the slowest seen;
+/// the line's wait, which no create waited in, still following.
 #[test]
-fn a_pools_waits_are_seeded_from_the_record_and_only_rise() {
-    let built = if cfg!(debug_assertions) {
-        CLONE_SLOWEST_DEBUG
-    } else {
-        CLONE_SLOWEST
-    };
-    let armed = Some(built * 2);
-    assert_eq!(
-        Seeds::new(setup(1, 4, None, None).limits).deadlines(),
-        (armed, armed)
-    );
-    let record = Some(CLONE_SLOWEST * 2);
-    let mut pool = Seeds::new(setup(1, 4, None, None).limits).seeded(CLONE_SLOWEST);
-    assert_eq!(pool.deadlines(), (record, record));
+fn a_pools_waits_follow_their_seeds_until_an_answer_and_only_rise() {
+    let mut pool = Seeds::new(setup(1, 4, None, None).limits);
+    assert_eq!(pool.deadlines(), (None, None));
     let seed = up(&mut pool, ms(0));
     assert_eq!(pool.create(ms(0)), Ok(Admit::Seed(seed)));
-    assert_eq!(pool.until(seed), Ok(record));
+    assert_eq!(pool.until(seed), Ok(None));
     assert_eq!(pool.done(seed, ms(1)), Ok(None));
-    assert_eq!(pool.deadlines(), (record, record));
-    let slow = CLONE_SLOWEST + ms(5);
+    assert_eq!(pool.deadlines(), (None, Some(ms(1))));
     assert_eq!(pool.create(ms(1)), Ok(Admit::Seed(seed)));
-    assert_eq!(pool.done(seed, ms(1) + slow), Ok(None));
-    assert_eq!(pool.deadlines(), (record, Some(slow * 2)));
+    assert_eq!(pool.done(seed, ms(6)), Ok(None));
+    assert_eq!(pool.deadlines(), (None, Some(ms(5))));
 }

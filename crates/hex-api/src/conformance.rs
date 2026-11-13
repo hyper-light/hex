@@ -164,15 +164,16 @@ pub const fn seed_from(record: Option<Duration>) -> Duration {
     }
 }
 
-/// The learned wait's bound before any sample on this host, twice its [`seed`] (the x2 the false-alarm
-/// margin): a fixed wait for a program's end, for the tests that wait outside the suite's learned waits
-/// (hex-cli's oci_box, oci_spec_box and node_socket on every native line). The suite itself waits on
-/// [`patience`], which learns.
-pub const PATIENCE: Duration = seed(HostClass::THIS).saturating_mul(2);
+/// The learned wait's bound before any sample on this host, its [`seed`], the slowest end on record (Hex's rule for
+/// learned waits, decision 9 of docs/design/runtime-architecture.md: no margin past the slowest answer): a fixed wait
+/// for a program's end, for the tests that wait outside the suite's learned waits (hex-cli's oci_box, oci_spec_box and
+/// node_socket on every native line). The suite itself waits on [`patience`], which learns.
+pub const PATIENCE: Duration = seed(HostClass::THIS);
 
-/// A wait whose bound is learned (Hex's rule for learned waits): before any sample, twice the slowest
-/// answer on its record; then twice the slowest of the record and what it has seen; and it only rises, so a
-/// node slower than the record is waited for, and no first wait is unbounded.
+/// A wait whose bound is learned (Hex's rule for learned waits, decision 9): before any sample, the slowest answer on
+/// its record; then the slowest of the record and what it has seen; and it only rises, so a node slower than the
+/// record is waited for once it has been seen, and no first wait is unbounded. A case's wait that runs out fails its
+/// case, so it has no back-off of its own (`hex_core::patience` backs a node's off in process).
 pub struct LearnedWait {
     record: Duration,
     seen_nanos: AtomicU64,
@@ -193,10 +194,10 @@ impl LearnedWait {
         self.seen_nanos.fetch_max(nanos, Ordering::Relaxed);
     }
 
-    /// Its bound now: twice the slowest of its record and what it has seen.
+    /// Its bound now: the slowest of its record and what it has seen.
     pub fn bound(&self) -> Duration {
         let seen = Duration::from_nanos(self.seen_nanos.load(Ordering::Relaxed));
-        self.record.max(seen).saturating_mul(2)
+        self.record.max(seen)
     }
 }
 

@@ -19,11 +19,13 @@
 //!   ([`Refused::Died`], [`Refused::Hung`]). The pool asks for the slot to be started again and counts the restart.
 //!   A report about a seed that has left is refused by type ([`Stale::Gone`]), never taken for its slot's next
 //!   seed's.
-//! - **Learned waits** (decision 9; Ada's 2026-11-06 rule, the lead's failure-bound rule): the line's wait and the
-//!   hang bound are each twice the slowest answer, recorded ([`CLONE_SLOWEST`], before the node has one) or seen by
-//!   this pool on `now`'s clock ([`crate::patience`]), and only rise. A create handed a seed after waiting is a
-//!   sample of the line's wait, a seed done with its create one of the hang bound's. A create refused at its wait's
-//!   end, and a seed that died or was taken for hung, is no sample (Karn's point).
+//! - **Learned waits** (decision 9; Ada's rules of 2026-11-06 and 2026-11-13, no picked constant and no record): the
+//!   line's wait and the hang bound are each the slowest answer this pool has seen on `now`'s clock
+//!   ([`crate::patience`]), and only rise. Before the pool's first answer, and after a run-out, each follows its party
+//!   (`None`): a busy seed is waited on while it lives, its death the pool's [`Seeds::died`]. A create handed a seed
+//!   after waiting is a sample of the line's wait, a seed done with its create one of the hang bound's. A create
+//!   refused at its wait's end, and a seed that died or was taken for hung, is no sample (Karn's point), and the next
+//!   wait follows its party.
 //! - **Restarts are bounded**: a start that fails, or a seed that dies before it serves a create, stops the starting
 //!   until the next create, so a node whose seeds can't start tries each slot once a create, never in a loop
 //!   (CLAUDE.md §2).
@@ -37,22 +39,6 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use crate::patience::Patience;
-
-/// The slowest answer in a seed's recorded distribution on the bench's host class (x86_64 Linux, adacachy2's AMD Ryzen
-/// 9 9950X3D2, the record host in fedora's place): a seed's answer to a create, the `seeds.hang` rows of
-/// `bench/competitive/probes/waits_census.md` run 4, the largest max of its release arms, 29.565 ms (29,564,846 ns: its
-/// tmpfs arm, measured unarmed, of 47,226). It replaces runs 1 and 3's 187.044 ms (fedora's), which replaced
-/// seed_path.md run 3's 1.918 ms, a clone timed alone that under the bar's load would have taken healthy seeds for hung.
-/// It seeds a pool's hang bound before the node has an answer of its own, and the line's wait,
-/// since a create in line waits for a busy seed's answer (decision 9: twice the slowest, recorded or seen). Another
-/// host class has no record yet; it starts from this one's and learns its own.
-pub const CLONE_SLOWEST: Duration = Duration::from_nanos(29_564_846);
-
-/// The same answer's slowest in a debug build, which a debug build's waits are seeded from (decision 9, by build
-/// profile): run 5's largest answer of the debug-build arms, the debug arm and the suites' (adacachy2), for it and the
-/// waits seeded from it (the line's, the exec seeds'), never under a bound one ran out at: 652.938 ms (652,937,547 ns,
-/// the suites' `seeds.hang`, of 493,529).
-pub const CLONE_SLOWEST_DEBUG: Duration = Duration::from_nanos(652_937_547);
 
 /// The line's wait's name, as the waits census records it.
 pub const WAIT: &str = "seeds.wait";
@@ -268,8 +254,9 @@ impl Seeds {
         Self::growing(limits, limits.seeds.get())
     }
 
-    /// The pool with both its waits seeded from a record whose slowest answer is `slowest` in place of
-    /// [`CLONE_SLOWEST`]: for a host class with a record of its own, or a test whose seeds answer as it chooses.
+    /// For tests alone (see [`Patience::seeded`]): the pool with both its waits as they would be once each had seen
+    /// an answer of `slowest`.
+    #[cfg(any(test, feature = "test-seeds"))]
     pub fn seeded(mut self, slowest: Duration) -> Self {
         self.wait = Patience::seeded(WAIT, slowest);
         self.hang = Patience::seeded(HANG, slowest);
@@ -298,8 +285,8 @@ impl Seeds {
             next_ticket: 0,
             counts: Counts::default(),
             handed: vec![0; slots],
-            wait: Patience::by_profile(WAIT, CLONE_SLOWEST, Some(CLONE_SLOWEST_DEBUG)),
-            hang: Patience::by_profile(HANG, CLONE_SLOWEST, Some(CLONE_SLOWEST_DEBUG)),
+            wait: Patience::measuring(WAIT),
+            hang: Patience::measuring(HANG),
         }
     }
 
@@ -517,11 +504,12 @@ impl Seeds {
                     _ => None,
                 })?;
         self.slots.get_mut(seed.slot)?.holds = Holds::Nothing;
-        // No sample: the answer never came (Karn's point).
-        let refused = Refused::Hung {
-            seed,
-            hang: until.saturating_sub(since),
-        };
+        let hang = until.saturating_sub(since);
+        // No sample: the answer never came (Karn's point), nor anything for the census, a hung seed saying nothing of
+        // an answer's time; but the next seed's wait follows it while it lives (decision 9), since at the slowest answer
+        // the bound sees no answer past itself: a seed slower than every one before is waited for next.
+        self.hang.expired();
+        let refused = Refused::Hung { seed, hang };
         bump(&mut self.counts.hung);
         bump(&mut self.counts.refused_hung);
         if let Some(ticket) = unclaimed {

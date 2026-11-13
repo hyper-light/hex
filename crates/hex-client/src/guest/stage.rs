@@ -20,8 +20,8 @@ use hex_core::wire::{self, Answer, Received};
 use super::{Duplex, DuplexOwner, Link};
 
 /// How long a staging connection waits on the guest's relay, each read for its answer and each write for room
-/// (decision 9): twice the slowest answer to a stage's request this process has had, from its last byte sent to the
-/// relay's answer. MEASURING: no record of a relay's answers yet; the `guest.stage` rows of
+/// (decision 9): the slowest answer to a stage's request this process has had or recorded, from its last byte sent to
+/// the relay's answer, or the back-off of one that ran out. MEASURING: no record of a relay's answers yet; the `guest.stage` rows of
 /// `bench/competitive/probes/waits_census.md` will seed it, and until then a staging connection waits for its relay
 /// alone.
 static STAGING: Patience = Patience::measuring("guest.stage");

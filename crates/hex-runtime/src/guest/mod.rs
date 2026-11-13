@@ -352,15 +352,18 @@ fn booted_owner(booted: Booted) -> Result<triomphe::Arc<Booted>, Refusal> {
 pub use hex_client::guest::shards::{CLASS, recorded, recorded_boot, seed_in, slowest_in};
 
 /// The first dial's bound before this node has seen a boot ([`GuestRuntime::first_dial_bound`] with nothing
-/// learned): the managed helper's control patience at the node's start, and the bound the macOS CPU
-/// response's producer measures up to (hex-cli's example `macos_cpu_response`, AC-T7.4.1).
+/// learned): the record's slowest boot to ready ([`recorded_boot`]), the managed helper's control patience at the
+/// node's start, and the bound the macOS CPU response's producer measures up to (hex-cli's example
+/// `macos_cpu_response`, AC-T7.4.1).
 pub fn recorded_dial_bound() -> Result<Duration, Refusal> {
     dial_bound(Duration::ZERO)
 }
 
-/// Twice (the margin) the slowest of the record's boot and `seen`, the slowest boot this node has seen.
+/// The slowest of the record's boot and `seen`, the slowest boot this node has seen. The record is the build's one
+/// remaining read of `bench/native/guest/records.tsv` (decision 9): a first boot that follows the guest's liveness
+/// needs a dial sliced against Shards' finite deadlines (HEX-GUEST-33), owed.
 fn dial_bound(seen: Duration) -> Result<Duration, Refusal> {
-    Ok(seen.max(recorded_boot()?).saturating_mul(2))
+    Ok(recorded_boot()?.max(seen))
 }
 
 /// The word that tells a Shards guest its boot's deadline on its kernel command line (AC-T7.4.1), as a Firecracker
@@ -798,8 +801,8 @@ impl GuestRuntime {
         }
     }
 
-    /// How long a boot may take to be ready (the lead's rule for learned waits): twice (the margin) the slowest of
-    /// the record's and this node's own, so it only rises; before any boot here, twice the record's.
+    /// How long a boot may take to be ready (decision 9, learned waits): the slowest of the record's and this node's
+    /// own, so it only rises; before any boot here, the record's ([`dial_bound`]).
     pub fn first_dial_bound(&self) -> Result<Duration, Refusal> {
         dial_bound(*self.slowest.lock().map_err(poisoned)?)
     }
@@ -897,8 +900,8 @@ impl GuestRuntime {
         Err(Refusal::Os {
             op: "booting the node's guest",
             why: format!(
-                "{BOOTS} guests booted, each alive and not ready within twice the slowest boot to \
-                 ready seen (bench/native/guest/boot-ready/RECORD.md): {}",
+                "{BOOTS} guests booted, each alive and not ready within its bound, the slowest boot to \
+                 ready recorded or seen (bench/native/guest/boot-ready/RECORD.md): {}",
                 hung.join("; ")
             ),
         })

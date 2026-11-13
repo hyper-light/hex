@@ -36,9 +36,11 @@ use shards_api::image::{
 use super::{GuestRuntime, poisoned};
 use crate::devices;
 
-/// The waits an image box's calls make, each learned (decision 9) and seeded from this host class's
-/// slowest recorded answer (bench/native/guest/records.tsv): Shards' boot of an image to its members'
-/// start, a stats answer, and a stop to its run's end.
+/// The waits an image box's calls make, each learned (decision 9): Shards' boot of an image to its members' start, a
+/// stats answer, and a stop to its run host's exit. Each is the slowest answer this process has seen; before its first,
+/// and after a run-out, it follows its party, the boot's or stop's thread and its run host, until the answer comes. No
+/// record is read, and none is needed to make an image box (decision 9; the census keeps `image_boot`, `image_stats`
+/// and `image_stop` as evidence).
 pub struct ImageWaits {
     boot: Patience,
     stats: Patience,
@@ -46,33 +48,19 @@ pub struct ImageWaits {
 }
 
 impl ImageWaits {
-    /// Seeded from records.tsv ([`hex_client::guest::shards::recorded`]): `image_boot`, `image_stats` and
-    /// `image_stop`. A measure no host class records is refused, naming the record to take, but where the
-    /// waits census runs ([`hex_core::patience::measures_all`]): it arms no wait, so there each measures, and
-    /// the census takes its first record (hex-cli's `image_real`; docs/design/shards-image-class.md §6).
-    pub fn recorded() -> Result<Self, Refusal> {
-        Self::from_records(
-            hex_client::guest::shards::recorded,
-            hex_core::patience::measures_all(),
-        )
+    /// The three waits, each following its party until its first answer.
+    pub const fn new() -> Self {
+        Self {
+            boot: Patience::measuring("hex.image.boot"),
+            stats: Patience::measuring("hex.image.stats"),
+            stop: Patience::measuring("hex.image.stop"),
+        }
     }
+}
 
-    /// Each wait seeded from `record`'s slowest answer for its measure, or, where it has none, measuring
-    /// while the `census` runs, else refused as `record` refuses it.
-    fn from_records(
-        record: impl Fn(&str) -> Result<Duration, Refusal>,
-        census: bool,
-    ) -> Result<Self, Refusal> {
-        let wait = |name: &'static str, measure: &str| match record(measure) {
-            Ok(slowest) => Ok(Patience::seeded(name, slowest)),
-            Err(_) if census => Ok(Patience::measuring(name)),
-            Err(why) => Err(why),
-        };
-        Ok(Self {
-            boot: wait("hex.image.boot", "image_boot")?,
-            stats: wait("hex.image.stats", "image_stats")?,
-            stop: wait("hex.image.stop", "image_stop")?,
-        })
+impl Default for ImageWaits {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

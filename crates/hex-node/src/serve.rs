@@ -144,8 +144,8 @@ pub const PROGRAMS: &str = "programs watched by the node agent's connections tog
 const READS_PER_WAKE: usize = 64;
 /// Most events one wake takes; more come on the next.
 pub const EVENTS: usize = 256;
-/// How long a list's worker waits for its client to read one part before it sends the next: twice the slowest
-/// such read this process has seen (decision 9; the lead's failure-bound rule); past it the client has stopped
+/// How long a list's worker waits for its client to read one part before it sends the next: the slowest such read
+/// this process has seen, or the back-off of one that ran out (decision 9); past it the client has stopped
 /// reading, and its connection is closed, the other calls on it refused by the close. MEASURING: the record to come is
 /// `bench/competitive/probes/waits_census.md`'s `serve.reads` row, which then seeds it. Until then the first part
 /// waited for is waited out.

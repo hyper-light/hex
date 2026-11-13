@@ -5,8 +5,8 @@ A completed wire typed refusal, `name !nanos`, is retained separately, excluded 
 An answered wire row alone does not prove workload success; physical/per-call provenance remains required.
 Legacy unmarked rows keep their original interpretation; historical refusals cannot be inferred.
 A wait that ran out is no sample (Karn's point), but its line, `name >nanos`, says its slowest is at least the bound it
-ran out at, which a row's record is never under, however few its answers ([`seed`]): a censored row's patience doubles
-each census until nothing runs out (decision 9; the lead, 2026-11-09)."""
+ran out at, which a row's record is never under, however few its answers ([`seed`]). The records are evidence the rule
+of decision 9 is held to (2026-11-13): no build reads them, and no wait is seeded from them."""
 import json
 import math
 import sys
