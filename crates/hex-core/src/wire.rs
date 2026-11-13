@@ -2342,6 +2342,7 @@ fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
                 args: r.list(|r| r.string("member argument"))?,
             })
         })?,
+        shares: Vec::new(),
     })
 }
 

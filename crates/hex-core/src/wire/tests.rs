@@ -4921,6 +4921,46 @@ fn a_shards_image_vm_carries_the_members_its_caller_drives_on_the_wire() {
     );
 }
 
+/// Joint plan step 12 for kiln's step 18 (AC-T7.4.1): do create a Shards image VM sharing two host directories, one
+/// read-write and one read-only, beside a member its caller drives. Expect it read back whole, its shares after its
+/// members, each its host directory, where its guest sees it and whether read-only.
+#[test]
+fn w12_a_shards_image_vms_shares_cross_the_wire_after_its_members() {
+    let create = Request::Call(Call::Create(Box::new(BoxSpec {
+        id: id("image-shares"),
+        bounds: Bounds::default(),
+        class: ClassSpec::ShardsImage(Box::new(ShardsImage {
+            members: vec![hex_api::ImageMember::new(Member {
+                kind: MemberKind::Harness,
+                name: "claude".to_owned(),
+            })],
+            shares: vec![
+                Mount {
+                    source: PathBuf::from("/var/lib/kiln/homes/ada/.claude"),
+                    destination: "/home/agent/.claude".to_owned(),
+                    read_only: false,
+                },
+                Mount {
+                    source: PathBuf::from("/srv/projects/hex"),
+                    destination: "/work/hex".to_owned(),
+                    read_only: true,
+                },
+            ],
+            ..ShardsImage::new(hex_api::sim::SIM_IMAGE)
+        })),
+        owner: None,
+        devices: Vec::new(),
+        allocation: Some(hex_api::sim::sim_vm_allocation().unwrap()),
+        route: None,
+        band: 0,
+    })));
+    let bytes = request(94, &create, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap().1,
+        create
+    );
+}
+
 /// Joint plan step 15 (every grant visible in Hex's record of the VM): do create a Shards image VM granted a provider
 /// by name, kiln on its host and a publish; expect it read back whole, its grants written after its command. Do
 /// write one whose grants the check refuses (a loopback destination), and read it as a peer that skipped the check

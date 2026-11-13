@@ -849,6 +849,95 @@ fn w12_a_driven_members_run_time_arguments_ride_its_boot_in_order() {
     }
 }
 
+/// Joint plan step 12 for kiln's step 18 (D231's shares): an image VM's guest sees the host directories its caller
+/// names, and only those. Do boot a VM sharing a home volume read-write and a project read-only; one granted egress and
+/// sharing none; then one whose share Shards refuses. Expect the first boot to ask Shards for exactly those two shares,
+/// each its host directory, where the guest sees it and whether read-only, in order; the second for none, its grants
+/// widening no share; the third's start refused as Invalid, in Shards' own words.
+#[test]
+fn w12_an_image_vm_shares_exactly_the_host_directories_its_caller_names() {
+    use hex_api::{Destination, Grant, Member, MemberKind, Mount, Ports, Proto};
+    let shares = vec![
+        Mount {
+            source: std::path::PathBuf::from("/var/lib/kiln/homes/ada/.claude"),
+            destination: "/home/agent/.claude".to_owned(),
+            read_only: false,
+        },
+        Mount {
+            source: std::path::PathBuf::from("/srv/projects/hex"),
+            destination: "/work/hex".to_owned(),
+            read_only: true,
+        },
+    ];
+    let boot_of = |shares: Vec<Mount>, grants: Vec<Grant>| {
+        let images = ModelImages::new();
+        images.names(
+            shards_api::image::MemberKind::Harness,
+            "codex",
+            &["api.anthropic.com:443"],
+        );
+        let (runtime, _owner) = model_runtime(&images, waits());
+        let mut boxed = spec("image-shares", None);
+        if let ClassSpec::ShardsImage(image) = &mut boxed.class {
+            image.shares = shares;
+            image.grants = grants;
+        }
+        let id = runtime.create(boxed).unwrap().id;
+        runtime.start(&id).unwrap();
+        let asked = images.asked.lock().unwrap().clone();
+        let [boot] = asked.as_slice() else {
+            panic!("boots asked: {asked:?}");
+        };
+        boot.clone()
+    };
+    let shared = boot_of(shares.clone(), Vec::new());
+    let asked: Vec<(std::path::PathBuf, String, bool)> = shared
+        .shares
+        .iter()
+        .map(|s| (s.host.clone(), s.at.clone(), s.read_only))
+        .collect();
+    let named: Vec<(std::path::PathBuf, String, bool)> = shares
+        .iter()
+        .map(|m| (m.source.clone(), m.destination.clone(), m.read_only))
+        .collect();
+    assert_eq!(asked, named);
+    let granted = boot_of(
+        Vec::new(),
+        vec![Grant::Egress {
+            member: Member {
+                kind: MemberKind::Harness,
+                name: "codex".to_owned(),
+            },
+            to: Destination::Name("api.anthropic.com".to_owned()),
+            ports: Ports {
+                proto: Proto::Tcp,
+                first: 443,
+                last: 443,
+            },
+        }],
+    );
+    assert!(granted.shares.is_empty(), "{:?}", granted.shares);
+    let images = ModelImages::new();
+    let words = "/srv/projects/hex: a share's directory is an absolute UTF-8 path";
+    *images.refuse.lock().unwrap() = Some(ImageRefusal::Spec {
+        what: "a share",
+        why: words.to_owned(),
+    });
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let mut boxed = spec("image-share-refused", None);
+    if let ClassSpec::ShardsImage(image) = &mut boxed.class {
+        image.shares = shares;
+    }
+    let id = runtime.create(boxed).unwrap().id;
+    match runtime.start(&id) {
+        Err(Refusal::Invalid { what, why }) => {
+            assert_eq!(what, "shards image");
+            assert!(why.contains("a share") && why.contains(words), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 /// Joint plan steps 12 and 15 (ROOT's KVM run of image_grants_real at c8b4ce6b, 2026-11-13): do end a running VM's run
 /// as Shards' run host does when it exits without its run's end, what it said last its only words (shards-api reads that
 /// end as `Failed` in them, and its stop as `Stopped`). Expect: its run host reaped through its stop, and the box shown
