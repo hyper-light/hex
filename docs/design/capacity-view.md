@@ -183,9 +183,11 @@ quiescent step after a heal.
 ### CV6. No leases on reservations; the only learned time is a holder's wait
 
 **The choice.** No term ends a reservation. A holder's wait for an answer (reserve, release, sync) is
-learned, per call kind and class, by hex-core's Patience on kiln's side as on Hex's (decision 9 of
-`runtime-architecture.md`): seeded from the waits census, learned from answers, never a picked
-constant. A wait that runs out abandons its reserve (CV5); it never ends anything the keeper holds.
+hex-core's Patience, per call kind and class, on kiln's side as on Hex's (decision 9 of `runtime-architecture.md`,
+as the person ruled it on 2026-11-13): within the slowest answer it has seen, the answer; past that, its run-out is
+told and the wait follows the keeper by its link, ending unanswered only at the link's end, a reset, or a whole
+window of that slowest answer with nothing from the keeper. No record seeds it and no constant is picked. A wait
+that ends unanswered abandons its reserve (CV5, `Holder::ran_out`); it never ends anything the keeper holds.
 
 **Why.** A lease (Gray and Cheriton, SOSP 1989) lets the grantor take back what it granted when the term
 ends without the holder's word, because the holder stops using it at the term. A reservation here is
@@ -405,8 +407,9 @@ core kiln drives through hex-api (Shards R12: one implementation), feeding it wh
      on `Synced`, its own count and sum must be the keeper's (`Event::Synced { agree }`), and where they aren't, the
      keeper's books are the machine's and it reports the difference;
    - only then `Reserve { fence, id, amount }`, `id` its epoch and a count never reused, and the work starts on
-     `Granted` for that id alone; a reserve with no answer within its learned wait (hex-core's Patience, CV6) is
-     abandoned: never started, and released at once where the link is up;
+     `Granted` for that id alone; a reserve whose wait ends with no answer (CV6: the keeper's link ended, was reset, or
+     stood still a whole window past the slowest answer seen) is abandoned: never started, and released at once where
+     the link is up;
    - `Release { fence, id }` once that work can no longer run.
 5. **What each answer asks.** `Refused { why }`: `Room` (decide again on the view it carries), `Full` (it holds the
    keeper's bound), `Empty`, `Devices` (a GPU by count, refused until device grants by identity), `Disagrees`.

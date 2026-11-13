@@ -2842,6 +2842,12 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             w.u8(13);
             put_upstream(w, *needs)
         }
+        // Joint plan step 12: a box whose run failed, in its runtime's words, after every older refusal.
+        Refusal::Failed { id, why } => {
+            w.u8(14);
+            w.string(id.as_str())?;
+            w.string(why)
+        }
     }
 }
 
@@ -2961,6 +2967,10 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
         }
         13 => Refusal::Awaits {
             needs: upstream(r)?,
+        },
+        14 => Refusal::Failed {
+            id: box_id(r)?,
+            why: r.string("refusal reason")?,
         },
         t => return Err(Fault::value("refusal", format!("variant {t}"))),
     })

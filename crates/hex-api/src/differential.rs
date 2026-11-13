@@ -586,6 +586,7 @@ fn kind(r: &Refusal) -> &'static str {
             crate::Upstream::NestedChannel => "Awaits(NestedChannel)",
             crate::Upstream::RatePeriod => "Awaits(RatePeriod)",
         },
+        Refusal::Failed { .. } => "Failed",
     }
 }
 

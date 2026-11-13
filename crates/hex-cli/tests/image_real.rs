@@ -10,9 +10,8 @@
 //! its count, fastest and slowest (`IMAGE-RECORD`); and, as it goes, every answer the client's own waits record
 //! (`IMAGE-STEP`, each call's answer as the client saw it) and each case's verdict and time (`IMAGE-CASE`).
 //!
-//! HEX-IMG-4 awaits Shards' guest time per vCPU (`Upstream::GuestCpuTimePerVcpu`), which D231's image boot says
-//! nothing of in its stats yet (Shards e82b9403): it must fail naming that, and every other case pass. Once Shards
-//! gives it, HEX-IMG-4 passes and this test says so, failing until its expectation goes.
+//! Every case passes: HEX-IMG-4's guest time per vCPU among them, which Shards gives an image run since D241, read as
+//! its run host reads its VM's (`Stats::microvm`, Shards e0cc059c and on).
 //!
 //! Explicit inputs only, each by its own variable; a missing one fails by name. Run alone, `--ignored`; on Linux
 //! inside a cgroup delegated to this binary (`HEX_DELEGATED`), as native_firecracker_smoke is, where the node holds
@@ -55,7 +54,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use hex_api::conformance::{self, Act, Failure, Fixture};
+use hex_api::conformance::{self, Act, Fixture};
 use hex_api::{
     Allocation, Bounds, BoxId, BoxSpec, Class, ClassSpec, Program, Runtime, ShardsImage,
 };
@@ -220,14 +219,5 @@ fn the_shards_image_class_holds_its_contract_through_a_real_node() {
         eprintln!("IMAGE-CASE {} {verdict}", case.id);
     }
     assert!(left.is_empty(), "a box is left: {left:?}");
-    // Guest time per vCPU awaits Shards: HEX-IMG-4 fails naming it, typed, and nothing else fails.
-    let (owed, failed): (Vec<&Failure>, Vec<&Failure>) =
-        failures.iter().partition(|f| f.case == "HEX-IMG-4");
-    assert!(failed.is_empty(), "the image cases failed: {failed:#?}");
-    assert!(
-        owed.iter()
-            .any(|f| f.why.contains("guest time per vCPU awaits")),
-        "HEX-IMG-4 passed, or failed for another reason than the guest time Shards owes: {owed:#?}; once Shards \
-         gives guest time per vCPU, this expectation goes"
-    );
+    assert!(failures.is_empty(), "the image cases failed: {failures:#?}");
 }

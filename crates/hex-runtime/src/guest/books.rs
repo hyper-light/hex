@@ -13,6 +13,9 @@ use crate::devices::{self, Books};
 pub(super) enum Routed {
     Image(BoxRecord),
     Other(Option<BoxRecord>),
+    /// A box whose backing or VM its node retired at its start (joint plan step 14): its inspect says why from its
+    /// record, its delete removes that record, and every other call is refused `Retired`.
+    Retired(BoxRecord),
 }
 
 pub(super) fn uncertain(id: &BoxId) -> Result<Refusal, Refusal> {
@@ -177,10 +180,28 @@ impl GuestRuntime {
     /// records), and routed by its class, so no call scans them twice: each operation still rereads it under its turn.
     pub(super) fn routed(&self, id: &BoxId) -> Result<Routed, Refusal> {
         Ok(match self.recorded_box(id)? {
+            Some(record) if record.retired => Routed::Retired(record),
             Some(record) if matches!(record.spec.class, ClassSpec::ShardsImage(_)) => {
                 Routed::Image(record)
             }
             snapshot => Routed::Other(snapshot),
+        })
+    }
+
+    /// Deletes a retired box (joint plan step 14): its backing or VM went with its retirement, so its record is all
+    /// there is to remove, in its turn.
+    pub(super) fn delete_retired(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        let books = self
+            .books
+            .get()
+            .ok_or_else(|| Refusal::Broken("guest has no initialized record authority".into()))?;
+        let id = &record.spec.id;
+        devices::with_transaction(books, id, &[], |transaction| {
+            match transaction.read(id)? {
+                Some(current) if current.retired => transaction.remove(id),
+                Some(_) => Err(uncertain(id)?),
+                None => Ok(()),
+            }
         })
     }
 

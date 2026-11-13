@@ -1110,6 +1110,7 @@ impl Runtime for GuestRuntime {
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
         match self.routed(id)? {
+            books::Routed::Retired(record) => Err(record.retired_refusal()?),
             books::Routed::Image(record) => self.start_image(record),
             books::Routed::Other(snapshot) => {
                 let snapshot = snapshot.as_ref();
@@ -1122,6 +1123,7 @@ impl Runtime for GuestRuntime {
 
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
         let snapshot = match self.routed(id)? {
+            books::Routed::Retired(record) => return Err(record.retired_refusal()?),
             // A member's program is the agent-control endpoint's (joint plan step 11).
             books::Routed::Image(_) => {
                 return Err(Refusal::Awaits {
@@ -1152,6 +1154,7 @@ impl Runtime for GuestRuntime {
 
     fn member(&self, id: &BoxId, member: &hex_api::Member) -> Result<Box<dyn Proc>, Refusal> {
         match self.routed(id)? {
+            books::Routed::Retired(record) => Err(record.retired_refusal()?),
             books::Routed::Image(record) => self.member_image(record, member),
             books::Routed::Other(_) => Err(Refusal::Invalid {
                 what: "member",
@@ -1166,6 +1169,7 @@ impl Runtime for GuestRuntime {
     /// guest's init having none from Hex; any other box's refused as the trait refuses it.
     fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
         match self.routed(id)? {
+            books::Routed::Retired(record) => Err(record.retired_refusal()?),
             books::Routed::Image(record) => self.room_image(record, room),
             books::Routed::Other(None) => Err(Refusal::NoSuchBox(id.try_clone()?)),
             books::Routed::Other(Some(record))
@@ -1192,6 +1196,7 @@ impl Runtime for GuestRuntime {
         rate: Option<std::num::NonZeroU64>,
     ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
         match self.routed(id)? {
+            books::Routed::Retired(record) => Err(record.retired_refusal()?),
             books::Routed::Image(record) => self.rate_image(record, rate),
             books::Routed::Other(None) => Err(Refusal::NoSuchBox(id.try_clone()?)),
             books::Routed::Other(Some(_)) => Err(Refusal::Invalid {
@@ -1206,6 +1211,7 @@ impl Runtime for GuestRuntime {
     /// Joint plan step 14 (C1): what an image VM costs its host (D241); any other box's refused as the trait refuses it.
     fn host_use(&self, id: &BoxId) -> Result<hex_api::HostUse, Refusal> {
         match self.routed(id)? {
+            books::Routed::Retired(record) => Err(record.retired_refusal()?),
             books::Routed::Image(record) => self.host_use_image(record),
             books::Routed::Other(None) => Err(Refusal::NoSuchBox(id.try_clone()?)),
             books::Routed::Other(Some(_)) => Err(Refusal::Invalid {
@@ -1219,6 +1225,7 @@ impl Runtime for GuestRuntime {
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
         match self.routed(id)? {
+            books::Routed::Retired(record) => Err(record.retired_refusal()?),
             books::Routed::Image(record) => self.signal_image(record, signal),
             books::Routed::Other(snapshot) => {
                 let snapshot = snapshot.as_ref();
@@ -1231,9 +1238,9 @@ impl Runtime for GuestRuntime {
 
     fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
         match self.routed(id)? {
+            // A retired box says why from its record, with no backing or VM to ask (joint plan step 14).
+            books::Routed::Retired(record) => record.retired_info(),
             books::Routed::Image(record) => self.inspect_image(record),
-            // A box whose backing was retired says why from its record, with no backing to ask (joint plan step 14).
-            books::Routed::Other(Some(record)) if record.retired => Self::retired_info(&record),
             books::Routed::Other(snapshot) => {
                 let snapshot = snapshot.as_ref();
                 self.call_recorded(snapshot, id, false, || {
@@ -1247,6 +1254,7 @@ impl Runtime for GuestRuntime {
 
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
         let snapshot = match self.routed(id)? {
+            books::Routed::Retired(record) => return Err(record.retired_refusal()?),
             books::Routed::Image(record) => return self.usage_image(record),
             books::Routed::Other(snapshot) => snapshot,
         };
@@ -1304,6 +1312,7 @@ impl Runtime for GuestRuntime {
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
         match self.routed(id)? {
+            books::Routed::Retired(record) => self.delete_retired(&record),
             books::Routed::Image(record) => self.delete_image(record),
             books::Routed::Other(Some(record)) if self.owns_record(&record.spec) => {
                 self.delete_recorded(&record, id)
@@ -1335,10 +1344,6 @@ impl GuestRuntime {
         snapshot: Option<&hex_core::record::BoxRecord>,
         id: &BoxId,
     ) -> Result<(), Refusal> {
-        // A box whose backing was retired is gone with it: its delete is its owner's, the record's alone to remove.
-        if snapshot.is_some_and(|record| record.retired) {
-            return Ok(());
-        }
         let Some(b) = self.booted_for_record(snapshot, id)? else {
             return if self.managed_shared() {
                 Ok(())

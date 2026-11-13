@@ -178,8 +178,13 @@ impl Books for Owner {
 #[derive(Default)]
 struct ModelRun {
     end: Mutex<Option<RunEnd>>,
+    /// What its run host said last where it exited without its run's end, as the test sets it: shards-api then reads
+    /// the run's end as `Failed` in those words, and a stop of it as `Stopped` (`Session::wait_for`, `Session::stop`).
+    gone: Mutex<Option<String>>,
     stops: AtomicUsize,
     stats: Mutex<Stats>,
+    /// The patience each stats ask was given, in order (decision 9).
+    stats_asked: Mutex<Vec<Duration>>,
     /// Each room (D241) and rate (D247) the run was told, in order (joint plan step 14).
     rooms: Mutex<Vec<Option<i64>>>,
     rates: Mutex<Vec<Option<std::num::NonZeroU64>>>,
@@ -270,7 +275,8 @@ impl ImageGuest for ModelGuest {
             .get(&member.name)
             .copied())
     }
-    fn stats(&self, _: StatsScope, _: Duration) -> Result<Stats, ImageRefusal> {
+    fn stats(&self, _: StatsScope, patience: Duration) -> Result<Stats, ImageRefusal> {
+        self.run.stats_asked.lock().unwrap().push(patience);
         match self.run.end.lock().unwrap().clone() {
             Some(end) => Err(ImageRefusal::Ended(end)),
             None => Ok(self.run.stats.lock().unwrap().clone()),
@@ -338,7 +344,12 @@ impl ImageGuest for ModelGuest {
         Ok(())
     }
     fn wait_for(&self, _: Duration) -> Result<Option<RunEnd>, ImageRefusal> {
-        Ok(self.run.end.lock().unwrap().clone())
+        let end = self.run.end.lock().unwrap().clone();
+        Ok(end.or_else(|| {
+            self.run.gone.lock().unwrap().as_ref().map(|said| {
+                RunEnd::Failed(format!("the run host exited without its run's end: {said}"))
+            })
+        }))
     }
 }
 
@@ -615,6 +626,9 @@ fn record(owner: &Owner, id: &BoxId) -> Option<BoxRecord> {
 /// makes either, so each measures, for its fact alone (hex_testkit::waits).
 static LATE_BOOT_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_late_boot_shown");
 static REAPED_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_reaped_shown");
+/// A run whose host exited without its run's end, reaped through its stop and shown Empty: a fact of its own, measuring
+/// alike.
+static HOST_GONE_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_host_gone_shown");
 
 /// Waits on `wait`, its fact's own patience, for box `id` to show `state`.
 fn shown(runtime: &GuestRuntime, id: &BoxId, state: BoxState, wait: &Patience) -> BoxInfo {
@@ -723,6 +737,78 @@ fn a_run_that_ends_on_its_own_is_reaped_and_its_status_recorded() {
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
 }
 
+/// Joint plan steps 12, 15 and 17 (ROOT's grants-none on KVM and HVF at c8b4ce6b, 2026-11-13: a probe of what Hex asks
+/// Shards, beside image_real's runs, which ran): do boot a VM of its members alone granted nothing, once with none of its
+/// members driven, as image_real's cases boot, and once with its harness driven by its caller (`ShardsImage::members`),
+/// as image_grants_real's check 2 boots. Expect the two boots asked alike in all but `members`: nothing kept past the
+/// microVM and every member held to reaching nothing (D246's `Some([])`), with no publish, in both; the second's
+/// `members` its harness alone, its stdin asked. So of what check 2 sends, its driven member alone is not image_real's.
+#[test]
+fn a_driven_member_changes_nothing_a_boot_asks_but_its_members() {
+    use hex_api::{ImageMember, Member, MemberKind};
+    // Each boot on a runtime of its own, so neither waits at a bound the other's answer taught (decision 9).
+    let asked_of = |members: Vec<ImageMember>| {
+        let images = ModelImages::new();
+        let (runtime, _owner) = model_runtime(&images, waits());
+        let mut spec = spec("image-probe", None);
+        if let ClassSpec::ShardsImage(image) = &mut spec.class {
+            image.members = members;
+        }
+        let id = runtime.create(spec).unwrap().id;
+        runtime.start(&id).unwrap();
+        let asked = images.asked.lock().unwrap().clone();
+        let [boot] = asked.as_slice() else {
+            panic!("boots asked: {asked:?}");
+        };
+        boot.clone()
+    };
+    let first = asked_of(Vec::new());
+    let second = asked_of(vec![ImageMember::new(Member {
+        kind: MemberKind::Harness,
+        name: "probe".to_owned(),
+    })]);
+    assert_eq!(first.egress.egress, Keep::Only(Vec::new()));
+    assert_eq!(first.egress.mcp, Keep::Only(Vec::new()));
+    assert_eq!(first.egress.destinations, Keep::Only(Vec::new()));
+    assert_eq!(first.egress.members, Some(Vec::new()));
+    assert!(!first.egress.dns && first.publish.is_empty() && first.members.is_empty());
+    let [member] = second.members.as_slice() else {
+        panic!("the driven boot's members: {:?}", second.members);
+    };
+    assert_eq!(member.member, MemberName::harness("probe"));
+    assert!(member.stdin && !member.terminal);
+    let mut alike = second.clone();
+    alike.members.clone_from(&first.members);
+    alike.ready_by = first.ready_by;
+    assert_eq!(alike, first);
+}
+
+/// Joint plan steps 12 and 15 (ROOT's KVM run of image_grants_real at c8b4ce6b, 2026-11-13): do end a running VM's run
+/// as Shards' run host does when it exits without its run's end, what it said last its only words (shards-api reads that
+/// end as `Failed` in them, and its stop as `Stopped`). Expect: its run host reaped through its stop, and the box shown
+/// Empty with an unknown exit and those words, by inspect and in its record, never a KILL Hex never sent.
+#[test]
+fn a_run_whose_host_exited_without_its_end_ends_in_its_hosts_words() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let id = runtime.create(spec("image-host-gone", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    let said = "init: the microVM's last words";
+    *images.run.gone.lock().unwrap() = Some(said.to_owned());
+    let info = shown(&runtime, &id, BoxState::Empty, &HOST_GONE_SHOWN);
+    let words = format!("the run host exited without its run's end: {said}");
+    assert_eq!(
+        (info.exit, info.ended.as_deref()),
+        (Some(Exit::Unknown), Some(words.as_str()))
+    );
+    let kept = record(&owner, &id).unwrap();
+    assert_eq!(
+        (kept.exit, kept.ended.as_deref()),
+        (Some(Exit::Unknown), Some(words.as_str()))
+    );
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+}
+
 /// Joint plan step 12 (HEX-IMG-3 on KVM, ROOT 2026-11-13): do end a running VM's run as Shards' run host ends one whose
 /// own command never started (D249: `Failed`, in its VM's words). Expect: its run host reaped through its stop, and the
 /// box shown Empty with an unknown exit and those words, by inspect and by list, its record keeping both.
@@ -756,6 +842,61 @@ fn a_run_that_failed_ends_saying_why_in_its_runtimes_words() {
         (kept.exit, kept.ended.as_deref()),
         (Some(Exit::Unknown), Some(words))
     );
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+}
+
+/// Joint plan step 12 (goal 15's finding; ROOT's (b), 2026-11-13): do start a VM whose run fails as it boots, its command
+/// never started (D249's `Failed`, in its VM's words), the run host's boot answering with the run up. Expect: the start
+/// refused `Failed`, naming the box with those words, never answered Ok; the box then shown Empty with an unknown exit
+/// and the same words, its record keeping them, its run host reaped through its stop.
+#[test]
+fn a_run_that_fails_as_it_boots_fails_its_start_in_its_runtimes_words() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let command = vec!["/bin/sh".into(), "-c".into(), "exit 3".into()];
+    let id = runtime
+        .create(spec("image-fails-as-it-boots", Some(command)))
+        .unwrap()
+        .id;
+    let words =
+        "its command never started (status 128): exec: \"/bin/sh\": operation not permitted";
+    *images.run.end.lock().unwrap() = Some(RunEnd::Failed(words.to_owned()));
+    assert_eq!(
+        runtime.start(&id),
+        Err(Refusal::Failed {
+            id: id.clone(),
+            why: words.to_owned(),
+        })
+    );
+    let info = shown(&runtime, &id, BoxState::Empty, &REAPED_SHOWN);
+    assert_eq!(
+        (info.exit, info.ended.as_deref()),
+        (Some(Exit::Unknown), Some(words))
+    );
+    let kept = record(&owner, &id).unwrap();
+    assert_eq!(
+        (kept.exit, kept.ended.as_deref()),
+        (Some(Exit::Unknown), Some(words))
+    );
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+}
+
+/// Joint plan step 12 (ROOT's (b), 2026-11-13): do start a VM whose command exits 3 at once, ended as the boot answers.
+/// Expect: the start answered Ok, as `docker start` answers a command that started, however soon it ended; the box then
+/// shown Empty with Code(3) and no words, its run host reaped through its stop.
+#[test]
+fn a_command_that_exits_at_once_has_started() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let command = vec!["/bin/sh".into(), "-c".into(), "exit 3".into()];
+    let id = runtime
+        .create(spec("image-exits-at-once", Some(command)))
+        .unwrap()
+        .id;
+    *images.run.end.lock().unwrap() = Some(RunEnd::Exited(3));
+    assert_eq!(runtime.start(&id), Ok(()));
+    let info = shown(&runtime, &id, BoxState::Empty, &REAPED_SHOWN);
+    assert_eq!((info.exit, info.ended), (Some(Exit::Code(3)), None));
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
 }
 
@@ -941,6 +1082,47 @@ fn microvm(guest: Result<GuestTimes, String>) -> Option<Microvm> {
         }),
         guest,
     })
+}
+
+/// Decision 9 (the person's ruling of 2026-11-13; ROOT's leftover of decision 9): a stats ask past its learned W* was
+/// given that W* as Shards' own patience, so D231 refused it there though its run was answering, an R03 bound of Hex's
+/// on a running VM's read. Do: read a running VM's usage once its stats wait has learned a 1 ns answer. Expect: Shards'
+/// stats asked with no bound of Hex's (`Duration::MAX`: until its run answers or ends); the usage answered; and W* risen
+/// to the answer that passed it.
+#[test]
+fn original_a_stats_ask_past_its_learned_w_star_follows_its_run() {
+    let images = ModelImages::new();
+    let vcpus = allocation().vm_size().unwrap().vcpus;
+    *images.run.stats.lock().unwrap() = Stats {
+        cpu_ns: Some(1_000),
+        memory_bytes: Some(1 << 20),
+        pids: Some(1),
+        read_bytes: Some(0),
+        write_bytes: Some(0),
+        microvm: microvm(Ok(guest_times(vcpus))),
+        ..Stats::default()
+    };
+    let learned = Duration::from_nanos(1);
+    let armed = ImageWaits {
+        stats: Patience::measuring("test.hex_runtime.image_stats_past"),
+        ..waits().unwrap()
+    };
+    armed.stats.answered(learned);
+    let (runtime, _owner) = model_runtime(&images, Ok(armed));
+    let id = runtime.create(spec("image-stats-past", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    assert!(runtime.usage(&id).is_ok());
+    assert_eq!(
+        *images.run.stats_asked.lock().unwrap(),
+        vec![Duration::MAX],
+        "Shards' stats was asked with a bound of Hex's"
+    );
+    let stats = &runtime.image().unwrap().waits().unwrap().stats;
+    assert!(
+        stats.slowest().is_some_and(|slowest| slowest > learned),
+        "W* didn't rise to the answer that passed it: {:?}",
+        stats.slowest()
+    );
 }
 
 /// Joint plan steps 12 and 14, HEX-IMG-4's contract (AC-T7.4.1): do read a running VM's usage, its run's stats
