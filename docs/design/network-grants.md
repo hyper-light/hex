@@ -2,8 +2,8 @@
 
 Each harness VM Hex launches reaches what its grants name and nothing else. It publishes nothing they don't
 name, and Hex's record of the VM shows every grant. This record states the grant model, who enforces it, what
-Hex can program through Shards today and what waits on Shards' step 9. Decided by goal 15 with Hex's lead,
-2026-11-12. The lead's ruling on enforcement (N3) follows the person's decision: "Hex owns TCP/UDP for Shards
+Hex can program through Shards today, and what Shards' step 9 gave it (D236, on Shards' main at `edbada623`; Hex
+vendors Shards at `2365d784`, which holds it). Decided by goal 15 with Hex's lead, 2026-11-12. The lead's ruling on enforcement (N3) follows the person's decision: "Hex owns TCP/UDP for Shards
 VMs" (joint plan kiln `01a1cd8e862e7169a074db3d5fa33f3d`, "Decided by the person" 2).
 
 Requirements served: `AC-T7.7.2` (flows allowed that no grant names: 0), `T-T7.7.1` (no DNS answer and no packet
@@ -14,7 +14,7 @@ Hex's record of the VM".
 ## N1. The grant: who, to whom, which ports, which way
 
 Default deny is Shards' rule as well as this step's: "a network flow that no directive explicitly grants does
-not exist ... Every grant names who, to whom, on which ports, which way" (Shards `CLAUDE.md` at `482c5d78`).
+not exist ... Every grant names who, to whom, on which ports, which way" (Shards `CLAUDE.md` at `2365d784`).
 A box's grants are a list of `hex_api::Grant` (`crates/hex-api/src/grants.rs`). The variant is the way:
 
 | Grant | Who | To whom | Ports | Way |
@@ -81,8 +81,9 @@ seven). Cilium's `toFQDNs` holds names the same way: "Cilium intercepts DNS resp
 Proxy", and the IPs those responses carry are allowed (`Documentation/security/policy/layer3.rst` at
 `cb21a81b`).
 
-What step 9's enforcer must also do for a grant to stay exact. Hex's conformance cases for the binding are
-these:
+What the enforcer must also do for a grant to stay exact. Shards' step 9 built it (D236: "a flow to its port
+reaches only an address its resolver answered for the name through it, or the address it is"), and its real-VM
+evidence is owed (D236, "Evidence owed"). Hex's conformance cases for the binding are these:
 
 - **Expiry.** A learned address stays pinned for its answer's TTL (RFC 1035 §3.2.1, RFC 2181 §8). A flow
   already admitted outlives its address's expiry, as Cilium's do ("live connections are not expired until they
@@ -101,9 +102,10 @@ carry another name in its TLS SNI, or in its HTTP authority inside TLS: domain f
 Wegmann and Paxson, "Blocking-resistant communication through domain fronting", PoPETs 2015(2), doi
 10.1515/popets-2015-0009). A grant's exactness has three levels, and the record states which one holds:
 
-1. the addresses learned for the name (step 9);
+1. the addresses learned for the name (D236 holds this one);
 2. the ClientHello's SNI equals the granted name. Encrypted Client Hello (RFC 9849, March 2026) hides the inner
-   name, so an ECH hello whose outer name isn't granted is refused (step 9);
+   name, so an ECH hello whose outer name isn't granted is refused. D236 does not hold this level: it rejected
+   names held by what a flow says, as a client chooses what it says;
 3. the HTTP authority equals the granted name. Only an enforcer that terminates TLS sees it: step 33's injector,
    which "terminates TLS only for granted hosts".
 
@@ -145,13 +147,13 @@ Alternatives considered:
 
 What would falsify N3:
 
-- a flow the network process admits that Hex's policy does not name, in step 9's conformance cases;
+- a flow the network process admits that Hex's policy does not name, in the enforcer's conformance cases (N2);
 - a grant Hex can't express through the network process's interface without widening it.
 
 Either would make Hex refuse that grant typed until the interface is exact. Neither would make Hex build its own
 enforcer.
 
-## N4. What Hex programs today, through Shards `482c5d78`'s image boot (D231)
+## N4. What Hex programs today, through Shards `2365d784`'s image boot (D231)
 
 Hex boots harness images through `shards_api::image::ImageShards::boot`. The run host, `shards api-run`, gives
 the VM a NIC and its network process only when something passes the microVM: a published port, or narrowed
@@ -163,22 +165,36 @@ dropped by the orchestrator, never added" (D231). A widening is refused (`Cause:
 Hex expresses everything through two fields of `shards_api::image::ImageSpec`:
 
 - `publish: Vec<Publish { guest_port, proto, host: Option<IpAddr>, host_port }>`;
-- `egress: Narrowing { egress: Keep, mcp: Keep, dns: bool }`.
+- `egress: Narrowing { egress: Keep, mcp: Keep, destinations: Keep, dns: bool }`.
 
 `Narrowing::default()` keeps the image's grants whole, so Hex never uses it.
 
-| A box's grants | What 482c5d78 can express | Hex today |
-|---|---|---|
-| none | `network none`: no NIC, no network process | programmed: `Narrowing { Only([]), Only([]), false }`, no publish |
-| `Publish` of a member's port at a host address, on a run of the members alone (`command: None`) | `Publish { guest_port, proto, host: Some(addr), host_port }`, only for a port the image gives a member for ingress (D122) | programmed; its receiver is unverified, see N6 |
-| `Publish`, on a run with a command of its own | the same, and also for a port the image gives no member, which then reaches that command | refused, `Awaits` the port's receiver named (`PublishReceiver`), see N6 |
-| `Egress` to a name, for a harness | no: harness egress is ports to any address, and `--dns` is any name (H2) | refused, `Awaits` member grants by name (step 9) |
-| `Egress` to a name, for an agent | an agent's remote MCP `host:port` is name-pinned, but `Keep` is image-wide, and shards-api shows no member's scope (`FOR`), so Hex can't prove it exact | refused, the same |
-| `Egress` to an address | no address-scoped egress | refused, `Awaits` member grants by address (step 9) |
-| `Host` (kiln beside the VM) | no host-service grant; `Policy::Host` is the host's whole network (D124) | refused, `Awaits` a member's host service (step 9) |
+What Shards' step 9 added (D236): a network's destinations, `NETWORK --egress=HOST:PORT` in the image's
+Agentfile, TCP alone, to a host's name, an IPv4 address (no IPv6, as D192), or `host.docker.internal`, the host
+itself, which reaches the host's IPv4 loopback at that port alone. They are the image's grants: an orchestrator
+keeps or drops them (`Narrowing.destinations`), never adds one. A destination reaches the network's members the
+image lets out on its port, and the network process holds the whole microVM to the union of its members' names
+on a port, so an image whose members that union can't hold apart is refused at build and at run
+(`agentfile::held`). And each port the run host binds names whom it reaches (`Bound::to`, N6).
 
-The exact egress form Shards does have, D192's `shards.egress=HOST:PORT`, lives on networks a daemon run joins.
-The image boot can't reach it.
+| A box's grants | What 2365d784 can express | Hex today |
+|---|---|---|
+| none | `network none`: no NIC, no network process | programmed: `Narrowing { Only([]), Only([]), Only([]), false }`, no publish |
+| `Publish` of a member's port at a host address, on a run of the members alone (`command: None`) | `Publish { guest_port, proto, host: Some(addr), host_port }`, only for a port the image gives a member for ingress (D122); `Bound::to` names its receivers | programmed; its receiver is recorded as declared, unread from `to`, see N6 |
+| `Publish`, on a run with a command of its own | the same, and also for a port the image gives no member, which then reaches that command (`to` empty) | refused, `Awaits(PublishReceiver)`, see N6 |
+| `Egress` to a name, for a member | a TCP destination `name:port` the image declares for the member's network, kept or dropped, never added | refused, `Awaits(MemberGrantsByName)` |
+| `Egress` to an address | the same, an IPv4 address alone | refused, `Awaits(MemberGrantsByAddress)` |
+| `Host` (kiln beside the VM) | the destination `host.docker.internal:PORT`, the image's, kept or dropped | refused, `Awaits(MemberHostService)` |
+
+So since step 9 these refusals no longer wait on Shards for what the image declares: a grant whose destination
+the image declares for its member, on TCP and one port, can be programmed exactly by keeping that destination
+alone; one the image doesn't declare would widen it, which D231 refuses, and is refused typed as a widening.
+Hex's program doesn't do this yet: it keeps no destination (`Keep::Only([])`) and refuses each such grant as
+above. **Owed to step 15:** programming them through `Narrowing.destinations`, reading `Bound::to` (N6), and the
+capability names these refusals give, which name Shards' grants by name and its host service, both given now.
+
+The exact egress form Shards had before, D192's `shards.egress=HOST:PORT`, lives on networks a daemon run joins;
+D236 took the same grammar into the Agentfile, where the image boot reads it.
 
 The refusal is the shared typed one goal 12 lands, `Refusal::Awaits { needs: Upstream }`. It names the missing
 capability, never a plan step's number. It is never a success: a box whose grants can't be programmed exactly
@@ -217,9 +233,12 @@ A run that breaks either is stopped, and its start is refused. A member the imag
 fault, `Invalid` naming the grant's member. A socket bound past or short of the grants is Shards', `Broken`. So
 no port stays published for a member or a socket no grant names.
 
-**The receiver gap.** shards-api 482c5d78 doesn't say who receives a published port: `MemberInfo` carries no
-ports, and `Bound` names no member. Its run host binds a publish for a port the image's Agentfile gives a member
-coming in. For a run with a command of its own, it also binds one for a port the Agentfile gives no member and
+**The receiver gap, as Hex's check still has it.** shards-api before D236 didn't say who receives a published
+port: `MemberInfo` carries no ports, and `Bound` named no member. At `2365d784` it does: `Bound::to` (D231,
+channel version 3) names each member the image gives the port coming in, by declared index and port, several
+where several claim it, and none where the port reaches the run's own command. Hex's check doesn't read it yet
+(owed to step 15), so what follows is still what Hex does. Shards' run host binds a publish for a port the image's
+Agentfile gives a member coming in. For a run with a command of its own, it also binds one for a port the Agentfile gives no member and
 doesn't declare as egress, and that port reaches the command (D122: "A published port no member claims reaches
 the run's own command"; `ports_granted` in `crates/shards/src/api_run.rs`). There a publish grant's "to whom"
 can't be held: Hex refuses a publish grant on a run with a command of its own at create, before any record,
@@ -227,8 +246,9 @@ can't be held: Hex refuses a publish grant on a run with a command of its own at
 through). A run of the members alone (`command: None`, the harness VM) is refused a port no member is given, so
 each of its publishes reaches a member, though not provably the grant's. So each `Published` records its receiver
 as `Receiver::Declared`: the member the image's Agentfile gives the port, which Hex can't verify is the grant's.
-Hex's lead asked Shards to name the receiving member. When Shards does, the check becomes exact: a new `Receiver`
-variant, appended after `Declared`, records it, and a run with a command of its own may be granted publishes.
+Hex's lead asked Shards to name the receiving member, and D236's `Bound::to` does. Once Hex's check reads it, the
+check becomes exact: a new `Receiver` variant, appended after `Declared`, records it, and a run with a command of
+its own may be granted publishes.
 
 ## N7. Bounds and literals
 
@@ -259,7 +279,7 @@ memory gives. It sorts that copy (O(n log n)), with no recursion (CLAUDE.md §11
 - `crates/hex-core/src/record.rs`: a Shards image VM's record keeps every way a grant takes, whole.
 - `crates/hex-runtime/src/grants/tests.rs`:
   - no grant is no network;
-  - each grant 482c5d78 can't hold is refused naming what it awaits;
+  - each grant Hex doesn't program yet is refused naming what it awaits;
   - a publish on a run with a command of its own awaits its receiver's name, and one on a run of the members alone
     is programmed;
   - the program's property test (`AC-T7.7.2`), over runs with a command of their own and without: every publish it
@@ -275,13 +295,14 @@ memory gives. It sorts that copy (O(n log n)), with no recursion (CLAUDE.md §11
   - A harness image booted with no grants: no NIC in the guest (`/sys/class/net` holds `lo` alone), and no DNS
     answer or packet for any name (`T-T7.7.1`).
   - A `Publish` grant: the host connects at the reported socket, and nothing else is bound.
-  - After step 9: the provider and kiln reach of the acceptance, and each N2 enforcer case.
+  - Once step 15 programs destinations (N4): the provider and kiln reach of the acceptance, and each N2 enforcer
+    case, on D236's enforcer.
 
 ## Sources
 
-- Shards at `482c5d78`:
-  - `docs/design/architecture.md`: D31, D59 parts seven, ten and eleven, D109, D122, D124, D192, D231;
-  - `crates/api/src/image.rs` and `image/wire.rs`;
+- Shards at `2365d784`:
+  - `docs/design/architecture.md`: D31, D59 parts seven, ten and eleven, D109, D122, D124, D192, D231, D236;
+  - `crates/api/src/image.rs` and `image/wire.rs` (`Narrowing`, `Keep`, `Bound`, `Receiving`);
   - `crates/shards/src/api_run.rs`;
   - `crates/net/src/lib.rs`;
   - `crates/agentfile/src/agentfile.rs` and `instructions.rs`;
