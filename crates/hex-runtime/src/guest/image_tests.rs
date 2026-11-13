@@ -665,6 +665,7 @@ fn waits() -> Result<ImageWaits, Refusal> {
         stats: Patience::measuring("test.hex_runtime.image_stats"),
         stop: Patience::measuring("test.hex_runtime.image_stop"),
         delete_boot: Patience::measuring("test.hex_runtime.image_delete_boot"),
+        started: Patience::measuring("test.hex_runtime.image_started"),
     })
 }
 
@@ -2616,6 +2617,179 @@ fn a_publish_to_a_member_the_image_doesnt_run_stops_the_vm() {
     }
 }
 
+/// The image class's waits as the guest runtime holds them, so a test can see where a wait of its own stands.
+fn image_waits(runtime: &GuestRuntime) -> &ImageWaits {
+    runtime
+        .images
+        .image
+        .as_ref()
+        .unwrap()
+        .waits
+        .as_ref()
+        .unwrap()
+}
+
+/// `started` asked of `id` on its own thread, and the model's gate opened once that call has returned or its own wait
+/// has run out (its W* a 1 ns one taught it, so it follows the boot from then on): either way the call has looked at
+/// the box with its boot still held. Answers what `started` answered.
+fn started_over_a_held_boot(
+    runtime: &GuestRuntime,
+    images: &ModelImages,
+    id: &BoxId,
+    wait: &Patience,
+) -> Result<BoxInfo, Refusal> {
+    std::thread::scope(|scope| {
+        let asking = scope.spawn(|| runtime.started(id));
+        hex_testkit::waits::until(wait, "started following the boot", || {
+            asking.is_finished() || image_waits(runtime).started.deadline().is_none()
+        })
+        .unwrap();
+        images.gate(Gate::Open);
+        asking.join().unwrap()
+    })
+}
+
+/// Each test's `started` call under way: these tests' facts alone.
+static STARTED_FOLLOWS_RUN: Patience =
+    Patience::measuring("test.hex_runtime.image_started_follows_run");
+static STARTED_FOLLOWS_FAILURE: Patience =
+    Patience::measuring("test.hex_runtime.image_started_follows_failure");
+static STARTED_FOLLOWS_ABANDONED: Patience =
+    Patience::measuring("test.hex_runtime.image_started_follows_abandoned");
+
+/// Waits whose boot and `started` call each run out at once (a 1 ns W*), so a start answers Pending and `started`
+/// follows the boot from its first look.
+fn started_waits(name: &'static str, started: &'static str) -> ImageWaits {
+    ImageWaits {
+        boot: Patience::seeded(name, Duration::from_nanos(1)),
+        started: Patience::seeded(started, Duration::from_nanos(1)),
+        ..waits().unwrap()
+    }
+}
+
+/// Kiln's HexVms adapter (ROOT, 2026-11-13; joint plan step 12, decision 9): a start past its boot's W* answers
+/// Pending, and its caller waits for the box's run with `started` rather than polling. Do: start a VM whose boot is held
+/// past a 1 ns W*, its start Pending; ask `started` as the boot is held, then let its run start. Expect: `started`
+/// following the boot until it answers, then the box Running; one boot.
+#[test]
+fn w12_started_follows_a_held_boot_to_its_run() {
+    let images = ModelImages::new();
+    images.gate(Gate::Host);
+    let (runtime, _owner) = model_runtime(
+        &images,
+        Ok(started_waits(
+            "test.hex_runtime.image_boot_started_run",
+            "test.hex_runtime.image_started_run",
+        )),
+    );
+    let id = runtime.create(spec("image-started-run", None)).unwrap().id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    let info = started_over_a_held_boot(&runtime, &images, &id, &STARTED_FOLLOWS_RUN).unwrap();
+    assert_eq!(info.state, BoxState::Running);
+    assert_eq!(images.asked.lock().unwrap().len(), 1);
+}
+
+/// As above, its boot then refused, its run never started. Expect: `started` answering the run's own failure in its
+/// runtime's words, `Refusal::Failed`, as the box's `ended` keeps them.
+#[test]
+fn w12_started_answers_a_boot_that_fails_in_its_words() {
+    let images = ModelImages::new();
+    images.gate(Gate::Host);
+    let (runtime, _owner) = model_runtime(
+        &images,
+        Ok(started_waits(
+            "test.hex_runtime.image_boot_started_failure",
+            "test.hex_runtime.image_started_failure",
+        )),
+    );
+    let id = runtime
+        .create(spec("image-started-failure", None))
+        .unwrap()
+        .id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    *images.refuse.lock().unwrap() = Some(ImageRefusal::Boot(
+        "its image's members never started".to_owned(),
+    ));
+    let answered = started_over_a_held_boot(&runtime, &images, &id, &STARTED_FOLLOWS_FAILURE);
+    assert!(
+        matches!(&answered, Err(Refusal::Failed { id: failed, why }) if failed == &id && why.contains("its image's members never started")),
+        "{answered:?}"
+    );
+    assert!(
+        runtime
+            .inspect(&id)
+            .unwrap()
+            .ended
+            .is_some_and(|why| why.contains("its image's members never started"))
+    );
+}
+
+/// As above, its boot's thread then ending with no answer. Expect: `started` refused only there, as the node's broken
+/// state in its own words, the boot it follows still under way.
+#[test]
+fn w12_started_whose_boot_ends_with_no_answer_says_the_boot_is_still_under_way() {
+    let images = ModelImages::new();
+    images.gate(Gate::Host);
+    let (runtime, _owner) = model_runtime(
+        &images,
+        Ok(started_waits(
+            "test.hex_runtime.image_boot_started_abandoned",
+            "test.hex_runtime.image_started_abandoned",
+        )),
+    );
+    let id = runtime
+        .create(spec("image-started-abandoned", None))
+        .unwrap()
+        .id;
+    assert!(matches!(
+        runtime.start(&id),
+        Err(Refusal::Lifecycle {
+            cause: LifecycleCause::Pending,
+            ..
+        })
+    ));
+    images.abandon.store(true, Ordering::SeqCst);
+    let answered = started_over_a_held_boot(&runtime, &images, &id, &STARTED_FOLLOWS_ABANDONED);
+    assert!(
+        matches!(&answered, Err(Refusal::Broken(why)) if why.contains("the boot it follows is still under way")),
+        "{answered:?}"
+    );
+}
+
+/// Kiln's HexVms adapter: a box not booting is answered at once, as inspect answers it. Do: create a VM, ask `started`,
+/// start it, ask again. Expect: `Created` with nothing booted, then `Running`, each inspect's answer.
+#[test]
+fn w12_started_of_a_box_not_booting_answers_as_inspect_at_once() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let id = runtime
+        .create(spec("image-started-at-once", None))
+        .unwrap()
+        .id;
+    assert_eq!(runtime.started(&id).unwrap(), runtime.inspect(&id).unwrap());
+    assert_eq!(runtime.started(&id).unwrap().state, BoxState::Created);
+    assert!(images.asked.lock().unwrap().is_empty());
+    runtime.start(&id).unwrap();
+    assert_eq!(runtime.started(&id).unwrap().state, BoxState::Running);
+    // An id the class holds no record of is no box of its (a node's guest runtime takes such an id as its guest's).
+    assert!(matches!(
+        Runtime::started(&runtime.images, &BoxId::new("image-started-none").unwrap()),
+        Err(Refusal::NoSuchBox(_))
+    ));
+}
+
 /// Decision 9 (no record is read), joint plan step 12: do make the image waits. Expect: each following its party (no
 /// bound) until its first answer, under its own name, and no refusal for want of a record: an image box needs none.
 #[test]
@@ -2626,22 +2800,25 @@ fn the_image_waits_follow_their_parties_until_their_first_answers() {
             waits.boot.deadline(),
             waits.stats.deadline(),
             waits.stop.deadline(),
-            waits.delete_boot.deadline()
+            waits.delete_boot.deadline(),
+            waits.started.deadline()
         ),
-        (None, None, None, None)
+        (None, None, None, None, None)
     );
     assert_eq!(
         (
             waits.boot.name(),
             waits.stats.name(),
             waits.stop.name(),
-            waits.delete_boot.name()
+            waits.delete_boot.name(),
+            waits.started.name()
         ),
         (
             "hex.image.boot",
             "hex.image.stats",
             "hex.image.stop",
-            "hex.image.delete_boot"
+            "hex.image.delete_boot",
+            "hex.image.started"
         )
     );
     waits.boot.answered(Duration::from_millis(3));

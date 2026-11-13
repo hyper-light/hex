@@ -54,16 +54,21 @@ pub struct ImageWaits {
     /// the boot's answer, its run started or its host ended. Past its W*, its run-out is told under its own name, the
     /// boot it ends still under way, and the delete waits on, refused only where the boot's thread ends with no answer.
     delete_boot: Patience,
+    /// A `started` call's wait for the boot of the box it asks (kiln's HexVms adapter, ROOT 2026-11-13): from its ask to
+    /// the boot's answer. Past its W*, its run-out is told under its own name, the boot it follows still under way, and
+    /// the call waits on, refused only where the boot's thread ends with no answer.
+    started: Patience,
 }
 
 impl ImageWaits {
-    /// The four waits, each following its party until its first answer.
+    /// The five waits, each following its party until its first answer.
     pub const fn new() -> Self {
         Self {
             boot: Patience::measuring("hex.image.boot"),
             stats: Patience::measuring("hex.image.stats"),
             stop: Patience::measuring("hex.image.stop"),
             delete_boot: Patience::measuring("hex.image.delete_boot"),
+            started: Patience::measuring("hex.image.started"),
         }
     }
 }

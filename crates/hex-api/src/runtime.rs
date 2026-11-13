@@ -150,6 +150,16 @@ pub trait Runtime: Send + Sync {
         self.delete(id).map(|()| None)
     }
 
+    /// Box `id` once its start has come to its end: a box still booting is followed to its boot's answer as decision 9
+    /// has a wait follow its party (its W* told when passed, refused only at the party's end, no timer), then answered as
+    /// [`Runtime::inspect`] answers it, its run started; or its run's own failure, [`Refusal::Failed`] in its runtime's
+    /// words, where it never started. A box not booting is answered at once, as `inspect` answers it, as is every box of
+    /// a class whose start answers only once its box runs (kiln's HexVms adapter, ROOT 2026-11-13: a start past W*
+    /// answers Pending, and its caller waits here rather than polling).
+    fn started(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        self.inspect(id)
+    }
+
     fn host_use(&self, id: &BoxId) -> Result<HostUse, Refusal> {
         Err(Refusal::Invalid {
             what: "host_use",
