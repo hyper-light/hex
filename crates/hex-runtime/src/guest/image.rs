@@ -1592,6 +1592,114 @@ impl ImageClass {
     }
 }
 
+impl ImageClass {
+    /// Box `id`'s record for a call of the class alone, refused `NoSuchBox` where its records hold no image box of that
+    /// id, and as the box's backing refuses it where its backing was retired (joint plan step 14).
+    fn called(&self, id: &BoxId) -> Result<BoxRecord, Refusal> {
+        let record = self
+            .image_record(id)?
+            .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+        if record.retired {
+            return Err(record.retired_refusal()?);
+        }
+        Ok(record)
+    }
+}
+
+/// The class alone as a runtime (joint plan step 12's item B): a node with no guest of Hex's serves its boxes, each a
+/// Shards image VM, through it, once its record authority is bound ([`ImageClass::bind_books`]). A box of any other
+/// class is refused at its create, and a program in a member awaits the agent-control endpoint, as on any node.
+impl hex_api::Runtime for ImageClass {
+    fn classes(&self) -> Vec<hex_api::Class> {
+        vec![hex_api::Class::Shards]
+    }
+
+    fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
+        if !matches!(spec.class, ClassSpec::ShardsImage(_)) {
+            return Err(Refusal::Invalid {
+                what: "class",
+                why: "this runtime serves Shards image VMs alone".to_owned(),
+            });
+        }
+        self.create_image(spec)
+    }
+
+    fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+        self.start_image(self.called(id)?)
+    }
+
+    fn exec(
+        &self,
+        id: &BoxId,
+        _: hex_api::Program,
+        _: hex_api::Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        self.called(id)?;
+        // A member's program is the agent-control endpoint's (joint plan step 11).
+        Err(Refusal::Awaits {
+            needs: Upstream::MemberExec,
+        })
+    }
+
+    fn run(
+        &self,
+        spec: BoxSpec,
+        _: hex_api::Program,
+        _: hex_api::Stdio,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        spec.check_run()?;
+        Err(Refusal::Invalid {
+            what: "class",
+            why: "a Shards image VM runs its image's members or its own command, never a run's program".to_owned(),
+        })
+    }
+
+    fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
+        self.signal_image(self.called(id)?, signal)
+    }
+
+    fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+        let record = self
+            .image_record(id)?
+            .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+        if record.retired {
+            return record.retired_info();
+        }
+        self.inspect_image(record)
+    }
+
+    fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
+        self.usage_image(self.called(id)?)
+    }
+
+    fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
+        self.image_infos()
+    }
+
+    fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        let record = self
+            .image_record(id)?
+            .ok_or(Refusal::NoSuchBox(id.try_clone()?))?;
+        self.delete_image(record)
+    }
+
+    fn member(&self, id: &BoxId, member: &Member) -> Result<Box<dyn Proc>, Refusal> {
+        self.member_image(self.called(id)?, member)
+    }
+
+    fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
+        self.room_image(self.called(id)?, room)
+    }
+
+    fn rate(&self, id: &BoxId, rate: Option<NonZeroU64>) -> Result<Option<NonZeroU64>, Refusal> {
+        self.rate_image(self.called(id)?, rate)
+    }
+
+    fn host_use(&self, id: &BoxId) -> Result<HostUse, Refusal> {
+        self.host_use_image(self.called(id)?)
+    }
+}
+
 /// `id`'s record as it is now.
 fn record_now(class: &ImageClass, id: &BoxId) -> Result<BoxRecord, Refusal> {
     class
