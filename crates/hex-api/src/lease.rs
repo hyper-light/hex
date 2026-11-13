@@ -51,10 +51,32 @@ impl std::fmt::Debug for Value {
     }
 }
 
+/// Two values alike byte for byte: what the node's wire compares a lease it carried by (docs/design/credential-grants.md
+/// C7), never printed either way.
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for Value {}
+
+/// `bytes` wiped, their whole allocation, and left empty: what a holder of a value's bytes outside a [`Value`] does as it
+/// lets go of them, the node's wire carrying one between its orchestrator and the run among them
+/// (docs/design/credential-grants.md C7).
+pub fn wipe(bytes: &mut Vec<u8>) {
+    zeroize::Zeroize::zeroize(bytes);
+}
+
+/// `bytes` wiped in place: a buffer read into again, as the node's socket's is, whose message carried a value.
+pub fn wipe_in_place(bytes: &mut [u8]) {
+    zeroize::Zeroize::zeroize(bytes);
+}
+
 /// A credential's value leased to a run: the lessor's name for the lease, by which the run gives it back
 /// ([`Lessor::release`]), never its value; the value; and how long it lives from now, none where it lives until its
 /// run ends.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Lease {
     pub lease: String,
     pub value: Value,
