@@ -686,6 +686,7 @@ dependencies = [
  "sha2 0.10.9",
  "shards-abi",
  "shards-api",
+ "shards-ipc",
  "shards-remote",
  "socket2",
  "tempfile",
