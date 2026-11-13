@@ -32,8 +32,8 @@ use hex_api::{
 use hex_core::patience::Patience;
 use hex_core::record::{BootSession, BoxRecord, Phase};
 use shards_api::image::{
-    BootStop, Channel, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images, MemberEnd,
-    MemberName, MemberSpec, RunEnd, Secret, Stats, StatsScope,
+    BootStop, Channel, ControlAsk, ImageGuest, ImageRefusal, ImageShare, ImageSpec, Images,
+    MemberEnd, MemberName, MemberSpec, RunEnd, Secret, Stats, StatsScope,
 };
 
 use super::{GuestRuntime, poisoned};
@@ -630,9 +630,9 @@ fn info(spec: &BoxSpec, state: BoxState, exit: Option<Exit>) -> Result<BoxInfo, 
 }
 
 /// What Shards' image boot gives a member its caller drives (joint plan step 17): its stdin a pipe the caller
-/// writes (`MemberSpec::stdin`), its variables, working directory and run-time arguments as the box's spec says them
-/// (the arguments after its image's command, D256), no file, no terminal and no MCP bridge (D254). Its stdout and
-/// stderr are D231's pipes for every member that runs.
+/// writes (`MemberSpec::stdin`), its variables, working directory, run-time arguments (after its image's command,
+/// D256) and MCP bridge (D254) as the box's spec says them, no file and no terminal. Its stdout and stderr are D231's
+/// pipes for every member that runs.
 fn member_spec(m: &ImageMember) -> MemberSpec {
     MemberSpec {
         member: member_name(&m.member),
@@ -646,7 +646,27 @@ fn member_spec(m: &ImageMember) -> MemberSpec {
         stdin: true,
         terminal: false,
         args: m.args.clone(),
-        mcp: false,
+        mcp: m.mcp,
+    }
+}
+
+/// The agent-control endpoint (D238, D252) this node asks of an image VM's run: none yet, a member's program running
+/// through none here.
+const CONTROL: Option<ControlAsk> = None;
+
+/// Whether `image`'s members' MCP bridges (Shards' D254) can be asked of a run whose node asks it an agent-control
+/// endpoint or not (`control`): each bridge's connections reach the run's controller over that endpoint alone, so a
+/// member asking one of a run with none is refused by its field, as Shards' own spec check refuses it.
+fn bridges(image: &ShardsImage, control: bool) -> Result<(), Refusal> {
+    match image.members.iter().position(|m| m.mcp) {
+        Some(at) if !control => Err(Refusal::Invalid {
+            what: "shards image",
+            why: format!(
+                "members[{at}].mcp: a member's MCP bridge reaches its run's controller over the run's agent-control \
+                 endpoint alone (Shards' D254), which this node asks of no image VM's run"
+            ),
+        }),
+        _ => Ok(()),
     }
 }
 
@@ -1178,7 +1198,7 @@ impl ImageClass {
             binary: Some(self.binary.clone()),
             env,
             // No agent-control endpoint (D238, D252): a member's program runs through none here yet.
-            control: None,
+            control: CONTROL,
             // No GPU (D232's identities): an image VM renders on none here.
             gpu_devices: Vec::new(),
             // Its CLIs' sign-ins (Shards' D242 step 8, image channel v24; docs/design/credential-grants.md C8), as its
@@ -1337,6 +1357,8 @@ impl ImageClass {
             crate::grants::program(image)?;
             // As are credentials no one can lease here (joint plan step 33).
             self.can_lease(image)?;
+            // And a member's MCP bridge where its run has no agent-control endpoint (Shards' D254).
+            bridges(image, CONTROL.is_some())?;
         }
         let books = self.image_books()?;
         let id = spec.id.try_clone()?;

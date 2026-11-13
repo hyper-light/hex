@@ -2898,8 +2898,8 @@ fn oci(r: &mut Reader<'_>) -> Result<OciSpec, Fault> {
 
 /// A Shards image VM's spec: its pinned image, then its run's command, an option of a list (joint plan
 /// step 12), then its network grants (joint plan step 15), then the members its caller drives, each its member,
-/// its variables, an option of its working directory (joint plan step 17) and its run-time arguments (D256, after
-/// the working directory), then its shares (kiln's step 18), each its host directory, where its guest sees it and
+/// its variables, an option of its working directory (joint plan step 17), its run-time arguments (D256, after
+/// the working directory) and whether it asks an MCP bridge (Shards' D254, after its arguments), then its shares (kiln's step 18), each its host directory, where its guest sees it and
 /// whether read-only, as a mount's, then its credential grants (joint plan step 33, [`put_credentials`]). Fields a later
 /// step adds go after the credentials (append-only).
 fn put_shards_image(w: &mut Writer, image: &ShardsImage) -> Result<(), Fault> {
@@ -2915,7 +2915,9 @@ fn put_shards_image(w: &mut Writer, image: &ShardsImage) -> Result<(), Fault> {
             w.string(v)
         })?;
         w.option_with(m.workdir.as_deref(), Writer::string)?;
-        w.list(&m.args, |w, arg| w.string(arg))
+        w.list(&m.args, |w, arg| w.string(arg))?;
+        w.bool(m.mcp);
+        Ok(())
     })?;
     w.list(&image.shares, |w, m| {
         w.path(&m.source)?;
@@ -2938,7 +2940,7 @@ fn shards_image(r: &mut Reader<'_>) -> Result<ShardsImage, Fault> {
                 env: r.list(|r| Ok((r.string("member variable")?, r.string("member value")?)))?,
                 workdir: r.option(|r| r.string("member workdir"))?,
                 args: r.list(|r| r.string("member argument"))?,
-                mcp: false,
+                mcp: r.bool("member mcp")?,
             })
         })?,
         shares: r.list(|r| {
