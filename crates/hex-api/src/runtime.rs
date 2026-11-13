@@ -1901,8 +1901,8 @@ pub enum Upstream {
     /// (joint plan step 14, C5).
     LiveMove,
     /// A destination (D236: a host's name, an IPv4 address or the host itself, by TCP) kept for the members an
-    /// orchestrator grants it alone. Given by Hex's recorded change to Shards (vendor/shards and vendor/shards-gpu,
-    /// change 0002: each member's reach in D231's narrowing, held by the run host before the VM starts), so no call
+    /// orchestrator grants it alone. Given by Shards' D246 (7a4ef5c02, upstream from Hex's change 0002; vendored at
+    /// 743c5b32): each member's reach in D231's narrowing, held by the run host before the VM starts, so no call
     /// awaits it now (joint plan step 15, docs/design/network-grants.md N4). Its tag stays, the wire being
     /// append-only.
     MemberDestinations,

@@ -349,8 +349,9 @@ struct ModelImages {
     /// Whom each guest port its image gives coming in reaches (D231's `Bound::to`), as the test sets them: a port
     /// not named here reaches no member, so the run's own command, or is refused on a run of the members alone.
     receivers: Mutex<Vec<(u16, Vec<Receiving>)>>,
-    /// What each member the image declares reaches by name (D236), as the test sets it: the run host holds every
-    /// one to its reach of the destinations kept where a boot holds members apart (`Narrowing::members`).
+    /// Each member the image declares and what it reaches by name (D236's destinations and its remote MCP servers',
+    /// `Agentfile::named`), as the test sets it: the run host holds every one to its reach of the names kept where a
+    /// boot holds members apart (`Narrowing::members`, D246).
     named: Mutex<Vec<(shards_api::image::MemberKind, String, Vec<String>)>>,
 }
 
@@ -378,30 +379,59 @@ impl ModelImages {
         ));
     }
 
-    /// The run host's hold of each member apart, as Hex's recorded Shards change makes it (`api_run`'s
-    /// `held_apart`): every member the image declares reaches exactly what the boot lets it of the destinations
-    /// kept, else the boot is refused as a widening before anything starts.
+    /// The run host's hold of each member apart, as Shards' `api_run::held_apart` makes it (D246) and its session
+    /// types its causes: where the boot names members' reaches, an entry for a member the image declares not is the
+    /// image's refusal and a member's second entry the request's; every member the image declares reaches, of the
+    /// names kept (the destinations and remote MCP servers alike), exactly its entry's, sorted and each once (a
+    /// member in no entry, nothing), else the boot is refused as a widening; each before anything starts.
     fn held_apart(&self, egress: &shards_api::image::Narrowing) -> Result<(), ImageRefusal> {
         let Some(asked) = &egress.members else {
             return Ok(());
         };
-        let Keep::Only(kept) = &egress.destinations else {
+        let (Keep::Only(destinations), Keep::Only(mcp)) = (&egress.destinations, &egress.mcp)
+        else {
             return Err(ImageRefusal::Widening(
-                "the model keeps no destination wholesale".to_owned(),
+                "the model keeps no name wholesale".to_owned(),
             ));
         };
-        for (kind, name, reaches) in self.named.lock().unwrap().iter() {
-            let mut reach: Vec<&String> = reaches.iter().filter(|r| kept.contains(r)).collect();
+        let named = self.named.lock().unwrap();
+        for (i, m) in asked.iter().enumerate() {
+            if !named
+                .iter()
+                .any(|(kind, name, _)| *kind == m.kind && *name == m.name)
+            {
+                return Err(ImageRefusal::Image(format!(
+                    "{:?} {}: the image declares no such member",
+                    m.kind, m.name
+                )));
+            }
+            if asked[..i]
+                .iter()
+                .any(|o| o.kind == m.kind && o.name == m.name)
+            {
+                return Err(ImageRefusal::Spec {
+                    what: "the request",
+                    why: format!("{:?} {}: its reach is named twice", m.kind, m.name),
+                });
+            }
+        }
+        for (kind, name, reaches) in named.iter() {
+            let mut reach: Vec<&String> = reaches
+                .iter()
+                .filter(|r| destinations.contains(r) || mcp.contains(r))
+                .collect();
             reach.sort();
+            reach.dedup();
             let mut lets: Vec<&String> = asked
                 .iter()
                 .find(|m| m.kind == *kind && m.name == *name)
                 .map(|m| m.destinations.iter().collect())
                 .unwrap_or_default();
             lets.sort();
+            lets.dedup();
             if reach != lets {
                 return Err(ImageRefusal::Widening(format!(
-                    "{kind:?} {name}: of the destinations kept it would reach {reach:?}, where the request lets it reach {lets:?}"
+                    "{kind:?} {name}: of the names kept it would reach {reach:?}, where the request lets it reach {lets:?} (D246)"
                 )));
             }
         }

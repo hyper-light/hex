@@ -7,10 +7,13 @@
 //!
 //! - **A destination its image grants not refuses the boot.** The probe granted a name its image doesn't grant is made,
 //!   and its start refused `Invalid`, past the image's grants: Shards' run host refused it before anything started.
-//! - **No grant, no network.** A VM granted nothing runs a command, in its image's own shell, that ends 0 only where
-//!   `lo` is its one interface: with no NIC, no name is answered and no packet leaves. A VM of its members alone
-//!   granted nothing runs with no network process (Shards' `shards-net`, one per networked microVM, D36), and no
-//!   process of its run holds a listening TCP or UDP socket.
+//! - **No grant, nothing past the microVM.** A VM of its members alone granted nothing, its probe driven by this test
+//!   (`ShardsImage::members`), is asked on the probe's stdin: its provider's name and its ungranted name unresolved
+//!   (no DNS answer, T-T7.7.1) and none of its targets connected, the host's service and the image's port egress
+//!   among them; inspect shows no grant and nothing published, and the host's service took nothing. Its image links
+//!   its harness past the microVM, so its run keeps its network, whose network process (Shards' `shards-net`, D36),
+//!   told nothing kept, lets nothing past (D250): one network process, no process of its run holding a listening
+//!   TCP or UDP socket or a flow past the host's loopback.
 //! - **One publish, published alone, to its member.** A VM of its members alone is granted one publish: the probe's
 //!   port at the host's loopback, on a host port the OS picks. Inspect shows that one grant, and its one published
 //!   port at 127.0.0.1 reaching the probe at that port, as Shards names it. Its run listens there alone: at no
@@ -21,7 +24,7 @@
 //! - **Its granted destinations alone, reached.** A VM of its members alone is granted that publish and, by TCP, the
 //!   probe's provider by name and the host's service (kiln's endpoint, `host.docker.internal`): the probe says it
 //!   reached both, its ungranted name and the image's port egress nowhere, and the host's service, this test's
-//!   listener, took its connection (N4: the run host holds every member to its reach of the destinations kept).
+//!   listener, took its connection (N4: the run host holds every member to its reach of the names kept, D246).
 //! - **A publish reaching the run's own command stops it.** A VM with a command of its own is granted a publish of a
 //!   port its image gives no member, which Shards gives that command (D122): its start is refused `Invalid`, naming
 //!   the run's own command, the VM is stopped, and no run host is left.
@@ -31,13 +34,17 @@
 //! read fails it: what can't be seen isn't passed. macOS and Windows keep no /proc: there those readings are owed, and
 //! the run says so (`GRANTS-OWED`), while every check of the VM itself, its inspect and the host's service runs alike.
 //!
+//! Every wait measures as the run goes, with no deadline picked for it: each waits for its fact while its party lives
+//! (the node's ready line while the node runs, the probe's answer while its VM runs, its report on its stdout until
+//! that ends), the person's rule of 2026-11-13.
+//!
 //! Explicit inputs only, each by its own variable; a missing one fails by name. Run alone, `--ignored`: on Linux
-//! inside a cgroup delegated to this binary (`HEX_DELEGATED`); with image_real's node inputs (`SHARDS_BIN`, which
-//! must be Hex's `shards`, `scripts/shards-gpu/build.sh`'s, whose run host holds each member to its reach;
-//! `SHARDS_KERNEL` and `SHARDS_INIT`, the kernel the run hosts boot and the init beside it, which Shards takes
-//! together, the init the `shards` build carries (build.sh's `shards-init`); the node's `HEX_GUEST_*`,
-//! `HEX_IMAGE_CPU_MILLI`, `HEX_IMAGE_MEMORY_BYTES`, `HEX_IMAGE_WORK`, a short path where the node's socket lies,
-//! `HEX_IMAGE_WAIT_MS` and `HEX_WAITS_CENSUS_MAX`), and the probe's:
+//! inside a cgroup delegated to this binary (`HEX_DELEGATED`); with image_real's node inputs (`SHARDS_BIN`, Hex's
+//! `shards`, `scripts/shards-gpu/build.sh`'s at the Shards revision vendor/shards pins, whose run host speaks the image
+//! channel the node's vendored API writes; `SHARDS_KERNEL` and `SHARDS_INIT`, the kernel the run hosts boot and the
+//! init beside it, which Shards takes together, the init that same `shards` build carries (build.sh's
+//! `shards-init`); the node's `HEX_GUEST_*`, `HEX_IMAGE_CPU_MILLI`, `HEX_IMAGE_MEMORY_BYTES`, `HEX_IMAGE_WORK`, a
+//! short path where the node's socket lies, and `HEX_WAITS_CENSUS_MAX`), and the probe's:
 //! - the probe image, in the node's Shards home before the node starts: `HEX_GRANTS_CONTEXT`, the context
 //!   `scripts/grants-probe/build.sh` made, built there; or else `HEX_GRANTS_IMAGE`, `NAME@sha256:...`, pulled there;
 //! - the recipe's own inputs, as it was given them: `HEX_GRANTS_MEMBER`, `HEX_GRANTS_PORT`,
@@ -60,8 +67,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::Duration;
+use std::sync::mpsc;
 
 use hex_api::{
     Allocation, Bounds, BoxId, BoxSpec, BoxState, Class, ClassSpec, Destination, Exit, Grant,
@@ -1098,8 +1104,6 @@ fn a_vms_network_is_its_grants_alone_on_a_real_node() {
     // A kernel goes with its init in Shards (`--kernel` and `--init` together); the node's run hosts inherit both.
     let init = PathBuf::from(input("SHARDS_INIT"));
     assert!(init.is_file(), "SHARDS_INIT {init:?} is no file");
-    let wait = Duration::from_millis(number("HEX_IMAGE_WAIT_MS"));
-    assert!(!wait.is_zero(), "HEX_IMAGE_WAIT_MS is 0");
     let work = PathBuf::from(input("HEX_IMAGE_WORK"));
     assert!(!work.exists(), "a run's own directory: {work:?} exists");
     fs::create_dir_all(work.join("state")).unwrap();
@@ -1127,8 +1131,9 @@ fn a_vms_network_is_its_grants_alone_on_a_real_node() {
         open: input("HEX_GRANTS_OPEN"),
         command_port: port("HEX_GRANTS_COMMAND_PORT"),
     };
-    // As image_real: a VM's start boots it, which the client's learned bounds (an OCI box's records) would refuse
-    // first, so every wait measures, and the run's deadline bounds the whole.
+    // A VM's start boots it, which the client's learned bounds (an OCI box's records) would refuse first: every wait
+    // measures, learned as the run goes, and each waits for its answer while its party lives (the person's rule of
+    // 2026-11-13), the run's whole with no deadline of its own.
     hex_core::patience::measure_all();
     assert!(
         hex_core::patience::census(step),
@@ -1147,7 +1152,7 @@ fn a_vms_network_is_its_grants_alone_on_a_real_node() {
     };
     #[cfg(not(target_os = "linux"))]
     let boxes: Option<PathBuf> = None;
-    let node = Node::start(&work, boxes.as_deref(), wait);
+    let node = Node::start(&work, boxes.as_deref());
     let (socket, pid) = (node.socket.clone(), node.child.id());
     let (done, finished) = mpsc::channel();
     std::thread::spawn(move || {
@@ -1164,10 +1169,9 @@ fn a_vms_network_is_its_grants_alone_on_a_real_node() {
         a_publish_reaching_the_runs_own_command_stops_it(&client, pid, &probe, allocation);
         let _ = done.send(client.list().unwrap());
     });
-    let left = match finished.recv_timeout(wait) {
+    let left = match finished.recv() {
         Ok(left) => left,
-        Err(RecvTimeoutError::Timeout) => panic!("the checks did not end within {wait:?}"),
-        Err(RecvTimeoutError::Disconnected) => panic!("a check failed: its panic is above"),
+        Err(mpsc::RecvError) => panic!("a check failed: its panic is above"),
     };
     drop(node);
     records(&work.join("census.txt"));
