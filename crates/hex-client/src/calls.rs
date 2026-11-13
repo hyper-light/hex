@@ -3009,6 +3009,42 @@ impl<T: Transport> Runtime for Core<T> {
         )
     }
 
+    // Joint plan step 14: a box's room, rate and host use are told and read in the node's own process, by its charge
+    // learner and by a runtime made in its caller's process; the node's wire carries none of them yet.
+    fn room(&self, id: &BoxId, room: Option<i64>) -> Result<Option<u64>, Refusal> {
+        let _ = room;
+        Err(Refusal::Invalid {
+            what: "room",
+            why: format!(
+                "box {id}: the node's wire carries no room call yet; a box's room is told in the node's own process"
+            ),
+        })
+    }
+
+    fn rate(
+        &self,
+        id: &BoxId,
+        rate: Option<std::num::NonZeroU64>,
+    ) -> Result<Option<std::num::NonZeroU64>, Refusal> {
+        let _ = rate;
+        Err(Refusal::Invalid {
+            what: "rate",
+            why: format!(
+                "box {id}: the node's wire carries no rate call yet; a box's rate is told in the node's own process"
+            ),
+        })
+    }
+
+    fn host_use(&self, id: &BoxId) -> Result<hex_api::HostUse, Refusal> {
+        Err(Refusal::Invalid {
+            what: "host_use",
+            why: format!(
+                "box {id}: the node's wire carries no host-use call yet; a box's host use is read in the node's own \
+                 process"
+            ),
+        })
+    }
+
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
         match self.plain(Call::Usage(id.clone()))? {
             Answer::Usage(usage) => Ok(usage),

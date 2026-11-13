@@ -174,7 +174,7 @@ fn running(ids: &[(&str, u8)]) -> Vec<(BoxId, Scope, BoxCgroup)> {
         .map(|(id, n)| {
             (
                 BoxId::new(id).unwrap(),
-                [*n; 16],
+                Scope::Native([*n; 16]),
                 BoxCgroup::at(fleet().join(id)),
             )
         })
@@ -833,7 +833,7 @@ fn recorded_three(store: &crate::store::Store) -> Vec<(BoxId, Scope, BoxCgroup)>
         store.begin(&made).unwrap();
         store.made(&made).unwrap();
         let record = store.get(&id).unwrap().unwrap().unwrap();
-        let scope = *record.native_scope.unwrap().bytes();
+        let scope = Scope::Native(*record.native_scope.unwrap().bytes());
         vms.push((id, scope, BoxCgroup::at(fleet().join(name))));
     }
     vms
@@ -1018,7 +1018,7 @@ fn w14_a_last_resort_end_shows_in_inspect_and_survives_a_restart() {
         store.begin(&made).unwrap();
         store.made(&made).unwrap();
         let record = store.get(&id).unwrap().unwrap().unwrap();
-        let scope = *record.native_scope.unwrap().bytes();
+        let scope = Scope::Native(*record.native_scope.unwrap().bytes());
         vms.push((id, scope, BoxCgroup::at(fleet().join(name))));
     }
     let io = Record::default();
@@ -1099,7 +1099,7 @@ fn w14_a_last_resort_end_shows_in_inspect_and_survives_a_restart() {
         .1;
     assert_eq!(read, answer);
 
-    let made_again = [7; 16];
+    let made_again = Scope::Native([7; 16]);
     assert!(!record_last_resort(&store, &vms[1].0, made_again, Some(&end)).unwrap());
 }
 
