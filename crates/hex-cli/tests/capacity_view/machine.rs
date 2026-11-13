@@ -11,7 +11,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 
 use hex_api::capacity::{Amounts, Budget, Held, Keeper, Records, Stop};
-use hex_api::{Bounds, BoxId, BoxInfo, BoxSpec, ClassSpec, Runtime};
+use hex_api::{Bounds, BoxId, BoxInfo, BoxSpec, Class, ClassSpec, Runtime};
 use hex_core::schedule::{self as dto, Command as Ask};
 use hex_node::scheduler::{Backend, CapacityHolder, CapacityLane, Config};
 use hex_quic::enroll::{Issued, Request, store};
@@ -205,6 +205,34 @@ pub fn scheduler(dir: &Path) -> (Process, SocketAddr) {
         .parse()
         .unwrap();
     (process, address)
+}
+
+/// Whether the scheduler over the node in `dir` places a `process` box under its `oci` placement class, as [`place`]
+/// asks, read as the scheduler reads them: the platform admits the class (`hex_sim::facts::classes`: Linux and
+/// Windows, never a Mac), and the capacity the node reports for the class's form offers a `process` route. The form
+/// is `oci` where the node runs containers and `process` where it doesn't (hex-node's `Runtimes::capacity_snapshot`);
+/// a Linux node's `oci` form offers both routes, a Windows node's its containers alone.
+pub fn places_process_boxes(dir: &Path) -> bool {
+    use hex_sim::model::{Class as Placed, Classes, Virt};
+    let here = hex_sim::facts::platform(std::env::consts::OS, std::env::consts::ARCH);
+    let (os, arch) = here.unwrap();
+    let oci = Classes::NONE.with(Placed::Oci);
+    if !hex_sim::facts::classes(os, arch, Virt::default(), oci).has(Placed::Oci) {
+        return false;
+    }
+    let node = hex_client::Client::connect(&dir.join("n.sock")).unwrap();
+    let form = if node.classes().contains(&Class::Oci) {
+        Class::Oci
+    } else {
+        Class::Process
+    };
+    let routes: Vec<Class> = node
+        .capacity(form)
+        .unwrap()
+        .map(|offer| offer.routes.iter().map(|r| r.key.class).collect())
+        .unwrap_or_default();
+    eprintln!("the node's {form:?} form offers routes of {routes:?}");
+    routes.contains(&Class::Process)
 }
 
 /// A box of Hex's own of `cpu_milli` and the least memory a box holds, placed through the scheduler, its program not

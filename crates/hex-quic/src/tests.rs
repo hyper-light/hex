@@ -27,6 +27,8 @@ static ROOM: Patience = Patience::measuring("test.hex_quic.room");
 static HELD_ROOM: Patience = Patience::measuring("test.hex_quic.held_room");
 /// A peer's Reset that follows its End, come to the reader.
 static RESET_AFTER_END: Patience = Patience::measuring("test.hex_quic.reset_after_end");
+/// A peer's reset, come to a connection whose owner hasn't read.
+static RESET: Patience = Patience::measuring("test.hex_quic.reset");
 
 fn loopback() -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
@@ -158,6 +160,39 @@ fn hex_quic_11_a_reader_that_stops_holds_its_own_connection_alone() {
     within(&ROOM, |by| fast.end(by)).unwrap();
     within(&ROOM, |by| fast_there.end(by)).unwrap();
     assert_eq!(within(&READ, |by| fast.read(&mut end, by)).unwrap(), 0);
+}
+
+/// HEX-QUIC-26 (Q3; CLAUDE.md §3): a connection whose peer wrote, ended its half and then let it go (a `Conn` dropped
+/// while its peer's half is open is reset) is read to its end all the same, its reset come before its owner read any of
+/// it: a program's stdout, which the node's copier ends and drops once its pipe ends. Do: the node writes to a stdio
+/// connection, ends it and drops it; once its reset has come, the client reads. Expect: every byte the node wrote,
+/// then the connection's end; only a write to the node, which let it go, refused as reset.
+#[test]
+fn hex_quic_26_a_connection_its_peer_ended_and_let_go_is_read_to_its_end() {
+    let ca = SimCa::new().unwrap();
+    let node = node(&ca, "node-26.test");
+    let client = client(enrolled(&ca, "client-26.test"));
+    let peer = within(&DIAL, |by| {
+        client.dial("node-26.test", node.local_addr(), by)
+    })
+    .unwrap();
+    let conn = client.open(peer, STDIO_PORT).unwrap();
+    within(&ROOM, |by| conn.write_all(b"n", by)).unwrap();
+    let (_, there) = within(&ACCEPT, |by| node.accept(STDIO_PORT, by)).unwrap();
+    assert_eq!(read_exactly(&there, 1), b"n");
+    let out = b"an owned box\n";
+    within(&ROOM, |by| there.write_all(out, by)).unwrap();
+    within(&ROOM, |by| there.end(by)).unwrap();
+    // The client's half is open: the drop resets the connection after its End.
+    drop(there);
+    until(&RESET, "the node's reset", || conn.gone().is_some()).unwrap();
+    assert!(!conn.hung_up(), "the node's bytes are still to read");
+    assert_eq!(read_exactly(&conn, out.len()), out);
+    let mut end = [0u8; 1];
+    assert_eq!(within(&READ, |by| conn.read(&mut end, by)).unwrap(), 0);
+    assert!(conn.hung_up());
+    let refused = conn.write_all(b"x", None).unwrap_err();
+    assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionReset);
 }
 
 /// HEX-QUIC-15 (Q3): a port the node doesn't serve is refused to its opener, typed, NoPort.

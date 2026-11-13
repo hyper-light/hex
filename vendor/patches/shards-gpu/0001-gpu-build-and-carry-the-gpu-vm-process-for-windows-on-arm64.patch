@@ -1,20 +1,20 @@
 Subject: gpu: build and carry the GPU VM process for Windows on arm64
-Why: Shards' GPU VM process for Windows on arm64 is held by its ROOT's GPU lane (D232, Held): upstream builds the renderer and carries the GPU's VM process for x86_64 Windows alone. Hex's GPU 0002 carried the arm64 half (gpu_target takes aarch64-pc-windows-msvc; gpu-libs names a Windows-aarch64 host from SHARDS_GPU_TARGET or the shell's architecture, builds through an explicit COFF cross file so x64 emulation on an ARM host cannot build an x64 renderer, and pins ninja's and pkgconf's arm64 Windows wheels by hash), rebased here onto 482c5d78 as the one change upstream does not hold (AC-T7.4.1).
+Why: Shards' GPU VM process for Windows on arm64 is held by its ROOT's GPU lane (D232, Held): upstream builds the renderer and carries the GPU's VM process for x86_64 Windows alone. Hex's GPU 0002 carried the arm64 half (gpu_target takes aarch64-pc-windows-msvc; gpu-libs names a Windows-aarch64 host from SHARDS_GPU_TARGET or the shell's architecture, builds through an explicit COFF cross file so x64 emulation on an ARM host cannot build an x64 renderer, and pins ninja's and pkgconf's arm64 Windows wheels by hash), rebased here onto 2365d784 as the one change upstream does not hold, its Windows branches taking upstream's two x86_64 fixes there for arm64 too: the identity bridge copied as lib*.a, the name meson gives it on Windows (1cd72867), and built for the C runtime rustc links, /MD (1f86d092) (AC-T7.4.1).
 
 diff --git a/crates/shards/build.rs b/crates/shards/build.rs
-index 7f3f1c049a92e26dc89ec01f6d4167299768a901..28e4a22b06f154419f02c600626034d08d97650f 100644
+index 78ee1e24238009e00a3b2164185289feacac12d3..a5c239b7bbc9b96bf8002163a39a0e10b9fea016 100644
 --- a/crates/shards/build.rs
 +++ b/crates/shards/build.rs
-@@ -14,7 +14,7 @@
- //!   carries none, for check builds of other targets (scripts/lint), and such a `shards`
- //!   refuses what needs them.
+@@ -16,7 +16,7 @@
+ //!   that carries `shards` and writes its helpers out beside it, signed as that program
+ //!   signs them (kiln, D237), and such a `shards` starts the ones beside it.
  //! - The GPU's VM process (`shards-vm-gpu`, D144, D201, D202): the VM process built with
 -//!   its renderer, on Apple silicon, on Linux (glibc's and musl's) and on x86_64 Windows where
 +//!   its renderer, on Apple silicon, on Linux (glibc's and musl's) and on amd64/arm64 Windows where
  //!   `SHARDS_GPU_LIBS` names the renderer's libraries (scripts/gpu-libs), into
  //!   `target/helpers-gpu`, signed as the VM process is on macOS; or `SHARDS_HELPERS_DIR`'s.
  //!   Without it, `shards` carries none and refuses a GPU.
-@@ -462,7 +462,7 @@ fn compile_helpers(out: &mut impl io::Write) -> Result<PathBuf, String> {
+@@ -467,7 +467,7 @@ fn compile_helpers(out: &mut impl io::Write) -> Result<PathBuf, String> {
  /// Whether `target` carries a GPU's VM process where its renderer's libraries are given
  /// (D144, D201, D202): Apple silicon's, Linux's, glibc's and musl's, whose GPU's VM process
  /// links its C library dynamically, as it opens the host's Vulkan driver, a library of the
@@ -23,7 +23,7 @@ index 7f3f1c049a92e26dc89ec01f6d4167299768a901..28e4a22b06f154419f02c600626034d0
  /// Windows's, whose VMs WHP runs.
  fn gpu_target(target: &str) -> bool {
      matches!(
-@@ -473,6 +473,7 @@ fn gpu_target(target: &str) -> bool {
+@@ -478,6 +478,7 @@ fn gpu_target(target: &str) -> bool {
              | "x86_64-unknown-linux-musl"
              | "aarch64-unknown-linux-musl"
              | "x86_64-pc-windows-msvc"
