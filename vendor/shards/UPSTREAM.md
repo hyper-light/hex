@@ -19,9 +19,14 @@ whose channel (version 4) adds each published port's receiving members (D231's
 
 ## Recorded changes
 
-None. Every change Hex carried at 33df95b0 (patches 0001-0031) is upstream: Shards'
+Every change Hex carried at 33df95b0 (patches 0001-0031) is upstream: Shards'
 hex-upstream-v1 maps each to its commit (docs/research/measurements/hex-upstream-v1/
 README.md at this revision), but 0004, 0005, 0007 and 0029, Hex's own campaign over
 the borrowed connector, which Shards classed as Hex-only. That campaign is now a test
 of Hex's on its dependency, its body unchanged: crates/hex-client/tests/
-shards_borrowed_contract.rs.
+shards_borrowed_contract.rs. The changes below are Hex's since, each offered upstream
+(`vendor/patches/shards/*.patch`, applied in name order).
+
+| Files | Change | Why | Patch |
+| --- | --- | --- | --- |
+| `crates/api/src/image/spawn.rs` (new), `crates/api/src/image/session.rs`, `crates/api/src/image.rs`, `crates/api/Cargo.toml` | D231's run host (`shards api-run`) is started by `image::spawn`, not std's `Command`: on Unix by posix_spawn(3), file actions putting its stdin, stdout and stderr on 0, 1 and 2, its signal mask emptied and SIGPIPE at its default, with `POSIX_SPAWN_CLOEXEC_DEFAULT` on Apple's; on Windows by CreateProcessW with a `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` of inheritable copies of those three alone (windows-sys `Win32_Security` for it). Its wait, kill and reap move with it. `a_run_host_holds_no_end_it_was_not_given` (macOS, Windows; in a test process of its own) holds it to that. | std's spawn hands the run host what another thread of its orchestrator holds inheritable at that moment, for as long as its VM runs (CVE-2024-21626's class): macOS's pipe, socket, socketpair and accept take no close-on-exec flag, and std's CreateProcessW inherits with no handle list. Hex starts every program holding its stdio alone, so it booted no image VM on macOS or Windows; Ada (2026-11-12): the image class works there too (Hex joint plan step 12, AC-T7.4.1). Red then green on macOS (HVF Mac) and Windows (WHP, jupiter). | `0001-image-the-run-host-started-holding-its-three-standard.patch` |
