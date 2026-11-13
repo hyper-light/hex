@@ -386,3 +386,48 @@ fn a_nodes_image_class_takes_this_boot_from_its_stores_own_stamp() {
         Err(Refusal::Broken(_))
     ));
 }
+
+/// Joint plan step 12, AC-T7.4.1 (docs/design/shards-image-class.md §8): a macOS or Windows node holds a Shards image
+/// VM in its guest runtime, beside its host runtime, and the VM's guest runs no node of Hex's. Do forward a start, an
+/// inspect, a usage and a signal of an image VM's spec through the node's runtime. Expect: each back to run here,
+/// where the guest runtime answers it, never to a guest's node, which no guest holding it would refuse NoSuchBox.
+#[test]
+fn an_image_vms_calls_run_here_not_at_a_guests_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let (node, _) = guest_node(dir.path());
+    let image = BoxSpec {
+        id: BoxId::new("image-forwarded").unwrap(),
+        bounds: Bounds::default(),
+        class: ClassSpec::ShardsImage(Box::new(hex_api::ShardsImage::new(hex_api::sim::SIM_IMAGE))),
+        owner: None,
+        allocation: Some(hex_api::sim::sim_vm_allocation().unwrap()),
+        route: None,
+        devices: Vec::new(),
+        band: 0,
+    };
+    let id = image.id.clone();
+    for call in [
+        Call::Start(id.clone()),
+        Call::Inspect(id.clone()),
+        Call::Usage(id.clone()),
+        Call::Signal {
+            id: id.clone(),
+            signal: hex_api::Signal::KILL,
+        },
+    ] {
+        let said = format!("{call:?}");
+        let routed = match node.runtime.forward_for(
+            &image,
+            call,
+            Stdio::null(),
+            Box::new(|_| {}),
+            Box::new(|_| {}),
+        ) {
+            Forward::Back(_) => "back".to_owned(),
+            Forward::Taken => "taken".to_owned(),
+            Forward::Offered(_) => "offered".to_owned(),
+            Forward::Refused(why) => format!("refused: {why}"),
+        };
+        assert_eq!(routed, "back", "{said}");
+    }
+}

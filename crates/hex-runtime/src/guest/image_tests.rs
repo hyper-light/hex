@@ -838,20 +838,12 @@ fn a_create_is_refused_before_any_record_on_a_host_without_an_image_boot() {
     assert!(Transaction::records(owner.as_ref()).unwrap().is_empty());
 }
 
-/// Joint plan step 12, CLAUDE.md §12: do ask for this host's image boot. Expect: Shards' on Linux; on macOS and
-/// Windows the refusal naming a run host started holding only its stdio, since D231 starts it through std's spawn,
-/// which hands it what another thread holds inheritable then.
+/// Joint plan step 12, CLAUDE.md §12 (Ada, 2026-11-12: the class works on Windows and macOS too): do ask for this
+/// host's image boot. Expect: Shards' on every host, its run host started holding only its stdio
+/// (vendor/patches/shards 0001: posix_spawn with POSIX_SPAWN_CLOEXEC_DEFAULT, CreateProcessW with a handle list).
 #[test]
-fn this_hosts_image_boot_is_shards_on_linux_and_names_what_d231_owes_elsewhere() {
-    let host = host_images().map(|_| ());
-    let expected = if cfg!(any(windows, target_os = "macos")) {
-        Err(Refusal::Awaits {
-            needs: Upstream::RunHostStdioOnly,
-        })
-    } else {
-        Ok(())
-    };
-    assert_eq!(host, expected);
+fn this_hosts_image_boot_is_shards_on_every_host() {
+    assert_eq!(host_images().map(|_| ()), Ok(()));
 }
 
 /// Joint plan step 12: do signal KILL to a VM never started. Expect: no boot, its end recorded
