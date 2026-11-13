@@ -1456,20 +1456,34 @@ fn w14_answers_that_measured_a_shared_guest_at_once_keep_its_boot_reading_until_
 
 /// Joint plan step 14 (C7; AC-T7.4.1; ROOT, 2026-11-13, pin 1): a shared backing goes Live only measured: its runtime
 /// takes its guest's first measurement from its agent's capacity answer before its record says Live, and leaves it
-/// Granted, saying why, without one. Do initialize a prepared backing whose guest already runs (its node restarted
-/// with it up) and whose agent answers no capacity; then again, its agent answering 8 GiB with 7 free and 100 GiB of
-/// disk with 40 free, up 10 s with 4 s of CPU, no box on it. Expect the first refused, the backing Granted; the second
-/// Live, its offer's guest measured: 1 GiB, 60 GiB of disk, and 400 milli-CPU read since its boot.
+/// Granted, saying why, without one. Do grant a backing whose launch published its controller and whose guest runs (a
+/// node that restarted with it up takes it back), its agent answering no capacity; then again, its agent answering 8
+/// GiB with 7 free and 100 GiB of disk with 40 free, up 10 s with 4 s of CPU, no box on it. Expect the first refused,
+/// the backing Granted; the second Live, its offer's guest measured: 1 GiB, 60 GiB of disk, and 400 milli-CPU read
+/// since its boot.
 #[test]
 fn w14_a_shared_backing_goes_live_only_measured() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = socket_fixture();
     let (runtime, owner) = configured(dir.path());
     let offer = runtime.prepare_backing().unwrap();
-    let mut granted = owner.row();
-    granted.accept_grant(&grant(&offer)).unwrap();
+    // The model's launch refuses after its intent; the row and receipt then say what a launch that published its
+    // controller leaves, the backing still Granted.
+    assert!(runtime.initialize_backing(grant(&offer)).is_err());
+    let identity = shards_api::Identity {
+        pid: 41,
+        started: 43,
+        vsock: runtime.pool_socket(offer.key).unwrap(),
+    };
+    let mut row = owner.row();
+    row.init = Some(controller(&identity));
+    Transaction::put_pool(owner.as_ref(), &row).unwrap();
+    let path = dir.path().join("@guest");
+    let mut receipt = pool::read(&path).unwrap().unwrap();
+    receipt.phase = Phase::Running(copy_identity(&identity).unwrap());
+    pool::write(&path, &receipt).unwrap();
     let binding = super::Binding {
         key: offer.key,
-        commitment: granted.native_commitment().unwrap(),
+        commitment: owner.row().native_commitment().unwrap(),
     };
     *runtime.booted.lock().unwrap() = Some(super::super::tests::running_guest(None, Some(binding)));
     let refused = runtime.initialize_backing(grant(&offer));
@@ -1478,9 +1492,9 @@ fn w14_a_shared_backing_goes_live_only_measured() {
             &refused,
             Err(Refusal::Backing {
                 cause: LifecycleCause::Uncertain,
-                why: Some(_),
+                why: Some(why),
                 ..
-            })
+            }) if why.contains("measured")
         ),
         "{refused:?}"
     );
