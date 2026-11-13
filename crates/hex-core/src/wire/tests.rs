@@ -881,6 +881,13 @@ fn refusals() -> Vec<Refusal> {
                 why: "ESRCH".to_owned(),
             }),
         },
+        // Joint plan step 12: a run that failed, in its runtime's words.
+        Refusal::Failed {
+            id: id("never-started"),
+            why:
+                "its command never started (status 128): exec: \"/bin/sh\": operation not permitted"
+                    .to_owned(),
+        },
     ];
     out.extend(connect_refusals());
     out
@@ -2264,6 +2271,7 @@ fn any_cause() -> impl Strategy<Value = Refusal> {
             .prop_map(|(port, failure)| Refusal::Connect { port, failure }),
         proptest::sample::select(Upstream::ALL.to_vec())
             .prop_map(|needs| Refusal::Awaits { needs }),
+        (any_id(), any_text()).prop_map(|(id, why)| Refusal::Failed { id, why }),
     ]
 }
 

@@ -762,6 +762,61 @@ fn a_run_that_failed_ends_saying_why_in_its_runtimes_words() {
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
 }
 
+/// Joint plan step 12 (goal 15's finding; ROOT's (b), 2026-11-13): do start a VM whose run fails as it boots, its command
+/// never started (D249's `Failed`, in its VM's words), the run host's boot answering with the run up. Expect: the start
+/// refused `Failed`, naming the box with those words, never answered Ok; the box then shown Empty with an unknown exit
+/// and the same words, its record keeping them, its run host reaped through its stop.
+#[test]
+fn a_run_that_fails_as_it_boots_fails_its_start_in_its_runtimes_words() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let command = vec!["/bin/sh".into(), "-c".into(), "exit 3".into()];
+    let id = runtime
+        .create(spec("image-fails-as-it-boots", Some(command)))
+        .unwrap()
+        .id;
+    let words =
+        "its command never started (status 128): exec: \"/bin/sh\": operation not permitted";
+    *images.run.end.lock().unwrap() = Some(RunEnd::Failed(words.to_owned()));
+    assert_eq!(
+        runtime.start(&id),
+        Err(Refusal::Failed {
+            id: id.clone(),
+            why: words.to_owned(),
+        })
+    );
+    let info = shown(&runtime, &id, BoxState::Empty, &REAPED_SHOWN);
+    assert_eq!(
+        (info.exit, info.ended.as_deref()),
+        (Some(Exit::Unknown), Some(words))
+    );
+    let kept = record(&owner, &id).unwrap();
+    assert_eq!(
+        (kept.exit, kept.ended.as_deref()),
+        (Some(Exit::Unknown), Some(words))
+    );
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+}
+
+/// Joint plan step 12 (ROOT's (b), 2026-11-13): do start a VM whose command exits 3 at once, ended as the boot answers.
+/// Expect: the start answered Ok, as `docker start` answers a command that started, however soon it ended; the box then
+/// shown Empty with Code(3) and no words, its run host reaped through its stop.
+#[test]
+fn a_command_that_exits_at_once_has_started() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let command = vec!["/bin/sh".into(), "-c".into(), "exit 3".into()];
+    let id = runtime
+        .create(spec("image-exits-at-once", Some(command)))
+        .unwrap()
+        .id;
+    *images.run.end.lock().unwrap() = Some(RunEnd::Exited(3));
+    assert_eq!(runtime.start(&id), Ok(()));
+    let info = shown(&runtime, &id, BoxState::Empty, &REAPED_SHOWN);
+    assert_eq!((info.exit, info.ended), (Some(Exit::Code(3)), None));
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+}
+
 /// Joint plan step 12, steps 11's boundary: do exec a member's program and send TERM to a running VM.
 /// Expect: Awaits(MemberExec) and Awaits(MemberSignal), no stop, and the VM still Running.
 #[test]
