@@ -615,9 +615,6 @@ fn record(owner: &Owner, id: &BoxId) -> Option<BoxRecord> {
 /// makes either, so each measures, for its fact alone (hex_testkit::waits).
 static LATE_BOOT_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_late_boot_shown");
 static REAPED_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_reaped_shown");
-/// The model's boot asked, and a box its refused boot ended shown Empty: facts no recorded operation makes either.
-static BOOT_ASKED: Patience = Patience::measuring("test.hex_runtime.image_boot_asked");
-static REFUSED_SHOWN: Patience = Patience::measuring("test.hex_runtime.image_refused_shown");
 
 /// Waits on `wait`, its fact's own patience, for box `id` to show `state`.
 fn shown(runtime: &GuestRuntime, id: &BoxId, state: BoxState, wait: &Patience) -> BoxInfo {
@@ -1147,25 +1144,28 @@ fn a_boot_past_its_patience_is_pending_and_its_answer_lands_after() {
     assert_eq!(images.asked.lock().unwrap().len(), 1);
 }
 
-/// Decision 9, joint plan step 12 (CLAUDE.md §2: every wait has a bound): do start a VM whose run host starts but
-/// whose run doesn't, its boot past its learned patience. Expect: Shards' boot given that patience as its own; start
-/// refused Lifecycle Pending; then Shards' refusal at its patience ends the box (Exit::Unknown), shown Empty, its
-/// record keeping it, with no second boot.
+/// Decision 9 (original; the person's ruling of 2026-11-13: W* is a bound only while answers come within it), joint
+/// plan step 12: a boot past its learned W* was given that W* as Shards' own patience, so D231 killed its run host
+/// there and the box ended, though its run was starting. Do: start a VM whose run host starts but whose run doesn't
+/// yet, its boot's W* one a 1 ns boot taught it; once Shards' boot is asked, let the run start. Expect: Shards' boot
+/// given no bound of Hex's (`Duration::MAX`: until the run starts or its host ends); start refused Lifecycle Pending,
+/// the run-out told (the boot's next wait follows its party); the box Running once its run starts, with no second
+/// boot; and W* risen to the boot that passed it, its answer taken by the later call.
 #[test]
-fn a_boot_is_given_its_learned_patience_and_ends_the_box_past_it() {
+fn original_a_boot_past_its_learned_w_star_goes_on_to_its_run() {
+    /// The model's boot asked, and the box shown Running once its run started: this test's facts alone.
+    static ASKED: Patience = Patience::measuring("test.hex_runtime.image_boot_past_asked");
+    static SHOWN: Patience = Patience::measuring("test.hex_runtime.image_boot_past_shown");
     let images = ModelImages::new();
     images.gate(Gate::Run);
-    // A 1 ns record arms the boot's bound at once; the model's twin of it says what that bound is.
-    let seed = Duration::from_nanos(1);
-    let bound = Patience::seeded("test.hex_runtime.image_boot_bounded_twin", seed)
-        .deadline()
-        .unwrap();
-    let bounded = ImageWaits {
-        boot: Patience::seeded("test.hex_runtime.image_boot_bounded", seed),
+    let learned = Duration::from_nanos(1);
+    let armed = ImageWaits {
+        boot: Patience::measuring("test.hex_runtime.image_boot_past"),
         ..waits().unwrap()
     };
-    let (runtime, owner) = model_runtime(&images, Ok(bounded));
-    let id = runtime.create(spec("image-bounded", None)).unwrap().id;
+    armed.boot.answered(learned);
+    let (runtime, owner) = model_runtime(&images, Ok(armed));
+    let id = runtime.create(spec("image-past", None)).unwrap().id;
     assert!(matches!(
         runtime.start(&id),
         Err(Refusal::Lifecycle {
@@ -1173,15 +1173,31 @@ fn a_boot_is_given_its_learned_patience_and_ends_the_box_past_it() {
             ..
         })
     ));
-    hex_testkit::waits::until(&BOOT_ASKED, "the model's boot asked", || {
+    hex_testkit::waits::until(&ASKED, "the model's boot asked", || {
         !images.patience.lock().unwrap().is_empty()
     })
     .unwrap();
-    assert_eq!(*images.patience.lock().unwrap(), vec![bound]);
-    let info = shown(&runtime, &id, BoxState::Empty, &REFUSED_SHOWN);
-    assert_eq!(info.exit, Some(Exit::Unknown));
-    assert_eq!(record(&owner, &id).unwrap().exit, Some(Exit::Unknown));
+    assert_eq!(
+        *images.patience.lock().unwrap(),
+        vec![Duration::MAX],
+        "Shards' boot was given a bound of Hex's"
+    );
+    let boot = &runtime.image().unwrap().waits().unwrap().boot;
+    assert_eq!(boot.deadline(), None, "the run-out wasn't told");
+    assert_eq!(runtime.inspect(&id).unwrap().state, BoxState::Created);
+    assert_eq!(
+        record(&owner, &id).unwrap().exit,
+        None,
+        "the box ended at W*"
+    );
+    images.gate(Gate::Open);
+    shown(&runtime, &id, BoxState::Running, &SHOWN);
     assert_eq!(images.asked.lock().unwrap().len(), 1);
+    assert!(
+        boot.slowest().is_some_and(|slowest| slowest > learned),
+        "W* didn't rise to the boot that passed it: {:?}",
+        boot.slowest()
+    );
 }
 
 /// Joint plan step 12, the owner's crash (ROOT, 2026-11-12): do give the runtime a Ready record with no
@@ -1804,52 +1820,25 @@ fn a_publish_to_a_member_the_image_doesnt_run_stops_the_vm() {
     }
 }
 
-/// Decision 9, joint plan step 12: do make the image waits from records of all three measures, from none
-/// outside the waits census, and from none while it runs. Expect: each armed at twice its record; refused
-/// naming the first record to take; and each measuring, armed at nothing, under its own name, so the census
-/// takes its first record.
+/// Decision 9 (no record is read), joint plan step 12: do make the image waits. Expect: each following its party (no
+/// bound) until its first answer, under its own name, and no refusal for want of a record: an image box needs none.
 #[test]
-fn the_image_waits_take_their_records_or_measure_only_while_the_census_runs() {
-    let ms = Duration::from_millis;
-    let recorded = |measure: &str| match measure {
-        "image_boot" => Ok(ms(3)),
-        "image_stats" => Ok(ms(5)),
-        "image_stop" => Ok(ms(7)),
-        other => panic!("no such measure {other}"),
-    };
-    let armed = ImageWaits::from_records(recorded, false).unwrap();
+fn the_image_waits_follow_their_parties_until_their_first_answers() {
+    let waits = ImageWaits::new();
     assert_eq!(
         (
-            armed.boot.deadline(),
-            armed.stats.deadline(),
-            armed.stop.deadline()
-        ),
-        (Some(ms(6)), Some(ms(10)), Some(ms(14)))
-    );
-    let none = |measure: &str| {
-        Err(Refusal::Platform {
-            what: "the oci class's guest",
-            platform: "test",
-            why: format!("no {measure} record for any host class yet"),
-        })
-    };
-    assert!(matches!(
-        ImageWaits::from_records(none, false),
-        Err(Refusal::Platform { why, .. }) if why.contains("image_boot")
-    ));
-    let census = ImageWaits::from_records(none, true).unwrap();
-    assert_eq!(
-        (
-            census.boot.deadline(),
-            census.stats.deadline(),
-            census.stop.deadline()
+            waits.boot.deadline(),
+            waits.stats.deadline(),
+            waits.stop.deadline()
         ),
         (None, None, None)
     );
     assert_eq!(
-        (census.boot.name(), census.stats.name(), census.stop.name()),
+        (waits.boot.name(), waits.stats.name(), waits.stop.name()),
         ("hex.image.boot", "hex.image.stats", "hex.image.stop")
     );
+    waits.boot.answered(Duration::from_millis(3));
+    assert_eq!(waits.boot.deadline(), Some(Duration::from_millis(3)));
 }
 
 /// AC-T7.4.1, joint plan step 12: a call on the guest's path reads the node's records once, the image class's routing

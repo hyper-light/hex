@@ -1,8 +1,10 @@
 # The waits census: each learned wait's answer distribution
 
-Decision 9 of `docs/design/runtime-architecture.md` and the lead's failure-bound rule (2026-11-06): before a node has
-an answer of its own, each wait's bound is twice the slowest answer in that wait's recorded distribution for the host
-class. This probe records those distributions. Each wait is a named `hex_core::patience::Patience`; with
+Decision 9 of `docs/design/runtime-architecture.md` (Ada's rules of 2026-11-06 and 2026-11-13: no picked constant, no
+record baked in): each wait's bound is the slowest answer its node has seen; before the first, and after a run-out, it
+follows its party while it lives and advances. Until 2026-11-13 each wait was seeded from this probe's record of its
+distribution for the host class, at twice its slowest; the records are now the evidence the rule is held to, read by
+no build. This probe records those distributions. Each wait is a named `hex_core::patience::Patience`; with
 `HEX_WAITS_CENSUS` naming a file (and `HEX_WAITS_CENSUS_MAX` its most lines), the node and its client append every
 answer each wait records, `name nanos`, from the wait's own timing point (`hex_node::census`), so nothing here
 re-implements a wait.
@@ -57,7 +59,8 @@ From run 3 the arm column is run 1's method: a release build's seed is the large
 row's 1,000 samples, in runs 1 and 3; a debug build's is the debug arm's (`Patience::by_profile`). From run 5 a debug
 build's is the largest answer of its debug-build arms, the `debug` arm and the `suites` (whose waits run armed, under
 the gates' load), for every wait seeded from the same record, the tests' among them, and never under a bound one ran
-out at: a row seeds once it has 1,000 answers or ran out, and its answers short of 1,000 count as seen. Each is the
+out at: a row seeds once it has 1,000 answers or ran out, and its answers short of 1,000 count as seen. From
+2026-11-13 no row seeds a wait ("Records as evidence" below). Each is the
 census's nanoseconds as recorded, never rounded below the max.
 
 Until a run is recorded here each of those waits stays MEASURING in the code, naming this file's row. Where a row's n
@@ -230,3 +233,21 @@ loops, its waits armed and each run-out told, `name >nanos`; load 10.1 at start,
   `oci_spec_box`'s conformance, its HEX-RT-2 emptying the same, "256.71229ms after SIGKILL"; in 5, `oci_reuse`'s
   cgroup reuse within its owner; once each, `process_box`'s contract, `node`'s `a_listing_teaches_the_next_its_wait` and
   the init's `a_start_whose_reader_is_gone_is_abandoned_not_a_sigpipe`.
+
+## Records as evidence (2026-11-13)
+
+Decision 9's bound lost its picked factor of two and its seeds (Ada, 2026-11-13: "we do not tolerate arbitrary
+constants"; no value measured on our machines baked in per profile, OS or build): a wait's bound is the slowest answer
+its node has seen, and before its first answer, and after a run-out, it follows its party (`hex_core::patience`). This
+file's rows seed no wait. They are the evidence the rule is held to: a row's run-outs and answers say where a bound at
+the slowest seen would have run out, the next answer outrunning the slowest of `n` with chance at most `1 / (n + 1)`
+(Wilks, 1941). What the census must record next, for decision 9's inputs:
+- **Each wait's answers that never came**: a wait still waiting when its arm ends, as a line of its own (the time it
+  had waited), so a row's never-answer rate is a count rather than inferred from its arms having ended. The rule takes
+  it as none today: an unarmed wait whose answer never came would have held its arm, and every arm of runs 1 to 5
+  ended.
+- **Where a row records answers that never came, what its run-out costs**: the time its caller lost (a refused call
+  asked again, a retired seed's restart and its create's clone on another), the rule's cost's third input, which only a
+  nonzero never-answer rate needs.
+- **A following wait's ends**: each refusal of a following wait as ended or stalled, with its party's progress count,
+  so a stall taken for a live party's slow work shows.
