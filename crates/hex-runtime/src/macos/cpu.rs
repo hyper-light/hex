@@ -88,14 +88,18 @@ impl Control {
         self.budget.held()
     }
 
-    /// Original (joint plan step 14, 2c, red): a hold's measured response is taken nowhere.
+    /// A hold's measured response (joint plan step 14, 2c): [`Budget::learn`].
     pub(super) fn learn(&mut self, response: Duration) -> Result<(), Failure> {
         self.budget.learn(response)
     }
 
-    /// Original (joint plan step 14, 2c, red): when a scope's credit ran out is read nowhere.
+    /// When the scope's credit ran out (joint plan step 14, 2c; ROOT, 2026-11-13), off its last observation: its
+    /// credit's overrun there, spent at the rate it runs past its earning (its maximum less its rate), rounded up so a
+    /// response measured from it is never short. None with credit left, held, before its first observation, or at a
+    /// rate it is never held at.
     pub(super) fn ran_out(&self) -> Option<Instant> {
-        None
+        let (at, _) = self.clock?;
+        at.checked_sub(self.budget.overrun()?)
     }
     pub(super) fn permit(&mut self) -> Result<(), Failure> {
         match self.budget.mode {
@@ -180,11 +184,38 @@ impl Budget {
         })
     }
 
-    /// Original (joint plan step 14, 2c, red): the response is the census row's, fixed, and a hold's measured one is
-    /// taken nowhere.
+    /// A hold's measured response (joint plan step 14, 2c; ROOT, 2026-11-13): the control's is the slowest seen, only
+    /// rising, and its burst, the most a scope runs past its stop, the maximum over it. A hold under way paid the burst
+    /// before it, so what its scope ran past its stop beyond that is owed too: its credit tops up by the difference.
+    /// Refused for a response of no time, as [`Budget::new`] refuses one.
     pub(super) fn learn(&mut self, response: Duration) -> Result<(), Failure> {
-        let _ = response;
+        if response.is_zero() {
+            return Err(Failure::Envelope);
+        }
+        let burst = product(self.maximum, response)?;
+        if burst <= self.burst {
+            return Ok(());
+        }
+        if self.mode == Mode::Held {
+            let owed = burst.checked_sub(self.burst).ok_or(Failure::Arithmetic)?;
+            self.credit = self.credit.checked_sub(owed).ok_or(Failure::Arithmetic)?;
+        }
+        self.burst = burst;
         Ok(())
+    }
+
+    /// How long before its last observation its credit ran out: its overrun, spent at the rate it runs past its earning,
+    /// rounded up; none with credit left, held or prepared, or at its maximum, where it is never held.
+    fn overrun(&self) -> Option<Duration> {
+        if self.mode != Mode::Running || self.credit > 0 {
+            return None;
+        }
+        let depletion = self.maximum.checked_sub(self.rate).filter(|d| *d > 0)?;
+        let over = self.credit.checked_neg()?;
+        let ns = over
+            .checked_add(depletion.checked_sub(1)?)?
+            .checked_div(depletion)?;
+        Some(Duration::from_nanos(u64::try_from(ns).ok()?))
     }
 
     /// A new rate for the same scope (joint plan step 14, C4 on macOS): its credit and any debt stay, and its burst,
@@ -466,7 +497,8 @@ mod tests {
     #[test]
     fn a_scopes_credit_ran_out_when_its_overrun_says() {
         let at = Instant::now();
-        let mut control = Control::new(1000, 4000, Duration::from_nanos(10), Duration::ZERO).unwrap();
+        let mut control =
+            Control::new(1000, 4000, Duration::from_nanos(10), Duration::ZERO).unwrap();
         control.start(at, Duration::ZERO).unwrap();
         assert_eq!(control.ran_out(), None, "credit left");
         let later = at + Duration::from_nanos(14);
