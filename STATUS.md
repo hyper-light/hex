@@ -70,8 +70,9 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
 - **Hex's wire over hyper-transport** (joint plan step 4; `docs/design/hex-quic.md`): built and merged
   (`hex-quic`, `hex node --quic`, `hex node enroll`). TLS13_AES_256_GCM_SHA384 alone, mutual under kiln's CA by
   CSR, learned waits per call kind and class. The hex-api conformance suite passes over QUIC with both ends
-  reporting the suite, in process and through `hex node` (HEX-QUIC-20, -23, -24), on Linux and macOS. Closes
-  with: the same on Windows (jupiter), the two-host run with its kill and partition (HEX-QUIC-25, the lead's),
+  reporting the suite, in process and through `hex node` (HEX-QUIC-20, -23, -24), on Linux and macOS. The node
+  reports each link's peer, suite and group on its wire and as `hex node links` (Q12, Shards plan step 34;
+  HEX-QUIC-28 to -31). Closes with: the same on Windows (jupiter), the two-host run with its kill and partition (HEX-QUIC-25, the lead's),
   and a waits census over QUIC to seed its measuring waits.
 - **The Shards class on Agentfile images** (joint plan step 12; `docs/design/shards-image-class.md`): built to
   Shards `1389dc0b` (D231 with D234-D250, image channel version 13). Linux, macOS and Windows boot image VMs, D231's

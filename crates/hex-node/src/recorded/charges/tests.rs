@@ -257,6 +257,32 @@ fn w14_a_refused_cap_fails_the_window_typed() {
     assert_eq!(learned.holdings.len(), 2);
 }
 
+/// Joint plan step 14 (AC-T7.4.1), C2: a learner carries a cold class at the workload's admission, the census's VMM
+/// overhead its ceiling's alone. Do ask a learner that has learned no VM for the capacity answer of a Shards profile
+/// whose receipt is its 16-CPU, 8 GiB envelope and a census overhead of half a CPU and 256 MiB. Expect the profile's
+/// prior carried at the envelope its VMs are admitted at, its ceiling the whole receipt.
+#[test]
+fn w14_a_cold_class_is_carried_at_its_admission() {
+    let census = RuntimeCost {
+        overhead: res(500, 256 << 20),
+        ..cost()
+    };
+    let receipt = census.allocate(CapacityResources::default()).unwrap();
+    let learner = Learner::new(WINDOW, res(32_000, 64 * GIB), LEARNS).unwrap();
+    let learned = learner
+        .learned(Class::Shards, &[census], &[])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        learned.priors,
+        vec![hex_api::LearnedPrior {
+            profile: census.id,
+            ceiling: receipt.resources,
+            booking: res(16_000, 8 * GIB),
+        }]
+    );
+}
+
 /// Joint plan step 14 (AC-T7.4.1): which records are running managed VMs. Do judge a running Shards VM's record, then
 /// the same deleting, ended, with no controller, with no lifetime, and a process box's. Expect only the first running.
 #[test]
@@ -792,6 +818,53 @@ fn w14_a_capping_node_learns_an_image_vm_through_its_run() {
         learner.window(&io, &[vm], budget, start + WINDOW * 2),
         Err(Refusal::Invalid { why, .. }) if why.contains("vCPU count")
     ));
+}
+
+/// Joint plan step 14 (AC-T7.4.1), C8: a class's capacity answer carries the holding of each VM its learner learns, a
+/// Shards image VM's as a managed VM's. Do run a window of a managed VM and an image VM, then answer for the class from
+/// the node's records. Expect both VMs' holdings on the answer.
+#[test]
+fn w14_an_answer_carries_each_learned_vms_holding_an_image_vms_too() {
+    let io = Record::default();
+    io.set("vm-1", 0, GIB);
+    io.host.borrow_mut().insert(
+        "img-1".to_owned(),
+        HostUse {
+            cpu_ns: 0,
+            footprint_bytes: GIB,
+            resident_bytes: GIB,
+            guest_ns: vec![0; 16],
+        },
+    );
+    let records = vec![vm("vm-1", 1), image_vm("img-1", 2)];
+    let mut learner = Learner::new(WINDOW, res(32_000, 64 * GIB), LEARNS).unwrap();
+    learner
+        .window(&io, &records, res(24_000, 64 * GIB), Instant::now())
+        .unwrap();
+    let mut capacity = hex_api::Capacity {
+        id: "shards".into(),
+        total: res(32_000, 64 * GIB),
+        free: CapacityResources::default(),
+        devices: Vec::new(),
+        cost: Some(cost()),
+        routes: Vec::new(),
+        device_routes: Vec::new(),
+        backings: Vec::new(),
+        unavailable: Vec::new(),
+        learned: None,
+    };
+    learner
+        .answer(Class::Shards, &mut capacity, &records)
+        .unwrap();
+    let mut held: Vec<String> = capacity
+        .learned
+        .unwrap()
+        .holdings
+        .iter()
+        .map(|holding| holding.id.as_str().to_owned())
+        .collect();
+    held.sort();
+    assert_eq!(held, ["img-1", "vm-1"]);
 }
 
 /// Joint plan step 14 (C4; AC-T7.4.1): a window books off the fleet's budget every box it doesn't learn. Do sort a
