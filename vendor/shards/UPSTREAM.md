@@ -1,7 +1,7 @@
 # Shards API seam
 
 Repository: https://github.com/hyper-light/shards
-Revision: `482c5d7856dfea06d167202876ecd430a680eada` (main).
+Revision: `2365d7844f7b4ecdfbba9aa94579b8fc007f3e63` (main).
 
 The API, ABI, AF_UNIX transport and test-directory crates, license, formatting,
 lint configuration and binding policy are copied exactly from this revision, with
@@ -12,7 +12,11 @@ changed here: the `shards` binary Hex boots GPU guests with is vendor/shards-gpu
 
 This revision holds what Hex's node speaks to: the direct boot (D215), launches
 through a client's native owner (D233), GPU selection by exact identity (D232), and
-an image booted under shards-init for an orchestrator (D231, `shards_api::image`).
+an image booted under shards-init for an orchestrator (D231, `shards_api::image`),
+with its nesting grant (D234), plugs (D235), destinations by name and the receivers a
+published port reaches (D236), and a member's stdin (channel version 6). The take list
+adds `docs/research/measurements/api-flakes/spawns.rs`, which the API's tests include by
+path at this revision (`crates/api/src/client.rs`).
 
 ## Recorded changes
 

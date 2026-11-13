@@ -12,6 +12,7 @@ fn nothing_kept() -> Narrowing {
     Narrowing {
         egress: Keep::Only(Vec::new()),
         mcp: Keep::Only(Vec::new()),
+        destinations: Keep::Only(Vec::new()),
         dns: false,
     }
 }
@@ -323,6 +324,7 @@ fn bound_at(guest_port: u16, at: &str) -> shards_api::image::Bound {
         guest_port,
         proto: shards_api::image::Proto::Tcp,
         host: at.parse().unwrap(),
+        to: Vec::new(),
     }
 }
 

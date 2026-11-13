@@ -196,6 +196,10 @@ fn refused(id: &BoxId, op: &'static str, why: ImageRefusal) -> Refusal {
             op,
             why: format!("the run host: {why}"),
         },
+        ImageRefusal::Plug(cause, why) => Refusal::Os {
+            op,
+            why: format!("the plug: {cause:?}: {why}"),
+        },
         ImageRefusal::Os { what, kind } => Refusal::Os {
             op: what,
             why: format!("{kind:?}"),
@@ -450,6 +454,9 @@ impl GuestRuntime {
             publish: network.publish,
             egress: network.egress,
             shares: Vec::new(),
+            // D234's nesting grant is no harness's: the image class asks none.
+            nesting: false,
+            ready_by: None,
             binary: Some(self.config.binary.clone()),
             env,
         })
@@ -633,7 +640,10 @@ impl GuestRuntime {
         let asked = Instant::now();
         let spawned = std::thread::Builder::new()
             .name("hex-image-boot".to_owned())
-            .spawn(move || answer.put(images.boot(&spec)));
+            // No patience of D231's own: the box's learned wait bounds its caller (`waits.boot`), and a boot
+            // slower than that bound is still answered and learned, where one killed at it would teach the wait
+            // nothing past its own bound (docs/design/shards-image-class.md §6).
+            .spawn(move || answer.put(images.boot(&spec, Duration::MAX)));
         if let Err(why) = spawned {
             // No boot began: the box ends, its intent's record kept with its end.
             image.insert(&id, Run::Ended(Exit::Unknown))?;

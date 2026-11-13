@@ -15,7 +15,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use super::wire::{self, Channel, MemberInfo, RunEnd, Stats, StatsScope};
+use super::wire::{self, Channel, MemberInfo, Ready, RunEnd, Stats, StatsScope};
 use super::{ImageGuest, ImageRefusal, ImageSpec, MemberEnd, MemberName};
 
 /// The most of a member channel's bytes the client lets its host send ahead of what the
@@ -44,26 +44,53 @@ struct Flow {
     ended: Option<wire::StreamEnd>,
 }
 
+/// A member's stdin, which the caller writes (plan step 5): the room its host gave and the
+/// feed has not used, whether its pipe was taken, and its end as its host told it.
+#[derive(Debug, Default)]
+struct InputFlow {
+    room: u64,
+    taken: bool,
+    ended: Option<(u64, wire::StreamEnd)>,
+}
+
 #[derive(Debug, Default)]
 struct State {
     started: Option<wire::Started>,
     refused: Option<ImageRefusal>,
     flows: HashMap<(u32, Channel), Flow>,
+    /// Each member's stdin its spec asked for, by its index.
+    inputs: HashMap<u32, InputFlow>,
     ends: HashMap<u32, u32>,
     stats: HashMap<u32, Result<Stats, String>>,
+    /// Each plug's or unplug's answer, by its ask's id (D235).
+    plugs: HashMap<u32, Result<(), (wire::PlugRefusal, String)>>,
     next_ask: u32,
+    /// The run's own command's readiness under the nesting grant (D234), as its init last
+    /// said it: init owns it, and moves it by D234's table.
+    ready: Option<Ready>,
     end: Option<RunEnd>,
     /// The host's process has exited and is reaped.
     exited: bool,
     /// Its answers have all been read: its stdout has ended.
     answered: bool,
     said: VecDeque<u8>,
+    /// Its diagnostics have all been read: its stderr has ended, its VM's with it.
+    said_all: bool,
 }
 
 impl State {
     /// The host is gone and has said all it will.
     fn gone(&self) -> bool {
         self.exited && self.answered
+    }
+}
+
+/// `refused` with the host's last diagnostics, where its run did not boot: what its VM said
+/// as it ended, the only words of why (`the VM ended before it took its run`).
+fn with_said(refused: ImageRefusal, said: &VecDeque<u8>) -> ImageRefusal {
+    match refused {
+        ImageRefusal::Boot(why) => ImageRefusal::Boot(format!("{why}{}", quoted(said))),
+        other => other,
     }
 }
 
@@ -213,10 +240,17 @@ pub(super) struct Session {
     members: Vec<MemberInfo>,
     published: Vec<wire::Bound>,
     outputs: Mutex<HashMap<(u32, Channel), io::PipeReader>>,
+    /// Its command has the nesting grant (D234): its spec asked for it, and its host, which
+    /// refuses a grant it cannot give, started it.
+    nesting: bool,
 }
 
 impl Session {
-    pub(super) fn start(spec: &ImageSpec, request: &wire::Request) -> Result<Session, ImageRefusal> {
+    pub(super) fn start(
+        spec: &ImageSpec,
+        request: &wire::Request,
+        patience: Duration,
+    ) -> Result<Session, ImageRefusal> {
         let binary = spec
             .binary
             .clone()
@@ -280,10 +314,14 @@ impl Session {
             end_it(&shared);
             return Err(e);
         }
-        // Started, refused, or gone: whichever comes first.
-        let outcome = shared.wait(Duration::MAX, |s| {
-            if let Some(r) = s.refused.take() {
-                return Some(Err(r));
+        // Started, refused, or gone: whichever comes first, within the caller's patience. A
+        // refusal is the host's last word, told once it has exited and said all it will.
+        let outcome = shared.wait(patience, |s| {
+            if s.refused.is_some() {
+                if !(s.gone() && s.said_all) {
+                    return None;
+                }
+                return s.refused.take().map(|r| Err(with_said(r, &s.said)));
             }
             if let Some(started) = s.started.take() {
                 return Some(Ok(started));
@@ -309,15 +347,37 @@ impl Session {
             }
             None => {
                 end_it(&shared);
-                return Err(ImageRefusal::Host("no answer to its request".into()));
+                let mut state = lock(&shared.state);
+                // Refused, by a host that has not yet exited: its refusal still.
+                if let Some(r) = state.refused.take() {
+                    return Err(with_said(r, &state.said));
+                }
+                let said = quoted(&state.said);
+                return Err(ImageRefusal::Boot(format!(
+                    "the run did not start within {patience:?}{said}"
+                )));
             }
         };
+        // Each member whose stdin its spec asked for, by its index in the host's answer.
+        {
+            let mut state = lock(&shared.state);
+            for m in request.members.iter().filter(|m| m.input) {
+                if let Some(info) = started
+                    .members
+                    .iter()
+                    .find(|i| i.kind == m.kind && i.name == m.name)
+                {
+                    state.inputs.entry(info.index).or_default();
+                }
+            }
+        }
         let session = Session {
             shared,
             host,
             members: started.members,
             published: started.published,
             outputs: Mutex::new(HashMap::new()),
+            nesting: request.nesting,
         };
         session.pump_outputs()?;
         Ok(session)
@@ -354,6 +414,49 @@ impl Session {
         Ok(())
     }
 
+    /// Asks its host a plug or an unplug (`kind`, D235), its payload made of the ask's id,
+    /// and waits at most `patience` for its answer.
+    fn plug_ask(
+        &self,
+        kind: u8,
+        patience: Duration,
+        payload: impl FnOnce(u32) -> Result<Vec<u8>, wire::WireError>,
+    ) -> Result<(), ImageRefusal> {
+        let id = {
+            let mut state = lock(&self.shared.state);
+            if let Some(end) = &state.end {
+                return Err(ImageRefusal::Ended(end.clone()));
+            }
+            state.next_ask = state.next_ask.wrapping_add(1);
+            state.next_ask
+        };
+        let payload = payload(id).map_err(|e| ImageRefusal::Spec {
+            what: "a plug",
+            why: e.to_string(),
+        })?;
+        self.shared.send(kind, &payload).map_err(|e| ImageRefusal::Os {
+            what: "the run host's plug",
+            kind: e.kind(),
+        })?;
+        let answer = self.shared.wait(patience, |s| {
+            if let Some(answer) = s.plugs.remove(&id) {
+                return Some(answer.map_err(|(cause, why)| ImageRefusal::Plug(cause, why)));
+            }
+            if let Some(end) = &s.end {
+                return Some(Err(ImageRefusal::Ended(end.clone())));
+            }
+            s.gone()
+                .then(|| Err(ImageRefusal::Host("it exited without answering".into())))
+        });
+        answer.unwrap_or_else(|| {
+            lock(&self.shared.state).plugs.remove(&id);
+            Err(ImageRefusal::Unsupported {
+                what: "a plug",
+                why: format!("no answer within {patience:?}"),
+            })
+        })
+    }
+
     fn index(&self, member: &MemberName) -> Result<&MemberInfo, ImageRefusal> {
         self.members
             .iter()
@@ -384,6 +487,50 @@ fn pump(shared: &Shared, member: u32, channel: Channel, mut writer: io::PipeWrit
         }
         let taken = u64::try_from(part.len()).unwrap_or(u64::MAX);
         if shared.credit(member, channel, taken).is_err() {
+            return;
+        }
+    }
+}
+
+/// Moves what the caller writes to member `member`'s stdin to its host, no more at once than
+/// the room the host gave, and its end once the caller closes its pipe; ends with the input,
+/// the run or the host, dropping its pipe's read end so that the caller's writes fail then.
+fn feed(shared: &Shared, member: u32, mut reader: io::PipeReader) {
+    let mut buf = vec![0u8; AHEAD as usize];
+    loop {
+        // Room first: nothing is read of the caller that its host has no room for.
+        let room = shared.wait(Duration::MAX, |s| {
+            let gone = s.end.is_some() || s.answered;
+            let flow = s.inputs.get(&member)?;
+            if flow.ended.is_some() || gone {
+                return Some(None);
+            }
+            (flow.room > 0).then_some(Some(flow.room))
+        });
+        let Some(Some(room)) = room else {
+            return;
+        };
+        let want = usize::try_from(room).unwrap_or(usize::MAX).min(buf.len());
+        let n = match reader.read(buf.get_mut(..want).unwrap_or_default()) {
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        };
+        if n == 0 {
+            let end = wire::InputEnd {
+                member,
+                end: wire::StreamEnd::Closed,
+            };
+            let _ = shared.send(wire::to_host::INPUT_END, &end.encode());
+            return;
+        }
+        if let Some(flow) = lock(&shared.state).inputs.get_mut(&member) {
+            flow.room = flow.room.saturating_sub(n as u64);
+        }
+        let mut payload = Vec::with_capacity(4 + n);
+        payload.extend_from_slice(&wire::Input::head(member));
+        payload.extend_from_slice(buf.get(..n).unwrap_or_default());
+        if shared.send(wire::to_host::INPUT, &payload).is_err() {
             return;
         }
     }
@@ -469,6 +616,32 @@ fn take(shared: &Shared, kind: u8, payload: &[u8]) -> Result<bool, String> {
             let answer = wire::StatsAnswer::decode(payload).map_err(bad)?;
             state.stats.insert(answer.id, answer.result);
         }
+        k::PLUGGED => {
+            let answer = wire::PlugAnswer::decode(payload).map_err(bad)?;
+            state.plugs.insert(answer.id, answer.result);
+        }
+        k::READY => state.ready = Some(wire::ready(payload).map_err(bad)?),
+        k::INPUT_ROOM => {
+            let room = wire::InputRoom::decode(payload).map_err(bad)?;
+            let flow = state
+                .inputs
+                .get_mut(&room.member)
+                .ok_or_else(|| "room for a member with no stdin of its owner's".to_string())?;
+            flow.room = flow
+                .room
+                .checked_add(room.bytes)
+                .ok_or_else(|| "a stdin's room past what a u64 counts".to_string())?;
+        }
+        k::INPUT_ENDED => {
+            let e = wire::InputEnded::decode(payload).map_err(bad)?;
+            let flow = state
+                .inputs
+                .get_mut(&e.member)
+                .ok_or_else(|| "an end of a member with no stdin of its owner's".to_string())?;
+            if flow.ended.replace((e.written, e.end)).is_some() {
+                return Err("a stdin ended twice".into());
+            }
+        }
         k::ENDED => {
             let end = wire::RunEnd::decode(payload).map_err(bad)?;
             if state.end.replace(end).is_some() {
@@ -488,13 +661,15 @@ fn keep_said(shared: &Shared, mut said: std::process::ChildStderr) {
     let mut buf = [0u8; 4096];
     while let Ok(n) = said.read(&mut buf) {
         if n == 0 {
-            return;
+            break;
         }
         let mut state = lock(&shared.state);
         state.said.extend(buf.get(..n).unwrap_or_default());
         let over = state.said.len().saturating_sub(keep);
         state.said.drain(..over);
     }
+    lock(&shared.state).said_all = true;
+    shared.changed.notify_all();
 }
 
 /// Waits for the host to exit, then reaps it under the state's lock as `exited` is set.
@@ -519,6 +694,31 @@ fn quoted(said: &VecDeque<u8>) -> String {
     format!(": {}", String::from_utf8_lossy(&bytes).trim_end())
 }
 
+/// What a wait for the readiness of a run's command past `seen` finds in `s`: a refusal at
+/// once where the command has no nesting grant (`granted`), whose readiness is the grant's
+/// (D234); its latest, once that differs from `seen`; else the run's end, or its host gone
+/// without one; else nothing yet.
+fn ready_past(s: &State, granted: bool, seen: Option<Ready>) -> Option<Result<Ready, ImageRefusal>> {
+    if !granted {
+        return Some(Err(ImageRefusal::Spec {
+            what: "nesting",
+            why: "readiness is the nesting grant's (D234), which the run does not ask for".into(),
+        }));
+    }
+    if let Some(ready) = s.ready.filter(|_| s.ready != seen) {
+        return Some(Ok(ready));
+    }
+    if let Some(end) = &s.end {
+        return Some(Err(ImageRefusal::Ended(end.clone())));
+    }
+    s.gone().then(|| {
+        Err(ImageRefusal::Host(format!(
+            "the run host exited without its run's end{}",
+            quoted(&s.said)
+        )))
+    })
+}
+
 impl ImageGuest for Session {
     fn members(&self) -> &[MemberInfo] {
         &self.members
@@ -538,11 +738,35 @@ impl ImageGuest for Session {
             })
     }
 
-    fn take_input(&self, _member: &MemberName) -> Result<io::PipeWriter, ImageRefusal> {
-        Err(ImageRefusal::Unsupported {
-            what: "a member's stdin",
-            why: "a member's input connection is owed (D231's next slice)".into(),
-        })
+    fn take_input(&self, member: &MemberName) -> Result<io::PipeWriter, ImageRefusal> {
+        let index = self.index(member)?.index;
+        {
+            let mut state = lock(&self.shared.state);
+            let flow = state.inputs.get_mut(&index).ok_or_else(|| ImageRefusal::Spec {
+                what: "a member's stdin",
+                why: format!("{member:?}: its spec asks for no stdin of it"),
+            })?;
+            if flow.taken {
+                return Err(ImageRefusal::Spec {
+                    what: "a member's stdin",
+                    why: format!("{member:?}: taken already"),
+                });
+            }
+            flow.taken = true;
+        }
+        let (reader, writer) = io::pipe().map_err(|e| ImageRefusal::Os {
+            what: "a member's stdin pipe",
+            kind: e.kind(),
+        })?;
+        let shared = self.shared.clone();
+        std::thread::Builder::new()
+            .name("shards-api-input".into())
+            .spawn(move || feed(&shared, index, reader))
+            .map_err(|e| ImageRefusal::Os {
+                what: "a member's stdin feed",
+                kind: e.kind(),
+            })?;
+        Ok(writer)
     }
 
     fn wait_member(&self, member: &MemberName, timeout: Duration) -> Result<Option<MemberEnd>, ImageRefusal> {
@@ -596,6 +820,50 @@ impl ImageGuest for Session {
         })
     }
 
+    fn plug(
+        &self,
+        member: &MemberName,
+        host: &std::path::Path,
+        at: &str,
+        read_only: bool,
+        patience: Duration,
+    ) -> Result<(), ImageRefusal> {
+        let info = self.index(member)?;
+        if !info.runs {
+            return Err(ImageRefusal::Plug(
+                wire::PlugRefusal::Member,
+                format!("{member:?} is files alone, and runs nothing"),
+            ));
+        }
+        let host = host.to_str().ok_or_else(|| ImageRefusal::Spec {
+            what: "a plug's host directory",
+            why: format!("{}: not UTF-8", host.display()),
+        })?;
+        let member = info.index;
+        self.plug_ask(wire::to_host::PLUG, patience, |id| {
+            wire::PlugAsk {
+                id,
+                member,
+                host: host.into(),
+                at: at.into(),
+                read_only,
+            }
+            .encode()
+        })
+    }
+
+    fn unplug(&self, at: &str, patience: Duration) -> Result<(), ImageRefusal> {
+        self.plug_ask(wire::to_host::UNPLUG, patience, |id| {
+            wire::UnplugAsk { id, at: at.into() }.encode()
+        })
+    }
+
+    fn wait_ready(&self, seen: Option<Ready>, timeout: Duration) -> Result<Option<Ready>, ImageRefusal> {
+        self.shared
+            .wait(timeout, |s| ready_past(s, self.nesting, seen))
+            .transpose()
+    }
+
     fn stop(&self) -> Result<(), ImageRefusal> {
         // Asked of the host, which kills its VM at once and says the run's end; a host that
         // cannot be asked is killed itself, and its VM's link closing ends the VM's run
@@ -604,8 +872,11 @@ impl ImageGuest for Session {
         if !ended && self.shared.send(wire::to_host::STOP, &[]).is_err() {
             self.host.kill(&lock(&self.shared.state));
         }
+        // The run's end comes as its VM goes, which the host kills at once; or the host is
+        // gone. The host's own exit after (its cleanup) is the watcher's to reap.
+        self.shared
+            .wait(Duration::MAX, |s| (s.end.is_some() || s.gone()).then_some(()));
         lock(&self.shared.to_host).take();
-        self.shared.wait(Duration::MAX, |s| s.gone().then_some(()));
         let mut state = lock(&self.shared.state);
         state.end.get_or_insert(RunEnd::Stopped);
         self.shared.changed.notify_all();
@@ -627,10 +898,221 @@ impl ImageGuest for Session {
     }
 }
 
+/// Its run ends with it: one still running is stopped; one ended has its host's stdin
+/// closed, its cue to finish and exit, which the watcher then reaps.
 impl Drop for Session {
     fn drop(&mut self) {
-        if !lock(&self.shared.state).gone() {
+        let running = {
+            let state = lock(&self.shared.state);
+            state.end.is_none() && !state.gone()
+        };
+        if running {
             let _ = self.stop();
         }
+        lock(&self.shared.to_host).take();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A session's shared state with no host behind it: its answers taken as its reader
+    /// takes them.
+    fn shared() -> Shared {
+        Shared {
+            state: Mutex::new(State::default()),
+            changed: Condvar::new(),
+            to_host: Mutex::new(None),
+        }
+    }
+
+    /// A member's stdin's room and end are taken as its host says them: room adds up, an
+    /// end comes once, and a member whose stdin its spec never asked for is given none.
+    #[test]
+    fn a_stdins_room_and_end_are_its_hosts_and_come_for_asked_members_alone() {
+        let s = shared();
+        lock(&s.state).inputs.insert(2, InputFlow::default());
+        let room = |member, bytes| wire::InputRoom { member, bytes }.encode();
+        assert_eq!(take(&s, wire::to_client::INPUT_ROOM, &room(2, 5)), Ok(false));
+        assert_eq!(take(&s, wire::to_client::INPUT_ROOM, &room(2, 3)), Ok(false));
+        assert_eq!(lock(&s.state).inputs[&2].room, 8);
+        assert!(take(&s, wire::to_client::INPUT_ROOM, &room(3, 1)).is_err());
+        assert!(take(&s, wire::to_client::INPUT_ROOM, &room(2, u64::MAX)).is_err());
+        let ended = wire::InputEnded {
+            member: 2,
+            written: 4,
+            end: wire::StreamEnd::Aborted(32),
+        }
+        .encode();
+        assert_eq!(take(&s, wire::to_client::INPUT_ENDED, &ended), Ok(false));
+        assert_eq!(
+            lock(&s.state).inputs[&2].ended,
+            Some((4, wire::StreamEnd::Aborted(32)))
+        );
+        assert!(
+            take(&s, wire::to_client::INPUT_ENDED, &ended).is_err(),
+            "ended twice"
+        );
+    }
+
+    /// The caller's bytes reach the host as they were written, never past the room it gave,
+    /// and the pipe's close is the input's end. The host here is `cat`, which hands back what
+    /// the feed sent.
+    #[cfg(unix)]
+    #[test]
+    fn a_feed_sends_its_callers_bytes_within_its_room_then_its_end() {
+        let mut host = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let s = Arc::new(Shared {
+            state: Mutex::new(State::default()),
+            changed: Condvar::new(),
+            to_host: Mutex::new(host.stdin.take()),
+        });
+        lock(&s.state).inputs.insert(1, InputFlow::default());
+        let (reader, mut writer) = io::pipe().unwrap();
+        let feeding = {
+            let s = s.clone();
+            std::thread::spawn(move || feed(&s, 1, reader))
+        };
+        let payload = b"\0\xff\x80{\"id\":1}\nno-newline";
+        writer.write_all(payload).unwrap();
+        drop(writer);
+        // Room for 7 bytes, then the rest: no frame carries more than it was given.
+        let room = |bytes| wire::InputRoom { member: 1, bytes }.encode();
+        assert_eq!(take(&s, wire::to_client::INPUT_ROOM, &room(7)), Ok(false));
+        let mut from_host = host.stdout.take().unwrap();
+        let (kind, first) = wire::read_frame(&mut from_host).unwrap().unwrap();
+        assert_eq!(kind, wire::to_host::INPUT);
+        let first = wire::Input::decode(&first).unwrap();
+        assert_eq!((first.member, first.bytes.as_slice()), (1, &payload[..7]));
+        assert_eq!(take(&s, wire::to_client::INPUT_ROOM, &room(1024)), Ok(false));
+        let mut got = first.bytes;
+        loop {
+            let (kind, frame) = wire::read_frame(&mut from_host).unwrap().unwrap();
+            if kind == wire::to_host::INPUT_END {
+                assert_eq!(
+                    wire::InputEnd::decode(&frame).unwrap(),
+                    wire::InputEnd {
+                        member: 1,
+                        end: wire::StreamEnd::Closed
+                    }
+                );
+                break;
+            }
+            assert_eq!(kind, wire::to_host::INPUT);
+            got.extend(wire::Input::decode(&frame).unwrap().bytes);
+        }
+        assert_eq!(got, payload);
+        feeding.join().unwrap();
+        lock(&s.to_host).take();
+        host.wait().unwrap();
+    }
+
+    /// A refusal comes back typed by its cause, its host's words unchanged: the nesting
+    /// grant asked of an image that does not give it (D234) a widening, in the daemon's
+    /// words; a crafted image's (NESTING beside an agent) the image's, in its build's, as
+    /// the daemon's read of the image says them.
+    #[test]
+    fn refusals_come_typed_in_their_hosts_words() {
+        let undeclared = shards_abi::run::nesting::undeclared();
+        let crafted = format!(
+            "the image's Agentfile (sha256:00): {}",
+            shards_abi::run::beside::nesting("agent", "a")
+        );
+        for (cause, why, typed) in [
+            (
+                wire::Cause::Widening,
+                &undeclared,
+                ImageRefusal::Widening(undeclared.clone()),
+            ),
+            (wire::Cause::Image, &crafted, ImageRefusal::Image(crafted.clone())),
+        ] {
+            let s = shared();
+            let refused = wire::Refused {
+                cause,
+                why: why.clone(),
+            }
+            .encode()
+            .unwrap();
+            assert_eq!(take(&s, wire::to_client::REFUSED, &refused), Ok(false));
+            assert_eq!(lock(&s.state).refused, Some(typed));
+        }
+    }
+
+    /// How long a test waits for what should come at once: only a failing test waits it
+    /// out, as crates/shards/tests/api_image.rs's `TIMEOUT` bounds its waits.
+    const BOUND: Duration = Duration::from_secs(120);
+
+    /// A wait with no clock for the readiness past `seen`, on a thread of its own, its
+    /// answer sent on as it comes: a test that fails ends at once, never held by its waiter.
+    fn waiter(
+        s: &Arc<Shared>,
+        seen: Option<Ready>,
+    ) -> std::sync::mpsc::Receiver<Result<Option<Ready>, ImageRefusal>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let s = Arc::clone(s);
+        std::thread::spawn(move || {
+            let _ = tx.send(s.wait(Duration::MAX, |st| ready_past(st, true, seen)).transpose());
+        });
+        rx
+    }
+
+    /// READY moves the run's readiness as its host relays it (D234), and answers a waiter
+    /// with no clock as it is taken: its first, then each that differs from what the waiter
+    /// saw, and none past what it saw. One that is no readiness breaks the channel; the
+    /// run's end ends a wait for a newer one, and what came before it is still told. A run
+    /// without the grant is refused a wait at once; a host gone without its run's end ends
+    /// one.
+    #[test]
+    fn readiness_is_told_as_it_moves() {
+        let s = Arc::new(shared());
+        let wait = |seen, timeout| s.wait(timeout, |st| ready_past(st, true, seen)).transpose();
+        assert_eq!(wait(None, Duration::ZERO), Ok(None));
+        let first = waiter(&s, None);
+        assert_eq!(
+            take(&s, wire::to_client::READY, &Ready::Passed(3).encode()),
+            Ok(false)
+        );
+        assert_eq!(first.recv_timeout(BOUND).unwrap(), Ok(Some(Ready::Passed(3))));
+        assert_eq!(wait(None, Duration::ZERO), Ok(Some(Ready::Passed(3))));
+        assert_eq!(wait(Some(Ready::Passed(3)), Duration::ZERO), Ok(None));
+        let next = waiter(&s, Some(Ready::Passed(3)));
+        assert_eq!(
+            take(&s, wire::to_client::READY, &Ready::Late(9).encode()),
+            Ok(false)
+        );
+        assert_eq!(next.recv_timeout(BOUND).unwrap(), Ok(Some(Ready::Late(9))));
+        for malformed in [&[1, 0, 0, 0, 0, 0, 0, 0, 1][..], &[], &[2; 10]] {
+            assert!(
+                take(&s, wire::to_client::READY, malformed).is_err(),
+                "{malformed:?}"
+            );
+        }
+        assert_eq!(lock(&s.state).ready, Some(Ready::Late(9)));
+        let ended = RunEnd::Exited(0).encode().unwrap();
+        assert_eq!(take(&s, wire::to_client::ENDED, &ended), Ok(true));
+        assert_eq!(
+            wait(Some(Ready::Late(9)), BOUND),
+            Err(ImageRefusal::Ended(RunEnd::Exited(0)))
+        );
+        assert_eq!(wait(None, Duration::ZERO), Ok(Some(Ready::Late(9))));
+        assert!(matches!(
+            s.wait(BOUND, |st| ready_past(st, false, None)),
+            Some(Err(ImageRefusal::Spec { what: "nesting", .. }))
+        ));
+        let gone = shared();
+        {
+            let mut st = lock(&gone.state);
+            st.exited = true;
+            st.answered = true;
+        }
+        assert!(matches!(
+            gone.wait(BOUND, |st| ready_past(st, true, None)),
+            Some(Err(ImageRefusal::Host(_)))
+        ));
     }
 }
