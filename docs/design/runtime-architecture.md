@@ -429,20 +429,33 @@ bytes past what a kind's body holds rather than skip them. A list's answer comes
 need, so a dense node answers it whole.
 
 **Bounds** (`serve::limits`), each a budget for the node over all its connections, each its platform's own as the node
-starts (`serve::Platform`: Linux's from its sizes, macOS's from its kernel), none picked; a hello tells each client the
-budgets and the `KEPT` the node keeps for every connection it admits. Each is refused past by type, naming it:
+starts (`serve::Platform`: Linux's from its sizes, macOS's from its kernel, Windows' from its handle table), none
+picked, those that hold descriptors fitted to them with everything else the node holds (below); a hello tells each
+client the budgets and the `KEPT` the node keeps for every connection it admits. Each is refused past by type, naming
+it:
 
 | Bound | Taken from | Past it |
 |---|---|---|
-| connections | the descriptors the node may hold, one each: Linux its hard `RLIMIT_NOFILE` (its soft raised to it), else `fs.nr_open`; macOS its soft `RLIMIT_NOFILE` within `kern.maxfilesperproc` | `Exhausted`, "connections to the node agent's socket", then closed; the kernel's `EMFILE` pauses accepting first |
+| connections | the descriptors the node may hold, one each: Linux its hard `RLIMIT_NOFILE` (its soft raised to it), else `fs.nr_open`; macOS its soft `RLIMIT_NOFILE` within `kern.maxfilesperproc`; Windows its 2^24 handles; at most the programs' and requests' budgets, `KEPT` each | `Exhausted`, "connections to the node agent's socket", then closed; the kernel's `EMFILE` pauses accepting first |
 | bytes in one message | the format's most, `wire::MAX_MESSAGE`, 131,072: under the kernel's bound on a `SOCK_SEQPACKET` record, the send buffer less 32 bytes (`net/unix/af_unix.c`): 212,960 under the default 212,992-byte buffer, measured on adacachy (Linux 7.2.9) | `Invalid`, naming the size and the bound |
 | requests in flight on the node's connections together | the threads the node may run: Linux the less of its soft `RLIMIT_NPROC` and `kernel.threads-max`; macOS `kern.num_taskthreads` | `Exhausted`, "requests in flight on the node agent's connections together" |
 | programs the node's connections watch together | Linux its supervisor's pidfd budget (`Sizes::inits`: at most its boxes, within its descriptors); macOS what `fork1` holds its user to (`kern.maxproc`, and but for root its soft `RLIMIT_NPROC`) | exec refused `Exhausted`, "programs watched by the node agent's connections together" |
 | answers waiting to be sent on a connection | in flight + programs + 1, by construction | its requests aren't read until they drain |
 | workers running calls | the requests' bound, so a call admitted has a worker that can exist | a call whose worker can't start waits in the queue the in-flight bound holds |
 
-Each is a ceiling, not the room left under it: what else holds the platform's room, the kernel refuses past as the
-node takes it (`EMFILE`, `EAGAIN`), typed, at no cost to an admission.
+The node's start fits the bounds that hold descriptors to its limit with everything else it holds, each at its most:
+the socket's own and its connections, the program places' streams, the programs it watches, each hosted VM's lanes
+(below) and what it held at its start. Linux's node fits them with its pools' (`netns::fit`); macOS and Windows nodes
+fit them alone (`serve::fit`), the program places the bound they cut, which the connections and lanes follow (ROOT's
+one accounting of 2026-11-13: before it a macOS or Windows node's connections were its raw descriptor limit, counting
+nothing beside them, so a busy node could pass it). What the process held at its start is Linux's `/proc/self/fd`,
+macOS's `/dev/fd` and Windows' `GetProcessHandleCount`. What else holds the platform's room past that, the kernel
+refuses as the node takes it (`EMFILE`, `EAGAIN`), typed, at no cost to an admission.
+
+A hosted VM, a node VM under shards-init (`node-under-shards-init.md` §5), is reached by Shards' socket lanes, each a
+local socket pair on the node's side; its run admits as many as its guest client may hold open at once at the node's
+fitted places, its two control connections and four for each place (a program's three streams and its box's staging
+connection; `serve::fit::lanes`), two descriptors each with its controller's two, counted among the node's own.
 
 **The disconnect rule.** When a connection closes, every program its execs started that it still watches is sent
 KILL through its pidfd, reaped, and counted in its box (`BoxInfo::abandoned`, appended to the seam with a default of
@@ -2516,7 +2529,8 @@ functional checks, with no new seed, timing, leak-freedom or performance claim.
 | --- | --- | --- | --- |
 | a seed's hang bound and the shell's wait for its answer (createpool `ANSWER_PATIENCE`) | 30 s, copied | the slowest answer seen; past it the run-out told and the seed followed by its life, its pidfd, to its answer or its end, never killed as hung; before the first answer, and from a run-out to the next, followed from the start (it was 2 × max(record, seen) until 2026-11-13) | the `seeds.hang` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 29.565 ms, debug 652.938 ms<!-- /record --> |
 | a create's wait in line for a seed (`seeds`' line) | 1 s, picked | the same; past it the busy seeds followed by their life, a create refused only when no seed can come | the same record: a create in line waits for a busy seed's answer |
-| a claim's wait for its parked init's first word on its sync pipe (createpool `CLAIMS`; the lead's (A) of 2026-11-09, no early answer) | the seeds' hang bound, for the init's answer | learned | the `parked.ready` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 12.896 ms, debug 652.431 ms<!-- /record --> |
+| a claim's wait for its parked init's first word on its sync pipe (createpool `CLAIMS`; the lead's (A) of 2026-11-09, no early answer) | the seeds' hang bound, for the init's answer | learned; past it the run-out told and the init followed by its life, its sync pipe, claim socket and pidfd, to its word or its end, never killed as hung | the `parked.ready` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 12.896 ms, debug 652.431 ms<!-- /record --> |
+| a park's wait for its init's word that it is parked (createpool `PARKS`) | the seeds' hang bound, the park failed and its init killed past it | learned; past it the run-out told and the init followed by its life, its socket and pidfd, to its word or its end | MEASURING: no census run has the `parked.park` rows yet |
 | a record change's wait for the same box's (`WRITE_PATIENCE`) | 60 s, picked | learned; past it, the holder followed to its let-go (2026-11-13: a refusal there failed HEX-SOCK-6's concurrent changes) | the `store.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 3.136 ms, debug 367.733 ms<!-- /record --> |
 | a create or delete's wait for the same box's (`TURN_PATIENCE`) | 120 s, picked | learned, from the holder's take; past it, the holder followed to its let-go | the `node.turns` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 43.627 ms, debug 1,719.743 ms<!-- /record --> |
 | a killed box's emptying, its programs' reaping and its init's end (`EMPTY_PATIENCE`, cgroups' `REMOVE_PATIENCE`), and a stopping server's wait for the programs it ended (serve `STOP_PATIENCE`) | 60 s each, picked or copied | learned from each kill to empty | the `node.emptying` rows: <!-- record: bench/competitive/probes/waits_census.md -->release 19.771 ms, debug 904.705 ms<!-- /record --> |
@@ -2539,8 +2553,8 @@ seeds' core (`refused_busy`, `refused_waited`), never sent through the shim: one
 ruling of 2026-11-06 under Ada's rule; it replaced the shim fallback, `ClassicReason::NoSeed`). Seeds grow ahead under
 the pool rule from the persisted learned peak, so a node's next start begins where the last peaked. The shim stays
 for its named consumer alone: a spec a seed can't serve (the classic reasons).
-A parked init that refuses its claim, ends, or says nothing within the claim's patience falls back to a seed's clone:
-the claim borrows the request, whose descriptors stay the runtime's.
+A parked init that refuses its claim or ends before its first word falls back to a seed's clone: the claim borrows the
+request, whose descriptors stay the runtime's.
 
 **What would falsify it.** A healthy node running out more often than the answers it has seen allow (each answer
 outrunning the slowest of `n` with chance at most `1 / (n + 1)`), refusing calls and record writes that would have

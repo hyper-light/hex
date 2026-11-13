@@ -374,6 +374,11 @@ pub struct StreamOffer {
     pub token: u64,
     pub exec: u64,
     pub streams: Streams,
+    /// The guest link's own bound on a connection's setup (`hex_client::guest::Link::setup_bound`): where the caller
+    /// gave no deadline, how long each of a stream's CONNECTs waits for its OK, Shards' borrowed connector waiting only
+    /// within a finite deadline; past it the CONNECT is made again while the VM lives, never a bound that refuses
+    /// (decision 9). None where the link has none. Last (AC-T7.4.1).
+    pub setup: Option<std::time::Duration>,
 }
 
 /// The answer to a hello.
@@ -616,6 +621,12 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
             w.u64(offer.token);
             w.u64(offer.exec);
             w.u8(offer.streams.bits());
+            w.option_with(offer.setup, |w, setup| {
+                let nanos = u64::try_from(setup.as_nanos())
+                    .map_err(|_| Fault::value("offer setup", "it passes a u64 of nanoseconds"))?;
+                w.u64(nanos);
+                Ok(())
+            })?;
         }
         Answer::Given { pid, given } => {
             w.header(kind::GIVEN, id);
@@ -1050,6 +1061,7 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
             token: r.u64()?,
             exec: r.u64()?,
             streams: r.u8().and_then(Streams::of)?,
+            setup: r.option(|r| r.u64().map(std::time::Duration::from_nanos))?,
         }),
         kind::USAGE_ANSWER => Answer::Usage(Usage {
             memory_bytes: r.u64()?,

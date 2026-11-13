@@ -153,6 +153,8 @@ pub const OCI_BOXES: &str = ".oci";
 pub struct Runs {
     /// VM boxes, a Firecracker VM's or a Shards guest's, whose backends [`Node::install_backends`] installs.
     pub vms: bool,
+    /// Node VMs under shards-init its guest runtime can hold at once, each with its lanes (`crate::serve::fit`).
+    pub hosted: usize,
 }
 
 /// A node agent over the `process` and `oci` classes.
@@ -361,7 +363,8 @@ impl Node {
             Owner::Root => Pools::root(sizes, files_ahead),
             Owner::Rootless { .. } => Pools::rootless(sizes, files_ahead),
         }
-        .running_vms(runs.vms);
+        .running_vms(runs.vms)
+        .hosting(runs.hosted);
         // Once every descriptor the node holds for its life beside its bounds is open (its store, keeper, roots and
         // /dev/null), and before any thread or pool holds one: every bound that holds them fitted to the hard limit,
         // past which the node's own budgets refuse by type (crate::netns::hold_descriptors).
@@ -727,6 +730,13 @@ impl Node {
     /// The node's pools' bounds on its host, and where their learned sizes start (Ada's rule, 2026-11-06).
     pub fn sizes(&self) -> Sizes {
         self.pools.sizes
+    }
+
+    /// Each hosted VM's lanes (`crate::serve::fit::lanes`) at the program places its start fitted: what a node VM under
+    /// shards-init's run grants its controller (Shards' D251), counted among the node's descriptors
+    /// ([`Runs::hosted`]).
+    pub fn hosted_lanes(&self) -> usize {
+        crate::serve::fit::lanes(crate::serve::limits(&self.pools.sizes.platform()).programs)
     }
 
     /// The node's pools as its start fitted them to its descriptor limit (`netns::hold_descriptors`): what its own

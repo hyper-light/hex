@@ -545,6 +545,7 @@ impl OfferedGuest {
                 token: u64::from(pid),
                 exec: u64::from(pid),
                 streams: Streams::default(),
+                setup: None,
             },
             ready: Box::new(move || {
                 let _cancelled = cancelled;
