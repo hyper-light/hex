@@ -1,6 +1,6 @@
-# Six-crate API workspace; upstream package/dependency/lint settings retained.
+# Seven-crate API workspace; upstream package/dependency/lint settings retained.
 [workspace]
-members = ["crates/abi", "crates/api", "crates/afunix", "crates/dns", "crates/ipc", "crates/testdir"]
+members = ["crates/abi", "crates/api", "crates/afunix", "crates/dns", "crates/ipc", "crates/remote", "crates/testdir"]
 resolver = "3"
 
 [workspace.package]
@@ -45,3 +45,9 @@ indexing_slicing = "deny"
 string_slice = "deny"
 print_stdout = "deny"
 print_stderr = "deny"
+
+# shards-remote's QUIC (shards-api's controller of a run's agent-control endpoint, D238 and D252) is hyper-raft's
+# hyper-quic, which upstream takes from git: here it is Hex's one vendored copy (vendor/hyper-raft), as in Hex's
+# workspace, so no second copy is built and no build reaches the network.
+[patch."https://github.com/hyper-light/hyper-raft"]
+hyper-quic = { path = "../hyper-raft/crates/hyper-quic" }

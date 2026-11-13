@@ -274,6 +274,22 @@ pub fn refusal(op: &'static str, why: &shards_api::Refusal) -> Refusal {
                 why: reason,
             }
         }
+        // The VM process refused its selection, as it said in place of a receipt (Shards 18f59d497): certain, the
+        // selection's own refusal, with its reason, the join's or the renderer's.
+        shards_api::Refusal::GpuProbe(shards_api::GpuProbeError::Refused(refused)) => {
+            Refusal::Invalid {
+                what: "physical GPU selection",
+                why: format!("its VM process refused it: {refused}"),
+            }
+        }
+        // Its report writer closed with nothing written: the VM process ended before its renderer said anything of its
+        // selection, which is left unknown; the process's own end says why.
+        shards_api::Refusal::GpuProbe(shards_api::GpuProbeError::Unreported) => Refusal::Os {
+            op,
+            why: "its VM process ended before its renderer said anything of its GPU selection: no report \
+                  was written"
+                .to_owned(),
+        },
         shards_api::Refusal::Connect { port, failure }
         | shards_api::Refusal::Borrowed {
             port,
