@@ -492,8 +492,9 @@ window, which would under-count Hex here.
   room and refused past it, the scheduler killed and started again, a link dropped, kiln-shaped work, every view's CPU
   held within the machine's and every grant within its room, each sync agreeing, and the keeper's books, read from its
   records once it has ended, the holder's own. Hex's boxes are `process` boxes, placed where its scheduler places one
-  under its `oci` class: on Linux; not on a Mac, which places Shards microVMs alone, nor on a Windows node that runs
-  containers, whose `oci` class places those alone. There the holder meets the machine's room alone. HEX-CV-2H (`capacity_view::two_hosts`, ignored phases, ROOT's): the same
+  under its `oci` class: on Linux and Windows, whose `oci` form offers a `process` route beside its `oci` one; not on a
+  Mac, which places Shards microVMs alone, where the holder meets the machine's room alone. HEX-CV-2H
+  (`capacity_view::two_hosts`, ignored phases, ROOT's): the same
   across two hosts, either on Linux, macOS or Windows, the scheduler killed by its pid and the lane's UDP port dropped
   and healed. Run notes: where the keeper's host admits no port the lane could bind (00aad's ufw), the scheduler binds
   loopback and a rootless UDP relay on that host forwards the holder's datagrams to it and its own back, the holder's

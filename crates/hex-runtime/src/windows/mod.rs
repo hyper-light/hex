@@ -1949,6 +1949,11 @@ fn native_encoding_upper_bound(
     Ok(())
 }
 
+/// An initialized native form's routes, as Linux offers them (`devices::native_routes`): the `process`
+/// route, and in the `oci` form the `oci` route beside it, the keys its encoding bound reserves
+/// (`native_encoding_upper_bound`), so a node that runs containers still takes `process` boxes (joint plan
+/// step 13). Only Holding::report's Hcs-route entries enter the `oci` snapshot, each eligible for the `oci`
+/// route alone; the `process` snapshot supplies no devices.
 fn native_route_offer(
     report: &mut Capacity,
     class: Class,
@@ -1957,32 +1962,7 @@ fn native_route_offer(
     if !initialized {
         return Ok(());
     }
-    let (process, oci) = crate::devices::native_route_keys(class, native_platform())?;
-    let key = if class == Class::Process {
-        process
-    } else {
-        oci.ok_or_else(|| pending("native OCI producer has no initialized route key"))?
-    };
-    report
-        .routes
-        .try_reserve_exact(1)
-        .map_err(|_| allocation(1))?;
-    report
-        .device_routes
-        .try_reserve_exact(report.devices.len())
-        .map_err(|_| allocation(report.devices.len()))?;
-    report.routes.push(hex_api::RouteOffer {
-        key,
-        cost: None,
-        backing: None,
-    });
-    // This is the first route in this fresh native snapshot; bit zero has no persisted identity.
-    // Only Holding::report's Hcs-route entries enter this native OCI snapshot. The ordinary
-    // Process snapshot supplies no devices; DeviceInfo no longer carries a second class list.
-    for _ in &report.devices {
-        report.device_routes.push(u64::from(class == Class::Oci));
-    }
-    Ok(())
+    crate::devices::native_routes(report, class, native_platform())
 }
 
 impl Runtime for WinRuntime {
@@ -2370,11 +2350,13 @@ mod tests {
             learned: None,
         };
         native_route_offer(&mut report, Class::Oci, true).unwrap();
-        assert_eq!(report.routes.len(), 1);
-        let route = report.routes.first().unwrap();
+        let route = report
+            .routes
+            .iter()
+            .find(|route| route.key.class == Class::Oci)
+            .unwrap();
         assert_eq!(route.key.image.os, hex_api::ImageOs::Windows);
         assert_eq!(route.key.execution, hex_api::Execution::Native);
-        assert_eq!(route.key.class, Class::Oci);
         assert!(report.devices.is_empty() && report.device_routes.is_empty());
         report.check().unwrap();
     }

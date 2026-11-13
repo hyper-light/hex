@@ -90,9 +90,9 @@ fn a_stranger_is_turned_away(dir: &Path, address: SocketAddr) {
 }
 
 /// The boxes of Hex's own HEX-CV-L1 places on the machine in `dir`, each a quarter of its CPUs: two where its scheduler
-/// places a `process` box under its `oci` placement class ([`machine::places_process_boxes`]), as on Linux; none where
-/// it doesn't, as on a Mac, which places Shards microVMs alone, or on a Windows node that runs containers, whose `oci`
-/// class places those alone. This test boots neither: there the stand-in meets the machine's room alone.
+/// places a `process` box under its `oci` placement class ([`machine::places_process_boxes`]), as on Linux and
+/// Windows; none where it doesn't, as on a Mac, which places Shards microVMs alone, which this test boots none of:
+/// there the stand-in meets the machine's room alone.
 pub fn hex_boxes(dir: &Path) -> u64 {
     if machine::places_process_boxes(dir) {
         2
