@@ -3481,3 +3481,76 @@ fn w39_a_guest_under_shards_init_boots_through_the_image_class_and_greets_its_no
     drop(runtime);
     assert!(relay.join().unwrap());
 }
+
+/// A node's loop with no room for one more connection: it refuses every guest connection's join.
+struct FullLoop;
+
+impl crate::guest::Joins for FullLoop {
+    fn reserve(&self) -> Result<(u64, crate::guest::Room), Refusal> {
+        Err(Refusal::Exhausted {
+            what: "the node loop's connections",
+            bound: 0,
+        })
+    }
+    fn join(&self, _: u64, _: hex_client::guest::Pump) -> Result<(), Refusal> {
+        Err(Refusal::Exhausted {
+            what: "the node loop's connections",
+            bound: 0,
+        })
+    }
+}
+
+/// Joint plan step 39 (AC-T7.4.1; ROOT, 2026-11-13): do boot a node's guest under shards-init whose connection its
+/// node's loop can't join, though its node greeted it. Expect: the boot refused as the loop refused it, and its node
+/// VM's run stopped first: its record Ended with its exit, so no run is left beside the next boot's.
+#[cfg(unix)]
+#[test]
+fn w39_a_guest_under_shards_init_its_nodes_loop_cant_join_has_its_node_vm_stopped() {
+    let images = ModelImages::new();
+    let sockets = super::super::tests::socket_fixture();
+    *images.serve.lock().unwrap() = Some(sockets.path().to_owned());
+    let relay = greeting_relay(sockets.path());
+    let config = crate::guest::GuestConfig {
+        boot: crate::guest::Boot::Image(hex_api::sim::SIM_IMAGE.to_owned()),
+        ..super::super::tests::config()
+    };
+    let owner = Arc::new(Owner::new());
+    let runtime = GuestRuntime::new(
+        Arc::new(shards_api::sim::SimGuests::new(|_| {
+            shards_api::End::PowerOff
+        })),
+        config.clone(),
+    )
+    .with_images(
+        Ok(Arc::clone(&images) as Arc<dyn Images>),
+        waits(),
+        owner.diagnostics(),
+    )
+    .with_runtime_cost(fixed_cost(&config))
+    .unwrap();
+    runtime.set_lanes(6).unwrap();
+    let books: Arc<dyn Books> = owner.clone();
+    runtime.bind_books(Arc::downgrade(&books)).unwrap();
+    runtime.join_loop(Arc::new(FullLoop)).unwrap();
+    let refused = runtime.boot().unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            Refusal::Exhausted {
+                what: "the node loop's connections",
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
+    let records = owner.node_vms.lock().unwrap().clone();
+    assert_eq!(records.len(), 1);
+    let record = records.into_values().next().unwrap();
+    assert_eq!(
+        (record.phase, record.exit.is_some()),
+        (NodeVmPhase::Ended, true),
+        "{record:?}"
+    );
+    drop(runtime);
+    assert!(relay.join().unwrap());
+}
