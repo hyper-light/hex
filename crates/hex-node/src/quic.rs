@@ -177,7 +177,7 @@ pub struct Quic<N: Os> {
     watched: Mutex<BTreeMap<u64, Arc<Control>>>,
     log: Arc<Log>,
     /// The endpoint, ended with the server: its acceptors then end too.
-    _endpoint: Arc<Endpoint>,
+    endpoint: Arc<Endpoint>,
 }
 
 impl<N: Os> Quic<N> {
@@ -251,7 +251,7 @@ impl<N: Os> Quic<N> {
             shared,
             watched: Mutex::new(BTreeMap::new()),
             log,
-            _endpoint: endpoint,
+            endpoint,
         })
     }
 
@@ -1042,6 +1042,23 @@ impl<N: Os> Os for Quic<N> {
 
     fn unwatch_source(&self, handle: Handle<'_>, token: u64) {
         self.native.unwatch_source(handle, token);
+    }
+
+    /// Each peer connected to the node's endpoint, as the endpoint's own TLS negotiated it (docs/design/hex-quic.md
+    /// Q12): the suite and group as their registries number them.
+    fn links(&self) -> Result<Vec<wire::Link>, Refusal> {
+        let links = self.endpoint.links().map_err(|e| Refusal::Os {
+            op: "reading the node's QUIC links",
+            why: e.to_string(),
+        })?;
+        Ok(links
+            .into_iter()
+            .map(|link| wire::Link {
+                peer: link.peer,
+                suite: u16::from(link.suite),
+                group: link.group.map(u16::from),
+            })
+            .collect())
     }
 }
 
