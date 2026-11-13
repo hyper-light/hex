@@ -65,8 +65,11 @@ pub trait Duplex: Read + Write + Send + Sync + 'static {
 
 impl Duplex for TcpStream {
     fn try_clone(&self) -> io::Result<DuplexOwner> {
-        own_duplex(TcpStream::try_clone(self)?)
-            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
+        let clone = TcpStream::try_clone(self)?;
+        // Winsock's duplicate is inheritable (hex_afunix::no_inherit).
+        #[cfg(windows)]
+        hex_afunix::no_inherit(std::os::windows::io::AsSocket::as_socket(&clone))?;
+        own_duplex(clone).map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
@@ -205,6 +208,8 @@ static ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.guest.answer.schedule.forget"),
     // MEASURING until a waits census records the node's links (docs/design/hex-quic.md Q12).
     Patience::measuring("client.guest.answer.links"),
+    // MEASURING until a waits census records a connection's lessors (docs/design/credential-grants.md C7).
+    Patience::measuring("client.guest.answer.lessors"),
 ];
 
 /// AC-T7.4.1: the kinds a box's class times, a wait for each (kind, class), named
@@ -279,6 +284,8 @@ static QUIC_ANSWERS: [Patience; KINDS] = [
     Patience::measuring("client.quic.answer.schedule.forget"),
     // MEASURING until a waits census records the node's links (docs/design/hex-quic.md Q12).
     Patience::measuring("client.quic.answer.links"),
+    // MEASURING until a waits census records a connection's lessors (docs/design/credential-grants.md C7).
+    Patience::measuring("client.quic.answer.lessors"),
 ];
 
 static QUIC_CLASS_ANSWERS: [[Patience; BOX_KINDS]; CLASSES] = [
@@ -544,6 +551,9 @@ fn caller_end(conn: &dyn Duplex) -> Result<hex_api::End, Refusal> {
     #[cfg(windows)]
     {
         use std::os::windows::io::AsSocket;
+        // Winsock's duplicate is inheritable: the caller's end passes to no process it starts.
+        hex_afunix::no_inherit(end.as_socket())
+            .map_err(os("keeping a caller's stdio connection from its children"))?;
         hex_afunix::set_nonblocking(end.as_socket(), false)
             .map_err(os("making a caller's stdio connection wait"))?;
         Ok(end.into())
@@ -879,8 +889,13 @@ impl<W: Waits> Transport for Stream<W> {
         Ok(true)
     }
 
-    fn frame(message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
-        stream::frame(&message, wire::MAX_MESSAGE).map_err(Refusal::from)
+    fn frame(mut message: Vec<u8>) -> Result<Vec<u8>, Refusal> {
+        let framed = stream::frame(&message, wire::MAX_MESSAGE).map_err(Refusal::from);
+        // A lease's value crosses in its framed copy alone (docs/design/credential-grants.md C7).
+        if wire::carries_secret(&message) {
+            hex_api::lease::wipe(&mut message);
+        }
+        framed
     }
 
     /// What the connection takes of the frame now. It carries no descriptor: its streams are connections of their

@@ -48,13 +48,15 @@ use hex_api::{
     ConnectFailure, ConnectPhase, ConnectReply, CredentialGrant, Destination, DeviceHolder,
     DeviceId, DeviceInfo, DeviceKind, DeviceUnavailable, Execution, Exit, GpuEligibility, Grant,
     GuestTime, ImageArch, ImageMember, ImageOs, ImagePlatform, IoKind, IoRates, Learned,
-    LearnedCeiling, LearnedEnd, LearnedHolding, LearnedOverhead, LearnedPrior, LearnedUse,
-    LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS, MAX_RUNTIME_ROUTES,
-    Member, MemberKind, Mount, Network, OciSpec, PhysicalDevice, PhysicalReport, Ports, Program,
-    Proto, Published, Receiver, Refusal, Rootfs, RouteKey, RouteOffer, RouteReceipt, RuntimeCost,
-    ShardsImage, Signal, StartedFrom, Upstream, Usage, User, check_credentials, check_grants,
-    check_published,
+    LearnedCeiling, LearnedEnd, LearnedHolder, LearnedHolding, LearnedOverhead, LearnedPrior,
+    LearnedUse, LifecycleCause, MAX_DEVICES, MAX_LEARNED_HOLDINGS, MAX_LEARNED_PRIORS,
+    MAX_RUNTIME_ROUTES, Member, MemberKind, Mount, Network, OciSpec, PhysicalDevice,
+    PhysicalReport, Ports, Program, Proto, Published, Receiver, Refusal, Rootfs, RouteKey,
+    RouteOffer, RouteReceipt, RuntimeCost, ShardsImage, Signal, StartedFrom, Upstream, Usage, User,
+    check_credentials, check_grants, check_published,
 };
+
+use hex_api::lease::{Lease, LeaseRefused, Value};
 
 use crate::netns;
 
@@ -172,6 +174,13 @@ mod kind {
     pub const MEMBER: u16 = 0x0017;
     pub const LINKS: u16 = 0x0018;
     pub const LINKS_ANSWER: u16 = 0x8010;
+    pub const LESSORS: u16 = 0x0019;
+    pub const LESSOR: u16 = 0x001a;
+    pub const LEASED: u16 = 0x001b;
+    pub const LESSOR_ASK: u16 = 0x8011;
+    pub const LEASE_ASK: u16 = 0x8012;
+    pub const LEASE_GIVEN: u16 = 0x8013;
+    pub const LESSOR_ENDED: u16 = 0x8014;
 }
 
 /// A message's header, once its wire identity is read as this side's.
@@ -199,6 +208,15 @@ pub enum Request {
     /// The caller opened every connection in an Offered answer. The original exec may now start.
     /// Not answered separately; the exec's Started/Refused and Exited keep its original header id.
     StreamsReady,
+    /// The orchestrator's answer to the node's [`Answer::LessorAsk`] its header's id names (docs/design/credential-grants.md
+    /// C7): the run's lessor made, or why not. Not answered.
+    Lessor(Result<(), Refusal>),
+    /// The orchestrator's answer to the node's [`Answer::LeaseAsk`] its header's id names, of run `run`: the lease, its
+    /// value wiped as it drops and never printed ([`hex_api::lease::Value`]), or why not, of Shards' kinds. Not answered.
+    Leased {
+        run: u64,
+        answer: Result<Lease, LeaseRefused>,
+    },
 }
 
 /// A call of the node agent: the `Runtime` seam's, its network namespace counts, and a program's kill.
@@ -271,6 +289,10 @@ pub enum Call {
     /// The node's links over QUIC (docs/design/hex-quic.md Q12): answered [`Answer::Links`], refused by type where the
     /// node serves no QUIC listener.
     Links,
+    /// This connection's orchestrator leases the credentials of the Shards image VMs it creates from now on
+    /// (docs/design/credential-grants.md C7): the node asks it over this connection ([`Answer::LessorAsk`],
+    /// [`Answer::LeaseAsk`]). Answered [`Answer::Done`], or refused by type where the node leases through no connection.
+    Lessors,
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -357,6 +379,21 @@ pub enum Answer {
         links: Vec<Link>,
         more: bool,
     },
+    /// A run of box `0`, which this connection created granting a credential, boots: its orchestrator is asked for the
+    /// run's lessor (docs/design/credential-grants.md C7, `Lessors::lessor`). The header's id names the run in what
+    /// follows. Sent unasked; answered [`Request::Lessor`].
+    LessorAsk(BoxId),
+    /// Run `run`'s lease of credential `reference`, under the run's `key` where it binds one (`Lessor::lease`). Sent
+    /// unasked, the header's id the ask's; answered [`Request::Leased`].
+    LeaseAsk {
+        run: u64,
+        reference: String,
+        key: Option<[u8; 32]>,
+    },
+    /// The run its header's id names gave lease `0` back (`Lessor::release`). Sent unasked; not answered.
+    LeaseGiven(String),
+    /// The run its header's id names has ended: its lessor is let go. Sent unasked; not answered.
+    LessorEnded,
 }
 
 /// A peer's connection to the node over QUIC, as the node's own TLS negotiated it (docs/design/hex-quic.md Q12).
@@ -546,8 +583,133 @@ pub fn request(id: u64, request: &Request, bound: usize) -> Result<Vec<u8>, Faul
         Request::Taken => w.header(kind::TAKEN, id),
         Request::StreamsReady => w.header(kind::STREAMS_READY, id),
         Request::Call(call) => put_call(&mut w, id, call)?,
+        Request::Lessor(made) => {
+            w.header(kind::LESSOR, id);
+            match made {
+                Ok(()) => w.u8(0),
+                Err(refusal) => {
+                    w.u8(1);
+                    put_refusal(&mut w, refusal)?;
+                }
+            }
+        }
+        Request::Leased { run, answer } => {
+            w.header(kind::LEASED, id);
+            w.u64(*run);
+            match answer {
+                Ok(lease) => put_lease(&mut w, lease)?,
+                Err(refused) => {
+                    w.u8(1);
+                    put_lease_refused(&mut w, refused)?;
+                }
+            }
+        }
     }
     w.done()
+}
+
+/// Whether `message` carries a lease's value ([`Request::Leased`]), so whoever held its bytes wipes them as it lets them
+/// go (docs/design/credential-grants.md C7): read from its kind alone, before or without reading the rest.
+pub fn carries_secret(message: &[u8]) -> bool {
+    message
+        .get(12..14)
+        .is_some_and(|got| got == &kind::LEASED.to_le_bytes()[..])
+}
+
+/// A lease as [`Request::Leased`] carries it: given (0), its name, its life, then its value last, so nothing can refuse
+/// the message once the value is in it, and the message's room reserved before, so no copy of the value is left behind
+/// as it grows ([`Writer::secret`]).
+fn put_lease(w: &mut Writer, lease: &Lease) -> Result<(), Fault> {
+    let value = lease.value.expose();
+    let life = lease
+        .life
+        .map(|life| {
+            u64::try_from(life.as_nanos())
+                .map_err(|_| Fault::value("lease life", "it passes a u64 of nanoseconds"))
+        })
+        .transpose()?;
+    let lengths = |n: usize| n.checked_add(size_of::<u32>());
+    let rest = [
+        Some(1usize),
+        lengths(lease.lease.len()),
+        Some(1usize.saturating_add(if life.is_some() { size_of::<u64>() } else { 0 })),
+        lengths(value.len()),
+    ]
+    .into_iter()
+    .try_fold(0usize, |n, part| part.and_then(|part| n.checked_add(part)))
+    .ok_or_else(|| Fault::value("lease", "its size passes this machine's addresses"))?;
+    w.secret();
+    w.reserve_fixed(rest)?;
+    w.u8(0);
+    w.string(&lease.lease)?;
+    w.option(life, |w, nanos| w.u64(nanos));
+    w.bytes(value)
+}
+
+/// A lease read from [`Request::Leased`]: its value copied into a [`Value`] at once, wiped as it drops; the message's own
+/// bytes are their holder's to wipe ([`carries_secret`]).
+fn lease(r: &mut Reader<'_>) -> Result<Lease, Fault> {
+    let lease = r.string("lease")?;
+    let life = r.option(|r| r.u64().map(std::time::Duration::from_nanos))?;
+    let value = r.bytes()?;
+    let mut held: Vec<u8> = Vec::new();
+    held.try_reserve_exact(value.len())
+        .map_err(|_| Fault::Storage {
+            what: "lease value",
+            bound: value.len(),
+        })?;
+    held.extend_from_slice(value);
+    Ok(Lease {
+        lease,
+        value: Value::new(held),
+        life,
+    })
+}
+
+/// Why a lease is refused, by Shards' kinds (`LeaseRefused`), each with its words.
+fn put_lease_refused(w: &mut Writer, refused: &LeaseRefused) -> Result<(), Fault> {
+    match refused {
+        LeaseRefused::Denied(why) => {
+            w.u8(0);
+            w.string(why)
+        }
+        LeaseRefused::KeyReplaced { asked, current } => {
+            w.u8(1);
+            w.string(asked)?;
+            w.option_with(current.as_deref(), |w, current| w.string(current))
+        }
+        LeaseRefused::Unavailable(why) => {
+            w.u8(2);
+            w.string(why)
+        }
+        LeaseRefused::Ended => {
+            w.u8(3);
+            Ok(())
+        }
+        LeaseRefused::Lapsed => {
+            w.u8(4);
+            Ok(())
+        }
+    }
+}
+
+fn lease_refused(r: &mut Reader<'_>) -> Result<LeaseRefused, Fault> {
+    Ok(match r.u8()? {
+        0 => LeaseRefused::Denied(r.string("a denied lease's words")?),
+        1 => LeaseRefused::KeyReplaced {
+            asked: r.string("a replaced key")?,
+            current: r.option(|r| r.string("the run's key"))?,
+        },
+        2 => LeaseRefused::Unavailable(r.string("an unavailable lease's words")?),
+        3 => LeaseRefused::Ended,
+        4 => LeaseRefused::Lapsed,
+        tag => {
+            return Err(Fault::value(
+                "lease refusal",
+                format!("{tag} names a refusal the wire doesn't define"),
+            ));
+        }
+    })
 }
 
 /// An answer as a message of at most `bound` bytes.
@@ -711,6 +873,25 @@ pub fn answer(id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> 
             w.bool(*more);
             w.list(links, put_link)?;
         }
+        Answer::LessorAsk(box_id) => {
+            w.header(kind::LESSOR_ASK, id);
+            w.string(box_id.as_str())?;
+        }
+        Answer::LeaseAsk {
+            run,
+            reference,
+            key,
+        } => {
+            w.header(kind::LEASE_ASK, id);
+            w.u64(*run);
+            w.string(reference)?;
+            w.option(key.as_ref(), |w, key| w.raw(key));
+        }
+        Answer::LeaseGiven(lease) => {
+            w.header(kind::LEASE_GIVEN, id);
+            w.string(lease)?;
+        }
+        Answer::LessorEnded => w.header(kind::LESSOR_ENDED, id),
     }
     w.done()
 }
@@ -902,6 +1083,31 @@ fn parse_request(
         kind::DELETE => Request::Call(Call::Delete(box_id(&mut r).map_err(bad)?)),
         kind::NETNS => Request::Call(Call::Netns),
         kind::LINKS => Request::Call(Call::Links),
+        kind::LESSORS => Request::Call(Call::Lessors),
+        kind::LESSOR => Request::Lessor(match r.u8().map_err(bad)? {
+            0 => Ok(()),
+            1 => Err(refusal(&mut r).map_err(bad)?),
+            tag => {
+                return Err(bad(Fault::value(
+                    "lessor answer",
+                    format!("{tag} names neither a lessor made nor a refusal"),
+                )));
+            }
+        }),
+        kind::LEASED => {
+            let run = r.u64().map_err(bad)?;
+            let answer = match r.u8().map_err(bad)? {
+                0 => Ok(lease(&mut r).map_err(bad)?),
+                1 => Err(lease_refused(&mut r).map_err(bad)?),
+                tag => {
+                    return Err(bad(Fault::value(
+                        "lease answer",
+                        format!("{tag} names neither a lease nor a refusal"),
+                    )));
+                }
+            };
+            Request::Leased { run, answer }
+        }
         kind::KILL => Request::Call(Call::Kill {
             exec: r.u64().map_err(bad)?,
         }),
@@ -1120,6 +1326,14 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
             more: r.bool("more")?,
             links: r.list(link)?,
         },
+        kind::LESSOR_ASK => Answer::LessorAsk(box_id(&mut r)?),
+        kind::LEASE_ASK => Answer::LeaseAsk {
+            run: r.u64()?,
+            reference: r.string("a lease's reference")?,
+            key: r.option(|r| r.array::<32>())?,
+        },
+        kind::LEASE_GIVEN => Answer::LeaseGiven(r.string("a lease given back")?),
+        kind::LESSOR_ENDED => Answer::LessorEnded,
         kind::GIVEN => {
             let pid = r.u32()?;
             let given = r.u8().and_then(Streams::of)?;
@@ -1212,6 +1426,9 @@ fn request_name(kind: u16) -> &'static str {
         kind::BACKING_USAGE => "a backing usage",
         kind::MEMBER => "a member",
         kind::LINKS => "a links",
+        kind::LESSORS => "a lessors",
+        kind::LESSOR => "a lessor",
+        kind::LEASED => "a leased",
         _ => "a request",
     }
 }
@@ -1308,6 +1525,10 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
         }
         Call::Links => {
             w.header(kind::LINKS, id);
+            Ok(())
+        }
+        Call::Lessors => {
+            w.header(kind::LESSORS, id);
             Ok(())
         }
         Call::Kill { exec } => {
@@ -1770,13 +1991,15 @@ fn put_unavailable_devices(w: &mut Writer, unavailable: &[DeviceUnavailable]) ->
 const LEARNED_PRIOR_BYTES: usize = 32 + 2 * RESOURCE_BYTES;
 /// A learned use: what the receipts booked and what their VMs are learned to take.
 const LEARNED_USE_BYTES: usize = 2 * RESOURCE_BYTES;
-/// One learned holding at its least: a one-byte box id with its length, then its resources.
-const LEARNED_HOLDING_MIN_BYTES: usize = size_of::<u32>() + 1 + RESOURCE_BYTES;
+/// A holder at its least ([`put_holder`]): its tag, then a one-byte box id with its length.
+const HOLDER_MIN_BYTES: usize = 1 + size_of::<u32>() + 1;
+/// One learned holding at its least: its holder at its least, then its resources.
+const LEARNED_HOLDING_MIN_BYTES: usize = HOLDER_MIN_BYTES + RESOURCE_BYTES;
 /// One learned end past its box id, at its most: what the VM held and its budget, its band, its fleet's held, growth
 /// and budget, then its unmoved capability's option tag and that capability's tag.
 const LEARNED_END_BYTES: usize = 5 * size_of::<u64>() + 1 + 2;
-/// One learned end at its least: a one-byte box id with its length, then the rest with no unmoved capability.
-const LEARNED_END_MIN_BYTES: usize = size_of::<u32>() + 1 + LEARNED_END_BYTES - 1;
+/// One learned end at its least: its holder at its least, then the rest with no unmoved capability.
+const LEARNED_END_MIN_BYTES: usize = HOLDER_MIN_BYTES + LEARNED_END_BYTES - 1;
 
 /// One learned ceiling at its least (C1): its profile's id, its envelope, and each dimension of its overhead none.
 const LEARNED_CEILING_MIN_BYTES: usize = 32 + RESOURCE_BYTES + 3;
@@ -1806,9 +2029,7 @@ pub fn fit_learned(capacity: &mut Capacity) -> Result<(), Fault> {
             bound: holdings.len(),
         })?;
     for holding in holdings {
-        let bytes = size_of::<u32>()
-            .saturating_add(holding.id.as_str().len())
-            .saturating_add(RESOURCE_BYTES);
+        let bytes = holder_bytes(&holding.id).saturating_add(RESOURCE_BYTES);
         let Some(left) = room.checked_sub(bytes) else {
             break;
         };
@@ -1822,9 +2043,7 @@ pub fn fit_learned(capacity: &mut Capacity) -> Result<(), Fault> {
             bound: ended.len(),
         })?;
     for end in ended {
-        let bytes = size_of::<u32>()
-            .saturating_add(end.id.as_str().len())
-            .saturating_add(LEARNED_END_BYTES);
+        let bytes = holder_bytes(&end.id).saturating_add(LEARNED_END_BYTES);
         let Some(left) = room.checked_sub(bytes) else {
             break;
         };
@@ -1855,7 +2074,7 @@ fn put_learned(w: &mut Writer, learned: &Learned) -> Result<(), Fault> {
     w.reserve_fixed(size_of::<u32>())?;
     w.device_count(learned.holdings.len(), LEARNED_HOLDING_MIN_BYTES)?;
     for holding in &learned.holdings {
-        w.string(holding.id.as_str())?;
+        put_holder(w, &holding.id)?;
         w.reserve_fixed(RESOURCE_BYTES)?;
         put_resources(w, holding.holding);
     }
@@ -1879,10 +2098,52 @@ fn put_learned(w: &mut Writer, learned: &Learned) -> Result<(), Fault> {
     Ok(())
 }
 
-/// One learned end (C5): its box id, then what the VM held and its budget, its band, its fleet's held, growth and
+/// A holder of a node's room (joint plan step 39): its tag, then its id: 0 and a box's id, or 1 and a node VM's run,
+/// its 16 bytes.
+fn put_holder(w: &mut Writer, holder: &LearnedHolder) -> Result<(), Fault> {
+    match holder {
+        LearnedHolder::Box(id) => {
+            w.reserve_fixed(1)?;
+            w.u8(0);
+            w.string(id.as_str())
+        }
+        LearnedHolder::Node(run) => {
+            w.reserve_fixed(1 + 16)?;
+            w.u8(1);
+            w.raw(run.bytes());
+            Ok(())
+        }
+    }
+}
+
+/// What [`put_holder`] writes of `holder`: its tag, then a box's id with its length, or a node VM's run.
+fn holder_bytes(holder: &LearnedHolder) -> usize {
+    match holder {
+        LearnedHolder::Box(id) => 1usize
+            .saturating_add(size_of::<u32>())
+            .saturating_add(id.as_str().len()),
+        LearnedHolder::Node(_) => 1 + 16,
+    }
+}
+
+/// The holder [`put_holder`] wrote.
+fn holder(r: &mut Reader<'_>) -> Result<LearnedHolder, Fault> {
+    match r.u8()? {
+        0 => Ok(LearnedHolder::Box(box_id(r)?)),
+        1 => Ok(LearnedHolder::Node(hex_api::NodeRun::from_bytes(
+            r.array::<16>()?,
+        ))),
+        tag => Err(Fault::value(
+            "a learned holder",
+            format!("tag {tag} names no holder"),
+        )),
+    }
+}
+
+/// One learned end (C5): its holder, then what the VM held and its budget, its band, its fleet's held, growth and
 /// budget, and what moving it instead awaited.
 fn put_learned_end(w: &mut Writer, end: &LearnedEnd) -> Result<(), Fault> {
-    w.string(end.id.as_str())?;
+    put_holder(w, &end.id)?;
     w.reserve_fixed(LEARNED_END_BYTES)?;
     w.u64(end.held);
     w.u64(end.budget);
@@ -1895,7 +2156,7 @@ fn put_learned_end(w: &mut Writer, end: &LearnedEnd) -> Result<(), Fault> {
 
 fn learned_end(r: &mut Reader<'_>) -> Result<LearnedEnd, Fault> {
     Ok(LearnedEnd {
-        id: box_id(r)?,
+        id: holder(r)?,
         held: r.u64()?,
         budget: r.u64()?,
         band: r.u8()?,
@@ -1929,7 +2190,7 @@ fn learned(r: &mut Reader<'_>) -> Result<Learned, Fault> {
         "learned holdings",
         |r| {
             Ok(LearnedHolding {
-                id: box_id(r)?,
+                id: holder(r)?,
                 holding: resources(r)?,
             })
         },
@@ -3255,6 +3516,16 @@ pub(crate) struct Writer {
     bound: usize,
     mode: WriteMode,
     failure: Option<Fault>,
+    /// Whether what it holds carries a lease's value ([`Writer::secret`]): wiped as it drops, unless handed on whole.
+    secret: bool,
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        if self.secret {
+            hex_api::lease::wipe(&mut self.out);
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -3271,7 +3542,14 @@ impl Writer {
             bound,
             mode: WriteMode::Ordinary,
             failure: None,
+            secret: false,
         }
+    }
+
+    /// What it writes from now carries a lease's value: wiped as it drops unless handed on whole ([`Writer::done`]),
+    /// its room reserved before the value goes in (`reserve_fixed`), so no copy is left as it grows.
+    pub(crate) fn secret(&mut self) {
+        self.secret = true;
     }
 
     fn counting(bound: usize) -> Self {
@@ -3280,6 +3558,7 @@ impl Writer {
             bound,
             mode: WriteMode::Counting(0),
             failure: None,
+            secret: false,
         }
     }
 
@@ -3294,6 +3573,7 @@ impl Writer {
             bound: bytes,
             mode: WriteMode::Fixed,
             failure: None,
+            secret: false,
         })
     }
 
@@ -3391,7 +3671,9 @@ impl Writer {
                 bound: self.bound,
             });
         }
-        Ok(self.out)
+        // Handed on whole: its holder wipes it, if it carries a value ([`carries_secret`]).
+        self.secret = false;
+        Ok(std::mem::take(&mut self.out))
     }
 
     pub(crate) fn u8(&mut self, v: u8) {

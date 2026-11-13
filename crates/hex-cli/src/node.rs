@@ -540,13 +540,18 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
     }
     let node = Arc::new(node);
     node.bind_prober(prober).map_err(failed)?;
+    let lessors = hex_node::serve::WireLessors::new();
     let shards = configured_guest(
         guest_config,
         &args.state,
         node.device_catalog(),
         node.shards_native_paths().map_err(failed)?,
+        Arc::clone(&lessors),
     )?
     .map(Arc::new);
+    if shards.is_some() {
+        node.lease_over_wire(lessors).map_err(failed)?;
+    }
     let firecracker = firecracker_config
         .map(|config| {
             hex_runtime::firecracker::FirecrackerRuntime::open(
@@ -650,11 +655,13 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
         &backend_path(&args.state, "devices").map_err(failed)?,
     )
     .map_err(failed)?;
+    let lessors = hex_node::serve::WireLessors::new();
     let host: Arc<dyn Host> = match configured_guest(
         guest_config,
         &args.state,
         catalog,
         runtime_paths(&args.state).map_err(failed)?,
+        Arc::clone(&lessors),
     )? {
         Some(guest) => {
             let (control, cost) = managed.ok_or_else(|| {
@@ -673,6 +680,7 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
             let routed = WithGuest::configured(process, guest, hex_runtime::guest::by_class);
             let node =
                 Arc::new(Recorded::open_with_prober(routed, &args.state, prober).map_err(failed)?);
+            node.lease_over_wire(lessors).map_err(failed)?;
             node.bind_guest_books().map_err(failed)?;
             // Joint plan step 14: what this node recorded under a census cost is retired first.
             node.retire_census().map_err(failed)?;
@@ -787,17 +795,20 @@ fn host(args: &Args) -> Result<Hosted, (u8, String)> {
         .map_err(failed)?;
     let prober = hex_node::facts::shared_prober(&args.state, hex_node::facts::Declared::default())
         .map_err(failed)?;
+    let lessors = hex_node::serve::WireLessors::new();
     let host: Arc<dyn Host> = match configured_guest(
         guest_config,
         &args.state,
         catalog,
         runtime_paths(&args.state).map_err(failed)?,
+        Arc::clone(&lessors),
     )? {
         Some(guest) => {
             let routed =
                 hex_runtime::guest::WithGuest::configured(runtime, guest, WinRuntime::oci_side);
             let node =
                 Arc::new(Recorded::open_with_prober(routed, &args.state, prober).map_err(failed)?);
+            node.lease_over_wire(lessors).map_err(failed)?;
             node.bind_guest_books().map_err(failed)?;
             // Joint plan step 14: what this node recorded under a census cost is retired first.
             node.retire_census().map_err(failed)?;
@@ -886,6 +897,7 @@ fn configured_guest(
     state: &Path,
     catalog: hex_runtime::devices::SharedCatalog,
     paths: (PathBuf, PathBuf),
+    lessors: Arc<hex_node::serve::WireLessors>,
 ) -> Result<Option<hex_runtime::guest::GuestRuntime>, (u8, String)> {
     use hex_runtime::guest::{GuestInputs, GuestRuntime};
     let Some(GuestInputs {
@@ -924,7 +936,10 @@ fn configured_guest(
             backend_path(state, "image-diagnostics").map_err(failed)?,
         )
         .with_runtime_cost(cost)
-        .map_err(failed)?;
+        .map_err(failed)?
+        // Its image VMs' credentials leased from the connection that created each (joint plan step 33): the socket
+        // keeps each box's route (docs/design/credential-grants.md C7).
+        .with_lessors(lessors);
     if let Some(images) = native_images {
         guest = guest.with_native_images(images).map_err(failed)?;
     }
