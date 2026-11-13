@@ -234,9 +234,12 @@ fn w33_a_runs_leases_answer_shards_run_host_from_its_own_lessor() {
 }
 
 /// A run's lessor that serves its sign-ins as the test sets it, and keeps what it was asked and told.
+/// A capture as the lessor heard it: its sign-in, its tokens and its key.
+type Capture = (String, hex_api::lease::SignInTokens, Option<[u8; 32]>);
+
 #[derive(Default)]
 struct SignedIn {
-    captured: Mutex<Vec<(String, hex_api::lease::SignInTokens, Option<[u8; 32]>)>>,
+    captured: Mutex<Vec<Capture>>,
     refreshed: Mutex<Vec<(String, Option<[u8; 32]>)>>,
     revoked: Mutex<Vec<(String, Option<[u8; 32]>)>>,
 }
