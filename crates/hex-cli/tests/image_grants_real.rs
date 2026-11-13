@@ -1044,6 +1044,7 @@ fn a_members_hand_over_is_asked_again_while_its_box_settles() {
     let pending = || Refusal::Lifecycle {
         id: id.clone(),
         cause: LifecycleCause::Pending,
+        why: None,
     };
     let mut answers = vec![Err(pending()), Err(pending()), Ok("the probe")].into_iter();
     let handed = handed_over(

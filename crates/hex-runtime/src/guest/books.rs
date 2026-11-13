@@ -18,10 +18,12 @@ pub(super) enum Routed {
     Retired(BoxRecord),
 }
 
-pub(super) fn uncertain(id: &BoxId) -> Result<Refusal, Refusal> {
+/// Box `id`'s lifecycle uncertain, in the refusing site's own words (joint plan step 12).
+pub(super) fn uncertain(id: &BoxId, why: &str) -> Result<Refusal, Refusal> {
     Ok(Refusal::Lifecycle {
         id: id.try_clone()?,
         cause: hex_api::LifecycleCause::Uncertain,
+        why: Some(why.to_owned()),
     })
 }
 
@@ -205,7 +207,10 @@ impl GuestRuntime {
         devices::with_transaction(books, id, &[], |transaction| {
             match transaction.read(id)? {
                 Some(current) if current.retired => transaction.remove(id),
-                Some(_) => Err(uncertain(id)?),
+                Some(_) => Err(uncertain(
+                    id,
+                    "its record isn't retired, so a retired box's delete may not remove it",
+                )?),
                 None => Ok(()),
             }
         })
@@ -239,7 +244,7 @@ impl GuestRuntime {
                     .pool_records()?
                     .into_iter()
                     .find(|record| record.key == key)
-                    .ok_or(uncertain(&id)?)
+                    .ok_or(uncertain(&id, "its route's backing has no record")?)
             })
             .transpose()?;
         let conflicts = source
@@ -248,22 +253,29 @@ impl GuestRuntime {
         let keys = self.turn_keys(conflicts)?;
         let (spec, expected_scope) = if let Some(source) = &source {
             let key = source.key;
-            spec.route.ok_or(uncertain(&id)?)?.check_backing_parts(
-                spec.allocation.map(|allocation| allocation.cost),
-                source.key,
-                source.cost,
-                &source.devices,
-                &spec.devices,
-            )?;
+            spec.route
+                .ok_or(uncertain(&id, "its spec names a backing but no route")?)?
+                .check_backing_parts(
+                    spec.allocation.map(|allocation| allocation.cost),
+                    source.key,
+                    source.cost,
+                    &source.devices,
+                    &spec.devices,
+                )?;
             let commitment = source.native_commitment()?;
             let pending =
                 devices::with_handoff_transaction(books, &id, &key, &keys, |transaction| {
-                    let current = transaction.read_pool(&key)?.ok_or(uncertain(&id)?)?;
+                    let current = transaction
+                        .read_pool(&key)?
+                        .ok_or(uncertain(&id, "its backing has no record")?)?;
                     self.preflight_backing(&current)?;
                     if current.native_commitment()? != commitment
                         || current.phase != hex_api::BackingPhase::Live
                     {
-                        return Err(uncertain(&id)?);
+                        return Err(uncertain(
+                            &id,
+                            "its backing isn't live, or isn't the one its route names",
+                        )?);
                     }
                     if transaction.read(&id)?.is_some() {
                         return Err(Refusal::Exists(id.try_clone()?));
@@ -276,11 +288,16 @@ impl GuestRuntime {
                     let pools = transaction.pool_records()?;
                     self.gpu_catalog
                         .as_ref()
-                        .ok_or(uncertain(&id)?)?
+                        .ok_or(uncertain(
+                            &id,
+                            "this node has no GPU catalog for its devices",
+                        )?)?
                         .prepare(&spec, &records, &pools)?;
                     budget.remaining()?;
                     transaction.put(&BoxRecord::new(spec, Phase::Creating, Vec::new()))?;
-                    transaction.read(&id)?.ok_or(uncertain(&id)?)
+                    transaction
+                        .read(&id)?
+                        .ok_or(uncertain(&id, "its record is gone right after its put")?)
                 })?;
             // Release the Box/device turns BEFORE entering the SAME owner's
             // Pool transaction. Both canonical claims remain during handoff.
@@ -290,9 +307,14 @@ impl GuestRuntime {
                 || released.devices != source.devices
                 || released.cost != source.cost
             {
-                return Err(uncertain(&id)?);
+                return Err(uncertain(
+                    &id,
+                    "its backing's release isn't the one its handoff began with",
+                )?);
             }
-            let scope = pending.native_scope.ok_or(uncertain(&id)?)?;
+            let scope = pending
+                .native_scope
+                .ok_or(uncertain(&id, "its pending backing names no native scope")?)?;
             (pending.spec, Some(scope))
         } else {
             (spec, None)
@@ -300,16 +322,25 @@ impl GuestRuntime {
         budget.remaining()?;
         let complete = |transaction: &dyn devices::Transaction| {
             if expected_scope.is_some() {
-                let source = source.as_ref().ok_or(uncertain(&id)?)?;
-                let current_source = transaction.read_pool(&source.key)?.ok_or(uncertain(&id)?)?;
+                let source = source
+                    .as_ref()
+                    .ok_or(uncertain(&id, "its handoff's backing is gone")?)?;
+                let current_source = transaction
+                    .read_pool(&source.key)?
+                    .ok_or(uncertain(&id, "its handoff's backing has no record")?)?;
                 self.handoff_source_released(&current_source)?;
                 if current_source.phase != hex_api::BackingPhase::Released
                     || current_source.exit.is_none()
                     || current_source.native_commitment()? != source.native_commitment()?
                 {
-                    return Err(uncertain(&id)?);
+                    return Err(uncertain(
+                        &id,
+                        "its handoff's backing changed its commitment",
+                    )?);
                 }
-                let current = transaction.read(&id)?.ok_or(uncertain(&id)?)?;
+                let current = transaction
+                    .read(&id)?
+                    .ok_or(uncertain(&id, "its record is gone during its handoff")?)?;
                 if current.spec != spec
                     || current.native_scope != expected_scope
                     || current.phase != Phase::Creating
@@ -317,7 +348,7 @@ impl GuestRuntime {
                     || current.run.is_some()
                     || current.exit.is_some()
                 {
-                    return Err(uncertain(&id)?);
+                    return Err(uncertain(&id, "its record changed during its handoff")?);
                 }
             } else if transaction.read(&id)?.is_some() {
                 return Err(Refusal::Exists(id.try_clone()?));
@@ -340,9 +371,14 @@ impl GuestRuntime {
                 budget.remaining()?;
                 transaction.put(&BoxRecord::new(spec, Phase::Creating, Vec::new()))?;
             }
-            let record = transaction.read(&id)?.ok_or(uncertain(&id)?)?;
+            let record = transaction
+                .read(&id)?
+                .ok_or(uncertain(&id, "its record is gone right after its put")?)?;
             let info = self.create_selected(record.spec, transaction, budget)?;
-            let mut record = transaction.read(&id)?.ok_or(uncertain(&id)?)?;
+            let mut record = transaction.read(&id)?.ok_or(uncertain(
+                &id,
+                "its record is gone after its selected create",
+            )?)?;
             if record.phase != Phase::Creating
                 || info.id != id
                 || info.class != record.spec.class.class()
@@ -351,7 +387,10 @@ impl GuestRuntime {
                 || record.init.is_none()
                 || record.native_scope.is_none()
             {
-                return Err(uncertain(&id)?);
+                return Err(uncertain(
+                    &id,
+                    "its selected create left no native scope in its record",
+                )?);
             }
             record.phase = Phase::Ready;
             transaction.put(&record)?;
@@ -389,14 +428,20 @@ impl GuestRuntime {
                 || record.init != snapshot.init
                 || record.native_scope != snapshot.native_scope
             {
-                return Err(uncertain(id)?);
+                return Err(uncertain(
+                    id,
+                    "its record's native scope isn't the one its call read",
+                )?);
             }
             if ready && record.phase != Phase::Ready {
-                return Err(uncertain(id)?);
+                return Err(uncertain(
+                    id,
+                    "its record isn't Ready, though its call needs it running",
+                )?);
             }
             self.validate_binding(&record.spec)?;
             self.selected_running_in(id, transaction, &record)?
-                .ok_or(uncertain(id)?)?;
+                .ok_or(uncertain(id, "its selected guest isn't running it")?)?;
             call()
         })
     }
@@ -416,7 +461,7 @@ impl GuestRuntime {
                     .pool_records()?
                     .into_iter()
                     .find(|record| record.key == key)
-                    .ok_or(uncertain(id)?)
+                    .ok_or(uncertain(id, "its route's backing has no record")?)
             })
             .transpose()?;
         let pending = source.as_ref().is_some_and(|source| {
@@ -426,7 +471,11 @@ impl GuestRuntime {
             )
         });
         let conflicts = if pending {
-            source.as_ref().ok_or(uncertain(id)?)?.devices.as_slice()
+            source
+                .as_ref()
+                .ok_or(uncertain(id, "its pending handoff has no backing")?)?
+                .devices
+                .as_slice()
         } else {
             snapshot.spec.devices.as_slice()
         };
@@ -439,13 +488,21 @@ impl GuestRuntime {
                 || record.init != snapshot.init
                 || record.native_scope != snapshot.native_scope
             {
-                return Err(uncertain(id)?);
+                return Err(uncertain(
+                    id,
+                    "its record's native scope isn't the one its call read",
+                )?);
             }
             record.phase = Phase::Deleting;
             transaction.put(&record)?;
             if pending {
-                let source = source.as_ref().ok_or(uncertain(id)?)?;
-                let current = transaction.read_pool(&source.key)?.ok_or(uncertain(id)?)?;
+                let source = source
+                    .as_ref()
+                    .ok_or(uncertain(id, "its pending handoff has no backing")?)?;
+                let current = transaction.read_pool(&source.key)?.ok_or(uncertain(
+                    id,
+                    "its pending handoff's backing has no record",
+                )?)?;
                 if matches!(
                     current.phase,
                     hex_api::BackingPhase::Live | hex_api::BackingPhase::Draining
@@ -466,7 +523,9 @@ impl GuestRuntime {
             self.forget_selected(id)
         };
         if pending {
-            let source = source.as_ref().ok_or(uncertain(id)?)?;
+            let source = source
+                .as_ref()
+                .ok_or(uncertain(id, "its pending handoff has no backing")?)?;
             devices::with_handoff_transaction(books, id, &source.key, &keys, delete)
         } else {
             devices::with_transaction(books, id, &keys, delete)
@@ -504,7 +563,10 @@ impl GuestRuntime {
                 || record.spec != snapshot.spec
                 || record.init != snapshot.init
             {
-                return Err(uncertain(id)?);
+                return Err(uncertain(
+                    id,
+                    "its record's init isn't the one its call read",
+                )?);
             }
             transaction.managed_usage().map(Some)
         })

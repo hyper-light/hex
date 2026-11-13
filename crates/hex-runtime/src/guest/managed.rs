@@ -170,7 +170,14 @@ pub(super) fn stop(
     id: &BoxId,
     identity: Option<&shards_api::Identity>,
 ) -> Result<shards_api::ManagedEnd, Refusal> {
-    stop_scope(transaction, identity, super::books::uncertain(id)?)
+    stop_scope(
+        transaction,
+        identity,
+        super::books::uncertain(
+            id,
+            "its managed scope's stop ended with its scope unreleased",
+        )?,
+    )
 }
 
 /// Stops the managed scope `identity` names (or the one with none published yet) and waits for its end ([`STOP`]): its

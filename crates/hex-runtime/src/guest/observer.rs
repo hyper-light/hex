@@ -538,8 +538,7 @@ pub(super) fn observe_selected(
         &mut Receipt::Selected(receipt),
         path,
         budget,
-        // A box's Lifecycle refusal takes its reason once goal 12 gives it the field.
-        &|_| crate::guest::books::uncertain(&id).unwrap_or_else(std::convert::identity),
+        &|why| crate::guest::books::uncertain(&id, why).unwrap_or_else(std::convert::identity),
     )
 }
 

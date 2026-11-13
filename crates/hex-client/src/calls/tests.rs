@@ -249,6 +249,7 @@ fn physical_report_uses_one_factual_rpc_and_preserves_typed_refusal() {
     let refusal = Refusal::Lifecycle {
         id: BoxId::new("uncertain-device").unwrap(),
         cause: hex_api::LifecycleCause::Uncertain,
+        why: Some("its device's report can't be read".to_owned()),
     };
     *transport.reply.lock().unwrap() = Some(Answer::Refused(refusal.clone()));
     assert_eq!(client.physical_report().unwrap_err(), refusal);

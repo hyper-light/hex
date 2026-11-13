@@ -1609,6 +1609,7 @@ impl Capacity {
                 return Err(Refusal::Lifecycle {
                     id: spec.id.try_clone()?,
                     cause: LifecycleCause::Busy,
+                    why: None,
                 });
             }
         }
@@ -2085,9 +2086,16 @@ pub enum Refusal {
     #[error("the node agent's state is unusable: {0}")]
     Broken(String),
     /// The named box retains its resources while an operation is pending or its physical result
-    /// is uncertain. Busy names exclusive lifecycle ownership, never absence or completion.
-    #[error("box {id}: {cause}")]
-    Lifecycle { id: BoxId, cause: LifecycleCause },
+    /// is uncertain. Busy names exclusive lifecycle ownership, never absence or completion. `why` is
+    /// the refusing site's own words where it gives them (joint plan step 12; ROOT, 2026-11-13: a bare
+    /// `Uncertain` cost two diagnoses), as [`Refusal::Backing`]'s are: every `Uncertain` site's, `None`
+    /// where a site has nothing to add to its cause. Appended (the wire IDENTITY moves).
+    #[error("box {id}: {cause}{}", Said(.why))]
+    Lifecycle {
+        id: BoxId,
+        cause: LifecycleCause,
+        why: Option<String>,
+    },
     /// A CONNECT to a guest's vsock port failed (Firecracker's CONNECT/OK handshake, which Shards
     /// speaks too): its port, phase and cause stay typed, never text (AC-T7.4.1, Shards R04). It
     /// says nothing of whether the guest ended.

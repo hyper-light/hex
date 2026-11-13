@@ -3196,7 +3196,7 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
             w.u8(8);
             w.string(why)
         }
-        Refusal::Lifecycle { id, cause } => {
+        Refusal::Lifecycle { id, cause, why } => {
             w.u8(9);
             w.string(id.as_str())?;
             w.u8(match cause {
@@ -3205,7 +3205,8 @@ fn put_plain_refusal(w: &mut Writer, refusal: &Refusal) -> Result<(), Fault> {
                 LifecycleCause::Busy => 2,
                 LifecycleCause::Retired => 3,
             });
-            Ok(())
+            // Appended after its cause (joint plan step 12): its reason in the refusing site's words, absent a byte 0.
+            w.option_with(why.as_deref(), |w, why| w.string(why))
         }
         Refusal::Backing { key, cause, why } => {
             // Its tag, key, cause and reason's option tag, and its reason, reserved whole before any of it is written.
@@ -3351,6 +3352,7 @@ fn plain_refusal(r: &mut Reader<'_>, tag: u8) -> Result<Refusal, Fault> {
                 3 => LifecycleCause::Retired,
                 t => return Err(Fault::value("lifecycle cause", format!("variant {t}"))),
             },
+            why: r.option(|r| r.string("lifecycle refusal reason"))?,
         },
         10 => Refusal::Backing {
             key: backing_key(r)?,
