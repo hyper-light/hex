@@ -380,6 +380,12 @@ impl Learner {
         })
     }
 
+    /// The VMs its last window couldn't read, and why. Original (red): none is told.
+    #[cfg(test)]
+    pub(super) fn unread(&self) -> &[(BoxId, Refusal)] {
+        &[]
+    }
+
     /// One window (C1 to C5, C7), read at `now`: the VMs `running`, each new one found by `record` (its class, receipt,
     /// band and any intent; none for a box that isn't a VM with a receipt), the reuse slots live boxes hold (`held`, in
     /// order), within the fleet's `budget`. A failure is kept until a window passes.
