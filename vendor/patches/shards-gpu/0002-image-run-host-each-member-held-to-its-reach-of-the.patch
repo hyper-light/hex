@@ -1,0 +1,377 @@
+Subject: image run host: each member held to its reach of the destinations kept, before the VM starts (D236)
+Why: Hex's joint plan step 15 holds a harness to exactly the providers and the host its grants name. Where a request names each member's reach (Narrowing::members, vendor/shards change 0002), the run host refuses before the VM starts a run in which any member the image declares would reach other than that, reading each member's reach by name from the Agentfile it already holds (agentfile::named_reach): under D236's held a member reaches exactly its own names among those kept (Hex's lead, 2026-11-12).
+
+diff --git a/crates/agentfile/src/agentfile.rs b/crates/agentfile/src/agentfile.rs
+index 488cbb4f8a074e2c3296a13378b634a0d0112e81..bd48400ec0c8e40b1e4dff260d5e8f3dcb680979 100644
+--- a/crates/agentfile/src/agentfile.rs
++++ b/crates/agentfile/src/agentfile.rs
+@@ -2203,6 +2203,19 @@ fn tcp_reach(directives: &[Directive]) -> Vec<TcpReach<'_>> {
+     members
+ }
+ 
++/// What each member reaches past the microVM by name (D236, §4.4): its networks'
++/// destinations and its remote MCP servers', each a host and a TCP port, as its init lets it
++/// out to them and its agents' resolver answers it, in the order the Agentfile declares its
++/// members. Where [`held`] holds, a member reaches exactly those of them its microVM's
++/// network process keeps, so an orchestrator that keeps some can hold each member to them
++/// (`Narrowing::members`).
++pub fn named_reach(directives: &[Directive]) -> Vec<(TargetKind, Vec<u8>, Vec<Destination>)> {
++    tcp_reach(directives)
++        .into_iter()
++        .map(|r| (r.member.0, r.member.1.to_vec(), r.named))
++        .collect()
++}
++
+ /// Members granted one TCP port past the microVM unalike, where any reaches it by name (a
+ /// destination, D236, or a remote MCP server, §4.4), refused, naming both: its network
+ /// process holds the whole microVM to the union of its members' grants on a port, and each
+diff --git a/crates/agentfile/tests/agentfile.rs b/crates/agentfile/tests/agentfile.rs
+index 920767ad2a6131ddf179e4c4a81e3968b7ace667..f23baf18eace364c7e2d45410804f5f8f0205be5 100644
+--- a/crates/agentfile/tests/agentfile.rs
++++ b/crates/agentfile/tests/agentfile.rs
+@@ -1538,6 +1538,54 @@ fn destinations_are_what_joined_networks_name_and_open() {
+     assert_eq!(af::spec(&read), af::spec(&directives));
+ }
+ 
++/// Each member's reach by name (D236, §4.4), as an orchestrator holds it per member: a
++/// harness its network's destinations, the host itself among them, an agent its own and its
++/// remote MCP server's, and a member that joins no network nothing; each in the order the
++/// Agentfile declares its members, and none of another member's.
++#[test]
++fn each_member_reaches_its_own_names() {
++    use shards_agentfile::agentfile::{self as af, TargetKind};
++    let text = "FROM alpine\nHARNESS codex FROM ./codex\nAGENT helper FROM ./helper\nAGENT idle FROM ./idle\n\
++        NETWORK --egress=api.openai.com:443 --egress=host.docker.internal:7070 provider FOR codex\n\
++        NETWORK --egress=api.example:8443 other FOR helper\n\
++        EXPOSE --harnesses=codex 443 7070 AS egress FOR provider\nEXPOSE --agents=helper 8443 AS egress FOR other\n\
++        CONNECT codex WITH codex ON provider\nCONNECT helper WITH helper ON other\n\
++        MCP web FROM https://mcp.example:9443/sse FOR helper\n";
++    let directives = af::resolve_targets(&stage_directives(text)).unwrap();
++    af::connections(&directives).unwrap();
++    af::held(&directives).unwrap();
++    let reach = af::named_reach(&directives);
++    let said: Vec<(TargetKind, String, Vec<String>)> = reach
++        .iter()
++        .map(|(kind, name, named)| {
++            let named = named
++                .iter()
++                .map(|(host, port)| format!("{}:{port}", String::from_utf8_lossy(host)))
++                .collect();
++            (*kind, String::from_utf8_lossy(name).into_owned(), named)
++        })
++        .collect();
++    assert_eq!(
++        said,
++        [
++            (
++                TargetKind::Harness,
++                "codex".to_string(),
++                vec![
++                    "api.openai.com:443".to_string(),
++                    "host.docker.internal:7070".to_string()
++                ]
++            ),
++            (
++                TargetKind::Agent,
++                "helper".to_string(),
++                vec!["api.example:8443".to_string(), "mcp.example:9443".to_string()]
++            ),
++            (TargetKind::Agent, "idle".to_string(), Vec::new()),
++        ]
++    );
++}
++
+ /// What no destination of a network's is, refused by name and why: one let in rather than
+ /// reached, of a network carrying no TCP, an all-digit or patterned host, an IPv6 address,
+ /// UDP, and the member's own loopback; a port, a range and a Unix socket read as before.
+diff --git a/crates/shards/src/agentfile.rs b/crates/shards/src/agentfile.rs
+index a267f5f2b50feaf87c1107a318ad03709e32cde1..e1f104e27a37395f04e09e835784c9538176d939 100644
+--- a/crates/shards/src/agentfile.rs
++++ b/crates/shards/src/agentfile.rs
+@@ -42,6 +42,19 @@ pub struct Agentfile {
+     pub ipv6: bool,
+     /// Who each port coming in past the microVM reaches (D122), for `shards read ports`.
+     pub receivers: Vec<shards_agentfile::agentfile::Receiver>,
++    /// What each member reaches past the microVM by name (D236, §4.4), as
++    /// `shards_agentfile::agentfile::named_reach` reads it, for an orchestrator that holds
++    /// its members apart (`api_run`'s `held_apart`, `Narrowing::members`).
++    pub named: Vec<NamedReach>,
++}
++
++/// One member's reach by name: its kind and name, and each `host:port` it reaches, as the
++/// build lists a destination or a remote MCP server (D236, §4.4).
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct NamedReach {
++    pub kind: shards_agentfile::agentfile::TargetKind,
++    pub name: String,
++    pub reaches: Vec<String>,
+ }
+ 
+ /// Grants of destinations by name, each `host:port` as the build lists a remote MCP server
+@@ -381,9 +394,24 @@ pub fn agentfile(rootfs: &std::path::Path, digest: &str) -> Result<Agentfile, St
+         _ => false,
+     });
+     let (managed_labels, active_members) = managed_plan(&mut image, &directives).map_err(fail)?;
++    let mut named = Vec::new();
++    for (kind, name, reaches) in af::named_reach(&directives) {
++        let text = |b: Vec<u8>| {
++            String::from_utf8(b).map_err(|_| fail("a member's name or destination that is not UTF-8".into()))
++        };
++        named.push(NamedReach {
++            kind,
++            name: text(name)?,
++            reaches: reaches
++                .into_iter()
++                .map(|(host, port)| text([host.as_slice(), b":", port.to_string().as_bytes()].concat()))
++                .collect::<Result<_, _>>()?,
++        });
++    }
+     let agentfile = Agentfile {
+         managed_labels,
+         active_members,
++        named,
+         volumes,
+         uplink: grants.past() || ingress,
+         ipv6: af::ipv6(&directives),
+diff --git a/crates/shards/src/api_run.rs b/crates/shards/src/api_run.rs
+index b0f41d288defee6470dfe26ea6aff8d75ffb4942..5c712d626846dc7657972bf6af6d6c49a71e162b 100644
+--- a/crates/shards/src/api_run.rs
++++ b/crates/shards/src/api_run.rs
+@@ -300,6 +300,98 @@ fn egress(
+     Ok(Some(shards_net::encode_policy(&ports, &named, dns)))
+ }
+ 
++/// Each member held to its reach of the destinations kept, where the request holds members
++/// apart (`Narrowing::members`, version 5). A member reaches each kept destination it reaches
++/// by name, its networks' destinations and its remote MCP servers' (`Agentfile::named`): its
++/// init lets it out to those alone and its agents' resolver answers it them, the network
++/// process holds the whole microVM to those kept, and D236's `held` makes the members that
++/// reach a port by name reach it alike. So a run that would let a member the image declares
++/// reach other than the request lets it (one the request names nowhere: none) is refused
++/// before it starts, a widening of what was asked; as is a member the request names that the
++/// image declares not, or names twice.
++fn held_apart(
++    agentfile: Option<&crate::agentfile::Agentfile>,
++    narrowing: &wire::Narrowing,
++) -> Result<(), No> {
++    use shards_agentfile::agentfile::TargetKind;
++    let Some(asked) = &narrowing.members else {
++        return Ok(());
++    };
++    let none = crate::agentfile::Agentfile::default();
++    let a = agentfile.unwrap_or(&none);
++    let kept: Vec<String> = match &narrowing.destinations {
++        wire::Keep::Only(items) => items.clone(),
++        wire::Keep::All => a
++            .grants
++            .destinations
++            .iter()
++            .map(|d| String::from_utf8_lossy(d).into_owned())
++            .collect(),
++    };
++    let kind_of = |k: TargetKind| match k {
++        TargetKind::Agent => wire::MemberKind::Agent,
++        TargetKind::Harness => wire::MemberKind::Harness,
++    };
++    for (i, m) in asked.iter().enumerate() {
++        if !a
++            .named
++            .iter()
++            .any(|n| kind_of(n.kind) == m.kind && n.name == m.name)
++        {
++            return Err(No(
++                Cause::Image,
++                format!("{:?} {}: the image declares no such member", m.kind, m.name),
++            ));
++        }
++        if asked.iter().take(i).any(|o| o.kind == m.kind && o.name == m.name) {
++            return Err(No(
++                Cause::Request,
++                format!("{:?} {}: its reach is named twice", m.kind, m.name),
++            ));
++        }
++    }
++    let said = |list: &[&str]| {
++        if list.is_empty() {
++            "none".to_string()
++        } else {
++            list.join(", ")
++        }
++    };
++    for n in &a.named {
++        let mut reach: Vec<&str> = n
++            .reaches
++            .iter()
++            .map(String::as_str)
++            .filter(|d| kept.iter().any(|k| k == d))
++            .collect();
++        reach.sort_unstable();
++        reach.dedup();
++        let mut lets: Vec<&str> = asked
++            .iter()
++            .find(|m| m.kind == kind_of(n.kind) && m.name == n.name)
++            .map(|m| m.destinations.iter().map(String::as_str).collect())
++            .unwrap_or_default();
++        lets.sort_unstable();
++        lets.dedup();
++        if reach != lets {
++            let word = match n.kind {
++                TargetKind::Agent => "agent",
++                TargetKind::Harness => "harness",
++            };
++            return Err(No(
++                Cause::Widening,
++                format!(
++                    "{word} {}: of the destinations kept it would reach {}, where the request lets it reach {} (D236)",
++                    n.name,
++                    said(&reach),
++                    said(&lets)
++                ),
++            ));
++        }
++    }
++    Ok(())
++}
++
+ /// Refuses a published port that would widen the run: one the image's Agentfile declares
+ /// `AS egress` (a destination, never a listener), and, for a run with no command of its
+ /// own, one the image gives no member for ingress (D122).
+@@ -568,6 +660,7 @@ mod hosted {
+         let staged = super::staged(request, &members)?;
+         super::ports_granted(&request.publish, agentfile.as_ref(), request.command.is_some())?;
+         let egress = super::egress(agentfile.as_ref().map(|a| &a.grants), &request.egress)?;
++        super::held_apart(agentfile.as_ref(), &request.egress)?;
+         if egress.is_some() {
+             run.network = "bridge".into();
+         }
+@@ -2132,6 +2225,7 @@ mod tests {
+             mcp: wire::Keep::Only(Vec::new()),
+             destinations: wire::Keep::Only(vec!["host.docker.internal:7070".into()]),
+             dns: false,
++            members: None,
+         };
+         let one = egress(Some(&grants), &narrowed).ok().unwrap().unwrap();
+         assert_ne!(Some(one.clone()), all);
+@@ -2144,6 +2238,7 @@ mod tests {
+             mcp: wire::Keep::Only(Vec::new()),
+             destinations: wire::Keep::Only(Vec::new()),
+             dns: false,
++            members: None,
+         };
+         assert_eq!(egress(Some(&grants), &none).ok().unwrap(), None);
+         // A destination the image does not grant, of another port or host: a widening.
+@@ -2174,6 +2269,114 @@ mod tests {
+         assert!(matches!(egress(None, &asked), Err(No(Cause::Widening, _))));
+     }
+ 
++    /// Each member held to its reach of the destinations kept (D236, version 5). Do: keep a
++    /// destination that harness codex and agent helper both reach by name, beside the host
++    /// itself that codex alone reaches, and hold each member to what the request lets it reach.
++    /// Expect: a request letting both reach the destination, and codex the host, passes; one
++    /// letting codex alone reach the destination, which helper would reach too, letting codex
++    /// none of what it would reach, or letting it reach more than it would, is refused as a
++    /// widening, naming the member and both reaches; a member the image declares not refused as
++    /// the image's, one named twice as the request's; a request holding no member apart, and
++    /// one keeping nothing, pass.
++    #[test]
++    fn each_member_is_held_to_its_reach_of_the_destinations_kept() {
++        use crate::agentfile::{Agentfile, NamedReach};
++        use shards_agentfile::agentfile::TargetKind;
++        let agentfile = Agentfile {
++            named: vec![
++                NamedReach {
++                    kind: TargetKind::Harness,
++                    name: "codex".into(),
++                    reaches: vec!["api.example:443".into(), "host.docker.internal:7070".into()],
++                },
++                NamedReach {
++                    kind: TargetKind::Agent,
++                    name: "helper".into(),
++                    reaches: vec!["api.example:443".into()],
++                },
++            ],
++            ..Agentfile::default()
++        };
++        let reach = |kind, name: &str, destinations: &[&str]| wire::MemberReach {
++            kind,
++            name: name.into(),
++            destinations: destinations.iter().map(|d| (*d).to_string()).collect(),
++        };
++        let held = |members: Option<Vec<wire::MemberReach>>| wire::Narrowing {
++            egress: wire::Keep::Only(Vec::new()),
++            mcp: wire::Keep::Only(Vec::new()),
++            destinations: wire::Keep::Only(vec![
++                "api.example:443".into(),
++                "host.docker.internal:7070".into(),
++            ]),
++            dns: false,
++            members,
++        };
++        let (harness, agent) = (wire::MemberKind::Harness, wire::MemberKind::Agent);
++        let both = vec![
++            reach(
++                harness,
++                "codex",
++                &["api.example:443", "host.docker.internal:7070"],
++            ),
++            reach(agent, "helper", &["api.example:443"]),
++        ];
++        assert!(held_apart(Some(&agentfile), &held(Some(both))).is_ok());
++        for (members, says) in [
++            (
++                vec![reach(
++                    harness,
++                    "codex",
++                    &["api.example:443", "host.docker.internal:7070"],
++                )],
++                "agent helper: of the destinations kept it would reach api.example:443, where the request lets it reach none",
++            ),
++            (
++                vec![
++                    reach(harness, "codex", &[]),
++                    reach(agent, "helper", &["api.example:443"]),
++                ],
++                "harness codex: of the destinations kept it would reach api.example:443, host.docker.internal:7070, where the request lets it reach none",
++            ),
++            (
++                vec![
++                    reach(
++                        harness,
++                        "codex",
++                        &["api.example:443", "host.docker.internal:7070"],
++                    ),
++                    reach(agent, "helper", &["api.example:443", "host.docker.internal:7070"]),
++                ],
++                "agent helper: of the destinations kept it would reach api.example:443, where the request lets it reach api.example:443, host.docker.internal:7070",
++            ),
++        ] {
++            match held_apart(Some(&agentfile), &held(Some(members))) {
++                Err(No(Cause::Widening, why)) => assert!(why.starts_with(says), "{why}"),
++                other => panic!("{says}: {:?}", other.map_err(|No(c, w)| (c, w))),
++            }
++        }
++        assert!(matches!(
++            held_apart(Some(&agentfile), &held(Some(vec![reach(harness, "nobody", &[])]))),
++            Err(No(Cause::Image, _))
++        ));
++        assert!(matches!(
++            held_apart(
++                Some(&agentfile),
++                &held(Some(vec![
++                    reach(agent, "helper", &[]),
++                    reach(agent, "helper", &[])
++                ]))
++            ),
++            Err(No(Cause::Request, _))
++        ));
++        assert!(held_apart(Some(&agentfile), &held(None)).is_ok());
++        let nothing_kept = wire::Narrowing {
++            destinations: wire::Keep::Only(Vec::new()),
++            ..held(Some(Vec::new()))
++        };
++        assert!(held_apart(Some(&agentfile), &nothing_kept).is_ok());
++    }
++
+     /// The run's request is one a warm VM takes: its log keeps something by the VM's own
+     /// check (warm.rs `head`), though it writes none, and its head says whether it
+     /// publishes ports.
