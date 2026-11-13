@@ -1,25 +1,29 @@
 # Decision (2026-11-12): the Shards class on Agentfile images under shards-init
 
 Joint plan step 12 (kiln plan `01a1cd8e862e7169a074db3d5fa33f3d`, "Every kiln harness in Shards microVMs, Hex as
-runtime"), AC-T7.4.1. Status: **built to Shards' D231 at `e82b9403`**, on Linux, macOS and Windows hosts, with Hex's
-patch to its run host's start (§1); its real-VM runs and the records its waits seed from are owed (§8).
+runtime"), AC-T7.4.1. Status: **built to Shards' D231 at `f176b3e6`**, on Linux, macOS and Windows hosts, its run
+host started holding only its stdio by Shards' own spawn (D248, §1) and each vCPU's guest time in its usage (D241,
+§4); its real-VM runs and the records its waits seed from are owed (§8).
 
 Sources, read at the revisions named:
-- Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `e82b9403`) and its research
-  record `docs/research/runtime-image-boot-decision-v1.md` (`31b3f106b`, and at `e82b9403`): the decision this class
-  binds to, its Windows run host among it (731b5e54, 53277586). At `e82b9403` beside it: D234 (a nested runtime's
+- Shards' D231 ("An image booted for an orchestrator", `docs/design/architecture.md` at `f176b3e6`) and its research
+  record `docs/research/runtime-image-boot-decision-v1.md` (`31b3f106b`, and at `f176b3e6`): the decision this class
+  binds to, its Windows run host among it (731b5e54, 53277586). At `f176b3e6` beside it: D234 (a nested runtime's
   grant, `ImageSpec::nesting` and `ready_by`), D235 (a project plugged into a running member, `ImageGuest::plug` and
-  `ImageRefusal::Plug`), D236 (destinations by name, `Narrowing::destinations`, `Bound::to`) and the joint plan's
-  step 5 (a member's stdin and working directory, `MemberSpec::stdin` and `workdir`, `ImageGuest::take_input`,
-  channel versions 5 and 6).
-- `shards_api::image` at `e82b9403`: `crates/api/src/image.rs` (`Images`, its `boot` and patience, `ImageGuest`,
-  `ImageSpec`, `ImageRefusal`), `image/session.rs` (the run host's process, started by std's `Command`, `stop`,
-  `wait_for`, `stats`; Hex's vendored copy starts it through `image/spawn.rs`, vendor/patches/shards 0001) and
-  `image/wire.rs` (`Stats`, `StatsScope`, `RunEnd`, `Narrowing`, `Bound`, channel version 6);
-  `crates/shards/src/api_run.rs` (how a narrowing keeps grants; the STATS it answers).
+  `ImageRefusal::Plug`), D236 (destinations by name, `Narrowing::destinations`, `Bound::to`), the joint plan's step 5
+  (a member's stdin and working directory, `MemberSpec::stdin` and `workdir`, `ImageGuest::take_input`), D241 (the
+  room an orchestrator's budget leaves the run, and the run's microVM cost in its stats, `Stats::microvm`), D242
+  (credentials granted by reference), D244 (a member's terminal), D246 (each member held to its reach of the names
+  kept, `Narrowing::members`), D247 (the run's CPU rate), D248 (the run host started holding its three standard
+  streams alone, through `shards_ipc`'s spawn) and D249 (a run whose command never started ends failed, in its VM's
+  words): image channel version 13.
+- `shards_api::image` at `f176b3e6`: `crates/api/src/image.rs` (`Images`, its `boot` and patience, `ImageGuest`,
+  `ImageSpec`, `ImageRefusal`), `image/session.rs` (the run host's process, `shards_ipc::spawn_with`, `stop`,
+  `wait_for`, `stats`) and `image/wire.rs` (`Stats`, `Microvm`, `GuestTimes`, `StatsScope`, `RunEnd`, `Narrowing`,
+  `MemberReach`, `Bound`); `crates/shards/src/api_run.rs` (how a narrowing keeps grants; the STATS it answers).
 - Shards' guest-cpu-time-v1 (221c7377, 6396a78b; its record
-  `docs/research/measurements/guest-cpu-time-v1/README.md` at `e82b9403`, "Not changed, and why"): each vCPU's guest
-  time, given to the daemon's runs, not yet to D231's.
+  `docs/research/measurements/guest-cpu-time-v1/README.md`): each vCPU's guest time, given to the daemon's runs, and
+  through D241 to D231's.
 - Windows handle inheritance: `CreateProcessW` (Microsoft Learn, processthreadsapi.h: `bInheritHandles` TRUE hands the
   child every inheritable handle of its parent), `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` (`UpdateProcThreadAttribute`),
   Microsoft KB315939 ("PRB: Child Inherits Unintended Handles During CreateProcess Call"), and Rust's std
@@ -54,8 +58,8 @@ Sources, read at the revisions named:
   box's.
 - **Hosts** (`hex_runtime::guest::host_images`). Linux, macOS and Windows boot image VMs (Ada, 2026-11-12: the class
   works on Windows and macOS too). Every program Hex starts holds only its stdio (CVE-2024-21626's class), and so does
-  D231's run host (`shards api-run`), which shards-api started through std's `Command`, handing it what another node
-  thread held inheritable at that moment, for as long as its VM ran:
+  D231's run host (`shards api-run`), which shards-api started through std's `Command` until D248, handing it what
+  another node thread held inheritable at that moment, for as long as its VM ran:
   - macOS: std's spawn passes no `POSIX_SPAWN_CLOEXEC_DEFAULT`, and macOS's pipe, socket, socketpair and accept take
     no close-on-exec flag, so the run host would hold every descriptor another thread had made and not yet marked (a
     box's pipe, a client's connection, the box helper's socket). Hex's own red: 1341adc6, a tool std started held the
@@ -67,18 +71,19 @@ Sources, read at the revisions named:
     spawns alone. Hex's own red: e14ff1b2 on jupiter (r124, 2026-11-09), a keeper std started held the node's stdout
     and stderr, so they didn't end with the node (fixed for the keeper by 6f4b8f7a).
 
-  Until 2026-11-12 a create on either was refused `Awaits(RunHostStdioOnly)`. The remedy is Hex's change to its
-  vendored Shards, offered upstream (vendor/patches/shards 0001, `image/spawn.rs`): posix_spawn with file actions for
-  0, 1 and 2 and `POSIX_SPAWN_CLOEXEC_DEFAULT` on Apple's, and CreateProcessW with a `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`
-  of inheritable copies of the three alone; its `a_run_host_holds_no_end_it_was_not_given` holds a run host to it on
-  macOS and Windows. The alternatives were refused: boot image VMs on std's spawn anyway (it breaks the stdio-only
-  rule), or serialize Hex's member starts behind image boots (a boot takes seconds, and every start would wait on it).
+  Until 2026-11-12 a create on either was refused `Awaits(RunHostStdioOnly)`. The remedy was Hex's change to its
+  vendored Shards (vendor/patches/shards 0001, `image/spawn.rs`), upstream since as D248 (Shards 9bdd4a7ec), so Hex
+  carries none: shards-api starts the run host through `shards_ipc::spawn_with`, the spawn Shards starts its own
+  processes with, holding only the three ends named for it (`POSIX_SPAWN_CLOEXEC_DEFAULT` on Apple's, CreateProcessW
+  with a `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` on Windows), and `a_run_host_holds_no_end_it_was_not_given` holds a run
+  host to it. The alternatives were refused: boot image VMs on std's spawn anyway (it breaks the stdio-only rule), or
+  serialize Hex's member starts behind image boots (a boot takes seconds, and every start would wait on it).
   Beside it, every descriptor the macOS runtime makes is close-on-exec as it is made
   (`every_descriptor_the_runtime_makes_is_close_on_exec`), so a spawn that does inherit holds none of the node's.
 - **The guest's kernel and init** (`guest_pair`; ROOT, 2026-11-12). D231's run host inherits the node's environment
   and boots the guest its `SHARDS_KERNEL` and `SHARDS_INIT` name, taking each only as a UTF-8 absolute path and
   dropping any other value without a word, both or neither: the daemon refuses one alone ("SHARDS_KERNEL and
-  SHARDS_INIT go together"; Shards e82b9403, `api_run.rs` `as_run`, `engine.rs`). `host_images` reads the pair once,
+  SHARDS_INIT go together"; Shards f176b3e6, `api_run.rs` `as_run`, `engine.rs`). `host_images` reads the pair once,
   as the node starts: one alone, or a value the run host would drop, makes the class unavailable on that node, every
   create refused `Platform` naming both variables before any record, where otherwise every start would be refused
   after its create was recorded (ROOT's r345), or its VMs boot Shards' own guest in place of the one named.
@@ -126,7 +131,9 @@ refused `Broken`, naming it.
 
 `RunEnd` becomes the box's exit as Shards reports it: `Exited(status)` is `Exit::Code(status)` (`docker run`'s
 status, 128 plus a signal's number where one ended it, kept as the number it is rather than guessed back into a
-signal), `Stopped` is `Exit::Signal(9)` (HEX-RT-12's KILL), `Failed` is `Exit::Unknown`.
+signal), `Stopped` is `Exit::Signal(9)` (HEX-RT-12's KILL), `Failed` is `Exit::Unknown`: a VM, host or guest that
+failed, or, since D249, a command that never started, which Shards no longer reports as the status a container keeps
+for it (HEX-IMG-3 read `Code(128)` of a command that never ran).
 
 **Grants (goal 15).** The boot's `publish` and `egress` come from goal 15's `program(&grants)`
 (docs/design/network-grants.md N4): the publishes its grants name, and none of the image's own grants past the VM
@@ -153,15 +160,15 @@ call, recovery's adoption among them, and is listed running: Hex can't prove it 
 ## 4. Usage
 
 `stats(StatsScope::Run)` reads the run's cgroup in the guest: `cpu_ns` becomes `cpu_usec`, `memory_bytes`,
-`pids`, `read_bytes` and `write_bytes` their counters. **Guest time per vCPU** is `GuestTime::Awaits
-(GuestCpuTimePerVcpu)`: Shards' guest-cpu-time-v1 (221c7377, 6396a78b) reads each vCPU's guest time for the
-daemon's runs alone. D231's run host never asks its VM `GUEST_TIME` (its `STATS` says init's cgroup lines alone,
-`api_run.rs` `stats`), and `image::wire::Stats` has no field for it,
-which that work's record leaves to the image-boot lane; a number Hex made up would be worse than none. When it
-lands, `GuestTime::PerVcpuNs` carries it: nanoseconds each vCPU ran the guest since the VM booted, by vCPU index,
-one for each vCPU of the VM's size, each only growing, none past the wall time the VM ran. Its wire
-bound, `GuestTime::MAX_VCPUS`, is every 8-bit vCPU index: a Shards VM numbers its x86_64 vCPUs by 8-bit APIC id (at
-most 255) and has fewer on arm64 (123).
+`pids`, `read_bytes` and `write_bytes` their counters. **Guest time per vCPU** is D241's: the run's stats carry its
+microVM's cost (`Stats::microvm`), each vCPU's guest time among it, which the run host asks its VM (`GUEST_TIME`, as
+the daemon asks it for its own runs, guest-cpu-time-v1). `GuestTime::PerVcpuNs` carries it: nanoseconds each vCPU ran
+the guest since the VM booted, by vCPU index, one for each vCPU of the VM's size, each only growing, none past the
+wall time the VM ran (`usage_of`, `per_vcpu`). A part the run host did not read is refused, naming why, never read
+as none (D241's rule): no microVM part, no guest time, a vCPU the read missed (Shards then keeps the most it read
+before, which no longer says the vCPU's time now), a count other than the VM's size, or time of vCPUs the VM no
+longer has. Its wire bound, `GuestTime::MAX_VCPUS`, is every 8-bit vCPU index: a Shards VM numbers its x86_64 vCPUs
+by 8-bit APIC id (at most 255) and has fewer on arm64 (123).
 
 Goal 14's learned charge (`hex-node` `node/charges.rs`) reads the cgroup of each VM the node launched through its
 native owner (`Supervisor::running_vms`): its VMM's use on the host. An image VM is none of those, its run host
@@ -239,16 +246,18 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   RECORD.md (bench/native/guest/image/). Until then a create on that host class is refused outside the waits census
   (§6).
 - **Real-VM runs** (ROOT): the image class's conformance cases (`IMAGE_CASES`) on a node with Shards configured, on
-  Linux KVM (`crates/hex-cli/tests/image_real.rs`), macOS HVF and Windows WHP; HEX-IMG-4 fails until Shards gives
-  guest time per vCPU, naming it.
-- **From Shards:** `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), guest time per vCPU in
-  D231's STATS (`GuestCpuTimePerVcpu`: `api-run` asking its VM `GUEST_TIME`, and a field of `image::wire::Stats` for
-  it), member exec and signals (`MemberExec`, `MemberSignal`; step 11), STATS' memory peak, OOM kills and refused
-  forks, Windows arm64's run host (unbuilt, D231), and Hex's patch 0001 taken upstream (the run host started holding
-  only its stdio). Given since 482c5d78: the Windows run host (`WindowsRunHost`, 731b5e54) and a boot patience
-  (`Images::boot`'s). The native-owner launch would also give the run host a scope of its own: it runs in the node's
-  process tree today, so Hex charges the VM's envelope by admission but cannot contain the run host per box, nor read
-  its use on the host (§4).
+  Linux KVM (`crates/hex-cli/tests/image_real.rs`), macOS HVF and Windows WHP, each with a run host at Shards
+  `f176b3e6` or later (image channel version 13: Hex's `shards`, rebuilt on each host by
+  `scripts/shards-gpu/build.sh`), as a run host and the vendored API of different versions refuse each other at
+  create.
+- **From Shards:** `attach` or the run's identity after an owner's crash (`AttachAfterCrash`), member exec and
+  signals (`MemberExec`, `MemberSignal`; step 11), STATS' memory peak, OOM kills and refused forks, and Windows
+  arm64's run host (unbuilt, D231). Given since 482c5d78: the Windows run host (`WindowsRunHost`, 731b5e54), a boot
+  patience (`Images::boot`'s), guest time per vCPU in the run's stats (D241), the run host holding only its stdio
+  (D248, Hex's 0001 upstream), each member held to its reach (D246, Hex's 0002 upstream) and a never-started
+  command's end in its VM's words (D249). The native-owner launch would also give the run host a scope of its own:
+  it runs in the node's process tree today, so Hex charges the VM's envelope by admission but cannot contain the run
+  host per box, nor read its use on the host (§4).
 - **A member's streams over the node's wire** (joint plan step 17's remote callers): a wire call that carries the
   three ends as the exec's asked streams are carried (descriptors on the local socket, stream lanes over QUIC). Until
   then `Runtime::member` is served in process alone, and a caller over the wire is refused, typed.
@@ -259,5 +268,5 @@ This class stays beside both: it is how a box boots an Agentfile image's members
   stopped box is held).
 - A harness that needs Shards' own sizing rather than its admitted size (then `vm_size` is the wrong source).
 - A digest-pinned image Shards' store cannot find whatever it is named (then pinning needs the name too).
-- A run host found holding a descriptor or handle it was not given (then patch 0001's spawn is not enough, and the
+- A run host found holding a descriptor or handle it was not given (then D248's spawn is not enough, and the
   macOS and Windows creates wait again).
