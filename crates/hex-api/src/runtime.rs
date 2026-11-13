@@ -1983,6 +1983,13 @@ pub enum Refusal {
     /// says nothing of any box's state.
     #[error("this needs {needs}, which the revision Hex builds against doesn't give yet")]
     Awaits { needs: Upstream },
+    /// Box `id`'s run failed (joint plan step 12): its command never started, or its VM, its host or its guest failed,
+    /// in its runtime's words, `why`, which its [`BoxInfo::ended`] keeps beside an `Unknown` exit. The workload never
+    /// ran, or stopped running for its machine's sake, where every other refusal is the call's or its infrastructure's.
+    /// A run that started and then ended, at once or not, is no failure: its exit says how it ended. After `Awaits`
+    /// (append-only).
+    #[error("box {id}'s run failed: {why}")]
+    Failed { id: BoxId, why: String },
 }
 
 /// A capability another product owes Hex, named by what it does, never by a plan step (a plan's

@@ -183,6 +183,8 @@ struct ModelRun {
     gone: Mutex<Option<String>>,
     stops: AtomicUsize,
     stats: Mutex<Stats>,
+    /// The patience each stats ask was given, in order (decision 9).
+    stats_asked: Mutex<Vec<Duration>>,
     /// Each room (D241) and rate (D247) the run was told, in order (joint plan step 14).
     rooms: Mutex<Vec<Option<i64>>>,
     rates: Mutex<Vec<Option<std::num::NonZeroU64>>>,
@@ -273,7 +275,8 @@ impl ImageGuest for ModelGuest {
             .get(&member.name)
             .copied())
     }
-    fn stats(&self, _: StatsScope, _: Duration) -> Result<Stats, ImageRefusal> {
+    fn stats(&self, _: StatsScope, patience: Duration) -> Result<Stats, ImageRefusal> {
+        self.run.stats_asked.lock().unwrap().push(patience);
         match self.run.end.lock().unwrap().clone() {
             Some(end) => Err(ImageRefusal::Ended(end)),
             None => Ok(self.run.stats.lock().unwrap().clone()),
@@ -842,6 +845,61 @@ fn a_run_that_failed_ends_saying_why_in_its_runtimes_words() {
     assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
 }
 
+/// Joint plan step 12 (goal 15's finding; ROOT's (b), 2026-11-13): do start a VM whose run fails as it boots, its command
+/// never started (D249's `Failed`, in its VM's words), the run host's boot answering with the run up. Expect: the start
+/// refused `Failed`, naming the box with those words, never answered Ok; the box then shown Empty with an unknown exit
+/// and the same words, its record keeping them, its run host reaped through its stop.
+#[test]
+fn a_run_that_fails_as_it_boots_fails_its_start_in_its_runtimes_words() {
+    let images = ModelImages::new();
+    let (runtime, owner) = model_runtime(&images, waits());
+    let command = vec!["/bin/sh".into(), "-c".into(), "exit 3".into()];
+    let id = runtime
+        .create(spec("image-fails-as-it-boots", Some(command)))
+        .unwrap()
+        .id;
+    let words =
+        "its command never started (status 128): exec: \"/bin/sh\": operation not permitted";
+    *images.run.end.lock().unwrap() = Some(RunEnd::Failed(words.to_owned()));
+    assert_eq!(
+        runtime.start(&id),
+        Err(Refusal::Failed {
+            id: id.clone(),
+            why: words.to_owned(),
+        })
+    );
+    let info = shown(&runtime, &id, BoxState::Empty, &REAPED_SHOWN);
+    assert_eq!(
+        (info.exit, info.ended.as_deref()),
+        (Some(Exit::Unknown), Some(words))
+    );
+    let kept = record(&owner, &id).unwrap();
+    assert_eq!(
+        (kept.exit, kept.ended.as_deref()),
+        (Some(Exit::Unknown), Some(words))
+    );
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+}
+
+/// Joint plan step 12 (ROOT's (b), 2026-11-13): do start a VM whose command exits 3 at once, ended as the boot answers.
+/// Expect: the start answered Ok, as `docker start` answers a command that started, however soon it ended; the box then
+/// shown Empty with Code(3) and no words, its run host reaped through its stop.
+#[test]
+fn a_command_that_exits_at_once_has_started() {
+    let images = ModelImages::new();
+    let (runtime, _owner) = model_runtime(&images, waits());
+    let command = vec!["/bin/sh".into(), "-c".into(), "exit 3".into()];
+    let id = runtime
+        .create(spec("image-exits-at-once", Some(command)))
+        .unwrap()
+        .id;
+    *images.run.end.lock().unwrap() = Some(RunEnd::Exited(3));
+    assert_eq!(runtime.start(&id), Ok(()));
+    let info = shown(&runtime, &id, BoxState::Empty, &REAPED_SHOWN);
+    assert_eq!((info.exit, info.ended), (Some(Exit::Code(3)), None));
+    assert_eq!(images.run.stops.load(Ordering::SeqCst), 1);
+}
+
 /// Joint plan step 12, steps 11's boundary: do exec a member's program and send TERM to a running VM.
 /// Expect: Awaits(MemberExec) and Awaits(MemberSignal), no stop, and the VM still Running.
 #[test]
@@ -1024,6 +1082,47 @@ fn microvm(guest: Result<GuestTimes, String>) -> Option<Microvm> {
         }),
         guest,
     })
+}
+
+/// Decision 9 (the person's ruling of 2026-11-13; ROOT's leftover of decision 9): a stats ask past its learned W* was
+/// given that W* as Shards' own patience, so D231 refused it there though its run was answering, an R03 bound of Hex's
+/// on a running VM's read. Do: read a running VM's usage once its stats wait has learned a 1 ns answer. Expect: Shards'
+/// stats asked with no bound of Hex's (`Duration::MAX`: until its run answers or ends); the usage answered; and W* risen
+/// to the answer that passed it.
+#[test]
+fn original_a_stats_ask_past_its_learned_w_star_follows_its_run() {
+    let images = ModelImages::new();
+    let vcpus = allocation().vm_size().unwrap().vcpus;
+    *images.run.stats.lock().unwrap() = Stats {
+        cpu_ns: Some(1_000),
+        memory_bytes: Some(1 << 20),
+        pids: Some(1),
+        read_bytes: Some(0),
+        write_bytes: Some(0),
+        microvm: microvm(Ok(guest_times(vcpus))),
+        ..Stats::default()
+    };
+    let learned = Duration::from_nanos(1);
+    let armed = ImageWaits {
+        stats: Patience::measuring("test.hex_runtime.image_stats_past"),
+        ..waits().unwrap()
+    };
+    armed.stats.answered(learned);
+    let (runtime, _owner) = model_runtime(&images, Ok(armed));
+    let id = runtime.create(spec("image-stats-past", None)).unwrap().id;
+    runtime.start(&id).unwrap();
+    assert!(runtime.usage(&id).is_ok());
+    assert_eq!(
+        *images.run.stats_asked.lock().unwrap(),
+        vec![Duration::MAX],
+        "Shards' stats was asked with a bound of Hex's"
+    );
+    let stats = &runtime.image().unwrap().waits().unwrap().stats;
+    assert!(
+        stats.slowest().is_some_and(|slowest| slowest > learned),
+        "W* didn't rise to the answer that passed it: {:?}",
+        stats.slowest()
+    );
 }
 
 /// Joint plan steps 12 and 14, HEX-IMG-4's contract (AC-T7.4.1): do read a running VM's usage, its run's stats
