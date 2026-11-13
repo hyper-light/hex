@@ -861,9 +861,10 @@ fn a_link_bound_with_no_finite_deadline_is_refused_before_shards() {
 /// HEX-GUEST-33, AC-T7.4.1 (CLAUDE.md §2, §3): through Shards' own client, a guest whose muxer answers the first
 /// CONNECT, then takes the next and never answers it: expect that dial refused by type at its deadline, the link's
 /// bound from its start, not held for as long as the guest is silent. A child `cat` stands in for the guest's VM
-/// process, which Shards holds by its pidfd and kills as the guest drops. The bound is an input, short so the case is,
-/// and twice it releases the muxer only where the dial overran, as Shards' `withheld_reply_expires_before_fixture_release`
-/// does.
+/// process, which Shards holds by its pidfd and kills as the guest drops. The bound is the caller's own deadline for the
+/// dial, the case's input; the dial's answer is waited for while the thread that dials lives (decision 9), never for a
+/// window of the test's own, and the muxer is released once it has come, as Shards'
+/// `withheld_reply_expires_before_fixture_release` releases its fixture.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_dial_the_guest_takes_and_never_answers_is_refused_at_its_deadline() {
@@ -929,8 +930,8 @@ fn a_dial_the_guest_takes_and_never_answers_is_refused_at_its_deadline() {
         let _ = held.recv();
         (first, second)
     });
-    // An input: the first dial's deadline, short so the case is. Shards' conformance asked an unserved port with this
-    // one (UNSERVED_PATIENCE) until its judged waits (Part B, ca7a04d0d) took that constant out.
+    // The caller's own deadline for its first dial (`ShardsLink::new`'s bound), the case's input: whatever it is, a dial
+    // the guest takes and never answers is refused at it, and not before. Short, so the case is.
     let bound = Duration::from_millis(200);
     let link = shards::ShardsLink::new(Arc::from(guest), bound);
     let control = link.dial(stream::CONTROL_PORT).unwrap();
@@ -941,7 +942,27 @@ fn a_dial_the_guest_takes_and_never_answers_is_refused_at_its_deadline() {
         let _ = sent.send((dialed, Instant::now()));
         link
     });
-    let got = answer.recv_timeout(bound.saturating_mul(2));
+    // The dial's answer, waited for while its thread lives, never for a window of the test's own (decision 9): a dial
+    // held for as long as the guest is silent holds its thread, which the muxer frees only once the answer has come.
+    static DIALED: hex_core::patience::Patience =
+        hex_core::patience::Patience::measuring("test.hex_client.guest.silent_dial_answered");
+    let got = hex_testkit::waits::follow::within(
+        &DIALED,
+        "the silent dial's answer",
+        || {
+            if dialing.is_finished() {
+                hex_testkit::waits::follow::Party::Ended
+            } else {
+                hex_testkit::waits::follow::Party::Live
+            }
+        },
+        |by| match by {
+            None => answer.recv().ok(),
+            Some(at) => answer
+                .recv_timeout(at.saturating_duration_since(Instant::now()))
+                .ok(),
+        },
+    );
     let _ = release.send(());
     let link = dialing.join().unwrap();
     let (first, second) = muxer.join().unwrap();
@@ -954,9 +975,7 @@ fn a_dial_the_guest_takes_and_never_answers_is_refused_at_its_deadline() {
     assert_eq!(first, format!("CONNECT {}\n", stream::CONTROL_PORT));
     assert_eq!(second, format!("CONNECT {}\n", stream::STDIO_PORT));
     let Ok((dialed, at)) = got else {
-        panic!(
-            "no answer within twice its bound {bound:?}: the guest's silence held the dial past its deadline"
-        );
+        panic!("{got:?}: the dial's thread ended with no answer of its dial's");
     };
     assert!(dialed.is_err(), "a silent guest's dial succeeded");
     assert!(
