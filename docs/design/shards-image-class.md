@@ -249,31 +249,31 @@ D231 gives no identity of the run's processes and no `attach`. So:
 
 ## 6. Waits
 
-Each wait is learned through hex-core's `Patience` (decision 9), seeded from the slowest row of
-`bench/native/guest/records.tsv` for this host class:
+Each wait is learned through hex-core's `Patience` (decision 9; `ImageWaits`): the slowest answer this process has
+seen, a bound only while answers come within it (the person's ruling of 2026-11-13); before its first answer, and from
+a run-out to the next, it follows its party until the answer comes. No record is read, and none is needed to make an
+image box: `ImageWaits::new` measures from nothing.
 
-| Wait | What it waits for | Record |
+| Wait | What it waits for | Its party |
 |---|---|---|
-| `image_boot` | `Images::boot`'s answer: the members started, or the refusal | owed |
-| `image_stats` | `stats(Run)`'s answer | owed |
-| `image_stop` | `stop`'s return: its run's end told, its VM gone (the run host exits after, on its own) | owed |
-| `image_delete_boot` | a delete's ask to the boot of the box it deletes answering, its run started or its host ended (§3) | none: decision 9 reads none |
+| `hex.image.boot` | `Images::boot`'s answer: the run started, or the refusal | the boot's thread, D231's run host |
+| `hex.image.stats` | `stats(Run)`'s answer | the run |
+| `hex.image.stop` | `stop`'s return: its run's end told, its VM gone (the run host exits after, on its own) | the stop's thread, the run host |
+| `hex.image.delete_boot` | a delete's ask to the boot of the box it deletes answering, its run started or its host ended (§3) | the boot's thread |
 
 D231's boot waits at most the patience its caller gives: past it, its run host is killed and the boot refused
-(`ImageRefusal::Boot`). Hex gives it the boot's learned bound (`Duration::MAX` while that bound measures, as in the
-census), so no boot holds a VM, a run host and a box Booting past it. Hex makes the boot on a thread of its own and
-bounds its caller's wait by the same bound; past it the call is refused `Lifecycle { Pending }` and the answer, when
-it comes, is recorded: a run, or Shards' refusal at its own bound, whose clock starts after the caller's, once its
-run host is started. D231's stop takes no patience and waits for its run's end, which its kill makes; Hex makes it
-on a thread of its own too and bounds its caller's wait the same way. No record exists yet for any of them, and a
-measure no class records is refused (`hex_client::guest::shards::recorded`): **a create is refused until all three
-are recorded**, so no box exists that a wait of its own could not bound. The one exception is the waits census
-(`hex_node::census`), which arms no wait: there each of the three measures (`ImageWaits::recorded`,
-`hex_core::patience::measures_all`).
-`crates/hex-cli/tests/image_record.rs` takes the three records on a host class: a harness image booted, its stats
-read and stopped n times through D231 as this class does, each series' first boot an upgrade's (a fresh cache), its
-rows and page written for records.tsv. `crates/hex-cli/tests/image_real.rs` runs the class's cases (`IMAGE_CASES`)
-through a real `hex node` in the census, with each wait's answers printed.
+(`ImageRefusal::Boot`). Hex gives it `Duration::MAX`, so Shards waits for the run's start or its host's end alone, and
+makes the boot on a thread of its own: the boot's W* is where a start answers `Lifecycle { Pending }` and tells the
+census its run-out, never where a boot ends, and the answer, when a later call takes it, is the sample W* rises to. A
+stats ask is given `Duration::MAX` too and followed by its run's life alone, its W* where the census is told a run-out.
+D231's stop takes no patience and waits for its run's end, which its kill makes; Hex makes it on a thread of its own:
+past the stop's W* a signal's or a retire's stop answers `Lifecycle { Pending }`, the stop going on, and a delete's
+follows it to its end (§3). The waits census (`hex_node::census`) measures every wait, unarmed
+(`hex_core::patience::measures_all`). `crates/hex-cli/tests/image_record.rs` times the three on a host class (a harness
+image booted, its stats read and stopped n times through D231 as this class does, each series' first boot an
+upgrade's, a fresh cache): evidence of decision 9's rule that the census keeps, never a seed.
+`crates/hex-cli/tests/image_real.rs` runs the class's cases (`IMAGE_CASES`) through a real `hex node` in the census,
+with each wait's answers printed.
 
 ## 7. Hex's PID 1 is kept
 
@@ -294,11 +294,9 @@ This class stays beside both: it is how a box boots an Agentfile image's members
 
 ## 8. Owed
 
-- **Records** for `image_boot`, `image_stats` and `image_stop` on each host class, Linux-KVM, macOS-HVF and
-  Windows-WHP (ROOT's measurement, `image_record`): `Images::boot` of a harness image to its return, `stats(Run)` to
-  its answer, `stop` to its return, each `n` with its slowest, added to `bench/native/guest/records.tsv` with their
-  RECORD.md (bench/native/guest/image/). Until then a create on that host class is refused outside the waits census
-  (§6).
+- **The waits' evidence** on each host class, Linux-KVM, macOS-HVF and Windows-WHP (ROOT's measurement,
+  `image_record`): `Images::boot` of a harness image to its return, `stats(Run)` to its answer, `stop` to its return,
+  each `n` with its slowest, as the census keeps it (§6). No create waits on it: decision 9 reads no record.
 - **Real-VM runs** (ROOT): the image class's conformance cases (`IMAGE_CASES`) on a node with Shards configured, on
   Linux KVM (`crates/hex-cli/tests/image_real.rs`), macOS HVF and Windows WHP, each with a run host at Shards
   `db4168345` or later (image channel version 23: Hex's `shards`, rebuilt on each host by
