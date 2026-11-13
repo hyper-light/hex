@@ -34,27 +34,40 @@ static STAGING: Patience = Patience::measuring("guest.stage");
 /// answer.
 ///
 /// With no W* each waits for the relay alone. The answer, however long it took, is the sample W* rises to, and the
-/// connection's next waits are bounded again, by the W* it rose to ([`Staging::answered`]).
+/// connection's next waits are bounded again, by the W* it rose to ([`Staging::answered`]). Its timeouts are set at its
+/// next read or write, never on a connection its relay closed after its last answer: macOS refuses a closed socket's
+/// options (`EINVAL`).
 struct Staging<'a> {
     conn: DuplexOwner,
     wait: &'a Patience,
     /// W*, the connection's timeouts while within it: none with no W*, and none past it.
     window: Option<std::time::Duration>,
+    /// Whether the connection's timeouts are `window`'s: false from a change of it to the next read or write.
+    armed: bool,
 }
 
 impl Staging<'_> {
-    /// Bounds the connection's reads and writes by W* as `wait` has it now: none with none.
-    fn bound(&mut self) -> io::Result<()> {
+    /// Within W* as `wait` has it now (none with none), from the next read or write.
+    fn within(&mut self) {
         self.window = self.wait.deadline();
-        self.conn.set_write_timeout(self.window)?;
-        self.conn.set_read_timeout(self.window)
+        self.armed = false;
     }
 
     /// An answer of the relay's, `took` after what it answers was sent: the sample W* rises to, and the connection's
     /// next waits bounded by it.
-    fn answered(&mut self, took: std::time::Duration) -> io::Result<()> {
+    fn answered(&mut self, took: std::time::Duration) {
         self.wait.answered(took);
-        self.bound()
+        self.within();
+    }
+
+    /// Sets the connection's timeouts to its window, where they aren't already.
+    fn arm(&mut self) -> io::Result<()> {
+        if !self.armed {
+            self.conn.set_write_timeout(self.window)?;
+            self.conn.set_read_timeout(self.window)?;
+            self.armed = true;
+        }
+        Ok(())
     }
 
     /// A read or a write that W*, `window`, ended: past W* from now on, its run-out told, once, and the connection
@@ -62,8 +75,8 @@ impl Staging<'_> {
     fn past(&mut self, window: std::time::Duration) -> io::Result<()> {
         self.wait.ran_out(window);
         self.window = None;
-        self.conn.set_write_timeout(None)?;
-        self.conn.set_read_timeout(None)
+        self.armed = false;
+        self.arm()
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
@@ -81,6 +94,7 @@ fn timed_out(e: &io::Error) -> bool {
 
 impl Read for Staging<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.arm()?;
         loop {
             match (self.conn.read(buf), self.window) {
                 (Err(e), Some(window)) if timed_out(&e) => self.past(window)?,
@@ -92,6 +106,7 @@ impl Read for Staging<'_> {
 
 impl Write for Staging<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.arm()?;
         loop {
             match (self.conn.write(buf), self.window) {
                 (Err(e), Some(window)) if timed_out(&e) => self.past(window)?,
@@ -112,8 +127,7 @@ fn relay_answer(
     sent: std::time::Instant,
 ) -> Result<Vec<u8>, Refusal> {
     let got = message(conn, deframer)?;
-    conn.answered(sent.elapsed())
-        .map_err(|e| Refusal::os("bounding a staging connection", e))?;
+    conn.answered(sent.elapsed());
     Ok(got)
 }
 
@@ -362,9 +376,9 @@ fn dial<'a>(link: &dyn Link, wait: &'a Patience) -> Result<Staging<'a>, Refusal>
         conn: link.dial(files::FILES_PORT)?,
         wait,
         window: None,
+        armed: false,
     };
-    conn.bound()
-        .map_err(|e| Refusal::os("bounding a staging connection", e))?;
+    conn.within();
     Ok(conn)
 }
 
