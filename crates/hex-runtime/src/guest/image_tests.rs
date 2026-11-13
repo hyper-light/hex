@@ -513,9 +513,13 @@ struct ModelImages {
     period: Mutex<Duration>,
     /// How the next boot's microVM starts (D253), as the test sets it: booted alone unless it does.
     started_from: Mutex<StartedFrom>,
-    /// Whether the next boot's thread ends with no answer at all, as the test sets it: it unwinds past its gate, as a
-    /// boot whose thread failed would.
+    /// Whether the next boot's thread ends with no answer at all, as the test sets it before anything wakes that boot:
+    /// held, it hears its gate alone, never its stop, and once its gate opens it unwinds past it, as a boot whose
+    /// thread failed would.
     abandon: AtomicBool,
+    /// How often a boot held at its gate has looked again: each wake of its wait, the test's own or one the OS gives a
+    /// condition variable's waiter unasked.
+    woken: AtomicUsize,
     /// The boots its stop ended (D231's `BootStop`), each `Ended(Stopped)`.
     stopped: AtomicUsize,
     /// The boots that answered with a run started.
@@ -540,6 +544,7 @@ impl ModelImages {
             period: Mutex::new(MODEL_RATE_PERIOD),
             started_from: Mutex::new(StartedFrom::Booted),
             abandon: AtomicBool::new(false),
+            woken: AtomicUsize::new(0),
             stopped: AtomicUsize::new(0),
             answered: AtomicUsize::new(0),
             serve: Mutex::new(None),
@@ -660,9 +665,14 @@ impl Images for ModelImages {
         self.patience.lock().unwrap().push(patience);
         *self.run.lessor.lock().unwrap() = spec.lessor.clone();
         let gate = self.gate.lock().unwrap();
+        // Held at its gate until it opens, or, unless the test abandons it, until its stop has come: a wake finds only
+        // what the test or the boot's stop has opened.
         let gate = self
             .opened
-            .wait_while(gate, |gate| *gate == Gate::Host && !stop.is_stopped())
+            .wait_while(gate, |gate| {
+                self.woken.fetch_add(1, Ordering::SeqCst);
+                *gate == Gate::Host && (self.abandon.load(Ordering::SeqCst) || !stop.is_stopped())
+            })
             .unwrap();
         if self.abandon.swap(false, Ordering::SeqCst) {
             panic!("the model's boot thread ends with no answer, as the test asked");
@@ -2100,6 +2110,7 @@ fn w12_a_delete_whose_boot_ends_with_no_answer_says_the_boot_is_still_under_way(
             ..
         })
     ));
+    images.abandon.store(true, Ordering::SeqCst);
     let answered = std::thread::scope(|scope| {
         let deleting = scope.spawn(|| runtime.delete(&id));
         hex_testkit::waits::until(
@@ -2108,15 +2119,17 @@ fn w12_a_delete_whose_boot_ends_with_no_answer_says_the_boot_is_still_under_way(
             || deleting.is_finished() || image_waits(&runtime).delete_boot.deadline().is_none(),
         )
         .unwrap();
-        // The wake the test never opened, its stop come: the held boot looks again, and answers as it then finds.
+        // The wake the test never opened, its stop come: the held boot looks again and stays held, the delete following.
+        let looked = images.woken.load(Ordering::SeqCst);
         images.poke();
         hex_testkit::waits::until(
             &DELETE_FOLLOWS_ABANDONED,
             "the held boot looking again",
-            || deleting.is_finished() || images.stopped.load(Ordering::SeqCst) > 0,
+            || images.woken.load(Ordering::SeqCst) > looked,
         )
         .unwrap();
-        images.abandon.store(true, Ordering::SeqCst);
+        assert_eq!(images.stopped.load(Ordering::SeqCst), 0);
+        assert!(!deleting.is_finished());
         images.gate(Gate::Open);
         deleting.join().unwrap()
     });
