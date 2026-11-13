@@ -1631,6 +1631,37 @@ mod tests {
         );
     }
 
+    /// T-T7.1.2 on every OS: do write, then update, a record naming a directory on disk (no native scope), which must
+    /// outlive the host. Expect: each write flushed, its file and its directory, and the record kept in the state
+    /// directory. Windows refused the directory's flush of a handle opened for reading alone: "Access is denied" (os
+    /// error 5).
+    #[test]
+    fn a_record_with_a_directory_on_disk_is_written_durably_on_every_os() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory on disk, beside this test's binary, else its crate's sources: a host's `/tmp` may be tmpfs.
+        let disk = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_owned))
+            .into_iter()
+            .chain([PathBuf::from(env!("CARGO_MANIFEST_DIR"))])
+            .filter(|d| !on_tmpfs(d))
+            .find_map(|d| tempfile::tempdir_in(d).ok())
+            .unwrap();
+        let store = store_in(dir.path());
+        let mut kept = record("d");
+        kept.dirs = vec![disk.path().join("d")];
+        assert!(must_outlive_host(&kept));
+        assert_eq!(store.put(&kept), Ok(()));
+        assert_eq!(store.syncs(), Syncs { files: 1, dirs: 1 });
+        let bump = |r: &mut BoxRecord| {
+            r.abandoned = r.abandoned.saturating_add(1);
+            true
+        };
+        assert_eq!(store.update(&kept.spec.id, bump), Ok(true));
+        assert_eq!(store.syncs(), Syncs { files: 2, dirs: 2 });
+        assert_eq!(names(&dir.path().join("state")), vec!["d.json".to_owned()]);
+    }
+
     /// Goal 5 plan step 2: writes of two boxes never wait on each other; two of one box do. While one
     /// box's turn is held, as its write holds it across the fsyncs, 31 other boxes' records are written
     /// from 31 threads at once, none of them waiting; a second write of the held box waits, its record
