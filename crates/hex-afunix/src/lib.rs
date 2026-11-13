@@ -46,7 +46,8 @@ use std::time::Duration;
 use windows_sys::Win32::Foundation::{
     CloseHandle, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle,
     ERROR_OPERATION_ABORTED, FALSE, GetHandleInformation, GetLastError, HANDLE,
-    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, STATUS_PENDING, TRUE, WAIT_TIMEOUT,
+    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, STATUS_PENDING, SetHandleInformation, TRUE,
+    WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Networking::WinSock::{
     AF_UNIX, AcceptEx, FD_CLOSE, FD_READ, FD_WRITE, FIONBIO, INVALID_SOCKET, LINGER, SD_BOTH,
@@ -218,6 +219,19 @@ pub fn inheritable(socket: BorrowedSocket<'_>) -> io::Result<bool> {
         return Err(last_error());
     }
     Ok((flags & HANDLE_FLAG_INHERIT) != 0)
+}
+
+/// Keeps `socket`'s handle from passing to a process this one starts. A socket Winsock duplicates for this process
+/// (`WSADuplicateSocketW`, under std's and Shards' `try_clone`) comes back inheritable, and a process another thread
+/// starts with every inheritable handle (std's `Command`) would hold the connection past its owner and reset it as it
+/// ends.
+pub fn no_inherit(socket: BorrowedSocket<'_>) -> io::Result<()> {
+    let handle = socket_handle(socket)?;
+    // SAFETY: the borrowed socket's handle stays open through the call, which clears its inheritance flag alone.
+    if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+        return Err(last_error());
+    }
+    Ok(())
 }
 
 /// Receives directly into the caller's buffer on an owned stream's socket (HEX-RT-17).

@@ -65,8 +65,11 @@ pub trait Duplex: Read + Write + Send + Sync + 'static {
 
 impl Duplex for TcpStream {
     fn try_clone(&self) -> io::Result<DuplexOwner> {
-        own_duplex(TcpStream::try_clone(self)?)
-            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
+        let clone = TcpStream::try_clone(self)?;
+        // Winsock's duplicate is inheritable (hex_afunix::no_inherit).
+        #[cfg(windows)]
+        hex_afunix::no_inherit(std::os::windows::io::AsSocket::as_socket(&clone))?;
+        own_duplex(clone).map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))
     }
 
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
@@ -544,6 +547,9 @@ fn caller_end(conn: &dyn Duplex) -> Result<hex_api::End, Refusal> {
     #[cfg(windows)]
     {
         use std::os::windows::io::AsSocket;
+        // Winsock's duplicate is inheritable: the caller's end passes to no process it starts.
+        hex_afunix::no_inherit(end.as_socket())
+            .map_err(os("keeping a caller's stdio connection from its children"))?;
         hex_afunix::set_nonblocking(end.as_socket(), false)
             .map_err(os("making a caller's stdio connection wait"))?;
         Ok(end.into())
