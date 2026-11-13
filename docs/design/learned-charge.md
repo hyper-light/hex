@@ -381,4 +381,9 @@ windows over its booking, its neighbours' and the box's misses while it rises, a
 (C1's falsifier); with the most VMs at once against envelope density, the starts refused while the riser rises, the
 riser's inspect (its exit and the last resort's why), and the learner's own CPU (Linux: its `hex-charges` thread;
 macOS and Windows: the node's whole CPU, an upper bound). Its windows go to `windows.tsv`; its figures are a record,
-not a verdict.
+not a verdict. Every number it runs with is derived, none picked (ROOT, 2026-11-12): each VM's workload from the
+traces (the most busy threads and MiB any step asks), the process box's CPU cap from kiln's CI (the median CPU of the
+build legs in bench/sched/kiln-ci-20261022-20261105.trace), and the deadline guarding the node's start and each create
+from the node's own boot bound for the class (twice it). Its traces are real harness sessions, recorded by
+bench/charge/record_trace.py in a cgroup of their own, a step per window of the cgroup's CFS period, the Linux
+learner's own window.
